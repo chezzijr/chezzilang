@@ -14,7 +14,9 @@ fn main():
 
 ## Status
 
-**Pre-M1 scaffold.** Design is locked; implementation hasn't started. See [`docs/spec.md`](docs/spec.md) for the full language design and build roadmap.
+**Pre-M1 scaffold.** Design is locked; implementation hasn't started.
+- [`docs/spec.md`](docs/spec.md) — full design + build roadmap
+- [`docs/syntax.md`](docs/syntax.md) — syntax cheat-sheet (every construct, by example)
 
 ## Design at a glance
 

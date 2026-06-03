@@ -1,7 +1,7 @@
 # Chezzi — Claude Code Guide
 
 Chezzi is a fast, statically-typed, Python-feel scripting language, hand-built in Rust.
-Full design + roadmap: **[`docs/spec.md`](docs/spec.md)**. Progress tracker: **[`PROGRESS.md`](PROGRESS.md)**.
+Full design + roadmap: **[`docs/spec.md`](docs/spec.md)**. Syntax cheat-sheet: **[`docs/syntax.md`](docs/syntax.md)**. Progress tracker: **[`PROGRESS.md`](PROGRESS.md)**.
 
 ## ⚠️ This is a LEARNING project — read this first
 
