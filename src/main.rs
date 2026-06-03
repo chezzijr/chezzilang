@@ -7,6 +7,8 @@
 //!
 //! Status: pre-M1 scaffold. Subcommands below are stubs.
 
+mod lexer;
+
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -32,7 +34,8 @@ fn main() -> ExitCode {
             print!("{USAGE}");
             ExitCode::SUCCESS
         }
-        "run" | "tokens" | "ast" | "repl" => {
+        "tokens" => cmd_tokens(args.get(1)),
+        "run" | "ast" | "repl" => {
             eprintln!("chezzi: '{cmd}' is not implemented yet (pre-M1 scaffold).");
             eprintln!("        see the roadmap in docs/spec.md");
             ExitCode::FAILURE
@@ -40,6 +43,38 @@ fn main() -> ExitCode {
         other => {
             eprintln!("chezzi: unknown command '{other}'\n");
             print!("{USAGE}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `chezzi tokens <file>` — read a source file, run the lexer, print the token stream.
+///
+/// This is plumbing (provided). It calls into YOUR `lexer` module. Until you implement the
+/// lexer's `todo!()`s, running this will panic at the `todo!` — that's expected.
+fn cmd_tokens(path: Option<&String>) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("chezzi tokens: missing file argument\nusage: chezzi tokens <file.chz>");
+        return ExitCode::FAILURE;
+    };
+
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("chezzi: cannot read '{path}': {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match lexer::tokenize(&source) {
+        Ok(tokens) => {
+            for tok in &tokens {
+                println!("{tok:?}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
             ExitCode::FAILURE
         }
     }
