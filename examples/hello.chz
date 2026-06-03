@@ -1,0 +1,43 @@
+# examples/hello.chz — touchstone program for the lexer/parser/interp milestones.
+# Not runnable yet (pre-M1). Doubles as golden-test + LLM-eval material.
+
+fn greet(name: str) -> str:
+    return "hi {name}"
+
+struct Point:
+    x: int
+    y: int
+
+    fn dist(self) -> float:
+        return sqrt(self.x * self.x + self.y * self.y)
+
+enum Shape:
+    Circle(int)
+    Square(int)
+
+fn area(s: Shape) -> float:
+    match s:
+        Circle(r): return 3.14 * float(r * r)
+        Square(n): return float(n * n)
+
+fn safe_div(a: int, b: int) -> Result[int]:
+    if b == 0:
+        return Err("divide by zero")
+    return Ok(a / b)
+
+fn main():
+    print(greet("thuan"))
+
+    total := 0
+    for i in 0..10:
+        if i % 2 == 0:
+            total += i
+    print("even sum 0..10: {total}")
+
+    p := Point(3, 4)
+    print("dist: {p.dist()}")
+
+    print("area: {area(Circle(2))}")
+
+    r := safe_div(10, 2)?
+    print("div: {r}")
