@@ -9,7 +9,7 @@
 //!
 //! See PROGRESS.md for the ordered sub-steps (1a … 1k).
 
-use std::fmt;
+use std::{collections::VecDeque, fmt};
 
 /// A single lexical token. This enum is provided as reference — you don't need to invent it.
 /// (Spans/line numbers are intentionally omitted for M1 to keep it simple; we add them later.)
@@ -69,6 +69,7 @@ pub enum Token {
     Comma,      // ,
     Colon,      // :
     Dot,        // .
+    DotDot,     // ..  (range, e.g. 0..10)
 
     // --- layout (the interesting part) ---
     Newline,    // end of a logical line
@@ -126,9 +127,9 @@ pub struct Lexer {
     chars: Vec<char>,
     pos: usize,        // index of the next char to read
     line: usize,       // current line, 1-based (for error messages)
-    indents: Vec<usize>, // the indentation stack. HINT (1h): starts as vec![0].
-    // You may want more fields as you go (e.g. a flag for "at start of line").
-    // Add them here when you need them.
+    indents: Vec<usize>, // the indentation stack. Starts as vec![0].
+    at_line_start: bool, // true when the next char begins a fresh logical line
+    pending: VecDeque<Token>, // layout tokens computed together but emitted one-per-call (Dedents)
 }
 
 impl Lexer {
@@ -138,6 +139,8 @@ impl Lexer {
             pos: 0,
             line: 1,
             indents: vec![0],
+            at_line_start: true,
+            pending: VecDeque::new(),
         }
     }
 
@@ -158,19 +161,26 @@ impl Lexer {
     /// Return the char one past the current one (lookahead of 2), or `'\0'`.
     /// HINT: like `peek`, but at `self.pos + 1`.
     fn peek_next(&self) -> char {
-        todo!("1a: return the char at self.pos + 1, or '\\0' if out of range")
+        *self.chars.get(self.pos + 1).unwrap_or(&'\0')
     }
 
     /// Consume the current char and return it. Remember to advance `self.pos`.
     /// HINT: read the char first, then bump `self.pos`, then return it.
     fn advance(&mut self) -> char {
-        todo!("1a: read self.peek(), advance self.pos by 1, return the char")
+        let char = self.peek();
+        self.pos += 1;
+        char
     }
 
     /// If the current char equals `expected`, consume it and return true. Otherwise false.
     /// LEARN: this is the classic trick for two-char operators like `:=`, `==`, `->`.
     fn match_char(&mut self, expected: char) -> bool {
-        todo!("1a: if not at end and peek() == expected, advance() and return true; else false")
+        if self.peek() == expected {
+            self.advance();
+            true
+        } else {
+            false
+        }
     }
 
     // ----- the main driver -----
@@ -206,8 +216,284 @@ impl Lexer {
     ///
     /// Build this up sub-step by sub-step. Start tiny: get `+` and `Eof` working, run the
     /// first guiding test, then add more. Don't try to write it all at once.
+    ///
+    /// WORKED SKELETON: the structure + operator dispatch are provided as a teaching example
+    /// (like `peek`/`is_at_end` were). YOUR remaining work is the three helpers below —
+    /// `identifier` (1e), `number` (1c), `string` (1d) — and INDENTATION (1h), whose seam is
+    /// marked with `TODO(1h)` inside this function.
     fn next_token(&mut self) -> Result<Token, LexError> {
-        todo!("M1: implement the scanner core — see the LEARN note above and PROGRESS.md")
+        // === STEP 0: drain queued layout tokens ===
+        // One source position can need several tokens at once (closing N blocks → N Dedents).
+        // We compute them together in `scan_indentation` and queue the extras here.
+        if let Some(tok) = self.pending.pop_front() {
+            return Ok(tok);
+        }
+
+        // === STEP A: start-of-line indentation (1h) ===
+        if self.at_line_start {
+            match self.scan_indentation()? {
+                Some(layout) => {
+                    // a real content line begins here; emit its Indent/Dedent(s) before its tokens
+                    self.at_line_start = false;
+                    self.pending.extend(layout);
+                    if let Some(tok) = self.pending.pop_front() {
+                        return Ok(tok);
+                    }
+                    // empty layout = same indent level → fall through and scan the first token
+                }
+                None => {
+                    // only blank/comment lines remain, then EOF. Leave at_line_start = true;
+                    // STEP C closes the file out (trailing Dedents + Eof).
+                }
+            }
+        }
+
+        // === STEP B: skip inline whitespace and `# comments` (NOT newlines) ===
+        loop {
+            match self.peek() {
+                ' ' | '\t' | '\r' => {
+                    self.advance();
+                }
+                '#' => {
+                    // comment runs to end of line; leave the '\n' for the newline rule below
+                    while !self.is_at_end() && self.peek() != '\n' {
+                        self.advance();
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        // === STEP C: end of input ===
+        if self.is_at_end() {
+            // 1. close the final logical line with a Newline (once)...
+            if !self.at_line_start {
+                self.at_line_start = true;
+                return Ok(Token::Newline);
+            }
+            // 2. ...then emit one Dedent per still-open indent level...
+            if *self.indents.last().unwrap() > 0 {
+                self.indents.pop();
+                return Ok(Token::Dedent);
+            }
+            // 3. ...and finally Eof.
+            return Ok(Token::Eof);
+        }
+
+        // === STEP D: newline ===
+        // (Blank/comment-only lines never reach here — STEP A's scan_indentation skips them,
+        // so when we see '\n' we're always ending a line that had real content.)
+        if self.peek() == '\n' {
+            self.advance();
+            self.line += 1;
+            self.at_line_start = true;
+            return Ok(Token::Newline);
+        }
+
+        // === STEP E: a real token starts here ===
+        self.at_line_start = false;
+        let start = self.pos; // index of the first char of this lexeme
+        let c = self.advance();
+        let tok = match c {
+            // single- and two-char operators (LEARN: match_char does the 2-char lookahead)
+            '+' => if self.match_char('=') { Token::PlusEq } else { Token::Plus },
+            '-' => {
+                if self.match_char('>') {
+                    Token::Arrow
+                } else if self.match_char('=') {
+                    Token::MinusEq
+                } else {
+                    Token::Minus
+                }
+            }
+            '*' => Token::Star,
+            '/' => Token::Slash,
+            '%' => Token::Percent,
+            ':' => if self.match_char('=') { Token::Walrus } else { Token::Colon },
+            '=' => if self.match_char('=') { Token::EqEq } else { Token::Assign },
+            '!' => {
+                if self.match_char('=') {
+                    Token::NotEq
+                } else {
+                    return Err(self.error("expected '=' after '!'"));
+                }
+            }
+            '<' => if self.match_char('=') { Token::LtEq } else { Token::Lt },
+            '>' => if self.match_char('=') { Token::GtEq } else { Token::Gt },
+            '|' => {
+                if self.match_char('>') {
+                    Token::Pipe
+                } else {
+                    return Err(self.error("expected '>' after '|'"));
+                }
+            }
+            '?' => Token::Question,
+            '(' => Token::LParen,
+            ')' => Token::RParen,
+            '[' => Token::LBracket,
+            ']' => Token::RBracket,
+            ',' => Token::Comma,
+            '.' => if self.match_char('.') { Token::DotDot } else { Token::Dot },
+
+            // delegate the "munching" token kinds to YOUR helpers below
+            '"' => return self.string(),
+            c if c.is_ascii_digit() => return self.number(start),
+            c if c.is_alphabetic() || c == '_' => return Ok(self.identifier(start)),
+
+            other => return Err(self.error(&format!("unexpected character {other:?}"))),
+        };
+        Ok(tok)
+    }
+
+    /// Small helper to build a `LexError` at the current line.
+    fn error(&self, message: &str) -> LexError {
+        LexError {
+            line: self.line,
+            message: message.to_string(),
+        }
+    }
+
+    /// (1h) Handle the indentation at the start of a logical line — the heart of an
+    /// indentation-sensitive lexer.
+    ///
+    /// Consumes the leading spaces of the upcoming line, skipping blank and comment-only lines
+    /// (which never affect indentation). Then compares the line's indent width against the indent
+    /// stack `self.indents` and returns the layout tokens to emit:
+    ///   - `Ok(Some(vec![Indent]))`      — deeper than before (one level opened)
+    ///   - `Ok(Some(vec![Dedent, ...]))` — shallower (one Dedent per level closed)
+    ///   - `Ok(Some(vec![]))`            — same level (nothing to emit)
+    ///   - `Ok(None)`                    — no content line remains (only blanks/comments + EOF);
+    ///                                      caller falls through to end-of-input handling
+    ///
+    /// On return for a content line, the cursor sits at that line's first non-space char.
+    fn scan_indentation(&mut self) -> Result<Option<Vec<Token>>, LexError> {
+        loop {
+            // 1. measure indentation by consuming leading spaces
+            let mut width = 0;
+            while self.peek() == ' ' {
+                self.advance();
+                width += 1;
+            }
+            // spaces only — a tab in the indentation is an error (avoids the classic tab/space mess)
+            if self.peek() == '\t' {
+                return Err(self.error("tabs are not allowed for indentation — use spaces"));
+            }
+
+            // 2. blank line (only whitespace) → does not count, skip it
+            if self.peek() == '\n' {
+                self.advance();
+                self.line += 1;
+                continue;
+            }
+            // 3. comment-only line → does not count, skip to its newline
+            if self.peek() == '#' {
+                while !self.is_at_end() && self.peek() != '\n' {
+                    self.advance();
+                }
+                continue;
+            }
+            // 4. end of input → no content line; let the caller close out
+            if self.is_at_end() {
+                return Ok(None);
+            }
+
+            // 5. a real content line at column `width` — compare against the indent stack
+            let top = *self.indents.last().unwrap();
+            if width > top {
+                // deeper → open one level
+                self.indents.push(width);
+                return Ok(Some(vec![Token::Indent]));
+            } else if width < top {
+                // shallower → close as many levels as needed, one Dedent each
+                let mut dedents = Vec::new();
+                while *self.indents.last().unwrap() > width {
+                    self.indents.pop();
+                    dedents.push(Token::Dedent);
+                }
+                // the new width must line up with some outer level we landed on
+                if *self.indents.last().unwrap() != width {
+                    return Err(self.error(
+                        "inconsistent dedent — does not match any outer indentation level",
+                    ));
+                }
+                return Ok(Some(dedents));
+            } else {
+                // same level → no layout token
+                return Ok(Some(Vec::new()));
+            }
+        }
+    }
+
+    // ----- YOUR helpers (the real M1 learning) -----
+
+    /// (1e) Scan an identifier or keyword. The first char is already consumed; `start` is its
+    /// index in `self.chars`.
+    /// HINT: munch (advance) while `self.peek()` is alphanumeric or `_`. Then build the word with
+    /// `self.chars[start..self.pos].iter().collect::<String>()`, and return
+    /// `keyword(&word).unwrap_or(Token::Ident(word))`.
+    fn identifier(&mut self, start: usize) -> Token {
+        while self.peek().is_alphanumeric() || self.peek() == '_' {
+            self.advance();
+        }
+
+        let identifier: String = self.chars[start..self.pos].iter().collect();
+        match keyword(&identifier) {
+            Some(tok) => tok,
+            None => Token::Ident(identifier)
+        }
+    }
+
+    /// (1c) Scan a number literal (int, or float if it has a single '.'). First digit already
+    /// consumed; `start` is its index.
+    /// HINT: munch digits; if you then see '.' FOLLOWED BY a digit, consume the '.' and the
+    /// fractional digits and produce `Token::Float`, else `Token::Int`. Parse with
+    /// `word.parse::<i64>()` / `parse::<f64>()` and map a parse failure to `self.error(...)`.
+    fn number(&mut self, start: usize) -> Result<Token, LexError> {
+        let mut is_float = false;
+
+        // integer part
+        while self.peek().is_ascii_digit() {
+            self.advance();
+        }
+
+        // fractional part — ONLY if the dot is followed by a digit
+        // (so `1.` keeps its dot, and `0..10` is not eaten as a number)
+        if self.peek() == '.' && self.peek_next().is_ascii_digit() {
+            is_float = true;
+            self.advance(); // consume the '.'
+            while self.peek().is_ascii_digit() {
+                self.advance();
+            }
+        }
+
+        let num: String = self.chars[start..self.pos].iter().collect();
+        if is_float {
+            let v = num.parse::<f64>().map_err(|e| self.error(&e.to_string()))?;
+            Ok(Token::Float(v))
+        } else {
+            let v = num.parse::<i64>().map_err(|e| self.error(&e.to_string()))?;
+            Ok(Token::Int(v))
+        }
+    }
+
+    /// (1d) Scan a plain string literal. The opening '\"' is already consumed.
+    /// HINT: munch chars until the closing '\"' (advance them into a String). If you hit end of
+    /// input first, return `self.error(\"unterminated string\")`. Don't worry about escapes or
+    /// interpolation yet — plain text only for M1.
+    fn string(&mut self) -> Result<Token, LexError> {
+        let mut text = String::new();
+        // munch everything up to the closing quote (no escapes / interpolation in M1)
+        while !self.is_at_end() && self.peek() != '"' {
+            if self.peek() == '\n' {
+                self.line += 1; // allow multi-line strings; keep line count honest
+            }
+            text.push(self.advance());
+        }
+        if self.is_at_end() {
+            return Err(self.error("unterminated string literal"));
+        }
+        self.advance(); // consume the closing '"'
+        Ok(Token::Str(text))
     }
 
     // ----- you'll likely add private helpers below as you go -----

@@ -8,30 +8,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-> **M1 — indentation-aware lexer.** Implement `src/lexer/mod.rs`.
-> Goal: `cargo run -- tokens examples/hello.chz` prints a clean token stream incl. INDENT/DEDENT.
+> **M2 — Parser → AST.** Build `src/parser/` + `src/ast/`.
+> Goal: `cargo run -- ast examples/hello.chz` prints a structured AST.
+> Use the operator-precedence table in [`docs/syntax.md`](docs/syntax.md) §4 for the Pratt parser.
 
-## M1 — Lexer  🟦
+## M1 — Lexer  ✅ DONE
 
-Sub-steps (do in order — each is one sitting):
+All 5 guiding tests green; lexes full `examples/hello.chz` (nested Indent/Dedent, `0..10`→DotDot, `?`).
 
-- ⬜ **1a. Char cursor** — `peek`, `peek_next`, `advance`, `is_at_end`. *(2 are done as worked examples; finish the rest.)*
-- ⬜ **1b. Single-char & operator tokens** — `+ - * / % ( ) [ ] : , .` then multi-char `== != <= >= := -> |> +=`.
-- ⬜ **1c. Numbers** — int and float literals.
-- ⬜ **1d. Strings** — plain `"..."` literal (interpolation lexing deferred to later).
-- ⬜ **1e. Identifiers & keywords** — scan a word, then look it up in the keyword table.
-- ⬜ **1f. Comments & whitespace** — skip `# ...` to end of line; skip inline spaces.
-- ⬜ **1g. Newlines** — emit `Newline` at end of a logical line; skip blank / comment-only lines.
-- ⬜ **1h. Indentation** — the hard one. Indent stack, emit `Indent`/`Dedent`. See the big HINT block in `mod.rs`.
-- ⬜ **1i. EOF** — flush remaining `Dedent`s, then emit `Eof`.
-- ⬜ **1j. Make the guiding tests green** — `cargo test`.
-- ⬜ **1k. Review with Claude**, then commit.
+- ✅ **1a. Char cursor** — *(yours, reviewed)*
+- ✅ **1b. Operator tokens** — *(scaffolded)*
+- ✅ **1c. Numbers** — int + float. *(yours, reviewed: fixed greedy-dot via peek_next lookahead)*
+- ✅ **1d. Strings** — plain `"..."`. *(scaffolded)*
+- ✅ **1e. Identifiers & keywords** — *(yours, reviewed)*
+- ✅ **1f. Comments & whitespace** — *(scaffolded)*
+- ✅ **1g. Newlines** — *(scaffolded)*
+- ✅ **1h. Indentation** — indent stack + pending-Dedent queue in `scan_indentation`. *(scaffolded; study it)*
+- ✅ **1i. EOF** — Newline → trailing Dedents → Eof *(scaffolded)*
+- ✅ **1j/1k. Tests green + reviewed.**
 
-**Done when:** all guiding tests pass AND `tokens examples/hello.chz` looks right.
+**Open follow-ups (small, do anytime):** scientific notation in numbers (`1e3`); string escapes (`\n`, `\"`); string interpolation lexing.
 
 ## Roadmap (later)
 
-- ⬜ **M2** — Parser → AST (`chezzi ast`)
+- 🟦 **M2** — Parser → AST (`chezzi ast`) ← NEXT
 - ⬜ **M3** — Tree-walk interpreter (working language!)
 - ⬜ **M4** — Type checker (local inference)
 - ⬜ **M4.5** — Modules / imports
