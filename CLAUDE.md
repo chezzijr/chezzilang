@@ -3,34 +3,23 @@
 Chezzi is a fast, statically-typed, Python-feel scripting language, hand-built in Rust.
 Full design + roadmap: **[`docs/spec.md`](docs/spec.md)**. Syntax cheat-sheet: **[`docs/syntax.md`](docs/syntax.md)**. Progress tracker: **[`PROGRESS.md`](PROGRESS.md)**.
 
-## ⚠️ This is a LEARNING project — read this first
+## How we work — build mode
 
-The owner (a Rust/compiler newbie) implements the code **themselves** to learn. Claude's job is to
-**guide and review, not to write the implementation.**
+Claude implements directly. Ship working, tested code each session.
 
-**Claude MUST:**
-- Bootstrap scaffolds: type definitions, function signatures, module wiring, `todo!()` stubs.
-- Leave the actual algorithm/logic to the user. Mark it with `todo!("hint: ...")` and inline `// HINT:` comments.
-- Write **guiding tests** (red tests the user makes green) when helpful.
-- Review the user's implementation: correctness, idiom, edge cases, performance. Be specific and honest.
-- Explain the *why* behind feedback — this is for learning.
-- Keep `PROGRESS.md` up to date after each work session.
-
-**Claude MUST NOT:**
-- Fill in the body of a function that's the user's current learning task.
-- "Helpfully" complete the lexer/parser/checker/VM logic. That defeats the purpose.
-- Refactor away the user's code without asking.
-
-If the user is stuck, give a **hint or a smaller sub-step**, not the answer — unless they explicitly say
-"just show me." When they say "show me," explain it thoroughly.
+- Write real implementations, not `todo!()` stubs. No `// HINT:` hand-holding.
+- Every milestone lands with passing tests and a clean `cargo build` / `cargo clippy`.
+- Each compiler phase is its own module under `src/`. Keep modules focused.
+- Verify before claiming done: run the tests and the relevant `chezzi` subcommand, show real output.
+- Keep `PROGRESS.md` current after each session; commit in conventional, single-line messages.
+- Match the existing code's style and patterns; reuse before adding new abstractions.
 
 ## Workflow per milestone
 
-1. Claude scaffolds the milestone (types, signatures, `todo!()`, guiding tests, wiring).
-2. User implements the `todo!()` bodies.
-3. User runs `cargo test` / the relevant `chezzi` subcommand.
-4. Claude reviews the diff: bugs, idiom, edge cases. User iterates.
-5. Update `PROGRESS.md`, commit, move to next sub-step.
+1. Implement the milestone (types, logic, wiring) in its module.
+2. Add unit tests + a golden check against `examples/*.chz`.
+3. `cargo test` + run the milestone's `chezzi` subcommand to verify end-to-end.
+4. Update `PROGRESS.md`, commit, move on.
 
 ## Commands
 
@@ -48,11 +37,10 @@ cargo clippy             # lint (idiom feedback — run often while learning)
 
 - Commits: single-line conventional (`feat:`, `fix:`, `chore:`, `docs:`, `test:`). No body.
 - Each compiler phase is its own module under `src/` (`lexer`, `parser`, `ast`, `checker`, ...).
-- Keep modules small and single-purpose (easier to learn, review, and test).
-- Inline `// HINT:` comments mark learning hand-holds. `// LEARN:` marks a concept worth understanding before writing.
-- Guiding tests live next to the code in `#[cfg(test)] mod tests`.
+- Keep modules small and single-purpose.
+- Unit tests live next to the code in `#[cfg(test)] mod tests`.
 
 ## Current focus
 
-See **[`PROGRESS.md`](PROGRESS.md)** — always the single source of truth for "what am I doing next."
-Right now: **M1 — the indentation-aware lexer.**
+See **[`PROGRESS.md`](PROGRESS.md)** — single source of truth for "what's next."
+Right now: **M2 — parser → AST.**

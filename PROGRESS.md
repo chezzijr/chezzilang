@@ -6,11 +6,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ---
 
+> **Mode:** build mode (Claude implements directly; learning/scaffold workflow retired — see `CLAUDE.md`).
+
 ## Current focus
 
-> **M2 — Parser → AST.** Build `src/parser/` + `src/ast/`.
+> **M2 — Parser → AST.** Build `src/ast/` + `src/parser/`.
 > Goal: `cargo run -- ast examples/hello.chz` prints a structured AST.
-> Use the operator-precedence table in [`docs/syntax.md`](docs/syntax.md) §4 for the Pratt parser.
+>
+> **Decisions locked:**
+> - Parser tech: **hand-written** recursive descent (statements) + **Pratt** (expressions), fed by the M1 lexer's `Token` stream. No parser generator (LALRPOP/pest considered, rejected — indentation handling + error quality + perf favor hand-written).
+> - Precedence: per [`docs/syntax.md`](docs/syntax.md) §4.
+> - AST: typed node enums in `src/ast/`; `ast` command pretty-prints (likely `{:#?}`).
+>
+> **Status:** not started (AST draft was begun then reverted — pacing TBD with owner).
+>
+> **Likely deferred to later milestones:** map literals (no brace tokens yet), multi-line expression continuation (e.g. indented `|>` chains), string-interpolation parsing.
 
 ## M1 — Lexer  ✅ DONE
 
