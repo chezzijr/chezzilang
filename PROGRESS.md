@@ -39,7 +39,15 @@ All 5 guiding tests green; lexes full `examples/hello.chz` (nested Indent/Dedent
 - ✅ **Parser** (`src/parser/`) — recursive descent (statements) + Pratt (expressions, binding powers per syntax.md §4). Shared block rule handles indented + inline (one-line `match` arms). Covers fn/struct/enum/match, if/else-if/else, for/while, return, all 4 import forms, closures, ranges, calls/field/index/`?`, list literals.
 - ✅ **CLI** — `chezzi ast <file>` wired (lex → parse → pretty-print).
 
+**Hardened after agent-review-panel** (2 passes + cold pass; 42 tests):
+- Non-lvalue assignment (`1 = 2`, `f() = 3`) → `ParseError`, not a wrong AST.
+- Statement terminator enforced — `x := 5 y := 6` on one line is an error.
+- Recursion depth cap (`MAX_DEPTH = 128`) on all 4 recursive entry points (`parse_bp`, `parse_unary`, `parse_type`, `parse_stmt`) → deep nesting returns a `ParseError` instead of SIGABRT.
+- Inline-block bodies allow `else` chaining but reject a nested compound statement (`if a: if b: …`) to avoid dangling-`else` ambiguity — nest via indentation.
+- Error messages render tokens in source form (`':='`, not `Walrus`).
+
 **Deferred (unchanged):** map literals `{...}` (no brace tokens), pipe `|>` (M6), string-interpolation parsing.
+**Deferred nit (rationale):** the comma-separated-list loop recurs in ~6 spots; left inline — a generic `parse_separated` helper adds `FnMut` borrow friction and the call sites differ (some consume the closing delimiter, some don't) for marginal gain.
 
 ## Roadmap (later)
 
