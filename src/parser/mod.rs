@@ -28,6 +28,12 @@ impl fmt::Display for ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
+/// Cap on parser recursion (nested expressions and blocks). Past this we return a `ParseError`
+/// instead of letting native stack recursion overflow and abort the process. Kept well below the
+/// depth that overflows a small (≈2 MB) thread stack — each nesting level is several frames deep —
+/// while far exceeding any realistic source nesting.
+const MAX_DEPTH: usize = 128;
+
 /// Parse a full token stream into a `Module`.
 pub fn parse(tokens: Vec<Tok>) -> PResult<Module> {
     Parser::new(tokens).parse_module()
@@ -36,11 +42,16 @@ pub fn parse(tokens: Vec<Tok>) -> PResult<Module> {
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
     fn new(toks: Vec<Tok>) -> Self {
-        Parser { toks, pos: 0 }
+        Parser {
+            toks,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     // ----- cursor helpers -----
@@ -91,7 +102,11 @@ impl Parser {
         if self.check(kind) {
             Ok(self.advance())
         } else {
-            Err(self.err(format!("expected {:?}, found {:?}", kind, self.peek())))
+            Err(self.err(format!(
+                "expected {}, found {}",
+                describe(kind),
+                describe(self.peek())
+            )))
         }
     }
 
@@ -105,7 +120,23 @@ impl Parser {
                     unreachable!()
                 }
             }
-            other => Err(self.err(format!("expected identifier, found {other:?}"))),
+            _ => Err(self.err(format!("expected identifier, found {}", describe(self.peek())))),
+        }
+    }
+
+    /// A simple statement must end the logical line; otherwise trailing tokens are a syntax error
+    /// (e.g. `x := 5 y := 6` packed onto one line).
+    fn expect_stmt_end(&mut self) -> PResult<()> {
+        if matches!(
+            self.peek(),
+            Token::Newline | Token::Dedent | Token::Eof
+        ) {
+            Ok(())
+        } else {
+            Err(self.err(format!(
+                "expected end of line, found {}",
+                describe(self.peek())
+            )))
         }
     }
 
@@ -152,7 +183,13 @@ impl Parser {
     // ----- statements -----
 
     fn parse_stmt(&mut self) -> PResult<Stmt> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.err("statement nested too deeply".to_string()));
+        }
         let span = self.cur_span();
+        // Compound statements own a block and end at its `Dedent`; line-oriented statements
+        // (let/assign/expr/return/import) must be followed by a line terminator.
         let kind = match self.peek() {
             Token::Fn => StmtKind::Fn(self.parse_fn()?),
             Token::Struct => self.parse_struct()?,
@@ -161,10 +198,23 @@ impl Parser {
             Token::For => self.parse_for()?,
             Token::While => self.parse_while()?,
             Token::Match => self.parse_match()?,
-            Token::Return => self.parse_return()?,
-            Token::Import => StmtKind::Import(self.parse_import()?),
-            _ => self.parse_simple_stmt()?,
+            Token::Return => {
+                let k = self.parse_return()?;
+                self.expect_stmt_end()?;
+                k
+            }
+            Token::Import => {
+                let k = StmtKind::Import(self.parse_import()?);
+                self.expect_stmt_end()?;
+                k
+            }
+            _ => {
+                let k = self.parse_simple_stmt()?;
+                self.expect_stmt_end()?;
+                k
+            }
         };
+        self.depth -= 1;
         Ok(Stmt { kind, span })
     }
 
@@ -209,6 +259,16 @@ impl Parser {
             Token::MinusEq => AssignOp::MinusEq,
             _ => return Ok(StmtKind::Expr(expr)),
         };
+        // only an assignable place — a name, field, or index — can be on the left of `= += -=`
+        if !matches!(
+            expr.kind,
+            ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { .. }
+        ) {
+            return Err(ParseError {
+                message: "invalid assignment target".to_string(),
+                span: expr.span,
+            });
+        }
         self.advance(); // the assignment operator
         let value = self.parse_expr()?;
         Ok(StmtKind::Assign {
@@ -320,7 +380,13 @@ impl Parser {
         let body = self.parse_block()?;
         let mut branches = vec![(cond, body)];
         let mut else_block = None;
-        while self.check(&Token::Else) {
+        loop {
+            // An indented body lands the cursor on `else` directly (the `Dedent` precedes it); an
+            // inline body (`if x: y`) leaves a `Newline` first, so step over newlines before testing.
+            self.skip_newlines();
+            if !self.check(&Token::Else) {
+                break;
+            }
             self.expect(&Token::Else)?;
             if self.check(&Token::If) {
                 // `else if` → another branch
@@ -358,9 +424,7 @@ impl Parser {
     fn parse_match(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Match)?;
         let scrutinee = self.parse_expr()?;
-        self.expect(&Token::Colon)?;
-        self.expect(&Token::Newline)?;
-        self.expect(&Token::Indent)?;
+        self.open_block()?;
         let mut arms = Vec::new();
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
@@ -458,7 +522,17 @@ impl Parser {
             self.expect(&Token::Dedent)?;
             Ok(stmts)
         } else {
-            // inline single statement (e.g. a one-line `match` arm)
+            // inline single statement (e.g. a one-line `match` arm). A compound statement that
+            // opens its own block is not allowed inline — `if a: if b: x` would make a trailing
+            // `else` ambiguous (which `if`?). Force such nesting to use an indented block.
+            if matches!(
+                self.peek(),
+                Token::If | Token::For | Token::While | Token::Match
+            ) {
+                return Err(self.err(
+                    "a nested block must be indented, not written inline after ':'".to_string(),
+                ));
+            }
             Ok(vec![self.parse_stmt()?])
         }
     }
@@ -475,17 +549,23 @@ impl Parser {
     // ----- types -----
 
     fn parse_type(&mut self) -> PResult<Type> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.err("type nested too deeply".to_string()));
+        }
         let name = self.expect_ident()?;
-        if self.eat(&Token::LBracket) {
+        let ty = if self.eat(&Token::LBracket) {
             let mut args = vec![self.parse_type()?];
             while self.eat(&Token::Comma) {
                 args.push(self.parse_type()?);
             }
             self.expect(&Token::RBracket)?;
-            Ok(Type::Generic(name, args))
+            Type::Generic(name, args)
         } else {
-            Ok(Type::Named(name))
-        }
+            Type::Named(name)
+        };
+        self.depth -= 1;
+        Ok(ty)
     }
 
     // ----- expressions (Pratt) -----
@@ -496,6 +576,10 @@ impl Parser {
 
     /// Precedence-climbing core. `min_bp` is the minimum left binding power that may bind here.
     fn parse_bp(&mut self, min_bp: u8) -> PResult<Expr> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.err("expression nested too deeply".to_string()));
+        }
         let mut lhs = self.parse_unary()?;
         while let Some((op, l_bp, r_bp)) = infix_op(self.peek()) {
             if l_bp < min_bp {
@@ -522,18 +606,23 @@ impl Parser {
                 },
             };
         }
+        self.depth -= 1;
         Ok(lhs)
     }
 
     /// Prefix unary operators (`not`, `-`), then a postfix chain.
     fn parse_unary(&mut self) -> PResult<Expr> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.err("expression nested too deeply".to_string()));
+        }
         let span = self.cur_span();
         let op = match self.peek() {
             Token::Not => Some(UnaryOp::Not),
             Token::Minus => Some(UnaryOp::Neg),
             _ => None,
         };
-        if let Some(op) = op {
+        let result = if let Some(op) = op {
             self.advance();
             let expr = self.parse_unary()?;
             Ok(Expr {
@@ -545,7 +634,9 @@ impl Parser {
             })
         } else {
             self.parse_postfix()
-        }
+        };
+        self.depth -= 1;
+        result
     }
 
     /// A primary expression followed by any chain of `(call)`, `.field`, `[index]`, `?`.
@@ -641,7 +732,7 @@ impl Parser {
             Token::Fn => return self.parse_closure(span),
             other => {
                 return Err(ParseError {
-                    message: format!("unexpected token in expression: {other:?}"),
+                    message: format!("unexpected {} in expression", describe(&other)),
                     span,
                 })
             }
@@ -670,6 +761,50 @@ impl Parser {
             span,
         })
     }
+}
+
+/// Render a token as the user would recognize it, for error messages — `':='` not `Walrus`.
+fn describe(tok: &Token) -> String {
+    use Token::*;
+    let s = match tok {
+        Plus => "'+'",
+        Minus => "'-'",
+        Star => "'*'",
+        Slash => "'/'",
+        Percent => "'%'",
+        Assign => "'='",
+        Walrus => "':='",
+        EqEq => "'=='",
+        NotEq => "'!='",
+        Lt => "'<'",
+        LtEq => "'<='",
+        Gt => "'>'",
+        GtEq => "'>='",
+        PlusEq => "'+='",
+        MinusEq => "'-='",
+        Arrow => "'->'",
+        Pipe => "'|>'",
+        Question => "'?'",
+        LParen => "'('",
+        RParen => "')'",
+        LBracket => "'['",
+        RBracket => "']'",
+        Comma => "','",
+        Colon => "':'",
+        Dot => "'.'",
+        DotDot => "'..'",
+        Newline => "end of line",
+        Indent => "an indented block",
+        Dedent => "a dedent",
+        Eof => "end of input",
+        Ident(name) => return format!("identifier '{name}'"),
+        Int(n) => return format!("integer {n}"),
+        Float(f) => return format!("float {f}"),
+        Str(_) => "a string literal",
+        // keywords print as their lowercase source spelling
+        other => return format!("'{}'", format!("{other:?}").to_lowercase()),
+    };
+    s.to_string()
 }
 
 /// An infix operator: a normal binary op, or the range marker `..`.
@@ -710,6 +845,11 @@ mod tests {
 
     fn parse_ok(src: &str) -> Module {
         parse(lexer::tokenize(src).unwrap()).unwrap_or_else(|e| panic!("parse failed: {e}"))
+    }
+
+    /// The error from a source that must fail to parse.
+    fn parse_err(src: &str) -> ParseError {
+        parse(lexer::tokenize(src).unwrap()).expect_err("expected a parse error")
     }
 
     /// The single statement in a one-statement module.
@@ -1017,5 +1157,246 @@ mod tests {
         let err = parse(lexer::tokenize("fn (\n").unwrap()).unwrap_err();
         assert!(err.message.contains("identifier"), "{}", err.message);
         assert_eq!(err.span.line, 1);
+    }
+
+    // ===== regression tests for the review-panel findings =====
+
+    /// An inline `if` body must still allow an `else` on the next line (was misparsed).
+    #[test]
+    fn inline_if_then_else() {
+        let StmtKind::Fn(f) = only("fn m():\n    if x: y = 1\n    else: z = 2\n") else {
+            panic!()
+        };
+        match &f.body[0].kind {
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
+                assert_eq!(branches.len(), 1);
+                assert!(else_block.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `else if` chains longer than one branch must keep every branch.
+    #[test]
+    fn else_if_chain_three_branches() {
+        match only("if a:\n    f()\nelse if b:\n    g()\nelse if c:\n    h()\nelse:\n    i()\n") {
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
+                assert_eq!(branches.len(), 3);
+                assert!(else_block.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Assignment to a non-lvalue is a syntax error, not a silently-wrong AST.
+    #[test]
+    fn rejects_non_lvalue_assignment() {
+        assert!(parse_err("1 = 2\n").message.contains("assignment target"));
+        assert!(parse_err("f() = 3\n").message.contains("assignment target"));
+        // a field/index target is fine
+        assert!(matches!(only("p.x = 1\n"), StmtKind::Assign { .. }));
+        assert!(matches!(only("xs[0] = 1\n"), StmtKind::Assign { .. }));
+    }
+
+    /// `:=` left side must be a bare name.
+    #[test]
+    fn rejects_walrus_on_non_ident() {
+        assert!(parse_err("a.b := 1\n").message.contains("must be a name"));
+    }
+
+    /// Two statements packed onto one physical line is an error (no terminator between them).
+    #[test]
+    fn rejects_trailing_tokens() {
+        assert!(parse_err("x := 5 y := 6\n").message.contains("end of line"));
+    }
+
+    /// A primary that starts with a non-expression token reports a readable error.
+    #[test]
+    fn primary_error_is_readable() {
+        let err = parse_err(", 1\n");
+        assert!(err.message.contains("unexpected"), "{}", err.message);
+        assert!(err.message.contains("','"), "should name the token: {}", err.message);
+    }
+
+    /// Error messages render tokens in source form, not Rust enum names.
+    #[test]
+    fn error_messages_use_source_spelling() {
+        // `for in xs:` — missing loop variable; expected identifier, found keyword `in`
+        let err = parse_err("for in xs:\n    f()\n");
+        assert!(err.message.contains("'in'"), "{}", err.message);
+        assert!(!err.message.contains("In"), "leaked enum name: {}", err.message);
+    }
+
+    /// Generic types with multiple arguments parse (the comma loop in `parse_type`).
+    #[test]
+    fn generic_type_multiple_args() {
+        let StmtKind::Fn(f) = only("fn g(m: map[str, list[int]]):\n    return\n") else {
+            panic!()
+        };
+        match &f.params[0].ty {
+            Some(Type::Generic(name, args)) => {
+                assert_eq!(name, "map");
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], Type::Named("str".into()));
+                assert_eq!(args[1], Type::Generic("list".into(), vec![Type::Named("int".into())]));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Unary `not` / `-` build `Unary` nodes.
+    #[test]
+    fn unary_operators() {
+        let StmtKind::Expr(e) = only("not done\n") else {
+            panic!()
+        };
+        assert!(matches!(e.kind, ExprKind::Unary { op: UnaryOp::Not, .. }));
+        let StmtKind::Expr(e) = only("-x\n") else { panic!() };
+        assert!(matches!(e.kind, ExprKind::Unary { op: UnaryOp::Neg, .. }));
+    }
+
+    /// A fully-chained postfix expression nests correctly: `a.b()[0]?`.
+    #[test]
+    fn chained_postfix() {
+        let StmtKind::Expr(e) = only("a.b()[0]?\n") else {
+            panic!()
+        };
+        // Try( Index( Call( Field(a, b) ), 0 ) )
+        let ExprKind::Try(inner) = e.kind else {
+            panic!("outermost should be Try")
+        };
+        let ExprKind::Index { obj, .. } = inner.kind else {
+            panic!("next should be Index")
+        };
+        let ExprKind::Call { callee, .. } = obj.kind else {
+            panic!("next should be Call")
+        };
+        assert!(matches!(callee.kind, ExprKind::Field { .. }));
+    }
+
+    /// Expression spans point at the start of the construct (lhs for binaries, primary for postfix).
+    #[test]
+    fn expr_spans_are_populated() {
+        // `a + b` indented in a fn body: the binary's span is the lhs `a` at line 2, col 5.
+        let StmtKind::Fn(f) = only("fn m():\n    a + b\n") else {
+            panic!()
+        };
+        let StmtKind::Expr(e) = &f.body[0].kind else {
+            panic!()
+        };
+        assert!(matches!(e.kind, ExprKind::Binary { .. }));
+        assert_eq!(e.span.line, 2);
+        assert_eq!(e.span.col, 5);
+    }
+
+    /// Closure without a declared return type parses (`ret: None`).
+    #[test]
+    fn closure_without_return_type() {
+        let StmtKind::Expr(e) = only("nums.map(fn(x): x * 2)\n") else {
+            panic!()
+        };
+        let ExprKind::Call { args, .. } = e.kind else {
+            panic!()
+        };
+        match &args[0].kind {
+            ExprKind::Closure { ret, params, .. } => {
+                assert!(ret.is_none());
+                assert!(params[0].ty.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Deeply nested input returns a `ParseError` instead of overflowing the native stack —
+    /// across all four recursive entry points: parens (parse_bp), unary chains (parse_unary),
+    /// nested generics (parse_type), and nested blocks (parse_stmt).
+    #[test]
+    fn deep_nesting_errors_not_crash() {
+        let paren = format!("x := {}1{}\n", "(".repeat(500), ")".repeat(500));
+        assert!(parse(lexer::tokenize(&paren).unwrap())
+            .unwrap_err()
+            .message
+            .contains("too deeply"));
+
+        let unary = format!("x := {}y\n", "not ".repeat(500));
+        assert!(parse(lexer::tokenize(&unary).unwrap())
+            .unwrap_err()
+            .message
+            .contains("too deeply"));
+
+        let generic = format!("z: {}int{} = w\n", "list[".repeat(500), "]".repeat(500));
+        assert!(parse(lexer::tokenize(&generic).unwrap())
+            .unwrap_err()
+            .message
+            .contains("too deeply"));
+
+        let blocks = {
+            let mut s = String::new();
+            for i in 0..500 {
+                s.push_str(&"    ".repeat(i));
+                s.push_str("if x:\n");
+            }
+            s.push_str(&"    ".repeat(500));
+            s.push_str("y = 1\n");
+            s
+        };
+        assert!(parse(lexer::tokenize(&blocks).unwrap())
+            .unwrap_err()
+            .message
+            .contains("too deeply"));
+    }
+
+    /// A compound statement cannot be the inline body of a block — that would make a trailing
+    /// `else` ambiguous. Force indentation instead.
+    #[test]
+    fn rejects_inline_nested_block() {
+        let err = parse_err("fn m():\n    if a: if b: x = 1\n");
+        assert!(err.message.contains("indented"), "{}", err.message);
+    }
+
+    /// Strengthened golden check: walk into hello.chz bodies, not just top-level shape.
+    #[test]
+    fn hello_example_inner_structure() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/hello.chz"
+        ))
+        .unwrap();
+        let module = parse(lexer::tokenize(&src).unwrap()).unwrap();
+
+        // index 4 = `fn safe_div(...) -> Result[int]:` — check its return type and `?` usage.
+        let StmtKind::Fn(safe_div) = &module.stmts[4].kind else {
+            panic!("stmts[4] should be safe_div")
+        };
+        assert_eq!(safe_div.name, "safe_div");
+        assert_eq!(
+            safe_div.ret,
+            Some(Type::Generic("Result".into(), vec![Type::Named("int".into())]))
+        );
+        // body: `if b == 0:` then `return Ok(a / b)`
+        assert!(matches!(safe_div.body[0].kind, StmtKind::If { .. }));
+        assert!(matches!(safe_div.body[1].kind, StmtKind::Return(Some(_))));
+
+        // index 3 = `fn area(s: Shape) -> float:` containing a `match` with 2 arms.
+        let StmtKind::Fn(area) = &module.stmts[3].kind else {
+            panic!("stmts[3] should be area")
+        };
+        let StmtKind::Match { arms, .. } = &area.body[0].kind else {
+            panic!("area body should be a match")
+        };
+        assert_eq!(arms.len(), 2);
+        assert_eq!(
+            arms[0].pattern,
+            Pattern::Variant {
+                name: "Circle".into(),
+                bindings: vec!["r".into()],
+            }
+        );
     }
 }

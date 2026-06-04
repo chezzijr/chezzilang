@@ -648,4 +648,30 @@ mod tests {
         // `if` is the first token: line 1, column 1.
         assert_eq!(toks[0].span, Span { line: 1, col: 1 });
     }
+
+    #[test]
+    fn layout_token_spans() {
+        // if x:\n    y\n  →  the Indent is at the start of line 2, the trailing Dedent + Eof
+        // land at the final position on line 3 (end of input).
+        let toks = tokenize("if x:\n    y\n").unwrap();
+        let indent = toks.iter().find(|t| t.kind == Token::Indent).unwrap();
+        assert_eq!(indent.span.line, 2);
+
+        let eof = toks.last().unwrap();
+        assert_eq!(eof.kind, Token::Eof);
+        assert_eq!(eof.span.line, 3);
+    }
+
+    #[test]
+    fn span_after_multiline_string() {
+        // A string spanning two lines must keep the column honest for the token after it.
+        // line 1: x := "a   (opens) ... line 2: b"  z
+        let toks = tokenize("x := \"a\nb\" z\n").unwrap();
+        let z = toks
+            .iter()
+            .find(|t| t.kind == Token::Ident("z".to_string()))
+            .unwrap();
+        // `b" z` → z is the 4th char on line 2 (1-based col 4).
+        assert_eq!(z.span, Span { line: 2, col: 4 });
+    }
 }
