@@ -1,0 +1,3 @@
+# rule: stmt
+# expect: end of line
+x := 5 y := 6

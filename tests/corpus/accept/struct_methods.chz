@@ -1,0 +1,7 @@
+# rule: structDecl, field, fnDecl
+struct Point:
+    x: int
+    y: int
+
+    fn dist(self) -> float:
+        return self.x * self.x + self.y * self.y

@@ -1,0 +1,3 @@
+# rule: letStmt
+# expect: must be a name
+a.b := 1

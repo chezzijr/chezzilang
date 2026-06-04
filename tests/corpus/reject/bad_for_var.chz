@@ -1,0 +1,4 @@
+# rule: forStmt
+# expect: identifier
+for in xs:
+    f()

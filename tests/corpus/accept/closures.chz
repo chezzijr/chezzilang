@@ -1,0 +1,4 @@
+# rule: closure
+fn main():
+    double := fn(x: int) -> int: x * 2
+    apply := fn(x): x

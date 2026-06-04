@@ -11,6 +11,9 @@ mod ast;
 mod lexer;
 mod parser;
 
+#[cfg(test)]
+mod conformance;
+
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -117,3 +120,4 @@ fn cmd_ast(path: Option<&String>) -> ExitCode {
         }
     }
 }
+

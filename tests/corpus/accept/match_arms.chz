@@ -1,0 +1,6 @@
+# rule: matchStmt, arm, pattern, block
+fn area(s: Shape) -> float:
+    match s:
+        Circle(r): return float(r)
+        Square(n): return float(n)
+        Point: return 0.0

@@ -1,0 +1,4 @@
+# rule: whileStmt, assignStmt
+fn main():
+    while cond:
+        cond = step()

@@ -1,0 +1,4 @@
+# rule: primary, exprList
+fn main():
+    nums := [1, 2, 3]
+    empty := []

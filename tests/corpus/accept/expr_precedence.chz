@@ -1,0 +1,7 @@
+# rule: expr, orExpr, andExpr, eqExpr, relExpr, addExpr, mulExpr, unary
+fn main():
+    a := 1 + 2 * 3
+    b := x and y or z
+    c := not done
+    d := -n + 1
+    e := p < q == r

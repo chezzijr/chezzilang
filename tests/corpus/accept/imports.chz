@@ -1,0 +1,5 @@
+# rule: importStmt, importNames, importName, dottedPath
+import std.io
+import std.io as fs
+import read, write from std.io
+import read as r from std.io

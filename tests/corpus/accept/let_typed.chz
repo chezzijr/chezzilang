@@ -1,0 +1,3 @@
+# rule: letStmt, type
+count: int = 0
+label: str = "hi"

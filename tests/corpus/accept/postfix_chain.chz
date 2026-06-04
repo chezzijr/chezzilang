@@ -1,0 +1,5 @@
+# rule: postfix
+fn main():
+    x := a.b()[0]?
+    y := obj.field
+    z := f(1, 2)

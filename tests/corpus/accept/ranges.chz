@@ -1,0 +1,3 @@
+# rule: rangeExpr
+fn main():
+    r := 0..10

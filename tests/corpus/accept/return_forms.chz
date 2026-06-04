@@ -1,0 +1,6 @@
+# rule: returnStmt
+fn a():
+    return
+
+fn b() -> int:
+    return 1

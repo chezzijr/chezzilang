@@ -1,0 +1,4 @@
+# rule: block
+# expect: indented
+fn m():
+    if a: if b: x = 1

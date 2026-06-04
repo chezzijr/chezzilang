@@ -1,0 +1,5 @@
+# rule: enumDecl, variant
+enum Shape:
+    Circle(int)
+    Square(int)
+    Point

@@ -1,0 +1,143 @@
+# Chezzi grammar — canonical reference (M2)
+#
+# This is the single source of truth for Chezzi's syntax. It is NOT decorative:
+# `cargo test conformance` executes it (via the `bnf` crate, a dev-dependency) and
+# differential-tests its accept/reject decisions against the hand-written parser in
+# `src/parser/mod.rs` on the corpus under `tests/corpus/`. If the code and this file
+# disagree, the test fails.
+#
+# IMPORTANT — this grammar is written over the LEXER'S TOKEN STREAM, not raw source text.
+# Every terminal (e.g. WALRUS, IDENT, NEWLINE) is a `Token` class emitted by the lexer
+# (`src/lexer/mod.rs`). That is what makes indentation expressible: INDENT / DEDENT / NEWLINE
+# are ordinary terminals the lexer produces. Terminal *values* (the 5 in INT, the name in
+# IDENT) are abstracted away — the grammar cares only about token class.
+#
+# Notation: pure BNF. `<x>` nonterminal, "TOK" terminal (a token class), `::=`, `|`.
+# No `*`/`?` — repetition is written with right-recursion, optionals as explicit alternatives.
+# The expression rules form a precedence cascade (loosest first) mirroring `infix_op`'s binding
+# powers in the parser (see docs/syntax.md §4); the hand parser realizes the same precedence via
+# Pratt binding powers rather than literal cascade recursion.
+#
+# Terminals = exactly the `Token` enum variants, one class each. PIPE ("|>") is a real token but
+# no rule uses it yet — reserved for the pipe operator (M6).
+
+# ===== top level =====
+# A file is zero or more statements then EOF. The lexer always emits a trailing NEWLINE before
+# EOF when the last line had content, and one DEDENT per still-open block; blank/comment-only
+# lines emit no tokens, so no stray NEWLINEs appear between statements.
+<module> ::= "EOF" | <stmts> "EOF"
+<stmts>  ::= <stmt> | <stmt> <stmts>
+
+<stmt>         ::= <simpleStmt> | <compoundStmt>
+<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt>
+
+# Line-oriented statements each consume their terminating NEWLINE.
+<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <importStmt> | <exprStmt>
+
+# ===== simple statements =====
+<letStmt> ::= "IDENT" "WALRUS" <expr> "NEWLINE"
+            | "IDENT" "COLON" <type> "ASSIGN" <expr> "NEWLINE"
+
+# Assignment target is restricted to a name / field / index (the parser's lvalue guard):
+# an lvalue is a bare IDENT, or any postfix expression that *ends* in `.field` or `[index]`
+# (so `f().x` and `xs[0]` are lvalues, but `f()` and `1` are not).
+<assignStmt> ::= <lvalue> "ASSIGN" <expr> "NEWLINE"
+               | <lvalue> "PLUSEQ" <expr> "NEWLINE"
+               | <lvalue> "MINUSEQ" <expr> "NEWLINE"
+<lvalue> ::= "IDENT"
+           | <postfix> "DOT" "IDENT"
+           | <postfix> "LBRACKET" <expr> "RBRACKET"
+
+<returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <expr> "NEWLINE"
+
+<importStmt> ::= "IMPORT" <dottedPath> "NEWLINE"
+               | "IMPORT" <dottedPath> "AS" "IDENT" "NEWLINE"
+               | "IMPORT" <importNames> "FROM" <dottedPath> "NEWLINE"
+<importNames> ::= <importName> | <importName> "COMMA" <importNames>
+<importName>  ::= "IDENT" | "IDENT" "AS" "IDENT"
+<dottedPath>  ::= "IDENT" | "IDENT" "DOT" <dottedPath>
+
+<exprStmt> ::= <expr> "NEWLINE"
+
+# ===== blocks =====
+# Indented block: ':' NEWLINE INDENT stmts DEDENT. Inline block: ':' followed by ONE simple
+# statement on the same line (its NEWLINE terminates the line). Inline bodies exclude compound
+# statements, so `if a: if b: x` cannot parse inline — a trailing `else` would be ambiguous.
+<block> ::= "COLON" "NEWLINE" "INDENT" <stmts> "DEDENT"
+          | "COLON" <simpleStmt>
+
+# ===== declarations =====
+<fnDecl> ::= "FN" "IDENT" "LPAREN" "RPAREN" <block>
+           | "FN" "IDENT" "LPAREN" <params> "RPAREN" <block>
+           | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> <block>
+           | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> <block>
+<params> ::= <param> | <param> "COMMA" <params>
+<param>  ::= "IDENT" | "IDENT" "COLON" <type>
+
+<structDecl>    ::= "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <structMembers> "DEDENT"
+<structMembers> ::= <structMember> | <structMember> <structMembers>
+<structMember>  ::= <field> | <fnDecl>
+<field>         ::= "IDENT" "COLON" <type> "NEWLINE"
+
+<enumDecl> ::= "ENUM" "IDENT" "COLON" "NEWLINE" "INDENT" <variants> "DEDENT"
+<variants> ::= <variant> | <variant> <variants>
+<variant>  ::= "IDENT" "NEWLINE"
+             | "IDENT" "LPAREN" <typeList> "RPAREN" "NEWLINE"
+
+# ===== control flow =====
+<ifStmt> ::= "IF" <expr> <block>
+           | "IF" <expr> <block> <elseChain>
+# zero+ `else if` branches, optionally a final `else`; at least one clause here.
+<elseChain> ::= <elseIf> | <elseFinal> | <elseIf> <elseChain>
+<elseIf>    ::= "ELSE" "IF" <expr> <block>
+<elseFinal> ::= "ELSE" <block>
+
+<forStmt>   ::= "FOR" "IDENT" "IN" <expr> <block>
+<whileStmt> ::= "WHILE" <expr> <block>
+
+<matchStmt> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <arms> "DEDENT"
+<arms>      ::= <arm> | <arm> <arms>
+<arm>       ::= <pattern> <block>
+<pattern>   ::= "IDENT"
+              | "IDENT" "LPAREN" "RPAREN"
+              | "IDENT" "LPAREN" <bindings> "RPAREN"
+<bindings>  ::= "IDENT" | "IDENT" "COMMA" <bindings>
+
+# ===== types =====
+<type>     ::= "IDENT" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
+<typeList> ::= <type> | <type> "COMMA" <typeList>
+
+# ===== expressions (precedence cascade, loosest -> tightest) =====
+<expr>     ::= <orExpr>
+<orExpr>   ::= <andExpr> | <orExpr> "OR" <andExpr>
+<andExpr>  ::= <eqExpr>  | <andExpr> "AND" <eqExpr>
+<eqExpr>   ::= <relExpr> | <eqExpr> "EQEQ" <relExpr> | <eqExpr> "NOTEQ" <relExpr>
+<relExpr>  ::= <rangeExpr>
+             | <relExpr> "LT" <rangeExpr>   | <relExpr> "LTEQ" <rangeExpr>
+             | <relExpr> "GT" <rangeExpr>   | <relExpr> "GTEQ" <rangeExpr>
+<rangeExpr>::= <addExpr> | <rangeExpr> "DOTDOT" <addExpr>
+<addExpr>  ::= <mulExpr> | <addExpr> "PLUS" <mulExpr> | <addExpr> "MINUS" <mulExpr>
+<mulExpr>  ::= <unary>
+             | <mulExpr> "STAR" <unary> | <mulExpr> "SLASH" <unary> | <mulExpr> "PERCENT" <unary>
+<unary>    ::= <postfix> | "NOT" <unary> | "MINUS" <unary>
+
+# postfix chain: calls, field access, indexing, and the `?` try operator.
+<postfix> ::= <primary>
+            | <postfix> "LPAREN" "RPAREN"
+            | <postfix> "LPAREN" <exprList> "RPAREN"
+            | <postfix> "DOT" "IDENT"
+            | <postfix> "LBRACKET" <expr> "RBRACKET"
+            | <postfix> "QUESTION"
+
+<primary> ::= "INT" | "FLOAT" | "STR" | "TRUE" | "FALSE" | "IDENT"
+            | "LPAREN" <expr> "RPAREN"
+            | "LBRACKET" "RBRACKET"
+            | "LBRACKET" <exprList> "RBRACKET"
+            | <closure>
+
+<closure> ::= "FN" "LPAREN" "RPAREN" "COLON" <expr>
+            | "FN" "LPAREN" <params> "RPAREN" "COLON" <expr>
+            | "FN" "LPAREN" "RPAREN" "ARROW" <type> "COLON" <expr>
+            | "FN" "LPAREN" <params> "RPAREN" "ARROW" <type> "COLON" <expr>
+
+<exprList> ::= <expr> | <expr> "COMMA" <exprList>

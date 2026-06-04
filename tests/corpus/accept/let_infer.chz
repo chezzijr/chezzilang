@@ -1,0 +1,4 @@
+# rule: letStmt, exprStmt
+x := 5
+name := "thuan"
+ok := true

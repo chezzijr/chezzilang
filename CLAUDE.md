@@ -1,7 +1,7 @@
 # Chezzi — Claude Code Guide
 
 Chezzi is a fast, statically-typed, Python-feel scripting language, hand-built in Rust.
-Full design + roadmap: **[`docs/spec.md`](docs/spec.md)**. Syntax cheat-sheet: **[`docs/syntax.md`](docs/syntax.md)**. Progress tracker: **[`PROGRESS.md`](PROGRESS.md)**.
+Full design + roadmap: **[`docs/spec.md`](docs/spec.md)**. Syntax cheat-sheet: **[`docs/syntax.md`](docs/syntax.md)**. Canonical grammar: **[`docs/grammar.bnf`](docs/grammar.bnf)** (executed + drift-checked by `cargo test conformance`). Progress tracker: **[`PROGRESS.md`](PROGRESS.md)**.
 
 ## How we work — build mode
 
@@ -26,6 +26,7 @@ Claude implements directly. Ship working, tested code each session.
 ```sh
 cargo build              # compile
 cargo test               # run unit + guiding tests
+cargo test conformance   # execute docs/grammar.bnf, differential-test vs the parser
 cargo run -- help        # CLI usage
 cargo run -- tokens examples/hello.chz   # M1 target
 cargo run -- ast    examples/hello.chz   # M2 target

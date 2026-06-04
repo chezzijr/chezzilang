@@ -1,0 +1,3 @@
+# rule: assignStmt
+# expect: invalid assignment target
+1 = 2
