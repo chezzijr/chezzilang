@@ -7,7 +7,9 @@
 //!
 //! Status: pre-M1 scaffold. Subcommands below are stubs.
 
+mod ast;
 mod lexer;
+mod parser;
 
 use std::process::ExitCode;
 
@@ -35,7 +37,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "tokens" => cmd_tokens(args.get(1)),
-        "run" | "ast" | "repl" => {
+        "ast" => cmd_ast(args.get(1)),
+        "run" | "repl" => {
             eprintln!("chezzi: '{cmd}' is not implemented yet (pre-M1 scaffold).");
             eprintln!("        see the roadmap in docs/spec.md");
             ExitCode::FAILURE
@@ -69,8 +72,43 @@ fn cmd_tokens(path: Option<&String>) -> ExitCode {
     match lexer::tokenize(&source) {
         Ok(tokens) => {
             for tok in &tokens {
-                println!("{tok:?}");
+                println!("{:?}", tok.kind);
             }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `chezzi ast <file>` — lex, parse, and pretty-print the AST. (M2)
+fn cmd_ast(path: Option<&String>) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("chezzi ast: missing file argument\nusage: chezzi ast <file.chz>");
+        return ExitCode::FAILURE;
+    };
+
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("chezzi: cannot read '{path}': {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let tokens = match lexer::tokenize(&source) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match parser::parse(tokens) {
+        Ok(module) => {
+            println!("{module:#?}");
             ExitCode::SUCCESS
         }
         Err(e) => {
