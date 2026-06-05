@@ -60,6 +60,7 @@ pub enum Token {
     Arrow,      // ->
     Pipe,       // |>
     Question,   // ?
+    Bang,       // !  (used in type position: `T!` = Result[T])
 
     // --- delimiters ---
     LParen,     // (
@@ -347,13 +348,7 @@ impl Lexer {
             '%' => Token::Percent,
             ':' => if self.match_char('=') { Token::Walrus } else { Token::Colon },
             '=' => if self.match_char('=') { Token::EqEq } else { Token::Assign },
-            '!' => {
-                if self.match_char('=') {
-                    Token::NotEq
-                } else {
-                    return Err(self.error("expected '=' after '!'"));
-                }
-            }
+            '!' => if self.match_char('=') { Token::NotEq } else { Token::Bang },
             '<' => if self.match_char('=') { Token::LtEq } else { Token::Lt },
             '>' => if self.match_char('=') { Token::GtEq } else { Token::Gt },
             '|' => {
@@ -615,6 +610,20 @@ mod tests {
     #[test]
     fn single_plus() {
         assert_eq!(kinds("+"), vec![Token::Plus, Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn bang_is_a_token() {
+        // Bare `!` lexes to `Bang` (consumed only in type position, for the `T!` Result shorthand).
+        assert_eq!(kinds("!"), vec![Token::Bang, Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn bang_vs_not_eq() {
+        assert_eq!(
+            kinds("! !="),
+            vec![Token::Bang, Token::NotEq, Token::Newline, Token::Eof]
+        );
     }
 
     #[test]

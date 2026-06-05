@@ -242,6 +242,9 @@ a real bug class).
   source order, no fixpoint — a call to a *later* un-annotated fn (or a self-recursive call with no
   concrete base) infers `Unknown` and stays permissive (define callees first / annotate for a
   precise type). Param types still required. Runtime-free (engines never read the declared return).
+- ✅ **`T?` / `T!` type shorthand (post-M4)** — in any type position, `T?` desugars to `Option[T]`
+  and `T!` to `Result[T]` (parse-time, in `parse_type`; new `Token::Bang`). Stacks left-to-right;
+  pure sugar — checker/engines/`Some·None·Ok·Err`/`match`/`?` unchanged.
 - ✅ **Two-pass** — pass 1 hoists every top-level decl (forward refs work, like the interp);
   pass 2 walks bodies, **collecting all errors** (Go-style) into a `Vec`.
 - ✅ **Error classes** (each with a test) — unknown name/type, call arity, non-callable, arithmetic

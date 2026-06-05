@@ -573,7 +573,7 @@ impl Parser {
             return Err(self.err("type nested too deeply".to_string()));
         }
         let name = self.expect_ident()?;
-        let ty = if self.eat(&Token::LBracket) {
+        let mut ty = if self.eat(&Token::LBracket) {
             let mut args = vec![self.parse_type()?];
             while self.eat(&Token::Comma) {
                 args.push(self.parse_type()?);
@@ -583,6 +583,17 @@ impl Parser {
         } else {
             Type::Named(name)
         };
+        // Postfix shorthand on a fully-parsed base type: `T?` = Option[T], `T!` = Result[T].
+        // Stacks left-to-right (`T?!` = Result[Option[T]]).
+        loop {
+            if self.eat(&Token::Question) {
+                ty = Type::Generic("Option".to_string(), vec![ty]);
+            } else if self.eat(&Token::Bang) {
+                ty = Type::Generic("Result".to_string(), vec![ty]);
+            } else {
+                break;
+            }
+        }
         self.depth -= 1;
         Ok(ty)
     }
@@ -819,6 +830,7 @@ fn describe(tok: &Token) -> String {
         Arrow => "'->'",
         Pipe => "'|>'",
         Question => "'?'",
+        Bang => "'!'",
         LParen => "'('",
         RParen => "')'",
         LBracket => "'['",
@@ -1350,6 +1362,53 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// `T?` is sugar for `Option[T]` in type position.
+    #[test]
+    fn optional_type_shorthand() {
+        let StmtKind::Fn(decl) = only("fn f(x: int?):\n    return x\n") else {
+            panic!()
+        };
+        assert_eq!(
+            decl.params[0].ty,
+            Some(Type::Generic("Option".into(), vec![Type::Named("int".into())]))
+        );
+    }
+
+    /// `T!` is sugar for `Result[T]` in type position.
+    #[test]
+    fn result_type_shorthand() {
+        let StmtKind::Fn(decl) = only("fn f() -> int!:\n    return Ok(1)\n") else {
+            panic!()
+        };
+        assert_eq!(
+            decl.ret,
+            Some(Type::Generic("Result".into(), vec![Type::Named("int".into())]))
+        );
+    }
+
+    /// The shorthand applies to a fully-parsed base type, including a generic like `list[int]`.
+    #[test]
+    fn optional_shorthand_on_generic_base() {
+        let StmtKind::Fn(decl) = only("fn f(x: list[int]?):\n    return x\n") else {
+            panic!()
+        };
+        assert_eq!(
+            decl.params[0].ty,
+            Some(Type::Generic(
+                "Option".into(),
+                vec![Type::Generic("list".into(), vec![Type::Named("int".into())])]
+            ))
+        );
+    }
+
+    /// Bare `!` is a token now (for the `T!` type shorthand) but has no meaning in expression
+    /// position — it must still be a parse error, not silently consumed.
+    #[test]
+    fn bang_in_expression_rejected() {
+        assert!(parse_err("x := !y\n").message.contains("unexpected '!'"));
+        assert!(parse_err("z := 1 ! 2\n").message.contains("'!'"));
     }
 
     /// Deeply nested input returns a `ParseError` instead of overflowing the native stack —

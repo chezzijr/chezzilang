@@ -284,6 +284,24 @@ fn inferred_method_return() {
     );
 }
 
+// ===== 9c. T? / T! type shorthand (sugar for Option[T] / Result[T]) =====
+
+#[test]
+fn type_shorthand_checks_like_long_form() {
+    // `int?` (param) and `int!` (return) desugar to Option[int] / Result[int].
+    ok("fn f(x: int?) -> int!:\n    match x:\n        Some(v): return Ok(v)\n        None: return Err(\"none\")\n");
+}
+
+#[test]
+fn optional_shorthand_accepts_some_and_none() {
+    ok("x: int? = Some(1)\ny: int? = None\n");
+}
+
+#[test]
+fn optional_shorthand_rejects_bare_value() {
+    rejects("x: int? = 5\n", "cannot assign int to variable of type Option[int]");
+}
+
 // ===== 10. field access =====
 
 #[test]

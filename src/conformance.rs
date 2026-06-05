@@ -67,6 +67,7 @@ fn symbol(tok: &Token) -> &'static str {
         Token::Arrow => "ARROW",
         Token::Pipe => "PIPE",
         Token::Question => "QUESTION",
+        Token::Bang => "BANG",
         Token::LParen => "LPAREN",
         Token::RParen => "RPAREN",
         Token::LBracket => "LBRACKET",

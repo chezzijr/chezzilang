@@ -1,0 +1,3 @@
+# rule: type
+fn f(x: int?, y: list[int]!) -> int!?:
+    return Ok(Some(0))

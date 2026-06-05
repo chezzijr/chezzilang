@@ -106,7 +106,9 @@
 <bindings>  ::= "IDENT" | "IDENT" "COMMA" <bindings>
 
 # ===== types =====
+# Postfix sugar on a base type: `T?` = Option[T], `T!` = Result[T] (stacks left-to-right).
 <type>     ::= "IDENT" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
+             | <type> "QUESTION" | <type> "BANG"
 <typeList> ::= <type> | <type> "COMMA" <typeList>
 
 # ===== expressions (precedence cascade, loosest -> tightest) =====

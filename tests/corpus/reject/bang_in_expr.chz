@@ -1,0 +1,3 @@
+# rule: expr
+# expect: unexpected '!'
+x := !y

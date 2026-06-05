@@ -54,8 +54,12 @@ count += 1             # reassignment (+= -= also)
 | `str` | `"hi"` | UTF-8 |
 | `list[T]` | `[1, 2]` | growable |
 | `map[K, V]` | `{"a": 1}` | hash map |
-| `Result[T]` | `Ok(x)` / `Err(msg)` | §9 |
-| `Option[T]` | `Some(x)` / `None` | §9 |
+| `Result[T]` | `Ok(x)` / `Err(msg)` | §9; shorthand `T!` |
+| `Option[T]` | `Some(x)` / `None` | §9; shorthand `T?` |
+
+**Type shorthand.** In any type position, `T?` is sugar for `Option[T]` and `T!` for `Result[T]`
+(e.g. `int?`, `list[int]?`, `int!`). Pure spelling — `Some`/`None`/`Ok`/`Err`, `match`, and `?`
+behave exactly as on the long forms.
 
 ## 4. Operators & precedence
 
@@ -162,7 +166,7 @@ match safe_div(10, 2):
 Errors are **values**, not exceptions. No hidden control flow.
 
 ```chezzi
-fn safe_div(a: int, b: int) -> Result[int]:
+fn safe_div(a: int, b: int) -> int!:        # int! == Result[int]
     if b == 0:
         return Err("divide by zero")
     return Ok(a / b)
@@ -173,7 +177,7 @@ fn calc() -> Result[int]:
     return Ok(x + y)
 ```
 
-`Option[T]` is the same shape for "maybe absent": `Some(v)` / `None`, also usable with `?`.
+`Option[T]` (shorthand `T?`) is the same shape for "maybe absent": `Some(v)` / `None`, also usable with `?`.
 
 **Unhandled errors at the top level exit the program.** An `Err`/`None` that reaches the top level —
 a bare top-level expression statement that evaluates to one (e.g. `compute()` whose result is `Err`),
