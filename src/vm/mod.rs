@@ -65,6 +65,8 @@ struct Vm {
     call_depth: usize,
     /// Each module's namespace object, indexed by module index (run-once cache + import targets).
     module_objs: Vec<GcRef>,
+    /// Test mode: collect before *every* instruction, to surface any missing GC root.
+    gc_stress: bool,
 }
 
 impl Vm {
@@ -77,6 +79,7 @@ impl Vm {
             out: String::new(),
             call_depth: 0,
             module_objs: Vec::new(),
+            gc_stress: false,
         }
     }
 
@@ -212,6 +215,12 @@ impl Vm {
 
     fn run_until(&mut self, base_level: usize) -> Result<(), RuntimeError> {
         while self.frames.len() > base_level {
+            // Collect at instruction boundaries only: here every live value is reachable from the
+            // VM roots (operand stack, frame slots, frame homes/closures, module namespaces) —
+            // there are no mid-opcode temporaries off the stack to miss.
+            if self.gc_stress || self.heap.should_collect() {
+                self.collect();
+            }
             let fi = self.frames.len() - 1;
             let pid = self.frames[fi].proto;
             let ip = self.frames[fi].ip;
@@ -221,6 +230,32 @@ impl Vm {
             self.step(op, span)?;
         }
         Ok(())
+    }
+
+    /// Mark-sweep collection. Roots: the whole operand stack (which contains every frame's local
+    /// slots *and* any in-flight expression temporaries), each frame's home module + backing
+    /// closure, and the module namespace cache. Everything else is garbage.
+    fn collect(&mut self) {
+        let mut work: Vec<GcRef> = Vec::new();
+        for v in &self.stack {
+            if let Value::Obj(h) = v {
+                work.push(*h);
+            }
+        }
+        for f in &self.frames {
+            work.push(f.home);
+            if let Some(c) = f.closure {
+                work.push(c);
+            }
+        }
+        work.extend(self.module_objs.iter().copied());
+
+        while let Some(h) = work.pop() {
+            if self.heap.mark(h) {
+                work.extend(self.heap.children(h));
+            }
+        }
+        self.heap.sweep();
     }
 
     fn base(&self) -> usize {
@@ -1059,6 +1094,44 @@ pub fn run_capture(src: &str) -> Result<String, RuntimeError> {
     result.map(|()| out)
 }
 
+/// Run a single-file program, returning stdout (or error) plus the final live-object count.
+/// `stress` collects before every instruction (surfaces missing GC roots); otherwise the normal
+/// allocation-threshold trigger drives collection (test helper for GC assertions).
+#[cfg(test)]
+pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize) {
+    let src = src.to_string();
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let tokens = match lexer::tokenize(&src) {
+                Ok(t) => t,
+                Err(e) => return (Err(RuntimeError { message: e.to_string(), span: Span { line: 1, col: 1 } }), 0),
+            };
+            let module = match parser::parse(tokens) {
+                Ok(m) => m,
+                Err(e) => return (Err(RuntimeError { message: e.message, span: e.span }), 0),
+            };
+            let program = match crate::compiler::compile_module_standalone(&module) {
+                Ok(p) => p,
+                Err(e) => return (Err(RuntimeError { message: e.message, span: e.span }), 0),
+            };
+            let mut vm = Vm::new(Rc::new(program));
+            vm.gc_stress = stress;
+            let result = vm.run();
+            let live = vm.heap.live();
+            (result.map(|()| vm.out), live)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked")
+}
+
+/// Stdout from a stress-mode run (panics on error) — convenience for parity-under-GC tests.
+#[cfg(test)]
+pub fn run_capture_stress(src: &str) -> String {
+    run_with(src, true).0.unwrap_or_else(|e| panic!("unexpected runtime error under GC stress: {e}"))
+}
+
 /// Run a multi-file program from its entry path on the dedicated VM thread. Mirrors
 /// `interp::run_file`: resolve the graph, compile it, run each module once in dependency order,
 /// then the entry's `main()`. Output produced so far is preserved alongside the outcome.
@@ -1570,5 +1643,126 @@ fn main():
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
         assert_eq!(vm_out, interp_out);
+    }
+}
+
+#[cfg(test)]
+mod gc_tests {
+    use super::*;
+
+    /// A value reachable only via the operand stack (mid-expression temporary) must survive a
+    /// collection — the headline use-after-collect trap. Each list is built, left on the stack,
+    /// then indexed; a GC fires (stress) between build and index.
+    #[test]
+    fn value_only_on_operand_stack_survives() {
+        assert_eq!(run_capture_stress("print([str(1), str(2), str(3)][0] + [str(4), str(5)][1])"), "15\n");
+    }
+
+    /// A value held only in a call-frame local slot survives collections triggered by later
+    /// allocations in the same frame.
+    #[test]
+    fn value_in_frame_slot_survives() {
+        let src = "\
+fn main():
+    x := [str(1), str(2)]
+    junk := str(3)
+    more := [str(4), str(5), str(6)]
+    print(x)";
+        assert_eq!(run_capture_stress(src), "[1, 2]\n");
+    }
+
+    /// A value reachable only through a module's globals (the namespace cache root) survives.
+    #[test]
+    fn value_in_module_global_survives() {
+        let src = "\
+K := [str(7), str(8)]
+fn main():
+    a := str(1)
+    b := [str(2), str(3)]
+    print(K)";
+        assert_eq!(run_capture_stress(src), "[7, 8]\n");
+    }
+
+    /// A value reachable only through a closure's captured environment survives — after the
+    /// defining frame is gone, only the closure object holds it.
+    #[test]
+    fn value_in_closure_capture_survives() {
+        let src = "\
+fn make():
+    secret := str(42)
+    return fn(): secret
+fn main():
+    g := make()
+    junk := [str(1), str(2), str(3)]
+    print(g())";
+        assert_eq!(run_capture_stress(src), "42\n");
+    }
+
+    /// An `Err` value propagated by `?` through a function boundary survives collection.
+    #[test]
+    fn value_propagated_by_try_survives() {
+        let src = "\
+fn d() -> Result[str]:
+    return Err(str(99))
+fn use() -> Result[str]:
+    x := d()?
+    return Ok(x)
+fn main():
+    match use():
+        Ok(v): print(v)
+        Err(e): print(\"got {e}\")";
+        assert_eq!(run_capture_stress(src), "got 99\n");
+    }
+
+    /// An allocation-heavy loop's garbage must be reclaimed: the live set stays bounded rather
+    /// than growing with the iteration count (threshold-driven GC, not stress mode).
+    #[test]
+    fn allocation_loop_is_bounded() {
+        let src = "\
+fn main():
+    i := 0
+    while i < 10000:
+        x := [str(i)]
+        i += 1
+    print(i)";
+        let (out, live) = run_with(src, false);
+        assert_eq!(out.unwrap(), "10000\n");
+        // Without collection this would be ~20000+ live objects; the threshold GC keeps it small.
+        assert!(live < 2000, "heap not bounded: {live} live objects after 10000 allocating iterations");
+    }
+
+    /// Stress-mode collection must not change observable behavior on a feature-rich program.
+    #[test]
+    fn hello_chz_identical_under_gc_stress() {
+        let expected = include_str!("../../examples/hello.expected");
+        assert_eq!(run_capture_stress(include_str!("../../examples/hello.chz")), expected);
+    }
+
+    /// Stress vs. normal must agree on a program exercising structs, enums, closures, and match.
+    #[test]
+    fn stress_matches_normal_on_mixed_program() {
+        let src = "\
+struct Box:
+    v: int
+    fn get(self) -> int:
+        return self.v
+enum Opt:
+    Has(int)
+    Nope
+fn pick(o: Opt) -> int:
+    match o:
+        Has(n): return n
+        Nope: return -1
+fn main():
+    b := Box(7)
+    add := fn(x: int) -> int: x + b.get()
+    print(add(3))
+    print(pick(Has(9)))
+    print(pick(Nope))
+    items := [str(1), str(2), str(3)]
+    for s in items:
+        print(s)";
+        let normal = run_capture(src).unwrap();
+        assert_eq!(run_capture_stress(src), normal);
     }
 }

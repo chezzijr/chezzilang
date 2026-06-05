@@ -48,11 +48,39 @@ struct Slot {
     mark: bool,
 }
 
-/// The object heap: a slab of slots with a free-list for reuse.
-#[derive(Debug, Default)]
+/// Smallest GC threshold — don't collect until at least this many objects have been allocated
+/// since the last collection (avoids thrashing on tiny programs).
+const MIN_GC_THRESHOLD: usize = 256;
+
+/// The object heap: a slab of slots with a free-list for reuse + mark-sweep bookkeeping.
+///
+/// The collector itself (root tracing) lives on the VM, which owns the roots; the heap provides
+/// the slot-level primitives: [`mark`](Heap::mark), [`children`](Heap::children),
+/// [`sweep`](Heap::sweep), and the allocation-driven [`should_collect`](Heap::should_collect)
+/// trigger. Collection runs only at instruction boundaries (see `Vm::run_until`), so every live
+/// value is reachable from the VM roots — there are no mid-opcode temporaries to miss.
+#[derive(Debug)]
 pub struct Heap {
     slots: Vec<Slot>,
     free: Vec<u32>,
+    /// Live (allocated, not freed) object count.
+    live: usize,
+    /// Allocations since the last collection — drives the growth-threshold trigger.
+    since_gc: usize,
+    /// Collect once `since_gc` reaches this; grows with the live set after each collection.
+    next_gc: usize,
+}
+
+impl Default for Heap {
+    fn default() -> Self {
+        Heap {
+            slots: Vec::new(),
+            free: Vec::new(),
+            live: 0,
+            since_gc: 0,
+            next_gc: MIN_GC_THRESHOLD,
+        }
+    }
 }
 
 impl Heap {
@@ -62,6 +90,8 @@ impl Heap {
 
     /// Allocate an object, returning its handle. Reuses a free slot when available.
     pub fn alloc(&mut self, obj: Obj) -> GcRef {
+        self.live += 1;
+        self.since_gc += 1;
         if let Some(idx) = self.free.pop() {
             let slot = &mut self.slots[idx as usize];
             slot.obj = Some(obj);
@@ -89,5 +119,69 @@ impl Heap {
             .obj
             .as_mut()
             .expect("dangling GcRef (object was collected while still reachable)")
+    }
+
+    /// Live object count — for GC assertions / bounded-heap tests.
+    #[cfg(test)]
+    pub fn live(&self) -> usize {
+        self.live
+    }
+
+    /// Whether enough has been allocated since the last collection to warrant one.
+    pub fn should_collect(&self) -> bool {
+        self.since_gc >= self.next_gc
+    }
+
+    /// Mark one object reachable. Returns `true` if it was *newly* marked (caller should then
+    /// trace its children), `false` if already marked (a cycle / shared reference — stop).
+    pub fn mark(&mut self, h: GcRef) -> bool {
+        let slot = &mut self.slots[h.0 as usize];
+        if slot.mark {
+            false
+        } else {
+            slot.mark = true;
+            true
+        }
+    }
+
+    /// The heap handles directly referenced by an object (for the mark worklist).
+    pub fn children(&self, h: GcRef) -> Vec<GcRef> {
+        let mut out = Vec::new();
+        let mut push = |v: &Value| {
+            if let Value::Obj(c) = v {
+                out.push(*c);
+            }
+        };
+        match self.get(h) {
+            Obj::Str(_) => {}
+            Obj::List(items) => items.iter().for_each(&mut push),
+            Obj::Struct { fields, .. } => fields.iter().for_each(|(_, v)| push(v)),
+            Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
+            Obj::Func { home, .. } => out.push(*home),
+            Obj::Closure { captured, home, .. } => {
+                captured.values().for_each(&mut push);
+                out.push(*home);
+            }
+            Obj::Module { globals, .. } => globals.values().for_each(&mut push),
+        }
+        out
+    }
+
+    /// Free every unmarked object and clear all marks for the next cycle. Resets the allocation
+    /// counter and grows the next-collection threshold relative to the surviving set.
+    pub fn sweep(&mut self) {
+        for (idx, slot) in self.slots.iter_mut().enumerate() {
+            if slot.obj.is_some() {
+                if slot.mark {
+                    slot.mark = false;
+                } else {
+                    slot.obj = None;
+                    self.free.push(idx as u32);
+                    self.live -= 1;
+                }
+            }
+        }
+        self.since_gc = 0;
+        self.next_gc = (self.live * 2).max(MIN_GC_THRESHOLD);
     }
 }

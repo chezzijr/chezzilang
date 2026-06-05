@@ -10,8 +10,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-> **M5 — Bytecode VM + mark-sweep GC.** Phased M5a/b/c. **M5a done** (compiler + stack VM,
-> golden parity on `hello.chz` + multi-file proj). **Next: M5b — mark-sweep collector.**
+> **M5 — Bytecode VM + mark-sweep GC.** Phased M5a/b/c. **M5a + M5b done** (compiler + stack VM
+> + hand-built mark-sweep GC). **Next: M5c — multi-file parity harness + perf + CLI default flip.**
 
 ## M5a — Bytecode compiler + stack VM (handle values, no collector yet)  ✅ DONE
 
@@ -42,8 +42,32 @@ clean `cargo clippy --all-targets`. Built **TDD** (red→green per bug class).
   mirrors `interp::run_file` (256MB thread, resolver graph, run-once dep order, home-globals,
   entry-only `main()`, partial-output-before-error).
 
-**Deferred to M5b/c:** the mark-sweep collector (`alloc` currently never frees); `--gc-stress`;
-the perf benchmark + flipping `run` to VM-by-default; a whole-corpus parity harness.
+## M5b — Mark-sweep garbage collector  ✅ DONE
+
+Hand-built tracing GC in `src/vm/heap.rs` + `Vm::collect`; 8 GC tests, 269 total; clean
+`cargo clippy --all-targets`. Built **TDD** — each test forces a collection and pins one root
+source; the headline operand-stack-root test was **bite-verified** to fail (7 dangling-handle
+panics) when the root is removed.
+
+- ✅ **Collector** — worklist mark (no native recursion) + sweep + free-list slot reuse. The heap
+  owns slot/mark/sweep primitives + the allocation-driven growth threshold (`next_gc = 2×live`,
+  min 256); the VM owns root tracing.
+- ✅ **Collect at instruction boundaries** — `run_until` collects at the top of each loop step
+  (or before *every* step in stress mode), where the entire live set is reachable from the roots,
+  so there are **no mid-opcode off-stack temporaries** to miss (the build-then-alloc sequences in
+  `NewList`/`NewStruct`/`NewEnum`/`ListClone`/`MakeClosure` complete within one un-interrupted step).
+- ✅ **Root set** — the whole operand stack (covers every frame's local slots **and** in-flight
+  expression temporaries), each frame's `home` module + backing `closure`, and the module
+  namespace cache (`module_objs`). Children traced: list items, struct fields, enum payloads,
+  closure captures + home, func home, module globals.
+- ✅ **Guarded bug classes** — value live only on the operand stack / in a frame slot / via module
+  globals / via a closure capture / propagated by `?` all survive collection; an allocation-heavy
+  loop stays bounded (`<2000` live after 10k allocating iterations) instead of growing
+  monotonically; `hello.chz` + a struct/enum/closure/match program are byte-identical under GC
+  stress vs. normal.
+
+**Deferred to M5c:** the perf benchmark (~10x target) + flipping `run` to VM-by-default with
+`--interp`; a whole-corpus interp-vs-VM parity harness (incl. multi-file under GC).
 
 ## M1 — Lexer  ✅ DONE
 
@@ -198,7 +222,7 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 
 ## Roadmap (later)
 
-- 🟦 **M5** — Bytecode VM + mark-sweep GC (M5a ✅ compiler+VM; M5b ⬜ GC ← NEXT; M5c ⬜ parity+perf)
+- 🟦 **M5** — Bytecode VM + mark-sweep GC (M5a ✅ compiler+VM; M5b ✅ GC; M5c ⬜ parity+perf ← NEXT)
 - ⬜ **M6** — Stdlib + pipe `|>` + **core-type methods** (string/list ergonomics — UX priority).
   Extend `eval_method_call` to dispatch on `Value::Str`/`Value::List`; handlers in `builtins.rs`.
   Starter set: `s.len/upper/lower/trim`, `s.split(sep)`, `sep.join(list)`, `s.starts_with/contains`
