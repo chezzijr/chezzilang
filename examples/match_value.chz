@@ -1,0 +1,34 @@
+# examples/match_value.chz — `match` on int/str/bool literals with a `_` wildcard,
+# exercising both the statement form and the expression form on both engines.
+
+fn classify(n: int):
+    match n:
+        0: print("zero")
+        1: print("one")
+        _: print("many")
+
+fn label(code: int) -> str:
+    return match code:
+        200: "ok"
+        404: "missing"
+        _: "other"
+
+fn first_letter(c: str) -> str:
+    return match c:
+        "a": "alpha"
+        "b": "beta"
+        _: "other"
+
+fn main():
+    classify(0)
+    classify(1)
+    classify(7)
+
+    print(label(200))
+    print(label(404))
+    print(label(500))
+
+    print(first_letter("a"))
+    print(first_letter("z"))
+
+main()

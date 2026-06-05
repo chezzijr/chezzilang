@@ -1,0 +1,17 @@
+# rule: matchStmt, pattern
+fn classify(n: int) -> str:
+    match n:
+        0: return "zero"
+        1: return "one"
+        _: return "many"
+
+fn name(c: str) -> str:
+    match c:
+        "a": return "first"
+        _: return "rest"
+
+fn flag(b: bool) -> str:
+    match b:
+        true: return "yes"
+        false: return "no"
+        _: return "?"

@@ -79,15 +79,19 @@ only by parallel lists + linear scan (O(n) lookups).
 
 ## 🟡 Notable friction
 
-### 6. `match` matches enum variants only — no literals, no wildcard
+### 6. ~~`match` matches enum variants only — no literals, no wildcard~~ ✅ FIXED
 ```chezzi
 match n:
-    0: return "zero"     # parse error: expected identifier, found integer 0
-    _: return "other"    # type error: '_' is not a variant
+    0: return "zero"     # int/str/bool literal arms now parse & type-check
+    _: return "other"    # wildcard catch-all
 ```
-**Impact:** can't `match` on int/str/bool values, and can't write a catch-all arm — every `match`
-must enumerate all variants (exhaustiveness is otherwise a nice property). Forces `if`/`else if`
-chains for value dispatch.
+**Fixed:** `Pattern` gained `Literal(LitPattern{Int,Str,Bool})` + `Wildcard` (wildcard reuses the
+`_` identifier — no new token). Checker `MatchKind { Variants, Literal(Ty), Skip }`: literal arms
+require the scrutinee be `int/str/bool` and each literal's type match; open literal domains need a
+`_` arm for exhaustiveness; a wildcard makes any match exhaustive; mixing literal and variant arms is
+rejected; `float` scrutinees still rejected. Both forms (statement + expression). Compiler lowers
+literal matches with no `EnsureEnum` and **no new opcode** (`Eq` + `JumpIfFalse`); variant matches
+keep `MatchArm`/`MatchNoArm`. See `examples/match_value.chz`.
 
 ### 7. No `break` / `continue`
 ```chezzi

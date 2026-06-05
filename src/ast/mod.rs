@@ -125,14 +125,27 @@ pub struct MatchArm {
     pub body: Block,
 }
 
-/// A match pattern. M2 supports variant patterns with optional value bindings —
-/// `Circle(r)`, `Ok(v)`, `Point`, `None`. Richer patterns come later.
+/// A match pattern. Variant patterns with optional value bindings (`Circle(r)`, `Ok(v)`,
+/// `Point`, `None`), literal patterns (`0`, `"a"`, `true`) against int/str/bool scrutinees,
+/// and a `_` wildcard catch-all.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     Variant {
         name: String,
         bindings: Vec<String>,
     },
+    /// An int/str/bool literal pattern. Float is intentionally excluded (float equality footgun).
+    Literal(LitPattern),
+    /// The `_` catch-all arm.
+    Wildcard,
+}
+
+/// A literal value usable as a `match` pattern.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LitPattern {
+    Int(i64),
+    Str(String),
+    Bool(bool),
 }
 
 /// The four import forms (syntax.md §12).

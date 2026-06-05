@@ -9,8 +9,8 @@
 mod ty;
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, Import, Param, Pattern, Span, Stmt,
-    StmtKind, Type, UnaryOp,
+    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, Import, LitPattern, Param, Pattern, Span,
+    Stmt, StmtKind, Type, UnaryOp,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
 use std::collections::HashMap;
@@ -18,6 +18,16 @@ use std::fmt;
 
 pub use ty::Ty;
 use ty::compatible;
+
+/// What a `match` scrutinee is being matched against, threaded through the match-checking helpers.
+enum MatchKind {
+    /// Enum/Result/Option scrutinee — arms are variant patterns.
+    Variants { label: String, variants: HashMap<String, Vec<Ty>> },
+    /// int/str/bool scrutinee — arms are literal patterns (+ a required `_` wildcard).
+    Literal(Ty),
+    /// Un-inferable (`Ty::Unknown`) scrutinee — skip exhaustiveness, accept any pattern shape.
+    Skip,
+}
 
 /// A type error, with the source span it occurred at. Mirrors `ParseError` / `RuntimeError`.
 #[derive(Debug, Clone, PartialEq)]
@@ -752,14 +762,12 @@ impl Checker {
         }
     }
 
-    /// The variant set a `match` scrutinee admits: `(label, variant→payload, skip_exhaustive)`.
-    /// Shared by the statement form (`check_match`) and the expression form (`infer_match`).
-    fn match_variants(&mut self, scrutinee: &Expr) -> (String, HashMap<String, Vec<Ty>>, bool) {
+    /// How a `match` is being checked, derived from the scrutinee's type.
+    fn match_kind(&mut self, scrutinee: &Expr) -> MatchKind {
         let sty = self.infer(scrutinee);
-        let skip = sty.is_unknown();
-        let (label, variants): (String, HashMap<String, Vec<Ty>>) = match &sty {
+        match &sty {
             Ty::Enum(name) => {
-                let map = self
+                let variants = self
                     .enums
                     .get(name)
                     .cloned()
@@ -767,124 +775,191 @@ impl Checker {
                     .into_iter()
                     .map(|v| (v.clone(), self.variants[&v].payload.clone()))
                     .collect();
-                (name.clone(), map)
+                MatchKind::Variants { label: name.clone(), variants }
             }
-            Ty::Result(inner) => (
-                "Result".into(),
-                HashMap::from([
+            Ty::Result(inner) => MatchKind::Variants {
+                label: "Result".into(),
+                variants: HashMap::from([
                     ("Ok".into(), vec![(**inner).clone()]),
                     ("Err".into(), vec![Ty::Unknown]),
                 ]),
-            ),
-            Ty::Option(inner) => (
-                "Option".into(),
-                HashMap::from([("Some".into(), vec![(**inner).clone()]), ("None".into(), vec![])]),
-            ),
-            Ty::Unknown => (String::new(), HashMap::new()), // un-inferable: skip exhaustiveness
+            },
+            Ty::Option(inner) => MatchKind::Variants {
+                label: "Option".into(),
+                variants: HashMap::from([
+                    ("Some".into(), vec![(**inner).clone()]),
+                    ("None".into(), vec![]),
+                ]),
+            },
+            // int/str/bool scrutinees match against literal patterns (+ a `_` wildcard).
+            Ty::Int => MatchKind::Literal(Ty::Int),
+            Ty::Str => MatchKind::Literal(Ty::Str),
+            Ty::Bool => MatchKind::Literal(Ty::Bool),
+            Ty::Unknown => MatchKind::Skip, // un-inferable: skip exhaustiveness
             other => {
                 self.error(scrutinee.span, format!("cannot match on non-enum type {other}"));
-                (String::new(), HashMap::new())
+                MatchKind::Skip
             }
-        };
-        (label, variants, skip)
+        }
     }
 
-    /// Push a scope and bind one arm's pattern payload, recording coverage + dup/arity diagnostics.
-    /// The caller must `pop_scope` once it has checked/inferred the arm body.
+    /// Push a scope and bind one arm's pattern payload, recording coverage + diagnostics. Returns
+    /// `true` if this arm was a `_` wildcard. The caller must `pop_scope` after the arm body.
     fn bind_match_arm(
         &mut self,
         pattern: &Pattern,
-        variants: &HashMap<String, Vec<Ty>>,
-        label: &str,
-        skip: bool,
+        kind: &MatchKind,
         span: Span,
         covered: &mut std::collections::HashSet<String>,
-    ) {
-        let Pattern::Variant { name, bindings } = pattern;
-        let payload = if variants.is_empty() && skip {
-            None // scrutinee unknown — accept any binding count
-        } else {
-            match variants.get(name) {
-                Some(p) => Some(p.clone()),
-                None => {
-                    if !label.is_empty() {
-                        self.error(span, format!("'{name}' is not a variant of {label}"));
+    ) -> bool {
+        // A wildcard binds nothing and is valid in every mode.
+        if let Pattern::Wildcard = pattern {
+            self.push_scope();
+            return true;
+        }
+        match kind {
+            MatchKind::Skip => {
+                // Un-inferable scrutinee: accept the pattern shape permissively (it may be a
+                // variant or a literal). Still scope so the caller can `pop_scope` uniformly.
+                if let Pattern::Variant { name, bindings } = pattern {
+                    covered.insert(name.clone());
+                    self.push_scope();
+                    for b in bindings {
+                        self.declare(b, Ty::Unknown);
                     }
-                    None
+                } else {
+                    self.push_scope();
                 }
             }
-        };
-        if !covered.insert(name.clone()) {
-            self.error(span, format!("duplicate match arm '{name}'"));
+            MatchKind::Variants { label, variants } => match pattern {
+                Pattern::Variant { name, bindings } => {
+                    let payload = match variants.get(name) {
+                        Some(p) => Some(p.clone()),
+                        None => {
+                            self.error(span, format!("'{name}' is not a variant of {label}"));
+                            None
+                        }
+                    };
+                    if !covered.insert(name.clone()) {
+                        self.error(span, format!("duplicate match arm '{name}'"));
+                    }
+                    self.push_scope();
+                    if let Some(payload) = &payload {
+                        if payload.len() != bindings.len() {
+                            self.error(
+                                span,
+                                format!(
+                                    "variant '{name}' binds {} value(s), but {} given",
+                                    payload.len(),
+                                    bindings.len()
+                                ),
+                            );
+                        }
+                        for (b, t) in bindings.iter().zip(payload.iter()) {
+                            self.declare(b, t.clone());
+                        }
+                    } else {
+                        for b in bindings {
+                            self.declare(b, Ty::Unknown);
+                        }
+                    }
+                }
+                Pattern::Literal(_) => {
+                    self.error(span, format!("cannot match a literal against {label}"));
+                    self.push_scope();
+                }
+                Pattern::Wildcard => unreachable!("wildcard handled above"),
+            },
+            MatchKind::Literal(ty) => {
+                match pattern {
+                    Pattern::Literal(lit) => {
+                        let lit_ty = match lit {
+                            LitPattern::Int(_) => Ty::Int,
+                            LitPattern::Str(_) => Ty::Str,
+                            LitPattern::Bool(_) => Ty::Bool,
+                        };
+                        if &lit_ty != ty {
+                            self.error(
+                                span,
+                                format!("literal of type {lit_ty} cannot match scrutinee of type {ty}"),
+                            );
+                        }
+                    }
+                    Pattern::Variant { .. } => {
+                        self.error(span, format!("cannot match a variant against {ty}"));
+                    }
+                    Pattern::Wildcard => unreachable!("wildcard handled above"),
+                }
+                self.push_scope();
+            }
         }
-        self.push_scope();
-        if let Some(payload) = &payload {
-            if payload.len() != bindings.len() {
-                self.error(
-                    span,
-                    format!(
-                        "variant '{name}' binds {} value(s), but {} given",
-                        payload.len(),
-                        bindings.len()
-                    ),
-                );
-            }
-            for (b, t) in bindings.iter().zip(payload.iter()) {
-                self.declare(b, t.clone());
-            }
-        } else {
-            for b in bindings {
-                self.declare(b, Ty::Unknown);
-            }
-        }
+        false
     }
 
-    /// Report a non-exhaustive match (missing variants), unless exhaustiveness was skipped.
+    /// Report a non-exhaustive match.
+    /// - Variants mode: missing variants, unless a `_` wildcard was seen.
+    /// - Literal mode: int/str/bool literal domains are open, so a `_` wildcard is *required*
+    ///   (we do NOT special-case `true`+`false` closing the bool domain — keeping one rule).
+    /// - Skip mode: un-inferable scrutinee, no exhaustiveness check.
     fn check_exhaustive(
         &mut self,
-        variants: &HashMap<String, Vec<Ty>>,
+        kind: &MatchKind,
         covered: &std::collections::HashSet<String>,
-        label: &str,
+        has_wildcard: bool,
         span: Span,
-        skip: bool,
     ) {
-        if skip {
+        if has_wildcard {
             return;
         }
-        let mut missing: Vec<String> =
-            variants.keys().filter(|v| !covered.contains(*v)).cloned().collect();
-        if !missing.is_empty() {
-            missing.sort();
-            self.error(span, format!("non-exhaustive match on {label}: missing {}", missing.join(", ")));
+        match kind {
+            MatchKind::Skip => {}
+            MatchKind::Variants { label, variants } => {
+                let mut missing: Vec<String> =
+                    variants.keys().filter(|v| !covered.contains(*v)).cloned().collect();
+                if !missing.is_empty() {
+                    missing.sort();
+                    self.error(
+                        span,
+                        format!("non-exhaustive match on {label}: missing {}", missing.join(", ")),
+                    );
+                }
+            }
+            MatchKind::Literal(_) => {
+                self.error(span, "non-exhaustive match: add a `_` arm".to_string());
+            }
         }
     }
 
     fn check_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm]) {
-        let (label, variants, skip) = self.match_variants(scrutinee);
+        let kind = self.match_kind(scrutinee);
         let mut covered = std::collections::HashSet::new();
+        let mut has_wildcard = false;
         for arm in arms {
-            self.bind_match_arm(&arm.pattern, &variants, &label, skip, scrutinee.span, &mut covered);
+            has_wildcard |=
+                self.bind_match_arm(&arm.pattern, &kind, scrutinee.span, &mut covered);
             for stmt in &arm.body {
                 self.check_stmt(stmt);
             }
             self.pop_scope();
         }
-        self.check_exhaustive(&variants, &covered, &label, scrutinee.span, skip);
+        self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
     }
 
     /// Infer an expression-position `match`: bind each arm, infer its value, and unify the arm
     /// types into one result. Exhaustiveness is still enforced.
     fn infer_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchExprArm]) -> Ty {
-        let (label, variants, skip) = self.match_variants(scrutinee);
+        let kind = self.match_kind(scrutinee);
         let mut covered = std::collections::HashSet::new();
+        let mut has_wildcard = false;
         let mut result: Option<Ty> = None;
         for arm in arms {
-            self.bind_match_arm(&arm.pattern, &variants, &label, skip, scrutinee.span, &mut covered);
+            has_wildcard |=
+                self.bind_match_arm(&arm.pattern, &kind, scrutinee.span, &mut covered);
             let t = self.infer(&arm.body);
             self.pop_scope();
             result = Some(self.unify_branch(result, t, arm.body.span));
         }
-        self.check_exhaustive(&variants, &covered, &label, scrutinee.span, skip);
+        self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
         result.unwrap_or(Ty::Unknown)
     }
 

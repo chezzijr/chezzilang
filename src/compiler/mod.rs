@@ -12,8 +12,8 @@
 //!      forward references resolve) and one proto per `fn` / method / closure.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, MatchArm, MatchExprArm, Module, Pattern,
-    Span, Stmt, StmtKind, UnaryOp,
+    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, LitPattern, MatchArm, MatchExprArm, Module,
+    Pattern, Span, Stmt, StmtKind, UnaryOp,
 };
 use crate::resolver::ModuleGraph;
 use crate::vm::op::{
@@ -410,6 +410,11 @@ impl Compiler {
     }
 
     fn compile_match(&mut self, fc: &mut FnComp, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<(), CompileError> {
+        if arms_are_literal(arms.iter().map(|a| &a.pattern)) {
+            return self.compile_match_lit(fc, scrutinee, arms, span, |s, fc, body| {
+                s.compile_block_flat(fc, body)
+            });
+        }
         fc.begin_scope();
         self.compile_expr(fc, scrutinee)?;
         let scrut = fc.add_hidden();
@@ -417,7 +422,9 @@ impl Compiler {
         fc.emit(Op::EnsureEnum(scrut), scrutinee.span);
         let mut end_jumps = Vec::new();
         for arm in arms {
-            let Pattern::Variant { name, bindings } = &arm.pattern;
+            let Pattern::Variant { name, bindings } = &arm.pattern else {
+                unreachable!("non-literal match arms are all variants (checker-enforced)")
+            };
             // Reserve binding slots in their own scope so they don't leak between arms.
             fc.begin_scope();
             let bind_start = fc.next_slot();
@@ -440,6 +447,58 @@ impl Compiler {
             fc.end_scope();
         }
         fc.emit(Op::MatchNoArm(scrut), scrutinee.span);
+        for j in end_jumps {
+            fc.patch_jump(j);
+        }
+        fc.end_scope();
+        Ok(())
+    }
+
+    /// Lower a literal/wildcard `match` (no `EnsureEnum` — a literal `match` on an int must not
+    /// raise "cannot match on int"). Each literal arm does `scrut == literal`, jumping to the next
+    /// arm on a miss; the (checker-guaranteed) `_` wildcard is the unconditional fallback. The
+    /// `run_body` closure compiles an arm body — a statement block or a value-expression — so this
+    /// serves both the statement and expression forms.
+    fn compile_match_lit<A, F>(
+        &mut self,
+        fc: &mut FnComp,
+        scrutinee: &Expr,
+        arms: &[A],
+        span: Span,
+        mut run_body: F,
+    ) -> Result<(), CompileError>
+    where
+        A: MatchArmLike,
+        F: FnMut(&mut Self, &mut FnComp, &A::Body) -> Result<(), CompileError>,
+    {
+        fc.begin_scope();
+        self.compile_expr(fc, scrutinee)?;
+        let scrut = fc.add_hidden();
+        fc.emit(Op::SetLocal(scrut), span);
+        let mut end_jumps = Vec::new();
+        for arm in arms {
+            match arm.pattern() {
+                Pattern::Literal(lit) => {
+                    fc.emit(Op::GetLocal(scrut), scrutinee.span);
+                    emit_lit_const(fc, lit, span);
+                    fc.emit(Op::Eq, span);
+                    let next = fc.emit_jump(Op::JumpIfFalse(0), span);
+                    run_body(self, fc, arm.body())?;
+                    end_jumps.push(fc.emit_jump(Op::Jump(0), span));
+                    fc.patch_jump(next);
+                }
+                Pattern::Wildcard => {
+                    // Unconditional fallback; the checker guarantees exactly one wildcard, and that
+                    // it (or a prior literal) covers every reachable path — including the
+                    // expression form, where the wildcard body leaves the result value.
+                    run_body(self, fc, arm.body())?;
+                    end_jumps.push(fc.emit_jump(Op::Jump(0), span));
+                }
+                Pattern::Variant { .. } => {
+                    unreachable!("literal match has no variant arms (checker-enforced)")
+                }
+            }
+        }
         for j in end_jumps {
             fc.patch_jump(j);
         }
@@ -522,6 +581,11 @@ impl Compiler {
     /// Expression-position `match`: like `compile_match`, but each arm body is compiled as an
     /// expression that leaves its value on the stack, so the whole `match` yields one value.
     fn compile_match_expr(&mut self, fc: &mut FnComp, scrutinee: &Expr, arms: &[MatchExprArm], span: Span) -> Result<(), CompileError> {
+        if arms_are_literal(arms.iter().map(|a| &a.pattern)) {
+            return self.compile_match_lit(fc, scrutinee, arms, span, |s, fc, body| {
+                s.compile_expr(fc, body) // leaves the arm's value on the stack
+            });
+        }
         fc.begin_scope();
         self.compile_expr(fc, scrutinee)?;
         let scrut = fc.add_hidden();
@@ -529,7 +593,9 @@ impl Compiler {
         fc.emit(Op::EnsureEnum(scrut), scrutinee.span);
         let mut end_jumps = Vec::new();
         for arm in arms {
-            let Pattern::Variant { name, bindings } = &arm.pattern;
+            let Pattern::Variant { name, bindings } = &arm.pattern else {
+                unreachable!("non-literal match arms are all variants (checker-enforced)")
+            };
             fc.begin_scope();
             let bind_start = fc.next_slot();
             for b in bindings {
@@ -692,6 +758,52 @@ fn binary_op(op: BinaryOp) -> Op {
         BinaryOp::Eq => Op::Eq,
         BinaryOp::NotEq => Op::NotEq,
         BinaryOp::And | BinaryOp::Or => unreachable!("and/or handled by short-circuit path"),
+    }
+}
+
+// ===== match lowering helpers =====
+
+/// A `match` arm uniform over the statement form (`MatchArm`) and expression form (`MatchExprArm`),
+/// so `compile_match_lit` can drive both.
+trait MatchArmLike {
+    type Body;
+    fn pattern(&self) -> &Pattern;
+    fn body(&self) -> &Self::Body;
+}
+
+impl MatchArmLike for MatchArm {
+    type Body = Block;
+    fn pattern(&self) -> &Pattern {
+        &self.pattern
+    }
+    fn body(&self) -> &Block {
+        &self.body
+    }
+}
+
+impl MatchArmLike for MatchExprArm {
+    type Body = Expr;
+    fn pattern(&self) -> &Pattern {
+        &self.pattern
+    }
+    fn body(&self) -> &Expr {
+        &self.body
+    }
+}
+
+/// True if these arms form a literal/wildcard match (vs an all-variant match). The checker
+/// rejects mixing the two, so any `Literal`/`Wildcard` arm means the whole match is literal-mode.
+fn arms_are_literal<'a>(patterns: impl Iterator<Item = &'a Pattern>) -> bool {
+    patterns.into_iter().any(|p| matches!(p, Pattern::Literal(_) | Pattern::Wildcard))
+}
+
+/// Emit the constant op that pushes a literal pattern's value (mirrors `compile_expr`'s literal
+/// lowering; a pattern's string is plain — never interpolated).
+fn emit_lit_const(fc: &mut FnComp, lit: &LitPattern, span: Span) {
+    match lit {
+        LitPattern::Int(n) => fc.emit(Op::ConstInt(*n), span),
+        LitPattern::Str(s) => fc.emit(Op::ConstStr(s.clone()), span),
+        LitPattern::Bool(b) => fc.emit(if *b { Op::True } else { Op::False }, span),
     }
 }
 

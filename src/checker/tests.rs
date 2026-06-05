@@ -557,14 +557,72 @@ fn wrong_binding_arity_rejected() {
 }
 
 #[test]
-fn match_on_int_rejected() {
-    rejects("x := 5\nmatch x:\n    Circle(r): print(r)\n", "cannot match on non-enum type int");
+fn match_variant_against_int_rejected() {
+    // A *variant* pattern against an int scrutinee is a type error (int is matched by literals).
+    rejects("x := 5\nmatch x:\n    Circle(r): print(r)\n", "cannot match a variant against int");
 }
 
 #[test]
 fn exhaustive_match_ok() {
     let src = "enum Shape:\n    Circle(int)\n    Square(int)\n\
                fn area(s: Shape) -> int:\n    match s:\n        Circle(r): return r * r\n        Square(n): return n * n\n";
+    ok(src);
+}
+
+// ===== 12b. literal + wildcard match =====
+
+#[test]
+fn match_int_literals_with_wildcard_ok() {
+    ok("n := 2\nmatch n:\n    0: print(\"zero\")\n    1: print(\"one\")\n    _: print(\"many\")\n");
+}
+
+#[test]
+fn match_str_literals_with_wildcard_ok() {
+    ok("c := \"x\"\nmatch c:\n    \"a\": print(\"first\")\n    _: print(\"other\")\n");
+}
+
+#[test]
+fn match_bool_literals_with_wildcard_ok() {
+    ok("b := true\nmatch b:\n    true: print(\"yes\")\n    false: print(\"no\")\n    _: print(\"?\")\n");
+}
+
+#[test]
+fn match_int_expr_with_wildcard_ok() {
+    ok("code := 200\nlabel := match code:\n    200: \"ok\"\n    404: \"missing\"\n    _: \"other\"\nprint(label)\n");
+}
+
+#[test]
+fn match_int_without_wildcard_rejected() {
+    rejects("n := 2\nmatch n:\n    0: print(\"zero\")\n    1: print(\"one\")\n", "non-exhaustive");
+}
+
+#[test]
+fn match_str_arm_against_int_scrutinee_rejected() {
+    rejects("n := 2\nmatch n:\n    \"a\": print(\"x\")\n    _: print(\"y\")\n", "literal");
+}
+
+#[test]
+fn match_variant_arm_in_int_match_rejected() {
+    rejects("n := 2\nmatch n:\n    Circle(r): print(r)\n    _: print(\"y\")\n", "cannot match a variant against int");
+}
+
+#[test]
+fn match_literal_arm_in_enum_match_rejected() {
+    let src = "enum Shape:\n    Circle(int)\n    Square(int)\n\
+               fn f(s: Shape):\n    match s:\n        0: print(\"x\")\n        _: print(\"y\")\n";
+    rejects(src, "cannot match a literal against Shape");
+}
+
+#[test]
+fn match_on_float_rejected() {
+    rejects("x := 1.5\nmatch x:\n    0: print(\"x\")\n    _: print(\"y\")\n", "cannot match on non-enum type float");
+}
+
+#[test]
+fn match_int_with_wildcard_in_enum_match_ok() {
+    // Wildcard makes an enum match exhaustive even with a missing variant.
+    let src = "enum Shape:\n    Circle(int)\n    Square(int)\n\
+               fn f(s: Shape):\n    match s:\n        Circle(r): print(\"c\")\n        _: print(\"other\")\n";
     ok(src);
 }
 

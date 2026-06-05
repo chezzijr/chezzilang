@@ -505,6 +505,34 @@ impl Parser {
     }
 
     fn parse_pattern(&mut self) -> PResult<Pattern> {
+        // Literal patterns: int / str / bool. Float is intentionally not a pattern.
+        match self.peek() {
+            Token::Int(n) => {
+                let n = *n;
+                self.advance();
+                return Ok(Pattern::Literal(LitPattern::Int(n)));
+            }
+            Token::Str(s) => {
+                let s = s.clone();
+                self.advance();
+                return Ok(Pattern::Literal(LitPattern::Str(s)));
+            }
+            Token::True => {
+                self.advance();
+                return Ok(Pattern::Literal(LitPattern::Bool(true)));
+            }
+            Token::False => {
+                self.advance();
+                return Ok(Pattern::Literal(LitPattern::Bool(false)));
+            }
+            // `_` is an identifier; it's a wildcard unless followed by `(` (a payload, i.e. a
+            // variant literally named `_`).
+            Token::Ident(name) if name == "_" && self.peek_at(1) != &Token::LParen => {
+                self.advance();
+                return Ok(Pattern::Wildcard);
+            }
+            _ => {}
+        }
         let name = self.expect_ident()?;
         let mut bindings = Vec::new();
         if self.eat(&Token::LParen) {
@@ -1126,8 +1154,23 @@ mod tests {
                         assert_eq!(name, "Circle");
                         assert_eq!(bindings, &vec!["r".to_string()]);
                     }
+                    other => panic!("{other:?}"),
                 }
                 assert!(arms[2].pattern == Pattern::Variant { name: "Point".into(), bindings: vec![] });
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_literal_and_wildcard_patterns() {
+        match only("match n:\n    0: return 1\n    \"a\": return 2\n    true: return 3\n    _: return 4\n") {
+            StmtKind::Match { arms, .. } => {
+                assert_eq!(arms.len(), 4);
+                assert_eq!(arms[0].pattern, Pattern::Literal(LitPattern::Int(0)));
+                assert_eq!(arms[1].pattern, Pattern::Literal(LitPattern::Str("a".into())));
+                assert_eq!(arms[2].pattern, Pattern::Literal(LitPattern::Bool(true)));
+                assert_eq!(arms[3].pattern, Pattern::Wildcard);
             }
             other => panic!("{other:?}"),
         }

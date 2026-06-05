@@ -103,6 +103,7 @@
 <pattern>   ::= "IDENT"
               | "IDENT" "LPAREN" "RPAREN"
               | "IDENT" "LPAREN" <bindings> "RPAREN"
+              | "INT" | "STR" | "TRUE" | "FALSE"
 <bindings>  ::= "IDENT" | "IDENT" "COMMA" <bindings>
 
 # ===== types =====

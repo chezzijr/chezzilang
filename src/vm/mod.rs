@@ -2498,6 +2498,41 @@ mod parity_tests {
         assert_parity_file(&[("main.chz", src)], "main.chz")
     }
 
+    // ----- literal + wildcard match parity -----
+
+    #[test]
+    fn match_int_literals_stmt_parity() {
+        assert_parity("n := 2\nmatch n:\n    0: print(\"zero\")\n    1: print(\"one\")\n    _: print(\"many\")\n");
+    }
+
+    #[test]
+    fn match_str_literals_expr_parity() {
+        assert_parity("c := \"x\"\ns := match c:\n    \"a\": \"first\"\n    _: \"other\"\nprint(s)\n");
+    }
+
+    #[test]
+    fn match_bool_literals_parity() {
+        assert_parity("b := false\nmatch b:\n    true: print(\"yes\")\n    false: print(\"no\")\n    _: print(\"?\")\n");
+    }
+
+    #[test]
+    fn match_literal_matched_arm_parity() {
+        // The matching literal arm fires (wildcard not reached).
+        assert_parity("n := 1\ns := match n:\n    0: \"a\"\n    1: \"b\"\n    _: \"z\"\nprint(s)\n");
+    }
+
+    #[test]
+    fn match_wildcard_reached_parity() {
+        // No literal matches → the `_` arm fires.
+        assert_parity("n := 9\ns := match n:\n    0: \"a\"\n    1: \"b\"\n    _: \"z\"\nprint(s)\n");
+    }
+
+    #[test]
+    fn match_variant_regression_parity() {
+        // A variant match still lowers via the variant path unchanged.
+        assert_parity("o := Some(5)\nmatch o:\n    Some(v): print(\"got {v}\")\n    None: print(\"none\")\n");
+    }
+
     #[test]
     fn parity_std_math() {
         let src = "\

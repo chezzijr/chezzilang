@@ -2,8 +2,8 @@
 //! Chezzi before the bytecode VM (M5). Single-file programs run here.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Expr, ExprKind, FnDecl, MatchArm, MatchExprArm, Pattern, Span, Stmt,
-    StmtKind, UnaryOp,
+    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, LitPattern, MatchArm, MatchExprArm, Pattern,
+    Span, Stmt, StmtKind, UnaryOp,
 };
 use crate::{lexer, parser};
 
@@ -476,43 +476,66 @@ impl Interp {
     /// (static exhaustiveness checking arrives with the type checker in M4).
     fn exec_match(&mut self, scrutinee: &Expr, arms: &[MatchArm]) -> Result<Flow, RuntimeError> {
         let value = self.eval(scrutinee)?;
-        let Value::Enum {
-            variant, payload, ..
-        } = &value
-        else {
-            return Err(RuntimeError {
-                message: format!("cannot match on {}", value.type_name()),
-                span: scrutinee.span,
-            });
-        };
         for arm in arms {
-            let Pattern::Variant { name, bindings } = &arm.pattern;
-            if name != variant.as_ref() {
-                continue;
+            match &arm.pattern {
+                Pattern::Variant { name, bindings } => {
+                    if let Some(flow) =
+                        self.match_variant_arm(name, bindings, &value, &arm.body, scrutinee.span)?
+                    {
+                        return Ok(flow);
+                    }
+                }
+                Pattern::Literal(lit) => {
+                    if literal_matches(lit, &value) {
+                        return self.exec_block(&arm.body);
+                    }
+                }
+                Pattern::Wildcard => return self.exec_block(&arm.body),
             }
-            if bindings.len() != payload.len() {
-                return Err(RuntimeError {
-                    message: format!(
-                        "pattern '{}' binds {} value(s) but variant carries {}",
-                        name,
-                        bindings.len(),
-                        payload.len()
-                    ),
-                    span: scrutinee.span,
-                });
-            }
-            self.env.push();
-            for (b, v) in bindings.iter().zip(payload.iter()) {
-                self.env.define(b, v.clone());
-            }
-            let flow = self.exec_block(&arm.body);
-            self.env.pop();
-            return flow;
         }
         Err(RuntimeError {
-            message: format!("no match arm for variant '{variant}'"),
+            message: no_match_arm_message(&value),
             span: scrutinee.span,
         })
+    }
+
+    /// Try a variant arm against `value`. `Ok(Some(flow))` = matched + ran; `Ok(None)` = no match.
+    /// A non-enum `value` here is a checker-prevented case, reported as a clean runtime error.
+    fn match_variant_arm(
+        &mut self,
+        name: &str,
+        bindings: &[String],
+        value: &Value,
+        body: &Block,
+        span: Span,
+    ) -> Result<Option<Flow>, RuntimeError> {
+        let Value::Enum { variant, payload, .. } = value else {
+            return Err(RuntimeError {
+                message: format!("cannot match on {}", value.type_name()),
+                span,
+            });
+        };
+        if name != variant.as_ref() {
+            return Ok(None);
+        }
+        if bindings.len() != payload.len() {
+            return Err(RuntimeError {
+                message: format!(
+                    "pattern '{}' binds {} value(s) but variant carries {}",
+                    name,
+                    bindings.len(),
+                    payload.len()
+                ),
+                span,
+            });
+        }
+        self.env.push();
+        for (b, v) in bindings.iter().zip(payload.iter()) {
+            self.env.define(b, v.clone());
+        }
+        let flow = self.exec_block(body);
+        self.env.pop();
+        Ok(Some(flow?))
     }
 
     /// Expression-position `match`: evaluate the chosen arm's value-expression and return it
@@ -523,38 +546,47 @@ impl Interp {
         arms: &[MatchExprArm],
     ) -> Result<Value, RuntimeError> {
         let value = self.eval(scrutinee)?;
-        let Value::Enum { variant, payload, .. } = &value else {
-            return Err(RuntimeError {
-                message: format!("cannot match on {}", value.type_name()),
-                span: scrutinee.span,
-            });
-        };
         for arm in arms {
-            let Pattern::Variant { name, bindings } = &arm.pattern;
-            if name != variant.as_ref() {
-                continue;
+            match &arm.pattern {
+                Pattern::Variant { name, bindings } => {
+                    let Value::Enum { variant, payload, .. } = &value else {
+                        return Err(RuntimeError {
+                            message: format!("cannot match on {}", value.type_name()),
+                            span: scrutinee.span,
+                        });
+                    };
+                    if name != variant.as_ref() {
+                        continue;
+                    }
+                    if bindings.len() != payload.len() {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "pattern '{}' binds {} value(s) but variant carries {}",
+                                name,
+                                bindings.len(),
+                                payload.len()
+                            ),
+                            span: scrutinee.span,
+                        });
+                    }
+                    self.env.push();
+                    for (b, v) in bindings.iter().zip(payload.iter()) {
+                        self.env.define(b, v.clone());
+                    }
+                    let result = self.eval(&arm.body);
+                    self.env.pop();
+                    return result;
+                }
+                Pattern::Literal(lit) => {
+                    if literal_matches(lit, &value) {
+                        return self.eval(&arm.body);
+                    }
+                }
+                Pattern::Wildcard => return self.eval(&arm.body),
             }
-            if bindings.len() != payload.len() {
-                return Err(RuntimeError {
-                    message: format!(
-                        "pattern '{}' binds {} value(s) but variant carries {}",
-                        name,
-                        bindings.len(),
-                        payload.len()
-                    ),
-                    span: scrutinee.span,
-                });
-            }
-            self.env.push();
-            for (b, v) in bindings.iter().zip(payload.iter()) {
-                self.env.define(b, v.clone());
-            }
-            let result = self.eval(&arm.body);
-            self.env.pop();
-            return result;
         }
         Err(RuntimeError {
-            message: format!("no match arm for variant '{variant}'"),
+            message: no_match_arm_message(&value),
             span: scrutinee.span,
         })
     }
@@ -1469,6 +1501,26 @@ fn values_equal(l: &Value, r: &Value) -> bool {
             as_f64(l) == as_f64(r)
         }
         _ => l == r,
+    }
+}
+
+/// The "no arm matched" runtime error message (a checker-prevented, non-exhaustive case). For an
+/// enum it names the variant — matching the VM's `MatchNoArm` wording for parity; otherwise the
+/// scrutinee's type.
+fn no_match_arm_message(value: &Value) -> String {
+    match value {
+        Value::Enum { variant, .. } => format!("no match arm for variant '{variant}'"),
+        other => format!("no match arm for {}", other.type_name()),
+    }
+}
+
+/// Does a literal pattern match a runtime value, by value (int/str/bool)?
+fn literal_matches(lit: &LitPattern, value: &Value) -> bool {
+    match (lit, value) {
+        (LitPattern::Int(n), Value::Int(v)) => n == v,
+        (LitPattern::Str(s), Value::Str(v)) => s.as_str() == v.as_ref(),
+        (LitPattern::Bool(b), Value::Bool(v)) => b == v,
+        _ => false,
     }
 }
 
