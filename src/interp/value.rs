@@ -7,13 +7,55 @@ use std::rc::Rc;
 
 // `HashMap` is still used by `Closure::captured`.
 
+/// A module's top-level bindings (its globals), shared by reference. Every callable carries the
+/// `ModEnv` of the module that *defined* it, so a function imported into another module still
+/// resolves its module-level names against its own home — not the caller's (see `Interp::call`).
+///
+/// Equality is by pointer identity and `Debug` is opaque: the table is self-referential (it holds
+/// the very `Func`s whose home it is), so a structural compare or print would recurse forever.
+#[derive(Clone)]
+pub struct ModEnv(pub Rc<RefCell<HashMap<String, Value>>>);
+
+impl ModEnv {
+    pub fn new() -> Self {
+        ModEnv(Rc::new(RefCell::new(HashMap::new())))
+    }
+}
+
+impl Default for ModEnv {
+    fn default() -> Self {
+        ModEnv::new()
+    }
+}
+
+impl PartialEq for ModEnv {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for ModEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<module globals>")
+    }
+}
+
+/// A module value: a named namespace whose members are its module's top-level bindings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModuleNamespace {
+    pub name: Rc<str>,
+    pub members: ModEnv,
+}
+
 /// An anonymous function plus the lexical environment it closed over. The captured local frames
-/// let `fn(x): x + n` keep referring to `n` after the enclosing function has returned.
+/// let `fn(x): x + n` keep referring to `n` after the enclosing function has returned; `home` is
+/// the module globals it resolves top-level names against.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Closure {
     pub params: Vec<Param>,
     pub body: Expr,
     pub captured: Vec<HashMap<String, Value>>,
+    pub home: ModEnv,
 }
 
 /// A runtime value. Reference types (lists, structs) share via `Rc` so assignment is by-reference,
@@ -26,10 +68,14 @@ pub enum Value {
     Str(Rc<str>),
     /// `[a, b, c]` — growable, shared by reference.
     List(Rc<RefCell<Vec<Value>>>),
-    /// A named function (top-level `fn` or struct method).
-    Func(Rc<FnDecl>),
+    /// A named function (top-level `fn` or struct method) plus the module globals it resolves
+    /// top-level names against (its "home" — see [`ModEnv`]).
+    Func(Rc<FnDecl>, ModEnv),
     /// An anonymous function with its captured environment.
     Closure(Rc<Closure>),
+    /// An imported module — a namespace of its top-level bindings. `io.read()` is a field access
+    /// on one of these.
+    Module(Rc<ModuleNamespace>),
     /// A struct instance: type name + mutable, by-reference fields kept in declaration order
     /// (so `Display` and iteration are deterministic — a `HashMap` would print fields randomly).
     Struct {
@@ -57,8 +103,9 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Str(_) => "str",
             Value::List(_) => "list",
-            Value::Func(_) => "function",
+            Value::Func(_, _) => "function",
             Value::Closure(_) => "function",
+            Value::Module(_) => "module",
             Value::Struct { .. } => "struct",
             Value::Enum { .. } => "enum",
             Value::Nil => "nil",
@@ -82,8 +129,9 @@ impl std::fmt::Display for Value {
                     .join(", ");
                 write!(f, "[{inner}]")
             }
-            Value::Func(decl) => write!(f, "<fn {}>", decl.name),
+            Value::Func(decl, _) => write!(f, "<fn {}>", decl.name),
             Value::Closure(_) => write!(f, "<closure>"),
+            Value::Module(ns) => write!(f, "<module {}>", ns.name),
             Value::Struct { name, fields } => {
                 let inner = fields
                     .borrow()

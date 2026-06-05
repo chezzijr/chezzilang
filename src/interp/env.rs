@@ -1,28 +1,31 @@
 //! Lexical environment.
 //!
 //! Two tiers, so functions get **lexical** (not dynamic) scoping:
-//!   - `globals` — top-level declarations (fns, structs, enums, top-level `:=`). Always visible.
+//!   - `globals` — the *current module's* top-level declarations (fns, structs, enums, top-level
+//!     `:=`). A [`ModEnv`] (shared `Rc<RefCell<…>>`) so a function carries its home module's
+//!     globals and resolves against them even when imported elsewhere (see `Interp::call`, which
+//!     swaps `globals` to the callee's home for the duration of the call).
 //!   - `locals`  — a stack of block scopes for the *currently executing* function body. A call
-//!     swaps in a fresh local stack (see `Interp::call`), so a callee never sees the caller's
-//!     locals — only globals and its own params.
+//!     swaps in a fresh local stack, so a callee never sees the caller's locals — only its home
+//!     globals and its own params.
 //!
 //! `define` writes to the innermost local scope, or to globals when no local scope is open
 //! (i.e. at the top level). `assign` mutates the nearest existing binding, locals before globals.
 
+use super::value::ModEnv;
 use super::Value;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 #[derive(Debug, Clone, Default)]
 pub struct Env {
-    globals: Rc<HashMap<String, Value>>,
+    globals: ModEnv,
     locals: Vec<HashMap<String, Value>>,
 }
 
 impl Env {
     pub fn new() -> Self {
         Env {
-            globals: Rc::new(HashMap::new()),
+            globals: ModEnv::new(),
             locals: Vec::new(),
         }
     }
@@ -45,6 +48,18 @@ impl Env {
         std::mem::replace(&mut self.locals, new_locals)
     }
 
+    /// The current module's globals handle — captured by a fn/closure so it can be restored when
+    /// the callable runs (even after being imported into a different module).
+    pub fn globals_rc(&self) -> ModEnv {
+        self.globals.clone()
+    }
+
+    /// Replace the active module globals, returning the previous handle (enter/leave a call into a
+    /// function whose home module differs from the caller's).
+    pub fn swap_globals(&mut self, new_globals: ModEnv) -> ModEnv {
+        std::mem::replace(&mut self.globals, new_globals)
+    }
+
     /// Declare a name. Writes to the innermost local scope, or to globals at the top level.
     pub fn define(&mut self, name: &str, value: Value) {
         match self.locals.last_mut() {
@@ -52,7 +67,7 @@ impl Env {
                 scope.insert(name.to_string(), value);
             }
             None => {
-                Rc::make_mut(&mut self.globals).insert(name.to_string(), value);
+                self.globals.0.borrow_mut().insert(name.to_string(), value);
             }
         }
     }
@@ -63,7 +78,7 @@ impl Env {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
-            .or_else(|| self.globals.get(name).cloned())
+            .or_else(|| self.globals.0.borrow().get(name).cloned())
     }
 
     /// Mutate an existing binding (`=`, `+=`, `-=`). Returns `false` if undefined.
@@ -74,8 +89,9 @@ impl Env {
                 return true;
             }
         }
-        if self.globals.contains_key(name) {
-            Rc::make_mut(&mut self.globals).insert(name.to_string(), value);
+        let mut g = self.globals.0.borrow_mut();
+        if g.contains_key(name) {
+            g.insert(name.to_string(), value);
             return true;
         }
         false

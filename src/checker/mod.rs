@@ -9,9 +9,10 @@
 mod ty;
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, Module, Param, Pattern, Span, Stmt,
+    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, Import, Param, Pattern, Span, Stmt,
     StmtKind, Type, UnaryOp,
 };
+use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -29,6 +30,14 @@ impl fmt::Display for CheckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "type error ({}): {}", self.span, self.message)
     }
+}
+
+/// The dotted path an import targets, for error messages (`core.db`).
+fn module_label(import: &Import) -> String {
+    let path = match import {
+        Import::Module { path, .. } | Import::From { path, .. } => path,
+    };
+    path.join(".")
 }
 
 /// A function (or method) signature: parameter types and return type.
@@ -51,16 +60,39 @@ struct VariantInfo {
     payload: Vec<Ty>,
 }
 
-/// Entry point: type-check a parsed module. Returns every error found, or `Ok(())` if clean.
-pub fn check(module: &Module) -> Result<(), Vec<CheckError>> {
+/// A module's public surface, computed when it's checked, consumed by its importers: its top-level
+/// functions, top-level values (`:=` / typed lets), and the type names it declares.
+#[derive(Clone, Default)]
+struct ModuleSig {
+    functions: HashMap<String, FnSig>,
+    values: HashMap<String, Ty>,
+    types: std::collections::HashSet<String>,
+}
+
+/// Type-check a single parsed module (no imports). Retained as the unit-test entry point; the CLI
+/// drives [`check_graph`] so single- and multi-file programs share one path.
+#[cfg(test)]
+pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
     let mut c = Checker::new();
-    c.collect_names(&module.stmts);
-    c.hoist(&module.stmts);
-    c.push_scope();
-    for stmt in &module.stmts {
-        c.check_stmt(stmt);
+    c.check_module(&module.stmts, None, &[]);
+    if c.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(c.errors)
     }
-    c.pop_scope();
+}
+
+/// Entry point for a multi-file program: type-check every module in the graph (dependencies
+/// before dependents), accumulating all errors across all modules (Go-style). Type names are
+/// program-global in M4.5, so a name reused across modules is a collision.
+pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
+    let mut c = Checker::new();
+    for lm in &graph.modules {
+        let label = if lm.id == graph.entry { None } else { Some(lm.label()) };
+        c.begin_module(label);
+        let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
+        c.module_sigs.insert(lm.id.clone(), sig);
+    }
     if c.errors.is_empty() {
         Ok(())
     } else {
@@ -80,6 +112,12 @@ struct Checker {
     enum_names: std::collections::HashSet<String>,
     /// Declared return type of the function body currently being checked (`Nil` at top level).
     current_ret: Ty,
+    /// Public surfaces of already-checked modules (multi-file programs), keyed by module id.
+    module_sigs: HashMap<ModuleId, ModuleSig>,
+    /// Names bound to an imported module in the *current* module → which module they refer to.
+    imported_modules: HashMap<String, ModuleId>,
+    /// Label of the module currently being checked (`None` = entry); prefixes its error messages.
+    current_module_label: Option<String>,
 }
 
 impl Checker {
@@ -94,11 +132,105 @@ impl Checker {
             struct_names: std::collections::HashSet::new(),
             enum_names: std::collections::HashSet::new(),
             current_ret: Ty::Nil,
+            module_sigs: HashMap::new(),
+            imported_modules: HashMap::new(),
+            current_module_label: None,
         }
     }
 
     fn error(&mut self, span: Span, message: impl Into<String>) {
-        self.errors.push(CheckError { message: message.into(), span });
+        let message = match &self.current_module_label {
+            Some(label) => format!("in module '{label}': {}", message.into()),
+            None => message.into(),
+        };
+        self.errors.push(CheckError { message, span });
+    }
+
+    /// Reset per-module state (functions, scopes, imports, current fn) before checking the next
+    /// module of a multi-file program. Program-global tables (structs/enums/variants/their names,
+    /// `module_sigs`) and accumulated `errors` are kept.
+    fn begin_module(&mut self, label: Option<String>) {
+        self.scopes.clear();
+        self.functions.clear();
+        self.imported_modules.clear();
+        self.current_ret = Ty::Nil;
+        self.current_module_label = label;
+    }
+
+    /// Check one module's statements with its imports bound first; returns its public signature.
+    /// `id` is `Some` for a graph module (enables import binding), `None` for a lone `check`.
+    fn check_module(
+        &mut self,
+        stmts: &[Stmt],
+        _id: Option<&ModuleId>,
+        imports: &[ResolvedImport],
+    ) -> ModuleSig {
+        self.push_scope();
+        for imp in imports {
+            self.bind_import(imp);
+        }
+        self.collect_names(stmts);
+        self.hoist(stmts);
+        for stmt in stmts {
+            self.check_stmt(stmt);
+        }
+        let sig = self.capture_sig(stmts);
+        self.pop_scope();
+        sig
+    }
+
+    /// Bind an import into the current module: a whole-module import becomes a `Ty::Module` name;
+    /// a `from` import injects each member (function/value) into scope, validating it exists.
+    fn bind_import(&mut self, imp: &ResolvedImport) {
+        match &imp.import {
+            Import::Module { path, alias } => {
+                let name = alias.clone().unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                self.imported_modules.insert(name.clone(), imp.target.clone());
+                self.declare(&name, Ty::Module(name.clone()));
+            }
+            Import::From { path: _, names } => {
+                let sig = self.module_sigs.get(&imp.target).cloned().unwrap_or_default();
+                for (member, alias) in names {
+                    let bind = alias.as_ref().unwrap_or(member);
+                    if let Some(fsig) = sig.functions.get(member) {
+                        self.functions.insert(bind.clone(), fsig.clone());
+                    } else if let Some(vty) = sig.values.get(member) {
+                        self.declare(bind, vty.clone());
+                    } else if sig.types.contains(member) {
+                        // A type name is program-global already; nothing to inject.
+                    } else {
+                        self.error(
+                            imp.span,
+                            format!("module '{}' has no member '{member}'", module_label(&imp.import)),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Capture this module's public surface (own top-level fns/values/types) after checking.
+    fn capture_sig(&self, stmts: &[Stmt]) -> ModuleSig {
+        let mut sig = ModuleSig::default();
+        for s in stmts {
+            match &s.kind {
+                StmtKind::Fn(decl) => {
+                    if let Some(fsig) = self.functions.get(&decl.name) {
+                        sig.functions.insert(decl.name.clone(), fsig.clone());
+                    }
+                }
+                StmtKind::Let { name, .. } => {
+                    if let Some(ty) = self.lookup(name) {
+                        sig.values.insert(name.clone(), ty);
+                    }
+                }
+                StmtKind::Struct { name, .. } | StmtKind::Enum { name, .. } => {
+                    sig.types.insert(name.clone());
+                }
+                _ => {}
+            }
+        }
+        sig
     }
 
     // ===== scopes =====
@@ -649,6 +781,29 @@ impl Checker {
                 self.error(obj.span, format!("type {obj_ty} has no field '{name}'"));
                 Ty::Unknown
             }
+            Ty::Module(mname) => {
+                let member = self
+                    .imported_modules
+                    .get(mname)
+                    .and_then(|id| self.module_sigs.get(id))
+                    .map(|sig| {
+                        if let Some(fsig) = sig.functions.get(name) {
+                            Some(Ty::Func {
+                                params: fsig.params.clone(),
+                                ret: Box::new(fsig.ret.clone()),
+                            })
+                        } else {
+                            sig.values.get(name).cloned()
+                        }
+                    });
+                match member {
+                    Some(Some(ty)) => ty,
+                    _ => {
+                        self.error(obj.span, format!("module '{mname}' has no member '{name}'"));
+                        Ty::Unknown
+                    }
+                }
+            }
             Ty::Unknown => Ty::Unknown,
             other => {
                 self.error(obj.span, format!("type {other} has no field '{name}'"));
@@ -843,6 +998,21 @@ impl Checker {
     fn infer_method_call(&mut self, obj: &Expr, method: &str, args: &[Expr], span: Span) -> Ty {
         let obj_ty = self.infer(obj);
         match &obj_ty {
+            // `module.fn(args)` is a plain call on the member — no `self`.
+            Ty::Module(mname) => {
+                let fsig = self
+                    .imported_modules
+                    .get(mname)
+                    .and_then(|id| self.module_sigs.get(id))
+                    .and_then(|sig| sig.functions.get(method).cloned());
+                if let Some(fsig) = fsig {
+                    self.check_args(method, &fsig.params, args, span);
+                    return fsig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("module '{mname}' has no member '{method}'"));
+                Ty::Unknown
+            }
             Ty::Struct(sname) => {
                 let sig = self.structs.get(sname).and_then(|i| i.methods.get(method).cloned());
                 if let Some(sig) = sig {
@@ -947,3 +1117,108 @@ fn op_sym(op: BinaryOp) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod graph_tests {
+    //! M4.5 cross-module type-checking tests (`check_graph` over real tempdir fixtures).
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new() -> Self {
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!("chezzi_chk_{}_{}", std::process::id(), n));
+            std::fs::create_dir_all(&dir).unwrap();
+            TmpDir(dir)
+        }
+        fn write(&self, rel: &str, contents: &str) -> PathBuf {
+            let p = self.0.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&p, contents).unwrap();
+            p
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn check_entry(entry: &Path) -> Result<(), Vec<CheckError>> {
+        let graph = crate::resolver::build_graph(entry).expect("graph should build");
+        check_graph(&graph)
+    }
+
+    fn errors(entry: &Path) -> Vec<String> {
+        check_entry(entry).unwrap_err().into_iter().map(|e| e.message).collect()
+    }
+
+    // 18. A module member's type resolves: a correct use checks clean, a mismatch is rejected.
+    #[test]
+    fn module_member_type_resolves() {
+        let t = TmpDir::new();
+        t.write("a.chz", "fn read() -> int: return 5\n");
+        let ok = t.write("ok.chz", "import a\nx: int = a.read()\nfn main(): print(x)\n");
+        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
+
+        let bad = t.write("bad.chz", "import a\nx: str = a.read()\nfn main(): print(x)\n");
+        let errs = errors(&bad);
+        assert!(
+            errs.iter().any(|m| m.contains("cannot assign int to variable of type str")),
+            "got: {errs:?}"
+        );
+    }
+
+    // 19. A type error inside an imported module is reported (with a module label), and the entry's
+    // own errors are still collected in the same run.
+    #[test]
+    fn type_error_across_module_boundary() {
+        let t = TmpDir::new();
+        // b returns str from an int-typed fn — a type error inside b.
+        t.write("b.chz", "fn helper() -> int: return \"nope\"\n");
+        let entry = t.write(
+            "main.chz",
+            // entry has its own error too: assigning int to a str var.
+            "import helper from b\nbad: str = 5\nfn main(): print(helper())\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter().any(|m| m.contains("in module 'b'")),
+            "imported module error not labeled: {errs:?}"
+        );
+        assert!(
+            errs.iter().any(|m| m.contains("cannot assign int to variable of type str")),
+            "entry error not collected: {errs:?}"
+        );
+    }
+
+    // 20. A `from` import of a name the module does not export is rejected at check time.
+    #[test]
+    fn unknown_imported_member_rejected() {
+        let t = TmpDir::new();
+        t.write("a.chz", "fn f(): print(\"f\")\n");
+        let entry = t.write("main.chz", "import nope from a\nfn main(): print(1)\n");
+        let errs = errors(&entry);
+        assert!(errs.iter().any(|m| m.contains("has no member 'nope'")), "got: {errs:?}");
+    }
+
+    // 21. Type names are program-global in M4.5: the same struct in two loaded modules collides.
+    #[test]
+    fn cross_module_type_collision_rejected() {
+        let t = TmpDir::new();
+        t.write("a.chz", "struct Point:\n    x: int\nfn fa(): print(1)\n");
+        t.write("b.chz", "struct Point:\n    y: int\nfn fb(): print(2)\n");
+        let entry = t.write("main.chz", "import a\nimport b\nfn main(): print(1)\n");
+        let errs = errors(&entry);
+        assert!(
+            errs.iter().any(|m| m.contains("'Point' is already defined")),
+            "got: {errs:?}"
+        );
+    }
+}

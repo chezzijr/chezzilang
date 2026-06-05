@@ -1,0 +1,5 @@
+# A module with a top-level constant its function closes over.
+PREFIX := "Hello"
+
+fn greeting(name: str) -> str:
+    return "{PREFIX}, {name}!"

@@ -10,7 +10,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-> **M4.5 — Modules / imports + resolver.** Multi-file programs; `chezzi.toml` root detection.
+> **M5 — Bytecode VM + mark-sweep GC.** (M4.5 modules done — see below.)
 
 ## M1 — Lexer  ✅ DONE
 
@@ -125,10 +125,47 @@ a real bug class).
 generic unification, user-defined generics, `?`-inside-closure frame semantics, field/index
 assignment (blocked until the interpreter supports it), pipe `|>` (M6).
 
+## M4.5 — Modules / imports + resolver  ✅ DONE
+
+Multi-file programs run; `chezzi.toml` root detection works. Built `src/resolver/`; 22 new tests
+(7 resolver + 11 interp + 4 checker), 213 total; clean `cargo clippy --all-targets`. Built **TDD**
+(red→green per bug class; the headline cross-module-globals test was bite-verified to fail without
+the fix). Imports already lexed/parsed since M2 — M4.5 made them *mean* something.
+
+- ✅ **Resolver** (`src/resolver/mod.rs`) — `find_root` (walk up for `chezzi.toml`, else entry's
+  dir), `std_root` (`$CHEZZI_STD` else compile-time `<crate>/std`), `build_graph` (DFS, postorder
+  load order = deps before dependents, entry last). Module identity = canonicalized abs path
+  (`ModuleId`) → diamonds de-dupe, run-once parse. Cycles → clean `ResolveError` (`a -> b -> a`),
+  not a stack overflow. `a.b.c` → `<root>/a/b/c.chz`; `std.*` → `<std_root>/…`. Lex/parse errors in
+  an imported file are re-labelled (`in module 'core.db': …`) since `Span` carries no filename.
+- ✅ **Interp** (`Value::Module` + `ModEnv`) — `module.fn()` is a plain call on a looked-up member
+  (no `self`); `import a as m` / `import f, g from a` bind into the importer's scope. **Run-once**:
+  each module's body (incl. top-level statements) evaluates exactly once in dependency order, its
+  globals snapshotted as a cached namespace; `main()` auto-runs **only** for the entry file.
+- ✅ **Cross-module globals (the subtle bug)** — a fn imported from B that reads B's top-level `K`
+  must resolve `K` against **B**, not the caller. Fixed by bundling each callable's home globals
+  into the value (`Value::Func(decl, ModEnv)`, `Closure.home`) and `Env::swap_globals` on every
+  call — mirrors the existing `swap_locals` idiom. `ModEnv` is a `Rc<RefCell<HashMap>>` newtype
+  with pointer-eq / opaque `Debug` (the table is self-referential — a deep compare/print would
+  recurse forever).
+- ✅ **Checker** (`check_graph`, `Ty::Module`, `ModuleSig`) — type-checks the whole graph,
+  accumulating errors across modules (Go-style). `io.read()` resolves member sigs; `from` imports
+  validate the member exists; imported-module errors carry the `in module '…'` label. Type names
+  are program-global in M4.5 → reuse across modules is an "already defined" collision (also a
+  runtime backstop in the interp hoist).
+- ✅ **CLI** — `check`/`run` are path-aware (`build_graph` → `check_graph`, gate, then `run_file`);
+  resolve/cycle/missing-module failures are `Fatal`, preserving the `--errors=json` contract.
+- ✅ **Golden** — `tests/fixtures/proj/` (`chezzi.toml` + whole-module + `from` imports + a
+  cross-module constant) runs to `main.expected` via the real entry point.
+
+**Deferred (note):** actual `std/` content (M6 — `std.*` *resolves* but the dir is empty by design,
+the std-path test asserts the path not a load); per-module type-name namespacing (program-global +
+collision-detected for now); next-to-binary std discovery / install story; re-export / transitive
+`from`; VM parity (M5 must mirror run-once + home-globals — golden tests will enforce).
+
 ## Roadmap (later)
 
-- ⬜ **M4.5** — Modules / imports ← NEXT
-- ⬜ **M5** — Bytecode VM + mark-sweep GC
+- ⬜ **M5** — Bytecode VM + mark-sweep GC ← NEXT
 - ⬜ **M6** — Stdlib + pipe `|>` + **core-type methods** (string/list ergonomics — UX priority).
   Extend `eval_method_call` to dispatch on `Value::Str`/`Value::List`; handlers in `builtins.rs`.
   Starter set: `s.len/upper/lower/trim`, `s.split(sep)`, `sep.join(list)`, `s.starts_with/contains`

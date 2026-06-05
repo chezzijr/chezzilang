@@ -19,6 +19,9 @@ pub enum Ty {
     Enum(String),
     Result(Box<Ty>),
     Option(Box<Ty>),
+    /// An imported module, identified by the name it's bound under in the current module. Member
+    /// access (`io.read()`) resolves against the module's exported signatures.
+    Module(String),
     /// Un-inferable, or "an error was already reported here". Compatible with everything.
     Unknown,
 }
@@ -52,7 +55,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         (Unknown, _) | (_, Unknown) => true,
         (Int, Int) | (Float, Float) | (Bool, Bool) | (Str, Str) | (Nil, Nil) => true,
         (List(a), List(b)) | (Result(a), Result(b)) | (Option(a), Option(b)) => compatible(a, b),
-        (Struct(a), Struct(b)) | (Enum(a), Enum(b)) => a == b,
+        (Struct(a), Struct(b)) | (Enum(a), Enum(b)) | (Module(a), Module(b)) => a == b,
         (Func { params: p1, ret: r1 }, Func { params: p2, ret: r2 }) => {
             p1.len() == p2.len()
                 && p1.iter().zip(p2).all(|(a, b)| compatible(a, b))
@@ -74,6 +77,7 @@ impl fmt::Display for Ty {
             Ty::Result(t) => write!(f, "Result[{t}]"),
             Ty::Option(t) => write!(f, "Option[{t}]"),
             Ty::Struct(n) | Ty::Enum(n) => write!(f, "{n}"),
+            Ty::Module(n) => write!(f, "module {n}"),
             Ty::Func { params, ret } => {
                 write!(f, "fn(")?;
                 for (i, p) in params.iter().enumerate() {

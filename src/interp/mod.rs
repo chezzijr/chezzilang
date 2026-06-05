@@ -34,10 +34,12 @@ enum Flow {
     Return(Value),
 }
 
-/// A struct type's runtime shape: ordered field names + methods by name.
+/// A struct type's runtime shape: ordered field names + methods by name, plus the module globals
+/// its methods resolve top-level names against (the module that defined the struct).
 struct StructDef {
     fields: Vec<String>,
     methods: std::collections::HashMap<String, std::rc::Rc<FnDecl>>,
+    home: value::ModEnv,
 }
 
 /// An enum variant's runtime shape: which enum it belongs to and how many payload values it holds.
@@ -53,6 +55,8 @@ struct Interp {
     out: String,
     structs: std::collections::HashMap<String, std::rc::Rc<StructDef>>,
     variants: std::collections::HashMap<String, VariantDef>,
+    /// Evaluated module namespaces, keyed by module id (run-once cache for a multi-file program).
+    namespaces: std::collections::HashMap<crate::resolver::ModuleId, std::rc::Rc<value::ModuleNamespace>>,
     /// Set by the `?` operator when it hits `Err`/`None`: the value to early-return from the
     /// enclosing function. While set, an `Err(RuntimeError)` carries the unwind up to the nearest
     /// call boundary (`call`/`call_closure`), which converts it into that function's return value.
@@ -76,6 +80,7 @@ impl Interp {
             out: String::new(),
             structs: std::collections::HashMap::new(),
             variants: std::collections::HashMap::new(),
+            namespaces: std::collections::HashMap::new(),
             propagating: None,
             call_depth: 0,
         };
@@ -165,6 +170,7 @@ impl Interp {
                     params: params.clone(),
                     body: (**body).clone(),
                     captured: self.env.snapshot_locals(),
+                    home: self.env.globals_rc(),
                 })))
             }
             ExprKind::Field { obj, name } => {
@@ -179,6 +185,12 @@ impl Interp {
                             message: format!("no field '{name}' on {}", target),
                             span: expr.span,
                         }),
+                    Value::Module(ns) => {
+                        ns.members.0.borrow().get(name).cloned().ok_or_else(|| RuntimeError {
+                            message: format!("module '{}' has no member '{name}'", ns.name),
+                            span: expr.span,
+                        })
+                    }
                     other => Err(RuntimeError {
                         message: format!("cannot read field '{name}' of {}", other.type_name()),
                         span: expr.span,
@@ -352,9 +364,15 @@ impl Interp {
             }
         }
 
-        match self.eval(callee)? {
-            Value::Func(decl) => self.call(&decl, arg_vals, span),
-            Value::Closure(clo) => self.call_closure(&clo, arg_vals, span),
+        let callee_val = self.eval(callee)?;
+        self.call_value(callee_val, arg_vals, span)
+    }
+
+    /// Dispatch an already-evaluated callable value (function or closure) on evaluated args.
+    fn call_value(&mut self, callee: Value, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+        match callee {
+            Value::Func(decl, home) => self.call(&decl, &home, args, span),
+            Value::Closure(clo) => self.call_closure(&clo, args, span),
             other => Err(RuntimeError {
                 message: format!("'{}' is not callable", other.type_name()),
                 span,
@@ -387,9 +405,11 @@ impl Interp {
         let mut new_locals = clo.captured.clone();
         new_locals.push(frame);
         self.enter_call(span)?;
+        let saved_globals = self.env.swap_globals(clo.home.clone());
         let saved = self.env.swap_locals(new_locals);
         let result = self.eval(&clo.body);
         self.env.swap_locals(saved);
+        self.env.swap_globals(saved_globals);
         self.call_depth -= 1;
         if let Some(v) = self.propagating.take() {
             return Ok(v);
@@ -493,6 +513,15 @@ impl Interp {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let receiver = self.eval(obj)?;
+        // `module.fn(args)` is a plain call on the looked-up member — no `self` is bound.
+        if let Value::Module(ns) = &receiver {
+            let member = ns.members.0.borrow().get(method).cloned().ok_or_else(|| RuntimeError {
+                message: format!("module '{}' has no member '{method}'", ns.name),
+                span,
+            })?;
+            let arg_vals = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+            return self.call_value(member, arg_vals, span);
+        }
         let Value::Struct { name, .. } = &receiver else {
             return Err(RuntimeError {
                 message: format!("type {} has no method '{method}'", receiver.type_name()),
@@ -512,12 +541,18 @@ impl Interp {
         for a in args {
             call_args.push(self.eval(a)?);
         }
-        self.call(&decl, call_args, span)
+        self.call(&decl, &def.home, call_args, span)
     }
 
     /// Call a user function: bind params in a fresh local frame (lexical scoping — the callee
     /// sees only globals + its params), run the body, and surface a `return` value (or `Nil`).
-    fn call(&mut self, decl: &FnDecl, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+    fn call(
+        &mut self,
+        decl: &FnDecl,
+        home: &value::ModEnv,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         if args.len() != decl.params.len() {
             return Err(RuntimeError {
                 message: format!(
@@ -534,9 +569,12 @@ impl Interp {
             frame.insert(param.name.clone(), arg);
         }
         self.enter_call(span)?;
+        // Resolve the callee's top-level names against *its* module, not the caller's.
+        let saved_globals = self.env.swap_globals(home.clone());
         let saved = self.env.swap_locals(vec![frame]);
         let result = self.exec_block(&decl.body);
         self.env.swap_locals(saved);
+        self.env.swap_globals(saved_globals);
         self.call_depth -= 1;
         // A `?` inside the body early-returns its Err/None value as this function's result.
         if let Some(v) = self.propagating.take() {
@@ -548,10 +586,17 @@ impl Interp {
         }
     }
 
-    /// Drive a whole module: hoist declarations, run top-level statements, then call `main()`
-    /// if one is defined. Errors surface to the caller with output preserved in `self.out`.
+    /// Drive a single-file module (the `run_program` test path): the whole program shares one set
+    /// of globals, `main()` auto-runs. Errors surface with output preserved in `self.out`.
+    #[cfg(test)]
     fn execute(&mut self, stmts: &[Stmt]) -> Result<(), RuntimeError> {
-        self.hoist_declarations(stmts);
+        self.eval_top_level(stmts, true)
+    }
+
+    /// Hoist declarations, run top-level statements, and — when `run_main` — auto-call a nullary
+    /// `main()`. Shared by the single-file path and per-module evaluation.
+    fn eval_top_level(&mut self, stmts: &[Stmt], run_main: bool) -> Result<(), RuntimeError> {
+        self.hoist_declarations(stmts)?;
         let result = self.exec_block(stmts);
         // Check propagation first: a top-level `?` raises a pseudo-error that we want to report as
         // the friendly "outside a function" message rather than the internal marker.
@@ -563,11 +608,13 @@ impl Interp {
             });
         }
         result?;
-        // Convention (single-file scripts): if a nullary `main` is defined, run it after the
-        // top-level declarations are in place.
-        if let Some(Value::Func(decl)) = self.env.get("main") {
+        // Convention: if a nullary `main` is defined, run it after the top-level declarations are
+        // in place — but only for the entry file, never for an imported module.
+        if run_main
+            && let Some(Value::Func(decl, home)) = self.env.get("main")
+        {
             if decl.params.is_empty() {
-                self.call(&decl, Vec::new(), Span { line: 1, col: 1 })?;
+                self.call(&decl, &home, Vec::new(), Span { line: 1, col: 1 })?;
             } else {
                 return Err(RuntimeError {
                     message: "main() must take no arguments".to_string(),
@@ -578,26 +625,90 @@ impl Interp {
         Ok(())
     }
 
+    /// Evaluate one module of a multi-file program into its own fresh globals, then snapshot those
+    /// globals as the module's namespace (cached for importers). Run-once: each module is evaluated
+    /// exactly once, in dependency order. `main()` auto-runs only for the entry module.
+    fn eval_module(
+        &mut self,
+        lm: &crate::resolver::LoadedModule,
+        is_entry: bool,
+    ) -> Result<(), RuntimeError> {
+        let mod_globals = value::ModEnv::new();
+        let saved = self.env.swap_globals(mod_globals.clone());
+        // Bind this module's imports before its body runs (dependencies are already evaluated, so
+        // their namespaces are in `self.namespaces`).
+        let bind = lm.imports.iter().try_for_each(|imp| self.bind_import(imp));
+        let result = bind.and_then(|()| self.eval_top_level(&lm.ast.stmts, is_entry));
+        self.env.swap_globals(saved);
+        self.namespaces.insert(
+            lm.id.clone(),
+            std::rc::Rc::new(value::ModuleNamespace {
+                name: lm.label().into(),
+                members: mod_globals,
+            }),
+        );
+        result
+    }
+
+    /// Bind a resolved import's names into the current module's scope.
+    fn bind_import(&mut self, imp: &crate::resolver::ResolvedImport) -> Result<(), RuntimeError> {
+        use crate::ast::Import;
+        let ns = self.namespaces.get(&imp.target).cloned().ok_or_else(|| RuntimeError {
+            message: "internal: imported module not evaluated before importer".to_string(),
+            span: imp.span,
+        })?;
+        match &imp.import {
+            Import::Module { path, alias } => {
+                let name = alias.clone().unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                self.env.define(&name, Value::Module(ns));
+            }
+            Import::From { path: _, names } => {
+                for (member, alias) in names {
+                    let value = ns.members.0.borrow().get(member).cloned().ok_or_else(|| {
+                        RuntimeError {
+                            message: format!("module '{}' has no member '{member}'", ns.name),
+                            span: imp.span,
+                        }
+                    })?;
+                    self.env.define(alias.as_ref().unwrap_or(member), value);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Pre-register top-level `fn` declarations as globals so functions can call each other
     /// regardless of source order (mutual / forward references).
-    fn hoist_declarations(&mut self, stmts: &[Stmt]) {
+    fn hoist_declarations(&mut self, stmts: &[Stmt]) -> Result<(), RuntimeError> {
+        let home = self.env.globals_rc();
         for stmt in stmts {
             match &stmt.kind {
                 StmtKind::Fn(decl) => {
-                    self.env
-                        .define(&decl.name, Value::Func(std::rc::Rc::new(decl.clone())));
+                    self.env.define(
+                        &decl.name,
+                        Value::Func(std::rc::Rc::new(decl.clone()), home.clone()),
+                    );
                 }
                 StmtKind::Struct {
                     name,
                     fields,
                     methods,
                 } => {
+                    // Type names are program-global in M4.5 (per-module type namespacing is
+                    // deferred): a name reused across modules is a collision, not a shadow.
+                    if self.structs.contains_key(name) {
+                        return Err(RuntimeError {
+                            message: format!("type '{name}' is already defined"),
+                            span: stmt.span,
+                        });
+                    }
                     let def = StructDef {
                         fields: fields.iter().map(|f| f.name.clone()).collect(),
                         methods: methods
                             .iter()
                             .map(|m| (m.name.clone(), std::rc::Rc::new(m.clone())))
                             .collect(),
+                        home: home.clone(),
                     };
                     self.structs.insert(name.clone(), std::rc::Rc::new(def));
                 }
@@ -609,6 +720,7 @@ impl Interp {
                 _ => {}
             }
         }
+        Ok(())
     }
 
     /// Execute a sequence of statements in the current scope, stopping early on `return`.
@@ -647,13 +759,14 @@ impl Interp {
                 Ok(Flow::Normal)
             }
             StmtKind::Fn(decl) => {
+                let home = self.env.globals_rc();
                 self.env
-                    .define(&decl.name, Value::Func(std::rc::Rc::new(decl.clone())));
+                    .define(&decl.name, Value::Func(std::rc::Rc::new(decl.clone()), home));
                 Ok(Flow::Normal)
             }
-            // Type declarations are registered up-front by `hoist_declarations`; nothing to do
-            // when execution reaches them.
-            StmtKind::Struct { .. } | StmtKind::Enum { .. } => Ok(Flow::Normal),
+            // Type declarations are registered up-front by `hoist_declarations`; imports are bound
+            // before the body runs (see `eval_module`). Nothing to do when execution reaches them.
+            StmtKind::Struct { .. } | StmtKind::Enum { .. } | StmtKind::Import(_) => Ok(Flow::Normal),
             StmtKind::Match { scrutinee, arms } => self.exec_match(scrutinee, arms),
             StmtKind::Return(value) => {
                 let v = match value {
@@ -685,10 +798,6 @@ impl Interp {
                 }
                 Ok(Flow::Normal)
             }
-            other => Err(RuntimeError {
-                message: format!("execution of {other:?} is not implemented yet"),
-                span: stmt.span,
-            }),
         }
     }
 
@@ -798,11 +907,10 @@ impl Interp {
 /// the recursion limit from the caller's (possibly small, e.g. 2 MB test) thread stack.
 const INTERP_STACK_BYTES: usize = 256 * 1024 * 1024;
 
-/// Run a whole program from source, returning the output produced **so far** alongside the
-/// outcome. Output accumulated before a mid-program error is preserved (so the CLI can print it).
-///
-/// Runs on a dedicated large-stack thread so that deep (but finite) recursion works and infinite
-/// recursion hits the [`MAX_CALL_DEPTH`] guard as a clean error rather than a host stack overflow.
+/// Run a whole program from a source string, returning the output produced **so far** alongside
+/// the outcome. The single-file test entry point — the CLI uses [`run_file`] so multi-file
+/// programs work. Runs on a dedicated large-stack thread (see [`INTERP_STACK_BYTES`]).
+#[cfg(test)]
 pub fn run_program(src: &str) -> (String, Result<(), RuntimeError>) {
     let src = src.to_string();
     std::thread::Builder::new()
@@ -813,6 +921,7 @@ pub fn run_program(src: &str) -> (String, Result<(), RuntimeError>) {
         .expect("interpreter thread panicked")
 }
 
+#[cfg(test)]
 fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
     let parsed = lexer::tokenize(src)
         .map_err(|e| RuntimeError {
@@ -833,6 +942,37 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
     let mut interp = Interp::new();
     let result = interp.execute(&module.stmts);
     (interp.out, result)
+}
+
+/// Run a multi-file program from its entry path: resolve the dependency graph, evaluate each
+/// module once in dependency order, then run the entry's `main()`. Output produced so far is
+/// preserved alongside the outcome (so the CLI can print partial output before an error).
+pub fn run_file(entry: &std::path::Path) -> (String, Result<(), RuntimeError>) {
+    let entry = entry.to_path_buf();
+    std::thread::Builder::new()
+        .stack_size(INTERP_STACK_BYTES)
+        .spawn(move || run_file_inner(&entry))
+        .expect("failed to spawn interpreter thread")
+        .join()
+        .expect("interpreter thread panicked")
+}
+
+fn run_file_inner(entry: &std::path::Path) -> (String, Result<(), RuntimeError>) {
+    let graph = match crate::resolver::build_graph(entry) {
+        Ok(g) => g,
+        Err(e) => {
+            return (String::new(), Err(RuntimeError { message: e.message, span: e.span }));
+        }
+    };
+    let mut interp = Interp::new();
+    // Modules are in load order: dependencies first, entry last.
+    for lm in &graph.modules {
+        let is_entry = lm.id == graph.entry;
+        if let Err(e) = interp.eval_module(lm, is_entry) {
+            return (interp.out, Err(e));
+        }
+    }
+    (interp.out, Ok(()))
 }
 
 /// Run a whole program and return its complete stdout, or the error if it didn't finish.
@@ -1467,5 +1607,174 @@ fn safe_div(a: int, b: int) -> Result[int]:
         assert_eq!(eval("3 == 3"), Value::Bool(true));
         assert_eq!(eval("3 != 3"), Value::Bool(false));
         assert_eq!(eval(r#""x" == "x""#), Value::Bool(true));
+    }
+}
+
+#[cfg(test)]
+mod module_tests {
+    //! M4.5 multi-file program tests, driven through `run_file` over real tempdir fixtures. Each
+    //! pins a distinct cross-module bug class.
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new() -> Self {
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!("chezzi_interp_{}_{}", std::process::id(), n));
+            std::fs::create_dir_all(&dir).unwrap();
+            TmpDir(dir)
+        }
+        fn write(&self, rel: &str, contents: &str) -> PathBuf {
+            let p = self.0.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&p, contents).unwrap();
+            p
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Run an entry file, asserting success and returning its stdout.
+    fn run_ok(entry: &std::path::Path) -> String {
+        let (out, res) = run_file(entry);
+        res.expect("run_file should succeed");
+        out
+    }
+
+    /// Run an entry file, asserting it fails, returning the error message.
+    fn run_err(entry: &std::path::Path) -> String {
+        let (_out, res) = run_file(entry);
+        res.expect_err("run_file should fail").message
+    }
+
+    // 8. Import a module and call a member (Value::Module + Field dispatch, not the struct path).
+    #[test]
+    fn import_module_and_call_member() {
+        let t = TmpDir::new();
+        t.write("util.chz", "fn greet(): print(\"hi from util\")\n");
+        let entry = t.write("main.chz", "import util\nfn main(): util.greet()\n");
+        assert_eq!(run_ok(&entry), "hi from util\n");
+    }
+
+    // 13. Cross-module globals: an imported fn resolves K against ITS module, not the caller's.
+    // (Written right after the basic import to force the architecture correct early.)
+    #[test]
+    fn imported_fn_sees_its_own_module_globals() {
+        let t = TmpDir::new();
+        t.write("b.chz", "K := 100\nfn helper() -> int: return K\n");
+        let entry = t.write(
+            "main.chz",
+            "import helper from b\nK := 1\nfn main(): print(helper())\n",
+        );
+        // Must print B's K (100), not the entry's K (1).
+        assert_eq!(run_ok(&entry), "100\n");
+    }
+
+    // 14. Same fix, second failure mode: the importer defines no K at all.
+    #[test]
+    fn imported_fn_globals_work_when_caller_has_none() {
+        let t = TmpDir::new();
+        t.write("b.chz", "K := 42\nfn helper() -> int: return K\n");
+        let entry = t.write("main.chz", "import helper from b\nfn main(): print(helper())\n");
+        assert_eq!(run_ok(&entry), "42\n");
+    }
+
+    // 9. `import a as m` binds the alias; the un-aliased last segment is NOT bound.
+    #[test]
+    fn import_module_alias() {
+        let t = TmpDir::new();
+        t.write("util.chz", "fn f(): print(\"f\")\n");
+        let entry = t.write("main.chz", "import util as m\nfn main(): m.f()\n");
+        assert_eq!(run_ok(&entry), "f\n");
+
+        let bad = t.write("bad.chz", "import util as m\nfn main(): util.f()\n");
+        assert!(run_err(&bad).contains("undefined name 'util'"));
+    }
+
+    // 10. `import f, g from a` pulls names into the importer's scope.
+    #[test]
+    fn from_named_import() {
+        let t = TmpDir::new();
+        t.write("lib.chz", "fn f(): print(\"f\")\nfn g(): print(\"g\")\n");
+        let entry = t.write("main.chz", "import f, g from lib\nfn main():\n    f()\n    g()\n");
+        assert_eq!(run_ok(&entry), "f\ng\n");
+    }
+
+    // 11. `import f as h from a`: the alias is bound, the original name is not.
+    #[test]
+    fn from_named_import_alias() {
+        let t = TmpDir::new();
+        t.write("lib.chz", "fn f(): print(\"f\")\n");
+        let entry = t.write("main.chz", "import f as h from lib\nfn main(): h()\n");
+        assert_eq!(run_ok(&entry), "f\n");
+
+        let bad = t.write("bad.chz", "import f as h from lib\nfn main(): f()\n");
+        assert!(run_err(&bad).contains("undefined name 'f'"));
+    }
+
+    // 12. Run-once across a diamond: a module-level statement runs exactly once.
+    #[test]
+    fn run_once_diamond_side_effect() {
+        let t = TmpDir::new();
+        t.write("c.chz", "print(\"init C\")\nfn fc(): print(\"fc\")\n");
+        t.write("a.chz", "import c\nfn fa(): c.fc()\n");
+        t.write("b.chz", "import c\nfn fb(): c.fc()\n");
+        let entry = t.write(
+            "main.chz",
+            "import a\nimport b\nfn main(): print(\"done\")\n",
+        );
+        let out = run_ok(&entry);
+        assert_eq!(out.matches("init C").count(), 1, "C init ran more than once: {out:?}");
+        assert_eq!(out, "init C\ndone\n");
+    }
+
+    // 15. Accessing an undefined member is a clean error.
+    #[test]
+    fn missing_member_access_errors() {
+        let t = TmpDir::new();
+        t.write("util.chz", "fn f(): print(\"f\")\n");
+        let entry = t.write("main.chz", "import util\nfn main(): util.nope()\n");
+        assert!(run_err(&entry).contains("has no member 'nope'"));
+    }
+
+    // 16. main() in an imported module does NOT auto-run.
+    #[test]
+    fn main_in_imported_module_does_not_autorun() {
+        let t = TmpDir::new();
+        t.write("lib.chz", "fn main(): print(\"lib main\")\nfn f(): print(\"f\")\n");
+        let entry = t.write("main.chz", "import f from lib\nfn main(): f()\n");
+        let out = run_ok(&entry);
+        assert!(!out.contains("lib main"), "imported main auto-ran: {out:?}");
+        assert_eq!(out, "f\n");
+    }
+
+    // 17. An import cycle surfaces as a clean error through the real entry point.
+    #[test]
+    fn import_cycle_errors_end_to_end() {
+        let t = TmpDir::new();
+        let entry = t.write("a.chz", "import b\nfn main(): print(1)\n");
+        t.write("b.chz", "import a\nfn f(): print(2)\n");
+        assert!(run_err(&entry).contains("cycle"));
+    }
+
+    // 22. Golden end-to-end: the committed multi-file fixture (chezzi.toml root, whole-module +
+    // from imports, cross-module global) runs to its expected stdout. The M5 VM must match it too.
+    #[test]
+    fn golden_multi_file_project() {
+        let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proj/main.chz");
+        let expected = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proj/main.expected"),
+        )
+        .expect("fixture expected output should exist");
+        assert_eq!(run_ok(&entry), expected);
     }
 }

@@ -12,6 +12,7 @@ mod checker;
 mod interp;
 mod lexer;
 mod parser;
+mod resolver;
 
 #[cfg(test)]
 mod conformance;
@@ -134,11 +135,11 @@ fn cmd_check(args: &[String]) -> ExitCode {
     let Some((path, json)) = parse_file_and_flags("check", args) else {
         return ExitCode::FAILURE;
     };
-    let Some(source) = read_source(&path) else {
+    if read_source(&path).is_none() {
         return ExitCode::FAILURE;
-    };
+    }
 
-    match type_check(&source) {
+    match type_check(&path) {
         CheckOutcome::Ok => {
             println!("{}", if json { "[]" } else { "ok: no type errors" });
             ExitCode::SUCCESS
@@ -159,12 +160,12 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let Some((path, json)) = parse_file_and_flags("run", args) else {
         return ExitCode::FAILURE;
     };
-    let Some(source) = read_source(&path) else {
+    if read_source(&path).is_none() {
         return ExitCode::FAILURE;
-    };
+    }
 
     // Pre-run type check: type errors block execution (no partial output).
-    match type_check(&source) {
+    match type_check(&path) {
         CheckOutcome::Ok => {}
         CheckOutcome::Errors(errs) => {
             report_check_errors(&errs, json);
@@ -177,7 +178,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
     }
 
     // Print whatever the program emitted before any error, then the error itself.
-    let (output, result) = interp::run_program(&source);
+    let (output, result) = interp::run_file(std::path::Path::new(&path));
     print!("{output}");
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -196,19 +197,16 @@ enum CheckOutcome {
     Fatal { text: String, line: usize, col: usize },
 }
 
-/// Lex → parse → type-check a source string, normalizing each failure mode.
-fn type_check(source: &str) -> CheckOutcome {
-    let tokens = match lexer::tokenize(source) {
-        Ok(t) => t,
-        Err(e) => return CheckOutcome::Fatal { text: e.to_string(), line: e.line, col: 1 },
-    };
-    let module = match parser::parse(tokens) {
-        Ok(m) => m,
+/// Resolve the module graph, then type-check it, normalizing each failure mode. A resolve, lex, or
+/// parse failure (in the entry or any imported module) is `Fatal`; type errors are `Errors`.
+fn type_check(path: &str) -> CheckOutcome {
+    let graph = match resolver::build_graph(std::path::Path::new(path)) {
+        Ok(g) => g,
         Err(e) => {
             return CheckOutcome::Fatal { text: e.to_string(), line: e.span.line, col: e.span.col };
         }
     };
-    match checker::check(&module) {
+    match checker::check_graph(&graph) {
         Ok(()) => CheckOutcome::Ok,
         Err(errs) => CheckOutcome::Errors(errs),
     }

@@ -1,0 +1,6 @@
+import greet
+import double from mathx
+
+fn main():
+    print(greet.greeting("world"))
+    print(double(21))
