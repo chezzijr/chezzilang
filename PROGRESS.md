@@ -245,6 +245,11 @@ a real bug class).
 - ✅ **`T?` / `T!` type shorthand (post-M4)** — in any type position, `T?` desugars to `Option[T]`
   and `T!` to `Result[T]` (parse-time, in `parse_type`; new `Token::Bang`). Stacks left-to-right;
   pure sugar — checker/engines/`Some·None·Ok·Err`/`match`/`?` unchanged.
+- ✅ **Expression-valued `match` / `if` (post-M4)** — `x := match s: …` (multiline, exhaustive,
+  value-expression arms) and `x := if c: a else: b` (inline, `else` required) yield a value.
+  New `ExprKind::Match`/`IfElse`; checker unifies arm/branch types (shared `match_variants` /
+  `bind_match_arm` / `check_exhaustive` helpers); both engines emit value-producing forms (parity
+  tested). Statement `match`/`if` unchanged; loops + fn bodies stay statements with `return`.
 - ✅ **Two-pass** — pass 1 hoists every top-level decl (forward refs work, like the interp);
   pass 2 walks bodies, **collecting all errors** (Go-style) into a `Vec`.
 - ✅ **Error classes** (each with a test) — unknown name/type, call arity, non-callable, arithmetic

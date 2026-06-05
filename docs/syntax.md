@@ -161,6 +161,26 @@ match safe_div(10, 2):
     Err(e): print("failed: {e}")
 ```
 
+### `match` and `if` as expressions
+
+Both branch forms can also be used as **expressions** that produce a value — handy for
+initializing a variable without a pre-declared mutable:
+
+```chezzi
+# match-expression: multiline, exhaustive, each arm body is a single value-expression
+label := match shape:
+    Circle(r): "round"
+    Square(n): "boxy"
+    Point:     "dot"
+
+# if-expression: inline, ternary-style — `else` is REQUIRED
+sign := if n > 0: "pos" else: "neg"
+```
+
+All arms (and both `if` branches) must agree on a type. The statement forms — `match s:` /
+`if c:` with indented blocks and `return`/assignments inside — are unchanged; only loops and
+function bodies stay statement-only (functions still return via explicit `return`).
+
 ## 9. Errors — Result / Option + `?`  (M3)
 
 Errors are **values**, not exceptions. No hidden control flow.

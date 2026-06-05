@@ -143,6 +143,17 @@
             | "LBRACKET" "RBRACKET"
             | "LBRACKET" <exprList> "RBRACKET"
             | <closure>
+            | <matchExpr>
+            | <ifExpr>
+
+# Expression-position `match`/`if` (value-producing, distinct from the statement forms above).
+# `matchExpr` arms are value-expressions (not blocks); it is multiline + exhaustive. A simple
+# statement whose value is a `matchExpr` is terminated by the arm block's DEDENT, not a trailing
+# NEWLINE (see the parser's expect_stmt_end). `ifExpr` is inline and requires `else`.
+<matchExpr> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <exprArms> "DEDENT"
+<exprArms>  ::= <exprArm> | <exprArm> <exprArms>
+<exprArm>   ::= <pattern> "COLON" <expr> "NEWLINE"
+<ifExpr>    ::= "IF" <expr> "COLON" <expr> "ELSE" "COLON" <expr>
 
 <closure> ::= "FN" "LPAREN" "RPAREN" "COLON" <expr>
             | "FN" "LPAREN" <params> "RPAREN" "COLON" <expr>

@@ -12,8 +12,8 @@
 //!      forward references resolve) and one proto per `fn` / method / closure.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, MatchArm, Module, Pattern, Span, Stmt,
-    StmtKind, UnaryOp,
+    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, MatchArm, MatchExprArm, Module, Pattern,
+    Span, Stmt, StmtKind, UnaryOp,
 };
 use crate::resolver::ModuleGraph;
 use crate::vm::op::{
@@ -483,7 +483,56 @@ impl Compiler {
                 fc.emit(Op::Try, expr.span);
             }
             ExprKind::Closure { params, body, .. } => self.compile_closure(fc, params, body, expr.span)?,
+            ExprKind::Match { scrutinee, arms } => self.compile_match_expr(fc, scrutinee, arms, expr.span)?,
+            ExprKind::IfElse { cond, then, els } => self.compile_if_expr(fc, cond, then, els)?,
         }
+        Ok(())
+    }
+
+    /// Expression-position `match`: like `compile_match`, but each arm body is compiled as an
+    /// expression that leaves its value on the stack, so the whole `match` yields one value.
+    fn compile_match_expr(&mut self, fc: &mut FnComp, scrutinee: &Expr, arms: &[MatchExprArm], span: Span) -> Result<(), CompileError> {
+        fc.begin_scope();
+        self.compile_expr(fc, scrutinee)?;
+        let scrut = fc.add_hidden();
+        fc.emit(Op::SetLocal(scrut), span);
+        fc.emit(Op::EnsureEnum(scrut), scrutinee.span);
+        let mut end_jumps = Vec::new();
+        for arm in arms {
+            let Pattern::Variant { name, bindings } = &arm.pattern;
+            fc.begin_scope();
+            let bind_start = fc.next_slot();
+            for b in bindings {
+                fc.add_local(b.clone());
+            }
+            let arm_op = fc.emit_jump(
+                Op::MatchArm { scrut, variant: name.clone(), nbind: bindings.len(), bind_start, next: 0 },
+                scrutinee.span,
+            );
+            self.compile_expr(fc, &arm.body)?; // leaves the arm's value on the stack
+            end_jumps.push(fc.emit_jump(Op::Jump(0), span));
+            fc.patch_jump(arm_op);
+            fc.end_scope();
+        }
+        fc.emit(Op::MatchNoArm(scrut), scrutinee.span); // exhaustive (checker) → a trap, never falls through
+        for j in end_jumps {
+            fc.patch_jump(j);
+        }
+        fc.end_scope();
+        Ok(())
+    }
+
+    /// Expression-position `if c: a else: b`: condition, then jump to whichever branch; both
+    /// branches leave exactly one value, so one value remains at the join.
+    fn compile_if_expr(&mut self, fc: &mut FnComp, cond: &Expr, then: &Expr, els: &Expr) -> Result<(), CompileError> {
+        self.compile_expr(fc, cond)?;
+        fc.emit(Op::AsBool, cond.span);
+        let skip = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
+        self.compile_expr(fc, then)?;
+        let end = fc.emit_jump(Op::Jump(0), cond.span);
+        fc.patch_jump(skip);
+        self.compile_expr(fc, els)?;
+        fc.patch_jump(end);
         Ok(())
     }
 

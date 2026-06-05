@@ -1,0 +1,2 @@
+# rule: ifExpr
+x := if y > 0: "pos" else: "neg"

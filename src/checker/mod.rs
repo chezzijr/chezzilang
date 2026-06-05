@@ -664,9 +664,11 @@ impl Checker {
         }
     }
 
-    fn check_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm]) {
+    /// The variant set a `match` scrutinee admits: `(label, variant→payload, skip_exhaustive)`.
+    /// Shared by the statement form (`check_match`) and the expression form (`infer_match`).
+    fn match_variants(&mut self, scrutinee: &Expr) -> (String, HashMap<String, Vec<Ty>>, bool) {
         let sty = self.infer(scrutinee);
-        // (variant name -> payload types) the scrutinee admits, plus a label for messages.
+        let skip = sty.is_unknown();
         let (label, variants): (String, HashMap<String, Vec<Ty>>) = match &sty {
             Ty::Enum(name) => {
                 let map = self
@@ -696,66 +698,134 @@ impl Checker {
                 (String::new(), HashMap::new())
             }
         };
+        (label, variants, skip)
+    }
 
-        let skip_exhaustive = sty.is_unknown();
-        let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for arm in arms {
-            let Pattern::Variant { name, bindings } = &arm.pattern;
-            let payload = if variants.is_empty() && skip_exhaustive {
-                None // scrutinee unknown — accept any binding count
-            } else {
-                match variants.get(name) {
-                    Some(p) => Some(p.clone()),
-                    None => {
-                        if !label.is_empty() {
-                            self.error(
-                                scrutinee.span,
-                                format!("'{name}' is not a variant of {label}"),
-                            );
-                        }
-                        None
+    /// Push a scope and bind one arm's pattern payload, recording coverage + dup/arity diagnostics.
+    /// The caller must `pop_scope` once it has checked/inferred the arm body.
+    fn bind_match_arm(
+        &mut self,
+        pattern: &Pattern,
+        variants: &HashMap<String, Vec<Ty>>,
+        label: &str,
+        skip: bool,
+        span: Span,
+        covered: &mut std::collections::HashSet<String>,
+    ) {
+        let Pattern::Variant { name, bindings } = pattern;
+        let payload = if variants.is_empty() && skip {
+            None // scrutinee unknown — accept any binding count
+        } else {
+            match variants.get(name) {
+                Some(p) => Some(p.clone()),
+                None => {
+                    if !label.is_empty() {
+                        self.error(span, format!("'{name}' is not a variant of {label}"));
                     }
-                }
-            };
-            if !covered.insert(name.clone()) {
-                self.error(scrutinee.span, format!("duplicate match arm '{name}'"));
-            }
-            self.push_scope();
-            if let Some(payload) = &payload {
-                if payload.len() != bindings.len() {
-                    self.error(
-                        scrutinee.span,
-                        format!(
-                            "variant '{name}' binds {} value(s), but {} given",
-                            payload.len(),
-                            bindings.len()
-                        ),
-                    );
-                }
-                for (b, t) in bindings.iter().zip(payload.iter()) {
-                    self.declare(b, t.clone());
-                }
-            } else {
-                for b in bindings {
-                    self.declare(b, Ty::Unknown);
+                    None
                 }
             }
+        };
+        if !covered.insert(name.clone()) {
+            self.error(span, format!("duplicate match arm '{name}'"));
+        }
+        self.push_scope();
+        if let Some(payload) = &payload {
+            if payload.len() != bindings.len() {
+                self.error(
+                    span,
+                    format!(
+                        "variant '{name}' binds {} value(s), but {} given",
+                        payload.len(),
+                        bindings.len()
+                    ),
+                );
+            }
+            for (b, t) in bindings.iter().zip(payload.iter()) {
+                self.declare(b, t.clone());
+            }
+        } else {
+            for b in bindings {
+                self.declare(b, Ty::Unknown);
+            }
+        }
+    }
+
+    /// Report a non-exhaustive match (missing variants), unless exhaustiveness was skipped.
+    fn check_exhaustive(
+        &mut self,
+        variants: &HashMap<String, Vec<Ty>>,
+        covered: &std::collections::HashSet<String>,
+        label: &str,
+        span: Span,
+        skip: bool,
+    ) {
+        if skip {
+            return;
+        }
+        let mut missing: Vec<String> =
+            variants.keys().filter(|v| !covered.contains(*v)).cloned().collect();
+        if !missing.is_empty() {
+            missing.sort();
+            self.error(span, format!("non-exhaustive match on {label}: missing {}", missing.join(", ")));
+        }
+    }
+
+    fn check_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm]) {
+        let (label, variants, skip) = self.match_variants(scrutinee);
+        let mut covered = std::collections::HashSet::new();
+        for arm in arms {
+            self.bind_match_arm(&arm.pattern, &variants, &label, skip, scrutinee.span, &mut covered);
             for stmt in &arm.body {
                 self.check_stmt(stmt);
             }
             self.pop_scope();
         }
+        self.check_exhaustive(&variants, &covered, &label, scrutinee.span, skip);
+    }
 
-        if !skip_exhaustive {
-            let missing: Vec<String> =
-                variants.keys().filter(|v| !covered.contains(*v)).cloned().collect();
-            if !missing.is_empty() {
-                let mut missing = missing;
-                missing.sort();
-                self.error(
-                    scrutinee.span,
-                    format!("non-exhaustive match on {label}: missing {}", missing.join(", ")),
-                );
+    /// Infer an expression-position `match`: bind each arm, infer its value, and unify the arm
+    /// types into one result. Exhaustiveness is still enforced.
+    fn infer_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchExprArm]) -> Ty {
+        let (label, variants, skip) = self.match_variants(scrutinee);
+        let mut covered = std::collections::HashSet::new();
+        let mut result: Option<Ty> = None;
+        for arm in arms {
+            self.bind_match_arm(&arm.pattern, &variants, &label, skip, scrutinee.span, &mut covered);
+            let t = self.infer(&arm.body);
+            self.pop_scope();
+            result = Some(self.unify_branch(result, t, arm.body.span));
+        }
+        self.check_exhaustive(&variants, &covered, &label, scrutinee.span, skip);
+        result.unwrap_or(Ty::Unknown)
+    }
+
+    /// Infer an expression-position `if c: a else: b`: condition is bool, the two branches unify.
+    fn infer_if_else(&mut self, cond: &Expr, then: &Expr, els: &Expr) -> Ty {
+        self.expect_bool(cond, "if condition");
+        let t_then = self.infer(then);
+        let t_els = self.infer(els);
+        let acc = self.unify_branch(None, t_then, then.span);
+        self.unify_branch(Some(acc), t_els, els.span)
+    }
+
+    /// Fold one branch's type into a match/if expression's running result type. The first concrete
+    /// branch sets the type; a later incompatible branch is a real error (and yields `Unknown` to
+    /// suppress cascades). `Unknown` branches never override a concrete result.
+    fn unify_branch(&mut self, acc: Option<Ty>, t: Ty, span: Span) -> Ty {
+        match acc {
+            None => t,
+            Some(prev) => {
+                if compatible(&prev, &t) {
+                    if prev.is_unknown() {
+                        t
+                    } else {
+                        prev
+                    }
+                } else {
+                    self.error(span, format!("branches have incompatible types: {prev} and {t}"));
+                    Ty::Unknown
+                }
             }
         }
     }
@@ -782,6 +852,8 @@ impl Checker {
             ExprKind::Index { obj, index } => self.infer_index(obj, index),
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
             ExprKind::Closure { params, ret, body } => self.infer_closure(params, ret.as_ref(), body),
+            ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms),
+            ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els),
         }
     }
 

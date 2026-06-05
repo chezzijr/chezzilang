@@ -150,13 +150,18 @@ impl Parser {
             self.peek(),
             Token::Newline | Token::Dedent | Token::Eof
         ) {
-            Ok(())
-        } else {
-            Err(self.err(format!(
-                "expected end of line, found {}",
-                describe(self.peek())
-            )))
+            return Ok(());
         }
+        // A simple statement whose value is a block-valued expression (`x := match s:` with
+        // indented arms) is terminated by the arm block's `Dedent`, which the expression already
+        // consumed — so there's no separate line terminator left to require.
+        if self.pos > 0 && matches!(self.toks[self.pos - 1].kind, Token::Dedent) {
+            return Ok(());
+        }
+        Err(self.err(format!(
+            "expected end of line, found {}",
+            describe(self.peek())
+        )))
     }
 
     fn err(&self, message: String) -> ParseError {
@@ -454,6 +459,49 @@ impl Parser {
         }
         self.expect(&Token::Dedent)?;
         Ok(StmtKind::Match { scrutinee, arms })
+    }
+
+    /// Expression-position `match` (keyword already consumed): `match scrut:` then indented
+    /// `pattern: value-expr` arms. Each arm body is a single expression (not a block).
+    fn parse_match_expr(&mut self, span: Span) -> PResult<Expr> {
+        let scrutinee = self.parse_expr()?;
+        self.open_block()?; // ':' Newline Indent
+        let mut arms = Vec::new();
+        self.skip_newlines();
+        while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            let pattern = self.parse_pattern()?;
+            self.expect(&Token::Colon)?;
+            let body = self.parse_expr()?;
+            arms.push(MatchExprArm { pattern, body });
+            self.skip_newlines();
+        }
+        self.expect(&Token::Dedent)?;
+        Ok(Expr {
+            kind: ExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms,
+            },
+            span,
+        })
+    }
+
+    /// Expression-position `if` (keyword already consumed): inline `if cond: then else: els`.
+    /// `else` is mandatory; the `then`/`els` expressions stop at the `else` keyword / line end.
+    fn parse_if_expr(&mut self, span: Span) -> PResult<Expr> {
+        let cond = self.parse_expr()?;
+        self.expect(&Token::Colon)?;
+        let then = self.parse_expr()?;
+        self.expect(&Token::Else)?;
+        self.expect(&Token::Colon)?;
+        let els = self.parse_expr()?;
+        Ok(Expr {
+            kind: ExprKind::IfElse {
+                cond: Box::new(cond),
+                then: Box::new(then),
+                els: Box::new(els),
+            },
+            span,
+        })
     }
 
     fn parse_pattern(&mut self) -> PResult<Pattern> {
@@ -775,6 +823,10 @@ impl Parser {
                 ExprKind::List(elems)
             }
             Token::Fn => return self.parse_closure(span),
+            // Expression-position `match`/`if` (the keyword was already consumed by `advance`).
+            // Statement-position `if`/`match` never reach here — `parse_stmt` dispatches them first.
+            Token::Match => return self.parse_match_expr(span),
+            Token::If => return self.parse_if_expr(span),
             other => {
                 return Err(ParseError {
                     message: format!("unexpected {} in expression", describe(&other)),
@@ -1401,6 +1453,68 @@ mod tests {
                 vec![Type::Generic("list".into(), vec![Type::Named("int".into())])]
             ))
         );
+    }
+
+    /// `match` in expression position parses to `ExprKind::Match` with value-expression arms.
+    #[test]
+    fn match_expression_parses() {
+        let StmtKind::Let { value, .. } = only("x := match s:\n    Some(v): v\n    None: 0\n")
+        else {
+            panic!()
+        };
+        let ExprKind::Match { arms, .. } = value.kind else {
+            panic!("{value:?}")
+        };
+        assert_eq!(arms.len(), 2);
+        assert!(matches!(arms[1].body.kind, ExprKind::Int(0)));
+    }
+
+    /// `if c: a else: b` in expression position parses to `ExprKind::IfElse` (inline, else required).
+    #[test]
+    fn if_expression_parses() {
+        let StmtKind::Let { value, .. } = only("x := if c: 1 else: 2\n") else {
+            panic!()
+        };
+        let ExprKind::IfElse { then, els, .. } = value.kind else {
+            panic!("{value:?}")
+        };
+        assert!(matches!(then.kind, ExprKind::Int(1)));
+        assert!(matches!(els.kind, ExprKind::Int(2)));
+    }
+
+    #[test]
+    fn if_expression_requires_else() {
+        assert!(parse_err("x := if c: 1\n").message.contains("else"));
+    }
+
+    /// Guards the `expect_stmt_end` Dedent-acceptance: a sibling statement may follow a
+    /// (Dedent-terminated) match-expression value — both statements must parse.
+    #[test]
+    fn match_expr_followed_by_sibling_statement() {
+        let m = parse_ok("x := match s:\n    A: 1\n    B: 2\ny := x\n");
+        assert_eq!(m.stmts.len(), 2);
+    }
+
+    /// match-expr as the last statement in a block: the arm Dedent and the block Dedent stack.
+    #[test]
+    fn match_expr_last_in_fn_body() {
+        let m = parse_ok("fn f(s: Color):\n    x := match s:\n        A: 1\n        B: 2\n    print(x)\n");
+        assert_eq!(m.stmts.len(), 1); // just the fn
+    }
+
+    /// An if-expression composes inside a larger expression.
+    #[test]
+    fn if_expr_nested_in_arithmetic() {
+        let StmtKind::Let { value, .. } = only("x := 1 + if c: 2 else: 3\n") else {
+            panic!()
+        };
+        assert!(matches!(value.kind, ExprKind::Binary { .. }));
+    }
+
+    /// Arm bodies are single-line expressions; an indented block body is a parse error.
+    #[test]
+    fn match_expr_arm_body_must_be_inline() {
+        parse_err("x := match s:\n    A:\n        1\n    B: 2\n");
     }
 
     /// Bare `!` is a token now (for the `T!` type shorthand) but has no meaning in expression

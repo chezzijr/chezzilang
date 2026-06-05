@@ -287,6 +287,8 @@ fn parser_rules_match_fns() {
         "parse_postfix",
         "parse_primary",
         "parse_closure",
+        "parse_match_expr",
+        "parse_if_expr",
         "parse_ok",
         "parse_err",
     ]

@@ -213,6 +213,27 @@ pub enum ExprKind {
         ret: Option<Type>,
         body: Box<Expr>,
     },
+    /// Expression-position `match` (`x := match s:` with `pattern: expr` arms). Distinct from the
+    /// statement form (`StmtKind::Match`, block arms): every arm body is a single value-expression
+    /// and the whole `match` evaluates to the chosen arm's value.
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchExprArm>,
+    },
+    /// Expression-position `if` (`if c: a else: b`) — inline, `else` mandatory; evaluates to the
+    /// taken branch's value. Distinct from the statement form (`StmtKind::If`, block bodies).
+    IfElse {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        els: Box<Expr>,
+    },
+}
+
+/// One arm of an expression-position `match`: `pattern: value-expr`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchExprArm {
+    pub pattern: Pattern,
+    pub body: Expr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

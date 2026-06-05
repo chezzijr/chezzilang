@@ -302,6 +302,58 @@ fn optional_shorthand_rejects_bare_value() {
     rejects("x: int? = 5\n", "cannot assign int to variable of type Option[int]");
 }
 
+// ===== 9d. expression-valued match / if (Part 3) =====
+
+#[test]
+fn match_expression_unifies_arms() {
+    ok("s := Some(5)\nx := match s:\n    Some(v): v\n    None: 0\ny := x + 1\n");
+}
+
+#[test]
+fn match_expression_incompatible_arms_rejected() {
+    rejects(
+        "s := Some(5)\nx := match s:\n    Some(v): v\n    None: \"z\"\n",
+        "incompatible types",
+    );
+}
+
+#[test]
+fn match_expression_nonexhaustive_rejected() {
+    rejects("s := Some(5)\nx := match s:\n    Some(v): v\n", "non-exhaustive");
+}
+
+#[test]
+fn if_expression_unifies_branches() {
+    ok("x := if true: 1 else: 2\ny := x + 1\n");
+}
+
+#[test]
+fn if_expression_incompatible_branches_rejected() {
+    rejects("x := if true: 1 else: \"z\"\n", "incompatible types");
+}
+
+#[test]
+fn if_expression_condition_must_be_bool() {
+    rejects("x := if 5: 1 else: 2\n", "if condition must be bool");
+}
+
+#[test]
+fn match_expression_duplicate_arm_rejected() {
+    rejects(
+        "s := Some(5)\nx := match s:\n    Some(v): v\n    Some(w): w\n    None: 0\n",
+        "duplicate match arm",
+    );
+}
+
+#[test]
+fn if_expression_unknown_branch_does_not_poison() {
+    // One branch is Unknown (undefined name — reported on its own), the other concrete. The result
+    // takes the concrete type, so there's no spurious "incompatible types" error.
+    let errs = check_src("x := if true: 1 else: undef\n");
+    assert!(errs.iter().any(|e| e.message.contains("unknown name 'undef'")));
+    assert!(!errs.iter().any(|e| e.message.contains("incompatible")));
+}
+
 // ===== 10. field access =====
 
 #[test]
@@ -600,3 +652,4 @@ fn user_enum_named_result_rejected() {
 fn user_struct_named_option_rejected() {
     rejects("struct Option:\n    x: int\n", "type 'Option' is reserved (builtin)");
 }
+

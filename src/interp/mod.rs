@@ -2,7 +2,8 @@
 //! Chezzi before the bytecode VM (M5). Single-file programs run here.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Expr, ExprKind, FnDecl, MatchArm, Pattern, Span, Stmt, StmtKind, UnaryOp,
+    AssignOp, BinaryOp, Expr, ExprKind, FnDecl, MatchArm, MatchExprArm, Pattern, Span, Stmt,
+    StmtKind, UnaryOp,
 };
 use crate::{lexer, parser};
 
@@ -227,6 +228,14 @@ impl Interp {
                 }
             }
             ExprKind::Call { callee, args } => self.eval_call(callee, args, expr.span),
+            ExprKind::Match { scrutinee, arms } => self.eval_match_expr(scrutinee, arms),
+            ExprKind::IfElse { cond, then, els } => {
+                if as_bool(self.eval(cond)?, cond.span)? {
+                    self.eval(then)
+                } else {
+                    self.eval(els)
+                }
+            }
             ExprKind::Try(inner) => {
                 let v = self.eval(inner)?;
                 match &v {
@@ -472,6 +481,50 @@ impl Interp {
             let flow = self.exec_block(&arm.body);
             self.env.pop();
             return flow;
+        }
+        Err(RuntimeError {
+            message: format!("no match arm for variant '{variant}'"),
+            span: scrutinee.span,
+        })
+    }
+
+    /// Expression-position `match`: evaluate the chosen arm's value-expression and return it
+    /// (vs `exec_match`, whose arm bodies are statement blocks producing a control-flow `Flow`).
+    fn eval_match_expr(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[MatchExprArm],
+    ) -> Result<Value, RuntimeError> {
+        let value = self.eval(scrutinee)?;
+        let Value::Enum { variant, payload, .. } = &value else {
+            return Err(RuntimeError {
+                message: format!("cannot match on {}", value.type_name()),
+                span: scrutinee.span,
+            });
+        };
+        for arm in arms {
+            let Pattern::Variant { name, bindings } = &arm.pattern;
+            if name != variant.as_ref() {
+                continue;
+            }
+            if bindings.len() != payload.len() {
+                return Err(RuntimeError {
+                    message: format!(
+                        "pattern '{}' binds {} value(s) but variant carries {}",
+                        name,
+                        bindings.len(),
+                        payload.len()
+                    ),
+                    span: scrutinee.span,
+                });
+            }
+            self.env.push();
+            for (b, v) in bindings.iter().zip(payload.iter()) {
+                self.env.define(b, v.clone());
+            }
+            let result = self.eval(&arm.body);
+            self.env.pop();
+            return result;
         }
         Err(RuntimeError {
             message: format!("no match arm for variant '{variant}'"),
