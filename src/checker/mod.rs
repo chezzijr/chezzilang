@@ -664,8 +664,11 @@ impl Checker {
             }
             AssignOp::PlusEq | AssignOp::MinusEq => {
                 // `+=` mirrors `+` (numeric, or str+str for `+=`); `-=` is numeric only.
+                // No implicit widening: `int <op> float` yields a float, which can't flow back
+                // into a concrete int slot — reject it (gap #9), mirroring strict `=` (`x = 1.5`).
                 let str_ok = op == AssignOp::PlusEq && *target_ty == Ty::Str && *val_ty == Ty::Str;
-                let num_ok = target_ty.is_numeric() && val_ty.is_numeric();
+                let widens = *target_ty == Ty::Int && *val_ty == Ty::Float;
+                let num_ok = target_ty.is_numeric() && val_ty.is_numeric() && !widens;
                 let known = !target_ty.is_unknown() && !val_ty.is_unknown();
                 if known && !str_ok && !num_ok {
                     let sym = if op == AssignOp::PlusEq { "+=" } else { "-=" };

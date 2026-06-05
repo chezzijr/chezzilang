@@ -160,6 +160,42 @@ fn typed_let_ok() {
     ok("x: int = 5\nx += 1\n");
 }
 
+// ===== 8b. compound assignment must not widen int -> float (gap #9) =====
+
+#[test]
+fn plus_eq_float_into_int_var_rejected() {
+    rejects("x: int = 5\nx += 1.5\n", "cannot apply += to int and float");
+}
+
+#[test]
+fn minus_eq_float_into_int_var_rejected() {
+    rejects("x: int = 5\nx -= 1.5\n", "cannot apply -= to int and float");
+}
+
+#[test]
+fn plus_eq_float_into_int_index_rejected() {
+    rejects("xs := [1, 2, 3]\nxs[0] += 1.5\n", "cannot apply += to int and float");
+}
+
+#[test]
+fn plus_eq_float_into_int_field_rejected() {
+    rejects(
+        "struct P:\n    x: int\np := P(1)\np.x += 1.5\n",
+        "cannot apply += to int and float",
+    );
+}
+
+#[test]
+fn plus_eq_int_into_float_var_ok() {
+    // widening the *other* way (int into a float slot) stays allowed.
+    ok("f: float = 1.0\nf += 1\n");
+}
+
+#[test]
+fn plus_eq_float_into_float_ok() {
+    ok("f: float = 1.0\nf += 1.5\n");
+}
+
 // ===== 9. return =====
 
 #[test]

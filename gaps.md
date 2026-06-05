@@ -101,7 +101,7 @@ fn pair() -> (int, int): ...   # unsupported
 **Impact:** a function returns exactly one value. Returning a pair needs a `struct` or a 2-element
 list. No destructuring (`a, b := ...`).
 
-### 9. `+=` / `-=` allow implicit int→float widening
+### 9. ~~`+=` / `-=` allow implicit int→float widening~~ ✅ FIXED
 ```chezzi
 x: int = 5
 x += 1.5        # accepted; x becomes 2.5 (a float in an int-typed slot)
@@ -113,10 +113,9 @@ rejected). But `check_assign_value`'s compound arm gates on `is_numeric && is_nu
 silently widen. Pre-existing for bare variables; the index/field-assignment work (gaps #1/#2) newly
 exposes it to `list[int]`/struct fields, where it can quietly poison an int array in a counting-sort
 / DP loop.
-**Fix sketch:** in `check_assign_value` (`src/checker/mod.rs`), the `PlusEq | MinusEq` arm should
-require the numeric result type to stay compatible with `target_ty` (reject `int <op> float` when the
-target is a concrete `int`), mirroring the strict `Eq`/`compatible` path. Applies to **all** targets
-(bare vars + index + field) for consistency — own change, own tests.
+**Fixed:** `check_assign_value`'s `PlusEq | MinusEq` arm now rejects `int <op> float` into a concrete
+`int` slot (`widens` guard), mirroring the strict `Eq`/`compatible` path. Applies to all targets
+(bare vars + index + field). Widening the other way (`int` into a `float` slot) stays allowed.
 
 ---
 
