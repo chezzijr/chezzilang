@@ -5,3 +5,5 @@ MSG := "from-main"
 fn main():
     print(who())
     print(MSG)
+
+main()

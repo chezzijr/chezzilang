@@ -23,3 +23,5 @@ fn main():
 
     # pipe: thread the value as the first argument of the call on the right
     print("hi" |> shout())
+
+main()

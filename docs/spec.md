@@ -72,7 +72,14 @@ fn main():
         |> filter(fn(x): x % 2 == 0)   # pipe (built last)
         |> map(fn(x): x * 10)
     print(nums)
+
+main()                                 # no auto-entry — `main` is a normal fn you call yourself
 ```
+
+**Entry model.** Programs run top-to-bottom; there is no automatic `main`. An `Err`/`None` left
+unhandled at the top level (a bare expression statement, or a top-level `?`) exits the program with
+`unhandled error: …` and a non-zero code. A future `chezzi.toml` `entrypoint` (tooling-only) may
+declare which function a project build runs.
 
 ## Imports & module resolution
 

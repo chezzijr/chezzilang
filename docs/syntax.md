@@ -168,6 +168,26 @@ fn calc() -> Result[int]:
 
 `Option[T]` is the same shape for "maybe absent": `Some(v)` / `None`, also usable with `?`.
 
+**Unhandled errors at the top level exit the program.** An `Err`/`None` that reaches the top level —
+a bare top-level expression statement that evaluates to one (e.g. `compute()` whose result is `Err`),
+or a top-level `?` that hits one — terminates the program with `unhandled error: <detail>` and a
+non-zero exit code. *Binding* the value handles it (`r := compute()` keeps running; inspect `r`).
+
+## 9b. Program entry — there is no automatic `main`
+
+Chezzi is a scripting language: a program runs **top-to-bottom**. There is **no automatic entry
+point** — `main` is an ordinary function. Define it and call it yourself if you want one:
+
+```chezzi
+fn main():
+    print("hello")
+
+main()        # nothing runs main for you
+```
+
+(A future `chezzi.toml` may declare a project `entrypoint` for tooling-driven builds; the language
+core does not special-case `main`.)
+
 ## 10. Strings & interpolation
 
 ```chezzi
@@ -266,4 +286,6 @@ fn main():
     match safe_div(10, 2):
         Ok(v):  print("div: {v}")
         Err(e): print("err: {e}")
+
+main()   # no automatic entry point — call it yourself
 ```

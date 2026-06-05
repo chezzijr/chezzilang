@@ -52,7 +52,8 @@ struct CallFrame {
     /// Whether this frame counts toward the call-depth limit (user calls do; module toplevels
     /// don't, matching the interpreter).
     counted: bool,
-    /// Module toplevel frame — a `?` that unwinds here is "used outside a function".
+    /// Module toplevel frame — an `Err`/`None` unhandled here (a `?` or a bare expression
+    /// statement) is a top-level unhandled error that exits the program.
     is_toplevel: bool,
 }
 
@@ -90,6 +91,24 @@ impl Vm {
         RuntimeError { message, span }
     }
 
+    /// If `v` is an unhandled error (`Err(..)`/`None`) reaching the top level, build the runtime
+    /// error that exits the program. Mirrors `interp::top_level_error` — message must be identical.
+    fn top_level_error(&self, v: Value, span: Span) -> Option<RuntimeError> {
+        let Value::Obj(h) = v else { return None };
+        let Obj::Enum { ty, variant, payload } = self.heap.get(h) else { return None };
+        // Builtin `Result`/`Option` only — a user enum that shadows `Err`/`None` is a normal value.
+        let unhandled = (ty.as_ref() == "Result" && variant.as_ref() == "Err")
+            || (ty.as_ref() == "Option" && variant.as_ref() == "None");
+        if !unhandled {
+            return None;
+        }
+        let detail = match payload.first() {
+            Some(p) => self.display(*p),
+            None => self.display(v),
+        };
+        Some(self.err(format!("unhandled error: {detail}"), span))
+    }
+
     // ----- top-level drivers -----
 
     /// Run every module in dependency order, then the entry's `main()`.
@@ -115,25 +134,10 @@ impl Vm {
             self.bind_import(mod_obj, imp)?;
         }
 
-        // Run the module body once.
+        // Run the module body once. No module auto-runs `main` — it's an ordinary function the
+        // program calls itself (scripting-language model). An unhandled `Err`/`None` reaching the
+        // top level (via `PopExprStmt` or a top-level `?`) exits during this call.
         self.run_proto(m.toplevel, mod_obj, None, Vec::new(), false, true, Span { line: 1, col: 1 })?;
-
-        // Entry module: auto-run a nullary `main()`.
-        if m.is_entry {
-            let main = match self.module_global(mod_obj, "main") {
-                Some(Value::Obj(h)) => match self.heap.get(h) {
-                    Obj::Func { proto, home } => Some((*proto, *home)),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some((proto, home)) = main {
-                if self.program.protos[proto].arity != 0 {
-                    return Err(self.err("main() must take no arguments".to_string(), Span { line: 1, col: 1 }));
-                }
-                self.run_proto(proto, home, None, Vec::new(), true, false, Span { line: 1, col: 1 })?;
-            }
-        }
         Ok(())
     }
 
@@ -295,6 +299,15 @@ impl Vm {
             Op::Nil => self.push(Value::Nil),
             Op::Pop => {
                 self.pop();
+            }
+            Op::PopExprStmt => {
+                let v = self.pop();
+                // An unhandled `Err`/`None` at the top level exits the program.
+                if self.frames.last().unwrap().is_toplevel
+                    && let Some(e) = self.top_level_error(v, span)
+                {
+                    return Err(e);
+                }
             }
             Op::GetLocal(slot) => {
                 let v = self.stack[self.base() + slot];
@@ -808,22 +821,29 @@ impl Vm {
         // before we mutate the stack / unwind a frame.
         let info = match v {
             Value::Obj(h) => match self.heap.get(h) {
-                Obj::Enum { variant, payload, .. } => Some((variant.to_string(), payload.len(), payload.first().copied())),
+                Obj::Enum { ty, variant, payload } => Some((ty.to_string(), variant.to_string(), payload.len(), payload.first().copied())),
                 _ => None,
             },
             _ => None,
         };
-        if let Some((variant, n, first)) = info {
-            if (variant == "Ok" || variant == "Some") && n == 1 {
+        // Gate on the *type* (`Result`/`Option`), not the bare variant name, so a user enum that
+        // shadows `Ok`/`Err`/`Some`/`None` is not treated as a Result/Option by `?`.
+        if let Some((ty, variant, n, first)) = info {
+            if (ty == "Result" && variant == "Ok" || ty == "Option" && variant == "Some") && n == 1 {
                 self.push(first.unwrap());
                 return Ok(());
             }
-            if variant == "Err" || variant == "None" {
-                // Early-return this value from the enclosing function.
+            if ty == "Result" && variant == "Err" || ty == "Option" && variant == "None" {
+                // A `?` at the top level (no enclosing function) is an unhandled error → exit. Use a
+                // module-level span (the interp's propagating channel carries no `?` span) so both
+                // engines report the same location.
                 if self.frames.last().unwrap().is_toplevel {
-                    let shown = self.display(v);
-                    return Err(self.err(format!("'?' used outside a function (propagated {shown})"), Span { line: 1, col: 1 }));
+                    let top = Span { line: 1, col: 1 };
+                    return Err(self.top_level_error(v, top).unwrap_or_else(|| {
+                        self.err(format!("unhandled error: {}", self.display(v)), top)
+                    }));
                 }
+                // Otherwise early-return this value from the enclosing function.
                 self.push(v);
                 self.do_return(true);
                 return Ok(());
@@ -1409,7 +1429,8 @@ print(Dot)";
 fn add(a: int, b: int) -> int:
     return a + b
 fn main():
-    print(add(add(1, 2), 3))";
+    print(add(add(1, 2), 3))
+main()";
         assert_eq!(run(src), "6\n");
     }
 
@@ -1420,7 +1441,8 @@ fn main():
 fn main():
     print(helper(21))
 fn helper(n: int) -> int:
-    return n * 2";
+    return n * 2
+main()";
         assert_eq!(run(src), "42\n");
     }
 
@@ -1430,7 +1452,8 @@ fn helper(n: int) -> int:
 fn loop(n: int) -> int:
     return loop(n + 1)
 fn main():
-    print(loop(0))";
+    print(loop(0))
+main()";
         assert!(run_err(src).contains("maximum call depth"));
     }
 
@@ -1447,7 +1470,8 @@ fn classify(n: int) -> str:
 fn main():
     print(classify(-1))
     print(classify(0))
-    print(classify(5))";
+    print(classify(5))
+main()";
         assert_eq!(run(src), "neg\nzero\npos\n");
     }
 
@@ -1460,7 +1484,8 @@ fn main():
     while i < 5:
         total += i
         i += 1
-    print(total)";
+    print(total)
+main()";
         assert_eq!(run(src), "10\n");
     }
 
@@ -1485,7 +1510,8 @@ fn make():
     return f
 fn main():
     g := make()
-    print(g(5))";
+    print(g(5))
+main()";
         assert_eq!(run(src), "15\n");
     }
 
@@ -1498,7 +1524,8 @@ fn main():
     add10 := adder(10)
     add100 := adder(100)
     print(add10(1))
-    print(add100(1))";
+    print(add100(1))
+main()";
         assert_eq!(run(src), "11\n101\n");
     }
 
@@ -1513,7 +1540,8 @@ fn safe_div(a: int, b: int) -> Result[int]:
     return Ok(a / b)
 fn main():
     r := safe_div(10, 2)?
-    print(r)";
+    print(r)
+main()";
         assert_eq!(run(src), "5\n");
     }
 
@@ -1530,7 +1558,8 @@ fn use() -> Result[int]:
 fn main():
     match use():
         Ok(v): print(\"ok {v}\")
-        Err(e): print(\"err {e}\")";
+        Err(e): print(\"err {e}\")
+main()";
         assert_eq!(run(src), "err zero\n");
     }
 
@@ -1541,12 +1570,13 @@ fn f() -> int:
     x := (5)?
     return x";
         // Reaching `?` on an int is a runtime error.
-        assert!(run_err(&format!("{src}\nfn main():\n    print(f())")).contains("'?' expects Result or Option, found int"));
+        assert!(run_err(&format!("{src}\nfn main():\n    print(f())\nmain()")).contains("'?' expects Result or Option, found int"));
     }
 
     #[test]
-    fn try_at_top_level_is_error() {
-        assert!(run_err(r#"x := Err("oops")?"#).contains("'?' used outside a function"));
+    fn top_level_try_err_is_unhandled_error() {
+        // A `?` at the top level whose Err reaches the top is an unhandled error (no main needed).
+        assert_eq!(run_err(r#"x := Err("oops")?"#), "unhandled error: oops");
     }
 
     // ----- for loops -----
@@ -1558,7 +1588,8 @@ fn main():
     total := 0
     for i in 0..1000:
         total += i
-    print(total)";
+    print(total)
+main()";
         assert_eq!(run(src), "499500\n");
     }
 
@@ -1572,7 +1603,8 @@ fn first() -> int:
         return i
     return -1
 fn main():
-    print(first())";
+    print(first())
+main()";
         assert_eq!(run(src), "0\n");
     }
 
@@ -1583,7 +1615,8 @@ fn main():
     total := 0
     for x in [10, 20, 30]:
         total += x
-    print(total)";
+    print(total)
+main()";
         assert_eq!(run(src), "60\n");
     }
 
@@ -1606,7 +1639,8 @@ fn area(s: Shape) -> int:
         Square(n): return n * n
 fn main():
     print(area(Circle(2)))
-    print(area(Square(3)))";
+    print(area(Square(3)))
+main()";
         assert_eq!(run(src), "12\n9\n");
     }
 
@@ -1622,7 +1656,8 @@ fn name(c: Color) -> str:
         Red: return \"r\"
         Green: return \"g\"
 fn main():
-    print(name(Blue))";
+    print(name(Blue))
+main()";
         assert_eq!(run_err(src), "no match arm for variant 'Blue'");
     }
 
@@ -1631,7 +1666,8 @@ fn main():
         let src = "\
 fn main():
     match 5:
-        Red: print(\"x\")";
+        Red: print(\"x\")
+main()";
         assert!(run_err(src).contains("cannot match on int"));
     }
 
@@ -1657,7 +1693,8 @@ struct P:
 fn main():
     p := P(1, 2)
     print(p.x)
-    print(p.y)";
+    print(p.y)
+main()";
         assert_eq!(run(src), "1\n2\n");
     }
 
@@ -1670,7 +1707,8 @@ struct Counter:
         return self.n * 2
 fn main():
     c := Counter(21)
-    print(c.doubled())";
+    print(c.doubled())
+main()";
         assert_eq!(run(src), "42\n");
     }
 
@@ -1712,13 +1750,14 @@ struct Point:
     x: int
     y: int
 fn main():
-    p := Point(1)";
+    p := Point(1)
+main()";
         assert!(run_err(src).contains("struct 'Point' expects 2 field(s), got 1"));
     }
 
     #[test]
     fn variant_arity_error() {
-        assert!(run_err("fn main():\n    x := Ok(1, 2)").contains("variant 'Ok' expects 1 value(s), got 2"));
+        assert!(run_err("fn main():\n    x := Ok(1, 2)\nmain()").contains("variant 'Ok' expects 1 value(s), got 2"));
     }
 
     #[test]
@@ -1729,7 +1768,8 @@ enum Light:
     On
     Off
 fn main():
-    print(Off)";
+    print(Off)
+main()";
         assert_eq!(run(src), "Off\n");
     }
 
@@ -1740,7 +1780,8 @@ fn main():
         let src = "\
 fn main():
     name := \"thuan\"
-    print(\"hi {name}, {{not interpolated}}\")";
+    print(\"hi {name}, {{not interpolated}}\")
+main()";
         assert_eq!(run(src), "hi thuan, {not interpolated}\n");
     }
 
@@ -1782,7 +1823,8 @@ fn main():
     x := [str(1), str(2)]
     junk := str(3)
     more := [str(4), str(5), str(6)]
-    print(x)";
+    print(x)
+main()";
         assert_eq!(run_capture_stress(src), "[1, 2]\n");
     }
 
@@ -1794,7 +1836,8 @@ K := [str(7), str(8)]
 fn main():
     a := str(1)
     b := [str(2), str(3)]
-    print(K)";
+    print(K)
+main()";
         assert_eq!(run_capture_stress(src), "[7, 8]\n");
     }
 
@@ -1809,7 +1852,8 @@ fn make():
 fn main():
     g := make()
     junk := [str(1), str(2), str(3)]
-    print(g())";
+    print(g())
+main()";
         assert_eq!(run_capture_stress(src), "42\n");
     }
 
@@ -1825,7 +1869,8 @@ fn use() -> Result[str]:
 fn main():
     match use():
         Ok(v): print(v)
-        Err(e): print(\"got {e}\")";
+        Err(e): print(\"got {e}\")
+main()";
         assert_eq!(run_capture_stress(src), "got 99\n");
     }
 
@@ -1839,7 +1884,8 @@ fn main():
     while i < 10000:
         x := [str(i)]
         i += 1
-    print(i)";
+    print(i)
+main()";
         let (out, live) = run_with(src, false);
         assert_eq!(out.unwrap(), "10000\n");
         // Without collection this would be ~20000+ live objects; the threshold GC keeps it small.
@@ -1876,7 +1922,8 @@ fn main():
     print(pick(Nope))
     items := [str(1), str(2), str(3)]
     for s in items:
-        print(s)";
+        print(s)
+main()";
         let normal = run_capture(src).unwrap();
         assert_eq!(run_capture_stress(src), normal);
     }
@@ -1907,25 +1954,25 @@ mod parity_tests {
         // arithmetic + promotion + truncation
         "print(7 / 2)\nprint(1 + 2.0)\nprint(2.5 * 2.0)\nprint(10 % 3)",
         // string concat + interpolation + escapes
-        "fn main():\n    n := \"x\"\n    print(\"a{n}b {1 + 2} {{lit}}\")",
+        "fn main():\n    n := \"x\"\n    print(\"a{n}b {1 + 2} {{lit}}\")\nmain()",
         // comparison + equality + bool logic
         "print(1 < 2)\nprint(2 == 2.0)\nprint(true and false)\nprint(false or true)\nprint(not true)",
         // lists, indexing, len
         "print([1, 2, 3])\nprint([10, 20, 30][2])\nprint(len([1, 2]))",
         // structs + methods
-        "struct P:\n    x: int\n    y: int\n    fn sum(self) -> int:\n        return self.x + self.y\nfn main():\n    p := P(3, 4)\n    print(p)\n    print(p.sum())",
+        "struct P:\n    x: int\n    y: int\n    fn sum(self) -> int:\n        return self.x + self.y\nfn main():\n    p := P(3, 4)\n    print(p)\n    print(p.sum())\nmain()",
         // enums + match + payload binding
-        "enum S:\n    C(int)\n    Sq(int)\nfn a(s: S) -> int:\n    match s:\n        C(r): return r * r\n        Sq(n): return n * n\nfn main():\n    print(a(C(3)))\n    print(a(Sq(4)))",
+        "enum S:\n    C(int)\n    Sq(int)\nfn a(s: S) -> int:\n    match s:\n        C(r): return r * r\n        Sq(n): return n * n\nfn main():\n    print(a(C(3)))\n    print(a(Sq(4)))\nmain()",
         // closures
-        "fn adder(n: int):\n    return fn(x: int) -> int: x + n\nfn main():\n    f := adder(10)\n    print(f(5))",
+        "fn adder(n: int):\n    return fn(x: int) -> int: x + n\nfn main():\n    f := adder(10)\n    print(f(5))\nmain()",
         // ? operator (Ok + Err propagation)
-        "fn d(a: int, b: int) -> Result[int]:\n    if b == 0:\n        return Err(\"zero\")\n    return Ok(a / b)\nfn use() -> Result[int]:\n    r := d(10, 0)?\n    return Ok(r)\nfn main():\n    match use():\n        Ok(v): print(v)\n        Err(e): print(e)",
+        "fn d(a: int, b: int) -> Result[int]:\n    if b == 0:\n        return Err(\"zero\")\n    return Ok(a / b)\nfn use() -> Result[int]:\n    r := d(10, 0)?\n    return Ok(r)\nfn main():\n    match use():\n        Ok(v): print(v)\n        Err(e): print(e)\nmain()",
         // for + while loops
-        "fn main():\n    t := 0\n    for i in 0..100:\n        t += i\n    print(t)\n    n := 5\n    while n > 0:\n        n -= 1\n    print(n)",
+        "fn main():\n    t := 0\n    for i in 0..100:\n        t += i\n    print(t)\n    n := 5\n    while n > 0:\n        n -= 1\n    print(n)\nmain()",
         // builtins
         "print(range(4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint(sqrt(16.0))\nprint(str(42))",
         // recursion
-        "fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nfn main():\n    print(fib(15))",
+        "fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nfn main():\n    print(fib(15))\nmain()",
         // ----- M6: core-type methods (str) -----
         "print(\"abcd\".len())\nprint(\"Hi There\".upper())\nprint(\"Hi There\".lower())\nprint(\"  pad  \".trim())",
         "print(\"a,b,c\".split(\",\"))\nprint(\",\".join([\"a\", \"b\", \"c\"]))",
@@ -1933,16 +1980,16 @@ mod parity_tests {
         // chained core-type methods
         "print(\"  Hello,World  \".trim().lower().split(\",\"))",
         // ----- M6: core-type methods (list) -----
-        "fn main():\n    xs := [1, 2]\n    xs.push(3)\n    xs.push(4)\n    print(xs)\n    print(xs.len())",
+        "fn main():\n    xs := [1, 2]\n    xs.push(3)\n    xs.push(4)\n    print(xs)\n    print(xs.len())\nmain()",
         // ----- M6: pipe operator -----
-        "fn inc(n: int) -> int: n + 1\nfn dbl(n: int) -> int: n * 2\nfn main():\n    print(5 |> inc() |> dbl())",
-        "fn shout(s: str) -> str: s.upper()\nfn main():\n    print(\"hi\" |> shout())",
+        "fn inc(n: int) -> int: n + 1\nfn dbl(n: int) -> int: n * 2\nfn main():\n    print(5 |> inc() |> dbl())\nmain()",
+        "fn shout(s: str) -> str: s.upper()\nfn main():\n    print(\"hi\" |> shout())\nmain()",
         // ----- error parity -----
         "print(1 / 0)",
         "print([1, 2][9])",
         "print(1 + \"x\")",
-        "fn main():\n    print(sqrt(-1.0))",
-        "fn loop(n: int) -> int:\n    return loop(n + 1)\nfn main():\n    print(loop(0))",
+        "fn main():\n    print(sqrt(-1.0))\nmain()",
+        "fn loop(n: int) -> int:\n    return loop(n + 1)\nfn main():\n    print(loop(0))\nmain()",
         // M6 method error parity
         "print(\"hi\".upper(\"extra\"))",
         "print(\"hi\".frobnicate())",
@@ -1952,6 +1999,16 @@ mod parity_tests {
         // both engines — the VM evaluates args (operands) before the call, so the interp must too.
         "print((5).frob(1 / 0))",
         "print(\"hi\".frob(1 / 0))",
+        // ----- entry model: no auto-main; unhandled top-level Err/None exits -----
+        "fn main():\n    print(\"hi\")",                                  // main defined but never called → no output
+        "Err(\"boom\")",                                                  // bare top-level Err → unhandled error
+        "x := Err(\"oops\")?",                                            // top-level `?` Err → unhandled error
+        "fn g() -> Option[int]:\n    return None\ng()",                   // bare None → unhandled error
+        "fn f() -> Result[int]:\n    return Err(\"x\")\nr := f()\nprint(\"handled\")", // Err bound = handled → no exit
+        "fn main():\n    print(\"before\")\n    x := Err(\"boom\")?\n    print(\"after\")\nmain()", // partial output then exit
+        // a user enum shadowing `Err` is a normal value: bare one must NOT exit, `?` must reject it
+        "enum Signal:\n    Err(int)\n    Quiet\nErr(5)\nprint(\"made it\")",
+        "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := Err(5)?\n    return x\nf()",
     ];
 
     #[test]
@@ -2031,7 +2088,7 @@ mod parity_tests {
     /// Asserts a conservative floor that holds even in debug builds; the real ~6x lands in release.
     #[test]
     fn bench_vm_faster_than_interp() {
-        let src = "fn main():\n    total := 0\n    i := 0\n    while i < 500000:\n        total += (i * 3 - 1) % 7\n        i += 1\n    print(total)";
+        let src = "fn main():\n    total := 0\n    i := 0\n    while i < 500000:\n        total += (i * 3 - 1) % 7\n        i += 1\n    print(total)\nmain()";
         let t = Instant::now();
         let ip = crate::interp::run_capture(src).unwrap();
         let interp_t = t.elapsed();

@@ -230,17 +230,19 @@ impl Interp {
             ExprKind::Try(inner) => {
                 let v = self.eval(inner)?;
                 match &v {
-                    // Unwrap the success case (payload guard: a user enum could shadow `Ok`/`Some`
-                    // as a nullary variant — don't index an empty payload).
-                    Value::Enum { variant, payload, .. }
-                        if (variant.as_ref() == "Ok" || variant.as_ref() == "Some")
+                    // Unwrap the success case. Gate on the *type* (`Result`/`Option`), not the bare
+                    // variant name, so a user enum that shadows `Ok`/`Some` isn't unwrapped by `?`.
+                    Value::Enum { ty, variant, payload }
+                        if (ty.as_ref() == "Result" && variant.as_ref() == "Ok"
+                            || ty.as_ref() == "Option" && variant.as_ref() == "Some")
                             && payload.len() == 1 =>
                     {
                         Ok(payload[0].clone())
                     }
-                    // Early-return the failure case from the enclosing function.
-                    Value::Enum { variant, .. }
-                        if variant.as_ref() == "Err" || variant.as_ref() == "None" =>
+                    // Early-return the failure case from the enclosing function (builtin types only).
+                    Value::Enum { ty, variant, .. }
+                        if ty.as_ref() == "Result" && variant.as_ref() == "Err"
+                            || ty.as_ref() == "Option" && variant.as_ref() == "None" =>
                     {
                         self.propagating = Some(v.clone());
                         Err(RuntimeError {
@@ -593,58 +595,37 @@ impl Interp {
     }
 
     /// Drive a single-file module (the `run_program` test path): the whole program shares one set
-    /// of globals, `main()` auto-runs. Errors surface with output preserved in `self.out`.
+    /// of globals and runs top-to-bottom (no auto-`main`). Errors surface with output preserved.
     #[cfg(test)]
     fn execute(&mut self, stmts: &[Stmt]) -> Result<(), RuntimeError> {
-        self.eval_top_level(stmts, true)
+        self.eval_top_level(stmts)
     }
 
-    /// Hoist declarations, run top-level statements, and — when `run_main` — auto-call a nullary
-    /// `main()`. Shared by the single-file path and per-module evaluation.
-    fn eval_top_level(&mut self, stmts: &[Stmt], run_main: bool) -> Result<(), RuntimeError> {
+    /// Hoist declarations and run top-level statements. There is **no** automatic entry point —
+    /// `main` is an ordinary function the program calls itself (scripting-language model). An
+    /// `Err`/`None` propagated to the top by a top-level `?` is an unhandled error and exits.
+    fn eval_top_level(&mut self, stmts: &[Stmt]) -> Result<(), RuntimeError> {
         self.hoist_declarations(stmts)?;
         let result = self.exec_block(stmts);
-        // Check propagation first: a top-level `?` raises a pseudo-error that we want to report as
-        // the friendly "outside a function" message rather than the internal marker.
+        // A `?` that propagated to the top (no enclosing function) is an unhandled error.
         if let Some(value) = self.propagating.take() {
-            // A `?` used at top level (outside any function) has nowhere to return to.
-            return Err(RuntimeError {
-                message: format!("'?' used outside a function (propagated {value})"),
-                span: Span { line: 1, col: 1 },
-            });
+            return Err(top_level_error(&value, Span { line: 1, col: 1 }).unwrap_or_else(|| {
+                RuntimeError { message: format!("unhandled error: {value}"), span: Span { line: 1, col: 1 } }
+            }));
         }
-        result?;
-        // Convention: if a nullary `main` is defined, run it after the top-level declarations are
-        // in place — but only for the entry file, never for an imported module.
-        if run_main
-            && let Some(Value::Func(decl, home)) = self.env.get("main")
-        {
-            if decl.params.is_empty() {
-                self.call(&decl, &home, Vec::new(), Span { line: 1, col: 1 })?;
-            } else {
-                return Err(RuntimeError {
-                    message: "main() must take no arguments".to_string(),
-                    span: Span { line: 1, col: 1 },
-                });
-            }
-        }
-        Ok(())
+        result.map(|_| ())
     }
 
     /// Evaluate one module of a multi-file program into its own fresh globals, then snapshot those
     /// globals as the module's namespace (cached for importers). Run-once: each module is evaluated
-    /// exactly once, in dependency order. `main()` auto-runs only for the entry module.
-    fn eval_module(
-        &mut self,
-        lm: &crate::resolver::LoadedModule,
-        is_entry: bool,
-    ) -> Result<(), RuntimeError> {
+    /// exactly once, in dependency order. No module auto-runs `main` (it's a normal function).
+    fn eval_module(&mut self, lm: &crate::resolver::LoadedModule) -> Result<(), RuntimeError> {
         let mod_globals = value::ModEnv::new();
         let saved = self.env.swap_globals(mod_globals.clone());
         // Bind this module's imports before its body runs (dependencies are already evaluated, so
         // their namespaces are in `self.namespaces`).
         let bind = lm.imports.iter().try_for_each(|imp| self.bind_import(imp));
-        let result = bind.and_then(|()| self.eval_top_level(&lm.ast.stmts, is_entry));
+        let result = bind.and_then(|()| self.eval_top_level(&lm.ast.stmts));
         self.env.swap_globals(saved);
         self.namespaces.insert(
             lm.id.clone(),
@@ -761,7 +742,15 @@ impl Interp {
                 Ok(Flow::Normal)
             }
             StmtKind::Expr(expr) => {
-                self.eval(expr)?;
+                let v = self.eval(expr)?;
+                // An `Err`/`None` left unhandled at the top level (`call_depth == 0`, i.e. not inside
+                // any function/closure call) exits the program. Inside a function a bare expression's
+                // value is discarded as usual.
+                if self.call_depth == 0
+                    && let Some(e) = top_level_error(&v, expr.span)
+                {
+                    return Err(e);
+                }
                 Ok(Flow::Normal)
             }
             StmtKind::Fn(decl) => {
@@ -973,8 +962,7 @@ fn run_file_inner(entry: &std::path::Path) -> (String, Result<(), RuntimeError>)
     let mut interp = Interp::new();
     // Modules are in load order: dependencies first, entry last.
     for lm in &graph.modules {
-        let is_entry = lm.id == graph.entry;
-        if let Err(e) = interp.eval_module(lm, is_entry) {
+        if let Err(e) = interp.eval_module(lm) {
             return (interp.out, Err(e));
         }
     }
@@ -1098,6 +1086,23 @@ fn as_bool(v: Value, span: Span) -> Result<bool, RuntimeError> {
             span,
         }),
     }
+}
+
+/// If `v` is an unhandled error (`Err(..)` or `None`) reaching the top level, build the runtime
+/// error that exits the program. Mirrors the VM's `top_level_error` — keep the message identical.
+fn top_level_error(v: &Value, span: Span) -> Option<RuntimeError> {
+    let Value::Enum { ty, variant, payload } = v else { return None };
+    // Builtin `Result`/`Option` only — a user enum that shadows `Err`/`None` is a normal value.
+    let unhandled = (ty.as_ref() == "Result" && variant.as_ref() == "Err")
+        || (ty.as_ref() == "Option" && variant.as_ref() == "None");
+    if !unhandled {
+        return None;
+    }
+    let detail = match payload.first() {
+        Some(p) => p.to_string(),
+        None => v.to_string(),
+    };
+    Some(RuntimeError { message: format!("unhandled error: {detail}"), span })
 }
 
 fn as_f64(v: &Value) -> f64 {
@@ -1575,14 +1580,11 @@ fn safe_div(a: int, b: int) -> Result[int]:
     }
 
     #[test]
-    fn top_level_try_in_block_reports_outside_function() {
+    fn top_level_try_in_block_reports_unhandled_error() {
+        // A `?` in a top-level block (still call_depth 0) whose Err reaches the top is unhandled.
         let src = format!("{SAFE_DIV}if true:\n    x := safe_div(1, 0)?\n    print(x)\n");
         let err = run_capture(&src).unwrap_err();
-        assert!(
-            err.message.contains("outside a function"),
-            "got: {}",
-            err.message
-        );
+        assert_eq!(err.message, "unhandled error: divide by zero");
     }
 
     #[test]
@@ -1625,6 +1627,90 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/methods.chz");
         let expected = include_str!("../../examples/methods.expected");
         assert_eq!(run_capture(source).expect("methods.chz should run"), expected);
+    }
+
+    // ===== entry model: no auto-main; unhandled top-level Err/None exits =====
+
+    #[test]
+    fn main_is_not_auto_called() {
+        // No automatic entry point — a defined-but-uncalled main produces no output.
+        assert_eq!(run("fn main():\n    print(1)\n"), "");
+    }
+
+    #[test]
+    fn explicit_main_call_runs() {
+        assert_eq!(run("fn main():\n    print(1)\nmain()\n"), "1\n");
+    }
+
+    #[test]
+    fn bare_top_level_err_exits() {
+        let e = run_capture("Err(\"boom\")\n").unwrap_err();
+        assert_eq!(e.message, "unhandled error: boom");
+    }
+
+    #[test]
+    fn bare_main_propagating_err_exits() {
+        let e = run_capture("fn main():\n    x := Err(\"boom\")?\n    print(\"after\")\nmain()\n")
+            .unwrap_err();
+        assert_eq!(e.message, "unhandled error: boom");
+    }
+
+    #[test]
+    fn main_propagating_err_prints_nothing_after() {
+        // partial output before the error is preserved, but "after" never prints
+        let (out, err) = crate::interp::run_program(
+            "fn main():\n    print(\"before\")\n    x := Err(\"boom\")?\n    print(\"after\")\nmain()\n",
+        );
+        assert_eq!(out, "before\n");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn handled_err_does_not_exit() {
+        // binding the Err = handled; the program keeps running
+        assert_eq!(
+            run("fn f() -> Result[int]:\n    return Err(\"x\")\nr := f()\nprint(\"handled\")\n"),
+            "handled\n"
+        );
+    }
+
+    #[test]
+    fn bare_top_level_ok_does_not_exit() {
+        assert_eq!(run("Ok(5)\nprint(\"ok\")\n"), "ok\n");
+    }
+
+    #[test]
+    fn bare_main_returning_nil_does_not_exit() {
+        assert_eq!(run("fn main():\n    print(\"hi\")\nmain()\n"), "hi\n");
+    }
+
+    #[test]
+    fn top_level_question_err_exits_with_unified_message() {
+        let e = run_capture("x := Err(\"oops\")?\n").unwrap_err();
+        assert_eq!(e.message, "unhandled error: oops");
+    }
+
+    #[test]
+    fn bare_top_level_none_exits() {
+        let e = run_capture("fn g() -> Option[int]:\n    return None\ng()\n").unwrap_err();
+        assert_eq!(e.message, "unhandled error: None");
+    }
+
+    #[test]
+    fn user_enum_named_err_is_not_a_top_level_error() {
+        // A user enum that shadows `Err` is a normal value — a bare one must NOT exit (only the
+        // builtin Result's Err does). Gating is on the type, not the bare variant name.
+        assert_eq!(run("enum Signal:\n    Err(int)\n    Quiet\nErr(5)\nprint(\"made it\")\n"), "made it\n");
+    }
+
+    #[test]
+    fn try_on_user_enum_named_err_is_type_error_not_propagation() {
+        // `?` must reject a user `Err` (not of type Result/Option), not silently propagate it.
+        let e = run_capture(
+            "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := Err(5)?\n    return x\nf()\n",
+        )
+        .unwrap_err();
+        assert!(e.message.contains("expects Result or Option"), "{}", e.message);
     }
 
     #[test]
@@ -1734,7 +1820,7 @@ mod module_tests {
     fn import_module_and_call_member() {
         let t = TmpDir::new();
         t.write("util.chz", "fn greet(): print(\"hi from util\")\n");
-        let entry = t.write("main.chz", "import util\nfn main(): util.greet()\n");
+        let entry = t.write("main.chz", "import util\nfn main(): util.greet()\nmain()\n");
         assert_eq!(run_ok(&entry), "hi from util\n");
     }
 
@@ -1746,7 +1832,7 @@ mod module_tests {
         t.write("b.chz", "K := 100\nfn helper() -> int: return K\n");
         let entry = t.write(
             "main.chz",
-            "import helper from b\nK := 1\nfn main(): print(helper())\n",
+            "import helper from b\nK := 1\nfn main(): print(helper())\nmain()\n",
         );
         // Must print B's K (100), not the entry's K (1).
         assert_eq!(run_ok(&entry), "100\n");
@@ -1757,7 +1843,7 @@ mod module_tests {
     fn imported_fn_globals_work_when_caller_has_none() {
         let t = TmpDir::new();
         t.write("b.chz", "K := 42\nfn helper() -> int: return K\n");
-        let entry = t.write("main.chz", "import helper from b\nfn main(): print(helper())\n");
+        let entry = t.write("main.chz", "import helper from b\nfn main(): print(helper())\nmain()\n");
         assert_eq!(run_ok(&entry), "42\n");
     }
 
@@ -1766,10 +1852,10 @@ mod module_tests {
     fn import_module_alias() {
         let t = TmpDir::new();
         t.write("util.chz", "fn f(): print(\"f\")\n");
-        let entry = t.write("main.chz", "import util as m\nfn main(): m.f()\n");
+        let entry = t.write("main.chz", "import util as m\nfn main(): m.f()\nmain()\n");
         assert_eq!(run_ok(&entry), "f\n");
 
-        let bad = t.write("bad.chz", "import util as m\nfn main(): util.f()\n");
+        let bad = t.write("bad.chz", "import util as m\nfn main(): util.f()\nmain()\n");
         assert!(run_err(&bad).contains("undefined name 'util'"));
     }
 
@@ -1778,7 +1864,7 @@ mod module_tests {
     fn from_named_import() {
         let t = TmpDir::new();
         t.write("lib.chz", "fn f(): print(\"f\")\nfn g(): print(\"g\")\n");
-        let entry = t.write("main.chz", "import f, g from lib\nfn main():\n    f()\n    g()\n");
+        let entry = t.write("main.chz", "import f, g from lib\nfn main():\n    f()\n    g()\nmain()\n");
         assert_eq!(run_ok(&entry), "f\ng\n");
     }
 
@@ -1787,10 +1873,10 @@ mod module_tests {
     fn from_named_import_alias() {
         let t = TmpDir::new();
         t.write("lib.chz", "fn f(): print(\"f\")\n");
-        let entry = t.write("main.chz", "import f as h from lib\nfn main(): h()\n");
+        let entry = t.write("main.chz", "import f as h from lib\nfn main(): h()\nmain()\n");
         assert_eq!(run_ok(&entry), "f\n");
 
-        let bad = t.write("bad.chz", "import f as h from lib\nfn main(): f()\n");
+        let bad = t.write("bad.chz", "import f as h from lib\nfn main(): f()\nmain()\n");
         assert!(run_err(&bad).contains("undefined name 'f'"));
     }
 
@@ -1803,7 +1889,7 @@ mod module_tests {
         t.write("b.chz", "import c\nfn fb(): c.fc()\n");
         let entry = t.write(
             "main.chz",
-            "import a\nimport b\nfn main(): print(\"done\")\n",
+            "import a\nimport b\nfn main(): print(\"done\")\nmain()\n",
         );
         let out = run_ok(&entry);
         assert_eq!(out.matches("init C").count(), 1, "C init ran more than once: {out:?}");
@@ -1815,18 +1901,19 @@ mod module_tests {
     fn missing_member_access_errors() {
         let t = TmpDir::new();
         t.write("util.chz", "fn f(): print(\"f\")\n");
-        let entry = t.write("main.chz", "import util\nfn main(): util.nope()\n");
+        let entry = t.write("main.chz", "import util\nfn main(): util.nope()\nmain()\n");
         assert!(run_err(&entry).contains("has no member 'nope'"));
     }
 
-    // 16. main() in an imported module does NOT auto-run.
+    // 16. `main` is an ordinary function: nothing auto-runs. The entry calls its own main; a `main`
+    // defined in an imported module is never invoked.
     #[test]
     fn main_in_imported_module_does_not_autorun() {
         let t = TmpDir::new();
         t.write("lib.chz", "fn main(): print(\"lib main\")\nfn f(): print(\"f\")\n");
-        let entry = t.write("main.chz", "import f from lib\nfn main(): f()\n");
+        let entry = t.write("main.chz", "import f from lib\nfn main(): f()\nmain()\n");
         let out = run_ok(&entry);
-        assert!(!out.contains("lib main"), "imported main auto-ran: {out:?}");
+        assert!(!out.contains("lib main"), "imported main ran: {out:?}");
         assert_eq!(out, "f\n");
     }
 

@@ -51,7 +51,6 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
             label: lm.label(),
             toplevel,
             imports: lm.imports.clone(),
-            is_entry: lm.id == graph.entry,
         });
     }
     Ok(c.program)
@@ -70,7 +69,6 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         label: "<main>".to_string(),
         toplevel,
         imports: Vec::new(),
-        is_entry: true,
     });
     Ok(c.program)
 }
@@ -218,7 +216,10 @@ impl Compiler {
             StmtKind::Assign { target, op, value } => self.compile_assign(fc, target, *op, value, stmt.span),
             StmtKind::Expr(expr) => {
                 self.compile_expr(fc, expr)?;
-                fc.emit(Op::Pop, stmt.span);
+                // `PopExprStmt` (not `Pop`): an unhandled `Err`/`None` from a top-level expression
+                // statement exits the program (the runtime checks the frame). Use `expr.span` (not
+                // `stmt.span`) so the error location matches the interpreter exactly.
+                fc.emit(Op::PopExprStmt, expr.span);
                 Ok(())
             }
             // Top-level fns are hoisted; struct/enum/import are no-ops at execution time. A `fn`

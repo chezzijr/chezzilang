@@ -17,6 +17,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > needed this session.
 > **Next: M6c only when the FFI seam is scheduled — otherwise M6 is functionally complete.**
 
+> **Entry-model change (post-M6, semantics fix).** Removed the auto-call of `main()` — `main` is now
+> an ordinary function; programs run top-to-bottom and call it themselves (scripting-language model;
+> future `chezzi.toml` `entrypoint` is a note only). An unhandled `Err`/`None` at the top level (a
+> bare expression statement, or a top-level `?`) now exits with `unhandled error: …` on **both**
+> engines (was: silently dropped for `main`'s `?`). VM gained `Op::PopExprStmt`. All examples/tests
+> migrated to explicit `main()` calls.
+
 ## M6a — Core-type methods (str / list)  ✅ DONE
 
 Built-in methods on `str` and `list` dispatch on the value in **both** backends + the checker, with

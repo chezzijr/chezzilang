@@ -41,3 +41,5 @@ fn main():
 
     r := safe_div(10, 2)?
     print("div: {r}")
+
+main()

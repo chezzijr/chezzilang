@@ -1181,12 +1181,13 @@ mod tests {
         ))
         .unwrap();
         let module = parse(lexer::tokenize(&src).unwrap()).expect("hello.chz should parse");
-        // greet, Point, Shape, area, safe_div, main
-        assert_eq!(module.stmts.len(), 6);
+        // greet, Point, Shape, area, safe_div, main, then the top-level `main()` call
+        assert_eq!(module.stmts.len(), 7);
         assert!(matches!(module.stmts[0].kind, StmtKind::Fn(_)));
         assert!(matches!(module.stmts[1].kind, StmtKind::Struct { .. }));
         assert!(matches!(module.stmts[2].kind, StmtKind::Enum { .. }));
         assert!(matches!(module.stmts[5].kind, StmtKind::Fn(_)));
+        assert!(matches!(module.stmts[6].kind, StmtKind::Expr(_)));
     }
 
     #[test]

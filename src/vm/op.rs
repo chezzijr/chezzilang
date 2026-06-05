@@ -46,6 +46,10 @@ pub enum Op {
     False,
     Nil,
     Pop,
+    /// Pop the value of a *statement-level* expression. If the current frame is the module top
+    /// level and the value is an unhandled `Err`/`None`, the program exits with that error;
+    /// otherwise it is discarded like `Pop`. (Emitted for expression statements.)
+    PopExprStmt,
 
     // ----- variables -----
     GetLocal(usize),
@@ -180,7 +184,6 @@ pub struct ModuleProto {
     pub label: String,
     pub toplevel: ProtoId,
     pub imports: Vec<ResolvedImport>,
-    pub is_entry: bool,
 }
 
 /// The whole compiled program.
