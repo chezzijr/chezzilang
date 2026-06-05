@@ -119,6 +119,11 @@ struct Checker {
     enum_names: std::collections::HashSet<String>,
     /// Declared return type of the function body currently being checked (`Nil` at top level).
     current_ret: Ty,
+    /// True while pass-1 is inferring a function's return type: `check_return` records each
+    /// return's type into `collected_rets` instead of diagnosing against `current_ret`.
+    inferring_ret: bool,
+    /// Return types gathered from the body during return-type inference (see `infer_fn_ret`).
+    collected_rets: Vec<Ty>,
     /// Public surfaces of already-checked modules (multi-file programs), keyed by module id.
     module_sigs: HashMap<ModuleId, ModuleSig>,
     /// Names bound to an imported module in the *current* module → which module they refer to.
@@ -139,6 +144,8 @@ impl Checker {
             struct_names: std::collections::HashSet::new(),
             enum_names: std::collections::HashSet::new(),
             current_ret: Ty::Nil,
+            inferring_ret: false,
+            collected_rets: Vec::new(),
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
             current_module_label: None,
@@ -161,6 +168,8 @@ impl Checker {
         self.functions.clear();
         self.imported_modules.clear();
         self.current_ret = Ty::Nil;
+        self.inferring_ret = false;
+        self.collected_rets.clear();
         self.current_module_label = label;
     }
 
@@ -178,6 +187,7 @@ impl Checker {
         }
         self.collect_names(stmts);
         self.hoist(stmts);
+        self.infer_returns(stmts);
         for stmt in stmts {
             self.check_stmt(stmt);
         }
@@ -347,8 +357,93 @@ impl Checker {
                 }
             })
             .collect();
-        let ret = decl.ret.as_ref().map(|t| self.resolve_type(t, span)).unwrap_or(Ty::Nil);
+        // No `-> T`: leave the return as `Unknown` for now — `infer_returns` (run after `hoist`)
+        // walks the body and replaces it with the inferred type. `Unknown` is the safe placeholder
+        // any *other* function's inference sees in the meantime (forward refs degrade silently
+        // rather than to a confidently-wrong `Nil`).
+        let ret = decl.ret.as_ref().map(|t| self.resolve_type(t, span)).unwrap_or(Ty::Unknown);
         FnSig { params, ret }
+    }
+
+    /// Pass-1.5: for every function/method that omitted `-> T`, infer its return type from the
+    /// body and overwrite the provisional `Unknown` left by `fn_sig`. Runs after `hoist`, so all
+    /// type names, variants, and (provisional) function sigs are already visible to the inference.
+    fn infer_returns(&mut self, stmts: &[Stmt]) {
+        for s in stmts {
+            match &s.kind {
+                StmtKind::Fn(decl) if decl.ret.is_none() => {
+                    let Some(sig) = self.functions.get(&decl.name).cloned() else { continue };
+                    let ret = self.infer_fn_ret(decl, None, &sig.params);
+                    if let Some(sig) = self.functions.get_mut(&decl.name) {
+                        sig.ret = ret;
+                    }
+                }
+                StmtKind::Struct { name, methods, .. } => {
+                    let self_ty = Ty::Struct(name.clone());
+                    for m in methods {
+                        if m.ret.is_some() {
+                            continue;
+                        }
+                        let Some(sig) =
+                            self.structs.get(name).and_then(|s| s.methods.get(&m.name)).cloned()
+                        else {
+                            continue;
+                        };
+                        let ret = self.infer_fn_ret(m, Some(self_ty.clone()), &sig.params);
+                        if let Some(ms) =
+                            self.structs.get_mut(name).and_then(|s| s.methods.get_mut(&m.name))
+                        {
+                            ms.ret = ret;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Infer one function's return type by walking its body in inference mode: every `return`'s
+    /// type is collected by `check_return` (with errors suppressed — pass 2 re-reports for real).
+    /// The pick rule, in order:
+    /// - first concrete non-`nil` return wins (pass 2 then validates the rest against it);
+    /// - else, if any value-return was uncertain (`Unknown` — a forward ref to a not-yet-inferred
+    ///   function, or a self-recursive call) → `Unknown`, so the function stays permissive instead
+    ///   of producing spurious errors (forward refs degrade *silently*, as the design promises);
+    /// - else (only bare `return`s / no returns at all) → `nil` (void preserved).
+    ///
+    /// Inference is single-pass in source order with no fixpoint: a call to a *later* un-annotated
+    /// function infers `Unknown` (permissive) rather than its precise type — define callees first,
+    /// or annotate, for a precise inferred type.
+    fn infer_fn_ret(&mut self, decl: &FnDecl, self_ty: Option<Ty>, params: &[Ty]) -> Ty {
+        let mark = self.errors.len();
+        let saved_ret = std::mem::replace(&mut self.current_ret, Ty::Unknown);
+        let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
+        let saved_rets = std::mem::take(&mut self.collected_rets);
+        self.push_scope();
+        for (i, param) in decl.params.iter().enumerate() {
+            let ty = if param.name == "self" {
+                self_ty.clone().unwrap_or(Ty::Unknown)
+            } else {
+                params.get(i).cloned().unwrap_or(Ty::Unknown)
+            };
+            self.declare(&param.name, ty);
+        }
+        for stmt in &decl.body {
+            self.check_stmt(stmt);
+        }
+        self.pop_scope();
+        let found = std::mem::replace(&mut self.collected_rets, saved_rets);
+        self.inferring_ret = saved_flag;
+        self.current_ret = saved_ret;
+        self.errors.truncate(mark); // discard inference-time errors; pass 2 re-reports them for real
+        if let Some(t) = found.iter().find(|t| !t.is_unknown() && **t != Ty::Nil) {
+            t.clone()
+        } else if found.iter().any(|t| t.is_unknown()) {
+            // A value-return we couldn't pin (forward ref / recursion): stay permissive, not `nil`.
+            Ty::Unknown
+        } else {
+            Ty::Nil
+        }
     }
 
     /// Resolve an AST `Type` annotation into a checker `Ty`, reporting unknown type names.
@@ -500,6 +595,17 @@ impl Checker {
     }
 
     fn check_return(&mut self, value: Option<&Expr>, span: Span) {
+        // Pass-1 inference mode: record the return's type, don't diagnose. A bare `return`
+        // contributes `Nil`. (Separate flag + field so we don't borrow `collected_rets` across
+        // the `&mut self` call to `infer`.)
+        if self.inferring_ret {
+            let ty = match value {
+                Some(e) => self.infer(e),
+                None => Ty::Nil,
+            };
+            self.collected_rets.push(ty);
+            return;
+        }
         let ret = self.current_ret.clone();
         match value {
             Some(e) => {
@@ -520,6 +626,9 @@ impl Checker {
 
     fn check_fn_body(&mut self, decl: &FnDecl, self_ty: Option<Ty>, sig: FnSig) {
         let saved_ret = std::mem::replace(&mut self.current_ret, sig.ret.clone());
+        // A nested function checked while pass-1 is inferring an *outer* function's return must not
+        // feed the outer `collected_rets` — this body's `return`s are diagnosed, not collected.
+        let saved_inferring = std::mem::replace(&mut self.inferring_ret, false);
         self.push_scope();
         for (i, param) in decl.params.iter().enumerate() {
             let ty = if param.name == "self" {
@@ -534,6 +643,7 @@ impl Checker {
         }
         self.pop_scope();
         self.current_ret = saved_ret;
+        self.inferring_ret = saved_inferring;
     }
 
     /// The element type produced by iterating `iter` in a `for` loop.

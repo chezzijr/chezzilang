@@ -1980,6 +1980,8 @@ mod parity_tests {
         "print(range(4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint(sqrt(16.0))\nprint(str(42))",
         // recursion
         "fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nfn main():\n    print(fib(15))\nmain()",
+        // inferred return type (no `-> T`): runtime is unaffected, both engines agree
+        "fn add(a: int, b: int):\n    return a + b\nfn classify(n: int):\n    if n == 0:\n        return Some(0)\n    return None\nfn main():\n    print(add(2, 3))\n    match classify(0):\n        Some(v): print(v)\n        None: print(\"none\")\nmain()",
         // ----- M6: core-type methods (str) -----
         "print(\"abcd\".len())\nprint(\"Hi There\".upper())\nprint(\"Hi There\".lower())\nprint(\"  pad  \".trim())",
         "print(\"a,b,c\".split(\",\"))\nprint(\",\".join([\"a\", \"b\", \"c\"]))",

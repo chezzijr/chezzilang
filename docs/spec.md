@@ -18,7 +18,7 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**, plus *Craftin
 |----------|--------|
 | Implementation host | **Rust** |
 | Execution model | **Tree-walk first → bytecode stack VM** |
-| Type system | **Static, local inference** (Go-style: explicit fn signatures, inferred locals) |
+| Type system | **Static, local inference** (explicit param types; inferred locals *and* fn return types) |
 | Surface syntax | **Indentation blocks** (Python-feel; lexer emits INDENT/DEDENT) |
 | Errors | **Result/Option + `?`** (errors as values, no hidden control flow) |
 | Memory | **Mark-sweep GC** (hand-built; primitives unboxed) |
@@ -40,7 +40,7 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**, plus *Craftin
 ### Syntax sketch
 
 ```chezzi
-fn add(a: int, b: int) -> int:        # explicit signature, inferred locals elsewhere
+fn add(a: int, b: int) -> int:        # explicit params; '-> T' optional (inferred from body)
     return a + b
 
 name := "thuan"

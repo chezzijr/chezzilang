@@ -67,6 +67,8 @@
           | "COLON" <simpleStmt>
 
 # ===== declarations =====
+# An omitted "ARROW" <type> is not "returns nothing": the checker infers the return type from
+# the body's `return`s (nil only when no value is returned). Param types remain required.
 <fnDecl> ::= "FN" "IDENT" "LPAREN" "RPAREN" <block>
            | "FN" "IDENT" "LPAREN" <params> "RPAREN" <block>
            | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> <block>

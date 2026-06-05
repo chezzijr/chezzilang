@@ -168,11 +168,6 @@ fn return_wrong_type_rejected() {
 }
 
 #[test]
-fn return_value_from_void_rejected() {
-    rejects("fn f():\n    return 5\n", "returns nothing");
-}
-
-#[test]
 fn missing_return_value_rejected() {
     rejects("fn f() -> int:\n    return\n", "expected a return value of type int");
 }
@@ -180,6 +175,113 @@ fn missing_return_value_rejected() {
 #[test]
 fn return_matches_signature_ok() {
     ok("fn f(a: int) -> int:\n    return a + 1\n");
+}
+
+// ===== 9b. return-type inference (un-annotated `-> T`) =====
+
+#[test]
+fn inferred_return_type_used_as_int() {
+    // No `-> T`: the body's `return 5` makes f infer `int`, so `x + 1` type-checks.
+    ok("fn f():\n    return 5\nx := f()\ny := x + 1\n");
+}
+
+#[test]
+fn inferred_return_from_expression() {
+    ok("fn add(a: int, b: int):\n    return a + b\nx := add(1, 2)\ny := x + 1\n");
+}
+
+#[test]
+fn void_preserved_when_no_value_return() {
+    // No value-return → infers `nil`; using the result as a number is rejected.
+    rejects(
+        "fn log(m: str):\n    print(m)\nx := log(\"h\")\ny := x + 1\n",
+        "cannot apply + to nil and int",
+    );
+}
+
+#[test]
+fn inferred_return_in_if_branch() {
+    ok("fn f(c: bool):\n    if c:\n        return 1\n    return 2\nx := f(true)\ny := x + 1\n");
+}
+
+#[test]
+fn inferred_return_from_accumulator_local() {
+    ok("fn sum(xs: list[int]):\n    total := 0\n    for x in xs:\n        total += x\n    return total\nn := sum([1, 2, 3])\nm := n + 1\n");
+}
+
+#[test]
+fn inferred_return_recursive() {
+    ok("fn fib(n: int):\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nx := fib(10)\ny := x + 1\n");
+}
+
+#[test]
+fn inferred_return_conflict_rejected() {
+    rejects(
+        "fn f(c: bool):\n    if c:\n        return 1\n    return \"x\"\n",
+        "expected return type int, found str",
+    );
+}
+
+#[test]
+fn inferred_result_return() {
+    ok("fn d(a: int, b: int):\n    if b == 0:\n        return Err(\"divide by zero\")\n    return Ok(a / b)\nmatch d(10, 2):\n    Ok(v): print(\"got {v}\")\n    Err(e): print(e)\n");
+}
+
+#[test]
+fn inferred_return_feeds_typed_let_mismatch() {
+    // The inferred `int` return is checked against an explicit `let` annotation.
+    rejects(
+        "fn f():\n    return 5\nx: str = f()\n",
+        "cannot assign int to variable of type str",
+    );
+}
+
+#[test]
+fn inferred_list_return() {
+    ok("fn mk():\n    return [1, 2, 3]\nxs := mk()\ny := xs[0] + 1\n");
+}
+
+#[test]
+fn inferred_struct_return() {
+    ok("struct P:\n    x: int\nfn mk():\n    return P(1)\np := mk()\nq := p.x + 1\n");
+}
+
+#[test]
+fn inferred_forward_ref_callee_first_is_precise() {
+    // Callee defined before the caller: the caller infers the precise `int`.
+    ok("fn g(n: int):\n    return n * 2\nfn f(n: int):\n    return g(n) + 1\nx := f(3)\ny := x + 1\n");
+}
+
+#[test]
+fn inferred_forward_ref_callee_later_is_permissive() {
+    // Callee defined *after* the caller (both un-annotated): no fixpoint, so the caller infers
+    // `Unknown` and stays permissive — crucially NOT a spurious "returns nothing" error.
+    ok("fn f(n: int):\n    return g(n) + 1\nfn g(n: int):\n    return n * 2\nx := f(3)\ny := x + 1\n");
+}
+
+#[test]
+fn inferred_recursion_only_no_spurious_error() {
+    // A body whose only return is a self-recursive call infers `Unknown` (not `nil`), so it does
+    // not wrongly report "function returns nothing".
+    ok("fn loopy(n: int):\n    return loopy(n - 1)\n");
+}
+
+#[test]
+fn inferred_nested_fn_does_not_pollute_outer() {
+    // A nested fn whose name collides with a top-level fn must not feed the outer inference:
+    // `outer` infers `int` from its OWN `return 42`, so `x + 1` type-checks.
+    ok("fn helper() -> str:\n    return \"top\"\nfn outer(c: bool):\n    fn helper() -> str:\n        return \"nested\"\n    return 42\nx := outer(true)\ny := x + 1\n");
+}
+
+#[test]
+fn inferred_method_return() {
+    // The un-annotated method infers `int` from `return self.v`; the later `return "x"` then
+    // conflicts. Observing the conflict proves inference ran on the method (no call site needed —
+    // statement-level `self`-method calls are blocked by a separate pre-existing arity bug).
+    rejects(
+        "struct Box:\n    v: int\n    fn get(self):\n        if true:\n            return self.v\n        return \"x\"\n",
+        "expected return type int, found str",
+    );
 }
 
 // ===== 10. field access =====

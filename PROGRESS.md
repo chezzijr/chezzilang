@@ -236,6 +236,12 @@ a real bug class).
 - ✅ **Pragmatic local inference** — bidirectional, no unification. `:=` infers from RHS; typed
   `let`/params/fields/returns checked against annotations. `Ok/Some` carry their payload type;
   `Err`/`None` are generic (`Result[?]`/`Option[?]`) so they unify with any declared `Result[T]`.
+- ✅ **Return-type inference (post-M4)** — a function/method that omits `-> T` infers its return
+  type from the body's `return`s (pass-1.5 `infer_returns`/`infer_fn_ret`, run after `hoist`):
+  first concrete return wins, conflicts are a real error, no value-return → `nil`. Single pass in
+  source order, no fixpoint — a call to a *later* un-annotated fn (or a self-recursive call with no
+  concrete base) infers `Unknown` and stays permissive (define callees first / annotate for a
+  precise type). Param types still required. Runtime-free (engines never read the declared return).
 - ✅ **Two-pass** — pass 1 hoists every top-level decl (forward refs work, like the interp);
   pass 2 walks bodies, **collecting all errors** (Go-style) into a `Vec`.
 - ✅ **Error classes** (each with a test) — unknown name/type, call arity, non-callable, arithmetic

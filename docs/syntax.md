@@ -79,16 +79,23 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 ## 5. Functions  (M3)
 
 ```chezzi
-fn add(a: int, b: int) -> int:     # signature types are REQUIRED
+fn add(a: int, b: int) -> int:     # param types REQUIRED; '-> T' optional
     return a + b
 
-fn log(msg: str):                  # no '-> T' means returns nothing
+fn double(x: int):                 # no '-> T' → return type inferred from the body (here: int)
+    return x * 2
+
+fn log(msg: str):                  # body returns no value → inferred 'nil' (returns nothing)
     print(msg)
 
 # closures / anonymous functions — body after ':'
-double := fn(x: int) -> int: x * 2
+twice := fn(x: int) -> int: x * 2
 nums.map(fn(x): x * 2)             # param/return types inferred in closures
 ```
+
+**Return type inference.** Omitting `-> T` infers the return type from the function's
+`return` statements: the first concrete return wins, conflicting returns are a type error,
+and a body with no value-returning `return` infers `nil`. Param types stay required.
 
 ## 6. Control flow  (M3)
 
