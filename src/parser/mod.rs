@@ -227,6 +227,16 @@ impl Parser {
                 self.expect_stmt_end()?;
                 k
             }
+            Token::Break => {
+                self.advance();
+                self.expect_stmt_end()?;
+                StmtKind::Break
+            }
+            Token::Continue => {
+                self.advance();
+                self.expect_stmt_end()?;
+                StmtKind::Continue
+            }
             Token::Import => {
                 let k = StmtKind::Import(self.parse_import()?);
                 self.expect_stmt_end()?;
@@ -1023,6 +1033,23 @@ mod tests {
                 assert!(ty.is_none());
                 assert_eq!(value.kind, ExprKind::Int(5));
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn break_and_continue_stmts() {
+        assert_eq!(only("break\n"), StmtKind::Break);
+        assert_eq!(only("continue\n"), StmtKind::Continue);
+    }
+
+    #[test]
+    fn break_continue_inline_in_loop() {
+        // `for i in 0..3: break` — inline block body is a single simple statement.
+        let m = parse_ok("for i in 0..3: break\n");
+        assert_eq!(m.stmts.len(), 1);
+        match &m.stmts[0].kind {
+            StmtKind::For { body, .. } => assert_eq!(body[0].kind, StmtKind::Break),
             other => panic!("{other:?}"),
         }
     }

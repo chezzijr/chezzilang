@@ -93,14 +93,17 @@ rejected; `float` scrutinees still rejected. Both forms (statement + expression)
 literal matches with no `EnsureEnum` and **no new opcode** (`Eq` + `JumpIfFalse`); variant matches
 keep `MatchArm`/`MatchNoArm`. See `examples/match_value.chz`.
 
-### 7. No `break` / `continue`
+### 7. ~~No `break` / `continue`~~ ✅ FIXED
 ```chezzi
 for i in 0..5:
-    if i == 3: break       # type error: unknown name 'break'
-    if i == 1: continue    # type error: unknown name 'continue'
+    if i == 3: break       # exits the loop
+    if i == 1: continue    # skips to the next iteration
 ```
-**Impact:** loops exit only via their condition or an enclosing `return`. Early-exit search loops
-must be restructured (flag variable, or factor into a function and `return`).
+**Fixed:** new `break`/`continue` keywords + `StmtKind`; checker `loop_depth` rejects them outside a
+loop; interp `Flow::Break`/`Continue` (loops intercept, `continue` falls through to the increment);
+compiler `LoopCtx { continue_jumps, break_jumps }` patches `break`→loop-exit and `continue`→the
+**increment** (range `i+=1` / list index advance) — never the bare condition, so `continue` can't
+spin. No new opcode (reuses `Op::Jump`). See `examples/loops.chz`.
 
 ### 8. No tuples / multiple return values
 ```chezzi

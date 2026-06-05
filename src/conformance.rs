@@ -38,6 +38,8 @@ fn symbol(tok: &Token) -> &'static str {
         Token::For => "FOR",
         Token::While => "WHILE",
         Token::In => "IN",
+        Token::Break => "BREAK",
+        Token::Continue => "CONTINUE",
         Token::Struct => "STRUCT",
         Token::Enum => "ENUM",
         Token::Match => "MATCH",

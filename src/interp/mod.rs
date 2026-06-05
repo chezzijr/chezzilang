@@ -33,6 +33,10 @@ enum Flow {
     Normal,
     /// `return value` — unwind to the enclosing function call.
     Return(Value),
+    /// `break` — unwind to (and stop) the innermost enclosing loop.
+    Break,
+    /// `continue` — unwind to the innermost enclosing loop's next iteration.
+    Continue,
 }
 
 /// A struct type's runtime shape: ordered field names + methods by name, plus the module globals
@@ -781,7 +785,9 @@ impl Interp {
         }
         match result? {
             Flow::Return(v) => Ok(v),
-            Flow::Normal => Ok(Value::Nil),
+            // A function body falling off the end (or a stray break/continue the checker would
+            // have rejected) yields nil.
+            Flow::Normal | Flow::Break | Flow::Continue => Ok(Value::Nil),
         }
     }
 
@@ -933,7 +939,9 @@ impl Interp {
         for stmt in stmts {
             match self.exec_stmt(stmt)? {
                 Flow::Normal => {}
-                flow @ Flow::Return(_) => return Ok(flow),
+                // Any non-normal flow (return/break/continue) short-circuits the block and
+                // propagates up to the enclosing loop (or function, for `return`).
+                other => return Ok(other),
             }
         }
         Ok(Flow::Normal)
@@ -988,6 +996,8 @@ impl Interp {
                 };
                 Ok(Flow::Return(v))
             }
+            StmtKind::Break => Ok(Flow::Break),
+            StmtKind::Continue => Ok(Flow::Continue),
             StmtKind::If {
                 branches,
                 else_block,
@@ -1005,8 +1015,12 @@ impl Interp {
             StmtKind::For { var, iter, body } => self.exec_for(var, iter, body),
             StmtKind::While { cond, body } => {
                 while as_bool(self.eval(cond)?, cond.span)? {
-                    if let Flow::Return(v) = self.exec_scoped_block(body)? {
-                        return Ok(Flow::Return(v));
+                    match self.exec_scoped_block(body)? {
+                        Flow::Return(v) => return Ok(Flow::Return(v)),
+                        // `break` stops the loop; the loop itself completes normally.
+                        Flow::Break => break,
+                        // `continue` re-evaluates the condition (the natural top of this `while`).
+                        Flow::Continue | Flow::Normal => {}
                     }
                 }
                 Ok(Flow::Normal)
@@ -1024,10 +1038,14 @@ impl Interp {
             let hi = self.eval_int(end)?;
             let mut i = lo;
             while i < hi {
-                if let Flow::Return(v) = self.run_for_body(var, Value::Int(i), body)? {
-                    return Ok(Flow::Return(v));
+                match self.run_for_body(var, Value::Int(i), body)? {
+                    Flow::Return(v) => return Ok(Flow::Return(v)),
+                    Flow::Break => break,
+                    // `continue` falls through to the `i += 1` increment below — it must NOT skip
+                    // the increment, or the loop never advances and hangs.
+                    Flow::Continue | Flow::Normal => {}
                 }
-                i += 1;
+                i += 1; // increment: `continue` lands here (falls through), never skips it.
             }
             return Ok(Flow::Normal);
         }
@@ -1041,8 +1059,11 @@ impl Interp {
             }
         };
         for item in items {
-            if let Flow::Return(v) = self.run_for_body(var, item, body)? {
-                return Ok(Flow::Return(v));
+            match self.run_for_body(var, item, body)? {
+                Flow::Return(v) => return Ok(Flow::Return(v)),
+                Flow::Break => break,
+                // `continue` falls through to the next element (the `for` advances naturally).
+                Flow::Continue | Flow::Normal => {}
             }
         }
         Ok(Flow::Normal)

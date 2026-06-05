@@ -246,6 +246,28 @@ impl Compiler {
                 fc.emit(Op::Return, stmt.span);
                 Ok(())
             }
+            StmtKind::Break => {
+                let j = fc.emit_jump(Op::Jump(0), stmt.span);
+                match fc.current_loop() {
+                    Some(ctx) => ctx.break_jumps.push(j),
+                    None => return Err(CompileError {
+                        message: "break outside loop".to_string(),
+                        span: stmt.span,
+                    }),
+                }
+                Ok(())
+            }
+            StmtKind::Continue => {
+                let j = fc.emit_jump(Op::Jump(0), stmt.span);
+                match fc.current_loop() {
+                    Some(ctx) => ctx.continue_jumps.push(j),
+                    None => return Err(CompileError {
+                        message: "continue outside loop".to_string(),
+                        span: stmt.span,
+                    }),
+                }
+                Ok(())
+            }
             StmtKind::If { branches, else_block } => self.compile_if(fc, branches, else_block.as_deref(), stmt.span),
             StmtKind::While { cond, body } => self.compile_while(fc, cond, body),
             StmtKind::For { var, iter, body } => self.compile_for(fc, var, iter, body, stmt.span),
@@ -342,14 +364,25 @@ impl Compiler {
         self.compile_expr(fc, cond)?;
         fc.emit(Op::AsBool, cond.span);
         let exit = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
+        fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new() });
         self.compile_block_scoped(fc, body)?;
         fc.emit(Op::Jump(loop_start), cond.span);
         fc.patch_jump(exit);
+        let ctx = fc.loops.pop().expect("loop ctx pushed above");
+        // `break` → loop exit (here, past the back-edge); `continue` → re-test the condition.
+        let exit_target = fc.here();
+        for j in ctx.break_jumps {
+            fc.patch_jump_to(j, exit_target);
+        }
+        for j in ctx.continue_jumps {
+            fc.patch_jump_to(j, loop_start);
+        }
         Ok(())
     }
 
     fn compile_for(&mut self, fc: &mut FnComp, var: &str, iter: &Expr, body: &[Stmt], span: Span) -> Result<(), CompileError> {
         fc.begin_scope();
+        fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new() });
         if let ExprKind::Range { start, end } = &iter.kind {
             // Lazy counting loop — the range is never materialized.
             self.compile_expr(fc, end)?;
@@ -367,12 +400,16 @@ impl Compiler {
             fc.emit(Op::Lt, span);
             let exit = fc.emit_jump(Op::JumpIfFalse(0), span);
             self.compile_block_scoped(fc, body)?;
+            // `continue` must land HERE — on the increment, not the condition (re-testing without
+            // advancing `i` would loop forever) and not after it (skipping the advance also hangs).
+            let inc_target = fc.here();
             fc.emit(Op::GetLocal(i_slot), span);
             fc.emit(Op::ConstInt(1), span);
             fc.emit(Op::Add, span);
             fc.emit(Op::SetLocal(i_slot), span);
             fc.emit(Op::Jump(loop_start), span);
             fc.patch_jump(exit);
+            self.patch_loop(fc, inc_target);
         } else {
             // Iterate a (cloned) list by index.
             self.compile_expr(fc, iter)?;
@@ -398,15 +435,32 @@ impl Compiler {
             fc.emit(Op::GetIndex, span);
             fc.emit(Op::SetLocal(var_slot), span);
             self.compile_block_scoped(fc, body)?;
+            // `continue` must land HERE — on the index increment, so the loop advances to the
+            // next element instead of re-testing the same index forever.
+            let inc_target = fc.here();
             fc.emit(Op::GetLocal(idx), span);
             fc.emit(Op::ConstInt(1), span);
             fc.emit(Op::Add, span);
             fc.emit(Op::SetLocal(idx), span);
             fc.emit(Op::Jump(loop_start), span);
             fc.patch_jump(exit);
+            self.patch_loop(fc, inc_target);
         }
         fc.end_scope();
         Ok(())
+    }
+
+    /// Pop the innermost `LoopCtx` and patch its pending jumps: `continue` → `inc_target` (the
+    /// loop's increment), `break` → the current position (the loop exit, past the back-edge).
+    fn patch_loop(&self, fc: &mut FnComp, inc_target: usize) {
+        let ctx = fc.loops.pop().expect("for-loop ctx pushed in compile_for");
+        let exit_target = fc.here();
+        for j in ctx.break_jumps {
+            fc.patch_jump_to(j, exit_target);
+        }
+        for j in ctx.continue_jumps {
+            fc.patch_jump_to(j, inc_target);
+        }
     }
 
     fn compile_match(&mut self, fc: &mut FnComp, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<(), CompileError> {
@@ -882,6 +936,15 @@ struct LocalVar {
 
 /// Compile-time state for one function (or the module toplevel): its code buffer, parallel spans,
 /// local-slot allocation, and (for closures) the set of captured names.
+/// Pending jumps for the innermost loop being compiled. `break` jumps land at the loop exit;
+/// `continue` jumps land at the loop's increment/condition. Both targets are unknown when the
+/// jump is emitted, so we collect placeholder `Op::Jump(0)` indices and patch them once the
+/// targets are known (see `compile_while` / `compile_for`).
+struct LoopCtx {
+    continue_jumps: Vec<usize>,
+    break_jumps: Vec<usize>,
+}
+
 struct FnComp {
     name: String,
     arity: usize,
@@ -895,6 +958,10 @@ struct FnComp {
     max_slots: usize,
     /// Names this function captures from an enclosing scope (closures only).
     captured_names: Vec<String>,
+    /// Stack of enclosing loops (innermost last), for `break`/`continue` jump patching. Empty
+    /// outside any loop. A closure compiles in its own `FnComp` with an empty stack, so a
+    /// `break`/`continue` there has no current loop (the checker rejects it; we defend anyway).
+    loops: Vec<LoopCtx>,
 }
 
 impl FnComp {
@@ -910,6 +977,25 @@ impl FnComp {
             slot_count: 0,
             max_slots: 0,
             captured_names: Vec::new(),
+            loops: Vec::new(),
+        }
+    }
+
+    /// The innermost loop being compiled, or `None` outside any loop.
+    fn current_loop(&mut self) -> Option<&mut LoopCtx> {
+        self.loops.last_mut()
+    }
+
+    /// Patch a previously-emitted jump to land at an explicit `target` instruction index (used for
+    /// `continue`, whose target — the loop's increment — is *before* the current position).
+    fn patch_jump_to(&mut self, at: usize, target: usize) {
+        match &mut self.code[at] {
+            Op::Jump(t)
+            | Op::JumpIfFalse(t)
+            | Op::JumpIfFalseKeep(t)
+            | Op::JumpIfTrueKeep(t)
+            | Op::MatchArm { next: t, .. } => *t = target,
+            other => panic!("patch_jump_to on non-jump op: {other:?}"),
         }
     }
 

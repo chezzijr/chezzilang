@@ -75,6 +75,10 @@ pub enum StmtKind {
     },
     /// `return` with an optional value.
     Return(Option<Expr>),
+    /// `break` — exit the innermost enclosing loop. Carries only its `Span` (via `Stmt`).
+    Break,
+    /// `continue` — skip to the next iteration of the innermost enclosing loop.
+    Continue,
     /// An `import …` statement.
     Import(Import),
     /// A bare expression used as a statement, e.g. `print(x)`.

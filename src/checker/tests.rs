@@ -1046,3 +1046,51 @@ fn list_fold_function_acc_must_match_init() {
     );
 }
 
+
+// ===== break / continue =====
+
+#[test]
+fn break_outside_loop_rejected() {
+    rejects("break\n", "break outside loop");
+}
+
+#[test]
+fn continue_outside_loop_rejected() {
+    rejects("continue\n", "continue outside loop");
+}
+
+#[test]
+fn break_continue_in_for_ok() {
+    ok("for i in 0..5:\n    if i == 3: break\n    continue\n");
+}
+
+#[test]
+fn break_continue_in_while_ok() {
+    ok("while true:\n    break\n");
+    ok("c := 0\nwhile c < 5:\n    c += 1\n    continue\n");
+}
+
+#[test]
+fn break_in_if_in_loop_ok() {
+    ok("for i in 0..5:\n    if i == 3:\n        break\n");
+}
+
+#[test]
+fn break_after_loop_rejected() {
+    // `loop_depth` is decremented when the loop body ends, so a `break` *after* the loop is illegal.
+    rejects("for i in 0..3:\n    print(i)\nbreak\n", "break outside loop");
+}
+
+#[test]
+fn nested_loops_break_legal_in_both() {
+    // Nested loops: an inner break/continue is legal, and the outer loop is still a loop afterward.
+    ok("for i in 0..3:\n    for j in 0..3:\n        break\n    continue\n");
+}
+
+// NOTE on functions/closures defined inside a loop: `check_fn_body`/`infer_closure` SAVE-ZERO-
+// RESTORE `loop_depth` so a `break`/`continue` in a nested function/closure body can't see an
+// outer loop. This rule is defensive: the current language can't route a checked statement-form
+// `break` into such a body (nested `fn` bodies aren't type-checked, and closure bodies are single
+// expressions that can't hold statements), so no source program exercises it through the checker.
+// The compiler is the enforcing layer — see its `break outside loop` CompileError on an empty
+// loop stack (closures compile in their own `FnComp` with an empty `loops` stack).

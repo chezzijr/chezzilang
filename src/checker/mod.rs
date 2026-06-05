@@ -184,6 +184,10 @@ struct Checker {
     imported_modules: HashMap<String, ModuleId>,
     /// Label of the module currently being checked (`None` = entry); prefixes its error messages.
     current_module_label: Option<String>,
+    /// How many enclosing `for`/`while` loops we're inside *within the current function body*.
+    /// Reset to 0 when descending into a (nested) function or closure body so an inner `break`
+    /// can't escape into an outer loop. `> 0` ⇒ `break`/`continue` are legal here.
+    loop_depth: usize,
 }
 
 impl Checker {
@@ -203,6 +207,7 @@ impl Checker {
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
             current_module_label: None,
+            loop_depth: 0,
         }
     }
 
@@ -599,17 +604,31 @@ impl Checker {
                 let elem = self.iter_elem(iter);
                 self.push_scope();
                 self.declare(var, elem);
+                self.loop_depth += 1;
                 for stmt in body {
                     self.check_stmt(stmt);
                 }
+                self.loop_depth -= 1;
                 self.pop_scope();
             }
             StmtKind::While { cond, body } => {
                 self.expect_bool(cond, "while condition");
+                self.loop_depth += 1;
                 self.check_block(body);
+                self.loop_depth -= 1;
             }
             StmtKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms),
             StmtKind::Return(value) => self.check_return(value.as_ref(), span),
+            StmtKind::Break => {
+                if self.loop_depth == 0 {
+                    self.error(span, "break outside loop");
+                }
+            }
+            StmtKind::Continue => {
+                if self.loop_depth == 0 {
+                    self.error(span, "continue outside loop");
+                }
+            }
             StmtKind::Expr(e) => {
                 self.infer(e);
             }
@@ -727,6 +746,9 @@ impl Checker {
         // A nested function checked while pass-1 is inferring an *outer* function's return must not
         // feed the outer `collected_rets` — this body's `return`s are diagnosed, not collected.
         let saved_inferring = std::mem::replace(&mut self.inferring_ret, false);
+        // A function body opens a fresh loop context: a loop enclosing this fn's *definition* must
+        // not make a `break`/`continue` in the body legal.
+        let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         self.push_scope();
         for (i, param) in decl.params.iter().enumerate() {
             let ty = if param.name == "self" {
@@ -742,6 +764,7 @@ impl Checker {
         self.pop_scope();
         self.current_ret = saved_ret;
         self.inferring_ret = saved_inferring;
+        self.loop_depth = saved_loop_depth;
     }
 
     /// The element type produced by iterating `iter` in a `for` loop.
@@ -1205,6 +1228,9 @@ impl Checker {
     }
 
     fn infer_closure(&mut self, params: &[Param], ret: Option<&Type>, body: &Expr) -> Ty {
+        // A closure body opens a fresh loop context (same rule as `check_fn_body`): a loop around
+        // the closure's definition must not make a `break`/`continue` inside it legal.
+        let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         self.push_scope();
         let param_tys: Vec<Ty> = params
             .iter()
@@ -1216,6 +1242,7 @@ impl Checker {
             .collect();
         let body_ty = self.infer(body);
         self.pop_scope();
+        self.loop_depth = saved_loop_depth;
         let ret_ty = match ret {
             Some(t) => {
                 let declared = self.resolve_type(t, body.span);

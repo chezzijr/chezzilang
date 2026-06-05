@@ -29,6 +29,8 @@ pub enum Token {
     For,
     While,
     In,
+    Break,
+    Continue,
     Struct,
     Enum,
     Match,
@@ -125,6 +127,8 @@ fn keyword(word: &str) -> Option<Token> {
         "for" => Token::For,
         "while" => Token::While,
         "in" => Token::In,
+        "break" => Token::Break,
+        "continue" => Token::Continue,
         "struct" => Token::Struct,
         "enum" => Token::Enum,
         "match" => Token::Match,
@@ -623,6 +627,14 @@ mod tests {
         assert_eq!(
             kinds("! !="),
             vec![Token::Bang, Token::NotEq, Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn break_and_continue_keywords() {
+        assert_eq!(
+            kinds("break continue"),
+            vec![Token::Break, Token::Continue, Token::Newline, Token::Eof]
         );
     }
 

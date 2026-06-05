@@ -32,7 +32,7 @@
 <compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
-<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <importStmt> | <exprStmt>
+<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <breakStmt> | <continueStmt> | <importStmt> | <exprStmt>
 
 # ===== simple statements =====
 <letStmt> ::= "IDENT" "WALRUS" <expr> "NEWLINE"
@@ -49,6 +49,11 @@
            | <postfix> "LBRACKET" <expr> "RBRACKET"
 
 <returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <expr> "NEWLINE"
+
+# `break` / `continue` are bare line-oriented statements; "inside a loop" is enforced by the
+# checker (context-sensitive), not the grammar.
+<breakStmt>    ::= "BREAK" "NEWLINE"
+<continueStmt> ::= "CONTINUE" "NEWLINE"
 
 <importStmt> ::= "IMPORT" <dottedPath> "NEWLINE"
                | "IMPORT" <dottedPath> "AS" "IDENT" "NEWLINE"

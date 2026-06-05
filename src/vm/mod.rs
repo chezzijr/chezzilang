@@ -2498,6 +2498,93 @@ mod parity_tests {
         assert_parity_file(&[("main.chz", src)], "main.chz")
     }
 
+    // ----- break / continue parity (both engines must agree AND produce the right output) -----
+
+    /// Assert both engines agree AND that the (shared) stdout equals `expect`. A hang here means a
+    /// `continue` is landing on the wrong target (re-test without advancing → infinite loop).
+    fn assert_parity_out(src: &str, expect: &str) {
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).expect("program should run"), expect, "for:\n{src}");
+    }
+
+    #[test]
+    fn break_early_for_parity() {
+        assert_parity_out(
+            "s := 0\nfor i in 0..10:\n    if i == 5: break\n    s += i\nprint(s)\n",
+            "10\n",
+        );
+    }
+
+    #[test]
+    fn continue_for_terminates_parity() {
+        // THE increment-landing guard: `continue` must reach the loop's `i += 1`, never the
+        // condition (would re-test the same `i` forever). If this hangs, the target is wrong.
+        assert_parity_out(
+            "for i in 0..5:\n    if i == 1: continue\n    if i == 3: continue\n    print(i)\n",
+            "0\n2\n4\n",
+        );
+    }
+
+    #[test]
+    fn while_break_parity() {
+        assert_parity_out(
+            "i := 0\nwhile true:\n    if i == 3: break\n    i += 1\nprint(i)\n",
+            "3\n",
+        );
+    }
+
+    #[test]
+    fn while_continue_progresses_parity() {
+        // The counter advances BEFORE the `continue`, so the `while` still terminates.
+        assert_parity_out(
+            "i := 0\ns := 0\nwhile i < 5:\n    i += 1\n    if i == 2: continue\n    s += i\nprint(s)\n",
+            "13\n",
+        );
+    }
+
+    #[test]
+    fn break_in_if_in_loop_parity() {
+        assert_parity_out(
+            "for i in 0..10:\n    if i > 2:\n        break\n    print(i)\n",
+            "0\n1\n2\n",
+        );
+    }
+
+    #[test]
+    fn return_from_loop_parity() {
+        // `return` inside a loop still returns the whole function (break/continue don't intercept it).
+        assert_parity_out(
+            "fn f():\n    for i in 0..10:\n        if i == 2: return i\n    return -1\nprint(f())\n",
+            "2\n",
+        );
+    }
+
+    #[test]
+    fn nested_loop_inner_break_parity() {
+        // Inner `break` does not break the outer loop: the outer runs all 3 iterations.
+        assert_parity_out(
+            "n := 0\nfor i in 0..3:\n    for j in 0..3:\n        break\n    n += 1\nprint(n)\n",
+            "3\n",
+        );
+    }
+
+    #[test]
+    fn continue_list_for_parity() {
+        // `continue` over a LIST for-loop (not just range) advances to the next element.
+        assert_parity_out(
+            "for x in [1,2,3,4]:\n    if x % 2 == 0: continue\n    print(x)\n",
+            "1\n3\n",
+        );
+    }
+
+    #[test]
+    fn break_list_for_parity() {
+        assert_parity_out(
+            "for x in [10,20,30,40]:\n    if x == 30: break\n    print(x)\n",
+            "10\n20\n",
+        );
+    }
+
     // ----- literal + wildcard match parity -----
 
     #[test]
