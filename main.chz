@@ -1,0 +1,5 @@
+fn print_hello_world():
+  world := "World!"
+  print("Hello {world}")
+
+print_hello_world()

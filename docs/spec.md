@@ -102,6 +102,26 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
   Native-Rust for io/os/math; some written in Chezzi (dogfooding).
 - **Later:** `std.list`, `std.map`, `std.json`, `std.time`.
 
+> **Future idea — native FFI (NOT scheduled; not part of any current milestone).** Because Chezzi
+> is written in Rust, the native-stdlib mechanism could later double as a foreign-function
+> interface: bind a Rust library and expose it as a module, instead of reimplementing everything in
+> Chezzi early on. Sketch for when/if we pick it up:
+> - **`NativeFn`** — a Rust fn registered as a callable Chezzi value (member of a native module),
+>   added to both `interp::Value` and `vm::Obj` (parity-tested).
+> - **`Host` trait** — the engine-agnostic context a native fn uses (`arg_int`/`arg_str`,
+>   `new_str`/`new_list`, `raise`, …) so a binding is written once and works on both the interp
+>   (Rc values) and the VM (heap handles). This trait would *be* the stdlib's native API too.
+> - **Userdata** — an opaque value wrapping `Box<dyn Any>` so Chezzi can carry but not inspect a
+>   native Rust object (`File`, `Regex`, …). Lua-style userdata / Python capsule.
+> - **Dependency policy if pursued:** default build stays **zero third-party crates** (Rust `std`
+>   only); crate-backed bindings ride behind **Cargo features** (`--features regex`), erroring
+>   "module not available" otherwise. FFI is the unsafe, explicit-opt-in seam — never the core.
+> - **Compiled-in bindings are easy** (native fns are Rust in the same crate — no ABI/marshalling).
+>   The hard, host-independent parts are deferred: *dynamic* `cdylib` plugins over a stable C ABI,
+>   and the dual-backend (interp+VM) duplication tax.
+>
+> Current milestones (M6+) do **not** include this — record-only so future sessions have the design.
+
 ## Architecture — pipeline
 
 ```
@@ -140,14 +160,17 @@ tests/          # Rust unit + golden tests
 
 | # | Deliverable | Runnable proof |
 |---|-------------|----------------|
-| **M1** | Indent-aware lexer + REPL that echoes tokens | `chezzi tokens foo.chz` prints token stream incl. INDENT/DEDENT |
-| **M2** | Parser → AST + pretty-printer | `chezzi ast foo.chz` round-trips source |
-| **M3** | Tree-walk interpreter | Working language: arithmetic, fns, if/for/while, structs, enums, match, interpolation, Result+`?` run single-file |
-| **M4** | Type checker (local inference) | Type errors caught pre-run with clear messages; `--errors=json` mode |
-| **M4.5** | Modules / imports + resolver | Multi-file program runs; `chezzi.toml` root detection works |
-| **M5** | Bytecode compiler + stack VM + mark-sweep GC | Same programs run on VM ~10x faster; golden tests match tree-walker |
-| **M6** | Stdlib fill-out + pipe `|>` operator | `std.io/math/str/os` usable; pipe chains run |
+| ✅ **M1** | Indent-aware lexer + REPL that echoes tokens | `chezzi tokens foo.chz` prints token stream incl. INDENT/DEDENT |
+| ✅ **M2** | Parser → AST + pretty-printer | `chezzi ast foo.chz` round-trips source |
+| ✅ **M3** | Tree-walk interpreter | Working language: arithmetic, fns, if/for/while, structs, enums, match, interpolation, Result+`?` run single-file |
+| ✅ **M4** | Type checker (local inference) | Type errors caught pre-run with clear messages; `--errors=json` mode |
+| ✅ **M4.5** | Modules / imports + resolver | Multi-file program runs; `chezzi.toml` root detection works |
+| ✅ **M5** | Bytecode compiler + stack VM + mark-sweep GC | Runs on VM (default); ~4–6.5× over the tree-walker; golden + parity tests match |
+| **M6** ← next | Stdlib fill-out + pipe `\|>` operator + core-type methods | `std.io/math/str/os` usable; pipe chains run |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional) |
+
+> Native FFI / Rust-library bindings are a **future idea, not on this roadmap** — see the
+> "Future idea — native FFI" note under *Standard library* above.
 
 ## Verification
 

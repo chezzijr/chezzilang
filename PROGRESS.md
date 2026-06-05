@@ -250,9 +250,20 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 
 - ✅ **M5** — Bytecode VM + mark-sweep GC (M5a compiler+VM; M5b GC; M5c parity+perf+CLI flip)
 - ⬜ **M6** — Stdlib + pipe `|>` + **core-type methods** (string/list ergonomics — UX priority). ← NEXT
-  Extend `eval_method_call` to dispatch on `Value::Str`/`Value::List`; handlers in `builtins.rs`.
-  Starter set: `s.len/upper/lower/trim`, `s.split(sep)`, `sep.join(list)`, `s.starts_with/contains`
-  (+ list mirror `xs.push/len`). Pullable earlier if string ergonomics start blocking real programs.
+  Core-type methods dispatch on `Value::Str`/`Value::List` — now in **both** backends: interp
+  `eval_method_call` (handlers in `builtins.rs`) **and** the VM's `do_method_call` (currently only
+  structs/modules). Parity suite must cover them. Starter set: `s.len/upper/lower/trim`,
+  `s.split(sep)`, `sep.join(list)`, `s.starts_with/contains` (+ list mirror `xs.push/len`).
+  Pullable earlier if string ergonomics start blocking real programs.
+
+### Ideas — NOT scheduled (record-only)
+
+- **Native FFI / Rust-library bindings** — let Chezzi call into Rust libs (bootstrap the ecosystem
+  instead of rewriting everything in Chezzi). Design sketch lives in `docs/spec.md` → *Standard
+  library* → "Future idea — native FFI": `NativeFn` value + a `Host` trait (write a binding once,
+  works on interp + VM) + opaque userdata; default build stays **zero third-party crates**, crate
+  bindings behind Cargo features; dynamic `cdylib` plugins deferred. **Deliberately excluded from
+  M6 and the current roadmap** — do not start without an explicit decision to schedule it.
 
 ---
 
