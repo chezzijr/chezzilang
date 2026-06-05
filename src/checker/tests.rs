@@ -771,6 +771,26 @@ fn unknown_list_method_rejected() {
 }
 
 #[test]
+fn list_pop_returns_option() {
+    ok("xs := [1, 2, 3]\nm := xs.pop()\nmatch m:\n    Some(v): print(v)\n    None: print(0)\n");
+}
+
+#[test]
+fn list_non_hof_methods_ok() {
+    ok("xs := [1, 2, 3]\nb := xs.contains(2)\ni := xs.index_of(2)\ns := xs.sum()\nxs.reverse()\n");
+}
+
+#[test]
+fn list_sum_float_is_float() {
+    ok("xs := [1.0, 2.0]\ns := xs.sum()\nt := s + 0.5\n");
+}
+
+#[test]
+fn list_sum_non_numeric_rejected() {
+    rejects("xs := [\"a\"]\ns := xs.sum()\n", "numeric");
+}
+
+#[test]
 fn method_on_int_rejected() {
     rejects("x := 5\ny := x.upper()\n", "type int has no method 'upper'");
 }

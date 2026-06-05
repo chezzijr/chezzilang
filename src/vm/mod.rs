@@ -886,6 +886,75 @@ impl Vm {
                     items.push(v);
                     Ok(Value::Nil)
                 }
+                "pop" => {
+                    self.arity_err("pop", args, 0, span)?;
+                    let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
+                    match items.pop() {
+                        Some(v) => {
+                            let eh = self.heap.alloc(Obj::Enum {
+                                ty: "Option".into(),
+                                variant: "Some".into(),
+                                payload: vec![v],
+                            });
+                            Ok(Value::Obj(eh))
+                        }
+                        None => {
+                            let eh = self.heap.alloc(Obj::Enum {
+                                ty: "Option".into(),
+                                variant: "None".into(),
+                                payload: vec![],
+                            });
+                            Ok(Value::Obj(eh))
+                        }
+                    }
+                }
+                "reverse" => {
+                    self.arity_err("reverse", args, 0, span)?;
+                    let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
+                    items.reverse();
+                    Ok(Value::Nil)
+                }
+                "contains" => {
+                    self.arity_err("contains", args, 1, span)?;
+                    let target = args[0];
+                    let elems = items.clone();
+                    Ok(Value::Bool(elems.iter().any(|v| self.values_equal(*v, target))))
+                }
+                "index_of" => {
+                    self.arity_err("index_of", args, 1, span)?;
+                    let target = args[0];
+                    let elems = items.clone();
+                    let idx = elems.iter().position(|v| self.values_equal(*v, target));
+                    Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
+                }
+                "sum" => {
+                    self.arity_err("sum", args, 0, span)?;
+                    let any_float = items.iter().any(|v| matches!(v, Value::Float(_)));
+                    if any_float {
+                        let mut acc = 0.0_f64;
+                        for v in items.iter() {
+                            match v {
+                                Value::Int(n) => acc += *n as f64,
+                                Value::Float(f) => acc += *f,
+                                other => {
+                                    return Err(self.err(format!("sum() expects a numeric list, got an element of type {}", self.type_name(*other)), span));
+                                }
+                            }
+                        }
+                        Ok(Value::Float(acc))
+                    } else {
+                        let mut acc = 0_i64;
+                        for v in items.iter() {
+                            match v {
+                                Value::Int(n) => acc += *n,
+                                other => {
+                                    return Err(self.err(format!("sum() expects a numeric list, got an element of type {}", self.type_name(*other)), span));
+                                }
+                            }
+                        }
+                        Ok(Value::Int(acc))
+                    }
+                }
                 _ => Err(self.err(format!("type list has no method '{method}'"), span)),
             },
             _ => unreachable!("core_method dispatched a non-str/list receiver"),
@@ -2594,6 +2663,48 @@ main()";
         let src = "fn apply(f: fn(int) -> int, v: int) -> int:\n    return f(v)\ninc := fn(x: int) -> int: x + 1\nprint(apply(inc, 4))\n";
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "5\n");
+    }
+
+    #[test]
+    fn parity_list_pop_some() {
+        let src = "xs := [1,2,3]\nx := xs.pop()\nmatch x:\n    Some(v): print(\"got {v}\")\n    None: print(\"empty\")\nprint(xs.len())\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "got 3\n2\n");
+    }
+
+    #[test]
+    fn parity_list_pop_empty_none() {
+        let src = "xs := [1]\na := xs.pop()\nb := xs.pop()\nmatch b:\n    Some(v): print(\"v\")\n    None: print(\"none\")\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "none\n");
+    }
+
+    #[test]
+    fn parity_list_reverse() {
+        let src = "xs := [3,1,2]\nxs.reverse()\nprint(xs[0])\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "2\n");
+    }
+
+    #[test]
+    fn parity_list_contains() {
+        let src = "print([1,2,3].contains(2))\nprint([1,2,3].contains(9))\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "true\nfalse\n");
+    }
+
+    #[test]
+    fn parity_list_index_of() {
+        let src = "print([10,20,30].index_of(20))\nprint([1,2].index_of(9))\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "1\n-1\n");
+    }
+
+    #[test]
+    fn parity_list_sum() {
+        let src = "print([1,2,3,4].sum())\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "10\n");
     }
 
     fn fixture(rel: &str) -> PathBuf {

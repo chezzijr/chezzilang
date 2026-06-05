@@ -133,6 +133,73 @@ fn list_method(
             items.borrow_mut().push(args.into_iter().next().unwrap());
             Ok(Value::Nil)
         }
+        "pop" => {
+            arity("pop", &args, 0, span)?;
+            match items.borrow_mut().pop() {
+                Some(v) => Ok(Value::Enum {
+                    ty: "Option".into(),
+                    variant: "Some".into(),
+                    payload: vec![v],
+                }),
+                None => Ok(Value::Enum {
+                    ty: "Option".into(),
+                    variant: "None".into(),
+                    payload: vec![],
+                }),
+            }
+        }
+        "reverse" => {
+            arity("reverse", &args, 0, span)?;
+            items.borrow_mut().reverse();
+            Ok(Value::Nil)
+        }
+        "contains" => {
+            arity("contains", &args, 1, span)?;
+            let target = &args[0];
+            let found = items.borrow().iter().any(|v| v == target);
+            Ok(Value::Bool(found))
+        }
+        "index_of" => {
+            arity("index_of", &args, 1, span)?;
+            let target = &args[0];
+            let idx = items.borrow().iter().position(|v| v == target);
+            Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
+        }
+        "sum" => {
+            arity("sum", &args, 0, span)?;
+            let items = items.borrow();
+            let any_float = items.iter().any(|v| matches!(v, Value::Float(_)));
+            if any_float {
+                let mut acc = 0.0_f64;
+                for v in items.iter() {
+                    match v {
+                        Value::Int(n) => acc += *n as f64,
+                        Value::Float(f) => acc += *f,
+                        other => {
+                            return Err(RuntimeError {
+                                message: format!("sum() expects a numeric list, got an element of type {}", other.type_name()),
+                                span,
+                            })
+                        }
+                    }
+                }
+                Ok(Value::Float(acc))
+            } else {
+                let mut acc = 0_i64;
+                for v in items.iter() {
+                    match v {
+                        Value::Int(n) => acc += *n,
+                        other => {
+                            return Err(RuntimeError {
+                                message: format!("sum() expects a numeric list, got an element of type {}", other.type_name()),
+                                span,
+                            })
+                        }
+                    }
+                }
+                Ok(Value::Int(acc))
+            }
+        }
         _ => Err(RuntimeError {
             message: format!("type list has no method '{method}'"),
             span,

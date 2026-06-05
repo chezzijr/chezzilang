@@ -1,0 +1,19 @@
+xs := [1, 2, 3]
+last := xs.pop()
+match last:
+    Some(v): print("popped {v}")
+    None: print("empty")
+print(xs.len())
+
+ys := [3, 1, 2]
+ys.reverse()
+print(ys[0])
+
+print(ys.contains(2))
+print(ys.contains(9))
+
+print(ys.index_of(1))
+print(ys.index_of(99))
+
+print([1, 2, 3, 4].sum())
+print([1.0, 2.5, 0.5].sum())

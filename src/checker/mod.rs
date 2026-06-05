@@ -1325,7 +1325,11 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                if method == "sum" {
+                    self.error(span, format!("sum() requires a numeric list, found list[{elem}]"));
+                } else {
+                    self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                }
                 Ty::Unknown
             }
             Ty::Unknown => {
@@ -1439,6 +1443,13 @@ fn list_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
     let (params, ret) = match method {
         "len" => (vec![], Ty::Int),
         "push" => (vec![elem.clone()], Ty::Nil),
+        "pop" => (vec![], Ty::option(elem.clone())),
+        "reverse" => (vec![], Ty::Nil),
+        "contains" => (vec![elem.clone()], Ty::Bool),
+        "index_of" => (vec![elem.clone()], Ty::Int),
+        // `sum` is only valid on numeric lists; an unknown element type is tolerated
+        // (it flows from an empty/unannotated list). Non-numeric is rejected at the call site.
+        "sum" if elem.is_numeric() || elem.is_unknown() => (vec![], elem.clone()),
         _ => return None,
     };
     Some(FnSig { params, ret })
