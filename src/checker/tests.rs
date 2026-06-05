@@ -468,3 +468,15 @@ fn unknown_list_method_rejected() {
 fn method_on_int_rejected() {
     rejects("x := 5\ny := x.upper()\n", "type int has no method 'upper'");
 }
+
+// ===== reserved builtin type names =====
+
+#[test]
+fn user_enum_named_result_rejected() {
+    rejects("enum Result:\n    A\n", "type 'Result' is reserved (builtin)");
+}
+
+#[test]
+fn user_struct_named_option_rejected() {
+    rejects("struct Option:\n    x: int\n", "type 'Option' is reserved (builtin)");
+}

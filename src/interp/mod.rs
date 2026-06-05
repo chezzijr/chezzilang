@@ -607,10 +607,14 @@ impl Interp {
     fn eval_top_level(&mut self, stmts: &[Stmt]) -> Result<(), RuntimeError> {
         self.hoist_declarations(stmts)?;
         let result = self.exec_block(stmts);
-        // A `?` that propagated to the top (no enclosing function) is an unhandled error.
+        // A `?` that propagated to the top (no enclosing function) is an unhandled error. The
+        // propagation marker still carries the `?`'s `expr.span`, so report at the real location
+        // (matching the bare-expr path and the VM) rather than a hard-coded line 1.
         if let Some(value) = self.propagating.take() {
-            return Err(top_level_error(&value, Span { line: 1, col: 1 }).unwrap_or_else(|| {
-                RuntimeError { message: format!("unhandled error: {value}"), span: Span { line: 1, col: 1 } }
+            let span = result.as_ref().err().map(|e| e.span).unwrap_or(Span { line: 1, col: 1 });
+            return Err(top_level_error(&value, span).unwrap_or_else(|| RuntimeError {
+                message: format!("unhandled error: {value}"),
+                span,
             }));
         }
         result.map(|_| ())
@@ -1688,6 +1692,14 @@ fn safe_div(a: int, b: int) -> Result[int]:
     fn top_level_question_err_exits_with_unified_message() {
         let e = run_capture("x := Err(\"oops\")?\n").unwrap_err();
         assert_eq!(e.message, "unhandled error: oops");
+    }
+
+    #[test]
+    fn top_level_question_err_reports_real_line() {
+        // The `?` is on line 3 — the error must point there, not at a hard-coded line 1.
+        let e = run_capture("fn d() -> Result[int]:\n    return Err(\"x\")\nx := d()?\n").unwrap_err();
+        assert_eq!(e.message, "unhandled error: x");
+        assert_eq!(e.span.line, 3, "expected the `?` line, got {}", e.span.line);
     }
 
     #[test]

@@ -834,13 +834,12 @@ impl Vm {
                 return Ok(());
             }
             if ty == "Result" && variant == "Err" || ty == "Option" && variant == "None" {
-                // A `?` at the top level (no enclosing function) is an unhandled error → exit. Use a
-                // module-level span (the interp's propagating channel carries no `?` span) so both
-                // engines report the same location.
+                // A `?` at the top level (no enclosing function) is an unhandled error → exit. Use
+                // the `?` op's own `span` so the reported location matches the interp (which threads
+                // the `?`'s `expr.span` through its propagation marker).
                 if self.frames.last().unwrap().is_toplevel {
-                    let top = Span { line: 1, col: 1 };
-                    return Err(self.top_level_error(v, top).unwrap_or_else(|| {
-                        self.err(format!("unhandled error: {}", self.display(v)), top)
+                    return Err(self.top_level_error(v, span).unwrap_or_else(|| {
+                        self.err(format!("unhandled error: {}", self.display(v)), span)
                     }));
                 }
                 // Otherwise early-return this value from the enclosing function.
@@ -1579,6 +1578,14 @@ fn f() -> int:
         assert_eq!(run_err(r#"x := Err("oops")?"#), "unhandled error: oops");
     }
 
+    #[test]
+    fn top_level_try_err_reports_real_line() {
+        // The `?` is on line 3 — report there, not at a hard-coded line 1 (parity with the interp).
+        let e = run_capture("fn d() -> Result[int]:\n    return Err(\"x\")\nx := d()?\n").unwrap_err();
+        assert_eq!(e.message, "unhandled error: x");
+        assert_eq!(e.span.line, 3, "expected the `?` line, got {}", e.span.line);
+    }
+
     // ----- for loops -----
 
     #[test]
@@ -2009,6 +2016,10 @@ mod parity_tests {
         // a user enum shadowing `Err` is a normal value: bare one must NOT exit, `?` must reject it
         "enum Signal:\n    Err(int)\n    Quiet\nErr(5)\nprint(\"made it\")",
         "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := Err(5)?\n    return x\nf()",
+        // unhandled top-level error INSIDE a top-level block (interp: call_depth 0, VM: is_toplevel)
+        "if true:\n    Err(\"boom\")\nprint(\"after\")",                  // bare Err in `if` → exit, no "after"
+        "for i in 0..1:\n    Err(\"x\")\nprint(\"after\")",              // bare Err in `for` → exit
+        "fn d() -> Result[int]:\n    return Err(\"z\")\nif true:\n    x := d()?\n    print(x)", // top-level `?` in block → exit (same span both engines)
     ];
 
     #[test]

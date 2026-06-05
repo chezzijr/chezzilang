@@ -40,6 +40,13 @@ fn module_label(import: &Import) -> String {
     path.join(".")
 }
 
+/// `Result`/`Option` are builtin generic types — the `?` operator and the top-level-error logic in
+/// both engines key on these literal names, so a user type that shadows them would collide. Reject
+/// the redefinition at declaration.
+fn is_reserved_type(name: &str) -> bool {
+    name == "Result" || name == "Option"
+}
+
 /// A function (or method) signature: parameter types and return type.
 #[derive(Clone)]
 struct FnSig {
@@ -280,6 +287,9 @@ impl Checker {
                     self.functions.insert(decl.name.clone(), sig);
                 }
                 StmtKind::Struct { name, fields, methods } => {
+                    if is_reserved_type(name) {
+                        self.error(s.span, format!("type '{name}' is reserved (builtin)"));
+                    }
                     if self.structs.contains_key(name) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
@@ -294,6 +304,9 @@ impl Checker {
                     self.structs.insert(name.clone(), StructInfo { fields, methods });
                 }
                 StmtKind::Enum { name, variants } => {
+                    if is_reserved_type(name) {
+                        self.error(s.span, format!("type '{name}' is reserved (builtin)"));
+                    }
                     if self.enums.contains_key(name) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
