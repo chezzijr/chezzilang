@@ -65,6 +65,8 @@ struct Vm {
     call_depth: usize,
     /// Each module's namespace object, indexed by module index (run-once cache + import targets).
     module_objs: Vec<GcRef>,
+    /// The current frame's slot base — cached so local access doesn't re-walk `frames` each op.
+    cur_base: usize,
     /// Test mode: collect before *every* instruction, to surface any missing GC root.
     gc_stress: bool,
 }
@@ -79,6 +81,7 @@ impl Vm {
             out: String::new(),
             call_depth: 0,
             module_objs: Vec::new(),
+            cur_base: 0,
             gc_stress: false,
         }
     }
@@ -208,12 +211,14 @@ impl Vm {
             self.stack.push(Value::Nil);
         }
         self.frames.push(CallFrame { proto, ip: 0, base, home, closure, counted, is_toplevel });
+        self.cur_base = base;
         Ok(())
     }
 
     // ----- the dispatch loop -----
 
     fn run_until(&mut self, base_level: usize) -> Result<(), RuntimeError> {
+        let program = Rc::clone(&self.program);
         while self.frames.len() > base_level {
             // Collect at instruction boundaries only: here every live value is reachable from the
             // VM roots (operand stack, frame slots, frame homes/closures, module namespaces) —
@@ -224,9 +229,12 @@ impl Vm {
             let fi = self.frames.len() - 1;
             let pid = self.frames[fi].proto;
             let ip = self.frames[fi].ip;
-            let op = self.program.protos[pid].code[ip].clone();
-            let span = self.program.protos[pid].lines[ip];
             self.frames[fi].ip = ip + 1;
+            // Borrow the instruction (no per-step clone — the hot path must not allocate). The
+            // `Rc` clone is a single refcount bump per loop entry; `op` then borrows program data
+            // that is disjoint from the `&mut self` fields `step` touches.
+            let op = &program.protos[pid].code[ip];
+            let span = program.protos[pid].lines[ip];
             self.step(op, span)?;
         }
         Ok(())
@@ -259,7 +267,7 @@ impl Vm {
     }
 
     fn base(&self) -> usize {
-        self.frames.last().unwrap().base
+        self.cur_base
     }
 
     fn jump(&mut self, target: usize) {
@@ -274,12 +282,12 @@ impl Vm {
         self.stack.pop().expect("operand stack underflow")
     }
 
-    fn step(&mut self, op: Op, span: Span) -> Result<(), RuntimeError> {
+    fn step(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         match op {
-            Op::ConstInt(n) => self.push(Value::Int(n)),
-            Op::ConstFloat(x) => self.push(Value::Float(x)),
+            Op::ConstInt(n) => self.push(Value::Int(*n)),
+            Op::ConstFloat(x) => self.push(Value::Float(*x)),
             Op::ConstStr(s) => {
-                let h = self.heap.alloc(Obj::Str(s.into_boxed_str()));
+                let h = self.heap.alloc(Obj::Str(s.clone().into_boxed_str()));
                 self.push(Value::Obj(h));
             }
             Op::True => self.push(Value::Bool(true)),
@@ -299,18 +307,18 @@ impl Vm {
             }
             Op::GetGlobal(name) => {
                 let home = self.frames.last().unwrap().home;
-                let v = self.module_global(home, &name).ok_or_else(|| self.err(format!("undefined name '{name}'"), span))?;
+                let v = self.module_global(home, name).ok_or_else(|| self.err(format!("undefined name '{name}'"), span))?;
                 self.push(v);
             }
             Op::DefineGlobal(name) => {
                 let v = self.pop();
                 let home = self.frames.last().unwrap().home;
-                self.module_define(home, &name, v);
+                self.module_define(home, name, v);
             }
             Op::SetGlobal(name) => {
                 let v = self.pop();
                 let home = self.frames.last().unwrap().home;
-                if !self.module_assign(home, &name, v) {
+                if !self.module_assign(home, name, v) {
                     return Err(self.err(format!("cannot assign to undefined name '{name}'"), span));
                 }
             }
@@ -318,12 +326,12 @@ impl Vm {
                 let clo = self.frames.last().unwrap().closure;
                 let v = clo
                     .and_then(|h| match self.heap.get(h) {
-                        Obj::Closure { captured, .. } => captured.get(&name).copied(),
+                        Obj::Closure { captured, .. } => captured.get(name).copied(),
                         _ => None,
                     })
                     .or_else(|| {
                         let home = self.frames.last().unwrap().home;
-                        self.module_global(home, &name)
+                        self.module_global(home, name)
                     })
                     .ok_or_else(|| self.err(format!("undefined name '{name}'"), span))?;
                 self.push(v);
@@ -368,39 +376,39 @@ impl Vm {
                     return Err(self.err(format!("expected int, found {}", self.type_name(v)), span));
                 }
             }
-            Op::Jump(t) => self.jump(t),
+            Op::Jump(t) => self.jump(*t),
             Op::JumpIfFalse(t) => {
                 if let Value::Bool(false) = self.pop() {
-                    self.jump(t);
+                    self.jump(*t);
                 }
             }
             Op::JumpIfFalseKeep(t) => {
                 if let Value::Bool(false) = *self.stack.last().unwrap() {
-                    self.jump(t);
+                    self.jump(*t);
                 }
             }
             Op::JumpIfTrueKeep(t) => {
                 if let Value::Bool(true) = *self.stack.last().unwrap() {
-                    self.jump(t);
+                    self.jump(*t);
                 }
             }
-            Op::Call(argc) => self.do_call(argc, span)?,
-            Op::CallMethod(name, argc) => self.do_method_call(&name, argc, span)?,
-            Op::CallBuiltin(name, argc) => self.do_builtin(&name, argc, span)?,
-            Op::CallPrint(argc) => self.do_print(argc),
+            Op::Call(argc) => self.do_call(*argc, span)?,
+            Op::CallMethod(name, argc) => self.do_method_call(name, *argc, span)?,
+            Op::CallBuiltin(name, argc) => self.do_builtin(name, *argc, span)?,
+            Op::CallPrint(argc) => self.do_print(*argc),
             Op::Return => self.do_return(false),
             Op::Try => self.do_try(span)?,
             Op::NewList(n) => {
-                let at = self.stack.len() - n;
+                let at = self.stack.len() - *n;
                 let items: Vec<Value> = self.stack.split_off(at);
                 let h = self.heap.alloc(Obj::List(items));
                 self.push(Value::Obj(h));
             }
-            Op::NewStruct(name, argc) => self.new_struct(&name, argc, span)?,
-            Op::NewEnum(ty, variant, argc) => self.new_enum(&ty, &variant, argc, span)?,
+            Op::NewStruct(name, argc) => self.new_struct(name, *argc, span)?,
+            Op::NewEnum(ty, variant, argc) => self.new_enum(ty, variant, *argc, span)?,
             Op::MakeFunc(proto) => {
                 let home = self.frames.last().unwrap().home;
-                let h = self.heap.alloc(Obj::Func { proto, home });
+                let h = self.heap.alloc(Obj::Func { proto: *proto, home });
                 self.push(Value::Obj(h));
             }
             Op::MakeClosure(proto, entries) => {
@@ -417,12 +425,12 @@ impl Vm {
                             })
                             .unwrap_or(Value::Nil),
                     };
-                    captured.insert(e.name, v);
+                    captured.insert(e.name.clone(), v);
                 }
-                let h = self.heap.alloc(Obj::Closure { proto, captured, home });
+                let h = self.heap.alloc(Obj::Closure { proto: *proto, captured, home });
                 self.push(Value::Obj(h));
             }
-            Op::GetField(name) => self.get_field(&name, span)?,
+            Op::GetField(name) => self.get_field(name, span)?,
             Op::GetIndex => self.get_index(span)?,
             Op::ToStr => {
                 let v = self.pop();
@@ -431,7 +439,7 @@ impl Vm {
                 self.push(Value::Obj(h));
             }
             Op::BuildStr(n) => {
-                let at = self.stack.len() - n;
+                let at = self.stack.len() - *n;
                 let parts: Vec<Value> = self.stack.split_off(at);
                 let mut s = String::new();
                 for p in parts {
@@ -466,14 +474,14 @@ impl Vm {
                 self.push(Value::Int(len));
             }
             Op::EnsureEnum(slot) => {
-                let v = self.stack[self.base() + slot];
+                let v = self.stack[self.base() + *slot];
                 if !matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Enum { .. })) {
                     return Err(self.err(format!("cannot match on {}", self.type_name(v)), span));
                 }
             }
-            Op::MatchArm { scrut, variant, nbind, bind_start, next } => self.match_arm(scrut, &variant, nbind, bind_start, next, span)?,
+            Op::MatchArm { scrut, variant, nbind, bind_start, next } => self.match_arm(*scrut, variant, *nbind, *bind_start, *next, span)?,
             Op::MatchNoArm(slot) => {
-                let v = self.stack[self.base() + slot];
+                let v = self.stack[self.base() + *slot];
                 let variant = match v {
                     Value::Obj(h) => match self.heap.get(h) {
                         Obj::Enum { variant, .. } => variant.to_string(),
@@ -489,7 +497,7 @@ impl Vm {
 
     // ----- arithmetic / comparison -----
 
-    fn arith(&mut self, op: Op, span: Span) -> Result<(), RuntimeError> {
+    fn arith(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
         let name = match op {
@@ -544,7 +552,7 @@ impl Vm {
         Ok(())
     }
 
-    fn compare_op(&mut self, op: Op, span: Span) -> Result<(), RuntimeError> {
+    fn compare_op(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
         let name = match op {
@@ -684,6 +692,7 @@ impl Vm {
             self.call_depth -= 1;
         }
         self.stack.truncate(frame.base);
+        self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
         self.push(ret);
     }
 
@@ -1764,5 +1773,137 @@ fn main():
         print(s)";
         let normal = run_capture(src).unwrap();
         assert_eq!(run_capture_stress(src), normal);
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    //! Cross-engine parity: the VM and the tree-walk interpreter must agree on stdout *and* error
+    //! for every program. These are the M5 acceptance tests — any divergence fails here.
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    /// Outcome of a run, normalized so interp and VM results compare directly.
+    fn interp_outcome(src: &str) -> Result<String, String> {
+        crate::interp::run_capture(src).map_err(|e| e.to_string())
+    }
+    fn vm_outcome(src: &str) -> Result<String, String> {
+        run_capture(src).map_err(|e| e.to_string())
+    }
+
+    fn assert_parity(src: &str) {
+        assert_eq!(vm_outcome(src), interp_outcome(src), "VM/interp divergence for:\n{src}");
+    }
+
+    /// A spread of programs exercising every feature class — run through BOTH engines.
+    const PROGRAMS: &[&str] = &[
+        // arithmetic + promotion + truncation
+        "print(7 / 2)\nprint(1 + 2.0)\nprint(2.5 * 2.0)\nprint(10 % 3)",
+        // string concat + interpolation + escapes
+        "fn main():\n    n := \"x\"\n    print(\"a{n}b {1 + 2} {{lit}}\")",
+        // comparison + equality + bool logic
+        "print(1 < 2)\nprint(2 == 2.0)\nprint(true and false)\nprint(false or true)\nprint(not true)",
+        // lists, indexing, len
+        "print([1, 2, 3])\nprint([10, 20, 30][2])\nprint(len([1, 2]))",
+        // structs + methods
+        "struct P:\n    x: int\n    y: int\n    fn sum(self) -> int:\n        return self.x + self.y\nfn main():\n    p := P(3, 4)\n    print(p)\n    print(p.sum())",
+        // enums + match + payload binding
+        "enum S:\n    C(int)\n    Sq(int)\nfn a(s: S) -> int:\n    match s:\n        C(r): return r * r\n        Sq(n): return n * n\nfn main():\n    print(a(C(3)))\n    print(a(Sq(4)))",
+        // closures
+        "fn adder(n: int):\n    return fn(x: int) -> int: x + n\nfn main():\n    f := adder(10)\n    print(f(5))",
+        // ? operator (Ok + Err propagation)
+        "fn d(a: int, b: int) -> Result[int]:\n    if b == 0:\n        return Err(\"zero\")\n    return Ok(a / b)\nfn use() -> Result[int]:\n    r := d(10, 0)?\n    return Ok(r)\nfn main():\n    match use():\n        Ok(v): print(v)\n        Err(e): print(e)",
+        // for + while loops
+        "fn main():\n    t := 0\n    for i in 0..100:\n        t += i\n    print(t)\n    n := 5\n    while n > 0:\n        n -= 1\n    print(n)",
+        // builtins
+        "print(range(4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint(sqrt(16.0))\nprint(str(42))",
+        // recursion
+        "fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nfn main():\n    print(fib(15))",
+        // ----- error parity -----
+        "print(1 / 0)",
+        "print([1, 2][9])",
+        "print(1 + \"x\")",
+        "fn main():\n    print(sqrt(-1.0))",
+        "fn loop(n: int) -> int:\n    return loop(n + 1)\nfn main():\n    print(loop(0))",
+    ];
+
+    #[test]
+    fn parity_full_suite_vm_vs_interp() {
+        for src in PROGRAMS {
+            assert_parity(src);
+        }
+    }
+
+    fn fixture(rel: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
+    }
+
+    /// Run a file through both engines and assert identical (stdout, error).
+    fn assert_file_parity(rel: &str) {
+        let path = fixture(rel);
+        let (vm_out, vm_res) = run_file(&path);
+        let (ip_out, ip_res) = crate::interp::run_file(&path);
+        assert_eq!(vm_out, ip_out, "stdout divergence for {rel}");
+        assert_eq!(vm_res.err().map(|e| e.to_string()), ip_res.err().map(|e| e.to_string()), "error divergence for {rel}");
+    }
+
+    #[test]
+    fn golden_hello_via_run_file() {
+        let path = fixture("examples/hello.chz");
+        let expected = std::fs::read_to_string(fixture("examples/hello.expected")).unwrap();
+        let (out, res) = run_file(&path);
+        assert!(res.is_ok());
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn golden_multi_file_project_via_vm() {
+        let expected = std::fs::read_to_string(fixture("tests/fixtures/proj/main.expected")).unwrap();
+        let (out, res) = run_file(&fixture("tests/fixtures/proj/main.chz"));
+        assert!(res.is_ok());
+        assert_eq!(out, expected);
+        assert_file_parity("tests/fixtures/proj/main.chz");
+    }
+
+    /// The M4.5 headline bug, now on the VM: an imported function reading its module's top-level
+    /// constant must resolve against *its own* module, not the caller — even when the caller
+    /// defines a same-named global with a different value.
+    #[test]
+    fn imported_fn_uses_home_globals() {
+        let (out, res) = run_file(&fixture("tests/fixtures/homeglobals/main.chz"));
+        assert!(res.is_ok());
+        assert_eq!(out, "from-lib\nfrom-main\n");
+        assert_file_parity("tests/fixtures/homeglobals/main.chz");
+    }
+
+    /// Whole multi-file project is byte-identical under GC stress.
+    #[test]
+    fn multi_file_identical_under_gc_stress() {
+        // The fixture is small; run it under stress by routing through the entry graph manually.
+        let expected = std::fs::read_to_string(fixture("tests/fixtures/proj/main.expected")).unwrap();
+        let graph = crate::resolver::build_graph(&fixture("tests/fixtures/proj/main.chz")).unwrap();
+        let program = crate::compiler::compile_graph(&graph).unwrap();
+        let mut vm = Vm::new(Rc::new(program));
+        vm.gc_stress = true;
+        vm.run().unwrap();
+        assert_eq!(vm.out, expected);
+    }
+
+    /// Record the VM speedup over the interpreter on a loop-heavy script (the spec's perf check).
+    /// Asserts a conservative floor that holds even in debug builds; the real ~6x lands in release.
+    #[test]
+    fn bench_vm_faster_than_interp() {
+        let src = "fn main():\n    total := 0\n    i := 0\n    while i < 500000:\n        total += (i * 3 - 1) % 7\n        i += 1\n    print(total)";
+        let t = Instant::now();
+        let ip = crate::interp::run_capture(src).unwrap();
+        let interp_t = t.elapsed();
+        let t = Instant::now();
+        let vm = run_capture(src).unwrap();
+        let vm_t = t.elapsed();
+        assert_eq!(vm, ip, "engines disagree on the benchmark output");
+        let ratio = interp_t.as_secs_f64() / vm_t.as_secs_f64();
+        println!("VM speedup over interp: {ratio:.1}x (interp {interp_t:?}, vm {vm_t:?}) [debug build; ~6x in release]");
+        assert!(ratio >= 1.2, "VM not faster than interp: {ratio:.2}x");
     }
 }

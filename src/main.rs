@@ -28,7 +28,7 @@ USAGE:
     chezzi <command> [file.chz]
 
 COMMANDS:
-    run     <file>   Type-check, then run a Chezzi program   (M3+)
+    run     <file>   Type-check, then run on the bytecode VM  (M5)
     check   <file>   Type-check only; report errors          (M4)
     tokens  <file>   Print the token stream                  (M1)
     ast     <file>   Print the parsed AST                    (M2)
@@ -37,7 +37,7 @@ COMMANDS:
 
 FLAGS:
     --errors=json    Emit type errors as JSON (for `check` / `run`)
-    --vm             Run on the bytecode VM instead of the tree-walk interpreter (M5)
+    --interp         Run on the tree-walk interpreter instead of the bytecode VM
 ";
 
 fn main() -> ExitCode {
@@ -158,16 +158,17 @@ fn cmd_check(args: &[String]) -> ExitCode {
     }
 }
 
-/// `chezzi run <file> [--errors=json] [--vm]` — type-check first (M4 gate), then execute on the
-/// tree-walk interpreter (default) or the bytecode VM (`--vm`, M5).
+/// `chezzi run <file> [--errors=json] [--interp]` — type-check first (M4 gate), then execute on
+/// the bytecode VM (default, M5) or the tree-walk interpreter (`--interp`, the reference engine).
 fn cmd_run(args: &[String]) -> ExitCode {
     let mut path = None;
     let mut json = false;
-    let mut use_vm = false;
+    let mut use_vm = true;
     for arg in args {
         match arg.as_str() {
             "--errors=json" => json = true,
             "--vm" => use_vm = true,
+            "--interp" => use_vm = false,
             other if other.starts_with("--") => {
                 eprintln!("chezzi run: unknown flag '{other}'");
                 return ExitCode::FAILURE;
@@ -177,7 +178,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
         }
     }
     let Some(path) = path else {
-        eprintln!("chezzi run: missing file argument\nusage: chezzi run <file.chz> [--errors=json] [--vm]");
+        eprintln!("chezzi run: missing file argument\nusage: chezzi run <file.chz> [--errors=json] [--interp]");
         return ExitCode::FAILURE;
     };
     if read_source(&path).is_none() {

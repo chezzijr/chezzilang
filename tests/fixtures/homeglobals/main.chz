@@ -1,0 +1,7 @@
+import who from lib
+
+MSG := "from-main"
+
+fn main():
+    print(who())
+    print(MSG)

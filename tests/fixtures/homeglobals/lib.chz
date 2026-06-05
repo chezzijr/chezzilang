@@ -1,0 +1,4 @@
+MSG := "from-lib"
+
+fn who() -> str:
+    return MSG

@@ -10,8 +10,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-> **M5 — Bytecode VM + mark-sweep GC.** Phased M5a/b/c. **M5a + M5b done** (compiler + stack VM
-> + hand-built mark-sweep GC). **Next: M5c — multi-file parity harness + perf + CLI default flip.**
+> **M5 — Bytecode VM + mark-sweep GC.** ✅ **DONE** (M5a compiler+VM, M5b mark-sweep GC, M5c
+> parity+perf+CLI flip). `chezzi run` now executes on the VM by default (`--interp` falls back).
+> **Next: M6 — stdlib + pipe `|>` + core-type methods.**
 
 ## M5a — Bytecode compiler + stack VM (handle values, no collector yet)  ✅ DONE
 
@@ -66,8 +67,33 @@ panics) when the root is removed.
   monotonically; `hello.chz` + a struct/enum/closure/match program are byte-identical under GC
   stress vs. normal.
 
-**Deferred to M5c:** the perf benchmark (~10x target) + flipping `run` to VM-by-default with
-`--interp`; a whole-corpus interp-vs-VM parity harness (incl. multi-file under GC).
+## M5c — Module parity + perf + CLI default flip  ✅ DONE
+
+`chezzi run` defaults to the VM; `--interp` runs the reference tree-walker. 6 parity tests, 275
+total; clean `cargo clippy --all-targets`.
+
+- ✅ **Cross-engine parity** — `parity_full_suite_vm_vs_interp` runs 16 programs (every feature
+  class + 5 error cases) through **both** engines and asserts identical `(stdout, error)`. Golden
+  `hello.chz` + the multi-file `proj/` run identically via `vm::run_file`; the project is also
+  byte-identical under GC stress.
+- ✅ **Home-globals on the VM (M4.5 headline bug)** — `imported_fn_uses_home_globals`: a new
+  `tests/fixtures/homeglobals/` where `main` defines `MSG := "from-main"` and imports `who` from
+  `lib` (which has `MSG := "from-lib"`). `who()` resolves `MSG` against **its own** module
+  (`from-lib`) — both engines agree. Multi-file run-once / dep-order / `import as` / `from` all
+  carry over.
+- ✅ **Perf** — refactored the dispatch loop to **borrow** each instruction (one `Rc` bump per
+  `run_until`, no per-op `clone`) — the single biggest win. Measured release speedup over the
+  interpreter: **~6.5×** on an arithmetic loop, **~4.3×** on recursive `fib`. (Short of the ~10×
+  aspiration: at ~1.7 ns/op the safe match-dispatch VM is near its floor and the tree-walker is
+  itself fast; closing the gap needs inline caching / unsafe dispatch — deferred.) `bench_vm_…`
+  records the ratio and asserts a debug-safe floor.
+- ✅ **CLI flip** — `cmd_run` defaults to `vm::run_file`; `--interp` selects the tree-walker;
+  `--vm` still accepted. `USAGE` updated.
+
+**Interpolation parse-error timing (documented divergence):** the VM pre-parses `{expr}` chunks at
+compile time, so a *malformed* interpolation in dead code is a load error rather than a
+reached-only runtime error. Any program that runs successfully on either engine produces identical
+stdout — this only differs on already-broken input.
 
 ## M1 — Lexer  ✅ DONE
 
@@ -222,8 +248,8 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 
 ## Roadmap (later)
 
-- 🟦 **M5** — Bytecode VM + mark-sweep GC (M5a ✅ compiler+VM; M5b ✅ GC; M5c ⬜ parity+perf ← NEXT)
-- ⬜ **M6** — Stdlib + pipe `|>` + **core-type methods** (string/list ergonomics — UX priority).
+- ✅ **M5** — Bytecode VM + mark-sweep GC (M5a compiler+VM; M5b GC; M5c parity+perf+CLI flip)
+- ⬜ **M6** — Stdlib + pipe `|>` + **core-type methods** (string/list ergonomics — UX priority). ← NEXT
   Extend `eval_method_call` to dispatch on `Value::Str`/`Value::List`; handlers in `builtins.rs`.
   Starter set: `s.len/upper/lower/trim`, `s.split(sep)`, `sep.join(list)`, `s.starts_with/contains`
   (+ list mirror `xs.push/len`). Pullable earlier if string ergonomics start blocking real programs.

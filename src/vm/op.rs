@@ -19,7 +19,7 @@ pub type ProtoId = usize;
 /// Where one snapshotted name's value comes from in the *enclosing* frame, at the moment a closure
 /// is created. The interpreter snapshots all in-scope locals by value; we mirror that — a closure
 /// captures every visible enclosing binding by name (snapshot-by-value, not by reference).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum CapSrc {
     /// Read the enclosing frame's local slot.
     Slot(usize),
