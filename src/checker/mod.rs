@@ -1023,6 +1023,25 @@ impl Checker {
                 self.error(span, format!("type {obj_ty} has no method '{method}'"));
                 Ty::Unknown
             }
+            // Core-type methods (M6): built-in methods on `str` and `list[T]`.
+            Ty::Str => {
+                if let Some(sig) = str_method_sig(method) {
+                    self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type str has no method '{method}'"));
+                Ty::Unknown
+            }
+            Ty::List(elem) => {
+                if let Some(sig) = list_method_sig(method, elem) {
+                    self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
             Ty::Unknown => {
                 self.infer_all(args);
                 Ty::Unknown
@@ -1113,6 +1132,30 @@ fn op_sym(op: BinaryOp) -> &'static str {
         Mod => "%",
         _ => "?",
     }
+}
+
+/// Built-in method signatures on `str` (M6). Must mirror the runtime handlers in both backends
+/// (`interp::builtins::call_method` and `vm::Vm::do_method_call`).
+fn str_method_sig(method: &str) -> Option<FnSig> {
+    let (params, ret) = match method {
+        "len" => (vec![], Ty::Int),
+        "upper" | "lower" | "trim" => (vec![], Ty::Str),
+        "split" => (vec![Ty::Str], Ty::list(Ty::Str)),
+        "join" => (vec![Ty::list(Ty::Str)], Ty::Str),
+        "starts_with" | "contains" => (vec![Ty::Str], Ty::Bool),
+        _ => return None,
+    };
+    Some(FnSig { params, ret })
+}
+
+/// Built-in method signatures on `list[T]` (M6). `elem` is the list's element type.
+fn list_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
+    let (params, ret) = match method {
+        "len" => (vec![], Ty::Int),
+        "push" => (vec![elem.clone()], Ty::Nil),
+        _ => return None,
+    };
+    Some(FnSig { params, ret })
 }
 
 #[cfg(test)]

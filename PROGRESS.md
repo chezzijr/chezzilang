@@ -10,9 +10,49 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-> **M5 — Bytecode VM + mark-sweep GC.** ✅ **DONE** (M5a compiler+VM, M5b mark-sweep GC, M5c
-> parity+perf+CLI flip). `chezzi run` now executes on the VM by default (`--interp` falls back).
-> **Next: M6 — stdlib + pipe `|>` + core-type methods.**
+> **M6 — stdlib + pipe `|>` + core-type methods.** 🟦 **M6a + M6b DONE** (core-type str/list
+> methods on both engines; pipe `|>` via parse-time desugar). **M6c (stdlib) deferred** — native
+> `std.io/os/math` need the `NativeFn`/`Host` FFI seam, which is explicitly *not scheduled*
+> (record-only; see Ideas below). Chezzi-written std modules are possible later but were not
+> needed this session.
+> **Next: M6c only when the FFI seam is scheduled — otherwise M6 is functionally complete.**
+
+## M6a — Core-type methods (str / list)  ✅ DONE
+
+Built-in methods on `str` and `list` dispatch on the value in **both** backends + the checker, with
+a golden + parity suite. Built **TDD** (red→green per bug class; checker/interp tests bite-verified
+to fail before the handlers existed). No new opcode — the existing `CallMethod(name, argc)` carries
+everything; methods dispatch on the receiver at runtime.
+
+- ✅ **Method set** — str: `len/upper/lower/trim`, `split(sep)→list[str]`, `join(list[str])→str`
+  (separator-bound: `",".join(xs)`), `starts_with(s)/contains(s)→bool`. list: `push(x)→nil`
+  (mutates in place), `len()→int`. `len()` stays a free builtin too (additive).
+- ✅ **Interp** (`src/interp/builtins.rs` `call_method` + hook in `eval_method_call`) — str methods
+  build new `Rc<str>`; `split` builds `Rc<RefCell<Vec>>`; `push` does `borrow_mut().push`.
+- ✅ **VM** (`src/vm/mod.rs` `core_method`, dispatched **before** the clone-match so `push` mutates
+  the heap list in place via `get_mut`). Multi-alloc `split` is safe — the GC only collects at
+  instruction boundaries (M5b), never mid-opcode. Error strings mirror the interp **exactly**.
+- ✅ **Checker** (`infer_method_call` + `str_method_sig`/`list_method_sig`) — `split→list[str]`,
+  `join` param `list[str]`, element types checked (`xs.push("x")` on `list[int]` rejected). Unknown
+  method / wrong arity / method-on-int all rejected with clear messages.
+- ✅ **Tests** — checker `ok`/`rejects` (16 cases), interp `run` asserts + error cases, VM parity
+  programs (str/list/chained/errors) in `parity_full_suite`, golden `examples/methods.chz` +
+  `.expected` run byte-identical on both engines.
+
+## M6b — Pipe operator `|>`  ✅ DONE
+
+`a |> f(x)` desugars **at parse time** to `f(a, x)` — threading the left value as the first arg. So
+the checker / interp / VM need **zero** pipe-specific code (they see a plain call). Built **TDD**.
+
+- ✅ **Parser** — `InfixOp::Pipe`, lowest binding power (level 0, left-assoc) in `infix_op`; the
+  `parse_bp` arm requires the RHS to be a `Call` and prepends the LHS to its args. Non-call RHS
+  (`5 |> 7`, `5 |> f`) → `ParseError "right side of '|>' must be a function call"`.
+- ✅ **Grammar + conformance** — `docs/grammar.bnf` gains a `<pipeExpr>`/`<pipeCall>` layer at the
+  loosest precedence (RHS must end in a call); PIPE is no longer a reserved/unused token.
+  `cargo test conformance` differential-tests grammar↔parser accept/reject; corpus files
+  `accept/pipe_chain.chz` + `reject/pipe_noncall.chz` added.
+- ✅ **Tests** — parser unit tests (desugar shape, arg-prepend, left-assoc chain, looser-than-`+`,
+  non-call rejects); pipe programs in the VM `parity_full_suite`.
 
 ## M5a — Bytecode compiler + stack VM (handle values, no collector yet)  ✅ DONE
 
@@ -249,12 +289,12 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 ## Roadmap (later)
 
 - ✅ **M5** — Bytecode VM + mark-sweep GC (M5a compiler+VM; M5b GC; M5c parity+perf+CLI flip)
-- ⬜ **M6** — Stdlib + pipe `|>` + **core-type methods** (string/list ergonomics — UX priority). ← NEXT
-  Core-type methods dispatch on `Value::Str`/`Value::List` — now in **both** backends: interp
-  `eval_method_call` (handlers in `builtins.rs`) **and** the VM's `do_method_call` (currently only
-  structs/modules). Parity suite must cover them. Starter set: `s.len/upper/lower/trim`,
-  `s.split(sep)`, `sep.join(list)`, `s.starts_with/contains` (+ list mirror `xs.push/len`).
-  Pullable earlier if string ergonomics start blocking real programs.
+- 🟦 **M6** — Stdlib + pipe `|>` + **core-type methods**.
+  - ✅ **M6a** — core-type str/list methods on both backends + checker + golden/parity.
+  - ✅ **M6b** — pipe `|>` (parse-time desugar to a call; grammar + conformance updated).
+  - ⬜ **M6c** — stdlib (`std.io/math/str/os`). **Blocked**: native modules need the `NativeFn`/
+    `Host` FFI seam, which is the deferred "Future idea" below. Chezzi-written modules are possible
+    but were not needed yet. Schedule M6c only alongside a decision on the FFI seam.
 
 ### Ideas — NOT scheduled (record-only)
 

@@ -656,6 +656,14 @@ impl Vm {
         let Value::Obj(h) = recv else {
             return Err(self.err(format!("type {} has no method '{method}'", self.type_name(recv)), span));
         };
+        // Core-type methods (M6): built-in methods on `str` / `list`. Handled before the clone-match
+        // so `list.push` mutates the heap object in place (the match below clones the Obj). Mirrors
+        // `interp::builtins::call_method` exactly — error strings included (parity-tested).
+        if matches!(self.heap.get(h), Obj::Str(_) | Obj::List(_)) {
+            let result = self.core_method(h, method, &args, span)?;
+            self.push(result);
+            return Ok(());
+        }
         match self.heap.get(h).clone() {
             // `module.fn(args)` — plain call on the looked-up member, no `self`.
             Obj::Module { name, globals } => {
@@ -681,6 +689,104 @@ impl Vm {
             }
             _ => Err(self.err(format!("type {} has no method '{method}'", self.type_name(recv)), span)),
         }
+    }
+
+    /// Built-in methods on `str` / `list` (M6). The result is returned (not pushed) so the caller
+    /// owns stack discipline. Multi-allocation paths (`split`) are safe: the GC only collects at
+    /// instruction boundaries, never mid-opcode, so all `alloc`s here complete uninterrupted.
+    fn core_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        // A str argument's owned text, with a uniform type error matching the interp.
+        let str_arg = |vm: &Vm, i: usize| -> Result<String, RuntimeError> {
+            match args[i] {
+                Value::Obj(ah) => match vm.heap.get(ah) {
+                    Obj::Str(a) => Ok(a.to_string()),
+                    _ => Err(vm.err(format!("{method}() expects a str argument, got {}", vm.type_name(args[i])), span)),
+                },
+                other => Err(vm.err(format!("{method}() expects a str argument, got {}", vm.type_name(other)), span)),
+            }
+        };
+        match self.heap.get(h) {
+            Obj::Str(s) => {
+                let s = s.to_string();
+                match method {
+                    "len" => {
+                        self.arity_err("len", args, 0, span)?;
+                        Ok(Value::Int(s.chars().count() as i64))
+                    }
+                    "upper" => {
+                        self.arity_err("upper", args, 0, span)?;
+                        Ok(self.alloc_str(s.to_uppercase()))
+                    }
+                    "lower" => {
+                        self.arity_err("lower", args, 0, span)?;
+                        Ok(self.alloc_str(s.to_lowercase()))
+                    }
+                    "trim" => {
+                        self.arity_err("trim", args, 0, span)?;
+                        Ok(self.alloc_str(s.trim().to_string()))
+                    }
+                    "split" => {
+                        self.arity_err("split", args, 1, span)?;
+                        let sep = str_arg(self, 0)?;
+                        let parts: Vec<Value> =
+                            s.split(sep.as_str()).map(|p| self.alloc_str(p.to_string())).collect();
+                        Ok(Value::Obj(self.heap.alloc(Obj::List(parts))))
+                    }
+                    "starts_with" => {
+                        self.arity_err("starts_with", args, 1, span)?;
+                        Ok(Value::Bool(s.starts_with(str_arg(self, 0)?.as_str())))
+                    }
+                    "contains" => {
+                        self.arity_err("contains", args, 1, span)?;
+                        Ok(Value::Bool(s.contains(str_arg(self, 0)?.as_str())))
+                    }
+                    "join" => {
+                        self.arity_err("join", args, 1, span)?;
+                        let Value::Obj(lh) = args[0] else {
+                            return Err(self.err(format!("join() expects a list of str, got {}", self.type_name(args[0])), span));
+                        };
+                        let Obj::List(items) = self.heap.get(lh) else {
+                            return Err(self.err(format!("join() expects a list of str, got {}", self.type_name(args[0])), span));
+                        };
+                        let mut out = String::new();
+                        for (i, item) in items.clone().iter().enumerate() {
+                            let Value::Obj(ih) = item else {
+                                return Err(self.err(format!("join() expects a list of str, got an element of type {}", self.type_name(*item)), span));
+                            };
+                            let Obj::Str(part) = self.heap.get(*ih) else {
+                                return Err(self.err(format!("join() expects a list of str, got an element of type {}", self.type_name(*item)), span));
+                            };
+                            if i > 0 {
+                                out.push_str(&s);
+                            }
+                            out.push_str(part);
+                        }
+                        Ok(self.alloc_str(out))
+                    }
+                    _ => Err(self.err(format!("type str has no method '{method}'"), span)),
+                }
+            }
+            Obj::List(items) => match method {
+                "len" => {
+                    self.arity_err("len", args, 0, span)?;
+                    Ok(Value::Int(items.len() as i64))
+                }
+                "push" => {
+                    self.arity_err("push", args, 1, span)?;
+                    let v = args[0];
+                    let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
+                    items.push(v);
+                    Ok(Value::Nil)
+                }
+                _ => Err(self.err(format!("type list has no method '{method}'"), span)),
+            },
+            _ => unreachable!("core_method dispatched a non-str/list receiver"),
+        }
+    }
+
+    /// Allocate a heap string and return its handle as a `Value`.
+    fn alloc_str(&mut self, s: String) -> Value {
+        Value::Obj(self.heap.alloc(Obj::Str(s.into_boxed_str())))
     }
 
     /// Return from the current frame. `propagated` true ⇒ the value came from `?` (no observable
@@ -1820,12 +1926,32 @@ mod parity_tests {
         "print(range(4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint(sqrt(16.0))\nprint(str(42))",
         // recursion
         "fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nfn main():\n    print(fib(15))",
+        // ----- M6: core-type methods (str) -----
+        "print(\"abcd\".len())\nprint(\"Hi There\".upper())\nprint(\"Hi There\".lower())\nprint(\"  pad  \".trim())",
+        "print(\"a,b,c\".split(\",\"))\nprint(\",\".join([\"a\", \"b\", \"c\"]))",
+        "print(\"abc\".starts_with(\"ab\"))\nprint(\"abc\".starts_with(\"z\"))\nprint(\"abc\".contains(\"b\"))\nprint(\"abc\".contains(\"q\"))",
+        // chained core-type methods
+        "print(\"  Hello,World  \".trim().lower().split(\",\"))",
+        // ----- M6: core-type methods (list) -----
+        "fn main():\n    xs := [1, 2]\n    xs.push(3)\n    xs.push(4)\n    print(xs)\n    print(xs.len())",
+        // ----- M6: pipe operator -----
+        "fn inc(n: int) -> int: n + 1\nfn dbl(n: int) -> int: n * 2\nfn main():\n    print(5 |> inc() |> dbl())",
+        "fn shout(s: str) -> str: s.upper()\nfn main():\n    print(\"hi\" |> shout())",
         // ----- error parity -----
         "print(1 / 0)",
         "print([1, 2][9])",
         "print(1 + \"x\")",
         "fn main():\n    print(sqrt(-1.0))",
         "fn loop(n: int) -> int:\n    return loop(n + 1)\nfn main():\n    print(loop(0))",
+        // M6 method error parity
+        "print(\"hi\".upper(\"extra\"))",
+        "print(\"hi\".frobnicate())",
+        "print(\",\".join([1, 2]))",
+        "print((5).upper())",
+        // arg-eval order: a bad method/receiver with an erroring arg must report the SAME error on
+        // both engines — the VM evaluates args (operands) before the call, so the interp must too.
+        "print((5).frob(1 / 0))",
+        "print(\"hi\".frob(1 / 0))",
     ];
 
     #[test]
@@ -1855,6 +1981,17 @@ mod parity_tests {
         let (out, res) = run_file(&path);
         assert!(res.is_ok());
         assert_eq!(out, expected);
+    }
+
+    /// M6 golden: core-type methods + pipe run end-to-end on the VM and byte-match the interp.
+    #[test]
+    fn golden_methods_via_run_file() {
+        let path = fixture("examples/methods.chz");
+        let expected = std::fs::read_to_string(fixture("examples/methods.expected")).unwrap();
+        let (out, res) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/methods.chz");
     }
 
     #[test]

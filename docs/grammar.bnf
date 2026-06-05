@@ -18,8 +18,8 @@
 # powers in the parser (see docs/syntax.md §4); the hand parser realizes the same precedence via
 # Pratt binding powers rather than literal cascade recursion.
 #
-# Terminals = exactly the `Token` enum variants, one class each. PIPE ("|>") is a real token but
-# no rule uses it yet — reserved for the pipe operator (M6).
+# Terminals = exactly the `Token` enum variants, one class each. PIPE ("|>") drives the pipe
+# operator (see <pipeExpr>, M6).
 
 # ===== top level =====
 # A file is zero or more statements then EOF. The lexer always emits a trailing NEWLINE before
@@ -108,7 +108,12 @@
 <typeList> ::= <type> | <type> "COMMA" <typeList>
 
 # ===== expressions (precedence cascade, loosest -> tightest) =====
-<expr>     ::= <orExpr>
+<expr>     ::= <pipeExpr>
+# pipe `|>` (M6) is the loosest operator: it threads its left value as the first argument of the
+# call on its right, so the right side must end in a call. Left-associative. (The hand parser
+# desugars `a |> f(x)` to `f(a, x)` at parse time.)
+<pipeExpr> ::= <orExpr> | <pipeExpr> "PIPE" <pipeCall>
+<pipeCall> ::= <postfix> "LPAREN" "RPAREN" | <postfix> "LPAREN" <exprList> "RPAREN"
 <orExpr>   ::= <andExpr> | <orExpr> "OR" <andExpr>
 <andExpr>  ::= <eqExpr>  | <andExpr> "AND" <eqExpr>
 <eqExpr>   ::= <relExpr> | <eqExpr> "EQEQ" <relExpr> | <eqExpr> "NOTEQ" <relExpr>

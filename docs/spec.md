@@ -33,7 +33,7 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**, plus *Craftin
 - **Pattern matching** — `match` on enums, exhaustiveness-checked.
 - **String interpolation** — `"hi {name}, sum {a+b}"`. First-class; string ops are a UX priority.
 - **Struct methods** — `fn dist(self)` on structs. Light OOP, no inheritance.
-- **Pipe `|>`** — functional chaining. Implemented **last** (M6).
+- **Pipe `|>`** — functional chaining. Implemented in M6 (parse-time desugar to a call).
 
 **Deferred (YAGNI v1):** classes/inheritance, concurrency, user-defined generics, macros, package registry, native backend.
 
@@ -166,7 +166,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M4** | Type checker (local inference) | Type errors caught pre-run with clear messages; `--errors=json` mode |
 | ✅ **M4.5** | Modules / imports + resolver | Multi-file program runs; `chezzi.toml` root detection works |
 | ✅ **M5** | Bytecode compiler + stack VM + mark-sweep GC | Runs on VM (default); ~4–6.5× over the tree-walker; golden + parity tests match |
-| **M6** ← next | Stdlib fill-out + pipe `\|>` operator + core-type methods | `std.io/math/str/os` usable; pipe chains run |
+| 🟦 **M6** | Stdlib fill-out + pipe `\|>` operator + core-type methods | **M6a/M6b done**: str/list methods + pipe chains run on both engines. **M6c (stdlib) blocked** on the deferred native-FFI seam |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional) |
 
 > Native FFI / Rust-library bindings are a **future idea, not on this roadmap** — see the

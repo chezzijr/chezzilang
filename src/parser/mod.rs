@@ -623,6 +623,21 @@ impl Parser {
                     },
                     span,
                 },
+                // `lhs |> f(args)` desugars at parse time to `f(lhs, args)` — threading `lhs` as the
+                // first argument. The RHS must be a call, so checker/interp/VM see a plain call and
+                // need no pipe-specific code.
+                InfixOp::Pipe => match rhs.kind {
+                    ExprKind::Call { callee, args } => {
+                        let mut new_args = Vec::with_capacity(args.len() + 1);
+                        new_args.push(lhs);
+                        new_args.extend(args);
+                        Expr {
+                            kind: ExprKind::Call { callee, args: new_args },
+                            span,
+                        }
+                    }
+                    _ => return Err(self.err("right side of '|>' must be a function call".to_string())),
+                },
             };
         }
         self.depth -= 1;
@@ -826,10 +841,11 @@ fn describe(tok: &Token) -> String {
     s.to_string()
 }
 
-/// An infix operator: a normal binary op, or the range marker `..`.
+/// An infix operator: a normal binary op, the range marker `..`, or the pipe `|>` (M6).
 enum InfixOp {
     Bin(BinaryOp),
     Range,
+    Pipe,
 }
 
 /// Map a token to its infix operator and (left, right) binding powers, per `docs/syntax.md` §4.
@@ -838,6 +854,9 @@ fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
     use BinaryOp::*;
     use InfixOp::*;
     let (op, l) = match tok {
+        // Pipe `|>` is the lowest-precedence infix op (level 0): the whole expression to its left
+        // is threaded into the call on its right. Left-associative (`a |> f |> g` = `(a|>f)|>g`).
+        Token::Pipe => (Pipe, 0),
         Token::Or => (Bin(Or), 1),
         Token::And => (Bin(And), 3),
         Token::EqEq => (Bin(Eq), 5),
@@ -1417,5 +1436,78 @@ mod tests {
                 bindings: vec!["r".into()],
             }
         );
+    }
+
+    // ===== M6: pipe operator desugars to a call =====
+
+    /// The value expression of a `x := <expr>` one-statement module.
+    fn let_value(src: &str) -> Expr {
+        match only(src) {
+            StmtKind::Let { value, .. } => value,
+            other => panic!("expected a let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipe_desugars_to_call_with_lhs_first() {
+        // `x := 5 |> inc()` ⇒ `inc(5)`
+        let v = let_value("x := 5 |> inc()\n");
+        let ExprKind::Call { callee, args } = v.kind else {
+            panic!("expected a Call, got {:?}", v.kind)
+        };
+        assert!(matches!(callee.kind, ExprKind::Ident(ref n) if n == "inc"));
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].kind, ExprKind::Int(5));
+    }
+
+    #[test]
+    fn pipe_prepends_before_existing_args() {
+        // `x := 5 |> add(2)` ⇒ `add(5, 2)`
+        let v = let_value("x := 5 |> add(2)\n");
+        let ExprKind::Call { args, .. } = v.kind else {
+            panic!("expected a Call, got {:?}", v.kind)
+        };
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].kind, ExprKind::Int(5));
+        assert_eq!(args[1].kind, ExprKind::Int(2));
+    }
+
+    #[test]
+    fn pipe_chain_is_left_associative() {
+        // `x := 5 |> inc() |> dbl()` ⇒ `dbl(inc(5))`
+        let v = let_value("x := 5 |> inc() |> dbl()\n");
+        let ExprKind::Call { callee, args } = v.kind else {
+            panic!("expected outer Call, got {:?}", v.kind)
+        };
+        assert!(matches!(callee.kind, ExprKind::Ident(ref n) if n == "dbl"));
+        assert_eq!(args.len(), 1);
+        let ExprKind::Call { callee: inner_callee, args: inner_args } = &args[0].kind else {
+            panic!("expected inner Call, got {:?}", args[0].kind)
+        };
+        assert!(matches!(inner_callee.kind, ExprKind::Ident(ref n) if n == "inc"));
+        assert_eq!(inner_args[0].kind, ExprKind::Int(5));
+    }
+
+    #[test]
+    fn pipe_non_call_rhs_rejected() {
+        let e = parse_err("x := 5 |> 7\n");
+        assert!(e.to_string().contains("right side of '|>' must be a function call"), "{e}");
+    }
+
+    #[test]
+    fn pipe_bare_identifier_rhs_rejected() {
+        let e = parse_err("x := 5 |> f\n");
+        assert!(e.to_string().contains("right side of '|>' must be a function call"), "{e}");
+    }
+
+    #[test]
+    fn pipe_binds_looser_than_arithmetic() {
+        // `x := 1 + 2 |> f()` ⇒ `f(1 + 2)`, not `1 + f(2)`.
+        let v = let_value("x := 1 + 2 |> f()\n");
+        let ExprKind::Call { args, .. } = v.kind else {
+            panic!("expected a Call, got {:?}", v.kind)
+        };
+        assert_eq!(args.len(), 1);
+        assert!(matches!(args[0].kind, ExprKind::Binary { op: BinaryOp::Add, .. }));
     }
 }

@@ -1,0 +1,6 @@
+# rule: pipeExpr
+fn main():
+    a := 5 |> inc()
+    b := 5 |> add(2) |> dbl()
+    c := xs |> map(fn(x): x * 2) |> sum()
+    d := s.trim() |> upper()

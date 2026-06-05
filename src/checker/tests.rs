@@ -369,10 +369,102 @@ fn hello_example_type_checks() {
     ok(src);
 }
 
+#[test]
+fn methods_example_type_checks() {
+    let src = include_str!("../../examples/methods.chz");
+    ok(src);
+}
+
 // ===== multiple errors are collected, not just the first =====
 
 #[test]
 fn collects_multiple_errors() {
     let errs = check_src("x := a + b\ny := c - d\n");
     assert!(errs.len() >= 4, "expected >=4 unknown-name errors, got: {errs:?}");
+}
+
+// ===== M6a: core-type methods (str / list) =====
+
+#[test]
+fn str_methods_infer_types_ok() {
+    ok("s := \"Hi\"\nn := s.len()\nu := s.upper()\nl := s.lower()\nt := s.trim()\n");
+    // bool-returning methods used in a bool context
+    ok("s := \"abc\"\nif s.starts_with(\"a\"):\n    print(s)\n");
+    ok("s := \"abc\"\nif s.contains(\"b\"):\n    print(s)\n");
+}
+
+#[test]
+fn str_len_is_int() {
+    // len() must be int — use it where an int is required.
+    ok("s := \"hi\"\nn: int = s.len()\nprint(n)\n");
+}
+
+#[test]
+fn str_upper_is_str() {
+    ok("s := \"hi\"\nu: str = s.upper()\nprint(u)\n");
+}
+
+#[test]
+fn str_split_returns_list_of_str() {
+    ok("parts := \"a,b,c\".split(\",\")\nx: list[str] = parts\nprint(x)\n");
+}
+
+#[test]
+fn str_split_element_is_str_not_int() {
+    rejects("parts: list[int] = \"a,b\".split(\",\")\n", "list[str] to variable of type list[int]");
+}
+
+#[test]
+fn str_join_takes_list_of_str_returns_str() {
+    ok("xs := [\"a\", \"b\"]\nr: str = \",\".join(xs)\nprint(r)\n");
+}
+
+#[test]
+fn str_join_rejects_list_of_int() {
+    rejects("r := \",\".join([1, 2])\n", "argument 1 of 'join'");
+}
+
+#[test]
+fn str_starts_with_is_bool() {
+    ok("s := \"hi\"\nb: bool = s.starts_with(\"h\")\nprint(b)\n");
+}
+
+#[test]
+fn str_method_wrong_arity_rejected() {
+    rejects("s := \"hi\"\nx := s.upper(\"extra\")\n", "'upper' expects 0 argument(s), got 1");
+}
+
+#[test]
+fn str_split_arg_must_be_str() {
+    rejects("x := \"a,b\".split(5)\n", "argument 1 of 'split'");
+}
+
+#[test]
+fn unknown_str_method_rejected() {
+    rejects("s := \"hi\"\nx := s.frobnicate()\n", "type str has no method 'frobnicate'");
+}
+
+#[test]
+fn list_push_and_len_ok() {
+    ok("xs := [1, 2, 3]\nxs.push(4)\nn := xs.len()\nprint(n)\n");
+}
+
+#[test]
+fn list_push_element_type_checked() {
+    rejects("xs := [1, 2, 3]\nxs.push(\"nope\")\n", "argument 1 of 'push'");
+}
+
+#[test]
+fn list_len_is_int() {
+    ok("xs := [1, 2]\nn: int = xs.len()\nprint(n)\n");
+}
+
+#[test]
+fn unknown_list_method_rejected() {
+    rejects("xs := [1, 2]\nx := xs.frobnicate()\n", "type list[int] has no method 'frobnicate'");
+}
+
+#[test]
+fn method_on_int_rejected() {
+    rejects("x := 5\ny := x.upper()\n", "type int has no method 'upper'");
 }

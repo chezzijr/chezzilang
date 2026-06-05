@@ -513,13 +513,21 @@ impl Interp {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let receiver = self.eval(obj)?;
+        // Evaluate the arguments up front — *before* any method-lookup or type error — so the
+        // interp matches the VM, which evaluates call operands (bytecode) before the `CallMethod`
+        // op. Without this, `(5).frob(1 / 0)` would error on the receiver type here while the VM
+        // errors on the argument, breaking interp/VM parity (caught by the parity suite).
+        let arg_vals = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+        // Core-type methods (M6): built-in methods on `str` and `list` dispatch on the value.
+        if matches!(receiver, Value::Str(_) | Value::List(_)) {
+            return builtins::call_method(&receiver, method, arg_vals, span);
+        }
         // `module.fn(args)` is a plain call on the looked-up member — no `self` is bound.
         if let Value::Module(ns) = &receiver {
             let member = ns.members.0.borrow().get(method).cloned().ok_or_else(|| RuntimeError {
                 message: format!("module '{}' has no member '{method}'", ns.name),
                 span,
             })?;
-            let arg_vals = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
             return self.call_value(member, arg_vals, span);
         }
         let Value::Struct { name, .. } = &receiver else {
@@ -536,11 +544,9 @@ impl Interp {
             message: format!("struct '{name}' has no method '{method}'"),
             span,
         })?;
-        let mut call_args = Vec::with_capacity(args.len() + 1);
+        let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
         call_args.push(receiver.clone());
-        for a in args {
-            call_args.push(self.eval(a)?);
-        }
+        call_args.extend(arg_vals);
         self.call(&decl, &def.home, call_args, span)
     }
 
@@ -1407,6 +1413,65 @@ fn safe_div(a: int, b: int) -> Result[int]:
         assert_eq!(run("print(len(\"abcd\"))\n"), "4\n");
     }
 
+    // ===== M6a: core-type methods on str / list =====
+
+    #[test]
+    fn str_method_len() {
+        assert_eq!(run("print(\"abcd\".len())\n"), "4\n");
+    }
+
+    #[test]
+    fn str_method_upper_lower() {
+        assert_eq!(run("print(\"Hi There\".upper())\n"), "HI THERE\n");
+        assert_eq!(run("print(\"Hi There\".lower())\n"), "hi there\n");
+    }
+
+    #[test]
+    fn str_method_trim() {
+        assert_eq!(run("print(\"  hi  \".trim())\n"), "hi\n");
+    }
+
+    #[test]
+    fn str_method_split() {
+        assert_eq!(run("print(\"a,b,c\".split(\",\"))\n"), "[a, b, c]\n");
+    }
+
+    #[test]
+    fn str_method_join() {
+        assert_eq!(run("print(\",\".join([\"a\", \"b\", \"c\"]))\n"), "a,b,c\n");
+    }
+
+    #[test]
+    fn str_method_starts_with_and_contains() {
+        assert_eq!(run("print(\"abc\".starts_with(\"ab\"))\n"), "true\n");
+        assert_eq!(run("print(\"abc\".starts_with(\"x\"))\n"), "false\n");
+        assert_eq!(run("print(\"abc\".contains(\"b\"))\n"), "true\n");
+        assert_eq!(run("print(\"abc\".contains(\"z\"))\n"), "false\n");
+    }
+
+    #[test]
+    fn list_method_push_mutates_in_place() {
+        assert_eq!(run("xs := [1, 2]\nxs.push(3)\nprint(xs)\nprint(xs.len())\n"), "[1, 2, 3]\n3\n");
+    }
+
+    #[test]
+    fn str_method_wrong_arity_errors() {
+        let e = run_capture("print(\"hi\".upper(\"extra\"))\n").unwrap_err();
+        assert!(e.message.contains("upper() expects 0 argument(s), got 1"), "{}", e.message);
+    }
+
+    #[test]
+    fn unknown_str_method_errors() {
+        let e = run_capture("print(\"hi\".frobnicate())\n").unwrap_err();
+        assert_eq!(e.message, "type str has no method 'frobnicate'");
+    }
+
+    #[test]
+    fn join_on_non_str_element_errors() {
+        let e = run_capture("print(\",\".join([1, 2]))\n").unwrap_err();
+        assert!(e.message.contains("join"), "{}", e.message);
+    }
+
     #[test]
     fn builtin_range() {
         assert_eq!(run("print(range(3))\n"), "[0, 1, 2]\n");
@@ -1552,6 +1617,14 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/hello.chz");
         let expected = include_str!("../../examples/hello.expected");
         assert_eq!(run_capture(source).expect("hello.chz should run"), expected);
+    }
+
+    /// M6 golden: core-type methods + pipe produce exactly the expected output on the interp.
+    #[test]
+    fn golden_methods_chz() {
+        let source = include_str!("../../examples/methods.chz");
+        let expected = include_str!("../../examples/methods.expected");
+        assert_eq!(run_capture(source).expect("methods.chz should run"), expected);
     }
 
     #[test]

@@ -238,8 +238,8 @@ fn grammar_is_valid_bnf() {
     let _ = engine_grammar(&chars); // panics if the grammar doesn't parse
 }
 
-/// Every terminal in the grammar is a real token class, and the only class the grammar omits is
-/// the reserved `PIPE` (the `|>` operator, not wired until M6).
+/// Every terminal in the grammar is a real token class, and every token class appears in the
+/// grammar (PIPE joined the cascade with the M6 pipe operator).
 #[test]
 fn terminals_match_token_enum() {
     let classes = token_classes_from_source();
@@ -249,11 +249,7 @@ fn terminals_match_token_enum() {
     assert!(unknown.is_empty(), "grammar terminals not in Token enum: {unknown:?}");
 
     let missing: Vec<_> = classes.difference(&terminals).collect();
-    assert_eq!(
-        missing,
-        vec![&"PIPE".to_string()],
-        "every token class except PIPE must appear in the grammar; unexpected: {missing:?}"
-    );
+    assert!(missing.is_empty(), "every token class must appear in the grammar; missing: {missing:?}");
 }
 
 /// Grammar nonterminals correspond to parser functions (and vice versa), within a documented map.

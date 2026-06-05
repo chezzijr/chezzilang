@@ -24,6 +24,122 @@ pub fn call(name: &str, args: Vec<Value>, span: Span) -> Result<Value, RuntimeEr
     }
 }
 
+/// Dispatch a core-type method (`s.upper()`, `xs.push(x)`, …) on a `str` or `list` receiver (M6).
+/// Caller guarantees `recv` is `Value::Str` or `Value::List`. Mirrors the VM's `do_method_call`
+/// and the checker's `str_method_sig`/`list_method_sig` — keep the three in lockstep.
+pub fn call_method(
+    recv: &Value,
+    method: &str,
+    args: Vec<Value>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    match recv {
+        Value::Str(s) => str_method(s, method, &args, span),
+        Value::List(items) => list_method(items, method, args, span),
+        _ => unreachable!("call_method dispatched a non-str/list receiver"),
+    }
+}
+
+fn str_method(s: &Rc<str>, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    let str_arg = |i: usize| -> Result<Rc<str>, RuntimeError> {
+        match &args[i] {
+            Value::Str(a) => Ok(a.clone()),
+            other => Err(RuntimeError {
+                message: format!("{method}() expects a str argument, got {}", other.type_name()),
+                span,
+            }),
+        }
+    };
+    match method {
+        "len" => {
+            arity("len", args, 0, span)?;
+            Ok(Value::Int(s.chars().count() as i64))
+        }
+        "upper" => {
+            arity("upper", args, 0, span)?;
+            Ok(Value::Str(s.to_uppercase().into()))
+        }
+        "lower" => {
+            arity("lower", args, 0, span)?;
+            Ok(Value::Str(s.to_lowercase().into()))
+        }
+        "trim" => {
+            arity("trim", args, 0, span)?;
+            Ok(Value::Str(s.trim().into()))
+        }
+        "split" => {
+            arity("split", args, 1, span)?;
+            let sep = str_arg(0)?;
+            let parts: Vec<Value> = s.split(sep.as_ref()).map(|p| Value::Str(p.into())).collect();
+            Ok(Value::List(Rc::new(RefCell::new(parts))))
+        }
+        "starts_with" => {
+            arity("starts_with", args, 1, span)?;
+            Ok(Value::Bool(s.starts_with(str_arg(0)?.as_ref())))
+        }
+        "contains" => {
+            arity("contains", args, 1, span)?;
+            Ok(Value::Bool(s.contains(str_arg(0)?.as_ref())))
+        }
+        "join" => {
+            arity("join", args, 1, span)?;
+            let Value::List(items) = &args[0] else {
+                return Err(RuntimeError {
+                    message: format!(
+                        "join() expects a list of str, got {}",
+                        args[0].type_name()
+                    ),
+                    span,
+                });
+            };
+            let mut out = String::new();
+            for (i, item) in items.borrow().iter().enumerate() {
+                let Value::Str(part) = item else {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "join() expects a list of str, got an element of type {}",
+                            item.type_name()
+                        ),
+                        span,
+                    });
+                };
+                if i > 0 {
+                    out.push_str(s);
+                }
+                out.push_str(part);
+            }
+            Ok(Value::Str(out.into()))
+        }
+        _ => Err(RuntimeError {
+            message: format!("type str has no method '{method}'"),
+            span,
+        }),
+    }
+}
+
+fn list_method(
+    items: &Rc<RefCell<Vec<Value>>>,
+    method: &str,
+    args: Vec<Value>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    match method {
+        "len" => {
+            arity("len", &args, 0, span)?;
+            Ok(Value::Int(items.borrow().len() as i64))
+        }
+        "push" => {
+            arity("push", &args, 1, span)?;
+            items.borrow_mut().push(args.into_iter().next().unwrap());
+            Ok(Value::Nil)
+        }
+        _ => Err(RuntimeError {
+            message: format!("type list has no method '{method}'"),
+            span,
+        }),
+    }
+}
+
 fn arity(name: &str, args: &[Value], n: usize, span: Span) -> Result<(), RuntimeError> {
     if args.len() == n {
         Ok(())

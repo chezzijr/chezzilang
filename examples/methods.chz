@@ -1,0 +1,25 @@
+# M6 — core-type methods (str / list) + pipe operator.
+
+fn shout(s: str) -> str:
+    return s.upper()
+
+fn main():
+    s := "  Hello, World  "
+    print(s.trim())
+    print(s.trim().upper())
+    print(s.len())
+
+    parts := "a,b,c".split(",")
+    print(parts)
+    print(",".join(parts))
+
+    print("chezzi".starts_with("che"))
+    print("chezzi".contains("ez"))
+
+    xs := [1, 2, 3]
+    xs.push(4)
+    print(xs)
+    print(xs.len())
+
+    # pipe: thread the value as the first argument of the call on the right
+    print("hi" |> shout())

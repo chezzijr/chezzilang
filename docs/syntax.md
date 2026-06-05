@@ -187,17 +187,21 @@ print("tab\tgap, quote \"x\", path C:\\tmp")
 print("literal {{x}} vs value {x}")
 ```
 
-Common string ops (via builtins / `std.str`) — **methods land with the stdlib (M6); not yet usable**:
+Core-type string methods (built in — no import needed):
 
 ```chezzi
 s.len()          s.upper()        s.lower()
 s.trim()         s.split(",")     s.starts_with("ab")
-"a" + "b"        # concatenation (works today)
+s.contains("b")  ",".join(parts)  # join: separator.join(list[str])
+"a" + "b"        # concatenation
 ```
 
-## 11. Pipe operator `|>`  (M6)
+List methods: `xs.push(x)` (mutates in place), `xs.len()`.
+
+## 11. Pipe operator `|>`
 
 Threads the left value as the first argument of the right call. Reads top-to-bottom for data flow.
+The right side must be a call; `a |> f(x)` desugars to `f(a, x)`.
 
 ```chezzi
 result := [1, 2, 3, 4]
