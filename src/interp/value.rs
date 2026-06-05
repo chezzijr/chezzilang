@@ -1,9 +1,32 @@
 //! Runtime values produced by the tree-walk interpreter.
 
 use crate::ast::{Expr, FnDecl, Param};
+use crate::native::NativeFn;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+
+/// A native (Rust) function exposed as a Chezzi value — a member of a native std module (M6c).
+/// Wraps a bare [`NativeFn`] pointer plus its name for display. `PartialEq`/`Debug` are hand-written
+/// because a `fn` pointer's derived `Debug` prints an address and its `PartialEq` compares by
+/// address (native fns are never compared in real programs — this just satisfies `Value`'s derive).
+#[derive(Clone)]
+pub struct NativeFnEntry {
+    pub name: Rc<str>,
+    pub func: NativeFn,
+}
+
+impl PartialEq for NativeFnEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.func as usize == other.func as usize
+    }
+}
+
+impl std::fmt::Debug for NativeFnEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<native fn {}>", self.name)
+    }
+}
 
 // `HashMap` is still used by `Closure::captured`.
 
@@ -73,6 +96,8 @@ pub enum Value {
     Func(Rc<FnDecl>, ModEnv),
     /// An anonymous function with its captured environment.
     Closure(Rc<Closure>),
+    /// A native (Rust) function — a member of a native std module (`std.math` etc., M6c).
+    Native(NativeFnEntry),
     /// An imported module — a namespace of its top-level bindings. `io.read()` is a field access
     /// on one of these.
     Module(Rc<ModuleNamespace>),
@@ -105,6 +130,7 @@ impl Value {
             Value::List(_) => "list",
             Value::Func(_, _) => "function",
             Value::Closure(_) => "function",
+            Value::Native(_) => "function",
             Value::Module(_) => "module",
             Value::Struct { .. } => "struct",
             Value::Enum { .. } => "enum",
@@ -131,6 +157,7 @@ impl std::fmt::Display for Value {
             }
             Value::Func(decl, _) => write!(f, "<fn {}>", decl.name),
             Value::Closure(_) => write!(f, "<closure>"),
+            Value::Native(e) => write!(f, "<native fn {}>", e.name),
             Value::Module(ns) => write!(f, "<module {}>", ns.name),
             Value::Struct { name, fields } => {
                 let inner = fields

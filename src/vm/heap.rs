@@ -39,6 +39,12 @@ pub enum Obj {
         name: Box<str>,
         globals: HashMap<String, Value>,
     },
+    /// A native (Rust) function — a member of a native std module (`std.math` etc., M6c). Holds no
+    /// heap references, so it has no GC children.
+    Native {
+        name: Box<str>,
+        func: crate::native::NativeFn,
+    },
 }
 
 /// One heap slot: the object (or a hole, for swept/free slots) + its GC mark bit.
@@ -163,6 +169,7 @@ impl Heap {
                 out.push(*home);
             }
             Obj::Module { globals, .. } => globals.values().for_each(&mut push),
+            Obj::Native { .. } => {}
         }
         out
     }

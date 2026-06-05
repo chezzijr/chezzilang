@@ -95,6 +95,11 @@ pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
 pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
     let mut c = Checker::new();
     for lm in &graph.modules {
+        // A native std module (std.math/io/os) has no AST: its public surface is a static table.
+        if let Some(name) = lm.native {
+            c.module_sigs.insert(lm.id.clone(), native_module_sig(name));
+            continue;
+        }
         let label = if lm.id == graph.entry { None } else { Some(lm.label()) };
         c.begin_module(label);
         let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
@@ -105,6 +110,45 @@ pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
     } else {
         Err(c.errors)
     }
+}
+
+/// The static type signatures of a native std module's members (M6c). This is the **third**
+/// lockstep table: it must agree with the runtime members in `src/native/<module>.rs` and the
+/// per-engine value lowering. `std.math` params are `float` (the language has no implicit int→float,
+/// so callers pass floats); `pi`/`e` are float constants.
+fn native_module_sig(name: &str) -> ModuleSig {
+    let mut sig = ModuleSig::default();
+    let mut func = |n: &str, params: Vec<Ty>, ret: Ty| {
+        sig.functions.insert(n.to_string(), FnSig { params, ret });
+    };
+    match name {
+        "std.math" => {
+            func("abs", vec![Ty::Float], Ty::Float);
+            func("min", vec![Ty::Float, Ty::Float], Ty::Float);
+            func("max", vec![Ty::Float, Ty::Float], Ty::Float);
+            func("floor", vec![Ty::Float], Ty::Float);
+            func("ceil", vec![Ty::Float], Ty::Float);
+            func("round", vec![Ty::Float], Ty::Float);
+            func("pow", vec![Ty::Float, Ty::Float], Ty::Float);
+            func("sqrt", vec![Ty::Float], Ty::Float);
+            sig.values.insert("pi".into(), Ty::Float);
+            sig.values.insert("e".into(), Ty::Float);
+        }
+        "std.io" => {
+            func("print", vec![Ty::Str], Ty::Nil);
+            func("eprint", vec![Ty::Str], Ty::Nil);
+            func("read_line", vec![], Ty::option(Ty::Str));
+            func("read_file", vec![Ty::Str], Ty::result(Ty::Str));
+            func("write_file", vec![Ty::Str, Ty::Str], Ty::result(Ty::Nil));
+        }
+        "std.os" => {
+            func("args", vec![], Ty::list(Ty::Str));
+            func("env", vec![Ty::Str], Ty::option(Ty::Str));
+            func("getcwd", vec![], Ty::result(Ty::Str));
+        }
+        _ => {}
+    }
+    sig
 }
 
 struct Checker {

@@ -51,6 +51,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
             label: lm.label(),
             toplevel,
             imports: lm.imports.clone(),
+            native: lm.native,
         });
     }
     Ok(c.program)
@@ -69,6 +70,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         label: "<main>".to_string(),
         toplevel,
         imports: Vec::new(),
+        native: None,
     });
     Ok(c.program)
 }

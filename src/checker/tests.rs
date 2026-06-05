@@ -712,3 +712,94 @@ fn user_struct_named_option_rejected() {
     rejects("struct Option:\n    x: int\n", "type 'Option' is reserved (builtin)");
 }
 
+// ===== M6c: native std module signatures =====
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static CHECKER_TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+struct TmpDir(PathBuf);
+impl TmpDir {
+    fn new() -> Self {
+        let n = CHECKER_TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("chezzi_chk_{}_{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).unwrap();
+        TmpDir(dir)
+    }
+    fn write(&self, rel: &str, contents: &str) -> PathBuf {
+        let p = self.0.join(rel);
+        std::fs::write(&p, contents).unwrap();
+        p
+    }
+}
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Type-check an entry program that may import native std modules (resolved via `build_graph`).
+fn check_entry(src: &str) -> Vec<CheckError> {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    }
+}
+
+fn entry_ok(src: &str) {
+    let errs = check_entry(src);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+fn entry_rejects(src: &str, needle: &str) {
+    let errs = check_entry(src);
+    assert!(
+        errs.iter().any(|e| e.message.contains(needle)),
+        "expected an error containing {needle:?}, got: {errs:?}"
+    );
+}
+
+#[test]
+fn native_math_floor_typechecks_and_returns_float() {
+    entry_ok("import std.math\nfn main():\n    x: float = math.floor(2.7)\n    print(x)\n");
+}
+
+#[test]
+fn native_math_unknown_member_rejected() {
+    entry_rejects(
+        "import std.math\nfn main():\n    print(math.nope(1.0))\n",
+        "has no member 'nope'",
+    );
+}
+
+#[test]
+fn native_math_wrong_arity_rejected() {
+    entry_rejects(
+        "import std.math\nfn main():\n    print(math.pow(2.0))\n",
+        "expects 2 argument",
+    );
+}
+
+#[test]
+fn native_math_constant_pi_is_float() {
+    entry_ok("import std.math\nfn main():\n    r: float = math.pi\n    print(r)\n");
+}
+
+#[test]
+fn native_math_from_import_binds_member() {
+    entry_ok("import floor from std.math\nfn main():\n    x: float = floor(2.7)\n    print(x)\n");
+}
+
+#[test]
+fn native_math_float_param_rejects_int() {
+    // The language has no implicit int->float; math.sqrt(int) is a type error.
+    entry_rejects(
+        "import std.math\nfn main():\n    print(math.sqrt(16))\n",
+        "",
+    );
+}
+

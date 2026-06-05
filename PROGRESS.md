@@ -10,12 +10,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-> **M6 — stdlib + pipe `|>` + core-type methods.** 🟦 **M6a + M6b DONE** (core-type str/list
-> methods on both engines; pipe `|>` via parse-time desugar). **M6c (stdlib) deferred** — native
-> `std.io/os/math` need the `NativeFn`/`Host` FFI seam, which is explicitly *not scheduled*
-> (record-only; see Ideas below). Chezzi-written std modules are possible later but were not
-> needed this session.
-> **Next: M6c only when the FFI seam is scheduled — otherwise M6 is functionally complete.**
+> **M6 — stdlib + pipe `|>` + core-type methods.** ✅ **M6a + M6b + M6c DONE.** The Level-2 native
+> FFI seam (`NativeFn` + `Host` trait) was scheduled and built: each binding is written once and
+> runs on both engines. Ships `std.math`/`std.io`/`std.os` (native) and `std.str` (pure Chezzi).
+> **Next: M6 complete → see roadmap for the next milestone (Stretch: Cranelift backend).**
+
+> **Deferred within M6c (small, intentional):** `std.os.exit(code)` — a correct cooperative exit
+> needs an exit-code channel threaded through both run drivers + the CLI; deferred to avoid a
+> misleading half-implementation. `std.io.read_file` is capped at 64 MiB (returns `Err`, no OOM).
+> `std.os.getcwd` reads the real cwd (not injectable via `HostConfig` yet — parity holds, documented).
+> Level-3 dynamic `cdylib`/C-ABI FFI remains out of scope per the spec.
 
 > **Entry-model change (post-M6, semantics fix).** Removed the auto-call of `main()` — `main` is now
 > an ordinary function; programs run top-to-bottom and call it themselves (scripting-language model;
@@ -60,6 +64,35 @@ the checker / interp / VM need **zero** pipe-specific code (they see a plain cal
   `accept/pipe_chain.chz` + `reject/pipe_noncall.chz` added.
 - ✅ **Tests** — parser unit tests (desugar shape, arg-prepend, left-assoc chain, looser-than-`+`,
   non-call rejects); pipe programs in the VM `parity_full_suite`.
+
+## M6c — Standard library + native FFI seam  ✅ DONE
+
+The Level-2 native FFI seam — the mechanism that exposes a Rust function as a callable Chezzi value,
+written once and run on **both** engines. Built **TDD** (red→green per cycle). CPython-built-in-C
+model; Level-3 dynamic `cdylib` loading stays out of scope.
+
+- ✅ **Seam** (`src/native/`) — `Host` trait (engine-agnostic arg access + stdout/stderr/stdin +
+  args/env/cwd) + `NativeFn` (`fn(&mut dyn Host) -> Result<NativeRet, HostError>`) + `NativeRet`
+  (engine-neutral return, lowered to each engine's `Value` **after** the call, so native code never
+  touches `Rc`/`GcRef` — GC-safe by construction). `HostConfig`/`Stdin` carry args/env/stdin.
+- ✅ **Both engines** — `Value::Native`/`Obj::Native`, `call_native` + `InterpHost`/`VmHost`
+  adapters + `lower_native`, native-module injection in `eval_module`/`run_module`. VM
+  `Obj::Native` has no GC children; the stress test `native_returned_heap_values_survive_gc_stress`
+  guards the invariant.
+- ✅ **Resolver** — native `std.*` (`is`/`native_name`) resolves to a **virtual** module (synthetic
+  `<native:std.math>` id, no `.chz` file); `std.str` stays file-backed. `LoadedModule.native`.
+- ✅ **Checker** — `native_module_sig` (the third lockstep table) injects static signatures; `from`
+  imports + `m.fn()` type-check with zero new logic. Math params are `float` (no implicit int→float).
+- ✅ **Modules** — `std.math` (abs/min/max/floor/ceil/round/pow/sqrt + `pi`/`e`), `std.io`
+  (print/eprint/read_line/read_file/write_file), `std.os` (args/env/getcwd) — all native; `std.str`
+  (repeat/reverse/pad_left/is_empty/split_lines) — **pure Chezzi** (`std/str.chz`), dogfooding.
+- ✅ **CLI** — `chezzi run f.chz a b` passes program args; env + real stdin wired via
+  `HostConfig::from_process`; `io.eprint` flushes to real stderr.
+- ✅ **Tests** — per-module parity (interp == VM on stdout *and* stderr *and* error), checker sig
+  tests, resolver virtual-module test, GC stress, `examples/std_demo.chz` golden, conformance. 401
+  total, clean `cargo clippy`.
+- ⏸️ **Deferred (intentional):** `std.os.exit(code)` (needs an exit-code channel through both run
+  drivers + CLI); `read_file` capped at 64 MiB; `getcwd` not yet injectable via `HostConfig`.
 
 ## M5a — Bytecode compiler + stack VM (handle values, no collector yet)  ✅ DONE
 
@@ -313,9 +346,9 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 - 🟦 **M6** — Stdlib + pipe `|>` + **core-type methods**.
   - ✅ **M6a** — core-type str/list methods on both backends + checker + golden/parity.
   - ✅ **M6b** — pipe `|>` (parse-time desugar to a call; grammar + conformance updated).
-  - ⬜ **M6c** — stdlib (`std.io/math/str/os`). **Blocked**: native modules need the `NativeFn`/
-    `Host` FFI seam, which is the deferred "Future idea" below. Chezzi-written modules are possible
-    but were not needed yet. Schedule M6c only alongside a decision on the FFI seam.
+  - ✅ **M6c** — stdlib via the Level-2 native FFI seam (`NativeFn` + `Host`): `std.math`/`std.io`/
+    `std.os` native, `std.str` pure Chezzi. Written once, runs on both engines. (`std.os.exit`,
+    `getcwd` cwd-injection, and Level-3 dynamic FFI deferred — see the M6c section above.)
 
 ### Ideas — NOT scheduled (record-only)
 

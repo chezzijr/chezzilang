@@ -54,6 +54,11 @@ struct VariantDef {
 struct Interp {
     env: env::Env,
     out: String,
+    /// Captured stderr (written by `std.io.eprint`). Separate from `out` so streams don't mix;
+    /// the CLI flushes it to the real stderr.
+    stderr: String,
+    /// Runtime configuration the native std modules read (args/env/stdin). Default = inert.
+    host: crate::native::HostConfig,
     structs: std::collections::HashMap<String, std::rc::Rc<StructDef>>,
     variants: std::collections::HashMap<String, VariantDef>,
     /// Evaluated module namespaces, keyed by module id (run-once cache for a multi-file program).
@@ -79,6 +84,8 @@ impl Interp {
         let mut interp = Interp {
             env: env::Env::new(),
             out: String::new(),
+            stderr: String::new(),
+            host: crate::native::HostConfig::default(),
             structs: std::collections::HashMap::new(),
             variants: std::collections::HashMap::new(),
             namespaces: std::collections::HashMap::new(),
@@ -384,11 +391,31 @@ impl Interp {
         match callee {
             Value::Func(decl, home) => self.call(&decl, &home, args, span),
             Value::Closure(clo) => self.call_closure(&clo, args, span),
+            Value::Native(e) => self.call_native(e.func, args, span),
             other => Err(RuntimeError {
                 message: format!("'{}' is not callable", other.type_name()),
                 span,
             }),
         }
+    }
+
+    /// Invoke a native (Rust) function value (M6c). Builds an [`InterpHost`] over the evaluated
+    /// args, runs the binding, and lowers its engine-neutral [`NativeRet`] into a `Value`. A
+    /// [`HostError`] becomes a `RuntimeError` carrying the call site's span.
+    fn call_native(
+        &mut self,
+        func: crate::native::NativeFn,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let mut host = InterpHost {
+            args,
+            out: &mut self.out,
+            stderr: &mut self.stderr,
+            cfg: &mut self.host,
+        };
+        let ret = func(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
+        Ok(lower_native(ret))
     }
 
     /// Call a closure: restore its captured frames, bind params on top, evaluate the body
@@ -677,6 +704,29 @@ impl Interp {
     /// globals as the module's namespace (cached for importers). Run-once: each module is evaluated
     /// exactly once, in dependency order. No module auto-runs `main` (it's a normal function).
     fn eval_module(&mut self, lm: &crate::resolver::LoadedModule) -> Result<(), RuntimeError> {
+        // A native std module (std.math/io/os) has no AST: build its namespace from the Rust member
+        // table + float constants and cache it. Mirrors the VM's `run_module` native arm.
+        if let Some(name) = lm.native {
+            let members = value::ModEnv::new();
+            {
+                let mut m = members.0.borrow_mut();
+                for (mname, func) in crate::native::native_members(name) {
+                    m.insert(
+                        mname.to_string(),
+                        Value::Native(value::NativeFnEntry { name: (*mname).into(), func: *func }),
+                    );
+                }
+                for (cname, cval) in crate::native::native_consts(name) {
+                    m.insert(cname.to_string(), Value::Float(*cval));
+                }
+            }
+            self.namespaces.insert(
+                lm.id.clone(),
+                std::rc::Rc::new(value::ModuleNamespace { name: name.into(), members }),
+            );
+            return Ok(());
+        }
+
         let mod_globals = value::ModEnv::new();
         let saved = self.env.swap_globals(mod_globals.clone());
         // Bind this module's imports before its body runs (dependencies are already evaluated, so
@@ -999,31 +1049,44 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
 /// Run a multi-file program from its entry path: resolve the dependency graph, evaluate each
 /// module once in dependency order, then run the entry's `main()`. Output produced so far is
 /// preserved alongside the outcome (so the CLI can print partial output before an error).
-pub fn run_file(entry: &std::path::Path) -> (String, Result<(), RuntimeError>) {
+/// Convenience wrapper with the default (inert) host config. Test-only — the CLI uses
+/// [`run_file_with`] to pass a process-backed config.
+#[cfg(test)]
+pub fn run_file(entry: &std::path::Path) -> RunOutput {
+    run_file_with(entry, crate::native::HostConfig::default())
+}
+
+/// A finished run: captured `(stdout, stderr, outcome)`. Stderr holds `std.io.eprint` output.
+pub type RunOutput = (String, String, Result<(), RuntimeError>);
+
+/// Like [`run_file`], but with an explicit [`crate::native::HostConfig`] (args/env/stdin) for the
+/// native std modules. The CLI passes a process-backed config; tests inject a deterministic one.
+pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(INTERP_STACK_BYTES)
-        .spawn(move || run_file_inner(&entry))
+        .spawn(move || run_file_inner(&entry, cfg))
         .expect("failed to spawn interpreter thread")
         .join()
         .expect("interpreter thread panicked")
 }
 
-fn run_file_inner(entry: &std::path::Path) -> (String, Result<(), RuntimeError>) {
+fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
     let graph = match crate::resolver::build_graph(entry) {
         Ok(g) => g,
         Err(e) => {
-            return (String::new(), Err(RuntimeError { message: e.message, span: e.span }));
+            return (String::new(), String::new(), Err(RuntimeError { message: e.message, span: e.span }));
         }
     };
     let mut interp = Interp::new();
+    interp.host = cfg;
     // Modules are in load order: dependencies first, entry last.
     for lm in &graph.modules {
         if let Err(e) = interp.eval_module(lm) {
-            return (interp.out, Err(e));
+            return (interp.out, interp.stderr, Err(e));
         }
     }
-    (interp.out, Ok(()))
+    (interp.out, interp.stderr, Ok(()))
 }
 
 /// Run a whole program and return its complete stdout, or the error if it didn't finish.
@@ -1051,6 +1114,90 @@ fn parse_expr_str(src: &str) -> Result<Expr, RuntimeError> {
         message: e.message,
         span: e.span,
     })
+}
+
+/// The interpreter's [`crate::native::Host`] adapter: lets a native fn read the evaluated `Value`
+/// arguments and write to the captured output buffers. Borrows only the fields it needs so it can
+/// be built inside an `&mut self` method. (Stdin / args / env / cooperative-exit are wired in a
+/// later milestone; the unwired methods return inert defaults — empty stdin/env, real cwd.)
+struct InterpHost<'a> {
+    args: Vec<Value>,
+    out: &'a mut String,
+    stderr: &'a mut String,
+    cfg: &'a mut crate::native::HostConfig,
+}
+
+impl crate::native::Host for InterpHost<'_> {
+    fn arg_count(&self) -> usize {
+        self.args.len()
+    }
+    fn arg_int(&mut self, i: usize) -> Result<i64, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Int(n)) => Ok(*n),
+            Some(other) => Err(crate::native::HostError::arg_type(i, "int", other.type_name())),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_float(&mut self, i: usize) -> Result<f64, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Float(f)) => Ok(*f),
+            Some(Value::Int(n)) => Ok(*n as f64),
+            Some(other) => Err(crate::native::HostError::arg_type(i, "float", other.type_name())),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_str(&mut self, i: usize) -> Result<String, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Str(s)) => Ok(s.to_string()),
+            Some(other) => Err(crate::native::HostError::arg_type(i, "str", other.type_name())),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn write_stdout(&mut self, s: &str) {
+        self.out.push_str(s);
+    }
+    fn write_stderr(&mut self, s: &str) {
+        self.stderr.push_str(s);
+    }
+    fn read_line(&mut self) -> Result<Option<String>, crate::native::HostError> {
+        self.cfg.stdin.read_line()
+    }
+    fn os_args(&self) -> Vec<String> {
+        self.cfg.args.clone()
+    }
+    fn os_env(&self, key: &str) -> Option<String> {
+        self.cfg.env.get(key).cloned()
+    }
+    fn os_getcwd(&self) -> Result<String, crate::native::HostError> {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .map_err(|e| crate::native::HostError { message: e.to_string() })
+    }
+}
+
+/// Lower a native fn's engine-neutral [`crate::native::NativeRet`] into an interpreter `Value`.
+/// `Ok`/`Err`/`Some`/`None` become the built-in `Result` / `Option` enum values.
+fn lower_native(ret: crate::native::NativeRet) -> Value {
+    use crate::native::NativeRet as N;
+    match ret {
+        N::Int(n) => Value::Int(n),
+        N::Float(f) => Value::Float(f),
+        N::Bool(b) => Value::Bool(b),
+        N::Str(s) => Value::Str(s.into()),
+        N::List(items) => {
+            let vs = items.into_iter().map(lower_native).collect();
+            Value::List(std::rc::Rc::new(std::cell::RefCell::new(vs)))
+        }
+        N::Ok(inner) => enum_val("Result", "Ok", vec![lower_native(*inner)]),
+        N::Err(msg) => enum_val("Result", "Err", vec![Value::Str(msg.into())]),
+        N::Some(inner) => enum_val("Option", "Some", vec![lower_native(*inner)]),
+        N::None => enum_val("Option", "None", Vec::new()),
+        N::Nil => Value::Nil,
+    }
+}
+
+fn enum_val(ty: &str, variant: &str, payload: Vec<Value>) -> Value {
+    Value::Enum { ty: ty.into(), variant: variant.into(), payload }
 }
 
 /// Apply a binary operator to two already-evaluated operands.
@@ -1202,6 +1349,41 @@ mod tests {
 
     fn run(src: &str) -> String {
         run_capture(src).expect("run should succeed")
+    }
+
+    // ----- M6c: native function values -----
+
+    #[test]
+    fn calls_native_fn_value() {
+        use crate::native::{Host, HostError, NativeRet};
+        fn add(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+            crate::native::expect_args(h, "add", 2)?;
+            Ok(NativeRet::Int(h.arg_int(0)? + h.arg_int(1)?))
+        }
+        let mut interp = Interp::new();
+        interp.env.define(
+            "add",
+            Value::Native(value::NativeFnEntry { name: "add".into(), func: add }),
+        );
+        let expr = parse_expr_str("add(40, 2)").unwrap();
+        assert_eq!(interp.eval(&expr), Ok(Value::Int(42)));
+    }
+
+    #[test]
+    fn native_fn_error_carries_span() {
+        use crate::native::{Host, HostError, NativeRet};
+        fn boom(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+            crate::native::expect_args(h, "boom", 0)?;
+            Ok(NativeRet::Nil)
+        }
+        let mut interp = Interp::new();
+        interp.env.define(
+            "boom",
+            Value::Native(value::NativeFnEntry { name: "boom".into(), func: boom }),
+        );
+        let expr = parse_expr_str("boom(1)").unwrap();
+        let err = interp.eval(&expr).unwrap_err();
+        assert_eq!(err.message, "boom() expects 0 argument(s), got 1");
     }
 
     #[test]
@@ -1869,14 +2051,14 @@ mod module_tests {
 
     /// Run an entry file, asserting success and returning its stdout.
     fn run_ok(entry: &std::path::Path) -> String {
-        let (out, res) = run_file(entry);
+        let (out, _err, res) = run_file(entry);
         res.expect("run_file should succeed");
         out
     }
 
     /// Run an entry file, asserting it fails, returning the error message.
     fn run_err(entry: &std::path::Path) -> String {
-        let (_out, res) = run_file(entry);
+        let (_out, _err, res) = run_file(entry);
         res.expect_err("run_file should fail").message
     }
 

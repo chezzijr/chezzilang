@@ -184,6 +184,9 @@ pub struct ModuleProto {
     pub label: String,
     pub toplevel: ProtoId,
     pub imports: Vec<ResolvedImport>,
+    /// `Some(name)` for a native std module (`std.math` etc., M6c): its globals are Rust
+    /// `NativeFn`s injected at run time, and its (empty) `toplevel` is never executed.
+    pub native: Option<&'static str>,
 }
 
 /// The whole compiled program.

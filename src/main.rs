@@ -12,6 +12,7 @@ mod checker;
 mod compiler;
 mod interp;
 mod lexer;
+mod native;
 mod parser;
 mod resolver;
 mod vm;
@@ -164,8 +165,11 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let mut path = None;
     let mut json = false;
     let mut use_vm = true;
+    // Positional args after the script path are the program's own args (std.os.args).
+    let mut prog_args: Vec<String> = Vec::new();
     for arg in args {
         match arg.as_str() {
+            _ if path.is_some() => prog_args.push(arg.clone()),
             "--errors=json" => json = true,
             "--vm" => use_vm = true,
             "--interp" => use_vm = false,
@@ -173,8 +177,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
                 eprintln!("chezzi run: unknown flag '{other}'");
                 return ExitCode::FAILURE;
             }
-            other if path.is_none() => path = Some(other.to_string()),
-            _ => {}
+            other => path = Some(other.to_string()),
         }
     }
     let Some(path) = path else {
@@ -198,16 +201,20 @@ fn cmd_run(args: &[String]) -> ExitCode {
         }
     }
 
-    // Print whatever the program emitted before any error, then the error itself.
+    // Print whatever the program emitted before any error, then the error itself. The native std
+    // modules read args/env/stdin from a process-backed config.
     let p = std::path::Path::new(&path);
-    let (output, errored) = if use_vm {
-        let (out, result) = vm::run_file(p);
-        (out, result.err().map(|e| e.to_string()))
+    let cfg = native::HostConfig::from_process(prog_args);
+    let (output, errout, errored) = if use_vm {
+        let (out, err, result) = vm::run_file_with(p, cfg);
+        (out, err, result.err().map(|e| e.to_string()))
     } else {
-        let (out, result) = interp::run_file(p);
-        (out, result.err().map(|e| e.to_string()))
+        let (out, err, result) = interp::run_file_with(p, cfg);
+        (out, err, result.err().map(|e| e.to_string()))
     };
     print!("{output}");
+    // Flush program stderr (std.io.eprint output) to the real stderr.
+    eprint!("{errout}");
     match errored {
         None => ExitCode::SUCCESS,
         Some(msg) => {

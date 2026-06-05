@@ -52,6 +52,10 @@ pub struct LoadedModule {
     pub dotted: Vec<String>,
     pub ast: Module,
     pub imports: Vec<ResolvedImport>,
+    /// `Some(name)` for a **native** std module (`std.math`/`std.io`/`std.os`, M6c): a virtual
+    /// module with no `.chz` file, whose members are Rust `NativeFn`s injected by each engine.
+    /// `None` for an ordinary file-backed module.
+    pub native: Option<&'static str>,
 }
 
 impl LoadedModule {
@@ -176,6 +180,14 @@ impl Builder {
         let mut resolved = Vec::with_capacity(imports.len());
         for (import, span) in imports {
             let path = import_path(&import);
+            // Native std modules (std.math/io/os) are virtual: no `.chz` file, members injected by
+            // the engines. Bind them to a synthetic, stable id and skip the filesystem entirely.
+            if let Some(name) = crate::native::native_name(&path) {
+                let target = native_id(name);
+                self.visit_native(&target, name);
+                resolved.push(ResolvedImport { target, import, span });
+                continue;
+            }
             let file = module_file(&path, &self.project_root, &self.std_root);
             let target = ModuleId(canonical_or_abs(&file));
             self.visit(&target, &path, span)?;
@@ -189,8 +201,25 @@ impl Builder {
             dotted: dotted.to_vec(),
             ast,
             imports: resolved,
+            native: None,
         });
         Ok(())
+    }
+
+    /// Emit a native (virtual) std module: no file read, no recursion, deduped like any other.
+    /// Its dotted path is the name split on `.` so [`LoadedModule::label`] reads `std.math`.
+    fn visit_native(&mut self, id: &ModuleId, name: &'static str) {
+        if self.visited.contains_key(id) {
+            return;
+        }
+        self.visited.insert(id.clone(), ());
+        self.order.push(LoadedModule {
+            id: id.clone(),
+            dotted: name.split('.').map(str::to_string).collect(),
+            ast: Module { stmts: Vec::new() },
+            imports: Vec::new(),
+            native: Some(name),
+        });
     }
 
     /// Lex + parse a module's source, wrapping failures with the module label (since `Span`
@@ -217,6 +246,12 @@ impl Builder {
             })
             .collect()
     }
+}
+
+/// A stable, distinct id for a native (virtual) std module — a sentinel path that can never collide
+/// with a real file (it is never canonicalized / read).
+fn native_id(name: &str) -> ModuleId {
+    ModuleId(PathBuf::from(format!("<native:{name}>")))
 }
 
 fn import_path(import: &Import) -> Vec<String> {
@@ -371,6 +406,23 @@ mod tests {
         let err = build_graph(&entry).unwrap_err();
         assert!(err.message.contains("cannot find module"), "got: {}", err.message);
         assert!(err.message.contains("nope.thing"), "got: {}", err.message);
+    }
+
+    // 8. A native std module (std.math) is virtual: resolved without any .chz file, flagged native.
+    #[test]
+    fn native_std_module_is_virtual() {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", "import std.math\nfn main(): print(1)\n");
+        let graph = build_graph(&entry).unwrap();
+        let m = graph
+            .modules
+            .iter()
+            .find(|m| m.label() == "std.math")
+            .expect("std.math should be in the graph");
+        assert_eq!(m.native, Some("std.math"));
+        assert!(m.ast.stmts.is_empty());
+        // Dependencies precede dependents: the native module loads before the entry.
+        assert_eq!(graph.modules.last().unwrap().id, graph.entry);
     }
 
     // 7. A diamond loads the shared module once; deps precede dependents, entry last.

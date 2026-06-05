@@ -1,0 +1,38 @@
+# std.str — string helpers written in Chezzi (M6c dogfooding).
+#
+# Built entirely on the core-type str methods (len/split/...) and indexing — no native code. This
+# is the "some written in Chezzi" half of the stdlib: it imports nothing native itself, but proves
+# Chezzi std modules coexist with the native ones (std.io/math/os) in the same program.
+
+# Is the string empty?
+fn is_empty(s: str) -> bool:
+    return s.len() == 0
+
+# `s` repeated `n` times ("ab", 3 -> "ababab"). n <= 0 yields "".
+fn repeat(s: str, n: int) -> str:
+    out := ""
+    i := 0
+    while i < n:
+        out = out + s
+        i += 1
+    return out
+
+# `s` reversed ("hello" -> "olleh").
+fn reverse(s: str) -> str:
+    out := ""
+    i := s.len() - 1
+    while i >= 0:
+        out = out + s[i]
+        i -= 1
+    return out
+
+# Left-pad `s` with `fill` until it is at least `width` long ("7", 3, "0" -> "007").
+fn pad_left(s: str, width: int, fill: str) -> str:
+    out := s
+    while out.len() < width:
+        out = fill + out
+    return out
+
+# Split `s` on newlines into a list of lines.
+fn split_lines(s: str) -> list[str]:
+    return s.split("\n")

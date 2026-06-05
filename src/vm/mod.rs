@@ -63,6 +63,10 @@ struct Vm {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
     out: String,
+    /// Captured stderr (written by `std.io.eprint`). Separate from `out` so streams don't mix.
+    stderr: String,
+    /// Runtime configuration the native std modules read (args/env/stdin). Default = inert.
+    host: crate::native::HostConfig,
     call_depth: usize,
     /// Each module's namespace object, indexed by module index (run-once cache + import targets).
     module_objs: Vec<GcRef>,
@@ -80,6 +84,8 @@ impl Vm {
             stack: Vec::new(),
             frames: Vec::new(),
             out: String::new(),
+            stderr: String::new(),
+            host: crate::native::HostConfig::default(),
             call_depth: 0,
             module_objs: Vec::new(),
             cur_base: 0,
@@ -128,6 +134,22 @@ impl Vm {
         });
         debug_assert_eq!(self.module_objs.len(), idx);
         self.module_objs.push(mod_obj);
+
+        // A native std module: populate its globals with Rust `NativeFn`s + float constants and
+        // skip running a toplevel. Mirrors the interpreter's `eval_module` native arm.
+        if let Some(name) = m.native {
+            for (mname, func) in crate::native::native_members(name) {
+                let nat = self.heap.alloc(Obj::Native {
+                    name: (*mname).into(),
+                    func: *func,
+                });
+                self.module_define(mod_obj, mname, Value::Obj(nat));
+            }
+            for (cname, cval) in crate::native::native_consts(name) {
+                self.module_define(mod_obj, cname, Value::Float(*cval));
+            }
+            return Ok(());
+        }
 
         // Bind imports (dependencies already ran, so their namespaces are populated).
         for imp in &m.imports {
@@ -649,10 +671,70 @@ impl Vm {
                     self.push(v);
                     Ok(())
                 }
+                Obj::Native { func, .. } => self.call_native(func, args, span),
                 _ => Err(self.err(format!("'{}' is not callable", self.type_name(callee)), span)),
             },
             other => Err(self.err(format!("'{}' is not callable", self.type_name(other)), span)),
         }
+    }
+
+    /// Invoke a native (Rust) function value (M6c). Builds a [`VmHost`] over the evaluated args,
+    /// runs the binding, then lowers its engine-neutral [`NativeRet`] into a heap-allocated `Value`
+    /// and pushes it. Lowering (the only allocation) happens here — at an instruction boundary,
+    /// after the call returns — so the "collect only at instruction boundaries" GC invariant holds.
+    fn call_native(
+        &mut self,
+        func: crate::native::NativeFn,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let mut host = VmHost { vm: self, args };
+        let ret = func(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
+        let v = self.lower_native(ret);
+        self.push(v);
+        Ok(())
+    }
+
+    /// Lower a native fn's engine-neutral [`crate::native::NativeRet`] into a VM `Value`, allocating
+    /// heap objects for the reference kinds. `Ok`/`Err`/`Some`/`None` become the built-in
+    /// `Result` / `Option` enum objects.
+    fn lower_native(&mut self, ret: crate::native::NativeRet) -> Value {
+        use crate::native::NativeRet as N;
+        match ret {
+            N::Int(n) => Value::Int(n),
+            N::Float(f) => Value::Float(f),
+            N::Bool(b) => Value::Bool(b),
+            N::Nil => Value::Nil,
+            N::Str(s) => self.alloc_str(s),
+            N::List(items) => {
+                let mut vs = Vec::with_capacity(items.len());
+                for x in items {
+                    vs.push(self.lower_native(x));
+                }
+                Value::Obj(self.heap.alloc(Obj::List(vs)))
+            }
+            N::Ok(inner) => {
+                let p = self.lower_native(*inner);
+                self.alloc_enum("Result", "Ok", vec![p])
+            }
+            N::Err(msg) => {
+                let p = self.alloc_str(msg);
+                self.alloc_enum("Result", "Err", vec![p])
+            }
+            N::Some(inner) => {
+                let p = self.lower_native(*inner);
+                self.alloc_enum("Option", "Some", vec![p])
+            }
+            N::None => self.alloc_enum("Option", "None", Vec::new()),
+        }
+    }
+
+    fn alloc_enum(&mut self, ty: &str, variant: &str, payload: Vec<Value>) -> Value {
+        Value::Obj(self.heap.alloc(Obj::Enum {
+            ty: ty.into(),
+            variant: variant.into(),
+            payload,
+        }))
     }
 
     fn check_arity(&self, _kind: &str, name: &str, want: usize, got: usize, span: Span) -> Result<(), RuntimeError> {
@@ -1129,6 +1211,7 @@ impl Vm {
                 Obj::Enum { .. } => "enum",
                 Obj::Func { .. } | Obj::Closure { .. } => "function",
                 Obj::Module { .. } => "module",
+                Obj::Native { .. } => "function",
             },
         }
     }
@@ -1161,8 +1244,73 @@ impl Vm {
                 Obj::Func { proto, .. } => format!("<fn {}>", self.program.protos[*proto].name),
                 Obj::Closure { .. } => "<closure>".to_string(),
                 Obj::Module { name, .. } => format!("<module {name}>"),
+                Obj::Native { name, .. } => format!("<native fn {name}>"),
             },
         }
+    }
+}
+
+/// The VM's [`crate::native::Host`] adapter: lets a native fn read the evaluated `Value` arguments
+/// (reaching into the heap for `str` args) and write to the captured output buffers. Holds `&mut
+/// Vm` plus the arg vector; it allocates nothing itself — the returned [`crate::native::NativeRet`]
+/// is lowered to heap objects by [`Vm::lower_native`] after the call returns. (Stdin / args / env /
+/// cooperative-exit are wired in a later milestone; the unwired methods return inert defaults.)
+struct VmHost<'a> {
+    vm: &'a mut Vm,
+    args: Vec<Value>,
+}
+
+impl crate::native::Host for VmHost<'_> {
+    fn arg_count(&self) -> usize {
+        self.args.len()
+    }
+    fn arg_int(&mut self, i: usize) -> Result<i64, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Int(n)) => Ok(*n),
+            Some(other) => Err(crate::native::HostError::arg_type(i, "int", self.vm.type_name(*other))),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_float(&mut self, i: usize) -> Result<f64, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Float(f)) => Ok(*f),
+            Some(Value::Int(n)) => Ok(*n as f64),
+            Some(other) => Err(crate::native::HostError::arg_type(i, "float", self.vm.type_name(*other))),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_str(&mut self, i: usize) -> Result<String, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
+                Obj::Str(s) => Ok(s.to_string()),
+                _ => {
+                    let got = self.vm.type_name(self.args[i]);
+                    Err(crate::native::HostError::arg_type(i, "str", got))
+                }
+            },
+            Some(other) => Err(crate::native::HostError::arg_type(i, "str", self.vm.type_name(*other))),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn write_stdout(&mut self, s: &str) {
+        self.vm.out.push_str(s);
+    }
+    fn write_stderr(&mut self, s: &str) {
+        self.vm.stderr.push_str(s);
+    }
+    fn read_line(&mut self) -> Result<Option<String>, crate::native::HostError> {
+        self.vm.host.stdin.read_line()
+    }
+    fn os_args(&self) -> Vec<String> {
+        self.vm.host.args.clone()
+    }
+    fn os_env(&self, key: &str) -> Option<String> {
+        self.vm.host.env.get(key).cloned()
+    }
+    fn os_getcwd(&self) -> Result<String, crate::native::HostError> {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .map_err(|e| crate::native::HostError { message: e.to_string() })
     }
 }
 
@@ -1269,28 +1417,41 @@ pub fn run_capture_stress(src: &str) -> String {
 /// Run a multi-file program from its entry path on the dedicated VM thread. Mirrors
 /// `interp::run_file`: resolve the graph, compile it, run each module once in dependency order,
 /// then the entry's `main()`. Output produced so far is preserved alongside the outcome.
-pub fn run_file(entry: &std::path::Path) -> (String, Result<(), RuntimeError>) {
+/// Convenience wrapper with the default (inert) host config. Test-only — the CLI uses
+/// [`run_file_with`] to pass a process-backed config.
+#[cfg(test)]
+pub fn run_file(entry: &std::path::Path) -> RunOutput {
+    run_file_with(entry, crate::native::HostConfig::default())
+}
+
+/// A finished run: captured `(stdout, stderr, outcome)`. Stderr holds `std.io.eprint` output.
+pub type RunOutput = (String, String, Result<(), RuntimeError>);
+
+/// Like [`run_file`], but with an explicit [`crate::native::HostConfig`] (args/env/stdin) for the
+/// native std modules. The CLI passes a process-backed config; tests inject a deterministic one.
+pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
-        .spawn(move || run_file_inner(&entry))
+        .spawn(move || run_file_inner(&entry, cfg))
         .expect("failed to spawn VM thread")
         .join()
         .expect("VM thread panicked")
 }
 
-fn run_file_inner(entry: &std::path::Path) -> (String, Result<(), RuntimeError>) {
+fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
     let graph = match crate::resolver::build_graph(entry) {
         Ok(g) => g,
-        Err(e) => return (String::new(), Err(RuntimeError { message: e.message, span: e.span })),
+        Err(e) => return (String::new(), String::new(), Err(RuntimeError { message: e.message, span: e.span })),
     };
     let program = match crate::compiler::compile_graph(&graph) {
         Ok(p) => p,
-        Err(e) => return (String::new(), Err(RuntimeError { message: e.message, span: e.span })),
+        Err(e) => return (String::new(), String::new(), Err(RuntimeError { message: e.message, span: e.span })),
     };
     let mut vm = Vm::new(Rc::new(program));
+    vm.host = cfg;
     let result = vm.run();
-    (vm.out, result)
+    (vm.out, vm.stderr, result)
 }
 
 #[cfg(test)]
@@ -1308,6 +1469,49 @@ mod tests {
             Ok(out) => panic!("expected a runtime error, got output: {out:?}"),
             Err(e) => e.message,
         }
+    }
+
+    // ----- M6c: native function values -----
+
+    fn empty_program() -> Program {
+        Program {
+            protos: vec![],
+            structs: Default::default(),
+            variants: Default::default(),
+            modules: vec![],
+        }
+    }
+
+    #[test]
+    fn vm_calls_native_fn_value() {
+        use crate::native::{Host, HostError, NativeRet};
+        fn add(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+            crate::native::expect_args(h, "add", 2)?;
+            Ok(NativeRet::Int(h.arg_int(0)? + h.arg_int(1)?))
+        }
+        let mut vm = Vm::new(Rc::new(empty_program()));
+        let h = vm.heap.alloc(Obj::Native { name: "add".into(), func: add });
+        vm.push(Value::Obj(h));
+        vm.push(Value::Int(40));
+        vm.push(Value::Int(2));
+        vm.do_call(2, Span { line: 1, col: 1 }).unwrap();
+        assert_eq!(vm.pop(), Value::Int(42));
+    }
+
+    #[test]
+    fn vm_native_str_return_lowers_to_heap_with_no_children() {
+        use crate::native::{Host, HostError, NativeRet};
+        fn greet(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
+            Ok(NativeRet::Str("hi".into()))
+        }
+        let mut vm = Vm::new(Rc::new(empty_program()));
+        let nat = vm.heap.alloc(Obj::Native { name: "greet".into(), func: greet });
+        // A native fn handle has no GC children (guards the mark-phase claim).
+        assert!(vm.heap.children(nat).is_empty());
+        vm.push(Value::Obj(nat));
+        vm.do_call(0, Span { line: 1, col: 1 }).unwrap();
+        let result = vm.pop();
+        assert_eq!(vm.display(result), "hi");
     }
 
     // ----- arithmetic -----
@@ -1956,6 +2160,225 @@ mod parity_tests {
         assert_eq!(vm_outcome(src), interp_outcome(src), "VM/interp divergence for:\n{src}");
     }
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static PARITY_TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new() -> Self {
+            let n = PARITY_TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!("chezzi_par_{}_{}", std::process::id(), n));
+            std::fs::create_dir_all(&dir).unwrap();
+            TmpDir(dir)
+        }
+        fn write(&self, rel: &str, contents: &str) -> PathBuf {
+            let p = self.0.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&p, contents).unwrap();
+            p
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Run a multi-file program (one or more `.chz` files) through BOTH engines via `run_file`,
+    /// assert they agree on stdout and on ok/err, and return the agreed stdout. `files` is
+    /// `(relative_path, contents)`; `entry` names the file to run. Needed because the single-file
+    /// `assert_parity` can't exercise imports (and std modules require the import path).
+    fn assert_parity_file(files: &[(&str, &str)], entry: &str) -> String {
+        let t = TmpDir::new();
+        let mut entry_path = None;
+        for (rel, contents) in files {
+            let p = t.write(rel, contents);
+            if *rel == entry {
+                entry_path = Some(p);
+            }
+        }
+        let entry_path = entry_path.expect("entry must be one of the files");
+        let (io, ie_out, ir) = crate::interp::run_file(&entry_path);
+        let (vo, ve_out, vr) = run_file(&entry_path);
+        assert_eq!(io, vo, "stdout divergence (interp vs vm) for entry {entry}");
+        assert_eq!(ie_out, ve_out, "stderr divergence (interp vs vm) for entry {entry}");
+        match (&ir, &vr) {
+            (Ok(()), Ok(())) => {}
+            (Err(ie), Err(ve)) => {
+                assert_eq!(ie.to_string(), ve.to_string(), "error divergence (interp vs vm)");
+            }
+            _ => panic!("ok/err divergence: interp={ir:?} vm={vr:?}"),
+        }
+        io
+    }
+
+    /// Convenience: a single entry file (the common std-module case).
+    fn parity_entry(src: &str) -> String {
+        assert_parity_file(&[("main.chz", src)], "main.chz")
+    }
+
+    #[test]
+    fn parity_std_math() {
+        let src = "\
+import std.math
+fn main():
+    print(math.floor(2.7))
+    print(math.ceil(2.1))
+    print(math.sqrt(16.0))
+    print(math.pow(2.0, 10.0))
+    print(math.abs(0.0 - 3.5))
+    print(math.min(2.0, 5.0))
+    print(math.max(2.0, 5.0))
+    print(math.round(2.5))
+    print(math.pi)
+main()";
+        assert_eq!(
+            parity_entry(src),
+            "2.0\n3.0\n4.0\n1024.0\n3.5\n2.0\n5.0\n3.0\n3.141592653589793\n"
+        );
+    }
+
+    /// Run an entry through both engines with a freshly-built [`crate::native::HostConfig`] each
+    /// (the config isn't `Clone` — `mk_cfg` produces an identical one per engine). Asserts stdout +
+    /// ok/err parity; returns the agreed stdout.
+    fn parity_entry_cfg(
+        src: &str,
+        mk_cfg: impl Fn() -> crate::native::HostConfig,
+    ) -> String {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (io, ie_out, ir) = crate::interp::run_file_with(&entry, mk_cfg());
+        let (vo, ve_out, vr) = run_file_with(&entry, mk_cfg());
+        assert_eq!(io, vo, "stdout divergence (interp vs vm)");
+        assert_eq!(ie_out, ve_out, "stderr divergence (interp vs vm)");
+        assert_eq!(ir.is_ok(), vr.is_ok(), "ok/err divergence: interp={ir:?} vm={vr:?}");
+        io
+    }
+
+    #[test]
+    fn parity_std_io_print() {
+        assert_eq!(
+            parity_entry("import std.io\nfn main():\n    io.print(\"hello\")\nmain()"),
+            "hello\n"
+        );
+    }
+
+    #[test]
+    fn parity_std_io_read_write_file() {
+        let t = TmpDir::new();
+        let data = t.0.join("data.txt").display().to_string();
+        let src = format!(
+            "import std.io\nfn main():\n    match io.write_file(\"{data}\", \"hello\\nworld\"):\n        Ok(_): io.print(\"wrote\")\n        Err(e): io.print(e)\n    match io.read_file(\"{data}\"):\n        Ok(s): io.print(s)\n        Err(e): io.print(e)\nmain()"
+        );
+        let entry = t.write("main.chz", &src);
+        let (io_out, _ie, ir) = crate::interp::run_file(&entry);
+        let (vo, _ve, vr) = run_file(&entry);
+        assert!(ir.is_ok() && vr.is_ok(), "interp={ir:?} vm={vr:?}");
+        assert_eq!(io_out, vo);
+        assert_eq!(io_out, "wrote\nhello\nworld\n");
+    }
+
+    #[test]
+    fn parity_std_io_read_missing_file_errs() {
+        // The error text comes from the same `std::fs` call on both engines, so it matches; we only
+        // assert the Err branch is taken (deterministic regardless of OS message).
+        let src = "import std.io\nfn main():\n    match io.read_file(\"/no/such/chezzi/path/xyz\"):\n        Ok(s): io.print(s)\n        Err(e): io.print(\"err\")\nmain()";
+        assert_eq!(parity_entry(src), "err\n");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn read_file_caps_oversized_input() {
+        // /dev/zero is unbounded; read_file must return an Err (the size cap), not OOM.
+        let src = "import std.io\nfn main():\n    match io.read_file(\"/dev/zero\"):\n        Ok(s): io.print(\"ok\")\n        Err(e): io.print(\"capped\")\nmain()";
+        assert_eq!(parity_entry(src), "capped\n");
+    }
+
+    #[test]
+    fn parity_std_io_read_line_consumes_injected_stdin() {
+        use crate::native::{HostConfig, Stdin};
+        let src = "import std.io\nfn main():\n    match io.read_line():\n        Some(l): io.print(\"got {l}\")\n        None: io.print(\"eof\")\n    match io.read_line():\n        Some(l): io.print(l)\n        None: io.print(\"eof\")\nmain()";
+        let out = parity_entry_cfg(src, || HostConfig {
+            stdin: Stdin::Lines(["alpha".to_string()].into_iter().collect()),
+            ..Default::default()
+        });
+        assert_eq!(out, "got alpha\neof\n");
+    }
+
+    #[test]
+    fn parity_std_io_eprint_goes_to_stderr_not_stdout() {
+        let src = "import std.io\nfn main():\n    io.eprint(\"to stderr\")\n    io.print(\"to stdout\")\nmain()";
+        // Parity (both engines): stdout has only the print line, stderr has only the eprint line.
+        assert_eq!(parity_entry(src), "to stdout\n");
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (out, err, res) = run_file(&entry);
+        assert!(res.is_ok());
+        assert_eq!(out, "to stdout\n");
+        assert_eq!(err, "to stderr\n");
+    }
+
+    #[test]
+    fn parity_std_os_args_and_env() {
+        use crate::native::HostConfig;
+        let src = "import std.io\nimport std.os\nfn main():\n    for a in os.args():\n        io.print(a)\n    match os.env(\"CHEZZI_TEST_VAR\"):\n        Some(v): io.print(v)\n        None: io.print(\"no var\")\nmain()";
+        let out = parity_entry_cfg(src, || HostConfig {
+            args: vec!["x".to_string(), "y".to_string()],
+            env: [("CHEZZI_TEST_VAR".to_string(), "hi".to_string())].into_iter().collect(),
+            ..Default::default()
+        });
+        assert_eq!(out, "x\ny\nhi\n");
+    }
+
+    #[test]
+    fn parity_std_os_env_missing_is_none() {
+        use crate::native::HostConfig;
+        let src = "import std.io\nimport std.os\nfn main():\n    match os.env(\"DEFINITELY_UNSET_XYZ\"):\n        Some(v): io.print(v)\n        None: io.print(\"none\")\nmain()";
+        let out = parity_entry_cfg(src, HostConfig::default);
+        assert_eq!(out, "none\n");
+    }
+
+    #[test]
+    fn parity_std_os_getcwd_ok() {
+        let src = "import std.io\nimport std.os\nfn main():\n    match os.getcwd():\n        Ok(p): io.print(\"ok\")\n        Err(e): io.print(\"err\")\nmain()";
+        assert_eq!(parity_entry(src), "ok\n");
+    }
+
+    /// Run a single-file (importing std) program on the VM with GC stress on (collect before every
+    /// instruction) and the given config — surfaces any native-return value the collector might free
+    /// while still reachable.
+    fn vm_run_file_stress(src: &str, cfg: crate::native::HostConfig) -> String {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let graph = crate::resolver::build_graph(&entry).unwrap();
+        let program = crate::compiler::compile_graph(&graph).unwrap();
+        let mut vm = Vm::new(Rc::new(program));
+        vm.gc_stress = true;
+        vm.host = cfg;
+        vm.run().unwrap_or_else(|e| panic!("unexpected error under GC stress: {e}"));
+        vm.out
+    }
+
+    #[test]
+    fn parity_std_str_pure_chezzi_with_mixed_native_import() {
+        // std.str is a real Chezzi file (crate/std/str.chz); std.io is native — both in one program.
+        let src = "import std.io\nimport std.str as text\nfn main():\n    io.print(text.repeat(\"ab\", 3))\n    io.print(text.reverse(\"hello\"))\n    io.print(text.pad_left(\"7\", 3, \"0\"))\n    if text.is_empty(\"\"):\n        io.print(\"empty\")\n    for line in text.split_lines(\"a\\nb\\nc\"):\n        io.print(line)\nmain()";
+        assert_eq!(parity_entry(src), "ababab\nolleh\n007\nempty\na\nb\nc\n");
+    }
+
+    #[test]
+    fn native_returned_heap_values_survive_gc_stress() {
+        use crate::native::HostConfig;
+        // Each os.args() call allocates a fresh heap list (immediately garbage); under stress the
+        // collector runs every instruction. A dangling handle in native lowering would panic here.
+        let src = "import std.io\nimport std.os\nfn main():\n    n := 0\n    while n < 300:\n        xs := os.args()\n        n += 1\n    io.print(\"done {n}\")\nmain()";
+        let cfg = HostConfig { args: vec!["a".to_string()], ..Default::default() };
+        let out = vm_run_file_stress(src, cfg);
+        assert_eq!(out, "done 300\n");
+    }
+
     /// A spread of programs exercising every feature class — run through BOTH engines.
     const PROGRAMS: &[&str] = &[
         // arithmetic + promotion + truncation
@@ -2040,9 +2463,10 @@ mod parity_tests {
     /// Run a file through both engines and assert identical (stdout, error).
     fn assert_file_parity(rel: &str) {
         let path = fixture(rel);
-        let (vm_out, vm_res) = run_file(&path);
-        let (ip_out, ip_res) = crate::interp::run_file(&path);
+        let (vm_out, vm_err, vm_res) = run_file(&path);
+        let (ip_out, ip_err, ip_res) = crate::interp::run_file(&path);
         assert_eq!(vm_out, ip_out, "stdout divergence for {rel}");
+        assert_eq!(vm_err, ip_err, "stderr divergence for {rel}");
         assert_eq!(vm_res.err().map(|e| e.to_string()), ip_res.err().map(|e| e.to_string()), "error divergence for {rel}");
     }
 
@@ -2050,7 +2474,7 @@ mod parity_tests {
     fn golden_hello_via_run_file() {
         let path = fixture("examples/hello.chz");
         let expected = std::fs::read_to_string(fixture("examples/hello.expected")).unwrap();
-        let (out, res) = run_file(&path);
+        let (out, _err, res) = run_file(&path);
         assert!(res.is_ok());
         assert_eq!(out, expected);
     }
@@ -2060,16 +2484,28 @@ mod parity_tests {
     fn golden_methods_via_run_file() {
         let path = fixture("examples/methods.chz");
         let expected = std::fs::read_to_string(fixture("examples/methods.expected")).unwrap();
-        let (out, res) = run_file(&path);
+        let (out, _err, res) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/methods.chz");
     }
 
+    /// M6c golden: the std-library demo (native std.io/math/os + Chezzi std.str) runs end-to-end on
+    /// the VM and byte-matches both the `.expected` file and the interpreter.
+    #[test]
+    fn golden_std_demo_via_run_file() {
+        let path = fixture("examples/std_demo.chz");
+        let expected = std::fs::read_to_string(fixture("examples/std_demo.expected")).unwrap();
+        let (out, _err, res) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/std_demo.chz");
+    }
+
     #[test]
     fn golden_multi_file_project_via_vm() {
         let expected = std::fs::read_to_string(fixture("tests/fixtures/proj/main.expected")).unwrap();
-        let (out, res) = run_file(&fixture("tests/fixtures/proj/main.chz"));
+        let (out, _err, res) = run_file(&fixture("tests/fixtures/proj/main.chz"));
         assert!(res.is_ok());
         assert_eq!(out, expected);
         assert_file_parity("tests/fixtures/proj/main.chz");
@@ -2080,7 +2516,7 @@ mod parity_tests {
     /// defines a same-named global with a different value.
     #[test]
     fn imported_fn_uses_home_globals() {
-        let (out, res) = run_file(&fixture("tests/fixtures/homeglobals/main.chz"));
+        let (out, _err, res) = run_file(&fixture("tests/fixtures/homeglobals/main.chz"));
         assert!(res.is_ok());
         assert_eq!(out, "from-lib\nfrom-main\n");
         assert_file_parity("tests/fixtures/homeglobals/main.chz");

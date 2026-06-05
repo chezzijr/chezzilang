@@ -1,0 +1,22 @@
+# M6c demo: the standard library — native modules (std.io / std.math / std.os) and a Chezzi-written
+# one (std.str), all in one program, running identically on the interpreter and the VM.
+
+import std.io
+import std.math
+import std.os
+import std.str as text
+
+fn main():
+    io.print(text.repeat("=", 10))
+    io.print("sqrt(2) = " + str(math.sqrt(2.0)))
+    io.print("floor(3.7) = " + str(math.floor(3.7)))
+    io.print("2^8 = " + str(math.pow(2.0, 8.0)))
+    io.print("max(3.0, 9.0) = " + str(math.max(3.0, 9.0)))
+    io.print(text.reverse("chezzi"))
+    io.print(text.pad_left("42", 5, "."))
+    io.print("args: " + str(len(os.args())))
+    match os.env("THIS_IS_NOT_SET_12345"):
+        Some(v): io.print(v)
+        None: io.print("env unset")
+
+main()
