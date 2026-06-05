@@ -662,6 +662,21 @@ impl Vm {
         }
     }
 
+    /// Total order over scalar values for `sort()`. The checker restricts `sort` to homogeneous
+    /// int/float/str lists; str elements are read through the heap. Anything else compares Equal.
+    fn value_order(&self, a: Value, b: Value) -> std::cmp::Ordering {
+        use std::cmp::Ordering::Equal;
+        match (a, b) {
+            (Value::Int(x), Value::Int(y)) => x.cmp(&y),
+            (Value::Float(x), Value::Float(y)) => x.total_cmp(&y),
+            (Value::Obj(ha), Value::Obj(hb)) => match (self.heap.get(ha), self.heap.get(hb)) {
+                (Obj::Str(x), Obj::Str(y)) => x.cmp(y),
+                _ => Equal,
+            },
+            _ => Equal,
+        }
+    }
+
     // ----- calls -----
 
     fn do_call(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
@@ -1008,6 +1023,18 @@ impl Vm {
                     self.arity_err("reverse", args, 0, span)?;
                     let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
                     items.reverse();
+                    Ok(Value::Nil)
+                }
+                "sort" => {
+                    self.arity_err("sort", args, 0, span)?;
+                    // In place, ascending. Checker guarantees a homogeneous orderable element type.
+                    // Str elements live on the heap, so the comparator needs `&self.heap` — which
+                    // would conflict with `get_mut`. Clone the elements out, sort (no alloc/closure
+                    // → no GC), then write back. `value_order` reads strings via `self.heap`.
+                    let mut elems = items.clone();
+                    elems.sort_by(|a, b| self.value_order(*a, *b));
+                    let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
+                    *items = elems;
                     Ok(Value::Nil)
                 }
                 "contains" => {
@@ -2801,6 +2828,27 @@ main()";
         let src = "print([1,2,3,4].sum())\n";
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "10\n");
+    }
+
+    #[test]
+    fn parity_list_sort_int() {
+        let src = "xs := [3,1,2]\nxs.sort()\nprint(xs[0])\nprint(xs[2])\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "1\n3\n");
+    }
+
+    #[test]
+    fn parity_list_sort_str() {
+        let src = "xs := [\"banana\",\"apple\",\"cherry\"]\nxs.sort()\nfor s in xs:\n    print(s)\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "apple\nbanana\ncherry\n");
+    }
+
+    #[test]
+    fn parity_list_sort_float() {
+        let src = "xs := [3.5, 1.1, 2.2]\nxs.sort()\nprint(xs[0])\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "1.1\n");
     }
 
     // ===== higher-order list methods: map / filter / fold =====

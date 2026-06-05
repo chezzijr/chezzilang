@@ -1334,6 +1334,8 @@ impl Checker {
                 self.infer_all(args);
                 if method == "sum" {
                     self.error(span, format!("sum() requires a numeric list, found list[{elem}]"));
+                } else if method == "sort" {
+                    self.error(span, format!("sort() requires a list of int, float, or str, found list[{elem}]"));
                 } else {
                     self.error(span, format!("type {obj_ty} has no method '{method}'"));
                 }
@@ -1548,9 +1550,17 @@ fn list_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
         // `sum` is only valid on numeric lists; an unknown element type is tolerated
         // (it flows from an empty/unannotated list). Non-numeric is rejected at the call site.
         "sum" if elem.is_numeric() || elem.is_unknown() => (vec![], elem.clone()),
+        // `sort` mutates in place (returns nil); only orderable element types (int/float/str).
+        // Unknown is tolerated (empty/unannotated list). Non-orderable is rejected at the call site.
+        "sort" if is_orderable(elem) || elem.is_unknown() => (vec![], Ty::Nil),
         _ => return None,
     };
     Some(FnSig { params, ret })
+}
+
+/// Element types that have a total order for `sort()`: the scalar comparables.
+fn is_orderable(t: &Ty) -> bool {
+    matches!(t, Ty::Int | Ty::Float | Ty::Str)
 }
 
 #[cfg(test)]

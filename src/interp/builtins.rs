@@ -117,6 +117,19 @@ fn str_method(s: &Rc<str>, method: &str, args: &[Value], span: Span) -> Result<V
     }
 }
 
+/// Total order over scalar values for `sort()`. The checker restricts `sort` to homogeneous
+/// int/float/str lists, so only the matching arms are ever hit; anything else compares Equal
+/// (a stable no-op) rather than panicking.
+fn value_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering::Equal;
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        (Value::Float(x), Value::Float(y)) => x.total_cmp(y),
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        _ => Equal,
+    }
+}
+
 fn list_method(
     items: &Rc<RefCell<Vec<Value>>>,
     method: &str,
@@ -151,6 +164,13 @@ fn list_method(
         "reverse" => {
             arity("reverse", &args, 0, span)?;
             items.borrow_mut().reverse();
+            Ok(Value::Nil)
+        }
+        "sort" => {
+            arity("sort", &args, 0, span)?;
+            // In place, ascending. The checker guarantees a homogeneous orderable element type
+            // (int/float/str); `value_order` falls back to Equal on anything else.
+            items.borrow_mut().sort_by(value_order);
             Ok(Value::Nil)
         }
         "contains" => {

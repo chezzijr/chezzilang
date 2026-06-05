@@ -52,18 +52,20 @@ functions are effectively impossible, and the `|>` pipe examples in the cheat-sh
 `Ty::Func { params, ret }`, so the type lattice is ready; mostly a parser + `Type` AST-node + a
 `Type → Ty` lowering addition.
 
-### 4. Lists have only `push` / `len`
+### 4. ~~Lists have only `push` / `len`~~ ✅ FIXED
 ```chezzi
-xs.map(...)  xs.filter(...)  xs.contains(x)  xs.index_of(x)
-xs.pop()     xs.reverse()    xs.sort()       xs.sum()
-# all: type error — type list[int] has no method '<name>'
+xs.map(f)    xs.filter(p)    xs.fold(init, f)            # higher-order (need gap #3, now built)
+xs.pop()     xs.reverse()    xs.sort()                   # pop→Option, sort ascending in place
+xs.contains(x)  xs.index_of(x)  xs.sum()                 # all built on both engines
 ```
-**Blocks:** every list operation is a hand-rolled loop. No `pop` means a list can't serve as a
-**stack** — kills iterative DFS, RPN/shunting-yard, backtracking with an explicit stack. No `sort`
-means re-implementing it each time.
-**Fix sketch:** the core-method dispatch already exists (M6a lockstep: `interp/builtins.rs`
-`list_method` + `vm` `core_method` + checker `list_method_sig`). Add `pop`/`reverse`/`contains`
-there directly. `map`/`filter`/`sort`-with-comparator depend on gap #3 (HOF params).
+**Fixed (phases A + B1 + B2):** added to the three lockstep tables (`interp/builtins.rs`
+`list_method` + `vm` `core_method` + checker `list_method_sig`): `pop()→T?`, `reverse()`,
+`contains(x)`, `index_of(x)→int`, `sum()` (numeric), `sort()` (ascending, int/float/str, in place),
+and the HOF methods `map`/`filter`/`fold` (typed off the closure's `Ty::Func` in `infer_method_call`;
+VM runs the closure per element via re-entrant `invoke_value`, keeping source+result rooted on the
+operand stack across calls — proven by `gc_stress` parity tests). `pop` makes a list a usable stack.
+`sort`-with-comparator (`sort_by`) deferred — expressible via `fold` meanwhile.
+See `examples/list_methods.chz`, `examples/list_hof.chz`.
 
 ### 5. No map / dictionary type
 ```chezzi

@@ -667,6 +667,34 @@ fn closure_body_matching_return_annotation_ok() {
     ok("f := fn(x: int) -> int: x * 2\ny := f(3)\n");
 }
 
+// ===== list sort() — orderable element types only (gap #4) =====
+
+#[test]
+fn list_sort_int_ok() {
+    ok("xs := [3, 1, 2]\nxs.sort()\n");
+}
+
+#[test]
+fn list_sort_str_ok() {
+    ok("xs := [\"b\", \"a\"]\nxs.sort()\n");
+}
+
+#[test]
+fn list_sort_float_ok() {
+    ok("xs := [3.0, 1.0]\nxs.sort()\n");
+}
+
+#[test]
+fn list_sort_returns_nil_rejected_as_value() {
+    // sort() mutates in place and yields nil — using its result as a number is rejected.
+    rejects("xs := [3, 1, 2]\nn := xs.sort() + 1\n", "cannot apply + to nil and int");
+}
+
+#[test]
+fn list_sort_non_orderable_rejected() {
+    rejects("xs := [true, false]\nxs.sort()\n", "sort() requires");
+}
+
 // ===== golden: the touchstone program must type-check clean =====
 
 #[test]
