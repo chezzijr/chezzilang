@@ -913,3 +913,50 @@ fn hof_param_type_wrong_fn_rejected() {
     );
 }
 
+// ===== higher-order list methods: map / filter / fold =====
+
+#[test]
+fn list_map_ok() {
+    ok("xs := [1,2,3]\nys := xs.map(fn(x: int) -> int: x * 2)\nz := ys[0] + 1\n");
+}
+
+#[test]
+fn list_filter_ok() {
+    ok("xs := [1,2,3]\nys := xs.filter(fn(x: int) -> bool: x > 1)\n");
+}
+
+#[test]
+fn list_fold_ok() {
+    ok("xs := [1,2,3]\ns := xs.fold(0, fn(a: int, x: int) -> int: a + x)\nt := s + 1\n");
+}
+
+#[test]
+fn list_map_changes_element_type() {
+    // map int -> bool produces list[bool]; indexing yields a bool.
+    ok("xs := [1,2]\nys := xs.map(fn(x: int) -> bool: x > 0)\nb := ys[0]\n");
+}
+
+#[test]
+fn list_filter_predicate_must_return_bool() {
+    rejects(
+        "xs := [1,2,3]\nys := xs.filter(fn(x: int) -> int: x)\n",
+        "predicate",
+    );
+}
+
+#[test]
+fn list_map_function_param_must_match_element() {
+    rejects(
+        "xs := [1,2,3]\nys := xs.map(fn(x: str) -> int: 0)\n",
+        "map",
+    );
+}
+
+#[test]
+fn list_fold_function_acc_must_match_init() {
+    rejects(
+        "xs := [1,2,3]\ns := xs.fold(0, fn(a: str, x: int) -> str: a)\n",
+        "fold",
+    );
+}
+

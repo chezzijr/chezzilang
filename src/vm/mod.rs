@@ -668,23 +668,30 @@ impl Vm {
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
         let callee = self.pop();
+        let v = self.invoke_value(callee, args, span)?;
+        self.push(v);
+        Ok(())
+    }
+
+    /// Dispatch an already-evaluated callable `Value` on evaluated args, *returning* the result
+    /// instead of pushing it. Shared by `do_call` (which pushes) and the higher-order list methods
+    /// (which call it per element while keeping their source/result lists rooted on the stack).
+    /// `args.len()` is the explicit arg count for arity checks.
+    fn invoke_value(&mut self, callee: Value, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+        let argc = args.len();
         match callee {
             Value::Obj(h) => match self.heap.get(h).clone() {
                 Obj::Func { proto, home } => {
                     self.check_arity("function", &self.program.protos[proto].name.clone(), self.program.protos[proto].arity, argc, span)?;
-                    let v = self.run_proto(proto, home, None, args, true, false, span)?;
-                    self.push(v);
-                    Ok(())
+                    self.run_proto(proto, home, None, args, true, false, span)
                 }
                 Obj::Closure { proto, home, .. } => {
                     if argc != self.program.protos[proto].arity {
                         return Err(self.err(format!("closure expects {} argument(s), got {argc}", self.program.protos[proto].arity), span));
                     }
-                    let v = self.run_proto(proto, home, Some(h), args, true, false, span)?;
-                    self.push(v);
-                    Ok(())
+                    self.run_proto(proto, home, Some(h), args, true, false, span)
                 }
-                Obj::Native { func, .. } => self.call_native(func, args, span),
+                Obj::Native { func, .. } => self.invoke_native(func, args, span),
                 _ => Err(self.err(format!("'{}' is not callable", self.type_name(callee)), span)),
             },
             other => Err(self.err(format!("'{}' is not callable", self.type_name(other)), span)),
@@ -695,17 +702,15 @@ impl Vm {
     /// runs the binding, then lowers its engine-neutral [`NativeRet`] into a heap-allocated `Value`
     /// and pushes it. Lowering (the only allocation) happens here — at an instruction boundary,
     /// after the call returns — so the "collect only at instruction boundaries" GC invariant holds.
-    fn call_native(
+    fn invoke_native(
         &mut self,
         func: crate::native::NativeFn,
         args: Vec<Value>,
         span: Span,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Value, RuntimeError> {
         let mut host = VmHost { vm: self, args };
         let ret = func(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
-        let v = self.lower_native(ret);
-        self.push(v);
-        Ok(())
+        Ok(self.lower_native(ret))
     }
 
     /// Lower a native fn's engine-neutral [`crate::native::NativeRet`] into a VM `Value`, allocating
@@ -764,6 +769,14 @@ impl Vm {
         let Value::Obj(h) = recv else {
             return Err(self.err(format!("type {} has no method '{method}'", self.type_name(recv)), span));
         };
+        // Higher-order list methods (`map`/`filter`/`fold`) call a closure per element, which runs
+        // nested VM frames that may GC at instruction boundaries. They keep the source + result
+        // (and fold's accumulator) rooted on the operand stack across the loop — see `list_hof`.
+        if matches!(self.heap.get(h), Obj::List(_)) && matches!(method, "map" | "filter" | "fold") {
+            let result = self.list_hof(h, method, args, span)?;
+            self.push(result);
+            return Ok(());
+        }
         // Core-type methods (M6): built-in methods on `str` / `list`. Handled before the clone-match
         // so `list.push` mutates the heap object in place (the match below clones the Obj). Mirrors
         // `interp::builtins::call_method` exactly — error strings included (parity-tested).
@@ -796,6 +809,89 @@ impl Vm {
                 Ok(())
             }
             _ => Err(self.err(format!("type {} has no method '{method}'", self.type_name(recv)), span)),
+        }
+    }
+
+    /// Higher-order list methods `map` / `filter` / `fold`. `src_h` is the receiver list. Each
+    /// element is fed to a closure via `invoke_value`, which runs nested VM frames that can trigger
+    /// GC at instruction boundaries. To keep the GC from collecting in-flight heap values, the
+    /// source list, the partially-built result list (map/filter), and the fold accumulator are all
+    /// kept rooted on the operand stack across the iteration. Returns the result (caller pushes it).
+    /// Arity & error messages match the interp exactly (parity-tested).
+    fn list_hof(&mut self, src_h: GcRef, method: &str, mut args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+        // ROOT the source list on the operand stack so its elements survive every closure call.
+        self.push(Value::Obj(src_h));
+        let n = match self.heap.get(src_h) {
+            Obj::List(v) => v.len(),
+            _ => unreachable!("list_hof on non-list"),
+        };
+        match method {
+            "map" | "filter" => {
+                if args.len() != 1 {
+                    self.pop(); // unroot source before erroring
+                    return Err(self.err(format!("'{method}' expects 1 argument(s), got {}", args.len()), span));
+                }
+                let f = args.swap_remove(0);
+                let is_filter = method == "filter";
+                // ROOT the result list too.
+                let res_h = self.heap.alloc(Obj::List(Vec::new()));
+                self.push(Value::Obj(res_h));
+                for i in 0..n {
+                    // Re-read each iteration; `src_h` stays valid (rooted on the stack).
+                    let elem = match self.heap.get(src_h) {
+                        Obj::List(v) => v[i],
+                        _ => unreachable!(),
+                    };
+                    // May GC; both source and result lists are rooted, so their elements survive.
+                    let out = self.invoke_value(f, vec![elem], span)?;
+                    if is_filter {
+                        match out {
+                            Value::Bool(true) => {
+                                if let Obj::List(items) = self.heap.get_mut(res_h) {
+                                    items.push(elem);
+                                }
+                            }
+                            Value::Bool(false) => {}
+                            other => {
+                                self.pop(); // unroot result
+                                self.pop(); // unroot source
+                                return Err(self.err(format!("filter predicate must return bool, got {}", self.type_name(other)), span));
+                            }
+                        }
+                    } else if let Obj::List(items) = self.heap.get_mut(res_h) {
+                        items.push(out);
+                    }
+                }
+                self.pop(); // unroot result
+                self.pop(); // unroot source
+                Ok(Value::Obj(res_h))
+            }
+            "fold" => {
+                if args.len() != 2 {
+                    self.pop(); // unroot source
+                    return Err(self.err(format!("'fold' expects 2 argument(s), got {}", args.len()), span));
+                }
+                let f = args.swap_remove(1);
+                let init = args.swap_remove(0);
+                // ROOT the accumulator: push init, remember its slot, and replace in place each step.
+                // `acc_slot` sits below every nested frame's base (frames push above the current
+                // stack top and pop back to it), so the index stays valid across `invoke_value`.
+                self.push(init);
+                let acc_slot = self.stack.len() - 1;
+                for i in 0..n {
+                    let elem = match self.heap.get(src_h) {
+                        Obj::List(v) => v[i],
+                        _ => unreachable!(),
+                    };
+                    let acc = self.stack[acc_slot];
+                    let new = self.invoke_value(f, vec![acc, elem], span)?;
+                    self.stack[acc_slot] = new;
+                }
+                let acc = self.pop(); // unroot accumulator
+                self.pop(); // unroot source
+                Ok(acc)
+            }
+            _ => unreachable!("list_hof called with non-HOF method {method}"),
         }
     }
 
@@ -2703,6 +2799,73 @@ main()";
     #[test]
     fn parity_list_sum() {
         let src = "print([1,2,3,4].sum())\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "10\n");
+    }
+
+    // ===== higher-order list methods: map / filter / fold =====
+    //
+    // These call a closure per element. On the VM each closure runs nested frames that can GC at
+    // instruction boundaries, so the source/result lists (and fold's accumulator) must stay rooted.
+    // Several tests use HEAP elements (strings / nested lists) and run under `gc_stress` so that a
+    // collection actually happens mid-iteration — if rooting is wrong they crash with a dangling ref.
+
+    #[test]
+    fn parity_list_map_int() {
+        let src = "xs := [1,2,3]\nys := xs.map(fn(x: int) -> int: x * 2)\nprint(ys)\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "[2, 4, 6]\n");
+    }
+
+    #[test]
+    fn parity_list_map_to_str_gc_stress() {
+        // Each element maps to a freshly-allocated string (heap), so collection mid-map matters.
+        let src = "xs := [1,2,3]\nys := xs.map(fn(x: int) -> str: \"n{x}\")\nfor y in ys:\n    print(y)\n";
+        assert_parity(src);
+        let expected = "n1\nn2\nn3\n";
+        assert_eq!(vm_outcome(src).unwrap(), expected);
+        assert_eq!(run_capture_stress(src), expected, "VM gc_stress diverged (rooting bug?)");
+    }
+
+    #[test]
+    fn parity_list_map_to_nested_list_gc_stress() {
+        // Maps each element to a nested list (heap); the result list holds heap children.
+        let src = "xs := [1,2,3]\nys := xs.map(fn(x: int) -> list[int]: [x, x])\nprint(ys[1][0])\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "2\n");
+        assert_eq!(run_capture_stress(src), "2\n", "VM gc_stress diverged (rooting bug?)");
+    }
+
+    #[test]
+    fn parity_list_filter_gc_stress() {
+        // Filter over string elements; kept elements are heap objects pushed into the result.
+        let src = "xs := [\"a\",\"bb\",\"ccc\",\"d\"]\nys := xs.filter(fn(x: str) -> bool: x.len() > 1)\nprint(ys.len())\nprint(ys[0])\n";
+        assert_parity(src);
+        let expected = "2\nbb\n";
+        assert_eq!(vm_outcome(src).unwrap(), expected);
+        assert_eq!(run_capture_stress(src), expected, "VM gc_stress diverged (rooting bug?)");
+    }
+
+    #[test]
+    fn parity_list_filter_int() {
+        let src = "xs := [1,2,3,4]\nys := xs.filter(fn(x: int) -> bool: x % 2 == 0)\nprint(ys.len())\nprint(ys[0])\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "2\n2\n");
+    }
+
+    #[test]
+    fn parity_list_fold_str_acc_gc_stress() {
+        // Fold building a string accumulator (heap) — each step allocates a new acc string, so the
+        // rooted accumulator slot must survive the next element's closure call.
+        let src = "xs := [\"a\",\"b\",\"c\"]\ns := xs.fold(\"\", fn(a: str, x: str) -> str: a + x)\nprint(s)\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "abc\n");
+        assert_eq!(run_capture_stress(src), "abc\n", "VM gc_stress diverged (rooting bug?)");
+    }
+
+    #[test]
+    fn parity_list_fold_sum() {
+        let src = "print([1,2,3,4].fold(0, fn(a: int, x: int) -> int: a + x))\n";
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "10\n");
     }

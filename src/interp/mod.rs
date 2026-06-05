@@ -600,6 +600,16 @@ impl Interp {
         // op. Without this, `(5).frob(1 / 0)` would error on the receiver type here while the VM
         // errors on the argument, breaking interp/VM parity (caught by the parity suite).
         let arg_vals = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+        // Higher-order list methods call a Chezzi function value per element, so they need the
+        // interpreter handle (`self.call_value`) and can't live in the pure `builtins` table.
+        if let Value::List(items) = &receiver
+            && matches!(method, "map" | "filter" | "fold")
+        {
+            // Clone the elements out so we don't hold the `RefCell` borrow across `call_value`
+            // (the closure body could re-borrow this same list).
+            let elems: Vec<Value> = items.borrow().clone();
+            return self.eval_list_hof(method, elems, arg_vals, span);
+        }
         // Core-type methods (M6): built-in methods on `str` and `list` dispatch on the value.
         if matches!(receiver, Value::Str(_) | Value::List(_)) {
             return builtins::call_method(&receiver, method, arg_vals, span);
@@ -630,6 +640,75 @@ impl Interp {
         call_args.push(receiver.clone());
         call_args.extend(arg_vals);
         self.call(&decl, &def.home, call_args, span)
+    }
+
+    /// Evaluate the higher-order list methods `map` / `filter` / `fold`. `elems` is the receiver
+    /// list's elements (already cloned out so no `RefCell` borrow is held across `call_value`).
+    fn eval_list_hof(
+        &mut self,
+        method: &str,
+        elems: Vec<Value>,
+        mut arg_vals: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            "map" => {
+                if arg_vals.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!("'map' expects 1 argument(s), got {}", arg_vals.len()),
+                        span,
+                    });
+                }
+                let f = arg_vals.swap_remove(0);
+                let mut out = Vec::with_capacity(elems.len());
+                for elem in elems {
+                    out.push(self.call_value(f.clone(), vec![elem], span)?);
+                }
+                Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(out))))
+            }
+            "filter" => {
+                if arg_vals.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!("'filter' expects 1 argument(s), got {}", arg_vals.len()),
+                        span,
+                    });
+                }
+                let p = arg_vals.swap_remove(0);
+                let mut out = Vec::new();
+                for elem in elems {
+                    let keep = self.call_value(p.clone(), vec![elem.clone()], span)?;
+                    match keep {
+                        Value::Bool(true) => out.push(elem),
+                        Value::Bool(false) => {}
+                        other => {
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "filter predicate must return bool, got {}",
+                                    other.type_name()
+                                ),
+                                span,
+                            });
+                        }
+                    }
+                }
+                Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(out))))
+            }
+            "fold" => {
+                if arg_vals.len() != 2 {
+                    return Err(RuntimeError {
+                        message: format!("'fold' expects 2 argument(s), got {}", arg_vals.len()),
+                        span,
+                    });
+                }
+                let f = arg_vals.swap_remove(1);
+                let mut acc = arg_vals.swap_remove(0);
+                for elem in elems {
+                    acc = self.call_value(f.clone(), vec![acc, elem], span)?;
+                }
+                Ok(acc)
+            }
+            _ => unreachable!("eval_list_hof called with non-HOF method {method}"),
+        }
     }
 
     /// Call a user function: bind params in a fresh local frame (lexical scoping — the callee
@@ -1750,6 +1829,46 @@ fn safe_div(a: int, b: int) -> Result[int]:
     #[test]
     fn list_method_push_mutates_in_place() {
         assert_eq!(run("xs := [1, 2]\nxs.push(3)\nprint(xs)\nprint(xs.len())\n"), "[1, 2, 3]\n3\n");
+    }
+
+    #[test]
+    fn list_map_doubles() {
+        assert_eq!(
+            run("xs := [1,2,3]\nys := xs.map(fn(x: int) -> int: x * 2)\nprint(ys)\n"),
+            "[2, 4, 6]\n"
+        );
+    }
+
+    #[test]
+    fn list_map_changes_type_to_str() {
+        assert_eq!(
+            run("xs := [1,2,3]\nys := xs.map(fn(x: int) -> str: \"n{x}\")\nfor y in ys:\n    print(y)\n"),
+            "n1\nn2\nn3\n"
+        );
+    }
+
+    #[test]
+    fn list_filter_evens() {
+        assert_eq!(
+            run("xs := [1,2,3,4]\nys := xs.filter(fn(x: int) -> bool: x % 2 == 0)\nprint(ys)\n"),
+            "[2, 4]\n"
+        );
+    }
+
+    #[test]
+    fn list_fold_sum() {
+        assert_eq!(
+            run("print([1,2,3,4].fold(0, fn(a: int, x: int) -> int: a + x))\n"),
+            "10\n"
+        );
+    }
+
+    #[test]
+    fn list_fold_string_acc() {
+        assert_eq!(
+            run("xs := [\"a\",\"b\",\"c\"]\ns := xs.fold(\"\", fn(a: str, x: str) -> str: a + x)\nprint(s)\n"),
+            "abc\n"
+        );
     }
 
     #[test]

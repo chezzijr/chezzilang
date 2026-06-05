@@ -1320,6 +1320,13 @@ impl Checker {
                 Ty::Unknown
             }
             Ty::List(elem) => {
+                // Higher-order methods whose result/param types depend on the closure's
+                // `Ty::Func` can't be expressed by the fixed `list_method_sig` table, so handle
+                // them here. `Ty::Unknown` arguments are tolerated permissively (no cascade).
+                if matches!(method, "map" | "filter" | "fold") {
+                    let elem = (**elem).clone();
+                    return self.infer_list_hof(method, &elem, args, span);
+                }
                 if let Some(sig) = list_method_sig(method, elem) {
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
@@ -1341,6 +1348,97 @@ impl Checker {
                 self.error(span, format!("type {other} has no method '{method}'"));
                 Ty::Unknown
             }
+        }
+    }
+
+    /// Type-check the higher-order list methods `map` / `filter` / `fold`, whose signatures
+    /// depend on the closure argument's `Ty::Func` and so can't live in `list_method_sig`.
+    /// `elem` is the list's element type. Returns the method's result type (`Ty::Unknown` on
+    /// error so a single mismatch doesn't cascade).
+    fn infer_list_hof(&mut self, method: &str, elem: &Ty, args: &[Expr], span: Span) -> Ty {
+        match method {
+            // map(f: fn(T) -> U) -> list[U]
+            "map" => {
+                if args.len() != 1 {
+                    self.error(span, format!("'map' expects 1 argument(s), got {}", args.len()));
+                    self.infer_all(args);
+                    return Ty::Unknown;
+                }
+                let ft = self.infer(&args[0]);
+                match ft {
+                    Ty::Unknown => Ty::Unknown,
+                    Ty::Func { params, ret } if params.len() == 1 && compatible(&params[0], elem) => {
+                        Ty::list(*ret)
+                    }
+                    other => {
+                        self.error(
+                            args[0].span,
+                            format!("map expects a function fn({elem}) -> U, found {other}"),
+                        );
+                        Ty::Unknown
+                    }
+                }
+            }
+            // filter(p: fn(T) -> bool) -> list[T]
+            "filter" => {
+                if args.len() != 1 {
+                    self.error(span, format!("'filter' expects 1 argument(s), got {}", args.len()));
+                    self.infer_all(args);
+                    return Ty::Unknown;
+                }
+                let pt = self.infer(&args[0]);
+                match pt {
+                    Ty::Unknown => Ty::list(elem.clone()),
+                    Ty::Func { params, ret }
+                        if params.len() == 1
+                            && compatible(&params[0], elem)
+                            && compatible(&ret, &Ty::Bool) =>
+                    {
+                        Ty::list(elem.clone())
+                    }
+                    other => {
+                        self.error(
+                            args[0].span,
+                            format!("filter expects a predicate fn({elem}) -> bool, found {other}"),
+                        );
+                        Ty::Unknown
+                    }
+                }
+            }
+            // fold(init: U, f: fn(U, T) -> U) -> U
+            "fold" => {
+                if args.len() != 2 {
+                    self.error(span, format!("'fold' expects 2 argument(s), got {}", args.len()));
+                    self.infer_all(args);
+                    return Ty::Unknown;
+                }
+                let init = self.infer(&args[0]);
+                let ft = self.infer(&args[1]);
+                match ft {
+                    Ty::Unknown => {
+                        // Closure type unknown: fall back to the init type as the result.
+                        init
+                    }
+                    Ty::Func { params, ret }
+                        if params.len() == 2
+                            && compatible(&params[0], &init)
+                            && compatible(&params[1], elem)
+                            && compatible(&ret, &init) =>
+                    {
+                        init
+                    }
+                    other => {
+                        self.error(
+                            args[1].span,
+                            format!(
+                                "fold expects a function fn({init}, {elem}) -> {init}, found {other}"
+                            ),
+                        );
+                        Ty::Unknown
+                    }
+                }
+            }
+            _ => unreachable!("infer_list_hof called with non-HOF method {method}"),
         }
     }
 

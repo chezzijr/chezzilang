@@ -1,0 +1,21 @@
+# examples/list_hof.chz — higher-order list methods: map, filter, fold.
+
+xs := [1, 2, 3, 4]
+
+doubled := xs.map(fn(x: int) -> int: x * 2)
+print(doubled)
+
+evens := xs.filter(fn(x: int) -> bool: x % 2 == 0)
+print(evens)
+
+total := xs.fold(0, fn(acc: int, x: int) -> int: acc + x)
+print(total)
+
+# map can change the element type (int -> str)
+labels := xs.map(fn(x: int) -> str: "n{x}")
+for label in labels:
+    print(label)
+
+# fold can build a heap accumulator (string)
+joined := labels.fold("", fn(acc: str, s: str) -> str: acc + s)
+print(joined)
