@@ -8,6 +8,7 @@
 //! Status: pre-M1 scaffold. Subcommands below are stubs.
 
 mod ast;
+mod interp;
 mod lexer;
 mod parser;
 
@@ -41,8 +42,9 @@ fn main() -> ExitCode {
         }
         "tokens" => cmd_tokens(args.get(1)),
         "ast" => cmd_ast(args.get(1)),
-        "run" | "repl" => {
-            eprintln!("chezzi: '{cmd}' is not implemented yet (pre-M1 scaffold).");
+        "run" => cmd_run(args.get(1)),
+        "repl" => {
+            eprintln!("chezzi: 'repl' is not implemented yet.");
             eprintln!("        see the roadmap in docs/spec.md");
             ExitCode::FAILURE
         }
@@ -114,6 +116,33 @@ fn cmd_ast(path: Option<&String>) -> ExitCode {
             println!("{module:#?}");
             ExitCode::SUCCESS
         }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `chezzi run <file>` — lex, parse, and execute the program with the tree-walk interpreter. (M3)
+fn cmd_run(path: Option<&String>) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("chezzi run: missing file argument\nusage: chezzi run <file.chz>");
+        return ExitCode::FAILURE;
+    };
+
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("chezzi: cannot read '{path}': {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Print whatever the program emitted before any error, then the error itself.
+    let (output, result) = interp::run_program(&source);
+    print!("{output}");
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e}");
             ExitCode::FAILURE

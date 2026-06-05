@@ -10,8 +10,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-> **M3 — Tree-walk interpreter.** Build `src/interp/`.
-> Goal: `cargo run -- run examples/hello.chz` executes the program.
+> **M4 — Type checker (local inference).** Build `src/checker/`.
+> Goal: type errors caught pre-run with clear messages; `--errors=json` mode.
 
 ## M1 — Lexer  ✅ DONE
 
@@ -60,10 +60,41 @@ Canonical grammar file with an executable drift check; 48 tests total.
 - ✅ **Bite-tested** — verified the harness actually fails on grammar drift, a bad corpus file, and a bogus token.
 - Run: `cargo test conformance`. Excluded by design: deep-nesting (a parser depth cap, not a grammar rule).
 
+## M3 — Tree-walk interpreter  ✅ DONE
+
+`cargo run -- run examples/hello.chz` executes the program end-to-end. Built `src/interp/`
+(`mod` + `value` + `env` + `builtins`); 70 interp tests, 118 total; clean `cargo clippy`.
+Built with **TDD** (red→green per feature; every test targets a real bug class).
+
+- ✅ **Values** (`value.rs`) — `Int/Float/Bool/Str/List/Func/Closure/Struct/Enum/Nil`. Reference
+  types share via `Rc<RefCell<…>>`. Deterministic `Display` (struct fields in declaration order).
+  Result/Option are plain `Enum`s (`Ok/Err/Some/None` pre-registered).
+- ✅ **Env** (`env.rs`) — lexical scoping: `globals: Rc<HashMap>` + a stack of local frames; a call
+  `swap_locals` to a fresh frame so a callee never sees the caller's locals. Closures snapshot
+  captured frames.
+- ✅ **Eval/exec** (`mod.rs`) — full expr + stmt set: arithmetic (int/int→int trunc, float promotion,
+  checked overflow, div/mod-by-zero error for **both** int and float), `and`/`or` short-circuit,
+  comparisons/equality, list literals + indexing, ranges (lazy in `for`), unary, calls, field
+  access, method calls (`self`-bound), closures, `if`/`for`/`while`/`match`, `return` (via `Flow`),
+  string interpolation (`{expr}`, `{{`/`}}`).
+- ✅ **`?` operator** — value-level early return via a `propagating` channel caught at the call
+  boundary; unwraps `Ok`/`Some`, propagates `Err`/`None` from the enclosing fn.
+- ✅ **Builtins** (`builtins.rs`) — `print`, `len`, `range` (length-capped), `int`/`float`/`str`
+  casts (range-checked), `sqrt`. `sqrt`/casts are temporary builtins until `std.math` (M4.5).
+- ✅ **Entry point** — hoist top-level `fn`/`struct`/`enum`, run top-level stmts, auto-call nullary
+  `main()`. CLI `chezzi run <file>` wired; prints partial output before a runtime error.
+- ✅ **Robustness** (review-panel hardened, warm + cold pass) — interpreter runs on a dedicated
+  256 MB-stack thread with a `MAX_CALL_DEPTH` guard (infinite recursion → clean error, not SIGABRT);
+  no reachable panics on adversarial input; lazy ranges; accurate error spans.
+
+**Deferred (unchanged):** maps `{...}`, pipe `|>` (M6), break/continue (no AST nodes), core-type
+methods (`s.upper()`, `xs.push()` — only user struct methods so far). Exhaustiveness of `match` is
+a runtime error now; static check arrives with M4. `?` inside a closure is absorbed at the closure
+boundary (a checker rule for M4).
+
 ## Roadmap (later)
 
-- ⬜ **M3** — Tree-walk interpreter (working language!) ← NEXT
-- ⬜ **M4** — Type checker (local inference)
+- ⬜ **M4** — Type checker (local inference) ← NEXT
 - ⬜ **M4.5** — Modules / imports
 - ⬜ **M5** — Bytecode VM + mark-sweep GC
 - ⬜ **M6** — Stdlib + pipe `|>`

@@ -39,6 +39,25 @@ pub fn parse(tokens: Vec<Tok>) -> PResult<Module> {
     Parser::new(tokens).parse_module()
 }
 
+/// Parse a token stream containing exactly one expression into an `Expr`.
+///
+/// Used by the M3 interpreter to evaluate the inner `{…}` fragments of an interpolated string
+/// by reusing the real lexer + Pratt parser. Tolerates surrounding `Newline`s; anything other
+/// than a single expression followed by `Eof` is a `ParseError`.
+pub fn parse_expr(tokens: Vec<Tok>) -> PResult<Expr> {
+    let mut p = Parser::new(tokens);
+    p.skip_newlines();
+    let expr = p.parse_expr()?;
+    p.skip_newlines();
+    if !p.check(&Token::Eof) {
+        return Err(p.err(format!(
+            "unexpected {} after expression",
+            describe(p.peek())
+        )));
+    }
+    Ok(expr)
+}
+
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
