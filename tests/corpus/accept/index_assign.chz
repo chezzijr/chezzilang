@@ -1,0 +1,6 @@
+# rule: assignStmt, lvalue, postfix
+fn main():
+    xs := [1, 2, 3]
+    xs[0] = 9
+    xs[1] += 4
+    xs[2] -= 1

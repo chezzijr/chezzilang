@@ -118,6 +118,14 @@ pub enum Op {
     GetField(String),
     /// Stack `[obj, index]` (index already `AsInt`-checked).
     GetIndex,
+    /// Stack `[obj, value]` → `[]` — mutate a struct field in place.
+    SetField(String),
+    /// Stack `[obj, index, value]` (index already `AsInt`-checked) → `[]` — mutate a list element.
+    SetIndex,
+    /// `[a]` → `[a, a]` — duplicate the top (compound field assignment).
+    Dup,
+    /// `[a, b]` → `[a, b, a, b]` — duplicate the top two (compound index assignment).
+    Dup2,
 
     // ----- strings -----
     /// Pop a value, push its `Display` form as a `Str` (interpolation chunk).

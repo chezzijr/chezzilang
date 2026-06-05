@@ -611,9 +611,46 @@ impl Checker {
                 };
                 self.check_assign_value(&var_ty, op, &val_ty, target.span);
             }
-            // The interpreter only supports assigning to a bare variable (interp `exec_assign`);
-            // field/index assignment is not implemented yet, so reject it here rather than let
-            // the checker green-light a program that errors at runtime.
+            // `xs[i] = v` — only lists are mutable by index. Strings are immutable; other types
+            // aren't indexable. (`infer_index` would green-light a str index — handle it here.)
+            ExprKind::Index { obj, index } => {
+                self.expect_int(index, "index");
+                match self.infer(obj) {
+                    Ty::List(elem) => self.check_assign_value(&elem, op, &val_ty, target.span),
+                    Ty::Str => self.error(
+                        target.span,
+                        "cannot assign to an index of str (strings are immutable)",
+                    ),
+                    Ty::Unknown => {}
+                    other => self.error(target.span, format!("cannot index-assign into {other}")),
+                }
+            }
+            // `p.x = v` — only data fields of a struct are assignable (not methods, not module
+            // members). `infer_field` would accept those, so check the field kind here.
+            ExprKind::Field { obj, name } => {
+                let obj_ty = self.infer(obj);
+                match &obj_ty {
+                    Ty::Struct(sname) => {
+                        let field_ty = self
+                            .structs
+                            .get(sname)
+                            .and_then(|info| info.fields.iter().find(|(f, _)| f == name))
+                            .map(|(_, ty)| ty.clone());
+                        match field_ty {
+                            Some(ty) => self.check_assign_value(&ty, op, &val_ty, target.span),
+                            None => self.error(
+                                target.span,
+                                format!("cannot assign to '{name}': type {obj_ty} has no field '{name}'"),
+                            ),
+                        }
+                    }
+                    Ty::Unknown => {}
+                    other => self.error(
+                        target.span,
+                        format!("cannot assign to field '{name}' of {other}"),
+                    ),
+                }
+            }
             _ => self.error(target.span, "invalid assignment target (only variables can be assigned)"),
         }
     }

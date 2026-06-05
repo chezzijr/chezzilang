@@ -254,20 +254,48 @@ impl Compiler {
     }
 
     fn compile_assign(&mut self, fc: &mut FnComp, target: &Expr, op: AssignOp, value: &Expr, span: Span) -> Result<(), CompileError> {
-        let ExprKind::Ident(name) = &target.kind else {
-            return Err(CompileError { message: "invalid assignment target".to_string(), span });
-        };
-        match op {
-            AssignOp::Eq => {
-                self.compile_expr(fc, value)?;
-                self.emit_store(fc, name, span);
+        match &target.kind {
+            ExprKind::Ident(name) => match op {
+                AssignOp::Eq => {
+                    self.compile_expr(fc, value)?;
+                    self.emit_store(fc, name, span);
+                }
+                AssignOp::PlusEq | AssignOp::MinusEq => {
+                    self.emit_load(fc, name, span);
+                    self.compile_expr(fc, value)?;
+                    fc.emit(if op == AssignOp::PlusEq { Op::Add } else { Op::Sub }, span);
+                    self.emit_store(fc, name, span);
+                }
+            },
+            // `obj.f = v` → [obj, v] SetField; compound dups `obj` to read-modify-write.
+            ExprKind::Field { obj, name } => {
+                self.compile_expr(fc, obj)?;
+                if op != AssignOp::Eq {
+                    fc.emit(Op::Dup, span);
+                    fc.emit(Op::GetField(name.clone()), target.span);
+                    self.compile_expr(fc, value)?;
+                    fc.emit(if op == AssignOp::PlusEq { Op::Add } else { Op::Sub }, span);
+                } else {
+                    self.compile_expr(fc, value)?;
+                }
+                fc.emit(Op::SetField(name.clone()), span);
             }
-            AssignOp::PlusEq | AssignOp::MinusEq => {
-                self.emit_load(fc, name, span);
-                self.compile_expr(fc, value)?;
-                fc.emit(if op == AssignOp::PlusEq { Op::Add } else { Op::Sub }, span);
-                self.emit_store(fc, name, span);
+            // `obj[i] = v` → [obj, i, v] SetIndex; compound dups `[obj, i]` to read-modify-write.
+            ExprKind::Index { obj, index } => {
+                self.compile_expr(fc, obj)?;
+                self.compile_expr(fc, index)?;
+                fc.emit(Op::AsInt, index.span);
+                if op != AssignOp::Eq {
+                    fc.emit(Op::Dup2, span);
+                    fc.emit(Op::GetIndex, target.span);
+                    self.compile_expr(fc, value)?;
+                    fc.emit(if op == AssignOp::PlusEq { Op::Add } else { Op::Sub }, span);
+                } else {
+                    self.compile_expr(fc, value)?;
+                }
+                fc.emit(Op::SetIndex, span);
             }
+            _ => return Err(CompileError { message: "invalid assignment target".to_string(), span }),
         }
         Ok(())
     }

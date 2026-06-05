@@ -94,6 +94,30 @@ model; Level-3 dynamic `cdylib` loading stays out of scope.
 - ⏸️ **Deferred (intentional):** `std.os.exit(code)` (needs an exit-code channel through both run
   drivers + CLI); `read_file` capped at 64 MiB; `getcwd` not yet injectable via `HostConfig`.
 
+## Post-M6 — Index & field assignment (mutability)  ✅ DONE
+
+`xs[i] = v` and `p.x = v` (plus `+=`/`-=`) now mutate in place on **both** engines — the two
+highest-leverage gaps from `gaps.md` (#1, #2), which unblock in-place array algorithms (counting
+sort, DP, sieve) and stateful objects. **Reverses the M4 decision** that rejected field/index
+assignment "to match the interpreter" — now that both engines support it, the checker allows it.
+Built **TDD** (red→green per layer; checker/interp/VM tests bite-verified to fail first).
+
+- ✅ **Front-end was the only blocker** — the parser already accepted `Field`/`Index` lvalues and
+  `docs/grammar.bnf`'s `<lvalue>` rule already permitted them; no grammar change needed.
+- ✅ **Checker** (`check_assign`) — `Index` target requires a `list` (str index-assign rejected —
+  strings are immutable); `Field` target requires a struct **data** field (methods/module members
+  rejected); element/field type checked via the existing `check_assign_value`.
+- ✅ **Interp** (`exec_assign`) — mutates in place through the existing `Rc<RefCell<…>>` (list
+  elements, struct fields); each subexpression evaluated once; bounds/missing-field errors mirror
+  the read path.
+- ✅ **VM** — four new ops in `src/vm/op.rs` (`SetIndex`, `SetField`, `Dup`, `Dup2`); `compile_assign`
+  emits them (`Dup`/`Dup2` give compound `+=`/`-=` a read-modify-write with no double-eval);
+  `set_index`/`set_field` mutate via `heap.get_mut`. Error strings byte-match the interp.
+- ✅ **Tests** — checker `ok`/`rejects` (9 cases), interp `run` asserts + OOB error, VM unit +
+  cross-engine parity (incl. OOB), conformance corpus (`accept/index_assign.chz`,
+  `accept/field_assign.chz`), golden `examples/mutate.chz` + `.expected` byte-identical on both
+  engines. 433 total, clean `cargo clippy`.
+
 ## M5a — Bytecode compiler + stack VM (handle values, no collector yet)  ✅ DONE
 
 `cargo run -- run --vm <file>` runs on the bytecode VM (tree-walk interp stays the default).

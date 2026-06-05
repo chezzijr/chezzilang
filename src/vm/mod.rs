@@ -467,6 +467,19 @@ impl Vm {
             }
             Op::GetField(name) => self.get_field(name, span)?,
             Op::GetIndex => self.get_index(span)?,
+            Op::SetField(name) => self.set_field(name, span)?,
+            Op::SetIndex => self.set_index(span)?,
+            Op::Dup => {
+                let top = *self.stack.last().expect("Dup on empty stack");
+                self.push(top);
+            }
+            Op::Dup2 => {
+                let n = self.stack.len();
+                let a = self.stack[n - 2];
+                let b = self.stack[n - 1];
+                self.push(a);
+                self.push(b);
+            }
             Op::ToStr => {
                 let v = self.pop();
                 let s = self.display(v);
@@ -1022,6 +1035,52 @@ impl Vm {
                     None => Err(self.err(format!("index {idx} out of bounds (len {})", chars.len()), span)),
                 }
             }
+            _ => Err(self.err(format!("cannot index {}", self.type_name(obj)), span)),
+        }
+    }
+
+    fn set_field(&mut self, name: &str, span: Span) -> Result<(), RuntimeError> {
+        let val = self.pop();
+        let obj = self.pop();
+        let Value::Obj(h) = obj else {
+            return Err(self.err(format!("cannot assign field '{name}' of {}", self.type_name(obj)), span));
+        };
+        match self.heap.get_mut(h) {
+            Obj::Struct { fields, .. } => match fields.iter_mut().find(|(k, _)| k.as_ref() == name) {
+                Some((_, slot)) => {
+                    *slot = val;
+                    Ok(())
+                }
+                None => {
+                    let shown = self.display(obj);
+                    Err(self.err(format!("no field '{name}' on {shown}"), span))
+                }
+            },
+            _ => Err(self.err(format!("cannot assign field '{name}' of {}", self.type_name(obj)), span)),
+        }
+    }
+
+    fn set_index(&mut self, span: Span) -> Result<(), RuntimeError> {
+        let val = self.pop();
+        let idx = match self.pop() {
+            Value::Int(n) => n,
+            _ => unreachable!("index pre-checked by AsInt"),
+        };
+        let obj = self.pop();
+        let Value::Obj(h) = obj else {
+            return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
+        };
+        match self.heap.get_mut(h) {
+            Obj::List(items) => match usize::try_from(idx).ok().filter(|i| *i < items.len()) {
+                Some(i) => {
+                    items[i] = val;
+                    Ok(())
+                }
+                None => {
+                    let len = items.len();
+                    Err(self.err(format!("index {idx} out of bounds (len {len})"), span))
+                }
+            },
             _ => Err(self.err(format!("cannot index {}", self.type_name(obj)), span)),
         }
     }
@@ -1883,6 +1942,53 @@ main()";
     }
 
     #[test]
+    fn index_assign_mutates_in_place() {
+        assert_eq!(run("xs := [1, 2, 3]\nxs[1] = 9\nprint(xs)\n"), "[1, 9, 3]\n");
+    }
+
+    #[test]
+    fn index_compound_assign() {
+        assert_eq!(
+            run("xs := [1, 2, 3]\nxs[0] += 5\nxs[2] -= 1\nprint(xs)\n"),
+            "[6, 2, 2]\n"
+        );
+    }
+
+    #[test]
+    fn index_assign_out_of_bounds_errors() {
+        assert_eq!(run_err("xs := [1, 2, 3]\nxs[5] = 0\n"), "index 5 out of bounds (len 3)");
+    }
+
+    #[test]
+    fn field_assign_mutates_in_place() {
+        let src = "\
+struct P:
+    x: int
+    y: int
+fn main():
+    p := P(1, 2)
+    p.x = 9
+    print(p.x)
+    print(p.y)
+main()";
+        assert_eq!(run(src), "9\n2\n");
+    }
+
+    #[test]
+    fn field_compound_assign() {
+        let src = "\
+struct P:
+    x: int
+fn main():
+    p := P(10)
+    p.x += 5
+    p.x -= 3
+    print(p.x)
+main()";
+        assert_eq!(run(src), "12\n");
+    }
+
+    #[test]
     fn field_access_and_unknown_field() {
         let src = "\
 struct P:
@@ -2450,6 +2556,39 @@ main()";
         }
     }
 
+    #[test]
+    fn parity_index_assign() {
+        assert_parity("xs := [1, 2, 3]\nxs[1] = 9\nxs[0] += 4\nxs[2] -= 1\nprint(xs)\n");
+    }
+
+    #[test]
+    fn parity_index_assign_out_of_bounds() {
+        assert_parity("xs := [1, 2, 3]\nxs[9] = 0\nprint(xs)\n");
+    }
+
+    #[test]
+    fn parity_compound_index_oob_vs_rhs_error_order() {
+        // Compound `xs[i] += rhs` on an out-of-bounds `i` where `rhs` ALSO errors: both engines
+        // must agree on which error wins. The VM reads the target (bounds-check) before `rhs`;
+        // the interp must do the same.
+        assert_parity("xs := [1, 2, 3]\nz := 0\nxs[5] += 1 / z\n");
+    }
+
+    #[test]
+    fn parity_compound_index_oob_skips_rhs_side_effect() {
+        // On an out-of-bounds compound assign, neither engine should run the rhs side effect.
+        assert_parity(
+            "fn side() -> int:\n    print(\"rhs ran\")\n    return 0\nxs := [1, 2, 3]\nxs[5] += side()\nprint(\"after\")\n",
+        );
+    }
+
+    #[test]
+    fn parity_field_assign() {
+        assert_parity(
+            "struct P:\n    x: int\n    y: int\np := P(1, 2)\np.x = 9\np.y += 3\nprint(p.x)\nprint(p.y)\n",
+        );
+    }
+
     fn fixture(rel: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
     }
@@ -2484,6 +2623,17 @@ main()";
         assert_file_parity("examples/methods.chz");
     }
 
+    /// Golden: in-place index & field assignment run end-to-end on the VM and byte-match the interp.
+    #[test]
+    fn golden_mutate_via_run_file() {
+        let path = fixture("examples/mutate.chz");
+        let expected = std::fs::read_to_string(fixture("examples/mutate.expected")).unwrap();
+        let (out, _err, res) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/mutate.chz");
+    }
+
     /// M6c golden: the std-library demo (native std.io/math/os + Chezzi std.str) runs end-to-end on
     /// the VM and byte-matches both the `.expected` file and the interpreter.
     #[test]
@@ -2494,6 +2644,18 @@ main()";
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/std_demo.chz");
+    }
+
+    /// A complete self-contained program (merge sort + binary search + stats over std.math) runs on
+    /// the VM, byte-matches `.expected`, and stays identical to the interpreter.
+    #[test]
+    fn golden_stats_app_via_run_file() {
+        let path = fixture("examples/stats.chz");
+        let expected = std::fs::read_to_string(fixture("examples/stats.expected")).unwrap();
+        let (out, _err, res) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/stats.chz");
     }
 
     #[test]

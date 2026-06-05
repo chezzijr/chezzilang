@@ -970,37 +970,91 @@ impl Interp {
         value: &Expr,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        let ExprKind::Ident(name) = &target.kind else {
-            return Err(RuntimeError {
+        match &target.kind {
+            ExprKind::Ident(name) => {
+                let rhs = self.eval(value)?;
+                let new_val = match op {
+                    AssignOp::Eq => rhs,
+                    AssignOp::PlusEq | AssignOp::MinusEq => {
+                        let cur = self.env.get(name).ok_or_else(|| RuntimeError {
+                            message: format!("undefined name '{name}'"),
+                            span,
+                        })?;
+                        let bin = if op == AssignOp::PlusEq { BinaryOp::Add } else { BinaryOp::Sub };
+                        eval_binary(bin, cur, rhs, span)?
+                    }
+                };
+                if !self.env.assign(name, new_val) {
+                    return Err(RuntimeError {
+                        message: format!("cannot assign to undefined name '{name}'"),
+                        span,
+                    });
+                }
+                Ok(())
+            }
+            // `xs[i] = v` — mutate a list element in place (lists are `Rc<RefCell<…>>`).
+            ExprKind::Index { obj, index } => {
+                let target_val = self.eval(obj)?;
+                let idx = self.eval_int(index)?;
+                let Value::List(items) = &target_val else {
+                    return Err(RuntimeError {
+                        message: format!("cannot index {}", target_val.type_name()),
+                        span,
+                    });
+                };
+                // Bounds-checked index. Eval order mirrors the VM exactly: plain `=` pushes `value`
+                // before `SetIndex` bounds-checks; compound `+=`/`-=` reads the current element
+                // (`Dup2`+`GetIndex`, which bounds-checks) BEFORE `value`.
+                let bounds_check = |idx: i64, len: usize| {
+                    usize::try_from(idx).ok().filter(|i| *i < len).ok_or_else(|| RuntimeError {
+                        message: format!("index {idx} out of bounds (len {len})"),
+                        span,
+                    })
+                };
+                let new_val = match op {
+                    AssignOp::Eq => self.eval(value)?,
+                    AssignOp::PlusEq | AssignOp::MinusEq => {
+                        let i = bounds_check(idx, items.borrow().len())?;
+                        let cur = items.borrow()[i].clone();
+                        let rhs = self.eval(value)?;
+                        let bin = if op == AssignOp::PlusEq { BinaryOp::Add } else { BinaryOp::Sub };
+                        eval_binary(bin, cur, rhs, span)?
+                    }
+                };
+                let i = bounds_check(idx, items.borrow().len())?;
+                items.borrow_mut()[i] = new_val;
+                Ok(())
+            }
+            // `p.x = v` — mutate a struct field in place (fields are `Rc<RefCell<…>>`).
+            ExprKind::Field { obj, name } => {
+                let target_val = self.eval(obj)?;
+                let rhs = self.eval(value)?;
+                let Value::Struct { fields, .. } = &target_val else {
+                    return Err(RuntimeError {
+                        message: format!("cannot assign field '{name}' of {}", target_val.type_name()),
+                        span,
+                    });
+                };
+                let pos = fields.borrow().iter().position(|(k, _)| k == name);
+                let Some(pos) = pos else {
+                    return Err(RuntimeError {
+                        message: format!("no field '{name}' on {target_val}"),
+                        span,
+                    });
+                };
+                let new_val = match op {
+                    AssignOp::Eq => rhs,
+                    AssignOp::PlusEq => eval_binary(BinaryOp::Add, fields.borrow()[pos].1.clone(), rhs, span)?,
+                    AssignOp::MinusEq => eval_binary(BinaryOp::Sub, fields.borrow()[pos].1.clone(), rhs, span)?,
+                };
+                fields.borrow_mut()[pos].1 = new_val;
+                Ok(())
+            }
+            _ => Err(RuntimeError {
                 message: "invalid assignment target".to_string(),
                 span,
-            });
-        };
-        let rhs = self.eval(value)?;
-        let new_val = match op {
-            AssignOp::Eq => rhs,
-            AssignOp::PlusEq => {
-                let cur = self.env.get(name).ok_or_else(|| RuntimeError {
-                    message: format!("undefined name '{name}'"),
-                    span,
-                })?;
-                eval_binary(BinaryOp::Add, cur, rhs, span)?
-            }
-            AssignOp::MinusEq => {
-                let cur = self.env.get(name).ok_or_else(|| RuntimeError {
-                    message: format!("undefined name '{name}'"),
-                    span,
-                })?;
-                eval_binary(BinaryOp::Sub, cur, rhs, span)?
-            }
-        };
-        if !self.env.assign(name, new_val) {
-            return Err(RuntimeError {
-                message: format!("cannot assign to undefined name '{name}'"),
-                span,
-            });
+            }),
         }
-        Ok(())
     }
 }
 
@@ -1774,6 +1828,40 @@ fn safe_div(a: int, b: int) -> Result[int]:
     #[test]
     fn string_indexing() {
         assert_eq!(run("s := \"abc\"\nprint(s[1])\n"), "b\n");
+    }
+
+    #[test]
+    fn index_assign_mutates_in_place() {
+        assert_eq!(run("xs := [1, 2, 3]\nxs[1] = 9\nprint(xs)\n"), "[1, 9, 3]\n");
+    }
+
+    #[test]
+    fn index_compound_assign() {
+        assert_eq!(
+            run("xs := [1, 2, 3]\nxs[0] += 5\nxs[2] -= 1\nprint(xs)\n"),
+            "[6, 2, 2]\n"
+        );
+    }
+
+    #[test]
+    fn index_assign_out_of_bounds_errors() {
+        assert!(run_capture("xs := [1, 2, 3]\nxs[5] = 0\n").is_err());
+    }
+
+    #[test]
+    fn field_assign_mutates_in_place() {
+        assert_eq!(
+            run("struct P:\n    x: int\n    y: int\np := P(1, 2)\np.x = 9\nprint(p.x)\nprint(p.y)\n"),
+            "9\n2\n"
+        );
+    }
+
+    #[test]
+    fn field_compound_assign() {
+        assert_eq!(
+            run("struct P:\n    x: int\np := P(10)\np.x += 5\np.x -= 3\nprint(p.x)\n"),
+            "12\n"
+        );
     }
 
     #[test]

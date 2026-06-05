@@ -447,6 +447,56 @@ fn list_index_ok() {
     ok("xs := [1, 2, 3]\ny := xs[0] + 1\n");
 }
 
+// ===== 11b. index / field assignment targets =====
+
+#[test]
+fn index_assign_ok() {
+    ok("xs := [1, 2, 3]\nxs[0] = 9\n");
+}
+
+#[test]
+fn index_compound_assign_ok() {
+    ok("xs := [1, 2, 3]\nxs[0] += 1\nxs[1] -= 2\n");
+}
+
+#[test]
+fn index_assign_type_mismatch_rejected() {
+    rejects("xs := [1, 2, 3]\nxs[0] = \"a\"\n", "cannot assign");
+}
+
+#[test]
+fn string_index_assign_rejected() {
+    rejects("s := \"hi\"\ns[0] = \"x\"\n", "strings are immutable");
+}
+
+#[test]
+fn field_assign_ok() {
+    ok("struct P:\n    x: int\np := P(1)\np.x = 5\n");
+}
+
+#[test]
+fn field_compound_assign_ok() {
+    ok("struct P:\n    x: int\np := P(1)\np.x += 4\np.x -= 1\n");
+}
+
+#[test]
+fn field_assign_type_mismatch_rejected() {
+    rejects("struct P:\n    x: int\np := P(1)\np.x = \"a\"\n", "cannot assign");
+}
+
+#[test]
+fn unknown_field_assign_rejected() {
+    rejects("struct P:\n    x: int\np := P(1)\np.y = 5\n", "has no field 'y'");
+}
+
+#[test]
+fn method_assign_rejected() {
+    rejects(
+        "struct P:\n    x: int\n    fn get(self) -> int:\n        return self.x\np := P(1)\np.get = 5\n",
+        "cannot assign",
+    );
+}
+
 // ===== 12. match =====
 
 #[test]
@@ -569,17 +619,6 @@ fn duplicate_function_is_reported() {
 fn variant_name_shared_across_enums_is_reported() {
     // `variants` is keyed by bare name; a collision would otherwise silently mis-type.
     rejects("enum A:\n    X(int)\nenum B:\n    X(str)\n", "variant 'X' is already defined");
-}
-
-#[test]
-fn field_assignment_rejected() {
-    // The interpreter only assigns to bare variables; the checker must match that.
-    rejects("struct P:\n    x: int\np := P(1)\np.x = 2\n", "invalid assignment target");
-}
-
-#[test]
-fn index_assignment_rejected() {
-    rejects("xs := [1, 2]\nxs[0] = 9\n", "invalid assignment target");
 }
 
 #[test]

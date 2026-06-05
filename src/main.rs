@@ -26,7 +26,7 @@ const USAGE: &str = "\
 chezzi — the Chezzi language toolchain
 
 USAGE:
-    chezzi <command> [file.chz]
+    chezzi <command> [flags] <file.chz> [program args...]
 
 COMMANDS:
     run     <file>   Type-check, then run on the bytecode VM  (M5)
@@ -39,6 +39,10 @@ COMMANDS:
 FLAGS:
     --errors=json    Emit type errors as JSON (for `check` / `run`)
     --interp         Run on the tree-walk interpreter instead of the bytecode VM
+
+NOTE: flags must come BEFORE the file path. Anything after the file is passed
+      to the program as an argument, so `chezzi run prog.chz --interp` runs the
+      default VM and hands `--interp` to the program. Use `chezzi run --interp prog.chz`.
 ";
 
 fn main() -> ExitCode {
@@ -166,6 +170,9 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let mut json = false;
     let mut use_vm = true;
     // Positional args after the script path are the program's own args (std.os.args).
+    // GOTCHA: this means flags MUST precede the file — `chezzi run prog.chz --interp`
+    // treats `--interp` as a program arg (path is already set) and silently runs the
+    // default VM. Correct form: `chezzi run --interp prog.chz`.
     let mut prog_args: Vec<String> = Vec::new();
     for arg in args {
         match arg.as_str() {

@@ -1,0 +1,137 @@
+# examples/stats.chz — a complete, self-contained program in Chezzi.
+#
+# Problem (classic): given a list of integers, sort them, report summary statistics
+# (count / sum / min / max / mean / population standard deviation), then answer a batch of
+# "is this value present?" membership queries.
+#
+# Showcases: recursion (merge sort), lists (build with push + read by index), structs & methods,
+# enums via Option + match, std.math (sqrt), and string interpolation. Pure build-and-read style —
+# Chezzi lists are append + index-read (no in-place element assignment), which suits a functional
+# merge sort that returns fresh sorted lists.
+#
+# In a real judge submission you'd read the data from stdin with `std.io.read_line()` + `int(...)`;
+# here the input is inline so the program is deterministic (and golden-testable).
+
+import std.io
+import std.math
+
+# ---- sorting -------------------------------------------------------------------------------------
+
+# Merge two already-sorted lists into one sorted list.
+fn merge(a: list[int], b: list[int]) -> list[int]:
+    out := []
+    i := 0
+    j := 0
+    while i < a.len() and j < b.len():
+        if a[i] <= b[j]:
+            out.push(a[i])
+            i += 1
+        else:
+            out.push(b[j])
+            j += 1
+    while i < a.len():
+        out.push(a[i])
+        i += 1
+    while j < b.len():
+        out.push(b[j])
+        j += 1
+    return out
+
+# Recursive merge sort: splits in half, sorts each, merges. Returns a new list.
+fn sort(xs: list[int]) -> list[int]:
+    n := xs.len()
+    if n <= 1:
+        return xs
+    mid := n / 2
+    left := []
+    right := []
+    i := 0
+    for x in xs:
+        if i < mid:
+            left.push(x)
+        else:
+            right.push(x)
+        i += 1
+    return merge(sort(left), sort(right))
+
+# ---- search --------------------------------------------------------------------------------------
+
+# Binary search over a sorted list. Returns Some(index) if present, else None.
+fn bsearch(xs: list[int], target: int) -> int?:
+    lo := 0
+    hi := xs.len() - 1
+    while lo <= hi:
+        mid := (lo + hi) / 2
+        v := xs[mid]
+        if v == target:
+            return Some(mid)
+        else if v < target:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return None
+
+# ---- statistics ----------------------------------------------------------------------------------
+
+struct Stats:
+    count: int
+    sum: int
+    min: int
+    max: int
+    mean: float
+    stddev: float
+
+    fn line(self) -> str:
+        return "count={self.count} sum={self.sum} min={self.min} max={self.max}"
+
+fn analyze(xs: list[int]) -> Stats:
+    n := xs.len()
+    total := 0
+    lo := xs[0]
+    hi := xs[0]
+    for x in xs:
+        total += x
+        if x < lo:
+            lo = x
+        if x > hi:
+            hi = x
+    mean := float(total) / float(n)
+    acc := 0.0
+    for x in xs:
+        d := float(x) - mean
+        acc += d * d
+    sd := math.sqrt(acc / float(n))
+    return Stats(n, total, lo, hi, mean, sd)
+
+# ---- helpers -------------------------------------------------------------------------------------
+
+fn join_ints(xs: list[int]) -> str:
+    out := ""
+    i := 0
+    for x in xs:
+        if i > 0:
+            out = out + ", "
+        out = out + str(x)
+        i += 1
+    return out
+
+# ---- main ----------------------------------------------------------------------------------------
+
+fn main():
+    data := [42, 7, 13, 7, 99, 1, 56, 23, 7, 88, 34, 2]
+    io.print("input:  " + join_ints(data))
+
+    ordered := sort(data)
+    io.print("sorted: " + join_ints(ordered))
+
+    s := analyze(ordered)
+    io.print(s.line())
+    io.print("mean={s.mean}")
+    io.print("stddev={s.stddev}")
+
+    for q in [23, 50, 99, 1]:
+        match bsearch(ordered, q):
+            Some(idx): io.print("found {q} at index {idx}")
+            None:      io.print("{q} not present")
+
+main()
