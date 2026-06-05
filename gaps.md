@@ -12,6 +12,11 @@ Legend: 🔴 blocks real apps · 🟡 notable friction · 🟢 works (recorded s
 
 Last updated: 2026-06-06. Baseline: post-M6c (native stdlib seam).
 
+> **Status: all flagged gaps (#1–#9) are now ✅ FIXED.** Both engines (tree-walk `interp` + bytecode
+> `vm`) stay in lockstep, verified by the parity + conformance suites (569 tests green). Each gap
+> landed TDD with golden `examples/*.chz` run under both engines. The one explicit deferral is
+> `sort_by` (HOF comparator) — expressible via `fold` meanwhile.
+
 ---
 
 ## 🔴 Blocking gaps
@@ -156,12 +161,15 @@ exposes it to `list[int]`/struct fields, where it can quietly poison an int arra
 
 ---
 
-## Suggested priority
+## Resolution order (all done)
 
 1. ~~**#1 + #2 (index / field assignment)**~~ ✅ **DONE (post-M6)** — one assignment-target rule
    across checker + both engines; unlocked mutable arrays and objects.
-2. **#3 (HOF params)** — the `Ty::Func` machinery already exists; mostly parser work. Unblocks #4's
-   `map`/`filter`/`sort` and the documented pipe idioms.
-3. **#4 `pop` (+ `reverse`/`contains`)** — trivial additions to the existing core-method tables;
-   `pop` alone unblocks stack-based algorithms.
-4. **#6 literal/wildcard `match`** — removes the most common "why won't this compile" for newcomers.
+2. ~~**#9 (strict compound assignment)**~~ ✅ — checker-only `widens` guard.
+3. ~~**#3 (HOF params)**~~ ✅ — `Type::Func` AST + parser + `resolve_type` lowering.
+4. ~~**#4 (list methods)**~~ ✅ — `pop`/`reverse`/`contains`/`index_of`/`sum`/`sort` + HOF
+   `map`/`filter`/`fold` (re-entrant `invoke_value`, GC-rooted, gc-stress tested).
+5. ~~**#6 (literal/wildcard `match`)**~~ ✅ — `Pattern::Literal`/`Wildcard`, no new opcode.
+6. ~~**#7 (break/continue)**~~ ✅ — `Flow`/compiler `LoopCtx`; for-`continue` lands on the increment.
+7. ~~**#5 (map type)**~~ ✅ — `{}` literals, `Obj::Map` insertion-ordered, index ops + methods, GC.
+8. ~~**#8 (tuples + multi-return + destructuring)**~~ ✅ — `(a,b)`, `(int,int)`, `a,b := …`, `.0`.
