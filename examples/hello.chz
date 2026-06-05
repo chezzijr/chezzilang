@@ -1,5 +1,5 @@
 # examples/hello.chz — touchstone program for the lexer/parser/interp milestones.
-# Not runnable yet (pre-M1). Doubles as golden-test + LLM-eval material.
+# Doubles as golden-test + LLM-eval material.
 
 fn greet(name: str) -> str:
     return "hi {name}"
@@ -8,8 +8,8 @@ struct Point:
     x: int
     y: int
 
-    fn dist(self) -> float:
-        return sqrt(self.x * self.x + self.y * self.y)
+    fn mag_sq(self) -> float:
+        return float(self.x * self.x + self.y * self.y)
 
 enum Shape:
     Circle(int)
@@ -35,7 +35,7 @@ fn main():
     print("even sum 0..10: {total}")
 
     p := Point(3, 4)
-    print("dist: {p.dist()}")
+    print("mag_sq: {p.mag_sq()}")
 
     print("area: {area(Circle(2))}")
 

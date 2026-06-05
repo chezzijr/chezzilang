@@ -129,7 +129,7 @@ struct Point:
     y: int
 
     fn dist(self) -> float:           # method: first param is 'self'
-        return sqrt(self.x*self.x + self.y*self.y)
+        return math.sqrt(float(self.x*self.x + self.y*self.y))   # needs: import std.math
 
 p := Point(3, 4)        # construct positionally
 print(p.x)              # field access

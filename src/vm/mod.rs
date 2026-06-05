@@ -1070,7 +1070,6 @@ impl Vm {
             "int" => self.builtin_int(&args, span)?,
             "float" => self.builtin_float(&args, span)?,
             "str" => self.builtin_str(&args, span)?,
-            "sqrt" => self.builtin_sqrt(&args, span)?,
             _ => unreachable!("unknown builtin {name}"),
         };
         self.push(result);
@@ -1151,18 +1150,6 @@ impl Vm {
         Ok(Value::Obj(self.heap.alloc(Obj::Str(s.into_boxed_str()))))
     }
 
-    fn builtin_sqrt(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-        self.arity_err("sqrt", args, 1, span)?;
-        let x = match args[0] {
-            Value::Int(n) => n as f64,
-            Value::Float(f) => f,
-            other => return Err(self.err(format!("sqrt() expects a number, got {}", self.type_name(other)), span)),
-        };
-        if x < 0.0 {
-            return Err(self.err(format!("sqrt() of a negative number ({x})"), span));
-        }
-        Ok(Value::Float(x.sqrt()))
-    }
 
     // ----- module namespace helpers -----
 
@@ -1946,12 +1933,6 @@ main()";
         assert!(run_err(r#"print(int("notnum"))"#).contains("cannot parse 'notnum'"));
     }
 
-    #[test]
-    fn builtin_sqrt() {
-        assert_eq!(run("print(sqrt(9.0))"), "3.0\n");
-        assert!(run_err("print(sqrt(-1.0))").contains("sqrt() of a negative number"));
-    }
-
     // ----- construction arity / nullary variant -----
 
     #[test]
@@ -2240,6 +2221,20 @@ main()";
         );
     }
 
+    #[test]
+    fn parity_std_math_sqrt_negative_errors() {
+        // math.sqrt of a negative is a runtime error, identical on both engines.
+        let src = "import std.math\nfn main():\n    print(math.sqrt(0.0 - 1.0))\nmain()";
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (_io, _ie, ir) = crate::interp::run_file(&entry);
+        let (_vo, _ve, vr) = run_file(&entry);
+        let ie = ir.unwrap_err().to_string();
+        let ve = vr.unwrap_err().to_string();
+        assert_eq!(ie, ve);
+        assert!(ie.contains("sqrt() of a negative number"), "{ie}");
+    }
+
     /// Run an entry through both engines with a freshly-built [`crate::native::HostConfig`] each
     /// (the config isn't `Clone` — `mk_cfg` produces an identical one per engine). Asserts stdout +
     /// ok/err parity; returns the agreed stdout.
@@ -2400,7 +2395,7 @@ main()";
         // for + while loops
         "fn main():\n    t := 0\n    for i in 0..100:\n        t += i\n    print(t)\n    n := 5\n    while n > 0:\n        n -= 1\n    print(n)\nmain()",
         // builtins
-        "print(range(4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint(sqrt(16.0))\nprint(str(42))",
+        "print(range(4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint(len([1, 2, 3]))\nprint(str(42))",
         // recursion
         "fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nfn main():\n    print(fib(15))\nmain()",
         // inferred return type (no `-> T`): runtime is unaffected, both engines agree
@@ -2422,7 +2417,6 @@ main()";
         "print(1 / 0)",
         "print([1, 2][9])",
         "print(1 + \"x\")",
-        "fn main():\n    print(sqrt(-1.0))\nmain()",
         "fn loop(n: int) -> int:\n    return loop(n + 1)\nfn main():\n    print(loop(0))\nmain()",
         // M6 method error parity
         "print(\"hi\".upper(\"extra\"))",

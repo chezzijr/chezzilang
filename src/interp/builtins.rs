@@ -1,4 +1,5 @@
-//! Built-in functions available without any import (`len`, `range`, `int`/`str`/`float`, `sqrt`).
+//! Built-in functions available without any import (`len`, `range`, `int`/`str`/`float`).
+//! Math intrinsics like `sqrt` are NOT builtins — they live in `std.math` (M6c).
 //! `print` lives in the interpreter itself because it writes to the captured output buffer.
 
 use super::{RuntimeError, Value};
@@ -8,7 +9,7 @@ use std::rc::Rc;
 
 /// The names handled here. Used so the interpreter can tell a builtin call from a user call.
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name, "len" | "range" | "int" | "float" | "str" | "sqrt")
+    matches!(name, "len" | "range" | "int" | "float" | "str")
 }
 
 /// Dispatch a builtin by name. Caller guarantees `is_builtin(name)`.
@@ -19,7 +20,6 @@ pub fn call(name: &str, args: Vec<Value>, span: Span) -> Result<Value, RuntimeEr
         "int" => cast_int(&args, span),
         "float" => cast_float(&args, span),
         "str" => cast_str(&args, span),
-        "sqrt" => sqrt(&args, span),
         _ => unreachable!("call dispatched a non-builtin: {name}"),
     }
 }
@@ -236,25 +236,4 @@ fn cast_float(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
 fn cast_str(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
     arity("str", args, 1, span)?;
     Ok(Value::Str(args[0].to_string().into()))
-}
-
-fn sqrt(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-    arity("sqrt", args, 1, span)?;
-    let x = match &args[0] {
-        Value::Int(n) => *n as f64,
-        Value::Float(f) => *f,
-        other => {
-            return Err(RuntimeError {
-                message: format!("sqrt() expects a number, got {}", other.type_name()),
-                span,
-            });
-        }
-    };
-    if x < 0.0 {
-        return Err(RuntimeError {
-            message: format!("sqrt() of a negative number ({x})"),
-            span,
-        });
-    }
-    Ok(Value::Float(x.sqrt()))
 }

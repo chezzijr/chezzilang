@@ -1195,16 +1195,6 @@ impl Checker {
                 self.infer_all(args);
                 Some(Ty::Str)
             }
-            "sqrt" => {
-                self.check_arity("sqrt", 1, args, span);
-                if let Some(a) = args.first() {
-                    let t = self.infer(a);
-                    if !t.is_numeric() && !t.is_unknown() {
-                        self.error(a.span, format!("sqrt() expects a number, got {t}"));
-                    }
-                }
-                Some(Ty::Float)
-            }
             // Generic built-in constructors for Result / Option.
             "Ok" => Some(Ty::result(self.one_arg(name, args, span))),
             "Some" => Some(Ty::option(self.one_arg(name, args, span))),

@@ -1732,15 +1732,9 @@ fn safe_div(a: int, b: int) -> Result[int]:
     }
 
     #[test]
-    fn builtin_sqrt() {
-        assert_eq!(run("print(sqrt(25.0))\n"), "5.0\n");
-        assert_eq!(run("print(sqrt(9))\n"), "3.0\n");
-    }
-
-    #[test]
     fn builtin_wrong_arity_errors() {
         assert!(run_capture("print(len())\n").is_err());
-        assert!(run_capture("print(sqrt(1, 2))\n").is_err());
+        assert!(run_capture("print(int())\n").is_err());
     }
 
     // ----- review-panel hardening regressions -----

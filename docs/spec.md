@@ -49,8 +49,8 @@ print("hi {name}")                     # interpolation
 struct Point:
     x: int
     y: int
-    fn dist(self) -> float:            # struct method
-        return sqrt(self.x*self.x + self.y*self.y)
+    fn dist(self) -> float:            # struct method (needs: import std.math)
+        return math.sqrt(float(self.x*self.x + self.y*self.y))
 
 enum Shape:
     Circle(int)
