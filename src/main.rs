@@ -9,10 +9,12 @@
 
 mod ast;
 mod checker;
+mod compiler;
 mod interp;
 mod lexer;
 mod parser;
 mod resolver;
+mod vm;
 
 #[cfg(test)]
 mod conformance;
@@ -35,6 +37,7 @@ COMMANDS:
 
 FLAGS:
     --errors=json    Emit type errors as JSON (for `check` / `run`)
+    --vm             Run on the bytecode VM instead of the tree-walk interpreter (M5)
 ";
 
 fn main() -> ExitCode {
@@ -155,9 +158,26 @@ fn cmd_check(args: &[String]) -> ExitCode {
     }
 }
 
-/// `chezzi run <file> [--errors=json]` — type-check first (M4 gate), then execute. (M3)
+/// `chezzi run <file> [--errors=json] [--vm]` — type-check first (M4 gate), then execute on the
+/// tree-walk interpreter (default) or the bytecode VM (`--vm`, M5).
 fn cmd_run(args: &[String]) -> ExitCode {
-    let Some((path, json)) = parse_file_and_flags("run", args) else {
+    let mut path = None;
+    let mut json = false;
+    let mut use_vm = false;
+    for arg in args {
+        match arg.as_str() {
+            "--errors=json" => json = true,
+            "--vm" => use_vm = true,
+            other if other.starts_with("--") => {
+                eprintln!("chezzi run: unknown flag '{other}'");
+                return ExitCode::FAILURE;
+            }
+            other if path.is_none() => path = Some(other.to_string()),
+            _ => {}
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("chezzi run: missing file argument\nusage: chezzi run <file.chz> [--errors=json] [--vm]");
         return ExitCode::FAILURE;
     };
     if read_source(&path).is_none() {
@@ -178,12 +198,19 @@ fn cmd_run(args: &[String]) -> ExitCode {
     }
 
     // Print whatever the program emitted before any error, then the error itself.
-    let (output, result) = interp::run_file(std::path::Path::new(&path));
+    let p = std::path::Path::new(&path);
+    let (output, errored) = if use_vm {
+        let (out, result) = vm::run_file(p);
+        (out, result.err().map(|e| e.to_string()))
+    } else {
+        let (out, result) = interp::run_file(p);
+        (out, result.err().map(|e| e.to_string()))
+    };
     print!("{output}");
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("{e}");
+    match errored {
+        None => ExitCode::SUCCESS,
+        Some(msg) => {
+            eprintln!("{msg}");
             ExitCode::FAILURE
         }
     }

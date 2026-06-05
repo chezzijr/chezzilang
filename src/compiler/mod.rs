@@ -1,0 +1,829 @@
+//! Bytecode compiler (M5): lowers a resolved module graph (or a single `Module`) to a [`Program`]
+//! of function prototypes for the stack VM. The compiler is the *only* place that knows about slots
+//! — locals resolve to operand-stack slots here; everything else (globals, struct/variant names,
+//! builtins) is resolved by name, matching the tree-walk interpreter's resolution order so the VM
+//! reproduces its semantics exactly.
+//!
+//! Two passes:
+//!   1. **Hoist** — register every module's struct / enum declarations into the program-global
+//!      type tables (with the interpreter's "type already defined" collision), plus the built-in
+//!      `Ok`/`Err`/`Some`/`None` variants.
+//!   2. **Compile** — for each module emit a `<toplevel>` proto (top-level `fn`s hoisted first so
+//!      forward references resolve) and one proto per `fn` / method / closure.
+
+use crate::ast::{
+    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, MatchArm, Module, Pattern, Span, Stmt,
+    StmtKind, UnaryOp,
+};
+use crate::resolver::ModuleGraph;
+use crate::vm::op::{
+    CapEntry, CapSrc, ModuleProto, Op, Program, Proto, ProtoId, StructDef, VariantDef,
+};
+use crate::{lexer, parser};
+use std::collections::HashMap;
+
+/// A compile-time failure (e.g. a malformed string interpolation). Carries a span so the CLI can
+/// report it like any other error. Most user errors are caught earlier by the type checker; this
+/// covers what only the compiler can see.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompileError {
+    pub message: String,
+    pub span: Span,
+}
+
+/// The name a builtin resolves to (mirrors `interp::builtins::is_builtin` + the special `print`).
+fn is_builtin(name: &str) -> bool {
+    matches!(name, "len" | "range" | "int" | "float" | "str" | "sqrt")
+}
+
+/// Compile a whole resolved module graph in dependency order.
+pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
+    let mut c = Compiler::new();
+    // Pass 1: hoist all type declarations across every module.
+    for lm in &graph.modules {
+        c.hoist_types(&lm.ast.stmts)?;
+    }
+    // Pass 2: compile each module's toplevel + functions.
+    for (idx, lm) in graph.modules.iter().enumerate() {
+        let toplevel = c.compile_module(idx, &lm.ast)?;
+        c.program.modules.push(ModuleProto {
+            id: lm.id.clone(),
+            label: lm.label(),
+            toplevel,
+            imports: lm.imports.clone(),
+            is_entry: lm.id == graph.entry,
+        });
+    }
+    Ok(c.program)
+}
+
+/// Compile a single in-memory module (test helper — no imports, treated as the entry).
+#[cfg(test)]
+pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileError> {
+    let mut c = Compiler::new();
+    c.hoist_types(&module.stmts)?;
+    let toplevel = c.compile_module(0, module)?;
+    // A synthetic module id so the run driver has something to key the namespace cache on.
+    let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
+    c.program.modules.push(ModuleProto {
+        id,
+        label: "<main>".to_string(),
+        toplevel,
+        imports: Vec::new(),
+        is_entry: true,
+    });
+    Ok(c.program)
+}
+
+struct Compiler {
+    program: Program,
+}
+
+impl Compiler {
+    fn new() -> Self {
+        let mut program = Program {
+            protos: Vec::new(),
+            structs: HashMap::new(),
+            variants: HashMap::new(),
+            modules: Vec::new(),
+        };
+        // Built-in Result / Option variants, available without declaration.
+        for (v, e, arity) in [("Ok", "Result", 1), ("Err", "Result", 1), ("Some", "Option", 1), ("None", "Option", 0)] {
+            program.variants.insert(
+                v.to_string(),
+                VariantDef { enum_name: e.to_string(), arity },
+            );
+        }
+        Compiler { program }
+    }
+
+    /// Pass 1: register struct / enum declarations into the program-global tables.
+    fn hoist_types(&mut self, stmts: &[Stmt]) -> Result<(), CompileError> {
+        for stmt in stmts {
+            match &stmt.kind {
+                StmtKind::Struct { name, fields, .. } => {
+                    if self.program.structs.contains_key(name) {
+                        return Err(CompileError {
+                            message: format!("type '{name}' is already defined"),
+                            span: stmt.span,
+                        });
+                    }
+                    self.program.structs.insert(
+                        name.clone(),
+                        StructDef {
+                            fields: fields.iter().map(|f| f.name.clone()).collect(),
+                            methods: HashMap::new(),
+                            module_idx: 0, // filled in pass 2
+                        },
+                    );
+                }
+                StmtKind::Enum { name, variants } => {
+                    for v in variants {
+                        self.program.variants.insert(
+                            v.name.clone(),
+                            VariantDef { enum_name: name.clone(), arity: v.payload.len() },
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Pass 2: compile one module to a toplevel proto; record method protos into the type table.
+    fn compile_module(&mut self, module_idx: usize, module: &Module) -> Result<ProtoId, CompileError> {
+        // Compile struct methods first, recording their proto ids + this module as their home.
+        for stmt in &module.stmts {
+            if let StmtKind::Struct { name, methods, .. } = &stmt.kind {
+                for m in methods {
+                    let pid = self.compile_fn(m, false)?;
+                    let def = self.program.structs.get_mut(name).expect("hoisted");
+                    def.module_idx = module_idx;
+                    def.methods.insert(m.name.clone(), pid);
+                }
+            }
+        }
+        // The synthetic toplevel function: top-level `fn`s are hoisted as globals before the body.
+        let mut fc = FnComp::new("<toplevel>".to_string(), 0, true);
+        for stmt in &module.stmts {
+            if let StmtKind::Fn(decl) = &stmt.kind {
+                let pid = self.compile_fn(decl, false)?;
+                fc.emit(Op::MakeFunc(pid), stmt.span);
+                fc.emit(Op::DefineGlobal(decl.name.clone()), stmt.span);
+            }
+        }
+        self.compile_block_flat(&mut fc, &module.stmts)?;
+        fc.emit(Op::Nil, Span { line: 1, col: 1 });
+        fc.emit(Op::Return, Span { line: 1, col: 1 });
+        Ok(self.finish(fc))
+    }
+
+    /// Compile a named function / method to its own proto. `params` occupy slots `0..arity`.
+    fn compile_fn(&mut self, decl: &FnDecl, _is_method: bool) -> Result<ProtoId, CompileError> {
+        let mut fc = FnComp::new(decl.name.clone(), decl.params.len(), false);
+        for p in &decl.params {
+            fc.add_local(p.name.clone());
+        }
+        self.compile_block_scoped(&mut fc, &decl.body)?;
+        // Fall off the end → return Nil.
+        fc.emit(Op::Nil, Span { line: 1, col: 1 });
+        fc.emit(Op::Return, Span { line: 1, col: 1 });
+        Ok(self.finish(fc))
+    }
+
+    fn finish(&mut self, fc: FnComp) -> ProtoId {
+        let pid = self.program.protos.len();
+        self.program.protos.push(Proto {
+            name: fc.name,
+            arity: fc.arity,
+            n_slots: fc.max_slots,
+            code: fc.code,
+            lines: fc.lines,
+        });
+        pid
+    }
+
+    // ----- statements -----
+
+    /// Compile statements into the current scope without opening a new one (used for the toplevel
+    /// and for blocks whose scope is managed by the caller).
+    fn compile_block_flat(&mut self, fc: &mut FnComp, stmts: &[Stmt]) -> Result<(), CompileError> {
+        for stmt in stmts {
+            self.compile_stmt(fc, stmt)?;
+        }
+        Ok(())
+    }
+
+    /// Compile a block in a fresh lexical scope (locals don't leak past the block).
+    fn compile_block_scoped(&mut self, fc: &mut FnComp, stmts: &[Stmt]) -> Result<(), CompileError> {
+        fc.begin_scope();
+        self.compile_block_flat(fc, stmts)?;
+        fc.end_scope();
+        Ok(())
+    }
+
+    fn compile_stmt(&mut self, fc: &mut FnComp, stmt: &Stmt) -> Result<(), CompileError> {
+        match &stmt.kind {
+            StmtKind::Let { name, value, .. } => {
+                self.compile_expr(fc, value)?;
+                if fc.is_global_scope() {
+                    fc.emit(Op::DefineGlobal(name.clone()), stmt.span);
+                } else {
+                    let slot = fc.add_local(name.clone());
+                    fc.emit(Op::SetLocal(slot), stmt.span);
+                }
+                Ok(())
+            }
+            StmtKind::Assign { target, op, value } => self.compile_assign(fc, target, *op, value, stmt.span),
+            StmtKind::Expr(expr) => {
+                self.compile_expr(fc, expr)?;
+                fc.emit(Op::Pop, stmt.span);
+                Ok(())
+            }
+            // Top-level fns are hoisted; struct/enum/import are no-ops at execution time. A `fn`
+            // statement nested in a block defines a local function value.
+            StmtKind::Fn(decl) => {
+                if fc.is_global_scope() {
+                    Ok(()) // already hoisted
+                } else {
+                    let pid = self.compile_fn(decl, false)?;
+                    fc.emit(Op::MakeFunc(pid), stmt.span);
+                    let slot = fc.add_local(decl.name.clone());
+                    fc.emit(Op::SetLocal(slot), stmt.span);
+                    Ok(())
+                }
+            }
+            StmtKind::Struct { .. } | StmtKind::Enum { .. } | StmtKind::Import(_) => Ok(()),
+            StmtKind::Return(value) => {
+                match value {
+                    Some(e) => self.compile_expr(fc, e)?,
+                    None => fc.emit(Op::Nil, stmt.span),
+                }
+                fc.emit(Op::Return, stmt.span);
+                Ok(())
+            }
+            StmtKind::If { branches, else_block } => self.compile_if(fc, branches, else_block.as_deref(), stmt.span),
+            StmtKind::While { cond, body } => self.compile_while(fc, cond, body),
+            StmtKind::For { var, iter, body } => self.compile_for(fc, var, iter, body, stmt.span),
+            StmtKind::Match { scrutinee, arms } => self.compile_match(fc, scrutinee, arms, stmt.span),
+        }
+    }
+
+    fn compile_assign(&mut self, fc: &mut FnComp, target: &Expr, op: AssignOp, value: &Expr, span: Span) -> Result<(), CompileError> {
+        let ExprKind::Ident(name) = &target.kind else {
+            return Err(CompileError { message: "invalid assignment target".to_string(), span });
+        };
+        match op {
+            AssignOp::Eq => {
+                self.compile_expr(fc, value)?;
+                self.emit_store(fc, name, span);
+            }
+            AssignOp::PlusEq | AssignOp::MinusEq => {
+                self.emit_load(fc, name, span);
+                self.compile_expr(fc, value)?;
+                fc.emit(if op == AssignOp::PlusEq { Op::Add } else { Op::Sub }, span);
+                self.emit_store(fc, name, span);
+            }
+        }
+        Ok(())
+    }
+
+    /// Store the value on top of the stack into an existing binding (`=`/`+=`/`-=` semantics:
+    /// never creates — a global that doesn't exist is a runtime error).
+    fn emit_store(&mut self, fc: &mut FnComp, name: &str, span: Span) {
+        match fc.resolve_local(name) {
+            Some(slot) => fc.emit(Op::SetLocal(slot), span),
+            None => fc.emit(Op::SetGlobal(name.to_string()), span),
+        }
+    }
+
+    /// Load a name's value (local → captured → global), mirroring the interpreter's lookup order.
+    fn emit_load(&mut self, fc: &mut FnComp, name: &str, span: Span) {
+        match fc.resolve_local(name) {
+            Some(slot) => fc.emit(Op::GetLocal(slot), span),
+            None if fc.captures(name) => fc.emit(Op::GetCaptured(name.to_string()), span),
+            None => fc.emit(Op::GetGlobal(name.to_string()), span),
+        }
+    }
+
+    fn compile_if(&mut self, fc: &mut FnComp, branches: &[(Expr, Block)], else_block: Option<&[Stmt]>, _span: Span) -> Result<(), CompileError> {
+        let mut end_jumps = Vec::new();
+        for (cond, body) in branches {
+            self.compile_expr(fc, cond)?;
+            fc.emit(Op::AsBool, cond.span);
+            let skip = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
+            self.compile_block_scoped(fc, body)?;
+            end_jumps.push(fc.emit_jump(Op::Jump(0), cond.span));
+            fc.patch_jump(skip);
+        }
+        if let Some(body) = else_block {
+            self.compile_block_scoped(fc, body)?;
+        }
+        for j in end_jumps {
+            fc.patch_jump(j);
+        }
+        Ok(())
+    }
+
+    fn compile_while(&mut self, fc: &mut FnComp, cond: &Expr, body: &[Stmt]) -> Result<(), CompileError> {
+        let loop_start = fc.here();
+        self.compile_expr(fc, cond)?;
+        fc.emit(Op::AsBool, cond.span);
+        let exit = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
+        self.compile_block_scoped(fc, body)?;
+        fc.emit(Op::Jump(loop_start), cond.span);
+        fc.patch_jump(exit);
+        Ok(())
+    }
+
+    fn compile_for(&mut self, fc: &mut FnComp, var: &str, iter: &Expr, body: &[Stmt], span: Span) -> Result<(), CompileError> {
+        fc.begin_scope();
+        if let ExprKind::Range { start, end } = &iter.kind {
+            // Lazy counting loop — the range is never materialized.
+            self.compile_expr(fc, end)?;
+            fc.emit(Op::AsInt, end.span);
+            let end_slot = fc.add_hidden();
+            fc.emit(Op::SetLocal(end_slot), span);
+            self.compile_expr(fc, start)?;
+            fc.emit(Op::AsInt, start.span);
+            let i_slot = fc.add_local(var.to_string());
+            fc.emit(Op::SetLocal(i_slot), span);
+
+            let loop_start = fc.here();
+            fc.emit(Op::GetLocal(i_slot), span);
+            fc.emit(Op::GetLocal(end_slot), span);
+            fc.emit(Op::Lt, span);
+            let exit = fc.emit_jump(Op::JumpIfFalse(0), span);
+            self.compile_block_scoped(fc, body)?;
+            fc.emit(Op::GetLocal(i_slot), span);
+            fc.emit(Op::ConstInt(1), span);
+            fc.emit(Op::Add, span);
+            fc.emit(Op::SetLocal(i_slot), span);
+            fc.emit(Op::Jump(loop_start), span);
+            fc.patch_jump(exit);
+        } else {
+            // Iterate a (cloned) list by index.
+            self.compile_expr(fc, iter)?;
+            fc.emit(Op::ListClone, iter.span);
+            let lst = fc.add_hidden();
+            fc.emit(Op::SetLocal(lst), span);
+            fc.emit(Op::GetLocal(lst), span);
+            fc.emit(Op::ArrLen, span);
+            let len = fc.add_hidden();
+            fc.emit(Op::SetLocal(len), span);
+            fc.emit(Op::ConstInt(0), span);
+            let idx = fc.add_hidden();
+            fc.emit(Op::SetLocal(idx), span);
+            let var_slot = fc.add_local(var.to_string());
+
+            let loop_start = fc.here();
+            fc.emit(Op::GetLocal(idx), span);
+            fc.emit(Op::GetLocal(len), span);
+            fc.emit(Op::Lt, span);
+            let exit = fc.emit_jump(Op::JumpIfFalse(0), span);
+            fc.emit(Op::GetLocal(lst), span);
+            fc.emit(Op::GetLocal(idx), span);
+            fc.emit(Op::GetIndex, span);
+            fc.emit(Op::SetLocal(var_slot), span);
+            self.compile_block_scoped(fc, body)?;
+            fc.emit(Op::GetLocal(idx), span);
+            fc.emit(Op::ConstInt(1), span);
+            fc.emit(Op::Add, span);
+            fc.emit(Op::SetLocal(idx), span);
+            fc.emit(Op::Jump(loop_start), span);
+            fc.patch_jump(exit);
+        }
+        fc.end_scope();
+        Ok(())
+    }
+
+    fn compile_match(&mut self, fc: &mut FnComp, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<(), CompileError> {
+        fc.begin_scope();
+        self.compile_expr(fc, scrutinee)?;
+        let scrut = fc.add_hidden();
+        fc.emit(Op::SetLocal(scrut), span);
+        fc.emit(Op::EnsureEnum(scrut), scrutinee.span);
+        let mut end_jumps = Vec::new();
+        for arm in arms {
+            let Pattern::Variant { name, bindings } = &arm.pattern;
+            // Reserve binding slots in their own scope so they don't leak between arms.
+            fc.begin_scope();
+            let bind_start = fc.next_slot();
+            for b in bindings {
+                fc.add_local(b.clone());
+            }
+            let arm_op = fc.emit_jump(
+                Op::MatchArm {
+                    scrut,
+                    variant: name.clone(),
+                    nbind: bindings.len(),
+                    bind_start,
+                    next: 0,
+                },
+                scrutinee.span,
+            );
+            self.compile_block_flat(fc, &arm.body)?;
+            end_jumps.push(fc.emit_jump(Op::Jump(0), span));
+            fc.patch_jump(arm_op);
+            fc.end_scope();
+        }
+        fc.emit(Op::MatchNoArm(scrut), scrutinee.span);
+        for j in end_jumps {
+            fc.patch_jump(j);
+        }
+        fc.end_scope();
+        Ok(())
+    }
+
+    // ----- expressions -----
+
+    fn compile_expr(&mut self, fc: &mut FnComp, expr: &Expr) -> Result<(), CompileError> {
+        match &expr.kind {
+            ExprKind::Int(n) => fc.emit(Op::ConstInt(*n), expr.span),
+            ExprKind::Float(x) => fc.emit(Op::ConstFloat(*x), expr.span),
+            ExprKind::Bool(b) => fc.emit(if *b { Op::True } else { Op::False }, expr.span),
+            ExprKind::Str(raw) => self.compile_str(fc, raw, expr.span)?,
+            ExprKind::Ident(name) => self.compile_ident(fc, name, expr.span),
+            ExprKind::List(items) => {
+                for it in items {
+                    self.compile_expr(fc, it)?;
+                }
+                fc.emit(Op::NewList(items.len()), expr.span);
+            }
+            ExprKind::Unary { op, expr: inner } => {
+                self.compile_expr(fc, inner)?;
+                match op {
+                    UnaryOp::Neg => fc.emit(Op::Neg, expr.span),
+                    UnaryOp::Not => {
+                        fc.emit(Op::AsBool, inner.span);
+                        fc.emit(Op::Not, expr.span);
+                    }
+                }
+            }
+            ExprKind::Binary { op: op @ (BinaryOp::And | BinaryOp::Or), lhs, rhs } => {
+                // Short-circuit: lhs is always bool-checked; rhs only when needed; result is bool.
+                self.compile_expr(fc, lhs)?;
+                fc.emit(Op::AsBool, lhs.span);
+                let jump = match op {
+                    BinaryOp::And => fc.emit_jump(Op::JumpIfFalseKeep(0), expr.span),
+                    _ => fc.emit_jump(Op::JumpIfTrueKeep(0), expr.span),
+                };
+                fc.emit(Op::Pop, expr.span);
+                self.compile_expr(fc, rhs)?;
+                fc.emit(Op::AsBool, rhs.span);
+                fc.patch_jump(jump);
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                self.compile_expr(fc, lhs)?;
+                self.compile_expr(fc, rhs)?;
+                fc.emit(binary_op(*op), expr.span);
+            }
+            ExprKind::Range { .. } => {
+                // The interpreter only evaluates ranges inside `for`; a bare range has no value.
+                return Err(CompileError {
+                    message: "a range can only be used as the iterable of a `for` loop".to_string(),
+                    span: expr.span,
+                });
+            }
+            ExprKind::Call { callee, args } => self.compile_call(fc, callee, args, expr.span)?,
+            ExprKind::Field { obj, name } => {
+                self.compile_expr(fc, obj)?;
+                fc.emit(Op::GetField(name.clone()), expr.span);
+            }
+            ExprKind::Index { obj, index } => {
+                self.compile_expr(fc, obj)?;
+                self.compile_expr(fc, index)?;
+                fc.emit(Op::AsInt, index.span);
+                fc.emit(Op::GetIndex, expr.span);
+            }
+            ExprKind::Try(inner) => {
+                self.compile_expr(fc, inner)?;
+                fc.emit(Op::Try, expr.span);
+            }
+            ExprKind::Closure { params, body, .. } => self.compile_closure(fc, params, body, expr.span)?,
+        }
+        Ok(())
+    }
+
+    fn compile_ident(&mut self, fc: &mut FnComp, name: &str, span: Span) {
+        // A nullary enum variant used as a value (e.g. `None`, `Red`) — resolved before any
+        // env lookup, exactly like the interpreter.
+        if let Some(def) = self.program.variants.get(name)
+            && def.arity == 0
+        {
+            let ty = def.enum_name.clone();
+            fc.emit(Op::NewEnum(ty, name.to_string(), 0), span);
+            return;
+        }
+        self.emit_load(fc, name, span);
+    }
+
+    fn compile_call(&mut self, fc: &mut FnComp, callee: &Expr, args: &[Expr], span: Span) -> Result<(), CompileError> {
+        // Method / module-member call: `obj.name(args)`.
+        if let ExprKind::Field { obj, name } = &callee.kind {
+            self.compile_expr(fc, obj)?;
+            for a in args {
+                self.compile_expr(fc, a)?;
+            }
+            fc.emit(Op::CallMethod(name.clone(), args.len()), span);
+            return Ok(());
+        }
+        // Bare-ident callees resolve by name in the interpreter's order:
+        // print → builtin → struct ctor → variant ctor → value.
+        if let ExprKind::Ident(name) = &callee.kind {
+            if name == "print" {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(Op::CallPrint(args.len()), span);
+                return Ok(());
+            }
+            if is_builtin(name) {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(Op::CallBuiltin(name.clone(), args.len()), span);
+                return Ok(());
+            }
+            if self.program.structs.contains_key(name) {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(Op::NewStruct(name.clone(), args.len()), span);
+                return Ok(());
+            }
+            if let Some(def) = self.program.variants.get(name) {
+                let ty = def.enum_name.clone();
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(Op::NewEnum(ty, name.clone(), args.len()), span);
+                return Ok(());
+            }
+        }
+        // General callable value.
+        self.compile_expr(fc, callee)?;
+        for a in args {
+            self.compile_expr(fc, a)?;
+        }
+        fc.emit(Op::Call(args.len()), span);
+        Ok(())
+    }
+
+    fn compile_closure(&mut self, fc: &mut FnComp, params: &[crate::ast::Param], body: &Expr, span: Span) -> Result<(), CompileError> {
+        // Snapshot every binding currently visible in the enclosing frame (matches the interpreter
+        // capturing all in-scope local frames).
+        let entries = fc.snapshot_entries();
+        let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+
+        let mut child = FnComp::new("<closure>".to_string(), params.len(), false);
+        child.captured_names = captured_names;
+        for p in params {
+            child.add_local(p.name.clone());
+        }
+        self.compile_expr(&mut child, body)?;
+        child.emit(Op::Return, span);
+        let pid = self.finish(child);
+
+        fc.emit(Op::MakeClosure(pid, entries), span);
+        Ok(())
+    }
+
+    /// Compile a string literal, splitting `{expr}` interpolations (pre-parsed at compile time)
+    /// from literal text. `{{`/`}}` are literal braces. A literal-only string is a single
+    /// `ConstStr`; an interpolated one builds its chunks and concatenates with `BuildStr`.
+    fn compile_str(&mut self, fc: &mut FnComp, raw: &str, span: Span) -> Result<(), CompileError> {
+        let chunks = parse_interpolation(raw, span)?;
+        if let [Chunk::Lit(s)] = chunks.as_slice() {
+            fc.emit(Op::ConstStr(s.clone()), span);
+            return Ok(());
+        }
+        if chunks.is_empty() {
+            fc.emit(Op::ConstStr(String::new()), span);
+            return Ok(());
+        }
+        let n = chunks.len();
+        for chunk in chunks {
+            match chunk {
+                Chunk::Lit(s) => fc.emit(Op::ConstStr(s), span),
+                Chunk::Expr(e) => {
+                    self.compile_expr(fc, &e)?;
+                    fc.emit(Op::ToStr, span);
+                }
+            }
+        }
+        fc.emit(Op::BuildStr(n), span);
+        Ok(())
+    }
+}
+
+fn binary_op(op: BinaryOp) -> Op {
+    match op {
+        BinaryOp::Add => Op::Add,
+        BinaryOp::Sub => Op::Sub,
+        BinaryOp::Mul => Op::Mul,
+        BinaryOp::Div => Op::Div,
+        BinaryOp::Mod => Op::Mod,
+        BinaryOp::Lt => Op::Lt,
+        BinaryOp::LtEq => Op::LtEq,
+        BinaryOp::Gt => Op::Gt,
+        BinaryOp::GtEq => Op::GtEq,
+        BinaryOp::Eq => Op::Eq,
+        BinaryOp::NotEq => Op::NotEq,
+        BinaryOp::And | BinaryOp::Or => unreachable!("and/or handled by short-circuit path"),
+    }
+}
+
+// ===== string interpolation (compile-time pre-parse) =====
+
+enum Chunk {
+    Lit(String),
+    Expr(Expr),
+}
+
+/// Split an interpolated string literal into literal/expr chunks, mirroring `interp::interpolate`
+/// (but at compile time): `{{`/`}}` are literal braces; each `{ … }` is lexed + parsed as an
+/// expression. A malformed interpolation surfaces here as a compile error.
+fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, CompileError> {
+    let mut chunks = Vec::new();
+    let mut lit = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                lit.push('{');
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next();
+                lit.push('}');
+            }
+            '{' => {
+                if !lit.is_empty() {
+                    chunks.push(Chunk::Lit(std::mem::take(&mut lit)));
+                }
+                let mut inner = String::new();
+                let mut closed = false;
+                for ic in chars.by_ref() {
+                    if ic == '}' {
+                        closed = true;
+                        break;
+                    }
+                    inner.push(ic);
+                }
+                if !closed {
+                    return Err(CompileError {
+                        message: "unterminated '{' in interpolated string".to_string(),
+                        span,
+                    });
+                }
+                let expr = parse_expr_str(&inner, span)?;
+                chunks.push(Chunk::Expr(expr));
+            }
+            '}' => {
+                return Err(CompileError {
+                    message: "unmatched '}' in string (use '}}' for a literal brace)".to_string(),
+                    span,
+                });
+            }
+            _ => lit.push(c),
+        }
+    }
+    if !lit.is_empty() {
+        chunks.push(Chunk::Lit(lit));
+    }
+    Ok(chunks)
+}
+
+fn parse_expr_str(src: &str, span: Span) -> Result<Expr, CompileError> {
+    let tokens = lexer::tokenize(src).map_err(|e| CompileError { message: e.to_string(), span })?;
+    parser::parse_expr(tokens).map_err(|e| CompileError { message: e.message, span })
+}
+
+// ===== per-function compile state =====
+
+struct LocalVar {
+    name: String,
+    depth: usize,
+}
+
+/// Compile-time state for one function (or the module toplevel): its code buffer, parallel spans,
+/// local-slot allocation, and (for closures) the set of captured names.
+struct FnComp {
+    name: String,
+    arity: usize,
+    is_toplevel: bool,
+    code: Vec<Op>,
+    lines: Vec<Span>,
+    locals: Vec<LocalVar>,
+    scope_depth: usize,
+    /// Number of slots currently in use (== next free slot).
+    slot_count: usize,
+    max_slots: usize,
+    /// Names this function captures from an enclosing scope (closures only).
+    captured_names: Vec<String>,
+}
+
+impl FnComp {
+    fn new(name: String, arity: usize, is_toplevel: bool) -> Self {
+        FnComp {
+            name,
+            arity,
+            is_toplevel,
+            code: Vec::new(),
+            lines: Vec::new(),
+            locals: Vec::new(),
+            scope_depth: 0,
+            slot_count: 0,
+            max_slots: 0,
+            captured_names: Vec::new(),
+        }
+    }
+
+    fn emit(&mut self, op: Op, span: Span) {
+        self.code.push(op);
+        self.lines.push(span);
+    }
+
+    /// Emit a jump-like op, returning its index so it can be patched once the target is known.
+    fn emit_jump(&mut self, op: Op, span: Span) -> usize {
+        let at = self.code.len();
+        self.emit(op, span);
+        at
+    }
+
+    /// The current instruction index — a jump target.
+    fn here(&self) -> usize {
+        self.code.len()
+    }
+
+    /// Patch a previously-emitted jump to land at the current position.
+    fn patch_jump(&mut self, at: usize) {
+        let target = self.code.len();
+        match &mut self.code[at] {
+            Op::Jump(t)
+            | Op::JumpIfFalse(t)
+            | Op::JumpIfFalseKeep(t)
+            | Op::JumpIfTrueKeep(t)
+            | Op::MatchArm { next: t, .. } => *t = target,
+            other => panic!("patch_jump on non-jump op: {other:?}"),
+        }
+    }
+
+    /// At global scope only when this is the toplevel proto and no block is open.
+    fn is_global_scope(&self) -> bool {
+        self.is_toplevel && self.scope_depth == 0
+    }
+
+    fn begin_scope(&mut self) {
+        self.scope_depth += 1;
+    }
+
+    fn end_scope(&mut self) {
+        self.scope_depth -= 1;
+        while let Some(l) = self.locals.last() {
+            if l.depth > self.scope_depth {
+                self.locals.pop();
+                self.slot_count -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn next_slot(&self) -> usize {
+        self.slot_count
+    }
+
+    /// Add a named local, returning its slot. A redeclaration in the same scope shadows by getting
+    /// a fresh slot (later lookups find the newest).
+    fn add_local(&mut self, name: String) -> usize {
+        let slot = self.slot_count;
+        self.locals.push(LocalVar { name, depth: self.scope_depth });
+        self.slot_count += 1;
+        if self.slot_count > self.max_slots {
+            self.max_slots = self.slot_count;
+        }
+        slot
+    }
+
+    /// A hidden compiler-temp slot (loop bookkeeping, match scrutinee) — no name to collide with.
+    fn add_hidden(&mut self) -> usize {
+        self.add_local(String::new())
+    }
+
+    /// Resolve a name to a local slot (innermost first). `None` ⇒ not a local.
+    fn resolve_local(&self, name: &str) -> Option<usize> {
+        self.locals
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, l)| l.name == name)
+            .map(|(slot, _)| slot)
+    }
+
+    fn captures(&self, name: &str) -> bool {
+        self.captured_names.iter().any(|n| n == name)
+    }
+
+    /// All bindings visible in this frame, to snapshot into a closure being created here. Locals
+    /// (innermost wins) plus, if this frame is itself a closure, its captured names.
+    fn snapshot_entries(&self) -> Vec<CapEntry> {
+        let mut seen = std::collections::HashSet::new();
+        let mut entries = Vec::new();
+        // Innermost local of each name wins; skip the hidden (unnamed) temps.
+        for (slot, l) in self.locals.iter().enumerate().rev() {
+            if l.name.is_empty() || !seen.insert(l.name.clone()) {
+                continue;
+            }
+            entries.push(CapEntry { name: l.name.clone(), src: CapSrc::Slot(slot) });
+        }
+        for name in &self.captured_names {
+            if seen.insert(name.clone()) {
+                entries.push(CapEntry { name: name.clone(), src: CapSrc::Captured });
+            }
+        }
+        entries
+    }
+}

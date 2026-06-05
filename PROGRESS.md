@@ -10,7 +10,40 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-> **M5 — Bytecode VM + mark-sweep GC.** (M4.5 modules done — see below.)
+> **M5 — Bytecode VM + mark-sweep GC.** Phased M5a/b/c. **M5a done** (compiler + stack VM,
+> golden parity on `hello.chz` + multi-file proj). **Next: M5b — mark-sweep collector.**
+
+## M5a — Bytecode compiler + stack VM (handle values, no collector yet)  ✅ DONE
+
+`cargo run -- run --vm <file>` runs on the bytecode VM (tree-walk interp stays the default).
+Golden parity holds: VM stdout == `hello.expected` and == the interpreter's output, and the
+multi-file `tests/fixtures/proj/` runs identically. Built `src/compiler/` (AST → `Program`) +
+`src/vm/` (`value` handle + `heap`-addressed `Obj` + `op` + exec loop); 48 VM tests, 261 total;
+clean `cargo clippy --all-targets`. Built **TDD** (red→green per bug class).
+
+- ✅ **Value model** — `Value` is `Copy` (unboxed `Int/Float/Bool/Nil` + `Obj(GcRef)`); the 6
+  reference kinds (Str/List/Struct/Enum/Func/Closure/Module) live in a VM-owned `Heap` of slots +
+  free-list (handle copies alias one object → by-reference sharing). No `RefCell`; `alloc` only
+  inserts (mark-sweep lands in M5b).
+- ✅ **Compiler** (`src/compiler/mod.rs`) — locals → operand-stack slots resolved at compile time;
+  globals/struct/variant/builtins resolved by name in the interpreter's order. Two passes (hoist
+  types → compile toplevel + fn/method/closure protos). Closures **snapshot all visible locals by
+  value** (matches the interp's frame snapshot — reassign-after-capture invisible) via `CapEntry`/
+  `GetCaptured`. String interpolation pre-parsed at compile time into literal/expr chunks.
+- ✅ **Bytecode** (`src/vm/op.rs`) — flat `Vec<Op>` of typed operands (jumps = absolute indices),
+  each op paired with a `Span` in `Proto::lines` so runtime errors recover source locations.
+  Covers every AST node: literals, all 14 binary ops (runtime type dispatch matching the interp:
+  checked int / float-promote / div-mod-by-zero error / str+str), `and`/`or` short-circuit,
+  unary, list/struct/enum construction + arity errors, field/index (+ out-of-bounds, str char
+  index), method calls (`self`-bound), closures, `?` (unwrap / propagate-to-caller / top-level
+  error), `for`-range (**lazy** counting loop) + `for`-list (cloned), `while`, `if`/`elif`/`else`,
+  `match` (variant dispatch + payload binding + no-arm error), `MAX_CALL_DEPTH` guard, builtins.
+- ✅ **CLI** — `--vm` flag wired in `cmd_run` after the unchanged type-check gate; `vm::run_file`
+  mirrors `interp::run_file` (256MB thread, resolver graph, run-once dep order, home-globals,
+  entry-only `main()`, partial-output-before-error).
+
+**Deferred to M5b/c:** the mark-sweep collector (`alloc` currently never frees); `--gc-stress`;
+the perf benchmark + flipping `run` to VM-by-default; a whole-corpus parity harness.
 
 ## M1 — Lexer  ✅ DONE
 
@@ -165,7 +198,7 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 
 ## Roadmap (later)
 
-- ⬜ **M5** — Bytecode VM + mark-sweep GC ← NEXT
+- 🟦 **M5** — Bytecode VM + mark-sweep GC (M5a ✅ compiler+VM; M5b ⬜ GC ← NEXT; M5c ⬜ parity+perf)
 - ⬜ **M6** — Stdlib + pipe `|>` + **core-type methods** (string/list ergonomics — UX priority).
   Extend `eval_method_call` to dispatch on `Value::Str`/`Value::List`; handlers in `builtins.rs`.
   Starter set: `s.len/upper/lower/trim`, `s.split(sep)`, `sep.join(list)`, `s.starts_with/contains`
