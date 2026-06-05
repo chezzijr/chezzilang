@@ -150,9 +150,15 @@
             | "LPAREN" <expr> "RPAREN"
             | "LBRACKET" "RBRACKET"
             | "LBRACKET" <exprList> "RBRACKET"
+            | "LBRACE" "RBRACE"
+            | "LBRACE" <mapEntries> "RBRACE"
             | <closure>
             | <matchExpr>
             | <ifExpr>
+
+# Map literal entries: `{k: v, k: v}`, insertion-ordered, no trailing comma.
+<mapEntries> ::= <mapEntry> | <mapEntry> "COMMA" <mapEntries>
+<mapEntry>   ::= <expr> "COLON" <expr>
 
 # Expression-position `match`/`if` (value-producing, distinct from the statement forms above).
 # `matchExpr` arms are value-expressions (not blocks); it is multiline + exhaustive. A simple

@@ -194,6 +194,8 @@ pub enum ExprKind {
     Ident(String),
     /// `[a, b, c]`
     List(Vec<Expr>),
+    /// `{k: v, …}` — insertion-ordered map literal. Each pair is `(key, value)`.
+    Map(Vec<(Expr, Expr)>),
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,

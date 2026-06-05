@@ -439,6 +439,21 @@ impl Vm {
                 let h = self.heap.alloc(Obj::List(items));
                 self.push(Value::Obj(h));
             }
+            Op::NewMap(n) => {
+                // Pop 2n values `[k0,v0,…]`; build insertion-ordered entries with last-key-wins upsert.
+                let at = self.stack.len() - 2 * *n;
+                let flat: Vec<Value> = self.stack.split_off(at);
+                let mut entries: Vec<(Value, Value)> = Vec::with_capacity(*n);
+                let mut it = flat.into_iter();
+                while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                    match entries.iter().position(|(ek, _)| self.values_equal(*ek, k)) {
+                        Some(i) => entries[i].1 = v,
+                        None => entries.push((k, v)),
+                    }
+                }
+                let h = self.heap.alloc(Obj::Map(entries));
+                self.push(Value::Obj(h));
+            }
             Op::NewStruct(name, argc) => self.new_struct(name, *argc, span)?,
             Op::NewEnum(ty, variant, argc) => self.new_enum(ty, variant, *argc, span)?,
             Op::MakeFunc(proto) => {
@@ -647,6 +662,10 @@ impl Vm {
                 match (self.heap.get(ha), self.heap.get(hb)) {
                     (Obj::Str(a), Obj::Str(b)) => a == b,
                     (Obj::List(a), Obj::List(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.values_equal(*x, *y)),
+                    (Obj::Map(a), Obj::Map(b)) => {
+                        a.len() == b.len()
+                            && a.iter().zip(b).all(|((ka, va), (kb, vb))| self.values_equal(*ka, *kb) && self.values_equal(*va, *vb))
+                    }
                     (Obj::Struct { name: na, fields: fa }, Obj::Struct { name: nb, fields: fb }) => {
                         na == nb
                             && fa.len() == fb.len()
@@ -795,7 +814,7 @@ impl Vm {
         // Core-type methods (M6): built-in methods on `str` / `list`. Handled before the clone-match
         // so `list.push` mutates the heap object in place (the match below clones the Obj). Mirrors
         // `interp::builtins::call_method` exactly — error strings included (parity-tested).
-        if matches!(self.heap.get(h), Obj::Str(_) | Obj::List(_)) {
+        if matches!(self.heap.get(h), Obj::Str(_) | Obj::List(_) | Obj::Map(_)) {
             let result = self.core_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
@@ -1080,7 +1099,52 @@ impl Vm {
                 }
                 _ => Err(self.err(format!("type list has no method '{method}'"), span)),
             },
-            _ => unreachable!("core_method dispatched a non-str/list receiver"),
+            Obj::Map(entries) => match method {
+                "len" => {
+                    self.arity_err("len", args, 0, span)?;
+                    Ok(Value::Int(entries.len() as i64))
+                }
+                "has" => {
+                    self.arity_err("has", args, 1, span)?;
+                    let key = args[0];
+                    let entries = entries.clone();
+                    Ok(Value::Bool(entries.iter().any(|(k, _)| self.values_equal(*k, key))))
+                }
+                "get" => {
+                    self.arity_err("get", args, 1, span)?;
+                    let key = args[0];
+                    let found = entries.iter().find(|(k, _)| self.values_equal(*k, key)).map(|(_, v)| *v);
+                    match found {
+                        Some(v) => Ok(self.alloc_enum("Option", "Some", vec![v])),
+                        None => Ok(self.alloc_enum("Option", "None", vec![])),
+                    }
+                }
+                "keys" => {
+                    self.arity_err("keys", args, 0, span)?;
+                    let keys: Vec<Value> = entries.iter().map(|(k, _)| *k).collect();
+                    Ok(Value::Obj(self.heap.alloc(Obj::List(keys))))
+                }
+                "values" => {
+                    self.arity_err("values", args, 0, span)?;
+                    let vals: Vec<Value> = entries.iter().map(|(_, v)| *v).collect();
+                    Ok(Value::Obj(self.heap.alloc(Obj::List(vals))))
+                }
+                "remove" => {
+                    self.arity_err("remove", args, 1, span)?;
+                    let key = args[0];
+                    let pos = entries.iter().position(|(k, _)| self.values_equal(*k, key));
+                    match pos {
+                        Some(i) => {
+                            let Obj::Map(entries) = self.heap.get_mut(h) else { unreachable!() };
+                            let (_, v) = entries.remove(i);
+                            Ok(self.alloc_enum("Option", "Some", vec![v]))
+                        }
+                        None => Ok(self.alloc_enum("Option", "None", vec![])),
+                    }
+                }
+                _ => Err(self.err(format!("type map has no method '{method}'"), span)),
+            },
+            _ => unreachable!("core_method dispatched a non-str/list/map receiver"),
         }
     }
 
@@ -1197,16 +1261,23 @@ impl Vm {
     }
 
     fn get_index(&mut self, span: Span) -> Result<(), RuntimeError> {
-        let idx = match self.pop() {
-            Value::Int(n) => n,
-            _ => unreachable!("index pre-checked by AsInt"),
-        };
+        // The index is NOT pre-validated as int (the `AsInt` was removed so map keys can be
+        // str/bool): pop it as a Value and validate per object kind.
+        let key = self.pop();
         let obj = self.pop();
         let Value::Obj(h) = obj else {
             return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
         };
+        // Require an int index for list/str (the message matches the old `AsInt` exactly, for parity).
+        let int_idx = |vm: &Vm| -> Result<i64, RuntimeError> {
+            match key {
+                Value::Int(n) => Ok(n),
+                other => Err(vm.err(format!("expected int, found {}", vm.type_name(other)), span)),
+            }
+        };
         match self.heap.get(h) {
             Obj::List(items) => {
+                let idx = int_idx(self)?;
                 let v = usize::try_from(idx).ok().and_then(|i| items.get(i).copied());
                 match v {
                     Some(v) => {
@@ -1217,6 +1288,7 @@ impl Vm {
                 }
             }
             Obj::Str(s) => {
+                let idx = int_idx(self)?;
                 let chars: Vec<char> = s.chars().collect();
                 match usize::try_from(idx).ok().and_then(|i| chars.get(i).copied()) {
                     Some(c) => {
@@ -1225,6 +1297,16 @@ impl Vm {
                         Ok(())
                     }
                     None => Err(self.err(format!("index {idx} out of bounds (len {})", chars.len()), span)),
+                }
+            }
+            Obj::Map(entries) => {
+                match entries.iter().find(|(k, _)| self.values_equal(*k, key)) {
+                    Some((_, v)) => {
+                        let v = *v;
+                        self.push(v);
+                        Ok(())
+                    }
+                    None => Err(self.err("key not found".to_string(), span)),
                 }
             }
             _ => Err(self.err(format!("cannot index {}", self.type_name(obj)), span)),
@@ -1254,13 +1336,25 @@ impl Vm {
 
     fn set_index(&mut self, span: Span) -> Result<(), RuntimeError> {
         let val = self.pop();
-        let idx = match self.pop() {
-            Value::Int(n) => n,
-            _ => unreachable!("index pre-checked by AsInt"),
-        };
+        // The index is NOT pre-validated as int (AsInt removed for map keys): pop as a Value.
+        let key = self.pop();
         let obj = self.pop();
         let Value::Obj(h) = obj else {
             return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
+        };
+        // For a map, locate the entry first (needs `&self.heap` for value-equality), then mutate.
+        if let Obj::Map(entries) = self.heap.get(h) {
+            let pos = entries.iter().position(|(k, _)| self.values_equal(*k, key));
+            let Obj::Map(entries) = self.heap.get_mut(h) else { unreachable!() };
+            match pos {
+                Some(i) => entries[i].1 = val,
+                None => entries.push((key, val)),
+            }
+            return Ok(());
+        }
+        let idx = match key {
+            Value::Int(n) => n,
+            other => return Err(self.err(format!("expected int, found {}", self.type_name(other)), span)),
         };
         match self.heap.get_mut(h) {
             Obj::List(items) => match usize::try_from(idx).ok().filter(|i| *i < items.len()) {
@@ -1445,6 +1539,7 @@ impl Vm {
             Value::Obj(h) => match self.heap.get(h) {
                 Obj::Str(_) => "str",
                 Obj::List(_) => "list",
+                Obj::Map(_) => "map",
                 Obj::Struct { .. } => "struct",
                 Obj::Enum { .. } => "enum",
                 Obj::Func { .. } | Obj::Closure { .. } => "function",
@@ -1466,6 +1561,14 @@ impl Vm {
                 Obj::List(items) => {
                     let inner = items.iter().map(|v| self.display(*v)).collect::<Vec<_>>().join(", ");
                     format!("[{inner}]")
+                }
+                Obj::Map(entries) => {
+                    let inner = entries
+                        .iter()
+                        .map(|(k, v)| format!("{}: {}", self.display(*k), self.display(*v)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{{{inner}}}")
                 }
                 Obj::Struct { name, fields } => {
                     let inner = fields.iter().map(|(k, v)| format!("{k}={}", self.display(*v))).collect::<Vec<_>>().join(", ");
@@ -2289,6 +2392,17 @@ main()";
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
         assert_eq!(vm_out, interp_out);
+    }
+
+    /// Gap #5 golden: `examples/map.chz` is byte-identical to its `.expected` on the VM,
+    /// and to the interpreter (the cross-engine acceptance bar for maps).
+    #[test]
+    fn golden_map_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/map.chz");
+        let expected = include_str!("../../examples/map.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 }
 
@@ -3140,6 +3254,119 @@ main()";
         vm.gc_stress = true;
         vm.run().unwrap();
         assert_eq!(vm.out, expected);
+    }
+
+    // ----- map / dictionary parity (gap #5) -----
+
+    #[test]
+    fn parity_map_literal_print() {
+        // Deterministic insertion order; duplicate key -> last wins. Display is `{k: v, …}`.
+        assert_parity_out("m := {\"a\": 1, \"b\": 2}\nprint(m)\n", "{a: 1, b: 2}\n");
+        assert_parity_out("e := {}\nprint(e)\n", "{}\n");
+        assert_parity_out("m := {\"a\": 1, \"a\": 9}\nprint(m)\n", "{a: 9}\n");
+    }
+
+    #[test]
+    fn parity_map_index_read() {
+        assert_parity_out("m := {\"a\": 1, \"b\": 2}\nprint(m[\"b\"])\n", "2\n");
+    }
+
+    #[test]
+    fn parity_map_missing_key_read_errors() {
+        // Both engines must error identically on a missing key.
+        let src = "m := {\"a\": 1}\nprint(m[\"z\"])\n";
+        assert_parity(src);
+        assert!(vm_outcome(src).unwrap_err().contains("key not found"), "{:?}", vm_outcome(src));
+    }
+
+    #[test]
+    fn parity_map_index_insert_and_update() {
+        assert_parity_out(
+            "m := {\"a\": 1}\nm[\"b\"] = 2\nm[\"a\"] = 9\nprint(m)\n",
+            "{a: 9, b: 2}\n",
+        );
+    }
+
+    #[test]
+    fn parity_map_compound_assign() {
+        assert_parity_out("m := {\"a\": 1}\nm[\"a\"] += 5\nprint(m[\"a\"])\n", "6\n");
+    }
+
+    #[test]
+    fn parity_map_compound_assign_missing_key_errors() {
+        // Compound on a missing key is an error (consistent with read-missing).
+        let src = "m := {\"a\": 1}\nm[\"z\"] += 1\n";
+        assert_parity(src);
+        assert!(vm_outcome(src).unwrap_err().contains("key not found"), "{:?}", vm_outcome(src));
+    }
+
+    #[test]
+    fn parity_map_methods() {
+        assert_parity_out("m := {\"a\": 1, \"b\": 2}\nprint(m.len())\n", "2\n");
+        assert_parity_out("m := {\"a\": 1}\nprint(m.has(\"a\"))\nprint(m.has(\"z\"))\n", "true\nfalse\n");
+        assert_parity_out(
+            "m := {\"a\": 1}\nmatch m.get(\"a\"):\n    Some(v): print(v)\n    None: print(\"absent\")\n",
+            "1\n",
+        );
+        assert_parity_out(
+            "m := {\"a\": 1}\nmatch m.get(\"z\"):\n    Some(v): print(v)\n    None: print(\"absent\")\n",
+            "absent\n",
+        );
+        assert_parity_out("m := {\"a\": 1, \"b\": 2}\nprint(m.keys())\n", "[a, b]\n");
+        assert_parity_out("m := {\"a\": 1, \"b\": 2}\nprint(m.values())\n", "[1, 2]\n");
+    }
+
+    #[test]
+    fn parity_map_remove() {
+        assert_parity_out(
+            "m := {\"a\": 1, \"b\": 2}\nmatch m.remove(\"a\"):\n    Some(v): print(v)\n    None: print(\"absent\")\nprint(m)\n",
+            "1\n{b: 2}\n",
+        );
+        // remove of a missing key -> None, map unchanged.
+        assert_parity_out(
+            "m := {\"a\": 1}\nmatch m.remove(\"z\"):\n    Some(v): print(v)\n    None: print(\"absent\")\nprint(m)\n",
+            "absent\n{a: 1}\n",
+        );
+    }
+
+    #[test]
+    fn parity_map_keys_iteration() {
+        assert_parity_out(
+            "m := {\"a\": 1, \"b\": 2, \"c\": 3}\nfor k in m.keys():\n    print(k)\n",
+            "a\nb\nc\n",
+        );
+    }
+
+    #[test]
+    fn parity_map_int_and_bool_keys() {
+        assert_parity_out("m := {1: \"x\", 2: \"y\"}\nprint(m[2])\n", "y\n");
+        assert_parity_out("m := {true: 1, false: 0}\nprint(m[false])\n", "0\n");
+    }
+
+    /// REGRESSION (AsInt relocation): a non-int LIST index now errors at runtime in `GetIndex`,
+    /// with the SAME message the removed `AsInt` produced. The checker is bypassed by `run_capture`,
+    /// so this exercises the relocated runtime validation on both engines.
+    #[test]
+    fn parity_list_non_int_index_still_errors() {
+        let src = "xs := [1, 2, 3]\nprint(xs[\"a\"])\n";
+        assert_parity(src);
+        assert!(vm_outcome(src).unwrap_err().contains("expected int, found str"), "{:?}", vm_outcome(src));
+        // And on assignment (SetIndex relocation).
+        let src2 = "xs := [1, 2, 3]\nxs[\"a\"] = 9\n";
+        assert_parity(src2);
+        assert!(vm_outcome(src2).unwrap_err().contains("expected int, found str"), "{:?}", vm_outcome(src2));
+    }
+
+    #[test]
+    fn parity_map_gc_stress_heap_keys_and_values() {
+        // Keys AND values are heap strings; build many maps so collection runs mid-stream and the
+        // `Heap::children` tracing of BOTH keys and values is exercised (a use-after-free if either
+        // is untraced). The keys()/values() lists also hold heap children.
+        let src = "fn main():\n    i := 0\n    while i < 200:\n        m := {\"k{i}\": \"v{i}\"}\n        m[\"extra\"] = \"x{i}\"\n        if i == 199:\n            print(m[\"k{i}\"])\n            print(m.values())\n        i += 1\nmain()\n";
+        assert_parity(src);
+        let expected = "v199\n[v199, x199]\n";
+        assert_eq!(vm_outcome(src).unwrap(), expected);
+        assert_eq!(run_capture_stress(src), expected, "VM gc_stress diverged (untraced map key/value?)");
     }
 
     /// Record the VM speedup over the interpreter on a loop-heavy script (the spec's perf check).

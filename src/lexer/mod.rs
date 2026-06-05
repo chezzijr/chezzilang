@@ -69,6 +69,8 @@ pub enum Token {
     RParen,     // )
     LBracket,   // [
     RBracket,   // ]
+    LBrace,     // {  (map literal)
+    RBrace,     // }
     Comma,      // ,
     Colon,      // :
     Dot,        // .
@@ -367,6 +369,8 @@ impl Lexer {
             ')' => Token::RParen,
             '[' => Token::LBracket,
             ']' => Token::RBracket,
+            '{' => Token::LBrace,
+            '}' => Token::RBrace,
             ',' => Token::Comma,
             '.' => if self.match_char('.') { Token::DotDot } else { Token::Dot },
 
@@ -635,6 +639,26 @@ mod tests {
         assert_eq!(
             kinds("break continue"),
             vec![Token::Break, Token::Continue, Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn braces_lex_for_maps() {
+        assert_eq!(
+            kinds("{}"),
+            vec![Token::LBrace, Token::RBrace, Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds("{\"a\": 1}"),
+            vec![
+                Token::LBrace,
+                Token::Str("a".to_string()),
+                Token::Colon,
+                Token::Int(1),
+                Token::RBrace,
+                Token::Newline,
+                Token::Eof,
+            ]
         );
     }
 

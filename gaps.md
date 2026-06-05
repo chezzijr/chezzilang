@@ -67,13 +67,18 @@ operand stack across calls — proven by `gc_stress` parity tests). `pop` makes 
 `sort`-with-comparator (`sort_by`) deferred — expressible via `fold` meanwhile.
 See `examples/list_methods.chz`, `examples/list_hof.chz`.
 
-### 5. No map / dictionary type
+### 5. ~~No map / dictionary type~~ ✅ FIXED
 ```chezzi
-m := {"a": 1}    # documented in the cheat-sheet, but `map[K,V]` is not built
+m := {"a": 1, "b": 2}   # insertion-ordered map literal; {} is empty
+m["c"] = 3              # keyed insert/update; m["a"] read errors on a missing key
+m.get("z")  m.has("a")  m.keys()  m.values()  m.remove("a")  m.len()
 ```
-**Blocks:** frequency counts, memoization, adjacency-by-key, dedup, any keyed lookup. Worked around
-only by parallel lists + linear scan (O(n) lookups).
-**Status:** the spec lists `std.map` as "later". No `Value::Map` in either engine yet.
+**Fixed:** new `{`/`}` tokens (no block ambiguity — blocks are indent-based); `Ty::Map(K,V)`,
+`Value::Map`/`Obj::Map` as an insertion-ordered `Vec<(K,V)>` (deterministic; `Value` isn't `Hash`);
+keys restricted to `int/str/bool`. `m[k]` read/`m[k]=v` write reuse the index ops — the compile-time
+`Op::AsInt` was removed and int-validation moved into the runtime `get_index`/`set_index` (list/str
+keep the exact `expected int` error; map does key lookup). `Heap::children` traces keys **and** values
+(gc-stress tested). `m[k]` missing → runtime error; `m.get(k)` → `Option[V]`. See `examples/map.chz`.
 
 ---
 

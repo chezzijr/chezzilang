@@ -1,0 +1,53 @@
+# map / dictionary (gap #5): literal, keyed get/set, methods, iteration.
+
+fn main():
+    # Insertion-ordered literal.
+    scores := {"ada": 90, "linus": 85}
+    print(scores)
+
+    # Keyed read (missing key would be a runtime error — we only read present keys).
+    print(scores["ada"])
+
+    # Keyed insert and update.
+    scores["grace"] = 95
+    scores["ada"] = 100
+    print(scores)
+
+    # Methods.
+    print(scores.len())
+    print(scores.has("linus"))
+    print(scores.has("ken"))
+
+    # Safe accessor returns Option[V].
+    match scores.get("grace"):
+        Some(v): print("grace: {v}")
+        None: print("grace: absent")
+    match scores.get("ken"):
+        Some(v): print("ken: {v}")
+        None: print("ken: absent")
+
+    # keys() / values() preserve insertion order.
+    for k in scores.keys():
+        print(k)
+    print(scores.values())
+
+    # Compound assignment on an existing key.
+    scores["ada"] += 5
+    print(scores["ada"])
+
+    # remove() returns the removed value as Option[V].
+    match scores.remove("linus"):
+        Some(v): print("removed {v}")
+        None: print("nothing removed")
+    print(scores)
+
+    # Empty map.
+    empty := {}
+    print(empty)
+    print(empty.len())
+
+    # Non-str keys.
+    by_id := {1: "one", 2: "two"}
+    print(by_id[2])
+
+main()

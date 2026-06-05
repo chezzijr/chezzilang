@@ -14,6 +14,8 @@ pub enum Ty {
     Str,
     Nil,
     List(Box<Ty>),
+    /// `map[K, V]` — insertion-ordered dictionary. `K` is a hashable scalar (int/str/bool).
+    Map(Box<Ty>, Box<Ty>),
     Func { params: Vec<Ty>, ret: Box<Ty> },
     Struct(String),
     Enum(String),
@@ -29,6 +31,9 @@ pub enum Ty {
 impl Ty {
     pub fn list(inner: Ty) -> Ty {
         Ty::List(Box::new(inner))
+    }
+    pub fn map(key: Ty, value: Ty) -> Ty {
+        Ty::Map(Box::new(key), Box::new(value))
     }
     pub fn result(inner: Ty) -> Ty {
         Ty::Result(Box::new(inner))
@@ -55,6 +60,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         (Unknown, _) | (_, Unknown) => true,
         (Int, Int) | (Float, Float) | (Bool, Bool) | (Str, Str) | (Nil, Nil) => true,
         (List(a), List(b)) | (Result(a), Result(b)) | (Option(a), Option(b)) => compatible(a, b),
+        (Map(ka, va), Map(kb, vb)) => compatible(ka, kb) && compatible(va, vb),
         (Struct(a), Struct(b)) | (Enum(a), Enum(b)) | (Module(a), Module(b)) => a == b,
         (Func { params: p1, ret: r1 }, Func { params: p2, ret: r2 }) => {
             p1.len() == p2.len()
@@ -74,6 +80,7 @@ impl fmt::Display for Ty {
             Ty::Str => write!(f, "str"),
             Ty::Nil => write!(f, "nil"),
             Ty::List(t) => write!(f, "list[{t}]"),
+            Ty::Map(k, v) => write!(f, "map[{k}, {v}]"),
             Ty::Result(t) => write!(f, "Result[{t}]"),
             Ty::Option(t) => write!(f, "Option[{t}]"),
             Ty::Struct(n) | Ty::Enum(n) => write!(f, "{n}"),

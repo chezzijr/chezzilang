@@ -91,6 +91,8 @@ pub enum Value {
     Str(Rc<str>),
     /// `[a, b, c]` — growable, shared by reference.
     List(Rc<RefCell<Vec<Value>>>),
+    /// `{k: v, …}` — insertion-ordered, shared by reference. Linear scan by value-equality.
+    Map(Rc<RefCell<Vec<(Value, Value)>>>),
     /// A named function (top-level `fn` or struct method) plus the module globals it resolves
     /// top-level names against (its "home" — see [`ModEnv`]).
     Func(Rc<FnDecl>, ModEnv),
@@ -128,6 +130,7 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Str(_) => "str",
             Value::List(_) => "list",
+            Value::Map(_) => "map",
             Value::Func(_, _) => "function",
             Value::Closure(_) => "function",
             Value::Native(_) => "function",
@@ -154,6 +157,15 @@ impl std::fmt::Display for Value {
                     .collect::<Vec<_>>()
                     .join(", ");
                 write!(f, "[{inner}]")
+            }
+            Value::Map(entries) => {
+                let inner = entries
+                    .borrow()
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "{{{inner}}}")
             }
             Value::Func(decl, _) => write!(f, "<fn {}>", decl.name),
             Value::Closure(_) => write!(f, "<closure>"),

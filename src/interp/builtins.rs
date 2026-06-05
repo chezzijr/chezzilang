@@ -36,7 +36,73 @@ pub fn call_method(
     match recv {
         Value::Str(s) => str_method(s, method, &args, span),
         Value::List(items) => list_method(items, method, args, span),
-        _ => unreachable!("call_method dispatched a non-str/list receiver"),
+        Value::Map(entries) => map_method(entries, method, args, span),
+        _ => unreachable!("call_method dispatched a non-str/list/map receiver"),
+    }
+}
+
+/// Built-in methods on `map[K, V]` (gap #5). Mirrors the VM's `core_method` Map arm and the
+/// checker's `map_method_sig` — keep the three in lockstep (error strings included). `get`/`remove`
+/// return `Option[V]` via the built-in `Option` enum (last-built-style like `list.pop`).
+fn map_method(
+    entries: &Rc<RefCell<Vec<(Value, Value)>>>,
+    method: &str,
+    args: Vec<Value>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    let some = |v: Value| Value::Enum {
+        ty: "Option".into(),
+        variant: "Some".into(),
+        payload: vec![v],
+    };
+    let none = || Value::Enum {
+        ty: "Option".into(),
+        variant: "None".into(),
+        payload: vec![],
+    };
+    match method {
+        "len" => {
+            arity("len", &args, 0, span)?;
+            Ok(Value::Int(entries.borrow().len() as i64))
+        }
+        "has" => {
+            arity("has", &args, 1, span)?;
+            let key = &args[0];
+            let found = entries.borrow().iter().any(|(k, _)| super::values_equal(k, key));
+            Ok(Value::Bool(found))
+        }
+        "get" => {
+            arity("get", &args, 1, span)?;
+            let key = &args[0];
+            let v = entries.borrow().iter().find(|(k, _)| super::values_equal(k, key)).map(|(_, v)| v.clone());
+            Ok(v.map(some).unwrap_or_else(none))
+        }
+        "keys" => {
+            arity("keys", &args, 0, span)?;
+            let keys: Vec<Value> = entries.borrow().iter().map(|(k, _)| k.clone()).collect();
+            Ok(Value::List(Rc::new(RefCell::new(keys))))
+        }
+        "values" => {
+            arity("values", &args, 0, span)?;
+            let vals: Vec<Value> = entries.borrow().iter().map(|(_, v)| v.clone()).collect();
+            Ok(Value::List(Rc::new(RefCell::new(vals))))
+        }
+        "remove" => {
+            arity("remove", &args, 1, span)?;
+            let key = &args[0];
+            let pos = entries.borrow().iter().position(|(k, _)| super::values_equal(k, key));
+            match pos {
+                Some(i) => {
+                    let (_, v) = entries.borrow_mut().remove(i);
+                    Ok(some(v))
+                }
+                None => Ok(none()),
+            }
+        }
+        _ => Err(RuntimeError {
+            message: format!("type map has no method '{method}'"),
+            span,
+        }),
     }
 }
 

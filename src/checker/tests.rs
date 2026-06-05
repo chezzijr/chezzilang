@@ -1094,3 +1094,99 @@ fn nested_loops_break_legal_in_both() {
 // expressions that can't hold statements), so no source program exercises it through the checker.
 // The compiler is the enforcing layer — see its `break outside loop` CompileError on an empty
 // loop stack (closures compile in their own `FnComp` with an empty `loops` stack).
+
+// ===== map / dictionary (gap #5) =====
+
+#[test]
+fn map_literal_infers_str_int() {
+    // A `map[str, int]` annotation must accept a `{"a": 1}` literal.
+    ok("m: map[str, int] = {\"a\": 1, \"b\": 2}\n");
+}
+
+#[test]
+fn empty_map_assignable_to_any_map() {
+    ok("m: map[str, int] = {}\n");
+}
+
+#[test]
+fn map_index_read_is_value_type() {
+    // `m["a"]` has the value type (int) — pushing it into an int slot must check clean.
+    ok("m := {\"a\": 1}\nx: int = m[\"a\"]\n");
+}
+
+#[test]
+fn map_index_assign_ok() {
+    ok("m := {\"a\": 1}\nm[\"c\"] = 3\n");
+}
+
+#[test]
+fn map_index_assign_wrong_value_type_rejected() {
+    rejects("m := {\"a\": 1}\nm[\"c\"] = \"x\"\n", "cannot assign");
+}
+
+#[test]
+fn map_index_wrong_key_type_rejected() {
+    // String map keyed by an int — incompatible key.
+    rejects("m := {\"a\": 1}\ny := m[5]\n", "key");
+}
+
+#[test]
+fn float_map_key_literal_rejected() {
+    rejects("m := {1.0: 2}\n", "hashable");
+}
+
+#[test]
+fn float_map_key_annotation_rejected() {
+    rejects("m: map[float, int] = {}\n", "hashable");
+}
+
+#[test]
+fn heterogeneous_map_values_rejected() {
+    rejects("m := {\"a\": 1, \"b\": \"x\"}\n", "differ");
+}
+
+#[test]
+fn heterogeneous_map_keys_rejected() {
+    rejects("m := {\"a\": 1, 2: 3}\n", "differ");
+}
+
+#[test]
+fn int_and_bool_map_keys_ok() {
+    ok("m: map[int, str] = {1: \"a\"}\n");
+    ok("m: map[bool, int] = {true: 1}\n");
+}
+
+#[test]
+fn map_keys_method_is_list_of_key() {
+    ok("m := {\"a\": 1}\nks: list[str] = m.keys()\n");
+}
+
+#[test]
+fn map_values_method_is_list_of_value() {
+    ok("m := {\"a\": 1}\nvs: list[int] = m.values()\n");
+}
+
+#[test]
+fn map_get_method_is_option_of_value() {
+    ok("m := {\"a\": 1}\no: Option[int] = m.get(\"a\")\n");
+}
+
+#[test]
+fn map_has_method_is_bool() {
+    ok("m := {\"a\": 1}\nb: bool = m.has(\"a\")\n");
+}
+
+#[test]
+fn map_len_method_is_int() {
+    ok("m := {\"a\": 1}\nn: int = m.len()\n");
+}
+
+#[test]
+fn map_remove_method_is_option_of_value() {
+    ok("m := {\"a\": 1}\nr: Option[int] = m.remove(\"a\")\n");
+}
+
+#[test]
+fn map_unknown_method_rejected() {
+    rejects("m := {\"a\": 1}\nm.frobnicate()\n", "no method");
+}

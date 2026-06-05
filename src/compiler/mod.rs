@@ -306,7 +306,8 @@ impl Compiler {
             ExprKind::Index { obj, index } => {
                 self.compile_expr(fc, obj)?;
                 self.compile_expr(fc, index)?;
-                fc.emit(Op::AsInt, index.span);
+                // No `AsInt`: the index may be a map key (str/bool). `GetIndex`/`SetIndex`
+                // validate int-ness in their list/str arms at runtime.
                 if op != AssignOp::Eq {
                     fc.emit(Op::Dup2, span);
                     fc.emit(Op::GetIndex, target.span);
@@ -575,6 +576,14 @@ impl Compiler {
                 }
                 fc.emit(Op::NewList(items.len()), expr.span);
             }
+            ExprKind::Map(entries) => {
+                // Push `[k0, v0, k1, v1, …]`, then build the map (last duplicate key wins at runtime).
+                for (k, v) in entries {
+                    self.compile_expr(fc, k)?;
+                    self.compile_expr(fc, v)?;
+                }
+                fc.emit(Op::NewMap(entries.len()), expr.span);
+            }
             ExprKind::Unary { op, expr: inner } => {
                 self.compile_expr(fc, inner)?;
                 match op {
@@ -618,7 +627,8 @@ impl Compiler {
             ExprKind::Index { obj, index } => {
                 self.compile_expr(fc, obj)?;
                 self.compile_expr(fc, index)?;
-                fc.emit(Op::AsInt, index.span);
+                // No `AsInt`: the index may be a map key (str/bool), not just a list/str int.
+                // `GetIndex` validates int-ness in its list/str arm at runtime.
                 fc.emit(Op::GetIndex, expr.span);
             }
             ExprKind::Try(inner) => {

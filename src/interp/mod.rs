@@ -177,6 +177,19 @@ impl Interp {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(vals))))
             }
+            ExprKind::Map(entries) => {
+                // Evaluate key then value per entry; duplicate keys upsert (last wins).
+                let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(entries.len());
+                for (k_expr, v_expr) in entries {
+                    let k = self.eval(k_expr)?;
+                    let v = self.eval(v_expr)?;
+                    match pairs.iter().position(|(ek, _)| values_equal(ek, &k)) {
+                        Some(i) => pairs[i].1 = v,
+                        None => pairs.push((k, v)),
+                    }
+                }
+                Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(pairs))))
+            }
             ExprKind::Closure { params, body, .. } => {
                 Ok(Value::Closure(std::rc::Rc::new(value::Closure {
                     params: params.clone(),
@@ -210,27 +223,54 @@ impl Interp {
                 }
             }
             ExprKind::Index { obj, index } => {
+                // Evaluate the object FIRST: a map indexes by an arbitrary key (str/bool/int), so we
+                // only force an int index for the list/str paths. The int-validation error reports
+                // at `expr.span` (the whole index expression) to match the VM's `GetIndex` span.
                 let target = self.eval(obj)?;
-                let idx = self.eval_int(index)?;
-                let bounds_err = |len: usize| RuntimeError {
-                    message: format!("index {idx} out of bounds (len {len})"),
-                    span: expr.span,
+                let want_int = |v: Value| -> Result<i64, RuntimeError> {
+                    match v {
+                        Value::Int(n) => Ok(n),
+                        other => Err(RuntimeError {
+                            message: format!("expected int, found {}", other.type_name()),
+                            span: expr.span,
+                        }),
+                    }
                 };
                 match &target {
+                    Value::Map(entries) => {
+                        let key = self.eval(index)?;
+                        entries
+                            .borrow()
+                            .iter()
+                            .find(|(k, _)| values_equal(k, &key))
+                            .map(|(_, v)| v.clone())
+                            .ok_or_else(|| RuntimeError {
+                                message: "key not found".to_string(),
+                                span: expr.span,
+                            })
+                    }
                     Value::List(items) => {
+                        let idx = want_int(self.eval(index)?)?;
                         let items = items.borrow();
                         usize::try_from(idx)
                             .ok()
                             .and_then(|i| items.get(i).cloned())
-                            .ok_or_else(|| bounds_err(items.len()))
+                            .ok_or_else(|| RuntimeError {
+                                message: format!("index {idx} out of bounds (len {})", items.len()),
+                                span: expr.span,
+                            })
                     }
                     Value::Str(s) => {
+                        let idx = want_int(self.eval(index)?)?;
                         let chars: Vec<char> = s.chars().collect();
                         usize::try_from(idx)
                             .ok()
                             .and_then(|i| chars.get(i).copied())
                             .map(|c| Value::Str(c.to_string().into()))
-                            .ok_or_else(|| bounds_err(chars.len()))
+                            .ok_or_else(|| RuntimeError {
+                                message: format!("index {idx} out of bounds (len {})", chars.len()),
+                                span: expr.span,
+                            })
                     }
                     other => Err(RuntimeError {
                         message: format!("cannot index {}", other.type_name()),
@@ -646,8 +686,8 @@ impl Interp {
             let elems: Vec<Value> = items.borrow().clone();
             return self.eval_list_hof(method, elems, arg_vals, span);
         }
-        // Core-type methods (M6): built-in methods on `str` and `list` dispatch on the value.
-        if matches!(receiver, Value::Str(_) | Value::List(_)) {
+        // Core-type methods (M6): built-in methods on `str`, `list`, and `map` dispatch on the value.
+        if matches!(receiver, Value::Str(_) | Value::List(_) | Value::Map(_)) {
             return builtins::call_method(&receiver, method, arg_vals, span);
         }
         // `module.fn(args)` is a plain call on the looked-up member — no `self` is bound.
@@ -1124,10 +1164,50 @@ impl Interp {
                 }
                 Ok(())
             }
-            // `xs[i] = v` — mutate a list element in place (lists are `Rc<RefCell<…>>`).
+            // `xs[i] = v` / `m[k] = v` — mutate a list element or upsert a map entry in place
+            // (both are `Rc<RefCell<…>>`). Evaluate the object once, then branch on its kind.
             ExprKind::Index { obj, index } => {
                 let target_val = self.eval(obj)?;
-                let idx = self.eval_int(index)?;
+                // Map upsert: the key is an arbitrary value (str/bool/int), not an int index.
+                if let Value::Map(entries) = &target_val {
+                    let key = self.eval(index)?;
+                    let new_val = match op {
+                        AssignOp::Eq => self.eval(value)?,
+                        AssignOp::PlusEq | AssignOp::MinusEq => {
+                            // Compound on a missing key is an error (consistent with read-missing).
+                            let cur = entries
+                                .borrow()
+                                .iter()
+                                .find(|(k, _)| values_equal(k, &key))
+                                .map(|(_, v)| v.clone());
+                            let Some(cur) = cur else {
+                                return Err(RuntimeError {
+                                    message: "key not found".to_string(),
+                                    span,
+                                });
+                            };
+                            let rhs = self.eval(value)?;
+                            let bin = if op == AssignOp::PlusEq { BinaryOp::Add } else { BinaryOp::Sub };
+                            eval_binary(bin, cur, rhs, span)?
+                        }
+                    };
+                    let pos = entries.borrow().iter().position(|(k, _)| values_equal(k, &key));
+                    match pos {
+                        Some(i) => entries.borrow_mut()[i].1 = new_val,
+                        None => entries.borrow_mut().push((key, new_val)),
+                    }
+                    return Ok(());
+                }
+                // Validate an int index at the assignment `span` (matches the VM's `SetIndex` span).
+                let idx = match self.eval(index)? {
+                    Value::Int(n) => n,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!("expected int, found {}", other.type_name()),
+                            span,
+                        });
+                    }
+                };
                 let Value::List(items) = &target_val else {
                     return Err(RuntimeError {
                         message: format!("cannot index {}", target_val.type_name()),
@@ -1516,7 +1596,7 @@ fn compare(l: &Value, r: &Value) -> Option<std::cmp::Ordering> {
 }
 
 /// Structural equality for `==` / `!=`. Cross-type compares are simply unequal.
-fn values_equal(l: &Value, r: &Value) -> bool {
+pub(super) fn values_equal(l: &Value, r: &Value) -> bool {
     match (l, r) {
         (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
             as_f64(l) == as_f64(r)
@@ -2140,6 +2220,14 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/methods.chz");
         let expected = include_str!("../../examples/methods.expected");
         assert_eq!(run_capture(source).expect("methods.chz should run"), expected);
+    }
+
+    /// Gap #5 golden: map literal, keyed get/set, methods, and iteration on the interp.
+    #[test]
+    fn golden_map_chz() {
+        let source = include_str!("../../examples/map.chz");
+        let expected = include_str!("../../examples/map.expected");
+        assert_eq!(run_capture(source).expect("map.chz should run"), expected);
     }
 
     // ===== entry model: no auto-main; unhandled top-level Err/None exits =====

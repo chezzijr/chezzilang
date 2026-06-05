@@ -886,6 +886,23 @@ impl Parser {
                 self.expect(&Token::RBracket)?;
                 ExprKind::List(elems)
             }
+            Token::LBrace => {
+                // Map literal `{k: v, …}` (insertion-ordered, no trailing comma — mirrors lists).
+                let mut entries = Vec::new();
+                if !self.check(&Token::RBrace) {
+                    loop {
+                        let key = self.parse_expr()?;
+                        self.expect(&Token::Colon)?;
+                        let value = self.parse_expr()?;
+                        entries.push((key, value));
+                        if !self.eat(&Token::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&Token::RBrace)?;
+                ExprKind::Map(entries)
+            }
             Token::Fn => return self.parse_closure(span),
             // Expression-position `match`/`if` (the keyword was already consumed by `advance`).
             // Statement-position `if`/`match` never reach here — `parse_stmt` dispatches them first.
@@ -951,6 +968,8 @@ fn describe(tok: &Token) -> String {
         RParen => "')'",
         LBracket => "'['",
         RBracket => "']'",
+        LBrace => "'{'",
+        RBrace => "'}'",
         Comma => "','",
         Colon => "':'",
         Dot => "'.'",
@@ -1319,6 +1338,28 @@ mod tests {
             panic!()
         };
         assert!(matches!(e.kind, ExprKind::Index { .. }));
+    }
+
+    #[test]
+    fn map_literal() {
+        let StmtKind::Expr(e) = only("{}\n") else {
+            panic!()
+        };
+        match e.kind {
+            ExprKind::Map(entries) => assert_eq!(entries.len(), 0),
+            other => panic!("{other:?}"),
+        }
+        let StmtKind::Expr(e) = only("{\"a\": 1, \"b\": 2}\n") else {
+            panic!()
+        };
+        match e.kind {
+            ExprKind::Map(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert!(matches!(entries[0].0.kind, ExprKind::Str(_)));
+                assert!(matches!(entries[0].1.kind, ExprKind::Int(1)));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

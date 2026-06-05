@@ -94,6 +94,37 @@ model; Level-3 dynamic `cdylib` loading stays out of scope.
 - ⏸️ **Deferred (intentional):** `std.os.exit(code)` (needs an exit-code channel through both run
   drivers + CLI); `read_file` capped at 64 MiB; `getcwd` not yet injectable via `HostConfig`.
 
+## Post-M6 — `map[K, V]` dictionary (gap #5)  ✅ DONE
+
+Insertion-ordered maps on **both** engines: literal `{"a": 1}` / empty `{}`, keyed read/insert/update
+`m[k]` / `m[k] = v` (missing-key read & compound-on-missing → runtime error), and methods
+`len`/`has`/`get`/`keys`/`values`/`remove` (`get`/`remove` → `Option[V]`). Keys restricted to hashable
+scalars (int/str/bool); float & composite keys rejected in the checker. Representation:
+insertion-ordered `Vec<(Value, Value)>` (interp `Rc<RefCell<…>>`, VM `Obj::Map`), linear scan by
+value-equality — deterministic iteration. Built **TDD** (red→green per layer).
+
+- ✅ **Lexer/grammar** — new `Token::LBrace`/`RBrace` (no brace tokens existed, so `{}` is
+  unambiguous); conformance `symbol()` + `docs/grammar.bnf` `<mapEntries>` production +
+  `accept/map_literal.chz`.
+- ✅ **AST/parser** — `ExprKind::Map(Vec<(Expr, Expr)>)`; `parse_primary` `{` arm (no trailing comma).
+- ✅ **Checker** — `Ty::Map(K, V)`; `resolve_type` lowers `map[K,V]` + validates hashable key;
+  `infer_map` (homogeneous keys/values, hashable key, empty → `map[?,?]`); `infer_index` /
+  `check_assign` Index arms treat map keys as the key type (not int); `map_method_sig`.
+- ✅ **Interp/VM** — `Value::Map` / `Obj::Map`; `ExprKind::Map`/`Op::NewMap` (last-key-wins upsert);
+  Index read & `exec_assign`/`set_index` restructured to branch on map vs list/str; `core_method`
+  /`map_method` for the six methods; `Display` = `{k: v, …}` (bare elements, mirrors list).
+- ✅ **AsInt relocation** — removed `Op::AsInt` before `GetIndex`/`SetIndex` (it only validated int,
+  wrongly rejecting str/bool map keys); int-validation moved into the VM `get_index`/`set_index`
+  list/str arms with the **exact** `"expected int, found …"` message. Both engines now report the
+  index int-error at the index-expression span (parity-tested); **zero regression** in the
+  pre-existing list-index suite (OOB, compound-OOB side-effect skip, str-index-reject all green).
+- ✅ **GC** — `Heap::children` traces **both** map keys and values; gc-stress parity test with heap
+  keys+values proves no use-after-free.
+- ✅ **Tests** — checker `ok`/`rejects` (18), parser + lexer units, 11 cross-engine parity tests
+  (literal/print, read, missing-key error, insert/update, compound, all six methods, keys-iteration,
+  int/bool keys, gc-stress) + a list non-int-index regression guard, golden `examples/map.chz` +
+  `.expected` byte-identical on both engines. **542 total**, clean `cargo clippy` + `cargo test conformance`.
+
 ## Post-M6 — Index & field assignment (mutability)  ✅ DONE
 
 `xs[i] = v` and `p.x = v` (plus `+=`/`-=`) now mutate in place on **both** engines — the two

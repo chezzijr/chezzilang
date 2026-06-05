@@ -74,6 +74,8 @@ fn symbol(tok: &Token) -> &'static str {
         Token::RParen => "RPAREN",
         Token::LBracket => "LBRACKET",
         Token::RBracket => "RBRACKET",
+        Token::LBrace => "LBRACE",
+        Token::RBrace => "RBRACE",
         Token::Comma => "COMMA",
         Token::Colon => "COLON",
         Token::Dot => "DOT",

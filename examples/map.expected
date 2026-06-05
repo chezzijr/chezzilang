@@ -1,0 +1,18 @@
+{ada: 90, linus: 85}
+90
+{ada: 100, linus: 85, grace: 95}
+3
+true
+false
+grace: 95
+ken: absent
+ada
+linus
+grace
+[100, 85, 95]
+105
+removed 85
+{ada: 105, grace: 95}
+{}
+0
+two

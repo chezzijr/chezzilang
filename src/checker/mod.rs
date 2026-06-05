@@ -529,7 +529,17 @@ impl Checker {
                 ("list", [inner]) => Ty::list(self.resolve_type(inner, span)),
                 ("Result", [inner]) => Ty::result(self.resolve_type(inner, span)),
                 ("Option", [inner]) => Ty::option(self.resolve_type(inner, span)),
-                ("map", [_, _]) => Ty::Unknown, // map typing deferred (no map literals yet)
+                ("map", [k, v]) => {
+                    let key = self.resolve_type(k, span);
+                    let value = self.resolve_type(v, span);
+                    if !is_hashable_key(&key) {
+                        self.error(
+                            span,
+                            format!("map key type must be a hashable scalar (int, str, or bool), found {key}"),
+                        );
+                    }
+                    Ty::map(key, value)
+                }
                 _ => {
                     self.error(span, format!("unknown generic type '{n}'"));
                     Ty::Unknown
@@ -647,15 +657,32 @@ impl Checker {
             // `xs[i] = v` — only lists are mutable by index. Strings are immutable; other types
             // aren't indexable. (`infer_index` would green-light a str index — handle it here.)
             ExprKind::Index { obj, index } => {
-                self.expect_int(index, "index");
                 match self.infer(obj) {
-                    Ty::List(elem) => self.check_assign_value(&elem, op, &val_ty, target.span),
-                    Ty::Str => self.error(
-                        target.span,
-                        "cannot assign to an index of str (strings are immutable)",
-                    ),
-                    Ty::Unknown => {}
-                    other => self.error(target.span, format!("cannot index-assign into {other}")),
+                    Ty::Map(k, v) => {
+                        let idx_ty = self.infer(index);
+                        if !compatible(&k, &idx_ty) {
+                            self.error(index.span, format!("map key must be {k}, found {idx_ty}"));
+                        }
+                        self.check_assign_value(&v, op, &val_ty, target.span);
+                    }
+                    Ty::List(elem) => {
+                        self.expect_int(index, "index");
+                        self.check_assign_value(&elem, op, &val_ty, target.span);
+                    }
+                    Ty::Str => {
+                        self.expect_int(index, "index");
+                        self.error(
+                            target.span,
+                            "cannot assign to an index of str (strings are immutable)",
+                        );
+                    }
+                    Ty::Unknown => {
+                        self.expect_int(index, "index");
+                    }
+                    other => {
+                        self.expect_int(index, "index");
+                        self.error(target.span, format!("cannot index-assign into {other}"));
+                    }
                 }
             }
             // `p.x = v` — only data fields of a struct are assignable (not methods, not module
@@ -1026,6 +1053,7 @@ impl Checker {
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Ident(name) => self.infer_ident(name, expr.span),
             ExprKind::List(items) => self.infer_list(items),
+            ExprKind::Map(entries) => self.infer_map(entries),
             ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner),
             ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
             ExprKind::Range { start, end } => {
@@ -1074,6 +1102,34 @@ impl Checker {
             }
         }
         Ty::list(elem)
+    }
+
+    /// Infer the type of a map literal `{k: v, …}`. Keys must share one (hashable) type, values
+    /// another; heterogeneity and non-hashable keys are errors. Empty `{}` → `map[?, ?]`.
+    fn infer_map(&mut self, entries: &[(Expr, Expr)]) -> Ty {
+        let mut key = Ty::Unknown;
+        let mut value = Ty::Unknown;
+        for (k_expr, v_expr) in entries {
+            let kt = self.infer(k_expr);
+            let vt = self.infer(v_expr);
+            if !kt.is_unknown() && !is_hashable_key(&kt) {
+                self.error(
+                    k_expr.span,
+                    format!("map key type must be a hashable scalar (int, str, or bool), found {kt}"),
+                );
+            }
+            if key.is_unknown() {
+                key = kt;
+            } else if !kt.is_unknown() && !compatible(&key, &kt) {
+                self.error(k_expr.span, format!("map keys differ: {key} vs {kt}"));
+            }
+            if value.is_unknown() {
+                value = vt;
+            } else if !vt.is_unknown() && !compatible(&value, &vt) {
+                self.error(v_expr.span, format!("map values differ: {value} vs {vt}"));
+            }
+        }
+        Ty::map(key, value)
     }
 
     fn infer_unary(&mut self, op: UnaryOp, inner: &Expr) -> Ty {
@@ -1194,12 +1250,29 @@ impl Checker {
     }
 
     fn infer_index(&mut self, obj: &Expr, index: &Expr) -> Ty {
-        self.expect_int(index, "index");
+        // Map keys are NOT int — infer the object first and check the index against the key type.
         match self.infer(obj) {
-            Ty::List(inner) => *inner,
-            Ty::Str => Ty::Str,
-            Ty::Unknown => Ty::Unknown,
+            Ty::Map(k, v) => {
+                let idx_ty = self.infer(index);
+                if !compatible(&k, &idx_ty) {
+                    self.error(index.span, format!("map key must be {k}, found {idx_ty}"));
+                }
+                *v
+            }
+            Ty::List(inner) => {
+                self.expect_int(index, "index");
+                *inner
+            }
+            Ty::Str => {
+                self.expect_int(index, "index");
+                Ty::Str
+            }
+            Ty::Unknown => {
+                self.expect_int(index, "index");
+                Ty::Unknown
+            }
             other => {
+                self.expect_int(index, "index");
                 self.error(obj.span, format!("cannot index into {other}"));
                 Ty::Unknown
             }
@@ -1443,6 +1516,15 @@ impl Checker {
                 }
                 Ty::Unknown
             }
+            Ty::Map(k, v) => {
+                if let Some(sig) = map_method_sig(method, k, v) {
+                    self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
             Ty::Unknown => {
                 self.infer_all(args);
                 Ty::Unknown
@@ -1663,6 +1745,26 @@ fn list_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
 /// Element types that have a total order for `sort()`: the scalar comparables.
 fn is_orderable(t: &Ty) -> bool {
     matches!(t, Ty::Int | Ty::Float | Ty::Str)
+}
+
+/// Valid `map` key types: the hashable scalars. `float` and composites are rejected (float
+/// equality footgun; composites have no stable identity). `Unknown` is tolerated (no cascade).
+fn is_hashable_key(t: &Ty) -> bool {
+    matches!(t, Ty::Int | Ty::Str | Ty::Bool | Ty::Unknown)
+}
+
+/// Built-in method signatures on `map[K, V]` (gap #5). `k`/`v` are the key / value types.
+fn map_method_sig(method: &str, k: &Ty, v: &Ty) -> Option<FnSig> {
+    let (params, ret) = match method {
+        "len" => (vec![], Ty::Int),
+        "has" => (vec![k.clone()], Ty::Bool),
+        "get" => (vec![k.clone()], Ty::option(v.clone())),
+        "keys" => (vec![], Ty::list(k.clone())),
+        "values" => (vec![], Ty::list(v.clone())),
+        "remove" => (vec![k.clone()], Ty::option(v.clone())),
+        _ => return None,
+    };
+    Some(FnSig { params, ret })
 }
 
 #[cfg(test)]

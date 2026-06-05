@@ -13,6 +13,9 @@ use std::collections::HashMap;
 pub enum Obj {
     Str(Box<str>),
     List(Vec<Value>),
+    /// `{k: v, …}` — insertion-ordered entries (linear scan by value-equality). Keys AND values
+    /// may be heap objects, so BOTH are traced as GC children.
+    Map(Vec<(Value, Value)>),
     /// Fields in declaration order (deterministic `Display` / iteration).
     Struct {
         name: Box<str>,
@@ -161,6 +164,10 @@ impl Heap {
         match self.get(h) {
             Obj::Str(_) => {}
             Obj::List(items) => items.iter().for_each(&mut push),
+            Obj::Map(entries) => entries.iter().for_each(|(k, v)| {
+                push(k);
+                push(v);
+            }),
             Obj::Struct { fields, .. } => fields.iter().for_each(|(_, v)| push(v)),
             Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
             Obj::Func { home, .. } => out.push(*home),
