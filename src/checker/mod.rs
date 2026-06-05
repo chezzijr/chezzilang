@@ -1211,7 +1211,20 @@ impl Checker {
             Ty::Struct(sname) => {
                 let sig = self.structs.get(sname).and_then(|i| i.methods.get(method).cloned());
                 if let Some(sig) = sig {
-                    self.check_args(method, &sig.params, args, span);
+                    // The first param is the receiver (bound implicitly from `obj`), so the call's
+                    // explicit args correspond to params[1..]. A method with NO params has no
+                    // receiver slot — both engines prepend the receiver and would error at runtime,
+                    // so reject the call here instead.
+                    match sig.params.split_first() {
+                        Some((_receiver, expected)) => self.check_args(method, expected, args, span),
+                        None => {
+                            self.error(
+                                span,
+                                format!("method '{method}' has no receiver parameter (its first parameter must be the receiver, e.g. `self`)"),
+                            );
+                            self.infer_all(args);
+                        }
+                    }
                     return sig.ret;
                 }
                 self.infer_all(args);

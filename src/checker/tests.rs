@@ -275,13 +275,72 @@ fn inferred_nested_fn_does_not_pollute_outer() {
 
 #[test]
 fn inferred_method_return() {
-    // The un-annotated method infers `int` from `return self.v`; the later `return "x"` then
-    // conflicts. Observing the conflict proves inference ran on the method (no call site needed —
-    // statement-level `self`-method calls are blocked by a separate pre-existing arity bug).
+    // The un-annotated method infers `int` from `return self.v`; the later `return "x"` conflicts.
+    // The conflict proves inference ran on the method body.
     rejects(
         "struct Box:\n    v: int\n    fn get(self):\n        if true:\n            return self.v\n        return \"x\"\n",
         "expected return type int, found str",
     );
+}
+
+// ===== 9b'. struct method calls — the receiver `self` is implicit, not an explicit argument =====
+
+const BOX: &str = "struct Box:\n    v: int\n    fn get(self) -> int:\n        return self.v\n    fn add(self, k: int) -> int:\n        return self.v + k\n";
+
+#[test]
+fn method_call_binds_self_implicitly() {
+    // `b.get()` passes zero explicit args; `self` is bound from the receiver, not counted.
+    ok(&format!("{BOX}b := Box(5)\nx := b.get()\ny := x + 1\n"));
+}
+
+#[test]
+fn method_call_with_args_ok() {
+    ok(&format!("{BOX}b := Box(5)\nx := b.add(3)\ny := x + 1\n"));
+}
+
+#[test]
+fn method_call_wrong_arity_rejected() {
+    rejects(&format!("{BOX}b := Box(5)\nx := b.add()\n"), "expects 1 argument");
+}
+
+#[test]
+fn method_call_wrong_arg_type_rejected() {
+    rejects(&format!("{BOX}b := Box(5)\nx := b.add(\"s\")\n"), "expected int");
+}
+
+#[test]
+fn method_call_too_many_args_rejected() {
+    rejects(&format!("{BOX}b := Box(5)\nx := b.get(1)\n"), "expects 0 argument");
+}
+
+#[test]
+fn method_without_receiver_param_rejected() {
+    // A method with no params has no receiver slot; calling it on an instance must be rejected at
+    // check time — otherwise the runtime errors ("expects 0 argument(s), got 1") since both engines
+    // prepend the receiver.
+    rejects(
+        "struct Box:\n    v: int\n    fn ping():\n        print(\"x\")\nb := Box(5)\nb.ping()\n",
+        "no receiver",
+    );
+}
+
+#[test]
+fn method_calls_another_method_via_self() {
+    // The motivating case: `self.dbl()` inside a method body — a `self`-method call with 0 args.
+    ok("struct Box:\n    v: int\n    fn dbl(self) -> int:\n        return self.v * 2\n    fn quad(self) -> int:\n        return self.dbl() + self.dbl()\n");
+}
+
+#[test]
+fn method_call_multi_arg_arity() {
+    let src = "struct C:\n    v: int\n    fn f(self, a: int, b: int) -> int:\n        return self.v + a + b\n";
+    ok(&format!("{src}c := C(1)\nx := c.f(2, 3)\n"));
+    rejects(&format!("{src}c := C(1)\nx := c.f(2)\n"), "expects 2 argument");
+}
+
+#[test]
+fn method_call_first_param_not_named_self_ok() {
+    // The receiver is positional, not keyed on the name `self`.
+    ok("struct Point:\n    x: int\n    fn getx(p: Point) -> int:\n        return p.x\np := Point(7)\nn := p.getx()\nm := n + 1\n");
 }
 
 // ===== 9c. T? / T! type shorthand (sugar for Option[T] / Result[T]) =====
