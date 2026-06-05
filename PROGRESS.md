@@ -10,8 +10,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-> **M4 — Type checker (local inference).** Build `src/checker/`.
-> Goal: type errors caught pre-run with clear messages; `--errors=json` mode.
+> **M4.5 — Modules / imports + resolver.** Multi-file programs; `chezzi.toml` root detection.
 
 ## M1 — Lexer  ✅ DONE
 
@@ -93,10 +92,42 @@ methods (`s.upper()`, `xs.push()` — only user struct methods so far). Exhausti
 a runtime error now; static check arrives with M4. `?` inside a closure is absorbed at the closure
 boundary (a checker rule for M4).
 
+## M4 — Type checker (local inference)  ✅ DONE
+
+`cargo run -- check examples/hello.chz` type-checks; `run` now **gates** on the checker (type
+errors block execution — no partial output). Built `src/checker/` (`mod` + `ty`); 73 checker
+tests, 191 total; clean `cargo clippy`. Built **TDD** (red→green per error class; every test pins
+a real bug class).
+
+- ✅ **Type lattice** (`ty.rs`) — `Ty`: `Int/Float/Bool/Str/Nil`, `List[T]`, `Result[T]`,
+  `Option[T]`, `Struct/Enum(name)`, `Func{params,ret}`, and `Unknown` (top/bottom element,
+  compatible with everything — suppresses error cascades). `compatible()` is structural; **no**
+  implicit int→float (numeric promotion lives only in arithmetic).
+- ✅ **Pragmatic local inference** — bidirectional, no unification. `:=` infers from RHS; typed
+  `let`/params/fields/returns checked against annotations. `Ok/Some` carry their payload type;
+  `Err`/`None` are generic (`Result[?]`/`Option[?]`) so they unify with any declared `Result[T]`.
+- ✅ **Two-pass** — pass 1 hoists every top-level decl (forward refs work, like the interp);
+  pass 2 walks bodies, **collecting all errors** (Go-style) into a `Vec`.
+- ✅ **Error classes** (each with a test) — unknown name/type, call arity, non-callable, arithmetic
+  (`+`/`-`/`*`/`/`/`%`, matching interp incl. `str+str`), comparison, bool context, assignment
+  mismatch (typed-let, `=`/`+=`/`-=`), return-vs-signature, field access, indexing, match
+  exhaustiveness (+ unknown variant, dup arm, binding arity), and the `?` operator (operand must
+  be Result/Option; enclosing fn ret must be Result/Option/**Nil** — the last allows `?` in
+  `main()`, matching interp's top-level unwind).
+- ✅ **CLI** — `chezzi check <file>` + `run` gating; `--errors=json` emits a structured JSON array
+  (hand-rolled, zero-dep escaper) and preserves the contract even on fatal lex/parse errors.
+- ✅ **Robustness** (review-panel: 4 S++ warm + 1 cold pass) — redeclaration guard
+  (dup fn/struct/enum/variant → clear error, no pass-2 panic); field/index assignment rejected to
+  match the interpreter (which only assigns bare vars); closure body checked against its explicit
+  return annotation; unknown CLI flags fail; no reachable panic on valid parsed input.
+
+**Deferred (note):** `map[K,V]` typing (no map literals yet), all-paths-return analysis, deeper
+generic unification, user-defined generics, `?`-inside-closure frame semantics, field/index
+assignment (blocked until the interpreter supports it), pipe `|>` (M6).
+
 ## Roadmap (later)
 
-- ⬜ **M4** — Type checker (local inference) ← NEXT
-- ⬜ **M4.5** — Modules / imports
+- ⬜ **M4.5** — Modules / imports ← NEXT
 - ⬜ **M5** — Bytecode VM + mark-sweep GC
 - ⬜ **M6** — Stdlib + pipe `|>` + **core-type methods** (string/list ergonomics — UX priority).
   Extend `eval_method_call` to dispatch on `Value::Str`/`Value::List`; handlers in `builtins.rs`.
