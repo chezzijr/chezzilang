@@ -1386,6 +1386,25 @@ fn safe_div(a: int, b: int) -> Result[int]:
         assert_eq!(run(&format!("{POINT}print(Point(3, 4))\n")), "Point(x=3, y=4)\n");
     }
 
+    #[test]
+    fn string_escapes_reach_output() {
+        assert_eq!(run(r#"print("tab\there")"#), "tab\there\n");
+        assert_eq!(run(r#"print("quote: \"x\"")"#), "quote: \"x\"\n");
+        assert_eq!(run(r#"print("back\\slash")"#), "back\\slash\n");
+    }
+
+    #[test]
+    fn escapes_and_interpolation_coexist() {
+        // `\t` is a lex-time escape; `{{a}}` and `{1+1}` are eval-time interpolation.
+        assert_eq!(run(r#"print("{{a}}\t{1 + 1}")"#), "{a}\t2\n");
+    }
+
+    #[test]
+    fn numeric_underscores_have_normal_value() {
+        assert_eq!(run("print(10_000_000)\n"), "10000000\n");
+        assert_eq!(run("print(1_000 == 1000)\n"), "true\n");
+    }
+
     /// Golden end-to-end: the touchstone program must produce exactly its expected output.
     /// `examples/hello.expected` is the regression baseline (the M5 VM must match it too).
     #[test]

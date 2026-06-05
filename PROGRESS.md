@@ -19,8 +19,8 @@ All 5 guiding tests green; lexes full `examples/hello.chz` (nested Indent/Dedent
 
 - ✅ **1a. Char cursor** — *(yours, reviewed)*
 - ✅ **1b. Operator tokens** — *(scaffolded)*
-- ✅ **1c. Numbers** — int + float. *(yours, reviewed: fixed greedy-dot via peek_next lookahead)*
-- ✅ **1d. Strings** — plain `"..."`. *(scaffolded)*
+- ✅ **1c. Numbers** — int + float; `_` digit separators (`10_000_000`, only between digits).
+- ✅ **1d. Strings** — `"..."` with escapes `\n \t \r \\ \" \0` (unknown escape → error).
 - ✅ **1e. Identifiers & keywords** — *(yours, reviewed)*
 - ✅ **1f. Comments & whitespace** — *(scaffolded)*
 - ✅ **1g. Newlines** — *(scaffolded)*
@@ -28,7 +28,8 @@ All 5 guiding tests green; lexes full `examples/hello.chz` (nested Indent/Dedent
 - ✅ **1i. EOF** — Newline → trailing Dedents → Eof *(scaffolded)*
 - ✅ **1j/1k. Tests green + reviewed.**
 
-**Open follow-ups (small, do anytime):** scientific notation in numbers (`1e3`); string escapes (`\n`, `\"`); string interpolation lexing.
+**Open follow-ups (small, do anytime):** scientific notation in numbers (`1e3`); single-quote strings; unicode `\u{…}` escapes.
+**Done post-M1:** string escapes (`\n \t \r \\ \" \0`), numeric underscores (`10_000_000`) — both lexer-only, TDD, conformance still green.
 
 ## M2 — Parser → AST  ✅ DONE
 
@@ -97,7 +98,10 @@ boundary (a checker rule for M4).
 - ⬜ **M4** — Type checker (local inference) ← NEXT
 - ⬜ **M4.5** — Modules / imports
 - ⬜ **M5** — Bytecode VM + mark-sweep GC
-- ⬜ **M6** — Stdlib + pipe `|>`
+- ⬜ **M6** — Stdlib + pipe `|>` + **core-type methods** (string/list ergonomics — UX priority).
+  Extend `eval_method_call` to dispatch on `Value::Str`/`Value::List`; handlers in `builtins.rs`.
+  Starter set: `s.len/upper/lower/trim`, `s.split(sep)`, `sep.join(list)`, `s.starts_with/contains`
+  (+ list mirror `xs.push/len`). Pullable earlier if string ergonomics start blocking real programs.
 
 ---
 

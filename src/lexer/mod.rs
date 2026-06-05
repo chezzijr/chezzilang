@@ -482,15 +482,14 @@ impl Lexer {
     }
 
     /// (1c) Scan a number literal (int, or float if it has a single '.'). First digit already
-    /// consumed; `start` is its index.
-    /// HINT: munch digits; if you then see '.' FOLLOWED BY a digit, consume the '.' and the
-    /// fractional digits and produce `Token::Float`, else `Token::Int`. Parse with
-    /// `word.parse::<i64>()` / `parse::<f64>()` and map a parse failure to `self.error(...)`.
+    /// consumed; `start` is its index. `_` is allowed as a digit-group separator
+    /// (`10_000_000`) but only **between two digits** — leading/trailing/doubled/dot-adjacent
+    /// underscores are a `LexError`.
     fn number(&mut self, start: usize) -> Result<Token, LexError> {
         let mut is_float = false;
 
-        // integer part
-        while self.peek().is_ascii_digit() {
+        // integer part (digits + group separators)
+        while self.peek().is_ascii_digit() || self.peek() == '_' {
             self.advance();
         }
 
@@ -499,12 +498,24 @@ impl Lexer {
         if self.peek() == '.' && self.peek_next().is_ascii_digit() {
             is_float = true;
             self.advance(); // consume the '.'
-            while self.peek().is_ascii_digit() {
+            while self.peek().is_ascii_digit() || self.peek() == '_' {
                 self.advance();
             }
         }
 
-        let num: String = self.chars[start..self.pos].iter().collect();
+        let word: Vec<char> = self.chars[start..self.pos].to_vec();
+        // Validate underscores: every '_' must be flanked by a digit on both sides.
+        for (i, &c) in word.iter().enumerate() {
+            if c == '_' {
+                let prev_ok = i > 0 && word[i - 1].is_ascii_digit();
+                let next_ok = word.get(i + 1).is_some_and(|n| n.is_ascii_digit());
+                if !(prev_ok && next_ok) {
+                    return Err(self.error("'_' in a number must be between digits"));
+                }
+            }
+        }
+
+        let num: String = word.into_iter().filter(|c| *c != '_').collect();
         if is_float {
             let v = num.parse::<f64>().map_err(|e| self.error(&e.to_string()))?;
             Ok(Token::Float(v))
@@ -514,19 +525,43 @@ impl Lexer {
         }
     }
 
-    /// (1d) Scan a plain string literal. The opening '\"' is already consumed.
-    /// HINT: munch chars until the closing '\"' (advance them into a String). If you hit end of
-    /// input first, return `self.error(\"unterminated string\")`. Don't worry about escapes or
-    /// interpolation yet — plain text only for M1.
+    /// (1d) Scan a string literal. The opening `"` is already consumed.
+    ///
+    /// Munches up to the closing `"`, translating backslash escapes (`\n \t \r \\ \" \0`). An
+    /// unknown escape, or a `\` at end-of-input, is a `LexError`. The stored contents are the
+    /// *processed* text (escapes resolved, quotes stripped); brace interpolation (`{…}`) is a
+    /// separate, later pass in the interpreter — not handled here.
     fn string(&mut self) -> Result<Token, LexError> {
         let mut text = String::new();
-        // munch everything up to the closing quote (no escapes / interpolation in M1)
         while !self.is_at_end() && self.peek() != '"' {
-            if self.peek() == '\n' {
-                self.line += 1; // allow multi-line strings; keep line count honest
-                self.line_start = self.pos + 1; // next char begins the new line
+            if self.peek() == '\\' {
+                self.advance(); // consume the backslash
+                if self.is_at_end() {
+                    return Err(self.error("unterminated string literal (trailing '\\')"));
+                }
+                let esc = self.advance();
+                let translated = match esc {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '\\' => '\\',
+                    '"' => '"',
+                    '0' => '\0',
+                    '\n' | '\r' => {
+                        return Err(self.error(
+                            "line continuations are not supported; close the string or use \\n",
+                        ));
+                    }
+                    other => return Err(self.error(&format!("unknown escape '\\{other}'"))),
+                };
+                text.push(translated);
+            } else {
+                if self.peek() == '\n' {
+                    self.line += 1; // a *literal* newline → multi-line string; keep line count honest
+                    self.line_start = self.pos + 1; // next char begins the new line
+                }
+                text.push(self.advance());
             }
-            text.push(self.advance());
         }
         if self.is_at_end() {
             return Err(self.error("unterminated string literal"));
@@ -660,6 +695,81 @@ mod tests {
         let eof = toks.last().unwrap();
         assert_eq!(eof.kind, Token::Eof);
         assert_eq!(eof.span.line, 3);
+    }
+
+    // ----- string escapes -----
+
+    #[test]
+    fn string_escapes_translate() {
+        // Chezzi source: "a\nb\tc\\d\"e"  (backslashes literal in the raw string below)
+        assert_eq!(
+            kinds(r#""a\nb\tc\\d\"e""#),
+            vec![Token::Str("a\nb\tc\\d\"e".to_string()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn string_escape_nul() {
+        assert_eq!(
+            kinds(r#""x\0y""#),
+            vec![Token::Str("x\0y".to_string()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn unknown_escape_is_an_error() {
+        assert!(tokenize(r#""\q""#).is_err());
+    }
+
+    #[test]
+    fn trailing_backslash_is_unterminated() {
+        // "abc\  with no closing quote
+        assert!(tokenize("\"abc\\").is_err());
+    }
+
+    #[test]
+    fn escaped_newline_does_not_advance_source_line() {
+        // The `\n` here is an ESCAPE (two source chars on one line), so `z` stays on line 1.
+        let src = r#"x := "a\nb" z"#.to_string() + "\n";
+        let toks = tokenize(&src).unwrap();
+        let z = toks
+            .iter()
+            .find(|t| t.kind == Token::Ident("z".to_string()))
+            .unwrap();
+        assert_eq!(z.span.line, 1);
+    }
+
+    // ----- numeric underscores -----
+
+    #[test]
+    fn int_with_underscores() {
+        assert_eq!(
+            kinds("10_000_000"),
+            vec![Token::Int(10_000_000), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn float_with_underscores() {
+        assert_eq!(
+            kinds("1_000.000_5"),
+            vec![Token::Float(1000.0005), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn bad_underscores_are_errors() {
+        assert!(tokenize("1__0").is_err(), "double underscore");
+        assert!(tokenize("1_").is_err(), "trailing underscore");
+        assert!(tokenize("1_.5").is_err(), "underscore before dot");
+    }
+
+    #[test]
+    fn underscores_do_not_break_range() {
+        assert_eq!(
+            kinds("0..10"),
+            vec![Token::Int(0), Token::DotDot, Token::Int(10), Token::Newline, Token::Eof]
+        );
     }
 
     #[test]

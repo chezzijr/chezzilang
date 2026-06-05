@@ -22,7 +22,9 @@ For the *why* behind each choice see [`spec.md`](spec.md); for token names see [
 
 ```chezzi
 42            # int   (i64)
+1_000_000     # int   — '_' is a digit-group separator (only between digits)
 3.14          # float (f64)
+1_234.567_8   # float — '_' works in both parts
 true  false   # bool
 "hello"       # str
 "hi {name}"   # str with interpolation — see §10
@@ -176,12 +178,21 @@ print("sum: {a + b}")             # any expression
 print("brace: {{not interpolated}}")   # '{{' / '}}' = literal braces
 ```
 
-Common string ops (via builtins / `std.str`):
+**Escapes.** Backslash escapes resolve at lex time: `\n` `\t` `\r` `\\` `\"` `\0`. An unknown
+escape is an error. Two independent layers, like Python f-strings: `\` escapes a *character*
+(`\"` → a quote), while `{{` / `}}` escape *interpolation* (→ a literal brace).
+
+```chezzi
+print("tab\tgap, quote \"x\", path C:\\tmp")
+print("literal {{x}} vs value {x}")
+```
+
+Common string ops (via builtins / `std.str`) — **methods land with the stdlib (M6); not yet usable**:
 
 ```chezzi
 s.len()          s.upper()        s.lower()
 s.trim()         s.split(",")     s.starts_with("ab")
-"a" + "b"        # concatenation
+"a" + "b"        # concatenation (works today)
 ```
 
 ## 11. Pipe operator `|>`  (M6)
