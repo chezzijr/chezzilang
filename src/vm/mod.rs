@@ -2589,6 +2589,13 @@ main()";
         );
     }
 
+    #[test]
+    fn parity_hof_param() {
+        let src = "fn apply(f: fn(int) -> int, v: int) -> int:\n    return f(v)\ninc := fn(x: int) -> int: x + 1\nprint(apply(inc, 4))\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "5\n");
+    }
+
     fn fixture(rel: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
     }

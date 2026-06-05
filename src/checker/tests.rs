@@ -878,3 +878,18 @@ fn native_math_float_param_rejects_int() {
     );
 }
 
+// ===== higher-order-function parameter types =====
+
+#[test]
+fn hof_param_type_ok() {
+    ok("fn apply(f: fn(int) -> int, v: int) -> int:\n    return f(v)\ninc := fn(x: int) -> int: x + 1\nn := apply(inc, 4)\n");
+}
+
+#[test]
+fn hof_param_type_wrong_fn_rejected() {
+    rejects(
+        "fn apply(f: fn(int) -> int) -> int:\n    return f(0)\nbad := fn(x: str) -> int: 0\nn := apply(bad)\n",
+        "argument",
+    );
+}
+

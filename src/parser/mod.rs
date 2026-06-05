@@ -620,6 +620,27 @@ impl Parser {
         if self.depth > MAX_DEPTH {
             return Err(self.err("type nested too deeply".to_string()));
         }
+        // `fn(T1, …) -> R` — a function type in type position.
+        if self.eat(&Token::Fn) {
+            self.expect(&Token::LParen)?;
+            let mut params = Vec::new();
+            if !self.check(&Token::RParen) {
+                params.push(self.parse_type()?);
+                while self.eat(&Token::Comma) {
+                    params.push(self.parse_type()?);
+                }
+            }
+            self.expect(&Token::RParen)?;
+            self.expect(&Token::Arrow)?;
+            let ret = self.parse_type()?;
+            let mut ty = Type::Func {
+                params,
+                ret: Box::new(ret),
+            };
+            ty = self.parse_type_postfix(ty);
+            self.depth -= 1;
+            return Ok(ty);
+        }
         let name = self.expect_ident()?;
         let mut ty = if self.eat(&Token::LBracket) {
             let mut args = vec![self.parse_type()?];
@@ -631,8 +652,14 @@ impl Parser {
         } else {
             Type::Named(name)
         };
-        // Postfix shorthand on a fully-parsed base type: `T?` = Option[T], `T!` = Result[T].
-        // Stacks left-to-right (`T?!` = Result[Option[T]]).
+        ty = self.parse_type_postfix(ty);
+        self.depth -= 1;
+        Ok(ty)
+    }
+
+    /// Postfix shorthand on a fully-parsed base type: `T?` = Option[T], `T!` = Result[T].
+    /// Stacks left-to-right (`T?!` = Result[Option[T]]).
+    fn parse_type_postfix(&mut self, mut ty: Type) -> Type {
         loop {
             if self.eat(&Token::Question) {
                 ty = Type::Generic("Option".to_string(), vec![ty]);
@@ -642,8 +669,7 @@ impl Parser {
                 break;
             }
         }
-        self.depth -= 1;
-        Ok(ty)
+        ty
     }
 
     // ----- expressions (Pratt) -----
@@ -1453,6 +1479,38 @@ mod tests {
                 vec![Type::Generic("list".into(), vec![Type::Named("int".into())])]
             ))
         );
+    }
+
+    /// A function type in parameter position: `f: fn(int) -> int`.
+    #[test]
+    fn fn_param_type() {
+        let StmtKind::Fn(f) =
+            only("fn apply(f: fn(int) -> int, v: int) -> int:\n    return f(v)\n")
+        else {
+            panic!()
+        };
+        match &f.params[0].ty {
+            Some(Type::Func { params, ret }) => {
+                assert_eq!(params.as_slice(), &[Type::Named("int".into())]);
+                assert_eq!(**ret, Type::Named("int".into()));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A zero-argument function type: `fn() -> int`.
+    #[test]
+    fn fn_type_zero_args() {
+        let StmtKind::Fn(f) = only("fn g(f: fn() -> int):\n    return f()\n") else {
+            panic!()
+        };
+        match &f.params[0].ty {
+            Some(Type::Func { params, ret }) => {
+                assert!(params.is_empty());
+                assert_eq!(**ret, Type::Named("int".into()));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// `match` in expression position parses to `ExprKind::Match` with value-expression arms.

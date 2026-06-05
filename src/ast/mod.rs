@@ -157,6 +157,7 @@ pub enum Import {
 pub enum Type {
     Named(String),
     Generic(String, Vec<Type>),
+    Func { params: Vec<Type>, ret: Box<Type> },
 }
 
 // ===== expressions =====

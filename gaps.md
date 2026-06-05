@@ -35,11 +35,14 @@ p.x = 5          # now mutates in place; `+=`/`-=` too
 accepts a `Field` LHS (struct data fields only — methods/module members rejected); interp does
 `fields.borrow_mut()`; VM gained `Op::SetField` (+ `Dup` for compound) mutating the heap `Obj::Struct`.
 
-### 3. No higher-order function parameters — `f: fn(int) -> int`
+### 3. ~~No higher-order function parameters — `f: fn(int) -> int`~~ ✅ FIXED
 ```chezzi
-fn apply(f: fn(int) -> int, v: int) -> int:   # parse error: expected identifier, found 'fn'
+fn apply(f: fn(int) -> int, v: int) -> int:   # now parses & type-checks
     return f(v)
 ```
+**Fixed:** added `Type::Func { params, ret }` AST node; `parse_type` parses a `fn(T, …) -> R` form
+in type position (shared `parse_type_postfix` for `?`/`!`); `resolve_type` lowers it to the existing
+`Ty::Func`. Calling already worked via `infer_call`. See `examples/hof.chz`.
 **Blocks:** writing `map`/`filter`/`fold`, comparators, callbacks, strategy objects. Closures *exist*
 as values (`inc := fn(x: int) -> int: x + 1` works and is callable), but a function parameter can't
 be **typed** to receive one — and parameter types are required. So user-defined higher-order

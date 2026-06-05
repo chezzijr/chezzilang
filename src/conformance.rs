@@ -285,6 +285,7 @@ fn parser_rules_match_fns() {
         "parse_bp",
         "parse_unary",
         "parse_postfix",
+        "parse_type_postfix",
         "parse_primary",
         "parse_closure",
         "parse_match_expr",

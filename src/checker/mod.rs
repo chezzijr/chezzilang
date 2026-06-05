@@ -506,6 +506,10 @@ impl Checker {
                     Ty::Unknown
                 }
             },
+            Type::Func { params, ret } => Ty::Func {
+                params: params.iter().map(|p| self.resolve_type(p, span)).collect(),
+                ret: Box::new(self.resolve_type(ret, span)),
+            },
             Type::Generic(n, args) => match (n.as_str(), args.as_slice()) {
                 ("list", [inner]) => Ty::list(self.resolve_type(inner, span)),
                 ("Result", [inner]) => Ty::result(self.resolve_type(inner, span)),
