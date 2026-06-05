@@ -26,9 +26,11 @@ pub struct Stmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
-    /// `x := expr` (ty = None) or `name: Type = expr` (ty = Some).
+    /// `x := expr` (ty = None) or `name: Type = expr` (ty = Some). `names` holds one binding for a
+    /// plain/typed let, or two-or-more for a destructuring let (`a, b := pair()`); a destructuring
+    /// let always has `ty = None`.
     Let {
-        name: String,
+        names: Vec<String>,
         ty: Option<Type>,
         value: Expr,
     },
@@ -175,6 +177,8 @@ pub enum Type {
     Named(String),
     Generic(String, Vec<Type>),
     Func { params: Vec<Type>, ret: Box<Type> },
+    /// `(T1, T2, …)` — a tuple type (always ≥2 elements; a 1-element `(T)` unwraps to `T`).
+    Tuple(Vec<Type>),
 }
 
 // ===== expressions =====
@@ -194,6 +198,8 @@ pub enum ExprKind {
     Ident(String),
     /// `[a, b, c]`
     List(Vec<Expr>),
+    /// `(a, b, …)` — a tuple literal (always ≥2 elements).
+    Tuple(Vec<Expr>),
     /// `{k: v, …}` — insertion-ordered map literal. Each pair is `(key, value)`.
     Map(Vec<(Expr, Expr)>),
     Unary {

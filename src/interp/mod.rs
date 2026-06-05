@@ -177,6 +177,13 @@ impl Interp {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(vals))))
             }
+            ExprKind::Tuple(items) => {
+                let vals = items
+                    .iter()
+                    .map(|e| self.eval(e))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::Tuple(std::rc::Rc::new(vals)))
+            }
             ExprKind::Map(entries) => {
                 // Evaluate key then value per entry; duplicate keys upsert (last wins).
                 let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(entries.len());
@@ -201,6 +208,14 @@ impl Interp {
             ExprKind::Field { obj, name } => {
                 let target = self.eval(obj)?;
                 match &target {
+                    // `t.0`, `t.1`, … — tuple element access. The field name is the element index.
+                    Value::Tuple(items) => match name.parse::<usize>().ok().and_then(|i| items.get(i)) {
+                        Some(v) => Ok(v.clone()),
+                        None => Err(RuntimeError {
+                            message: format!("tuple has no element '.{name}' (len {})", items.len()),
+                            span: expr.span,
+                        }),
+                    },
                     Value::Struct { fields, .. } => fields
                         .borrow()
                         .iter()
@@ -998,9 +1013,33 @@ impl Interp {
     /// Execute one statement.
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<Flow, RuntimeError> {
         match &stmt.kind {
-            StmtKind::Let { name, value, .. } => {
+            StmtKind::Let { names, value, .. } => {
                 let v = self.eval(value)?;
-                self.env.define(name, v);
+                if names.len() > 1 {
+                    // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
+                    let Value::Tuple(items) = &v else {
+                        return Err(RuntimeError {
+                            message: format!("cannot destructure {}", v.type_name()),
+                            span: stmt.span,
+                        });
+                    };
+                    if items.len() != names.len() {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "destructuring binds {} name(s), but the tuple has {} element(s)",
+                                names.len(),
+                                items.len()
+                            ),
+                            span: stmt.span,
+                        });
+                    }
+                    let items = items.clone();
+                    for (name, elem) in names.iter().zip(items.iter()) {
+                        self.env.define(name, elem.clone());
+                    }
+                } else {
+                    self.env.define(&names[0], v);
+                }
                 Ok(Flow::Normal)
             }
             StmtKind::Assign { target, op, value } => {
@@ -2375,6 +2414,32 @@ fn safe_div(a: int, b: int) -> Result[int]:
         assert_eq!(eval("3 == 3"), Value::Bool(true));
         assert_eq!(eval("3 != 3"), Value::Bool(false));
         assert_eq!(eval(r#""x" == "x""#), Value::Bool(true));
+    }
+
+    // ----- gap #8: tuples + multi-return + destructuring -----
+
+    #[test]
+    fn tuple_literal_and_element_access() {
+        assert_eq!(run("t := (1, 2)\nprint(t.0)\nprint(t.1)\nprint(t)\n"), "1\n2\n(1, 2)\n");
+    }
+
+    #[test]
+    fn destructuring_binds_elements() {
+        assert_eq!(run("a, b := (10, 20)\nprint(a + b)\n"), "30\n");
+    }
+
+    #[test]
+    fn tuple_element_out_of_range_is_runtime_error() {
+        let err = run_capture("t := (1, 2)\nprint(t.2)\n").expect_err("out-of-range should error");
+        assert!(err.message.contains("has no element '.2'"), "{}", err.message);
+    }
+
+    /// Robustness for `--interp` (the checker normally prevents this): destructuring a non-tuple is
+    /// a clean runtime error, not a panic.
+    #[test]
+    fn destructuring_non_tuple_is_runtime_error() {
+        let err = run_capture("a, b := 5\n").expect_err("non-tuple destructure should error");
+        assert!(err.message.contains("cannot destructure"), "{}", err.message);
     }
 }
 

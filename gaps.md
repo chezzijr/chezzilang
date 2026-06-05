@@ -110,13 +110,19 @@ compiler `LoopCtx { continue_jumps, break_jumps }` patches `break`→loop-exit a
 **increment** (range `i+=1` / list index advance) — never the bare condition, so `continue` can't
 spin. No new opcode (reuses `Op::Jump`). See `examples/loops.chz`.
 
-### 8. No tuples / multiple return values
+### 8. ~~No tuples / multiple return values~~ ✅ FIXED
 ```chezzi
-t := (1, 2)              # parse error: expected ')', found ','
-fn pair() -> (int, int): ...   # unsupported
+t := (1, 2)                    # tuple literal (2+ elements; `(e,)` rejected, `(e)` is grouping)
+fn pair() -> (int, int):       # tuple return type → multi-return
+    return (3, 4)
+a, b := pair()                 # destructuring let
+x := t.0                       # field-style element access (.0, .1, …)
 ```
-**Impact:** a function returns exactly one value. Returning a pair needs a `struct` or a 2-element
-list. No destructuring (`a, b := ...`).
+**Fixed:** `Type::Tuple`/`Ty::Tuple`/`ExprKind::Tuple`; `StmtKind::Let` carries `names: Vec<String>`
+(single binding = one name, destructure = many). `Value::Tuple`/`Obj::Tuple` (immutable, GC-traced),
+`Op::NewTuple`; `.N` access reuses `ExprKind::Field`/`Op::GetField` (postfix `.` now accepts an int).
+Destructure compiles to a hidden local + per-element `GetField`. Out of scope: 1-tuples, unit `()`,
+nested-pattern destructure, `a,b = …` reassignment, runtime `t[i]`. See `examples/pair.chz`.
 
 ### 9. ~~`+=` / `-=` allow implicit int→float widening~~ ✅ FIXED
 ```chezzi

@@ -1,0 +1,5 @@
+# rule: primary, postfix
+fn main():
+    t := (1, 2)
+    x := t.0
+    y := t.1

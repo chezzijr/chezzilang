@@ -1190,3 +1190,52 @@ fn map_remove_method_is_option_of_value() {
 fn map_unknown_method_rejected() {
     rejects("m := {\"a\": 1}\nm.frobnicate()\n", "no method");
 }
+
+// ===== gap #8: tuples + multi-return + destructuring =====
+
+#[test]
+fn tuple_literal_infers_tuple_type() {
+    ok("t := (1, 2)\nx := t.0 + t.1\n");
+}
+
+#[test]
+fn tuple_return_type_matching_ok() {
+    ok("fn pair() -> (int, int):\n    return (3, 4)\n");
+}
+
+#[test]
+fn tuple_return_type_mismatch_rejected() {
+    rejects(
+        "fn pair() -> (int, int):\n    return (3, \"x\")\n",
+        "expected return type",
+    );
+}
+
+#[test]
+fn destructure_binds_element_types() {
+    // `a` is int, so `a + 1` type-checks; `b` is str, so `b + \"!\"` does too.
+    ok("fn pair() -> (int, str):\n    return (1, \"x\")\nfn main():\n    a, b := pair()\n    c := a + 1\n    d := b + \"!\"\n");
+}
+
+#[test]
+fn destructure_arity_mismatch_rejected() {
+    rejects(
+        "fn pair() -> (int, int):\n    return (1, 2)\nfn main():\n    a, b, c := pair()\n",
+        "destructuring binds 3",
+    );
+}
+
+#[test]
+fn destructure_non_tuple_rejected() {
+    rejects("fn main():\n    a, b := 5\n", "cannot destructure non-tuple");
+}
+
+#[test]
+fn tuple_element_typed() {
+    ok("t := (1, \"x\")\nn := t.0 + 1\ns := t.1 + \"!\"\n");
+}
+
+#[test]
+fn tuple_element_out_of_range_rejected() {
+    rejects("t := (1, 2)\nx := t.2\n", "has no element '.2'");
+}

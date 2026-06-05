@@ -17,6 +17,8 @@ pub enum Ty {
     /// `map[K, V]` — insertion-ordered dictionary. `K` is a hashable scalar (int/str/bool).
     Map(Box<Ty>, Box<Ty>),
     Func { params: Vec<Ty>, ret: Box<Ty> },
+    /// `(T1, T2, …)` — a fixed-arity tuple (always ≥2 elements).
+    Tuple(Vec<Ty>),
     Struct(String),
     Enum(String),
     Result(Box<Ty>),
@@ -67,6 +69,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
                 && p1.iter().zip(p2).all(|(a, b)| compatible(a, b))
                 && compatible(r1, r2)
         }
+        (Tuple(a), Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| compatible(x, y)),
         _ => false,
     }
 }
@@ -94,6 +97,16 @@ impl fmt::Display for Ty {
                     write!(f, "{p}")?;
                 }
                 write!(f, ") -> {ret}")
+            }
+            Ty::Tuple(elems) => {
+                write!(f, "(")?;
+                for (i, t) in elems.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{t}")?;
+                }
+                write!(f, ")")
             }
             Ty::Unknown => write!(f, "?"),
         }

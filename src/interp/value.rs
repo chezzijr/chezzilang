@@ -91,6 +91,9 @@ pub enum Value {
     Str(Rc<str>),
     /// `[a, b, c]` — growable, shared by reference.
     List(Rc<RefCell<Vec<Value>>>),
+    /// `(a, b, …)` — a fixed-arity, immutable tuple. Shared by `Rc` (no `RefCell`: tuples never
+    /// mutate). Derived `PartialEq` gives structural equality.
+    Tuple(Rc<Vec<Value>>),
     /// `{k: v, …}` — insertion-ordered, shared by reference. Linear scan by value-equality.
     Map(Rc<RefCell<Vec<(Value, Value)>>>),
     /// A named function (top-level `fn` or struct method) plus the module globals it resolves
@@ -130,6 +133,7 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Str(_) => "str",
             Value::List(_) => "list",
+            Value::Tuple(_) => "tuple",
             Value::Map(_) => "map",
             Value::Func(_, _) => "function",
             Value::Closure(_) => "function",
@@ -157,6 +161,14 @@ impl std::fmt::Display for Value {
                     .collect::<Vec<_>>()
                     .join(", ");
                 write!(f, "[{inner}]")
+            }
+            Value::Tuple(items) => {
+                let inner = items
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "({inner})")
             }
             Value::Map(entries) => {
                 let inner = entries

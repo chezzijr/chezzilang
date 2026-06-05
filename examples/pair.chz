@@ -1,0 +1,18 @@
+# examples/pair.chz — tuples, multiple return values, and destructuring (gap #8).
+
+fn divmod(a: int, b: int) -> (int, int):
+    return (a / b, a % b)
+
+fn main():
+    # multi-return + destructuring let
+    q, r := divmod(17, 5)
+    print(q)
+    print(r)
+
+    # tuple literal + element access
+    t := (q, r)
+    print(t.0)
+    print(t.1)
+    print(t)
+
+main()

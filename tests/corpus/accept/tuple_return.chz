@@ -1,0 +1,3 @@
+# rule: fnDecl, type
+fn pair() -> (int, int):
+    return (3, 4)

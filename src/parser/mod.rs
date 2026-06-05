@@ -262,10 +262,22 @@ impl Parser {
             self.expect(&Token::Assign)?;
             let value = self.parse_expr()?;
             return Ok(StmtKind::Let {
-                name,
+                names: vec![name],
                 ty: Some(ty),
                 value,
             });
+        }
+
+        // destructuring let: `a, b, … := expr` — a bare-identifier list (≥2) before `:=`. Only the
+        // walrus form introduces destructuring; `a, b = …` reassignment is intentionally out of scope.
+        if matches!(self.peek(), Token::Ident(_)) && self.peek_at(1) == &Token::Comma {
+            let mut names = vec![self.expect_ident()?];
+            while self.eat(&Token::Comma) {
+                names.push(self.expect_ident()?);
+            }
+            self.expect(&Token::Walrus)?;
+            let value = self.parse_expr()?;
+            return Ok(StmtKind::Let { names, ty: None, value });
         }
 
         let expr = self.parse_expr()?;
@@ -283,7 +295,7 @@ impl Parser {
                     }
                 };
                 return Ok(StmtKind::Let {
-                    name,
+                    names: vec![name],
                     ty: None,
                     value,
                 });
@@ -679,6 +691,22 @@ impl Parser {
             self.depth -= 1;
             return Ok(ty);
         }
+        // `(T)` unwraps to `T`; `(T1, T2, …)` is a tuple type. The `?`/`!` postfix still applies.
+        if self.eat(&Token::LParen) {
+            let mut types = vec![self.parse_type()?];
+            while self.eat(&Token::Comma) {
+                types.push(self.parse_type()?);
+            }
+            self.expect(&Token::RParen)?;
+            let mut ty = if types.len() == 1 {
+                types.pop().unwrap()
+            } else {
+                Type::Tuple(types)
+            };
+            ty = self.parse_type_postfix(ty);
+            self.depth -= 1;
+            return Ok(ty);
+        }
         let name = self.expect_ident()?;
         let mut ty = if self.eat(&Token::LBracket) {
             let mut args = vec![self.parse_type()?];
@@ -824,7 +852,15 @@ impl Parser {
                 }
                 Token::Dot => {
                     self.advance();
-                    let name = self.expect_ident()?;
+                    // `obj.field` (struct/module) or `tuple.0` (element access). A numeric field name
+                    // is the tuple-element index, stored as its decimal string (reusing `Field`).
+                    let name = if let Token::Int(n) = self.peek() {
+                        let n = *n;
+                        self.advance();
+                        n.to_string()
+                    } else {
+                        self.expect_ident()?
+                    };
                     Expr {
                         kind: ExprKind::Field {
                             obj: Box::new(e),
@@ -869,9 +905,31 @@ impl Parser {
             Token::False => ExprKind::Bool(false),
             Token::Ident(name) => ExprKind::Ident(name),
             Token::LParen => {
-                let e = self.parse_expr()?;
-                self.expect(&Token::RParen)?;
-                return Ok(e); // grouped — keep the inner expr (and its span)
+                // `()` stays unchanged (no inner expr → falls through to the error path below);
+                // `(e)` is grouping; `(e1, e2, …)` is a tuple; `(e,)` is a parse error.
+                if self.check(&Token::RParen) {
+                    return Err(self.err("unexpected ')' in expression".to_string()));
+                }
+                let first = self.parse_expr()?;
+                if self.eat(&Token::Comma) {
+                    // a comma after the first element ⇒ a tuple. A trailing `(e,)` (comma then `)`)
+                    // is a 1-element tuple, which we do not support.
+                    if self.check(&Token::RParen) {
+                        return Err(self.err("1-element tuples are not supported".to_string()));
+                    }
+                    let mut elems = vec![first];
+                    loop {
+                        elems.push(self.parse_expr()?);
+                        if !self.eat(&Token::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+                    ExprKind::Tuple(elems)
+                } else {
+                    self.expect(&Token::RParen)?;
+                    return Ok(first); // grouped — keep the inner expr (and its span)
+                }
             }
             Token::LBracket => {
                 let mut elems = Vec::new();
@@ -1047,8 +1105,8 @@ mod tests {
     #[test]
     fn walrus_let() {
         match only("x := 5\n") {
-            StmtKind::Let { name, ty, value } => {
-                assert_eq!(name, "x");
+            StmtKind::Let { names, ty, value } => {
+                assert_eq!(names, vec!["x".to_string()]);
                 assert!(ty.is_none());
                 assert_eq!(value.kind, ExprKind::Int(5));
             }
@@ -1076,8 +1134,8 @@ mod tests {
     #[test]
     fn typed_let() {
         match only("name: str = \"thuan\"\n") {
-            StmtKind::Let { name, ty, value } => {
-                assert_eq!(name, "name");
+            StmtKind::Let { names, ty, value } => {
+                assert_eq!(names, vec!["name".to_string()]);
                 assert_eq!(ty, Some(Type::Named("str".into())));
                 assert_eq!(value.kind, ExprKind::Str("thuan".into()));
             }
@@ -1841,6 +1899,84 @@ mod tests {
     fn pipe_bare_identifier_rhs_rejected() {
         let e = parse_err("x := 5 |> f\n");
         assert!(e.to_string().contains("right side of '|>' must be a function call"), "{e}");
+    }
+
+    // ===== gap #8: tuples + multi-return + destructuring =====
+
+    #[test]
+    fn tuple_literal_two_elements() {
+        let StmtKind::Expr(e) = only("(1, 2)\n") else { panic!() };
+        match e.kind {
+            ExprKind::Tuple(elems) => {
+                assert_eq!(elems.len(), 2);
+                assert_eq!(elems[0].kind, ExprKind::Int(1));
+                assert_eq!(elems[1].kind, ExprKind::Int(2));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `(1 + 2)` is grouping, not a 1-tuple — it stays a `Binary`.
+    #[test]
+    fn paren_single_expr_is_grouping() {
+        let StmtKind::Expr(e) = only("(1 + 2)\n") else { panic!() };
+        assert!(matches!(e.kind, ExprKind::Binary { op: BinaryOp::Add, .. }));
+    }
+
+    /// `(e,)` (a trailing-comma 1-tuple) is intentionally a parse error.
+    #[test]
+    fn one_element_tuple_rejected() {
+        assert!(parse_err("(1,)\n").message.contains("1-element tuples"));
+    }
+
+    #[test]
+    fn tuple_return_type_parses() {
+        let StmtKind::Fn(f) = only("fn pair() -> (int, int):\n    return (3, 4)\n") else {
+            panic!()
+        };
+        assert_eq!(
+            f.ret,
+            Some(Type::Tuple(vec![Type::Named("int".into()), Type::Named("int".into())]))
+        );
+    }
+
+    /// `(T)` in type position unwraps to `T` (not a 1-tuple).
+    #[test]
+    fn paren_single_type_unwraps() {
+        let StmtKind::Fn(f) = only("fn f(x: (int)):\n    return x\n") else { panic!() };
+        assert_eq!(f.params[0].ty, Some(Type::Named("int".into())));
+    }
+
+    #[test]
+    fn destructuring_let_parses() {
+        match only("a, b := pair()\n") {
+            StmtKind::Let { names, ty, value } => {
+                assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+                assert!(ty.is_none());
+                assert!(matches!(value.kind, ExprKind::Call { .. }));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `a, 1 := …` — every destructure target must be a bare identifier.
+    #[test]
+    fn destructuring_non_ident_rejected() {
+        assert!(parse_err("a, 1 := pair()\n").message.contains("identifier"));
+    }
+
+    #[test]
+    fn tuple_element_access_parses() {
+        let StmtKind::Expr(e) = only("t.0\n") else { panic!() };
+        match e.kind {
+            ExprKind::Field { name, .. } => assert_eq!(name, "0"),
+            other => panic!("{other:?}"),
+        }
+        let StmtKind::Expr(e) = only("t.1\n") else { panic!() };
+        match e.kind {
+            ExprKind::Field { name, .. } => assert_eq!(name, "1"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

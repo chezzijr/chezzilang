@@ -28,6 +28,37 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > engines (was: silently dropped for `main`'s `?`). VM gained `Op::PopExprStmt`. All examples/tests
 > migrated to explicit `main()` calls.
 
+## Post-M6 — Tuples + multiple return + destructuring (gap #8)  ✅ DONE
+
+Tuples on **both** engines: literal `(e1, e2, …)` (≥2 elements), tuple type `(T1, T2, …)` in type
+position, tuple-return functions, destructuring let `a, b := expr`, and `.0`/`.1`/… element access.
+Immutable + fixed-arity; shared by `Rc<Vec<Value>>` (interp) / `Obj::Tuple` (VM). Built **TDD**
+(failing test first per layer). **No new tokens** — reuses `(` `)` `,` `.`.
+
+- ✅ **Disambiguation** — expression `(e)` stays grouping, `(e1, e2, …)` is a tuple, `(e,)` is a
+  parse error (`"1-element tuples are not supported"`), `()` unchanged. Type `(T)` unwraps to `T`,
+  `(T1, …)` is a tuple type. `t.0` lexes as `Ident · Dot · Int(0)`; the postfix `Dot` handler now
+  accepts an `Int` (decimal-string field name) → reuses `ExprKind::Field`.
+- ✅ **AST** — `Type::Tuple` + `ExprKind::Tuple`; `StmtKind::Let.name: String` → `names: Vec<String>`
+  (single binding = `vec![name]`; len>1 only on the destructuring path). Ripple updated at every
+  match/construct site (parser ×2 construct + ×2 test, checker hoist + check, interp exec, compiler).
+- ✅ **Parser** — `parse_primary` LParen arm (grouping vs tuple vs 1-tuple error); `parse_type`
+  leading-LParen branch (unwrap-1 / tuple-≥2, `?`/`!` postfix still applies); destructuring let in
+  `parse_simple_stmt` (peek `Ident Comma`); grammar `<primary>`/`<type>`/`<letStmt>`+`<identList>` +
+  `<postfix> DOT INT`; corpus `accept/{tuple_literal,tuple_return,destructure_let}.chz`,
+  `reject/one_element_tuple.chz`.
+- ✅ **Checker** — `Ty::Tuple` (+ `compatible` element-wise, `Display` `(a, b)`); `resolve_type`,
+  `infer` (Tuple), `infer_field` tuple-index arm (out-of-range/non-numeric → error); `check_destructure`
+  (arity match, `Unknown` permissive, non-tuple/arity-mismatch errors).
+- ✅ **Interp/VM** — `Value::Tuple`/`Obj::Tuple` (`type_name` `"tuple"`, `Display` `(a, b)` identical);
+  eval `Tuple` + `Field` index + destructuring `Let`; `Op::NewTuple`, tuple-aware `GetField`
+  (compiler emits `GetLocal(hidden)`+`GetField("i")` per binding — no new index op), `values_equal`
+  element-wise. **`Heap::children` traces tuple elements** (gc-stress parity proves it).
+- ✅ **Tests** — parser units (8), checker `ok`/`rejects` (8), interp `run` (4), cross-engine parity
+  (7: literal/print, element access, OOB, destructure, equality, multi-return-destructure, heap-elements
+  gc-stress), golden `examples/pair.chz` byte-identical on both engines. **569 total** (from 542),
+  clean `cargo clippy` + `cargo test conformance`.
+
 ## M6a — Core-type methods (str / list)  ✅ DONE
 
 Built-in methods on `str` and `list` dispatch on the value in **both** backends + the checker, with

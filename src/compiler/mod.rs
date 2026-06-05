@@ -205,12 +205,28 @@ impl Compiler {
 
     fn compile_stmt(&mut self, fc: &mut FnComp, stmt: &Stmt) -> Result<(), CompileError> {
         match &stmt.kind {
-            StmtKind::Let { name, value, .. } => {
+            StmtKind::Let { names, value, .. } => {
                 self.compile_expr(fc, value)?;
-                if fc.is_global_scope() {
-                    fc.emit(Op::DefineGlobal(name.clone()), stmt.span);
+                if names.len() > 1 {
+                    // destructuring let `a, b := value`: stash the tuple in a hidden local, then for
+                    // each binding load it and read element `.i` (the tuple-aware `GetField`). No new
+                    // index op — `GetField("i")` on a tuple is the element access.
+                    let tuple_slot = fc.add_hidden();
+                    fc.emit(Op::SetLocal(tuple_slot), stmt.span);
+                    for (i, name) in names.iter().enumerate() {
+                        fc.emit(Op::GetLocal(tuple_slot), stmt.span);
+                        fc.emit(Op::GetField(i.to_string()), stmt.span);
+                        if fc.is_global_scope() {
+                            fc.emit(Op::DefineGlobal(name.clone()), stmt.span);
+                        } else {
+                            let slot = fc.add_local(name.clone());
+                            fc.emit(Op::SetLocal(slot), stmt.span);
+                        }
+                    }
+                } else if fc.is_global_scope() {
+                    fc.emit(Op::DefineGlobal(names[0].clone()), stmt.span);
                 } else {
-                    let slot = fc.add_local(name.clone());
+                    let slot = fc.add_local(names[0].clone());
                     fc.emit(Op::SetLocal(slot), stmt.span);
                 }
                 Ok(())
@@ -575,6 +591,12 @@ impl Compiler {
                     self.compile_expr(fc, it)?;
                 }
                 fc.emit(Op::NewList(items.len()), expr.span);
+            }
+            ExprKind::Tuple(items) => {
+                for it in items {
+                    self.compile_expr(fc, it)?;
+                }
+                fc.emit(Op::NewTuple(items.len()), expr.span);
             }
             ExprKind::Map(entries) => {
                 // Push `[k0, v0, k1, v1, …]`, then build the map (last duplicate key wins at runtime).

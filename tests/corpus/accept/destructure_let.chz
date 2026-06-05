@@ -1,0 +1,8 @@
+# rule: letStmt
+fn pair() -> (int, int):
+    return (3, 4)
+
+fn main():
+    a, b := pair()
+    print(a)
+    print(b)

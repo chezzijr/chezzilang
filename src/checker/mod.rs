@@ -295,9 +295,11 @@ impl Checker {
                         sig.functions.insert(decl.name.clone(), fsig.clone());
                     }
                 }
-                StmtKind::Let { name, .. } => {
-                    if let Some(ty) = self.lookup(name) {
-                        sig.values.insert(name.clone(), ty);
+                StmtKind::Let { names, .. } => {
+                    for name in names {
+                        if let Some(ty) = self.lookup(name) {
+                            sig.values.insert(name.clone(), ty);
+                        }
                     }
                 }
                 StmtKind::Struct { name, .. } | StmtKind::Enum { name, .. } => {
@@ -525,6 +527,7 @@ impl Checker {
                 params: params.iter().map(|p| self.resolve_type(p, span)).collect(),
                 ret: Box::new(self.resolve_type(ret, span)),
             },
+            Type::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve_type(t, span)).collect()),
             Type::Generic(n, args) => match (n.as_str(), args.as_slice()) {
                 ("list", [inner]) => Ty::list(self.resolve_type(inner, span)),
                 ("Result", [inner]) => Ty::result(self.resolve_type(inner, span)),
@@ -561,8 +564,14 @@ impl Checker {
     fn check_stmt(&mut self, stmt: &Stmt) {
         let span = stmt.span;
         match &stmt.kind {
-            StmtKind::Let { name, ty, value } => {
+            StmtKind::Let { names, ty, value } => {
                 let val_ty = self.infer(value);
+                if names.len() > 1 {
+                    // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
+                    self.check_destructure(names, &val_ty, value.span);
+                    return;
+                }
+                let name = &names[0];
                 let declared = match ty {
                     Some(t) => {
                         let expected = self.resolve_type(t, span);
@@ -641,6 +650,43 @@ impl Checker {
             }
             StmtKind::Expr(e) => {
                 self.infer(e);
+            }
+        }
+    }
+
+    /// Check a destructuring let `a, b, … := value`. The value's type must be a tuple whose arity
+    /// matches the binding count; each name is then declared with its element type. An `Unknown`
+    /// value (an already-reported error) declares all names `Unknown` so no cascade follows.
+    fn check_destructure(&mut self, names: &[String], val_ty: &Ty, span: Span) {
+        match val_ty {
+            Ty::Unknown => {
+                for name in names {
+                    self.declare(name, Ty::Unknown);
+                }
+            }
+            Ty::Tuple(elems) if elems.len() == names.len() => {
+                for (name, ty) in names.iter().zip(elems) {
+                    self.declare(name, ty.clone());
+                }
+            }
+            Ty::Tuple(elems) => {
+                self.error(
+                    span,
+                    format!(
+                        "destructuring binds {} name(s), but the tuple has {} element(s)",
+                        names.len(),
+                        elems.len()
+                    ),
+                );
+                for name in names {
+                    self.declare(name, Ty::Unknown);
+                }
+            }
+            other => {
+                self.error(span, format!("cannot destructure non-tuple value of type {other}"));
+                for name in names {
+                    self.declare(name, Ty::Unknown);
+                }
             }
         }
     }
@@ -1053,6 +1099,7 @@ impl Checker {
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Ident(name) => self.infer_ident(name, expr.span),
             ExprKind::List(items) => self.infer_list(items),
+            ExprKind::Tuple(items) => Ty::Tuple(items.iter().map(|e| self.infer(e)).collect()),
             ExprKind::Map(entries) => self.infer_map(entries),
             ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner),
             ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
@@ -1202,6 +1249,15 @@ impl Checker {
     fn infer_field(&mut self, obj: &Expr, name: &str) -> Ty {
         let obj_ty = self.infer(obj);
         match &obj_ty {
+            // `t.0`, `t.1`, … — tuple element access. The field name is the element index as a
+            // decimal string; out-of-range or non-numeric is an error.
+            Ty::Tuple(elems) => match name.parse::<usize>() {
+                Ok(i) if i < elems.len() => elems[i].clone(),
+                _ => {
+                    self.error(obj.span, format!("tuple {obj_ty} has no element '.{name}'"));
+                    Ty::Unknown
+                }
+            },
             Ty::Struct(sname) => {
                 if let Some(info) = self.structs.get(sname) {
                     if let Some((_, ty)) = info.fields.iter().find(|(f, _)| f == name) {

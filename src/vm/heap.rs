@@ -13,6 +13,9 @@ use std::collections::HashMap;
 pub enum Obj {
     Str(Box<str>),
     List(Vec<Value>),
+    /// `(a, b, …)` — a fixed-arity, immutable tuple. Elements may be heap objects, so they are
+    /// traced as GC children (same as `List`).
+    Tuple(Vec<Value>),
     /// `{k: v, …}` — insertion-ordered entries (linear scan by value-equality). Keys AND values
     /// may be heap objects, so BOTH are traced as GC children.
     Map(Vec<(Value, Value)>),
@@ -164,6 +167,7 @@ impl Heap {
         match self.get(h) {
             Obj::Str(_) => {}
             Obj::List(items) => items.iter().for_each(&mut push),
+            Obj::Tuple(items) => items.iter().for_each(&mut push),
             Obj::Map(entries) => entries.iter().for_each(|(k, v)| {
                 push(k);
                 push(v);

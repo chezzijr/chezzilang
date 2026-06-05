@@ -105,6 +105,8 @@ pub enum Op {
 
     // ----- construction -----
     NewList(usize),
+    /// Build a tuple from the top `n` values (`n` ≥ 2). Mirrors `NewList`.
+    NewTuple(usize),
     /// Build a map from `n` entries. Stack layout `[k0, v0, k1, v1, …]` (2n values); last key wins.
     NewMap(usize),
     NewStruct(String, usize),

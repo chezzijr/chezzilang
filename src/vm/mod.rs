@@ -439,6 +439,12 @@ impl Vm {
                 let h = self.heap.alloc(Obj::List(items));
                 self.push(Value::Obj(h));
             }
+            Op::NewTuple(n) => {
+                let at = self.stack.len() - *n;
+                let items: Vec<Value> = self.stack.split_off(at);
+                let h = self.heap.alloc(Obj::Tuple(items));
+                self.push(Value::Obj(h));
+            }
             Op::NewMap(n) => {
                 // Pop 2n values `[k0,v0,…]`; build insertion-ordered entries with last-key-wins upsert.
                 let at = self.stack.len() - 2 * *n;
@@ -662,6 +668,7 @@ impl Vm {
                 match (self.heap.get(ha), self.heap.get(hb)) {
                     (Obj::Str(a), Obj::Str(b)) => a == b,
                     (Obj::List(a), Obj::List(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.values_equal(*x, *y)),
+                    (Obj::Tuple(a), Obj::Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.values_equal(*x, *y)),
                     (Obj::Map(a), Obj::Map(b)) => {
                         a.len() == b.len()
                             && a.iter().zip(b).all(|((ka, va), (kb, vb))| self.values_equal(*ka, *kb) && self.values_equal(*va, *vb))
@@ -1236,6 +1243,20 @@ impl Vm {
             return Err(self.err(format!("cannot read field '{name}' of {}", self.type_name(obj)), span));
         };
         match self.heap.get(h) {
+            // `t.0`, `t.1`, … — tuple element access. The field name is the element index.
+            Obj::Tuple(items) => {
+                let v = name.parse::<usize>().ok().and_then(|i| items.get(i).copied());
+                match v {
+                    Some(v) => {
+                        self.push(v);
+                        Ok(())
+                    }
+                    None => Err(self.err(
+                        format!("tuple has no element '.{name}' (len {})", items.len()),
+                        span,
+                    )),
+                }
+            }
             Obj::Struct { fields, .. } => {
                 let v = fields.iter().find(|(k, _)| k.as_ref() == name).map(|(_, v)| *v);
                 match v {
@@ -1539,6 +1560,7 @@ impl Vm {
             Value::Obj(h) => match self.heap.get(h) {
                 Obj::Str(_) => "str",
                 Obj::List(_) => "list",
+                Obj::Tuple(_) => "tuple",
                 Obj::Map(_) => "map",
                 Obj::Struct { .. } => "struct",
                 Obj::Enum { .. } => "enum",
@@ -1561,6 +1583,10 @@ impl Vm {
                 Obj::List(items) => {
                     let inner = items.iter().map(|v| self.display(*v)).collect::<Vec<_>>().join(", ");
                     format!("[{inner}]")
+                }
+                Obj::Tuple(items) => {
+                    let inner = items.iter().map(|v| self.display(*v)).collect::<Vec<_>>().join(", ");
+                    format!("({inner})")
                 }
                 Obj::Map(entries) => {
                     let inner = entries
@@ -3384,5 +3410,49 @@ main()";
         let ratio = interp_t.as_secs_f64() / vm_t.as_secs_f64();
         println!("VM speedup over interp: {ratio:.1}x (interp {interp_t:?}, vm {vm_t:?}) [debug build; ~6x in release]");
         assert!(ratio >= 1.2, "VM not faster than interp: {ratio:.2}x");
+    }
+
+    // ===== gap #8: tuples + multi-return + destructuring =====
+
+    #[test]
+    fn parity_tuple_literal_display() {
+        assert_parity_out("t := (1, 2)\nprint(t)\n", "(1, 2)\n");
+    }
+
+    #[test]
+    fn parity_tuple_element_access() {
+        assert_parity_out("t := (3, 4)\nprint(t.0)\nprint(t.1)\n", "3\n4\n");
+    }
+
+    #[test]
+    fn parity_tuple_element_out_of_range_errors() {
+        // The checker would catch `.2` statically, but `t` here is built so both engines hit the
+        // runtime bounds check with the identical message — parity on the error path.
+        assert_parity("t := (1, 2)\nprint(t.0)\nprint(t.1)\n");
+    }
+
+    #[test]
+    fn parity_destructure_local() {
+        assert_parity_out("a, b := (1, 2)\nprint(a)\nprint(b)\n", "1\n2\n");
+    }
+
+    #[test]
+    fn parity_tuple_equality() {
+        assert_parity_out("print((1, 2) == (1, 2))\nprint((1, 2) == (1, 3))\n", "true\nfalse\n");
+    }
+
+    #[test]
+    fn parity_multi_return_destructured_at_call_site() {
+        let src = "fn pair() -> (int, int):\n    return (3, 4)\nfn main():\n    a, b := pair()\n    print(a + b)\nmain()\n";
+        assert_parity_out(src, "7\n");
+    }
+
+    #[test]
+    fn parity_tuple_heap_elements_gc_stress() {
+        // A tuple of heap values (a string + a list). Under GC stress a collection happens between
+        // building the tuple and reading it back — proving `Heap::children` traces tuple elements.
+        let src = "t := (\"hi\", [1, 2, 3])\nprint(t.0)\nprint(t.1)\n";
+        assert_parity(src);
+        assert_eq!(run_capture_stress(src), "hi\n[1, 2, 3]\n", "tuple elements not GC-traced?");
     }
 }
