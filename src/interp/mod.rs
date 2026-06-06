@@ -1391,7 +1391,8 @@ impl Interp {
                     self.structs.insert(name.clone(), std::rc::Rc::new(def));
                     self.struct_fields.insert(name.clone(), fields.clone());
                 }
-                StmtKind::Enum { name, variants } => {
+                // Type-erased: type parameters are checker-only (identical runtime per instantiation).
+                StmtKind::Enum { name, variants, .. } => {
                     for v in variants {
                         self.register_variant(&v.name, name, v.payload.len());
                     }
@@ -2878,6 +2879,14 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/generic_structs.chz");
         let expected = include_str!("../../examples/generic_structs.expected");
         assert_eq!(run_capture(source).expect("generic_structs.chz should run"), expected);
+    }
+
+    /// Tier-2 golden: generic enums (Tree[T] / Either[A, B]) on the interp.
+    #[test]
+    fn golden_generic_enum_chz() {
+        let source = include_str!("../../examples/generic_enum.chz");
+        let expected = include_str!("../../examples/generic_enum.expected");
+        assert_eq!(run_capture(source).expect("generic_enum.chz should run"), expected);
     }
 
     /// M10-G1 golden: the `Stringable` protocol — `str(self)` overrides print/str()/interpolation.

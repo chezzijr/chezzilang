@@ -1,0 +1,46 @@
+# examples/generic_enum.chz — generic enums (Tier 2): enum Tree[T] and Either[A, B].
+#
+# Type-erased like generic structs — the type parameters matter only to the checker; at runtime a
+# Tree[int] and a Tree[str] are the very same shape. Builds and folds binary trees at two different
+# element types (proving the erasure), and matches a two-parameter Either with payload binding.
+
+enum Tree[T]:
+    Leaf
+    Node(T, Tree[T], Tree[T])
+
+# Sum an int tree (in-order recursion; the `v` bound by Node is int here).
+fn sum(t: Tree[int]) -> int:
+    match t:
+        Leaf:
+            return 0
+        Node(v, l, r):
+            return sum(l) + v + sum(r)
+
+# Flatten a str tree in order (same enum, T = str — only the checker sees the difference).
+fn flatten(t: Tree[str]) -> str:
+    match t:
+        Leaf:
+            return ""
+        Node(v, l, r):
+            return flatten(l) + v + flatten(r)
+
+enum Either[A, B]:
+    Left(A)
+    Right(B)
+
+fn describe(e: Either[int, str]) -> str:
+    match e:
+        Left(n):
+            return "int {n}"
+        Right(s):
+            return "str {s}"
+
+fn main():
+    it: Tree[int] = Node(2, Node(1, Leaf, Leaf), Node(3, Leaf, Leaf))
+    print("sum: {sum(it)}")
+    st: Tree[str] = Node("b", Node("a", Leaf, Leaf), Node("c", Leaf, Leaf))
+    print("flatten: {flatten(st)}")
+    print(describe(Left(7)))
+    print(describe(Right("hi")))
+
+main()

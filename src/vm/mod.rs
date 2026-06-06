@@ -3319,6 +3319,16 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// Tier-2 golden: generic enums (Tree[T] / Either[A, B]) — byte-identical VM, interp, expected.
+    #[test]
+    fn golden_generic_enum_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/generic_enum.chz");
+        let expected = include_str!("../../examples/generic_enum.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     #[test]
     fn sort_over_comparable_structs_on_vm() {
         let src = "\
@@ -4393,6 +4403,8 @@ main()";
         "struct P:\n    x: int\n    y: int\n    fn sum(self) -> int:\n        return self.x + self.y\nfn main():\n    p := P(3, 4)\n    print(p)\n    print(p.sum())\nmain()",
         // enums + match + payload binding
         "enum S:\n    C(int)\n    Sq(int)\nfn a(s: S) -> int:\n    match s:\n        C(r): return r * r\n        Sq(n): return n * n\nfn main():\n    print(a(C(3)))\n    print(a(Sq(4)))\nmain()",
+        // generic enum (type-erased): same enum at two element types + match payload substitution
+        "enum Tree[T]:\n    Leaf\n    Node(T, Tree[T], Tree[T])\nfn sum(t: Tree[int]) -> int:\n    match t:\n        Leaf: return 0\n        Node(v, l, r): return sum(l) + v + sum(r)\nfn main():\n    t: Tree[int] = Node(2, Node(1, Leaf, Leaf), Node(3, Leaf, Leaf))\n    print(sum(t))\nmain()",
         // closures
         "fn adder(n: int):\n    return fn(x: int) -> int: x + n\nfn main():\n    f := adder(10)\n    print(f(5))\nmain()",
         // ? operator (Ok + Err propagation)

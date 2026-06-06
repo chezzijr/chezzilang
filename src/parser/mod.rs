@@ -470,6 +470,7 @@ impl Parser {
     fn parse_enum(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Enum)?;
         let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.open_block()?;
         let mut variants = Vec::new();
         self.skip_newlines();
@@ -494,7 +495,11 @@ impl Parser {
             self.skip_newlines();
         }
         self.expect(&Token::Dedent)?;
-        Ok(StmtKind::Enum { name, variants })
+        Ok(StmtKind::Enum {
+            name,
+            type_params,
+            variants,
+        })
     }
 
     fn parse_if(&mut self) -> PResult<StmtKind> {
@@ -1451,12 +1456,28 @@ mod tests {
     #[test]
     fn enum_with_and_without_payload() {
         match only("enum Shape:\n    Circle(int)\n    Point\n") {
-            StmtKind::Enum { name, variants } => {
+            StmtKind::Enum { name, type_params, variants } => {
                 assert_eq!(name, "Shape");
+                assert!(type_params.is_empty());
                 assert_eq!(variants[0].name, "Circle");
                 assert_eq!(variants[0].payload, vec![Type::Named("int".into())]);
                 assert_eq!(variants[1].name, "Point");
                 assert!(variants[1].payload.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_enum_parses_type_params() {
+        match only("enum Tree[T]:\n    Leaf\n    Node(T, Tree[T], Tree[T])\n") {
+            StmtKind::Enum { name, type_params, variants } => {
+                assert_eq!(name, "Tree");
+                assert_eq!(type_params.len(), 1);
+                assert_eq!(type_params[0].name, "T");
+                assert_eq!(variants[0].name, "Leaf");
+                assert_eq!(variants[1].name, "Node");
+                assert_eq!(variants[1].payload.len(), 3);
             }
             other => panic!("{other:?}"),
         }

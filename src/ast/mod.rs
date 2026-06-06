@@ -55,9 +55,12 @@ pub enum StmtKind {
         name: String,
         methods: Vec<MethodSig>,
     },
-    /// `enum Name:` with its variants.
+    /// `enum Name:` (or `enum Name[T]:`) with its variants. `type_params` is empty for a
+    /// non-generic enum; for `enum Tree[T]` a variant payload may reference `T`. Type-erased like
+    /// generic structs — the parameters matter only to the checker.
     Enum {
         name: String,
+        type_params: Vec<TypeParam>,
         variants: Vec<Variant>,
     },
     /// `type Name = <type>` — a transparent type alias (`Name` is interchangeable with the aliased

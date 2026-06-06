@@ -469,6 +469,128 @@ fn unwrap(b: Box) -> int:
     rejects(src, "expects 1 type argument(s), got 0");
 }
 
+// ----- generic enums (type-erased) -----
+
+/// A generic binary tree, the workhorse fixture for the generic-enum tests.
+const TREE: &str = "\
+enum Tree[T]:
+    Leaf
+    Node(T, Tree[T], Tree[T])
+";
+
+#[test]
+fn generic_enum_construction_infers_type_arg_ok() {
+    // Node(1, Leaf, Leaf) infers T=int; the value flows into a `Tree[int]` slot.
+    ok(&format!("{TREE}t: Tree[int] = Node(1, Leaf, Leaf)\n"));
+}
+
+#[test]
+fn generic_enum_construction_type_mismatch_rejected() {
+    // First payload is T; an int and a str in the two Node arms can't both be T.
+    rejects(&format!("{TREE}t := Node(1, Node(\"x\", Leaf, Leaf), Leaf)\n"), "expected");
+}
+
+#[test]
+fn generic_enum_annotation_arg_mismatch_rejected() {
+    // A Tree[str] slot can't hold a Node whose payload infers T=int.
+    rejects(&format!("{TREE}t: Tree[str] = Node(1, Leaf, Leaf)\n"), "cannot assign");
+}
+
+#[test]
+fn generic_enum_match_substitutes_payload_ok() {
+    // The `v` bound by `Node(v, ...)` of a `Tree[int]` is int.
+    let src = format!(
+        "{TREE}fn first(t: Tree[int]) -> int:\n    match t:\n        Leaf: return 0\n        Node(v, l, r): return v\n"
+    );
+    ok(&src);
+}
+
+#[test]
+fn generic_enum_match_payload_type_enforced() {
+    // The `v` bound by `Node(v, ...)` of a `Tree[int]` is int, not str.
+    let src = format!(
+        "{TREE}fn bad(t: Tree[int]):\n    match t:\n        Leaf: print(\"l\")\n        Node(v, l, r):\n            s: str = v\n"
+    );
+    rejects(&src, "cannot assign int");
+}
+
+#[test]
+fn generic_enum_wrong_arity_rejected() {
+    rejects(&format!("{TREE}t: Tree[int, str] = Leaf\n"), "expects 1 type argument(s)");
+}
+
+#[test]
+fn bare_generic_enum_without_args_rejected() {
+    rejects(&format!("{TREE}fn f(t: Tree) -> int:\n    return 0\n"), "expects 1 type argument(s), got 0");
+}
+
+#[test]
+fn generic_enum_multi_param_ok() {
+    let src = "\
+enum Either[A, B]:
+    Left(A)
+    Right(B)
+fn fst(e: Either[int, str]) -> int:
+    match e:
+        Left(a): return a
+        Right(b): return 0
+";
+    ok(src);
+}
+
+#[test]
+fn generic_enum_nested_self_referential_ok() {
+    // Cons holds T and a nested LinkedList[T]? — the payload references the enum's own param.
+    let src = "\
+enum LinkedList[T]:
+    Nil
+    Cons(T, LinkedList[T]?)
+fn len(l: LinkedList[int]) -> int:
+    match l:
+        Nil: return 0
+        Cons(h, t): return 1
+";
+    ok(src);
+}
+
+#[test]
+fn generic_enum_bound_enforced_at_construction() {
+    let src = "\
+struct Plain:
+    n: int
+enum Box[T: Comparable]:
+    Empty
+    Has(T)
+b := Has(Plain(1))
+";
+    rejects(src, "does not satisfy Comparable");
+}
+
+#[test]
+fn generic_enum_bound_satisfied_ok() {
+    let src = "\
+enum Box[T: Comparable]:
+    Empty
+    Has(T)
+b: Box[int] = Has(5)
+";
+    ok(src);
+}
+
+#[test]
+fn generic_enum_unknown_bound_rejected() {
+    rejects("enum Box[T: Nope]:\n    Has(T)\n", "unknown protocol 'Nope'");
+}
+
+#[test]
+fn struct_and_enum_sharing_a_name_rejected() {
+    // Review (Solidity lens): a struct and enum with the same name both registered silently,
+    // the enum shadowed; with the merged `Name[args]` Display this surfaced as a nonsense
+    // "cannot assign Foo[int] to … Foo[int]". Must be a clean "already defined" instead.
+    rejects("struct Foo:\n    n: int\nenum Foo:\n    A\n", "type 'Foo' is already defined");
+    rejects("enum Bar:\n    A\nstruct Bar:\n    n: int\n", "type 'Bar' is already defined");
+}
+
 // ----- sort() widened to Comparable (G3) -----
 
 #[test]

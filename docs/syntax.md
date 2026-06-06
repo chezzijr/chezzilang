@@ -290,6 +290,23 @@ fn area(s: Shape) -> float:
         Point:     return 0.0
 ```
 
+Enums may be **generic**, carrying type parameters after the name exactly like generic structs; a
+variant's payload may reference them (including the enum's own type, for recursive shapes). Type
+arguments are inferred from the constructor's arguments, or written explicitly in a type annotation,
+and — like all generics — are **type-erased** (a `Tree[int]` and a `Tree[str]` share one runtime
+shape). Bounds (`[T: Comparable]`) and multiple type parameters (`Either[A, B]`) work too.
+
+```chezzi
+enum Tree[T]:
+    Leaf
+    Node(T, Tree[T], Tree[T])
+
+fn sum(t: Tree[int]) -> int:
+    match t:
+        Leaf:          return 0
+        Node(v, l, r): return sum(l) + v + sum(r)   # v is int — T substituted in the match
+```
+
 `match` also works on `Result`/`Option` (they're enums under the hood):
 
 ```chezzi

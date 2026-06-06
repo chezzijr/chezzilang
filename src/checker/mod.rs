@@ -238,6 +238,9 @@ struct Checker {
     type_params: HashMap<String, Vec<String>>,
     /// enum name → its variant names, in declaration order (for exhaustiveness).
     enums: HashMap<String, Vec<String>>,
+    /// enum name → its generic type parameters (empty for a non-generic enum). Used to build the
+    /// substitution from `Tree[int]`'s args onto each variant's payload (which may name `T`).
+    enum_type_params: HashMap<String, Vec<TypeParam>>,
     variants: HashMap<String, VariantInfo>,
     struct_names: std::collections::HashSet<String>,
     enum_names: std::collections::HashSet<String>,
@@ -277,6 +280,7 @@ impl Checker {
             protocols: prebuilt_protocols(),
             type_params: HashMap::new(),
             enums: HashMap::new(),
+            enum_type_params: HashMap::new(),
             variants: HashMap::new(),
             struct_names: std::collections::HashSet::new(),
             enum_names: std::collections::HashSet::new(),
@@ -456,9 +460,19 @@ impl Checker {
         for s in stmts {
             match &s.kind {
                 StmtKind::Struct { name, .. } => {
+                    // Cross-kind name clash: a struct and an enum can't share a name (they'd both
+                    // register, the enum silently shadowed, and — sharing a `Name[args]` Display —
+                    // produce nonsense like "cannot assign Foo[int] to … Foo[int]"). Same-kind dups
+                    // are caught later in the resolve pass.
+                    if self.enum_names.contains(name) {
+                        self.error(s.span, format!("type '{name}' is already defined"));
+                    }
                     self.struct_names.insert(name.clone());
                 }
                 StmtKind::Enum { name, .. } => {
+                    if self.struct_names.contains(name) {
+                        self.error(s.span, format!("type '{name}' is already defined"));
+                    }
                     self.enum_names.insert(name.clone());
                 }
                 StmtKind::TypeAlias { name, ty } => {
@@ -523,12 +537,25 @@ impl Checker {
                         StructInfo { type_params: type_params.clone(), fields, methods },
                     );
                 }
-                StmtKind::Enum { name, variants } => {
+                StmtKind::Enum { name, type_params, variants } => {
                     if is_reserved_type(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
                     if self.enums.contains_key(name) {
                         self.error(s.span, format!("type '{name}' is already defined"));
+                    }
+                    // The enum's type parameters are in scope across its variant payloads (so a
+                    // `Node(T, Tree[T])` resolves `T`). Validate each bound names a known protocol.
+                    let saved = self.enter_type_params(type_params);
+                    for tp in type_params {
+                        for bound in &tp.bounds {
+                            if !self.protocols.contains_key(bound) {
+                                self.error(
+                                    s.span,
+                                    format!("unknown protocol '{bound}' in bound on '{}'", tp.name),
+                                );
+                            }
+                        }
                     }
                     let mut names = Vec::new();
                     for v in variants {
@@ -545,7 +572,9 @@ impl Checker {
                             VariantInfo { enum_name: name.clone(), payload },
                         );
                     }
+                    self.exit_type_params(saved);
                     self.enums.insert(name.clone(), names);
+                    self.enum_type_params.insert(name.clone(), type_params.clone());
                 }
                 _ => {}
             }
@@ -706,7 +735,14 @@ impl Checker {
                     }
                     Ty::strukt(n.clone())
                 }
-                _ if self.enum_names.contains(n) => Ty::Enum(n.clone()),
+                _ if self.enum_names.contains(n) => {
+                    // A generic enum written without type arguments is missing them.
+                    let nparams = self.enum_type_params.get(n).map_or(0, |tps| tps.len());
+                    if nparams > 0 {
+                        self.error(span, format!("type '{n}' expects {nparams} type argument(s), got 0"));
+                    }
+                    Ty::Enum(n.clone(), Vec::new())
+                }
                 _ => {
                     self.error(span, format!("unknown type '{n}'"));
                     Ty::Unknown
@@ -769,6 +805,31 @@ impl Checker {
                         }
                     }
                     Ty::Struct(n.clone(), resolved)
+                }
+                // A user-defined generic enum instantiated with type arguments: `Tree[int]`.
+                _ if self.enum_names.contains(n) => {
+                    let resolved: Vec<Ty> = args.iter().map(|a| self.resolve_type(a, span)).collect();
+                    let tps = self.enum_type_params.get(n).cloned();
+                    if let Some(tps) = tps {
+                        if tps.len() != resolved.len() {
+                            self.error(
+                                span,
+                                format!(
+                                    "type '{n}' expects {} type argument(s), got {}",
+                                    tps.len(),
+                                    resolved.len()
+                                ),
+                            );
+                        }
+                        for (tp, arg) in tps.iter().zip(&resolved) {
+                            for bound in &tp.bounds {
+                                if let Err(msg) = self.satisfies(arg, bound) {
+                                    self.error(span, msg);
+                                }
+                            }
+                        }
+                    }
+                    Ty::Enum(n.clone(), resolved)
                 }
                 _ => {
                     self.error(span, format!("unknown generic type '{n}'"));
@@ -1125,14 +1186,19 @@ impl Checker {
     fn match_kind(&mut self, scrutinee: &Expr) -> MatchKind {
         let sty = self.infer(scrutinee);
         match &sty {
-            Ty::Enum(name) => {
+            Ty::Enum(name, targs) => {
+                let map = self.enum_param_map(name, targs);
                 let variants = self
                     .enums
                     .get(name)
                     .cloned()
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|v| (v.clone(), self.variants[&v].payload.clone()))
+                    .map(|v| {
+                        let payload =
+                            self.variants[&v].payload.iter().map(|p| subst(p, &map)).collect();
+                        (v, payload)
+                    })
                     .collect();
                 MatchKind::Variants { label: name.clone(), variants }
             }
@@ -1163,13 +1229,31 @@ impl Checker {
         }
     }
 
+    /// The substitution from a generic enum's type parameters to a concrete instantiation's type
+    /// arguments (`Tree[int]` ⇒ `{T: int}`). Empty for a non-generic enum.
+    fn enum_param_map(&self, name: &str, targs: &[Ty]) -> HashMap<String, Ty> {
+        self.enum_type_params
+            .get(name)
+            .map(|tps| tps.iter().map(|tp| tp.name.clone()).zip(targs.iter().cloned()).collect())
+            .unwrap_or_default()
+    }
+
     /// The variant→payload map for an enum/Option/Result type, else `None`. Shared by `match_kind`
     /// and the nested-pattern checker (gap #15) so they agree on what counts as a variant.
     fn variants_of(&self, ty: &Ty) -> Option<HashMap<String, Vec<Ty>>> {
         match ty {
-            Ty::Enum(name) => {
+            Ty::Enum(name, targs) => {
+                let map = self.enum_param_map(name, targs);
                 let vs = self.enums.get(name)?;
-                Some(vs.iter().map(|v| (v.clone(), self.variants[v].payload.clone())).collect())
+                Some(
+                    vs.iter()
+                        .map(|v| {
+                            let payload =
+                                self.variants[v].payload.iter().map(|p| subst(p, &map)).collect();
+                            (v.clone(), payload)
+                        })
+                        .collect(),
+                )
             }
             Ty::Result(inner) => Some(HashMap::from([
                 ("Ok".into(), vec![(**inner).clone()]),
@@ -1537,11 +1621,14 @@ impl Checker {
         if name == "None" {
             return Ty::option(Ty::Unknown);
         }
-        // A nullary user variant used as a value (e.g. `Red`).
+        // A nullary user variant used as a value (e.g. `Red`, or `Leaf` of a generic `Tree[T]`).
+        // A nullary variant carries no payload to infer type arguments from, so a generic enum's
+        // args are left `Unknown` (e.g. `Leaf` is `Tree[?]`), unified later against a typed slot.
         if let Some(v) = self.variants.get(name)
             && v.payload.is_empty()
         {
-            return Ty::Enum(v.enum_name.clone());
+            let nparams = self.enum_type_params.get(&v.enum_name).map_or(0, |tps| tps.len());
+            return Ty::Enum(v.enum_name.clone(), vec![Ty::Unknown; nparams]);
         }
         self.error(span, format!("unknown name '{name}'"));
         Ty::Unknown
@@ -2084,8 +2171,44 @@ impl Checker {
                 }
                 // User enum variant constructor?
                 if let Some(v) = self.variants.get(name).cloned() {
-                    self.check_args(name, &v.payload, args, span);
-                    return Some(Ty::Enum(v.enum_name));
+                    let tps =
+                        self.enum_type_params.get(&v.enum_name).cloned().unwrap_or_default();
+                    if tps.is_empty() {
+                        self.check_args(name, &v.payload, args, span);
+                        return Some(Ty::Enum(v.enum_name, Vec::new()));
+                    }
+                    // Generic enum: infer the enum's type arguments by unifying the variant's
+                    // declared payload types (which contain the enum's `Ty::Param`s) against the
+                    // argument types, then check each argument against the substituted payload.
+                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+                    if arg_tys.len() != v.payload.len() {
+                        self.check_arity(name, v.payload.len(), args, span);
+                    }
+                    let mut sub = HashMap::new();
+                    for (decl, actual) in v.payload.iter().zip(&arg_tys) {
+                        unify(decl, actual, &mut sub);
+                    }
+                    for (decl, (actual, arg)) in v.payload.iter().zip(arg_tys.iter().zip(args)) {
+                        let expected = subst(decl, &sub);
+                        if !compatible(&expected, actual) {
+                            self.error(
+                                arg.span,
+                                format!("argument to '{name}' has type {actual}, expected {expected}"),
+                            );
+                        }
+                    }
+                    for tp in &tps {
+                        if let Some(concrete) = sub.get(&tp.name) {
+                            for bound in &tp.bounds {
+                                if let Err(msg) = self.satisfies(concrete, bound) {
+                                    self.error(span, msg);
+                                }
+                            }
+                        }
+                    }
+                    let targs =
+                        tps.iter().map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown)).collect();
+                    return Some(Ty::Enum(v.enum_name, targs));
                 }
                 // Global function?
                 if let Some(sig) = self.functions.get(name).cloned() {
@@ -2747,6 +2870,7 @@ fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
             ret: Box::new(subst(ret, map)),
         },
         Ty::Struct(n, args) => Ty::Struct(n.clone(), args.iter().map(|t| subst(t, map)).collect()),
+        Ty::Enum(n, args) => Ty::Enum(n.clone(), args.iter().map(|t| subst(t, map)).collect()),
         other => other.clone(),
     }
 }
@@ -2781,7 +2905,9 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
             unify(dk, ak, map);
             unify(dv, av, map);
         }
-        (Ty::Struct(dn, da), Ty::Struct(an, aa)) if dn == an && da.len() == aa.len() => {
+        (Ty::Struct(dn, da), Ty::Struct(an, aa)) | (Ty::Enum(dn, da), Ty::Enum(an, aa))
+            if dn == an && da.len() == aa.len() =>
+        {
             da.iter().zip(aa).for_each(|(d, a)| unify(d, a, map));
         }
         (Ty::Tuple(ds), Ty::Tuple(as_)) if ds.len() == as_.len() => {

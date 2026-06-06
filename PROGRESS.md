@@ -14,13 +14,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `~/.claude/plans/see-gaps-and-help-mellow-meteor.md`. Staged G1→G4 (ascending risk), each TDD +
 > commit.
 >
-> **NEXT SESSION (in order):** (1) **G4 — generic enums** `enum Tree[T]`: change `Ty::Enum(String)`
-> → `Ty::Enum(String, Vec<Ty>)` (~7 sites in checker/ty.rs), add `type_params` to AST `Enum`, parse
-> `[T]` (reuse `parse_type_params`), infer args at variant construction (mirror generic structs),
-> substitute payload types in `match` arms; runtime is type-erased (no engine change). Keep
-> `Result`/`Option` as their current special types. (2) **Run the agent-review-panel gate** on the
-> whole M10 milestone before declaring it done. (3) **Map-model rework** (deferred this session, see
-> G2): decide assoc-list-vs-real-hashmap, then lift the struct map/set key restriction.
+> **THIS SESSION (gaps follow-up, in order):** ✅ tech-debt (parser `MAX_DEPTH` 128→64, dropped the
+> test stack-size crutch); ✅ **G4 — generic enums**; 🟦 **map-model rework** (real hash tables +
+> Hashable struct keys) — in progress.
 > - ✅ **G1 — `Stringable` protocol.** Prebuilt protocol `str(self) -> str`; a struct that defines it
 >   overrides its default repr in `print`, the `str()` builtin, and `{…}` interpolation (nested in
 >   list/tuple/map/set/enum too). Both engines via a new protocol-aware `stringify` (`&self`
@@ -41,7 +37,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   `examples/operators.chz` + `examples/type_alias.chz`, checker units, grammar + conformance.
 >   (Also hardened the parser `deep_nesting` test onto a generous-stack thread — MAX_DEPTH=128 sat at
 >   the 2 MiB test-thread edge.)
-> - ⬜ **G4** — generic enums (`enum Tree[T]`).
+> - ✅ **G4 — generic enums.** `Ty::Enum(String)` → `Ty::Enum(String, Vec<Ty>)`; AST `Enum` gained
+>   `type_params`; parser reuses `parse_type_params`; checker enters params over variant payloads,
+>   infers args at variant construction via `unify` (mirrors generic structs), substitutes payloads
+>   in `match` (`enum_param_map` + `subst`), enforces bounds. **Type-erased** — compiler/VM unchanged
+>   (`StmtKind::Enum { .. }`). `Result`/`Option` stay special. Golden `examples/generic_enum.chz`
+>   (Tree[T] at int+str, Either[A,B]) on both engines + parity; checker + parser units; grammar +
+>   conformance updated; `docs/syntax.md` §8.
 >
 > **M9 — Tier-2 stdlib: `std.regex` + `std.request`** ✅ DONE. Plan:
 > `~/.claude/plans/see-the-docs-and-dreamy-unicorn.md`.

@@ -354,8 +354,14 @@ interpolation, pipe. What remains to make it a language you'd reach for to write
   equality; elements are hashable scalars. See `examples/set.chz`.
 
 ### Tier 2 — type-system depth
-- **Generic enums** — `enum Tree[T]`, `enum LinkedList[T]`. Only *structs* got type parameters in
-  M7-G2; `Result`/`Option` are hardcoded. The most-felt remaining type hole.
+- ~~**Generic enums** — `enum Tree[T]`, `enum LinkedList[T]`.~~ ✅ **DONE.** Enums now carry type
+  parameters exactly like generic structs (M7-G2): `Ty::Enum(String, Vec<Ty>)`, parser reads
+  `parse_type_params` after the name, the checker enters the params over variant payloads, infers
+  type args from the constructor (`unify`), substitutes them into variant payloads at `match`
+  (`enum_param_map` + `subst`), and enforces bounds (`enum Box[T: Comparable]`). **Type-erased** —
+  zero compiler/VM change; identical runtime per instantiation. `Result`/`Option` stay hardcoded
+  (`Ty::Result`/`Ty::Option`) and coexist. See `examples/generic_enum.chz` (`Tree[T]` at int+str,
+  `Either[A, B]`), `docs/syntax.md` §8.
 - **`Hashable` protocol** → let structs be `map` keys (maps key only int/str/bool now). 🟦 **M10-G2
   partial:** the prebuilt `Hashable` protocol (`hash(self) -> int`) now exists as a generic bound
   (`[T: Hashable]`; int/str/bool satisfy it intrinsically, structs by defining `hash`). **Not yet

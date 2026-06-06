@@ -24,7 +24,9 @@ pub enum Ty {
     /// A struct type, with its generic type arguments (empty for a non-generic struct). E.g.
     /// `Pair[int, str]` is `Struct("Pair", [Int, Str])`; a plain `Point` is `Struct("Point", [])`.
     Struct(String, Vec<Ty>),
-    Enum(String),
+    /// An enum type, with its generic type arguments (empty for a non-generic enum). E.g.
+    /// `Tree[int]` is `Enum("Tree", [Int])`; a plain `Shape` is `Enum("Shape", [])`.
+    Enum(String, Vec<Ty>),
     /// A bound generic type variable (e.g. `T` inside `fn max[T: Comparable]`). Opaque while
     /// checking a generic body; replaced by a concrete `Ty` at each call site via substitution.
     Param(String),
@@ -78,10 +80,10 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         (List(a), List(b)) | (Result(a), Result(b)) | (Option(a), Option(b)) => compatible(a, b),
         (Map(ka, va), Map(kb, vb)) => compatible(ka, kb) && compatible(va, vb),
         (Set(a), Set(b)) => compatible(a, b),
-        (Struct(a, aa), Struct(b, ba)) => {
+        (Struct(a, aa), Struct(b, ba)) | (Enum(a, aa), Enum(b, ba)) => {
             a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| compatible(x, y))
         }
-        (Enum(a), Enum(b)) | (Module(a), Module(b)) | (Param(a), Param(b)) => a == b,
+        (Module(a), Module(b)) | (Param(a), Param(b)) => a == b,
         (Func { params: p1, ret: r1 }, Func { params: p2, ret: r2 }) => {
             p1.len() == p2.len()
                 && p1.iter().zip(p2).all(|(a, b)| compatible(a, b))
@@ -105,7 +107,7 @@ impl fmt::Display for Ty {
             Ty::Set(t) => write!(f, "set[{t}]"),
             Ty::Result(t) => write!(f, "Result[{t}]"),
             Ty::Option(t) => write!(f, "Option[{t}]"),
-            Ty::Struct(n, args) => {
+            Ty::Struct(n, args) | Ty::Enum(n, args) => {
                 write!(f, "{n}")?;
                 if !args.is_empty() {
                     write!(f, "[")?;
@@ -119,7 +121,7 @@ impl fmt::Display for Ty {
                 }
                 Ok(())
             }
-            Ty::Enum(n) | Ty::Param(n) => write!(f, "{n}"),
+            Ty::Param(n) => write!(f, "{n}"),
             Ty::Module(n) => write!(f, "module {n}"),
             Ty::Func { params, ret } => {
                 write!(f, "fn(")?;
@@ -169,7 +171,7 @@ mod tests {
     fn nominal_types_compare_by_name() {
         assert!(compatible(&Ty::strukt("Point"), &Ty::strukt("Point")));
         assert!(!compatible(&Ty::strukt("Point"), &Ty::strukt("Vec")));
-        assert!(!compatible(&Ty::strukt("Point"), &Ty::Enum("Point".into())));
+        assert!(!compatible(&Ty::strukt("Point"), &Ty::Enum("Point".into(), vec![])));
         // Generic structs compare by name AND type arguments.
         assert!(compatible(
             &Ty::Struct("Pair".into(), vec![Ty::Int, Ty::Str]),

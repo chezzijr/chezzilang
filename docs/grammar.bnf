@@ -113,6 +113,7 @@
                  | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
 
 <enumDecl> ::= "ENUM" "IDENT" "COLON" "NEWLINE" "INDENT" <variants> "DEDENT"
+            | "ENUM" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <variants> "DEDENT"
 <variants> ::= <variant> | <variant> <variants>
 <variant>  ::= "IDENT" "NEWLINE"
              | "IDENT" "LPAREN" <typeList> "RPAREN" "NEWLINE"

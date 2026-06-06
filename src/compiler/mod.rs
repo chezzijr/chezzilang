@@ -120,7 +120,9 @@ impl Compiler {
                     );
                     self.struct_fields.insert(name.clone(), fields.clone());
                 }
-                StmtKind::Enum { name, variants } => {
+                // Type-erased: type parameters are checker-only, the runtime is identical for
+                // `Tree[int]` and `Tree[str]`.
+                StmtKind::Enum { name, variants, .. } => {
                     for v in variants {
                         self.program.variants.insert(
                             v.name.clone(),
