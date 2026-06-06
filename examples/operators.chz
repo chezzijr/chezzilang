@@ -1,0 +1,28 @@
+# M10-G3 — operator overloading via the per-operator numeric protocols, plus multi-bound generics.
+# A struct that defines `add`/`sub`/`mul(self, other: Self) -> Self` satisfies the prebuilt `Add`/
+# `Sub`/`Mul` protocols, so `+`/`-`/`*` work on its values. `/` and `%` are never overloaded.
+
+struct Vec2:
+    x: int
+    y: int
+    fn add(self, o: Vec2) -> Vec2:
+        return Vec2(self.x + o.x, self.y + o.y)
+    fn sub(self, o: Vec2) -> Vec2:
+        return Vec2(self.x - o.x, self.y - o.y)
+    fn mul(self, o: Vec2) -> Vec2:
+        return Vec2(self.x * o.x, self.y * o.y)
+    fn str(self) -> str:
+        return "<{self.x}, {self.y}>"
+
+# Multi-bound: T must satisfy BOTH Add and Mul.
+fn fma[T: Add + Mul](a: T, b: T, c: T) -> T:
+    return a + b * c
+
+a := Vec2(1, 2)
+b := Vec2(3, 4)
+print(a + b)            # <4, 6>
+print(b - a)            # <2, 2>
+print(a * b)            # <3, 8>
+print((a + b) - a)      # <3, 4>   — chained
+print(fma(a, b, b))     # a + b*b = <1+9, 2+16> = <10, 18>
+print(fma(2, 3, 4))     # ints satisfy Add+Mul intrinsically: 2 + 3*4 = 14

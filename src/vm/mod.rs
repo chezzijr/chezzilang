@@ -647,6 +647,16 @@ impl Vm {
                     _ => unreachable!(),
                 })
             }
+            // Arithmetic overloading: `+`/`-`/`*` on two structs dispatch to `add`/`sub`/`mul` (the
+            // `Add`/`Sub`/`Mul` protocols). The checker has verified conformance. Must precede the
+            // string-concat `Add` arm below (which would otherwise reject struct+struct).
+            (Value::Obj(ha), Value::Obj(hb))
+                if matches!(op, Op::Add | Op::Sub | Op::Mul)
+                    && matches!(self.heap.get(ha), Obj::Struct { .. })
+                    && matches!(self.heap.get(hb), Obj::Struct { .. }) =>
+            {
+                self.struct_arith(op, l, r, span)?
+            }
             (Value::Obj(ha), Value::Obj(hb)) if matches!(op, Op::Add) => {
                 if let (Obj::Str(a), Obj::Str(b)) = (self.heap.get(ha), self.heap.get(hb)) {
                     let s = format!("{a}{b}");
@@ -660,6 +670,33 @@ impl Vm {
         };
         self.push(result);
         Ok(())
+    }
+
+    /// Arithmetic operator overloading: dispatch `+`/`-`/`*` on two structs to the receiver's
+    /// `add`/`sub`/`mul(self, other) -> Self` method (the `Add`/`Sub`/`Mul` protocols). `l`/`r` are
+    /// passed as the call's args (rooted as the new frame's locals). Mirrors `interp::struct_arith`.
+    fn struct_arith(&mut self, op: &Op, l: Value, r: Value, span: Span) -> Result<Value, RuntimeError> {
+        let method = match op {
+            Op::Add => "add",
+            Op::Sub => "sub",
+            Op::Mul => "mul",
+            _ => unreachable!("struct_arith only handles + - *"),
+        };
+        let Value::Obj(h) = l else { unreachable!() };
+        let Obj::Struct { name, .. } = self.heap.get(h) else { unreachable!() };
+        let name = name.clone();
+        let def = self
+            .program
+            .structs
+            .get(name.as_ref())
+            .cloned()
+            .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
+        let proto = *def
+            .methods
+            .get(method)
+            .ok_or_else(|| self.err(format!("struct '{name}' has no '{method}' method"), span))?;
+        let home = self.module_objs[def.module_idx];
+        self.run_proto(proto, home, None, vec![l, r], true, false, span)
     }
 
     /// Bitwise / shift ops — int-only (gap #13). Shift amounts outside `0..64` are a runtime error
@@ -3234,6 +3271,28 @@ main()";
     fn golden_stringable_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/stringable.chz");
         let expected = include_str!("../../examples/stringable.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// M10-G3 golden: `examples/operators.chz` (operator overloading via `Add`/`Sub`/`Mul` + the
+    /// multi-bound `T: Add + Mul`) byte-identical on the VM, interp, and `.expected`.
+    #[test]
+    fn golden_operators_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/operators.chz");
+        let expected = include_str!("../../examples/operators.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// M10-G3 golden: `examples/type_alias.chz` (transparent type aliases) byte-identical on the
+    /// VM, interp, and `.expected`.
+    #[test]
+    fn golden_type_alias_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/type_alias.chz");
+        let expected = include_str!("../../examples/type_alias.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));

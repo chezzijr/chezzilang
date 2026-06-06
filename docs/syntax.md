@@ -201,8 +201,32 @@ print(Point(1, 1) < Point(5, 5))     # true  — `<` calls Point.compare
 ```
 
 Equality (`==` / `!=`) is **not** affected — it stays structural (field-by-field) for every type.
-Only ordering is overloaded, and only through `Comparable`; there is no operator overloading for
-`+ - * /`.
+Ordering is overloaded through `Comparable`; arithmetic `+`/`-`/`*` is overloaded through the
+per-operator protocols **`Add`/`Sub`/`Mul`** (methods `add`/`sub`/`mul(self, other: Self) -> Self`).
+A struct defining the matching method gets that operator on its values; `int`/`float` satisfy them
+intrinsically. `/` and `%` are never overloaded.
+
+```chezzi
+struct Vec2:
+    x: int
+    y: int
+    fn add(self, o: Vec2) -> Vec2:
+        return Vec2(self.x + o.x, self.y + o.y)
+
+print((Vec2(1, 2) + Vec2(3, 4)).x)   # 4   — `+` calls Vec2.add
+```
+
+A type parameter may carry **multiple bounds** with `+`: `fn fma[T: Add + Mul](a: T, b: T, c: T)`
+requires `T` to satisfy both. **Type aliases** name an existing type transparently — `type Name =
+<type>` makes `Name` interchangeable with the aliased type everywhere (structural, not a distinct
+nominal type); aliases may name scalars, collections, structs, or other aliases (cycles are
+rejected).
+
+```chezzi
+type UserId = int
+type Scores = map[str, int]
+uid: UserId = 7        # UserId and int are the same type
+```
 
 The prebuilt **`Stringable`** protocol (`str(self) -> str`) customises how a value is rendered. A
 struct that defines `str(self) -> str` overrides its default `Name(field=value, …)` repr everywhere

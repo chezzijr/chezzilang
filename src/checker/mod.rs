@@ -62,7 +62,7 @@ fn is_reserved_type(name: &str) -> bool {
 /// Prebuilt protocols a user program may use as bounds but must not redeclare (mirrors
 /// [`prebuilt_protocols`]).
 fn is_reserved_protocol(name: &str) -> bool {
-    matches!(name, "Comparable" | "Stringable" | "Hashable")
+    matches!(name, "Comparable" | "Stringable" | "Hashable" | "Add" | "Sub" | "Mul")
 }
 
 /// A function (or method) signature: parameter types and return type. `type_params` is non-empty
@@ -235,12 +235,16 @@ struct Checker {
     protocols: HashMap<String, ProtocolInfo>,
     /// Generic type parameters currently in scope (name → optional protocol bound), set while
     /// building/checking a generic fn's signature and body. Save/restore to nest.
-    type_params: HashMap<String, Option<String>>,
+    type_params: HashMap<String, Vec<String>>,
     /// enum name → its variant names, in declaration order (for exhaustiveness).
     enums: HashMap<String, Vec<String>>,
     variants: HashMap<String, VariantInfo>,
     struct_names: std::collections::HashSet<String>,
     enum_names: std::collections::HashSet<String>,
+    /// Transparent type aliases (`type UserId = int`): name → the aliased AST type, resolved on
+    /// demand in `resolve_type`. `alias_resolving` is the active resolution stack (cycle guard).
+    aliases: HashMap<String, Type>,
+    alias_resolving: Vec<String>,
     /// Declared return type of the function body currently being checked (`Nil` at top level).
     current_ret: Ty,
     /// True while pass-1 is inferring a function's return type: `check_return` records each
@@ -276,6 +280,8 @@ impl Checker {
             variants: HashMap::new(),
             struct_names: std::collections::HashSet::new(),
             enum_names: std::collections::HashSet::new(),
+            aliases: HashMap::new(),
+            alias_resolving: Vec::new(),
             current_ret: Ty::Nil,
             inferring_ret: false,
             collected_rets: Vec::new(),
@@ -455,6 +461,20 @@ impl Checker {
                 StmtKind::Enum { name, .. } => {
                     self.enum_names.insert(name.clone());
                 }
+                StmtKind::TypeAlias { name, ty } => {
+                    if matches!(name.as_str(), "int" | "float" | "bool" | "str" | "nil")
+                        || is_reserved_type(name)
+                    {
+                        self.error(s.span, format!("type '{name}' is reserved (builtin)"));
+                    } else if self.aliases.contains_key(name)
+                        || self.struct_names.contains(name)
+                        || self.enum_names.contains(name)
+                    {
+                        self.error(s.span, format!("type '{name}' is already defined"));
+                    } else {
+                        self.aliases.insert(name.clone(), ty.clone());
+                    }
+                }
                 _ => {}
             }
         }
@@ -539,10 +559,10 @@ impl Checker {
     fn fn_sig(&mut self, decl: &FnDecl, span: Span) -> FnSig {
         let saved = self.enter_type_params(&decl.type_params);
         for tp in &decl.type_params {
-            if let Some(bound) = &tp.bound
-                && !self.protocols.contains_key(bound)
-            {
-                self.error(span, format!("unknown protocol '{bound}' in bound on '{}'", tp.name));
+            for bound in &tp.bounds {
+                if !self.protocols.contains_key(bound) {
+                    self.error(span, format!("unknown protocol '{bound}' in bound on '{}'", tp.name));
+                }
             }
         }
         let params = decl
@@ -664,6 +684,20 @@ impl Checker {
                 // fn signature/body or a protocol method — checked BEFORE type names so an
                 // in-scope type parameter shadows a same-named struct/enum.
                 _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
+                // A transparent type alias resolves to its underlying type (recursively). The
+                // `alias_resolving` stack breaks cycles (`type A = B; type B = A`).
+                _ if self.aliases.contains_key(n) => {
+                    if self.alias_resolving.iter().any(|a| a == n) {
+                        self.error(span, format!("recursive type alias '{n}'"));
+                        Ty::Unknown
+                    } else {
+                        let aliased = self.aliases[n].clone();
+                        self.alias_resolving.push(n.clone());
+                        let ty = self.resolve_type(&aliased, span);
+                        self.alias_resolving.pop();
+                        ty
+                    }
+                }
                 _ if self.struct_names.contains(n) => {
                     // A generic struct written without type arguments is missing them.
                     let nparams = self.structs.get(n).map_or(0, |i| i.type_params.len());
@@ -725,12 +759,12 @@ impl Checker {
                                 ),
                             );
                         }
-                        // Enforce each type parameter's protocol bound against its argument.
+                        // Enforce each type parameter's protocol bounds against its argument.
                         for (tp, arg) in tps.iter().zip(&resolved) {
-                            if let Some(bound) = &tp.bound
-                                && let Err(msg) = self.satisfies(arg, bound)
-                            {
-                                self.error(span, msg);
+                            for bound in &tp.bounds {
+                                if let Err(msg) = self.satisfies(arg, bound) {
+                                    self.error(span, msg);
+                                }
                             }
                         }
                     }
@@ -807,7 +841,10 @@ impl Checker {
             }
             // Enums, imports, and protocols carry nothing to check in pass 2 (protocol method
             // signatures are validated during hoisting).
-            StmtKind::Enum { .. } | StmtKind::Import(_) | StmtKind::Protocol { .. } => {}
+            StmtKind::Enum { .. }
+            | StmtKind::Import(_)
+            | StmtKind::Protocol { .. }
+            | StmtKind::TypeAlias { .. } => {}
             StmtKind::If { branches, else_block } => {
                 for (cond, body) in branches {
                     self.expect_bool(cond, "if condition");
@@ -1609,6 +1646,8 @@ impl Checker {
                     Ty::Str
                 } else if l.is_numeric() && r.is_numeric() {
                     numeric_result(&l, &r)
+                } else if let Some(t) = self.op_overload_result(&l, &r, "Add") {
+                    t
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
@@ -1616,7 +1655,22 @@ impl Checker {
                     Ty::Unknown
                 }
             }
-            Sub | Mul | Div | Mod => {
+            // `-`/`*` overload via the `Sub`/`Mul` protocols on same-typed structs; `/`/`%` stay
+            // numeric-only (no protocol).
+            Sub | Mul => {
+                let proto = if op == Sub { "Sub" } else { "Mul" };
+                if l.is_numeric() && r.is_numeric() {
+                    numeric_result(&l, &r)
+                } else if let Some(t) = self.op_overload_result(&l, &r, proto) {
+                    t
+                } else if either_unknown {
+                    Ty::Unknown
+                } else {
+                    self.error(lhs.span, format!("cannot apply {} to {l} and {r}", op_sym(op)));
+                    Ty::Unknown
+                }
+            }
+            Div | Mod => {
                 if l.is_numeric() && r.is_numeric() {
                     numeric_result(&l, &r)
                 } else if either_unknown {
@@ -2014,13 +2068,14 @@ impl Checker {
                             );
                         }
                     }
-                    // Enforce each type parameter's protocol bound against its inferred argument.
+                    // Enforce each type parameter's protocol bounds against its inferred argument.
                     for tp in &tps {
-                        if let Some(bound) = &tp.bound
-                            && let Some(concrete) = sub.get(&tp.name)
-                            && let Err(msg) = self.satisfies(concrete, bound)
-                        {
-                            self.error(span, msg);
+                        if let Some(concrete) = sub.get(&tp.name) {
+                            for bound in &tp.bounds {
+                                if let Err(msg) = self.satisfies(concrete, bound) {
+                                    self.error(span, msg);
+                                }
+                            }
                         }
                     }
                     let targs =
@@ -2176,13 +2231,15 @@ impl Checker {
             // A bound generic type parameter exposes its protocol's methods (e.g. `a.compare(b)`
             // where `a: T` and `T: Comparable`).
             Ty::Param(pname) => {
-                let bound = self.type_params.get(pname).cloned().flatten();
-                if let Some(proto) = bound
-                    && let Some(msig) = self
-                        .protocols
-                        .get(&proto)
+                // Search the param's bounds for a protocol that declares `method` (multi-bound
+                // `T: Add + Mul` exposes the union of both protocols' methods).
+                let bounds = self.type_params.get(pname).cloned().unwrap_or_default();
+                let msig = bounds.iter().find_map(|proto| {
+                    self.protocols
+                        .get(proto)
                         .and_then(|p| p.methods.iter().find(|(n, _)| n == method).map(|(_, s)| s.clone()))
-                {
+                });
+                if let Some(msig) = msig {
                     let map = HashMap::from([("Self".to_string(), obj_ty.clone())]);
                     let expected: Vec<Ty> = match msig.params.split_first() {
                         Some((_recv, rest)) => rest.iter().map(|t| subst(t, &map)).collect(),
@@ -2441,15 +2498,15 @@ impl Checker {
     }
 
     /// Install `tps` as the in-scope generic type parameters, returning the previous map to restore.
-    fn enter_type_params(&mut self, tps: &[TypeParam]) -> HashMap<String, Option<String>> {
+    fn enter_type_params(&mut self, tps: &[TypeParam]) -> HashMap<String, Vec<String>> {
         let saved = self.type_params.clone();
         for tp in tps {
-            self.type_params.insert(tp.name.clone(), tp.bound.clone());
+            self.type_params.insert(tp.name.clone(), tp.bounds.clone());
         }
         saved
     }
 
-    fn exit_type_params(&mut self, saved: HashMap<String, Option<String>>) {
+    fn exit_type_params(&mut self, saved: HashMap<String, Vec<String>>) {
         self.type_params = saved;
     }
 
@@ -2464,7 +2521,7 @@ impl Checker {
         }
         let mut saved = self.type_params.clone();
         std::mem::swap(&mut self.type_params, &mut saved); // start clean, with only Self visible
-        self.type_params.insert("Self".to_string(), None);
+        self.type_params.insert("Self".to_string(), Vec::new());
         let sigs = methods
             .iter()
             .map(|m| {
@@ -2506,10 +2563,15 @@ impl Checker {
         if protocol == "Hashable" && matches!(ty, Ty::Int | Ty::Str | Ty::Bool) {
             return Ok(());
         }
-        // A bound type parameter satisfies a protocol if its declared bound *is* that protocol —
+        // The numeric operator protocols are satisfied intrinsically by int/float (their `+ - *` are
+        // the primitive ops), so a `[T: Add + Mul]` generic works over numbers as well as structs.
+        if matches!(protocol, "Add" | "Sub" | "Mul") && matches!(ty, Ty::Int | Ty::Float) {
+            return Ok(());
+        }
+        // A bound type parameter satisfies a protocol if that protocol is among its declared bounds —
         // this is what lets a generic forward its `T: P` value into another `[U: P]` call.
         if let Ty::Param(name) = ty {
-            return if self.type_params.get(name).and_then(|b| b.as_deref()) == Some(protocol) {
+            return if self.type_params.get(name).is_some_and(|bs| bs.iter().any(|b| b == protocol)) {
                 Ok(())
             } else {
                 Err(format!("type {ty} does not satisfy {protocol}"))
@@ -2541,6 +2603,22 @@ impl Checker {
         }
     }
 
+    /// Result type of an overloaded arithmetic operator (`+`/`-`/`*`) on two operands of the *same*
+    /// struct or type-parameter that satisfies `protocol` (`Add`/`Sub`/`Mul`). The runtime dispatches
+    /// to the `add`/`sub`/`mul` method; the result type is that same type. `None` ⇒ not overloadable.
+    fn op_overload_result(&self, l: &Ty, r: &Ty, protocol: &str) -> Option<Ty> {
+        let same = match (l, r) {
+            (Ty::Struct(a, _), Ty::Struct(b, _)) => a == b,
+            (Ty::Param(a), Ty::Param(b)) => a == b,
+            _ => false,
+        };
+        if same && self.satisfies(l, protocol).is_ok() {
+            Some(l.clone())
+        } else {
+            None
+        }
+    }
+
     /// Are `l < r` etc. allowed? True for same-named comparable type params, or same-named structs
     /// that satisfy `Comparable` (operator overloading dispatches to their `compare` at runtime).
     fn ordering_allowed(&self, l: &Ty, r: &Ty) -> bool {
@@ -2548,8 +2626,7 @@ impl Checker {
             (Ty::Param(a), Ty::Param(b)) if a == b => self
                 .type_params
                 .get(a)
-                .and_then(|b| b.as_deref())
-                .is_some_and(|proto| self.protocol_has_method(proto, "compare")),
+                .is_some_and(|bs| bs.iter().any(|proto| self.protocol_has_method(proto, "compare"))),
             (Ty::Struct(a, _), Ty::Struct(b, _)) if a == b => self.satisfies(l, "Comparable").is_ok(),
             _ => false,
         }
@@ -2575,10 +2652,12 @@ impl Checker {
         }
         // Enforce declared bounds against each inferred binding.
         for tp in &sig.type_params {
-            if let (Some(bound), Some(concrete)) = (&tp.bound, subst_map.get(&tp.name))
-                && let Err(msg) = self.satisfies(concrete, bound)
-            {
-                self.error(span, msg);
+            if let Some(concrete) = subst_map.get(&tp.name) {
+                for bound in &tp.bounds {
+                    if let Err(msg) = self.satisfies(concrete, bound) {
+                        self.error(span, msg);
+                    }
+                }
             }
         }
         // Each argument must match its parameter's substituted type (catches a type param used in
@@ -2629,6 +2708,20 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             methods: vec![("hash".to_string(), FnSig::plain(vec![Ty::Unknown], Ty::Int))],
         },
     );
+    // Per-operator numeric protocols (M10-G3): a struct satisfying `Add`/`Sub`/`Mul` (method
+    // `add`/`sub`/`mul`(self, other: Self) -> Self) overloads `+`/`-`/`*`. `Self` for `other` and the
+    // return makes them binary same-type operators (mirrors `Comparable`'s `compare`).
+    for (proto, method) in [("Add", "add"), ("Sub", "sub"), ("Mul", "mul")] {
+        m.insert(
+            proto.to_string(),
+            ProtocolInfo {
+                methods: vec![(
+                    method.to_string(),
+                    FnSig::plain(vec![Ty::Unknown, Ty::Param("Self".into())], Ty::Param("Self".into())),
+                )],
+            },
+        );
+    }
     m
 }
 

@@ -60,6 +60,12 @@ pub enum StmtKind {
         name: String,
         variants: Vec<Variant>,
     },
+    /// `type Name = <type>` — a transparent type alias (`Name` is interchangeable with the aliased
+    /// type everywhere; structural, not a distinct nominal type).
+    TypeAlias {
+        name: String,
+        ty: Type,
+    },
     /// `if` / `else if` / `else`. Each `(cond, body)` is one branch; `else if` adds another
     /// branch; a final bare `else` is `else_block`.
     If {
@@ -113,12 +119,12 @@ pub struct FnDecl {
     pub body: Block,
 }
 
-/// A generic type parameter declaration: `T` or `T: Comparable`. The optional `bound` names a
-/// protocol the instantiating type must structurally satisfy.
+/// A generic type parameter declaration: `T`, `T: Comparable`, or `T: Add + Mul`. `bounds` names the
+/// protocols the instantiating type must structurally satisfy (empty = unbounded).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeParam {
     pub name: String,
-    pub bound: Option<String>,
+    pub bounds: Vec<String>,
 }
 
 /// A protocol method signature — like an [`FnDecl`] but body-less. `Self` (as `Type::Named("Self")`)

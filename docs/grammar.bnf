@@ -32,7 +32,7 @@
 <compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
-<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <breakStmt> | <continueStmt> | <importStmt> | <exprStmt>
+<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <exprStmt>
 
 # ===== simple statements =====
 # The third form is a destructuring let: `a, b, … := expr` binds a tuple's elements positionally.
@@ -94,7 +94,8 @@
 # Generic type parameters on a fn/struct declaration: `[T]`, `[T: Comparable]`, `[A, B]`.
 <typeParams>    ::= "LBRACKET" <typeParamList> "RBRACKET"
 <typeParamList> ::= <typeParam> | <typeParam> "COMMA" <typeParamList>
-<typeParam>     ::= "IDENT" | "IDENT" "COLON" "IDENT"
+<typeParam>     ::= "IDENT" | "IDENT" "COLON" <boundList>
+<boundList>     ::= "IDENT" | "IDENT" "PLUS" <boundList>
 
 <structDecl>    ::= "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <structMembers> "DEDENT"
                   | "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <structMembers> "DEDENT"
@@ -115,6 +116,9 @@
 <variants> ::= <variant> | <variant> <variants>
 <variant>  ::= "IDENT" "NEWLINE"
              | "IDENT" "LPAREN" <typeList> "RPAREN" "NEWLINE"
+
+# A transparent type alias: `type Name = <type>`. `Name` is interchangeable with the aliased type.
+<typeAliasDecl> ::= "TYPE" "IDENT" "ASSIGN" <type> "NEWLINE"
 
 # ===== control flow =====
 <ifStmt> ::= "IF" <expr> <block>

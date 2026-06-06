@@ -259,6 +259,7 @@ impl Compiler {
             StmtKind::Struct { .. }
             | StmtKind::Enum { .. }
             | StmtKind::Protocol { .. }
+            | StmtKind::TypeAlias { .. }
             | StmtKind::Import(_) => Ok(()),
             StmtKind::Return(value) => {
                 match value {

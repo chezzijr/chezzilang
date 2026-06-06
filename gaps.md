@@ -368,8 +368,14 @@ interpolation, pipe. What remains to make it a language you'd reach for to write
   Both engines via a protocol-aware `stringify` (the `&self` `display` stays for error/debug text);
   enums keep the built-in repr (no enum methods). Naming: chose `Stringable` over `Display`/`Show`
   to match the `-able` convention and the `str()` builtin. See `examples/stringable.chz`.
-- **A numeric protocol** → `+ - *` on user types (vectors, money), and would let `abs`/`min`/`max`
-  fully unify (see M7-G3 note). Multi-bound `T: A + B`; **type aliases** (`type UserId = int`).
+- ~~**A numeric protocol** → `+ - *` on user types; multi-bound `T: A + B`; **type aliases**.~~ ✅
+  **M10-G3.** Per-operator prebuilt protocols `Add`/`Sub`/`Mul` (method `add`/`sub`/`mul(self,
+  other: Self) -> Self`) overload `+`/`-`/`*` on same-typed structs (int/float satisfy intrinsically;
+  `/`/`%` never overload). **Multi-bound** `T: Add + Mul` (`TypeParam.bound` → `bounds: Vec`).
+  **Type aliases** `type UserId = int` — transparent (structural), resolve in `resolve_type` with a
+  cycle guard; reserved/dup names rejected. Both engines dispatch via `run_proto`/`call` (mirrors
+  `compare`). See `examples/operators.chz`, `examples/type_alias.chz`. Not done: unifying
+  `abs`/`min`/`max` onto the numeric protocol (optional follow-up).
 
 ### Tier 3 — runtime robustness + ergonomics
 - **Panic recovery** — there is none: a runtime error (index-OOB, div-by-zero) kills the process;

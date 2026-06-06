@@ -180,6 +180,13 @@ impl Interp {
                 {
                     return self.struct_ordering(*op, l, r, expr.span);
                 }
+                // Arithmetic overloading: `+`/`-`/`*` on two structs dispatch to `add`/`sub`/`mul`
+                // (the `Add`/`Sub`/`Mul` protocols). The checker has verified conformance.
+                if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul)
+                    && matches!((&l, &r), (Value::Struct { .. }, Value::Struct { .. }))
+                {
+                    return self.struct_arith(*op, l, r, expr.span);
+                }
                 eval_binary(*op, l, r, expr.span)
             }
             ExprKind::List(items) => {
@@ -966,6 +973,28 @@ impl Interp {
         }))
     }
 
+    /// Arithmetic operator overloading: dispatch `+`/`-`/`*` on two structs to the receiver's
+    /// `add`/`sub`/`mul(self, other) -> Self` method (the `Add`/`Sub`/`Mul` protocols). The checker
+    /// has verified conformance, so the method exists and returns the same struct type.
+    fn struct_arith(&mut self, op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, RuntimeError> {
+        let method = match op {
+            BinaryOp::Add => "add",
+            BinaryOp::Sub => "sub",
+            BinaryOp::Mul => "mul",
+            _ => unreachable!("struct_arith only handles + - *"),
+        };
+        let Value::Struct { name, .. } = &l else { unreachable!() };
+        let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
+            message: format!("unknown struct type '{name}'"),
+            span,
+        })?;
+        let decl = def.methods.get(method).cloned().ok_or_else(|| RuntimeError {
+            message: format!("struct '{name}' has no '{method}' method"),
+            span,
+        })?;
+        self.call(&decl, &def.home, vec![l, r], span)
+    }
+
     /// Call a struct's `compare(self, other) -> int` method and return the resulting `Ordering`.
     /// Shared by ordering operators (`struct_ordering`) and `list.sort()` over Comparable structs.
     fn struct_compare(
@@ -1453,6 +1482,7 @@ impl Interp {
             StmtKind::Struct { .. }
             | StmtKind::Enum { .. }
             | StmtKind::Protocol { .. }
+            | StmtKind::TypeAlias { .. }
             | StmtKind::Import(_) => Ok(Flow::Normal),
             StmtKind::Match { scrutinee, arms } => self.exec_match(scrutinee, arms),
             StmtKind::Return(value) => {
@@ -2856,6 +2886,22 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/stringable.chz");
         let expected = include_str!("../../examples/stringable.expected");
         assert_eq!(run_capture(source).expect("stringable.chz should run"), expected);
+    }
+
+    /// M10-G3 golden: operator overloading (`Add`/`Sub`/`Mul`) + multi-bound `T: Add + Mul`.
+    #[test]
+    fn golden_operators_chz() {
+        let source = include_str!("../../examples/operators.chz");
+        let expected = include_str!("../../examples/operators.expected");
+        assert_eq!(run_capture(source).expect("operators.chz should run"), expected);
+    }
+
+    /// M10-G3 golden: transparent type aliases (`type UserId = int`).
+    #[test]
+    fn golden_type_alias_chz() {
+        let source = include_str!("../../examples/type_alias.chz");
+        let expected = include_str!("../../examples/type_alias.expected");
+        assert_eq!(run_capture(source).expect("type_alias.chz should run"), expected);
     }
 
     /// G3 golden: std.cmp (generic min/max/clamp) + Comparable sort on the interp. (Imports a std

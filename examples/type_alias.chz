@@ -1,0 +1,23 @@
+# M10-G3 — transparent type aliases. `type Name = <type>` makes `Name` interchangeable with the
+# aliased type everywhere (structural, not a distinct nominal type). Aliases may name any type:
+# scalars, collections, structs, and other aliases.
+
+type UserId = int
+type Score = map[str, int]
+
+struct User:
+    id: UserId          # alias in a field type
+    name: str
+
+fn label(u: User) -> str:
+    return "{u.name}#{u.id}"
+
+uid: UserId = 42        # alias in a let annotation
+n: int = uid            # transparent: UserId and int are the same type
+print(n)
+
+u := User(uid, "ada")
+print(label(u))
+
+scores: Score = {"ada": 10, "bo": 7}
+print(scores["ada"] + scores["bo"])

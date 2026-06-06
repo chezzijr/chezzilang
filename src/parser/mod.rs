@@ -219,6 +219,11 @@ impl Parser {
             Token::Struct => self.parse_struct()?,
             Token::Enum => self.parse_enum()?,
             Token::Protocol => self.parse_protocol()?,
+            Token::Type => {
+                let k = self.parse_type_alias()?;
+                self.expect_stmt_end()?;
+                k
+            }
             Token::If => self.parse_if()?,
             Token::For => self.parse_for()?,
             Token::While => self.parse_while()?,
@@ -355,12 +360,15 @@ impl Parser {
         if self.eat(&Token::LBracket) {
             loop {
                 let name = self.expect_ident()?;
-                let bound = if self.eat(&Token::Colon) {
-                    Some(self.expect_ident()?)
-                } else {
-                    None
-                };
-                params.push(TypeParam { name, bound });
+                // `T`, `T: Comparable`, or multi-bound `T: Add + Mul`.
+                let mut bounds = Vec::new();
+                if self.eat(&Token::Colon) {
+                    bounds.push(self.expect_ident()?);
+                    while self.eat(&Token::Plus) {
+                        bounds.push(self.expect_ident()?);
+                    }
+                }
+                params.push(TypeParam { name, bounds });
                 if !self.eat(&Token::Comma) {
                     break;
                 }
@@ -446,6 +454,15 @@ impl Parser {
             fields,
             methods,
         })
+    }
+
+    /// `type Name = <type>` — a transparent type alias (one line, terminated by the caller).
+    fn parse_type_alias(&mut self) -> PResult<StmtKind> {
+        self.expect(&Token::Type)?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::Assign)?;
+        let ty = self.parse_type()?;
+        Ok(StmtKind::TypeAlias { name, ty })
     }
 
     fn parse_enum(&mut self) -> PResult<StmtKind> {
@@ -1272,7 +1289,7 @@ mod tests {
                 assert_eq!(f.name, "max");
                 assert_eq!(f.type_params.len(), 1);
                 assert_eq!(f.type_params[0].name, "T");
-                assert_eq!(f.type_params[0].bound, Some("Comparable".into()));
+                assert_eq!(f.type_params[0].bounds, vec!["Comparable".to_string()]);
                 assert_eq!(f.params.len(), 2);
                 assert_eq!(f.ret, Some(Type::Named("T".into())));
             }
@@ -1286,7 +1303,7 @@ mod tests {
             StmtKind::Fn(f) => {
                 assert_eq!(f.type_params.len(), 2);
                 assert_eq!(f.type_params[0].name, "A");
-                assert_eq!(f.type_params[0].bound, None);
+                assert_eq!(f.type_params[0].bounds, Vec::<String>::new());
                 assert_eq!(f.type_params[1].name, "B");
             }
             other => panic!("{other:?}"),
@@ -1986,38 +2003,37 @@ mod tests {
     /// nested generics (parse_type), and nested blocks (parse_stmt).
     #[test]
     fn deep_nesting_errors_not_crash() {
-        let paren = format!("x := {}1{}\n", "(".repeat(500), ")".repeat(500));
-        assert!(parse(lexer::tokenize(&paren).unwrap())
-            .unwrap_err()
-            .message
-            .contains("too deeply"));
+        // The `MAX_DEPTH` guard (128) trips well before any real stack limit, but a *test* thread's
+        // default stack (~2 MiB) leaves only a thin margin for 128 deep parser frames — thin enough
+        // that incidental code-layout shifts can tip it into a host stack overflow before the guard
+        // fires. Run on a generous-stack thread so the test exercises the guard, not the host stack.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let paren = format!("x := {}1{}\n", "(".repeat(500), ")".repeat(500));
+                assert!(parse(lexer::tokenize(&paren).unwrap()).unwrap_err().message.contains("too deeply"));
 
-        let unary = format!("x := {}y\n", "not ".repeat(500));
-        assert!(parse(lexer::tokenize(&unary).unwrap())
-            .unwrap_err()
-            .message
-            .contains("too deeply"));
+                let unary = format!("x := {}y\n", "not ".repeat(500));
+                assert!(parse(lexer::tokenize(&unary).unwrap()).unwrap_err().message.contains("too deeply"));
 
-        let generic = format!("z: {}int{} = w\n", "list[".repeat(500), "]".repeat(500));
-        assert!(parse(lexer::tokenize(&generic).unwrap())
-            .unwrap_err()
-            .message
-            .contains("too deeply"));
+                let generic = format!("z: {}int{} = w\n", "list[".repeat(500), "]".repeat(500));
+                assert!(parse(lexer::tokenize(&generic).unwrap()).unwrap_err().message.contains("too deeply"));
 
-        let blocks = {
-            let mut s = String::new();
-            for i in 0..500 {
-                s.push_str(&"    ".repeat(i));
-                s.push_str("if x:\n");
-            }
-            s.push_str(&"    ".repeat(500));
-            s.push_str("y = 1\n");
-            s
-        };
-        assert!(parse(lexer::tokenize(&blocks).unwrap())
-            .unwrap_err()
-            .message
-            .contains("too deeply"));
+                let blocks = {
+                    let mut s = String::new();
+                    for i in 0..500 {
+                        s.push_str(&"    ".repeat(i));
+                        s.push_str("if x:\n");
+                    }
+                    s.push_str(&"    ".repeat(500));
+                    s.push_str("y = 1\n");
+                    s
+                };
+                assert!(parse(lexer::tokenize(&blocks).unwrap()).unwrap_err().message.contains("too deeply"));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// A compound statement cannot be the inline body of a block — that would make a trailing
@@ -2219,3 +2235,4 @@ mod tests {
         assert!(matches!(args[0].kind, ExprKind::Binary { op: BinaryOp::Add, .. }));
     }
 }
+

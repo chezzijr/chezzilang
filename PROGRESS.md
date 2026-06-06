@@ -25,8 +25,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   key restriction NOT lifted** — found `map`/`set` are association lists (`Vec<(K,V)>`, linear scan +
 >   structural `==`, no hashing), so enabling struct keys is entangled with a real-hashmap decision;
 >   deferred to a dedicated map-model session (user's call). Checker units only (no runtime change).
-> - ⬜ **G3** — numeric op protocols + multi-bound `T: A + B` + type aliases. ⬜ **G4** — generic
->   enums (`enum Tree[T]`).
+> - ✅ **G3 — numeric operator protocols + multi-bound + type aliases.** Per-operator `Add`/`Sub`/
+>   `Mul` (method `add`/`sub`/`mul`) overload `+`/`-`/`*` on same-typed structs (int/float intrinsic;
+>   `/`/`%` never); both engines dispatch via `run_proto`/`call`. Multi-bound `T: Add + Mul`
+>   (`TypeParam.bound`→`bounds: Vec`, refactored ~8 sites). Transparent type aliases `type UserId =
+>   int` (new `type` keyword, `resolve_type` cycle guard, reserved/dup checks). Goldens
+>   `examples/operators.chz` + `examples/type_alias.chz`, checker units, grammar + conformance.
+>   (Also hardened the parser `deep_nesting` test onto a generous-stack thread — MAX_DEPTH=128 sat at
+>   the 2 MiB test-thread edge.)
+> - ⬜ **G4** — generic enums (`enum Tree[T]`).
 >
 > **M9 — Tier-2 stdlib: `std.regex` + `std.request`** ✅ DONE. Plan:
 > `~/.claude/plans/see-the-docs-and-dreamy-unicorn.md`.

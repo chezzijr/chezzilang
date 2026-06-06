@@ -242,6 +242,91 @@ fn redeclaring_hashable_rejected() {
     rejects("protocol Hashable:\n    fn hash(self) -> int\n", "reserved");
 }
 
+// ----- numeric operator protocols + multi-bound (M10-G3) -----
+
+const VEC2: &str = "\
+struct Vec2:
+    x: int
+    y: int
+    fn add(self, o: Vec2) -> Vec2:
+        return Vec2(self.x + o.x, self.y + o.y)
+    fn mul(self, o: Vec2) -> Vec2:
+        return Vec2(self.x * o.x, self.y * o.y)
+";
+
+#[test]
+fn struct_add_mul_overload_ok() {
+    ok(&format!("{VEC2}v := Vec2(1, 2) + Vec2(3, 4) * Vec2(5, 6)\n"));
+}
+
+#[test]
+fn struct_without_sub_rejects_minus() {
+    // Vec2 defines add/mul but not sub ⇒ `-` is not overloaded.
+    rejects(&format!("{VEC2}v := Vec2(1, 2) - Vec2(3, 4)\n"), "cannot apply - to Vec2 and Vec2");
+}
+
+#[test]
+fn multi_bound_add_mul_ok() {
+    ok(&format!(
+        "{VEC2}fn fma[T: Add + Mul](a: T, b: T, c: T) -> T:\n    return a + b * c\nv := fma(Vec2(1,2), Vec2(3,4), Vec2(5,6))\nn := fma(2, 3, 4)\n"
+    ));
+}
+
+#[test]
+fn multi_bound_missing_one_protocol_rejected() {
+    // Point has add but no mul ⇒ fails the `Mul` half of `T: Add + Mul`.
+    let src = "\
+struct PointA:
+    x: int
+    fn add(self, o: PointA) -> PointA:
+        return PointA(self.x + o.x)
+fn fma[T: Add + Mul](a: T, b: T, c: T) -> T:
+    return a + b * c
+v := fma(PointA(1), PointA(2), PointA(3))
+";
+    rejects(src, "does not satisfy Mul");
+}
+
+#[test]
+fn redeclaring_add_rejected() {
+    rejects("protocol Add:\n    fn add(self, other: Self) -> Self\n", "reserved");
+}
+
+// ----- transparent type aliases (M10-G3) -----
+
+#[test]
+fn type_alias_transparent_ok() {
+    // UserId ≡ int: usable interchangeably in annotations and calls.
+    ok("type UserId = int\nfn double(n: int) -> int:\n    return n * 2\nid: UserId = 5\nx: int = id\ny := double(id)\n");
+}
+
+#[test]
+fn type_alias_mismatch_still_rejected() {
+    // The alias is transparent, so a str where the underlying int is expected is still an error
+    // (and the message names the resolved type, `int`).
+    rejects("type UserId = int\nid: UserId = \"no\"\n", "cannot assign str to variable of type int");
+}
+
+#[test]
+fn type_alias_to_collection_ok() {
+    ok("type Scores = map[str, int]\ns: Scores = {\"a\": 1}\nn: int = s[\"a\"]\n");
+}
+
+#[test]
+fn type_alias_reserved_name_rejected() {
+    rejects("type int = str\n", "reserved");
+}
+
+#[test]
+fn recursive_type_alias_rejected() {
+    rejects("type A = B\ntype B = A\nx: A = 1\n", "recursive type alias");
+}
+
+#[test]
+fn type_alias_redeclared_rejected() {
+    rejects("type T1 = int\ntype T1 = str\n", "already defined");
+}
+
 // ----- generic structs (G2) -----
 
 const PAIR: &str = "\
