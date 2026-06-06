@@ -315,11 +315,13 @@ nullary variants (`Cons(h, None)`) stay unsupported (clear checker error); **mat
 
 ## Deferred to future milestones
 
-- ~~**Generics / operator overloading** (extends #12)~~ ✅ **M7-G1** — generic functions
-  (`fn max[T: Comparable]`) + Go-style structural **protocols** (type-erased; all work in the
-  checker, runtime barely changed). Prebuilt `Comparable` wires `< <= > >=` to a user `compare`
-  method (the sole operator overload; `==`/`!=` stay structural). See `examples/generics.chz` and
-  `docs/syntax.md` §7b. (G2 — generic *structs* `Pair[A,B]`/`Stack[T]` — follows.)
+- ~~**Generics / operator overloading** (extends #12)~~ ✅ **M7 (G1 + G2)** — generic functions
+  (`fn max[T: Comparable]`) **and** generic structs (`Pair[A, B]`, `Stack[T]`) + Go-style
+  structural **protocols** (type-erased; all work in the checker, runtime barely changed). Prebuilt
+  `Comparable` wires `< <= > >=` to a user `compare` method (the sole operator overload; `==`/`!=`
+  stay structural). See `examples/generics.chz`, `examples/generic_structs.chz`, `docs/syntax.md`
+  §7b. Not yet: explicit call-site type args (`max[int](…)`), generic enums, multi-bound `T: A + B`,
+  a `Hashable`/`Display` protocol — none currently needed.
 - **Match guards** (`pattern if cond:`) and **range patterns** (`1..10:`) (extend #15): guards are the
   general mechanism (subsume range / less-than / greater-than); revisit when needed.
 - **A real `char` type / `s.chars()`** (extends #10): `ord`/`chr` cover the 80/20.

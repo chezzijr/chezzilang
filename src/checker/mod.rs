@@ -75,8 +75,11 @@ impl FnSig {
     }
 }
 
-/// A struct's shape: ordered `(field, type)` pairs and its methods by name.
+/// A struct's shape: its generic type parameters (empty for a non-generic struct), ordered
+/// `(field, type)` pairs, and its methods by name. Field/method types may contain `Ty::Param`s
+/// naming the struct's type parameters; they're substituted at each use site.
 struct StructInfo {
+    type_params: Vec<TypeParam>,
     fields: Vec<(String, Ty)>,
     methods: HashMap<String, FnSig>,
 }
@@ -407,13 +410,16 @@ impl Checker {
                     let sig = self.fn_sig(decl, s.span);
                     self.functions.insert(decl.name.clone(), sig);
                 }
-                StmtKind::Struct { name, fields, methods, .. } => {
+                StmtKind::Struct { name, type_params, fields, methods } => {
                     if is_reserved_type(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
                     if self.structs.contains_key(name) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
+                    // The struct's type parameters are in scope across its field and method
+                    // signatures (so `first: A` and `fn push(self, x: T)` resolve `A`/`T`).
+                    let saved = self.enter_type_params(type_params);
                     let fields: Vec<(String, Ty)> = fields
                         .iter()
                         .map(|f| (f.name.clone(), self.resolve_type(&f.ty, s.span)))
@@ -422,7 +428,11 @@ impl Checker {
                         .iter()
                         .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
                         .collect();
-                    self.structs.insert(name.clone(), StructInfo { fields, methods });
+                    self.exit_type_params(saved);
+                    self.structs.insert(
+                        name.clone(),
+                        StructInfo { type_params: type_params.clone(), fields, methods },
+                    );
                 }
                 StmtKind::Enum { name, variants } => {
                     if is_reserved_type(name) {
@@ -500,8 +510,9 @@ impl Checker {
                         sig.ret = ret;
                     }
                 }
-                StmtKind::Struct { name, methods, .. } => {
-                    let self_ty = Ty::Struct(name.clone());
+                StmtKind::Struct { name, type_params, methods, .. } => {
+                    let self_ty = self.struct_self_ty(name);
+                    let saved = self.enter_type_params(type_params);
                     for m in methods {
                         if m.ret.is_some() {
                             continue;
@@ -518,6 +529,7 @@ impl Checker {
                             ms.ret = ret;
                         }
                     }
+                    self.exit_type_params(saved);
                 }
                 _ => {}
             }
@@ -579,7 +591,7 @@ impl Checker {
                 "bool" => Ty::Bool,
                 "str" => Ty::Str,
                 "nil" => Ty::Nil,
-                _ if self.struct_names.contains(n) => Ty::Struct(n.clone()),
+                _ if self.struct_names.contains(n) => Ty::strukt(n.clone()),
                 _ if self.enum_names.contains(n) => Ty::Enum(n.clone()),
                 // A generic type parameter (`T`) or `Self`, in scope while checking a generic
                 // fn signature/body or a protocol method.
@@ -608,6 +620,23 @@ impl Checker {
                         );
                     }
                     Ty::map(key, value)
+                }
+                // A user-defined generic struct instantiated with type arguments: `Pair[int, str]`.
+                _ if self.struct_names.contains(n) => {
+                    let resolved: Vec<Ty> = args.iter().map(|a| self.resolve_type(a, span)).collect();
+                    if let Some(info) = self.structs.get(n)
+                        && info.type_params.len() != resolved.len()
+                    {
+                        self.error(
+                            span,
+                            format!(
+                                "type '{n}' expects {} type argument(s), got {}",
+                                info.type_params.len(),
+                                resolved.len()
+                            ),
+                        );
+                    }
+                    Ty::Struct(n.clone(), resolved)
                 }
                 _ => {
                     self.error(span, format!("unknown generic type '{n}'"));
@@ -663,8 +692,10 @@ impl Checker {
                     self.check_fn_body(decl, None, sig);
                 }
             }
-            StmtKind::Struct { name, methods, .. } => {
-                let self_ty = Ty::Struct(name.clone());
+            StmtKind::Struct { name, type_params, methods, .. } => {
+                let self_ty = self.struct_self_ty(name);
+                // The struct's type parameters are in scope across its method bodies.
+                let saved = self.enter_type_params(type_params);
                 for m in methods {
                     // Panic-safe: a redeclared struct name means `structs[name]` is a *different*
                     // struct whose method table may not contain `m.name`.
@@ -674,6 +705,7 @@ impl Checker {
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
                 }
+                self.exit_type_params(saved);
             }
             // Enums, imports, and protocols carry nothing to check in pass 2 (protocol method
             // signatures are validated during hoisting).
@@ -806,12 +838,12 @@ impl Checker {
             ExprKind::Field { obj, name } => {
                 let obj_ty = self.infer(obj);
                 match &obj_ty {
-                    Ty::Struct(sname) => {
-                        let field_ty = self
-                            .structs
-                            .get(sname)
-                            .and_then(|info| info.fields.iter().find(|(f, _)| f == name))
-                            .map(|(_, ty)| ty.clone());
+                    Ty::Struct(sname, targs) => {
+                        let field_ty = self.structs.get(sname).and_then(|info| {
+                            info.fields.iter().find(|(f, _)| f == name).map(|(_, ty)| {
+                                subst(ty, &struct_param_map(info, targs))
+                            })
+                        });
                         match field_ty {
                             Some(ty) => self.check_assign_value(&ty, op, &val_ty, target.span),
                             None => self.error(
@@ -1513,17 +1545,15 @@ impl Checker {
                     Ty::Unknown
                 }
             },
-            Ty::Struct(sname) => {
+            Ty::Struct(sname, targs) => {
                 if let Some(info) = self.structs.get(sname) {
+                    let map = struct_param_map(info, targs);
                     if let Some((_, ty)) = info.fields.iter().find(|(f, _)| f == name) {
-                        return ty.clone();
+                        return subst(ty, &map);
                     }
-                    if info.methods.contains_key(name) {
-                        let sig = &info.methods[name];
-                        return Ty::Func {
-                            params: sig.params.clone(),
-                            ret: Box::new(sig.ret.clone()),
-                        };
+                    if let Some(sig) = info.methods.get(name) {
+                        let params = sig.params.iter().map(|t| subst(t, &map)).collect();
+                        return Ty::Func { params, ret: Box::new(subst(&sig.ret, &map)) };
                     }
                 }
                 self.error(obj.span, format!("type {obj_ty} has no field '{name}'"));
@@ -1754,10 +1784,36 @@ impl Checker {
             }
             _ => {
                 // Struct constructor?
-                if let Some(info) = self.structs.get(name) {
-                    let params: Vec<Ty> = info.fields.iter().map(|(_, t)| t.clone()).collect();
-                    self.check_args(name, &params, args, span);
-                    return Some(Ty::Struct(name.to_string()));
+                if let Some((tps, fields)) =
+                    self.structs.get(name).map(|i| (i.type_params.clone(), i.fields.clone()))
+                {
+                    let field_tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();
+                    if tps.is_empty() {
+                        self.check_args(name, &field_tys, args, span);
+                        return Some(Ty::strukt(name.to_string()));
+                    }
+                    // Generic struct: infer its type arguments by unifying the declared field types
+                    // (which contain the struct's `Ty::Param`s) against the argument types.
+                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+                    if arg_tys.len() != field_tys.len() {
+                        self.check_arity(name, field_tys.len(), args, span);
+                    }
+                    let mut sub = HashMap::new();
+                    for (decl, actual) in field_tys.iter().zip(&arg_tys) {
+                        unify(decl, actual, &mut sub);
+                    }
+                    for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
+                        let expected = subst(decl, &sub);
+                        if !compatible(&expected, actual) {
+                            self.error(
+                                arg.span,
+                                format!("argument to '{name}' has type {actual}, expected {expected}"),
+                            );
+                        }
+                    }
+                    let targs =
+                        tps.iter().map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown)).collect();
+                    return Some(Ty::Struct(name.to_string(), targs));
                 }
                 // User enum variant constructor?
                 if let Some(v) = self.variants.get(name).cloned() {
@@ -1805,14 +1861,22 @@ impl Checker {
                 self.error(span, format!("module '{mname}' has no member '{method}'"));
                 Ty::Unknown
             }
-            Ty::Struct(sname) => {
-                let sig = self.structs.get(sname).and_then(|i| i.methods.get(method).cloned());
-                if let Some(sig) = sig {
+            Ty::Struct(sname, targs) => {
+                // Substitute the struct's type arguments into the method signature, so calling
+                // `Stack[int].push(x)` checks `x` against `int`, not the parameter `T`.
+                let resolved = self.structs.get(sname).and_then(|info| {
+                    info.methods.get(method).map(|sig| {
+                        let map = struct_param_map(info, targs);
+                        let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
+                        (params, subst(&sig.ret, &map))
+                    })
+                });
+                if let Some((params, ret)) = resolved {
                     // The first param is the receiver (bound implicitly from `obj`), so the call's
                     // explicit args correspond to params[1..]. A method with NO params has no
                     // receiver slot — both engines prepend the receiver and would error at runtime,
                     // so reject the call here instead.
-                    match sig.params.split_first() {
+                    match params.split_first() {
                         Some((_receiver, expected)) => self.check_args(method, expected, args, span),
                         None => {
                             self.error(
@@ -1822,7 +1886,7 @@ impl Checker {
                             self.infer_all(args);
                         }
                     }
-                    return sig.ret;
+                    return ret;
                 }
                 self.infer_all(args);
                 self.error(span, format!("type {obj_ty} has no method '{method}'"));
@@ -2125,6 +2189,17 @@ impl Checker {
 
     // ===== generics & protocols =====
 
+    /// The `Self` type for a struct's own methods: `Struct(name, [Param(p) for each type param])`,
+    /// so inside `struct Stack[T]` the receiver is `Stack[T]` and `self.items` is `list[T]`.
+    fn struct_self_ty(&self, name: &str) -> Ty {
+        let args = self
+            .structs
+            .get(name)
+            .map(|i| i.type_params.iter().map(|tp| Ty::Param(tp.name.clone())).collect())
+            .unwrap_or_default();
+        Ty::Struct(name.to_string(), args)
+    }
+
     /// Install `tps` as the in-scope generic type parameters, returning the previous map to restore.
     fn enter_type_params(&mut self, tps: &[TypeParam]) -> HashMap<String, Option<String>> {
         let saved = self.type_params.clone();
@@ -2186,7 +2261,7 @@ impl Checker {
             return Ok(());
         }
         match ty {
-            Ty::Struct(sname) => {
+            Ty::Struct(sname, _) => {
                 let Some(info) = self.structs.get(sname) else {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 };
@@ -2220,7 +2295,7 @@ impl Checker {
                 .get(a)
                 .and_then(|b| b.as_deref())
                 .is_some_and(|proto| self.protocol_has_method(proto, "compare")),
-            (Ty::Struct(a), Ty::Struct(b)) if a == b => self.satisfies(l, "Comparable").is_ok(),
+            (Ty::Struct(a, _), Ty::Struct(b, _)) if a == b => self.satisfies(l, "Comparable").is_ok(),
             _ => false,
         }
     }
@@ -2283,6 +2358,12 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
     m
 }
 
+/// The substitution from a struct's type parameters to a concrete instantiation's type arguments
+/// (`Stack[int]` ⇒ `{T: int}`). Empty for a non-generic struct.
+fn struct_param_map(info: &StructInfo, targs: &[Ty]) -> HashMap<String, Ty> {
+    info.type_params.iter().map(|tp| tp.name.clone()).zip(targs.iter().cloned()).collect()
+}
+
 /// Substitute generic type parameters in `ty` using `map` (e.g. `Self ↦ Point`, `T ↦ int`).
 /// Unmapped params are left as-is.
 fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
@@ -2297,6 +2378,7 @@ fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
             params: params.iter().map(|t| subst(t, map)).collect(),
             ret: Box::new(subst(ret, map)),
         },
+        Ty::Struct(n, args) => Ty::Struct(n.clone(), args.iter().map(|t| subst(t, map)).collect()),
         other => other.clone(),
     }
 }
@@ -2330,6 +2412,9 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
         (Ty::Map(dk, dv), Ty::Map(ak, av)) => {
             unify(dk, ak, map);
             unify(dv, av, map);
+        }
+        (Ty::Struct(dn, da), Ty::Struct(an, aa)) if dn == an && da.len() == aa.len() => {
+            da.iter().zip(aa).for_each(|(d, a)| unify(d, a, map));
         }
         (Ty::Tuple(ds), Ty::Tuple(as_)) if ds.len() == as_.len() => {
             ds.iter().zip(as_).for_each(|(d, a)| unify(d, a, map));

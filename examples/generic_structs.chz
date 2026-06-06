@@ -1,0 +1,52 @@
+# Generic structs (G2): structs parameterized by type, with type arguments inferred at
+# construction (or written explicitly in a type annotation). Like generic functions, they are
+# type-erased — the parameters matter only to the checker; at runtime a `Pair[int, str]` is just
+# an ordinary struct value.
+
+struct Pair[A, B]:
+    first: A
+    second: B
+
+    fn left(self) -> A:
+        return self.first
+
+    fn right(self) -> B:
+        return self.second
+
+struct Stack[T]:
+    items: list[T]
+
+    fn push(self, x: T):
+        self.items.push(x)
+
+    fn pop(self) -> T:
+        n := self.items.len()
+        v := self.items[n - 1]
+        return v
+
+    fn size(self) -> int:
+        return self.items.len()
+
+# construction infers A=int, B=str
+p := Pair(42, "hello")
+print(p.first)
+print(p.left())
+print(p.right())
+
+# the field's type is substituted (B=str), so str methods work on it
+print(p.second.upper())
+
+# explicit type arguments in an annotation
+q: Pair[str, int] = Pair("answer", 42)
+print(q.first)
+print(q.right() + 1)
+
+# a generic container with methods
+s := Stack([10, 20])
+s.push(30)
+print(s.size())
+print(s.pop())
+
+# nest generics: a Stack of Pairs
+ps := Stack([Pair(1, 2)])
+print(ps.size())

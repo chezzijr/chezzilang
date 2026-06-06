@@ -19,7 +19,9 @@ pub enum Ty {
     Func { params: Vec<Ty>, ret: Box<Ty> },
     /// `(T1, T2, …)` — a fixed-arity tuple (always ≥2 elements).
     Tuple(Vec<Ty>),
-    Struct(String),
+    /// A struct type, with its generic type arguments (empty for a non-generic struct). E.g.
+    /// `Pair[int, str]` is `Struct("Pair", [Int, Str])`; a plain `Point` is `Struct("Point", [])`.
+    Struct(String, Vec<Ty>),
     Enum(String),
     /// A bound generic type variable (e.g. `T` inside `fn max[T: Comparable]`). Opaque while
     /// checking a generic body; replaced by a concrete `Ty` at each call site via substitution.
@@ -46,6 +48,10 @@ impl Ty {
     pub fn option(inner: Ty) -> Ty {
         Ty::Option(Box::new(inner))
     }
+    /// A non-generic struct type (no type arguments) — the common case.
+    pub fn strukt(name: impl Into<String>) -> Ty {
+        Ty::Struct(name.into(), Vec::new())
+    }
 
     /// Is this a number (`int` or `float`)?
     pub fn is_numeric(&self) -> bool {
@@ -66,9 +72,10 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         (Int, Int) | (Float, Float) | (Bool, Bool) | (Str, Str) | (Nil, Nil) => true,
         (List(a), List(b)) | (Result(a), Result(b)) | (Option(a), Option(b)) => compatible(a, b),
         (Map(ka, va), Map(kb, vb)) => compatible(ka, kb) && compatible(va, vb),
-        (Struct(a), Struct(b)) | (Enum(a), Enum(b)) | (Module(a), Module(b)) | (Param(a), Param(b)) => {
-            a == b
+        (Struct(a, aa), Struct(b, ba)) => {
+            a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| compatible(x, y))
         }
+        (Enum(a), Enum(b)) | (Module(a), Module(b)) | (Param(a), Param(b)) => a == b,
         (Func { params: p1, ret: r1 }, Func { params: p2, ret: r2 }) => {
             p1.len() == p2.len()
                 && p1.iter().zip(p2).all(|(a, b)| compatible(a, b))
@@ -91,7 +98,21 @@ impl fmt::Display for Ty {
             Ty::Map(k, v) => write!(f, "map[{k}, {v}]"),
             Ty::Result(t) => write!(f, "Result[{t}]"),
             Ty::Option(t) => write!(f, "Option[{t}]"),
-            Ty::Struct(n) | Ty::Enum(n) | Ty::Param(n) => write!(f, "{n}"),
+            Ty::Struct(n, args) => {
+                write!(f, "{n}")?;
+                if !args.is_empty() {
+                    write!(f, "[")?;
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{a}")?;
+                    }
+                    write!(f, "]")?;
+                }
+                Ok(())
+            }
+            Ty::Enum(n) | Ty::Param(n) => write!(f, "{n}"),
             Ty::Module(n) => write!(f, "module {n}"),
             Ty::Func { params, ret } => {
                 write!(f, "fn(")?;
@@ -139,16 +160,26 @@ mod tests {
 
     #[test]
     fn nominal_types_compare_by_name() {
-        assert!(compatible(&Ty::Struct("Point".into()), &Ty::Struct("Point".into())));
-        assert!(!compatible(&Ty::Struct("Point".into()), &Ty::Struct("Vec".into())));
-        assert!(!compatible(&Ty::Struct("Point".into()), &Ty::Enum("Point".into())));
+        assert!(compatible(&Ty::strukt("Point"), &Ty::strukt("Point")));
+        assert!(!compatible(&Ty::strukt("Point"), &Ty::strukt("Vec")));
+        assert!(!compatible(&Ty::strukt("Point"), &Ty::Enum("Point".into())));
+        // Generic structs compare by name AND type arguments.
+        assert!(compatible(
+            &Ty::Struct("Pair".into(), vec![Ty::Int, Ty::Str]),
+            &Ty::Struct("Pair".into(), vec![Ty::Int, Ty::Str])
+        ));
+        assert!(!compatible(
+            &Ty::Struct("Pair".into(), vec![Ty::Int, Ty::Str]),
+            &Ty::Struct("Pair".into(), vec![Ty::Int, Ty::Int])
+        ));
     }
 
     #[test]
     fn display_renders_source_forms() {
         assert_eq!(Ty::list(Ty::Int).to_string(), "list[int]");
         assert_eq!(Ty::result(Ty::Int).to_string(), "Result[int]");
-        assert_eq!(Ty::Struct("Point".into()).to_string(), "Point");
+        assert_eq!(Ty::strukt("Point").to_string(), "Point");
+        assert_eq!(Ty::Struct("Pair".into(), vec![Ty::Int, Ty::Str]).to_string(), "Pair[int, str]");
         assert_eq!(
             Ty::Func { params: vec![Ty::Int, Ty::Str], ret: Box::new(Ty::Bool) }.to_string(),
             "fn(int, str) -> bool"

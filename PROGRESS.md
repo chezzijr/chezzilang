@@ -12,11 +12,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 > **Language gaps round 2 (#10–#15): ✅ ALL DONE.** See the section below.
 
-> **M7 — generics + structural protocols.** 🟦 **G1 DONE** — generic functions
-> (`fn max[T: Comparable]`), Go-style structural `protocol`s, prebuilt `Comparable` wiring
-> `< <= > >=` to a user `compare` method (type-erased: the checker does the work, both runtimes
-> barely change). Golden `examples/generics.chz` is byte-identical on interp + VM; grammar +
-> conformance corpus updated. **G2 (next):** generic structs (`Pair[A, B]`, `Stack[T]`).
+> **M7 — generics + structural protocols.** ✅ **G1 + G2 DONE.** Type-erased generics (all work
+> in the checker; both runtimes barely change). **G1:** generic functions (`fn max[T: Comparable]`),
+> Go-style structural `protocol`s, prebuilt `Comparable` wiring `< <= > >=` to a user `compare`
+> method. **G2:** generic structs (`Pair[A, B]`, `Stack[T]`) — `Ty::Struct` carries type args,
+> field/method types substitute the struct's params, type args inferred at construction or written
+> explicitly. Goldens `examples/generics.chz` + `examples/generic_structs.chz` are byte-identical
+> on interp + VM; grammar + conformance corpus updated.
 
 > **M6 — stdlib + pipe `|>` + core-type methods.** ✅ **M6a + M6b + M6c DONE.** The Level-2 native
 > FFI seam (`NativeFn` + `Host` trait) was scheduled and built: each binding is written once and

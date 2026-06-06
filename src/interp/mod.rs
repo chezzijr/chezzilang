@@ -2449,6 +2449,20 @@ fn safe_div(a: int, b: int) -> Result[int]:
         assert_eq!(run_capture(source).expect("generics.chz should run"), expected);
     }
 
+    /// G2 golden: generic structs (Pair / Stack) on the interp.
+    #[test]
+    fn golden_generic_structs_chz() {
+        let source = include_str!("../../examples/generic_structs.chz");
+        let expected = include_str!("../../examples/generic_structs.expected");
+        assert_eq!(run_capture(source).expect("generic_structs.chz should run"), expected);
+    }
+
+    #[test]
+    fn generic_struct_is_erased_at_runtime() {
+        let src = "struct Box[T]:\n    val: T\n    fn get(self) -> T:\n        return self.val\nb := Box(42)\nprint(b.get())\nprint(b.val)\n";
+        assert_eq!(run(src), "42\n42\n");
+    }
+
     #[test]
     fn generic_max_over_int_runs() {
         let src = "fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nprint(max(3, 9))\nprint(max(9, 3))\n";

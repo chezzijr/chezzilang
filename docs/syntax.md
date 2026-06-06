@@ -202,6 +202,29 @@ Equality (`==` / `!=`) is **not** affected — it stays structural (field-by-fie
 Only ordering is overloaded, and only through `Comparable`; there is no operator overloading for
 `+ - * /`.
 
+**Generic structs** carry type parameters after the name; their fields and methods may use them.
+Type arguments are inferred at construction, or written explicitly in a type annotation.
+
+```chezzi
+struct Pair[A, B]:
+    first: A
+    second: B
+    fn left(self) -> A:
+        return self.first
+
+struct Stack[T]:
+    items: list[T]
+    fn push(self, x: T):
+        self.items.push(x)
+
+p := Pair(42, "hi")              # inferred Pair[int, str]
+print(p.left())                  # 42  — left() returns A = int
+q: Pair[str, int] = Pair("k", 9) # explicit type arguments
+```
+
+Generics are **type-erased**: the parameters exist only for the checker. At runtime a
+`Pair[int, str]` is an ordinary struct value — there is no monomorphization and no per-type code.
+
 ## 8. Enums & pattern matching  (M3)
 
 ```chezzi

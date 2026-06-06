@@ -154,6 +154,69 @@ fn redeclaring_comparable_rejected() {
     );
 }
 
+// ----- generic structs (G2) -----
+
+const PAIR: &str = "\
+struct Pair[A, B]:
+    first: A
+    second: B
+    fn left(self) -> A:
+        return self.first
+";
+
+#[test]
+fn generic_struct_field_type_substituted() {
+    // first is A=int; assigning it to a str binding must be rejected.
+    rejects(&format!("{PAIR}p := Pair(1, \"x\")\nn: str = p.first\n"), "cannot assign int");
+}
+
+#[test]
+fn generic_struct_construction_and_field_ok() {
+    ok(&format!("{PAIR}p := Pair(1, \"x\")\nn: int = p.first\ns: str = p.second\n"));
+}
+
+#[test]
+fn generic_struct_method_return_substituted() {
+    ok(&format!("{PAIR}p := Pair(7, \"x\")\nn: int = p.left()\n"));
+    rejects(&format!("{PAIR}p := Pair(7, \"x\")\nn: str = p.left()\n"), "cannot assign int");
+}
+
+#[test]
+fn generic_struct_explicit_type_args_ok() {
+    ok(&format!("{PAIR}p: Pair[str, int] = Pair(\"k\", 9)\n"));
+}
+
+#[test]
+fn generic_struct_wrong_arity_rejected() {
+    rejects(&format!("{PAIR}p: Pair[int] = Pair(1, 2)\n"), "expects 2 type argument(s)");
+}
+
+#[test]
+fn generic_struct_method_arg_checked_against_type_arg() {
+    let src = "\
+struct Box[T]:
+    val: T
+    fn set(self, x: T) -> T:
+        return x
+b := Box(5)
+y := b.set(\"nope\")
+";
+    rejects(src, "expected int");
+}
+
+#[test]
+fn generic_struct_method_arg_ok() {
+    let src = "\
+struct Box[T]:
+    val: T
+    fn set(self, x: T) -> T:
+        return x
+b := Box(5)
+y := b.set(9)
+";
+    ok(src);
+}
+
 // ===== 2. unknown type =====
 
 #[test]

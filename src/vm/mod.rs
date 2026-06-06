@@ -2669,6 +2669,16 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// G2 golden: generic structs are byte-identical on the VM, interpreter, and `.expected`.
+    #[test]
+    fn golden_generic_structs_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/generic_structs.chz");
+        let expected = include_str!("../../examples/generic_structs.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     #[test]
     fn struct_ordering_dispatches_to_compare_on_vm() {
         let src = "\
