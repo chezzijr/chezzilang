@@ -296,6 +296,42 @@ fn unwrap(b: Box) -> int:
     rejects(src, "expects 1 type argument(s), got 0");
 }
 
+// ----- sort() widened to Comparable (G3) -----
+
+#[test]
+fn sort_on_comparable_struct_list_ok() {
+    let src = "\
+struct P:
+    n: int
+    fn compare(self, o: P) -> int:
+        return self.n - o.n
+xs := [P(2), P(1)]
+xs.sort()
+";
+    ok(src);
+}
+
+#[test]
+fn sort_on_non_comparable_struct_list_rejected() {
+    let src = "\
+struct P:
+    n: int
+xs := [P(2), P(1)]
+xs.sort()
+";
+    rejects(src, "sort() requires a list of Comparable");
+}
+
+#[test]
+fn sort_on_primitive_list_still_ok() {
+    ok("xs := [3, 1, 2]\nxs.sort()\nys := [\"b\", \"a\"]\nys.sort()\n");
+}
+
+#[test]
+fn sort_with_args_rejected() {
+    rejects("xs := [3, 1]\nxs.sort(5)\n", "expects 0 argument(s)");
+}
+
 // ===== 2. unknown type =====
 
 #[test]
@@ -1242,18 +1278,33 @@ fn native_math_float_param_rejects_int() {
 // ===== int+float polymorphic math (gap #12) =====
 
 #[test]
-fn native_math_max_int_returns_int() {
-    entry_ok("import std.math\nfn main():\n    x: int = math.max(3, 5)\n    print(x)\n");
+fn cmp_max_int_returns_int() {
+    entry_ok("import std.cmp\nfn main():\n    x: int = cmp.max(3, 5)\n    print(x)\n");
 }
 
 #[test]
-fn native_math_max_float_returns_float() {
-    entry_ok("import std.math\nfn main():\n    x: float = math.max(3.0, 5.0)\n    print(x)\n");
+fn cmp_max_float_returns_float() {
+    entry_ok("import std.cmp\nfn main():\n    x: float = cmp.max(3.0, 5.0)\n    print(x)\n");
 }
 
 #[test]
-fn native_math_min_int_returns_int() {
-    entry_ok("import std.math\nfn main():\n    x: int = math.min(3, 5)\n    print(x)\n");
+fn cmp_min_int_returns_int() {
+    entry_ok("import std.cmp\nfn main():\n    x: int = cmp.min(3, 5)\n    print(x)\n");
+}
+
+#[test]
+fn cmp_max_over_comparable_struct_ok() {
+    entry_ok(
+        "import std.cmp\nstruct P:\n    n: int\n    fn compare(self, o: P) -> int:\n        return self.n - o.n\nfn main():\n    p := cmp.max(P(1), P(2))\n    print(p.n)\n",
+    );
+}
+
+#[test]
+fn cmp_max_over_non_comparable_struct_rejected() {
+    entry_rejects(
+        "import std.cmp\nstruct P:\n    n: int\nfn main():\n    p := cmp.max(P(1), P(2))\n    print(p.n)\n",
+        "does not satisfy Comparable",
+    );
 }
 
 #[test]
@@ -1267,38 +1318,38 @@ fn native_math_abs_float_returns_float() {
 }
 
 #[test]
-fn native_math_max_int_result_not_float() {
-    // The int form must NOT be a float — assigning to a float slot is rejected.
+fn cmp_max_int_result_not_float() {
+    // The int instantiation must NOT be a float — assigning to a float slot is rejected.
     entry_rejects(
-        "import std.math\nfn main():\n    x: float = math.max(3, 5)\n    print(x)\n",
+        "import std.cmp\nfn main():\n    x: float = cmp.max(3, 5)\n    print(x)\n",
         "",
     );
 }
 
 #[test]
-fn native_math_max_mixed_int_float_rejected() {
-    // No implicit int->float widening, even in the polymorphic form.
+fn cmp_max_mixed_int_float_rejected() {
+    // No implicit int->float widening: T unifies to int, so a float second arg is rejected.
     entry_rejects(
-        "import std.math\nfn main():\n    print(math.max(3, 5.0))\n",
+        "import std.cmp\nfn main():\n    print(cmp.max(3, 5.0))\n",
         "",
     );
 }
 
 #[test]
-fn native_math_from_import_max_int_returns_int() {
-    // The `from`-import form must keep abs/min/max polymorphic, like the qualified `math.max`.
-    entry_ok("import max from std.math\nfn main():\n    x: int = max(3, 5)\n    print(x)\n");
+fn cmp_from_import_max_int_returns_int() {
+    // The `from`-import form routes through the same generic-call path as qualified `cmp.max`.
+    entry_ok("import max from std.cmp\nfn main():\n    x: int = max(3, 5)\n    print(x)\n");
 }
 
 #[test]
-fn native_math_from_import_max_float_returns_float() {
-    entry_ok("import max from std.math\nfn main():\n    x: float = max(3.0, 5.0)\n    print(x)\n");
+fn cmp_from_import_max_float_returns_float() {
+    entry_ok("import max from std.cmp\nfn main():\n    x: float = max(3.0, 5.0)\n    print(x)\n");
 }
 
 #[test]
-fn native_math_from_import_max_int_not_float() {
+fn cmp_from_import_max_int_not_float() {
     entry_rejects(
-        "import max from std.math\nfn main():\n    x: float = max(3, 5)\n    print(x)\n",
+        "import max from std.cmp\nfn main():\n    x: float = max(3, 5)\n    print(x)\n",
         "",
     );
 }

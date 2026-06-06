@@ -1,0 +1,26 @@
+# std.cmp — comparison helpers as generic functions over the `Comparable` protocol (M7-G3).
+#
+# Written entirely in Chezzi: `<` dispatches through `Comparable.compare`, so these work for every
+# Comparable type — int, float, str, AND any user struct that implements `compare(self, other) -> int`.
+# This replaces the old numeric-only `std.math.min`/`max` (the gap-#12 ad-hoc int/float overload)
+# with one real, extensible implementation.
+
+# The larger of `a` and `b` (returns `b` on a tie, like the old native max).
+fn max[T: Comparable](a: T, b: T) -> T:
+    if a < b:
+        return b
+    return a
+
+# The smaller of `a` and `b` (returns `a` on a tie).
+fn min[T: Comparable](a: T, b: T) -> T:
+    if a < b:
+        return a
+    return b
+
+# `x` clamped to the inclusive range `[lo, hi]` (assumes `lo <= hi`).
+fn clamp[T: Comparable](x: T, lo: T, hi: T) -> T:
+    if x < lo:
+        return lo
+    if hi < x:
+        return hi
+    return x

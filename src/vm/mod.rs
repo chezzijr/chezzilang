@@ -698,6 +698,22 @@ impl Vm {
     /// Dispatch an ordering operator on two structs to the receiver's `compare(self, other) -> int`
     /// method, mapping the sign of the result to a boolean. Mirrors `interp::struct_ordering`.
     fn struct_ordering(&mut self, op: &Op, l: Value, r: Value, span: Span) -> Result<(), RuntimeError> {
+        let ord = self.struct_compare(l, r, span)?;
+        let b = match op {
+            Op::Lt => ord.is_lt(),
+            Op::LtEq => ord.is_le(),
+            Op::Gt => ord.is_gt(),
+            Op::GtEq => ord.is_ge(),
+            _ => unreachable!(),
+        };
+        self.push(Value::Bool(b));
+        Ok(())
+    }
+
+    /// Call a struct's `compare(self, other) -> int` method and return the resulting `Ordering`.
+    /// Shared by ordering operators (`struct_ordering`) and `list.sort()` over Comparable structs.
+    /// Mirrors `interp::struct_compare`.
+    fn struct_compare(&mut self, l: Value, r: Value, span: Span) -> Result<std::cmp::Ordering, RuntimeError> {
         let Value::Obj(h) = l else { unreachable!() };
         let Obj::Struct { name, .. } = self.heap.get(h).clone() else { unreachable!() };
         let def = self
@@ -710,21 +726,37 @@ impl Vm {
             self.err(format!("struct '{name}' has no 'compare' method (needed to order its values)"), span)
         })?;
         let home = self.module_objs[def.module_idx];
-        let ord = match self.run_proto(proto, home, None, vec![l, r], true, false, span)? {
-            Value::Int(n) => n.cmp(&0),
-            other => {
-                return Err(self.err(format!("compare() must return int, got {}", self.type_name(other)), span))
+        match self.run_proto(proto, home, None, vec![l, r], true, false, span)? {
+            Value::Int(n) => Ok(n.cmp(&0)),
+            other => Err(self.err(format!("compare() must return int, got {}", self.type_name(other)), span)),
+        }
+    }
+
+    /// Stable merge sort of a list of Comparable structs, ordering via each struct's `compare`.
+    /// (Primitive lists use the faster `value_order`.) Mirrors `interp::merge_sort_structs`.
+    fn merge_sort_structs(&mut self, mut xs: Vec<Value>, span: Span) -> Result<Vec<Value>, RuntimeError> {
+        let n = xs.len();
+        if n <= 1 {
+            return Ok(xs);
+        }
+        let right = xs.split_off(n / 2);
+        let left = self.merge_sort_structs(xs, span)?;
+        let right = self.merge_sort_structs(right, span)?;
+        let mut out = Vec::with_capacity(n);
+        let (mut li, mut ri) = (0, 0);
+        while li < left.len() && ri < right.len() {
+            // `<= Equal` keeps the left element first on ties → stable.
+            if self.struct_compare(left[li], right[ri], span)?.is_le() {
+                out.push(left[li]);
+                li += 1;
+            } else {
+                out.push(right[ri]);
+                ri += 1;
             }
-        };
-        let b = match op {
-            Op::Lt => ord.is_lt(),
-            Op::LtEq => ord.is_le(),
-            Op::Gt => ord.is_gt(),
-            Op::GtEq => ord.is_ge(),
-            _ => unreachable!(),
-        };
-        self.push(Value::Bool(b));
-        Ok(())
+        }
+        out.extend_from_slice(&left[li..]);
+        out.extend_from_slice(&right[ri..]);
+        Ok(out)
     }
 
     fn compare(&self, l: Value, r: Value) -> Option<std::cmp::Ordering> {
@@ -1248,11 +1280,20 @@ impl Vm {
                 "sort" => {
                     self.arity_err("sort", args, 0, span)?;
                     // In place, ascending. Checker guarantees a homogeneous orderable element type.
-                    // Str elements live on the heap, so the comparator needs `&self.heap` — which
-                    // would conflict with `get_mut`. Clone the elements out, sort (no alloc/closure
-                    // → no GC), then write back. `value_order` reads strings via `self.heap`.
-                    let mut elems = items.clone();
-                    elems.sort_by(|a, b| self.value_order(*a, *b));
+                    // A list of Comparable structs orders via each struct's `compare` (engine
+                    // re-entry, so a merge sort that holds `&mut self`); primitives use the faster
+                    // `value_order`. Str elements live on the heap, so `value_order` needs
+                    // `&self.heap` — clone the elements out, sort (no alloc/closure → no GC for the
+                    // primitive path), then write back.
+                    let is_struct =
+                        matches!(items.first(), Some(Value::Obj(hh)) if matches!(self.heap.get(*hh), Obj::Struct { .. }));
+                    let elems = if is_struct {
+                        self.merge_sort_structs(items.clone(), span)?
+                    } else {
+                        let mut elems = items.clone();
+                        elems.sort_by(|a, b| self.value_order(*a, *b));
+                        elems
+                    };
                     let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
                     *items = elems;
                     Ok(Value::Nil)
@@ -2680,6 +2721,24 @@ main()";
     }
 
     #[test]
+    fn sort_over_comparable_structs_on_vm() {
+        let src = "\
+struct P:
+    n: int
+    t: str
+    fn compare(self, o: P) -> int:
+        return self.n - o.n
+    fn show(self) -> str:
+        return self.t + str(self.n)
+xs := [P(3, \"c\"), P(1, \"a\"), P(2, \"b\"), P(1, \"z\")]
+xs.sort()
+for x in xs:
+    print(x.show())
+";
+        assert_eq!(run(src), "a1\nz1\nb2\nc3\n");
+    }
+
+    #[test]
     fn struct_ordering_dispatches_to_compare_on_vm() {
         let src = "\
 struct P:
@@ -3107,16 +3166,23 @@ mod parity_tests {
     }
 
     #[test]
-    fn math_max_int_parity() {
-        // imports std.math, so it must go through the file/graph path (`parity_entry`).
-        let out = parity_entry("import std.math\nfn main():\n    print(math.max(3, 5))\n    print(math.min(3, 5))\n    print(math.abs(-5))\nmain()\n");
+    fn cmp_max_int_parity() {
+        // Generic min/max now live in std.cmp; abs stays in std.math. File/graph path required.
+        let out = parity_entry("import std.cmp\nimport std.math\nfn main():\n    print(cmp.max(3, 5))\n    print(cmp.min(3, 5))\n    print(math.abs(-5))\nmain()\n");
         assert_eq!(out, "5\n3\n5\n");
     }
 
     #[test]
-    fn math_max_float_parity() {
-        let out = parity_entry("import std.math\nfn main():\n    print(math.max(3.0, 5.0))\n    print(math.abs(-2.5))\nmain()\n");
+    fn cmp_max_float_parity() {
+        let out = parity_entry("import std.cmp\nimport std.math\nfn main():\n    print(cmp.max(3.0, 5.0))\n    print(math.abs(-2.5))\nmain()\n");
         assert_eq!(out, "5.0\n2.5\n");
+    }
+
+    #[test]
+    fn cmp_max_struct_parity() {
+        // The generic max over a Comparable struct must be byte-identical on both engines.
+        let src = "import std.cmp\nstruct P:\n    n: int\n    fn compare(self, o: P) -> int:\n        return self.n - o.n\nfn main():\n    print(cmp.max(P(2), P(9)).n)\n    print(cmp.min(P(2), P(9)).n)\nmain()\n";
+        assert_eq!(parity_entry(src), "9\n2\n");
     }
 
     #[test]
@@ -3305,14 +3371,12 @@ fn main():
     print(math.sqrt(16.0))
     print(math.pow(2.0, 10.0))
     print(math.abs(0.0 - 3.5))
-    print(math.min(2.0, 5.0))
-    print(math.max(2.0, 5.0))
     print(math.round(2.5))
     print(math.pi)
 main()";
         assert_eq!(
             parity_entry(src),
-            "2.0\n3.0\n4.0\n1024.0\n3.5\n2.0\n5.0\n3.0\n3.141592653589793\n"
+            "2.0\n3.0\n4.0\n1024.0\n3.5\n3.0\n3.141592653589793\n"
         );
     }
 
@@ -3805,8 +3869,21 @@ main()";
         assert_file_parity("examples/stats.chz");
     }
 
-    /// Gap #12 golden: `examples/knapsack.chz` fills an int DP table with `math.max` (now int+float
-    /// polymorphic). Runs on the VM, byte-matches `.expected`, and stays identical to the interp.
+    /// G3 golden: `examples/stdlib_cmp.chz` — `import std.cmp`, generic `min`/`max`/`clamp` over
+    /// int/float/str/struct, and `list.sort()` over Comparable structs. Byte-matches `.expected`
+    /// and stays identical on interp + VM.
+    #[test]
+    fn golden_stdlib_cmp_via_run_file() {
+        let path = fixture("examples/stdlib_cmp.chz");
+        let expected = std::fs::read_to_string(fixture("examples/stdlib_cmp.expected")).unwrap();
+        let (out, _err, res) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/stdlib_cmp.chz");
+    }
+
+    /// Golden: `examples/knapsack.chz` fills an int DP table with `cmp.max` (std.cmp generic over
+    /// Comparable). Runs on the VM, byte-matches `.expected`, and stays identical to the interp.
     #[test]
     fn golden_knapsack_via_run_file() {
         let path = fixture("examples/knapsack.chz");

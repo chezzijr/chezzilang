@@ -1,0 +1,36 @@
+# std.cmp + Comparable sort (M7-G3): the stdlib's polymorphism now runs on generics, not the old
+# ad-hoc numeric overload. `cmp.min`/`cmp.max`/`cmp.clamp` and `list.sort()` all work over any
+# Comparable type — int, float, str, AND user structs that implement `compare`.
+
+import std.cmp
+
+struct Money:
+    cents: int
+
+    fn compare(self, other: Money) -> int:
+        return self.cents - other.cents
+
+    fn show(self) -> str:
+        return "$" + str(self.cents)
+
+# cmp.min / cmp.max / cmp.clamp over primitives
+print(cmp.max(3, 7))
+print(cmp.min(3, 7))
+print(cmp.max("apple", "banana"))
+print(cmp.max(2.5, 1.5))
+print(cmp.clamp(15, 0, 10))
+print(cmp.clamp(-4, 0, 10))
+
+# ...and over a Comparable struct (dispatches to Money.compare)
+print(cmp.max(Money(150), Money(99)).show())
+
+# list.sort() over Comparable structs — stable ascending order
+wallet := [Money(150), Money(20), Money(99), Money(20)]
+wallet.sort()
+for m in wallet:
+    print(m.show())
+
+# primitive sort still works
+nums := [5, 2, 8, 1]
+nums.sort()
+print(nums)

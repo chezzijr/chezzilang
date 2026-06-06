@@ -394,10 +394,13 @@ script's own dir is root. `std.*` is reserved (stdlib). `a.b.c` → `<root>/a/b/
 Always available (no import): `print`, `len`, `range`, `int()`, `str()`, `float()`,
 `ord(s)→int` (first codepoint), `chr(n)→str` (codepoint → 1-char string), plus methods on core types.
 
-`std.math` `abs`/`min`/`max` are int+float polymorphic (int args → int, float args → float; no
-mixing); the rest of `std.math` is float-only.
+`std.math.abs` is int+float polymorphic (int → int, float → float). `min`/`max`/`clamp` live in
+**`std.cmp`** as generic `[T: Comparable]` functions — they work on int, float, str, **and any
+struct that implements `compare`** (the old numeric-only `std.math.min`/`max` were replaced by these
+in M7). `list.sort()` is likewise Comparable: it sorts lists of int/float/str or of any struct with
+a `compare` method.
 
-Importable: `std.io`, `std.math`, `std.str`, `std.os`. (Later: `std.list`, `std.map`, `std.json`, `std.time`.)
+Importable: `std.io`, `std.math`, `std.str`, `std.cmp`, `std.os`. (Later: `std.list`, `std.map`, `std.json`, `std.time`.)
 
 ---
 

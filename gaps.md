@@ -320,8 +320,11 @@ nullary variants (`Cons(h, None)`) stay unsupported (clear checker error); **mat
   structural **protocols** (type-erased; all work in the checker, runtime barely changed). Prebuilt
   `Comparable` wires `< <= > >=` to a user `compare` method (the sole operator overload; `==`/`!=`
   stay structural). See `examples/generics.chz`, `examples/generic_structs.chz`, `docs/syntax.md`
-  §7b. Not yet: explicit call-site type args (`max[int](…)`), generic enums, multi-bound `T: A + B`,
-  a `Hashable`/`Display` protocol — none currently needed.
+  §7b. **M7-G3** then unified the stdlib onto it: `min`/`max`/`clamp` are generic `[T: Comparable]`
+  functions in pure-Chezzi `std.cmp` (native numeric `std.math.min`/`max` + the `numeric_poly` hack
+  removed; `abs` stays native), and `list.sort()` widened to any Comparable element. See
+  `examples/stdlib_cmp.chz`. Not yet: explicit call-site type args (`max[int](…)`), generic enums,
+  multi-bound `T: A + B`, a numeric protocol (would let `abs`/`+`/`-` unify too), `Hashable`/`Display`.
 - **Match guards** (`pattern if cond:`) and **range patterns** (`1..10:`) (extend #15): guards are the
   general mechanism (subsume range / less-than / greater-than); revisit when needed.
 - **A real `char` type / `s.chars()`** (extends #10): `ord`/`chr` cover the 80/20.

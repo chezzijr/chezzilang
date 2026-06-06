@@ -106,7 +106,10 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 - **Builtins (no import):** `print`, `len`, `range`, casts (`int()`/`str()`/`float()`),
   core-type methods (`s.upper()`, `xs.push()`, `m.get()`).
 - **Std modules v1 (shipped, M6c):** `std.math`/`std.io`/`std.os` (native-Rust via the FFI seam),
-  `std.str` (written in Chezzi — dogfooding). Imported with `import std.math` / `import f from std.io`.
+  `std.str` + `std.cmp` (written in Chezzi — dogfooding; `std.cmp` adds M7-G3). Imported with
+  `import std.math` / `import f from std.io`. `std.cmp` holds generic `min`/`max`/`clamp`
+  (`[T: Comparable]`); `list.sort()` is likewise Comparable. (`std.math.min`/`max` were retired into
+  `std.cmp`; `abs` stays native.)
 - **Later:** `std.list`, `std.map`, `std.json`, `std.time`.
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 deferred.** Because Chezzi is written in Rust, the

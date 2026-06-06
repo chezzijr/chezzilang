@@ -158,14 +158,11 @@ fn native_module_sig(name: &str) -> ModuleSig {
     };
     match name {
         "std.math" => {
-            // abs/min/max are numeric-polymorphic (int args → int, float args → float); the
-            // `FnSig` here only fixes their arity — `infer_numeric_poly` does the real typing.
+            // `abs` is numeric-polymorphic (int args → int, float args → float); the `FnSig` here
+            // only fixes its arity — `infer_numeric_poly` does the real typing. (`min`/`max` moved
+            // to `std.cmp` as generic `[T: Comparable]` functions, M7-G3.)
             func("abs", vec![Ty::Float], Ty::Float);
-            func("min", vec![Ty::Float, Ty::Float], Ty::Float);
-            func("max", vec![Ty::Float, Ty::Float], Ty::Float);
             sig.numeric_poly.insert("abs".into());
-            sig.numeric_poly.insert("min".into());
-            sig.numeric_poly.insert("max".into());
             func("floor", vec![Ty::Float], Ty::Float);
             func("ceil", vec![Ty::Float], Ty::Float);
             func("round", vec![Ty::Float], Ty::Float);
@@ -1882,6 +1879,11 @@ impl Checker {
                     return self.infer_numeric_poly(method, arity, args, span);
                 }
                 if let Some(fsig) = fsig {
+                    // A generic module function (`cmp.max`): infer its type parameters from the
+                    // arguments, enforce bounds, and substitute into the return type.
+                    if !fsig.type_params.is_empty() {
+                        return self.infer_generic_call(method, &fsig, args, span);
+                    }
                     self.check_args(method, &fsig.params, args, span);
                     return fsig.ret;
                 }
@@ -1938,6 +1940,22 @@ impl Checker {
                     let elem = (**elem).clone();
                     return self.infer_list_hof(method, &elem, args, span);
                 }
+                // `sort()` works on any list whose element is Comparable: the scalar orderables
+                // (int/float/str) OR a struct that satisfies the `Comparable` protocol. The runtime
+                // dispatches the struct case to each element's `compare`. Handled here (not in the
+                // fixed `list_method_sig` table) because it needs `self.satisfies`.
+                if method == "sort" {
+                    self.check_arity("sort", 0, args, span);
+                    let elem = (**elem).clone();
+                    if is_orderable(&elem) || elem.is_unknown() || self.satisfies(&elem, "Comparable").is_ok() {
+                        return Ty::Nil;
+                    }
+                    self.error(
+                        span,
+                        format!("sort() requires a list of Comparable values (int, float, str, or a struct with a `compare` method), found list[{elem}]"),
+                    );
+                    return Ty::Nil;
+                }
                 if let Some(sig) = list_method_sig(method, elem) {
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
@@ -1945,8 +1963,6 @@ impl Checker {
                 self.infer_all(args);
                 if method == "sum" {
                     self.error(span, format!("sum() requires a numeric list, found list[{elem}]"));
-                } else if method == "sort" {
-                    self.error(span, format!("sort() requires a list of int, float, or str, found list[{elem}]"));
                 } else {
                     self.error(span, format!("type {obj_ty} has no method '{method}'"));
                 }
@@ -2529,7 +2545,8 @@ fn list_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
         "sum" if elem.is_numeric() || elem.is_unknown() => (vec![], elem.clone()),
         // `sort` mutates in place (returns nil); only orderable element types (int/float/str).
         // Unknown is tolerated (empty/unannotated list). Non-orderable is rejected at the call site.
-        "sort" if is_orderable(elem) || elem.is_unknown() => (vec![], Ty::Nil),
+        // `sort` is handled in `infer_method_call` (it needs `self.satisfies` to allow Comparable
+        // structs), so it never reaches this table.
         _ => return None,
     };
     Some(FnSig::plain(params, ret))

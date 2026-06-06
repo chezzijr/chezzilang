@@ -3,10 +3,10 @@
 # Showcases nested mutable collections: a `list[list[int]]` DP table built with push, then
 # filled in place with `dp[i][w] = ...` (nested index assignment — gaps #1 reaching two levels).
 #
-# Gap #12 fixed: `math.max` is now int+float polymorphic, so the DP recurrence reads
-# `dp[i][w] = math.max(without, with_it)` directly over the int table — no hand-rolled `if a > b`.
+# `cmp.max` (std.cmp, generic over Comparable) handles the int DP recurrence directly:
+# `dp[i][w] = cmp.max(without, with_it)` over the int table — no hand-rolled `if a > b`.
 
-import std.math
+import std.cmp
 
 fn build_table(rows: int, cols: int) -> list[list[int]]:
     dp := []
@@ -32,7 +32,7 @@ fn main():
             without := dp[i - 1][w]
             if wi <= w:
                 with_it := dp[i - 1][w - wi] + vi
-                dp[i][w] = math.max(without, with_it)   # int max — gap #12
+                dp[i][w] = cmp.max(without, with_it)   # generic int max (std.cmp)
             else:
                 dp[i][w] = without
 

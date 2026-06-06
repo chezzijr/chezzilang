@@ -12,13 +12,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 > **Language gaps round 2 (#10–#15): ✅ ALL DONE.** See the section below.
 
-> **M7 — generics + structural protocols.** ✅ **G1 + G2 DONE.** Type-erased generics (all work
+> **M7 — generics + structural protocols.** ✅ **G1 + G2 + G3 DONE.** Type-erased generics (all work
 > in the checker; both runtimes barely change). **G1:** generic functions (`fn max[T: Comparable]`),
 > Go-style structural `protocol`s, prebuilt `Comparable` wiring `< <= > >=` to a user `compare`
 > method. **G2:** generic structs (`Pair[A, B]`, `Stack[T]`) — `Ty::Struct` carries type args,
 > field/method types substitute the struct's params, type args inferred at construction or written
 > explicitly. Goldens `examples/generics.chz` + `examples/generic_structs.chz` are byte-identical
 > on interp + VM; grammar + conformance corpus updated.
+> **G3:** stdlib unified onto the new system — `min`/`max`/`clamp` are now generic
+> `[T: Comparable]` functions in a new pure-Chezzi **`std.cmp`** module (the old numeric-only native
+> `std.math.min`/`max` + their `numeric_poly` hack removed; `abs` stays native), and `list.sort()`
+> widened to any Comparable element (incl. structs, via each engine's `struct_compare` + a stable
+> merge sort). Also fixed module-qualified generic calls (`cmp.max`). Golden
+> `examples/stdlib_cmp.chz` byte-identical on both engines.
 
 > **M6 — stdlib + pipe `|>` + core-type methods.** ✅ **M6a + M6b + M6c DONE.** The Level-2 native
 > FFI seam (`NativeFn` + `Host` trait) was scheduled and built: each binding is written once and
