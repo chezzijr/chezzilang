@@ -10,10 +10,37 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **Language gaps round 2 (#10–#15): ✅ ALL DONE.** See the section below. Next: pick the next
+> milestone (Stretch: Cranelift backend) or the deferred items in `gaps.md` (generics / match guards).
+
 > **M6 — stdlib + pipe `|>` + core-type methods.** ✅ **M6a + M6b + M6c DONE.** The Level-2 native
 > FFI seam (`NativeFn` + `Host` trait) was scheduled and built: each binding is written once and
 > runs on both engines. Ships `std.math`/`std.io`/`std.os` (native) and `std.str` (pure Chezzi).
-> **Next: M6 complete → see roadmap for the next milestone (Stretch: Cranelift backend).**
+
+## Round 2 — language gaps #10–#15  ✅ DONE
+
+A second probing pass (real DSA + apps) surfaced six gaps; all fixed **TDD**, both engines in
+lockstep, each with a golden `examples/*.chz` run under interp + VM. **660 tests green** (incl.
+parity + `cargo test conformance`), clean `cargo clippy`. Details + fix notes in `gaps.md`.
+
+- ✅ **#11 `sort_by`** — `xs.sort_by(fn(T,T)->int)`, stable, in place. A merge sort drives the
+  fallible/re-entrant comparator (not `slice::sort_by`); the VM permutes `usize` indices with the
+  source list GC-rooted (gc-stress tested). `examples/sort_by.chz`.
+- ✅ **#10 `ord`/`chr`** — two builtins in the `len`/`range` lockstep tables (interp + compiler + vm
+  + checker). `examples/cipher.chz` (ROT13 + digit parsing).
+- ✅ **#12 int+float math** — `abs`/`min`/`max` numeric-polymorphic (int→int, float→float, mixed
+  rejected) via `Host::arg_is_int` + checker `ModuleSig::numeric_poly`. `examples/knapsack.chz`.
+- ✅ **#14 map `for`** — `For.vars: Vec<String>`; `for k in m` (key) and `for k, v in m` (entry).
+  VM normalises the iterand (list→clone, map→keys) via `ListClone`. `examples/word_freq.chz`.
+- ✅ **#15 nested/tuple match** — recursive `Pattern` (`Tuple`/`Ident` + `Vec<Pattern>` bindings) +
+  `MatchKind::Tuple`; recursive lowering reuses `MatchArm`/`GetField`/`Eq` (no new opcodes).
+  `examples/match_nested.chz`.
+- ✅ **#13 bitwise** — `& | ^ << >>` (int-only) across lexer→parser→checker→both engines +
+  `grammar.bnf`; Python precedence; shift-out-of-range is a runtime error (no panic).
+  `examples/bits.chz`.
+
+**Deferred** (recorded in `gaps.md`): generics / operator-overloading trait (extends #12), match
+guards + range patterns (extend #15), a real `char` type (extends #10), `sort_by_key` (sugar on #11).
 
 > **Deferred within M6c (small, intentional):** `std.os.exit(code)` — a correct cooperative exit
 > needs an exit-code channel threaded through both run drivers + the CLI; deferred to avoid a
@@ -447,8 +474,24 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 
 ---
 
+## Gaps — round 2 (open, document-only)
+
+Second probing pass: wrote real DSA + apps to stress the post-round-1 language. Five new programs
+run green and byte-identical on **both** engines — `examples/bst.chz`, `linked_list.chz`,
+`knapsack.chz`, `calc.chz`, `word_freq.chz` (+ `.expected` goldens) — and surfaced six new gaps,
+written up in `gaps.md` (#10–#15) with quoted, observed errors. Headlines: **#10 no char access**
+(no `ord`/`chr`; `s[i]` is a 1-char str, not a codepoint) and **#11 no `sort_by`** are real-app
+blockers; #12 (int `min`/`max`/`abs`), #13 (bitwise ops), #14 (map iteration), #15 (nested match
+patterns) are friction. Confirmed working 🟢: recursive/self-referential structs (tree + linked
+list), mutable `self` across method calls, nested-list DP, empty-map `K,V` inference. No `src/`
+changes this pass — surfacing only; full 569-test suite still green.
+
 ## Learning log
 
 Jot what clicked / what confused you — future-you and Claude both use this.
 
-- _(empty — add notes as you go)_
+- Recursive structs "just work" via the checker's two-pass name collection — trees and linked lists
+  need no special support, only `Node?` child fields + a `match` per step.
+- The two loudest missing features for everyday code: `sort_by` (ranking / priority queues /
+  Dijkstra) and `ord`/`chr` (any char-level parsing or cipher). Both are small additions — the HOF
+  `invoke_value` plumbing and the native-seam dispatch already exist.

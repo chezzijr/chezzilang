@@ -12,10 +12,15 @@ Legend: 🔴 blocks real apps · 🟡 notable friction · 🟢 works (recorded s
 
 Last updated: 2026-06-06. Baseline: post-M6c (native stdlib seam).
 
-> **Status: all flagged gaps (#1–#9) are now ✅ FIXED.** Both engines (tree-walk `interp` + bytecode
+> **Status: round-1 gaps (#1–#9) are all ✅ FIXED.** Both engines (tree-walk `interp` + bytecode
 > `vm`) stay in lockstep, verified by the parity + conformance suites (569 tests green). Each gap
-> landed TDD with golden `examples/*.chz` run under both engines. The one explicit deferral is
-> `sort_by` (HOF comparator) — expressible via `fold` meanwhile.
+> landed TDD with golden `examples/*.chz` run under both engines.
+>
+> **Round 2 (#10–#15): ✅ ALL FIXED.** A second probing pass — real DSA + apps (`examples/bst.chz`,
+> `linked_list.chz`, `knapsack.chz`, `calc.chz`, `word_freq.chz`) — surfaced six new gaps. Each was
+> observed on both engines (exact errors quoted below), not inferred. All six now land TDD, both
+> engines in lockstep, with golden `examples/*.chz` (sort_by, cipher, knapsack, word_freq,
+> match_nested, bits) committed and run under both engines. 660 tests green (parity + conformance).
 
 ---
 
@@ -85,6 +90,46 @@ keys restricted to `int/str/bool`. `m[k]` read/`m[k]=v` write reuse the index op
 keep the exact `expected int` error; map does key lookup). `Heap::children` traces keys **and** values
 (gc-stress tested). `m[k]` missing → runtime error; `m.get(k)` → `Option[V]`. See `examples/map.chz`.
 
+### 10. ~~No character access — no `ord` / `chr`~~ ✅ FIXED — `ord(s)→int`, `chr(n)→str` builtins
+```chezzi
+print(ord("a"))   # type error (line 2, col 11): unknown name 'ord'
+print(chr(65))    # type error (line 2, col 11): unknown name 'chr'
+s := "abc"
+c := s[0]         # c == "a"  (a 1-char str, NOT a codepoint)
+print(int(c))     # runtime error: int(): cannot parse 'a' as an integer
+```
+**Probe:** `examples/calc.chz` — a recursive-descent evaluator that *works*, but only because the
+input is pre-tokenised with spaces (`"3 + 4 * 2"` → `.split(" ")`). A Caesar cipher / ROT13, a JSON
+or CSV scanner, base conversion, run-length encoding, any "classify this character" loop — all dead.
+**Blocks:** real lexers/tokenisers, ciphers, char-frequency, parsing `"3+4*2"` without spaces. You
+can *read* a character (`s[i]` → 1-char str) and compare it (`c == "+"`), but you cannot map it to a
+number or shift it: there is no `'a'..'z'`, no `ord`/`chr`, no `c.is_digit()`, no digit value.
+**Fixed:** two builtins — `ord(s: str) -> int` (first codepoint, errors on empty) and
+`chr(n: int) -> str` (errors on an invalid codepoint) — registered in the same lockstep tables as
+`len`/`range` (interp `builtins.rs` `is_builtin`/`call` + compiler `is_builtin` + vm `do_builtin` +
+checker `infer_named_call`). Enables ciphers, scanners, digit classification (`ord(c) - ord("0")`).
+A real `char` type / `s.chars()` stays deferred (bigger type-system change). See `examples/cipher.chz`.
+
+### 11. ~~No `sort_by` / comparator~~ ✅ FIXED — `xs.sort_by(fn(T, T) -> int)`, stable, in place
+```chezzi
+xs.sort_by(fn(a: int, b: int) -> int: b - a)
+# type error (line 3, col 5): type list[int] has no method 'sort_by'
+```
+**Probe:** `examples/word_freq.chz` — counting words into `map[str,int]` is easy; printing the
+**top-N by count** is not. With no comparator you cannot sort `(word, count)` pairs, so the program
+falls back to a repeated linear argmax (O(n²)) with a `used` set. A Dijkstra / Prim shortest-path
+hits the same wall (no way to keep a frontier ordered by distance, no priority queue), as does
+"sort these structs by a field" or "sort strings by length".
+**Blocks:** top-N ranking, leaderboards, priority queues, Dijkstra/Prim/Huffman, any non-natural
+ordering or sort-by-key. (Already noted as the lone round-1 deferral; round 2 confirms it is the
+single most-felt missing method — promote from "deferred" to a real 🔴.)
+**Fixed:** `xs.sort_by(fn(T, T) -> int)` (negative = a before b) added to the HOF path in all three
+engines (checker `infer_list_hof`, interp `eval_list_sort_by`, vm `list_sort_by`). Because the
+comparator is fallible and re-enters the engine, a **stable merge sort** drives it rather than
+`slice::sort_by`; the VM permutes plain `usize` indices while the source list stays GC-rooted on the
+operand stack (gc-stress tested). `sort_by_key` deferred (sugar). See `examples/sort_by.chz`,
+`examples/word_freq.chz` (top-N by count).
+
 ---
 
 ## 🟡 Notable friction
@@ -145,6 +190,78 @@ exposes it to `list[int]`/struct fields, where it can quietly poison an int arra
 `int` slot (`widens` guard), mirroring the strict `Eq`/`compatible` path. Applies to all targets
 (bare vars + index + field). Widening the other way (`int` into a `float` slot) stays allowed.
 
+### 12. ~~`std.math` `abs` / `min` / `max` are float-only~~ ✅ FIXED — int+float polymorphic
+```chezzi
+import std.math
+print(math.max(3, 5))   # type error: argument 1 of 'max': expected float, found int
+print(math.abs(-5))     # type error: argument 1 of 'abs': expected float, found int
+```
+**Probe:** `examples/knapsack.chz` — the DP recurrence wants `max(without, with_it)` over an int
+table, but `std.math.max` only takes floats, so every `max`/`min` is spelled out as a 4-line
+`if a > b: a else: b`. `abs` on an int (gcd, distance, "how far off") needs the same hand-rolling or
+a `float(...)`/`int(...)` round-trip that risks precision and reads badly.
+**Blocks:** clean int DSA — DP, gcd, Manhattan/abs distance, clamping. Not *blocking* (workaround is
+trivial), but it is friction in the most common numeric code.
+**Fixed:** `abs`/`min`/`max` are now numeric-polymorphic (int args → int, float args → float; a
+mixed int/float call is rejected, consistent with no implicit widening). The native seam grew a
+`Host::arg_is_int` and the fns branch to `NativeRet::Int`/`Float`; the checker special-cases the
+three (`ModuleSig::numeric_poly` + `infer_numeric_poly`). Other `std.math` fns stay float-only.
+Full generics / an ordering trait for user types stay deferred (future milestone). See
+`examples/knapsack.chz` (DP table uses `math.max`).
+
+### 13. ~~No bitwise operators~~ ✅ FIXED — `&` `|` `^` `<<` `>>` (int-only)
+```chezzi
+print(5 ^ 3)   # resolve error (line 2): lex error: unexpected character '^'
+```
+**Probe:** "find the single number" (XOR-fold a list where every value but one appears twice) — the
+canonical O(n)/O(1) trick is unwritable. So are bitmask DP, subset enumeration (`1 << n`), bitset
+sieves, hashing, parity/popcount, and packing flags.
+**Blocks:** bit-manipulation DSA and any low-level integer work. The lexer doesn't even tokenise the
+symbols (`^`, `<<`, `>>` fail at lex time; `&`/`|` would too).
+**Fixed:** new lexer tokens (`Amp`/`Caret`/`BitOr`/`Shl`/`Shr`; bare `|` now lexes, `|>` still the
+pipe) + `BinaryOp` variants + int-only checker rules + interp/vm ops, plus `docs/grammar.bnf` (drift
+-checked by conformance). Precedence follows Python (comparison looser than `|`<`^`<`&`<shifts<add).
+A shift amount outside `0..64` is a runtime error in both engines (no Rust panic). See
+`examples/bits.chz` (XOR-fold single-number + bitmask).
+
+### 14. ~~Maps aren't iterable in a `for` loop~~ ✅ FIXED — `for k in m` and `for k, v in m`
+```chezzi
+m := {"a": 1, "b": 2}
+for k in m:        # type error: cannot iterate over map[str, int]
+    print(k)
+for k in m.keys(): # required form
+    print(k)
+```
+**Probe:** `examples/word_freq.chz` iterates `counts.keys()`. Minor, but every map walk is wordier
+than range/list iteration, and there is no `for k, v in m:` key+value form — you re-`m[k]` (or
+`m.get(k)`) inside the loop for the value.
+**Blocks:** nothing (`.keys()` is a clean workaround), pure ergonomics.
+**Fixed:** `StmtKind::For` now carries `vars: Vec<String>`; the parser reads a comma-separated list,
+the checker (`for_bindings`) binds the **key** for one var and **key+value** for two (two-var form
+requires a map). The VM normalises the iterand with `ListClone` (list → clone, map → keys) and looks
+up the value via the existing `GetIndex`; no `continue`/`break` retargeting changes. See
+`examples/word_freq.chz`.
+
+### 15. ~~`match` has no nested / tuple patterns~~ ✅ FIXED — nested + tuple patterns
+```chezzi
+t := (1, 2)
+match t:
+    (a, b): print(a + b)   # parse error (line 3, col 9): expected identifier, found '('
+```
+**Probe:** `examples/bst.chz` / `linked_list.chz` — every step down a tree/list is a full
+`match root: None: ... Some(n): ...` block; you cannot write `Some((x, y))`, `Cons(h, Some(t))`, or
+match a tuple's shape directly. Tuple destructuring works in `let` (`a, b := pair()`) but not in a
+`match` arm.
+**Blocks:** nothing outright (nest `match`es or destructure after binding), but recursive
+data-structure code is markedly more verbose than the Python/Rust feel the language targets.
+**Fixed:** `Pattern` generalised — variant `bindings` became `Vec<Pattern>`, plus `Pattern::Tuple`
+and `Pattern::Ident` (a sub-position binding name). Parser recurses (`parse_subpattern`/
+`parse_tuple_pattern`); checker recurses (`bind_subpattern`, new `MatchKind::Tuple`); interp uses a
+recursive `try_bind`; the compiler lowers via a recursive `emit_pattern` reusing `MatchArm`
+(variant), `GetField` (tuple element), and `Eq`+`JumpIfFalse` (literal) — no new opcodes. Nested
+nullary variants (`Cons(h, None)`) stay unsupported (clear checker error); **match guards** and
+**range patterns** stay deferred (future). See `examples/match_nested.chz`.
+
 ---
 
 ## 🟢 Verified working (so we don't re-flag)
@@ -158,6 +275,19 @@ exposes it to `list[int]`/struct fields, where it can quietly poison an int arra
 - **`Result` / `Option` + `?`**, exhaustive-match checking, deep recursion, integer overflow → error
   (not wrap), int division truncation, `%` on negatives.
 - **`std.math` / `std.io` / `std.os`** native modules and **`std.str`** (Chezzi), on both engines.
+- **Recursive / self-referential structs** — `struct Node: val: int; left: Node?; right: Node?` and
+  `struct Cell: val: int; next: Cell?` build, walk, and GC fine (the checker's two-pass name
+  collection resolves the self-reference). BST insert/in-order/height + linked-list reverse run
+  identically on both engines. See `examples/bst.chz`, `examples/linked_list.chz`.
+- **Mutable `self` across method calls** — a method doing `self.pos += 1` persists for the caller
+  (struct is one heap object by reference); recursive-descent parser cursor relies on it.
+  See `examples/calc.chz`.
+- **Nested-list DP** — `list[list[int]]` built with `push`, filled with two-level
+  `dp[i][w] = ...` index assignment. See `examples/knapsack.chz`.
+- **Empty map literal infers `K,V` from later use** — `m := {}` then `m["a"] = 1` type-checks
+  (no annotation needed).
+- **Space-tokenised recursive-descent parsing** with mutually-recursive struct methods
+  (`expr → term → factor → expr`). See `examples/calc.chz`.
 
 ---
 
@@ -173,3 +303,21 @@ exposes it to `list[int]`/struct fields, where it can quietly poison an int arra
 6. ~~**#7 (break/continue)**~~ ✅ — `Flow`/compiler `LoopCtx`; for-`continue` lands on the increment.
 7. ~~**#5 (map type)**~~ ✅ — `{}` literals, `Obj::Map` insertion-ordered, index ops + methods, GC.
 8. ~~**#8 (tuples + multi-return + destructuring)**~~ ✅ — `(a,b)`, `(int,int)`, `a,b := …`, `.0`.
+
+## Resolution order (round 2 — all done)
+
+1. ~~**#11 (`sort_by`)**~~ ✅ — stable merge sort over a re-entrant comparator, GC-rooted on the VM.
+2. ~~**#10 (`ord` / `chr`)**~~ ✅ — two builtins in the `len`/`range` lockstep tables.
+3. ~~**#12 (int `min`/`max`/`abs`)**~~ ✅ — numeric-polymorphic native fns + checker `numeric_poly`.
+4. ~~**#14 (map iteration)**~~ ✅ — `For.vars: Vec<String>`; `for k` / `for k, v` over a map.
+5. ~~**#15 (nested match patterns)**~~ ✅ — recursive `Pattern` + `MatchKind::Tuple`; no new opcodes.
+6. ~~**#13 (bitwise ops)**~~ ✅ — lexer→parser→checker→both engines + `grammar.bnf` (conformance).
+
+## Deferred to future milestones
+
+- **Generics / operator overloading** (extends #12): `max[T]` over user types needs parametric
+  polymorphism + an ordering trait. Large; the round-2 ad-hoc int/float overload is forward-compatible.
+- **Match guards** (`pattern if cond:`) and **range patterns** (`1..10:`) (extend #15): guards are the
+  general mechanism (subsume range / less-than / greater-than); revisit when needed.
+- **A real `char` type / `s.chars()`** (extends #10): `ord`/`chr` cover the 80/20.
+- **`sort_by_key`** (sugar on #11).

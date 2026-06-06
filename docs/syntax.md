@@ -72,13 +72,20 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 | 3 | `not` `-` (unary) | |
 | 4 | `*` `/` `%` | |
 | 5 | `+` `-` | |
-| 6 | `<` `<=` `>` `>=` | |
-| 7 | `==` `!=` | |
-| 8 | `and` | |
-| 9 | `or` | |
-| 10 | `\|>` | pipe (§11), left-assoc |
+| 6 | `..` | range (end-exclusive) |
+| 7 | `<<` `>>` | bitwise shift (int-only) |
+| 8 | `&` | bitwise and (int-only) |
+| 9 | `^` | bitwise xor (int-only) |
+| 10 | `\|` | bitwise or (int-only) |
+| 11 | `<` `<=` `>` `>=` | |
+| 12 | `==` `!=` | |
+| 13 | `and` | |
+| 14 | `or` | |
+| 15 | `\|>` | pipe (§11), left-assoc |
 
-> This table is the contract for the Pratt parser in **M2**.
+> This table is the contract for the Pratt parser. Bitwise ops are **int-only** (a float operand is
+> a type error); the relative order follows Python (comparison looser than `\|` < `^` < `&` < shifts).
+> A shift amount outside `0..64` is a runtime error.
 
 ## 5. Functions  (M3)
 
@@ -117,8 +124,16 @@ for i in 0..10:        # range: 0..10 is 0 through 9 (end-exclusive)
 for item in items:     # iterate a list
     print(item)
 
+for k in counts:       # iterate a map → its keys (insertion order)
+    print(k)
+
+for k, v in counts:    # iterate a map's entries → key + value
+    print("{k}={v}")
+
 while cond:
     cond = step()
+
+# `break` exits the innermost loop; `continue` skips to the next iteration.
 ```
 
 ## 7. Structs  (M3)
@@ -160,6 +175,24 @@ match safe_div(10, 2):
     Ok(v):  print("got {v}")
     Err(e): print("failed: {e}")
 ```
+
+A scrutinee can also be an **int/str/bool** (literal arms + a required `_` wildcard) or a **tuple**.
+Patterns **nest**: a variant payload or tuple element may itself be a binding, a literal, a wildcard,
+a tuple, or another variant.
+
+```chezzi
+match point:                  # tuple scrutinee
+    (0, 0):  "origin"
+    (0, y):  "on the y axis"
+    (x, y):  "at {x},{y}"     # an all-binding tuple arm is irrefutable (exhaustive)
+
+match maybe_pair:             # nested: a tuple inside Some(...)
+    None:         print("none")
+    Some((a, b)): print(a + b)
+```
+
+(Nested **nullary** variants like `Cons(h, None)` aren't supported yet — nest a `match`. Match
+guards and range patterns are future additions.)
 
 ### `match` and `if` as expressions
 
@@ -247,7 +280,13 @@ s.contains("b")  ",".join(parts)  # join: separator.join(list[str])
 "a" + "b"        # concatenation
 ```
 
-List methods: `xs.push(x)` (mutates in place), `xs.len()`.
+List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.contains(v)`
+`xs.index_of(v)` `xs.sum()` `xs.sort()` (ascending, in place); higher-order `xs.map(f)`
+`xs.filter(p)` `xs.fold(init, f)`; and `xs.sort_by(fn(a, b) -> int)` — a custom comparator
+(negative = `a` before `b`), stable, in place.
+
+Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`; `m[k]`
+reads (errors on a missing key), `m[k] = v` inserts/updates. Iterate with `for k in m` / `for k, v in m`.
 
 ## 11. Pipe operator `|>`
 
@@ -281,7 +320,10 @@ script's own dir is root. `std.*` is reserved (stdlib). `a.b.c` → `<root>/a/b/
 ## 13. Standard library (v1)
 
 Always available (no import): `print`, `len`, `range`, `int()`, `str()`, `float()`,
-plus methods on core types.
+`ord(s)→int` (first codepoint), `chr(n)→str` (codepoint → 1-char string), plus methods on core types.
+
+`std.math` `abs`/`min`/`max` are int+float polymorphic (int args → int, float args → float; no
+mixing); the rest of `std.math` is float-only.
 
 Importable: `std.io`, `std.math`, `std.str`, `std.os`. (Later: `std.list`, `std.map`, `std.json`, `std.time`.)
 
