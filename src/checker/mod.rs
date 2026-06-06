@@ -743,6 +743,8 @@ impl Checker {
                     }
                     Ty::Enum(n.clone(), Vec::new())
                 }
+                // A protocol name used as a value type (existential), e.g. `Error`.
+                _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
                 _ => {
                     self.error(span, format!("unknown type '{n}'"));
                     Ty::Unknown
@@ -756,6 +758,9 @@ impl Checker {
             Type::Generic(n, args) => match (n.as_str(), args.as_slice()) {
                 ("list", [inner]) => Ty::list(self.resolve_type(inner, span)),
                 ("Result", [inner]) => Ty::result(self.resolve_type(inner, span)),
+                ("Result", [t, e]) => {
+                    Ty::result_e(self.resolve_type(t, span), self.resolve_type(e, span))
+                }
                 ("Option", [inner]) => Ty::option(self.resolve_type(inner, span)),
                 ("map", [k, v]) => {
                     let key = self.resolve_type(k, span);
@@ -863,7 +868,7 @@ impl Checker {
                 let declared = match ty {
                     Some(t) => {
                         let expected = self.resolve_type(t, span);
-                        if !compatible(&expected, &val_ty) {
+                        if !self.assignable(&expected, &val_ty) {
                             self.error(
                                 value.span,
                                 format!("cannot assign {val_ty} to variable of type {expected}"),
@@ -1062,7 +1067,7 @@ impl Checker {
     fn check_assign_value(&mut self, target_ty: &Ty, op: AssignOp, val_ty: &Ty, span: Span) {
         match op {
             AssignOp::Eq => {
-                if !compatible(target_ty, val_ty) {
+                if !self.assignable(target_ty, val_ty) {
                     self.error(span, format!("cannot assign {val_ty} to {target_ty}"));
                 }
             }
@@ -1100,7 +1105,7 @@ impl Checker {
                 let ty = self.infer(e);
                 if ret == Ty::Nil {
                     self.error(e.span, "function returns nothing, cannot return a value");
-                } else if !compatible(&ret, &ty) {
+                } else if !self.assignable(&ret, &ty) {
                     self.error(e.span, format!("expected return type {ret}, found {ty}"));
                 }
             }
@@ -1202,11 +1207,11 @@ impl Checker {
                     .collect();
                 MatchKind::Variants { label: name.clone(), variants }
             }
-            Ty::Result(inner) => MatchKind::Variants {
+            Ty::Result(ok, err) => MatchKind::Variants {
                 label: "Result".into(),
                 variants: HashMap::from([
-                    ("Ok".into(), vec![(**inner).clone()]),
-                    ("Err".into(), vec![Ty::Unknown]),
+                    ("Ok".into(), vec![(**ok).clone()]),
+                    ("Err".into(), vec![(**err).clone()]),
                 ]),
             },
             Ty::Option(inner) => MatchKind::Variants {
@@ -1255,9 +1260,9 @@ impl Checker {
                         .collect(),
                 )
             }
-            Ty::Result(inner) => Some(HashMap::from([
-                ("Ok".into(), vec![(**inner).clone()]),
-                ("Err".into(), vec![Ty::Unknown]),
+            Ty::Result(ok, err) => Some(HashMap::from([
+                ("Ok".into(), vec![(**ok).clone()]),
+                ("Err".into(), vec![(**err).clone()]),
             ])),
             Ty::Option(inner) => Some(HashMap::from([
                 ("Some".into(), vec![(**inner).clone()]),
@@ -1885,15 +1890,33 @@ impl Checker {
         let t = self.infer(inner);
         // The enclosing function must be able to early-return the Err/None. We allow Result/Option
         // (propagate) and Nil (top-level / `fn main()` — the interpreter unwinds it at the boundary).
-        match &self.current_ret {
-            Ty::Result(_) | Ty::Option(_) | Ty::Nil => {}
-            other => self.error(
-                span,
-                format!("'?' used in a function that returns {other}, not Result or Option"),
-            ),
-        }
+        let ret_err = match &self.current_ret {
+            Ty::Result(_, e) => Some((**e).clone()),
+            Ty::Option(_) | Ty::Nil => None,
+            other => {
+                self.error(
+                    span,
+                    format!("'?' used in a function that returns {other}, not Result or Option"),
+                );
+                None
+            }
+        };
         match t {
-            Ty::Result(inner) | Ty::Option(inner) => *inner,
+            Ty::Result(ok, err) => {
+                // Propagating an `Err` early-returns it as the enclosing function's error, so the
+                // inner error type must fit the enclosing one (Rust-like). Skip when the enclosing
+                // returns Option/Nil (no error slot to check against).
+                if let Some(re) = ret_err
+                    && !self.assignable(&re, &err)
+                {
+                    self.error(
+                        span,
+                        format!("'?' propagates error {err}, but the enclosing function's error type is {re}"),
+                    );
+                }
+                *ok
+            }
+            Ty::Option(inner) => *inner,
             Ty::Unknown => Ty::Unknown,
             other => {
                 self.error(span, format!("'?' expects Result or Option, found {other}"));
@@ -1976,7 +1999,7 @@ impl Checker {
         let ret_ty = match ret {
             Some(t) => {
                 let declared = self.resolve_type(t, body.span);
-                if !compatible(&declared, &body_ty) {
+                if !self.assignable(&declared, &body_ty) {
                     self.error(
                         body.span,
                         format!("closure body has type {body_ty}, but its return type is {declared}"),
@@ -2120,12 +2143,11 @@ impl Checker {
                 }
             }
             // Generic built-in constructors for Result / Option.
-            "Ok" => Some(Ty::result(self.one_arg(name, args, span))),
+            // `Ok(x)`: success type known, error type open (unifies with the declared `E`).
+            "Ok" => Some(Ty::result_e(self.one_arg(name, args, span), Ty::Unknown)),
             "Some" => Some(Ty::option(self.one_arg(name, args, span))),
-            "Err" => {
-                let _ = self.one_arg(name, args, span);
-                Some(Ty::result(Ty::Unknown))
-            }
+            // `Err(x)`: error type known (`typeof x`), success type open.
+            "Err" => Some(Ty::result_e(Ty::Unknown, self.one_arg(name, args, span))),
             _ => {
                 // Struct constructor?
                 if let Some((tps, fields)) =
@@ -2148,7 +2170,7 @@ impl Checker {
                     }
                     for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
                         let expected = subst(decl, &sub);
-                        if !compatible(&expected, actual) {
+                        if !self.assignable(&expected, actual) {
                             self.error(
                                 arg.span,
                                 format!("argument to '{name}' has type {actual}, expected {expected}"),
@@ -2190,7 +2212,7 @@ impl Checker {
                     }
                     for (decl, (actual, arg)) in v.payload.iter().zip(arg_tys.iter().zip(args)) {
                         let expected = subst(decl, &sub);
-                        if !compatible(&expected, actual) {
+                        if !self.assignable(&expected, actual) {
                             self.error(
                                 arg.span,
                                 format!("argument to '{name}' has type {actual}, expected {expected}"),
@@ -2254,6 +2276,23 @@ impl Checker {
                 }
                 self.infer_all(args);
                 self.error(span, format!("module '{mname}' has no member '{method}'"));
+                Ty::Unknown
+            }
+            // A protocol existential (e.g. `Error`): only the protocol's own methods are callable.
+            Ty::Protocol(pname) => {
+                let sig = self
+                    .protocols
+                    .get(pname)
+                    .and_then(|pinfo| pinfo.methods.iter().find(|(m, _)| m == method))
+                    .map(|(_, msig)| msig.clone());
+                if let Some(msig) = sig {
+                    // First param is the implicit receiver; explicit args correspond to params[1..].
+                    let expected = msig.params.get(1..).unwrap_or(&[]).to_vec();
+                    self.check_args(method, &expected, args, span);
+                    return msig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {pname} has no method '{method}'"));
                 Ty::Unknown
             }
             Ty::Struct(sname, targs) => {
@@ -2573,7 +2612,7 @@ impl Checker {
         for (i, arg) in args.iter().enumerate() {
             let at = self.infer(arg);
             if let Some(pt) = params.get(i)
-                && !compatible(pt, &at)
+                && !self.assignable(pt, &at)
             {
                 self.error(
                     arg.span,
@@ -2678,6 +2717,35 @@ impl Checker {
         self.satisfies(t, "Hashable").is_ok()
     }
 
+    /// Assignability with protocol-existential awareness. Like the free [`compatible`], but a
+    /// concrete type is assignable to a `Protocol(P)` slot iff it satisfies `P` — which needs the
+    /// protocol/struct registry, so it can't live in the context-free `compatible`. Recurses through
+    /// compound types so a nested existential (the `E` in `Result[T, Error]`) is checked structurally.
+    fn assignable(&self, expected: &Ty, actual: &Ty) -> bool {
+        use Ty::*;
+        match (expected, actual) {
+            (Unknown, _) | (_, Unknown) => true,
+            (Protocol(p), a) => self.satisfies(a, p).is_ok(),
+            (List(e), List(a)) | (Option(e), Option(a)) | (Set(e), Set(a)) => self.assignable(e, a),
+            (Result(et, ee), Result(at, ae)) => {
+                self.assignable(et, at) && self.assignable(ee, ae)
+            }
+            (Map(ek, ev), Map(ak, av)) => self.assignable(ek, ak) && self.assignable(ev, av),
+            (Struct(n, ea), Struct(m, aa)) | (Enum(n, ea), Enum(m, aa)) => {
+                n == m && ea.len() == aa.len() && ea.iter().zip(aa).all(|(x, y)| self.assignable(x, y))
+            }
+            (Tuple(e), Tuple(a)) => {
+                e.len() == a.len() && e.iter().zip(a).all(|(x, y)| self.assignable(x, y))
+            }
+            (Func { params: p1, ret: r1 }, Func { params: p2, ret: r2 }) => {
+                p1.len() == p2.len()
+                    && p1.iter().zip(p2).all(|(a, b)| self.assignable(a, b))
+                    && self.assignable(r1, r2)
+            }
+            _ => compatible(expected, actual),
+        }
+    }
+
     fn satisfies(&self, ty: &Ty, protocol: &str) -> Result<(), String> {
         let Some(pinfo) = self.protocols.get(protocol) else {
             return Err(format!("unknown protocol '{protocol}'"));
@@ -2693,6 +2761,18 @@ impl Checker {
         // through to the structural check (needs a `hash(self) -> int` method).
         if protocol == "Hashable" && matches!(ty, Ty::Int | Ty::Str | Ty::Bool) {
             return Ok(());
+        }
+        // `str` conforms to `Error` intrinsically (Go-style: its message is itself).
+        if protocol == "Error" && matches!(ty, Ty::Str) {
+            return Ok(());
+        }
+        // A protocol existential value satisfies a protocol iff it IS that protocol.
+        if let Ty::Protocol(p) = ty {
+            return if p == protocol {
+                Ok(())
+            } else {
+                Err(format!("type {ty} does not satisfy {protocol}"))
+            };
         }
         // The numeric operator protocols are satisfied intrinsically by int/float (their `+ - *` are
         // the primitive ops), so a `[T: Add + Mul]` generic works over numbers as well as structs.
@@ -2795,7 +2875,7 @@ impl Checker {
         // two positions with conflicting types, e.g. `max(1, "x")`).
         for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &subst_map);
-            if !compatible(&expected, actual) {
+            if !self.assignable(&expected, actual) {
                 self.error(
                     arg.span,
                     format!("argument to '{name}' has type {actual}, expected {expected}"),
@@ -2826,6 +2906,14 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             // receiver `self` (Unknown) only, returning str. A struct with `str(self) -> str`
             // satisfies it; `print`/`str()`/interpolation dispatch to that method at runtime.
             methods: vec![("str".to_string(), FnSig::plain(vec![Ty::Unknown], Ty::Str))],
+        },
+    );
+    m.insert(
+        // The default error type (Go-style `error`): one method `message(self) -> str`. `str`
+        // conforms intrinsically; any struct with `message(self) -> str` conforms structurally.
+        "Error".to_string(),
+        ProtocolInfo {
+            methods: vec![("message".to_string(), FnSig::plain(vec![Ty::Unknown], Ty::Str))],
         },
     );
     m.insert(
@@ -2871,7 +2959,7 @@ fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
         Ty::Param(n) => map.get(n).cloned().unwrap_or_else(|| ty.clone()),
         Ty::List(t) => Ty::list(subst(t, map)),
         Ty::Option(t) => Ty::option(subst(t, map)),
-        Ty::Result(t) => Ty::result(subst(t, map)),
+        Ty::Result(t, e) => Ty::result_e(subst(t, map), subst(e, map)),
         Ty::Map(k, v) => Ty::map(subst(k, map), subst(v, map)),
         Ty::Set(t) => Ty::set(subst(t, map)),
         Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| subst(t, map)).collect()),
@@ -2908,8 +2996,10 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
                 map.insert(n.clone(), a.clone());
             }
         }
-        (Ty::List(d), Ty::List(a)) | (Ty::Option(d), Ty::Option(a)) | (Ty::Result(d), Ty::Result(a)) => {
-            unify(d, a, map)
+        (Ty::List(d), Ty::List(a)) | (Ty::Option(d), Ty::Option(a)) => unify(d, a, map),
+        (Ty::Result(dt, de), Ty::Result(at, ae)) => {
+            unify(dt, at, map);
+            unify(de, ae, map);
         }
         (Ty::Map(dk, dv), Ty::Map(ak, av)) => {
             unify(dk, ak, map);
@@ -2974,6 +3064,8 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
     let (params, ret) = match method {
         "len" => (vec![], Ty::Int),
         "upper" | "lower" | "trim" => (vec![], Ty::Str),
+        // `str` conforms to `Error`: `message()` returns the string itself.
+        "message" => (vec![], Ty::Str),
         "split" => (vec![Ty::Str], Ty::list(Ty::Str)),
         "chars" => (vec![], Ty::list(Ty::Str)),
         "join" => (vec![Ty::list(Ty::Str)], Ty::Str),

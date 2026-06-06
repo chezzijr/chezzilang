@@ -1,0 +1,11 @@
+# rule: type
+struct DbErr:
+    code: int
+    fn message(self) -> str:
+        return "db {self.code}"
+fn q() -> int!DbErr:
+    return Err(DbErr(1))
+fn p() -> int!:
+    return Err("oops")
+fn r() -> Result[int, str]:
+    return Ok(1)

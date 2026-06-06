@@ -10,6 +10,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **M11 — Tier 3: panic recovery + Go-style errors** (`gaps.md` Tier 3). 🟦 IN PROGRESS. Plan:
+> `~/.claude/plans/see-past-commits-docs-fluttering-turing.md`. Staged A→B (errors first, then the
+> recovery boundary), each TDD + commit.
+>
+> - ✅ **Phase A — Go-style `Result[T, E]`.** `Result` is now 2-param: `T!` = `Result[T, Error]`,
+>   `T!E` = `Result[T, E]`. New built-in **`Error` protocol** (`message(self) -> str`); `str`
+>   conforms intrinsically so `Err("…")` still works everywhere (no wrapper/builder needed). Added a
+>   `Ty::Protocol(name)` existential (a protocol used as a value type, e.g. the default `Error`) +
+>   a checker `assignable()` that does protocol conformance (the context-free `compatible` can't).
+>   `?` now checks the propagated error type fits the enclosing function's `E`. Runtime is
+>   type-erased (only new runtime: `str.message()`); both engines parity-checked. Migrated example
+>   error-consumption sites (`"…" + e` / `e.trim()` → `e.message()`). Docs + grammar (`T!E`) +
+>   conformance corpus updated. 845 tests green, clippy clean.
+> - ⬜ **Phase B — `recover:` boundary** (next): block expression → `Result[T, Error]` that catches
+>   any runtime fault transitively beneath it.
+
 > **M10 — Tier 2: type-system depth** (`gaps.md` Tier 2). 🟦 IN PROGRESS. Plan:
 > `~/.claude/plans/see-gaps-and-help-mellow-meteor.md`. Staged G1→G4 (ascending risk), each TDD +
 > commit.

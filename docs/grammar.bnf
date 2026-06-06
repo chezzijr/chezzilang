@@ -154,14 +154,14 @@
 <tuplePattern> ::= "LPAREN" <subpatterns> "RPAREN"
 
 # ===== types =====
-# Postfix sugar on a base type: `T?` = Option[T], `T!` = Result[T] (stacks left-to-right).
-# A parenthesized type is grouping when it has one element (`(T)` ⇒ `T`) and a tuple type when it
-# has two or more (`(T1, T2, …)`).
+# Postfix sugar on a base type: `T?` = Option[T], `T!` = Result[T, Error], `T!E` = Result[T, E]
+# (stacks left-to-right). A parenthesized type is grouping when it has one element (`(T)` ⇒ `T`)
+# and a tuple type when it has two or more (`(T1, T2, …)`).
 <type>     ::= "IDENT" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
              | "FN" "LPAREN" "RPAREN" "ARROW" <type>
              | "FN" "LPAREN" <typeList> "RPAREN" "ARROW" <type>
              | "LPAREN" <typeList> "RPAREN"
-             | <type> "QUESTION" | <type> "BANG"
+             | <type> "QUESTION" | <type> "BANG" | <type> "BANG" <type>
 <typeList> ::= <type> | <type> "COMMA" <typeList>
 
 # ===== expressions (precedence cascade, loosest -> tightest) =====

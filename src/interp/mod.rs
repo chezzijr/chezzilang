@@ -2854,6 +2854,12 @@ fn safe_div(a: int, b: int) -> Result[int]:
     }
 
     #[test]
+    fn str_conforms_to_error_message_returns_self() {
+        // `str` is an `Error` (Go-style): `.message()` yields the string itself.
+        assert_eq!(run("print(\"boom\".message())\n"), "boom\n");
+    }
+
+    #[test]
     fn str_method_split() {
         assert_eq!(run("print(\"a,b,c\".split(\",\"))\n"), "[a, b, c]\n");
     }

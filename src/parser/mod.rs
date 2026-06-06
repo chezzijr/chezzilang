@@ -812,7 +812,7 @@ impl Parser {
                 params,
                 ret: Box::new(ret),
             };
-            ty = self.parse_type_postfix(ty);
+            ty = self.parse_type_postfix(ty)?;
             self.depth -= 1;
             return Ok(ty);
         }
@@ -828,7 +828,7 @@ impl Parser {
             } else {
                 Type::Tuple(types)
             };
-            ty = self.parse_type_postfix(ty);
+            ty = self.parse_type_postfix(ty)?;
             self.depth -= 1;
             return Ok(ty);
         }
@@ -843,24 +843,31 @@ impl Parser {
         } else {
             Type::Named(name)
         };
-        ty = self.parse_type_postfix(ty);
+        ty = self.parse_type_postfix(ty)?;
         self.depth -= 1;
         Ok(ty)
     }
 
-    /// Postfix shorthand on a fully-parsed base type: `T?` = Option[T], `T!` = Result[T].
-    /// Stacks left-to-right (`T?!` = Result[Option[T]]).
-    fn parse_type_postfix(&mut self, mut ty: Type) -> Type {
+    /// Postfix shorthand on a fully-parsed base type: `T?` = Option[T], `T!` = Result[T, Error],
+    /// `T!E` = Result[T, E]. Stacks left-to-right (`T?!` = Result[Option[T], Error]).
+    fn parse_type_postfix(&mut self, mut ty: Type) -> PResult<Type> {
         loop {
             if self.eat(&Token::Question) {
                 ty = Type::Generic("Option".to_string(), vec![ty]);
             } else if self.eat(&Token::Bang) {
-                ty = Type::Generic("Result".to_string(), vec![ty]);
+                // An explicit error type follows only if the next token can start one; otherwise
+                // `T!` defaults the error type to `Error` (resolved later by the checker).
+                if matches!(self.peek(), Token::Ident(_) | Token::LParen | Token::Fn) {
+                    let err = self.parse_type()?;
+                    ty = Type::Generic("Result".to_string(), vec![ty, err]);
+                } else {
+                    ty = Type::Generic("Result".to_string(), vec![ty]);
+                }
             } else {
                 break;
             }
         }
-        ty
+        Ok(ty)
     }
 
     // ----- expressions (Pratt) -----

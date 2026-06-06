@@ -32,8 +32,14 @@ pub enum Ty {
     /// A bound generic type variable (e.g. `T` inside `fn max[T: Comparable]`). Opaque while
     /// checking a generic body; replaced by a concrete `Ty` at each call site via substitution.
     Param(String),
-    Result(Box<Ty>),
+    /// `Result[T, E]` — `T` is the success type, `E` the error type. `T!` / `Result[T]` default
+    /// `E` to the `Error` protocol existential (`Protocol("Error")`); `T!E` sets it explicitly.
+    Result(Box<Ty>, Box<Ty>),
     Option(Box<Ty>),
+    /// A protocol used *as a value type* (existential), e.g. the default error type `Error`. A
+    /// concrete type is assignable to it iff it satisfies the protocol; only the protocol's own
+    /// methods are callable on it. Type-erased at runtime (methods dispatch by name).
+    Protocol(String),
     /// An imported module, identified by the name it's bound under in the current module. Member
     /// access (`io.read()`) resolves against the module's exported signatures.
     Module(String),
@@ -51,8 +57,17 @@ impl Ty {
     pub fn set(elem: Ty) -> Ty {
         Ty::Set(Box::new(elem))
     }
+    /// `Result[T]` / `T!` — error type defaults to the `Error` protocol.
     pub fn result(inner: Ty) -> Ty {
-        Ty::Result(Box::new(inner))
+        Ty::Result(Box::new(inner), Box::new(Ty::error_proto()))
+    }
+    /// `Result[T, E]` / `T!E` — explicit error type.
+    pub fn result_e(inner: Ty, err: Ty) -> Ty {
+        Ty::Result(Box::new(inner), Box::new(err))
+    }
+    /// The default error type: the `Error` protocol as an existential.
+    pub fn error_proto() -> Ty {
+        Ty::Protocol("Error".to_string())
     }
     pub fn option(inner: Ty) -> Ty {
         Ty::Option(Box::new(inner))
@@ -79,7 +94,12 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
     match (expected, actual) {
         (Unknown, _) | (_, Unknown) => true,
         (Int, Int) | (Float, Float) | (Bool, Bool) | (Str, Str) | (Nil, Nil) => true,
-        (List(a), List(b)) | (Result(a), Result(b)) | (Option(a), Option(b)) => compatible(a, b),
+        (List(a), List(b)) | (Option(a), Option(b)) => compatible(a, b),
+        (Result(at, ae), Result(bt, be)) => compatible(at, bt) && compatible(ae, be),
+        // A protocol existential: identity matches; `str` conforms to `Error` intrinsically.
+        // Struct conformance needs the registry — handled by `Checker::assignable`, not here.
+        (Protocol(a), Protocol(b)) => a == b,
+        (Protocol(p), Str) if p == "Error" => true,
         (Map(ka, va), Map(kb, vb)) => compatible(ka, kb) && compatible(va, vb),
         (Set(a), Set(b)) => compatible(a, b),
         (Struct(a, aa), Struct(b, ba)) | (Enum(a, aa), Enum(b, ba)) => {
@@ -107,8 +127,15 @@ impl fmt::Display for Ty {
             Ty::List(t) => write!(f, "list[{t}]"),
             Ty::Map(k, v) => write!(f, "map[{k}, {v}]"),
             Ty::Set(t) => write!(f, "set[{t}]"),
-            Ty::Result(t) => write!(f, "Result[{t}]"),
+            // `Result[T]` when the error is the default `Error` or still unconstrained (`?`);
+            // `Result[T, E]` for an explicit error type.
+            Ty::Result(t, e) => match e.as_ref() {
+                Ty::Protocol(p) if p == "Error" => write!(f, "Result[{t}]"),
+                Ty::Unknown => write!(f, "Result[{t}]"),
+                _ => write!(f, "Result[{t}, {e}]"),
+            },
             Ty::Option(t) => write!(f, "Option[{t}]"),
+            Ty::Protocol(n) => write!(f, "{n}"),
             Ty::Struct(n, args) | Ty::Enum(n, args) => {
                 write!(f, "{n}")?;
                 if !args.is_empty() {

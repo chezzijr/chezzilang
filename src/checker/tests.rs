@@ -2365,3 +2365,52 @@ fn set_union_arg_must_be_set() {
 fn set_not_indexable() {
     rejects("s := {1, 2}\nx := s[0]\n", "cannot index into set");
 }
+
+// ===== Go-style Result[T, E] + Error protocol (M11 Phase A) =====
+
+#[test]
+fn result_two_type_params_ok() {
+    ok("fn q() -> Result[int, str]:\n    return Err(\"bad\")\n");
+}
+
+#[test]
+fn bang_shorthand_with_error_type_ok() {
+    // `T!E` == `Result[T, E]`.
+    ok("fn q() -> int!str:\n    return Err(\"bad\")\n");
+}
+
+#[test]
+fn err_payload_typed_as_concrete_err() {
+    // When `E` is `str`, the bound `Err` payload is a `str` — str methods available.
+    ok("fn q() -> Result[int, str]:\n    return Err(\"bad\")\nfn main():\n    match q():\n        Ok(v): print(v)\n        Err(e): print(e.trim())\nmain()\n");
+}
+
+#[test]
+fn custom_struct_error_ok() {
+    ok("struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db\"\nfn q() -> int!DbErr:\n    return Err(DbErr(503))\n");
+}
+
+#[test]
+fn error_protocol_existential_accepts_str() {
+    // `Error` used as a value type; `str` conforms; only `message()` is available on it.
+    ok("fn q() -> Result[int, Error]:\n    return Err(\"bad\")\nfn main():\n    match q():\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()\n");
+}
+
+#[test]
+fn bang_default_error_is_error_protocol() {
+    // `T!` defaults `E` to the `Error` protocol; the payload supports `.message()`.
+    ok("fn q() -> int!:\n    return Err(\"bad\")\nfn main():\n    match q():\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()\n");
+}
+
+#[test]
+fn default_error_existential_rejects_str_methods() {
+    // `Error` existential exposes only `message()` — not `str`'s methods.
+    rejects("fn q() -> int!:\n    return Err(\"x\")\nfn main():\n    match q():\n        Ok(v): print(v)\n        Err(e): print(e.trim())\nmain()\n", "trim");
+}
+
+#[test]
+fn struct_error_without_message_rejected_as_error() {
+    // A struct lacking `message(self) -> str` does not satisfy `Error`, so it can't be the
+    // payload where `Error` is expected — the return-type check flags the mismatch.
+    rejects("struct Bad:\n    n: int\nfn q() -> Result[int, Error]:\n    return Err(Bad(1))\n", "Bad");
+}

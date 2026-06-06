@@ -71,6 +71,11 @@ fn str_method(s: &Rc<str>, method: &str, args: &[Value], span: Span) -> Result<V
             arity("trim", args, 0, span)?;
             Ok(Value::Str(s.trim().into()))
         }
+        // `str` conforms to the `Error` protocol (Go-style): its message is itself.
+        "message" => {
+            arity("message", args, 0, span)?;
+            Ok(Value::Str(s.clone()))
+        }
         "split" => {
             arity("split", args, 1, span)?;
             let sep = str_arg(0)?;

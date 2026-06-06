@@ -18,4 +18,4 @@ match request.get("https://example.com"):
             None: print("content-type: (none)")
         print("body bytes: " + str(resp.body.len()))
     Err(e):
-        print("request failed: " + e)
+        print("request failed: " + e.message())

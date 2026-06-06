@@ -25,14 +25,14 @@ match json.parse(src):
         print(str(json.as_float(stars)?))
         print(str(json.is_null(json.get(json.get(doc, "meta")?, "home")?)))
     Err(e):
-        print("parse failed: " + e)
+        print("parse failed: " + e.message())
 
 # Errors come back as Err, never a crash.
 match json.parse("[1, 2,]"):
     Ok(j): print(json.stringify(j))
-    Err(e): print("error: " + e)
+    Err(e): print("error: " + e.message())
 
 # Unicode escapes (incl. surrogate pairs) decode to real codepoints.
 match json.parse("\"sn\\u00f6 \\ud83d\\ude04\""):
     Ok(j): print(json.as_str(j)?)
-    Err(e): print("error: " + e)
+    Err(e): print("error: " + e.message())

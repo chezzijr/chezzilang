@@ -56,12 +56,13 @@ count += 1             # reassignment (+= -= also)
 | `map[K, V]` | `{"a": 1}` | insertion-ordered hash map; `K` is any `Hashable` type |
 | `set[T]` | `{1, 2, 3}` | deduped, insertion-ordered hash set; `T` any `Hashable` type; empty is `set()` |
 | `tuple` | `(1, "a")` | fixed-arity, immutable |
-| `Result[T]` | `Ok(x)` / `Err(msg)` | §9; shorthand `T!` |
+| `Result[T, E]` | `Ok(x)` / `Err(e)` | §9; shorthand `T!E`, or `T!` (E = `Error`) |
 | `Option[T]` | `Some(x)` / `None` | §9; shorthand `T?` |
 
-**Type shorthand.** In any type position, `T?` is sugar for `Option[T]` and `T!` for `Result[T]`
-(e.g. `int?`, `list[int]?`, `int!`). Pure spelling — `Some`/`None`/`Ok`/`Err`, `match`, and `?`
-behave exactly as on the long forms.
+**Type shorthand.** In any type position, `T?` is sugar for `Option[T]`; `T!E` for `Result[T, E]`;
+and `T!` for `Result[T, Error]` (E defaults to the built-in `Error` protocol). Examples: `int?`,
+`list[int]?`, `int!` (= `Result[int, Error]`), `int!DbErr` (= `Result[int, DbErr]`). Pure spelling —
+`Some`/`None`/`Ok`/`Err`, `match`, and `?` behave exactly as on the long forms.
 
 ## 4. Operators & precedence
 
@@ -372,15 +373,37 @@ function bodies stay statement-only (functions still return via explicit `return
 Errors are **values**, not exceptions. No hidden control flow.
 
 ```chezzi
-fn safe_div(a: int, b: int) -> int!:        # int! == Result[int]
+fn safe_div(a: int, b: int) -> int!:        # int! == Result[int, Error]
     if b == 0:
-        return Err("divide by zero")
+        return Err("divide by zero")        # a str IS an Error (see below)
     return Ok(a / b)
 
 fn calc() -> Result[int]:
     x := safe_div(10, 2)?     # '?' unwraps Ok, or returns the Err from THIS function
     y := safe_div(x, 0)?      # if Err, calc() returns that Err immediately
     return Ok(x + y)
+```
+
+**The `Error` type (Go-style).** `E` defaults to the built-in `Error` protocol — one method,
+`message(self) -> str`. `str` conforms to it intrinsically (its message is itself), so `Err("…")`
+works everywhere with no wrapper. For a *structured* error, define a struct with `message` and
+name it explicitly with `T!E`:
+
+```chezzi
+protocol Error:                 # built-in; shown for reference
+    fn message(self) -> str
+
+struct DbErr:
+    code: int
+    fn message(self) -> str:
+        return "db error {self.code}"
+
+fn query() -> Row!DbErr:        # Result[Row, DbErr]
+    return Err(DbErr(503))
+
+match query():
+    Ok(row): use(row)
+    Err(e):  print(e.message())   # on a default `Error`, only message() is available
 ```
 
 `Option[T]` (shorthand `T?`) is the same shape for "maybe absent": `Some(v)` / `None`, also usable with `?`.

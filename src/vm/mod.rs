@@ -1633,6 +1633,11 @@ impl Vm {
                         self.arity_err("trim", args, 0, span)?;
                         Ok(self.alloc_str(s.trim().to_string()))
                     }
+                    // `str` conforms to `Error`: `message()` returns the string itself.
+                    "message" => {
+                        self.arity_err("message", args, 0, span)?;
+                        Ok(self.alloc_str(s.to_string()))
+                    }
                     "split" => {
                         self.arity_err("split", args, 1, span)?;
                         let sep = str_arg(self, 0)?;
@@ -4633,6 +4638,12 @@ main()";
         "fn lookup(k: int) -> int?:\n    if k == 0:\n        return None\n    return Some(k)\nfn main():\n    found := match lookup(7):\n        Some(v): v\n        None: -1\n    print(found)\n    sign := if found > 0: \"pos\" else: \"neg\"\n    print(sign)\n    none := match lookup(0):\n        Some(v): v\n        None: -1\n    print(none)\nmain()",
         // ----- M6: core-type methods (str) -----
         "print(\"abcd\".len())\nprint(\"Hi There\".upper())\nprint(\"Hi There\".lower())\nprint(\"  pad  \".trim())",
+        // str conforms to Error: message() returns the string itself
+        "print(\"boom\".message())",
+        // Go-style Result[T, E]: custom struct error (T!E), match, message() dispatch
+        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db {self.code}\"\nfn q(ok: bool) -> int!DbErr:\n    if ok:\n        return Ok(1)\n    return Err(DbErr(503))\nfn main():\n    match q(false):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n    match q(true):\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
+        // default-Error path: Err(str) flows as Result[int, Error], consumed via message()
+        "fn parse(ok: bool) -> int!:\n    if ok:\n        return Ok(42)\n    return Err(\"bad input\")\nfn main():\n    match parse(false):\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
         "print(\"a,b,c\".split(\",\"))\nprint(\",\".join([\"a\", \"b\", \"c\"]))",
         "print(\"abc\".starts_with(\"ab\"))\nprint(\"abc\".starts_with(\"z\"))\nprint(\"abc\".contains(\"b\"))\nprint(\"abc\".contains(\"q\"))",
         // chained core-type methods

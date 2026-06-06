@@ -9,11 +9,11 @@ import std.time
 # --- std.process: a command's output comes back as Result[str] (Ok=stdout, Err=stderr) ---
 match process.cmd("echo hello from the shell"):
     Ok(out): print("stdout: " + out.trim())
-    Err(e): print("error: " + e.trim())
+    Err(e): print("error: " + e.message().trim())
 
 match process.cmd("exit 7"):
     Ok(out): print("ok: " + out)
-    Err(e): print("failed: " + e)
+    Err(e): print("failed: " + e.message())
 
 # --- std.fs: existence, type, size, listing, and a simple */? glob ---
 print("exists(Cargo.toml): " + str(fs.exists("Cargo.toml")))
@@ -23,15 +23,15 @@ print("is_file(examples): " + str(fs.is_file("examples")))
 
 match fs.list_dir("examples/sysfixture"):
     Ok(names): print("list: " + ",".join(names))
-    Err(e): print("error: " + e)
+    Err(e): print("error: " + e.message())
 
 match fs.glob("examples/sysfixture/*.txt"):
     Ok(hits): print("glob: " + ",".join(hits))
-    Err(e): print("error: " + e)
+    Err(e): print("error: " + e.message())
 
 match fs.size("examples/sysfixture/a.txt"):
     Ok(n): print("size: " + str(n))
-    Err(e): print("error: " + e)
+    Err(e): print("error: " + e.message())
 
 # --- std.time: wall clock (non-deterministic → booleans), then deterministic formatting ---
 print("now > 0: " + str(time.now() > 0))
