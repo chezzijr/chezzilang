@@ -104,6 +104,7 @@
 <elseFinal> ::= "ELSE" <block>
 
 <forStmt>   ::= "FOR" "IDENT" "IN" <expr> <block>
+            | "FOR" <identList> "IN" <expr> <block>
 <whileStmt> ::= "WHILE" <expr> <block>
 
 <matchStmt> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <arms> "DEDENT"

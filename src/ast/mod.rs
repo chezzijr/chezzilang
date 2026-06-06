@@ -59,9 +59,10 @@ pub enum StmtKind {
         branches: Vec<(Expr, Block)>,
         else_block: Option<Block>,
     },
-    /// `for var in iter:` — `iter` may be a range (`0..10`) or any iterable expression.
+    /// `for var in iter:` — `iter` may be a range (`0..10`) or any iterable expression. `vars` holds
+    /// one binding for the common form, or two (`for k, v in m:`) to destructure a map's entries.
     For {
-        var: String,
+        vars: Vec<String>,
         iter: Expr,
         body: Block,
     },

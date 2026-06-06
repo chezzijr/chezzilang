@@ -1,0 +1,33 @@
+# examples/word_freq.chz — word-frequency counter + top-N (Domain C).
+#
+# Counts words into a `map[str,int]`, then prints the top-3 by frequency.
+#
+# Exercises two round-2 fixes: iterate the map's entries directly with `for w, c in counts`
+# (gap #14), then rank `(word, count)` pairs by count with a comparator (gap #11). Ties keep
+# first-seen order (sort_by is stable, map preserves insertion order).
+
+fn main():
+    text := "the quick brown fox the lazy dog the fox jumps the dog"
+    counts := {}
+    for w in text.split(" "):
+        if counts.has(w):
+            counts[w] = counts[w] + 1
+        else:
+            counts[w] = 1
+
+    print("unique words: {counts.len()}")
+
+    # Build (word, count) pairs by iterating the map directly (gap #14).
+    pairs := []
+    for w, c in counts:
+        pairs.push((w, c))
+
+    # Rank by count, descending — a comparator over tuples (gap #11).
+    pairs.sort_by(fn(a: (str, int), b: (str, int)) -> int: b.1 - a.1)
+
+    # Top 3.
+    for i in 0..3:
+        p := pairs[i]
+        print("{p.0}: {p.1}")
+
+main()

@@ -1172,7 +1172,7 @@ impl Interp {
                     None => Ok(Flow::Normal),
                 }
             }
-            StmtKind::For { var, iter, body } => self.exec_for(var, iter, body),
+            StmtKind::For { vars, iter, body } => self.exec_for(vars, iter, body),
             StmtKind::While { cond, body } => {
                 while as_bool(self.eval(cond)?, cond.span)? {
                     match self.exec_scoped_block(body)? {
@@ -1188,17 +1188,17 @@ impl Interp {
         }
     }
 
-    /// Execute a `for var in iter:` loop. `iter` is either a `start..end` range or any
-    /// expression evaluating to a list. Each iteration runs the body in a fresh scope with
-    /// `var` bound, so the loop variable doesn't leak. Ranges are iterated **lazily** (never
+    /// Execute a `for vars in iter:` loop. `iter` is a `start..end` range, a list, or a map
+    /// (`for k in m` binds the key; `for k, v in m` binds key+value). Each iteration runs the body
+    /// in a fresh scope so the loop variables don't leak. Ranges are iterated **lazily** (never
     /// materialized) so `for i in 0..huge:` can't exhaust memory.
-    fn exec_for(&mut self, var: &str, iter: &Expr, body: &[Stmt]) -> Result<Flow, RuntimeError> {
+    fn exec_for(&mut self, vars: &[String], iter: &Expr, body: &[Stmt]) -> Result<Flow, RuntimeError> {
         if let ExprKind::Range { start, end } = &iter.kind {
             let lo = self.eval_int(start)?;
             let hi = self.eval_int(end)?;
             let mut i = lo;
             while i < hi {
-                match self.run_for_body(var, Value::Int(i), body)? {
+                match self.run_for_body(vars, vec![Value::Int(i)], body)? {
                     Flow::Return(v) => return Ok(Flow::Return(v)),
                     Flow::Break => break,
                     // `continue` falls through to the `i += 1` increment below — it must NOT skip
@@ -1209,8 +1209,21 @@ impl Interp {
             }
             return Ok(Flow::Normal);
         }
-        let items = match self.eval(iter)? {
-            Value::List(items) => items.borrow().clone(),
+        // Materialize the per-iteration value tuples up front (clone out) so a body that mutates the
+        // collection doesn't disturb iteration, and no borrow is held across the body.
+        let rows: Vec<Vec<Value>> = match self.eval(iter)? {
+            Value::List(items) => items.borrow().iter().map(|v| vec![v.clone()]).collect(),
+            Value::Map(entries) => entries
+                .borrow()
+                .iter()
+                .map(|(k, v)| {
+                    if vars.len() == 2 {
+                        vec![k.clone(), v.clone()]
+                    } else {
+                        vec![k.clone()]
+                    }
+                })
+                .collect(),
             other => {
                 return Err(RuntimeError {
                     message: format!("cannot iterate over {}", other.type_name()),
@@ -1218,8 +1231,8 @@ impl Interp {
                 });
             }
         };
-        for item in items {
-            match self.run_for_body(var, item, body)? {
+        for row in rows {
+            match self.run_for_body(vars, row, body)? {
                 Flow::Return(v) => return Ok(Flow::Return(v)),
                 Flow::Break => break,
                 // `continue` falls through to the next element (the `for` advances naturally).
@@ -1229,15 +1242,18 @@ impl Interp {
         Ok(Flow::Normal)
     }
 
-    /// Run one `for` iteration: bind `var` in a fresh scope, execute the body, pop the scope.
+    /// Run one `for` iteration: bind each name in `vars` to the matching value in a fresh scope,
+    /// execute the body, pop the scope. `vars` and `vals` are zipped (equal length in practice).
     fn run_for_body(
         &mut self,
-        var: &str,
-        item: Value,
+        vars: &[String],
+        vals: Vec<Value>,
         body: &[Stmt],
     ) -> Result<Flow, RuntimeError> {
         self.env.push();
-        self.env.define(var, item);
+        for (name, val) in vars.iter().zip(vals) {
+            self.env.define(name, val);
+        }
         let flow = self.exec_block(body);
         self.env.pop();
         flow

@@ -628,10 +628,12 @@ impl Checker {
                     self.check_block(body);
                 }
             }
-            StmtKind::For { var, iter, body } => {
-                let elem = self.iter_elem(iter);
+            StmtKind::For { vars, iter, body } => {
+                let bindings = self.for_bindings(vars, iter);
                 self.push_scope();
-                self.declare(var, elem);
+                for (name, ty) in bindings {
+                    self.declare(&name, ty);
+                }
                 self.loop_depth += 1;
                 for stmt in body {
                     self.check_stmt(stmt);
@@ -850,19 +852,42 @@ impl Checker {
     }
 
     /// The element type produced by iterating `iter` in a `for` loop.
-    fn iter_elem(&mut self, iter: &Expr) -> Ty {
+    /// The per-iteration bindings of a `for` loop: one name for the common form, or two
+    /// (`for k, v in m:`) to destructure a map's entries. A range/list/str binds a single value; a
+    /// map binds its key (1 name) or key+value (2 names). Any other arity/iterand combination is an
+    /// error (a dummy `Unknown` binding is returned per name so checking continues).
+    fn for_bindings(&mut self, vars: &[String], iter: &Expr) -> Vec<(String, Ty)> {
+        let unknowns = |vars: &[String]| vars.iter().map(|v| (v.clone(), Ty::Unknown)).collect();
+        // Ranges are syntactic and always yield a single int.
         if let ExprKind::Range { start, end } = &iter.kind {
             self.expect_int(start, "range bound");
             self.expect_int(end, "range bound");
-            return Ty::Int;
+            if vars.len() != 1 {
+                self.error(iter.span, "a range binds a single loop variable; `for k, v` needs a map");
+                return unknowns(vars);
+            }
+            return vec![(vars[0].clone(), Ty::Int)];
         }
-        match self.infer(iter) {
-            Ty::List(inner) => *inner,
-            Ty::Str => Ty::Str,
-            Ty::Unknown => Ty::Unknown,
+        let it = self.infer(iter);
+        match &it {
+            Ty::Map(k, v) => match vars.len() {
+                1 => vec![(vars[0].clone(), (**k).clone())],
+                2 => vec![(vars[0].clone(), (**k).clone()), (vars[1].clone(), (**v).clone())],
+                _ => {
+                    self.error(iter.span, "a `for` over a map binds one (key) or two (key, value) names");
+                    unknowns(vars)
+                }
+            },
+            Ty::List(_) | Ty::Str if vars.len() != 1 => {
+                self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
+                unknowns(vars)
+            }
+            Ty::List(inner) => vec![(vars[0].clone(), (**inner).clone())],
+            Ty::Str => vec![(vars[0].clone(), Ty::Str)],
+            Ty::Unknown => unknowns(vars),
             other => {
                 self.error(iter.span, format!("cannot iterate over {other}"));
-                Ty::Unknown
+                unknowns(vars)
             }
         }
     }

@@ -453,11 +453,16 @@ impl Parser {
 
     fn parse_for(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::For)?;
-        let var = self.expect_ident()?;
+        // One binding (`for x in …`), or a comma-separated list (`for k, v in m:`) to destructure a
+        // map's entries. The checker enforces which iterands accept which arities.
+        let mut vars = vec![self.expect_ident()?];
+        while self.eat(&Token::Comma) {
+            vars.push(self.expect_ident()?);
+        }
         self.expect(&Token::In)?;
         let iter = self.parse_expr()?;
         let body = self.parse_block()?;
-        Ok(StmtKind::For { var, iter, body })
+        Ok(StmtKind::For { vars, iter, body })
     }
 
     fn parse_while(&mut self) -> PResult<StmtKind> {
@@ -1228,8 +1233,8 @@ mod tests {
     #[test]
     fn for_over_range_and_list() {
         match only("for i in 0..10:\n    print(i)\n") {
-            StmtKind::For { var, iter, .. } => {
-                assert_eq!(var, "i");
+            StmtKind::For { vars, iter, .. } => {
+                assert_eq!(vars, vec!["i".to_string()]);
                 assert!(matches!(iter.kind, ExprKind::Range { .. }));
             }
             other => panic!("{other:?}"),

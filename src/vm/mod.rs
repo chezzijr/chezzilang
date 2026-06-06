@@ -518,12 +518,19 @@ impl Vm {
                 self.push(Value::Obj(h));
             }
             Op::ListClone => {
+                // Normalise a `for` iterand to an index-iterable list: a list is cloned (so a body
+                // that mutates it doesn't disturb iteration); a map yields its keys (gap #14).
                 let v = self.pop();
                 match v {
                     Value::Obj(h) => match self.heap.get(h) {
                         Obj::List(items) => {
                             let cloned = items.clone();
                             let nh = self.heap.alloc(Obj::List(cloned));
+                            self.push(Value::Obj(nh));
+                        }
+                        Obj::Map(entries) => {
+                            let keys: Vec<Value> = entries.iter().map(|(k, _)| *k).collect();
+                            let nh = self.heap.alloc(Obj::List(keys));
                             self.push(Value::Obj(nh));
                         }
                         _ => return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span)),
@@ -2573,6 +2580,16 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// Gap #14 (+ #11) golden: `examples/word_freq.chz` iterates a map with `for w, c in counts`
+    /// and ranks tuples with `sort_by`. Byte-identical on the VM, the interpreter, and `.expected`.
+    #[test]
+    fn golden_word_freq_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/word_freq.chz");
+        let expected = include_str!("../../examples/word_freq.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
 }
 
 #[cfg(test)]
@@ -2788,6 +2805,31 @@ mod parity_tests {
     fn assert_parity_out(src: &str, expect: &str) {
         assert_parity(src);
         assert_eq!(vm_outcome(src).expect("program should run"), expect, "for:\n{src}");
+    }
+
+    #[test]
+    fn for_over_map_keys_parity() {
+        assert_parity_out(
+            "m := {\"a\": 1, \"b\": 2, \"c\": 3}\nfor k in m:\n    print(k)\n",
+            "a\nb\nc\n",
+        );
+    }
+
+    #[test]
+    fn for_over_map_key_value_parity() {
+        assert_parity_out(
+            "m := {\"a\": 1, \"b\": 2}\ns := 0\nfor k, v in m:\n    print(\"{k}={v}\")\n    s += v\nprint(s)\n",
+            "a=1\nb=2\n3\n",
+        );
+    }
+
+    #[test]
+    fn for_over_map_break_continue_parity() {
+        // break/continue still target the index increment over the keys sequence.
+        assert_parity_out(
+            "m := {\"a\": 1, \"b\": 2, \"c\": 3, \"d\": 4}\nfor k, v in m:\n    if v == 2: continue\n    if v == 4: break\n    print(k)\n",
+            "a\nc\n",
+        );
     }
 
     #[test]

@@ -286,7 +286,7 @@ impl Compiler {
             }
             StmtKind::If { branches, else_block } => self.compile_if(fc, branches, else_block.as_deref(), stmt.span),
             StmtKind::While { cond, body } => self.compile_while(fc, cond, body),
-            StmtKind::For { var, iter, body } => self.compile_for(fc, var, iter, body, stmt.span),
+            StmtKind::For { vars, iter, body } => self.compile_for(fc, vars, iter, body, stmt.span),
             StmtKind::Match { scrutinee, arms } => self.compile_match(fc, scrutinee, arms, stmt.span),
         }
     }
@@ -397,18 +397,19 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_for(&mut self, fc: &mut FnComp, var: &str, iter: &Expr, body: &[Stmt], span: Span) -> Result<(), CompileError> {
+    fn compile_for(&mut self, fc: &mut FnComp, vars: &[String], iter: &Expr, body: &[Stmt], span: Span) -> Result<(), CompileError> {
         fc.begin_scope();
         fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new() });
         if let ExprKind::Range { start, end } = &iter.kind {
-            // Lazy counting loop — the range is never materialized.
+            // Lazy counting loop — the range is never materialized. The checker guarantees a single
+            // loop variable for a range.
             self.compile_expr(fc, end)?;
             fc.emit(Op::AsInt, end.span);
             let end_slot = fc.add_hidden();
             fc.emit(Op::SetLocal(end_slot), span);
             self.compile_expr(fc, start)?;
             fc.emit(Op::AsInt, start.span);
-            let i_slot = fc.add_local(var.to_string());
+            let i_slot = fc.add_local(vars[0].clone());
             fc.emit(Op::SetLocal(i_slot), span);
 
             let loop_start = fc.here();
@@ -428,8 +429,19 @@ impl Compiler {
             fc.patch_jump(exit);
             self.patch_loop(fc, inc_target);
         } else {
-            // Iterate a (cloned) list by index.
-            self.compile_expr(fc, iter)?;
+            // Iterate a sequence by index. `ListClone` normalises the iterand: a list is cloned, a
+            // map yields its keys (gap #14). For `for k, v in m:` the original map is also kept so
+            // the value can be looked up by key each iteration.
+            let map_slot = if vars.len() == 2 {
+                self.compile_expr(fc, iter)?;
+                let m = fc.add_hidden();
+                fc.emit(Op::SetLocal(m), span);
+                fc.emit(Op::GetLocal(m), span);
+                Some(m)
+            } else {
+                self.compile_expr(fc, iter)?;
+                None
+            };
             fc.emit(Op::ListClone, iter.span);
             let lst = fc.add_hidden();
             fc.emit(Op::SetLocal(lst), span);
@@ -440,7 +452,10 @@ impl Compiler {
             fc.emit(Op::ConstInt(0), span);
             let idx = fc.add_hidden();
             fc.emit(Op::SetLocal(idx), span);
-            let var_slot = fc.add_local(var.to_string());
+            // The loop variable(s): the sequence element binds the first (key for a map); for the
+            // two-name map form the value is fetched via `map[key]`.
+            let key_slot = fc.add_local(vars[0].clone());
+            let val_slot = map_slot.map(|_| fc.add_local(vars[1].clone()));
 
             let loop_start = fc.here();
             fc.emit(Op::GetLocal(idx), span);
@@ -450,7 +465,13 @@ impl Compiler {
             fc.emit(Op::GetLocal(lst), span);
             fc.emit(Op::GetLocal(idx), span);
             fc.emit(Op::GetIndex, span);
-            fc.emit(Op::SetLocal(var_slot), span);
+            fc.emit(Op::SetLocal(key_slot), span);
+            if let (Some(m), Some(v)) = (map_slot, val_slot) {
+                fc.emit(Op::GetLocal(m), span);
+                fc.emit(Op::GetLocal(key_slot), span);
+                fc.emit(Op::GetIndex, span);
+                fc.emit(Op::SetLocal(v), span);
+            }
             self.compile_block_scoped(fc, body)?;
             // `continue` must land HERE — on the index increment, so the loop advances to the
             // next element instead of re-testing the same index forever.

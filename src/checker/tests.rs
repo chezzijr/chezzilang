@@ -1169,6 +1169,40 @@ fn ord_result_is_int_not_str() {
 }
 
 
+// ===== map iteration in for (gap #14) =====
+
+#[test]
+fn for_over_map_binds_key() {
+    ok("m := {\"a\": 1}\nfor k in m:\n    s: str = k\n    print(s)\n");
+}
+
+#[test]
+fn for_over_map_key_value() {
+    ok("m := {\"a\": 1}\nfor k, v in m:\n    s: str = k\n    n: int = v\n    print(\"{s}{n}\")\n");
+}
+
+#[test]
+fn for_over_map_value_type_is_v() {
+    // The value binding has the map's value type — assigning to a mismatched slot is rejected.
+    rejects("m := {\"a\": 1}\nfor k, v in m:\n    s: str = v\n", "");
+}
+
+#[test]
+fn for_kv_over_list_rejected() {
+    rejects("xs := [1,2,3]\nfor a, b in xs:\n    print(a)\n", "requires a map");
+}
+
+#[test]
+fn for_kv_over_range_rejected() {
+    rejects("for a, b in 0..3:\n    print(a)\n", "range");
+}
+
+#[test]
+fn for_over_int_still_rejected() {
+    rejects("for x in 5:\n    print(x)\n", "cannot iterate over int");
+}
+
+
 // ===== break / continue =====
 
 #[test]
