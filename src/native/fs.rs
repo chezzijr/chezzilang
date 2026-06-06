@@ -89,31 +89,35 @@ fn glob(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 }
 
 /// Match a single path component against a `*`/`?` wildcard. `*` matches any run (including empty),
-/// `?` matches exactly one character; every other character is literal. Recursive backtracking on
-/// `*` — fine for filename-length inputs.
+/// `?` matches exactly one character; every other character is literal. Uses the classic greedy
+/// two-pointer algorithm with a single backtrack mark — linear-ish, no exponential blowup on
+/// adversarial patterns like `*a*a*a…b`.
 fn wildcard_match(pat: &str, name: &str) -> bool {
     let p: Vec<char> = pat.chars().collect();
     let n: Vec<char> = name.chars().collect();
-    matches_from(&p, 0, &n, 0)
-}
-
-fn matches_from(p: &[char], pi: usize, n: &[char], ni: usize) -> bool {
-    if pi == p.len() {
-        return ni == n.len();
-    }
-    match p[pi] {
-        '*' => {
-            // Match zero or more characters: try consuming none, then one more each step.
-            for k in ni..=n.len() {
-                if matches_from(p, pi + 1, n, k) {
-                    return true;
-                }
-            }
-            false
+    let (mut pi, mut ni) = (0, 0);
+    let (mut star, mut mark) = (None, 0);
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ni;
+            pi += 1;
+        } else if let Some(s) = star {
+            // Backtrack: the last `*` swallows one more character.
+            pi = s + 1;
+            mark += 1;
+            ni = mark;
+        } else {
+            return false;
         }
-        '?' => ni < n.len() && matches_from(p, pi + 1, n, ni + 1),
-        c => ni < n.len() && n[ni] == c && matches_from(p, pi + 1, n, ni + 1),
     }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 /// Callable members. `(name, fn)`.
@@ -142,5 +146,15 @@ mod tests {
         assert!(!wildcard_match("foo*bar", "fooXYZbaz"));
         assert!(wildcard_match("exact", "exact"));
         assert!(!wildcard_match("exact", "exacted"));
+    }
+
+    /// Regression (review): a multi-star pattern against a long non-matching name must not blow up
+    /// exponentially. The greedy two-pointer matcher returns near-instantly.
+    #[test]
+    fn wildcard_no_catastrophic_backtracking() {
+        let pat = "*a*a*a*a*a*a*a*a*a*a*b";
+        let name = "a".repeat(64); // no 'b' → never matches
+        assert!(!wildcard_match(pat, &name));
+        assert!(wildcard_match("*a*a*b", "aaaaaaab"));
     }
 }

@@ -1005,15 +1005,18 @@ impl Vm {
     /// descriptor (passing through an `Err`), push the resulting `Result[T]`.
     fn json_decode(&mut self, desc: &crate::json_decode::TypeDescriptor, span: Span) -> Result<(), RuntimeError> {
         let res = self.pop();
-        let (variant, payload) = self
-            .enum_parts(res)
-            .ok_or_else(|| self.err("decode: parse did not return a Result".to_string(), span))?;
+        let bad = "decode: parse did not return a Result".to_string();
+        let (rty, variant, payload) =
+            self.enum_parts(res).ok_or_else(|| self.err(bad.clone(), span))?;
+        if rty != "Result" {
+            return Err(self.err(bad, span));
+        }
         match variant.as_str() {
             "Err" => {
                 self.push(res); // a Result Err(str) is already a valid Result[T]
                 Ok(())
             }
-            "Ok" => {
+            "Ok" if payload.len() == 1 => {
                 let jv = payload[0];
                 match self.coerce_json(jv, desc, "$") {
                     Ok(v) => {
@@ -1028,15 +1031,17 @@ impl Vm {
                 }
                 Ok(())
             }
-            _ => Err(self.err("decode: parse returned a non-Result".to_string(), span)),
+            _ => Err(self.err(bad, span)),
         }
     }
 
-    /// The variant name and (copied) payload of an enum value, or `None` if it isn't an enum.
-    fn enum_parts(&self, v: Value) -> Option<(String, Vec<Value>)> {
+    /// The enum type, variant name, and (copied) payload of an enum value; `None` if not an enum.
+    fn enum_parts(&self, v: Value) -> Option<(String, String, Vec<Value>)> {
         match v {
             Value::Obj(h) => match self.heap.get(h) {
-                Obj::Enum { variant, payload, .. } => Some((variant.to_string(), payload.clone())),
+                Obj::Enum { ty, variant, payload } => {
+                    Some((ty.to_string(), variant.to_string(), payload.clone()))
+                }
                 _ => None,
             },
             _ => None,
@@ -1052,7 +1057,7 @@ impl Vm {
         path: &str,
     ) -> Result<Value, String> {
         use crate::json_decode::TypeDescriptor as D;
-        let (variant, payload) = self
+        let (_jty, variant, payload) = self
             .enum_parts(jv)
             .ok_or_else(|| format!("decode: expected a JSON value at {path}"))?;
         let mismatch = |want: &str| format!("decode: expected {want} at {path}, found {}", crate::json_decode::json_kind(&variant));
@@ -3305,6 +3310,24 @@ main()";
         assert_eq!(run_capture_stress(src), "42\n");
     }
 
+    /// Set algebra with heap-allocated (string) elements under GC stress: the source set, the
+    /// argument set, and the freshly-built result must all survive a collection mid-operation.
+    #[test]
+    fn set_algebra_survives_gc_stress() {
+        let src = "\
+a := set([\"al\" + \"pha\", \"be\" + \"ta\", \"gam\" + \"ma\"])
+b := set([\"be\" + \"ta\", \"de\" + \"lta\"])
+print(a.union(b).len())
+print(a.intersection(b).len())
+print(a.difference(b).len())
+total := 0
+for w in a:
+    total += w.len()
+print(total)";
+        // alpha+beta+gamma = 5+4+5 = 14
+        assert_eq!(run_capture_stress(src), "4\n1\n2\n14\n");
+    }
+
     /// `list.sort()` over Comparable structs whose `compare` allocates (triggering GC mid-sort) must
     /// not collect the in-flight elements OR the source list — even when the receiver is an inline
     /// temporary (popped before dispatch, so otherwise unrooted). Regression for the M7-G3 review.
@@ -3588,6 +3611,26 @@ mod parity_tests {
             "m := {\"a\": 1, \"b\": 2, \"c\": 3}\nfor k in m:\n    print(k)\n",
             "a\nb\nc\n",
         );
+    }
+
+    /// Regression (review #1): a struct field named `decode` must still be indexable — the
+    /// `.decode[…]` JSON form is only stolen when a real `[Type](arg)` follows.
+    #[test]
+    fn field_named_decode_is_indexable_parity() {
+        let out = parity_entry(
+            "struct Box:\n    decode: list[int]\nb := Box([10, 20, 30])\nprint(b.decode[1])\nprint(b.decode[0] + b.decode[2])\n",
+        );
+        assert_eq!(out, "20\n40\n");
+    }
+
+    /// Regression (review #2): malformed and out-of-range numbers come back as `Err` / stringify
+    /// cleanly — they must never abort the host (no uncaught `float()`/`int()` panic).
+    #[test]
+    fn json_malformed_numbers_are_errors_parity() {
+        let out = parity_entry(
+            "import std.json\nfn tp(s: str) -> str:\n    match json.parse(s):\n        Ok(j): return \"OK \" + json.stringify(j)\n        Err(e): return \"ERR\"\nprint(tp(\"1e\"))\nprint(tp(\"1.\"))\nprint(tp(\"100000000000000000000\"))\n",
+        );
+        assert_eq!(out, "ERR\nERR\nOK 100000000000000000000.0\n");
     }
 
     #[test]

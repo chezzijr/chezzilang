@@ -2,9 +2,14 @@
 //!
 //! `cmd(line)` runs `line` through `sh -c`, so a full command line works (pipes, redirects,
 //! arguments). The result mirrors how you read a command at a terminal: exit status 0 yields
-//! `Ok(stdout)`, any other status (or a spawn failure) yields `Err(stderr)`. Output is decoded
-//! lossily as UTF-8. This hits the real process table directly (like `std.io.read_file` hits the
-//! real filesystem); it does not route through the injected `HostConfig`.
+//! `Ok(stdout)`, any other status (or a spawn failure) yields `Err(stderr)` — note that on failure
+//! stdout is discarded (only stderr is surfaced). Output is decoded lossily as UTF-8. This hits the
+//! real process table directly (like `std.io.read_file` hits the real filesystem); it does not
+//! route through the injected `HostConfig`.
+//!
+//! SECURITY: because the line is handed to the shell (`shell=True`-style, like Python's
+//! `subprocess`), interpolating untrusted input into it is a shell-injection vector. Callers must
+//! sanitize or avoid building `cmd` strings from untrusted data.
 
 use super::{expect_args, Host, HostError, NativeFn, NativeRet};
 

@@ -962,32 +962,33 @@ impl Parser {
                     } else {
                         self.expect_ident()?
                     };
-                    // `.decode[Type](arg)` — the one type-argument call form (JSON decode). The
-                    // `[` right after `.decode` disambiguates it from indexing a field named
-                    // `decode`. Anything else stays an ordinary field access.
-                    if name == "decode" && self.check(&Token::LBracket) {
+                    // `.decode[Type](arg)` — the one type-argument call form (JSON decode). We
+                    // SPECULATIVELY try to parse `[Type] (` after `.decode`; if that exact shape
+                    // isn't present we backtrack and fall back to an ordinary field access (so
+                    // `b.decode[1]` indexes a field named `decode`, `b.decode[i](x)` is index+call,
+                    // etc.). Only `.decode[<type>](…)` is stolen.
+                    let decode = if name == "decode" && self.check(&Token::LBracket) {
+                        let save = self.pos;
                         self.advance(); // '['
-                        let ty = self.parse_type()?;
-                        self.expect(&Token::RBracket)?;
-                        self.expect(&Token::LParen)?;
-                        let arg = self.parse_expr()?;
-                        self.expect(&Token::RParen)?;
-                        Expr {
-                            kind: ExprKind::DecodeCall {
-                                obj: Box::new(e),
-                                ty,
-                                arg: Box::new(arg),
-                            },
-                            span,
+                        match self.try_parse_decode_tail(e.clone(), span) {
+                            Some(expr) => Some(expr),
+                            None => {
+                                self.pos = save; // restore — not a decode form
+                                None
+                            }
                         }
                     } else {
-                        Expr {
+                        None
+                    };
+                    match decode {
+                        Some(expr) => expr,
+                        None => Expr {
                             kind: ExprKind::Field {
                                 obj: Box::new(e),
                                 name,
                             },
                             span,
-                        }
+                        },
                     }
                 }
                 Token::LBracket => {
@@ -1013,6 +1014,24 @@ impl Parser {
             };
         }
         Ok(e)
+    }
+
+    /// Speculatively parse the tail of a `.decode[Type](arg)` form, assuming the opening `[` has
+    /// just been consumed. Returns `None` (so the caller backtracks to a plain field access) if the
+    /// exact `<type> ] ( <expr> )` shape isn't present — e.g. `b.decode[1]` indexes a field.
+    fn try_parse_decode_tail(&mut self, obj: Expr, span: Span) -> Option<Expr> {
+        let ty = self.parse_type().ok()?;
+        if !self.eat(&Token::RBracket) || !self.eat(&Token::LParen) {
+            return None;
+        }
+        let arg = self.parse_expr().ok()?;
+        if !self.eat(&Token::RParen) {
+            return None;
+        }
+        Some(Expr {
+            kind: ExprKind::DecodeCall { obj: Box::new(obj), ty, arg: Box::new(arg) },
+            span,
+        })
     }
 
     fn parse_primary(&mut self) -> PResult<Expr> {

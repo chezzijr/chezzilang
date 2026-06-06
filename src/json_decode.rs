@@ -51,7 +51,7 @@ pub fn from_type(
             ("list", [t]) => Ok(TypeDescriptor::List(Box::new(from_type(t, structs, visiting)?))),
             ("map", [k, v]) => {
                 if !matches!(k, Type::Named(s) if s == "str") {
-                    return Err("decode: map keys must be str".to_string());
+                    return Err("decode: map keys must be str, found a non-str key".to_string());
                 }
                 Ok(TypeDescriptor::Map(Box::new(from_type(v, structs, visiting)?)))
             }

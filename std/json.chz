@@ -133,26 +133,38 @@ struct Parser:
         return Ok(n)
 
     fn parse_number(self) -> Result[Json]:
+        # Scan a JSON number, validating its shape FIRST so `float(raw)` below only ever sees a
+        # well-formed numeral (a bad numeral would otherwise abort the program, not return Err).
         start := self.pos
         if self.peek() == "-":
             self.pos += 1
+        int_digits := 0
         while is_digit(self.peek()):
             self.pos += 1
+            int_digits += 1
+        if int_digits == 0:
+            return Err("invalid number: expected a digit")
         if self.peek() == ".":
             self.pos += 1
+            frac := 0
             while is_digit(self.peek()):
                 self.pos += 1
+                frac += 1
+            if frac == 0:
+                return Err("invalid number: digits required after '.'")
         if self.peek() == "e" or self.peek() == "E":
             self.pos += 1
             if self.peek() == "+" or self.peek() == "-":
                 self.pos += 1
+            exp := 0
             while is_digit(self.peek()):
                 self.pos += 1
+                exp += 1
+            if exp == 0:
+                return Err("invalid number: digits required in exponent")
         raw := ""
         for i in start..self.pos:
             raw = raw + self.src[i]
-        if raw == "" or raw == "-":
-            return Err("invalid number")
         return Ok(Num(float(raw)))
 
     fn parse_array(self) -> Result[Json]:
@@ -247,11 +259,14 @@ fn escape(s: str) -> str:
                                     out = out + c
     return out + "\""
 
-# Render a float the way JSON expects: whole numbers print without a trailing ".0".
+# Render a float the way JSON expects: whole numbers print without a trailing ".0". Only round-trip
+# through `int` for magnitudes safely inside i64 AND the exact-integer float range (~2^53); larger
+# values (or non-integers) print via `str(f)` directly, so `int(f)` can never overflow and abort.
 fn num_str(f: float) -> str:
-    i := int(f)
-    if float(i) == f:
-        return str(i)
+    if f > -9000000000000000.0 and f < 9000000000000000.0:
+        i := int(f)
+        if float(i) == f:
+            return str(i)
     return str(f)
 
 fn stringify(j: Json) -> str:
