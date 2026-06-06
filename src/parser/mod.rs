@@ -29,10 +29,12 @@ impl fmt::Display for ParseError {
 type PResult<T> = Result<T, ParseError>;
 
 /// Cap on parser recursion (nested expressions and blocks). Past this we return a `ParseError`
-/// instead of letting native stack recursion overflow and abort the process. Kept well below the
-/// depth that overflows a small (≈2 MB) thread stack — each nesting level is several frames deep —
-/// while far exceeding any realistic source nesting.
-const MAX_DEPTH: usize = 128;
+/// instead of letting native stack recursion overflow and abort the process. Each nesting level is
+/// several large parser frames (~16 KB), so 64 levels ≈ 1 MiB — comfortably under a small (≈2 MiB)
+/// thread stack with real headroom for the guard to fire before the host stack overflows, while
+/// still far exceeding any realistic source nesting. (Was 128, which sat right at the test-thread
+/// stack edge; see `deep_nesting_errors_not_crash`.)
+const MAX_DEPTH: usize = 64;
 
 /// Parse a full token stream into a `Module`.
 pub fn parse(tokens: Vec<Tok>) -> PResult<Module> {
@@ -2003,37 +2005,30 @@ mod tests {
     /// nested generics (parse_type), and nested blocks (parse_stmt).
     #[test]
     fn deep_nesting_errors_not_crash() {
-        // The `MAX_DEPTH` guard (128) trips well before any real stack limit, but a *test* thread's
-        // default stack (~2 MiB) leaves only a thin margin for 128 deep parser frames — thin enough
-        // that incidental code-layout shifts can tip it into a host stack overflow before the guard
-        // fires. Run on a generous-stack thread so the test exercises the guard, not the host stack.
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let paren = format!("x := {}1{}\n", "(".repeat(500), ")".repeat(500));
-                assert!(parse(lexer::tokenize(&paren).unwrap()).unwrap_err().message.contains("too deeply"));
+        // `MAX_DEPTH` (64) trips after ~1 MiB of parser frames — well within a *test* thread's
+        // default (~2 MiB) stack, so the guard fires cleanly instead of the host stack overflowing.
+        // (Was 128, which sat at the stack edge and needed a 64 MiB thread to test; the lower bound
+        // removed that crutch — runs inline now.) Exercises all four recursive entry points.
+        let paren = format!("x := {}1{}\n", "(".repeat(500), ")".repeat(500));
+        assert!(parse(lexer::tokenize(&paren).unwrap()).unwrap_err().message.contains("too deeply"));
 
-                let unary = format!("x := {}y\n", "not ".repeat(500));
-                assert!(parse(lexer::tokenize(&unary).unwrap()).unwrap_err().message.contains("too deeply"));
+        let unary = format!("x := {}y\n", "not ".repeat(500));
+        assert!(parse(lexer::tokenize(&unary).unwrap()).unwrap_err().message.contains("too deeply"));
 
-                let generic = format!("z: {}int{} = w\n", "list[".repeat(500), "]".repeat(500));
-                assert!(parse(lexer::tokenize(&generic).unwrap()).unwrap_err().message.contains("too deeply"));
+        let generic = format!("z: {}int{} = w\n", "list[".repeat(500), "]".repeat(500));
+        assert!(parse(lexer::tokenize(&generic).unwrap()).unwrap_err().message.contains("too deeply"));
 
-                let blocks = {
-                    let mut s = String::new();
-                    for i in 0..500 {
-                        s.push_str(&"    ".repeat(i));
-                        s.push_str("if x:\n");
-                    }
-                    s.push_str(&"    ".repeat(500));
-                    s.push_str("y = 1\n");
-                    s
-                };
-                assert!(parse(lexer::tokenize(&blocks).unwrap()).unwrap_err().message.contains("too deeply"));
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        let blocks = {
+            let mut s = String::new();
+            for i in 0..500 {
+                s.push_str(&"    ".repeat(i));
+                s.push_str("if x:\n");
+            }
+            s.push_str(&"    ".repeat(500));
+            s.push_str("y = 1\n");
+            s
+        };
+        assert!(parse(lexer::tokenize(&blocks).unwrap()).unwrap_err().message.contains("too deeply"));
     }
 
     /// A compound statement cannot be the inline body of a block — that would make a trailing

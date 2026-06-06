@@ -392,14 +392,13 @@ Formatter, LSP, package manager / registry (spec defers this), REPL, debugger, b
 runner, doc comments + docgen.
 
 ### Known fragilities (tech debt)
-- **Parser `MAX_DEPTH` (128) sits at the test-thread stack edge.** Each recursive-descent frame is
-  large (~16 KB), so 128 deep frames ≈ 2 MiB — right at a Rust *test* thread's default stack. The
-  production parser runs on the 8 MiB main thread (or the interp's 256 MiB thread) and is fine, but
-  the `parser::tests::deep_nesting_errors_not_crash` test overflowed the host stack before the depth
-  guard could fire, and incidental code-layout shifts can re-tip it. **Worked around (M10-G3)** by
-  running that test on a 64 MiB thread. **Proper fixes** (not yet done): shrink per-frame parser
-  stack usage, or lower `MAX_DEPTH` to leave real headroom, or make the guard self-tuning to the
-  available stack. Touches `src/parser/mod.rs` (`MAX_DEPTH`, `parse_stmt`/`parse_type`/`parse_expr`).
+- ~~**Parser `MAX_DEPTH` (128) sits at the test-thread stack edge.**~~ ✅ **FIXED** — lowered
+  `MAX_DEPTH` 128 → 64. Each recursive-descent frame is ~16 KB, so the old 128 deep frames ≈ 2 MiB
+  sat right at a Rust *test* thread's default stack: the `deep_nesting_errors_not_crash` test
+  overflowed the host stack before the depth guard could fire (worked around M10-G3 by running it on
+  a 64 MiB thread). 64 levels ≈ 1 MiB now leaves real headroom — the guard fires cleanly on the bare
+  test thread, so the 64 MiB workaround thread was removed (test runs inline). 64 still far exceeds
+  any realistic source nesting; full suite + conformance green. `src/parser/mod.rs`.
 
 **Recommended next:** with Tier 1 shipped (M8), the highest-leverage remaining work is **Tier 2
 type-system depth** — **generic enums** (`enum Tree[T]`; the most-felt type hole) and the
