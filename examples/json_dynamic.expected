@@ -1,0 +1,10 @@
+{"name":"chezzi","version":1,"debug":false,"langs":["rust","chz"],"meta":{"stars":9.5,"home":null}}
+chezzi
+1
+false
+2
+rust
+9.5
+true
+error: unexpected character ']'
+snö 😄

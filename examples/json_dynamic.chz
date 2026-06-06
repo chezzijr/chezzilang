@@ -1,0 +1,38 @@
+# examples/json_dynamic.chz — std.json layer A: the dynamic `Json` enum (parse / stringify /
+# accessors). NOTE: a JSON literal written in Chezzi source must DOUBLE its braces ({{ }}),
+# because bare {…} is string interpolation. The parser itself accepts ordinary JSON.
+
+import std.json
+
+# A small config document, round-tripped.
+src := "{{\"name\": \"chezzi\", \"version\": 1, \"debug\": false, \"langs\": [\"rust\", \"chz\"], \"meta\": {{\"stars\": 9.5, \"home\": null}}}}"
+
+match json.parse(src):
+    Ok(doc):
+        # Re-serialize: object key order is preserved (insertion-ordered map).
+        print(json.stringify(doc))
+
+        # Pull out typed values with the accessors (each returns an Option).
+        print(json.as_str(json.get(doc, "name")?)?)
+        print(str(json.as_int(json.get(doc, "version")?)?))
+        print(str(json.as_bool(json.get(doc, "debug")?)?))
+
+        # Walk into nested containers.
+        langs := json.get(doc, "langs")?
+        print(str(json.len(langs)))
+        print(json.as_str(json.at(langs, 0)?)?)
+        stars := json.get(json.get(doc, "meta")?, "stars")?
+        print(str(json.as_float(stars)?))
+        print(str(json.is_null(json.get(json.get(doc, "meta")?, "home")?)))
+    Err(e):
+        print("parse failed: " + e)
+
+# Errors come back as Err, never a crash.
+match json.parse("[1, 2,]"):
+    Ok(j): print(json.stringify(j))
+    Err(e): print("error: " + e)
+
+# Unicode escapes (incl. surrogate pairs) decode to real codepoints.
+match json.parse("\"sn\\u00f6 \\ud83d\\ude04\""):
+    Ok(j): print(json.as_str(j)?)
+    Err(e): print("error: " + e)

@@ -4044,6 +4044,19 @@ main()";
         assert_file_parity("examples/stdlib_cmp.chz");
     }
 
+    /// M8-M2 golden: `examples/json_dynamic.chz` — `import std.json`, the pure-Chezzi `Json` enum
+    /// parse/stringify round-trip + accessors + unicode escapes + an error case. Byte-matches
+    /// `.expected` and stays identical on interp + VM.
+    #[test]
+    fn golden_json_dynamic_via_run_file() {
+        let path = fixture("examples/json_dynamic.chz");
+        let expected = std::fs::read_to_string(fixture("examples/json_dynamic.expected")).unwrap();
+        let (out, _err, res) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/json_dynamic.chz");
+    }
+
     /// Golden: `examples/knapsack.chz` fills an int DP table with `cmp.max` (std.cmp generic over
     /// Comparable). Runs on the VM, byte-matches `.expected`, and stays identical to the interp.
     #[test]

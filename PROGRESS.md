@@ -14,8 +14,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `~/.claude/plans/in-gaps-see-tier-nested-neumann.md`. Milestones:
 > **M1 ✅** char Python-style — `s.chars() -> list[str]` + iterable strings (`for c in s:`);
 > no `char` type (a char is a 1-char `str`, like Python). Golden `examples/string_iter.chz`,
-> byte-identical both engines. · **M2 ⬜** std.json layer A (pure-Chezzi `Json` enum +
-> parse/stringify/accessors). · **M3 ⬜** native trio std.process(`cmd`)/std.fs/std.time. ·
+> byte-identical both engines. · **M2 ✅** std.json layer A — pure-Chezzi `Json` enum +
+> recursive-descent `parse` (unicode `\u`/surrogates, errors as `Err`) + `stringify` +
+> accessors (`as_*`/`get`/`at`/`len`/`is_null`); golden `examples/json_dynamic.chz`
+> byte-identical both engines. (Papercut: JSON literals in Chezzi *source* must double braces
+> `{{ }}` — bare `{}` is string interpolation.) · **M3 ⬜** native trio
+> std.process(`cmd`)/std.fs/std.time. ·
 > **M4 ⬜** set type. · **M5 ⬜** std.json `decode[T]` into struct/map/list/scalar. · **M6 ⬜** docs.
 
 > **Language gaps round 2 (#10–#15): ✅ ALL DONE.** See the section below.

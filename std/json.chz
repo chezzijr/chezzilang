@@ -1,0 +1,334 @@
+# std.json — JSON parse / stringify, written in Chezzi (dogfoods the language).
+#
+# `Json` is the dynamic representation: every JSON value is exactly one of six shapes.
+# Use `parse` to read a string into a `Json` tree, `stringify` to serialize one back, and
+# the `as_*` / `get` / `at` accessors to pull typed values out without a full `match`.
+# (For decoding straight into a struct or typed map, see `json.decode[T]` — built on top.)
+
+enum Json:
+    Null
+    Bool(bool)
+    Num(float)
+    Str(str)
+    Arr(list[Json])
+    Obj(map[str, Json])
+
+# ----- parsing -------------------------------------------------------------------------------
+
+# A cursor over the input's codepoints. Fields mutate in place across method calls.
+struct Parser:
+    src: list[str]
+    pos: int
+    len: int
+
+    fn peek(self) -> str:
+        if self.pos >= self.len:
+            return ""
+        return self.src[self.pos]
+
+    fn bump(self) -> str:
+        c := self.peek()
+        self.pos += 1
+        return c
+
+    fn skip_ws(self):
+        while self.pos < self.len:
+            c := self.src[self.pos]
+            if c == " " or c == "\t" or c == "\n" or c == "\r":
+                self.pos += 1
+            else:
+                return
+
+    fn parse_value(self) -> Result[Json]:
+        self.skip_ws()
+        c := self.peek()
+        if c == "":
+            return Err("unexpected end of input")
+        if c == "{{":
+            return self.parse_object()
+        if c == "[":
+            return self.parse_array()
+        if c == "\"":
+            s := self.parse_string()?
+            return Ok(Str(s))
+        if c == "t":
+            return self.parse_lit("true", Bool(true))
+        if c == "f":
+            return self.parse_lit("false", Bool(false))
+        if c == "n":
+            return self.parse_lit("null", Null)
+        if c == "-" or (c >= "0" and c <= "9"):
+            return self.parse_number()
+        return Err("unexpected character '" + c + "'")
+
+    fn parse_lit(self, word: str, val: Json) -> Result[Json]:
+        for i in 0..word.len():
+            if self.bump() != word[i]:
+                return Err("invalid literal, expected '" + word + "'")
+        return Ok(val)
+
+    fn parse_string(self) -> Result[str]:
+        self.pos += 1                       # consume the opening quote
+        out := ""
+        while true:
+            if self.pos >= self.len:
+                return Err("unterminated string")
+            c := self.bump()
+            if c == "\"":
+                return Ok(out)
+            if c == "\\":
+                e := self.bump()
+                if e == "\"":
+                    out = out + "\""
+                else:
+                    if e == "\\":
+                        out = out + "\\"
+                    else:
+                        if e == "/":
+                            out = out + "/"
+                        else:
+                            if e == "n":
+                                out = out + "\n"
+                            else:
+                                if e == "t":
+                                    out = out + "\t"
+                                else:
+                                    if e == "r":
+                                        out = out + "\r"
+                                    else:
+                                        if e == "b":
+                                            out = out + chr(8)
+                                        else:
+                                            if e == "f":
+                                                out = out + chr(12)
+                                            else:
+                                                if e == "u":
+                                                    u := self.parse_unicode()?
+                                                    out = out + u
+                                                else:
+                                                    return Err("invalid escape '\\" + e + "'")
+            else:
+                out = out + c
+
+    # A `\uXXXX` escape, combining a high+low surrogate pair into one codepoint.
+    fn parse_unicode(self) -> Result[str]:
+        hi := self.parse_hex4()?
+        if hi >= 55296 and hi <= 56319:                 # high surrogate
+            if self.bump() != "\\" or self.bump() != "u":
+                return Err("expected low surrogate")
+            lo := self.parse_hex4()?
+            if lo < 56320 or lo > 57343:
+                return Err("invalid low surrogate")
+            cp := 65536 + (hi - 55296) * 1024 + (lo - 56320)
+            return Ok(chr(cp))
+        if hi >= 56320 and hi <= 57343:
+            return Err("unexpected low surrogate")
+        return Ok(chr(hi))
+
+    fn parse_hex4(self) -> Result[int]:
+        n := 0
+        for i in 0..4:
+            d := hex_val(self.bump())?
+            n = n * 16 + d
+        return Ok(n)
+
+    fn parse_number(self) -> Result[Json]:
+        start := self.pos
+        if self.peek() == "-":
+            self.pos += 1
+        while is_digit(self.peek()):
+            self.pos += 1
+        if self.peek() == ".":
+            self.pos += 1
+            while is_digit(self.peek()):
+                self.pos += 1
+        if self.peek() == "e" or self.peek() == "E":
+            self.pos += 1
+            if self.peek() == "+" or self.peek() == "-":
+                self.pos += 1
+            while is_digit(self.peek()):
+                self.pos += 1
+        raw := ""
+        for i in start..self.pos:
+            raw = raw + self.src[i]
+        if raw == "" or raw == "-":
+            return Err("invalid number")
+        return Ok(Num(float(raw)))
+
+    fn parse_array(self) -> Result[Json]:
+        self.pos += 1                       # consume '['
+        items := []
+        self.skip_ws()
+        if self.peek() == "]":
+            self.pos += 1
+            return Ok(Arr(items))
+        while true:
+            v := self.parse_value()?
+            items.push(v)
+            self.skip_ws()
+            c := self.bump()
+            if c == "]":
+                return Ok(Arr(items))
+            if c != ",":
+                return Err("expected ',' or ']' in array")
+
+    fn parse_object(self) -> Result[Json]:
+        self.pos += 1                       # consume '{'
+        obj := {}
+        self.skip_ws()
+        if self.peek() == "}}":
+            self.pos += 1
+            return Ok(Obj(obj))
+        while true:
+            self.skip_ws()
+            if self.peek() != "\"":
+                return Err("expected string key in object")
+            key := self.parse_string()?
+            self.skip_ws()
+            if self.bump() != ":":
+                return Err("expected ':' after object key")
+            v := self.parse_value()?
+            obj[key] = v
+            self.skip_ws()
+            c := self.bump()
+            if c == "}}":
+                return Ok(Obj(obj))
+            if c != ",":
+                return Err("expected ',' or '}}' in object")
+
+fn is_digit(c: str) -> bool:
+    return c >= "0" and c <= "9"
+
+fn hex_val(c: str) -> Result[int]:
+    if c >= "0" and c <= "9":
+        return Ok(ord(c) - ord("0"))
+    if c >= "a" and c <= "f":
+        return Ok(ord(c) - ord("a") + 10)
+    if c >= "A" and c <= "F":
+        return Ok(ord(c) - ord("A") + 10)
+    return Err("invalid hex digit '" + c + "'")
+
+# Parse a JSON document into a `Json` tree. Trailing non-whitespace is an error.
+fn parse(s: str) -> Result[Json]:
+    p := Parser(s.chars(), 0, s.len())
+    v := p.parse_value()?
+    p.skip_ws()
+    if p.pos < p.len:
+        return Err("trailing characters after JSON value")
+    return Ok(v)
+
+# ----- serializing ---------------------------------------------------------------------------
+
+fn escape(s: str) -> str:
+    out := "\""
+    for c in s:
+        n := ord(c)
+        if c == "\"":
+            out = out + "\\\""
+        else:
+            if c == "\\":
+                out = out + "\\\\"
+            else:
+                if n == 10:
+                    out = out + "\\n"
+                else:
+                    if n == 9:
+                        out = out + "\\t"
+                    else:
+                        if n == 13:
+                            out = out + "\\r"
+                        else:
+                            if n == 8:
+                                out = out + "\\b"
+                            else:
+                                if n == 12:
+                                    out = out + "\\f"
+                                else:
+                                    out = out + c
+    return out + "\""
+
+# Render a float the way JSON expects: whole numbers print without a trailing ".0".
+fn num_str(f: float) -> str:
+    i := int(f)
+    if float(i) == f:
+        return str(i)
+    return str(f)
+
+fn stringify(j: Json) -> str:
+    match j:
+        Null: return "null"
+        Bool(b):
+            if b:
+                return "true"
+            return "false"
+        Num(n): return num_str(n)
+        Str(s): return escape(s)
+        Arr(xs):
+            out := "["
+            first := true
+            for x in xs:
+                if not first:
+                    out = out + ","
+                out = out + stringify(x)
+                first = false
+            return out + "]"
+        Obj(m):
+            out := "{{"
+            first := true
+            for k in m.keys():
+                if not first:
+                    out = out + ","
+                out = out + escape(k) + ":" + stringify(m[k])
+                first = false
+            return out + "}}"
+
+# ----- accessors -----------------------------------------------------------------------------
+# (Enums can't carry methods yet, so these are free functions: `json.as_int(j)`.)
+
+fn is_null(j: Json) -> bool:
+    match j:
+        Null: return true
+        _: return false
+
+fn as_bool(j: Json) -> Option[bool]:
+    match j:
+        Bool(b): return Some(b)
+        _: return None
+
+fn as_float(j: Json) -> Option[float]:
+    match j:
+        Num(n): return Some(n)
+        _: return None
+
+fn as_int(j: Json) -> Option[int]:
+    match j:
+        Num(n): return Some(int(n))
+        _: return None
+
+fn as_str(j: Json) -> Option[str]:
+    match j:
+        Str(s): return Some(s)
+        _: return None
+
+# Look up a key in an object (None if not an object or key is absent).
+fn get(j: Json, key: str) -> Option[Json]:
+    match j:
+        Obj(m): return m.get(key)
+        _: return None
+
+# Index into an array (None if not an array or out of bounds).
+fn at(j: Json, i: int) -> Option[Json]:
+    match j:
+        Arr(xs):
+            if i < 0 or i >= xs.len():
+                return None
+            return Some(xs[i])
+        _: return None
+
+# Element count: array length, object size, or string length; 0 for scalars.
+fn len(j: Json) -> int:
+    match j:
+        Arr(xs): return xs.len()
+        Obj(m): return m.len()
+        Str(s): return s.len()
+        _: return 0
