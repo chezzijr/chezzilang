@@ -1300,6 +1300,8 @@ impl Interp {
                     }
                 })
                 .collect(),
+            // Strings iterate as 1-char strings (Python-style; the checker binds a single str var).
+            Value::Str(s) => s.chars().map(|c| vec![Value::Str(c.to_string().into())]).collect(),
             other => {
                 return Err(RuntimeError {
                     message: format!("cannot iterate over {}", other.type_name()),
@@ -2491,6 +2493,14 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/hello.chz");
         let expected = include_str!("../../examples/hello.expected");
         assert_eq!(run_capture(source).expect("hello.chz should run"), expected);
+    }
+
+    /// M1 (tier-1) golden: Python-style char handling — `s.chars()` + iterable strings.
+    #[test]
+    fn golden_string_iter_chz() {
+        let source = include_str!("../../examples/string_iter.chz");
+        let expected = include_str!("../../examples/string_iter.expected");
+        assert_eq!(run_capture(source).expect("string_iter.chz should run"), expected);
     }
 
     /// M6 golden: core-type methods + pipe produce exactly the expected output on the interp.

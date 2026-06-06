@@ -534,6 +534,14 @@ impl Vm {
                             let nh = self.heap.alloc(Obj::List(keys));
                             self.push(Value::Obj(nh));
                         }
+                        // A string iterates as 1-char strings (Python-style; gap: char type).
+                        Obj::Str(s) => {
+                            let chars: Vec<String> = s.chars().map(|c| c.to_string()).collect();
+                            let items: Vec<Value> =
+                                chars.into_iter().map(|c| self.alloc_str(c)).collect();
+                            let nh = self.heap.alloc(Obj::List(items));
+                            self.push(Value::Obj(nh));
+                        }
                         _ => return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span)),
                     },
                     other => return Err(self.err(format!("cannot iterate over {}", self.type_name(other)), span)),
@@ -1262,6 +1270,12 @@ impl Vm {
                         let parts: Vec<Value> =
                             s.split(sep.as_str()).map(|p| self.alloc_str(p.to_string())).collect();
                         Ok(Value::Obj(self.heap.alloc(Obj::List(parts))))
+                    }
+                    "chars" => {
+                        self.arity_err("chars", args, 0, span)?;
+                        let cs: Vec<Value> =
+                            s.chars().map(|c| self.alloc_str(c.to_string())).collect();
+                        Ok(Value::Obj(self.heap.alloc(Obj::List(cs))))
                     }
                     "starts_with" => {
                         self.arity_err("starts_with", args, 1, span)?;
@@ -2747,6 +2761,17 @@ main()";
         assert_eq!(vm_out, interp_out);
     }
 
+    /// M1 (tier-1) golden: `examples/string_iter.chz` (chars + iterable strings) byte-identical
+    /// on the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_string_iter_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/string_iter.chz");
+        let expected = include_str!("../../examples/string_iter.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     /// Gap #5 golden: `examples/map.chz` is byte-identical to its `.expected` on the VM,
     /// and to the interpreter (the cross-engine acceptance bar for maps).
     #[test]
@@ -3239,6 +3264,30 @@ mod parity_tests {
         assert_parity_out(
             "m := {\"a\": 1, \"b\": 2, \"c\": 3}\nfor k in m:\n    print(k)\n",
             "a\nb\nc\n",
+        );
+    }
+
+    #[test]
+    fn str_chars_parity() {
+        assert_parity_out(
+            "cs := \"héllo\".chars()\nprint(cs.len())\nprint(cs[1])\n",
+            "5\né\n",
+        );
+    }
+
+    #[test]
+    fn for_over_str_parity() {
+        assert_parity_out(
+            "out := \"\"\nfor c in \"abc\":\n    out = out + c + \"-\"\nprint(out)\n",
+            "a-b-c-\n",
+        );
+    }
+
+    #[test]
+    fn for_over_empty_str_parity() {
+        assert_parity_out(
+            "n := 0\nfor c in \"\":\n    n += 1\nprint(n)\n",
+            "0\n",
         );
     }
 

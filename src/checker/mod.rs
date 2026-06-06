@@ -2524,6 +2524,7 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
         "len" => (vec![], Ty::Int),
         "upper" | "lower" | "trim" => (vec![], Ty::Str),
         "split" => (vec![Ty::Str], Ty::list(Ty::Str)),
+        "chars" => (vec![], Ty::list(Ty::Str)),
         "join" => (vec![Ty::list(Ty::Str)], Ty::Str),
         "starts_with" | "contains" => (vec![Ty::Str], Ty::Bool),
         _ => return None,

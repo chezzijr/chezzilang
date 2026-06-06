@@ -1098,6 +1098,21 @@ fn str_split_element_is_str_not_int() {
 }
 
 #[test]
+fn str_chars_returns_list_of_str() {
+    ok("cs: list[str] = \"abc\".chars()\nprint(cs)\n");
+}
+
+#[test]
+fn str_chars_element_is_str_not_int() {
+    rejects("cs: list[int] = \"abc\".chars()\n", "list[str] to variable of type list[int]");
+}
+
+#[test]
+fn for_over_str_binds_str() {
+    ok("for c in \"abc\":\n    u: str = c.upper()\n    print(u)\n");
+}
+
+#[test]
 fn str_join_takes_list_of_str_returns_str() {
     ok("xs := [\"a\", \"b\"]\nr: str = \",\".join(xs)\nprint(r)\n");
 }

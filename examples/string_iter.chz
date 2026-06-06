@@ -1,0 +1,28 @@
+# examples/string_iter.chz — Python-style char handling: s.chars() + iterable strings.
+# Chezzi has no `char` type; a character is a 1-char `str` (like Python). `s[i]`, iteration,
+# and `s.chars()` all yield 1-char strings, and `ord`/`chr` bridge to/from codepoints.
+
+# Iterate a string directly (no index needed).
+vowels := 0
+for c in "education":
+    if c == "a" or c == "e" or c == "i" or c == "o" or c == "u":
+        vowels += 1
+print(vowels)
+
+# .chars() materializes the 1-char strings into a list.
+cs := "café".chars()
+print(cs.len())          # 4 — counts codepoints, not bytes
+print(cs[3])             # é
+
+# A tiny tokenizer-style classify loop, no spaces required.
+fn count_digits(s: str) -> int:
+    n := 0
+    for c in s:
+        if c >= "0" and c <= "9":
+            n += 1
+    return n
+print(count_digits("a1b2c3d"))
+
+# chars() composes with the list HOFs and join.
+upper := "abc".chars().map(fn(c: str) -> str: c.upper())
+print("".join(upper))

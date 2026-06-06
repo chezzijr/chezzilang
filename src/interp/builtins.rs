@@ -141,6 +141,11 @@ fn str_method(s: &Rc<str>, method: &str, args: &[Value], span: Span) -> Result<V
             let parts: Vec<Value> = s.split(sep.as_ref()).map(|p| Value::Str(p.into())).collect();
             Ok(Value::List(Rc::new(RefCell::new(parts))))
         }
+        "chars" => {
+            arity("chars", args, 0, span)?;
+            let cs: Vec<Value> = s.chars().map(|c| Value::Str(c.to_string().into())).collect();
+            Ok(Value::List(Rc::new(RefCell::new(cs))))
+        }
         "starts_with" => {
             arity("starts_with", args, 1, span)?;
             Ok(Value::Bool(s.starts_with(str_arg(0)?.as_ref())))
