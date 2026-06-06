@@ -6,11 +6,11 @@ A fast, statically-typed, Python-feel scripting language. Hand-built in Rust.
 
 ## Goals (ranked)
 
-1. **Learn** — hand-build the guts (lexer, parser, type checker, VM, GC). No transpiling, no codegen shortcuts.
+1. **Self-contained** — the guts (lexer, parser, type checker, VM, GC) are hand-built on Rust `std` only: no transpiling, no codegen shortcuts, minimal dependencies.
 2. **Usable tool** — bytecode VM for ~10x over a tree-walker; real modules so programs split into files.
 3. **LLM-friendly** — static types as guardrails, explicit signatures, machine-readable compiler errors, small orthogonal grammar.
 
-Closest existing cousins (read, don't copy): **Crystal**, **Nim**, plus *Crafting Interpreters* for the implementation path.
+Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 
 ## Locked decisions
 
@@ -117,7 +117,7 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
   `ord`/`chr`, `set()`/`set(list)`, core-type methods (`s.upper()`, `s.chars()`, `xs.push()`,
   `m.get()`, `set.add()`).
 - **Std modules v1 (shipped, M6c):** `std.math`/`std.io`/`std.os` (native-Rust via the FFI seam),
-  `std.str` + `std.cmp` (written in Chezzi — dogfooding; `std.cmp` adds M7-G3). Imported with
+  `std.str` + `std.cmp` (written in Chezzi; `std.cmp` adds M7-G3). Imported with
   `import std.math` / `import f from std.io`. `std.cmp` holds generic `min`/`max`/`clamp`
   (`[T: Comparable]`); `list.sort()` is likewise Comparable. (`std.math.min`/`max` were retired into
   `std.cmp`; `abs` stays native.)

@@ -6,7 +6,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ---
 
-> **Mode:** build mode (Claude implements directly; learning/scaffold workflow retired — see `CLAUDE.md`).
+> **Mode:** Claude implements directly — working, tested code each session (see `CLAUDE.md`).
 
 ## Current focus
 
@@ -184,7 +184,7 @@ model; Level-3 dynamic `cdylib` loading stays out of scope.
   imports + `m.fn()` type-check with zero new logic. Math params are `float` (no implicit int→float).
 - ✅ **Modules** — `std.math` (abs/min/max/floor/ceil/round/pow/sqrt + `pi`/`e`), `std.io`
   (print/eprint/read_line/read_file/write_file), `std.os` (args/env/getcwd) — all native; `std.str`
-  (repeat/reverse/pad_left/is_empty/split_lines) — **pure Chezzi** (`std/str.chz`), dogfooding.
+  (repeat/reverse/pad_left/is_empty/split_lines) — **pure Chezzi** (`std/str.chz`).
 - ✅ **CLI** — `chezzi run f.chz a b` passes program args; env + real stdin wired via
   `HostConfig::from_process`; `io.eprint` flushes to real stderr.
 - ✅ **Tests** — per-module parity (interp == VM on stdout *and* stderr *and* error), checker sig
@@ -333,16 +333,16 @@ stdout — this only differs on already-broken input.
 
 All 5 guiding tests green; lexes full `examples/hello.chz` (nested Indent/Dedent, `0..10`→DotDot, `?`).
 
-- ✅ **1a. Char cursor** — *(yours, reviewed)*
-- ✅ **1b. Operator tokens** — *(scaffolded)*
+- ✅ **1a. Char cursor**
+- ✅ **1b. Operator tokens**
 - ✅ **1c. Numbers** — int + float; `_` digit separators (`10_000_000`, only between digits).
 - ✅ **1d. Strings** — `"..."` with escapes `\n \t \r \\ \" \0` (unknown escape → error).
-- ✅ **1e. Identifiers & keywords** — *(yours, reviewed)*
-- ✅ **1f. Comments & whitespace** — *(scaffolded)*
-- ✅ **1g. Newlines** — *(scaffolded)*
-- ✅ **1h. Indentation** — indent stack + pending-Dedent queue in `scan_indentation`. *(scaffolded; study it)*
-- ✅ **1i. EOF** — Newline → trailing Dedents → Eof *(scaffolded)*
-- ✅ **1j/1k. Tests green + reviewed.**
+- ✅ **1e. Identifiers & keywords**
+- ✅ **1f. Comments & whitespace**
+- ✅ **1g. Newlines**
+- ✅ **1h. Indentation** — indent stack + pending-Dedent queue in `scan_indentation`.
+- ✅ **1i. EOF** — Newline → trailing Dedents → Eof
+- ✅ **1j/1k. Tests green.**
 
 **Open follow-ups (small, do anytime):** scientific notation in numbers (`1e3`); single-quote strings; unicode `\u{…}` escapes.
 **Done post-M1:** string escapes (`\n \t \r \\ \" \0`), numeric underscores (`10_000_000`) — both lexer-only, TDD, conformance still green.
@@ -527,9 +527,7 @@ patterns) are friction. Confirmed working 🟢: recursive/self-referential struc
 list), mutable `self` across method calls, nested-list DP, empty-map `K,V` inference. No `src/`
 changes this pass — surfacing only; full 569-test suite still green.
 
-## Learning log
-
-Jot what clicked / what confused you — future-you and Claude both use this.
+## Notes
 
 - Recursive structs "just work" via the checker's two-pass name collection — trees and linked lists
   need no special support, only `Node?` child fields + a `match` per step.

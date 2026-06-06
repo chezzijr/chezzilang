@@ -3,11 +3,11 @@
 Chezzi is a fast, statically-typed, Python-feel scripting language, hand-built in Rust.
 Full design + roadmap: **[`docs/spec.md`](docs/spec.md)**. Syntax cheat-sheet: **[`docs/syntax.md`](docs/syntax.md)**. Canonical grammar: **[`docs/grammar.bnf`](docs/grammar.bnf)** (executed + drift-checked by `cargo test conformance`). Progress tracker: **[`PROGRESS.md`](PROGRESS.md)**.
 
-## How we work — build mode
+## How we work
 
 Claude implements directly. Ship working, tested code each session.
 
-- Write real implementations, not `todo!()` stubs. No `// HINT:` hand-holding.
+- Write real implementations, not `todo!()` stubs.
 - Every milestone lands with passing tests and a clean `cargo build` / `cargo clippy`.
 - Each compiler phase is its own module under `src/`. Keep modules focused.
 - Verify before claiming done: run the tests and the relevant `chezzi` subcommand, show real output.
@@ -31,7 +31,7 @@ cargo run -- help        # CLI usage
 cargo run -- tokens examples/hello.chz   # M1 target
 cargo run -- ast    examples/hello.chz   # M2 target
 cargo run -- run    examples/hello.chz   # M3 target
-cargo clippy             # lint (idiom feedback — run often while learning)
+cargo clippy             # lint
 ```
 
 ## Conventions
