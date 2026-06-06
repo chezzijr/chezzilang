@@ -333,7 +333,7 @@ matching with exhaustiveness, closures/HOF, struct methods, modules, GC, two bac
 interpolation, pipe. What remains to make it a language you'd reach for to write real scripts is
 **~80% standard-library breadth, ~20% type-system depth**, ordered below by leverage.
 
-### Tier 1 — blocks everyday scripting (mostly stdlib) — ✅ **DONE (M8)** except regex/http
+### Tier 1 — blocks everyday scripting (mostly stdlib) — ✅ **DONE (M8 + M9)**
 - ~~**`std.json`** — parse/serialize.~~ ✅ **M8.** A pure-Chezzi `Json` enum (`parse`/`stringify`/
   `as_*`/`get`/`at`) **plus** type-directed `json.decode[T](s)` into a struct / typed map / list /
   scalar. Sidestepped the `Display`/`Hashable` dependency the original note feared — a dedicated
@@ -341,8 +341,11 @@ interpolation, pipe. What remains to make it a language you'd reach for to write
   `examples/json_decode.chz`.
 - **More stdlib:** ✅ `std.time` (`now`/`monotonic`/`sleep_ms`/`format`), ✅ `std.fs`
   (`list_dir`/`exists`/`is_file`/`is_dir`/`size`/`glob`), ✅ `std.process` (`cmd(s) -> Result[str]`).
-  Still deferred: **regex**, **`std.http`** (both want vetted third-party crates; the project avoids
-  deps by default). See `examples/sys.chz`.
+  ✅ **M9 — `std.regex`** (the `regex` crate; `is_match`/`find`/`find_all`/`replace_all`/`split`,
+  `Match` struct) and ✅ **`std.request`** (blocking HTTP/HTTPS via `ureq`+rustls; `get`/`post` →
+  `Result[Response]`). These took the project's first runtime deps (the seam grew
+  `NativeRet::Struct`/`Map` so native fns can return structured values). See `examples/sys.chz`,
+  `examples/regex_demo.chz`, `examples/request_demo.chz`.
 - ~~**A real `char` type / `s.chars()`**~~ ✅ **M8 — Python-style, no `char` type.** Added
   `s.chars() -> list[str]` and made strings iterable (`for c in s:`); a character stays a 1-char
   `str` (like Python). See `examples/string_iter.chz`.
