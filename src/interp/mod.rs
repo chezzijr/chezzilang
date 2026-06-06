@@ -1823,6 +1823,20 @@ fn lower_native(ret: crate::native::NativeRet) -> Value {
             let vs = items.into_iter().map(lower_native).collect();
             Value::List(std::rc::Rc::new(std::cell::RefCell::new(vs)))
         }
+        N::Struct { name, fields } => {
+            let fs = fields.into_iter().map(|(k, v)| (k, lower_native(v))).collect();
+            Value::Struct {
+                name: name.into(),
+                fields: std::rc::Rc::new(std::cell::RefCell::new(fs)),
+            }
+        }
+        N::Map(entries) => {
+            let es = entries
+                .into_iter()
+                .map(|(k, v)| (lower_native(k), lower_native(v)))
+                .collect();
+            Value::Map(std::rc::Rc::new(std::cell::RefCell::new(es)))
+        }
         N::Ok(inner) => enum_val("Result", "Ok", vec![lower_native(*inner)]),
         N::Err(msg) => enum_val("Result", "Err", vec![Value::Str(msg.into())]),
         N::Some(inner) => enum_val("Option", "Some", vec![lower_native(*inner)]),
@@ -2104,6 +2118,42 @@ mod tests {
         );
         let expr = parse_expr_str("add(40, 2)").unwrap();
         assert_eq!(interp.eval(&expr), Ok(Value::Int(42)));
+    }
+
+    #[test]
+    fn lowers_native_struct_to_struct_value() {
+        use crate::native::NativeRet as N;
+        let ret = N::Struct {
+            name: "Match".into(),
+            fields: vec![
+                ("text".into(), N::Str("hi".into())),
+                ("start".into(), N::Int(0)),
+            ],
+        };
+        match lower_native(ret) {
+            Value::Struct { name, fields } => {
+                assert_eq!(&*name, "Match");
+                let f = fields.borrow();
+                assert_eq!(f[0].0, "text");
+                assert_eq!(f[0].1, Value::Str("hi".into()));
+                assert_eq!(f[1], ("start".to_string(), Value::Int(0)));
+            }
+            other => panic!("expected Struct, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_native_map_to_map_value() {
+        use crate::native::NativeRet as N;
+        let ret = N::Map(vec![(N::Str("k".into()), N::Str("v".into()))]);
+        match lower_native(ret) {
+            Value::Map(entries) => {
+                let e = entries.borrow();
+                assert_eq!(e.len(), 1);
+                assert_eq!(e[0], (Value::Str("k".into()), Value::Str("v".into())));
+            }
+            other => panic!("expected Map, got {other:?}"),
+        }
     }
 
     #[test]

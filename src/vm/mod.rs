@@ -977,6 +977,25 @@ impl Vm {
                 }
                 Value::Obj(self.heap.alloc(Obj::List(vs)))
             }
+            N::Struct { name, fields } => {
+                // Lower fields first (each may allocate), then allocate the struct itself — keeps
+                // every allocation at this instruction boundary, preserving the GC invariant.
+                let mut fs = Vec::with_capacity(fields.len());
+                for (k, v) in fields {
+                    let lv = self.lower_native(v);
+                    fs.push((k.into_boxed_str(), lv));
+                }
+                Value::Obj(self.heap.alloc(Obj::Struct { name: name.into_boxed_str(), fields: fs }))
+            }
+            N::Map(entries) => {
+                let mut es = Vec::with_capacity(entries.len());
+                for (k, v) in entries {
+                    let lk = self.lower_native(k);
+                    let lv = self.lower_native(v);
+                    es.push((lk, lv));
+                }
+                Value::Obj(self.heap.alloc(Obj::Map(es)))
+            }
             N::Ok(inner) => {
                 let p = self.lower_native(*inner);
                 self.alloc_enum("Result", "Ok", vec![p])
@@ -3533,6 +3552,76 @@ mod parity_tests {
         assert_parity_file(&[("main.chz", src)], "main.chz")
     }
 
+    // ----- M9: std.regex parity (exercises NativeRet::Struct lowering on both engines) -----
+
+    #[test]
+    fn regex_find_all_replace_split_parity() {
+        let out = parity_entry(
+            r##"import std.regex
+match regex.find_all("[0-9]+", "a1 22 333"):
+    Ok(ms):
+        for m in ms:
+            print(m.text)
+    Err(e): print(e)
+match regex.replace_all("[0-9]+", "a1b22c", "#"):
+    Ok(s): print(s)
+    Err(e): print(e)
+match regex.split(",", "a,b,c"):
+    Ok(parts): print("|".join(parts))
+    Err(e): print(e)
+"##,
+        );
+        assert_eq!(out, "1\n22\n333\na#b#c\na|b|c\n");
+    }
+
+    /// `std.request` against a loopback server, run through BOTH engines (exercises `NativeRet::Map`
+    /// lowering on each). The server serves one canned response per connection; interp and vm each
+    /// open one, so it accepts twice.
+    #[test]
+    fn request_get_parity_against_local_server() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = "pong";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nX-Test: hi\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+
+        let src = format!(
+            "import std.request\nmatch request.get(\"http://{addr}/\"):\n    Ok(resp):\n        print(str(resp.status))\n        print(resp.body)\n        print(resp.headers[\"x-test\"])\n    Err(e): print(e)\n"
+        );
+        let out = parity_entry(&src);
+        server.join().unwrap();
+        assert_eq!(out, "200\npong\nhi\n");
+    }
+
+    #[test]
+    fn regex_find_groups_and_span_parity() {
+        let out = parity_entry(
+            r#"import std.regex
+match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
+    Ok(opt):
+        match opt:
+            Some(m): print(m.text + " " + str(m.start) + " " + ",".join(m.groups))
+            None: print("none")
+    Err(e): print(e)
+"#,
+        );
+        assert_eq!(out, "ann@host 3 ann,host\n");
+    }
+
     // ----- break / continue parity (both engines must agree AND produce the right output) -----
 
     /// Assert both engines agree AND that the (shared) stdout equals `expect`. A hang here means a
@@ -4507,6 +4596,19 @@ main()";
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/json_dynamic.chz");
+    }
+
+    /// M9 golden: `examples/regex_demo.chz` — `import std.regex` (is_match / find with capture
+    /// groups / find_all / replace_all / split + a bad-pattern Err). Byte-matches `.expected` and
+    /// stays identical on interp + VM.
+    #[test]
+    fn golden_regex_demo_via_run_file() {
+        let path = fixture("examples/regex_demo.chz");
+        let expected = std::fs::read_to_string(fixture("examples/regex_demo.expected")).unwrap();
+        let (out, _err, res) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/regex_demo.chz");
     }
 
     /// Golden: `examples/knapsack.chz` fills an int DP table with `cmp.max` (std.cmp generic over

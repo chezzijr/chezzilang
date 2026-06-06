@@ -17,6 +17,8 @@ pub mod io;
 pub mod math;
 pub mod os;
 pub mod process;
+pub mod regex;
+pub mod request;
 pub mod time;
 
 use std::collections::HashMap;
@@ -94,11 +96,20 @@ pub struct HostError {
 pub enum NativeRet {
     Int(i64),
     Float(f64),
-    /// Seam completeness — no std fn returns a bool yet, but native fns may.
-    #[allow(dead_code)]
     Bool(bool),
     Str(String),
     List(Vec<NativeRet>),
+    /// A struct instance: type name + named fields in declaration order. The checker must know a
+    /// struct of this `name` with matching field types (seeded for stdlib structs like
+    /// `Response`/`Match`). Each engine lowers this to its own struct value.
+    Struct {
+        name: String,
+        fields: Vec<(String, NativeRet)>,
+    },
+    /// A `{k: v, …}` map, insertion-ordered. Used by e.g. `std.request` response headers
+    /// (`map[str, str]`). Keys MUST be unique: lowering pushes entries verbatim (it does not dedup),
+    /// so the caller is responsible for upholding the language's map unique-key invariant.
+    Map(Vec<(NativeRet, NativeRet)>),
     Ok(Box<NativeRet>),
     Err(String),
     Some(Box<NativeRet>),
@@ -177,6 +188,8 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
             "process" => Some("std.process"),
             "fs" => Some("std.fs"),
             "time" => Some("std.time"),
+            "regex" => Some("std.regex"),
+            "request" => Some("std.request"),
             _ => None,
         },
         _ => None,
@@ -194,6 +207,8 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn)] {
         "std.process" => process::MEMBERS,
         "std.fs" => fs::MEMBERS,
         "std.time" => time::MEMBERS,
+        "std.regex" => regex::MEMBERS,
+        "std.request" => request::MEMBERS,
         _ => &[],
     }
 }

@@ -200,6 +200,21 @@ fn native_module_sig(name: &str) -> ModuleSig {
             func("sleep_ms", vec![Ty::Int], Ty::Nil);
             func("format", vec![Ty::Int], Ty::Str);
         }
+        "std.regex" => {
+            // `Match` is the synthetic struct seeded in `seed_stdlib_structs`.
+            let m = || Ty::Struct("Match".to_string(), vec![]);
+            func("is_match", vec![Ty::Str, Ty::Str], Ty::result(Ty::Bool));
+            func("find", vec![Ty::Str, Ty::Str], Ty::result(Ty::option(m())));
+            func("find_all", vec![Ty::Str, Ty::Str], Ty::result(Ty::list(m())));
+            func("replace_all", vec![Ty::Str, Ty::Str, Ty::Str], Ty::result(Ty::Str));
+            func("split", vec![Ty::Str, Ty::Str], Ty::result(Ty::list(Ty::Str)));
+        }
+        "std.request" => {
+            // `Response` is the synthetic struct seeded in `seed_stdlib_structs`.
+            let resp = || Ty::Struct("Response".to_string(), vec![]);
+            func("get", vec![Ty::Str], Ty::result(resp()));
+            func("post", vec![Ty::Str, Ty::Str], Ty::result(resp()));
+        }
         _ => {}
     }
     sig
@@ -244,7 +259,7 @@ struct Checker {
 
 impl Checker {
     fn new() -> Self {
-        Checker {
+        let mut c = Checker {
             errors: Vec::new(),
             scopes: Vec::new(),
             functions: HashMap::new(),
@@ -263,7 +278,41 @@ impl Checker {
             imported_poly: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
-        }
+        };
+        c.seed_stdlib_structs();
+        c
+    }
+
+    /// Register the synthetic struct shapes that native std modules return (M9): `Match`
+    /// (`std.regex`) and `Response` (`std.request`). They have no AST, so their field layouts are
+    /// seeded here; `infer_field` then types `m.text`, `resp.status`, etc. Like all type names in
+    /// M4.5 these are program-global, so `Match`/`Response` become reserved names (a user struct of
+    /// the same name collides, as intended).
+    fn seed_stdlib_structs(&mut self) {
+        let mk = |fields: Vec<(&str, Ty)>| StructInfo {
+            type_params: Vec::new(),
+            fields: fields.into_iter().map(|(n, t)| (n.to_string(), t)).collect(),
+            methods: HashMap::new(),
+        };
+        self.structs.insert(
+            "Match".into(),
+            mk(vec![
+                ("text", Ty::Str),
+                ("start", Ty::Int),
+                ("end", Ty::Int),
+                ("groups", Ty::list(Ty::Str)),
+            ]),
+        );
+        self.struct_names.insert("Match".into());
+        self.structs.insert(
+            "Response".into(),
+            mk(vec![
+                ("status", Ty::Int),
+                ("body", Ty::Str),
+                ("headers", Ty::map(Ty::Str, Ty::Str)),
+            ]),
+        );
+        self.struct_names.insert("Response".into());
     }
 
     fn error(&mut self, span: Span, message: impl Into<String>) {

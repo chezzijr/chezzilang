@@ -1850,6 +1850,72 @@ fn native_fs_unknown_member_rejected() {
     );
 }
 
+// ===== M9: std.regex (Match struct) =====
+
+#[test]
+fn native_regex_is_match_returns_result_bool() {
+    entry_ok("import std.regex\nfn main():\n    match regex.is_match(\"x\", \"xy\"):\n        Ok(b):\n            if b:\n                print(\"yes\")\n        Err(e): print(e)\n");
+}
+
+#[test]
+fn native_regex_find_returns_match_with_typed_fields() {
+    entry_ok("import std.regex\nfn main():\n    match regex.find(\"[0-9]+\", \"a12\"):\n        Ok(opt):\n            match opt:\n                Some(m):\n                    t: str = m.text\n                    st: int = m.start\n                    g: list[str] = m.groups\n                    print(t + str(st) + \",\".join(g))\n                None: print(\"none\")\n        Err(e): print(e)\n");
+}
+
+#[test]
+fn native_regex_find_all_returns_result_list_match() {
+    entry_ok("import std.regex\nfn main():\n    match regex.find_all(\"[0-9]+\", \"1 2\"):\n        Ok(ms):\n            for m in ms:\n                print(m.text)\n        Err(e): print(e)\n");
+}
+
+#[test]
+fn native_regex_split_and_replace_all_return_strings() {
+    entry_ok("import std.regex\nfn main():\n    match regex.replace_all(\"a\", \"banana\", \"o\"):\n        Ok(s): print(s)\n        Err(e): print(e)\n    match regex.split(\",\", \"a,b\"):\n        Ok(xs): print(\"|\".join(xs))\n        Err(e): print(e)\n");
+}
+
+#[test]
+fn native_regex_match_unknown_field_rejected() {
+    entry_rejects(
+        "import std.regex\nfn main():\n    match regex.find(\"a\", \"a\"):\n        Ok(opt):\n            match opt:\n                Some(m): print(m.nope)\n                None: print(\"\")\n        Err(e): print(e)\n",
+        "has no field 'nope'",
+    );
+}
+
+#[test]
+fn native_regex_unknown_member_rejected() {
+    entry_rejects(
+        "import std.regex\nfn main():\n    print(regex.compile(\"x\"))\n",
+        "has no member 'compile'",
+    );
+}
+
+// ===== M9: std.request (Response struct) =====
+
+#[test]
+fn native_request_get_returns_response_with_typed_fields() {
+    entry_ok("import std.request\nfn main():\n    match request.get(\"http://x\"):\n        Ok(resp):\n            st: int = resp.status\n            body: str = resp.body\n            h: map[str, str] = resp.headers\n            print(body + str(st) + h[\"k\"])\n        Err(e): print(e)\n");
+}
+
+#[test]
+fn native_request_post_takes_url_and_body() {
+    entry_ok("import std.request\nfn main():\n    match request.post(\"http://x\", \"payload\"):\n        Ok(resp): print(str(resp.status))\n        Err(e): print(e)\n");
+}
+
+#[test]
+fn native_request_get_arg_must_be_str() {
+    entry_rejects(
+        "import std.request\nfn main():\n    print(request.get(5))\n",
+        "argument 1 of 'get'",
+    );
+}
+
+#[test]
+fn native_request_response_unknown_field_rejected() {
+    entry_rejects(
+        "import std.request\nfn main():\n    match request.get(\"http://x\"):\n        Ok(resp): print(resp.nope)\n        Err(e): print(e)\n",
+        "has no field 'nope'",
+    );
+}
+
 #[test]
 fn native_time_now_is_int_monotonic_is_float() {
     entry_ok("import std.time\nfn main():\n    t: int = time.now()\n    m: float = time.monotonic()\n    time.sleep_ms(0)\n    s: str = time.format(t)\n    print(s)\n");

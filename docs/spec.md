@@ -42,7 +42,11 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 **Non-goals (by design, never):** classes & inheritance — Chezzi is composition-only with
 structural `protocol`s, like Rust/Go (see *Locked decisions*).
 
-**Still deferred (YAGNI v1):** concurrency, macros, package registry, native backend. The fuller
+**Still deferred (YAGNI v1):** concurrency, macros, package registry, native backend. Chezzi is
+**single-threaded and synchronous** — both engines run one sequential loop, there is no async/await
+and no scheduler, so all stdlib I/O (`std.request`, `std.fs`, …) blocks. A Go-style model (`go`
+keyword + `chan` queue) is a possible future milestone but is large (scheduler, `Rc`→`Arc` value
+sharing, a channel type across grammar/checker/both engines) and not part of v1. The fuller
 "what's missing to be a complete scripting language" list — `std.json`/stdlib
 breadth, generic enums, `Display`/`Hashable`/numeric protocols, panic recovery, iterators — is
 tracked in `gaps.md` → *Roadmap to a complete v1*.
@@ -126,8 +130,17 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
   `std.process` (`cmd(s) -> Result[str]`); `std.fs` (`list_dir`/`exists`/`is_file`/`is_dir`/
   `size`/`glob`); `std.time` (`now`/`monotonic`/`sleep_ms`/`format`). Plus the **`set`** type
   (`{a, b, c}`), **`s.chars()`** + iterable strings (Python-style; no `char` type).
-- **Later:** `std.regex`, `std.http` (need vetted third-party crates), generic enums,
-  `Display`/`Hashable` protocols (would let custom `str(x)` and struct map/set keys).
+- **Std modules — M9 (shipped):** `std.regex` (the `regex` crate; stateless `is_match`/`find`/
+  `find_all`/`replace_all`/`split`, returning a `Match` struct `{text, start, end, groups}` — spans
+  are byte offsets); `std.request` (blocking HTTP/HTTPS via `ureq`+rustls; `get(url)` /
+  `post(url, body)` returning a `Response` struct `{status, body, headers: map[str,str]}`, where a
+  ≥400 status is a normal `Response`, not an `Err`). These are Chezzi's **first runtime
+  dependencies**. Both are **synchronous/blocking** (the language is single-threaded — see below).
+  `Match`/`Response` are program-global reserved type names (a user struct of the same name
+  collides). The native seam grew `NativeRet::Struct`/`Map` so a native fn can return a structured
+  value.
+- **Later:** generic enums, `Display`/`Hashable` protocols (would let custom `str(x)` and struct
+  map/set keys), custom request headers / non-GET-POST verbs / a first-class compiled `Regex`.
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 deferred.** Because Chezzi is written in Rust, the
 > native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn and expose it as a

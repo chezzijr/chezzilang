@@ -10,7 +10,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-> **M8 — Tier-1 stdlib build-out** (`gaps.md` Tier 1). Plan:
+> **M9 — Tier-2 stdlib: `std.regex` + `std.request`** ✅ DONE. Plan:
+> `~/.claude/plans/see-the-docs-and-dreamy-unicorn.md`.
+> - ✅ **Seam** — `NativeRet::Struct`/`Map` added so native fns return structured values; lowered on
+>   both engines (interp unit-tested; VM via parity).
+> - ✅ **`std.regex`** (the `regex` crate) — stateless (the `Host` seam can't pass a compiled handle
+>   back in), thread-local compile cache; `is_match`/`find`/`find_all`/`replace_all`/`split` →
+>   `Result`, `Match {text,start,end,groups}` (byte offsets). Golden `examples/regex_demo.chz`.
+> - ✅ **`std.request`** (`ureq` + rustls, blocking) — `get`/`post` → `Result[Response]`
+>   (`{status, body, headers: map[str,str]}`); ≥400 is a normal Response, transport errors → Err.
+>   Loopback-server integration + cross-engine parity tests; manual `examples/request_demo.chz`.
+> - ✅ **Checker** — synthetic `Match`/`Response` structs seeded (program-global reserved names) +
+>   `native_module_sig` for both modules.
+> - First runtime deps (`regex`, `ureq`); language stays single-threaded/sync (concurrency deferred).
+>
+> **M8 — Tier-1 stdlib build-out** (`gaps.md` Tier 1). ✅ DONE. Plan:
 > `~/.claude/plans/in-gaps-see-tier-nested-neumann.md`. Milestones:
 > **M1 ✅** char Python-style — `s.chars() -> list[str]` + iterable strings (`for c in s:`);
 > no `char` type (a char is a 1-char `str`, like Python). Golden `examples/string_iter.chz`,

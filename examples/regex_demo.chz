@@ -1,0 +1,43 @@
+# std.regex demo (M9): is_match, capture groups, find_all, replace_all, split.
+# Patterns are plain strings, so a literal backslash is written `\\` (e.g. `\\.` is an escaped dot,
+# `\\s` is whitespace) — chezzi strings only recognize \n \t \r \\ \" \0.
+import std.regex
+
+# --- is_match: does the subject contain a run of digits? ---
+match regex.is_match("[0-9]+", "abc123"):
+    Ok(b):
+        if b:
+            print("has digits")
+        else:
+            print("no digits")
+    Err(e): print(e)
+
+# --- find: first match, with capture groups and byte offset ---
+match regex.find("([a-z]+)@([a-z]+)\\.com", "mail: ann@host.com done"):
+    Ok(opt):
+        match opt:
+            Some(m): print(m.text + " user=" + ",".join(m.groups) + " at " + str(m.start))
+            None: print("no match")
+    Err(e): print(e)
+
+# --- find_all: every match ---
+match regex.find_all("[0-9]+", "a1 b22 c333"):
+    Ok(ms):
+        for m in ms:
+            print("num: " + m.text)
+    Err(e): print(e)
+
+# --- replace_all: swap every vowel ---
+match regex.replace_all("[aeiou]", "banana", "*"):
+    Ok(s): print(s)
+    Err(e): print(e)
+
+# --- split: on a comma plus optional whitespace ---
+match regex.split(",\\s*", "a, b,c,  d"):
+    Ok(parts): print("|".join(parts))
+    Err(e): print(e)
+
+# --- a bad pattern surfaces as Err ---
+match regex.is_match("(unclosed", "x"):
+    Ok(b): print("ok")
+    Err(e): print("bad pattern")

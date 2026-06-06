@@ -1,0 +1,21 @@
+# std.request demo (M9) — blocking HTTP client (ureq + rustls).
+#
+# NOTE: this example makes a REAL network request, so it is NOT part of the golden/CI suite (its
+# output is non-deterministic). Run it manually:
+#     cargo run -- run examples/request_demo.chz
+#
+# A non-2xx status is a normal Response (status carries the code); only transport/DNS/TLS failures
+# come back as Err. Response is { status: int, body: str, headers: map[str, str] } — header names
+# are lowercased by ureq.
+import std.request
+
+match request.get("https://example.com"):
+    Ok(resp):
+        print("status: " + str(resp.status))
+        # headers is map[str, str]; use .get for a safe Option lookup (indexing a missing key errors).
+        match resp.headers.get("content-type"):
+            Some(ct): print("content-type: " + ct)
+            None: print("content-type: (none)")
+        print("body bytes: " + str(resp.body.len()))
+    Err(e):
+        print("request failed: " + e)

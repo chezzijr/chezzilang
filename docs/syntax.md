@@ -424,8 +424,23 @@ JSON *literal in Chezzi source* must double its braces (`{{ }}`) — bare `{…}
 (`*`/`?` in the last path component). **`std.time`**: `now()` (epoch secs), `monotonic()` (secs,
 steady), `sleep_ms(n)`, `format(epoch)` (UTC `"YYYY-MM-DD HH:MM:SS"`).
 
+**`std.regex`** (M9, backed by the `regex` crate — stateless, with an internal compile cache):
+`is_match(pat, s) -> Result[bool]`, `find(pat, s) -> Result[Option[Match]]`,
+`find_all(pat, s) -> Result[list[Match]]`, `replace_all(pat, s, repl) -> Result[str]`,
+`split(pat, s) -> Result[list[str]]`. A `Match` is `{text: str, start: int, end: int,
+groups: list[str]}` (`start`/`end` are **byte** offsets; `groups` is capture groups 1..n, a
+non-participating optional group is `""`). A bad pattern → `Err`. Patterns are ordinary strings, so a
+literal backslash is written `\\` (e.g. `"\\d+"`, `"\\."`).
+
+**`std.request`** (M9, blocking HTTP/HTTPS via `ureq` + rustls): `get(url) -> Result[Response]`,
+`post(url, body) -> Result[Response]`. A `Response` is `{status: int, body: str,
+headers: map[str, str]}` (header names lowercased). A ≥400 status is a normal `Response` (its
+`status` carries the code); only transport/DNS/TLS failures are `Err`. Synchronous — blocks the
+single thread until the response arrives. `Match` and `Response` are reserved (program-global) type
+names.
+
 Importable: `std.io`, `std.math`, `std.str`, `std.cmp`, `std.os`, `std.json`, `std.process`,
-`std.fs`, `std.time`. (Later: `std.regex`, `std.http`.)
+`std.fs`, `std.time`, `std.regex`, `std.request`.
 
 ---
 
