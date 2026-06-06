@@ -20,7 +20,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 ## Round 2 — language gaps #10–#15  ✅ DONE
 
 A second probing pass (real DSA + apps) surfaced six gaps; all fixed **TDD**, both engines in
-lockstep, each with a golden `examples/*.chz` run under interp + VM. **660 tests green** (incl.
+lockstep, each with a golden `examples/*.chz` run under interp + VM. **646 tests green** (incl.
 parity + `cargo test conformance`), clean `cargo clippy`. Details + fix notes in `gaps.md`.
 
 - ✅ **#11 `sort_by`** — `xs.sort_by(fn(T,T)->int)`, stable, in place. A merge sort drives the

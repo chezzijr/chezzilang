@@ -20,7 +20,7 @@ Last updated: 2026-06-06. Baseline: post-M6c (native stdlib seam).
 > `linked_list.chz`, `knapsack.chz`, `calc.chz`, `word_freq.chz`) — surfaced six new gaps. Each was
 > observed on both engines (exact errors quoted below), not inferred. All six now land TDD, both
 > engines in lockstep, with golden `examples/*.chz` (sort_by, cipher, knapsack, word_freq,
-> match_nested, bits) committed and run under both engines. 660 tests green (parity + conformance).
+> match_nested, bits) committed and run under both engines. 646 tests green (parity + conformance).
 
 ---
 
