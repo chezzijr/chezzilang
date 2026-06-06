@@ -2590,6 +2590,17 @@ main()";
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
+
+    /// Gap #15 golden: `examples/match_nested.chz` (tuple patterns, nested `Some((a, b))`, nested
+    /// literals) is byte-identical on the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_match_nested_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/match_nested.chz");
+        let expected = include_str!("../../examples/match_nested.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
 }
 
 #[cfg(test)]
@@ -2805,6 +2816,40 @@ mod parity_tests {
     fn assert_parity_out(src: &str, expect: &str) {
         assert_parity(src);
         assert_eq!(vm_outcome(src).expect("program should run"), expect, "for:\n{src}");
+    }
+
+    #[test]
+    fn match_tuple_pattern_parity() {
+        assert_parity_out(
+            "p := (3, 4)\nmatch p:\n    (0, y): print(y)\n    (x, y): print(x + y)\n",
+            "7\n",
+        );
+    }
+
+    #[test]
+    fn match_tuple_literal_arm_parity() {
+        assert_parity_out(
+            "p := (1, 9)\nlabel := match p:\n    (1, n): \"one {n}\"\n    _: \"other\"\nprint(label)\n",
+            "one 9\n",
+        );
+    }
+
+    #[test]
+    fn match_nested_variant_in_tuple_parity() {
+        assert_parity_out(
+            "o: (int, int)? = Some((10, 20))\nmatch o:\n    None: print(\"none\")\n    Some((a, b)): print(a + b)\n",
+            "30\n",
+        );
+    }
+
+    #[test]
+    fn match_nested_heap_payload_gc_stress() {
+        // Nested pattern binding heap values (strings) inside a tuple inside a variant; a GC mid-bind
+        // must not collect the still-referenced payload.
+        let src = "o: (str, str)? = Some((\"a\" + \"b\", \"c\" + \"d\"))\nmatch o:\n    None: print(\"none\")\n    Some((x, y)): print(x + y)\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "abcd\n");
+        assert_eq!(run_capture_stress(src), "abcd\n", "VM gc_stress diverged (rooting bug?)");
     }
 
     #[test]

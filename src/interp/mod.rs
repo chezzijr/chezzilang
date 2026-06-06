@@ -2,7 +2,7 @@
 //! Chezzi before the bytecode VM (M5). Single-file programs run here.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, LitPattern, MatchArm, MatchExprArm, Pattern,
+    AssignOp, BinaryOp, Expr, ExprKind, FnDecl, LitPattern, MatchArm, MatchExprArm, Pattern,
     Span, Stmt, StmtKind, UnaryOp,
 };
 use crate::{lexer, parser};
@@ -535,66 +535,32 @@ impl Interp {
     /// (static exhaustiveness checking arrives with the type checker in M4).
     fn exec_match(&mut self, scrutinee: &Expr, arms: &[MatchArm]) -> Result<Flow, RuntimeError> {
         let value = self.eval(scrutinee)?;
+        // A variant pattern against a non-enum value is a checker-prevented case; in `Skip` mode
+        // (un-inferable scrutinee) it can still slip through, so report it as a clean runtime error.
+        if let Some(arm) = arms.first()
+            && pattern_needs_enum(&arm.pattern)
+            && !matches!(value, Value::Enum { .. })
+        {
+            return Err(RuntimeError {
+                message: format!("cannot match on {}", value.type_name()),
+                span: scrutinee.span,
+            });
+        }
         for arm in arms {
-            match &arm.pattern {
-                Pattern::Variant { name, bindings } => {
-                    if let Some(flow) =
-                        self.match_variant_arm(name, bindings, &value, &arm.body, scrutinee.span)?
-                    {
-                        return Ok(flow);
-                    }
+            if let Some(binds) = try_bind(&arm.pattern, &value) {
+                self.env.push();
+                for (name, v) in binds {
+                    self.env.define(&name, v);
                 }
-                Pattern::Literal(lit) => {
-                    if literal_matches(lit, &value) {
-                        return self.exec_block(&arm.body);
-                    }
-                }
-                Pattern::Wildcard => return self.exec_block(&arm.body),
+                let flow = self.exec_block(&arm.body);
+                self.env.pop();
+                return flow;
             }
         }
         Err(RuntimeError {
             message: no_match_arm_message(&value),
             span: scrutinee.span,
         })
-    }
-
-    /// Try a variant arm against `value`. `Ok(Some(flow))` = matched + ran; `Ok(None)` = no match.
-    /// A non-enum `value` here is a checker-prevented case, reported as a clean runtime error.
-    fn match_variant_arm(
-        &mut self,
-        name: &str,
-        bindings: &[String],
-        value: &Value,
-        body: &Block,
-        span: Span,
-    ) -> Result<Option<Flow>, RuntimeError> {
-        let Value::Enum { variant, payload, .. } = value else {
-            return Err(RuntimeError {
-                message: format!("cannot match on {}", value.type_name()),
-                span,
-            });
-        };
-        if name != variant.as_ref() {
-            return Ok(None);
-        }
-        if bindings.len() != payload.len() {
-            return Err(RuntimeError {
-                message: format!(
-                    "pattern '{}' binds {} value(s) but variant carries {}",
-                    name,
-                    bindings.len(),
-                    payload.len()
-                ),
-                span,
-            });
-        }
-        self.env.push();
-        for (b, v) in bindings.iter().zip(payload.iter()) {
-            self.env.define(b, v.clone());
-        }
-        let flow = self.exec_block(body);
-        self.env.pop();
-        Ok(Some(flow?))
     }
 
     /// Expression-position `match`: evaluate the chosen arm's value-expression and return it
@@ -605,43 +571,24 @@ impl Interp {
         arms: &[MatchExprArm],
     ) -> Result<Value, RuntimeError> {
         let value = self.eval(scrutinee)?;
+        if let Some(arm) = arms.first()
+            && pattern_needs_enum(&arm.pattern)
+            && !matches!(value, Value::Enum { .. })
+        {
+            return Err(RuntimeError {
+                message: format!("cannot match on {}", value.type_name()),
+                span: scrutinee.span,
+            });
+        }
         for arm in arms {
-            match &arm.pattern {
-                Pattern::Variant { name, bindings } => {
-                    let Value::Enum { variant, payload, .. } = &value else {
-                        return Err(RuntimeError {
-                            message: format!("cannot match on {}", value.type_name()),
-                            span: scrutinee.span,
-                        });
-                    };
-                    if name != variant.as_ref() {
-                        continue;
-                    }
-                    if bindings.len() != payload.len() {
-                        return Err(RuntimeError {
-                            message: format!(
-                                "pattern '{}' binds {} value(s) but variant carries {}",
-                                name,
-                                bindings.len(),
-                                payload.len()
-                            ),
-                            span: scrutinee.span,
-                        });
-                    }
-                    self.env.push();
-                    for (b, v) in bindings.iter().zip(payload.iter()) {
-                        self.env.define(b, v.clone());
-                    }
-                    let result = self.eval(&arm.body);
-                    self.env.pop();
-                    return result;
+            if let Some(binds) = try_bind(&arm.pattern, &value) {
+                self.env.push();
+                for (name, v) in binds {
+                    self.env.define(&name, v);
                 }
-                Pattern::Literal(lit) => {
-                    if literal_matches(lit, &value) {
-                        return self.eval(&arm.body);
-                    }
-                }
-                Pattern::Wildcard => return self.eval(&arm.body),
+                let result = self.eval(&arm.body);
+                self.env.pop();
+                return result;
             }
         }
         Err(RuntimeError {
@@ -1761,6 +1708,47 @@ fn literal_matches(lit: &LitPattern, value: &Value) -> bool {
         (LitPattern::Str(s), Value::Str(v)) => s.as_str() == v.as_ref(),
         (LitPattern::Bool(b), Value::Bool(v)) => b == v,
         _ => false,
+    }
+}
+
+/// Whether a top-level arm pattern requires the scrutinee to be an enum (so a non-enum value is a
+/// clean "cannot match on …" error rather than silently falling through). A nullary `Variant`
+/// (`None`, `Red`) and a variant-with-payload both do; literals/wildcards/tuples don't.
+fn pattern_needs_enum(pattern: &Pattern) -> bool {
+    matches!(pattern, Pattern::Variant { .. })
+}
+
+/// Try to match `value` against `pattern`, returning the name→value bindings to install on success,
+/// or `None` on a mismatch. Recurses through nested tuple/variant patterns (gap #15). The program is
+/// type-checked, so a shape mismatch here is a genuine value mismatch (a different variant / a
+/// non-matching literal / a different tuple shape), not a type error.
+fn try_bind(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
+    match pattern {
+        Pattern::Wildcard => Some(Vec::new()),
+        Pattern::Ident(name) => Some(vec![(name.clone(), value.clone())]),
+        Pattern::Literal(lit) => literal_matches(lit, value).then(Vec::new),
+        Pattern::Tuple(subs) => {
+            let Value::Tuple(elems) = value else { return None };
+            if elems.len() != subs.len() {
+                return None;
+            }
+            let mut out = Vec::new();
+            for (sub, v) in subs.iter().zip(elems.iter()) {
+                out.extend(try_bind(sub, v)?);
+            }
+            Some(out)
+        }
+        Pattern::Variant { name, bindings } => {
+            let Value::Enum { variant, payload, .. } = value else { return None };
+            if name != variant.as_ref() || bindings.len() != payload.len() {
+                return None;
+            }
+            let mut out = Vec::new();
+            for (sub, v) in bindings.iter().zip(payload.iter()) {
+                out.extend(try_bind(sub, v)?);
+            }
+            Some(out)
+        }
     }
 }
 

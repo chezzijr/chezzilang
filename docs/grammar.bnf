@@ -110,11 +110,22 @@
 <matchStmt> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <arms> "DEDENT"
 <arms>      ::= <arm> | <arm> <arms>
 <arm>       ::= <pattern> <block>
-<pattern>   ::= "IDENT"
-              | "IDENT" "LPAREN" "RPAREN"
-              | "IDENT" "LPAREN" <bindings> "RPAREN"
-              | "INT" | "STR" | "TRUE" | "FALSE"
-<bindings>  ::= "IDENT" | "IDENT" "COMMA" <bindings>
+# A top-level arm pattern. A bare "IDENT" names a (nullary) variant; "IDENT" "(" … ")" a variant
+# with sub-patterns; "(" … ")" a tuple pattern; or an int/str/bool literal. Sub-patterns nest
+# (gap #15): a variant payload slot or tuple element is itself a <subpattern>.
+<pattern>     ::= "IDENT"
+                | "IDENT" "LPAREN" "RPAREN"
+                | "IDENT" "LPAREN" <subpatterns> "RPAREN"
+                | <tuplePattern>
+                | "INT" | "STR" | "TRUE" | "FALSE"
+# A sub-pattern (nested position). A bare "IDENT" here is a binding name, not a variant.
+<subpattern>  ::= "IDENT"
+                | "IDENT" "LPAREN" "RPAREN"
+                | "IDENT" "LPAREN" <subpatterns> "RPAREN"
+                | <tuplePattern>
+                | "INT" | "STR" | "TRUE" | "FALSE"
+<subpatterns> ::= <subpattern> | <subpattern> "COMMA" <subpatterns>
+<tuplePattern> ::= "LPAREN" <subpatterns> "RPAREN"
 
 # ===== types =====
 # Postfix sugar on a base type: `T?` = Option[T], `T!` = Result[T] (stacks left-to-right).

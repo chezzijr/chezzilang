@@ -132,15 +132,23 @@ pub struct MatchArm {
     pub body: Block,
 }
 
-/// A match pattern. Variant patterns with optional value bindings (`Circle(r)`, `Ok(v)`,
-/// `Point`, `None`), literal patterns (`0`, `"a"`, `true`) against int/str/bool scrutinees,
-/// and a `_` wildcard catch-all.
+/// A match pattern. Variant patterns with optional sub-patterns (`Circle(r)`, `Ok(v)`, `Point`,
+/// `None`, `Cons(h, Some(t))`), tuple patterns (`(a, b)`, `(0, x)` — gap #15), literal patterns
+/// (`0`, `"a"`, `true`) against int/str/bool scrutinees, a plain binding name in a sub-position,
+/// and a `_` wildcard catch-all. Sub-patterns nest arbitrarily (`Variant`/`Tuple` bindings are
+/// themselves `Pattern`s).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
+    /// A binding name in a sub-position (a variant payload slot or tuple element), e.g. the `h` and
+    /// `t` in `Cons(h, t)` or the `a`/`b` in `(a, b)`. A bare identifier at the *top* of an arm is a
+    /// nullary `Variant` instead (it names a variant like `None`).
+    Ident(String),
     Variant {
         name: String,
-        bindings: Vec<String>,
+        bindings: Vec<Pattern>,
     },
+    /// A tuple pattern, e.g. `(a, b)` or `(0, _)`. Two-or-more elements (matches a tuple value).
+    Tuple(Vec<Pattern>),
     /// An int/str/bool literal pattern. Float is intentionally excluded (float equality footgun).
     Literal(LitPattern),
     /// The `_` catch-all arm.

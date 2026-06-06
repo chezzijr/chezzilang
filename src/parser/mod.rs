@@ -531,7 +531,20 @@ impl Parser {
         })
     }
 
+    /// Parse a top-level match-arm pattern. A bare identifier here names a variant (`None`,
+    /// `Point`); `(...)` is a tuple pattern. Nested positions use [`parse_subpattern`], where a bare
+    /// identifier is a binding instead.
     fn parse_pattern(&mut self) -> PResult<Pattern> {
+        self.parse_pattern_impl(true)
+    }
+
+    /// Parse a sub-pattern (a variant payload slot or a tuple element). A bare identifier here is a
+    /// binding name; `Name(...)` is a nested variant; `(...)` a nested tuple.
+    fn parse_subpattern(&mut self) -> PResult<Pattern> {
+        self.parse_pattern_impl(false)
+    }
+
+    fn parse_pattern_impl(&mut self, top: bool) -> PResult<Pattern> {
         // Literal patterns: int / str / bool. Float is intentionally not a pattern.
         match self.peek() {
             Token::Int(n) => {
@@ -552,6 +565,8 @@ impl Parser {
                 self.advance();
                 return Ok(Pattern::Literal(LitPattern::Bool(false)));
             }
+            // A parenthesised group is a tuple pattern (gap #15).
+            Token::LParen => return self.parse_tuple_pattern(),
             // `_` is an identifier; it's a wildcard unless followed by `(` (a payload, i.e. a
             // variant literally named `_`).
             Token::Ident(name) if name == "_" && self.peek_at(1) != &Token::LParen => {
@@ -561,19 +576,42 @@ impl Parser {
             _ => {}
         }
         let name = self.expect_ident()?;
-        let mut bindings = Vec::new();
         if self.eat(&Token::LParen) {
+            // `Name(p, …)` — a variant with (possibly nested) sub-patterns.
+            let mut bindings = Vec::new();
             if !self.check(&Token::RParen) {
                 loop {
-                    bindings.push(self.expect_ident()?);
+                    bindings.push(self.parse_subpattern()?);
                     if !self.eat(&Token::Comma) {
                         break;
                     }
                 }
             }
             self.expect(&Token::RParen)?;
+            return Ok(Pattern::Variant { name, bindings });
         }
-        Ok(Pattern::Variant { name, bindings })
+        // A bare identifier: a nullary variant at the top of an arm, or a binding in a sub-position.
+        if top {
+            Ok(Pattern::Variant { name, bindings: Vec::new() })
+        } else {
+            Ok(Pattern::Ident(name))
+        }
+    }
+
+    /// Parse `( p1, p2, … )`. A single parenthesised pattern `(p)` is grouping (returns `p`);
+    /// two-or-more elements form a `Tuple` matching a tuple value of that arity.
+    fn parse_tuple_pattern(&mut self) -> PResult<Pattern> {
+        self.expect(&Token::LParen)?;
+        let mut elems = vec![self.parse_subpattern()?];
+        while self.eat(&Token::Comma) {
+            elems.push(self.parse_subpattern()?);
+        }
+        self.expect(&Token::RParen)?;
+        if elems.len() == 1 {
+            Ok(elems.pop().expect("one element"))
+        } else {
+            Ok(Pattern::Tuple(elems))
+        }
     }
 
     fn parse_return(&mut self) -> PResult<StmtKind> {
@@ -1261,7 +1299,7 @@ mod tests {
                 match &arms[0].pattern {
                     Pattern::Variant { name, bindings } => {
                         assert_eq!(name, "Circle");
-                        assert_eq!(bindings, &vec!["r".to_string()]);
+                        assert_eq!(bindings, &vec![Pattern::Ident("r".to_string())]);
                     }
                     other => panic!("{other:?}"),
                 }
@@ -1839,7 +1877,7 @@ mod tests {
             arms[0].pattern,
             Pattern::Variant {
                 name: "Circle".into(),
-                bindings: vec!["r".into()],
+                bindings: vec![Pattern::Ident("r".into())],
             }
         );
     }

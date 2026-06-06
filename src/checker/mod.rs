@@ -25,6 +25,8 @@ enum MatchKind {
     Variants { label: String, variants: HashMap<String, Vec<Ty>> },
     /// int/str/bool scrutinee — arms are literal patterns (+ a required `_` wildcard).
     Literal(Ty),
+    /// Tuple scrutinee — arms are tuple patterns (gap #15). Carries the element types.
+    Tuple(Vec<Ty>),
     /// Un-inferable (`Ty::Unknown`) scrutinee — skip exhaustiveness, accept any pattern shape.
     Skip,
 }
@@ -925,6 +927,7 @@ impl Checker {
             Ty::Int => MatchKind::Literal(Ty::Int),
             Ty::Str => MatchKind::Literal(Ty::Str),
             Ty::Bool => MatchKind::Literal(Ty::Bool),
+            Ty::Tuple(tys) => MatchKind::Tuple(tys.clone()),
             Ty::Unknown => MatchKind::Skip, // un-inferable: skip exhaustiveness
             other => {
                 self.error(scrutinee.span, format!("cannot match on non-enum type {other}"));
@@ -933,8 +936,128 @@ impl Checker {
         }
     }
 
-    /// Push a scope and bind one arm's pattern payload, recording coverage + diagnostics. Returns
-    /// `true` if this arm was a `_` wildcard. The caller must `pop_scope` after the arm body.
+    /// The variant→payload map for an enum/Option/Result type, else `None`. Shared by `match_kind`
+    /// and the nested-pattern checker (gap #15) so they agree on what counts as a variant.
+    fn variants_of(&self, ty: &Ty) -> Option<HashMap<String, Vec<Ty>>> {
+        match ty {
+            Ty::Enum(name) => {
+                let vs = self.enums.get(name)?;
+                Some(vs.iter().map(|v| (v.clone(), self.variants[v].payload.clone())).collect())
+            }
+            Ty::Result(inner) => Some(HashMap::from([
+                ("Ok".into(), vec![(**inner).clone()]),
+                ("Err".into(), vec![Ty::Unknown]),
+            ])),
+            Ty::Option(inner) => Some(HashMap::from([
+                ("Some".into(), vec![(**inner).clone()]),
+                ("None".into(), vec![]),
+            ])),
+            _ => None,
+        }
+    }
+
+    /// Type-check a *nested* sub-pattern (a variant payload slot or tuple element — gap #15) against
+    /// its expected type `ty`, declaring any bindings into the current scope. Returns whether the
+    /// sub-pattern is **irrefutable** (matches every value of `ty`): a binding/wildcard is, a
+    /// literal/variant is not, a tuple is iff all its elements are.
+    fn bind_subpattern(&mut self, pattern: &Pattern, ty: &Ty, span: Span) -> bool {
+        match pattern {
+            Pattern::Wildcard => true,
+            Pattern::Ident(name) => {
+                // A nested bare identifier is a binding. Guard the footgun where it shadows a
+                // nullary variant of the matched type (`Cons(h, None)`): that's a variant the user
+                // likely meant to match, which nested patterns don't support yet.
+                if let Some(vmap) = self.variants_of(ty)
+                    && vmap.get(name).is_some_and(|p| p.is_empty())
+                {
+                    self.error(
+                        span,
+                        format!("'{name}' is a variant of {ty}; nested nullary-variant patterns aren't supported — use a nested match"),
+                    );
+                    return true;
+                }
+                self.declare(name, ty.clone());
+                true
+            }
+            Pattern::Literal(lit) => {
+                let lit_ty = lit_pattern_ty(lit);
+                if !ty.is_unknown() && &lit_ty != ty {
+                    self.error(span, format!("literal of type {lit_ty} cannot match a value of type {ty}"));
+                }
+                false
+            }
+            Pattern::Tuple(subs) => {
+                match ty {
+                    Ty::Tuple(tys) => {
+                        if tys.len() != subs.len() {
+                            self.error(
+                                span,
+                                format!("tuple pattern has {} element(s), but the value has {}", subs.len(), tys.len()),
+                            );
+                        }
+                        let mut irref = true;
+                        for (sub, t) in subs.iter().zip(tys.iter()) {
+                            irref &= self.bind_subpattern(sub, t, span);
+                        }
+                        irref
+                    }
+                    Ty::Unknown => {
+                        let mut irref = true;
+                        for sub in subs {
+                            irref &= self.bind_subpattern(sub, &Ty::Unknown, span);
+                        }
+                        irref
+                    }
+                    other => {
+                        self.error(span, format!("tuple pattern cannot match a value of type {other}"));
+                        for sub in subs {
+                            self.bind_subpattern(sub, &Ty::Unknown, span);
+                        }
+                        false
+                    }
+                }
+            }
+            Pattern::Variant { name, bindings } => {
+                match self.variants_of(ty) {
+                    Some(vmap) => match vmap.get(name) {
+                        Some(payload) => {
+                            if payload.len() != bindings.len() {
+                                self.error(
+                                    span,
+                                    format!("variant '{name}' binds {} value(s), but {} given", payload.len(), bindings.len()),
+                                );
+                            }
+                            for (b, t) in bindings.iter().zip(payload.iter()) {
+                                self.bind_subpattern(b, t, span);
+                            }
+                        }
+                        None => {
+                            self.error(span, format!("'{name}' is not a variant of {ty}"));
+                            for b in bindings {
+                                self.bind_subpattern(b, &Ty::Unknown, span);
+                            }
+                        }
+                    },
+                    None if ty.is_unknown() => {
+                        for b in bindings {
+                            self.bind_subpattern(b, &Ty::Unknown, span);
+                        }
+                    }
+                    None => {
+                        self.error(span, format!("variant pattern '{name}' cannot match a value of type {ty}"));
+                        for b in bindings {
+                            self.bind_subpattern(b, &Ty::Unknown, span);
+                        }
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Push a scope and bind one arm's pattern, recording coverage + diagnostics. Returns `true` if
+    /// this arm is **irrefutable** (a `_` wildcard, or a tuple of irrefutable sub-patterns — either
+    /// makes the match exhaustive). The caller must `pop_scope` after the arm body.
     fn bind_match_arm(
         &mut self,
         pattern: &Pattern,
@@ -949,65 +1072,66 @@ impl Checker {
         }
         match kind {
             MatchKind::Skip => {
-                // Un-inferable scrutinee: accept the pattern shape permissively (it may be a
-                // variant or a literal). Still scope so the caller can `pop_scope` uniformly.
-                if let Pattern::Variant { name, bindings } = pattern {
-                    covered.insert(name.clone());
-                    self.push_scope();
-                    for b in bindings {
-                        self.declare(b, Ty::Unknown);
+                // Un-inferable scrutinee: accept the pattern shape permissively, binding everything
+                // as `Unknown`. Still scope so the caller can `pop_scope` uniformly.
+                self.push_scope();
+                match pattern {
+                    Pattern::Variant { name, bindings } => {
+                        covered.insert(name.clone());
+                        for b in bindings {
+                            self.bind_subpattern(b, &Ty::Unknown, span);
+                        }
                     }
-                } else {
-                    self.push_scope();
+                    Pattern::Tuple(subs) => {
+                        for s in subs {
+                            self.bind_subpattern(s, &Ty::Unknown, span);
+                        }
+                    }
+                    _ => {}
                 }
             }
-            MatchKind::Variants { label, variants } => match pattern {
-                Pattern::Variant { name, bindings } => {
-                    let payload = match variants.get(name) {
-                        Some(p) => Some(p.clone()),
-                        None => {
+            MatchKind::Variants { label, variants } => {
+                self.push_scope();
+                match pattern {
+                    Pattern::Variant { name, bindings } => {
+                        let payload = variants.get(name).cloned();
+                        if payload.is_none() {
                             self.error(span, format!("'{name}' is not a variant of {label}"));
-                            None
                         }
-                    };
-                    if !covered.insert(name.clone()) {
-                        self.error(span, format!("duplicate match arm '{name}'"));
-                    }
-                    self.push_scope();
-                    if let Some(payload) = &payload {
-                        if payload.len() != bindings.len() {
-                            self.error(
-                                span,
-                                format!(
-                                    "variant '{name}' binds {} value(s), but {} given",
-                                    payload.len(),
-                                    bindings.len()
-                                ),
-                            );
+                        if !covered.insert(name.clone()) {
+                            self.error(span, format!("duplicate match arm '{name}'"));
                         }
-                        for (b, t) in bindings.iter().zip(payload.iter()) {
-                            self.declare(b, t.clone());
-                        }
-                    } else {
-                        for b in bindings {
-                            self.declare(b, Ty::Unknown);
+                        match &payload {
+                            Some(payload) => {
+                                if payload.len() != bindings.len() {
+                                    self.error(
+                                        span,
+                                        format!("variant '{name}' binds {} value(s), but {} given", payload.len(), bindings.len()),
+                                    );
+                                }
+                                for (b, t) in bindings.iter().zip(payload.iter()) {
+                                    self.bind_subpattern(b, t, span);
+                                }
+                            }
+                            None => {
+                                for b in bindings {
+                                    self.bind_subpattern(b, &Ty::Unknown, span);
+                                }
+                            }
                         }
                     }
+                    Pattern::Literal(_) => self.error(span, format!("cannot match a literal against {label}")),
+                    Pattern::Tuple(_) => self.error(span, format!("cannot match a tuple against {label}")),
+                    Pattern::Ident(_) | Pattern::Wildcard => {
+                        unreachable!("ident/wildcard handled elsewhere")
+                    }
                 }
-                Pattern::Literal(_) => {
-                    self.error(span, format!("cannot match a literal against {label}"));
-                    self.push_scope();
-                }
-                Pattern::Wildcard => unreachable!("wildcard handled above"),
-            },
+            }
             MatchKind::Literal(ty) => {
+                self.push_scope();
                 match pattern {
                     Pattern::Literal(lit) => {
-                        let lit_ty = match lit {
-                            LitPattern::Int(_) => Ty::Int,
-                            LitPattern::Str(_) => Ty::Str,
-                            LitPattern::Bool(_) => Ty::Bool,
-                        };
+                        let lit_ty = lit_pattern_ty(lit);
                         if &lit_ty != ty {
                             self.error(
                                 span,
@@ -1015,12 +1139,29 @@ impl Checker {
                             );
                         }
                     }
-                    Pattern::Variant { .. } => {
-                        self.error(span, format!("cannot match a variant against {ty}"));
+                    Pattern::Variant { .. } => self.error(span, format!("cannot match a variant against {ty}")),
+                    Pattern::Tuple(_) => self.error(span, format!("cannot match a tuple against {ty}")),
+                    Pattern::Ident(_) | Pattern::Wildcard => {
+                        unreachable!("ident/wildcard handled elsewhere")
                     }
-                    Pattern::Wildcard => unreachable!("wildcard handled above"),
                 }
+            }
+            MatchKind::Tuple(tys) => {
                 self.push_scope();
+                if let Pattern::Tuple(subs) = pattern {
+                    if tys.len() != subs.len() {
+                        self.error(
+                            span,
+                            format!("tuple pattern has {} element(s), but the value has {}", subs.len(), tys.len()),
+                        );
+                    }
+                    let mut irref = true;
+                    for (sub, t) in subs.iter().zip(tys.iter()) {
+                        irref &= self.bind_subpattern(sub, t, span);
+                    }
+                    return irref;
+                }
+                self.error(span, "a tuple scrutinee requires a tuple pattern (or `_`)".to_string());
             }
         }
         false
@@ -1055,6 +1196,11 @@ impl Checker {
                 }
             }
             MatchKind::Literal(_) => {
+                self.error(span, "non-exhaustive match: add a `_` arm".to_string());
+            }
+            MatchKind::Tuple(_) => {
+                // A tuple match is exhaustive only via an irrefutable arm (a `_`, or a tuple of
+                // all-binding sub-patterns). `has_wildcard` already captured that.
                 self.error(span, "non-exhaustive match: add a `_` arm".to_string());
             }
         }
@@ -1868,6 +2014,15 @@ impl Checker {
 
     fn expect_int_val(&mut self, e: &Expr) {
         self.expect_int(e, "argument");
+    }
+}
+
+/// The type a literal match-pattern matches against.
+fn lit_pattern_ty(lit: &LitPattern) -> Ty {
+    match lit {
+        LitPattern::Int(_) => Ty::Int,
+        LitPattern::Str(_) => Ty::Str,
+        LitPattern::Bool(_) => Ty::Bool,
     }
 }
 

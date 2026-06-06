@@ -1169,6 +1169,59 @@ fn ord_result_is_int_not_str() {
 }
 
 
+// ===== nested / tuple match patterns (gap #15) =====
+
+#[test]
+fn match_tuple_pattern_ok() {
+    ok("t := (1, 2)\nmatch t:\n    (a, b): print(a + b)\n");
+}
+
+#[test]
+fn match_tuple_binds_element_types() {
+    // Tuple elements bind with their element types: `s` is str, `n` is int.
+    ok("t := (\"x\", 2)\nmatch t:\n    (s, n): print(\"{s}{n + 1}\")\n");
+}
+
+#[test]
+fn match_nested_some_tuple_ok() {
+    ok("o: (int, int)? = Some((1, 2))\nmatch o:\n    None: print(\"n\")\n    Some((a, b)): print(a + b)\n");
+}
+
+#[test]
+fn match_tuple_with_literal_ok() {
+    ok("t := (1, 2)\nmatch t:\n    (1, n): print(n)\n    _: print(0)\n");
+}
+
+#[test]
+fn match_single_tuple_arm_is_exhaustive() {
+    // A tuple pattern of all bindings is irrefutable → exhaustive with one arm.
+    ok("t := (1, 2)\nmatch t:\n    (a, b): print(a + b)\n");
+}
+
+#[test]
+fn match_tuple_with_literal_needs_wildcard() {
+    rejects("t := (1, 2)\nmatch t:\n    (1, n): print(n)\n", "non-exhaustive");
+}
+
+#[test]
+fn match_tuple_wrong_arity_rejected() {
+    rejects("t := (1, 2)\nmatch t:\n    (a, b, c): print(a)\n", "element");
+}
+
+#[test]
+fn match_nested_tuple_element_type_mismatch_rejected() {
+    rejects("t := (\"x\", 2)\nmatch t:\n    (s, n): m: int = s\n", "");
+}
+
+#[test]
+fn match_nested_nullary_variant_rejected() {
+    // `Cons(h, None)`-style: a nested nullary variant isn't supported; the checker guides the user.
+    let src = "enum L:\n    Nil\n    Cons(int, L)\n\
+               fn f(x: L):\n    match x:\n        Nil: print(\"e\")\n        Cons(h, Nil): print(h)\n";
+    rejects(src, "nested nullary-variant");
+}
+
+
 // ===== map iteration in for (gap #14) =====
 
 #[test]

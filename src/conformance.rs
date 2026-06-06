@@ -273,6 +273,8 @@ fn parser_rules_match_fns() {
         ("whileStmt", "parse_while"),
         ("matchStmt", "parse_match"),
         ("pattern", "parse_pattern"),
+        ("subpattern", "parse_subpattern"),
+        ("tuplePattern", "parse_tuple_pattern"),
         ("returnStmt", "parse_return"),
         ("importStmt", "parse_import"),
         ("dottedPath", "parse_dotted_path"),
@@ -286,6 +288,7 @@ fn parser_rules_match_fns() {
     // parser fns with no 1:1 grammar rule: the Pratt cascade + structural helpers + test helpers.
     let helper_fns: BTreeSet<&str> = [
         "parse_simple_stmt",
+        "parse_pattern_impl",
         "parse_bp",
         "parse_unary",
         "parse_postfix",
