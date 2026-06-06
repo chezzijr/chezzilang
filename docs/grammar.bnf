@@ -184,13 +184,15 @@
              | <mulExpr> "STAR" <unary> | <mulExpr> "SLASH" <unary> | <mulExpr> "PERCENT" <unary>
 <unary>    ::= <postfix> | "NOT" <unary> | "MINUS" <unary>
 
-# postfix chain: calls, field access, indexing, and the `?` try operator.
+# postfix chain: calls, field access, indexing, the `?` try operator, and the scoped
+# `.decode[Type](arg)` type-argument call form (JSON decode — the only call with a type argument).
 <postfix> ::= <primary>
             | <postfix> "LPAREN" "RPAREN"
             | <postfix> "LPAREN" <exprList> "RPAREN"
             | <postfix> "DOT" "IDENT"
             | <postfix> "DOT" "INT"
             | <postfix> "LBRACKET" <expr> "RBRACKET"
+            | <postfix> "DOT" "IDENT" "LBRACKET" <type> "RBRACKET" "LPAREN" <expr> "RPAREN"
             | <postfix> "QUESTION"
 
 # A parenthesized expression is grouping when it holds one expr (`(e)`) and a tuple literal when it
@@ -202,11 +204,13 @@
             | "LBRACKET" <exprList> "RBRACKET"
             | "LBRACE" "RBRACE"
             | "LBRACE" <mapEntries> "RBRACE"
+            | "LBRACE" <exprList> "RBRACE"
             | <closure>
             | <matchExpr>
             | <ifExpr>
 
-# Map literal entries: `{k: v, k: v}`, insertion-ordered, no trailing comma.
+# Brace literals: `{}` is the empty map; `{k: v, …}` (entries with COLON) is a map; `{a, b, …}`
+# (bare exprs, no COLON) is a set. The empty set is `set()`, since `{}` is taken by the map.
 <mapEntries> ::= <mapEntry> | <mapEntry> "COMMA" <mapEntries>
 <mapEntry>   ::= <expr> "COLON" <expr>
 

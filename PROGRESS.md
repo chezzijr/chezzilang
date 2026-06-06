@@ -28,7 +28,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > map by no `:`), `set()`/`set(list)`, methods `add/remove/has/len/union/intersection/
 > difference`, `for x in s`, order-independent equality, `set[T]` annotation; elements are
 > hashable scalars. `Ty::Set`/`Value::Set`/`Obj::Set` + `Op::NewSet`, GC-traced, both engines.
-> Golden `examples/set.chz`. · **M5 ✅** std.json `decode[T]` — type-directed decode into
+> Golden `examples/set.chz`. · **M6 ✅** docs — spec/syntax/grammar.bnf (set-literal +
+> `.decode[T]` productions, drift-checked; corpus `set_literal.chz`/`decode_call.chz`), gaps.md
+> Tier-1 ticked. · **M5 ✅** std.json `decode[T]` — type-directed decode into
 > struct/typed-map/list/scalar via a scoped `ExprKind::DecodeCall` (parser special-cases
 > `.decode[T](…)`, no general call-site type-args) + a self-contained `TypeDescriptor`
 > (`src/json_decode.rs`) built at compile time (VM `Op::JsonDecode`) / eval time (interp); reuses

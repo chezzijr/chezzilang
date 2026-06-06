@@ -21,6 +21,7 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**, plus *Craftin
 | Type system | **Static, local inference** (explicit param types; inferred locals *and* fn return types) |
 | Surface syntax | **Indentation blocks** (Python-feel; lexer emits INDENT/DEDENT) |
 | Errors | **Result/Option + `?`** (errors as values, no hidden control flow) |
+| Code organization | **Composition, not inheritance** — structs + methods + interfaces (structural `protocol`s), like Rust/Go. No classes, no inheritance. |
 | Memory | **Mark-sweep GC** (hand-built; primitives unboxed) |
 | Name / ext / binary | **Chezzi** / `.chz` / `chezzi run foo.chz` |
 
@@ -32,10 +33,19 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**, plus *Craftin
 **Included:**
 - **Pattern matching** — `match` on enums, exhaustiveness-checked.
 - **String interpolation** — `"hi {name}, sum {a+b}"`. First-class; string ops are a UX priority.
-- **Struct methods** — `fn dist(self)` on structs. Light OOP, no inheritance.
+- **Struct methods** — `fn dist(self)` on structs. Composition + structural `protocol`s, no classes or inheritance (Rust/Go style).
 - **Pipe `|>`** — functional chaining. Implemented in M6 (parse-time desugar to a call).
 
-**Deferred (YAGNI v1):** classes/inheritance, concurrency, user-defined generics, macros, package registry, native backend.
+**Shipped post-v1:** user-defined generics + structural protocols (M7 — generic fns/structs,
+`Comparable`; `std.cmp`).
+
+**Non-goals (by design, never):** classes & inheritance — Chezzi is composition-only with
+structural `protocol`s, like Rust/Go (see *Locked decisions*).
+
+**Still deferred (YAGNI v1):** concurrency, macros, package registry, native backend. The fuller
+"what's missing to be a complete scripting language" list — `std.json`/stdlib
+breadth, generic enums, `Display`/`Hashable`/numeric protocols, panic recovery, iterators — is
+tracked in `gaps.md` → *Roadmap to a complete v1*.
 
 ### Syntax sketch
 
@@ -104,13 +114,20 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 ## Standard library
 
 - **Builtins (no import):** `print`, `len`, `range`, casts (`int()`/`str()`/`float()`),
-  core-type methods (`s.upper()`, `xs.push()`, `m.get()`).
+  `ord`/`chr`, `set()`/`set(list)`, core-type methods (`s.upper()`, `s.chars()`, `xs.push()`,
+  `m.get()`, `set.add()`).
 - **Std modules v1 (shipped, M6c):** `std.math`/`std.io`/`std.os` (native-Rust via the FFI seam),
   `std.str` + `std.cmp` (written in Chezzi — dogfooding; `std.cmp` adds M7-G3). Imported with
   `import std.math` / `import f from std.io`. `std.cmp` holds generic `min`/`max`/`clamp`
   (`[T: Comparable]`); `list.sort()` is likewise Comparable. (`std.math.min`/`max` were retired into
   `std.cmp`; `abs` stays native.)
-- **Later:** `std.list`, `std.map`, `std.json`, `std.time`.
+- **Std modules — M8 (shipped):** `std.json` (pure-Chezzi `Json` enum + `parse`/`stringify`/
+  accessors **and** type-directed `json.decode[T](s)` into a struct/map/list/scalar);
+  `std.process` (`cmd(s) -> Result[str]`); `std.fs` (`list_dir`/`exists`/`is_file`/`is_dir`/
+  `size`/`glob`); `std.time` (`now`/`monotonic`/`sleep_ms`/`format`). Plus the **`set`** type
+  (`{a, b, c}`), **`s.chars()`** + iterable strings (Python-style; no `char` type).
+- **Later:** `std.regex`, `std.http` (need vetted third-party crates), generic enums,
+  `Display`/`Hashable` protocols (would let custom `str(x)` and struct map/set keys).
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 deferred.** Because Chezzi is written in Rust, the
 > native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn and expose it as a

@@ -53,7 +53,9 @@ count += 1             # reassignment (+= -= also)
 | `bool` | `true` | |
 | `str` | `"hi"` | UTF-8 |
 | `list[T]` | `[1, 2]` | growable |
-| `map[K, V]` | `{"a": 1}` | hash map |
+| `map[K, V]` | `{"a": 1}` | insertion-ordered; key is a hashable scalar |
+| `set[T]` | `{1, 2, 3}` | deduped, insertion-ordered; `T` hashable scalar; empty is `set()` |
+| `tuple` | `(1, "a")` | fixed-arity, immutable |
 | `Result[T]` | `Ok(x)` / `Err(msg)` | §9; shorthand `T!` |
 | `Option[T]` | `Some(x)` / `None` | §9; shorthand `T?` |
 
@@ -349,8 +351,12 @@ Core-type string methods (built in — no import needed):
 s.len()          s.upper()        s.lower()
 s.trim()         s.split(",")     s.starts_with("ab")
 s.contains("b")  ",".join(parts)  # join: separator.join(list[str])
+s.chars()        # → list[str] of 1-char strings; also `for c in s:` iterates them
 "a" + "b"        # concatenation
 ```
+
+A character is just a 1-char `str` (Python-style — there is no `char` type): index with `s[i]`,
+iterate with `for c in s:` or `s.chars()`, and bridge to codepoints with `ord`/`chr`.
 
 List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.contains(v)`
 `xs.index_of(v)` `xs.sum()` `xs.sort()` (ascending, in place); higher-order `xs.map(f)`
@@ -359,6 +365,11 @@ List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.c
 
 Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`; `m[k]`
 reads (errors on a missing key), `m[k] = v` inserts/updates. Iterate with `for k in m` / `for k, v in m`.
+
+Sets: `{a, b, c}` is a set literal (deduped, insertion-ordered; `{}` is the empty *map*, the empty
+set is `set()`; `set(list)` builds one from a list). Elements are hashable scalars (int/str/bool).
+Methods: `s.add(x)` `s.remove(x)→bool` `s.has(x)` `s.len()` `s.union(t)` `s.intersection(t)`
+`s.difference(t)`; iterate with `for x in s`. `==` is order-independent.
 
 ## 11. Pipe operator `|>`
 
@@ -392,7 +403,8 @@ script's own dir is root. `std.*` is reserved (stdlib). `a.b.c` → `<root>/a/b/
 ## 13. Standard library (v1)
 
 Always available (no import): `print`, `len`, `range`, `int()`, `str()`, `float()`,
-`ord(s)→int` (first codepoint), `chr(n)→str` (codepoint → 1-char string), plus methods on core types.
+`ord(s)→int` (first codepoint), `chr(n)→str` (codepoint → 1-char string), `set()`/`set(list)`,
+plus methods on core types.
 
 `std.math.abs` is int+float polymorphic (int → int, float → float). `min`/`max`/`clamp` live in
 **`std.cmp`** as generic `[T: Comparable]` functions — they work on int, float, str, **and any
@@ -400,7 +412,20 @@ struct that implements `compare`** (the old numeric-only `std.math.min`/`max` we
 in M7). `list.sort()` is likewise Comparable: it sorts lists of int/float/str or of any struct with
 a `compare` method.
 
-Importable: `std.io`, `std.math`, `std.str`, `std.cmp`, `std.os`. (Later: `std.list`, `std.map`, `std.json`, `std.time`.)
+**`std.json`** (M8): `json.parse(s) -> Result[Json]` and `json.stringify(j) -> str` over a dynamic
+`Json` enum (`Null`/`Bool`/`Num`/`Str`/`Arr`/`Obj`), with accessors `as_int`/`as_float`/`as_str`/
+`as_bool`/`get`/`at`/`is_null`/`as_object`/`as_array`. For known shapes, `json.decode[T](s) ->
+Result[T]` deserializes straight into a struct / `map[str, V]` / `list[T]` / scalar (Option fields
+accept null-or-absent; extra keys ignored; recursive/generic struct targets are rejected). Note: a
+JSON *literal in Chezzi source* must double its braces (`{{ }}`) — bare `{…}` is interpolation.
+
+**`std.process`** (M8): `cmd(s) -> Result[str]` runs `s` via the shell — `Ok(stdout)` on success,
+`Err(stderr)` otherwise. **`std.fs`**: `list_dir`, `exists`, `is_file`, `is_dir`, `size`, `glob`
+(`*`/`?` in the last path component). **`std.time`**: `now()` (epoch secs), `monotonic()` (secs,
+steady), `sleep_ms(n)`, `format(epoch)` (UTC `"YYYY-MM-DD HH:MM:SS"`).
+
+Importable: `std.io`, `std.math`, `std.str`, `std.cmp`, `std.os`, `std.json`, `std.process`,
+`std.fs`, `std.time`. (Later: `std.regex`, `std.http`.)
 
 ---
 

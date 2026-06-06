@@ -325,7 +325,56 @@ nullary variants (`Cons(h, None)`) stay unsupported (clear checker error); **mat
   removed; `abs` stays native), and `list.sort()` widened to any Comparable element. See
   `examples/stdlib_cmp.chz`. Not yet: explicit call-site type args (`max[int](…)`), generic enums,
   multi-bound `T: A + B`, a numeric protocol (would let `abs`/`+`/`-` unify too), `Hashable`/`Display`.
-- **Match guards** (`pattern if cond:`) and **range patterns** (`1..10:`) (extend #15): guards are the
-  general mechanism (subsume range / less-than / greater-than); revisit when needed.
-- **A real `char` type / `s.chars()`** (extends #10): `ord`/`chr` cover the 80/20.
-- **`sort_by_key`** (sugar on #11).
+## Roadmap to a complete v1 (statically-typed scripting language)
+
+The language **core** is feature-complete: scalars, `list`/`map`/`tuple`, structs (generic), sum
+types (`enum` with payloads), `Result`/`Option` + `?`, generics + structural protocols, pattern
+matching with exhaustiveness, closures/HOF, struct methods, modules, GC, two backends, string
+interpolation, pipe. What remains to make it a language you'd reach for to write real scripts is
+**~80% standard-library breadth, ~20% type-system depth**, ordered below by leverage.
+
+### Tier 1 — blocks everyday scripting (mostly stdlib) — ✅ **DONE (M8)** except regex/http
+- ~~**`std.json`** — parse/serialize.~~ ✅ **M8.** A pure-Chezzi `Json` enum (`parse`/`stringify`/
+  `as_*`/`get`/`at`) **plus** type-directed `json.decode[T](s)` into a struct / typed map / list /
+  scalar. Sidestepped the `Display`/`Hashable` dependency the original note feared — a dedicated
+  `Json` enum makes `stringify` a plain `match` and keeps keys `str`. See `examples/json_dynamic.chz`,
+  `examples/json_decode.chz`.
+- **More stdlib:** ✅ `std.time` (`now`/`monotonic`/`sleep_ms`/`format`), ✅ `std.fs`
+  (`list_dir`/`exists`/`is_file`/`is_dir`/`size`/`glob`), ✅ `std.process` (`cmd(s) -> Result[str]`).
+  Still deferred: **regex**, **`std.http`** (both want vetted third-party crates; the project avoids
+  deps by default). See `examples/sys.chz`.
+- ~~**A real `char` type / `s.chars()`**~~ ✅ **M8 — Python-style, no `char` type.** Added
+  `s.chars() -> list[str]` and made strings iterable (`for c in s:`); a character stays a 1-char
+  `str` (like Python). See `examples/string_iter.chz`.
+- ~~**`set` type**~~ ✅ **M8.** `{a, b, c}` literals (deduped, insertion-ordered), `set()`/`set(list)`,
+  `add`/`remove`/`has`/`len`/`union`/`intersection`/`difference`, iteration, order-independent
+  equality; elements are hashable scalars. See `examples/set.chz`.
+
+### Tier 2 — type-system depth
+- **Generic enums** — `enum Tree[T]`, `enum LinkedList[T]`. Only *structs* got type parameters in
+  M7-G2; `Result`/`Option` are hardcoded. The most-felt remaining type hole.
+- **`Hashable` protocol** → let structs be `map` keys (maps key only int/str/bool now).
+- **`Display`/`Show` protocol** → custom `str(point)` / `print(point)`. The dispatch shape from M7-G3
+  (intrinsic-satisfaction table + struct-method dispatch) already supports it — cheap to add.
+- **A numeric protocol** → `+ - *` on user types (vectors, money), and would let `abs`/`min`/`max`
+  fully unify (see M7-G3 note). Multi-bound `T: A + B`; **type aliases** (`type UserId = int`).
+
+### Tier 3 — runtime robustness + ergonomics
+- **Panic recovery** — there is none: a runtime error (index-OOB, div-by-zero) kills the process;
+  `Result`/`?` only covers *explicit* errors. A `recover`/boundary matters for robust scripts.
+- **Iterator protocol** — `for` only iterates built-in containers; a user struct can't be iterable,
+  and there are no lazy/generator sequences.
+- **Match guards** (`pattern if cond:`) and **range patterns** (`1..10:`) (extend #15): guards are
+  the general mechanism (subsume range / less-than / greater-than).
+- **Default / named / variadic args**; **`sort_by_key`** (sugar on #11).
+- **Integers:** `i64` only — no overflow policy, no `byte`/bignum.
+
+### Tier 4 — ecosystem (toolchain, not the language)
+Formatter, LSP, package manager / registry (spec defers this), REPL, debugger, built-in test
+runner, doc comments + docgen.
+
+**Recommended next:** with Tier 1 shipped (M8), the highest-leverage remaining work is **Tier 2
+type-system depth** — **generic enums** (`enum Tree[T]`; the most-felt type hole) and the
+`Display`/`Hashable` protocols (naming settled: `Display`+`str(self)`, `Hashable`+`hash(self)` —
+`Hashable` would lift the int/str/bool restriction on map/set keys). **Panic recovery** (Tier 3) is
+the close second for script robustness.
