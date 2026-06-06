@@ -217,6 +217,85 @@ y := b.set(9)
     ok(src);
 }
 
+// ----- review-panel regressions (G1/G2) -----
+
+#[test]
+fn bounded_type_param_forwards_to_bounded_call_ok() {
+    // Review #1: a `T: Comparable` value must satisfy Comparable when forwarded to another
+    // `[U: Comparable]` call (generic composition).
+    let src = "\
+fn max[T: Comparable](a: T, b: T) -> T:
+    if a < b:
+        return b
+    return a
+fn pick[T: Comparable](a: T, b: T) -> T:
+    return max(a, b)
+print(pick(3, 7))
+";
+    ok(src);
+}
+
+#[test]
+fn generic_struct_bound_enforced_at_construction() {
+    // Review C1: a struct type-param bound must be enforced, not just on generic fns.
+    let src = "\
+struct Plain:
+    n: int
+struct Box[T: Comparable]:
+    a: T
+b := Box(Plain(1))
+";
+    rejects(src, "does not satisfy Comparable");
+}
+
+#[test]
+fn generic_struct_bound_enforced_on_explicit_type_arg() {
+    let src = "\
+struct Plain:
+    n: int
+struct Box[T: Comparable]:
+    a: T
+b: Box[Plain] = Box(Plain(1))
+";
+    rejects(src, "does not satisfy Comparable");
+}
+
+#[test]
+fn generic_struct_bound_satisfied_ok() {
+    let src = "\
+struct Box[T: Comparable]:
+    a: T
+b := Box(5)
+c: Box[str] = Box(\"hi\")
+";
+    ok(src);
+}
+
+#[test]
+fn type_param_shadows_same_named_struct() {
+    // Review I2: an in-scope type parameter shadows a same-named type.
+    let src = "\
+struct T:
+    n: int
+fn id[T](x: T) -> T:
+    return x
+y := id(5)
+";
+    ok(src);
+}
+
+#[test]
+fn bare_generic_struct_without_args_rejected() {
+    // Review I3: using a generic struct as a type without its arguments is an error.
+    let src = "\
+struct Box[T]:
+    v: T
+fn unwrap(b: Box) -> int:
+    return 0
+";
+    rejects(src, "expects 1 type argument(s), got 0");
+}
+
 // ===== 2. unknown type =====
 
 #[test]

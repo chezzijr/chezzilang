@@ -591,11 +591,19 @@ impl Checker {
                 "bool" => Ty::Bool,
                 "str" => Ty::Str,
                 "nil" => Ty::Nil,
-                _ if self.struct_names.contains(n) => Ty::strukt(n.clone()),
-                _ if self.enum_names.contains(n) => Ty::Enum(n.clone()),
                 // A generic type parameter (`T`) or `Self`, in scope while checking a generic
-                // fn signature/body or a protocol method.
+                // fn signature/body or a protocol method — checked BEFORE type names so an
+                // in-scope type parameter shadows a same-named struct/enum.
                 _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
+                _ if self.struct_names.contains(n) => {
+                    // A generic struct written without type arguments is missing them.
+                    let nparams = self.structs.get(n).map_or(0, |i| i.type_params.len());
+                    if nparams > 0 {
+                        self.error(span, format!("type '{n}' expects {nparams} type argument(s), got 0"));
+                    }
+                    Ty::strukt(n.clone())
+                }
+                _ if self.enum_names.contains(n) => Ty::Enum(n.clone()),
                 _ => {
                     self.error(span, format!("unknown type '{n}'"));
                     Ty::Unknown
@@ -624,17 +632,28 @@ impl Checker {
                 // A user-defined generic struct instantiated with type arguments: `Pair[int, str]`.
                 _ if self.struct_names.contains(n) => {
                     let resolved: Vec<Ty> = args.iter().map(|a| self.resolve_type(a, span)).collect();
-                    if let Some(info) = self.structs.get(n)
-                        && info.type_params.len() != resolved.len()
-                    {
-                        self.error(
-                            span,
-                            format!(
-                                "type '{n}' expects {} type argument(s), got {}",
-                                info.type_params.len(),
-                                resolved.len()
-                            ),
-                        );
+                    // Clone the param list out so the borrow on `self.structs` is dropped before
+                    // the `satisfies`/`error` calls below.
+                    let tps = self.structs.get(n).map(|i| i.type_params.clone());
+                    if let Some(tps) = tps {
+                        if tps.len() != resolved.len() {
+                            self.error(
+                                span,
+                                format!(
+                                    "type '{n}' expects {} type argument(s), got {}",
+                                    tps.len(),
+                                    resolved.len()
+                                ),
+                            );
+                        }
+                        // Enforce each type parameter's protocol bound against its argument.
+                        for (tp, arg) in tps.iter().zip(&resolved) {
+                            if let Some(bound) = &tp.bound
+                                && let Err(msg) = self.satisfies(arg, bound)
+                            {
+                                self.error(span, msg);
+                            }
+                        }
                     }
                     Ty::Struct(n.clone(), resolved)
                 }
@@ -1811,6 +1830,15 @@ impl Checker {
                             );
                         }
                     }
+                    // Enforce each type parameter's protocol bound against its inferred argument.
+                    for tp in &tps {
+                        if let Some(bound) = &tp.bound
+                            && let Some(concrete) = sub.get(&tp.name)
+                            && let Err(msg) = self.satisfies(concrete, bound)
+                        {
+                            self.error(span, msg);
+                        }
+                    }
                     let targs =
                         tps.iter().map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown)).collect();
                     return Some(Ty::Struct(name.to_string(), targs));
@@ -2259,6 +2287,15 @@ impl Checker {
         }
         if protocol == "Comparable" && matches!(ty, Ty::Int | Ty::Float | Ty::Str) {
             return Ok(());
+        }
+        // A bound type parameter satisfies a protocol if its declared bound *is* that protocol —
+        // this is what lets a generic forward its `T: P` value into another `[U: P]` call.
+        if let Ty::Param(name) = ty {
+            return if self.type_params.get(name).and_then(|b| b.as_deref()) == Some(protocol) {
+                Ok(())
+            } else {
+                Err(format!("type {ty} does not satisfy {protocol}"))
+            };
         }
         match ty {
             Ty::Struct(sname, _) => {
