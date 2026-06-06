@@ -77,6 +77,12 @@ pub enum Op {
     GtEq,
     Eq,
     NotEq,
+    // Bitwise / shift (int-only) — gap #13.
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
     /// Require the top of stack to be a bool (operand of `and`/`or`/`not`, `if`/`while` condition).
     AsBool,
     /// Require the top of stack to be an int (range bounds, list index).

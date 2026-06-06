@@ -63,6 +63,11 @@ pub enum Token {
     Pipe,       // |>
     Question,   // ?
     Bang,       // !  (used in type position: `T!` = Result[T])
+    Amp,        // &  (bitwise and)
+    Caret,      // ^  (bitwise xor)
+    BitOr,      // |  (bitwise or)
+    Shl,        // << (left shift)
+    Shr,        // >> (right shift)
 
     // --- delimiters ---
     LParen,     // (
@@ -355,15 +360,27 @@ impl Lexer {
             ':' => if self.match_char('=') { Token::Walrus } else { Token::Colon },
             '=' => if self.match_char('=') { Token::EqEq } else { Token::Assign },
             '!' => if self.match_char('=') { Token::NotEq } else { Token::Bang },
-            '<' => if self.match_char('=') { Token::LtEq } else { Token::Lt },
-            '>' => if self.match_char('=') { Token::GtEq } else { Token::Gt },
-            '|' => {
-                if self.match_char('>') {
-                    Token::Pipe
+            '<' => {
+                if self.match_char('=') {
+                    Token::LtEq
+                } else if self.match_char('<') {
+                    Token::Shl
                 } else {
-                    return Err(self.error("expected '>' after '|'"));
+                    Token::Lt
                 }
             }
+            '>' => {
+                if self.match_char('=') {
+                    Token::GtEq
+                } else if self.match_char('>') {
+                    Token::Shr
+                } else {
+                    Token::Gt
+                }
+            }
+            '|' => if self.match_char('>') { Token::Pipe } else { Token::BitOr },
+            '&' => Token::Amp,
+            '^' => Token::Caret,
             '?' => Token::Question,
             '(' => Token::LParen,
             ')' => Token::RParen,

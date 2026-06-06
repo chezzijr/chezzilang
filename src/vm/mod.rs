@@ -399,6 +399,7 @@ impl Vm {
                 let l = self.pop();
                 self.push(Value::Bool(!self.values_equal(l, r)));
             }
+            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => self.bitwise(op, span)?,
             Op::AsBool => {
                 let v = *self.stack.last().unwrap();
                 if !matches!(v, Value::Bool(_)) {
@@ -621,6 +622,41 @@ impl Vm {
                 } else {
                     return Err(self.err(format!("cannot apply {name} to {} and {}", self.type_name(l), self.type_name(r)), span));
                 }
+            }
+            _ => return Err(self.err(format!("cannot apply {name} to {} and {}", self.type_name(l), self.type_name(r)), span)),
+        };
+        self.push(result);
+        Ok(())
+    }
+
+    /// Bitwise / shift ops — int-only (gap #13). Shift amounts outside `0..64` are a runtime error
+    /// (Rust would otherwise panic), with a message identical to the interpreter's.
+    fn bitwise(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
+        let r = self.pop();
+        let l = self.pop();
+        let name = match op {
+            Op::BitAnd => "BitAnd",
+            Op::BitOr => "BitOr",
+            Op::BitXor => "BitXor",
+            Op::Shl => "Shl",
+            Op::Shr => "Shr",
+            _ => unreachable!(),
+        };
+        let result = match (l, r) {
+            (Value::Int(a), Value::Int(b)) => {
+                let v = match op {
+                    Op::BitAnd => a & b,
+                    Op::BitOr => a | b,
+                    Op::BitXor => a ^ b,
+                    Op::Shl | Op::Shr => {
+                        if !(0..64).contains(&b) {
+                            return Err(self.err(format!("shift amount {b} out of range (0..64)"), span));
+                        }
+                        if matches!(op, Op::Shl) { a << (b as u32) } else { a >> (b as u32) }
+                    }
+                    _ => unreachable!(),
+                };
+                Value::Int(v)
             }
             _ => return Err(self.err(format!("cannot apply {name} to {} and {}", self.type_name(l), self.type_name(r)), span)),
         };
@@ -2601,6 +2637,17 @@ main()";
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
+
+    /// Gap #13 golden: `examples/bits.chz` (`& | ^ << >>` — XOR-fold + bitmask) is byte-identical
+    /// on the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_bits_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/bits.chz");
+        let expected = include_str!("../../examples/bits.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
 }
 
 #[cfg(test)]
@@ -2816,6 +2863,35 @@ mod parity_tests {
     fn assert_parity_out(src: &str, expect: &str) {
         assert_parity(src);
         assert_eq!(vm_outcome(src).expect("program should run"), expect, "for:\n{src}");
+    }
+
+    #[test]
+    fn bitwise_ops_parity() {
+        assert_parity_out(
+            "print(5 & 3)\nprint(5 | 2)\nprint(5 ^ 3)\nprint(1 << 4)\nprint(255 >> 4)\n",
+            "1\n7\n6\n16\n15\n",
+        );
+    }
+
+    #[test]
+    fn bitwise_precedence_below_comparison_parity() {
+        // `5 & 3 == 1` is `(5 & 3) == 1` (bitwise binds tighter than `==`, Python-style).
+        assert_parity_out("print(5 & 3 == 1)\n", "true\n");
+    }
+
+    #[test]
+    fn xor_fold_single_number_parity() {
+        assert_parity_out(
+            "xs := [4,1,2,1,4,2,7]\nacc := 0\nfor x in xs:\n    acc = acc ^ x\nprint(acc)\n",
+            "7\n",
+        );
+    }
+
+    #[test]
+    fn shift_out_of_range_error_parity() {
+        // Dynamic shift the checker can't catch — both engines must raise the same runtime error.
+        assert_parity("print(1 << 64)\n");
+        assert_parity("print(1 << -1)\n");
     }
 
     #[test]

@@ -292,4 +292,10 @@ pub enum BinaryOp {
     NotEq,
     And,
     Or,
+    // Bitwise (int-only) — gap #13.
+    BitAnd, // &
+    BitOr,  // |
+    BitXor, // ^
+    Shl,    // <<
+    Shr,    // >>
 }

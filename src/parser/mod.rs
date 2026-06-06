@@ -1101,24 +1101,31 @@ enum InfixOp {
 fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
     use BinaryOp::*;
     use InfixOp::*;
+    // Precedence ladder (loosest → tightest). Bitwise ops follow Python's relative order: comparison
+    // is looser than `|` < `^` < `&` < shifts, and shifts are looser than additive (gap #13).
     let (op, l) = match tok {
-        // Pipe `|>` is the lowest-precedence infix op (level 0): the whole expression to its left
+        // Pipe `|>` is the lowest-precedence infix op (level 1): the whole expression to its left
         // is threaded into the call on its right. Left-associative (`a |> f |> g` = `(a|>f)|>g`).
-        Token::Pipe => (Pipe, 0),
-        Token::Or => (Bin(Or), 1),
-        Token::And => (Bin(And), 3),
-        Token::EqEq => (Bin(Eq), 5),
-        Token::NotEq => (Bin(NotEq), 5),
-        Token::Lt => (Bin(Lt), 7),
-        Token::LtEq => (Bin(LtEq), 7),
-        Token::Gt => (Bin(Gt), 7),
-        Token::GtEq => (Bin(GtEq), 7),
-        Token::DotDot => (Range, 9),
-        Token::Plus => (Bin(Add), 11),
-        Token::Minus => (Bin(Sub), 11),
-        Token::Star => (Bin(Mul), 13),
-        Token::Slash => (Bin(Div), 13),
-        Token::Percent => (Bin(Mod), 13),
+        Token::Pipe => (Pipe, 1),
+        Token::Or => (Bin(Or), 3),
+        Token::And => (Bin(And), 5),
+        Token::EqEq => (Bin(Eq), 7),
+        Token::NotEq => (Bin(NotEq), 7),
+        Token::Lt => (Bin(Lt), 9),
+        Token::LtEq => (Bin(LtEq), 9),
+        Token::Gt => (Bin(Gt), 9),
+        Token::GtEq => (Bin(GtEq), 9),
+        Token::BitOr => (Bin(BitOr), 11),
+        Token::Caret => (Bin(BitXor), 13),
+        Token::Amp => (Bin(BitAnd), 15),
+        Token::Shl => (Bin(Shl), 17),
+        Token::Shr => (Bin(Shr), 17),
+        Token::DotDot => (Range, 19),
+        Token::Plus => (Bin(Add), 21),
+        Token::Minus => (Bin(Sub), 21),
+        Token::Star => (Bin(Mul), 23),
+        Token::Slash => (Bin(Div), 23),
+        Token::Percent => (Bin(Mod), 23),
         _ => return None,
     };
     Some((op, l, l + 1))

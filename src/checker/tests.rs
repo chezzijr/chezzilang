@@ -1169,6 +1169,34 @@ fn ord_result_is_int_not_str() {
 }
 
 
+// ===== bitwise operators (gap #13) =====
+
+#[test]
+fn bitwise_int_ops_ok() {
+    ok("a := 5 & 3\nb := 5 | 2\nc := 5 ^ 3\nd := 1 << 4\ne := 255 >> 4\n");
+}
+
+#[test]
+fn bitwise_result_is_int() {
+    ok("x: int = (1 << 8) | 3\n");
+}
+
+#[test]
+fn bitwise_on_float_rejected() {
+    rejects("x := 5 & 3.0\n", "bitwise");
+}
+
+#[test]
+fn shift_on_float_rejected() {
+    rejects("x := 1.0 << 2\n", "bitwise");
+}
+
+#[test]
+fn bitwise_on_str_rejected() {
+    rejects("x := \"a\" ^ \"b\"\n", "bitwise");
+}
+
+
 // ===== nested / tuple match patterns (gap #15) =====
 
 #[test]

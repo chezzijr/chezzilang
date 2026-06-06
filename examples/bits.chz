@@ -1,0 +1,24 @@
+# examples/bits.chz — bitwise operators & | ^ << >> (gap #13), int-only.
+
+# "Single number": every value appears twice except one. XOR-folding cancels the pairs.
+fn single(xs: list[int]) -> int:
+    acc := 0
+    for x in xs:
+        acc = acc ^ x
+    return acc
+
+print(single([4, 1, 2, 1, 4, 2, 7]))   # 7
+
+# Bitmask: collect a set of flags, then test membership.
+READ := 1 << 0
+WRITE := 1 << 1
+EXEC := 1 << 2
+perms := READ | EXEC
+print(perms)                            # 5
+print(perms & WRITE)                    # 0  (not set)
+print((perms & EXEC) != 0)              # true
+
+# Shifts and masking: extract the low byte of a number.
+n := (3 << 8) | 200
+print(n >> 8)                           # 3   (high byte)
+print(n & 255)                          # 200 (low byte)

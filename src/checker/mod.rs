@@ -1422,6 +1422,20 @@ impl Checker {
                 }
                 Ty::Bool
             }
+            // Bitwise/shift ops are int-only (gap #13).
+            BitAnd | BitOr | BitXor | Shl | Shr => {
+                if l == Ty::Int && r == Ty::Int {
+                    Ty::Int
+                } else if either_unknown {
+                    Ty::Unknown
+                } else {
+                    self.error(
+                        lhs.span,
+                        format!("bitwise operator {} requires int operands, found {l} and {r}", op_sym(op)),
+                    );
+                    Ty::Unknown
+                }
+            }
             Eq | NotEq => Ty::Bool, // equality is permissive (matches the interpreter)
         }
     }
@@ -2043,6 +2057,11 @@ fn op_sym(op: BinaryOp) -> &'static str {
         Mul => "*",
         Div => "/",
         Mod => "%",
+        BitAnd => "&",
+        BitOr => "|",
+        BitXor => "^",
+        Shl => "<<",
+        Shr => ">>",
         _ => "?",
     }
 }

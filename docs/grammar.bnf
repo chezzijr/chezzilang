@@ -148,9 +148,15 @@
 <orExpr>   ::= <andExpr> | <orExpr> "OR" <andExpr>
 <andExpr>  ::= <eqExpr>  | <andExpr> "AND" <eqExpr>
 <eqExpr>   ::= <relExpr> | <eqExpr> "EQEQ" <relExpr> | <eqExpr> "NOTEQ" <relExpr>
-<relExpr>  ::= <rangeExpr>
-             | <relExpr> "LT" <rangeExpr>   | <relExpr> "LTEQ" <rangeExpr>
-             | <relExpr> "GT" <rangeExpr>   | <relExpr> "GTEQ" <rangeExpr>
+<relExpr>  ::= <bitOrExpr>
+             | <relExpr> "LT" <bitOrExpr>   | <relExpr> "LTEQ" <bitOrExpr>
+             | <relExpr> "GT" <bitOrExpr>   | <relExpr> "GTEQ" <bitOrExpr>
+# Bitwise / shift cascade (gap #13), Python's relative order: `|` looser than `^` looser than `&`
+# looser than the shifts, which sit just above range. All int-only (enforced by the checker).
+<bitOrExpr> ::= <bitXorExpr> | <bitOrExpr> "BITOR" <bitXorExpr>
+<bitXorExpr>::= <bitAndExpr> | <bitXorExpr> "CARET" <bitAndExpr>
+<bitAndExpr>::= <shiftExpr>  | <bitAndExpr> "AMP" <shiftExpr>
+<shiftExpr> ::= <rangeExpr>  | <shiftExpr> "SHL" <rangeExpr> | <shiftExpr> "SHR" <rangeExpr>
 <rangeExpr>::= <addExpr> | <rangeExpr> "DOTDOT" <addExpr>
 <addExpr>  ::= <mulExpr> | <addExpr> "PLUS" <mulExpr> | <addExpr> "MINUS" <mulExpr>
 <mulExpr>  ::= <unary>

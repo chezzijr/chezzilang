@@ -909,6 +909,11 @@ fn binary_op(op: BinaryOp) -> Op {
         BinaryOp::GtEq => Op::GtEq,
         BinaryOp::Eq => Op::Eq,
         BinaryOp::NotEq => Op::NotEq,
+        BinaryOp::BitAnd => Op::BitAnd,
+        BinaryOp::BitOr => Op::BitOr,
+        BinaryOp::BitXor => Op::BitXor,
+        BinaryOp::Shl => Op::Shl,
+        BinaryOp::Shr => Op::Shr,
         BinaryOp::And | BinaryOp::Or => unreachable!("and/or handled by short-circuit path"),
     }
 }

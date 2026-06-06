@@ -1624,6 +1624,29 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, Ru
                 _ => unreachable!(),
             }))
         }
+        // Bitwise/shift ops — int-only (gap #13). The checker rejects non-int operands; this is the
+        // runtime fallback.
+        BitAnd | BitOr | BitXor | Shl | Shr => match (&l, &r) {
+            (Int(a), Int(b)) => {
+                let v = match op {
+                    BitAnd => a & b,
+                    BitOr => a | b,
+                    BitXor => a ^ b,
+                    Shl | Shr => {
+                        if *b < 0 || *b >= 64 {
+                            return Err(RuntimeError {
+                                message: format!("shift amount {b} out of range (0..64)"),
+                                span,
+                            });
+                        }
+                        if op == Shl { a << (*b as u32) } else { a >> (*b as u32) }
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(Int(v))
+            }
+            _ => Err(type_err(op, &l, &r)),
+        },
         Eq => Ok(Value::Bool(values_equal(&l, &r))),
         NotEq => Ok(Value::Bool(!values_equal(&l, &r))),
         And | Or => Err(RuntimeError {
