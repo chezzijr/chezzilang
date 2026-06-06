@@ -268,6 +268,15 @@ pub enum ExprKind {
     },
     /// postfix `expr?` — error propagation.
     Try(Box<Expr>),
+    /// `module.decode[Type](arg)` — type-directed JSON decode (M8). `obj` is the json-module
+    /// expression (so the engine can reach its `parse`), `ty` is the target type to decode into,
+    /// `arg` is the source string. Evaluates to `Result[ty]`. Scoped to the `.decode[T](…)` shape;
+    /// not general call-site type arguments.
+    DecodeCall {
+        obj: Box<Expr>,
+        ty: Type,
+        arg: Box<Expr>,
+    },
     /// `fn(params) [-> ret]: body` — an anonymous function; body is a single expression.
     Closure {
         params: Vec<Param>,

@@ -11,6 +11,7 @@ mod ast;
 mod checker;
 mod compiler;
 mod interp;
+mod json_decode;
 mod lexer;
 mod native;
 mod parser;

@@ -962,12 +962,32 @@ impl Parser {
                     } else {
                         self.expect_ident()?
                     };
-                    Expr {
-                        kind: ExprKind::Field {
-                            obj: Box::new(e),
-                            name,
-                        },
-                        span,
+                    // `.decode[Type](arg)` — the one type-argument call form (JSON decode). The
+                    // `[` right after `.decode` disambiguates it from indexing a field named
+                    // `decode`. Anything else stays an ordinary field access.
+                    if name == "decode" && self.check(&Token::LBracket) {
+                        self.advance(); // '['
+                        let ty = self.parse_type()?;
+                        self.expect(&Token::RBracket)?;
+                        self.expect(&Token::LParen)?;
+                        let arg = self.parse_expr()?;
+                        self.expect(&Token::RParen)?;
+                        Expr {
+                            kind: ExprKind::DecodeCall {
+                                obj: Box::new(e),
+                                ty,
+                                arg: Box::new(arg),
+                            },
+                            span,
+                        }
+                    } else {
+                        Expr {
+                            kind: ExprKind::Field {
+                                obj: Box::new(e),
+                                name,
+                            },
+                            span,
+                        }
                     }
                 }
                 Token::LBracket => {

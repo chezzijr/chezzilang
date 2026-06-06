@@ -64,6 +64,8 @@ struct Interp {
     /// Runtime configuration the native std modules read (args/env/stdin). Default = inert.
     host: crate::native::HostConfig,
     structs: std::collections::HashMap<String, std::rc::Rc<StructDef>>,
+    /// Struct name → declared fields (with types), for building `json.decode` descriptors.
+    struct_fields: std::collections::HashMap<String, Vec<crate::ast::Field>>,
     variants: std::collections::HashMap<String, VariantDef>,
     /// Evaluated module namespaces, keyed by module id (run-once cache for a multi-file program).
     namespaces: std::collections::HashMap<crate::resolver::ModuleId, std::rc::Rc<value::ModuleNamespace>>,
@@ -91,6 +93,7 @@ impl Interp {
             stderr: String::new(),
             host: crate::native::HostConfig::default(),
             structs: std::collections::HashMap::new(),
+            struct_fields: std::collections::HashMap::new(),
             variants: std::collections::HashMap::new(),
             namespaces: std::collections::HashMap::new(),
             propagating: None,
@@ -340,10 +343,147 @@ impl Interp {
                     }),
                 }
             }
+            ExprKind::DecodeCall { obj, ty, arg } => {
+                // Reuse the json module's `parse` (obj.parse(arg) → Result[Json]), then coerce.
+                let parse_call = Expr {
+                    kind: ExprKind::Call {
+                        callee: Box::new(Expr {
+                            kind: ExprKind::Field { obj: obj.clone(), name: "parse".to_string() },
+                            span: expr.span,
+                        }),
+                        args: vec![(**arg).clone()],
+                    },
+                    span: expr.span,
+                };
+                let res = self.eval(&parse_call)?;
+                let desc = crate::json_decode::from_type(ty, &self.struct_fields, &mut Vec::new())
+                    .map_err(|message| RuntimeError { message, span: expr.span })?;
+                match &res {
+                    Value::Enum { ty: rty, variant, payload }
+                        if rty.as_ref() == "Result" && variant.as_ref() == "Ok" && payload.len() == 1 =>
+                    {
+                        let jv = payload[0].clone();
+                        match self.coerce_json(&jv, &desc, "$") {
+                            Ok(v) => Ok(enum_val("Result", "Ok", vec![v])),
+                            Err(msg) => Ok(enum_val("Result", "Err", vec![Value::Str(msg.into())])),
+                        }
+                    }
+                    // Parse error: the Result Err(str) is already a valid Result[T].
+                    Value::Enum { ty: rty, variant, .. }
+                        if rty.as_ref() == "Result" && variant.as_ref() == "Err" =>
+                    {
+                        Ok(res)
+                    }
+                    _ => Err(RuntimeError {
+                        message: "decode: parse did not return a Result".to_string(),
+                        span: expr.span,
+                    }),
+                }
+            }
             other => Err(RuntimeError {
                 message: format!("evaluation of {other:?} is not implemented yet"),
                 span: expr.span,
             }),
+        }
+    }
+
+    /// Coerce a parsed `Json` value into a concrete value of the descriptor's type. Mirrors the
+    /// VM's `coerce_json` (identical error wording — the parity suite checks this).
+    fn coerce_json(
+        &self,
+        jv: &Value,
+        desc: &crate::json_decode::TypeDescriptor,
+        path: &str,
+    ) -> Result<Value, String> {
+        use crate::json_decode::TypeDescriptor as D;
+        let Value::Enum { ty, variant, payload } = jv else {
+            return Err(format!("decode: expected a JSON value at {path}"));
+        };
+        let _ = ty;
+        let kind = crate::json_decode::json_kind(variant);
+        let mismatch = |want: &str| format!("decode: expected {want} at {path}, found {kind}");
+        match desc {
+            D::Int => {
+                let f = json_num(variant, payload).ok_or_else(|| mismatch("int"))?;
+                if f.fract() != 0.0 || !f.is_finite() {
+                    return Err(format!("decode: expected an integer at {path}, found {f}"));
+                }
+                Ok(Value::Int(f as i64))
+            }
+            D::Float => Ok(Value::Float(json_num(variant, payload).ok_or_else(|| mismatch("float"))?)),
+            D::Bool => match (variant.as_ref(), payload.first()) {
+                ("Bool", Some(Value::Bool(b))) => Ok(Value::Bool(*b)),
+                _ => Err(mismatch("bool")),
+            },
+            D::Str => match (variant.as_ref(), payload.first()) {
+                ("Str", Some(Value::Str(s))) => Ok(Value::Str(s.clone())),
+                _ => Err(mismatch("str")),
+            },
+            D::Option(inner) => {
+                if variant.as_ref() == "Null" {
+                    Ok(enum_val("Option", "None", Vec::new()))
+                } else {
+                    Ok(enum_val("Option", "Some", vec![self.coerce_json(jv, inner, path)?]))
+                }
+            }
+            D::List(inner) => {
+                let Value::List(items) = payload.first().cloned().unwrap_or(Value::Nil) else {
+                    return Err(mismatch("array"));
+                };
+                if variant.as_ref() != "Arr" {
+                    return Err(mismatch("array"));
+                }
+                let src = items.borrow().clone();
+                let mut out = Vec::with_capacity(src.len());
+                for (i, it) in src.iter().enumerate() {
+                    out.push(self.coerce_json(it, inner, &format!("{path}[{i}]"))?);
+                }
+                Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(out))))
+            }
+            D::Map(inner) => {
+                if variant.as_ref() != "Obj" {
+                    return Err(mismatch("object"));
+                }
+                let Value::Map(entries) = payload.first().cloned().unwrap_or(Value::Nil) else {
+                    return Err(mismatch("object"));
+                };
+                let src = entries.borrow().clone();
+                let mut out: Vec<(Value, Value)> = Vec::with_capacity(src.len());
+                for (k, v) in &src {
+                    let key = match k {
+                        Value::Str(s) => s.to_string(),
+                        _ => String::new(),
+                    };
+                    out.push((k.clone(), self.coerce_json(v, inner, &format!("{path}.{key}"))?));
+                }
+                Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(out))))
+            }
+            D::Struct { name, fields } => {
+                if variant.as_ref() != "Obj" {
+                    return Err(mismatch(&format!("object for {name}")));
+                }
+                let Value::Map(entries) = payload.first().cloned().unwrap_or(Value::Nil) else {
+                    return Err(mismatch("object"));
+                };
+                let src = entries.borrow().clone();
+                let mut field_vals: Vec<(String, Value)> = Vec::with_capacity(fields.len());
+                for (fname, fdesc) in fields {
+                    let found = src.iter().find(|(k, _)| matches!(k, Value::Str(s) if s.as_ref() == fname));
+                    let fpath = format!("{path}.{fname}");
+                    let v = match found {
+                        Some((_, jval)) => self.coerce_json(jval, fdesc, &fpath)?,
+                        None => match fdesc {
+                            D::Option(_) => enum_val("Option", "None", Vec::new()),
+                            _ => return Err(format!("decode: missing key '{fname}' at {path}")),
+                        },
+                    };
+                    field_vals.push((fname.clone(), v));
+                }
+                Ok(Value::Struct {
+                    name: name.clone().into(),
+                    fields: std::rc::Rc::new(std::cell::RefCell::new(field_vals)),
+                })
+            }
         }
     }
 
@@ -1131,6 +1271,7 @@ impl Interp {
                         home: home.clone(),
                     };
                     self.structs.insert(name.clone(), std::rc::Rc::new(def));
+                    self.struct_fields.insert(name.clone(), fields.clone());
                 }
                 StmtKind::Enum { name, variants } => {
                     for v in variants {
@@ -1681,6 +1822,19 @@ fn lower_native(ret: crate::native::NativeRet) -> Value {
 
 fn enum_val(ty: &str, variant: &str, payload: Vec<Value>) -> Value {
     Value::Enum { ty: ty.into(), variant: variant.into(), payload }
+}
+
+/// The `f64` of a JSON `Num` variant's payload, else `None` (used by `json.decode` coercion).
+fn json_num(variant: &str, payload: &[Value]) -> Option<f64> {
+    if variant == "Num" {
+        match payload.first() {
+            Some(Value::Float(f)) => Some(*f),
+            Some(Value::Int(n)) => Some(*n as f64),
+            _ => None,
+        }
+    } else {
+        None
+    }
 }
 
 /// Apply a binary operator to two already-evaluated operands.

@@ -1416,6 +1416,7 @@ impl Checker {
             ExprKind::Field { obj, name } => self.infer_field(obj, name),
             ExprKind::Index { obj, index } => self.infer_index(obj, index),
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
+            ExprKind::DecodeCall { obj, ty, arg } => self.infer_decode(obj, ty, arg, expr.span),
             ExprKind::Closure { params, ret, body } => self.infer_closure(params, ret.as_ref(), body),
             ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms),
             ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els),
@@ -1671,6 +1672,61 @@ impl Checker {
                 self.error(span, format!("'?' expects Result or Option, found {other}"));
                 Ty::Unknown
             }
+        }
+    }
+
+    /// `json.decode[T](s)` — the source must be `str`, the target `T` must be decodable. Yields
+    /// `Result[T]`. (`obj` is the json-module expression; we infer it only to surface a bad-module
+    /// error, but place no constraint on it — any module exposing `parse` works at runtime.)
+    fn infer_decode(&mut self, obj: &Expr, ty: &Type, arg: &Expr, span: Span) -> Ty {
+        let _ = self.infer(obj);
+        let arg_ty = self.infer(arg);
+        if !compatible(&Ty::Str, &arg_ty) {
+            self.error(span, format!("decode source must be str, found {arg_ty}"));
+        }
+        let target = self.resolve_type(ty, span);
+        if let Err(msg) = self.is_decodable(&target, &mut Vec::new()) {
+            self.error(span, msg);
+            return Ty::Unknown;
+        }
+        Ty::result(target)
+    }
+
+    /// Whether `json.decode` can produce a value of this type. Mirrors `json_decode::from_type`'s
+    /// acceptance (kept in sync): scalars, `list`/`map[str,_]`/`Option` of decodables, and
+    /// non-generic, non-recursive structs of decodable fields. `visiting` rejects recursive structs.
+    fn is_decodable(&self, ty: &Ty, visiting: &mut Vec<String>) -> Result<(), String> {
+        match ty {
+            Ty::Int | Ty::Float | Ty::Str | Ty::Bool => Ok(()),
+            Ty::Unknown => Ok(()), // an error was already reported; don't pile on
+            Ty::List(t) | Ty::Option(t) => self.is_decodable(t, visiting),
+            Ty::Map(k, v) => {
+                if !matches!(**k, Ty::Str) {
+                    return Err(format!("decode: map keys must be str, found {k}"));
+                }
+                self.is_decodable(v, visiting)
+            }
+            Ty::Struct(name, args) => {
+                if !args.is_empty() {
+                    return Err(format!("decode: cannot decode into generic struct {ty}"));
+                }
+                if visiting.iter().any(|s| s == name) {
+                    return Err(format!(
+                        "decode: recursive struct '{name}' is not decodable; use the Json enum instead"
+                    ));
+                }
+                let Some(info) = self.structs.get(name) else {
+                    return Err(format!("decode: '{name}' is not a decodable type"));
+                };
+                visiting.push(name.clone());
+                let fields = info.fields.clone();
+                for (_, fty) in &fields {
+                    self.is_decodable(fty, visiting)?;
+                }
+                visiting.pop();
+                Ok(())
+            }
+            other => Err(format!("decode: cannot decode into {other}")),
         }
     }
 

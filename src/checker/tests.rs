@@ -1862,3 +1862,60 @@ fn native_time_format_arg_must_be_int() {
         "argument 1 of 'format'",
     );
 }
+
+// ===== M8-M5: type-directed json.decode[T] =====
+
+#[test]
+fn json_decode_into_struct_is_result_of_struct() {
+    entry_ok("import std.json\nstruct P:\n    x: int\n    y: int\nfn main():\n    match json.decode[P](\"x\"):\n        Ok(p): print(str(p.x))\n        Err(e): print(e)\n");
+}
+
+#[test]
+fn json_decode_into_typed_map_and_list() {
+    entry_ok("import std.json\nfn main():\n    a := json.decode[map[str, int]](\"x\")\n    b := json.decode[list[float]](\"y\")\n    print(\"ok\")\n");
+}
+
+#[test]
+fn json_decode_scalar_result_type_flows() {
+    entry_ok("import std.json\nfn main():\n    match json.decode[int](\"3\"):\n        Ok(n): print(str(n + 1))\n        Err(e): print(e)\n");
+}
+
+#[test]
+fn json_decode_source_must_be_str() {
+    entry_rejects(
+        "import std.json\nfn main():\n    print(json.decode[int](5))\n",
+        "decode source must be str",
+    );
+}
+
+#[test]
+fn json_decode_rejects_function_target() {
+    entry_rejects(
+        "import std.json\nfn main():\n    x := json.decode[fn(int) -> int](\"x\")\n",
+        "cannot decode into",
+    );
+}
+
+#[test]
+fn json_decode_rejects_unknown_target_type() {
+    entry_rejects(
+        "import std.json\nfn main():\n    x := json.decode[Nope](\"x\")\n",
+        "unknown type 'Nope'",
+    );
+}
+
+#[test]
+fn json_decode_rejects_recursive_struct() {
+    entry_rejects(
+        "import std.json\nstruct Node:\n    val: int\n    next: Node?\nfn main():\n    x := json.decode[Node](\"x\")\n",
+        "recursive struct",
+    );
+}
+
+#[test]
+fn json_decode_rejects_map_with_non_str_key() {
+    entry_rejects(
+        "import std.json\nfn main():\n    x := json.decode[map[int, int]](\"x\")\n",
+        "map keys must be str",
+    );
+}

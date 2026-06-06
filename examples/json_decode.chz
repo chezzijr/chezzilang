@@ -1,0 +1,46 @@
+# examples/json_decode.chz — std.json layer B: type-directed `json.decode[T](s)`. Decodes a JSON
+# string straight into a struct / typed map / list / scalar (no manual Json walking). Returns
+# Result[T]: a parse error or a shape/type mismatch comes back as Err. (Reminder: JSON literals in
+# Chezzi source double their braces, {{ }}, because bare {…} is interpolation.)
+
+import std.json
+
+struct Address:
+    city: str
+    zip: str
+
+struct User:
+    name: str
+    age: int
+    active: bool
+    score: float
+    nick: str?              # optional: absent or null → None
+    tags: list[str]
+    address: Address        # nested struct
+
+src := "{{\"name\":\"Ada\",\"age\":36,\"active\":true,\"score\":9.5,\"tags\":[\"math\",\"cs\"],\"address\":{{\"city\":\"London\",\"zip\":\"NW1\"}},\"extra\":\"ignored\"}}"
+
+match json.decode[User](src):
+    Ok(u):
+        print(u.name + ", age " + str(u.age) + ", active=" + str(u.active))
+        print("score=" + str(u.score) + ", tags=" + ",".join(u.tags))
+        print("city=" + u.address.city + " zip=" + u.address.zip)
+        match u.nick:
+            Some(n): print("nick=" + n)
+            None: print("no nick")
+    Err(e):
+        print("decode failed: " + e)
+
+# Decode straight into a typed map and a list.
+match json.decode[map[str, int]]("{{\"a\":1,\"b\":2,\"c\":3}}"):
+    Ok(m): print("map total=" + str(m["a"] + m["b"] + m["c"]))
+    Err(e): print("err: " + e)
+
+match json.decode[list[float]]("[1.5, 2.5, 3.0]"):
+    Ok(xs): print("list len=" + str(xs.len()))
+    Err(e): print("err: " + e)
+
+# Type mismatches and missing keys come back as Err with a path.
+match json.decode[User]("{{\"name\":\"x\",\"age\":\"oops\"}}"):
+    Ok(u): print(u.name)
+    Err(e): print("rejected: " + e)

@@ -1,0 +1,7 @@
+Ada, age 36, active=true
+score=9.5, tags=math,cs
+city=London zip=NW1
+no nick
+map total=6
+list len=3
+rejected: decode: expected int at $.age, found string

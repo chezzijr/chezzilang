@@ -24,7 +24,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > component); std.time `now/monotonic/sleep_ms/format` (UTC date via Hinnant civil-from-days, no
 > chrono). Zero engine/`Host`/`NativeRet` changes — fns call `std::` directly + existing
 > lowering. Golden `examples/sys.chz`. ·
-> **M4 ⬜** set type. · **M5 ⬜** std.json `decode[T]` into struct/map/list/scalar. · **M6 ⬜** docs.
+> **M4 ⬜** set type. · **M5 ✅** std.json `decode[T]` — type-directed decode into
+> struct/typed-map/list/scalar via a scoped `ExprKind::DecodeCall` (parser special-cases
+> `.decode[T](…)`, no general call-site type-args) + a self-contained `TypeDescriptor`
+> (`src/json_decode.rs`) built at compile time (VM `Op::JsonDecode`) / eval time (interp); reuses
+> the module's `parse` then coerces. Option fields ↔ null/absent, extra keys ignored, recursive/
+> generic struct targets rejected. Plus dynamic `as_object`/`as_array`. Golden
+> `examples/json_decode.chz`, byte-identical both engines. · **M6 ⬜** docs.
 
 > **Language gaps round 2 (#10–#15): ✅ ALL DONE.** See the section below.
 

@@ -77,6 +77,8 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
 
 struct Compiler {
     program: Program,
+    /// Struct name → declared fields (with types), kept for building `json.decode` descriptors.
+    struct_fields: HashMap<String, Vec<crate::ast::Field>>,
 }
 
 impl Compiler {
@@ -94,7 +96,7 @@ impl Compiler {
                 VariantDef { enum_name: e.to_string(), arity },
             );
         }
-        Compiler { program }
+        Compiler { program, struct_fields: HashMap::new() }
     }
 
     /// Pass 1: register struct / enum declarations into the program-global tables.
@@ -116,6 +118,7 @@ impl Compiler {
                             module_idx: 0, // filled in pass 2
                         },
                     );
+                    self.struct_fields.insert(name.clone(), fields.clone());
                 }
                 StmtKind::Enum { name, variants } => {
                     for v in variants {
@@ -764,6 +767,24 @@ impl Compiler {
             ExprKind::Try(inner) => {
                 self.compile_expr(fc, inner)?;
                 fc.emit(Op::Try, expr.span);
+            }
+            ExprKind::DecodeCall { obj, ty, arg } => {
+                // Reuse the module's own `parse` (`obj.parse(arg)` → Result[Json]), then coerce the
+                // parsed value into the target type with a descriptor built from `ty`.
+                let parse_call = Expr {
+                    kind: ExprKind::Call {
+                        callee: Box::new(Expr {
+                            kind: ExprKind::Field { obj: obj.clone(), name: "parse".to_string() },
+                            span: expr.span,
+                        }),
+                        args: vec![(**arg).clone()],
+                    },
+                    span: expr.span,
+                };
+                self.compile_expr(fc, &parse_call)?;
+                let desc = crate::json_decode::from_type(ty, &self.struct_fields, &mut Vec::new())
+                    .map_err(|message| CompileError { message, span: expr.span })?;
+                fc.emit(Op::JsonDecode(desc), expr.span);
             }
             ExprKind::Closure { params, body, .. } => self.compile_closure(fc, params, body, expr.span)?,
             ExprKind::Match { scrutinee, arms } => self.compile_match_expr(fc, scrutinee, arms, expr.span)?,

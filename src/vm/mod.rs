@@ -434,6 +434,10 @@ impl Vm {
             Op::CallPrint(argc) => self.do_print(*argc),
             Op::Return => self.do_return(false),
             Op::Try => self.do_try(span)?,
+            Op::JsonDecode(desc) => {
+                let desc = desc.clone();
+                self.json_decode(&desc, span)?;
+            }
             Op::NewList(n) => {
                 let at = self.stack.len() - *n;
                 let items: Vec<Value> = self.stack.split_off(at);
@@ -972,6 +976,185 @@ impl Vm {
             variant: variant.into(),
             payload,
         }))
+    }
+
+    /// `Op::JsonDecode`: pop the `Result[Json]` from `parse`, coerce its `Ok` payload against the
+    /// descriptor (passing through an `Err`), push the resulting `Result[T]`.
+    fn json_decode(&mut self, desc: &crate::json_decode::TypeDescriptor, span: Span) -> Result<(), RuntimeError> {
+        let res = self.pop();
+        let (variant, payload) = self
+            .enum_parts(res)
+            .ok_or_else(|| self.err("decode: parse did not return a Result".to_string(), span))?;
+        match variant.as_str() {
+            "Err" => {
+                self.push(res); // a Result Err(str) is already a valid Result[T]
+                Ok(())
+            }
+            "Ok" => {
+                let jv = payload[0];
+                match self.coerce_json(jv, desc, "$") {
+                    Ok(v) => {
+                        let r = self.alloc_enum("Result", "Ok", vec![v]);
+                        self.push(r);
+                    }
+                    Err(msg) => {
+                        let s = self.alloc_str(msg);
+                        let r = self.alloc_enum("Result", "Err", vec![s]);
+                        self.push(r);
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(self.err("decode: parse returned a non-Result".to_string(), span)),
+        }
+    }
+
+    /// The variant name and (copied) payload of an enum value, or `None` if it isn't an enum.
+    fn enum_parts(&self, v: Value) -> Option<(String, Vec<Value>)> {
+        match v {
+            Value::Obj(h) => match self.heap.get(h) {
+                Obj::Enum { variant, payload, .. } => Some((variant.to_string(), payload.clone())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Coerce a parsed `Json` value into a concrete value of the descriptor's type. `path` is a
+    /// JSON-pointer-ish breadcrumb for error messages. Mirrors the interpreter's `coerce_json`.
+    fn coerce_json(
+        &mut self,
+        jv: Value,
+        desc: &crate::json_decode::TypeDescriptor,
+        path: &str,
+    ) -> Result<Value, String> {
+        use crate::json_decode::TypeDescriptor as D;
+        let (variant, payload) = self
+            .enum_parts(jv)
+            .ok_or_else(|| format!("decode: expected a JSON value at {path}"))?;
+        let mismatch = |want: &str| format!("decode: expected {want} at {path}, found {}", crate::json_decode::json_kind(&variant));
+        match desc {
+            D::Int => {
+                let f = self.json_num(&variant, &payload).ok_or_else(|| mismatch("int"))?;
+                if f.fract() != 0.0 || !f.is_finite() {
+                    return Err(format!("decode: expected an integer at {path}, found {f}"));
+                }
+                Ok(Value::Int(f as i64))
+            }
+            D::Float => {
+                let f = self.json_num(&variant, &payload).ok_or_else(|| mismatch("float"))?;
+                Ok(Value::Float(f))
+            }
+            D::Bool => match (variant.as_str(), payload.first()) {
+                ("Bool", Some(Value::Bool(b))) => Ok(Value::Bool(*b)),
+                _ => Err(mismatch("bool")),
+            },
+            D::Str => {
+                if variant == "Str" {
+                    let s = self.val_str(payload[0]).unwrap_or_default();
+                    Ok(self.alloc_str(s))
+                } else {
+                    Err(mismatch("str"))
+                }
+            }
+            D::Option(inner) => {
+                if variant == "Null" {
+                    Ok(self.alloc_enum("Option", "None", Vec::new()))
+                } else {
+                    let v = self.coerce_json(jv, inner, path)?;
+                    Ok(self.alloc_enum("Option", "Some", vec![v]))
+                }
+            }
+            D::List(inner) => {
+                if variant != "Arr" {
+                    return Err(mismatch("array"));
+                }
+                let items = match self.heap.get(self.as_obj(payload[0])) {
+                    Obj::List(items) => items.clone(),
+                    _ => return Err(mismatch("array")),
+                };
+                let mut out = Vec::with_capacity(items.len());
+                for (i, it) in items.into_iter().enumerate() {
+                    out.push(self.coerce_json(it, inner, &format!("{path}[{i}]"))?);
+                }
+                Ok(Value::Obj(self.heap.alloc(Obj::List(out))))
+            }
+            D::Map(inner) => {
+                if variant != "Obj" {
+                    return Err(mismatch("object"));
+                }
+                let entries = match self.heap.get(self.as_obj(payload[0])) {
+                    Obj::Map(entries) => entries.clone(),
+                    _ => return Err(mismatch("object")),
+                };
+                let mut out: Vec<(Value, Value)> = Vec::with_capacity(entries.len());
+                for (k, v) in entries {
+                    let key = self.val_str(k).unwrap_or_default();
+                    let coerced = self.coerce_json(v, inner, &format!("{path}.{key}"))?;
+                    out.push((k, coerced));
+                }
+                Ok(Value::Obj(self.heap.alloc(Obj::Map(out))))
+            }
+            D::Struct { name, fields } => {
+                if variant != "Obj" {
+                    return Err(mismatch(&format!("object for {name}")));
+                }
+                let entries = match self.heap.get(self.as_obj(payload[0])) {
+                    Obj::Map(entries) => entries.clone(),
+                    _ => return Err(mismatch("object")),
+                };
+                let mut field_vals: Vec<(Box<str>, Value)> = Vec::with_capacity(fields.len());
+                for (fname, fdesc) in fields {
+                    let found = entries.iter().find(|(k, _)| {
+                        self.val_str(*k).as_deref() == Some(fname.as_str())
+                    });
+                    let fpath = format!("{path}.{fname}");
+                    let v = match found {
+                        Some((_, jval)) => self.coerce_json(*jval, fdesc, &fpath)?,
+                        None => match fdesc {
+                            // A missing Option field decodes to None; anything else is an error.
+                            D::Option(_) => self.alloc_enum("Option", "None", Vec::new()),
+                            _ => return Err(format!("decode: missing key '{fname}' at {path}")),
+                        },
+                    };
+                    field_vals.push((fname.clone().into_boxed_str(), v));
+                }
+                let h = self.heap.alloc(Obj::Struct { name: name.clone().into_boxed_str(), fields: field_vals });
+                Ok(Value::Obj(h))
+            }
+        }
+    }
+
+    /// The `f64` of a JSON `Num`, else `None`.
+    fn json_num(&self, variant: &str, payload: &[Value]) -> Option<f64> {
+        if variant == "Num" {
+            match payload.first() {
+                Some(Value::Float(f)) => Some(*f),
+                Some(Value::Int(n)) => Some(*n as f64),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// The owned text of a str value, else `None`.
+    fn val_str(&self, v: Value) -> Option<String> {
+        match v {
+            Value::Obj(h) => match self.heap.get(h) {
+                Obj::Str(s) => Some(s.to_string()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The heap handle of an `Obj` value (caller guarantees it is one).
+    fn as_obj(&self, v: Value) -> GcRef {
+        match v {
+            Value::Obj(h) => h,
+            _ => unreachable!("as_obj on non-object"),
+        }
     }
 
     fn check_arity(&self, _kind: &str, name: &str, want: usize, got: usize, span: Span) -> Result<(), RuntimeError> {
@@ -3268,6 +3451,22 @@ mod parity_tests {
     }
 
     #[test]
+    fn json_decode_struct_parity() {
+        let out = parity_entry(
+            "import std.json\nstruct P:\n    x: int\n    y: int\nmatch json.decode[P](\"{{\\\"x\\\":1,\\\"y\\\":2}}\"):\n    Ok(p): print(p.x + p.y)\n    Err(e): print(e)\n",
+        );
+        assert_eq!(out, "3\n");
+    }
+
+    #[test]
+    fn json_decode_error_parity() {
+        let out = parity_entry(
+            "import std.json\nstruct P:\n    x: int\nmatch json.decode[P](\"{{\\\"y\\\":2}}\"):\n    Ok(p): print(p.x)\n    Err(e): print(e)\n",
+        );
+        assert_eq!(out, "decode: missing key 'x' at $\n");
+    }
+
+    #[test]
     fn process_cmd_ok_and_err_parity() {
         let out = parity_entry(
             "import std.process\nmatch process.cmd(\"printf abc\"):\n    Ok(s): print(\"ok:\" + s)\n    Err(e): print(\"err:\" + e)\nmatch process.cmd(\"exit 2\"):\n    Ok(s): print(\"ok\")\n    Err(e): print(\"err:\" + e)\n",
@@ -4066,6 +4265,19 @@ main()";
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/stdlib_cmp.chz");
+    }
+
+    /// M8-M5 golden: `examples/json_decode.chz` — type-directed `json.decode[T]` into struct /
+    /// typed map / list / scalar, with Option fields, extra-key tolerance, and an error case.
+    /// Byte-identical on interp + VM.
+    #[test]
+    fn golden_json_decode_via_run_file() {
+        let path = fixture("examples/json_decode.chz");
+        let expected = std::fs::read_to_string(fixture("examples/json_decode.expected")).unwrap();
+        let (out, _err, res) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/json_decode.chz");
     }
 
     /// M8-M3 golden: `examples/sys.chz` — the native trio std.process/std.fs/std.time, end-to-end

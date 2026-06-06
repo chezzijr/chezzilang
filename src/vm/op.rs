@@ -108,6 +108,11 @@ pub enum Op {
     Return,
     /// `?` — unwrap `Ok`/`Some`, else propagate `Err`/`None` out of the enclosing function.
     Try,
+    /// `json.decode[T](s)` coercion step. Stack: `[result_json]` where `result_json` is the
+    /// `Result[Json]` produced by `json.parse(s)`. Pops it and pushes `Result[T]`: if the parse
+    /// errored, the `Err` passes through; otherwise the inner `Json` is coerced against the
+    /// descriptor (→ `Ok(value)` or `Err(msg)`).
+    JsonDecode(crate::json_decode::TypeDescriptor),
 
     // ----- construction -----
     NewList(usize),
