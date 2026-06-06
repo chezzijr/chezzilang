@@ -20,8 +20,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   `Stringable` (not `Display`/`Show`) to match the `-able` convention + the `str()` builtin.
 >   Self-referential `str` trips the call-depth guard on both engines (interp counts the dispatch so
 >   it errors before host-stack overflow). Golden `examples/stringable.chz` + checker units + parity.
-> - ⬜ **G2** — `Hashable` (struct map/set keys). ⬜ **G3** — numeric op protocols + multi-bound
->   `T: A + B` + type aliases. ⬜ **G4** — generic enums (`enum Tree[T]`).
+> - 🟦 **G2 — `Hashable` protocol (bound only).** Prebuilt `Hashable` (`hash(self) -> int`) usable as
+>   a `[T: Hashable]` bound; int/str/bool satisfy intrinsically, structs via a `hash` method. **Map/set
+>   key restriction NOT lifted** — found `map`/`set` are association lists (`Vec<(K,V)>`, linear scan +
+>   structural `==`, no hashing), so enabling struct keys is entangled with a real-hashmap decision;
+>   deferred to a dedicated map-model session (user's call). Checker units only (no runtime change).
+> - ⬜ **G3** — numeric op protocols + multi-bound `T: A + B` + type aliases. ⬜ **G4** — generic
+>   enums (`enum Tree[T]`).
 >
 > **M9 — Tier-2 stdlib: `std.regex` + `std.request`** ✅ DONE. Plan:
 > `~/.claude/plans/see-the-docs-and-dreamy-unicorn.md`.

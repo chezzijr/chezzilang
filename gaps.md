@@ -356,7 +356,12 @@ interpolation, pipe. What remains to make it a language you'd reach for to write
 ### Tier 2 — type-system depth
 - **Generic enums** — `enum Tree[T]`, `enum LinkedList[T]`. Only *structs* got type parameters in
   M7-G2; `Result`/`Option` are hardcoded. The most-felt remaining type hole.
-- **`Hashable` protocol** → let structs be `map` keys (maps key only int/str/bool now).
+- **`Hashable` protocol** → let structs be `map` keys (maps key only int/str/bool now). 🟦 **M10-G2
+  partial:** the prebuilt `Hashable` protocol (`hash(self) -> int`) now exists as a generic bound
+  (`[T: Hashable]`; int/str/bool satisfy it intrinsically, structs by defining `hash`). **Not yet
+  wired to map/set keys** — discovered that `map`/`set` are *association lists* (`Vec<(K,V)>`, linear
+  scan + structural `==`, **no hashing**), so lifting the key restriction is entangled with whether
+  to make them real hash tables. Deferred to a dedicated map-model session.
 - ~~**`Display`/`Show` protocol** → custom `str(point)` / `print(point)`.~~ ✅ **M10-G1 — shipped as
   `Stringable`.** Prebuilt protocol `Stringable` with `str(self) -> str`; a struct that defines it
   overrides its default repr in `print`, the `str()` builtin, and `{…}` interpolation (nested too).

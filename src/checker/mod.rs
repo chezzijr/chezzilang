@@ -62,7 +62,7 @@ fn is_reserved_type(name: &str) -> bool {
 /// Prebuilt protocols a user program may use as bounds but must not redeclare (mirrors
 /// [`prebuilt_protocols`]).
 fn is_reserved_protocol(name: &str) -> bool {
-    matches!(name, "Comparable" | "Stringable")
+    matches!(name, "Comparable" | "Stringable" | "Hashable")
 }
 
 /// A function (or method) signature: parameter types and return type. `type_params` is non-empty
@@ -2500,6 +2500,12 @@ impl Checker {
         if protocol == "Comparable" && matches!(ty, Ty::Int | Ty::Float | Ty::Str) {
             return Ok(());
         }
+        // `Hashable` is satisfied intrinsically by the scalar key types (mirrors the map/set key
+        // restriction; float is excluded — its equality is a hazard). Struct conformance falls
+        // through to the structural check (needs a `hash(self) -> int` method).
+        if protocol == "Hashable" && matches!(ty, Ty::Int | Ty::Str | Ty::Bool) {
+            return Ok(());
+        }
         // A bound type parameter satisfies a protocol if its declared bound *is* that protocol —
         // this is what lets a generic forward its `T: P` value into another `[U: P]` call.
         if let Ty::Param(name) = ty {
@@ -2610,6 +2616,17 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             // receiver `self` (Unknown) only, returning str. A struct with `str(self) -> str`
             // satisfies it; `print`/`str()`/interpolation dispatch to that method at runtime.
             methods: vec![("str".to_string(), FnSig::plain(vec![Ty::Unknown], Ty::Str))],
+        },
+    );
+    m.insert(
+        "Hashable".to_string(),
+        ProtocolInfo {
+            // receiver `self` (Unknown) only, returning int. A struct with `hash(self) -> int`
+            // satisfies it. NOTE (M10-G2): the protocol exists as a generic bound only — it is NOT
+            // yet wired to map/set keys (maps are association lists keyed by structural equality, so
+            // no hash is computed). Lifting the int/str/bool key restriction is deferred to the
+            // map-model rework.
+            methods: vec![("hash".to_string(), FnSig::plain(vec![Ty::Unknown], Ty::Int))],
         },
     );
     m

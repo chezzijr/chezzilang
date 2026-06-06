@@ -203,6 +203,45 @@ fn redeclaring_stringable_rejected() {
     rejects("protocol Stringable:\n    fn str(self) -> str\n", "reserved");
 }
 
+// ----- Hashable protocol (M10-G2: bound only; not yet wired to map/set keys) -----
+
+#[test]
+fn hashable_struct_satisfies_ok() {
+    let src = "\
+struct Id:
+    n: int
+    fn hash(self) -> int:
+        return self.n
+fn keyed[T: Hashable](v: T) -> int:
+    return v.hash()
+x := keyed(Id(7))
+";
+    ok(src);
+}
+
+#[test]
+fn hashable_intrinsic_for_scalars_ok() {
+    // int/str/bool satisfy Hashable intrinsically, so a `[T: Hashable]` bound accepts them.
+    ok("fn keyed[T: Hashable](v: T) -> T:\n    return v\na := keyed(3)\nb := keyed(\"x\")\nc := keyed(true)\n");
+}
+
+#[test]
+fn hashable_missing_method_rejected() {
+    let src = "\
+struct Bare:
+    a: int
+fn keyed[T: Hashable](v: T) -> T:
+    return v
+x := keyed(Bare(1))
+";
+    rejects(src, "does not satisfy Hashable");
+}
+
+#[test]
+fn redeclaring_hashable_rejected() {
+    rejects("protocol Hashable:\n    fn hash(self) -> int\n", "reserved");
+}
+
 // ----- generic structs (G2) -----
 
 const PAIR: &str = "\

@@ -223,6 +223,11 @@ print("here: {Point(3, 4)}")  # here: (3, 4)
 print([Point(5, 6)])          # [(5, 6)]      — dispatches when nested too
 ```
 
+The prebuilt **`Hashable`** protocol (`hash(self) -> int`) is a generic bound: `int`/`str`/`bool`
+satisfy it intrinsically, and a struct satisfies it by defining `hash(self) -> int`. It is currently
+*only* a bound — it is **not** yet wired to `map`/`set` keys (those still accept only `int`/`str`/
+`bool`), because maps are association lists keyed by structural equality rather than hash tables.
+
 **Generic structs** carry type parameters after the name; their fields and methods may use them.
 Type arguments are inferred at construction, or written explicitly in a type annotation.
 
