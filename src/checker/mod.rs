@@ -1554,7 +1554,7 @@ impl Checker {
                 // Higher-order methods whose result/param types depend on the closure's
                 // `Ty::Func` can't be expressed by the fixed `list_method_sig` table, so handle
                 // them here. `Ty::Unknown` arguments are tolerated permissively (no cascade).
-                if matches!(method, "map" | "filter" | "fold") {
+                if matches!(method, "map" | "filter" | "fold" | "sort_by") {
                     let elem = (**elem).clone();
                     return self.infer_list_hof(method, &elem, args, span);
                 }
@@ -1677,6 +1677,38 @@ impl Checker {
                             ),
                         );
                         Ty::Unknown
+                    }
+                }
+            }
+            // sort_by(cmp: fn(T, T) -> int) -> nil (sorts in place, like sort)
+            "sort_by" => {
+                if args.len() != 1 {
+                    self.error(
+                        span,
+                        format!("'sort_by' expects 1 argument(s), got {}", args.len()),
+                    );
+                    self.infer_all(args);
+                    return Ty::Nil;
+                }
+                let ft = self.infer(&args[0]);
+                match ft {
+                    Ty::Unknown => Ty::Nil,
+                    Ty::Func { params, ret }
+                        if params.len() == 2
+                            && compatible(&params[0], elem)
+                            && compatible(&params[1], elem)
+                            && compatible(&ret, &Ty::Int) =>
+                    {
+                        Ty::Nil
+                    }
+                    other => {
+                        self.error(
+                            args[0].span,
+                            format!(
+                                "sort_by expects a comparator fn({elem}, {elem}) -> int, found {other}"
+                            ),
+                        );
+                        Ty::Nil
                     }
                 }
             }

@@ -694,11 +694,16 @@ impl Interp {
         // Higher-order list methods call a Chezzi function value per element, so they need the
         // interpreter handle (`self.call_value`) and can't live in the pure `builtins` table.
         if let Value::List(items) = &receiver
-            && matches!(method, "map" | "filter" | "fold")
+            && matches!(method, "map" | "filter" | "fold" | "sort_by")
         {
             // Clone the elements out so we don't hold the `RefCell` borrow across `call_value`
             // (the closure body could re-borrow this same list).
             let elems: Vec<Value> = items.borrow().clone();
+            if method == "sort_by" {
+                // `sort_by` sorts in place; keep the `Rc` so we can write the result back.
+                let list = std::rc::Rc::clone(items);
+                return self.eval_list_sort_by(list, elems, arg_vals, span);
+            }
             return self.eval_list_hof(method, elems, arg_vals, span);
         }
         // Core-type methods (M6): built-in methods on `str`, `list`, and `map` dispatch on the value.
@@ -799,6 +804,82 @@ impl Interp {
                 Ok(acc)
             }
             _ => unreachable!("eval_list_hof called with non-HOF method {method}"),
+        }
+    }
+
+    /// `xs.sort_by(cmp)` — sort `xs` in place using a Chezzi comparator `fn(T, T) -> int`
+    /// (negative = a before b, positive = a after b, zero = equal). Uses a stable top-down merge
+    /// sort: the comparator is fallible (re-enters the interpreter) so `slice::sort_by`, which
+    /// demands an infallible total order, can't be used. Returns `nil`.
+    fn eval_list_sort_by(
+        &mut self,
+        list: std::rc::Rc<std::cell::RefCell<Vec<Value>>>,
+        elems: Vec<Value>,
+        mut arg_vals: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        if arg_vals.len() != 1 {
+            return Err(RuntimeError {
+                message: format!("'sort_by' expects 1 argument(s), got {}", arg_vals.len()),
+                span,
+            });
+        }
+        let cmp = arg_vals.swap_remove(0);
+        let sorted = self.merge_sort_by(elems, &cmp, span)?;
+        *list.borrow_mut() = sorted;
+        Ok(Value::Nil)
+    }
+
+    /// Stable top-down merge sort driven by a Chezzi comparator value.
+    fn merge_sort_by(
+        &mut self,
+        mut xs: Vec<Value>,
+        cmp: &Value,
+        span: Span,
+    ) -> Result<Vec<Value>, RuntimeError> {
+        let n = xs.len();
+        if n <= 1 {
+            return Ok(xs);
+        }
+        let right = xs.split_off(n / 2);
+        let left = self.merge_sort_by(xs, cmp, span)?;
+        let right = self.merge_sort_by(right, cmp, span)?;
+        let mut out = Vec::with_capacity(n);
+        let mut li = left.into_iter().peekable();
+        let mut ri = right.into_iter().peekable();
+        loop {
+            match (li.peek(), ri.peek()) {
+                (Some(l), Some(r)) => {
+                    // `<= 0` keeps left first on ties → stable.
+                    let ord = self.compare_with(cmp, l.clone(), r.clone(), span)?;
+                    if ord <= 0 {
+                        out.push(li.next().unwrap());
+                    } else {
+                        out.push(ri.next().unwrap());
+                    }
+                }
+                (Some(_), None) => out.push(li.next().unwrap()),
+                (None, Some(_)) => out.push(ri.next().unwrap()),
+                (None, None) => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// Run the comparator on `(a, b)` and return its int result (errors if it returns non-int).
+    fn compare_with(
+        &mut self,
+        cmp: &Value,
+        a: Value,
+        b: Value,
+        span: Span,
+    ) -> Result<i64, RuntimeError> {
+        match self.call_value(cmp.clone(), vec![a, b], span)? {
+            Value::Int(n) => Ok(n),
+            other => Err(RuntimeError {
+                message: format!("sort_by comparator must return int, got {}", other.type_name()),
+                span,
+            }),
         }
     }
 

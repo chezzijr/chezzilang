@@ -818,6 +818,12 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
+        // `sort_by` also runs a closure per comparison, but sorts in place and returns nil.
+        if matches!(self.heap.get(h), Obj::List(_)) && method == "sort_by" {
+            let result = self.list_sort_by(h, args, span)?;
+            self.push(result);
+            return Ok(());
+        }
         // Core-type methods (M6): built-in methods on `str` / `list`. Handled before the clone-match
         // so `list.push` mutates the heap object in place (the match below clones the Obj). Mirrors
         // `interp::builtins::call_method` exactly — error strings included (parity-tested).
@@ -933,6 +939,87 @@ impl Vm {
                 Ok(acc)
             }
             _ => unreachable!("list_hof called with non-HOF method {method}"),
+        }
+    }
+
+    /// `xs.sort_by(cmp)` — stable in-place sort driven by a Chezzi comparator `fn(T, T) -> int`
+    /// (negative = a before b, positive = a after b, zero = equal). The comparator re-enters the VM
+    /// and may GC, so we never hold the elements in an unrooted Rust `Vec`: the source list stays
+    /// rooted on the operand stack, and the merge sort permutes plain `usize` **indices**, re-reading
+    /// elements from the rooted heap object on each comparison. The final permutation is materialised
+    /// only after all comparator calls finish (no GC in between). Returns `nil`.
+    fn list_sort_by(&mut self, src_h: GcRef, mut args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+        // ROOT the source list so its elements survive every comparator call.
+        self.push(Value::Obj(src_h));
+        if args.len() != 1 {
+            self.pop(); // unroot source before erroring
+            return Err(self.err(format!("'sort_by' expects 1 argument(s), got {}", args.len()), span));
+        }
+        let cmp = args.swap_remove(0);
+        let n = match self.heap.get(src_h) {
+            Obj::List(v) => v.len(),
+            _ => unreachable!("list_sort_by on non-list"),
+        };
+        let order = match self.msort_indices(src_h, (0..n).collect(), cmp, span) {
+            Ok(o) => o,
+            Err(e) => {
+                self.pop(); // unroot source
+                return Err(e);
+            }
+        };
+        // No comparator calls remain, so no GC: safe to read the rooted elements and reorder.
+        let reordered: Vec<Value> = match self.heap.get(src_h) {
+            Obj::List(v) => order.iter().map(|&i| v[i]).collect(),
+            _ => unreachable!(),
+        };
+        if let Obj::List(v) = self.heap.get_mut(src_h) {
+            *v = reordered;
+        }
+        self.pop(); // unroot source
+        Ok(Value::Nil)
+    }
+
+    /// Stable top-down merge sort over `idx` (positions into the rooted list `src_h`), comparing
+    /// elements via the Chezzi comparator `cmp`.
+    fn msort_indices(&mut self, src_h: GcRef, idx: Vec<usize>, cmp: Value, span: Span) -> Result<Vec<usize>, RuntimeError> {
+        let n = idx.len();
+        if n <= 1 {
+            return Ok(idx);
+        }
+        let mut idx = idx;
+        let right = idx.split_off(n / 2);
+        let left = self.msort_indices(src_h, idx, cmp, span)?;
+        let right = self.msort_indices(src_h, right, cmp, span)?;
+        let mut out = Vec::with_capacity(n);
+        let (mut li, mut ri) = (0, 0);
+        while li < left.len() && ri < right.len() {
+            let a = match self.heap.get(src_h) {
+                Obj::List(v) => v[left[li]],
+                _ => unreachable!(),
+            };
+            let b = match self.heap.get(src_h) {
+                Obj::List(v) => v[right[ri]],
+                _ => unreachable!(),
+            };
+            // `<= 0` keeps the left element first on ties → stable.
+            if self.compare_with(cmp, a, b, span)? <= 0 {
+                out.push(left[li]);
+                li += 1;
+            } else {
+                out.push(right[ri]);
+                ri += 1;
+            }
+        }
+        out.extend_from_slice(&left[li..]);
+        out.extend_from_slice(&right[ri..]);
+        Ok(out)
+    }
+
+    /// Run the comparator on `(a, b)` and return its int result (errors if it returns non-int).
+    fn compare_with(&mut self, cmp: Value, a: Value, b: Value, span: Span) -> Result<i64, RuntimeError> {
+        match self.invoke_value(cmp, vec![a, b], span)? {
+            Value::Int(n) => Ok(n),
+            other => Err(self.err(format!("sort_by comparator must return int, got {}", self.type_name(other)), span)),
         }
     }
 
@@ -2430,6 +2517,17 @@ main()";
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
+
+    /// Gap #11 golden: `examples/sort_by.chz` (custom comparators, stable order, tuple-field sort)
+    /// is byte-identical on the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_sort_by_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/sort_by.chz");
+        let expected = include_str!("../../examples/sort_by.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
 }
 
 #[cfg(test)]
@@ -2645,6 +2743,31 @@ mod parity_tests {
     fn assert_parity_out(src: &str, expect: &str) {
         assert_parity(src);
         assert_eq!(vm_outcome(src).expect("program should run"), expect, "for:\n{src}");
+    }
+
+    #[test]
+    fn sort_by_descending_parity() {
+        assert_parity_out(
+            "xs := [3,1,2]\nxs.sort_by(fn(a: int, b: int) -> int: b - a)\nprint(xs)\n",
+            "[3, 2, 1]\n",
+        );
+    }
+
+    #[test]
+    fn sort_by_stable_by_key_parity() {
+        // Equal keys (string length) must keep input order — stability is part of the contract.
+        assert_parity_out(
+            "ws := [\"bb\", \"a\", \"dd\", \"e\"]\nws.sort_by(fn(a: str, b: str) -> int: a.len() - b.len())\nprint(ws)\n",
+            "[a, e, bb, dd]\n",
+        );
+    }
+
+    #[test]
+    fn sort_by_empty_and_singleton_parity() {
+        assert_parity_out(
+            "xs := [42]\nxs.sort_by(fn(a: int, b: int) -> int: a - b)\nprint(xs)\n",
+            "[42]\n",
+        );
     }
 
     #[test]
@@ -3171,6 +3294,27 @@ main()";
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "abc\n");
         assert_eq!(run_capture_stress(src), "abc\n", "VM gc_stress diverged (rooting bug?)");
+    }
+
+    #[test]
+    fn parity_list_sort_by_str_gc_stress() {
+        // Sort heap-string elements by length; the comparator re-enters the VM and a collection can
+        // fire mid-sort. The source list must stay rooted (we permute indices, not raw Values).
+        let src = "xs := [\"ccc\",\"a\",\"dd\",\"b\"]\nxs.sort_by(fn(a: str, b: str) -> int: a.len() - b.len())\nfor x in xs:\n    print(x)\n";
+        assert_parity(src);
+        let expected = "a\nb\ndd\nccc\n";
+        assert_eq!(vm_outcome(src).unwrap(), expected);
+        assert_eq!(run_capture_stress(src), expected, "VM gc_stress diverged (rooting bug?)");
+    }
+
+    #[test]
+    fn parity_list_sort_by_nested_list_gc_stress() {
+        // Elements are nested lists (heap); sort by first element. Exercises rooting of heap children
+        // across comparator calls under stress.
+        let src = "xs := [[3,0],[1,0],[2,0]]\nxs.sort_by(fn(a: list[int], b: list[int]) -> int: a[0] - b[0])\nprint(xs[0][0])\nprint(xs[2][0])\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "1\n3\n");
+        assert_eq!(run_capture_stress(src), "1\n3\n", "VM gc_stress diverged (rooting bug?)");
     }
 
     #[test]

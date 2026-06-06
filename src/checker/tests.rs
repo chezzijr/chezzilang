@@ -1046,6 +1046,35 @@ fn list_fold_function_acc_must_match_init() {
     );
 }
 
+#[test]
+fn list_sort_by_ok() {
+    ok("xs := [3,1,2]\nxs.sort_by(fn(a: int, b: int) -> int: a - b)\n");
+}
+
+#[test]
+fn list_sort_by_comparator_param_must_match_element() {
+    rejects(
+        "xs := [1,2,3]\nxs.sort_by(fn(a: str, b: str) -> int: 0)\n",
+        "sort_by",
+    );
+}
+
+#[test]
+fn list_sort_by_comparator_must_return_int() {
+    rejects(
+        "xs := [1,2,3]\nxs.sort_by(fn(a: int, b: int) -> bool: a < b)\n",
+        "sort_by",
+    );
+}
+
+#[test]
+fn list_sort_by_comparator_must_take_two_args() {
+    rejects(
+        "xs := [1,2,3]\nxs.sort_by(fn(a: int) -> int: a)\n",
+        "sort_by",
+    );
+}
+
 
 // ===== break / continue =====
 
