@@ -21,6 +21,9 @@ pub enum Ty {
     Tuple(Vec<Ty>),
     Struct(String),
     Enum(String),
+    /// A bound generic type variable (e.g. `T` inside `fn max[T: Comparable]`). Opaque while
+    /// checking a generic body; replaced by a concrete `Ty` at each call site via substitution.
+    Param(String),
     Result(Box<Ty>),
     Option(Box<Ty>),
     /// An imported module, identified by the name it's bound under in the current module. Member
@@ -63,7 +66,9 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         (Int, Int) | (Float, Float) | (Bool, Bool) | (Str, Str) | (Nil, Nil) => true,
         (List(a), List(b)) | (Result(a), Result(b)) | (Option(a), Option(b)) => compatible(a, b),
         (Map(ka, va), Map(kb, vb)) => compatible(ka, kb) && compatible(va, vb),
-        (Struct(a), Struct(b)) | (Enum(a), Enum(b)) | (Module(a), Module(b)) => a == b,
+        (Struct(a), Struct(b)) | (Enum(a), Enum(b)) | (Module(a), Module(b)) | (Param(a), Param(b)) => {
+            a == b
+        }
         (Func { params: p1, ret: r1 }, Func { params: p2, ret: r2 }) => {
             p1.len() == p2.len()
                 && p1.iter().zip(p2).all(|(a, b)| compatible(a, b))
@@ -86,7 +91,7 @@ impl fmt::Display for Ty {
             Ty::Map(k, v) => write!(f, "map[{k}, {v}]"),
             Ty::Result(t) => write!(f, "Result[{t}]"),
             Ty::Option(t) => write!(f, "Option[{t}]"),
-            Ty::Struct(n) | Ty::Enum(n) => write!(f, "{n}"),
+            Ty::Struct(n) | Ty::Enum(n) | Ty::Param(n) => write!(f, "{n}"),
             Ty::Module(n) => write!(f, "module {n}"),
             Ty::Func { params, ret } => {
                 write!(f, "fn(")?;

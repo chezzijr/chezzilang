@@ -1,0 +1,4 @@
+# rule: typeParams
+# expect: expected identifier
+fn f[](a: int) -> int:
+    return a

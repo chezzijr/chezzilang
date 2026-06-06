@@ -253,7 +253,10 @@ impl Compiler {
                     Ok(())
                 }
             }
-            StmtKind::Struct { .. } | StmtKind::Enum { .. } | StmtKind::Import(_) => Ok(()),
+            StmtKind::Struct { .. }
+            | StmtKind::Enum { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::Import(_) => Ok(()),
             StmtKind::Return(value) => {
                 match value {
                     Some(e) => self.compile_expr(fc, e)?,

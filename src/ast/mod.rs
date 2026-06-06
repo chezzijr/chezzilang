@@ -42,11 +42,18 @@ pub enum StmtKind {
     },
     /// A top-level or method function definition.
     Fn(FnDecl),
-    /// `struct Name:` with fields and (optionally) methods.
+    /// `struct Name:` (or `struct Name[A, B]:`) with fields and (optionally) methods.
     Struct {
         name: String,
+        type_params: Vec<TypeParam>,
         fields: Vec<Field>,
         methods: Vec<FnDecl>,
+    },
+    /// `protocol Name:` — a structural interface: a list of method signatures (no bodies). A type
+    /// satisfies it by having matching methods (Go-style; no explicit `implements`).
+    Protocol {
+        name: String,
+        methods: Vec<MethodSig>,
     },
     /// `enum Name:` with its variants.
     Enum {
@@ -99,9 +106,28 @@ pub enum AssignOp {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
     pub name: String,
+    /// Generic type parameters: `fn max[T: Comparable](…)`. Empty for non-generic fns/methods.
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub ret: Option<Type>, // None ⇒ returns nothing
     pub body: Block,
+}
+
+/// A generic type parameter declaration: `T` or `T: Comparable`. The optional `bound` names a
+/// protocol the instantiating type must structurally satisfy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeParam {
+    pub name: String,
+    pub bound: Option<String>,
+}
+
+/// A protocol method signature — like an [`FnDecl`] but body-less. `Self` (as `Type::Named("Self")`)
+/// inside the params/ret refers to the conforming type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodSig {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret: Option<Type>,
 }
 
 /// A function or closure parameter. `ty` is `None` for closure params, whose types are inferred.

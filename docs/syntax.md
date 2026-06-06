@@ -153,6 +153,55 @@ print(p.dist())         # method call
 
 No inheritance (by design). Composition only.
 
+## 7b. Generics & protocols  (M7)
+
+**Generic functions** take type parameters in `[…]` after the name. A parameter may carry a
+**bound** — a protocol the instantiating type must satisfy. Type arguments are always inferred
+from the call (no `max[int](…)` form).
+
+```chezzi
+fn first[T](a: T, b: T) -> T:        # unbounded: works for any type
+    return a
+
+fn max[T: Comparable](a: T, b: T) -> T:   # bounded: T must be Comparable
+    if a < b:
+        return b
+    return a
+
+print(max(3, 7))                     # 7   (int is Comparable)
+print(max("apple", "banana"))        # banana
+```
+
+**Protocols** are Go-style structural interfaces: a block of body-less method signatures. A type
+satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
+a signature refers to the conforming type.
+
+```chezzi
+protocol Comparable:                 # this one is PREBUILT — shown for illustration
+    fn compare(self, other: Self) -> int
+
+struct Point:
+    x: int
+    y: int
+    fn compare(self, other: Point) -> int:   # ⇒ Point satisfies Comparable, structurally
+        return (self.x + self.y) - (other.x + other.y)
+
+print(max(Point(1, 2), Point(3, 0)).x)   # works: Point is Comparable
+```
+
+The prebuilt **`Comparable`** protocol (`compare(self, other: Self) -> int`) is special: it is the
+one protocol wired to operators. For any `Comparable` value — including a bare `T: Comparable` —
+the ordering operators `< <= > >=` dispatch to `compare` (a negative/zero/positive result means
+less/equal/greater). `int`, `float`, and `str` satisfy `Comparable` intrinsically.
+
+```chezzi
+print(Point(1, 1) < Point(5, 5))     # true  — `<` calls Point.compare
+```
+
+Equality (`==` / `!=`) is **not** affected — it stays structural (field-by-field) for every type.
+Only ordering is overloaded, and only through `Comparable`; there is no operator overloading for
+`+ - * /`.
+
 ## 8. Enums & pattern matching  (M3)
 
 ```chezzi

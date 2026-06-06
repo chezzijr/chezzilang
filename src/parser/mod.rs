@@ -218,6 +218,7 @@ impl Parser {
             Token::Fn => StmtKind::Fn(self.parse_fn()?),
             Token::Struct => self.parse_struct()?,
             Token::Enum => self.parse_enum()?,
+            Token::Protocol => self.parse_protocol()?,
             Token::If => self.parse_if()?,
             Token::For => self.parse_for()?,
             Token::While => self.parse_while()?,
@@ -327,6 +328,7 @@ impl Parser {
     fn parse_fn(&mut self) -> PResult<FnDecl> {
         self.expect(&Token::Fn)?;
         let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.expect(&Token::LParen)?;
         let params = self.parse_params()?;
         self.expect(&Token::RParen)?;
@@ -338,10 +340,64 @@ impl Parser {
         let body = self.parse_block()?;
         Ok(FnDecl {
             name,
+            type_params,
             params,
             ret,
             body,
         })
+    }
+
+    /// Optional `[T, U: Bound, …]` generic-parameter list immediately after a `fn`/`struct` name.
+    /// Returns an empty vec when there's no `[`. Decl-site only — distinct from `parse_type`'s use
+    /// of `[` for generic *arguments* (`list[int]`).
+    fn parse_type_params(&mut self) -> PResult<Vec<TypeParam>> {
+        let mut params = Vec::new();
+        if self.eat(&Token::LBracket) {
+            loop {
+                let name = self.expect_ident()?;
+                let bound = if self.eat(&Token::Colon) {
+                    Some(self.expect_ident()?)
+                } else {
+                    None
+                };
+                params.push(TypeParam { name, bound });
+                if !self.eat(&Token::Comma) {
+                    break;
+                }
+            }
+            self.expect(&Token::RBracket)?;
+        }
+        Ok(params)
+    }
+
+    /// A body-less method signature inside a `protocol` block: `fn name(params) -> ret` then NEWLINE.
+    fn parse_fn_sig(&mut self) -> PResult<MethodSig> {
+        self.expect(&Token::Fn)?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::LParen)?;
+        let params = self.parse_params()?;
+        self.expect(&Token::RParen)?;
+        let ret = if self.eat(&Token::Arrow) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        Ok(MethodSig { name, params, ret })
+    }
+
+    fn parse_protocol(&mut self) -> PResult<StmtKind> {
+        self.expect(&Token::Protocol)?;
+        let name = self.expect_ident()?;
+        self.open_block()?;
+        let mut methods = Vec::new();
+        self.skip_newlines();
+        while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            methods.push(self.parse_fn_sig()?);
+            self.expect_stmt_end()?;
+            self.skip_newlines();
+        }
+        self.expect(&Token::Dedent)?;
+        Ok(StmtKind::Protocol { name, methods })
     }
 
     /// Comma-separated `name[: Type]` until (but not consuming) the closing `)`.
@@ -367,6 +423,7 @@ impl Parser {
     fn parse_struct(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Struct)?;
         let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.open_block()?;
         let mut fields = Vec::new();
         let mut methods = Vec::new();
@@ -385,6 +442,7 @@ impl Parser {
         self.expect(&Token::Dedent)?;
         Ok(StmtKind::Struct {
             name,
+            type_params,
             fields,
             methods,
         })
@@ -1153,6 +1211,72 @@ mod tests {
     }
 
     #[test]
+    fn generic_fn_decl_with_bound() {
+        match only("fn max[T: Comparable](a: T, b: T) -> T:\n    return a\n") {
+            StmtKind::Fn(f) => {
+                assert_eq!(f.name, "max");
+                assert_eq!(f.type_params.len(), 1);
+                assert_eq!(f.type_params[0].name, "T");
+                assert_eq!(f.type_params[0].bound, Some("Comparable".into()));
+                assert_eq!(f.params.len(), 2);
+                assert_eq!(f.ret, Some(Type::Named("T".into())));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_fn_decl_multi_param_unbounded() {
+        match only("fn pair[A, B](a: A, b: B):\n    print(a)\n") {
+            StmtKind::Fn(f) => {
+                assert_eq!(f.type_params.len(), 2);
+                assert_eq!(f.type_params[0].name, "A");
+                assert_eq!(f.type_params[0].bound, None);
+                assert_eq!(f.type_params[1].name, "B");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_struct_decl() {
+        match only("struct Pair[A, B]:\n    first: A\n    second: B\n") {
+            StmtKind::Struct { name, type_params, fields, .. } => {
+                assert_eq!(name, "Pair");
+                assert_eq!(type_params.len(), 2);
+                assert_eq!(type_params[0].name, "A");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].ty, Type::Named("A".into()));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn protocol_decl_collects_method_sigs() {
+        match only("protocol Comparable:\n    fn compare(self, other: Self) -> int\n") {
+            StmtKind::Protocol { name, methods } => {
+                assert_eq!(name, "Comparable");
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].name, "compare");
+                assert_eq!(methods[0].params.len(), 2);
+                assert_eq!(methods[0].params[1].ty, Some(Type::Named("Self".into())));
+                assert_eq!(methods[0].ret, Some(Type::Named("int".into())));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn protocol_with_multiple_method_sigs() {
+        let src = "protocol Shape:\n    fn area(self) -> float\n    fn name(self) -> str\n";
+        match only(src) {
+            StmtKind::Protocol { methods, .. } => assert_eq!(methods.len(), 2),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn walrus_let() {
         match only("x := 5\n") {
             StmtKind::Let { names, ty, value } => {
@@ -1238,7 +1362,7 @@ mod tests {
     #[test]
     fn struct_with_field_and_method() {
         match only("struct Point:\n    x: int\n    y: int\n\n    fn dist(self) -> float:\n        return self.x\n") {
-            StmtKind::Struct { name, fields, methods } => {
+            StmtKind::Struct { name, fields, methods, .. } => {
                 assert_eq!(name, "Point");
                 assert_eq!(fields.len(), 2);
                 assert_eq!(methods.len(), 1);

@@ -1,0 +1,8 @@
+# rule: fnDecl, typeParams, typeParam
+fn max[T: Comparable](a: T, b: T) -> T:
+    if a < b:
+        return b
+    return a
+
+fn first[A, B](a: A, b: B) -> A:
+    return a

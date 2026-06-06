@@ -1,0 +1,5 @@
+# rule: protocolDecl
+# expect: expected end of line
+protocol P:
+    fn f(self) -> int:
+        return 1

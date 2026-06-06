@@ -9,8 +9,8 @@
 mod ty;
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, Import, LitPattern, Param, Pattern, Span,
-    Stmt, StmtKind, Type, UnaryOp,
+    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, Import, LitPattern, MethodSig, Param,
+    Pattern, Span, Stmt, StmtKind, Type, TypeParam, UnaryOp,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
 use std::collections::HashMap;
@@ -59,17 +59,33 @@ fn is_reserved_type(name: &str) -> bool {
     name == "Result" || name == "Option"
 }
 
-/// A function (or method) signature: parameter types and return type.
+/// A function (or method) signature: parameter types and return type. `type_params` is non-empty
+/// only for generic functions (`fn max[T: Comparable]`), where `params`/`ret` contain `Ty::Param`s.
 #[derive(Clone)]
 struct FnSig {
     params: Vec<Ty>,
     ret: Ty,
+    type_params: Vec<TypeParam>,
+}
+
+impl FnSig {
+    /// A non-generic signature (the common case).
+    fn plain(params: Vec<Ty>, ret: Ty) -> FnSig {
+        FnSig { params, ret, type_params: Vec::new() }
+    }
 }
 
 /// A struct's shape: ordered `(field, type)` pairs and its methods by name.
 struct StructInfo {
     fields: Vec<(String, Ty)>,
     methods: HashMap<String, FnSig>,
+}
+
+/// A protocol's required method signatures, in declaration order. `Self` appears as `Ty::Param("Self")`
+/// inside these sigs; conformance substitutes it with the candidate type.
+#[derive(Clone)]
+struct ProtocolInfo {
+    methods: Vec<(String, FnSig)>,
 }
 
 /// A user enum variant: which enum it belongs to and its payload field types.
@@ -135,7 +151,7 @@ pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
 fn native_module_sig(name: &str) -> ModuleSig {
     let mut sig = ModuleSig::default();
     let mut func = |n: &str, params: Vec<Ty>, ret: Ty| {
-        sig.functions.insert(n.to_string(), FnSig { params, ret });
+        sig.functions.insert(n.to_string(), FnSig::plain(params, ret));
     };
     match name {
         "std.math" => {
@@ -177,6 +193,11 @@ struct Checker {
     scopes: Vec<HashMap<String, Ty>>,
     functions: HashMap<String, FnSig>,
     structs: HashMap<String, StructInfo>,
+    /// Structural protocols by name. Program-global (like structs). Pre-seeded with `Comparable`.
+    protocols: HashMap<String, ProtocolInfo>,
+    /// Generic type parameters currently in scope (name → optional protocol bound), set while
+    /// building/checking a generic fn's signature and body. Save/restore to nest.
+    type_params: HashMap<String, Option<String>>,
     /// enum name → its variant names, in declaration order (for exhaustiveness).
     enums: HashMap<String, Vec<String>>,
     variants: HashMap<String, VariantInfo>,
@@ -211,6 +232,8 @@ impl Checker {
             scopes: Vec::new(),
             functions: HashMap::new(),
             structs: HashMap::new(),
+            protocols: prebuilt_protocols(),
+            type_params: HashMap::new(),
             enums: HashMap::new(),
             variants: HashMap::new(),
             struct_names: std::collections::HashSet::new(),
@@ -240,6 +263,7 @@ impl Checker {
     fn begin_module(&mut self, label: Option<String>) {
         self.scopes.clear();
         self.functions.clear();
+        self.type_params.clear();
         self.imported_modules.clear();
         self.imported_poly.clear();
         self.current_ret = Ty::Nil;
@@ -368,6 +392,12 @@ impl Checker {
     /// (a name defined twice) are reported here — otherwise "last write wins" would silently
     /// mis-type or, for struct methods, panic in pass 2 on a key that no longer exists.
     fn hoist(&mut self, stmts: &[Stmt]) {
+        // Protocols first: function/struct signatures may reference them in type-parameter bounds.
+        for s in stmts {
+            if let StmtKind::Protocol { name, methods } = &s.kind {
+                self.hoist_protocol(name, methods, s.span);
+            }
+        }
         for s in stmts {
             match &s.kind {
                 StmtKind::Fn(decl) => {
@@ -377,7 +407,7 @@ impl Checker {
                     let sig = self.fn_sig(decl, s.span);
                     self.functions.insert(decl.name.clone(), sig);
                 }
-                StmtKind::Struct { name, fields, methods } => {
+                StmtKind::Struct { name, fields, methods, .. } => {
                     if is_reserved_type(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
@@ -424,8 +454,18 @@ impl Checker {
     }
 
     /// Build a function's signature, resolving param/return annotations. `self` (an un-annotated
-    /// first param of a method) is left for `check_fn_body` to bind to the struct type.
+    /// first param of a method) is left for `check_fn_body` to bind to the struct type. The decl's
+    /// generic `type_params` are installed (so `T` in annotations resolves to `Ty::Param("T")`) and
+    /// each declared bound is validated against the known protocols.
     fn fn_sig(&mut self, decl: &FnDecl, span: Span) -> FnSig {
+        let saved = self.enter_type_params(&decl.type_params);
+        for tp in &decl.type_params {
+            if let Some(bound) = &tp.bound
+                && !self.protocols.contains_key(bound)
+            {
+                self.error(span, format!("unknown protocol '{bound}' in bound on '{}'", tp.name));
+            }
+        }
         let params = decl
             .params
             .iter()
@@ -443,7 +483,8 @@ impl Checker {
         // any *other* function's inference sees in the meantime (forward refs degrade silently
         // rather than to a confidently-wrong `Nil`).
         let ret = decl.ret.as_ref().map(|t| self.resolve_type(t, span)).unwrap_or(Ty::Unknown);
-        FnSig { params, ret }
+        self.exit_type_params(saved);
+        FnSig { params, ret, type_params: decl.type_params.clone() }
     }
 
     /// Pass-1.5: for every function/method that omitted `-> T`, infer its return type from the
@@ -497,6 +538,7 @@ impl Checker {
     /// or annotate, for a precise inferred type.
     fn infer_fn_ret(&mut self, decl: &FnDecl, self_ty: Option<Ty>, params: &[Ty]) -> Ty {
         let mark = self.errors.len();
+        let saved_tps = self.enter_type_params(&decl.type_params);
         let saved_ret = std::mem::replace(&mut self.current_ret, Ty::Unknown);
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         let saved_rets = std::mem::take(&mut self.collected_rets);
@@ -516,6 +558,7 @@ impl Checker {
         let found = std::mem::replace(&mut self.collected_rets, saved_rets);
         self.inferring_ret = saved_flag;
         self.current_ret = saved_ret;
+        self.exit_type_params(saved_tps);
         self.errors.truncate(mark); // discard inference-time errors; pass 2 re-reports them for real
         if let Some(t) = found.iter().find(|t| !t.is_unknown() && **t != Ty::Nil) {
             t.clone()
@@ -538,6 +581,9 @@ impl Checker {
                 "nil" => Ty::Nil,
                 _ if self.struct_names.contains(n) => Ty::Struct(n.clone()),
                 _ if self.enum_names.contains(n) => Ty::Enum(n.clone()),
+                // A generic type parameter (`T`) or `Self`, in scope while checking a generic
+                // fn signature/body or a protocol method.
+                _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
                 _ => {
                     self.error(span, format!("unknown type '{n}'"));
                     Ty::Unknown
@@ -629,7 +675,9 @@ impl Checker {
                     }
                 }
             }
-            StmtKind::Enum { .. } | StmtKind::Import(_) => {} // nothing to check in pass 2
+            // Enums, imports, and protocols carry nothing to check in pass 2 (protocol method
+            // signatures are validated during hoisting).
+            StmtKind::Enum { .. } | StmtKind::Import(_) | StmtKind::Protocol { .. } => {}
             StmtKind::If { branches, else_block } => {
                 for (cond, body) in branches {
                     self.expect_bool(cond, "if condition");
@@ -837,6 +885,7 @@ impl Checker {
     }
 
     fn check_fn_body(&mut self, decl: &FnDecl, self_ty: Option<Ty>, sig: FnSig) {
+        let saved_tps = self.enter_type_params(&decl.type_params);
         let saved_ret = std::mem::replace(&mut self.current_ret, sig.ret.clone());
         // A nested function checked while pass-1 is inferring an *outer* function's return must not
         // feed the outer `collected_rets` — this body's `return`s are diagnosed, not collected.
@@ -860,6 +909,7 @@ impl Checker {
         self.current_ret = saved_ret;
         self.inferring_ret = saved_inferring;
         self.loop_depth = saved_loop_depth;
+        self.exit_type_params(saved_tps);
     }
 
     /// The element type produced by iterating `iter` in a `for` loop.
@@ -1425,7 +1475,9 @@ impl Checker {
                 }
             }
             Lt | LtEq | Gt | GtEq => {
-                let ok = (l.is_numeric() && r.is_numeric()) || (l == Ty::Str && r == Ty::Str);
+                let ok = (l.is_numeric() && r.is_numeric())
+                    || (l == Ty::Str && r == Ty::Str)
+                    || self.ordering_allowed(&l, &r);
                 if !ok && !either_unknown {
                     self.error(lhs.span, format!("cannot compare {l} and {r}"));
                 }
@@ -1719,6 +1771,11 @@ impl Checker {
                     if self.imported_poly.contains(name) {
                         return Some(self.infer_numeric_poly(name, sig.params.len(), args, span));
                     }
+                    // A generic function: infer its type parameters from the arguments, enforce
+                    // bounds, and substitute into the return type.
+                    if !sig.type_params.is_empty() {
+                        return Some(self.infer_generic_call(name, &sig, args, span));
+                    }
                     self.check_args(name, &sig.params, args, span);
                     return Some(sig.ret);
                 }
@@ -1810,6 +1867,28 @@ impl Checker {
                 }
                 self.infer_all(args);
                 self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
+            // A bound generic type parameter exposes its protocol's methods (e.g. `a.compare(b)`
+            // where `a: T` and `T: Comparable`).
+            Ty::Param(pname) => {
+                let bound = self.type_params.get(pname).cloned().flatten();
+                if let Some(proto) = bound
+                    && let Some(msig) = self
+                        .protocols
+                        .get(&proto)
+                        .and_then(|p| p.methods.iter().find(|(n, _)| n == method).map(|(_, s)| s.clone()))
+                {
+                    let map = HashMap::from([("Self".to_string(), obj_ty.clone())]);
+                    let expected: Vec<Ty> = match msig.params.split_first() {
+                        Some((_recv, rest)) => rest.iter().map(|t| subst(t, &map)).collect(),
+                        None => Vec::new(),
+                    };
+                    self.check_args(method, &expected, args, span);
+                    return subst(&msig.ret, &map);
+                }
+                self.infer_all(args);
+                self.error(span, format!("type parameter {pname} has no method '{method}'"));
                 Ty::Unknown
             }
             Ty::Unknown => {
@@ -2043,6 +2122,226 @@ impl Checker {
     fn expect_int_val(&mut self, e: &Expr) {
         self.expect_int(e, "argument");
     }
+
+    // ===== generics & protocols =====
+
+    /// Install `tps` as the in-scope generic type parameters, returning the previous map to restore.
+    fn enter_type_params(&mut self, tps: &[TypeParam]) -> HashMap<String, Option<String>> {
+        let saved = self.type_params.clone();
+        for tp in tps {
+            self.type_params.insert(tp.name.clone(), tp.bound.clone());
+        }
+        saved
+    }
+
+    fn exit_type_params(&mut self, saved: HashMap<String, Option<String>>) {
+        self.type_params = saved;
+    }
+
+    /// Register a `protocol` declaration's method signatures. `Self` resolves to `Ty::Param("Self")`.
+    fn hoist_protocol(&mut self, name: &str, methods: &[MethodSig], span: Span) {
+        if name == "Comparable" {
+            self.error(span, format!("protocol '{name}' is reserved (builtin)"));
+            return;
+        }
+        if self.protocols.contains_key(name) {
+            self.error(span, format!("protocol '{name}' is already defined"));
+        }
+        let mut saved = self.type_params.clone();
+        std::mem::swap(&mut self.type_params, &mut saved); // start clean, with only Self visible
+        self.type_params.insert("Self".to_string(), None);
+        let sigs = methods
+            .iter()
+            .map(|m| {
+                let params = m
+                    .params
+                    .iter()
+                    .map(|p| match &p.ty {
+                        Some(t) => self.resolve_type(t, span),
+                        None if p.name == "self" => Ty::Unknown,
+                        None => {
+                            self.error(span, format!("protocol method parameter '{}' needs a type", p.name));
+                            Ty::Unknown
+                        }
+                    })
+                    .collect();
+                let ret = m.ret.as_ref().map(|t| self.resolve_type(t, span)).unwrap_or(Ty::Nil);
+                (m.name.clone(), FnSig::plain(params, ret))
+            })
+            .collect();
+        self.type_params = saved; // restore
+        self.protocols.insert(name.to_string(), ProtocolInfo { methods: sigs });
+    }
+
+    /// Does concrete `ty` structurally satisfy `protocol`? Read-only. Primitives intrinsically
+    /// satisfy `Comparable`; structs satisfy any protocol whose methods they all implement.
+    fn satisfies(&self, ty: &Ty, protocol: &str) -> Result<(), String> {
+        let Some(pinfo) = self.protocols.get(protocol) else {
+            return Err(format!("unknown protocol '{protocol}'"));
+        };
+        if let Ty::Unknown = ty {
+            return Ok(()); // don't cascade
+        }
+        if protocol == "Comparable" && matches!(ty, Ty::Int | Ty::Float | Ty::Str) {
+            return Ok(());
+        }
+        match ty {
+            Ty::Struct(sname) => {
+                let Some(info) = self.structs.get(sname) else {
+                    return Err(format!("type {ty} does not satisfy {protocol}"));
+                };
+                for (mname, msig) in &pinfo.methods {
+                    match info.methods.get(mname) {
+                        Some(actual) if method_matches(msig, actual, ty) => {}
+                        Some(_) => {
+                            return Err(format!(
+                                "type {ty} does not satisfy {protocol} (method '{mname}' has the wrong signature)"
+                            ));
+                        }
+                        None => {
+                            return Err(format!(
+                                "type {ty} does not satisfy {protocol} (missing method '{mname}')"
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(format!("type {ty} does not satisfy {protocol}")),
+        }
+    }
+
+    /// Are `l < r` etc. allowed? True for same-named comparable type params, or same-named structs
+    /// that satisfy `Comparable` (operator overloading dispatches to their `compare` at runtime).
+    fn ordering_allowed(&self, l: &Ty, r: &Ty) -> bool {
+        match (l, r) {
+            (Ty::Param(a), Ty::Param(b)) if a == b => self
+                .type_params
+                .get(a)
+                .and_then(|b| b.as_deref())
+                .is_some_and(|proto| self.protocol_has_method(proto, "compare")),
+            (Ty::Struct(a), Ty::Struct(b)) if a == b => self.satisfies(l, "Comparable").is_ok(),
+            _ => false,
+        }
+    }
+
+    fn protocol_has_method(&self, protocol: &str, method: &str) -> bool {
+        self.protocols
+            .get(protocol)
+            .is_some_and(|p| p.methods.iter().any(|(n, _)| n == method))
+    }
+
+    /// Type-check a call to a generic function: infer each type parameter from the arguments,
+    /// enforce the declared bounds, and substitute into the return type.
+    fn infer_generic_call(&mut self, name: &str, sig: &FnSig, args: &[Expr], span: Span) -> Ty {
+        if args.len() != sig.params.len() {
+            self.check_arity(name, sig.params.len(), args, span);
+        }
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+        // Infer the type-parameter substitution from positional arguments.
+        let mut subst_map: HashMap<String, Ty> = HashMap::new();
+        for (decl, actual) in sig.params.iter().zip(&arg_tys) {
+            unify(decl, actual, &mut subst_map);
+        }
+        // Enforce declared bounds against each inferred binding.
+        for tp in &sig.type_params {
+            if let (Some(bound), Some(concrete)) = (&tp.bound, subst_map.get(&tp.name))
+                && let Err(msg) = self.satisfies(concrete, bound)
+            {
+                self.error(span, msg);
+            }
+        }
+        // Each argument must match its parameter's substituted type (catches a type param used in
+        // two positions with conflicting types, e.g. `max(1, "x")`).
+        for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
+            let expected = subst(decl, &subst_map);
+            if !compatible(&expected, actual) {
+                self.error(
+                    arg.span,
+                    format!("argument to '{name}' has type {actual}, expected {expected}"),
+                );
+            }
+        }
+        subst(&sig.ret, &subst_map)
+    }
+}
+
+/// The prebuilt protocols every program starts with. `Comparable` requires
+/// `compare(self, other: Self) -> int`; primitives (int/float/str) satisfy it intrinsically.
+fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
+    let mut m = HashMap::new();
+    m.insert(
+        "Comparable".to_string(),
+        ProtocolInfo {
+            // receiver `self` (Unknown), `other: Self` (Param "Self"), returning int.
+            methods: vec![(
+                "compare".to_string(),
+                FnSig::plain(vec![Ty::Unknown, Ty::Param("Self".into())], Ty::Int),
+            )],
+        },
+    );
+    m
+}
+
+/// Substitute generic type parameters in `ty` using `map` (e.g. `Self ↦ Point`, `T ↦ int`).
+/// Unmapped params are left as-is.
+fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
+    match ty {
+        Ty::Param(n) => map.get(n).cloned().unwrap_or_else(|| ty.clone()),
+        Ty::List(t) => Ty::list(subst(t, map)),
+        Ty::Option(t) => Ty::option(subst(t, map)),
+        Ty::Result(t) => Ty::result(subst(t, map)),
+        Ty::Map(k, v) => Ty::map(subst(k, map), subst(v, map)),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| subst(t, map)).collect()),
+        Ty::Func { params, ret } => Ty::Func {
+            params: params.iter().map(|t| subst(t, map)).collect(),
+            ret: Box::new(subst(ret, map)),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Does a struct method `actual` match a protocol method `proto` (with `Self` bound to `self_ty`)?
+fn method_matches(proto: &FnSig, actual: &FnSig, self_ty: &Ty) -> bool {
+    if proto.params.len() != actual.params.len() {
+        return false;
+    }
+    let map = HashMap::from([("Self".to_string(), self_ty.clone())]);
+    proto
+        .params
+        .iter()
+        .zip(&actual.params)
+        .all(|(p, a)| compatible(&subst(p, &map), a))
+        && compatible(&subst(&proto.ret, &map), &actual.ret)
+}
+
+/// Bind type parameters in `decl` to the corresponding concrete `actual` types (first binding wins;
+/// `Unknown` actuals are ignored so an un-inferable argument doesn't pin a param).
+fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
+    match (decl, actual) {
+        (Ty::Param(n), a) => {
+            if !a.is_unknown() && !map.contains_key(n) {
+                map.insert(n.clone(), a.clone());
+            }
+        }
+        (Ty::List(d), Ty::List(a)) | (Ty::Option(d), Ty::Option(a)) | (Ty::Result(d), Ty::Result(a)) => {
+            unify(d, a, map)
+        }
+        (Ty::Map(dk, dv), Ty::Map(ak, av)) => {
+            unify(dk, ak, map);
+            unify(dv, av, map);
+        }
+        (Ty::Tuple(ds), Ty::Tuple(as_)) if ds.len() == as_.len() => {
+            ds.iter().zip(as_).for_each(|(d, a)| unify(d, a, map));
+        }
+        (Ty::Func { params: dp, ret: dr }, Ty::Func { params: ap, ret: ar })
+            if dp.len() == ap.len() =>
+        {
+            dp.iter().zip(ap).for_each(|(d, a)| unify(d, a, map));
+            unify(dr, ar, map);
+        }
+        _ => {}
+    }
 }
 
 /// The type a literal match-pattern matches against.
@@ -2091,7 +2390,7 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
         "starts_with" | "contains" => (vec![Ty::Str], Ty::Bool),
         _ => return None,
     };
-    Some(FnSig { params, ret })
+    Some(FnSig::plain(params, ret))
 }
 
 /// Built-in method signatures on `list[T]` (M6). `elem` is the list's element type.
@@ -2111,7 +2410,7 @@ fn list_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
         "sort" if is_orderable(elem) || elem.is_unknown() => (vec![], Ty::Nil),
         _ => return None,
     };
-    Some(FnSig { params, ret })
+    Some(FnSig::plain(params, ret))
 }
 
 /// Element types that have a total order for `sort()`: the scalar comparables.
@@ -2136,7 +2435,7 @@ fn map_method_sig(method: &str, k: &Ty, v: &Ty) -> Option<FnSig> {
         "remove" => (vec![k.clone()], Ty::option(v.clone())),
         _ => return None,
     };
-    Some(FnSig { params, ret })
+    Some(FnSig::plain(params, ret))
 }
 
 #[cfg(test)]

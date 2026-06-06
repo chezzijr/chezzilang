@@ -41,6 +41,119 @@ fn declared_variable_ok() {
     ok("x := 5\ny := x + 1\n");
 }
 
+// ===== generics & structural protocols (G1) =====
+
+const POINT: &str = "\
+struct Point:
+    x: int
+    y: int
+    fn compare(self, other: Point) -> int:
+        return (self.x + self.y) - (other.x + other.y)
+";
+
+#[test]
+fn generic_max_over_int_ok() {
+    ok("fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nm := max(3, 7)\n");
+}
+
+#[test]
+fn generic_max_over_comparable_struct_ok() {
+    let src = format!(
+        "{POINT}fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\np := max(Point(1, 2), Point(3, 0))\n"
+    );
+    ok(&src);
+}
+
+#[test]
+fn generic_max_result_type_is_substituted() {
+    // The result of max(3,7) is int, so a str-typed binding must be rejected.
+    rejects(
+        "fn max[T: Comparable](a: T, b: T) -> T:\n    return a\nx: str = max(3, 7)\n",
+        "cannot assign int",
+    );
+}
+
+#[test]
+fn ordering_on_unbounded_type_param_rejected() {
+    rejects(
+        "fn pick[T](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\n",
+        "cannot compare",
+    );
+}
+
+#[test]
+fn calling_comparable_generic_on_non_comparable_struct_rejected() {
+    // Plain (no `compare` method) ⇒ does not satisfy Comparable.
+    let src = "\
+struct Plain:
+    n: int
+fn max[T: Comparable](a: T, b: T) -> T:
+    return a
+p := max(Plain(1), Plain(2))
+";
+    rejects(src, "does not satisfy Comparable");
+}
+
+#[test]
+fn generic_call_with_mismatched_type_args_rejected() {
+    rejects(
+        "fn max[T: Comparable](a: T, b: T) -> T:\n    return a\nx := max(3, \"a\")\n",
+        "expected int",
+    );
+}
+
+#[test]
+fn unbounded_generic_passthrough_ok() {
+    ok("fn first[T](a: T, b: T) -> T:\n    return a\nx := first(1, 2)\ny := first(\"a\", \"b\")\n");
+}
+
+#[test]
+fn ordering_on_comparable_struct_directly_ok() {
+    ok(&format!("{POINT}b := Point(1, 2) < Point(3, 4)\n"));
+}
+
+#[test]
+fn ordering_on_non_comparable_struct_rejected() {
+    rejects(
+        "struct Plain:\n    n: int\nb := Plain(1) < Plain(2)\n",
+        "cannot compare",
+    );
+}
+
+#[test]
+fn calling_protocol_method_on_type_param_ok() {
+    ok("fn cmp[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\n");
+}
+
+#[test]
+fn user_protocol_bound_ok() {
+    let src = "\
+protocol Shape:
+    fn area(self) -> float
+struct Circle:
+    r: float
+    fn area(self) -> float:
+        return self.r
+fn biggest[T: Shape](a: T) -> float:
+    return a.area()
+x := biggest(Circle(2.0))
+";
+    ok(src);
+}
+
+#[test]
+fn unknown_protocol_bound_rejected() {
+    rejects("fn f[T: Bogus](a: T) -> T:\n    return a\n", "unknown protocol 'Bogus'");
+}
+
+#[test]
+fn redeclaring_comparable_rejected() {
+    rejects(
+        "protocol Comparable:\n    fn compare(self, other: Self) -> int\n",
+        "reserved",
+    );
+}
+
 // ===== 2. unknown type =====
 
 #[test]

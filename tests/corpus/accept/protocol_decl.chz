@@ -1,0 +1,7 @@
+# rule: protocolDecl, fnSig
+protocol Comparable:
+    fn compare(self, other: Self) -> int
+
+protocol Shape:
+    fn area(self) -> float
+    fn name(self) -> str

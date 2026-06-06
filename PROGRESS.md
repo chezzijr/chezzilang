@@ -10,8 +10,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-> **Language gaps round 2 (#10–#15): ✅ ALL DONE.** See the section below. Next: pick the next
-> milestone (Stretch: Cranelift backend) or the deferred items in `gaps.md` (generics / match guards).
+> **Language gaps round 2 (#10–#15): ✅ ALL DONE.** See the section below.
+
+> **M7 — generics + structural protocols.** 🟦 **G1 DONE** — generic functions
+> (`fn max[T: Comparable]`), Go-style structural `protocol`s, prebuilt `Comparable` wiring
+> `< <= > >=` to a user `compare` method (type-erased: the checker does the work, both runtimes
+> barely change). Golden `examples/generics.chz` is byte-identical on interp + VM; grammar +
+> conformance corpus updated. **G2 (next):** generic structs (`Pair[A, B]`, `Stack[T]`).
 
 > **M6 — stdlib + pipe `|>` + core-type methods.** ✅ **M6a + M6b + M6c DONE.** The Level-2 native
 > FFI seam (`NativeFn` + `Host` trait) was scheduled and built: each binding is written once and

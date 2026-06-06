@@ -168,6 +168,15 @@ impl Interp {
             ExprKind::Binary { op, lhs, rhs } => {
                 let l = self.eval(lhs)?;
                 let r = self.eval(rhs)?;
+                // Operator overloading: ordering (`< <= > >=`) on two structs dispatches to the
+                // type's `compare(self, other) -> int` method (the `Comparable` protocol). The
+                // checker has already verified conformance. Equality stays structural (handled by
+                // `eval_binary`); only ordering is overloaded.
+                if matches!(op, BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq)
+                    && matches!((&l, &r), (Value::Struct { .. }, Value::Struct { .. }))
+                {
+                    return self.struct_ordering(*op, l, r, expr.span);
+                }
                 eval_binary(*op, l, r, expr.span)
             }
             ExprKind::List(items) => {
@@ -638,6 +647,17 @@ impl Interp {
         // op. Without this, `(5).frob(1 / 0)` would error on the receiver type here while the VM
         // errors on the argument, breaking interp/VM parity (caught by the parity suite).
         let arg_vals = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+        // `compare` on a primitive (int/float/str): these intrinsically satisfy `Comparable`, so an
+        // erased generic body may call `.compare()` on a concrete primitive receiver. Return the
+        // sign of the ordering (-1/0/1). Structs with their own `compare` fall through to the
+        // normal method dispatch below.
+        if method == "compare"
+            && arg_vals.len() == 1
+            && matches!(receiver, Value::Int(_) | Value::Float(_) | Value::Str(_))
+            && let Some(ord) = compare(&receiver, &arg_vals[0])
+        {
+            return Ok(Value::Int(ord as i64));
+        }
         // Higher-order list methods call a Chezzi function value per element, so they need the
         // interpreter handle (`self.call_value`) and can't live in the pure `builtins` table.
         if let Value::List(items) = &receiver
@@ -683,6 +703,43 @@ impl Interp {
         call_args.push(receiver.clone());
         call_args.extend(arg_vals);
         self.call(&decl, &def.home, call_args, span)
+    }
+
+    /// Operator overloading for ordering (`< <= > >=`) on two structs: dispatch to the receiver's
+    /// `compare(self, other) -> int` method and map the sign of the result to a boolean. The checker
+    /// guarantees the struct satisfies `Comparable`, so `compare` exists and returns int.
+    fn struct_ordering(
+        &mut self,
+        op: BinaryOp,
+        l: Value,
+        r: Value,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let Value::Struct { name, .. } = &l else { unreachable!() };
+        let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
+            message: format!("unknown struct type '{name}'"),
+            span,
+        })?;
+        let decl = def.methods.get("compare").cloned().ok_or_else(|| RuntimeError {
+            message: format!("struct '{name}' has no 'compare' method (needed to order its values)"),
+            span,
+        })?;
+        let ord = match self.call(&decl, &def.home, vec![l.clone(), r], span)? {
+            Value::Int(n) => n.cmp(&0),
+            other => {
+                return Err(RuntimeError {
+                    message: format!("compare() must return int, got {}", other.type_name()),
+                    span,
+                })
+            }
+        };
+        Ok(Value::Bool(match op {
+            BinaryOp::Lt => ord.is_lt(),
+            BinaryOp::LtEq => ord.is_le(),
+            BinaryOp::Gt => ord.is_gt(),
+            BinaryOp::GtEq => ord.is_ge(),
+            _ => unreachable!(),
+        }))
     }
 
     /// Evaluate the higher-order list methods `map` / `filter` / `fold`. `elems` is the receiver
@@ -987,6 +1044,7 @@ impl Interp {
                     name,
                     fields,
                     methods,
+                    ..
                 } => {
                     // Type names are program-global in M4.5 (per-module type namespacing is
                     // deferred): a name reused across modules is a collision, not a shadow.
@@ -1094,7 +1152,10 @@ impl Interp {
             }
             // Type declarations are registered up-front by `hoist_declarations`; imports are bound
             // before the body runs (see `eval_module`). Nothing to do when execution reaches them.
-            StmtKind::Struct { .. } | StmtKind::Enum { .. } | StmtKind::Import(_) => Ok(Flow::Normal),
+            StmtKind::Struct { .. }
+            | StmtKind::Enum { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::Import(_) => Ok(Flow::Normal),
             StmtKind::Match { scrutinee, arms } => self.exec_match(scrutinee, arms),
             StmtKind::Return(value) => {
                 let v = match value {
@@ -2378,6 +2439,41 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/map.chz");
         let expected = include_str!("../../examples/map.expected");
         assert_eq!(run_capture(source).expect("map.chz should run"), expected);
+    }
+
+    /// G1 golden: generics + structural `Comparable` protocol on the interp.
+    #[test]
+    fn golden_generics_chz() {
+        let source = include_str!("../../examples/generics.chz");
+        let expected = include_str!("../../examples/generics.expected");
+        assert_eq!(run_capture(source).expect("generics.chz should run"), expected);
+    }
+
+    #[test]
+    fn generic_max_over_int_runs() {
+        let src = "fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nprint(max(3, 9))\nprint(max(9, 3))\n";
+        assert_eq!(run(src), "9\n9\n");
+    }
+
+    #[test]
+    fn struct_ordering_dispatches_to_compare() {
+        let src = "\
+struct P:
+    n: int
+    fn compare(self, other: P) -> int:
+        return self.n - other.n
+print(P(1) < P(2))
+print(P(2) < P(1))
+print(P(5) >= P(5))
+";
+        assert_eq!(run(src), "true\nfalse\ntrue\n");
+    }
+
+    #[test]
+    fn primitive_compare_method_returns_sign() {
+        // Reachable via an erased generic body (`a.compare(b)` on a concrete primitive).
+        let src = "fn c[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nprint(c(2, 5))\nprint(c(5, 2))\nprint(c(4, 4))\n";
+        assert_eq!(run(src), "-1\n1\n0\n");
     }
 
     // ===== entry model: no auto-main; unhandled top-level Err/None exits =====

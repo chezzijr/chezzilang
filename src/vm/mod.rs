@@ -667,6 +667,15 @@ impl Vm {
     fn compare_op(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
+        // Operator overloading: ordering on two structs dispatches to `compare(self, other) -> int`
+        // (the `Comparable` protocol). The checker has verified conformance. Equality stays
+        // structural; only ordering is overloaded. Mirrors `interp::struct_ordering`.
+        if let (Value::Obj(hl), Value::Obj(hr)) = (l, r)
+            && matches!(self.heap.get(hl), Obj::Struct { .. })
+            && matches!(self.heap.get(hr), Obj::Struct { .. })
+        {
+            return self.struct_ordering(op, l, r, span);
+        }
         let name = match op {
             Op::Lt => "Lt",
             Op::LtEq => "LtEq",
@@ -675,6 +684,38 @@ impl Vm {
             _ => unreachable!(),
         };
         let ord = self.compare(l, r).ok_or_else(|| self.err(format!("cannot apply {name} to {} and {}", self.type_name(l), self.type_name(r)), span))?;
+        let b = match op {
+            Op::Lt => ord.is_lt(),
+            Op::LtEq => ord.is_le(),
+            Op::Gt => ord.is_gt(),
+            Op::GtEq => ord.is_ge(),
+            _ => unreachable!(),
+        };
+        self.push(Value::Bool(b));
+        Ok(())
+    }
+
+    /// Dispatch an ordering operator on two structs to the receiver's `compare(self, other) -> int`
+    /// method, mapping the sign of the result to a boolean. Mirrors `interp::struct_ordering`.
+    fn struct_ordering(&mut self, op: &Op, l: Value, r: Value, span: Span) -> Result<(), RuntimeError> {
+        let Value::Obj(h) = l else { unreachable!() };
+        let Obj::Struct { name, .. } = self.heap.get(h).clone() else { unreachable!() };
+        let def = self
+            .program
+            .structs
+            .get(name.as_ref())
+            .cloned()
+            .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
+        let proto = *def.methods.get("compare").ok_or_else(|| {
+            self.err(format!("struct '{name}' has no 'compare' method (needed to order its values)"), span)
+        })?;
+        let home = self.module_objs[def.module_idx];
+        let ord = match self.run_proto(proto, home, None, vec![l, r], true, false, span)? {
+            Value::Int(n) => n.cmp(&0),
+            other => {
+                return Err(self.err(format!("compare() must return int, got {}", self.type_name(other)), span))
+            }
+        };
         let b = match op {
             Op::Lt => ord.is_lt(),
             Op::LtEq => ord.is_le(),
@@ -850,6 +891,20 @@ impl Vm {
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
         let recv = self.pop();
+        // `compare` on a primitive (int/float/str): they intrinsically satisfy `Comparable`, so an
+        // erased generic body may call `.compare()` on a concrete primitive. Return the sign of the
+        // ordering. Structs with their own `compare` fall through to the normal dispatch below.
+        // Mirrors `interp::eval_method_call`.
+        if method == "compare" && args.len() == 1 {
+            let is_prim = matches!(recv, Value::Int(_) | Value::Float(_))
+                || matches!(recv, Value::Obj(h) if matches!(self.heap.get(h), Obj::Str(_)));
+            if is_prim
+                && let Some(ord) = self.compare(recv, args[0])
+            {
+                self.push(Value::Int(ord as i64));
+                return Ok(());
+            }
+        }
         let Value::Obj(h) = recv else {
             return Err(self.err(format!("type {} has no method '{method}'", self.type_name(recv)), span));
         };
@@ -2601,6 +2656,37 @@ main()";
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// G1 golden: `examples/generics.chz` (generics + structural `Comparable`) is byte-identical
+    /// on the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_generics_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/generics.chz");
+        let expected = include_str!("../../examples/generics.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    #[test]
+    fn struct_ordering_dispatches_to_compare_on_vm() {
+        let src = "\
+struct P:
+    n: int
+    fn compare(self, other: P) -> int:
+        return self.n - other.n
+print(P(1) < P(2))
+print(P(2) < P(1))
+print(P(5) >= P(5))
+";
+        assert_eq!(run(src), "true\nfalse\ntrue\n");
+    }
+
+    #[test]
+    fn primitive_compare_method_on_vm() {
+        let src = "fn c[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nprint(c(2, 5))\nprint(c(5, 2))\n";
+        assert_eq!(run(src), "-1\n1\n");
     }
 
     /// Gap #11 golden: `examples/sort_by.chz` (custom comparators, stable order, tuple-field sort)

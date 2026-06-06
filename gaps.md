@@ -315,8 +315,11 @@ nullary variants (`Cons(h, None)`) stay unsupported (clear checker error); **mat
 
 ## Deferred to future milestones
 
-- **Generics / operator overloading** (extends #12): `max[T]` over user types needs parametric
-  polymorphism + an ordering trait. Large; the round-2 ad-hoc int/float overload is forward-compatible.
+- ~~**Generics / operator overloading** (extends #12)~~ ✅ **M7-G1** — generic functions
+  (`fn max[T: Comparable]`) + Go-style structural **protocols** (type-erased; all work in the
+  checker, runtime barely changed). Prebuilt `Comparable` wires `< <= > >=` to a user `compare`
+  method (the sole operator overload; `==`/`!=` stay structural). See `examples/generics.chz` and
+  `docs/syntax.md` §7b. (G2 — generic *structs* `Pair[A,B]`/`Stack[T]` — follows.)
 - **Match guards** (`pattern if cond:`) and **range patterns** (`1..10:`) (extend #15): guards are the
   general mechanism (subsume range / less-than / greater-than); revisit when needed.
 - **A real `char` type / `s.chars()`** (extends #10): `ord`/`chr` cover the 80/20.

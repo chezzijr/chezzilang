@@ -29,7 +29,7 @@
 <stmts>  ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
-<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt>
+<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
 <simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <breakStmt> | <continueStmt> | <importStmt> | <exprStmt>
@@ -78,17 +78,38 @@
 # ===== declarations =====
 # An omitted "ARROW" <type> is not "returns nothing": the checker infers the return type from
 # the body's `return`s (nil only when no value is returned). Param types remain required.
+# A function may carry generic type parameters after its name: `fn max[T: Comparable](…)`. The
+# optional bound names a protocol the instantiating type must structurally satisfy.
 <fnDecl> ::= "FN" "IDENT" "LPAREN" "RPAREN" <block>
            | "FN" "IDENT" "LPAREN" <params> "RPAREN" <block>
            | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> <block>
            | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> <block>
+           | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" <block>
+           | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" <block>
+           | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> <block>
+           | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <block>
 <params> ::= <param> | <param> "COMMA" <params>
 <param>  ::= "IDENT" | "IDENT" "COLON" <type>
 
+# Generic type parameters on a fn/struct declaration: `[T]`, `[T: Comparable]`, `[A, B]`.
+<typeParams>    ::= "LBRACKET" <typeParamList> "RBRACKET"
+<typeParamList> ::= <typeParam> | <typeParam> "COMMA" <typeParamList>
+<typeParam>     ::= "IDENT" | "IDENT" "COLON" "IDENT"
+
 <structDecl>    ::= "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <structMembers> "DEDENT"
+                  | "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <structMembers> "DEDENT"
 <structMembers> ::= <structMember> | <structMember> <structMembers>
 <structMember>  ::= <field> | <fnDecl>
 <field>         ::= "IDENT" "COLON" <type> "NEWLINE"
+
+# A protocol is a Go-style structural interface: a block of body-less method signatures. A type
+# satisfies it by having matching methods (no explicit `implements`).
+<protocolDecl> ::= "PROTOCOL" "IDENT" "COLON" "NEWLINE" "INDENT" <fnSigs> "DEDENT"
+<fnSigs>       ::= <fnSig> | <fnSig> <fnSigs>
+<fnSig>        ::= "FN" "IDENT" "LPAREN" "RPAREN" "NEWLINE"
+                 | "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
+                 | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
+                 | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
 
 <enumDecl> ::= "ENUM" "IDENT" "COLON" "NEWLINE" "INDENT" <variants> "DEDENT"
 <variants> ::= <variant> | <variant> <variants>

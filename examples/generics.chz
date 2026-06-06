@@ -1,0 +1,52 @@
+# Generics + structural protocols (G1).
+#
+# `protocol`s are Go-style structural interfaces: a type satisfies one by having the right
+# methods, with no explicit `implements`. The prebuilt `Comparable` protocol requires
+# `compare(self, other: Self) -> int`; int/float/str satisfy it intrinsically, and any struct
+# that defines `compare` satisfies it too. A `T: Comparable` bound lets a generic use `<`/`>`
+# (which dispatch to `compare`) and call `.compare()` on its values.
+
+struct Point:
+    x: int
+    y: int
+
+    fn compare(self, other: Point) -> int:
+        return (self.x + self.y) - (other.x + other.y)
+
+    fn label(self) -> str:
+        return "(" + str(self.x) + ", " + str(self.y) + ")"
+
+# Generic, bounded: works for any Comparable type.
+fn max[T: Comparable](a: T, b: T) -> T:
+    if a < b:
+        return b
+    return a
+
+# Generic, unbounded: a pure pass-through, works for any type.
+fn first[T](a: T, b: T) -> T:
+    return a
+
+# Calls a protocol method on a bound type parameter.
+fn cmp[T: Comparable](a: T, b: T) -> int:
+    return a.compare(b)
+
+# max over primitives (int satisfies Comparable intrinsically)
+print(max(3, 7))
+print(max(10, 2))
+print(max("apple", "banana"))
+
+# max over a user struct that implements `compare`
+best := max(Point(1, 2), Point(3, 0))
+print(best.label())
+
+# the `<` operator on structs dispatches to `compare`
+print(Point(1, 1) < Point(5, 5))
+print(Point(9, 9) < Point(1, 1))
+
+# unbounded generic pass-through over two different types
+print(first(42, 99))
+print(first("x", "y"))
+
+# `.compare()` on a bound type parameter, over a primitive and a struct
+print(cmp(2, 5))
+print(cmp(Point(4, 4), Point(1, 1)))
