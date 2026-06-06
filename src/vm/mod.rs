@@ -3268,6 +3268,30 @@ mod parity_tests {
     }
 
     #[test]
+    fn process_cmd_ok_and_err_parity() {
+        let out = parity_entry(
+            "import std.process\nmatch process.cmd(\"printf abc\"):\n    Ok(s): print(\"ok:\" + s)\n    Err(e): print(\"err:\" + e)\nmatch process.cmd(\"exit 2\"):\n    Ok(s): print(\"ok\")\n    Err(e): print(\"err:\" + e)\n",
+        );
+        assert_eq!(out, "ok:abc\nerr:command exited with status 2\n");
+    }
+
+    #[test]
+    fn fs_predicates_parity() {
+        let out = parity_entry(
+            "import std.fs\nprint(fs.exists(\"Cargo.toml\"))\nprint(fs.exists(\"definitely_not_here.zzz\"))\nprint(fs.is_dir(\"src\"))\n",
+        );
+        assert_eq!(out, "true\nfalse\ntrue\n");
+    }
+
+    #[test]
+    fn time_format_parity() {
+        let out = parity_entry(
+            "import std.time\nprint(time.format(0))\nprint(time.format(1700000000))\nprint(time.now() > 0)\n",
+        );
+        assert_eq!(out, "1970-01-01 00:00:00\n2023-11-14 22:13:20\ntrue\n");
+    }
+
+    #[test]
     fn str_chars_parity() {
         assert_parity_out(
             "cs := \"héllo\".chars()\nprint(cs.len())\nprint(cs[1])\n",
@@ -4042,6 +4066,18 @@ main()";
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/stdlib_cmp.chz");
+    }
+
+    /// M8-M3 golden: `examples/sys.chz` — the native trio std.process/std.fs/std.time, end-to-end
+    /// on the VM, byte-identical to `.expected` and the interpreter (deterministic ops only).
+    #[test]
+    fn golden_sys_via_run_file() {
+        let path = fixture("examples/sys.chz");
+        let expected = std::fs::read_to_string(fixture("examples/sys.expected")).unwrap();
+        let (out, _err, res) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/sys.chz");
     }
 
     /// M8-M2 golden: `examples/json_dynamic.chz` — `import std.json`, the pure-Chezzi `Json` enum

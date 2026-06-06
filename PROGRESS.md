@@ -18,8 +18,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > recursive-descent `parse` (unicode `\u`/surrogates, errors as `Err`) + `stringify` +
 > accessors (`as_*`/`get`/`at`/`len`/`is_null`); golden `examples/json_dynamic.chz`
 > byte-identical both engines. (Papercut: JSON literals in Chezzi *source* must double braces
-> `{{ }}` — bare `{}` is string interpolation.) · **M3 ⬜** native trio
-> std.process(`cmd`)/std.fs/std.time. ·
+> `{{ }}` — bare `{}` is string interpolation.) · **M3 ✅** native trio —
+> std.process `cmd(s)->Result[str]` (Ok=stdout/Err=stderr via `sh -c`); std.fs
+> `list_dir/exists/is_file/is_dir/size/glob` (glob = dependency-free `*`/`?` matcher, last
+> component); std.time `now/monotonic/sleep_ms/format` (UTC date via Hinnant civil-from-days, no
+> chrono). Zero engine/`Host`/`NativeRet` changes — fns call `std::` directly + existing
+> lowering. Golden `examples/sys.chz`. ·
 > **M4 ⬜** set type. · **M5 ⬜** std.json `decode[T]` into struct/map/list/scalar. · **M6 ⬜** docs.
 
 > **Language gaps round 2 (#10–#15): ✅ ALL DONE.** See the section below.

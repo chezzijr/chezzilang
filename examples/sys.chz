@@ -1,0 +1,41 @@
+# examples/sys.chz — the M8 native trio: std.process (run commands), std.fs (filesystem
+# queries), std.time (clock + date formatting). Only deterministic operations are printed so the
+# golden output is stable (now()/monotonic() are checked as booleans, not values).
+
+import std.process
+import std.fs
+import std.time
+
+# --- std.process: a command's output comes back as Result[str] (Ok=stdout, Err=stderr) ---
+match process.cmd("echo hello from the shell"):
+    Ok(out): print("stdout: " + out.trim())
+    Err(e): print("error: " + e.trim())
+
+match process.cmd("exit 7"):
+    Ok(out): print("ok: " + out)
+    Err(e): print("failed: " + e)
+
+# --- std.fs: existence, type, size, listing, and a simple */? glob ---
+print("exists(Cargo.toml): " + str(fs.exists("Cargo.toml")))
+print("exists(nope.xyz): " + str(fs.exists("nope.xyz")))
+print("is_dir(examples): " + str(fs.is_dir("examples")))
+print("is_file(examples): " + str(fs.is_file("examples")))
+
+match fs.list_dir("examples/sysfixture"):
+    Ok(names): print("list: " + ",".join(names))
+    Err(e): print("error: " + e)
+
+match fs.glob("examples/sysfixture/*.txt"):
+    Ok(hits): print("glob: " + ",".join(hits))
+    Err(e): print("error: " + e)
+
+match fs.size("examples/sysfixture/a.txt"):
+    Ok(n): print("size: " + str(n))
+    Err(e): print("error: " + e)
+
+# --- std.time: wall clock (non-deterministic → booleans), then deterministic formatting ---
+print("now > 0: " + str(time.now() > 0))
+print("monotonic >= 0: " + str(time.monotonic() >= 0.0))
+time.sleep_ms(0)
+print("format(0): " + time.format(0))
+print("format(1700000000): " + time.format(1700000000))

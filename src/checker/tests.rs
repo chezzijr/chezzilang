@@ -1816,3 +1816,49 @@ fn tuple_element_typed() {
 fn tuple_element_out_of_range_rejected() {
     rejects("t := (1, 2)\nx := t.2\n", "has no element '.2'");
 }
+
+// ===== M8-M3: native trio std.process / std.fs / std.time signatures =====
+
+#[test]
+fn native_process_cmd_returns_result_str() {
+    entry_ok("import std.process\nfn main():\n    match process.cmd(\"echo hi\"):\n        Ok(s): print(s)\n        Err(e): print(e)\n");
+}
+
+#[test]
+fn native_process_cmd_arg_must_be_str() {
+    entry_rejects(
+        "import std.process\nfn main():\n    print(process.cmd(5))\n",
+        "argument 1 of 'cmd'",
+    );
+}
+
+#[test]
+fn native_fs_predicates_are_bool_and_size_is_result_int() {
+    entry_ok("import std.fs\nfn main():\n    b: bool = fs.is_file(\"x\")\n    e: bool = fs.exists(\"x\")\n    match fs.size(\"x\"):\n        Ok(n): print(str(n))\n        Err(m): print(m)\n");
+}
+
+#[test]
+fn native_fs_list_dir_returns_result_list_str() {
+    entry_ok("import std.fs\nfn main():\n    match fs.list_dir(\".\"):\n        Ok(xs): print(\",\".join(xs))\n        Err(e): print(e)\n");
+}
+
+#[test]
+fn native_fs_unknown_member_rejected() {
+    entry_rejects(
+        "import std.fs\nfn main():\n    print(fs.touch(\"x\"))\n",
+        "has no member 'touch'",
+    );
+}
+
+#[test]
+fn native_time_now_is_int_monotonic_is_float() {
+    entry_ok("import std.time\nfn main():\n    t: int = time.now()\n    m: float = time.monotonic()\n    time.sleep_ms(0)\n    s: str = time.format(t)\n    print(s)\n");
+}
+
+#[test]
+fn native_time_format_arg_must_be_int() {
+    entry_rejects(
+        "import std.time\nfn main():\n    print(time.format(\"x\"))\n",
+        "argument 1 of 'format'",
+    );
+}

@@ -183,6 +183,23 @@ fn native_module_sig(name: &str) -> ModuleSig {
             func("env", vec![Ty::Str], Ty::option(Ty::Str));
             func("getcwd", vec![], Ty::result(Ty::Str));
         }
+        "std.process" => {
+            func("cmd", vec![Ty::Str], Ty::result(Ty::Str));
+        }
+        "std.fs" => {
+            func("list_dir", vec![Ty::Str], Ty::result(Ty::list(Ty::Str)));
+            func("exists", vec![Ty::Str], Ty::Bool);
+            func("is_file", vec![Ty::Str], Ty::Bool);
+            func("is_dir", vec![Ty::Str], Ty::Bool);
+            func("size", vec![Ty::Str], Ty::result(Ty::Int));
+            func("glob", vec![Ty::Str], Ty::result(Ty::list(Ty::Str)));
+        }
+        "std.time" => {
+            func("now", vec![], Ty::Int);
+            func("monotonic", vec![], Ty::Float);
+            func("sleep_ms", vec![Ty::Int], Ty::Nil);
+            func("format", vec![Ty::Int], Ty::Str);
+        }
         _ => {}
     }
     sig

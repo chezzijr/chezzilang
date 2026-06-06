@@ -12,9 +12,12 @@
 //! This is the CPython-built-in-C-module model (compiled-in bindings), **not** dynamic `cdylib`/
 //! C-ABI loading — that (Level-3) stays deferred per `docs/spec.md`.
 
+pub mod fs;
 pub mod io;
 pub mod math;
 pub mod os;
+pub mod process;
+pub mod time;
 
 use std::collections::HashMap;
 
@@ -171,6 +174,9 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
             "math" => Some("std.math"),
             "io" => Some("std.io"),
             "os" => Some("std.os"),
+            "process" => Some("std.process"),
+            "fs" => Some("std.fs"),
+            "time" => Some("std.time"),
             _ => None,
         },
         _ => None,
@@ -185,6 +191,9 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn)] {
         "std.math" => math::MEMBERS,
         "std.io" => io::MEMBERS,
         "std.os" => os::MEMBERS,
+        "std.process" => process::MEMBERS,
+        "std.fs" => fs::MEMBERS,
+        "std.time" => time::MEMBERS,
         _ => &[],
     }
 }

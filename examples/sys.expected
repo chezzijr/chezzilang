@@ -1,0 +1,13 @@
+stdout: hello from the shell
+failed: command exited with status 7
+exists(Cargo.toml): true
+exists(nope.xyz): false
+is_dir(examples): true
+is_file(examples): false
+list: a.txt,b.txt,note.md
+glob: examples/sysfixture/a.txt,examples/sysfixture/b.txt
+size: 6
+now > 0: true
+monotonic >= 0: true
+format(0): 1970-01-01 00:00:00
+format(1700000000): 2023-11-14 22:13:20
