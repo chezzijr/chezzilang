@@ -193,6 +193,9 @@ struct Checker {
     module_sigs: HashMap<ModuleId, ModuleSig>,
     /// Names bound to an imported module in the *current* module → which module they refer to.
     imported_modules: HashMap<String, ModuleId>,
+    /// `from`-imported names that are numeric-polymorphic native fns (`abs`/`min`/`max`), so a bare
+    /// call resolves their result type by argument type instead of the float-only `FnSig` (gap #12).
+    imported_poly: std::collections::HashSet<String>,
     /// Label of the module currently being checked (`None` = entry); prefixes its error messages.
     current_module_label: Option<String>,
     /// How many enclosing `for`/`while` loops we're inside *within the current function body*.
@@ -217,6 +220,7 @@ impl Checker {
             collected_rets: Vec::new(),
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
+            imported_poly: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
         }
@@ -237,6 +241,7 @@ impl Checker {
         self.scopes.clear();
         self.functions.clear();
         self.imported_modules.clear();
+        self.imported_poly.clear();
         self.current_ret = Ty::Nil;
         self.inferring_ret = false;
         self.collected_rets.clear();
@@ -281,6 +286,10 @@ impl Checker {
                     let bind = alias.as_ref().unwrap_or(member);
                     if let Some(fsig) = sig.functions.get(member) {
                         self.functions.insert(bind.clone(), fsig.clone());
+                        // Carry the numeric-polymorphism marker onto the imported name (gap #12).
+                        if sig.numeric_poly.contains(member) {
+                            self.imported_poly.insert(bind.clone());
+                        }
                     } else if let Some(vty) = sig.values.get(member) {
                         self.declare(bind, vty.clone());
                     } else if sig.types.contains(member) {
@@ -1705,6 +1714,11 @@ impl Checker {
                 }
                 // Global function?
                 if let Some(sig) = self.functions.get(name).cloned() {
+                    // A `from`-imported numeric-polymorphic native fn (abs/min/max) types by its
+                    // argument type, not the float-only `FnSig` (gap #12).
+                    if self.imported_poly.contains(name) {
+                        return Some(self.infer_numeric_poly(name, sig.params.len(), args, span));
+                    }
                     self.check_args(name, &sig.params, args, span);
                     return Some(sig.ret);
                 }

@@ -430,19 +430,31 @@ impl Compiler {
             self.patch_loop(fc, inc_target);
         } else {
             // Iterate a sequence by index. `ListClone` normalises the iterand: a list is cloned, a
-            // map yields its keys (gap #14). For `for k, v in m:` the original map is also kept so
-            // the value can be looked up by key each iteration.
-            let map_slot = if vars.len() == 2 {
+            // map yields its keys (gap #14). For `for k, v in m:` we ALSO snapshot the values up
+            // front (via `values()`) and index them in lockstep — matching the interpreter's
+            // pair-snapshot semantics, so a body that mutates the map mid-loop can't perturb the
+            // values bound (and can't crash the key→value lookup).
+            let vals_slot = if vars.len() == 2 {
                 self.compile_expr(fc, iter)?;
                 let m = fc.add_hidden();
                 fc.emit(Op::SetLocal(m), span);
+                // keys snapshot (the sequence we iterate)
                 fc.emit(Op::GetLocal(m), span);
-                Some(m)
+                fc.emit(Op::ListClone, iter.span);
+                let keys = fc.add_hidden();
+                fc.emit(Op::SetLocal(keys), span);
+                // values snapshot, aligned with keys (same insertion order, same instant)
+                fc.emit(Op::GetLocal(m), span);
+                fc.emit(Op::CallMethod("values".to_string(), 0), span);
+                let vals = fc.add_hidden();
+                fc.emit(Op::SetLocal(vals), span);
+                fc.emit(Op::GetLocal(keys), span); // leave keys on the stack as the iterand
+                Some(vals)
             } else {
                 self.compile_expr(fc, iter)?;
+                fc.emit(Op::ListClone, iter.span);
                 None
             };
-            fc.emit(Op::ListClone, iter.span);
             let lst = fc.add_hidden();
             fc.emit(Op::SetLocal(lst), span);
             fc.emit(Op::GetLocal(lst), span);
@@ -453,9 +465,9 @@ impl Compiler {
             let idx = fc.add_hidden();
             fc.emit(Op::SetLocal(idx), span);
             // The loop variable(s): the sequence element binds the first (key for a map); for the
-            // two-name map form the value is fetched via `map[key]`.
+            // two-name map form the value is read from the values snapshot at the same index.
             let key_slot = fc.add_local(vars[0].clone());
-            let val_slot = map_slot.map(|_| fc.add_local(vars[1].clone()));
+            let val_slot = vals_slot.map(|_| fc.add_local(vars[1].clone()));
 
             let loop_start = fc.here();
             fc.emit(Op::GetLocal(idx), span);
@@ -466,9 +478,9 @@ impl Compiler {
             fc.emit(Op::GetLocal(idx), span);
             fc.emit(Op::GetIndex, span);
             fc.emit(Op::SetLocal(key_slot), span);
-            if let (Some(m), Some(v)) = (map_slot, val_slot) {
-                fc.emit(Op::GetLocal(m), span);
-                fc.emit(Op::GetLocal(key_slot), span);
+            if let (Some(vals), Some(v)) = (vals_slot, val_slot) {
+                fc.emit(Op::GetLocal(vals), span);
+                fc.emit(Op::GetLocal(idx), span);
                 fc.emit(Op::GetIndex, span);
                 fc.emit(Op::SetLocal(v), span);
             }

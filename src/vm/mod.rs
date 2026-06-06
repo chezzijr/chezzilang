@@ -992,33 +992,42 @@ impl Vm {
     /// elements from the rooted heap object on each comparison. The final permutation is materialised
     /// only after all comparator calls finish (no GC in between). Returns `nil`.
     fn list_sort_by(&mut self, src_h: GcRef, mut args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
-        // ROOT the source list so its elements survive every comparator call.
-        self.push(Value::Obj(src_h));
         if args.len() != 1 {
-            self.pop(); // unroot source before erroring
             return Err(self.err(format!("'sort_by' expects 1 argument(s), got {}", args.len()), span));
         }
         let cmp = args.swap_remove(0);
-        let n = match self.heap.get(src_h) {
-            Obj::List(v) => v.len(),
-            _ => unreachable!("list_sort_by on non-list"),
+        // Sort a SNAPSHOT taken now (matching the interpreter): a comparator that mutates the source
+        // list mid-sort must not perturb the ordering, and its mutations are discarded by the final
+        // write-back. The snapshot list is itself heap-allocated and rooted on the operand stack so
+        // its elements survive the comparator's collections.
+        let snap_h = {
+            let elems = match self.heap.get(src_h) {
+                Obj::List(v) => v.clone(),
+                _ => unreachable!("list_sort_by on non-list"),
+            };
+            self.heap.alloc(Obj::List(elems))
         };
-        let order = match self.msort_indices(src_h, (0..n).collect(), cmp, span) {
+        self.push(Value::Obj(snap_h)); // ROOT the snapshot
+        let n = match self.heap.get(snap_h) {
+            Obj::List(v) => v.len(),
+            _ => unreachable!(),
+        };
+        let order = match self.msort_indices(snap_h, (0..n).collect(), cmp, span) {
             Ok(o) => o,
             Err(e) => {
-                self.pop(); // unroot source
+                self.pop(); // unroot snapshot
                 return Err(e);
             }
         };
-        // No comparator calls remain, so no GC: safe to read the rooted elements and reorder.
-        let reordered: Vec<Value> = match self.heap.get(src_h) {
+        // No comparator calls remain, so no GC: read the rooted snapshot and write the result back.
+        let reordered: Vec<Value> = match self.heap.get(snap_h) {
             Obj::List(v) => order.iter().map(|&i| v[i]).collect(),
             _ => unreachable!(),
         };
         if let Obj::List(v) = self.heap.get_mut(src_h) {
             *v = reordered;
         }
-        self.pop(); // unroot source
+        self.pop(); // unroot snapshot
         Ok(Value::Nil)
     }
 
@@ -2974,6 +2983,25 @@ mod parity_tests {
     }
 
     #[test]
+    fn for_over_map_kv_mutation_during_iteration_parity() {
+        // The body reassigns a not-yet-visited key; both engines must agree (snapshot semantics:
+        // the value bound is the one captured at loop start, like list iteration).
+        assert_parity_out(
+            "m := {\"a\": 1, \"b\": 2, \"c\": 3}\nout := 0\nfor k, v in m:\n    m[\"c\"] = 99\n    out += v\nprint(out)\n",
+            "6\n",
+        );
+    }
+
+    #[test]
+    fn for_over_map_kv_remove_during_iteration_parity() {
+        // Removing a future key mid-iteration must not crash one engine while the other succeeds.
+        assert_parity_out(
+            "m := {\"a\": 1, \"b\": 2}\nfirst := true\nsum := 0\nfor k, v in m:\n    if first:\n        m.remove(\"b\")\n        first = false\n    sum += v\nprint(sum)\n",
+            "3\n",
+        );
+    }
+
+    #[test]
     fn for_over_map_break_continue_parity() {
         // break/continue still target the index increment over the keys sequence.
         assert_parity_out(
@@ -3038,6 +3066,16 @@ mod parity_tests {
             "ws := [\"bb\", \"a\", \"dd\", \"e\"]\nws.sort_by(fn(a: str, b: str) -> int: a.len() - b.len())\nprint(ws)\n",
             "[a, e, bb, dd]\n",
         );
+    }
+
+    #[test]
+    fn sort_by_comparator_mutates_list_parity() {
+        // A comparator that mutates an element being sorted must behave identically on both engines.
+        // Both sort a snapshot taken at call time and overwrite the list with the sorted result, so
+        // the in-comparator `xs[0] = 100` is discarded.
+        let src = "xs := [3, 1, 2]\nfn cmp(a: int, b: int) -> int:\n    xs[0] = 100\n    return a - b\nxs.sort_by(cmp)\nprint(xs)\n";
+        assert_parity(src);
+        assert_eq!(vm_outcome(src).unwrap(), "[1, 2, 3]\n");
     }
 
     #[test]

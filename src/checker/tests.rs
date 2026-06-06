@@ -1030,6 +1030,25 @@ fn native_math_max_mixed_int_float_rejected() {
 }
 
 #[test]
+fn native_math_from_import_max_int_returns_int() {
+    // The `from`-import form must keep abs/min/max polymorphic, like the qualified `math.max`.
+    entry_ok("import max from std.math\nfn main():\n    x: int = max(3, 5)\n    print(x)\n");
+}
+
+#[test]
+fn native_math_from_import_max_float_returns_float() {
+    entry_ok("import max from std.math\nfn main():\n    x: float = max(3.0, 5.0)\n    print(x)\n");
+}
+
+#[test]
+fn native_math_from_import_max_int_not_float() {
+    entry_rejects(
+        "import max from std.math\nfn main():\n    x: float = max(3, 5)\n    print(x)\n",
+        "",
+    );
+}
+
+#[test]
 fn native_math_floor_still_float_only() {
     // Only abs/min/max became polymorphic; floor stays float-only.
     entry_rejects(
