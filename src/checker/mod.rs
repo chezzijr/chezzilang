@@ -760,20 +760,20 @@ impl Checker {
                 ("map", [k, v]) => {
                     let key = self.resolve_type(k, span);
                     let value = self.resolve_type(v, span);
-                    if !is_hashable_key(&key) {
+                    if !self.is_hashable_key(&key) {
                         self.error(
                             span,
-                            format!("map key type must be a hashable scalar (int, str, or bool), found {key}"),
+                            format!("map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {key}"),
                         );
                     }
                     Ty::map(key, value)
                 }
                 ("set", [t]) => {
                     let elem = self.resolve_type(t, span);
-                    if !is_hashable_key(&elem) {
+                    if !self.is_hashable_key(&elem) {
                         self.error(
                             span,
-                            format!("set element type must be a hashable scalar (int, str, or bool), found {elem}"),
+                            format!("set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {elem}"),
                         );
                     }
                     Ty::set(elem)
@@ -1653,10 +1653,10 @@ impl Checker {
         let mut elem = Ty::Unknown;
         for e in elems {
             let et = self.infer(e);
-            if !et.is_unknown() && !is_hashable_key(&et) {
+            if !et.is_unknown() && !self.is_hashable_key(&et) {
                 self.error(
                     e.span,
-                    format!("set element type must be a hashable scalar (int, str, or bool), found {et}"),
+                    format!("set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {et}"),
                 );
             }
             if elem.is_unknown() {
@@ -1674,10 +1674,10 @@ impl Checker {
         for (k_expr, v_expr) in entries {
             let kt = self.infer(k_expr);
             let vt = self.infer(v_expr);
-            if !kt.is_unknown() && !is_hashable_key(&kt) {
+            if !kt.is_unknown() && !self.is_hashable_key(&kt) {
                 self.error(
                     k_expr.span,
-                    format!("map key type must be a hashable scalar (int, str, or bool), found {kt}"),
+                    format!("map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {kt}"),
                 );
             }
             if key.is_unknown() {
@@ -2105,10 +2105,10 @@ impl Checker {
                                 Ty::Unknown
                             }
                         };
-                        if !elem.is_unknown() && !is_hashable_key(&elem) {
+                        if !elem.is_unknown() && !self.is_hashable_key(&elem) {
                             self.error(
                                 span,
-                                format!("set element type must be a hashable scalar (int, str, or bool), found {elem}"),
+                                format!("set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {elem}"),
                             );
                         }
                         Some(Ty::set(elem))
@@ -2670,6 +2670,14 @@ impl Checker {
 
     /// Does concrete `ty` structurally satisfy `protocol`? Read-only. Primitives intrinsically
     /// satisfy `Comparable`; structs satisfy any protocol whose methods they all implement.
+    /// Valid `map` key / `set` element types: anything that satisfies the `Hashable` protocol —
+    /// the scalars `int`/`str`/`bool` intrinsically, or a struct defining `hash(self) -> int`.
+    /// `float` is rejected (NaN/equality footgun); `Unknown` is tolerated (no cascade). With this,
+    /// user structs can be map keys / set elements, hashed via their `hash()` at runtime.
+    fn is_hashable_key(&self, t: &Ty) -> bool {
+        self.satisfies(t, "Hashable").is_ok()
+    }
+
     fn satisfies(&self, ty: &Ty, protocol: &str) -> Result<(), String> {
         let Some(pinfo) = self.protocols.get(protocol) else {
             return Err(format!("unknown protocol '{protocol}'"));
@@ -2824,10 +2832,12 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         "Hashable".to_string(),
         ProtocolInfo {
             // receiver `self` (Unknown) only, returning int. A struct with `hash(self) -> int`
-            // satisfies it. NOTE (M10-G2): the protocol exists as a generic bound only — it is NOT
-            // yet wired to map/set keys (maps are association lists keyed by structural equality, so
-            // no hash is computed). Lifting the int/str/bool key restriction is deferred to the
-            // map-model rework.
+            // satisfies it. WIRED TO MAP/SET KEYS: `map`/`set` are real hash tables (insertion-order
+            // entries + a hash→position index), so any `Hashable` type can be a key/element — the
+            // scalars int/str/bool intrinsically, or a struct via its `hash()` (dispatched at
+            // runtime, hash confirmed by structural `==`). CONTRACT: two structurally-equal structs
+            // (the `==` used to confirm a probe) MUST return the same `hash()` — the implementor owns
+            // this (like Rust's `Hash`/`Eq`); the checker can't enforce purity.
             methods: vec![("hash".to_string(), FnSig::plain(vec![Ty::Unknown], Ty::Int))],
         },
     );
@@ -2997,12 +3007,6 @@ fn list_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
 /// Element types that have a total order for `sort()`: the scalar comparables.
 fn is_orderable(t: &Ty) -> bool {
     matches!(t, Ty::Int | Ty::Float | Ty::Str)
-}
-
-/// Valid `map` key types: the hashable scalars. `float` and composites are rejected (float
-/// equality footgun; composites have no stable identity). `Unknown` is tolerated (no cascade).
-fn is_hashable_key(t: &Ty) -> bool {
-    matches!(t, Ty::Int | Ty::Str | Ty::Bool | Ty::Unknown)
 }
 
 /// Built-in method signatures on `map[K, V]` (gap #5). `k`/`v` are the key / value types.

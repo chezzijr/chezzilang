@@ -12,6 +12,7 @@ mod env;
 mod value;
 
 pub use value::Value;
+use value::{MapData, SetData};
 
 /// A runtime error, with the source span it occurred at.
 #[derive(Debug, Clone, PartialEq)]
@@ -204,27 +205,30 @@ impl Interp {
                 Ok(Value::Tuple(std::rc::Rc::new(vals)))
             }
             ExprKind::Map(entries) => {
-                // Evaluate key then value per entry; duplicate keys upsert (last wins).
-                let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(entries.len());
+                // Evaluate key then value per entry; duplicate keys upsert (last wins). A struct
+                // key's hash() re-enters the interpreter (fine — the Rc heap never moves).
+                let mut map = MapData::default();
                 for (k_expr, v_expr) in entries {
                     let k = self.eval(k_expr)?;
                     let v = self.eval(v_expr)?;
-                    match pairs.iter().position(|(ek, _)| values_equal(ek, &k)) {
-                        Some(i) => pairs[i].1 = v,
-                        None => pairs.push((k, v)),
+                    let hk = self.hash_value(&k, expr.span)?;
+                    match map.candidates(hk).iter().copied().find(|&p| values_equal(&map.entries[p].1, &k)) {
+                        Some(i) => map.entries[i].2 = v,
+                        None => map.push(hk, k, v),
                     }
                 }
-                Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(pairs))))
+                Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map))))
             }
             ExprKind::Set(elems) => {
-                let mut items: Vec<Value> = Vec::with_capacity(elems.len());
+                let mut set = SetData::default();
                 for e in elems {
                     let v = self.eval(e)?;
-                    if !items.iter().any(|x| values_equal(x, &v)) {
-                        items.push(v);
+                    let hv = self.hash_value(&v, expr.span)?;
+                    if !set.candidates(hv).iter().copied().any(|p| values_equal(&set.entries[p].1, &v)) {
+                        set.push(hv, v);
                     }
                 }
-                Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(items))))
+                Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(set))))
             }
             ExprKind::Closure { params, body, .. } => {
                 Ok(Value::Closure(std::rc::Rc::new(value::Closure {
@@ -283,11 +287,15 @@ impl Interp {
                 match &target {
                     Value::Map(entries) => {
                         let key = self.eval(index)?;
-                        entries
-                            .borrow()
+                        // Hash BEFORE borrowing the map: a struct key's hash() may read this same
+                        // map (re-entrant) and a live `borrow()` would double-borrow-panic.
+                        let hk = self.hash_value(&key, expr.span)?;
+                        let m = entries.borrow();
+                        m.candidates(hk)
                             .iter()
-                            .find(|(k, _)| values_equal(k, &key))
-                            .map(|(_, v)| v.clone())
+                            .copied()
+                            .find(|&p| values_equal(&m.entries[p].1, &key))
+                            .map(|p| m.entries[p].2.clone())
                             .ok_or_else(|| RuntimeError {
                                 message: "key not found".to_string(),
                                 span: expr.span,
@@ -465,13 +473,14 @@ impl Interp {
                     return Err(mismatch("object"));
                 };
                 let src = entries.borrow().clone();
-                let mut out: Vec<(Value, Value)> = Vec::with_capacity(src.len());
-                for (k, v) in &src {
+                let mut out = MapData::default();
+                for (hk, k, v) in &src.entries {
                     let key = match k {
                         Value::Str(s) => s.to_string(),
                         _ => String::new(),
                     };
-                    out.push((k.clone(), self.coerce_json(v, inner, &format!("{path}.{key}"))?));
+                    // str keys are unchanged → reuse their cached hash.
+                    out.push(*hk, k.clone(), self.coerce_json(v, inner, &format!("{path}.{key}"))?);
                 }
                 Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(out))))
             }
@@ -485,10 +494,10 @@ impl Interp {
                 let src = entries.borrow().clone();
                 let mut field_vals: Vec<(String, Value)> = Vec::with_capacity(fields.len());
                 for (fname, fdesc) in fields {
-                    let found = src.iter().find(|(k, _)| matches!(k, Value::Str(s) if s.as_ref() == fname));
+                    let found = src.entries.iter().find(|(_, k, _)| matches!(k, Value::Str(s) if s.as_ref() == fname));
                     let fpath = format!("{path}.{fname}");
                     let v = match found {
-                        Some((_, jval)) => self.coerce_json(jval, fdesc, &fpath)?,
+                        Some((_, _, jval)) => self.coerce_json(jval, fdesc, &fpath)?,
                         None => match fdesc {
                             D::Option(_) => enum_val("Option", "None", Vec::new()),
                             _ => return Err(format!("decode: missing key '{fname}' at {path}")),
@@ -585,6 +594,11 @@ impl Interp {
             if name == "str" && arg_vals.len() == 1 {
                 let s = self.stringify(&arg_vals[0], span)?;
                 return Ok(Value::Str(s.into()));
+            }
+            // `set(list)` can take a list of structs whose `hash()` re-enters the engine, so it can't
+            // live in the pure `builtins` table — route it here. Other builtins stay pure.
+            if name == "set" {
+                return self.builtin_set(arg_vals, span);
             }
             if builtins::is_builtin(name) {
                 return builtins::call(name, arg_vals, span);
@@ -847,8 +861,18 @@ impl Interp {
             let list = std::rc::Rc::clone(items);
             return self.eval_list_sort(list, elems, span);
         }
-        // Core-type methods (M6): built-in methods on `str`, `list`, and `map` dispatch on the value.
-        if matches!(receiver, Value::Str(_) | Value::List(_) | Value::Map(_) | Value::Set(_)) {
+        // Map/set methods can hash a struct key (engine access for the user `hash()`), so they live
+        // here rather than the pure `builtins` table. (Mirrors the `sort`-over-structs routing.)
+        if let Value::Map(m) = &receiver {
+            let m = std::rc::Rc::clone(m);
+            return self.eval_map_method(&m, method, arg_vals, span);
+        }
+        if let Value::Set(s) = &receiver {
+            let s = std::rc::Rc::clone(s);
+            return self.eval_set_method(&s, method, arg_vals, span);
+        }
+        // Core-type methods (M6): built-in methods on `str` and `list` dispatch on the value.
+        if matches!(receiver, Value::Str(_) | Value::List(_)) {
             return builtins::call_method(&receiver, method, arg_vals, span);
         }
         // `module.fn(args)` is a plain call on the looked-up member — no `self` is bound.
@@ -916,19 +940,20 @@ impl Interp {
                 let elems = (**items).clone();
                 Ok(format!("({})", self.stringify_seq(&elems, span)?))
             }
-            Value::Map(entries) => {
-                let entries = entries.borrow().clone();
+            Value::Map(m) => {
+                let entries = m.borrow().entries.clone();
                 let mut rendered = Vec::with_capacity(entries.len());
-                for (k, mv) in &entries {
+                for (_, k, mv) in &entries {
                     rendered.push(format!("{}: {}", self.stringify(k, span)?, self.stringify(mv, span)?));
                 }
                 Ok(format!("{{{}}}", rendered.join(", ")))
             }
-            Value::Set(items) => {
-                let elems = items.borrow().clone();
-                if elems.is_empty() {
+            Value::Set(s) => {
+                let entries = s.borrow().entries.clone();
+                if entries.is_empty() {
                     Ok("set()".to_string())
                 } else {
+                    let elems: Vec<Value> = entries.into_iter().map(|(_, e)| e).collect();
                     Ok(format!("{{{}}}", self.stringify_seq(&elems, span)?))
                 }
             }
@@ -1016,6 +1041,45 @@ impl Interp {
             Value::Int(n) => Ok(n.cmp(&0)),
             other => Err(RuntimeError {
                 message: format!("compare() must return int, got {}", other.type_name()),
+                span,
+            }),
+        }
+    }
+
+    /// A `u64` hash of `v` for map/set keys, upholding `values_equal(a,b) ⇒ hash(a)==hash(b)`.
+    /// Numeric keys hash by canonical f64 bits (so `3` and `3.0` collide); str by content; a struct
+    /// key dispatches its user `hash(self) -> int` (re-entrant via `self.call`, but the Rc heap
+    /// never moves, so no rooting is needed — unlike the VM). Floats are rejected as keys by the
+    /// checker, so only integral-valued floats reach here.
+    fn hash_value(&mut self, v: &Value, span: Span) -> Result<u64, RuntimeError> {
+        match v {
+            Value::Struct { .. } => self.struct_hash(v, span),
+            Value::Str(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Nil => {
+                Ok(scalar_hash(v))
+            }
+            other => Err(RuntimeError {
+                message: format!("{} is not hashable (cannot be a map/set key)", other.type_name()),
+                span,
+            }),
+        }
+    }
+
+    /// Dispatch a struct key's user `hash(self) -> int`, returning its `i64` as a `u64`. Mirrors
+    /// [`struct_compare`].
+    fn struct_hash(&mut self, v: &Value, span: Span) -> Result<u64, RuntimeError> {
+        let Value::Struct { name, .. } = v else { unreachable!() };
+        let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
+            message: format!("unknown struct type '{name}'"),
+            span,
+        })?;
+        let decl = def.methods.get("hash").cloned().ok_or_else(|| RuntimeError {
+            message: format!("struct '{name}' has no 'hash' method (needed to use it as a map/set key)"),
+            span,
+        })?;
+        match self.call(&decl, &def.home, vec![v.clone()], span)? {
+            Value::Int(n) => Ok(n as u64),
+            other => Err(RuntimeError {
+                message: format!("hash() must return int, got {}", other.type_name()),
                 span,
             }),
         }
@@ -1134,6 +1198,187 @@ impl Interp {
                 Ok(acc)
             }
             _ => unreachable!("eval_list_hof called with non-HOF method {method}"),
+        }
+    }
+
+    /// `set()` → empty set; `set(list)` → a deduped hash set of the list's elements. On `Interp`
+    /// (not `builtins`) because a struct element's `hash()` re-enters the engine. Mirrors
+    /// `vm::Vm::builtin_set`.
+    fn builtin_set(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+        let src: Vec<Value> = match args.as_slice() {
+            [] => Vec::new(),
+            [Value::List(items)] => items.borrow().clone(),
+            [other] => {
+                return Err(RuntimeError {
+                    message: format!("set() expects a list, got {}", other.type_name()),
+                    span,
+                });
+            }
+            _ => {
+                return Err(RuntimeError {
+                    message: format!("set() expects 0 or 1 argument(s), got {}", args.len()),
+                    span,
+                });
+            }
+        };
+        let mut set = SetData::default();
+        for v in src {
+            let hv = self.hash_value(&v, span)?;
+            if !set.candidates(hv).iter().copied().any(|p| values_equal(&set.entries[p].1, &v)) {
+                set.push(hv, v);
+            }
+        }
+        Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(set))))
+    }
+
+    /// Built-in methods on `map[K, V]`. Mirrors the VM's `core_method` Map arm and the checker's
+    /// `map_method_sig` (keep the three in lockstep, error strings included). Lives on `Interp` (not
+    /// the pure `builtins` table) because a struct key's `hash()` re-enters the engine. `get`/`remove`
+    /// return `Option[V]`.
+    fn eval_map_method(
+        &mut self,
+        m: &std::rc::Rc<std::cell::RefCell<MapData>>,
+        method: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let some = |v: Value| Value::Enum { ty: "Option".into(), variant: "Some".into(), payload: vec![v] };
+        let none = || Value::Enum { ty: "Option".into(), variant: "None".into(), payload: vec![] };
+        match method {
+            "len" => {
+                builtins::arity("len", &args, 0, span)?;
+                Ok(Value::Int(m.borrow().entries.len() as i64))
+            }
+            "has" => {
+                builtins::arity("has", &args, 1, span)?;
+                let hk = self.hash_value(&args[0], span)?; // hash before borrowing (re-entrant)
+                let mm = m.borrow();
+                Ok(Value::Bool(mm.candidates(hk).iter().any(|&p| values_equal(&mm.entries[p].1, &args[0]))))
+            }
+            "get" => {
+                builtins::arity("get", &args, 1, span)?;
+                let hk = self.hash_value(&args[0], span)?;
+                let found = {
+                    let mm = m.borrow();
+                    mm.candidates(hk).iter().copied()
+                        .find(|&p| values_equal(&mm.entries[p].1, &args[0]))
+                        .map(|p| mm.entries[p].2.clone())
+                };
+                Ok(found.map(some).unwrap_or_else(none))
+            }
+            "keys" => {
+                builtins::arity("keys", &args, 0, span)?;
+                let keys: Vec<Value> = m.borrow().entries.iter().map(|(_, k, _)| k.clone()).collect();
+                Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(keys))))
+            }
+            "values" => {
+                builtins::arity("values", &args, 0, span)?;
+                let vals: Vec<Value> = m.borrow().entries.iter().map(|(_, _, v)| v.clone()).collect();
+                Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(vals))))
+            }
+            "remove" => {
+                builtins::arity("remove", &args, 1, span)?;
+                let hk = self.hash_value(&args[0], span)?;
+                let pos = {
+                    let mm = m.borrow();
+                    mm.candidates(hk).iter().copied().find(|&p| values_equal(&mm.entries[p].1, &args[0]))
+                };
+                match pos {
+                    Some(i) => {
+                        let (_, _, v) = m.borrow_mut().remove_at(i);
+                        Ok(some(v))
+                    }
+                    None => Ok(none()),
+                }
+            }
+            _ => Err(RuntimeError { message: format!("type map has no method '{method}'"), span }),
+        }
+    }
+
+    /// Built-in methods on `set[T]`. Mirrors the VM's `core_method` Set arm and the checker's
+    /// `set_method_sig`. On `Interp` (not `builtins`) for struct-key `hash()` access. Set algebra
+    /// reuses each operand's per-element cached hash, so it never re-enters the engine.
+    fn eval_set_method(
+        &mut self,
+        s: &std::rc::Rc<std::cell::RefCell<SetData>>,
+        method: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            "len" => {
+                builtins::arity("len", &args, 0, span)?;
+                Ok(Value::Int(s.borrow().entries.len() as i64))
+            }
+            "has" => {
+                builtins::arity("has", &args, 1, span)?;
+                let hx = self.hash_value(&args[0], span)?;
+                let ss = s.borrow();
+                Ok(Value::Bool(ss.candidates(hx).iter().any(|&p| values_equal(&ss.entries[p].1, &args[0]))))
+            }
+            "add" => {
+                builtins::arity("add", &args, 1, span)?;
+                let hx = self.hash_value(&args[0], span)?;
+                let present = {
+                    let ss = s.borrow();
+                    ss.candidates(hx).iter().any(|&p| values_equal(&ss.entries[p].1, &args[0]))
+                };
+                if !present {
+                    s.borrow_mut().push(hx, args[0].clone());
+                }
+                Ok(Value::Nil)
+            }
+            "remove" => {
+                builtins::arity("remove", &args, 1, span)?;
+                let hx = self.hash_value(&args[0], span)?;
+                let pos = {
+                    let ss = s.borrow();
+                    ss.candidates(hx).iter().copied().find(|&p| values_equal(&ss.entries[p].1, &args[0]))
+                };
+                match pos {
+                    Some(i) => {
+                        s.borrow_mut().remove_at(i);
+                        Ok(Value::Bool(true))
+                    }
+                    None => Ok(Value::Bool(false)),
+                }
+            }
+            "union" | "intersection" | "difference" => {
+                builtins::arity(method, &args, 1, span)?;
+                let Value::Set(other) = &args[0] else {
+                    return Err(RuntimeError {
+                        message: format!("{method}() expects a set argument, got {}", args[0].type_name()),
+                        span,
+                    });
+                };
+                // Both operands carry per-element cached hashes — no re-hashing, no re-entry.
+                let mine = s.borrow().entries.clone();
+                let other = other.borrow().clone();
+                let mut out = SetData::default();
+                let add = |out: &mut SetData, he: u64, e: &Value| {
+                    if !out.candidates(he).iter().any(|&p| values_equal(&out.entries[p].1, e)) {
+                        out.push(he, e.clone());
+                    }
+                };
+                match method {
+                    "union" => {
+                        for (he, e) in mine.iter().chain(other.entries.iter()) {
+                            add(&mut out, *he, e);
+                        }
+                    }
+                    m => {
+                        let keep_when_present = m == "intersection";
+                        for (he, e) in &mine {
+                            let in_other = other.candidates(*he).iter().any(|&p| values_equal(&other.entries[p].1, e));
+                            if in_other == keep_when_present {
+                                add(&mut out, *he, e);
+                            }
+                        }
+                    }
+                }
+                Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(out))))
+            }
+            _ => Err(RuntimeError { message: format!("type set has no method '{method}'"), span }),
         }
     }
 
@@ -1550,10 +1795,11 @@ impl Interp {
         // collection doesn't disturb iteration, and no borrow is held across the body.
         let rows: Vec<Vec<Value>> = match self.eval(iter)? {
             Value::List(items) => items.borrow().iter().map(|v| vec![v.clone()]).collect(),
-            Value::Map(entries) => entries
+            Value::Map(m) => m
                 .borrow()
+                .entries
                 .iter()
-                .map(|(k, v)| {
+                .map(|(_, k, v)| {
                     if vars.len() == 2 {
                         vec![k.clone(), v.clone()]
                     } else {
@@ -1561,7 +1807,7 @@ impl Interp {
                     }
                 })
                 .collect(),
-            Value::Set(items) => items.borrow().iter().map(|v| vec![v.clone()]).collect(),
+            Value::Set(s) => s.borrow().entries.iter().map(|(_, e)| vec![e.clone()]).collect(),
             // Strings iterate as 1-char strings (Python-style; the checker binds a single str var).
             Value::Str(s) => s.chars().map(|c| vec![Value::Str(c.to_string().into())]).collect(),
             other => {
@@ -1647,15 +1893,20 @@ impl Interp {
                 // Map upsert: the key is an arbitrary value (str/bool/int), not an int index.
                 if let Value::Map(entries) = &target_val {
                     let key = self.eval(index)?;
+                    // Hash before borrowing (a struct key's hash() may re-read this map).
+                    let hk = self.hash_value(&key, span)?;
                     let new_val = match op {
                         AssignOp::Eq => self.eval(value)?,
                         AssignOp::PlusEq | AssignOp::MinusEq => {
                             // Compound on a missing key is an error (consistent with read-missing).
-                            let cur = entries
-                                .borrow()
-                                .iter()
-                                .find(|(k, _)| values_equal(k, &key))
-                                .map(|(_, v)| v.clone());
+                            let cur = {
+                                let m = entries.borrow();
+                                m.candidates(hk)
+                                    .iter()
+                                    .copied()
+                                    .find(|&p| values_equal(&m.entries[p].1, &key))
+                                    .map(|p| m.entries[p].2.clone())
+                            };
                             let Some(cur) = cur else {
                                 return Err(RuntimeError {
                                     message: "key not found".to_string(),
@@ -1667,10 +1918,13 @@ impl Interp {
                             eval_binary(bin, cur, rhs, span)?
                         }
                     };
-                    let pos = entries.borrow().iter().position(|(k, _)| values_equal(k, &key));
+                    let pos = {
+                        let m = entries.borrow();
+                        m.candidates(hk).iter().copied().find(|&p| values_equal(&m.entries[p].1, &key))
+                    };
                     match pos {
-                        Some(i) => entries.borrow_mut()[i].1 = new_val,
-                        None => entries.borrow_mut().push((key, new_val)),
+                        Some(i) => entries.borrow_mut().entries[i].2 = new_val,
+                        None => entries.borrow_mut().push(hk, key, new_val),
                     }
                     return Ok(());
                 }
@@ -1941,11 +2195,14 @@ fn lower_native(ret: crate::native::NativeRet) -> Value {
             }
         }
         N::Map(entries) => {
-            let es = entries
-                .into_iter()
-                .map(|(k, v)| (lower_native(k), lower_native(v)))
-                .collect();
-            Value::Map(std::rc::Rc::new(std::cell::RefCell::new(es)))
+            // Native maps have unique scalar (str) keys — hash directly, no dedup needed.
+            let mut map = MapData::default();
+            for (k, v) in entries {
+                let lk = lower_native(k);
+                let hk = scalar_hash(&lk);
+                map.push(hk, lk, lower_native(v));
+            }
+            Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map)))
         }
         N::Ok(inner) => enum_val("Result", "Ok", vec![lower_native(*inner)]),
         N::Err(msg) => enum_val("Result", "Err", vec![Value::Str(msg.into())]),
@@ -2125,6 +2382,28 @@ fn compare(l: &Value, r: &Value) -> Option<std::cmp::Ordering> {
 }
 
 /// Structural equality for `==` / `!=`. Cross-type compares are simply unequal.
+/// Infallible hash for scalar keys (int/float/bool/nil/str). Numeric values hash by canonical f64
+/// bits so `3` and `3.0` collide; str by content. Non-scalar values fall back to `0` (a
+/// correctness-safe degenerate hash — `values_equal` still confirms each probe). Mirrors
+/// `vm::Vm::scalar_hash`.
+pub(super) fn scalar_hash(v: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    match v {
+        // Normalise zero so `Int(0)`, `+0.0`, and `-0.0` (all `values_equal`) hash identically —
+        // `(-0.0).to_bits() != (0.0).to_bits()` would otherwise break the hash invariant.
+        Value::Int(n) => (if *n == 0 { 0.0 } else { *n as f64 }).to_bits(),
+        Value::Float(f) => (if *f == 0.0 { 0.0 } else { *f }).to_bits(),
+        Value::Bool(b) => *b as u64,
+        Value::Nil => 0,
+        Value::Str(s) => {
+            let mut hr = std::collections::hash_map::DefaultHasher::new();
+            s.as_bytes().hash(&mut hr);
+            hr.finish()
+        }
+        _ => 0,
+    }
+}
+
 pub(super) fn values_equal(l: &Value, r: &Value) -> bool {
     match (l, r) {
         (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
@@ -2133,7 +2412,8 @@ pub(super) fn values_equal(l: &Value, r: &Value) -> bool {
         // Sets are unordered: equal iff same size and every element of one is in the other.
         (Value::Set(a), Value::Set(b)) => {
             let (a, b) = (a.borrow(), b.borrow());
-            a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| values_equal(x, y)))
+            a.entries.len() == b.entries.len()
+                && a.entries.iter().all(|(_, x)| b.entries.iter().any(|(_, y)| values_equal(x, y)))
         }
         _ => l == r,
     }
@@ -2257,10 +2537,11 @@ mod tests {
         use crate::native::NativeRet as N;
         let ret = N::Map(vec![(N::Str("k".into()), N::Str("v".into()))]);
         match lower_native(ret) {
-            Value::Map(entries) => {
-                let e = entries.borrow();
-                assert_eq!(e.len(), 1);
-                assert_eq!(e[0], (Value::Str("k".into()), Value::Str("v".into())));
+            Value::Map(m) => {
+                let m = m.borrow();
+                assert_eq!(m.entries.len(), 1);
+                assert_eq!(m.entries[0].1, Value::Str("k".into()));
+                assert_eq!(m.entries[0].2, Value::Str("v".into()));
             }
             other => panic!("expected Map, got {other:?}"),
         }
@@ -2887,6 +3168,14 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/generic_enum.chz");
         let expected = include_str!("../../examples/generic_enum.expected");
         assert_eq!(run_capture(source).expect("generic_enum.chz should run"), expected);
+    }
+
+    /// Golden: real hash-table map/set with Hashable struct keys, on the interp.
+    #[test]
+    fn golden_hashmap_keys_chz() {
+        let source = include_str!("../../examples/hashmap_keys.chz");
+        let expected = include_str!("../../examples/hashmap_keys.expected");
+        assert_eq!(run_capture(source).expect("hashmap_keys.chz should run"), expected);
     }
 
     /// M10-G1 golden: the `Stringable` protocol — `str(self)` overrides print/str()/interpolation.

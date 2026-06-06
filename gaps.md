@@ -362,12 +362,18 @@ interpolation, pipe. What remains to make it a language you'd reach for to write
   zero compiler/VM change; identical runtime per instantiation. `Result`/`Option` stay hardcoded
   (`Ty::Result`/`Ty::Option`) and coexist. See `examples/generic_enum.chz` (`Tree[T]` at int+str,
   `Either[A, B]`), `docs/syntax.md` §8.
-- **`Hashable` protocol** → let structs be `map` keys (maps key only int/str/bool now). 🟦 **M10-G2
-  partial:** the prebuilt `Hashable` protocol (`hash(self) -> int`) now exists as a generic bound
-  (`[T: Hashable]`; int/str/bool satisfy it intrinsically, structs by defining `hash`). **Not yet
-  wired to map/set keys** — discovered that `map`/`set` are *association lists* (`Vec<(K,V)>`, linear
-  scan + structural `==`, **no hashing**), so lifting the key restriction is entangled with whether
-  to make them real hash tables. Deferred to a dedicated map-model session.
+- ~~**`Hashable` protocol** → let structs be `map` keys (maps key only int/str/bool now).~~ ✅
+  **DONE (M10-G2 bound + map-model rework).** `map`/`set` were *association lists* (`Vec<(K,V)>`,
+  linear scan, no hashing); now they are **real insertion-ordered hash tables** — a `Vec` of
+  `(cached_u64_hash, k[, v])` plus a side `HashMap<u64, Vec<usize>>` (hash→positions) for O(1)-avg
+  lookup; the cached hash makes index rebuild-after-remove pure (no re-hashing). The key restriction
+  is **lifted**: any `Hashable` type is a key/element — int/str/bool intrinsically, or a struct via
+  its `hash(self) -> int`, dispatched at runtime and confirmed by structural `==`. The struct-key
+  `hash()` re-enters the engine (GC-rooted on the VM operand stack like `sort_by`; Rc-safe on the
+  interp). Numeric keys hash by canonical f64 bits (`3`==`3.0`, ±0.0 normalised); float keys stay
+  rejected (NaN). Insertion order preserved; both engines byte-identical (parity + gc-stress).
+  Contract: structurally-equal structs must return equal `hash()` (user-owned, like Rust Hash/Eq).
+  See `examples/hashmap_keys.chz`, `docs/syntax.md` §6.
 - ~~**`Display`/`Show` protocol** → custom `str(point)` / `print(point)`.~~ ✅ **M10-G1 — shipped as
   `Stringable`.** Prebuilt protocol `Stringable` with `str(self) -> str`; a struct that defines it
   overrides its default repr in `print`, the `str()` builtin, and `{…}` interpolation (nested too).

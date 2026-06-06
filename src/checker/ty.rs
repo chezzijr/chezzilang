@@ -14,9 +14,11 @@ pub enum Ty {
     Str,
     Nil,
     List(Box<Ty>),
-    /// `map[K, V]` — insertion-ordered dictionary. `K` is a hashable scalar (int/str/bool).
+    /// `map[K, V]` — insertion-ordered hash map. `K` is any `Hashable` type (int/str/bool or a
+    /// struct implementing `hash(self) -> int`).
     Map(Box<Ty>, Box<Ty>),
-    /// `set[T]` — insertion-ordered set. `T` is a hashable scalar (int/str/bool).
+    /// `set[T]` — insertion-ordered hash set. `T` is any `Hashable` type (int/str/bool or a struct
+    /// implementing `hash(self) -> int`).
     Set(Box<Ty>),
     Func { params: Vec<Ty>, ret: Box<Ty> },
     /// `(T1, T2, …)` — a fixed-arity tuple (always ≥2 elements).

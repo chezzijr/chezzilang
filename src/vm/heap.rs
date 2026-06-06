@@ -8,6 +8,74 @@ use super::op::ProtoId;
 use super::value::{GcRef, Value};
 use std::collections::HashMap;
 
+/// A real hash table that *also* preserves insertion order. `entries` is the insertion-ordered
+/// store (so iteration, `keys()`, set equality, and GC tracing stay deterministic); `index` maps a
+/// key's cached hash to its candidate positions in `entries` for O(1)-average lookup. The cached
+/// `u64` per entry makes index rebuild (after a remove) a pure, engine-free pass — no re-hashing of
+/// user `hash()` methods. Probing always confirms a hash hit with the engine's `values_equal`
+/// (structural), so a collision never returns the wrong key. The `index` holds plain `usize` — it
+/// is **not** a GC child (only `entries`' keys/values are traced).
+#[derive(Debug, Clone, Default)]
+pub struct MapData {
+    pub entries: Vec<(u64, Value, Value)>,
+    pub index: HashMap<u64, Vec<usize>>,
+}
+
+impl MapData {
+    /// Positions in `entries` whose key hashed to `h` (the probe candidates).
+    pub fn candidates(&self, h: u64) -> &[usize] {
+        self.index.get(&h).map_or(&[], |v| v.as_slice())
+    }
+    /// Append a fresh entry (caller has confirmed the key is absent), updating the index.
+    pub fn push(&mut self, h: u64, k: Value, v: Value) {
+        let pos = self.entries.len();
+        self.entries.push((h, k, v));
+        self.index.entry(h).or_default().push(pos);
+    }
+    /// Remove the entry at `i` (shifting the tail, preserving order) and rebuild the index from the
+    /// cached hashes — pure, no re-hashing.
+    pub fn remove_at(&mut self, i: usize) -> (u64, Value, Value) {
+        let removed = self.entries.remove(i);
+        self.rebuild_index();
+        removed
+    }
+    fn rebuild_index(&mut self) {
+        self.index.clear();
+        for (pos, (h, _, _)) in self.entries.iter().enumerate() {
+            self.index.entry(*h).or_default().push(pos);
+        }
+    }
+}
+
+/// A hash *set* with the same insertion-order-preserving design as [`MapData`].
+#[derive(Debug, Clone, Default)]
+pub struct SetData {
+    pub entries: Vec<(u64, Value)>,
+    pub index: HashMap<u64, Vec<usize>>,
+}
+
+impl SetData {
+    pub fn candidates(&self, h: u64) -> &[usize] {
+        self.index.get(&h).map_or(&[], |v| v.as_slice())
+    }
+    pub fn push(&mut self, h: u64, e: Value) {
+        let pos = self.entries.len();
+        self.entries.push((h, e));
+        self.index.entry(h).or_default().push(pos);
+    }
+    pub fn remove_at(&mut self, i: usize) -> (u64, Value) {
+        let removed = self.entries.remove(i);
+        self.rebuild_index();
+        removed
+    }
+    fn rebuild_index(&mut self) {
+        self.index.clear();
+        for (pos, (h, _)) in self.entries.iter().enumerate() {
+            self.index.entry(*h).or_default().push(pos);
+        }
+    }
+}
+
 /// A heap object — the reference half of the value space.
 #[derive(Debug, Clone)]
 pub enum Obj {
@@ -16,12 +84,12 @@ pub enum Obj {
     /// `(a, b, …)` — a fixed-arity, immutable tuple. Elements may be heap objects, so they are
     /// traced as GC children (same as `List`).
     Tuple(Vec<Value>),
-    /// `{k: v, …}` — insertion-ordered entries (linear scan by value-equality). Keys AND values
-    /// may be heap objects, so BOTH are traced as GC children.
-    Map(Vec<(Value, Value)>),
-    /// `{a, b, …}` — insertion-ordered, deduped set (linear scan by value-equality). Elements may
-    /// be heap objects (str), so they are traced as GC children.
-    Set(Vec<Value>),
+    /// `{k: v, …}` — an insertion-ordered hash map (see [`MapData`]). Keys AND values may be heap
+    /// objects, so BOTH are traced as GC children (the cached hashes / index are not).
+    Map(MapData),
+    /// `{a, b, …}` — an insertion-ordered hash set (see [`SetData`]). Elements may be heap objects,
+    /// so they are traced as GC children.
+    Set(SetData),
     /// Fields in declaration order (deterministic `Display` / iteration).
     Struct {
         name: Box<str>,
@@ -171,11 +239,11 @@ impl Heap {
             Obj::Str(_) => {}
             Obj::List(items) => items.iter().for_each(&mut push),
             Obj::Tuple(items) => items.iter().for_each(&mut push),
-            Obj::Map(entries) => entries.iter().for_each(|(k, v)| {
+            Obj::Map(m) => m.entries.iter().for_each(|(_, k, v)| {
                 push(k);
                 push(v);
             }),
-            Obj::Set(items) => items.iter().for_each(&mut push),
+            Obj::Set(s) => s.entries.iter().for_each(|(_, e)| push(e)),
             Obj::Struct { fields, .. } => fields.iter().for_each(|(_, v)| push(v)),
             Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
             Obj::Func { home, .. } => out.push(*home),

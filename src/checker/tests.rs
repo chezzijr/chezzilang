@@ -203,7 +203,50 @@ fn redeclaring_stringable_rejected() {
     rejects("protocol Stringable:\n    fn str(self) -> str\n", "reserved");
 }
 
-// ----- Hashable protocol (M10-G2: bound only; not yet wired to map/set keys) -----
+// ----- Hashable struct keys for map/set (key restriction lifted) -----
+
+/// A Hashable struct (defines `hash(self) -> int`) usable as a map key / set element.
+const POINT_H: &str = "\
+struct Point:
+    x: int
+    y: int
+    fn hash(self) -> int:
+        return self.x * 31 + self.y
+";
+
+#[test]
+fn struct_with_hash_is_valid_map_key() {
+    ok(&format!("{POINT_H}m: map[Point, str] = {{}}\nm[Point(1, 2)] = \"a\"\n"));
+}
+
+#[test]
+fn set_of_hashable_struct_ok() {
+    ok(&format!("{POINT_H}s: set[Point] = set()\ns.add(Point(1, 2))\n"));
+}
+
+#[test]
+fn struct_without_hash_rejected_as_map_key() {
+    let src = "struct Bare:\n    a: int\nm: map[Bare, int] = {}\n";
+    rejects(src, "map key type must implement Hashable");
+}
+
+#[test]
+fn struct_without_hash_rejected_as_set_element() {
+    let src = "struct Bare:\n    a: int\ns: set[Bare] = set()\n";
+    rejects(src, "set element type must implement Hashable");
+}
+
+#[test]
+fn float_still_rejected_as_map_key() {
+    rejects("m: map[float, int] = {}\n", "map key type must implement Hashable");
+}
+
+#[test]
+fn float_still_rejected_as_set_element() {
+    rejects("s: set[float] = set()\n", "set element type must implement Hashable");
+}
+
+// ----- Hashable protocol (M10-G2: bound; M10 map-model: wired to map/set keys) -----
 
 #[test]
 fn hashable_struct_satisfies_ok() {
@@ -2004,12 +2047,12 @@ fn map_index_wrong_key_type_rejected() {
 
 #[test]
 fn float_map_key_literal_rejected() {
-    rejects("m := {1.0: 2}\n", "hashable");
+    rejects("m := {1.0: 2}\n", "must implement Hashable");
 }
 
 #[test]
 fn float_map_key_annotation_rejected() {
-    rejects("m: map[float, int] = {}\n", "hashable");
+    rejects("m: map[float, int] = {}\n", "must implement Hashable");
 }
 
 #[test]
@@ -2310,7 +2353,7 @@ fn set_mixed_element_types_rejected() {
 
 #[test]
 fn set_non_hashable_element_rejected() {
-    rejects("s := {[1], [2]}\n", "hashable scalar");
+    rejects("s := {[1], [2]}\n", "must implement Hashable");
 }
 
 #[test]

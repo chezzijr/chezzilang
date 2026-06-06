@@ -7,7 +7,7 @@ pub mod heap;
 pub mod op;
 pub mod value;
 
-use heap::{Heap, Obj};
+use heap::{Heap, MapData, Obj, SetData};
 use op::{CapSrc, Op, Program, ProtoId};
 use std::rc::Rc;
 use value::{GcRef, Value};
@@ -451,31 +451,47 @@ impl Vm {
                 self.push(Value::Obj(h));
             }
             Op::NewMap(n) => {
-                // Pop 2n values `[k0,v0,…]`; build insertion-ordered entries with last-key-wins upsert.
-                let at = self.stack.len() - 2 * *n;
-                let flat: Vec<Value> = self.stack.split_off(at);
-                let mut entries: Vec<(Value, Value)> = Vec::with_capacity(*n);
-                let mut it = flat.into_iter();
-                while let (Some(k), Some(v)) = (it.next(), it.next()) {
-                    match entries.iter().position(|(ek, _)| self.values_equal(*ek, k)) {
-                        Some(i) => entries[i].1 = v,
-                        None => entries.push((k, v)),
+                // Build an insertion-ordered hash map with last-key-wins upsert. Phase 1 hashes
+                // every key while ALL operands are still rooted on the stack (a struct key's hash()
+                // re-enters the VM and can GC); phase 2 then builds the map with no further re-entry
+                // (so no GC), reading keys/values from the still-rooted stack.
+                let count = *n;
+                let at = self.stack.len() - 2 * count;
+                let mut hashes = Vec::with_capacity(count);
+                for j in 0..count {
+                    let k = self.stack[at + 2 * j];
+                    hashes.push(self.hash_value(k, span)?);
+                }
+                let mut map = MapData::default();
+                for (j, &hk) in hashes.iter().enumerate() {
+                    let (k, v) = (self.stack[at + 2 * j], self.stack[at + 2 * j + 1]);
+                    match map.candidates(hk).iter().copied().find(|&p| self.values_equal(map.entries[p].1, k)) {
+                        Some(p) => map.entries[p].2 = v,
+                        None => map.push(hk, k, v),
                     }
                 }
-                let h = self.heap.alloc(Obj::Map(entries));
+                self.stack.truncate(at);
+                let h = self.heap.alloc(Obj::Map(map));
                 self.push(Value::Obj(h));
             }
             Op::NewSet(n) => {
-                // Pop n values, dedup by value-equality keeping first occurrence (insertion order).
-                let at = self.stack.len() - *n;
-                let raw: Vec<Value> = self.stack.split_off(at);
-                let mut items: Vec<Value> = Vec::with_capacity(*n);
-                for v in raw {
-                    if !items.iter().any(|e| self.values_equal(*e, v)) {
-                        items.push(v);
+                // Insertion-ordered hash set, dedup keeping first occurrence. Same two-phase rooting
+                // as NewMap (phase 1 hashes all elements rooted; phase 2 builds GC-free).
+                let count = *n;
+                let at = self.stack.len() - count;
+                let mut hashes = Vec::with_capacity(count);
+                for j in 0..count {
+                    hashes.push(self.hash_value(self.stack[at + j], span)?);
+                }
+                let mut set = SetData::default();
+                for (j, &he) in hashes.iter().enumerate() {
+                    let e = self.stack[at + j];
+                    if !set.candidates(he).iter().copied().any(|p| self.values_equal(set.entries[p].1, e)) {
+                        set.push(he, e);
                     }
                 }
-                let h = self.heap.alloc(Obj::Set(items));
+                self.stack.truncate(at);
+                let h = self.heap.alloc(Obj::Set(set));
                 self.push(Value::Obj(h));
             }
             Op::NewStruct(name, argc) => self.new_struct(name, *argc, span)?,
@@ -549,14 +565,14 @@ impl Vm {
                             let nh = self.heap.alloc(Obj::List(cloned));
                             self.push(Value::Obj(nh));
                         }
-                        Obj::Map(entries) => {
-                            let keys: Vec<Value> = entries.iter().map(|(k, _)| *k).collect();
+                        Obj::Map(m) => {
+                            let keys: Vec<Value> = m.entries.iter().map(|(_, k, _)| *k).collect();
                             let nh = self.heap.alloc(Obj::List(keys));
                             self.push(Value::Obj(nh));
                         }
-                        Obj::Set(items) => {
-                            let cloned = items.clone();
-                            let nh = self.heap.alloc(Obj::List(cloned));
+                        Obj::Set(s) => {
+                            let elems: Vec<Value> = s.entries.iter().map(|(_, e)| *e).collect();
+                            let nh = self.heap.alloc(Obj::List(elems));
                             self.push(Value::Obj(nh));
                         }
                         // A string iterates as 1-char strings (Python-style; gap: char type).
@@ -802,6 +818,82 @@ impl Vm {
         }
     }
 
+    /// A `u64` hash of `v` for map/set keys, upholding the invariant `values_equal(a,b) ⇒
+    /// hash(a)==hash(b)`. Numeric keys hash by their canonical f64 bits (so `Int(3)` and `Float(3.0)`
+    /// collide, matching `values_equal`'s numeric unification); str by content; a struct key
+    /// dispatches its user `hash(self) -> int` (re-entrant — may allocate / trigger GC). Floats are
+    /// rejected as keys by the checker (NaN footgun), so only integral-valued floats reach here.
+    fn hash_value(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
+        match v {
+            // A struct key dispatches its user `hash()` (re-entrant). Everything else is scalar.
+            Value::Obj(h) => match self.heap.get(h) {
+                Obj::Struct { .. } => self.struct_hash(v, span),
+                Obj::Str(_) => Ok(self.scalar_hash(v)),
+                _ => Err(self.err(format!("{} is not hashable (cannot be a map/set key)", self.type_name(v)), span)),
+            },
+            _ => Ok(self.scalar_hash(v)),
+        }
+    }
+
+    /// Infallible hash for scalar keys (int/float/bool/nil/str). Numeric values hash by canonical
+    /// f64 bits so `3` and `3.0` collide; str by content. Non-scalar values fall back to `0` (a
+    /// correctness-safe degenerate hash — `values_equal` still confirms each probe).
+    fn scalar_hash(&self, v: Value) -> u64 {
+        use std::hash::{Hash, Hasher};
+        match v {
+            // Normalise zero so `Int(0)`, `+0.0`, and `-0.0` (all `values_equal`) hash identically —
+            // `(-0.0).to_bits() != (0.0).to_bits()` would otherwise break the hash invariant.
+            Value::Int(n) => (if n == 0 { 0.0 } else { n as f64 }).to_bits(),
+            Value::Float(f) => (if f == 0.0 { 0.0 } else { f }).to_bits(),
+            Value::Bool(b) => b as u64,
+            Value::Nil => 0,
+            Value::Obj(h) => match self.heap.get(h) {
+                Obj::Str(s) => {
+                    let mut hr = std::collections::hash_map::DefaultHasher::new();
+                    s.as_bytes().hash(&mut hr);
+                    hr.finish()
+                }
+                _ => 0,
+            },
+        }
+    }
+
+    /// Dispatch a struct key's user `hash(self) -> int`, returning its `i64` as a `u64`. Mirrors
+    /// [`struct_compare`] (re-entrant via `run_proto`).
+    fn struct_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
+        let Value::Obj(h) = v else { unreachable!() };
+        let Obj::Struct { name, .. } = self.heap.get(h).clone() else { unreachable!() };
+        let def = self
+            .program
+            .structs
+            .get(name.as_ref())
+            .cloned()
+            .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
+        let proto = *def.methods.get("hash").ok_or_else(|| {
+            self.err(format!("struct '{name}' has no 'hash' method (needed to use it as a map/set key)"), span)
+        })?;
+        let home = self.module_objs[def.module_idx];
+        match self.run_proto(proto, home, None, vec![v], true, false, span)? {
+            Value::Int(n) => Ok(n as u64),
+            other => Err(self.err(format!("hash() must return int, got {}", self.type_name(other)), span)),
+        }
+    }
+
+    /// Hash `key`, keeping `roots` alive on the operand stack across the call. A struct key's
+    /// `hash()` re-enters the VM and can trigger GC; the map/set receiver and any in-flight
+    /// key/value (already popped off the stack before dispatch) must be rooted or the collector
+    /// could free them mid-hash. For scalar keys this is a couple of redundant push/pops.
+    fn hash_key_rooted(&mut self, key: Value, roots: &[Value], span: Span) -> Result<u64, RuntimeError> {
+        for &r in roots {
+            self.push(r);
+        }
+        let res = self.hash_value(key, span);
+        for _ in roots {
+            self.pop();
+        }
+        res
+    }
+
     /// `xs.sort()` over a list of Comparable structs, ordering via each struct's `compare`. Because
     /// `compare` re-enters the VM (and may allocate / trigger GC), this mirrors `list_sort_by`
     /// exactly: snapshot the elements into a heap list ROOTED on the operand stack, permute
@@ -909,14 +1001,18 @@ impl Vm {
                     (Obj::Str(a), Obj::Str(b)) => a == b,
                     (Obj::List(a), Obj::List(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.values_equal(*x, *y)),
                     (Obj::Tuple(a), Obj::Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.values_equal(*x, *y)),
+                    // Maps compare key+value pairwise in insertion order (matches the old assoc-list
+                    // semantics — the cached hash is ignored).
                     (Obj::Map(a), Obj::Map(b)) => {
-                        a.len() == b.len()
-                            && a.iter().zip(b).all(|((ka, va), (kb, vb))| self.values_equal(*ka, *kb) && self.values_equal(*va, *vb))
+                        a.entries.len() == b.entries.len()
+                            && a.entries.iter().zip(&b.entries).all(|((_, ka, va), (_, kb, vb))| {
+                                self.values_equal(*ka, *kb) && self.values_equal(*va, *vb)
+                            })
                     }
                     // Sets are unordered: equal iff same size and every element of `a` is in `b`.
                     (Obj::Set(a), Obj::Set(b)) => {
-                        a.len() == b.len()
-                            && a.iter().all(|x| b.iter().any(|y| self.values_equal(*x, *y)))
+                        a.entries.len() == b.entries.len()
+                            && a.entries.iter().all(|(_, x)| b.entries.iter().any(|(_, y)| self.values_equal(*x, *y)))
                     }
                     (Obj::Struct { name: na, fields: fa }, Obj::Struct { name: nb, fields: fb }) => {
                         na == nb
@@ -1028,13 +1124,16 @@ impl Vm {
                 Value::Obj(self.heap.alloc(Obj::Struct { name: name.into_boxed_str(), fields: fs }))
             }
             N::Map(entries) => {
-                let mut es = Vec::with_capacity(entries.len());
+                // Native maps have unique scalar (str) keys — hash them directly (no re-entry, no
+                // dedup needed).
+                let mut map = MapData::default();
                 for (k, v) in entries {
                     let lk = self.lower_native(k);
                     let lv = self.lower_native(v);
-                    es.push((lk, lv));
+                    let hk = self.scalar_hash(lk);
+                    map.push(hk, lk, lv);
                 }
-                Value::Obj(self.heap.alloc(Obj::Map(es)))
+                Value::Obj(self.heap.alloc(Obj::Map(map)))
             }
             N::Ok(inner) => {
                 let p = self.lower_native(*inner);
@@ -1171,14 +1270,14 @@ impl Vm {
                     return Err(mismatch("object"));
                 }
                 let entries = match self.heap.get(self.as_obj(payload[0])) {
-                    Obj::Map(entries) => entries.clone(),
+                    Obj::Map(m) => m.entries.clone(),
                     _ => return Err(mismatch("object")),
                 };
-                let mut out: Vec<(Value, Value)> = Vec::with_capacity(entries.len());
-                for (k, v) in entries {
+                let mut out = MapData::default();
+                for (hk, k, v) in entries {
                     let key = self.val_str(k).unwrap_or_default();
                     let coerced = self.coerce_json(v, inner, &format!("{path}.{key}"))?;
-                    out.push((k, coerced));
+                    out.push(hk, k, coerced); // str keys unchanged → reuse the cached hash
                 }
                 Ok(Value::Obj(self.heap.alloc(Obj::Map(out))))
             }
@@ -1187,17 +1286,17 @@ impl Vm {
                     return Err(mismatch(&format!("object for {name}")));
                 }
                 let entries = match self.heap.get(self.as_obj(payload[0])) {
-                    Obj::Map(entries) => entries.clone(),
+                    Obj::Map(m) => m.entries.clone(),
                     _ => return Err(mismatch("object")),
                 };
                 let mut field_vals: Vec<(Box<str>, Value)> = Vec::with_capacity(fields.len());
                 for (fname, fdesc) in fields {
-                    let found = entries.iter().find(|(k, _)| {
+                    let found = entries.iter().find(|(_, k, _)| {
                         self.val_str(*k).as_deref() == Some(fname.as_str())
                     });
                     let fpath = format!("{path}.{fname}");
                     let v = match found {
-                        Some((_, jval)) => self.coerce_json(*jval, fdesc, &fpath)?,
+                        Some((_, _, jval)) => self.coerce_json(*jval, fdesc, &fpath)?,
                         None => match fdesc {
                             // A missing Option field decodes to None; anything else is an error.
                             D::Option(_) => self.alloc_enum("Option", "None", Vec::new()),
@@ -1684,21 +1783,27 @@ impl Vm {
                 }
                 _ => Err(self.err(format!("type list has no method '{method}'"), span)),
             },
-            Obj::Map(entries) => match method {
+            Obj::Map(m) => match method {
                 "len" => {
                     self.arity_err("len", args, 0, span)?;
-                    Ok(Value::Int(entries.len() as i64))
+                    Ok(Value::Int(m.entries.len() as i64))
                 }
                 "has" => {
                     self.arity_err("has", args, 1, span)?;
                     let key = args[0];
-                    let entries = entries.clone();
-                    Ok(Value::Bool(entries.iter().any(|(k, _)| self.values_equal(*k, key))))
+                    let hk = self.hash_key_rooted(key, &[Value::Obj(h), key], span)?;
+                    let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
+                    let found = m.candidates(hk).iter().any(|&p| self.values_equal(m.entries[p].1, key));
+                    Ok(Value::Bool(found))
                 }
                 "get" => {
                     self.arity_err("get", args, 1, span)?;
                     let key = args[0];
-                    let found = entries.iter().find(|(k, _)| self.values_equal(*k, key)).map(|(_, v)| *v);
+                    let hk = self.hash_key_rooted(key, &[Value::Obj(h), key], span)?;
+                    let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
+                    let found = m.candidates(hk).iter().copied()
+                        .find(|&p| self.values_equal(m.entries[p].1, key))
+                        .map(|p| m.entries[p].2);
                     match found {
                         Some(v) => Ok(self.alloc_enum("Option", "Some", vec![v])),
                         None => Ok(self.alloc_enum("Option", "None", vec![])),
@@ -1706,22 +1811,24 @@ impl Vm {
                 }
                 "keys" => {
                     self.arity_err("keys", args, 0, span)?;
-                    let keys: Vec<Value> = entries.iter().map(|(k, _)| *k).collect();
+                    let keys: Vec<Value> = m.entries.iter().map(|(_, k, _)| *k).collect();
                     Ok(Value::Obj(self.heap.alloc(Obj::List(keys))))
                 }
                 "values" => {
                     self.arity_err("values", args, 0, span)?;
-                    let vals: Vec<Value> = entries.iter().map(|(_, v)| *v).collect();
+                    let vals: Vec<Value> = m.entries.iter().map(|(_, _, v)| *v).collect();
                     Ok(Value::Obj(self.heap.alloc(Obj::List(vals))))
                 }
                 "remove" => {
                     self.arity_err("remove", args, 1, span)?;
                     let key = args[0];
-                    let pos = entries.iter().position(|(k, _)| self.values_equal(*k, key));
+                    let hk = self.hash_key_rooted(key, &[Value::Obj(h), key], span)?;
+                    let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
+                    let pos = m.candidates(hk).iter().copied().find(|&p| self.values_equal(m.entries[p].1, key));
                     match pos {
                         Some(i) => {
-                            let Obj::Map(entries) = self.heap.get_mut(h) else { unreachable!() };
-                            let (_, v) = entries.remove(i);
+                            let Obj::Map(m) = self.heap.get_mut(h) else { unreachable!() };
+                            let (_, _, v) = m.remove_at(i);
                             Ok(self.alloc_enum("Option", "Some", vec![v]))
                         }
                         None => Ok(self.alloc_enum("Option", "None", vec![])),
@@ -1729,35 +1836,40 @@ impl Vm {
                 }
                 _ => Err(self.err(format!("type map has no method '{method}'"), span)),
             },
-            Obj::Set(items) => match method {
+            Obj::Set(s) => match method {
                 "len" => {
                     self.arity_err("len", args, 0, span)?;
-                    Ok(Value::Int(items.len() as i64))
+                    Ok(Value::Int(s.entries.len() as i64))
                 }
                 "has" => {
                     self.arity_err("has", args, 1, span)?;
                     let x = args[0];
-                    let items = items.clone();
-                    Ok(Value::Bool(items.iter().any(|e| self.values_equal(*e, x))))
+                    let hx = self.hash_key_rooted(x, &[Value::Obj(h), x], span)?;
+                    let Obj::Set(s) = self.heap.get(h) else { unreachable!() };
+                    Ok(Value::Bool(s.candidates(hx).iter().any(|&p| self.values_equal(s.entries[p].1, x))))
                 }
                 "add" => {
                     self.arity_err("add", args, 1, span)?;
                     let x = args[0];
-                    let present = items.iter().any(|e| self.values_equal(*e, x));
+                    let hx = self.hash_key_rooted(x, &[Value::Obj(h), x], span)?;
+                    let Obj::Set(s) = self.heap.get(h) else { unreachable!() };
+                    let present = s.candidates(hx).iter().any(|&p| self.values_equal(s.entries[p].1, x));
                     if !present {
-                        let Obj::Set(items) = self.heap.get_mut(h) else { unreachable!() };
-                        items.push(x);
+                        let Obj::Set(s) = self.heap.get_mut(h) else { unreachable!() };
+                        s.push(hx, x);
                     }
                     Ok(Value::Nil)
                 }
                 "remove" => {
                     self.arity_err("remove", args, 1, span)?;
                     let x = args[0];
-                    let pos = items.iter().position(|e| self.values_equal(*e, x));
+                    let hx = self.hash_key_rooted(x, &[Value::Obj(h), x], span)?;
+                    let Obj::Set(s) = self.heap.get(h) else { unreachable!() };
+                    let pos = s.candidates(hx).iter().copied().find(|&p| self.values_equal(s.entries[p].1, x));
                     match pos {
                         Some(i) => {
-                            let Obj::Set(items) = self.heap.get_mut(h) else { unreachable!() };
-                            items.remove(i);
+                            let Obj::Set(s) = self.heap.get_mut(h) else { unreachable!() };
+                            s.remove_at(i);
                             Ok(Value::Bool(true))
                         }
                         None => Ok(Value::Bool(false)),
@@ -1765,30 +1877,38 @@ impl Vm {
                 }
                 "union" | "intersection" | "difference" => {
                     self.arity_err(method, args, 1, span)?;
-                    let mine = items.clone();
+                    // Both operands already carry per-element cached hashes, so set algebra needs no
+                    // re-hashing (no user code re-enters) — purely build a fresh hash set, deduping
+                    // and membership-testing via the cached hashes confirmed by `values_equal`.
+                    let mine = match self.heap.get(h) {
+                        Obj::Set(s) => s.entries.clone(),
+                        _ => unreachable!(),
+                    };
                     let other = self.set_arg(args[0], method, span)?;
-                    let result = match method {
+                    let mut out = SetData::default();
+                    let add = |vm: &Vm, set: &mut SetData, he: u64, e: Value| {
+                        if !set.candidates(he).iter().any(|&p| vm.values_equal(set.entries[p].1, e)) {
+                            set.push(he, e);
+                        }
+                    };
+                    match method {
                         "union" => {
-                            let mut out = mine.clone();
-                            for e in &other {
-                                if !out.iter().any(|x| self.values_equal(*x, *e)) {
-                                    out.push(*e);
+                            for (he, e) in mine.iter().chain(other.entries.iter()) {
+                                add(self, &mut out, *he, *e);
+                            }
+                        }
+                        // intersection keeps mine's elements present in other; difference drops them.
+                        m => {
+                            let keep_when_present = m == "intersection";
+                            for (he, e) in &mine {
+                                let in_other = other.candidates(*he).iter().any(|&p| self.values_equal(other.entries[p].1, *e));
+                                if in_other == keep_when_present {
+                                    add(self, &mut out, *he, *e);
                                 }
                             }
-                            out
                         }
-                        "intersection" => mine
-                            .iter()
-                            .copied()
-                            .filter(|e| other.iter().any(|x| self.values_equal(*x, *e)))
-                            .collect(),
-                        _ => mine
-                            .iter()
-                            .copied()
-                            .filter(|e| !other.iter().any(|x| self.values_equal(*x, *e)))
-                            .collect(),
-                    };
-                    Ok(Value::Obj(self.heap.alloc(Obj::Set(result))))
+                    }
+                    Ok(Value::Obj(self.heap.alloc(Obj::Set(out))))
                 }
                 _ => Err(self.err(format!("type set has no method '{method}'"), span)),
             },
@@ -1796,11 +1916,12 @@ impl Vm {
         }
     }
 
-    /// Read a set argument's elements (for set algebra), erroring if it isn't a set.
-    fn set_arg(&self, v: Value, method: &str, span: Span) -> Result<Vec<Value>, RuntimeError> {
+    /// Read a set argument (for set algebra), erroring if it isn't a set. Returns a clone of its
+    /// [`SetData`] (entries + index) so membership tests reuse the cached hashes.
+    fn set_arg(&self, v: Value, method: &str, span: Span) -> Result<SetData, RuntimeError> {
         match v {
             Value::Obj(h) => match self.heap.get(h) {
-                Obj::Set(items) => Ok(items.clone()),
+                Obj::Set(s) => Ok(s.clone()),
                 _ => Err(self.err(format!("{method}() expects a set argument, got {}", self.type_name(v)), span)),
             },
             _ => Err(self.err(format!("{method}() expects a set argument, got {}", self.type_name(v)), span)),
@@ -1972,10 +2093,12 @@ impl Vm {
                     None => Err(self.err(format!("index {idx} out of bounds (len {})", chars.len()), span)),
                 }
             }
-            Obj::Map(entries) => {
-                match entries.iter().find(|(k, _)| self.values_equal(*k, key)) {
-                    Some((_, v)) => {
-                        let v = *v;
+            Obj::Map(_) => {
+                let hk = self.hash_key_rooted(key, &[obj, key], span)?;
+                let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
+                match m.candidates(hk).iter().copied().find(|&p| self.values_equal(m.entries[p].1, key)) {
+                    Some(p) => {
+                        let v = m.entries[p].2;
                         self.push(v);
                         Ok(())
                     }
@@ -2015,13 +2138,16 @@ impl Vm {
         let Value::Obj(h) = obj else {
             return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
         };
-        // For a map, locate the entry first (needs `&self.heap` for value-equality), then mutate.
-        if let Obj::Map(entries) = self.heap.get(h) {
-            let pos = entries.iter().position(|(k, _)| self.values_equal(*k, key));
-            let Obj::Map(entries) = self.heap.get_mut(h) else { unreachable!() };
+        // For a map, hash the key (rooting the map/key/value across a struct key's re-entrant
+        // hash()), locate the entry, then mutate — updating the side index on insert.
+        if matches!(self.heap.get(h), Obj::Map(_)) {
+            let hk = self.hash_key_rooted(key, &[obj, key, val], span)?;
+            let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
+            let pos = m.candidates(hk).iter().copied().find(|&p| self.values_equal(m.entries[p].1, key));
+            let Obj::Map(m) = self.heap.get_mut(h) else { unreachable!() };
             match pos {
-                Some(i) => entries[i].1 = val,
-                None => entries.push((key, val)),
+                Some(i) => m.entries[i].2 = val,
+                None => m.push(hk, key, val),
             }
             return Ok(());
         }
@@ -2113,26 +2239,38 @@ impl Vm {
         }
     }
 
-    /// `set()` → empty set; `set(list)` → a deduped set of the list's elements.
+    /// `set()` → empty set; `set(list)` → a deduped hash set of the list's elements.
     fn builtin_set(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-        let src: Vec<Value> = match args {
-            [] => Vec::new(),
+        let (list_obj, src): (Value, Vec<Value>) = match args {
+            [] => (Value::Nil, Vec::new()),
             [one] => match one {
                 Value::Obj(h) => match self.heap.get(*h) {
-                    Obj::List(items) => items.clone(),
+                    Obj::List(items) => (*one, items.clone()),
                     _ => return Err(self.err(format!("set() expects a list, got {}", self.type_name(*one)), span)),
                 },
                 other => return Err(self.err(format!("set() expects a list, got {}", self.type_name(*other)), span)),
             },
             _ => return Err(self.err(format!("set() expects 0 or 1 argument(s), got {}", args.len()), span)),
         };
-        let mut items: Vec<Value> = Vec::with_capacity(src.len());
-        for v in src {
-            if !items.iter().any(|e| self.values_equal(*e, v)) {
-                items.push(v);
+        // Root the source list so its elements survive a struct element's re-entrant hash() GC; hash
+        // every element first (phase 1, rooted), then build the set GC-free (phase 2).
+        self.push(list_obj);
+        let built = (|| {
+            let mut hashes = Vec::with_capacity(src.len());
+            for &v in &src {
+                hashes.push(self.hash_value(v, span)?);
             }
-        }
-        Ok(Value::Obj(self.heap.alloc(Obj::Set(items))))
+            let mut set = SetData::default();
+            for (i, &v) in src.iter().enumerate() {
+                let he = hashes[i];
+                if !set.candidates(he).iter().any(|&p| self.values_equal(set.entries[p].1, v)) {
+                    set.push(he, v);
+                }
+            }
+            Ok(set)
+        })();
+        self.pop(); // unroot the source list
+        Ok(Value::Obj(self.heap.alloc(Obj::Set(built?))))
     }
 
     fn builtin_len(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
@@ -2302,19 +2440,20 @@ impl Vm {
                     let inner = items.iter().map(|v| self.display(*v)).collect::<Vec<_>>().join(", ");
                     format!("({inner})")
                 }
-                Obj::Map(entries) => {
-                    let inner = entries
+                Obj::Map(m) => {
+                    let inner = m
+                        .entries
                         .iter()
-                        .map(|(k, v)| format!("{}: {}", self.display(*k), self.display(*v)))
+                        .map(|(_, k, v)| format!("{}: {}", self.display(*k), self.display(*v)))
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("{{{inner}}}")
                 }
-                Obj::Set(items) => {
-                    if items.is_empty() {
+                Obj::Set(s) => {
+                    if s.entries.is_empty() {
                         "set()".to_string()
                     } else {
-                        let inner = items.iter().map(|v| self.display(*v)).collect::<Vec<_>>().join(", ");
+                        let inner = s.entries.iter().map(|(_, v)| self.display(*v)).collect::<Vec<_>>().join(", ");
                         format!("{{{inner}}}")
                     }
                 }
@@ -2366,18 +2505,19 @@ impl Vm {
             Obj::Str(s) => Ok(s.to_string()),
             Obj::List(items) => Ok(format!("[{}]", self.stringify_seq(&items, span)?)),
             Obj::Tuple(items) => Ok(format!("({})", self.stringify_seq(&items, span)?)),
-            Obj::Map(entries) => {
-                let mut rendered = Vec::with_capacity(entries.len());
-                for (k, mv) in &entries {
+            Obj::Map(m) => {
+                let mut rendered = Vec::with_capacity(m.entries.len());
+                for (_, k, mv) in &m.entries {
                     rendered.push(format!("{}: {}", self.stringify(*k, span)?, self.stringify(*mv, span)?));
                 }
                 Ok(format!("{{{}}}", rendered.join(", ")))
             }
-            Obj::Set(items) => {
-                if items.is_empty() {
+            Obj::Set(s) => {
+                if s.entries.is_empty() {
                     Ok("set()".to_string())
                 } else {
-                    Ok(format!("{{{}}}", self.stringify_seq(&items, span)?))
+                    let elems: Vec<Value> = s.entries.iter().map(|(_, e)| *e).collect();
+                    Ok(format!("{{{}}}", self.stringify_seq(&elems, span)?))
                 }
             }
             Obj::Struct { name, fields } => {
@@ -3329,6 +3469,16 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// Golden: real hash-table map/set with Hashable struct keys — byte-identical VM, interp, expected.
+    #[test]
+    fn golden_hashmap_keys_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/hashmap_keys.chz");
+        let expected = include_str!("../../examples/hashmap_keys.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     #[test]
     fn sort_over_comparable_structs_on_vm() {
         let src = "\
@@ -3554,6 +3704,68 @@ fn main():
     print(\"ok\")
 main()";
         assert_eq!(run_capture_stress(src), "00123456\nok\n");
+    }
+
+    /// A struct key's `hash()` allocates (triggering GC mid-operation). The map/set obj and the
+    /// in-flight key/value — popped off the operand stack before dispatch — must stay rooted across
+    /// every hash, including with an INLINE-TEMPORARY receiver (`make_map().get(k)`). Regression for
+    /// the hash-table struct-key rooting.
+    #[test]
+    fn map_struct_key_survives_gc_stress() {
+        let src = "\
+struct K:
+    n: int
+    fn hash(self) -> int:
+        junk := [str(self.n), str(self.n + 1)]
+        return self.n
+fn make_map() -> map[K, str]:
+    m: map[K, str] = {}
+    i := 0
+    while i < 8:
+        m[K(i)] = str(i)
+        i = i + 1
+    return m
+fn main():
+    m := make_map()
+    out := \"\"
+    for k in m:
+        out = out + m[k]
+    print(out)
+    print(m.has(K(3)))
+    print(m.get(K(5)))
+    print(make_map().get(K(2)))   # inline-temporary receiver
+    print(m.remove(K(0)))
+    print(m.len())
+main()";
+        assert_eq!(
+            run_capture_stress(src),
+            "01234567\ntrue\nSome(5)\nSome(2)\nSome(0)\n7\n"
+        );
+    }
+
+    /// Set construction (`set([..])`) + `add` over structs whose `hash()` allocates, including
+    /// algebra — none of the elements may be collected mid-hash.
+    #[test]
+    fn set_struct_hash_survives_gc_stress() {
+        let src = "\
+struct K:
+    n: int
+    fn hash(self) -> int:
+        junk := [str(self.n)]
+        return self.n
+fn main():
+    a := set([K(1), K(2), K(2), K(3)])
+    print(a.len())
+    a.add(K(3))
+    a.add(K(4))
+    print(a.len())
+    b := set([K(3), K(4), K(5)])
+    print(a.union(b).len())
+    print(a.intersection(b).len())
+    print(a.difference(b).len())
+main()";
+        // a = {1,2,3,4}; b = {3,4,5}; |a∪b|=5, |a∩b|=2, |a\\b|=2
+        assert_eq!(run_capture_stress(src), "3\n4\n5\n2\n2\n");
     }
 
     /// Same hazard via `sort_by` with an allocating comparator on an inline-temporary list.
@@ -4921,6 +5133,71 @@ main()";
     fn parity_map_int_and_bool_keys() {
         assert_parity_out("m := {1: \"x\", 2: \"y\"}\nprint(m[2])\n", "y\n");
         assert_parity_out("m := {true: 1, false: 0}\nprint(m[false])\n", "0\n");
+    }
+
+    // ----- Hashable struct keys (hash-table map/set) -----
+
+    /// A struct with `hash(self) -> int` as a map key: insert/update/get/has/remove + insertion-order
+    /// iteration must be byte-identical across both engines.
+    #[test]
+    fn parity_map_struct_key() {
+        let src = "\
+struct P:
+    x: int
+    y: int
+    fn hash(self) -> int:
+        return self.x * 31 + self.y
+fn main():
+    m: map[P, str] = {}
+    m[P(1, 2)] = \"a\"
+    m[P(3, 4)] = \"b\"
+    m[P(1, 2)] = \"z\"
+    for k in m:
+        print(k)
+    print(m[P(3, 4)])
+    print(m.has(P(1, 2)))
+    print(m.has(P(9, 9)))
+    print(m.get(P(3, 4)))
+    print(m.remove(P(1, 2)))
+    print(m.len())
+main()";
+        assert_parity(src);
+    }
+
+    /// Set of structs: dedup of structurally-equal keys via custom hash + union/intersection/difference.
+    #[test]
+    fn parity_set_struct_algebra() {
+        let src = "\
+struct P:
+    x: int
+    fn hash(self) -> int:
+        return self.x
+fn main():
+    a: set[P] = set([P(1), P(2), P(2), P(3)])
+    b: set[P] = set([P(2), P(3), P(4)])
+    print(a.len())
+    print(a.union(b).len())
+    print(a.intersection(b).len())
+    print(a.difference(b).len())
+    print(a.has(P(2)))
+    a.remove(P(2))
+    print(a.has(P(2)))
+main()";
+        assert_parity(src);
+    }
+
+    /// A struct used as a map key but MISSING `hash()` is a checker error — but `run_capture` bypasses
+    /// the checker, so the runtime must error consistently (not panic) on both engines.
+    #[test]
+    fn parity_map_struct_key_missing_hash_errors() {
+        let src = "\
+struct P:
+    x: int
+fn main():
+    m: map[P, int] = {}
+    m[P(1)] = 5
+main()";
+        assert_parity(src);
     }
 
     /// REGRESSION (AsInt relocation): a non-int LIST index now errors at runtime in `GetIndex`,

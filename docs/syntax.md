@@ -53,8 +53,8 @@ count += 1             # reassignment (+= -= also)
 | `bool` | `true` | |
 | `str` | `"hi"` | UTF-8 |
 | `list[T]` | `[1, 2]` | growable |
-| `map[K, V]` | `{"a": 1}` | insertion-ordered; key is a hashable scalar |
-| `set[T]` | `{1, 2, 3}` | deduped, insertion-ordered; `T` hashable scalar; empty is `set()` |
+| `map[K, V]` | `{"a": 1}` | insertion-ordered hash map; `K` is any `Hashable` type |
+| `set[T]` | `{1, 2, 3}` | deduped, insertion-ordered hash set; `T` any `Hashable` type; empty is `set()` |
 | `tuple` | `(1, "a")` | fixed-arity, immutable |
 | `Result[T]` | `Ok(x)` / `Err(msg)` | §9; shorthand `T!` |
 | `Option[T]` | `Some(x)` / `None` | §9; shorthand `T?` |
@@ -247,10 +247,24 @@ print("here: {Point(3, 4)}")  # here: (3, 4)
 print([Point(5, 6)])          # [(5, 6)]      — dispatches when nested too
 ```
 
-The prebuilt **`Hashable`** protocol (`hash(self) -> int`) is a generic bound: `int`/`str`/`bool`
-satisfy it intrinsically, and a struct satisfies it by defining `hash(self) -> int`. It is currently
-*only* a bound — it is **not** yet wired to `map`/`set` keys (those still accept only `int`/`str`/
-`bool`), because maps are association lists keyed by structural equality rather than hash tables.
+The prebuilt **`Hashable`** protocol (`hash(self) -> int`) governs `map` keys and `set` elements:
+`int`/`str`/`bool` satisfy it intrinsically, and a struct satisfies it by defining `hash(self) ->
+int`. `map`/`set` are real insertion-ordered hash tables, so **any `Hashable` type can be a key or
+element** — a struct key is hashed via its `hash()` and the probe confirmed by structural `==`.
+`float` is rejected (NaN footgun). Contract: two structurally-equal structs must return the same
+`hash()` (the implementor owns this, like Rust's `Hash`/`Eq`).
+
+```chezzi
+struct Point:
+    x: int
+    y: int
+    fn hash(self) -> int:
+        return self.x * 31 + self.y
+
+label: map[Point, str] = {}
+label[Point(1, 2)] = "here"      # struct key — hashed via Point.hash
+print(label[Point(1, 2)])        # here
+```
 
 **Generic structs** carry type parameters after the name; their fields and methods may use them.
 Type arguments are inferred at construction, or written explicitly in a type annotation.

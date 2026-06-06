@@ -22,8 +22,8 @@ pub fn call(name: &str, args: Vec<Value>, span: Span) -> Result<Value, RuntimeEr
         "str" => cast_str(&args, span),
         "ord" => ord(&args, span),
         "chr" => chr(&args, span),
-        "set" => set_ctor(&args, span),
-        _ => unreachable!("call dispatched a non-builtin: {name}"),
+        // `set` is intercepted by `Interp` (it may hash struct elements via re-entrant `hash()`).
+        _ => unreachable!("call dispatched a non-builtin or engine-routed builtin: {name}"),
     }
 }
 
@@ -39,153 +39,8 @@ pub fn call_method(
     match recv {
         Value::Str(s) => str_method(s, method, &args, span),
         Value::List(items) => list_method(items, method, args, span),
-        Value::Map(entries) => map_method(entries, method, args, span),
-        Value::Set(items) => set_method(items, method, args, span),
-        _ => unreachable!("call_method dispatched a non-str/list/map/set receiver"),
-    }
-}
-
-/// Built-in methods on `set[T]` (M8). Mirrors the VM's `core_method` Set arm and the checker's
-/// `set_method_sig` — keep the three in lockstep (error strings included).
-fn set_method(
-    items: &Rc<RefCell<Vec<Value>>>,
-    method: &str,
-    args: Vec<Value>,
-    span: Span,
-) -> Result<Value, RuntimeError> {
-    let set_arg = |i: usize| -> Result<Vec<Value>, RuntimeError> {
-        match &args[i] {
-            Value::Set(other) => Ok(other.borrow().clone()),
-            other => Err(RuntimeError {
-                message: format!("{method}() expects a set argument, got {}", other.type_name()),
-                span,
-            }),
-        }
-    };
-    match method {
-        "len" => {
-            arity("len", &args, 0, span)?;
-            Ok(Value::Int(items.borrow().len() as i64))
-        }
-        "has" => {
-            arity("has", &args, 1, span)?;
-            Ok(Value::Bool(items.borrow().iter().any(|e| super::values_equal(e, &args[0]))))
-        }
-        "add" => {
-            arity("add", &args, 1, span)?;
-            let present = items.borrow().iter().any(|e| super::values_equal(e, &args[0]));
-            if !present {
-                items.borrow_mut().push(args[0].clone());
-            }
-            Ok(Value::Nil)
-        }
-        "remove" => {
-            arity("remove", &args, 1, span)?;
-            let pos = items.borrow().iter().position(|e| super::values_equal(e, &args[0]));
-            match pos {
-                Some(i) => {
-                    items.borrow_mut().remove(i);
-                    Ok(Value::Bool(true))
-                }
-                None => Ok(Value::Bool(false)),
-            }
-        }
-        "union" | "intersection" | "difference" => {
-            arity(method, &args, 1, span)?;
-            let mine = items.borrow().clone();
-            let other = set_arg(0)?;
-            let result: Vec<Value> = match method {
-                "union" => {
-                    let mut out = mine.clone();
-                    for e in &other {
-                        if !out.iter().any(|x| super::values_equal(x, e)) {
-                            out.push(e.clone());
-                        }
-                    }
-                    out
-                }
-                "intersection" => mine
-                    .iter()
-                    .filter(|e| other.iter().any(|x| super::values_equal(x, e)))
-                    .cloned()
-                    .collect(),
-                _ => mine
-                    .iter()
-                    .filter(|e| !other.iter().any(|x| super::values_equal(x, e)))
-                    .cloned()
-                    .collect(),
-            };
-            Ok(Value::Set(Rc::new(RefCell::new(result))))
-        }
-        _ => Err(RuntimeError {
-            message: format!("type set has no method '{method}'"),
-            span,
-        }),
-    }
-}
-
-/// Built-in methods on `map[K, V]` (gap #5). Mirrors the VM's `core_method` Map arm and the
-/// checker's `map_method_sig` — keep the three in lockstep (error strings included). `get`/`remove`
-/// return `Option[V]` via the built-in `Option` enum (last-built-style like `list.pop`).
-fn map_method(
-    entries: &Rc<RefCell<Vec<(Value, Value)>>>,
-    method: &str,
-    args: Vec<Value>,
-    span: Span,
-) -> Result<Value, RuntimeError> {
-    let some = |v: Value| Value::Enum {
-        ty: "Option".into(),
-        variant: "Some".into(),
-        payload: vec![v],
-    };
-    let none = || Value::Enum {
-        ty: "Option".into(),
-        variant: "None".into(),
-        payload: vec![],
-    };
-    match method {
-        "len" => {
-            arity("len", &args, 0, span)?;
-            Ok(Value::Int(entries.borrow().len() as i64))
-        }
-        "has" => {
-            arity("has", &args, 1, span)?;
-            let key = &args[0];
-            let found = entries.borrow().iter().any(|(k, _)| super::values_equal(k, key));
-            Ok(Value::Bool(found))
-        }
-        "get" => {
-            arity("get", &args, 1, span)?;
-            let key = &args[0];
-            let v = entries.borrow().iter().find(|(k, _)| super::values_equal(k, key)).map(|(_, v)| v.clone());
-            Ok(v.map(some).unwrap_or_else(none))
-        }
-        "keys" => {
-            arity("keys", &args, 0, span)?;
-            let keys: Vec<Value> = entries.borrow().iter().map(|(k, _)| k.clone()).collect();
-            Ok(Value::List(Rc::new(RefCell::new(keys))))
-        }
-        "values" => {
-            arity("values", &args, 0, span)?;
-            let vals: Vec<Value> = entries.borrow().iter().map(|(_, v)| v.clone()).collect();
-            Ok(Value::List(Rc::new(RefCell::new(vals))))
-        }
-        "remove" => {
-            arity("remove", &args, 1, span)?;
-            let key = &args[0];
-            let pos = entries.borrow().iter().position(|(k, _)| super::values_equal(k, key));
-            match pos {
-                Some(i) => {
-                    let (_, v) = entries.borrow_mut().remove(i);
-                    Ok(some(v))
-                }
-                None => Ok(none()),
-            }
-        }
-        _ => Err(RuntimeError {
-            message: format!("type map has no method '{method}'"),
-            span,
-        }),
+        // map/set methods need engine access (a struct key's `hash()`), so they live on `Interp`.
+        _ => unreachable!("call_method dispatched a non-str/list receiver"),
     }
 }
 
@@ -381,7 +236,7 @@ fn list_method(
     }
 }
 
-fn arity(name: &str, args: &[Value], n: usize, span: Span) -> Result<(), RuntimeError> {
+pub(super) fn arity(name: &str, args: &[Value], n: usize, span: Span) -> Result<(), RuntimeError> {
     if args.len() == n {
         Ok(())
     } else {
@@ -404,33 +259,6 @@ fn len(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
     }
 }
 
-/// `set()` → empty set; `set(list)` → a deduped set of the list's elements. Mirrors the VM's
-/// `builtin_set` and the checker's `set` arm.
-fn set_ctor(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-    let src: Vec<Value> = match args {
-        [] => Vec::new(),
-        [Value::List(items)] => items.borrow().clone(),
-        [other] => {
-            return Err(RuntimeError {
-                message: format!("set() expects a list, got {}", other.type_name()),
-                span,
-            })
-        }
-        _ => {
-            return Err(RuntimeError {
-                message: format!("set() expects 0 or 1 argument(s), got {}", args.len()),
-                span,
-            })
-        }
-    };
-    let mut items: Vec<Value> = Vec::with_capacity(src.len());
-    for v in src {
-        if !items.iter().any(|e| super::values_equal(e, &v)) {
-            items.push(v);
-        }
-    }
-    Ok(Value::Set(Rc::new(RefCell::new(items))))
-}
 
 /// Upper bound on the length of a list produced by `range()`, to prevent an absurd argument from
 /// exhausting memory. (A `for` loop over a range is lazy and not subject to this; this only caps

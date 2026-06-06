@@ -81,6 +81,88 @@ pub struct Closure {
     pub home: ModEnv,
 }
 
+/// An insertion-ordered hash map (interp side, mirroring `vm::heap::MapData`). `entries` is the
+/// insertion-ordered store with a cached key hash per entry; `index` maps a hash to its candidate
+/// positions for O(1)-average lookup. Equality ignores the cached hashes and the index — it compares
+/// key/value pairs in order (preserving the pre-hash-table assoc-list `==` semantics).
+#[derive(Debug, Clone, Default)]
+pub struct MapData {
+    pub entries: Vec<(u64, Value, Value)>,
+    pub index: HashMap<u64, Vec<usize>>,
+}
+
+impl MapData {
+    pub fn candidates(&self, h: u64) -> &[usize] {
+        self.index.get(&h).map_or(&[], |v| v.as_slice())
+    }
+    pub fn push(&mut self, h: u64, k: Value, v: Value) {
+        let pos = self.entries.len();
+        self.entries.push((h, k, v));
+        self.index.entry(h).or_default().push(pos);
+    }
+    pub fn remove_at(&mut self, i: usize) -> (u64, Value, Value) {
+        let removed = self.entries.remove(i);
+        self.rebuild_index();
+        removed
+    }
+    fn rebuild_index(&mut self) {
+        self.index.clear();
+        for (pos, (h, _, _)) in self.entries.iter().enumerate() {
+            self.index.entry(*h).or_default().push(pos);
+        }
+    }
+}
+
+impl PartialEq for MapData {
+    fn eq(&self, o: &Self) -> bool {
+        self.entries.len() == o.entries.len()
+            && self
+                .entries
+                .iter()
+                .zip(&o.entries)
+                .all(|((_, ka, va), (_, kb, vb))| ka == kb && va == vb)
+    }
+}
+
+/// An insertion-ordered hash set, same design as [`MapData`].
+#[derive(Debug, Clone, Default)]
+pub struct SetData {
+    pub entries: Vec<(u64, Value)>,
+    pub index: HashMap<u64, Vec<usize>>,
+}
+
+impl SetData {
+    pub fn candidates(&self, h: u64) -> &[usize] {
+        self.index.get(&h).map_or(&[], |v| v.as_slice())
+    }
+    pub fn push(&mut self, h: u64, e: Value) {
+        let pos = self.entries.len();
+        self.entries.push((h, e));
+        self.index.entry(h).or_default().push(pos);
+    }
+    pub fn remove_at(&mut self, i: usize) -> (u64, Value) {
+        let removed = self.entries.remove(i);
+        self.rebuild_index();
+        removed
+    }
+    fn rebuild_index(&mut self) {
+        self.index.clear();
+        for (pos, (h, _)) in self.entries.iter().enumerate() {
+            self.index.entry(*h).or_default().push(pos);
+        }
+    }
+}
+
+impl PartialEq for SetData {
+    /// Order-sensitive element comparison (ignoring cached hashes / index) — matches the derived
+    /// `Vec` equality the old assoc-list set had. Order-*independent* set equality lives in
+    /// `interp::values_equal`'s dedicated `Set` arm.
+    fn eq(&self, o: &Self) -> bool {
+        self.entries.len() == o.entries.len()
+            && self.entries.iter().zip(&o.entries).all(|((_, a), (_, b))| a == b)
+    }
+}
+
 /// A runtime value. Reference types (lists, structs) share via `Rc` so assignment is by-reference,
 /// matching the spec's growable `list` / mutable struct semantics.
 #[derive(Debug, Clone, PartialEq)]
@@ -94,10 +176,10 @@ pub enum Value {
     /// `(a, b, …)` — a fixed-arity, immutable tuple. Shared by `Rc` (no `RefCell`: tuples never
     /// mutate). Derived `PartialEq` gives structural equality.
     Tuple(Rc<Vec<Value>>),
-    /// `{k: v, …}` — insertion-ordered, shared by reference. Linear scan by value-equality.
-    Map(Rc<RefCell<Vec<(Value, Value)>>>),
-    /// `{a, b, …}` — insertion-ordered, deduped set, shared by reference. Linear scan by equality.
-    Set(Rc<RefCell<Vec<Value>>>),
+    /// `{k: v, …}` — an insertion-ordered hash map (see [`MapData`]), shared by reference.
+    Map(Rc<RefCell<MapData>>),
+    /// `{a, b, …}` — an insertion-ordered hash set (see [`SetData`]), shared by reference.
+    Set(Rc<RefCell<SetData>>),
     /// A named function (top-level `fn` or struct method) plus the module globals it resolves
     /// top-level names against (its "home" — see [`ModEnv`]).
     Func(Rc<FnDecl>, ModEnv),
@@ -173,21 +255,22 @@ impl std::fmt::Display for Value {
                     .join(", ");
                 write!(f, "({inner})")
             }
-            Value::Map(entries) => {
-                let inner = entries
+            Value::Map(m) => {
+                let inner = m
                     .borrow()
+                    .entries
                     .iter()
-                    .map(|(k, v)| format!("{k}: {v}"))
+                    .map(|(_, k, v)| format!("{k}: {v}"))
                     .collect::<Vec<_>>()
                     .join(", ");
                 write!(f, "{{{inner}}}")
             }
-            Value::Set(items) => {
-                let items = items.borrow();
-                if items.is_empty() {
+            Value::Set(s) => {
+                let s = s.borrow();
+                if s.entries.is_empty() {
                     write!(f, "set()")
                 } else {
-                    let inner = items.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+                    let inner = s.entries.iter().map(|(_, v)| v.to_string()).collect::<Vec<_>>().join(", ");
                     write!(f, "{{{inner}}}")
                 }
             }

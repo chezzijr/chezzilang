@@ -15,8 +15,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > commit.
 >
 > **THIS SESSION (gaps follow-up, in order):** ✅ tech-debt (parser `MAX_DEPTH` 128→64, dropped the
-> test stack-size crutch); ✅ **G4 — generic enums**; 🟦 **map-model rework** (real hash tables +
-> Hashable struct keys) — in progress.
+> test stack-size crutch); ✅ **G4 — generic enums**; ✅ **map-model rework** — `map`/`set` are now
+> real insertion-ordered **hash tables** (entries `Vec<(u64_hash, k[, v])>` + side index
+> `HashMap<u64, Vec<usize>>`) and the key restriction is **lifted**: any `Hashable` type (int/str/bool
+> or a struct with `hash(self) -> int`) is a key/element. Struct-key `hash()` re-enters (GC-rooted on
+> the VM operand stack like `sort_by`; Rc-safe on interp); numeric keys hash by canonical f64 bits
+> (±0.0 normalised); float keys stay rejected. Both engines byte-identical — parity + 2 gc-stress
+> tests + golden `examples/hashmap_keys.chz`. Checker `is_hashable_key` → `satisfies(Hashable)`.
+> Reviewed (Solidity + Godot S++ lenses): rooting/index-invariant/parity clean; applied the ±0.0
+> hash-normalisation finding.
 > - ✅ **G1 — `Stringable` protocol.** Prebuilt protocol `str(self) -> str`; a struct that defines it
 >   overrides its default repr in `print`, the `str()` builtin, and `{…}` interpolation (nested in
 >   list/tuple/map/set/enum too). Both engines via a new protocol-aware `stringify` (`&self`
@@ -24,11 +31,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   `Stringable` (not `Display`/`Show`) to match the `-able` convention + the `str()` builtin.
 >   Self-referential `str` trips the call-depth guard on both engines (interp counts the dispatch so
 >   it errors before host-stack overflow). Golden `examples/stringable.chz` + checker units + parity.
-> - 🟦 **G2 — `Hashable` protocol (bound only).** Prebuilt `Hashable` (`hash(self) -> int`) usable as
->   a `[T: Hashable]` bound; int/str/bool satisfy intrinsically, structs via a `hash` method. **Map/set
->   key restriction NOT lifted** — found `map`/`set` are association lists (`Vec<(K,V)>`, linear scan +
->   structural `==`, no hashing), so enabling struct keys is entangled with a real-hashmap decision;
->   deferred to a dedicated map-model session (user's call). Checker units only (no runtime change).
+> - ✅ **G2 — `Hashable` protocol.** Prebuilt `Hashable` (`hash(self) -> int`) usable as a
+>   `[T: Hashable]` bound; int/str/bool satisfy intrinsically, structs via a `hash` method. **Map/set
+>   key restriction now LIFTED** by the map-model rework (see "THIS SESSION" above): `map`/`set` became
+>   real hash tables and any `Hashable` type is a key/element.
 > - ✅ **G3 — numeric operator protocols + multi-bound + type aliases.** Per-operator `Add`/`Sub`/
 >   `Mul` (method `add`/`sub`/`mul`) overload `+`/`-`/`*` on same-typed structs (int/float intrinsic;
 >   `/`/`%` never); both engines dispatch via `run_proto`/`call`. Multi-bound `T: Add + Mul`
