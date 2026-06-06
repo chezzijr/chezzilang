@@ -13,6 +13,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **M10 — Tier 2: type-system depth** (`gaps.md` Tier 2). 🟦 IN PROGRESS. Plan:
 > `~/.claude/plans/see-gaps-and-help-mellow-meteor.md`. Staged G1→G4 (ascending risk), each TDD +
 > commit.
+>
+> **NEXT SESSION (in order):** (1) **G4 — generic enums** `enum Tree[T]`: change `Ty::Enum(String)`
+> → `Ty::Enum(String, Vec<Ty>)` (~7 sites in checker/ty.rs), add `type_params` to AST `Enum`, parse
+> `[T]` (reuse `parse_type_params`), infer args at variant construction (mirror generic structs),
+> substitute payload types in `match` arms; runtime is type-erased (no engine change). Keep
+> `Result`/`Option` as their current special types. (2) **Run the agent-review-panel gate** on the
+> whole M10 milestone before declaring it done. (3) **Map-model rework** (deferred this session, see
+> G2): decide assoc-list-vs-real-hashmap, then lift the struct map/set key restriction.
 > - ✅ **G1 — `Stringable` protocol.** Prebuilt protocol `str(self) -> str`; a struct that defines it
 >   overrides its default repr in `print`, the `str()` builtin, and `{…}` interpolation (nested in
 >   list/tuple/map/set/enum too). Both engines via a new protocol-aware `stringify` (`&self`
