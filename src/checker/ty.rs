@@ -16,6 +16,8 @@ pub enum Ty {
     List(Box<Ty>),
     /// `map[K, V]` — insertion-ordered dictionary. `K` is a hashable scalar (int/str/bool).
     Map(Box<Ty>, Box<Ty>),
+    /// `set[T]` — insertion-ordered set. `T` is a hashable scalar (int/str/bool).
+    Set(Box<Ty>),
     Func { params: Vec<Ty>, ret: Box<Ty> },
     /// `(T1, T2, …)` — a fixed-arity tuple (always ≥2 elements).
     Tuple(Vec<Ty>),
@@ -41,6 +43,9 @@ impl Ty {
     }
     pub fn map(key: Ty, value: Ty) -> Ty {
         Ty::Map(Box::new(key), Box::new(value))
+    }
+    pub fn set(elem: Ty) -> Ty {
+        Ty::Set(Box::new(elem))
     }
     pub fn result(inner: Ty) -> Ty {
         Ty::Result(Box::new(inner))
@@ -72,6 +77,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         (Int, Int) | (Float, Float) | (Bool, Bool) | (Str, Str) | (Nil, Nil) => true,
         (List(a), List(b)) | (Result(a), Result(b)) | (Option(a), Option(b)) => compatible(a, b),
         (Map(ka, va), Map(kb, vb)) => compatible(ka, kb) && compatible(va, vb),
+        (Set(a), Set(b)) => compatible(a, b),
         (Struct(a, aa), Struct(b, ba)) => {
             a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| compatible(x, y))
         }
@@ -96,6 +102,7 @@ impl fmt::Display for Ty {
             Ty::Nil => write!(f, "nil"),
             Ty::List(t) => write!(f, "list[{t}]"),
             Ty::Map(k, v) => write!(f, "map[{k}, {v}]"),
+            Ty::Set(t) => write!(f, "set[{t}]"),
             Ty::Result(t) => write!(f, "Result[{t}]"),
             Ty::Option(t) => write!(f, "Option[{t}]"),
             Ty::Struct(n, args) => {

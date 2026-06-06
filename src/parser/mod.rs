@@ -1066,21 +1066,37 @@ impl Parser {
                 ExprKind::List(elems)
             }
             Token::LBrace => {
-                // Map literal `{k: v, …}` (insertion-ordered, no trailing comma — mirrors lists).
-                let mut entries = Vec::new();
-                if !self.check(&Token::RBrace) {
-                    loop {
-                        let key = self.parse_expr()?;
-                        self.expect(&Token::Colon)?;
+                // `{}` is the empty map. Otherwise the first element decides: a `key: value` pair
+                // makes it a map literal; a bare expression makes it a set literal `{a, b, c}`.
+                // (The empty set is `set()`, since `{}` is taken.)
+                if self.check(&Token::RBrace) {
+                    self.advance();
+                    ExprKind::Map(Vec::new())
+                } else {
+                    let first = self.parse_expr()?;
+                    if self.eat(&Token::Colon) {
+                        // Map: finish the first pair, then the rest.
+                        let mut entries = Vec::new();
                         let value = self.parse_expr()?;
-                        entries.push((key, value));
-                        if !self.eat(&Token::Comma) {
-                            break;
+                        entries.push((first, value));
+                        while self.eat(&Token::Comma) {
+                            let key = self.parse_expr()?;
+                            self.expect(&Token::Colon)?;
+                            let value = self.parse_expr()?;
+                            entries.push((key, value));
                         }
+                        self.expect(&Token::RBrace)?;
+                        ExprKind::Map(entries)
+                    } else {
+                        // Set: a comma-separated list of elements.
+                        let mut elems = vec![first];
+                        while self.eat(&Token::Comma) {
+                            elems.push(self.parse_expr()?);
+                        }
+                        self.expect(&Token::RBrace)?;
+                        ExprKind::Set(elems)
                     }
                 }
-                self.expect(&Token::RBrace)?;
-                ExprKind::Map(entries)
             }
             Token::Fn => return self.parse_closure(span),
             // Expression-position `match`/`if` (the keyword was already consumed by `advance`).

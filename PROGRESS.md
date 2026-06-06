@@ -24,7 +24,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > component); std.time `now/monotonic/sleep_ms/format` (UTC date via Hinnant civil-from-days, no
 > chrono). Zero engine/`Host`/`NativeRet` changes — fns call `std::` directly + existing
 > lowering. Golden `examples/sys.chz`. ·
-> **M4 ⬜** set type. · **M5 ✅** std.json `decode[T]` — type-directed decode into
+> **M4 ✅** set type — `{a, b, c}` literals (deduped, insertion-ordered; disambiguated from
+> map by no `:`), `set()`/`set(list)`, methods `add/remove/has/len/union/intersection/
+> difference`, `for x in s`, order-independent equality, `set[T]` annotation; elements are
+> hashable scalars. `Ty::Set`/`Value::Set`/`Obj::Set` + `Op::NewSet`, GC-traced, both engines.
+> Golden `examples/set.chz`. · **M5 ✅** std.json `decode[T]` — type-directed decode into
 > struct/typed-map/list/scalar via a scoped `ExprKind::DecodeCall` (parser special-cases
 > `.decode[T](…)`, no general call-site type-args) + a self-contained `TypeDescriptor`
 > (`src/json_decode.rs`) built at compile time (VM `Op::JsonDecode`) / eval time (interp); reuses

@@ -19,6 +19,9 @@ pub enum Obj {
     /// `{k: v, …}` — insertion-ordered entries (linear scan by value-equality). Keys AND values
     /// may be heap objects, so BOTH are traced as GC children.
     Map(Vec<(Value, Value)>),
+    /// `{a, b, …}` — insertion-ordered, deduped set (linear scan by value-equality). Elements may
+    /// be heap objects (str), so they are traced as GC children.
+    Set(Vec<Value>),
     /// Fields in declaration order (deterministic `Display` / iteration).
     Struct {
         name: Box<str>,
@@ -172,6 +175,7 @@ impl Heap {
                 push(k);
                 push(v);
             }),
+            Obj::Set(items) => items.iter().for_each(&mut push),
             Obj::Struct { fields, .. } => fields.iter().for_each(|(_, v)| push(v)),
             Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
             Obj::Func { home, .. } => out.push(*home),

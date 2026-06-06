@@ -465,6 +465,19 @@ impl Vm {
                 let h = self.heap.alloc(Obj::Map(entries));
                 self.push(Value::Obj(h));
             }
+            Op::NewSet(n) => {
+                // Pop n values, dedup by value-equality keeping first occurrence (insertion order).
+                let at = self.stack.len() - *n;
+                let raw: Vec<Value> = self.stack.split_off(at);
+                let mut items: Vec<Value> = Vec::with_capacity(*n);
+                for v in raw {
+                    if !items.iter().any(|e| self.values_equal(*e, v)) {
+                        items.push(v);
+                    }
+                }
+                let h = self.heap.alloc(Obj::Set(items));
+                self.push(Value::Obj(h));
+            }
             Op::NewStruct(name, argc) => self.new_struct(name, *argc, span)?,
             Op::NewEnum(ty, variant, argc) => self.new_enum(ty, variant, *argc, span)?,
             Op::MakeFunc(proto) => {
@@ -536,6 +549,11 @@ impl Vm {
                         Obj::Map(entries) => {
                             let keys: Vec<Value> = entries.iter().map(|(k, _)| *k).collect();
                             let nh = self.heap.alloc(Obj::List(keys));
+                            self.push(Value::Obj(nh));
+                        }
+                        Obj::Set(items) => {
+                            let cloned = items.clone();
+                            let nh = self.heap.alloc(Obj::List(cloned));
                             self.push(Value::Obj(nh));
                         }
                         // A string iterates as 1-char strings (Python-style; gap: char type).
@@ -854,6 +872,11 @@ impl Vm {
                     (Obj::Map(a), Obj::Map(b)) => {
                         a.len() == b.len()
                             && a.iter().zip(b).all(|((ka, va), (kb, vb))| self.values_equal(*ka, *kb) && self.values_equal(*va, *vb))
+                    }
+                    // Sets are unordered: equal iff same size and every element of `a` is in `b`.
+                    (Obj::Set(a), Obj::Set(b)) => {
+                        a.len() == b.len()
+                            && a.iter().all(|x| b.iter().any(|y| self.values_equal(*x, *y)))
                     }
                     (Obj::Struct { name: na, fields: fa }, Obj::Struct { name: nb, fields: fb }) => {
                         na == nb
@@ -1202,7 +1225,7 @@ impl Vm {
         // Core-type methods (M6): built-in methods on `str` / `list`. Handled before the clone-match
         // so `list.push` mutates the heap object in place (the match below clones the Obj). Mirrors
         // `interp::builtins::call_method` exactly — error strings included (parity-tested).
-        if matches!(self.heap.get(h), Obj::Str(_) | Obj::List(_) | Obj::Map(_)) {
+        if matches!(self.heap.get(h), Obj::Str(_) | Obj::List(_) | Obj::Map(_) | Obj::Set(_)) {
             let result = self.core_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
@@ -1642,7 +1665,81 @@ impl Vm {
                 }
                 _ => Err(self.err(format!("type map has no method '{method}'"), span)),
             },
-            _ => unreachable!("core_method dispatched a non-str/list/map receiver"),
+            Obj::Set(items) => match method {
+                "len" => {
+                    self.arity_err("len", args, 0, span)?;
+                    Ok(Value::Int(items.len() as i64))
+                }
+                "has" => {
+                    self.arity_err("has", args, 1, span)?;
+                    let x = args[0];
+                    let items = items.clone();
+                    Ok(Value::Bool(items.iter().any(|e| self.values_equal(*e, x))))
+                }
+                "add" => {
+                    self.arity_err("add", args, 1, span)?;
+                    let x = args[0];
+                    let present = items.iter().any(|e| self.values_equal(*e, x));
+                    if !present {
+                        let Obj::Set(items) = self.heap.get_mut(h) else { unreachable!() };
+                        items.push(x);
+                    }
+                    Ok(Value::Nil)
+                }
+                "remove" => {
+                    self.arity_err("remove", args, 1, span)?;
+                    let x = args[0];
+                    let pos = items.iter().position(|e| self.values_equal(*e, x));
+                    match pos {
+                        Some(i) => {
+                            let Obj::Set(items) = self.heap.get_mut(h) else { unreachable!() };
+                            items.remove(i);
+                            Ok(Value::Bool(true))
+                        }
+                        None => Ok(Value::Bool(false)),
+                    }
+                }
+                "union" | "intersection" | "difference" => {
+                    self.arity_err(method, args, 1, span)?;
+                    let mine = items.clone();
+                    let other = self.set_arg(args[0], method, span)?;
+                    let result = match method {
+                        "union" => {
+                            let mut out = mine.clone();
+                            for e in &other {
+                                if !out.iter().any(|x| self.values_equal(*x, *e)) {
+                                    out.push(*e);
+                                }
+                            }
+                            out
+                        }
+                        "intersection" => mine
+                            .iter()
+                            .copied()
+                            .filter(|e| other.iter().any(|x| self.values_equal(*x, *e)))
+                            .collect(),
+                        _ => mine
+                            .iter()
+                            .copied()
+                            .filter(|e| !other.iter().any(|x| self.values_equal(*x, *e)))
+                            .collect(),
+                    };
+                    Ok(Value::Obj(self.heap.alloc(Obj::Set(result))))
+                }
+                _ => Err(self.err(format!("type set has no method '{method}'"), span)),
+            },
+            _ => unreachable!("core_method dispatched a non-str/list/map/set receiver"),
+        }
+    }
+
+    /// Read a set argument's elements (for set algebra), erroring if it isn't a set.
+    fn set_arg(&self, v: Value, method: &str, span: Span) -> Result<Vec<Value>, RuntimeError> {
+        match v {
+            Value::Obj(h) => match self.heap.get(h) {
+                Obj::Set(items) => Ok(items.clone()),
+                _ => Err(self.err(format!("{method}() expects a set argument, got {}", self.type_name(v)), span)),
+            },
+            _ => Err(self.err(format!("{method}() expects a set argument, got {}", self.type_name(v)), span)),
         }
     }
 
@@ -1929,6 +2026,7 @@ impl Vm {
             "str" => self.builtin_str(&args, span)?,
             "ord" => self.builtin_ord(&args, span)?,
             "chr" => self.builtin_chr(&args, span)?,
+            "set" => self.builtin_set(&args, span)?,
             _ => unreachable!("unknown builtin {name}"),
         };
         self.push(result);
@@ -1941,6 +2039,28 @@ impl Vm {
         } else {
             Err(self.err(format!("{name}() expects {n} argument(s), got {}", args.len()), span))
         }
+    }
+
+    /// `set()` → empty set; `set(list)` → a deduped set of the list's elements.
+    fn builtin_set(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        let src: Vec<Value> = match args {
+            [] => Vec::new(),
+            [one] => match one {
+                Value::Obj(h) => match self.heap.get(*h) {
+                    Obj::List(items) => items.clone(),
+                    _ => return Err(self.err(format!("set() expects a list, got {}", self.type_name(*one)), span)),
+                },
+                other => return Err(self.err(format!("set() expects a list, got {}", self.type_name(*other)), span)),
+            },
+            _ => return Err(self.err(format!("set() expects 0 or 1 argument(s), got {}", args.len()), span)),
+        };
+        let mut items: Vec<Value> = Vec::with_capacity(src.len());
+        for v in src {
+            if !items.iter().any(|e| self.values_equal(*e, v)) {
+                items.push(v);
+            }
+        }
+        Ok(Value::Obj(self.heap.alloc(Obj::Set(items))))
     }
 
     fn builtin_len(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
@@ -2083,6 +2203,7 @@ impl Vm {
                 Obj::List(_) => "list",
                 Obj::Tuple(_) => "tuple",
                 Obj::Map(_) => "map",
+                Obj::Set(_) => "set",
                 Obj::Struct { .. } => "struct",
                 Obj::Enum { .. } => "enum",
                 Obj::Func { .. } | Obj::Closure { .. } => "function",
@@ -2116,6 +2237,14 @@ impl Vm {
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("{{{inner}}}")
+                }
+                Obj::Set(items) => {
+                    if items.is_empty() {
+                        "set()".to_string()
+                    } else {
+                        let inner = items.iter().map(|v| self.display(*v)).collect::<Vec<_>>().join(", ");
+                        format!("{{{inner}}}")
+                    }
                 }
                 Obj::Struct { name, fields } => {
                     let inner = fields.iter().map(|(k, v)| format!("{k}={}", self.display(*v))).collect::<Vec<_>>().join(", ");
@@ -2944,6 +3073,17 @@ main()";
         assert_eq!(vm_out, interp_out);
     }
 
+    /// M8-M4 golden: `examples/set.chz` (the set type — literals, membership, algebra, iteration)
+    /// byte-identical on the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_set_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/set.chz");
+        let expected = include_str!("../../examples/set.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     /// M1 (tier-1) golden: `examples/string_iter.chz` (chars + iterable strings) byte-identical
     /// on the VM, the interpreter, and its `.expected`.
     #[test]
@@ -3488,6 +3628,27 @@ mod parity_tests {
             "import std.time\nprint(time.format(0))\nprint(time.format(1700000000))\nprint(time.now() > 0)\n",
         );
         assert_eq!(out, "1970-01-01 00:00:00\n2023-11-14 22:13:20\ntrue\n");
+    }
+
+    #[test]
+    fn set_dedup_and_algebra_parity() {
+        assert_parity_out(
+            "s := {3, 1, 3, 2, 1}\nprint(s.len())\nprint({1,2,3}.union({3,4}).len())\nprint({1,2,3}.intersection({2,3,4}).len())\nprint({1,2,3}.difference({2,3}).len())\nprint({1,2} == {2,1})\n",
+            "3\n4\n2\n1\ntrue\n",
+        );
+    }
+
+    #[test]
+    fn set_mutation_and_iteration_parity() {
+        assert_parity_out(
+            "s := set()\ns.add(10)\ns.add(10)\ns.add(20)\nprint(s.len())\nprint(s.remove(10))\nprint(s.remove(10))\ntotal := 0\nfor x in {5, 15, 25}:\n    total += x\nprint(total)\n",
+            "2\ntrue\nfalse\n45\n",
+        );
+    }
+
+    #[test]
+    fn set_display_parity() {
+        assert_parity_out("print({1, 2, 3})\nprint(set())\n", "{1, 2, 3}\nset()\n");
     }
 
     #[test]

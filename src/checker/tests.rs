@@ -1919,3 +1919,45 @@ fn json_decode_rejects_map_with_non_str_key() {
         "map keys must be str",
     );
 }
+
+// ===== M8-M4: set type =====
+
+#[test]
+fn set_literal_infers_set_of_elem() {
+    ok("s: set[int] = {1, 2, 3}\nprint(s.len())\n");
+}
+
+#[test]
+fn set_methods_typecheck() {
+    ok("s := {1, 2}\nb: bool = s.has(1)\ns.add(3)\nr: bool = s.remove(1)\nu: set[int] = s.union({4})\nprint(u.len())\n");
+}
+
+#[test]
+fn set_builtin_empty_and_from_list() {
+    ok("e := set()\ne.add(\"x\")\nf: set[int] = set([1, 1, 2])\nprint(f.len())\n");
+}
+
+#[test]
+fn set_iteration_binds_element() {
+    ok("for x in {1, 2, 3}:\n    y: int = x\n    print(y)\n");
+}
+
+#[test]
+fn set_mixed_element_types_rejected() {
+    rejects("s := {1, \"two\"}\n", "set elements differ");
+}
+
+#[test]
+fn set_non_hashable_element_rejected() {
+    rejects("s := {[1], [2]}\n", "hashable scalar");
+}
+
+#[test]
+fn set_union_arg_must_be_set() {
+    rejects("s := {1, 2}\nx := s.union([3])\n", "argument 1 of 'union'");
+}
+
+#[test]
+fn set_not_indexable() {
+    rejects("s := {1, 2}\nx := s[0]\n", "cannot index into set");
+}

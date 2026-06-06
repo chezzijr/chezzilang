@@ -209,6 +209,16 @@ impl Interp {
                 }
                 Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(pairs))))
             }
+            ExprKind::Set(elems) => {
+                let mut items: Vec<Value> = Vec::with_capacity(elems.len());
+                for e in elems {
+                    let v = self.eval(e)?;
+                    if !items.iter().any(|x| values_equal(x, &v)) {
+                        items.push(v);
+                    }
+                }
+                Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(items))))
+            }
             ExprKind::Closure { params, body, .. } => {
                 Ok(Value::Closure(std::rc::Rc::new(value::Closure {
                     params: params.clone(),
@@ -826,7 +836,7 @@ impl Interp {
             return self.eval_list_sort(list, elems, span);
         }
         // Core-type methods (M6): built-in methods on `str`, `list`, and `map` dispatch on the value.
-        if matches!(receiver, Value::Str(_) | Value::List(_) | Value::Map(_)) {
+        if matches!(receiver, Value::Str(_) | Value::List(_) | Value::Map(_) | Value::Set(_)) {
             return builtins::call_method(&receiver, method, arg_vals, span);
         }
         // `module.fn(args)` is a plain call on the looked-up member — no `self` is bound.
@@ -1441,6 +1451,7 @@ impl Interp {
                     }
                 })
                 .collect(),
+            Value::Set(items) => items.borrow().iter().map(|v| vec![v.clone()]).collect(),
             // Strings iterate as 1-char strings (Python-style; the checker binds a single str var).
             Value::Str(s) => s.chars().map(|c| vec![Value::Str(c.to_string().into())]).collect(),
             other => {
@@ -1994,6 +2005,11 @@ pub(super) fn values_equal(l: &Value, r: &Value) -> bool {
     match (l, r) {
         (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
             as_f64(l) == as_f64(r)
+        }
+        // Sets are unordered: equal iff same size and every element of one is in the other.
+        (Value::Set(a), Value::Set(b)) => {
+            let (a, b) = (a.borrow(), b.borrow());
+            a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| values_equal(x, y)))
         }
         _ => l == r,
     }
@@ -2647,6 +2663,14 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/hello.chz");
         let expected = include_str!("../../examples/hello.expected");
         assert_eq!(run_capture(source).expect("hello.chz should run"), expected);
+    }
+
+    /// M8-M4 golden: the set type (literals, membership, algebra, iteration).
+    #[test]
+    fn golden_set_chz() {
+        let source = include_str!("../../examples/set.chz");
+        let expected = include_str!("../../examples/set.expected");
+        assert_eq!(run_capture(source).expect("set.chz should run"), expected);
     }
 
     /// M1 (tier-1) golden: Python-style char handling — `s.chars()` + iterable strings.

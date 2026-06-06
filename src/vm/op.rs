@@ -120,6 +120,8 @@ pub enum Op {
     NewTuple(usize),
     /// Build a map from `n` entries. Stack layout `[k0, v0, k1, v1, …]` (2n values); last key wins.
     NewMap(usize),
+    /// Build a set from the top `n` values (deduped, insertion order kept). Mirrors `NewList`.
+    NewSet(usize),
     NewStruct(String, usize),
     /// `ty`, `variant`, `argc`.
     NewEnum(String, String, usize),

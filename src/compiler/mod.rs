@@ -33,7 +33,7 @@ pub struct CompileError {
 
 /// The name a builtin resolves to (mirrors `interp::builtins::is_builtin` + the special `print`).
 fn is_builtin(name: &str) -> bool {
-    matches!(name, "len" | "range" | "int" | "float" | "str" | "ord" | "chr")
+    matches!(name, "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set")
 }
 
 /// Compile a whole resolved module graph in dependency order.
@@ -716,6 +716,12 @@ impl Compiler {
                     self.compile_expr(fc, v)?;
                 }
                 fc.emit(Op::NewMap(entries.len()), expr.span);
+            }
+            ExprKind::Set(elems) => {
+                for e in elems {
+                    self.compile_expr(fc, e)?;
+                }
+                fc.emit(Op::NewSet(elems.len()), expr.span);
             }
             ExprKind::Unary { op, expr: inner } => {
                 self.compile_expr(fc, inner)?;

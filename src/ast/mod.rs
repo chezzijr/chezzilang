@@ -237,6 +237,8 @@ pub enum ExprKind {
     Tuple(Vec<Expr>),
     /// `{k: v, …}` — insertion-ordered map literal. Each pair is `(key, value)`.
     Map(Vec<(Expr, Expr)>),
+    /// `{a, b, c}` — set literal (≥1 element; empty `{}` is a map, empty set is `set()`).
+    Set(Vec<Expr>),
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,

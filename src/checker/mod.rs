@@ -643,6 +643,16 @@ impl Checker {
                     }
                     Ty::map(key, value)
                 }
+                ("set", [t]) => {
+                    let elem = self.resolve_type(t, span);
+                    if !is_hashable_key(&elem) {
+                        self.error(
+                            span,
+                            format!("set element type must be a hashable scalar (int, str, or bool), found {elem}"),
+                        );
+                    }
+                    Ty::set(elem)
+                }
                 // A user-defined generic struct instantiated with type arguments: `Pair[int, str]`.
                 _ if self.struct_names.contains(n) => {
                     let resolved: Vec<Ty> = args.iter().map(|a| self.resolve_type(a, span)).collect();
@@ -1004,11 +1014,12 @@ impl Checker {
                     unknowns(vars)
                 }
             },
-            Ty::List(_) | Ty::Str if vars.len() != 1 => {
+            Ty::List(_) | Ty::Str | Ty::Set(_) if vars.len() != 1 => {
                 self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
                 unknowns(vars)
             }
             Ty::List(inner) => vec![(vars[0].clone(), (**inner).clone())],
+            Ty::Set(elem) => vec![(vars[0].clone(), (**elem).clone())],
             Ty::Str => vec![(vars[0].clone(), Ty::Str)],
             Ty::Unknown => unknowns(vars),
             other => {
@@ -1405,6 +1416,7 @@ impl Checker {
             ExprKind::List(items) => self.infer_list(items),
             ExprKind::Tuple(items) => Ty::Tuple(items.iter().map(|e| self.infer(e)).collect()),
             ExprKind::Map(entries) => self.infer_map(entries),
+            ExprKind::Set(elems) => self.infer_set(elems),
             ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner),
             ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
             ExprKind::Range { start, end } => {
@@ -1458,6 +1470,25 @@ impl Checker {
 
     /// Infer the type of a map literal `{k: v, …}`. Keys must share one (hashable) type, values
     /// another; heterogeneity and non-hashable keys are errors. Empty `{}` → `map[?, ?]`.
+    fn infer_set(&mut self, elems: &[Expr]) -> Ty {
+        let mut elem = Ty::Unknown;
+        for e in elems {
+            let et = self.infer(e);
+            if !et.is_unknown() && !is_hashable_key(&et) {
+                self.error(
+                    e.span,
+                    format!("set element type must be a hashable scalar (int, str, or bool), found {et}"),
+                );
+            }
+            if elem.is_unknown() {
+                elem = et;
+            } else if !et.is_unknown() && !compatible(&elem, &et) {
+                self.error(e.span, format!("set elements differ: {elem} vs {et}"));
+            }
+        }
+        Ty::set(elem)
+    }
+
     fn infer_map(&mut self, entries: &[(Expr, Expr)]) -> Ty {
         let mut key = Ty::Unknown;
         let mut value = Ty::Unknown;
@@ -1864,6 +1895,34 @@ impl Checker {
                 }
                 Some(Ty::Str)
             }
+            "set" => {
+                // `set()` → empty set (element inferred from later use, like `{}` for maps);
+                // `set(xs)` → a set from a list, deduped.
+                match args.len() {
+                    0 => Some(Ty::set(Ty::Unknown)),
+                    1 => {
+                        let elem = match self.infer(&args[0]) {
+                            Ty::List(inner) => *inner,
+                            Ty::Unknown => Ty::Unknown,
+                            other => {
+                                self.error(args[0].span, format!("set() expects a list, got {other}"));
+                                Ty::Unknown
+                            }
+                        };
+                        if !elem.is_unknown() && !is_hashable_key(&elem) {
+                            self.error(
+                                span,
+                                format!("set element type must be a hashable scalar (int, str, or bool), found {elem}"),
+                            );
+                        }
+                        Some(Ty::set(elem))
+                    }
+                    _ => {
+                        self.error(span, "set() expects set() or set(list)");
+                        Some(Ty::set(Ty::Unknown))
+                    }
+                }
+            }
             // Generic built-in constructors for Result / Option.
             "Ok" => Some(Ty::result(self.one_arg(name, args, span))),
             "Some" => Some(Ty::option(self.one_arg(name, args, span))),
@@ -2043,6 +2102,15 @@ impl Checker {
             }
             Ty::Map(k, v) => {
                 if let Some(sig) = map_method_sig(method, k, v) {
+                    self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
+            Ty::Set(elem) => {
+                if let Some(sig) = set_method_sig(method, elem) {
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -2499,6 +2567,7 @@ fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
         Ty::Option(t) => Ty::option(subst(t, map)),
         Ty::Result(t) => Ty::result(subst(t, map)),
         Ty::Map(k, v) => Ty::map(subst(k, map), subst(v, map)),
+        Ty::Set(t) => Ty::set(subst(t, map)),
         Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| subst(t, map)).collect()),
         Ty::Func { params, ret } => Ty::Func {
             params: params.iter().map(|t| subst(t, map)).collect(),
@@ -2646,6 +2715,20 @@ fn map_method_sig(method: &str, k: &Ty, v: &Ty) -> Option<FnSig> {
         "keys" => (vec![], Ty::list(k.clone())),
         "values" => (vec![], Ty::list(v.clone())),
         "remove" => (vec![k.clone()], Ty::option(v.clone())),
+        _ => return None,
+    };
+    Some(FnSig::plain(params, ret))
+}
+
+/// Built-in method signatures on `set[T]`. `elem` is the set's element type.
+fn set_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
+    let set = Ty::set(elem.clone());
+    let (params, ret) = match method {
+        "len" => (vec![], Ty::Int),
+        "has" => (vec![elem.clone()], Ty::Bool),
+        "add" => (vec![elem.clone()], Ty::Nil),
+        "remove" => (vec![elem.clone()], Ty::Bool), // true if the element was present
+        "union" | "intersection" | "difference" => (vec![set.clone()], set),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))

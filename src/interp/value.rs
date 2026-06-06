@@ -96,6 +96,8 @@ pub enum Value {
     Tuple(Rc<Vec<Value>>),
     /// `{k: v, …}` — insertion-ordered, shared by reference. Linear scan by value-equality.
     Map(Rc<RefCell<Vec<(Value, Value)>>>),
+    /// `{a, b, …}` — insertion-ordered, deduped set, shared by reference. Linear scan by equality.
+    Set(Rc<RefCell<Vec<Value>>>),
     /// A named function (top-level `fn` or struct method) plus the module globals it resolves
     /// top-level names against (its "home" — see [`ModEnv`]).
     Func(Rc<FnDecl>, ModEnv),
@@ -135,6 +137,7 @@ impl Value {
             Value::List(_) => "list",
             Value::Tuple(_) => "tuple",
             Value::Map(_) => "map",
+            Value::Set(_) => "set",
             Value::Func(_, _) => "function",
             Value::Closure(_) => "function",
             Value::Native(_) => "function",
@@ -178,6 +181,15 @@ impl std::fmt::Display for Value {
                     .collect::<Vec<_>>()
                     .join(", ");
                 write!(f, "{{{inner}}}")
+            }
+            Value::Set(items) => {
+                let items = items.borrow();
+                if items.is_empty() {
+                    write!(f, "set()")
+                } else {
+                    let inner = items.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+                    write!(f, "{{{inner}}}")
+                }
             }
             Value::Func(decl, _) => write!(f, "<fn {}>", decl.name),
             Value::Closure(_) => write!(f, "<closure>"),
