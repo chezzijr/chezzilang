@@ -1524,6 +1524,9 @@ impl crate::native::Host for InterpHost<'_> {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
+    fn arg_is_int(&self, i: usize) -> bool {
+        matches!(self.args.get(i), Some(Value::Int(_)))
+    }
     fn arg_float(&mut self, i: usize) -> Result<f64, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Float(f)) => Ok(*f),

@@ -89,8 +89,6 @@ pub struct HostError {
 /// `Result` / `Option` enums that both engines already register.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NativeRet {
-    /// Seam completeness — no std fn returns an int yet (math is float-only), but native fns may.
-    #[allow(dead_code)]
     Int(i64),
     Float(f64),
     /// Seam completeness — no std fn returns a bool yet, but native fns may.
@@ -112,10 +110,11 @@ pub enum NativeRet {
 /// directly (keeps runs deterministic and testable).
 pub trait Host {
     fn arg_count(&self) -> usize;
-    /// `args[i]` as an int; errors if it is not an int. (Seam completeness — math args are floats;
-    /// the first int-arg std fn will use this.)
-    #[allow(dead_code)]
+    /// `args[i]` as an int; errors if it is not an int.
     fn arg_int(&mut self, i: usize) -> Result<i64, HostError>;
+    /// Whether `args[i]` is an int (no promotion). Lets a numeric-polymorphic native fn
+    /// (`abs`/`min`/`max`) pick an int vs float result without consuming the argument.
+    fn arg_is_int(&self, i: usize) -> bool;
     /// `args[i]` as a float; an int argument is promoted (matches the builtin `sqrt`).
     fn arg_float(&mut self, i: usize) -> Result<f64, HostError>;
     /// `args[i]` as an owned string; errors if it is not a str.
@@ -223,6 +222,9 @@ mod tests {
         }
         fn arg_float(&mut self, i: usize) -> Result<f64, HostError> {
             Ok(self.arg_int(i)? as f64)
+        }
+        fn arg_is_int(&self, i: usize) -> bool {
+            i < self.ints.len()
         }
         fn arg_str(&mut self, _i: usize) -> Result<String, HostError> {
             Err(HostError {

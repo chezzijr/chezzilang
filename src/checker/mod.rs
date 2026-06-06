@@ -84,6 +84,10 @@ struct ModuleSig {
     functions: HashMap<String, FnSig>,
     values: HashMap<String, Ty>,
     types: std::collections::HashSet<String>,
+    /// Native functions whose result type follows their argument type (int args → int, float args
+    /// → float) instead of the fixed `FnSig` (gap #12: `std.math` `abs`/`min`/`max`). The `FnSig`
+    /// still records arity; the result/param strictness is handled by `infer_numeric_poly`.
+    numeric_poly: std::collections::HashSet<String>,
 }
 
 /// Type-check a single parsed module (no imports). Retained as the unit-test entry point; the CLI
@@ -133,9 +137,14 @@ fn native_module_sig(name: &str) -> ModuleSig {
     };
     match name {
         "std.math" => {
+            // abs/min/max are numeric-polymorphic (int args → int, float args → float); the
+            // `FnSig` here only fixes their arity — `infer_numeric_poly` does the real typing.
             func("abs", vec![Ty::Float], Ty::Float);
             func("min", vec![Ty::Float, Ty::Float], Ty::Float);
             func("max", vec![Ty::Float, Ty::Float], Ty::Float);
+            sig.numeric_poly.insert("abs".into());
+            sig.numeric_poly.insert("min".into());
+            sig.numeric_poly.insert("max".into());
             func("floor", vec![Ty::Float], Ty::Float);
             func("ceil", vec![Ty::Float], Ty::Float);
             func("round", vec![Ty::Float], Ty::Float);
@@ -1524,11 +1533,14 @@ impl Checker {
         match &obj_ty {
             // `module.fn(args)` is a plain call on the member — no `self`.
             Ty::Module(mname) => {
-                let fsig = self
-                    .imported_modules
-                    .get(mname)
-                    .and_then(|id| self.module_sigs.get(id))
-                    .and_then(|sig| sig.functions.get(method).cloned());
+                let sig = self.imported_modules.get(mname).and_then(|id| self.module_sigs.get(id));
+                let is_poly = sig.is_some_and(|s| s.numeric_poly.contains(method));
+                let fsig = sig.and_then(|s| s.functions.get(method).cloned());
+                // Numeric-polymorphic native fns (gap #12): result type follows the argument type.
+                if is_poly {
+                    let arity = fsig.as_ref().map_or(2, |f| f.params.len());
+                    return self.infer_numeric_poly(method, arity, args, span);
+                }
                 if let Some(fsig) = fsig {
                     self.check_args(method, &fsig.params, args, span);
                     return fsig.ret;
@@ -1733,6 +1745,45 @@ impl Checker {
                 }
             }
             _ => unreachable!("infer_list_hof called with non-HOF method {method}"),
+        }
+    }
+
+    /// Type a numeric-polymorphic native call (`std.math` `abs`/`min`/`max`): every argument must be
+    /// the *same* numeric type (int or float — no implicit int/float mix, matching the language's
+    /// no-implicit-widening rule), and the result type is that argument type. `Ty::Unknown` args are
+    /// tolerated (no cascade); an all-unknown call yields `Ty::Unknown`.
+    fn infer_numeric_poly(&mut self, method: &str, arity: usize, args: &[Expr], span: Span) -> Ty {
+        self.check_arity(method, arity, args, span);
+        let mut saw_int = false;
+        let mut saw_float = false;
+        let mut bad = false;
+        for a in args {
+            match self.infer(a) {
+                Ty::Int => saw_int = true,
+                Ty::Float => saw_float = true,
+                Ty::Unknown => {}
+                other => {
+                    self.error(a.span, format!("argument of '{method}': expected int or float, found {other}"));
+                    bad = true;
+                }
+            }
+        }
+        if saw_int && saw_float {
+            self.error(
+                span,
+                format!("'{method}' arguments must be the same numeric type (no implicit int/float mix)"),
+            );
+            return Ty::Unknown;
+        }
+        if bad {
+            return Ty::Unknown;
+        }
+        if saw_float {
+            Ty::Float
+        } else if saw_int {
+            Ty::Int
+        } else {
+            Ty::Unknown
         }
     }
 

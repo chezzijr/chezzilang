@@ -1755,6 +1755,9 @@ impl crate::native::Host for VmHost<'_> {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
+    fn arg_is_int(&self, i: usize) -> bool {
+        matches!(self.args.get(i), Some(Value::Int(_)))
+    }
     fn arg_float(&mut self, i: usize) -> Result<f64, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Float(f)) => Ok(*f),
@@ -2569,6 +2572,7 @@ main()";
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
+
 }
 
 #[cfg(test)]
@@ -2784,6 +2788,19 @@ mod parity_tests {
     fn assert_parity_out(src: &str, expect: &str) {
         assert_parity(src);
         assert_eq!(vm_outcome(src).expect("program should run"), expect, "for:\n{src}");
+    }
+
+    #[test]
+    fn math_max_int_parity() {
+        // imports std.math, so it must go through the file/graph path (`parity_entry`).
+        let out = parity_entry("import std.math\nfn main():\n    print(math.max(3, 5))\n    print(math.min(3, 5))\n    print(math.abs(-5))\nmain()\n");
+        assert_eq!(out, "5\n3\n5\n");
+    }
+
+    #[test]
+    fn math_max_float_parity() {
+        let out = parity_entry("import std.math\nfn main():\n    print(math.max(3.0, 5.0))\n    print(math.abs(-2.5))\nmain()\n");
+        assert_eq!(out, "5.0\n2.5\n");
     }
 
     #[test]
@@ -3460,6 +3477,18 @@ main()";
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/stats.chz");
+    }
+
+    /// Gap #12 golden: `examples/knapsack.chz` fills an int DP table with `math.max` (now int+float
+    /// polymorphic). Runs on the VM, byte-matches `.expected`, and stays identical to the interp.
+    #[test]
+    fn golden_knapsack_via_run_file() {
+        let path = fixture("examples/knapsack.chz");
+        let expected = std::fs::read_to_string(fixture("examples/knapsack.expected")).unwrap();
+        let (out, _err, res) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/knapsack.chz");
     }
 
     #[test]

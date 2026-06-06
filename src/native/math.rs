@@ -1,24 +1,41 @@
-//! `std.math` — native float intrinsics (M6c).
+//! `std.math` — native math intrinsics (M6c).
 //!
-//! Every function takes and returns `float` (Chezzi has no implicit int→float, so callers pass
-//! floats; the checker's `native_module_sig("std.math")` enforces this). Pure Rust `std` — no
-//! third-party crates.
+//! Most functions take and return `float` (Chezzi has no implicit int→float, so callers pass
+//! floats; the checker's `native_module_sig("std.math")` enforces this). The exceptions are
+//! `abs`/`min`/`max`, which are numeric-polymorphic (gap #12): int args → int, float args → float.
+//! Pure Rust `std` — no third-party crates.
 
 use super::{expect_args, Host, HostError, NativeFn, NativeRet};
 
+// abs/min/max are numeric-polymorphic (gap #12): int args yield an int result, float args a float.
+// The checker (`infer_numeric_poly`) guarantees the args are present and all the same numeric type,
+// so `arg_is_int(0)` decides the whole call.
+
 fn abs(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "abs", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.abs()))
+    if h.arg_is_int(0) {
+        Ok(NativeRet::Int(h.arg_int(0)?.abs()))
+    } else {
+        Ok(NativeRet::Float(h.arg_float(0)?.abs()))
+    }
 }
 
 fn min(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "min", 2)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.min(h.arg_float(1)?)))
+    if h.arg_is_int(0) {
+        Ok(NativeRet::Int(h.arg_int(0)?.min(h.arg_int(1)?)))
+    } else {
+        Ok(NativeRet::Float(h.arg_float(0)?.min(h.arg_float(1)?)))
+    }
 }
 
 fn max(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "max", 2)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.max(h.arg_float(1)?)))
+    if h.arg_is_int(0) {
+        Ok(NativeRet::Int(h.arg_int(0)?.max(h.arg_int(1)?)))
+    } else {
+        Ok(NativeRet::Float(h.arg_float(0)?.max(h.arg_float(1)?)))
+    }
 }
 
 fn floor(h: &mut dyn Host) -> Result<NativeRet, HostError> {

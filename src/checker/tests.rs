@@ -984,6 +984,60 @@ fn native_math_float_param_rejects_int() {
     );
 }
 
+// ===== int+float polymorphic math (gap #12) =====
+
+#[test]
+fn native_math_max_int_returns_int() {
+    entry_ok("import std.math\nfn main():\n    x: int = math.max(3, 5)\n    print(x)\n");
+}
+
+#[test]
+fn native_math_max_float_returns_float() {
+    entry_ok("import std.math\nfn main():\n    x: float = math.max(3.0, 5.0)\n    print(x)\n");
+}
+
+#[test]
+fn native_math_min_int_returns_int() {
+    entry_ok("import std.math\nfn main():\n    x: int = math.min(3, 5)\n    print(x)\n");
+}
+
+#[test]
+fn native_math_abs_int_returns_int() {
+    entry_ok("import std.math\nfn main():\n    x: int = math.abs(-5)\n    print(x)\n");
+}
+
+#[test]
+fn native_math_abs_float_returns_float() {
+    entry_ok("import std.math\nfn main():\n    x: float = math.abs(-5.0)\n    print(x)\n");
+}
+
+#[test]
+fn native_math_max_int_result_not_float() {
+    // The int form must NOT be a float — assigning to a float slot is rejected.
+    entry_rejects(
+        "import std.math\nfn main():\n    x: float = math.max(3, 5)\n    print(x)\n",
+        "",
+    );
+}
+
+#[test]
+fn native_math_max_mixed_int_float_rejected() {
+    // No implicit int->float widening, even in the polymorphic form.
+    entry_rejects(
+        "import std.math\nfn main():\n    print(math.max(3, 5.0))\n",
+        "",
+    );
+}
+
+#[test]
+fn native_math_floor_still_float_only() {
+    // Only abs/min/max became polymorphic; floor stays float-only.
+    entry_rejects(
+        "import std.math\nfn main():\n    print(math.floor(2))\n",
+        "",
+    );
+}
+
 // ===== higher-order-function parameter types =====
 
 #[test]
