@@ -204,6 +204,25 @@ Equality (`==` / `!=`) is **not** affected — it stays structural (field-by-fie
 Only ordering is overloaded, and only through `Comparable`; there is no operator overloading for
 `+ - * /`.
 
+The prebuilt **`Stringable`** protocol (`str(self) -> str`) customises how a value is rendered. A
+struct that defines `str(self) -> str` overrides its default `Name(field=value, …)` repr everywhere
+it is printed: by `print`, by the `str()` builtin, and inside `{…}` string interpolation — including
+when nested in a list / tuple / map / set / enum payload. Structs without a `str` method keep the
+default repr; enums always use the built-in `Variant(payload)` repr (enums have no methods). Like
+`Comparable`, `Stringable` is prebuilt and works as a generic bound (`fn show[T: Stringable](v: T)`).
+
+```chezzi
+struct Point:
+    x: int
+    y: int
+    fn str(self) -> str:
+        return "({self.x}, {self.y})"
+
+print(Point(1, 2))            # (1, 2)        — not Point(x=1, y=2)
+print("here: {Point(3, 4)}")  # here: (3, 4)
+print([Point(5, 6)])          # [(5, 6)]      — dispatches when nested too
+```
+
 **Generic structs** carry type parameters after the name; their fields and methods may use them.
 Type arguments are inferred at construction, or written explicitly in a type annotation.
 

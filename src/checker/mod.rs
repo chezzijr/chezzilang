@@ -59,6 +59,12 @@ fn is_reserved_type(name: &str) -> bool {
     name == "Result" || name == "Option"
 }
 
+/// Prebuilt protocols a user program may use as bounds but must not redeclare (mirrors
+/// [`prebuilt_protocols`]).
+fn is_reserved_protocol(name: &str) -> bool {
+    matches!(name, "Comparable" | "Stringable")
+}
+
 /// A function (or method) signature: parameter types and return type. `type_params` is non-empty
 /// only for generic functions (`fn max[T: Comparable]`), where `params`/`ret` contain `Ty::Param`s.
 #[derive(Clone)]
@@ -2449,7 +2455,7 @@ impl Checker {
 
     /// Register a `protocol` declaration's method signatures. `Self` resolves to `Ty::Param("Self")`.
     fn hoist_protocol(&mut self, name: &str, methods: &[MethodSig], span: Span) {
-        if name == "Comparable" {
+        if is_reserved_protocol(name) {
             self.error(span, format!("protocol '{name}' is reserved (builtin)"));
             return;
         }
@@ -2596,6 +2602,14 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
                 "compare".to_string(),
                 FnSig::plain(vec![Ty::Unknown, Ty::Param("Self".into())], Ty::Int),
             )],
+        },
+    );
+    m.insert(
+        "Stringable".to_string(),
+        ProtocolInfo {
+            // receiver `self` (Unknown) only, returning str. A struct with `str(self) -> str`
+            // satisfies it; `print`/`str()`/interpolation dispatch to that method at runtime.
+            methods: vec![("str".to_string(), FnSig::plain(vec![Ty::Unknown], Ty::Str))],
         },
     );
     m

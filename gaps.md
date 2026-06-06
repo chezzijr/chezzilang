@@ -357,8 +357,12 @@ interpolation, pipe. What remains to make it a language you'd reach for to write
 - **Generic enums** — `enum Tree[T]`, `enum LinkedList[T]`. Only *structs* got type parameters in
   M7-G2; `Result`/`Option` are hardcoded. The most-felt remaining type hole.
 - **`Hashable` protocol** → let structs be `map` keys (maps key only int/str/bool now).
-- **`Display`/`Show` protocol** → custom `str(point)` / `print(point)`. The dispatch shape from M7-G3
-  (intrinsic-satisfaction table + struct-method dispatch) already supports it — cheap to add.
+- ~~**`Display`/`Show` protocol** → custom `str(point)` / `print(point)`.~~ ✅ **M10-G1 — shipped as
+  `Stringable`.** Prebuilt protocol `Stringable` with `str(self) -> str`; a struct that defines it
+  overrides its default repr in `print`, the `str()` builtin, and `{…}` interpolation (nested too).
+  Both engines via a protocol-aware `stringify` (the `&self` `display` stays for error/debug text);
+  enums keep the built-in repr (no enum methods). Naming: chose `Stringable` over `Display`/`Show`
+  to match the `-able` convention and the `str()` builtin. See `examples/stringable.chz`.
 - **A numeric protocol** → `+ - *` on user types (vectors, money), and would let `abs`/`min`/`max`
   fully unify (see M7-G3 note). Multi-bound `T: A + B`; **type aliases** (`type UserId = int`).
 

@@ -531,7 +531,7 @@ impl Interp {
                     }
                     let expr = parse_expr_str(&inner)?;
                     let value = self.eval(&expr)?;
-                    out.push_str(&value.to_string());
+                    out.push_str(&self.stringify(&value, span)?);
                 }
                 '}' => {
                     return Err(RuntimeError {
@@ -565,14 +565,19 @@ impl Interp {
         // Builtins and struct constructors are resolved by name.
         if let ExprKind::Ident(name) = &callee.kind {
             if name == "print" {
-                let line = arg_vals
-                    .iter()
-                    .map(|v| v.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                self.out.push_str(&line);
+                let mut parts = Vec::with_capacity(arg_vals.len());
+                for v in &arg_vals {
+                    parts.push(self.stringify(v, span)?);
+                }
+                self.out.push_str(&parts.join(" "));
                 self.out.push('\n');
                 return Ok(Value::Nil);
+            }
+            // `str(x)` dispatches to a `Stringable` struct's `str` method (else default repr).
+            // Arity ≠ 1 falls through to the builtin so its arity error is preserved.
+            if name == "str" && arg_vals.len() == 1 {
+                let s = self.stringify(&arg_vals[0], span)?;
+                return Ok(Value::Str(s.into()));
             }
             if builtins::is_builtin(name) {
                 return builtins::call(name, arg_vals, span);
@@ -865,6 +870,80 @@ impl Interp {
         call_args.push(receiver.clone());
         call_args.extend(arg_vals);
         self.call(&decl, &def.home, call_args, span)
+    }
+
+    /// Render a value the way `print` / `str()` / `{…}` interpolation should: a struct that defines
+    /// `str(self) -> str` (the `Stringable` protocol) dispatches to that method; everything else
+    /// uses the default structural repr, recursing through `stringify` so a struct nested in a list
+    /// / tuple / map / set / enum payload still honours the protocol. Mirrors `Value`'s `Display`
+    /// for the non-dispatch cases (kept in lock-step with the VM's `stringify`, parity-tested).
+    fn stringify(&mut self, v: &Value, span: Span) -> Result<String, RuntimeError> {
+        match v {
+            Value::Struct { name, fields } => {
+                // `str(self) -> str` overrides the default repr. Only a self-only method is the hook
+                // (a `str` taking extra args is an unrelated method).
+                if let Some(def) = self.structs.get(name.as_ref()).cloned()
+                    && let Some(decl) = def.methods.get("str").cloned()
+                    && decl.params.len() == 1
+                {
+                    // Count the dispatch against the call-depth guard: `stringify` adds native frames
+                    // per cycle on top of `call`'s, so a self-referential `str` must trip the soft
+                    // limit before exhausting the host stack (parity with the VM's graceful error).
+                    self.enter_call(span)?;
+                    let res = self.call(&decl, &def.home, vec![v.clone()], span);
+                    self.call_depth -= 1;
+                    return self.stringify(&res?, span);
+                }
+                let parts = fields.borrow().clone();
+                let mut rendered = Vec::with_capacity(parts.len());
+                for (k, fv) in &parts {
+                    rendered.push(format!("{k}={}", self.stringify(fv, span)?));
+                }
+                Ok(format!("{name}({})", rendered.join(", ")))
+            }
+            Value::List(items) => {
+                let elems = items.borrow().clone();
+                Ok(format!("[{}]", self.stringify_seq(&elems, span)?))
+            }
+            Value::Tuple(items) => {
+                let elems = (**items).clone();
+                Ok(format!("({})", self.stringify_seq(&elems, span)?))
+            }
+            Value::Map(entries) => {
+                let entries = entries.borrow().clone();
+                let mut rendered = Vec::with_capacity(entries.len());
+                for (k, mv) in &entries {
+                    rendered.push(format!("{}: {}", self.stringify(k, span)?, self.stringify(mv, span)?));
+                }
+                Ok(format!("{{{}}}", rendered.join(", ")))
+            }
+            Value::Set(items) => {
+                let elems = items.borrow().clone();
+                if elems.is_empty() {
+                    Ok("set()".to_string())
+                } else {
+                    Ok(format!("{{{}}}", self.stringify_seq(&elems, span)?))
+                }
+            }
+            Value::Enum { variant, payload, .. } => {
+                if payload.is_empty() {
+                    Ok(variant.to_string())
+                } else {
+                    Ok(format!("{variant}({})", self.stringify_seq(payload, span)?))
+                }
+            }
+            // Scalars, functions, modules — no protocol dispatch; reuse `Display`.
+            other => Ok(other.to_string()),
+        }
+    }
+
+    /// `stringify` each element and join with `, ` (shared by list/tuple/set/enum-payload).
+    fn stringify_seq(&mut self, elems: &[Value], span: Span) -> Result<String, RuntimeError> {
+        let mut rendered = Vec::with_capacity(elems.len());
+        for e in elems {
+            rendered.push(self.stringify(e, span)?);
+        }
+        Ok(rendered.join(", "))
     }
 
     /// Operator overloading for ordering (`< <= > >=`) on two structs: dispatch to the receiver's
@@ -2586,6 +2665,14 @@ fn safe_div(a: int, b: int) -> Result[int]:
         assert!(run_capture(src).is_err());
     }
 
+    /// M10-G1: a self-referential `Stringable` `str` (`return str(self)`) must hit the call-depth
+    /// guard gracefully, not overflow the host stack — `stringify` adds native frames per cycle.
+    #[test]
+    fn self_referential_stringable_errors_instead_of_aborting() {
+        let src = "struct Loop:\n    n: int\n    fn str(self) -> str:\n        return str(self)\nprint(Loop(1))\n";
+        assert!(run_capture(src).is_err());
+    }
+
     #[test]
     fn list_indexing() {
         assert_eq!(eval("[10, 20, 30][1]"), Value::Int(20));
@@ -2761,6 +2848,14 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/generic_structs.chz");
         let expected = include_str!("../../examples/generic_structs.expected");
         assert_eq!(run_capture(source).expect("generic_structs.chz should run"), expected);
+    }
+
+    /// M10-G1 golden: the `Stringable` protocol — `str(self)` overrides print/str()/interpolation.
+    #[test]
+    fn golden_stringable_chz() {
+        let source = include_str!("../../examples/stringable.chz");
+        let expected = include_str!("../../examples/stringable.expected");
+        assert_eq!(run_capture(source).expect("stringable.chz should run"), expected);
     }
 
     /// G3 golden: std.cmp (generic min/max/clamp) + Comparable sort on the interp. (Imports a std

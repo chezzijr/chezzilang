@@ -154,6 +154,55 @@ fn redeclaring_comparable_rejected() {
     );
 }
 
+// ----- Stringable protocol (M10-G1) -----
+
+#[test]
+fn stringable_struct_satisfies_ok() {
+    let src = "\
+struct Point:
+    x: int
+    y: int
+    fn str(self) -> str:
+        return \"({self.x}, {self.y})\"
+fn show[T: Stringable](v: T) -> str:
+    return v.str()
+s := show(Point(1, 2))
+";
+    ok(src);
+}
+
+#[test]
+fn stringable_wrong_signature_rejected() {
+    // `str` returns int, not str ⇒ does not satisfy Stringable.
+    let src = "\
+struct Bad:
+    n: int
+    fn str(self) -> int:
+        return self.n
+fn show[T: Stringable](v: T) -> str:
+    return v.str()
+x := show(Bad(1))
+";
+    rejects(src, "does not satisfy Stringable");
+}
+
+#[test]
+fn stringable_missing_method_rejected() {
+    let src = "\
+struct Bare:
+    a: int
+fn show[T: Stringable](v: T) -> str:
+    return v.str()
+x := show(Bare(1))
+";
+    rejects(src, "does not satisfy Stringable");
+}
+
+#[test]
+fn redeclaring_stringable_rejected() {
+    rejects("protocol Stringable:\n    fn str(self) -> str\n", "reserved");
+}
+
 // ----- generic structs (G2) -----
 
 const PAIR: &str = "\

@@ -10,6 +10,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **M10 — Tier 2: type-system depth** (`gaps.md` Tier 2). 🟦 IN PROGRESS. Plan:
+> `~/.claude/plans/see-gaps-and-help-mellow-meteor.md`. Staged G1→G4 (ascending risk), each TDD +
+> commit.
+> - ✅ **G1 — `Stringable` protocol.** Prebuilt protocol `str(self) -> str`; a struct that defines it
+>   overrides its default repr in `print`, the `str()` builtin, and `{…}` interpolation (nested in
+>   list/tuple/map/set/enum too). Both engines via a new protocol-aware `stringify` (`&self`
+>   `display` kept for error/debug text). Enums keep the built-in repr (no enum methods). Named
+>   `Stringable` (not `Display`/`Show`) to match the `-able` convention + the `str()` builtin.
+>   Self-referential `str` trips the call-depth guard on both engines (interp counts the dispatch so
+>   it errors before host-stack overflow). Golden `examples/stringable.chz` + checker units + parity.
+> - ⬜ **G2** — `Hashable` (struct map/set keys). ⬜ **G3** — numeric op protocols + multi-bound
+>   `T: A + B` + type aliases. ⬜ **G4** — generic enums (`enum Tree[T]`).
+>
 > **M9 — Tier-2 stdlib: `std.regex` + `std.request`** ✅ DONE. Plan:
 > `~/.claude/plans/see-the-docs-and-dreamy-unicorn.md`.
 > - ✅ **Seam** — `NativeRet::Struct`/`Map` added so native fns return structured values; lowered on

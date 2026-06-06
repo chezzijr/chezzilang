@@ -431,7 +431,7 @@ impl Vm {
             Op::Call(argc) => self.do_call(*argc, span)?,
             Op::CallMethod(name, argc) => self.do_method_call(name, *argc, span)?,
             Op::CallBuiltin(name, argc) => self.do_builtin(name, *argc, span)?,
-            Op::CallPrint(argc) => self.do_print(*argc),
+            Op::CallPrint(argc) => self.do_print(*argc, span)?,
             Op::Return => self.do_return(false),
             Op::Try => self.do_try(span)?,
             Op::JsonDecode(desc) => {
@@ -520,18 +520,21 @@ impl Vm {
                 self.push(b);
             }
             Op::ToStr => {
-                let v = self.pop();
-                let s = self.display(v);
+                let v = self.stack[self.stack.len() - 1]; // leave rooted; stringify may run user code
+                let s = self.stringify(v, span)?;
+                self.pop();
                 let h = self.heap.alloc(Obj::Str(s.into_boxed_str()));
                 self.push(Value::Obj(h));
             }
             Op::BuildStr(n) => {
                 let at = self.stack.len() - *n;
-                let parts: Vec<Value> = self.stack.split_off(at);
+                // Stringify in place so each interpolated part stays rooted while a `str` method runs.
                 let mut s = String::new();
-                for p in parts {
-                    s.push_str(&self.display(p));
+                for i in 0..*n {
+                    let p = self.stack[at + i];
+                    s.push_str(&self.stringify(p, span)?);
                 }
+                self.stack.truncate(at);
                 let h = self.heap.alloc(Obj::Str(s.into_boxed_str()));
                 self.push(Value::Obj(h));
             }
@@ -2030,13 +2033,21 @@ impl Vm {
 
     // ----- builtins / print -----
 
-    fn do_print(&mut self, argc: usize) {
+    fn do_print(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;
-        let args: Vec<Value> = self.stack.split_off(at);
-        let line = args.iter().map(|v| self.display(*v)).collect::<Vec<_>>().join(" ");
-        self.out.push_str(&line);
+        // Keep the args rooted on the operand stack while stringifying — a `Stringable` `str` method
+        // runs user code that can GC. `stringify` pushes/pops above `at + argc`, so these indices
+        // stay valid across the loop.
+        let mut parts = Vec::with_capacity(argc);
+        for i in 0..argc {
+            let v = self.stack[at + i];
+            parts.push(self.stringify(v, span)?);
+        }
+        self.stack.truncate(at);
+        self.out.push_str(&parts.join(" "));
         self.out.push('\n');
         self.push(Value::Nil);
+        Ok(())
     }
 
     fn do_builtin(&mut self, name: &str, argc: usize, span: Span) -> Result<(), RuntimeError> {
@@ -2149,7 +2160,7 @@ impl Vm {
 
     fn builtin_str(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         self.arity_err("str", args, 1, span)?;
-        let s = self.display(args[0]);
+        let s = self.stringify(args[0], span)?;
         Ok(Value::Obj(self.heap.alloc(Obj::Str(s.into_boxed_str()))))
     }
 
@@ -2288,6 +2299,86 @@ impl Vm {
                 Obj::Native { name, .. } => format!("<native fn {name}>"),
             },
         }
+    }
+
+    /// Protocol-aware render for `print` / `str()` / interpolation: a struct with a self-only
+    /// `str(self) -> str` method (the `Stringable` protocol) dispatches to it; everything else uses
+    /// the default structural repr, recursing through `stringify` so nested structs honour the
+    /// protocol too. Mirrors `interp::Interp::stringify` exactly (parity-tested). Distinct from the
+    /// `&self` `display` above, which stays the pure structural form for error/debug text.
+    fn stringify(&mut self, v: Value, span: Span) -> Result<String, RuntimeError> {
+        match v {
+            Value::Int(n) => Ok(n.to_string()),
+            Value::Float(x) => Ok(format_float(x)),
+            Value::Bool(b) => Ok(b.to_string()),
+            Value::Nil => Ok("nil".to_string()),
+            // ROOT the object on the operand stack: a `str` method runs nested frames that GC at
+            // instruction boundaries, and the container keeps its transitive contents reachable.
+            Value::Obj(h) => {
+                self.push(v);
+                let r = self.stringify_obj(h, span);
+                self.pop();
+                r
+            }
+        }
+    }
+
+    fn stringify_obj(&mut self, h: GcRef, span: Span) -> Result<String, RuntimeError> {
+        // Clone the object's shape out so no heap borrow is held across the nested `&mut self` calls.
+        match self.heap.get(h).clone() {
+            Obj::Str(s) => Ok(s.to_string()),
+            Obj::List(items) => Ok(format!("[{}]", self.stringify_seq(&items, span)?)),
+            Obj::Tuple(items) => Ok(format!("({})", self.stringify_seq(&items, span)?)),
+            Obj::Map(entries) => {
+                let mut rendered = Vec::with_capacity(entries.len());
+                for (k, mv) in &entries {
+                    rendered.push(format!("{}: {}", self.stringify(*k, span)?, self.stringify(*mv, span)?));
+                }
+                Ok(format!("{{{}}}", rendered.join(", ")))
+            }
+            Obj::Set(items) => {
+                if items.is_empty() {
+                    Ok("set()".to_string())
+                } else {
+                    Ok(format!("{{{}}}", self.stringify_seq(&items, span)?))
+                }
+            }
+            Obj::Struct { name, fields } => {
+                // `str(self) -> str` overrides the default repr. Only a self-only method is the hook.
+                if let Some(def) = self.program.structs.get(name.as_ref()).cloned()
+                    && let Some(&proto) = def.methods.get("str")
+                    && self.program.protos[proto].arity == 1
+                {
+                    let home = self.module_objs[def.module_idx];
+                    let res = self.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span)?;
+                    return self.stringify(res, span);
+                }
+                let mut rendered = Vec::with_capacity(fields.len());
+                for (k, fv) in &fields {
+                    rendered.push(format!("{k}={}", self.stringify(*fv, span)?));
+                }
+                Ok(format!("{name}({})", rendered.join(", ")))
+            }
+            Obj::Enum { variant, payload, .. } => {
+                if payload.is_empty() {
+                    Ok(variant.to_string())
+                } else {
+                    Ok(format!("{variant}({})", self.stringify_seq(&payload, span)?))
+                }
+            }
+            Obj::Func { proto, .. } => Ok(format!("<fn {}>", self.program.protos[proto].name)),
+            Obj::Closure { .. } => Ok("<closure>".to_string()),
+            Obj::Module { name, .. } => Ok(format!("<module {name}>")),
+            Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
+        }
+    }
+
+    fn stringify_seq(&mut self, elems: &[Value], span: Span) -> Result<String, RuntimeError> {
+        let mut rendered = Vec::with_capacity(elems.len());
+        for e in elems {
+            rendered.push(self.stringify(*e, span)?);
+        }
+        Ok(rendered.join(", "))
     }
 }
 
@@ -2701,6 +2792,13 @@ fn loop(n: int) -> int:
 fn main():
     print(loop(0))
 main()";
+        assert!(run_err(src).contains("maximum call depth"));
+    }
+
+    /// M10-G1: a self-referential `Stringable` `str` must hit the depth guard, not loop forever.
+    #[test]
+    fn self_referential_stringable_hits_depth_limit() {
+        let src = "struct Loop:\n    n: int\n    fn str(self) -> str:\n        return str(self)\nprint(Loop(1))\n";
         assert!(run_err(src).contains("maximum call depth"));
     }
 
@@ -3125,6 +3223,17 @@ main()";
     fn golden_map_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/map.chz");
         let expected = include_str!("../../examples/map.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// M10-G1 golden: `examples/stringable.chz` (the `Stringable` protocol — `str(self)` dispatch
+    /// from print/str()/interpolation, nested too) byte-identical on the VM, interp, and `.expected`.
+    #[test]
+    fn golden_stringable_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/stringable.chz");
+        let expected = include_str!("../../examples/stringable.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));

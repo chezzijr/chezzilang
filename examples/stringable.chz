@@ -1,0 +1,27 @@
+# M10-G1 — the `Stringable` protocol: a struct with `str(self) -> str` customises how it is
+# rendered by `print`, the `str()` builtin, and `{…}` interpolation. Structs without it keep the
+# default `Name(field=value, …)` repr. `Stringable` is a built-in protocol (like `Comparable`), so
+# it works as a generic bound.
+
+struct Point:
+    x: int
+    y: int
+    fn str(self) -> str:
+        return "({self.x}, {self.y})"
+
+struct Bare:
+    a: int
+    b: int
+
+# A generic bound proves `Stringable` is a real, prebuilt protocol.
+fn show[T: Stringable](v: T) -> str:
+    return v.str()
+
+p := Point(1, 2)
+print(p)                            # dispatches to Point.str
+print(str(p))                       # str() builtin dispatches too
+print("p = {p}")                    # interpolation dispatches too
+print([Point(3, 4), Point(5, 6)])   # nested inside a list
+print((Point(1, 1), 5))             # nested inside a tuple
+print(Bare(7, 8))                   # no `str` method -> default repr
+print(show(Point(9, 0)))            # via a [T: Stringable] generic
