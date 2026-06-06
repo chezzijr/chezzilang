@@ -411,9 +411,27 @@ runner, doc comments + docgen.
   a 64 MiB thread). 64 levels ≈ 1 MiB now leaves real headroom — the guard fires cleanly on the bare
   test thread, so the 64 MiB workaround thread was removed (test runs inline). 64 still far exceeds
   any realistic source nesting; full suite + conformance green. `src/parser/mod.rs`.
+- **Duplicate generic type parameter `[T, T]` is silently accepted** — `fn f[T, T]`, `struct S[T, T]`,
+  and `enum E[T, T]` all type-check. No panic (the param map is last-write-wins, so only the last
+  `T`'s inferred arg is bound-checked), but a malformed declaration with surprising semantics gets
+  through. **Fix:** reject a duplicate name in `parse_type_params` (one place catches all three decl
+  kinds) or in each hoist. Surfaced by the M10-G4 generic-enum review (Solidity lens).
+  `src/parser/mod.rs` (`parse_type_params`) or `src/checker/mod.rs` (the struct/enum/fn hoists).
+- **Nested `set` equality diverges across engines (latent parity gap).** Top-level set `==` is
+  unordered on both engines (the dedicated `values_equal` Set arm), but a `set` nested inside a
+  struct/list falls to derived `==`: the VM recurses through its `values_equal` (still unordered)
+  while the interp uses the derived `PartialEq` on `SetData` (order-*sensitive*). So
+  `Wrapper(set([1,2])) == Wrapper(set([2,1]))` is `true` on the VM and `false` on the interp.
+  **Pre-existing** (predates the M10 hash-table rework — confirmed by A/B build vs HEAD), but the
+  parity suite doesn't cover it. **Fix:** route nested-collection equality through `values_equal` on
+  both engines, or make `SetData`'s `PartialEq` order-independent. `src/interp/mod.rs`
+  (`eval_binary` Eq / `values_equal`) + `src/interp/value.rs` (`SetData` `PartialEq`).
+- **No explicit call-site type arguments** — `max[int](…)` / `Stack[int](…)`. Type args are only ever
+  *inferred* from arguments; you can't pin them explicitly. Minor (inference covers the common case),
+  deferred since M7. Checker `infer_generic_call` / variant + struct construction.
 
-**Recommended next:** with Tier 1 shipped (M8), the highest-leverage remaining work is **Tier 2
-type-system depth** — **generic enums** (`enum Tree[T]`; the most-felt type hole) and the
-`Display`/`Hashable` protocols (naming settled: `Display`+`str(self)`, `Hashable`+`hash(self)` —
-`Hashable` would lift the int/str/bool restriction on map/set keys). **Panic recovery** (Tier 3) is
-the close second for script robustness.
+**Recommended next:** with Tier 1 + Tier 2 shipped (type system feature-complete after M10), the
+highest-leverage remaining work is **Tier 3 runtime robustness** — **panic recovery** (a `recover`/
+boundary so an index-OOB / div-by-zero doesn't kill the process; `Result`/`?` only covers *explicit*
+errors) is the single biggest thing between Chezzi and "a language you'd reach for to write real
+scripts." The **iterator protocol** (user structs iterable; lazy sequences) is the close second.
