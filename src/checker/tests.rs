@@ -1076,6 +1076,45 @@ fn list_sort_by_comparator_must_take_two_args() {
 }
 
 
+// ===== ord / chr builtins (gap #10) =====
+
+#[test]
+fn ord_of_str_is_int() {
+    ok("n: int = ord(\"a\")\n");
+}
+
+#[test]
+fn chr_of_int_is_str() {
+    ok("s: str = chr(65)\n");
+}
+
+#[test]
+fn ord_roundtrip_chr() {
+    ok("s: str = chr(ord(\"z\"))\n");
+}
+
+#[test]
+fn ord_rejects_int_arg() {
+    rejects("n := ord(5)\n", "ord");
+}
+
+#[test]
+fn chr_rejects_str_arg() {
+    rejects("s := chr(\"x\")\n", "chr");
+}
+
+#[test]
+fn ord_rejects_wrong_arity() {
+    rejects("n := ord(\"a\", \"b\")\n", "ord");
+}
+
+#[test]
+fn ord_result_is_int_not_str() {
+    // `ord(c) - ord("0")` — the digit-value idiom — type-checks as int arithmetic.
+    ok("c := \"7\"\nd: int = ord(c) - ord(\"0\")\n");
+}
+
+
 // ===== break / continue =====
 
 #[test]

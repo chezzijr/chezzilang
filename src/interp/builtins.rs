@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 /// The names handled here. Used so the interpreter can tell a builtin call from a user call.
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name, "len" | "range" | "int" | "float" | "str")
+    matches!(name, "len" | "range" | "int" | "float" | "str" | "ord" | "chr")
 }
 
 /// Dispatch a builtin by name. Caller guarantees `is_builtin(name)`.
@@ -20,6 +20,8 @@ pub fn call(name: &str, args: Vec<Value>, span: Span) -> Result<Value, RuntimeEr
         "int" => cast_int(&args, span),
         "float" => cast_float(&args, span),
         "str" => cast_str(&args, span),
+        "ord" => ord(&args, span),
+        "chr" => chr(&args, span),
         _ => unreachable!("call dispatched a non-builtin: {name}"),
     }
 }
@@ -389,4 +391,44 @@ fn cast_float(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
 fn cast_str(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
     arity("str", args, 1, span)?;
     Ok(Value::Str(args[0].to_string().into()))
+}
+
+/// `ord(s)` — the Unicode codepoint of the first (and, by convention, only) character of `s`.
+/// Errors on a non-str argument or an empty string. With `s[i]` yielding a 1-char str, this is the
+/// char→int bridge (e.g. `ord(c) - ord("0")` for a digit value).
+fn ord(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    arity("ord", args, 1, span)?;
+    match &args[0] {
+        Value::Str(s) => match s.chars().next() {
+            Some(c) => Ok(Value::Int(c as i64)),
+            None => Err(RuntimeError {
+                message: "ord() of an empty string".to_string(),
+                span,
+            }),
+        },
+        other => Err(RuntimeError {
+            message: format!("ord() expects a str, got {}", other.type_name()),
+            span,
+        }),
+    }
+}
+
+/// `chr(n)` — the 1-character str for Unicode codepoint `n`. Errors on a non-int argument or a
+/// value that is not a valid codepoint (negative, > 0x10FFFF, or a surrogate).
+fn chr(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    arity("chr", args, 1, span)?;
+    match &args[0] {
+        Value::Int(n) => u32::try_from(*n)
+            .ok()
+            .and_then(char::from_u32)
+            .map(|c| Value::Str(c.to_string().into()))
+            .ok_or_else(|| RuntimeError {
+                message: format!("chr(): {n} is not a valid Unicode codepoint"),
+                span,
+            }),
+        other => Err(RuntimeError {
+            message: format!("chr() expects an int, got {}", other.type_name()),
+            span,
+        }),
+    }
 }

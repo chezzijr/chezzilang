@@ -1523,6 +1523,8 @@ impl Vm {
             "int" => self.builtin_int(&args, span)?,
             "float" => self.builtin_float(&args, span)?,
             "str" => self.builtin_str(&args, span)?,
+            "ord" => self.builtin_ord(&args, span)?,
+            "chr" => self.builtin_chr(&args, span)?,
             _ => unreachable!("unknown builtin {name}"),
         };
         self.push(result);
@@ -1601,6 +1603,34 @@ impl Vm {
         self.arity_err("str", args, 1, span)?;
         let s = self.display(args[0]);
         Ok(Value::Obj(self.heap.alloc(Obj::Str(s.into_boxed_str()))))
+    }
+
+    /// `ord(s)` — codepoint of the first char of `s`. Mirrors `interp::builtins::ord` (errors too).
+    fn builtin_ord(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        self.arity_err("ord", args, 1, span)?;
+        match args[0] {
+            Value::Obj(h) => match self.heap.get(h) {
+                Obj::Str(s) => match s.chars().next() {
+                    Some(c) => Ok(Value::Int(c as i64)),
+                    None => Err(self.err("ord() of an empty string".to_string(), span)),
+                },
+                _ => Err(self.err(format!("ord() expects a str, got {}", self.type_name(args[0])), span)),
+            },
+            other => Err(self.err(format!("ord() expects a str, got {}", self.type_name(other)), span)),
+        }
+    }
+
+    /// `chr(n)` — the 1-char str for codepoint `n`. Mirrors `interp::builtins::chr` (errors too).
+    fn builtin_chr(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        self.arity_err("chr", args, 1, span)?;
+        match args[0] {
+            Value::Int(n) => u32::try_from(n)
+                .ok()
+                .and_then(char::from_u32)
+                .map(|c| Value::Obj(self.heap.alloc(Obj::Str(c.to_string().into_boxed_str()))))
+                .ok_or_else(|| self.err(format!("chr(): {n} is not a valid Unicode codepoint"), span)),
+            other => Err(self.err(format!("chr() expects an int, got {}", self.type_name(other)), span)),
+        }
     }
 
 
@@ -2528,6 +2558,17 @@ main()";
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
+
+    /// Gap #10 golden: `examples/cipher.chz` (ord/chr — ROT13 + manual digit parsing) is
+    /// byte-identical on the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_cipher_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/cipher.chz");
+        let expected = include_str!("../../examples/cipher.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
 }
 
 #[cfg(test)]
@@ -2743,6 +2784,34 @@ mod parity_tests {
     fn assert_parity_out(src: &str, expect: &str) {
         assert_parity(src);
         assert_eq!(vm_outcome(src).expect("program should run"), expect, "for:\n{src}");
+    }
+
+    #[test]
+    fn ord_chr_parity() {
+        assert_parity_out("print(ord(\"A\"))\nprint(chr(97))\n", "65\na\n");
+    }
+
+    #[test]
+    fn ord_chr_roundtrip_parity() {
+        assert_parity_out("print(chr(ord(\"z\")))\n", "z\n");
+    }
+
+    #[test]
+    fn ord_index_digit_value_parity() {
+        // The digit-value idiom over an indexed char.
+        assert_parity_out("s := \"7\"\nprint(ord(s[0]) - ord(\"0\"))\n", "7\n");
+    }
+
+    #[test]
+    fn ord_empty_string_error_parity() {
+        // Runtime error (checker can't catch it) — message must match across engines.
+        assert_parity("print(ord(\"\"))\n");
+    }
+
+    #[test]
+    fn chr_invalid_codepoint_error_parity() {
+        assert_parity("print(chr(-1))\n");
+        assert_parity("print(chr(2000000))\n");
     }
 
     #[test]

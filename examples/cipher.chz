@@ -1,0 +1,29 @@
+# examples/cipher.chz — character work via ord/chr (gap #10): ROT13 + digit parsing.
+
+# ROT13: rotate each lowercase letter by 13, leave everything else untouched.
+fn rot13(s: str) -> str:
+    out := ""
+    for i in 0..s.len():
+        c := s[i]
+        if c >= "a" and c <= "z":
+            shifted := (ord(c) - ord("a") + 13) % 26 + ord("a")
+            out = out + chr(shifted)
+        else:
+            out = out + c
+    return out
+
+msg := "hello, world"
+enc := rot13(msg)
+print(enc)
+print(rot13(enc))    # ROT13 is its own inverse
+
+# Parse a string of digits into an int, the manual way (no int() round-trip).
+fn parse_digits(s: str) -> int:
+    n := 0
+    for i in 0..s.len():
+        n = n * 10 + (ord(s[i]) - ord("0"))
+    return n
+
+print(parse_digits("2026"))
+print(ord("A"))
+print(chr(97))

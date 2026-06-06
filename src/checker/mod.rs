@@ -1470,6 +1470,26 @@ impl Checker {
                 self.infer_all(args);
                 Some(Ty::Str)
             }
+            "ord" => {
+                self.check_arity("ord", 1, args, span);
+                if let Some(a) = args.first() {
+                    match self.infer(a) {
+                        Ty::Str | Ty::Unknown => {}
+                        other => self.error(a.span, format!("ord() expects a str, got {other}")),
+                    }
+                }
+                Some(Ty::Int)
+            }
+            "chr" => {
+                self.check_arity("chr", 1, args, span);
+                if let Some(a) = args.first() {
+                    match self.infer(a) {
+                        Ty::Int | Ty::Unknown => {}
+                        other => self.error(a.span, format!("chr() expects an int, got {other}")),
+                    }
+                }
+                Some(Ty::Str)
+            }
             // Generic built-in constructors for Result / Option.
             "Ok" => Some(Ty::result(self.one_arg(name, args, span))),
             "Some" => Some(Ty::option(self.one_arg(name, args, span))),

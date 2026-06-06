@@ -33,7 +33,7 @@ pub struct CompileError {
 
 /// The name a builtin resolves to (mirrors `interp::builtins::is_builtin` + the special `print`).
 fn is_builtin(name: &str) -> bool {
-    matches!(name, "len" | "range" | "int" | "float" | "str")
+    matches!(name, "len" | "range" | "int" | "float" | "str" | "ord" | "chr")
 }
 
 /// Compile a whole resolved module graph in dependency order.
