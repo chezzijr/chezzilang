@@ -2648,6 +2648,35 @@ main()";
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
+
+    /// Round-2 probe goldens: recursive data-structure + evaluator programs that surfaced the
+    /// round-2 gaps. Byte-identical on the VM, the interpreter, and their `.expected`.
+    #[test]
+    fn golden_bst_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/bst.chz");
+        let expected = include_str!("../../examples/bst.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    #[test]
+    fn golden_linked_list_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/linked_list.chz");
+        let expected = include_str!("../../examples/linked_list.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    #[test]
+    fn golden_calc_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/calc.chz");
+        let expected = include_str!("../../examples/calc.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
 }
 
 #[cfg(test)]

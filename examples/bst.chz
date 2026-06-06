@@ -1,0 +1,87 @@
+# examples/bst.chz — binary search tree: recursive struct + Option child links.
+#
+# Showcases (round-2 probe, Domain A): a SELF-REFERENTIAL struct — `Node` holds two
+# `Node?` children — built and walked recursively across both engines. Confirms recursive
+# struct field resolution, `Option[Node]` construction (`Some(Node(...))` / `None`), in-place
+# field assignment to rebuild links (gap #2), and by-reference list accumulation.
+#
+# Friction noted in gaps.md: every child step needs a full `match` (no nested patterns,
+# no `if let` — gap #15), so the tree code is wordier than it should be.
+
+struct Node:
+    val: int
+    left: Node?
+    right: Node?
+
+# Insert v into the subtree rooted at `root`, returning the (possibly new) subtree root.
+fn insert(root: Node?, v: int) -> Node?:
+    match root:
+        None:
+            return Some(Node(v, None, None))
+        Some(n):
+            if v < n.val:
+                n.left = insert(n.left, v)
+            else if v > n.val:
+                n.right = insert(n.right, v)
+            return Some(n)
+
+# In-order walk, appending values into `out` (shared by reference).
+fn inorder(root: Node?, out: list[int]):
+    match root:
+        None:
+            return
+        Some(n):
+            inorder(n.left, out)
+            out.push(n.val)
+            inorder(n.right, out)
+
+# Height of the tree (deepest path), to show recursion returning a value.
+fn height(root: Node?) -> int:
+    match root:
+        None:
+            return 0
+        Some(n):
+            lh := height(n.left)
+            rh := height(n.right)
+            if lh > rh:
+                return lh + 1
+            return rh + 1
+
+fn contains(root: Node?, v: int) -> bool:
+    match root:
+        None:
+            return false
+        Some(n):
+            if v == n.val:
+                return true
+            if v < n.val:
+                return contains(n.left, v)
+            return contains(n.right, v)
+
+fn join_ints(xs: list[int]) -> str:
+    out := ""
+    i := 0
+    for x in xs:
+        if i > 0:
+            out = out + " "
+        out = out + str(x)
+        i += 1
+    return out
+
+fn main():
+    root: Node? = None
+    for v in [5, 3, 8, 1, 4, 7, 9, 2, 6]:
+        root = insert(root, v)
+
+    walk := []
+    inorder(root, walk)
+    print("inorder: " + join_ints(walk))
+    print("height: {height(root)}")
+
+    for q in [6, 10]:
+        if contains(root, q):
+            print("contains {q}: yes")
+        else:
+            print("contains {q}: no")
+
+main()

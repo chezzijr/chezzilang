@@ -1,0 +1,66 @@
+# examples/calc.chz — recursive-descent arithmetic evaluator (Domain B).
+#
+# Grammar:  expr := term (('+'|'-') term)*   term := factor (('*'|'/') factor)*
+#           factor := INT | '(' expr ')'
+#
+# A `Parser` struct carries the token list + a mutable cursor; methods advance `self.pos`
+# in place (gap #2). Mutual recursion between methods (expr -> term -> factor -> expr).
+#
+# DELIBERATE LIMITATION (gaps.md #10): the input is SPACE-SEPARATED ("3 + 4 * 2") so we can
+# tokenise with `.split(" ")`. A real lexer over "3+4*2" is impossible today — there is no
+# char type, no `ord`/`chr`, and `s[i]` yields a 1-char `str` you cannot turn into a codepoint
+# or digit. So the scanner stage has to be faked by the caller.
+
+struct Parser:
+    toks: list[str]
+    pos: int
+
+    fn peek(self) -> str:
+        if self.pos < self.toks.len():
+            return self.toks[self.pos]
+        return ""
+
+    fn advance(self) -> str:
+        t := self.peek()
+        self.pos += 1
+        return t
+
+    fn parse_expr(self) -> int:
+        v := self.parse_term()
+        while self.peek() == "+" or self.peek() == "-":
+            op := self.advance()
+            r := self.parse_term()
+            if op == "+":
+                v = v + r
+            else:
+                v = v - r
+        return v
+
+    fn parse_term(self) -> int:
+        v := self.parse_factor()
+        while self.peek() == "*" or self.peek() == "/":
+            op := self.advance()
+            r := self.parse_factor()
+            if op == "*":
+                v = v * r
+            else:
+                v = v / r
+        return v
+
+    fn parse_factor(self) -> int:
+        t := self.advance()
+        if t == "(":
+            v := self.parse_expr()
+            close := self.advance()   # consume ")"
+            return v
+        return int(t)
+
+fn eval(src: str) -> int:
+    p := Parser(src.split(" "), 0)
+    return p.parse_expr()
+
+fn main():
+    for src in ["3 + 4 * 2", "( 3 + 4 ) * 2", "10 - 2 - 3", "2 * ( 3 + 5 ) - 1"]:
+        print("{src} = {eval(src)}")
+
+main()

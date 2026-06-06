@@ -1,0 +1,63 @@
+# examples/linked_list.chz — singly-linked list via a recursive struct (Domain A).
+#
+# Second witness that self-referential structs work end-to-end: `Cell` points at the next
+# `Cell?`. Builds a list by prepending, computes length + sum recursively, and reverses it by
+# walking and re-linking. Same nested-`match`-per-step friction as bst.chz (gap #15).
+
+struct Cell:
+    val: int
+    next: Cell?
+
+# Prepend v, returning the new head.
+fn cons(head: Cell?, v: int) -> Cell?:
+    return Some(Cell(v, head))
+
+fn length(head: Cell?) -> int:
+    match head:
+        None:
+            return 0
+        Some(c):
+            return 1 + length(c.next)
+
+fn sum(head: Cell?) -> int:
+    match head:
+        None:
+            return 0
+        Some(c):
+            return c.val + sum(c.next)
+
+# Iterative reverse: pop from `head`, push onto `acc`.
+fn reverse(head: Cell?) -> Cell?:
+    acc: Cell? = None
+    cur := head
+    while true:
+        match cur:
+            None:
+                return acc
+            Some(c):
+                acc = Some(Cell(c.val, acc))
+                cur = c.next
+
+fn show(head: Cell?) -> str:
+    out := ""
+    cur := head
+    while true:
+        match cur:
+            None:
+                return out
+            Some(c):
+                if out != "":
+                    out = out + " -> "
+                out = out + str(c.val)
+                cur = c.next
+
+fn main():
+    head: Cell? = None
+    for v in [1, 2, 3, 4, 5]:
+        head = cons(head, v)
+    print("list:     " + show(head))
+    print("length:   {length(head)}")
+    print("sum:      {sum(head)}")
+    print("reversed: " + show(reverse(head)))
+
+main()
