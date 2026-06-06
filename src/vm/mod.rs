@@ -732,21 +732,75 @@ impl Vm {
         }
     }
 
-    /// Stable merge sort of a list of Comparable structs, ordering via each struct's `compare`.
-    /// (Primitive lists use the faster `value_order`.) Mirrors `interp::merge_sort_structs`.
-    fn merge_sort_structs(&mut self, mut xs: Vec<Value>, span: Span) -> Result<Vec<Value>, RuntimeError> {
-        let n = xs.len();
-        if n <= 1 {
-            return Ok(xs);
+    /// `xs.sort()` over a list of Comparable structs, ordering via each struct's `compare`. Because
+    /// `compare` re-enters the VM (and may allocate / trigger GC), this mirrors `list_sort_by`
+    /// exactly: snapshot the elements into a heap list ROOTED on the operand stack, permute
+    /// *indices* re-read from that rooted list per comparison (never holding unrooted `Value`s
+    /// across a `compare` call), then write the result back. (Primitives use the faster
+    /// `value_order`, which never re-enters the VM.) Mirrors `interp::eval_list_sort`.
+    fn list_sort_structs(&mut self, src_h: GcRef, span: Span) -> Result<Value, RuntimeError> {
+        // Root the source list itself: a method receiver is popped before dispatch, so an inline
+        // temporary (`make().sort()`) is otherwise unrooted and the comparator's GC could collect it
+        // before the write-back.
+        self.push(Value::Obj(src_h));
+        let snap_h = {
+            let elems = match self.heap.get(src_h) {
+                Obj::List(v) => v.clone(),
+                _ => unreachable!("list_sort on non-list"),
+            };
+            self.heap.alloc(Obj::List(elems))
+        };
+        self.push(Value::Obj(snap_h)); // ROOT the snapshot across the comparator calls
+        let n = match self.heap.get(snap_h) {
+            Obj::List(v) => v.len(),
+            _ => unreachable!(),
+        };
+        let order = match self.msort_indices_structs(snap_h, (0..n).collect(), span) {
+            Ok(o) => o,
+            Err(e) => {
+                self.pop(); // unroot snapshot
+                self.pop(); // unroot source
+                return Err(e);
+            }
+        };
+        // No comparator calls remain, so no GC: read the rooted snapshot and write the result back.
+        let reordered: Vec<Value> = match self.heap.get(snap_h) {
+            Obj::List(v) => order.iter().map(|&i| v[i]).collect(),
+            _ => unreachable!(),
+        };
+        if let Obj::List(v) = self.heap.get_mut(src_h) {
+            *v = reordered;
         }
-        let right = xs.split_off(n / 2);
-        let left = self.merge_sort_structs(xs, span)?;
-        let right = self.merge_sort_structs(right, span)?;
+        self.pop(); // unroot snapshot
+        self.pop(); // unroot source
+        Ok(Value::Nil)
+    }
+
+    /// Stable top-down merge sort over `idx` (positions into the rooted list `src_h`), comparing
+    /// elements via each struct's `compare`. Re-reads elements from `src_h` per comparison so no
+    /// unrooted `Value` is held across the GC-capable `struct_compare` call.
+    fn msort_indices_structs(&mut self, src_h: GcRef, idx: Vec<usize>, span: Span) -> Result<Vec<usize>, RuntimeError> {
+        let n = idx.len();
+        if n <= 1 {
+            return Ok(idx);
+        }
+        let mut idx = idx;
+        let right = idx.split_off(n / 2);
+        let left = self.msort_indices_structs(src_h, idx, span)?;
+        let right = self.msort_indices_structs(src_h, right, span)?;
         let mut out = Vec::with_capacity(n);
         let (mut li, mut ri) = (0, 0);
         while li < left.len() && ri < right.len() {
+            let a = match self.heap.get(src_h) {
+                Obj::List(v) => v[left[li]],
+                _ => unreachable!(),
+            };
+            let b = match self.heap.get(src_h) {
+                Obj::List(v) => v[right[ri]],
+                _ => unreachable!(),
+            };
             // `<= Equal` keeps the left element first on ties → stable.
-            if self.struct_compare(left[li], right[ri], span)?.is_le() {
+            if self.struct_compare(a, b, span)?.is_le() {
                 out.push(left[li]);
                 li += 1;
             } else {
@@ -1083,6 +1137,10 @@ impl Vm {
             return Err(self.err(format!("'sort_by' expects 1 argument(s), got {}", args.len()), span));
         }
         let cmp = args.swap_remove(0);
+        // Root the source list itself: a method receiver is popped before dispatch, so an inline
+        // temporary (`make().sort_by(...)`) is otherwise unrooted and the comparator's GC could
+        // collect it before the write-back.
+        self.push(Value::Obj(src_h));
         // Sort a SNAPSHOT taken now (matching the interpreter): a comparator that mutates the source
         // list mid-sort must not perturb the ordering, and its mutations are discarded by the final
         // write-back. The snapshot list is itself heap-allocated and rooted on the operand stack so
@@ -1103,6 +1161,7 @@ impl Vm {
             Ok(o) => o,
             Err(e) => {
                 self.pop(); // unroot snapshot
+                self.pop(); // unroot source
                 return Err(e);
             }
         };
@@ -1115,6 +1174,7 @@ impl Vm {
             *v = reordered;
         }
         self.pop(); // unroot snapshot
+        self.pop(); // unroot source
         Ok(Value::Nil)
     }
 
@@ -1287,13 +1347,12 @@ impl Vm {
                     // primitive path), then write back.
                     let is_struct =
                         matches!(items.first(), Some(Value::Obj(hh)) if matches!(self.heap.get(*hh), Obj::Struct { .. }));
-                    let elems = if is_struct {
-                        self.merge_sort_structs(items.clone(), span)?
-                    } else {
-                        let mut elems = items.clone();
-                        elems.sort_by(|a, b| self.value_order(*a, *b));
-                        elems
-                    };
+                    if is_struct {
+                        // Struct compare re-enters the VM (may GC) → rooted, index-based sort.
+                        return self.list_sort_structs(h, span);
+                    }
+                    let mut elems = items.clone();
+                    elems.sort_by(|a, b| self.value_order(*a, *b));
                     let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
                     *items = elems;
                     Ok(Value::Nil)
@@ -2896,6 +2955,60 @@ fn main():
     print(g())
 main()";
         assert_eq!(run_capture_stress(src), "42\n");
+    }
+
+    /// `list.sort()` over Comparable structs whose `compare` allocates (triggering GC mid-sort) must
+    /// not collect the in-flight elements OR the source list — even when the receiver is an inline
+    /// temporary (popped before dispatch, so otherwise unrooted). Regression for the M7-G3 review.
+    #[test]
+    fn struct_sort_survives_gc_stress() {
+        let src = "\
+struct M:
+    c: int
+    fn compare(self, o: M) -> int:
+        junk := [str(self.c), str(o.c)]
+        return self.c - o.c
+fn make() -> list[M]:
+    xs := []
+    i := 0
+    while i < 8:
+        xs.push(M((i * 5) % 7))
+        i = i + 1
+    return xs
+fn main():
+    xs := make()
+    xs.sort()
+    out := \"\"
+    for m in xs:
+        out = out + str(m.c)
+    print(out)
+    make().sort()              # inline temporary receiver
+    print(\"ok\")
+main()";
+        assert_eq!(run_capture_stress(src), "00123456\nok\n");
+    }
+
+    /// Same hazard via `sort_by` with an allocating comparator on an inline-temporary list.
+    #[test]
+    fn struct_sort_by_inline_temporary_survives_gc_stress() {
+        let src = "\
+struct M:
+    c: int
+    fn compare(self, o: M) -> int:
+        junk := [str(self.c)]
+        return self.c - o.c
+fn make() -> list[M]:
+    xs := []
+    i := 0
+    while i < 6:
+        xs.push(M((i * 5) % 7))
+        i = i + 1
+    return xs
+fn main():
+    make().sort_by(fn(a: M, b: M) -> int: a.compare(b))
+    print(\"ok\")
+main()";
+        assert_eq!(run_capture_stress(src), "ok\n");
     }
 
     /// An `Err` value propagated by `?` through a function boundary survives collection.

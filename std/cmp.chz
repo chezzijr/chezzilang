@@ -5,13 +5,13 @@
 # This replaces the old numeric-only `std.math.min`/`max` (the gap-#12 ad-hoc int/float overload)
 # with one real, extensible implementation.
 
-# The larger of `a` and `b` (returns `b` on a tie, like the old native max).
+# The larger of `a` and `b`. On a tie (neither is smaller) returns the first argument, `a`.
 fn max[T: Comparable](a: T, b: T) -> T:
     if a < b:
         return b
     return a
 
-# The smaller of `a` and `b` (returns `a` on a tie).
+# The smaller of `a` and `b`. On a tie returns the second argument, `b`.
 fn min[T: Comparable](a: T, b: T) -> T:
     if a < b:
         return a
