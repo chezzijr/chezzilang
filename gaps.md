@@ -263,8 +263,8 @@ and `Pattern::Ident` (a sub-position binding name). Parser recurses (`parse_subp
 `parse_tuple_pattern`); checker recurses (`bind_subpattern`, new `MatchKind::Tuple`); interp uses a
 recursive `try_bind`; the compiler lowers via a recursive `emit_pattern` reusing `MatchArm`
 (variant), `GetField` (tuple element), and `Eq`+`JumpIfFalse` (literal) — no new opcodes. Nested
-nullary variants (`Cons(h, None)`) stay unsupported (clear checker error); **match guards** and
-**range patterns** stay deferred (future). See `examples/match_nested.chz`.
+nullary variants (`Cons(h, None)`) stay unsupported (clear checker error). **match guards** and
+**range patterns** were later added on top of this (see Tier 3). See `examples/match_nested.chz`.
 
 ---
 
@@ -420,8 +420,12 @@ interpolation, pipe. What remains to make it a language you'd reach for to write
   `break` terminate). Structural detection (no formal generic `Iterator[T]`); both engines agree
   (the type-erased VM branches at runtime via `Op::IsStruct`). Still missing: lazy/generator
   sequences (`yield`).
-- **Match guards** (`pattern if cond:`) and **range patterns** (`1..10:`) (extend #15): guards are
-  the general mechanism (subsume range / less-than / greater-than).
+- **Match guards** (`pattern if cond:`) and **range patterns** (`1..10:`) — ✅ FIXED (extend #15).
+  Optional bool guard on both arm types (a guarded arm is never irrefutable, so it can't close an
+  exhaustive match); half-open int `start..end` patterns (`start <= v < end`, int-only, refutable).
+  No new token/opcode (reuse `If`/`DotDot` + `JumpIfFalse`/`GtEq`/`Lt`); both engines agree. A bare
+  top-level identifier on a literal scrutinee now value-binds (disambiguated from nullary variants
+  via the variant registry). `examples/match_guard.chz`, `examples/match_range.chz`.
 - **Default / named / variadic args**; **`sort_by_key`** (sugar on #11).
 - **Integers:** `i64` only — no overflow policy, no `byte`/bignum.
 
@@ -467,8 +471,11 @@ runner, doc comments + docgen.
   `?` in a non-`Result`/`Option` closure is now rejected at type-check; a `Result`-returning closure's
   `?` is validated like a named fn's. `src/checker/mod.rs` (`infer_closure`).
 
-**Recommended next:** Tier 1, Tier 2, and Tier 3 panic recovery (M11) are shipped, and the
-"known fragilities" tech debt is now cleared (dup type-param, nested-set parity, explicit call-site
-type args, closure-`?` soundness). The highest-leverage remaining Tier 3 work is the **iterator
-protocol** (user structs iterable in `for`; lazy/generator sequences), then **match guards**
-(`pattern if cond:`) + **range patterns**.
+**Recommended next:** Tier 1, Tier 2, Tier 3 panic recovery (M11), the **iterator protocol**
+(structural `next(self) -> Option[T]`), and **match guards + range patterns** are all shipped; the
+"known fragilities" tech debt is cleared (dup type-param, nested-set parity, explicit call-site
+type args, closure-`?` soundness). Remaining Tier 3 work: **default / named / variadic args** +
+`sort_by_key`. Deferred to a future milestone (needs coroutine/continuation support in both
+engines): **generators (`yield`)** and **lazy/generator sequences**; a follow-up that would unlock
+reusable lazy `map`/`filter`/`zip` adapters is a formal **generic `Iterator[T]` protocol** (the
+current structural detection can't bound a type param `[S: Iterator]`).

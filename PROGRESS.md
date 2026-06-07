@@ -174,6 +174,12 @@ parity + `cargo test conformance`), clean `cargo clippy`. Details + fix notes in
 - ✅ **#13 bitwise** — `& | ^ << >>` (int-only) across lexer→parser→checker→both engines +
   `grammar.bnf`; Python precedence; shift-out-of-range is a runtime error (no panic).
   `examples/bits.chz`.
+- ✅ **iterator protocol** (Tier 3) — a user struct with `next(self) -> Option[T]` is iterable in
+  `for x in s`, binding `x: T`, looping lazily (`next()` called per step, so infinite iterators with
+  an early `break` terminate). Structural detection in the checker (no formal generic `Iterator[T]`);
+  the type-erased VM branches at runtime via the new `Op::IsStruct` opcode, so both engines agree.
+  No grammar change (only the iterand's allowed type widened). Deferred follow-ups: generators
+  (`yield`) and a generic `Iterator[T]` protocol for reusable lazy adapters. `examples/iterator.chz`.
 - ✅ **match guards + range patterns** (extends #15) — `pattern if cond:` (optional bool guard on
   both `MatchArm`/`MatchExprArm`; a guarded arm is never irrefutable, so it can't make a match
   exhaustive) and half-open int `start..end` patterns (`start <= v < end`, int-only, refutable).
