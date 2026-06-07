@@ -45,6 +45,7 @@ fn symbol(tok: &Token) -> &'static str {
         Token::Protocol => "PROTOCOL",
         Token::Type => "TYPE",
         Token::Match => "MATCH",
+        Token::Recover => "RECOVER",
         Token::Import => "IMPORT",
         Token::From => "FROM",
         Token::As => "AS",
@@ -308,6 +309,7 @@ fn parser_rules_match_fns() {
         "parse_closure",
         "parse_match_expr",
         "parse_if_expr",
+        "parse_recover_expr",
         "parse_ok",
         "parse_err",
     ]

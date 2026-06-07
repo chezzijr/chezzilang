@@ -40,6 +40,9 @@
 <letStmt> ::= "IDENT" "WALRUS" <expr> "NEWLINE"
             | "IDENT" "COLON" <type> "ASSIGN" <expr> "NEWLINE"
             | <identList> "WALRUS" <expr> "NEWLINE"
+            # A block-valued RHS (`r := recover:` …) is terminated by the block's DEDENT, not a
+            # trailing NEWLINE (mirrors the parser's `expect_stmt_end`).
+            | "IDENT" "WALRUS" <recoverExpr>
 <identList> ::= "IDENT" "COMMA" "IDENT" | "IDENT" "COMMA" <identList>
 
 # Assignment target is restricted to a name / field / index (the parser's lvalue guard):
@@ -213,6 +216,7 @@
             | <closure>
             | <matchExpr>
             | <ifExpr>
+            | <recoverExpr>
 
 # Brace literals: `{}` is the empty map; `{k: v, …}` (entries with COLON) is a map; `{a, b, …}`
 # (bare exprs, no COLON) is a set. The empty set is `set()`, since `{}` is taken by the map.
@@ -227,6 +231,9 @@
 <exprArms>  ::= <exprArm> | <exprArm> <exprArms>
 <exprArm>   ::= <pattern> "COLON" <expr> "NEWLINE"
 <ifExpr>    ::= "IF" <expr> "COLON" <expr> "ELSE" "COLON" <expr>
+# Panic-recovery boundary: runs a block, yields `Result[T, Error]` (Ok = trailing value, Err = a
+# caught runtime fault). Reuses <block> (inline or indented).
+<recoverExpr> ::= "RECOVER" <block>
 
 <closure> ::= "FN" "LPAREN" "RPAREN" "COLON" <expr>
             | "FN" "LPAREN" <params> "RPAREN" "COLON" <expr>

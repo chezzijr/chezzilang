@@ -798,7 +798,40 @@ impl Compiler {
             ExprKind::Closure { params, body, .. } => self.compile_closure(fc, params, body, expr.span)?,
             ExprKind::Match { scrutinee, arms } => self.compile_match_expr(fc, scrutinee, arms, expr.span)?,
             ExprKind::IfElse { cond, then, els } => self.compile_if_expr(fc, cond, then, els)?,
+            ExprKind::Recover(block) => self.compile_recover(fc, block, expr.span)?,
         }
+        Ok(())
+    }
+
+    /// `recover: <block>` — install a handler over the block; on the happy path wrap the block's
+    /// trailing-expression value in `Ok`, on a caught fault the VM has pushed the message `str` and
+    /// we wrap it in `Err`. Both paths leave exactly one `Result` value on the stack.
+    fn compile_recover(&mut self, fc: &mut FnComp, block: &[Stmt], span: Span) -> Result<(), CompileError> {
+        // The handler target is `done`. Three paths converge there, each leaving one `Result`:
+        //   • normal: wrap the trailing value in `Ok`, drop the handler, fall through;
+        //   • panic: the VM unwinds, pushes `Err(message)`, and jumps to `done`;
+        //   • `?` Err/None in the block: `do_try` pushes the propagated value and jumps to `done`.
+        let push = fc.emit_jump(Op::PushHandler(0), span);
+        fc.begin_scope();
+        if let Some((last, init)) = block.split_last() {
+            for stmt in init {
+                self.compile_stmt(fc, stmt)?;
+            }
+            match &last.kind {
+                StmtKind::Expr(e) => self.compile_expr(fc, e)?, // trailing value
+                _ => {
+                    self.compile_stmt(fc, last)?;
+                    fc.emit(Op::Nil, span);
+                }
+            }
+        } else {
+            fc.emit(Op::Nil, span);
+        }
+        fc.end_scope();
+        fc.emit(Op::NewEnum("Result".to_string(), "Ok".to_string(), 1), span);
+        fc.emit(Op::PopHandler, span);
+        let done = fc.here();
+        fc.patch_jump_to(push, done);
         Ok(())
     }
 
@@ -1145,6 +1178,7 @@ impl FnComp {
             | Op::JumpIfFalse(t)
             | Op::JumpIfFalseKeep(t)
             | Op::JumpIfTrueKeep(t)
+            | Op::PushHandler(t)
             | Op::MatchArm { next: t, .. } => *t = target,
             other => panic!("patch_jump_to on non-jump op: {other:?}"),
         }
@@ -1175,6 +1209,7 @@ impl FnComp {
             | Op::JumpIfFalse(t)
             | Op::JumpIfFalseKeep(t)
             | Op::JumpIfTrueKeep(t)
+            | Op::PushHandler(t)
             | Op::MatchArm { next: t, .. } => *t = target,
             other => panic!("patch_jump on non-jump op: {other:?}"),
         }

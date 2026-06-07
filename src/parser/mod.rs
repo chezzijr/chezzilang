@@ -613,6 +613,16 @@ impl Parser {
         })
     }
 
+    /// Expression-position `recover:` (keyword already consumed): `recover:` then an inline or
+    /// indented block. Reuses `parse_block`; the block's trailing expression is its `Ok` value.
+    fn parse_recover_expr(&mut self, span: Span) -> PResult<Expr> {
+        let body = self.parse_block()?;
+        Ok(Expr {
+            kind: ExprKind::Recover(body),
+            span,
+        })
+    }
+
     /// Parse a top-level match-arm pattern. A bare identifier here names a variant (`None`,
     /// `Point`); `(...)` is a tuple pattern. Nested positions use [`parse_subpattern`], where a bare
     /// identifier is a binding instead.
@@ -1153,6 +1163,7 @@ impl Parser {
             // Statement-position `if`/`match` never reach here — `parse_stmt` dispatches them first.
             Token::Match => return self.parse_match_expr(span),
             Token::If => return self.parse_if_expr(span),
+            Token::Recover => return self.parse_recover_expr(span),
             other => {
                 return Err(ParseError {
                     message: format!("unexpected {} in expression", describe(&other)),

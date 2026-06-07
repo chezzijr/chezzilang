@@ -1,0 +1,42 @@
+# Panic recovery: a runtime fault beneath `recover:` becomes Err, not a process kill.
+fn risky(i: int, xs: list[int]) -> int:
+    return xs[i]          # may panic (index out of bounds)
+
+fn parse_int(s: str) -> int!:
+    if s == "42":
+        return Ok(42)
+    return Err("not an int: '{s}'")
+
+fn main():
+    xs := [10, 20, 30]
+
+    # Ok path: the block's trailing expression is the recovered value.
+    a := recover:
+        risky(1, xs)
+    match a:
+        Ok(v): print("ok: {v}")
+        Err(e): print("err: {e.message()}")
+
+    # Fault path: the out-of-bounds access is caught at the boundary.
+    b := recover:
+        risky(99, xs)
+    match b:
+        Ok(v): print("ok: {v}")
+        Err(e): print("recovered: {e.message()}")
+
+    # divide-by-zero, three steps in, is caught the same way.
+    c := recover:
+        100 / (len(xs) - 3)
+    match c:
+        Ok(v): print("ok: {v}")
+        Err(e): print("recovered: {e.message()}")
+
+    # A `?` inside the block short-circuits to the boundary (try-block style): an explicit Err
+    # lands in `d` just like a panic would — one boundary handles both kinds of failure.
+    d := recover:
+        n := parse_int("nope")?
+        n * 2
+    match d:
+        Ok(v): print("ok: {v}")
+        Err(e): print("recovered: {e.message()}")
+main()

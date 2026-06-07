@@ -250,6 +250,10 @@ struct Checker {
     alias_resolving: Vec<String>,
     /// Declared return type of the function body currently being checked (`Nil` at top level).
     current_ret: Ty,
+    /// `> 0` while checking statements lexically inside a `recover:` block (within the current
+    /// function — reset across nested fn/closure boundaries). A `?` here targets the recover
+    /// boundary (yielding to `r`), not the enclosing function's return.
+    recover_depth: u32,
     /// True while pass-1 is inferring a function's return type: `check_return` records each
     /// return's type into `collected_rets` instead of diagnosing against `current_ret`.
     inferring_ret: bool,
@@ -287,6 +291,7 @@ impl Checker {
             aliases: HashMap::new(),
             alias_resolving: Vec::new(),
             current_ret: Ty::Nil,
+            recover_depth: 0,
             inferring_ret: false,
             collected_rets: Vec::new(),
             module_sigs: HashMap::new(),
@@ -1126,6 +1131,9 @@ impl Checker {
         // A function body opens a fresh loop context: a loop enclosing this fn's *definition* must
         // not make a `break`/`continue` in the body legal.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+        // A nested fn opens a fresh `?`-target context: a `?` in this body targets this function,
+        // not an enclosing recover at the definition site.
+        let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
         self.push_scope();
         for (i, param) in decl.params.iter().enumerate() {
             let ty = if param.name == "self" {
@@ -1142,6 +1150,7 @@ impl Checker {
         self.current_ret = saved_ret;
         self.inferring_ret = saved_inferring;
         self.loop_depth = saved_loop_depth;
+        self.recover_depth = saved_recover;
         self.exit_type_params(saved_tps);
     }
 
@@ -1613,7 +1622,33 @@ impl Checker {
             ExprKind::Closure { params, ret, body } => self.infer_closure(params, ret.as_ref(), body),
             ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms),
             ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els),
+            ExprKind::Recover(block) => self.infer_recover(block),
         }
+    }
+
+    /// `recover: <block>` yields `Result[T, Error]` where `T` is the type of the block's trailing
+    /// expression (or `nil`). Non-final statements are checked for their effects.
+    fn infer_recover(&mut self, block: &Block) -> Ty {
+        // A `recover:` block is a value, not a control-flow target: `return`/`break`/`continue` that
+        // would escape it are rejected (both engines agree). `?` is fine — it propagates normally.
+        if let Some((span, kw)) = recover_escaping_flow(block, false) {
+            self.error(span, format!("'{kw}' is not allowed inside a recover block"));
+        }
+        self.push_scope();
+        self.recover_depth += 1;
+        let mut value_ty = Ty::Nil;
+        if let Some((last, init)) = block.split_last() {
+            for stmt in init {
+                self.check_stmt(stmt);
+            }
+            match &last.kind {
+                StmtKind::Expr(e) => value_ty = self.infer(e),
+                _ => self.check_stmt(last),
+            }
+        }
+        self.recover_depth -= 1;
+        self.pop_scope();
+        Ty::result(value_ty)
     }
 
     fn infer_ident(&mut self, name: &str, span: Span) -> Ty {
@@ -1888,6 +1923,31 @@ impl Checker {
 
     fn infer_try(&mut self, inner: &Expr, span: Span) -> Ty {
         let t = self.infer(inner);
+        // Inside a `recover:` block, `?` short-circuits to the boundary (try-block style), not the
+        // enclosing function. The boundary's error type is `Error`, and its result is `Result`-typed,
+        // so only a `Result` operand fits — `?` on an `Option` is rejected here.
+        if self.recover_depth > 0 {
+            return match t {
+                Ty::Result(ok, err) => {
+                    if !self.assignable(&Ty::error_proto(), &err) {
+                        self.error(
+                            span,
+                            format!("'?' inside a recover block propagates error {err}, which must satisfy Error"),
+                        );
+                    }
+                    *ok
+                }
+                Ty::Unknown => Ty::Unknown,
+                Ty::Option(_) => {
+                    self.error(span, "'?' on an Option is not allowed inside a recover block (its result is Result-typed); use match instead".to_string());
+                    Ty::Unknown
+                }
+                other => {
+                    self.error(span, format!("'?' expects Result or Option, found {other}"));
+                    Ty::Unknown
+                }
+            };
+        }
         // The enclosing function must be able to early-return the Err/None. We allow Result/Option
         // (propagate) and Nil (top-level / `fn main()` — the interpreter unwinds it at the boundary).
         let ret_err = match &self.current_ret {
@@ -1984,6 +2044,7 @@ impl Checker {
         // A closure body opens a fresh loop context (same rule as `check_fn_body`): a loop around
         // the closure's definition must not make a `break`/`continue` inside it legal.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+        let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
         self.push_scope();
         let param_tys: Vec<Ty> = params
             .iter()
@@ -1996,6 +2057,7 @@ impl Checker {
         let body_ty = self.infer(body);
         self.pop_scope();
         self.loop_depth = saved_loop_depth;
+        self.recover_depth = saved_recover;
         let ret_ty = match ret {
             Some(t) => {
                 let declared = self.resolve_type(t, body.span);
@@ -3060,6 +3122,49 @@ fn op_sym(op: BinaryOp) -> &'static str {
 
 /// Built-in method signatures on `str` (M6). Must mirror the runtime handlers in both backends
 /// (`interp::builtins::call_method` and `vm::Vm::do_method_call`).
+/// Find a control-flow statement that would escape a `recover:` block — a `return`, or a
+/// `break`/`continue` not contained by a loop *inside* the block. Recurses through nested blocks but
+/// stops at nested `fn` declarations (their control flow is their own). `?` is an expression, not a
+/// statement, so it is never flagged.
+fn recover_escaping_flow(stmts: &[Stmt], in_loop: bool) -> Option<(Span, &'static str)> {
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Return(_) => return Some((s.span, "return")),
+            StmtKind::Break if !in_loop => return Some((s.span, "break")),
+            StmtKind::Continue if !in_loop => return Some((s.span, "continue")),
+            StmtKind::Break | StmtKind::Continue => {}
+            StmtKind::If { branches, else_block } => {
+                for (_, body) in branches {
+                    if let Some(x) = recover_escaping_flow(body, in_loop) {
+                        return Some(x);
+                    }
+                }
+                if let Some(eb) = else_block
+                    && let Some(x) = recover_escaping_flow(eb, in_loop)
+                {
+                    return Some(x);
+                }
+            }
+            // A loop makes its own `break`/`continue` local; a `return` inside still escapes.
+            StmtKind::For { body, .. } | StmtKind::While { body, .. } => {
+                if let Some(x) = recover_escaping_flow(body, true) {
+                    return Some(x);
+                }
+            }
+            StmtKind::Match { arms, .. } => {
+                for arm in arms {
+                    if let Some(x) = recover_escaping_flow(&arm.body, in_loop) {
+                        return Some(x);
+                    }
+                }
+            }
+            StmtKind::Fn(_) => {} // nested function: its control flow is its own
+            _ => {}
+        }
+    }
+    None
+}
+
 fn str_method_sig(method: &str) -> Option<FnSig> {
     let (params, ret) = match method {
         "len" => (vec![], Ty::Int),

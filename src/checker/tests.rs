@@ -2414,3 +2414,53 @@ fn struct_error_without_message_rejected_as_error() {
     // payload where `Error` is expected — the return-type check flags the mismatch.
     rejects("struct Bad:\n    n: int\nfn q() -> Result[int, Error]:\n    return Err(Bad(1))\n", "Bad");
 }
+
+// ===== recover: boundary (M11 Phase B) =====
+
+#[test]
+fn recover_yields_result_of_block_value() {
+    // `recover:` evaluates to Result[T, Error]; matching Ok/Err is well-typed.
+    ok("fn main():\n    r := recover:\n        [1, 2][0]\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()\n");
+}
+
+#[test]
+fn recover_value_composes_with_question_mark() {
+    // The recover result is an ordinary Result, usable with `?`.
+    ok("fn run() -> int!:\n    r := recover:\n        99\n    v := r?\n    return Ok(v)\n");
+}
+
+#[test]
+fn recover_block_rejects_return() {
+    rejects(
+        "fn f() -> int!:\n    r := recover:\n        return Ok(1)\n    return r\n",
+        "'return' is not allowed inside a recover block",
+    );
+}
+
+#[test]
+fn recover_block_rejects_escaping_break() {
+    rejects(
+        "fn main():\n    for i in 0..3:\n        r := recover:\n            break\n        print(r)\nmain()\n",
+        "'break' is not allowed inside a recover block",
+    );
+}
+
+#[test]
+fn recover_allows_inner_loop_break() {
+    // A break that targets a loop *inside* the recover block is fine.
+    ok("fn main():\n    r := recover:\n        for i in 0..3:\n            if i == 1: break\n        42\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()\n");
+}
+
+#[test]
+fn recover_question_mark_allowed_in_non_result_fn() {
+    // `?` targets the recover boundary, so the enclosing fn need not return Result.
+    ok("fn risky() -> int!:\n    return Err(\"x\")\nfn compute() -> str:\n    r := recover:\n        v := risky()?\n        v\n    match r:\n        Ok(v): return \"ok\"\n        Err(e): return e.message()\n");
+}
+
+#[test]
+fn recover_question_mark_on_option_rejected() {
+    rejects(
+        "fn find() -> int?:\n    return None\nfn main():\n    r := recover:\n        v := find()?\n        v\n    print(r)\nmain()\n",
+        "Option is not allowed inside a recover block",
+    );
+}

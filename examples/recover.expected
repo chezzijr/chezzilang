@@ -1,0 +1,4 @@
+ok: 20
+recovered: index 99 out of bounds (len 3)
+recovered: division by zero
+recovered: not an int: 'nope'

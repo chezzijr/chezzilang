@@ -308,6 +308,10 @@ pub enum ExprKind {
         then: Box<Expr>,
         els: Box<Expr>,
     },
+    /// `recover: <block>` — a panic-recovery boundary. Runs the block; any runtime fault occurring
+    /// transitively beneath it is caught and converted to `Err(Error)`, otherwise the block's
+    /// trailing-expression value is wrapped in `Ok`. Evaluates to `Result[T, Error]`.
+    Recover(Block),
 }
 
 /// One arm of an expression-position `match`: `pattern: value-expr`.

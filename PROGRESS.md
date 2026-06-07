@@ -23,8 +23,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   type-erased (only new runtime: `str.message()`); both engines parity-checked. Migrated example
 >   error-consumption sites (`"…" + e` / `e.trim()` → `e.message()`). Docs + grammar (`T!E`) +
 >   conformance corpus updated. 845 tests green, clippy clean.
-> - ⬜ **Phase B — `recover:` boundary** (next): block expression → `Result[T, Error]` that catches
->   any runtime fault transitively beneath it.
+> - ✅ **Phase B — `recover:` boundary.** Block expression → `Result[T, Error]` that catches any
+>   runtime fault (OOB, div0, overflow, missing key, …) occurring transitively beneath it — no
+>   per-call wrapping. **try-block semantics:** a `?` inside short-circuits to the boundary (its Err
+>   lands in `r`), so one `recover:` handles both panics and propagated errors, and `?` is allowed
+>   even when the enclosing fn doesn't return a Result. Interp catches the unwind (snapshot/restore
+>   locals + globals + call-depth, gate on the `?`-propagation channel); VM uses a handler stack +
+>   `PushHandler`/`PopHandler` ops with the catch converging at a `done` label. `return`/`break`/
+>   `continue` escaping a recover and `?`-on-Option inside one are rejected by the checker. New
+>   `recover` keyword + AST/parser/grammar (`recoverExpr`) + conformance corpus. Golden
+>   `examples/recover.chz`, parity across all cases. 857 tests green, clippy clean.
 
 > **M10 — Tier 2: type-system depth** (`gaps.md` Tier 2). 🟦 IN PROGRESS. Plan:
 > `~/.claude/plans/see-gaps-and-help-mellow-meteor.md`. Staged G1→G4 (ascending risk), each TDD +

@@ -339,6 +339,7 @@ impl Interp {
                     self.eval(els)
                 }
             }
+            ExprKind::Recover(block) => self.eval_recover(block),
             ExprKind::Try(inner) => {
                 let v = self.eval(inner)?;
                 match &v {
@@ -1649,6 +1650,69 @@ impl Interp {
     }
 
     /// Execute a sequence of statements in the current scope, stopping early on `return`.
+    /// `recover: <block>` — run the block; convert any genuine runtime fault occurring transitively
+    /// beneath it into `Err(<message>)` (a `str`, which is an `Error`), otherwise wrap the block's
+    /// trailing-expression value in `Ok`. A `?` Err/None in flight short-circuits to this boundary
+    /// (try-block style): its value becomes the result directly.
+    ///
+    /// No execution state is restored here: a fault unwinds through `call`/`call_closure`/loops/
+    /// scoped blocks, each of which restores caller locals + globals + call-depth + scope on its own
+    /// error path. So side effects performed before the fault (e.g. an outer-variable assignment)
+    /// persist — matching the VM, which mutates locals in place. Only the recover's own scope is
+    /// balanced here.
+    fn eval_recover(&mut self, block: &[Stmt]) -> Result<Value, RuntimeError> {
+        let saved_prop = self.propagating.take();
+        self.env.push();
+        let result = self.eval_recover_body(block);
+        self.env.pop();
+        match result {
+            Ok(v) => {
+                self.propagating = saved_prop;
+                Ok(enum_val("Result", "Ok", vec![v]))
+            }
+            Err(e) => {
+                if let Some(propagated) = self.propagating.take() {
+                    // A `?` Err/None in the block short-circuits here: it becomes the result.
+                    self.propagating = saved_prop;
+                    Ok(propagated)
+                } else {
+                    // A genuine runtime fault: its message (a `str`, i.e. an `Error`) becomes Err.
+                    self.propagating = saved_prop;
+                    Ok(enum_val("Result", "Err", vec![Value::Str(e.message.into())]))
+                }
+            }
+        }
+    }
+
+    /// Evaluate a `recover` block to its value: the trailing expression statement (or `nil`). The
+    /// non-final statements run for their effects; control flow (`return`/`break`/`continue`) inside
+    /// a recover block is rejected (the boundary is a value, not a flow target).
+    fn eval_recover_body(&mut self, block: &[Stmt]) -> Result<Value, RuntimeError> {
+        let Some((last, init)) = block.split_last() else {
+            return Ok(Value::Nil);
+        };
+        for stmt in init {
+            if !matches!(self.exec_stmt(stmt)?, Flow::Normal) {
+                return Err(RuntimeError {
+                    message: "control flow (return/break/continue) is not allowed inside a recover block".to_string(),
+                    span: stmt.span,
+                });
+            }
+        }
+        match &last.kind {
+            StmtKind::Expr(e) => self.eval(e),
+            _ => {
+                if !matches!(self.exec_stmt(last)?, Flow::Normal) {
+                    return Err(RuntimeError {
+                        message: "control flow (return/break/continue) is not allowed inside a recover block".to_string(),
+                        span: last.span,
+                    });
+                }
+                Ok(Value::Nil)
+            }
+        }
+    }
+
     fn exec_block(&mut self, stmts: &[Stmt]) -> Result<Flow, RuntimeError> {
         for stmt in stmts {
             match self.exec_stmt(stmt)? {
@@ -2860,6 +2924,41 @@ fn safe_div(a: int, b: int) -> Result[int]:
     }
 
     #[test]
+    fn recover_catches_index_oob() {
+        // A runtime fault beneath a `recover:` boundary becomes `Err`, not a process kill.
+        let out = run("fn main():\n    r := recover:\n        [1, 2][9]\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()\n");
+        assert!(out.starts_with("recovered: "), "got: {out:?}");
+        assert!(out.contains("out of bounds"), "got: {out:?}");
+    }
+
+    #[test]
+    fn recover_ok_path_wraps_value() {
+        // No fault ⇒ the block's trailing expression is the `Ok` value.
+        let out = run("fn main():\n    r := recover:\n        2 + 3\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err {e.message()}\")\nmain()\n");
+        assert_eq!(out, "ok 5\n");
+    }
+
+    #[test]
+    fn recover_catches_question_mark_err() {
+        // try-block: a `?` Err inside recover lands in `r` (not propagated out of the function).
+        let out = run("fn risky(ok: bool) -> int!:\n    if ok:\n        return Ok(7)\n    return Err(\"boom\")\nfn main():\n    r := recover:\n        x := risky(false)?\n        x + 1\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"caught: {e.message()}\")\nmain()\n");
+        assert_eq!(out, "caught: boom\n");
+    }
+
+    #[test]
+    fn recover_keeps_side_effects_before_a_fault() {
+        // A mutation made before a caught fault persists (keep semantics; matches the VM).
+        let out = run("fn main():\n    x := 1\n    r := recover:\n        x = 99\n        [1][9]\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"recovered\")\n    print(\"x={x}\")\nmain()\n");
+        assert_eq!(out, "recovered\nx=99\n");
+    }
+
+    #[test]
+    fn recover_question_mark_ok_unwraps() {
+        let out = run("fn risky(ok: bool) -> int!:\n    if ok:\n        return Ok(7)\n    return Err(\"boom\")\nfn main():\n    r := recover:\n        x := risky(true)?\n        x + 1\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"caught: {e.message()}\")\nmain()\n");
+        assert_eq!(out, "ok 8\n");
+    }
+
+    #[test]
     fn str_method_split() {
         assert_eq!(run("print(\"a,b,c\".split(\",\"))\n"), "[a, b, c]\n");
     }
@@ -3206,6 +3305,13 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/type_alias.chz");
         let expected = include_str!("../../examples/type_alias.expected");
         assert_eq!(run_capture(source).expect("type_alias.chz should run"), expected);
+    }
+
+    #[test]
+    fn golden_recover_chz() {
+        let source = include_str!("../../examples/recover.chz");
+        let expected = include_str!("../../examples/recover.expected");
+        assert_eq!(run_capture(source).expect("recover.chz should run"), expected);
     }
 
     /// G3 golden: std.cmp (generic min/max/clamp) + Comparable sort on the interp. (Imports a std

@@ -390,8 +390,11 @@ interpolation, pipe. What remains to make it a language you'd reach for to write
   `abs`/`min`/`max` onto the numeric protocol (optional follow-up).
 
 ### Tier 3 — runtime robustness + ergonomics
-- **Panic recovery** — there is none: a runtime error (index-OOB, div-by-zero) kills the process;
-  `Result`/`?` only covers *explicit* errors. A `recover`/boundary matters for robust scripts.
+- ✅ **Panic recovery (M11).** `recover:` block → `Result[T, Error]` catches any runtime fault
+  (index-OOB, div-by-zero, overflow, missing key) occurring transitively beneath it. try-block
+  semantics: a `?` inside short-circuits to the boundary, so one `recover:` handles both panics and
+  propagated errors. Errors are now Go-style: `Result[T, E]` (`T!` = `Result[T, Error]`, `T!E`
+  explicit), `Error` protocol (`message(self) -> str`) with `str` conforming intrinsically.
 - **Iterator protocol** — `for` only iterates built-in containers; a user struct can't be iterable,
   and there are no lazy/generator sequences.
 - **Match guards** (`pattern if cond:`) and **range patterns** (`1..10:`) (extend #15): guards are

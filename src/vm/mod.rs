@@ -72,8 +72,22 @@ struct Vm {
     module_objs: Vec<GcRef>,
     /// The current frame's slot base — cached so local access doesn't re-walk `frames` each op.
     cur_base: usize,
+    /// Active `recover:` boundaries (a stack; the innermost is last). A runtime fault unwinds to the
+    /// nearest handler whose frame is owned by the currently-running dispatch loop.
+    handlers: Vec<Handler>,
     /// Test mode: collect before *every* instruction, to surface any missing GC root.
     gc_stress: bool,
+}
+
+/// A snapshot taken at a `recover:` boundary (`Op::PushHandler`). On a caught fault the VM restores
+/// the operand stack, call frames, and call-depth to these values, then jumps to `ip` in the
+/// boundary's frame with the fault message pushed as the operand.
+#[derive(Clone, Copy)]
+struct Handler {
+    stack_len: usize,
+    frame_len: usize,
+    call_depth: usize,
+    ip: usize,
 }
 
 impl Vm {
@@ -89,6 +103,7 @@ impl Vm {
             call_depth: 0,
             module_objs: Vec::new(),
             cur_base: 0,
+            handlers: Vec::new(),
             gc_stress: false,
         }
     }
@@ -261,7 +276,27 @@ impl Vm {
             // that is disjoint from the `&mut self` fields `step` touches.
             let op = &program.protos[pid].code[ip];
             let span = program.protos[pid].lines[ip];
-            self.step(op, span)?;
+            if let Err(rte) = self.step(op, span) {
+                // Try the nearest `recover:` boundary owned by THIS dispatch loop (its frame is
+                // above `base_level`). A handler below `base_level` belongs to an outer loop, so we
+                // propagate and let that loop catch it.
+                match self.handlers.last().copied() {
+                    Some(h) if h.frame_len > base_level => {
+                        self.handlers.pop();
+                        self.frames.truncate(h.frame_len);
+                        self.stack.truncate(h.stack_len);
+                        self.call_depth = h.call_depth;
+                        self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
+                        self.frames[h.frame_len - 1].ip = h.ip;
+                        // Convert the fault message (a `str`, i.e. an `Error`) into `Err(msg)`; the
+                        // boundary's `done` label receives a ready `Result`.
+                        let msg = self.alloc_str(rte.message);
+                        let err = self.alloc_enum("Result", "Err", vec![msg]);
+                        self.push(err);
+                    }
+                    _ => return Err(rte),
+                }
+            }
         }
         Ok(())
     }
@@ -411,6 +446,15 @@ impl Vm {
                 if !matches!(v, Value::Int(_)) {
                     return Err(self.err(format!("expected int, found {}", self.type_name(v)), span));
                 }
+            }
+            Op::PushHandler(target) => self.handlers.push(Handler {
+                stack_len: self.stack.len(),
+                frame_len: self.frames.len(),
+                call_depth: self.call_depth,
+                ip: *target,
+            }),
+            Op::PopHandler => {
+                self.handlers.pop();
             }
             Op::Jump(t) => self.jump(*t),
             Op::JumpIfFalse(t) => {
@@ -1948,6 +1992,11 @@ impl Vm {
         }
         self.stack.truncate(frame.base);
         self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
+        // Drop any `recover:` handlers installed in the frame we just left (e.g. a `?` early-return
+        // out of a recover block) — they must not survive to catch a later, unrelated fault.
+        while self.handlers.last().is_some_and(|h| h.frame_len > self.frames.len()) {
+            self.handlers.pop();
+        }
         self.push(ret);
     }
 
@@ -1970,6 +2019,21 @@ impl Vm {
                 return Ok(());
             }
             if ty == "Result" && variant == "Err" || ty == "Option" && variant == "None" {
+                // A `?` directly inside a `recover:` block (a handler installed in THIS frame)
+                // short-circuits to that boundary (try-block style): the `Err`/`None` value becomes
+                // the recover's result. Function-scoped `?` (no same-frame handler) falls through.
+                if self
+                    .handlers
+                    .last()
+                    .is_some_and(|h| h.frame_len == self.frames.len())
+                {
+                    let h = self.handlers.pop().unwrap();
+                    self.stack.truncate(h.stack_len);
+                    self.call_depth = h.call_depth;
+                    self.push(v); // the propagated Result/Option value IS the recover's result
+                    self.jump(h.ip);
+                    return Ok(());
+                }
                 // A `?` at the top level (no enclosing function) is an unhandled error → exit. Use
                 // the `?` op's own `span` so the reported location matches the interp (which threads
                 // the `?`'s `expr.span` through its propagation marker).
@@ -4644,6 +4708,29 @@ main()";
         "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db {self.code}\"\nfn q(ok: bool) -> int!DbErr:\n    if ok:\n        return Ok(1)\n    return Err(DbErr(503))\nfn main():\n    match q(false):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n    match q(true):\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
         // default-Error path: Err(str) flows as Result[int, Error], consumed via message()
         "fn parse(ok: bool) -> int!:\n    if ok:\n        return Ok(42)\n    return Err(\"bad input\")\nfn main():\n    match parse(false):\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
+        // ----- M11 Phase B: recover boundary -----
+        // recover catches index-OOB; Ok path wraps the trailing value
+        "fn main():\n    r := recover:\n        [1, 2][9]\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()",
+        // recover catches divide-by-zero
+        "fn main():\n    r := recover:\n        10 / 0\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"err: {e.message()}\")\nmain()",
+        // recover catches integer overflow
+        "fn main():\n    r := recover:\n        9223372036854775807 * 2\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"ovf\")\nmain()",
+        // recover ok-path wraps the value
+        "fn main():\n    r := recover:\n        2 + 3\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err\")\nmain()",
+        // a fault three calls deep is caught at the boundary (no per-call wrapping)
+        "fn a() -> int:\n    return b()\nfn b() -> int:\n    return c()\nfn c() -> int:\n    return [1][9]\nfn main():\n    r := recover:\n        a()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"deep recovered\")\nmain()",
+        // `?` inside recover short-circuits to `r` (try-block): the Err lands in `r`, and code
+        // AFTER the recover still runs — the enclosing fn returns a plain str, so this only works
+        // if `?` did NOT exit the function.
+        "fn d(b: int) -> int!:\n    if b == 0:\n        return Err(\"zero\")\n    return Ok(10 / b)\nfn use() -> str:\n    r := recover:\n        x := d(0)?\n        x + 1\n    match r:\n        Ok(v): return \"ok\"\n        Err(e): return \"caught {e.message()}\"\nfn main():\n    print(use())\nmain()",
+        // `?` Ok path inside recover: value unwrapped, trailing expression becomes the Ok result
+        "fn d(b: int) -> int!:\n    return Ok(10 / b)\nfn main():\n    r := recover:\n        x := d(2)?\n        x + 1\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(e.message())\nmain()",
+        // side effects before a caught fault PERSIST (keep semantics) — both engines must agree
+        "fn main():\n    x := 1\n    r := recover:\n        x = 99\n        [1][9]\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"recovered\")\n    print(\"x={x}\")\nmain()",
+        // nested recover: the inner boundary catches, the outer sees a normal value
+        "fn main():\n    r := recover:\n        inner := recover:\n            [1][9]\n        match inner:\n            Ok(v): v\n            Err(e): 0\n    match r:\n        Ok(v): print(\"outer ok {v}\")\n        Err(e): print(\"outer err\")\nmain()",
+        // recovered value composes with `?` after the boundary\n
+        "fn run() -> int!:\n    r := recover:\n        [10, 20][0]\n    v := r?\n    return Ok(v + 1)\nfn main():\n    match run():\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
         "print(\"a,b,c\".split(\",\"))\nprint(\",\".join([\"a\", \"b\", \"c\"]))",
         "print(\"abc\".starts_with(\"ab\"))\nprint(\"abc\".starts_with(\"z\"))\nprint(\"abc\".contains(\"b\"))\nprint(\"abc\".contains(\"q\"))",
         // chained core-type methods

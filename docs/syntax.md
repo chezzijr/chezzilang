@@ -413,6 +413,42 @@ a bare top-level expression statement that evaluates to one (e.g. `compute()` wh
 or a top-level `?` that hits one — terminates the program with `unhandled error: <detail>` and a
 non-zero exit code. *Binding* the value handles it (`r := compute()` keeps running; inspect `r`).
 
+### `recover:` — the panic-recovery boundary
+
+`Result`/`?` handle *expected* errors. A **runtime fault** — index-out-of-bounds, divide-by-zero,
+integer overflow, a missing map key — is a *panic*: by default it terminates the program. A
+`recover:` block is a boundary that **catches any panic occurring transitively beneath it** (no need
+to pre-mark risky code) and yields a `Result[T, Error]`:
+
+```chezzi
+r := recover:
+    rows := parse(file)       # may panic deep inside
+    rows[0] / rows[1]         # OOB / divide-by-zero is caught here
+match r:
+    Ok(v):  print(v)          # Ok wraps the block's trailing-expression value
+    Err(e): print("recovered: {e.message()}")   # a fault becomes Err(message)
+```
+
+It behaves like a **try-block**: a `?` inside the block short-circuits to the boundary (the `Err`
+lands in `r`), so one `recover:` handles *both* panics and propagated `Result` errors. Because `?`
+targets the boundary rather than the function, it is allowed even when the enclosing function does
+not return a `Result`.
+
+```chezzi
+fn run() -> str:                       # not a Result-returning function
+    r := recover:
+        n := parse_int(input)?         # an Err here lands in `r`, not propagated out of run()
+        n * 2
+    match r:
+        Ok(v):  return "got {v}"
+        Err(e): return "failed: {e.message()}"
+```
+
+Rules: `recover:` is a value (not a control-flow target) — `return`/`break`/`continue` that would
+escape it are rejected; a `?` on an `Option` inside it is rejected (its result is `Result`-typed —
+use `match`). Reach for `recover:` at boundaries (a request, a REPL line, a plugin, a test), not as
+everyday error handling — `Result`/`?` remain the tool for expected failures.
+
 ## 9b. Program entry — there is no automatic `main`
 
 Chezzi is a scripting language: a program runs **top-to-bottom**. There is **no automatic entry

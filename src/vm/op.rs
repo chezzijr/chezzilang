@@ -97,6 +97,14 @@ pub enum Op {
     /// Peek; jump if top is `true`, leaving it on the stack (`or` short-circuit).
     JumpIfTrueKeep(usize),
 
+    // ----- panic recovery (`recover:` boundary) -----
+    /// Install a handler covering the following region. On a runtime fault before the matching
+    /// `PopHandler`, the VM unwinds the operand stack / call frames / call-depth to this point,
+    /// pushes the fault message (a `str`) as the operand, and jumps to the given catch target.
+    PushHandler(usize),
+    /// Remove the most-recently installed handler (the protected region completed without faulting).
+    PopHandler,
+
     // ----- calls -----
     /// Stack: `[callee, arg0, …]`; pops `argc + 1`, pushes the result.
     Call(usize),
