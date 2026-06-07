@@ -39,8 +39,12 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   patterns. **No new lexer token** (unlike Python's `[a:b:c]`), no step. **Shape:** the parser emits a
   `Slice { obj, start, end }` when an index expression is a `..` range; the checker types it as the
   container type (`list[T] → list[T]`, `str → str`; bounds must be `int`); both engines do a
-  bounds-clamped range-copy (list + str). **Deferred extensions:** omitted bounds (`xs[..n]`/`xs[1..]`
-  /`xs[..]` — needs optional-bound ranges), inclusive `..=`, and negative indexing on plain `[i]`.
+  bounds-clamped range-copy (list + str). **Hardcoded to list/str** — *not* a protocol: plain
+  indexing `obj[i]` is itself hardcoded (no `Index` protocol; user structs can't be indexed), so a
+  `Sliceable` protocol alone would be backwards. If user-defined collections ever warrant it, add an
+  `Indexable` + `Sliceable` **pair** as a deliberate milestone — not now. **Deferred extensions:**
+  omitted bounds (`xs[..n]`/`xs[1..]`/`xs[..]` — needs optional-bound ranges), inclusive `..=`, and
+  negative indexing on plain `[i]`.
 - ~~**Generators (`yield`) + a formal `Iterator[T]` protocol**~~ — **resolved + descoped.** The
   `Iterator[T]` protocol shipped (M13, see 🟢): `[S: Iterator[T], T]` is a real parameterized bound.
   `yield`/generators are a **permanent non-goal** (see `spec.md` *Non-goals*) — they would have
