@@ -10,7 +10,7 @@ in `PROGRESS.md` + the cited `examples/*.chz`.
 
 Legend: 🔴 blocks real apps · 🟡 notable friction · 🟢 works (recorded so we don't re-flag it).
 
-Last updated: 2026-06-07. Baseline: post-M11 (panic recovery + Go-style errors; default/named args).
+Last updated: 2026-06-07. Baseline: post-M13 (`Iterator[T]` parameterized bound; `yield` dropped).
 
 > **Forward-looking brainstorm** (a non-Go concurrency model, VM/GC optimizations, far-out ideas)
 > lives in **[`docs/future.md`](docs/future.md)** — speculative, NOT scheduled. Concrete near-term
@@ -23,7 +23,7 @@ Last updated: 2026-06-07. Baseline: post-M11 (panic recovery + Go-style errors; 
 
 The language **core** is feature-complete: scalars, `list`/`map`/`set`/`tuple`, structs (generic),
 sum types (`enum` with payloads, generic), `Result`/`Option` + `?`, generics + structural protocols
-(`Comparable`/`Add`/`Sub`/`Mul`/`Hashable`/`Stringable`/`Error`/iterator), exhaustive `match`
+(`Comparable`/`Add`/`Sub`/`Mul`/`Hashable`/`Stringable`/`Error`/`Iterator[T]`), exhaustive `match`
 (literals, wildcard, nested/tuple, guards, ranges), closures/HOF, struct methods, modules, GC, two
 backends, string interpolation, pipe, panic recovery (`recover:`), default + named args. What remains
 is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered below by leverage.
@@ -36,11 +36,13 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 - **Slicing** — `xs[1:3]`, `s[2:]`, `xs[::-1]`. Scripting-essential, fully missing. **Fix:** lexer
   already has `..`; add `:` inside an index expression → a `Slice` expr lowering to a runtime
   range-copy (list + str). Decide step/negative-index semantics up front.
-- **Generators (`yield`) + a formal `Iterator[T]` protocol** — structural `next(self) -> Option[T]`
-  iteration already works (see 🟢), but everything is **eager**: no lazy `map`/`filter`/`zip`, no
-  `yield`. **Blocks:** big-data/stream pipelines. **Fix shape:** needs coroutine/continuation support
-  in *both* engines (the hard part) + a generic `Iterator[T]` protocol so a type param can be bounded
-  `[S: Iterator]` (current detection is structural, can't bound). The roadmap's #1 deferred item.
+- ~~**Generators (`yield`) + a formal `Iterator[T]` protocol**~~ — **resolved + descoped.** The
+  `Iterator[T]` protocol shipped (M13, see 🟢): `[S: Iterator[T], T]` is a real parameterized bound.
+  `yield`/generators are now a **deliberate non-goal** — it would have needed coroutine/continuation
+  support in *both* engines, and is unnecessary: lazy `map`/`filter`/`take` are written as **adapter
+  structs** over `Iterator[T]` (Rust's `std::iter` model — `examples/iter_adapters.chz`). If a
+  coroutine runtime ever lands (the concurrency track's fibers), `yield` could return as pure sugar
+  over this protocol — but it is not planned.
 - **`std.os.exit(code)` + real process exit codes** — scripts *must* be able to signal failure.
   **Fix:** thread an exit-code channel through both run drivers + the CLI.
 
@@ -81,6 +83,10 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   methods: the desugar pass lacks the receiver type. **Fix:** would require engine-native kwarg
   binding (the desugar can't resolve the receiver). Also still deferred: **non-constant default
   expressions** (defaults must be constant literals today).
+- **Calling a function-typed field** — `self.f(x)` on a struct whose field `f: fn(T)->U` parses as a
+  *method* call (`type X has no method 'f'`). **Workaround:** bind first — `g := self.f` then `g(x)`
+  (used in `examples/iter_adapters.chz`). **Fix:** in method-call lowering, if the receiver has a
+  field matching the name with a `fn` type, treat it as field-access-then-call. Found during M13.
 - **`sort_by_key`** — sugar on `sort_by` (#11). Still open.
 - **Mutable closure capture** — captures are snapshot-by-value, so closure counters / accumulators
   don't work (real functional gap). **Decide:** keep intentional (document loudly) or fix with a
@@ -113,6 +119,11 @@ manager / registry (spec defers this), debugger, doc comments + docgen.
 - **Empty map literal infers `K,V` from later use** — `m := {}` then `m["a"] = 1` type-checks.
 - **User-struct iterator protocol** — a struct with `next(self) -> Option[T]` is iterable in `for`
   (lazy per-step; infinite + early `break` terminates). Both engines.
+- **`Iterator[T]` parameterized bound** (M13) — `[S: Iterator[T], T]` accepts any iterable (built-in
+  `list`/`set`/`str`/`map` intrinsically, or a struct via `next`) and recovers element type `T` into
+  loop vars + return types. The language's first protocol that takes type arguments. Lazy adapter
+  structs (Take/Mapped over an infinite source) compose without `yield`. Both engines parity-tested.
+  `examples/iterator_bound.chz`, `examples/iter_adapters.chz`.
 
 ---
 

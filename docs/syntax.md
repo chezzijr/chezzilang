@@ -189,6 +189,17 @@ struct Counter:
 for x in Counter(0, 5):    # x binds the element type (int); single loop variable only
     print(x)
 
+# `Iterator[T]` is a real protocol bound: a generic fn can take ANY iterable — built-in
+# list/set/str (intrinsically) or a user struct with `next` — and recover its element type `T`.
+fn first_or[S: Iterator[T], T](xs: S, default: T) -> T:
+    for x in xs:           # x is typed `T`
+        return x
+    return default
+first_or([10, 20], 0)      # 10   (T = int, recovered from the list element)
+first_or("hi", "?")        # "h"  (T = str)
+# There is NO `yield`/generator keyword — lazy sequences are built as adapter structs over this
+# protocol (Rust-style; see examples/iter_adapters.chz for Take/Mapped).
+
 while cond:
     cond = step()
 
@@ -276,7 +287,25 @@ print((Vec2(1, 2) + Vec2(3, 4)).x)   # 4   — `+` calls Vec2.add
 ```
 
 A type parameter may carry **multiple bounds** with `+`: `fn fma[T: Add + Mul](a: T, b: T, c: T)`
-requires `T` to satisfy both. **Type aliases** name an existing type transparently — `type Name =
+requires `T` to satisfy both.
+
+The prebuilt **`Iterator[T]`** protocol is the one **parameterized** bound: `[S: Iterator[T], T]`
+accepts any iterable `S` and binds `T` to its element type (recovered by unifying the iterand's
+element). It is satisfied **intrinsically** by `list`/`set`/`str`/`map` (str → str, map → its keys)
+and **structurally** by any struct with `next(self) -> Option[T]`. `T` then flows into the body's
+loop variable and the return type. (`Iterator` is the only protocol that takes type arguments; the
+others are bare.)
+
+```chezzi
+fn to_list[S: Iterator[T], T](xs: S) -> list[T]:
+    out := []
+    for x in xs:            # x : T
+        out.push(x)
+    return out
+to_list("ab")              # ["a", "b"]   (T = str)
+```
+
+**Type aliases** name an existing type transparently — `type Name =
 <type>` makes `Name` interchangeable with the aliased type everywhere (structural, not a distinct
 nominal type); aliases may name scalars, collections, structs, or other aliases (cycles are
 rejected).

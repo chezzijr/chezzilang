@@ -2,7 +2,7 @@
 
 A fast, statically-typed, Python-feel scripting language. Hand-built in Rust.
 
-> **Status:** M1–M11 shipped (through panic recovery + Go-style `Result[T, E]`); M12 added the iterator protocol + match guards/range patterns — 904 tests passing. This doc is the source of truth for the *language design*; live build status lives in `PROGRESS.md` and the roadmap at the bottom.
+> **Status:** M1–M11 shipped (through panic recovery + Go-style `Result[T, E]`); M12 added the iterator protocol + match guards/range patterns; M13 added the parameterized `Iterator[T]` bound (`yield` dropped as a non-goal) — 951 tests passing. This doc is the source of truth for the *language design*; live build status lives in `PROGRESS.md` and the roadmap at the bottom.
 
 ## Goals (ranked)
 
@@ -42,15 +42,18 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 - **Bitwise ops** — `& | ^ << >>` (int-only, M8/M11).
 - **`recover:` block** — panic-recovery boundary → `Result[T, Error]` catching any runtime fault beneath it (M11).
 
-**Shipped post-v1 (M7–M11):**
+**Shipped post-v1 (M7–M13):**
 - **M7** — user-defined generics + structural protocols (generic fns/structs, `Comparable`; `std.cmp`).
 - **M8** — tier-1 stdlib (`std.json`/`process`/`fs`/`time`), the `set` type, iterable strings (`s.chars()`).
 - **M9** — tier-2 stdlib (`std.regex`, `std.request`) — first runtime crate deps.
 - **M10** — type-system depth: `Stringable`/`Hashable` + operator protocols (`Add`/`Sub`/`Mul`), generic enums, type aliases, multi-bound generics (`T: Add + Mul`), any-`Hashable` map/set keys.
 - **M11** — panic recovery (`recover:`) + Go-style `Result[T, E]` with the built-in `Error` protocol (`message(self) -> str`).
+- **M12** — iterator protocol (structs with `next(self) -> Option[T]` iterable in `for`), match guards + range patterns.
+- **M13** — `Iterator[T]`: the first **parameterized** protocol bound (`[S: Iterator[T], T]`) — any iterable, element type recovered; lazy adapter structs replace `yield`.
 
 **Non-goals (by design, never):** classes & inheritance — Chezzi is composition-only with
-structural `protocol`s, like Rust/Go (see *Locked decisions*).
+structural `protocol`s, like Rust/Go (see *Locked decisions*). **`yield`/generators** — lazy sequences
+are adapter structs over `Iterator[T]` (Rust model), so no coroutine runtime is ever needed.
 
 **Still deferred (YAGNI v1):** concurrency, macros, package registry, native backend. Chezzi is
 **single-threaded and synchronous** — both engines run one sequential loop, there is no async/await
@@ -58,12 +61,14 @@ and no scheduler, so all stdlib I/O (`std.request`, `std.fs`, …) blocks. A Go-
 keyword + `chan` queue) is a possible future milestone but is large (scheduler, `Rc`→`Arc` value
 sharing, a channel type across grammar/checker/both engines) and not part of v1. Most of the former
 "what's missing" list has since shipped (M8–M11: `std.json`, generic enums, `Stringable`/`Hashable`/
-numeric protocols, panic recovery, the **iterator protocol** (user structs with
-`next(self) -> Option[T]` iterable in `for`), and **match guards + range patterns** — see
-*Shipped post-v1* above, plus **default + named arguments** for functions and struct constructors);
-remaining gaps are mostly ergonomics (variadic args, comprehensions, slicing) and lazy/generator
-sequences (`yield`). Open items stay tracked in
-`gaps.md` → *Roadmap to a complete v1*.
+numeric protocols, panic recovery, the **`Iterator[T]` protocol** (a parameterized bound:
+`[S: Iterator[T], T]` accepts any iterable — built-in `list`/`set`/`str`/`map` intrinsically, or a
+user struct with `next(self) -> Option[T]` — and recovers its element type `T`), and **match guards +
+range patterns** — see *Shipped post-v1* above, plus **default + named arguments** for functions and
+struct constructors); remaining gaps are mostly ergonomics (variadic args, comprehensions, slicing).
+**`yield`/generators are a deliberate non-goal** — lazy sequences are written as adapter structs over
+`Iterator[T]` (Rust's `Map`/`Take` model), so no coroutine runtime is needed. Open items stay tracked
+in `gaps.md` → *Roadmap to a complete v1*.
 
 ### Syntax sketch
 
@@ -223,6 +228,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M10** | Type-system depth | `Stringable`/`Hashable` + operator protocols (`Add`/`Sub`/`Mul`), generic enums, type aliases, multi-bound generics, any-`Hashable` map/set keys |
 | ✅ **M11** | Panic recovery + Go-style errors | Phase A ✅ `Result[T, E]` + `Error` protocol; Phase B ✅ `recover:` boundary with try-block semantics. Both engines parity-tested |
 | ✅ **M12** | Tier-3 ergonomics (part) | **Iterator protocol** (user structs with `next(self) -> Option[T]` iterable in `for`, lazy); **match guards** (`pattern if cond:`) + int **range patterns** (`1..10:`). Both engines parity-tested |
+| ✅ **M13** | `Iterator[T]` protocol | The language's first **parameterized** protocol bound: `[S: Iterator[T], T]` accepts any iterable (built-ins intrinsically, structs via `next`) and recovers element type `T`. Lazy adapters (Take/Mapped) replace `yield` (a non-goal). Checker/parser/grammar only; both engines parity-tested |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional) |
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c** — see the *Standard library* note

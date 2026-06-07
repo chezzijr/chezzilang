@@ -191,8 +191,17 @@ parity + `cargo test conformance`), clean `cargo clippy`. Details + fix notes in
   `for x in s`, binding `x: T`, looping lazily (`next()` called per step, so infinite iterators with
   an early `break` terminate). Structural detection in the checker (no formal generic `Iterator[T]`);
   the type-erased VM branches at runtime via the new `Op::IsStruct` opcode, so both engines agree.
-  No grammar change (only the iterand's allowed type widened). Deferred follow-ups: generators
-  (`yield`) and a generic `Iterator[T]` protocol for reusable lazy adapters. `examples/iterator.chz`.
+  No grammar change (only the iterand's allowed type widened). `examples/iterator.chz`.
+- ✅ **`Iterator[T]` protocol** (M13) — the language's first **parameterized** protocol bound. A
+  generic fn `[S: Iterator[T], T]` accepts any iterable — built-in `list`/`set`/`str`/`map`
+  intrinsically (like `int` satisfies `Add`), or a struct via its `next` — and **recovers the element
+  type** `T` (unified from the iterand's element) into loop vars and return types. Bounds now carry
+  type args (`ast::Bound { name, args }`, parser + `grammar.bnf <bound>` rule). Element recovery is
+  shared across free-fn / struct-ctor / enum-variant call sites (`recover_iter_elems`/`enforce_bounds`),
+  and `inner.next()` on a bounded param yields `Option[T]` so **lazy adapter structs** (Take/Mapped
+  over an infinite source) compose with **no `yield`** — the Rust `std::iter` model. Checker + parser +
+  grammar only; both engines unchanged and parity-tested. **`yield`/generators dropped as a non-goal.**
+  `examples/iterator_bound.chz`, `examples/iter_adapters.chz`.
 - ✅ **match guards + range patterns** (extends #15) — `pattern if cond:` (optional bool guard on
   both `MatchArm`/`MatchExprArm`; a guarded arm is never irrefutable, so it can't make a match
   exhaustive) and half-open int `start..end` patterns (`start <= v < end`, int-only, refutable).
@@ -629,8 +638,9 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 
 - **Future directions brainstorm** — `defer`, a shared-nothing (BEAM-style) concurrency **+
   parallelism** model (`spawn`/`parallel:`/`chan[T]`, per-task heap+GC, move/copy messaging),
-  missing scripting features (comprehensions, slicing, iterators/generators, variadic args,
-  …; default + named args now shipped), and VM/GC optimizations (superinstructions, inline caching, NaN-boxing, …) are written up in
+  missing scripting features (comprehensions, slicing, variadic args,
+  …; default + named args and `Iterator[T]` now shipped — `yield`/generators dropped as a non-goal),
+  and VM/GC optimizations (superinstructions, inline caching, NaN-boxing, …) are written up in
   **[`docs/future.md`](docs/future.md)**. Opinionated + speculative; promote into `gaps.md` when
   scheduled.
 - **Native FFI / Rust-library bindings** — let Chezzi call into Rust libs (bootstrap the ecosystem
