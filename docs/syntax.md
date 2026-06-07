@@ -374,6 +374,20 @@ print(p.left())                  # 42  — left() returns A = int
 q: Pair[str, int] = Pair("k", 9) # explicit type arguments
 ```
 
+A **method may introduce its own type parameters** in `[…]`, fresh and beyond the struct's own —
+inferred from the call arguments just like a free generic function (it may not reuse a struct
+parameter's name):
+
+```chezzi
+struct Box[T]:
+    v: T
+    fn map_to[U](self, f: fn(T) -> U) -> U:   # U is fresh; inferred from the closure
+        return f(self.v)
+
+b := Box(5)
+print(b.map_to(fn(x: int) -> str: "n{x}"))    # U = str  → "n5"
+```
+
 Generics are **type-erased**: the parameters exist only for the checker. At runtime a
 `Pair[int, str]` is an ordinary struct value — there is no monomorphization and no per-type code.
 

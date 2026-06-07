@@ -1,0 +1,16 @@
+# Method-level type parameters: a method may introduce its own fresh `[U]`
+# beyond the struct's own `[T]`. `U` is inferred from the call arguments.
+struct Box[T]:
+    v: T
+    fn map_to[U](self, f: fn(T) -> U) -> U:
+        return f(self.v)
+    fn biggest[U: Comparable](self, a: U, b: U) -> U:
+        if a < b:
+            return b
+        return a
+
+b := Box(5)
+print(b.map_to(fn(x: int) -> str: "n{x}"))   # U = str  -> "n5"
+print(b.map_to(fn(x: int) -> int: x * 2))    # U = int  -> 10
+print(b.biggest(3, 7))                        # U = int  -> 7
+print(b.biggest("apple", "pear"))             # U = str  -> "pear"

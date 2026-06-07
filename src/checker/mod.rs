@@ -585,6 +585,20 @@ impl Checker {
     /// generic `type_params` are installed (so `T` in annotations resolves to `Ty::Param("T")`) and
     /// each declared bound is validated against the known protocols.
     fn fn_sig(&mut self, decl: &FnDecl, span: Span) -> FnSig {
+        // A method's own `[U]` may not reuse a type parameter already in scope (the struct's `[T]`):
+        // it would be a confusing double-binding. `self.type_params` is empty for a free fn, so this
+        // only fires for methods declared inside a generic struct.
+        for tp in &decl.type_params {
+            if self.type_params.contains_key(&tp.name) {
+                self.error(
+                    span,
+                    format!(
+                        "method type parameter '{}' shadows the struct's type parameter '{}'",
+                        tp.name, tp.name
+                    ),
+                );
+            }
+        }
         let saved = self.enter_type_params(&decl.type_params);
         for tp in &decl.type_params {
             self.check_bounds(&tp.bounds, &tp.name, span);
@@ -2514,10 +2528,16 @@ impl Checker {
                     info.methods.get(method).map(|sig| {
                         let map = struct_param_map(info, targs);
                         let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
-                        (params, subst(&sig.ret, &map))
+                        (params, subst(&sig.ret, &map), sig.type_params.clone())
                     })
                 });
-                if let Some((params, ret)) = resolved {
+                if let Some((params, ret, mtps)) = resolved {
+                    // A generic method introduces its own type params `[U]` (beyond the struct's
+                    // `[T]`, already substituted above). Infer them from the call arguments —
+                    // mirrors the free generic-fn path (`infer_generic_call`).
+                    if !mtps.is_empty() {
+                        return self.infer_generic_method(method, &params, &ret, &mtps, args, span);
+                    }
                     // The first param is the receiver (bound implicitly from `obj`), so the call's
                     // explicit args correspond to params[1..]. A method with NO params has no
                     // receiver slot — both engines prepend the receiver and would error at runtime,
@@ -3257,6 +3277,47 @@ impl Checker {
             }
         }
         subst(&sig.ret, &subst_map)
+    }
+
+    /// Infer a generic *method*'s own type parameters from the call arguments. `params`/`ret` are the
+    /// method signature already substituted with the receiver struct's type arguments, so only the
+    /// method's own `[U]` params remain free; `params[0]` is the receiver (bound from `obj`, not an
+    /// explicit arg). Mirrors `infer_generic_call`'s tail. The parser never attaches call-site type
+    /// args to a method callee, so inference is purely positional.
+    fn infer_generic_method(
+        &mut self,
+        method: &str,
+        params: &[Ty],
+        ret: &Ty,
+        mtps: &[TypeParam],
+        args: &[Expr],
+        span: Span,
+    ) -> Ty {
+        let expected = params.get(1..).unwrap_or(&[]);
+        if args.len() != expected.len() {
+            self.error(
+                span,
+                format!("'{method}' expects {} argument(s), got {}", expected.len(), args.len()),
+            );
+        }
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+        let mut mmap: HashMap<String, Ty> = HashMap::new();
+        for (decl, actual) in expected.iter().zip(&arg_tys) {
+            unify(decl, actual, &mut mmap);
+        }
+        // Recover element types from `Iterator[T]` bounds, then enforce every declared bound.
+        self.recover_iter_elems(mtps, &mut mmap, span);
+        self.enforce_bounds(mtps, &mmap, span);
+        for (decl, (actual, arg)) in expected.iter().zip(arg_tys.iter().zip(args)) {
+            let want = subst(decl, &mmap);
+            if !self.assignable(&want, actual) {
+                self.error(
+                    arg.span,
+                    format!("argument to '{method}' has type {actual}, expected {want}"),
+                );
+            }
+        }
+        subst(ret, &mmap)
     }
 }
 

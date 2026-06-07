@@ -10,6 +10,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **M14 — Method-level type parameters.** ✅ DONE (TDD, full suite + conformance green — 961 tests).
+> A struct method may now introduce its **own** fresh type params `[U]` beyond the struct's `[T]`
+> (`fn map_to[U](self, f: fn(T) -> U) -> U`). `U` is inferred from the call arguments, declared
+> bounds are enforced, and `Iterator[T]` element recovery applies — the free generic-fn inference
+> path (`infer_generic_call`) generalized into a sibling `infer_generic_method` invoked from the
+> `Ty::Struct` arm of `infer_method_call` (`src/checker/mod.rs`). A method type param that reuses a
+> struct param's name is rejected (`fn_sig`, "shadows"). Generics are type-erased, so **no engine
+> change** — `examples/method_type_params.chz` runs byte-identical on VM + interp (parity test).
+> Next: user-defined parameterized protocols (generalize the special-cased `Iterator[T]`).
+
 > **Default + named arguments.** ✅ DONE (TDD, both engines in lockstep, full suite + conformance
 > green — 935 tests). Free functions and struct constructors take constant-literal **defaults**
 > (`fn f(x: int, y: int = 10)`, `port: int = 8080`) and **named call args** (`f(1, y=2)`,

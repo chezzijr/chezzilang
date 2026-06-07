@@ -490,6 +490,89 @@ y := b.set(9)
     ok(src);
 }
 
+// ----- method-level type parameters (F1) -----
+
+// A method introducing its own fresh `[U]` beyond the struct's `[T]`.
+const BOXMAP: &str = "\
+struct Box[T]:
+    v: T
+    fn map_to[U](self, f: fn(T) -> U) -> U:
+        return f(self.v)
+";
+
+#[test]
+fn method_type_param_inferred_from_closure_ok() {
+    // U is inferred from the closure's return type (str); the call type-checks and yields str.
+    ok(&format!("{BOXMAP}b := Box(5)\ns: str = b.map_to(fn(x: int) -> str: \"n{{x}}\")\n"));
+}
+
+#[test]
+fn method_type_param_result_type_substituted() {
+    // U=str, so binding the result to an int must be rejected (proves U flowed into the return).
+    rejects(
+        &format!("{BOXMAP}b := Box(5)\nn: int = b.map_to(fn(x: int) -> str: \"n{{x}}\")\n"),
+        "cannot assign str",
+    );
+}
+
+#[test]
+fn method_type_param_bound_satisfied_ok() {
+    let src = "\
+struct Box[T]:
+    v: T
+    fn biggest[U: Comparable](self, a: U, b: U) -> U:
+        if a < b:
+            return b
+        return a
+b := Box(0)
+r: int = b.biggest(3, 7)
+";
+    ok(src);
+}
+
+#[test]
+fn method_type_param_bound_enforced() {
+    // U: Comparable, but Plain isn't Comparable — the method bound must be enforced at the call.
+    let src = "\
+struct Plain:
+    n: int
+struct Box[T]:
+    v: T
+    fn biggest[U: Comparable](self, a: U, b: U) -> U:
+        if a < b:
+            return b
+        return a
+b := Box(0)
+r := b.biggest(Plain(1), Plain(2))
+";
+    rejects(src, "does not satisfy Comparable");
+}
+
+#[test]
+fn method_type_param_arity_checked() {
+    let src = "\
+struct Box[T]:
+    v: T
+    fn one[U](self, a: U) -> U:
+        return a
+b := Box(0)
+r := b.one(1, 2)
+";
+    rejects(src, "expects");
+}
+
+#[test]
+fn method_type_param_shadowing_struct_param_rejected() {
+    // A method type param reusing the struct's `T` is a confusing double-binding — reject it.
+    let src = "\
+struct Box[T]:
+    v: T
+    fn weird[T](self, x: T) -> T:
+        return x
+";
+    rejects(src, "shadows");
+}
+
 // ----- review-panel regressions (G1/G2) -----
 
 #[test]

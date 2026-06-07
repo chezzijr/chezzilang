@@ -66,19 +66,6 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 
 ### 🟡 Type-system + runtime depth (already-tracked open)
 
-- **Method-level type parameters** — a method may use the struct's params but **cannot introduce its
-  own** `[U]`. A fresh `[U]` on a method parses but is never seeded into the substitution map, so it
-  stays unbound:
-  ```chezzi
-  struct Box[T]:
-      v: T
-      fn map_to[U](self, f: fn(T) -> U) -> U:   # U never inferred → type error
-          return f(self.v)
-  ```
-  Free generic functions infer their own `[T, U]` fine — only methods are affected. **Workaround:**
-  lift to a free `fn map_to[T, U](b: Box[T], f: fn(T) -> U) -> U`. **Fix:** seed method-decl type
-  params into the checker subst map at call time (mirror `seed_targs` / the free-fn path) in
-  `src/checker/mod.rs`.
 - **Defaults / named args on methods** — shipped for free functions + struct constructors, but not
   methods: the desugar pass lacks the receiver type. **Fix:** would require engine-native kwarg
   binding (the desugar can't resolve the receiver). Also still deferred: **non-constant default
@@ -169,6 +156,11 @@ seam grew `NativeRet::Struct`/`Map`. `examples/regex_demo.chz`, `request_demo.ch
 structural iterator protocol; match guards (`pat if cond:`) + range patterns (`1..10:`); default +
 named args (functions + struct constructors, desugar pass). `examples/match_guard.chz`,
 `match_range.chz`, `default_args.chz`, `named_struct.chz`.
+
+**M14 — method-level type parameters ✅** · a method may introduce its own fresh `[U]` beyond the
+struct's `[T]` (`fn map_to[U](self, f: fn(T) -> U) -> U`); `U` is inferred from the call args, bounds
+enforced, recovered through `Iterator[T]` — the free generic-fn path generalized to method calls
+(`infer_generic_method`). Shadowing the struct's own param is rejected. `examples/method_type_params.chz`.
 
 **Tech debt cleared ✅** · parser `MAX_DEPTH` 128→64 (off the test-stack edge); duplicate type param
 `[T, T]` rejected; nested-`set` equality parity; explicit call-site type args; `?`-in-closure checked

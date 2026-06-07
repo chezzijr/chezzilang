@@ -4978,6 +4978,12 @@ main()";
     }
 
     #[test]
+    fn parity_method_type_params() {
+        // A generic method's own `[U]` is type-erased at runtime, so both engines run it identically.
+        assert_file_parity("examples/method_type_params.chz");
+    }
+
+    #[test]
     fn parity_hof_param() {
         let src = "fn apply(f: fn(int) -> int, v: int) -> int:\n    return f(v)\ninc := fn(x: int) -> int: x + 1\nprint(apply(inc, 4))\n";
         assert_parity(src);
