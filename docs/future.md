@@ -251,8 +251,9 @@ stop-the-world GC) **untouched** — the whole point of choosing A+C over D.
 
 1. **Comprehensions** — `[x*2 for x in xs if x>0]` (+ dict/set). A Python-feel language without
    these feels broken. Pure parse-time desugar to loop + push. Cheap, large UX win.
-2. **Slicing** — `xs[1:3]`, `s[2:]`, `xs[::-1]`. Scripting essential, fully missing. Lexer has `..`;
-   needs `:` inside an index expression.
+2. **Sub-ranges — Rust-style `xs[1..3]`** — sub-list / substring via the existing `..` range
+   (half-open), no new lexer token, no step. `Slice { obj, start, end }` → container-typed →
+   bounds-clamped range-copy. (Omitted bounds / `..=` / negative index are deferred extensions.)
 3. ~~**Iterator protocol + generators (`yield`)**~~ — **iterator DONE; generators removed.** The
    `Iterator[T]` parameterized protocol shipped (M13): user structs usable in `for`, generic
    `[S: Iterator[T], T]` bounds, and lazy `map`/`filter`/`take` written as **adapter structs** over it

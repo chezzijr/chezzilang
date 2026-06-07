@@ -33,9 +33,14 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 - **Comprehensions** — `[x*2 for x in xs if x>0]` (+ dict/set forms). A Python-feel language without
   these reads as broken. **Fix:** parse-time desugar to a loop + `push`; no new opcode, no engine
   change. Cheap, large UX win.
-- **Slicing** — `xs[1:3]`, `s[2:]`, `xs[::-1]`. Scripting-essential, fully missing. **Fix:** lexer
-  already has `..`; add `:` inside an index expression → a `Slice` expr lowering to a runtime
-  range-copy (list + str). Decide step/negative-index semantics up front.
+- **Sub-ranges — Rust-style `xs[1..3]`** — extracting a sub-list / substring today needs a manual
+  `for … push` loop. **Fix (decided):** index with the **existing** `..` range — `xs[start..end]`,
+  `s[start..end]` — half-open (end-exclusive), matching the `..` used in `for i in 1..n` and range
+  patterns. **No new lexer token** (unlike Python's `[a:b:c]`), no step. **Shape:** the parser emits a
+  `Slice { obj, start, end }` when an index expression is a `..` range; the checker types it as the
+  container type (`list[T] → list[T]`, `str → str`; bounds must be `int`); both engines do a
+  bounds-clamped range-copy (list + str). **Deferred extensions:** omitted bounds (`xs[..n]`/`xs[1..]`
+  /`xs[..]` — needs optional-bound ranges), inclusive `..=`, and negative indexing on plain `[i]`.
 - ~~**Generators (`yield`) + a formal `Iterator[T]` protocol**~~ — **resolved + descoped.** The
   `Iterator[T]` protocol shipped (M13, see 🟢): `[S: Iterator[T], T]` is a real parameterized bound.
   `yield`/generators are a **permanent non-goal** (see `spec.md` *Non-goals*) — they would have
