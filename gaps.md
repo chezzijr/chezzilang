@@ -47,10 +47,12 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 
 ### 🟡 Scripting ergonomics (promoted from future.md)
 
-- **Spread / unpack** — `[*a, *b]`, `{**m}` (spread into a literal). **Variadics are a permanent
-  non-goal** (see `spec.md` *Non-goals*): no variadic params (`f(*args)`) and no variadic generics
-  (`Foo[T...]`) — pass an explicit `list`, and generics are fixed-arity. Default + named args (fns,
-  struct ctors, methods) cover the ergonomic cases.
+- **List concat + map merge** — combining two lists / maps today needs a manual `for … push` loop
+  (`+` is str/numeric-only; there is no list `+`, `.concat`/`.extend`, or map `.merge`/`.update`).
+  **Fix:** add list concatenation (extend `Add` to lists, or a `.concat`/`.extend` method) and a map
+  `.merge`/`.update` method — both reuse existing operator/method dispatch, no new syntax.
+  (Spread/unpack `[*a, *b]`, `{**m}`, `f(*args)` is **dropped** — variadics are a non-goal, see
+  `spec.md`, and concat/merge cover the literal case more cleanly.)
 - **Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`. Bitwise ops shipped but only decimal
   literals exist — awkward for bit work. **Fix:** lexer-only.
 - **`enumerate` / `zip` builtins** — `for i, x in enumerate(xs)`, `for a, b in zip(xs, ys)`. The

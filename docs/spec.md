@@ -57,7 +57,9 @@ structural `protocol`s, like Rust/Go (see *Locked decisions*). **`yield`/generat
 are adapter structs over `Iterator[T]` (Rust model), so no coroutine runtime is ever needed.
 **Variadics** — neither variadic arguments (`fn log(*args)`) nor variadic generics (`Foo[T...]`):
 pass an explicit `list`, and generics are always fixed-arity. Default + named arguments cover the
-ergonomic cases variadics usually serve.
+ergonomic cases variadics usually serve. **Spread/unpack syntax** (`[*a, *b]`, `{**m}`, `f(*args)`)
+is likewise dropped — list concatenation and map merge are served by plain methods/operators, not
+new syntax.
 
 **Still deferred (YAGNI v1):** concurrency, macros, package registry, native backend. Chezzi is
 **single-threaded and synchronous** — both engines run one sequential loop, there is no async/await

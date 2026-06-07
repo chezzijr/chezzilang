@@ -259,9 +259,10 @@ stop-the-world GC) **untouched** — the whole point of choosing A+C over D.
    (Rust `std::iter` model — `examples/iter_adapters.chz`). **`yield`/generators are a permanent
    non-goal** (see `spec.md` *Non-goals*): they would need coroutine/continuation support in both
    engines, and the adapter-struct pattern covers lazy streaming without it.
-4. **Spread / unpack** — `[*a, *b]`, `{**m}`. (Variadics — `f(*args)` arguments and `Foo[T...]`
-   generics — are a permanent **non-goal**, see `spec.md`: pass an explicit `list`, generics are
-   fixed-arity. Spread into a *literal* could still be considered; variadic *params* are not.)
+4. **List concat + map merge** — `+`/`.concat`/`.extend` for lists and `.merge`/`.update` for maps;
+   today combining two needs a manual `for … push`. (Spread/unpack `[*a, *b]`, `{**m}`, `f(*args)` is
+   **dropped** — variadics are a permanent non-goal, see `spec.md`; concat/merge cover the real need
+   with no new syntax.)
 5. **Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`. Bitwise ops shipped but (likely) no
    non-decimal literals — awkward for bit work. Lexer-only.
 6. **Optional chaining + null-coalescing** — `x?.field`, `a ?? default` on `Option`. `if/else`
