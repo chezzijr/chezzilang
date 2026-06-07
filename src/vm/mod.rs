@@ -3262,12 +3262,26 @@ main()";
 
     #[test]
     fn match_on_non_enum_is_error() {
+        // A *payload* variant pattern unambiguously needs an enum scrutinee; matching it on an int is
+        // a clean runtime error (the `EnsureEnum` guard) rather than a panic.
         let src = "\
 fn main():
     match 5:
-        Red: print(\"x\")
+        Some(x): print(x)
 main()";
         assert!(run_err(src).contains("cannot match on int"));
+    }
+
+    #[test]
+    fn match_bare_ident_on_non_enum_binds_value() {
+        // A bare top-level identifier against a non-enum value is a binding capturing the whole
+        // value (the checker permits this only for literal scrutinees) — not an enum-match error.
+        let src = "\
+fn main():
+    match 5:
+        x: print(x)
+main()";
+        assert_eq!(run(src), "5\n");
     }
 
     // ----- field / index -----
@@ -3667,6 +3681,28 @@ print(P(5) >= P(5))
     fn golden_match_nested_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/match_nested.chz");
         let expected = include_str!("../../examples/match_nested.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Match-guard golden: `examples/match_guard.chz` (`pattern if cond:` arms, expr + stmt forms)
+    /// is byte-identical on the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_match_guard_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/match_guard.chz");
+        let expected = include_str!("../../examples/match_guard.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Range-pattern golden: `examples/match_range.chz` (half-open `start..end` int patterns) is
+    /// byte-identical on the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_match_range_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/match_range.chz");
+        let expected = include_str!("../../examples/match_range.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
@@ -4193,6 +4229,41 @@ match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "abcd\n");
         assert_eq!(run_capture_stress(src), "abcd\n", "VM gc_stress diverged (rooting bug?)");
+    }
+
+    #[test]
+    fn match_guard_fallthrough_parity() {
+        // The first arm's pattern binds but its guard is false → fall through to the next arm.
+        assert_parity_out(
+            "n := 5\nmatch n:\n    x if x < 0: print(\"neg\")\n    x if x > 10: print(\"big\")\n    _: print(\"mid\")\n",
+            "mid\n",
+        );
+    }
+
+    #[test]
+    fn match_guard_first_true_parity() {
+        assert_parity_out(
+            "n := -2\nlabel := match n:\n    x if x < 0: \"neg\"\n    _: \"nonneg\"\nprint(label)\n",
+            "neg\n",
+        );
+    }
+
+    #[test]
+    fn match_range_boundaries_parity() {
+        // Half-open: start is inclusive, end is exclusive.
+        assert_parity_out(
+            "fn b(n: int) -> str:\n    return match n:\n        0..10: \"lo\"\n        10..20: \"hi\"\n        _: \"out\"\nprint(b(0))\nprint(b(9))\nprint(b(10))\nprint(b(19))\nprint(b(20))\n",
+            "lo\nlo\nhi\nhi\nout\n",
+        );
+    }
+
+    #[test]
+    fn match_range_with_literal_mix_parity() {
+        // A match mixing int literals and ranges still routes through the literal path.
+        assert_parity_out(
+            "fn f(n: int) -> str:\n    return match n:\n        0: \"zero\"\n        1..100: \"small\"\n        _: \"big\"\nprint(f(0))\nprint(f(50))\nprint(f(500))\n",
+            "zero\nsmall\nbig\n",
+        );
     }
 
     #[test]

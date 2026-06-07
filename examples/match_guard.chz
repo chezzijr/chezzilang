@@ -1,0 +1,28 @@
+# examples/match_guard.chz — match guards `pattern if cond:`. An arm matches only when its
+# pattern binds AND the guard (a bool, with the bindings in scope) is true; else it falls through.
+# Exercises both the expression form (`return match`) and the statement form, on both engines.
+
+fn classify(n: int) -> str:
+    return match n:
+        x if x < 0: "neg"
+        0: "zero"
+        x if x > 100: "big"
+        _: "pos"
+
+fn sign(n: int):
+    match n:
+        x if x < 0: print("minus")
+        0: print("zero")
+        _: print("plus")
+
+fn main():
+    print(classify(-3))
+    print(classify(0))
+    print(classify(7))
+    print(classify(250))
+
+    sign(-1)
+    sign(0)
+    sign(42)
+
+main()

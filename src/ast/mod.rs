@@ -160,10 +160,14 @@ pub struct Variant {
     pub payload: Vec<Type>,
 }
 
-/// One arm of a `match`: `pattern: body`.
+/// One arm of a `match`: `pattern [if guard]: body`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pattern: Pattern,
+    /// Optional `if <expr>` guard. The arm matches only if the pattern binds AND the guard (a bool,
+    /// evaluated with the pattern's bindings in scope) is true; otherwise control falls through to
+    /// the next arm. A guarded arm is never irrefutable (does not contribute to exhaustiveness).
+    pub guard: Option<Expr>,
     pub body: Block,
 }
 
@@ -186,6 +190,9 @@ pub enum Pattern {
     Tuple(Vec<Pattern>),
     /// An int/str/bool literal pattern. Float is intentionally excluded (float equality footgun).
     Literal(LitPattern),
+    /// A half-open integer range pattern `start..end` — matches an `int` value `v` when
+    /// `start <= v < end`. Int-only; refutable (never irrefutable / never makes a match exhaustive).
+    Range { start: i64, end: i64 },
     /// The `_` catch-all arm.
     Wildcard,
 }
@@ -318,10 +325,12 @@ pub enum ExprKind {
     Recover(Block),
 }
 
-/// One arm of an expression-position `match`: `pattern: value-expr`.
+/// One arm of an expression-position `match`: `pattern [if guard]: value-expr`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchExprArm {
     pub pattern: Pattern,
+    /// Optional `if <expr>` guard — see [`MatchArm::guard`].
+    pub guard: Option<Expr>,
     pub body: Expr,
 }
 

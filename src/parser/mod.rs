@@ -145,6 +145,20 @@ impl Parser {
         }
     }
 
+    /// Expect an integer literal (used for the `end` of a range pattern `start..end`).
+    fn expect_int(&mut self) -> PResult<i64> {
+        match self.peek() {
+            Token::Int(_) => {
+                if let Token::Int(n) = self.advance().kind {
+                    Ok(n)
+                } else {
+                    unreachable!()
+                }
+            }
+            _ => Err(self.err(format!("expected integer, found {}", describe(self.peek())))),
+        }
+    }
+
     /// A simple statement must end the logical line; otherwise trailing tokens are a syntax error
     /// (e.g. `x := 5 y := 6` packed onto one line).
     fn expect_stmt_end(&mut self) -> PResult<()> {
@@ -565,8 +579,13 @@ impl Parser {
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
             let pattern = self.parse_pattern()?;
+            let guard = if self.eat(&Token::If) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
             let body = self.parse_block()?;
-            arms.push(MatchArm { pattern, body });
+            arms.push(MatchArm { pattern, guard, body });
             self.skip_newlines();
         }
         self.expect(&Token::Dedent)?;
@@ -582,9 +601,14 @@ impl Parser {
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
             let pattern = self.parse_pattern()?;
+            let guard = if self.eat(&Token::If) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
             self.expect(&Token::Colon)?;
             let body = self.parse_expr()?;
-            arms.push(MatchExprArm { pattern, body });
+            arms.push(MatchExprArm { pattern, guard, body });
             self.skip_newlines();
         }
         self.expect(&Token::Dedent)?;
@@ -645,6 +669,11 @@ impl Parser {
             Token::Int(n) => {
                 let n = *n;
                 self.advance();
+                // `start..end` — a half-open integer range pattern (matches `start <= v < end`).
+                if self.eat(&Token::DotDot) {
+                    let end = self.expect_int()?;
+                    return Ok(Pattern::Range { start: n, end });
+                }
                 return Ok(Pattern::Literal(LitPattern::Int(n)));
             }
             Token::Str(s) => {

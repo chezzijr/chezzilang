@@ -1311,6 +1311,13 @@ impl Checker {
                 }
                 false
             }
+            Pattern::Range { .. } => {
+                // A range sub-pattern is int-only and always refutable.
+                if !ty.is_unknown() && ty != &Ty::Int {
+                    self.error(span, format!("range pattern cannot match a value of type {ty}"));
+                }
+                false
+            }
             Pattern::Tuple(subs) => {
                 match ty {
                     Ty::Tuple(tys) => {
@@ -1446,6 +1453,7 @@ impl Checker {
                         }
                     }
                     Pattern::Literal(_) => self.error(span, format!("cannot match a literal against {label}")),
+                    Pattern::Range { .. } => self.error(span, format!("cannot match a range against {label}")),
                     Pattern::Tuple(_) => self.error(span, format!("cannot match a tuple against {label}")),
                     Pattern::Ident(_) | Pattern::Wildcard => {
                         unreachable!("ident/wildcard handled elsewhere")
@@ -1463,6 +1471,19 @@ impl Checker {
                                 format!("literal of type {lit_ty} cannot match scrutinee of type {ty}"),
                             );
                         }
+                    }
+                    Pattern::Range { .. } => {
+                        // A range pattern is int-only; reject against str/bool scrutinees.
+                        if ty != &Ty::Int {
+                            self.error(span, format!("range pattern cannot match scrutinee of type {ty}"));
+                        }
+                    }
+                    // int/str/bool have no nullary variants, so a bare top-level identifier here is a
+                    // binding capturing the whole scrutinee value (irrefutable catch-all). The parser
+                    // emits it as `Variant { bindings: [] }`; reinterpret it as a binding.
+                    Pattern::Variant { name, bindings } if bindings.is_empty() => {
+                        self.declare(name, ty.clone());
+                        return true;
                     }
                     Pattern::Variant { .. } => self.error(span, format!("cannot match a variant against {ty}")),
                     Pattern::Tuple(_) => self.error(span, format!("cannot match a tuple against {ty}")),
@@ -1536,8 +1557,13 @@ impl Checker {
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
         for arm in arms {
-            has_wildcard |=
-                self.bind_match_arm(&arm.pattern, &kind, scrutinee.span, &mut covered);
+            let irref = self.bind_match_arm(&arm.pattern, &kind, scrutinee.span, &mut covered);
+            // The guard is type-checked with the arm's bindings in scope. A guarded arm is never
+            // irrefutable — its guard may fail at runtime — so it can't make the match exhaustive.
+            if let Some(guard) = &arm.guard {
+                self.expect_bool(guard, "match guard");
+            }
+            has_wildcard |= irref && arm.guard.is_none();
             for stmt in &arm.body {
                 self.check_stmt(stmt);
             }
@@ -1554,8 +1580,11 @@ impl Checker {
         let mut has_wildcard = false;
         let mut result: Option<Ty> = None;
         for arm in arms {
-            has_wildcard |=
-                self.bind_match_arm(&arm.pattern, &kind, scrutinee.span, &mut covered);
+            let irref = self.bind_match_arm(&arm.pattern, &kind, scrutinee.span, &mut covered);
+            if let Some(guard) = &arm.guard {
+                self.expect_bool(guard, "match guard");
+            }
+            has_wildcard |= irref && arm.guard.is_none();
             let t = self.infer(&arm.body);
             self.pop_scope();
             result = Some(self.unify_branch(result, t, arm.body.span));

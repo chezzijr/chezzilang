@@ -1,0 +1,26 @@
+# examples/match_range.chz — half-open integer range patterns `start..end` (matches `start <= v <
+# end`). Int-only, refutable (a `_` is still required for exhaustiveness). Exercises the expression
+# form (`return match`) and the statement form, on both engines.
+
+fn grade(n: int) -> str:
+    return match n:
+        0..60: "F"
+        60..90: "B"
+        _: "A"
+
+fn bucket(n: int):
+    match n:
+        0..10: print("lo")
+        10..20: print("mid")
+        _: print("hi")
+
+fn main():
+    print(grade(42))
+    print(grade(75))
+    print(grade(95))
+
+    bucket(3)
+    bucket(15)
+    bucket(99)
+
+main()
