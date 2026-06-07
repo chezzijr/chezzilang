@@ -658,6 +658,66 @@ n := first(b)
 }
 
 #[test]
+fn param_protocol_forwarding_wrong_arg_rejected() {
+    // Review-panel CRITICAL: forwarding a `Container[str]` value into a `Container[int]` bound must
+    // be rejected — the bound's type args have to match, not just the protocol name.
+    let src = "\
+protocol Container[T]:
+    fn get(self, i: int) -> T
+    fn size(self) -> int
+struct StrBox:
+    items: list[str]
+    fn get(self, i: int) -> str:
+        return self.items[i]
+    fn size(self) -> int:
+        return len(self.items)
+fn total[X: Container[int]](c: X) -> int:
+    return c.size()
+fn forward[Y: Container[str]](c: Y) -> int:
+    return total(c)
+n := forward(StrBox([\"a\"]))
+";
+    rejects(src, "does not satisfy Container");
+}
+
+#[test]
+fn param_protocol_forwarding_matching_arg_ok() {
+    // The same forward with matching args (`Container[int]` → `Container[int]`) must still be accepted.
+    let src = "\
+protocol Container[T]:
+    fn get(self, i: int) -> T
+    fn size(self) -> int
+struct IntBox:
+    items: list[int]
+    fn get(self, i: int) -> int:
+        return self.items[i]
+    fn size(self) -> int:
+        return len(self.items)
+fn total[X: Container[int]](c: X) -> int:
+    return c.size()
+fn forward[Y: Container[int]](c: Y) -> int:
+    return total(c)
+n := forward(IntBox([1]))
+";
+    ok(src);
+}
+
+#[test]
+fn generic_method_without_receiver_rejected() {
+    // Review-panel IMPORTANT: a generic method whose first param isn't a receiver must be rejected,
+    // not silently bind the receiver to the first declared param.
+    let src = "\
+struct Box[T]:
+    v: T
+    fn ident[U]() -> U:
+        pass
+b := Box(5)
+r := b.ident()
+";
+    rejects(src, "receiver");
+}
+
+#[test]
 fn param_protocol_as_value_type_rejected() {
     // A parameterized protocol may only be a bound, not an existential value type (out of scope).
     let src = "\

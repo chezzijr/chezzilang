@@ -141,10 +141,12 @@ argument evaluates in parameter order, not source-text order (`f(y=g(), x=h())` 
 module, `from`-imported, or module-qualified `mod.f(...)`), struct constructors, **and struct
 methods** (`p.greet(punct="?")`, `p.scale()` filling a default). Because a method's receiver type is
 unknown to the desugar pass, methods are resolved by name: if two structs define a same-named method
-with **different** parameters, a named call to it is ambiguous and rejected (pass those positionally),
-and a method that reuses a built-in method name (`map`, `push`, `len`, …) does not get default/named
-support. **Not yet** supported on closures or enum variants; defaults must be constant literals (no
-`compute()` or references to other params).
+with **different** parameters, a named call to it is rejected as ambiguous and — since the binding
+can't be chosen safely — its **defaults aren't filled** either (the call then fails the arity check),
+so give same-named methods the same parameter shape or unique names. A method that reuses a built-in
+method name (`map`, `push`, `len`, …) does not get default/named support. **Not yet** supported on
+closures or enum variants; defaults must be constant literals (no `compute()` or references to other
+params).
 
 **`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
 **explicit `-> Result[…]`/`-> Option[…]`** return type. The `?` propagates to *that closure's*

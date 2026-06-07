@@ -2553,7 +2553,7 @@ impl Checker {
                     // `[T]`, already substituted above). Infer them from the call arguments —
                     // mirrors the free generic-fn path (`infer_generic_call`).
                     if !mtps.is_empty() {
-                        return self.infer_generic_method(method, &params, &ret, &mtps, args, span);
+                        return self.infer_generic_method(method, &params, &ret, &mtps, &obj_ty, args, span);
                     }
                     // The first param is the receiver (bound implicitly from `obj`), so the call's
                     // explicit args correspond to params[1..]. A method with NO params has no
@@ -3083,6 +3083,60 @@ impl Checker {
         self.satisfies_args(ty, protocol, &[])
     }
 
+    /// Do a declared bound's type args (AST `Type`s) match the `required` ones (resolved `Ty`s) for a
+    /// forwarded parameterized bound? Read-only — used inside `satisfies_args`. Conservative: only a
+    /// *fully concrete* mismatch is rejected (so a still-generic arg like a sibling type param keeps
+    /// forwarding loosely, as before), which is what closes the `Container[str]`→`Container[int]` hole
+    /// without breaking valid `[S: Iterator[T], T]` forwards.
+    fn bound_args_match(&self, bound_args: &[Type], required: &[Ty]) -> bool {
+        if bound_args.len() != required.len() {
+            return false;
+        }
+        bound_args.iter().zip(required).all(|(ba, want)| {
+            let bt = self.resolve_ty_ro(ba);
+            !ty_fully_concrete(&bt) || !ty_fully_concrete(want) || compatible(&bt, want)
+        })
+    }
+
+    /// Read-only type resolution (no error emission), for contexts that only hold `&self`. Returns
+    /// `Ty::Unknown` for anything it can't resolve, which callers treat permissively.
+    fn resolve_ty_ro(&self, t: &Type) -> Ty {
+        match t {
+            Type::Named(n) => match n.as_str() {
+                "int" => Ty::Int,
+                "float" => Ty::Float,
+                "bool" => Ty::Bool,
+                "str" => Ty::Str,
+                "nil" => Ty::Nil,
+                _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
+                _ if self.struct_names.contains(n) => Ty::strukt(n.clone()),
+                _ if self.enum_names.contains(n) => Ty::Enum(n.clone(), Vec::new()),
+                _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
+                _ => Ty::Unknown,
+            },
+            Type::Generic(n, args) => match (n.as_str(), args.as_slice()) {
+                ("list", [x]) => Ty::list(self.resolve_ty_ro(x)),
+                ("set", [x]) => Ty::set(self.resolve_ty_ro(x)),
+                ("Option", [x]) => Ty::option(self.resolve_ty_ro(x)),
+                ("Result", [x]) => Ty::result(self.resolve_ty_ro(x)),
+                ("Result", [x, e]) => Ty::result_e(self.resolve_ty_ro(x), self.resolve_ty_ro(e)),
+                ("map", [k, v]) => Ty::map(self.resolve_ty_ro(k), self.resolve_ty_ro(v)),
+                _ if self.struct_names.contains(n) => {
+                    Ty::Struct(n.clone(), args.iter().map(|a| self.resolve_ty_ro(a)).collect())
+                }
+                _ if self.enum_names.contains(n) => {
+                    Ty::Enum(n.clone(), args.iter().map(|a| self.resolve_ty_ro(a)).collect())
+                }
+                _ => Ty::Unknown,
+            },
+            Type::Func { params, ret } => Ty::Func {
+                params: params.iter().map(|p| self.resolve_ty_ro(p)).collect(),
+                ret: Box::new(self.resolve_ty_ro(ret)),
+            },
+            Type::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve_ty_ro(t)).collect()),
+        }
+    }
+
     /// Does concrete `ty` satisfy `protocol` instantiated with `args` (the bound's type arguments,
     /// e.g. `[int]` for `Container[int]`)? `args` is empty for a bare protocol. For a parameterized
     /// protocol the structural check substitutes the protocol's type params with `args` before
@@ -3133,9 +3187,14 @@ impl Checker {
             return Ok(());
         }
         // A bound type parameter satisfies a protocol if that protocol is among its declared bounds —
-        // this is what lets a generic forward its `T: P` value into another `[U: P]` call.
+        // this is what lets a generic forward its `T: P` value into another `[U: P]` call. For a
+        // parameterized protocol the bound's type args must also match the required ones, so a
+        // `Container[str]` value is NOT accepted where `Container[int]` is required (forwarding hole).
         if let Ty::Param(name) = ty {
-            return if self.type_params.get(name).is_some_and(|bs| bs.iter().any(|b| b.name == protocol)) {
+            let matched = self.type_params.get(name).is_some_and(|bs| {
+                bs.iter().any(|b| b.name == protocol && self.bound_args_match(&b.args, args))
+            });
+            return if matched {
                 Ok(())
             } else {
                 Err(format!("type {ty} does not satisfy {protocol}"))
@@ -3362,16 +3421,27 @@ impl Checker {
     /// method's own `[U]` params remain free; `params[0]` is the receiver (bound from `obj`, not an
     /// explicit arg). Mirrors `infer_generic_call`'s tail. The parser never attaches call-site type
     /// args to a method callee, so inference is purely positional.
+    #[allow(clippy::too_many_arguments)] // the method's resolved signature pieces + receiver + call
     fn infer_generic_method(
         &mut self,
         method: &str,
         params: &[Ty],
         ret: &Ty,
         mtps: &[TypeParam],
+        recv_ty: &Ty,
         args: &[Expr],
         span: Span,
     ) -> Ty {
-        let expected = params.get(1..).unwrap_or(&[]);
+        // The first parameter is the receiver (bound from `obj`). A method with NO params has no
+        // receiver slot — reject, mirroring the non-generic path.
+        let Some((receiver, expected)) = params.split_first() else {
+            self.error(
+                span,
+                format!("method '{method}' has no receiver parameter (its first parameter must be the receiver, e.g. `self`)"),
+            );
+            self.infer_all(args);
+            return Ty::Unknown;
+        };
         if args.len() != expected.len() {
             self.error(
                 span,
@@ -3380,6 +3450,9 @@ impl Checker {
         }
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
         let mut mmap: HashMap<String, Ty> = HashMap::new();
+        // A method type param may appear in the receiver position (`fn f[U](u: U)`); bind it from the
+        // actual receiver type so it isn't left unresolved.
+        unify(receiver, recv_ty, &mut mmap);
         for (decl, actual) in expected.iter().zip(&arg_tys) {
             unify(decl, actual, &mut mmap);
         }
@@ -3484,6 +3557,22 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
 /// (`Stack[int]` ⇒ `{T: int}`). Empty for a non-generic struct.
 fn struct_param_map(info: &StructInfo, targs: &[Ty]) -> HashMap<String, Ty> {
     info.type_params.iter().map(|tp| tp.name.clone()).zip(targs.iter().cloned()).collect()
+}
+
+/// Is `ty` fully concrete — free of any type parameter or `Unknown`? Used to decide when a forwarded
+/// parameterized bound's args can be compared strictly (only a concrete-vs-concrete mismatch is an
+/// error; anything still generic forwards loosely).
+fn ty_fully_concrete(ty: &Ty) -> bool {
+    match ty {
+        Ty::Unknown | Ty::Param(_) => false,
+        Ty::List(x) | Ty::Option(x) | Ty::Set(x) => ty_fully_concrete(x),
+        Ty::Map(k, v) => ty_fully_concrete(k) && ty_fully_concrete(v),
+        Ty::Result(a, b) => ty_fully_concrete(a) && ty_fully_concrete(b),
+        Ty::Struct(_, a) | Ty::Enum(_, a) => a.iter().all(ty_fully_concrete),
+        Ty::Tuple(ts) => ts.iter().all(ty_fully_concrete),
+        Ty::Func { params, ret } => params.iter().all(ty_fully_concrete) && ty_fully_concrete(ret),
+        _ => true,
+    }
 }
 
 /// Substitute generic type parameters in `ty` using `map` (e.g. `Self ↦ Point`, `T ↦ int`).

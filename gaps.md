@@ -72,6 +72,9 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   *method* call (`type X has no method 'f'`). **Workaround:** bind first — `g := self.f` then `g(x)`
   (used in `examples/iter_adapters.chz`). **Fix:** in method-call lowering, if the receiver has a
   field matching the name with a `fn` type, treat it as field-access-then-call. Found during M13.
+  **GOTCHA when fixing:** the desugar method-arg pass (`src/desugar/mod.rs::normalize_call`) treats
+  every `recv.name(...)` as a possible method — make it field-aware then, or a same-named method's
+  default could be injected into a fn-field call.
 - **`sort_by_key`** — sugar on `sort_by` (#11). Still open.
 - **Mutable closure capture** — captures are snapshot-by-value, so closure counters / accumulators
   don't work (real functional gap). **Decide:** keep intentional (document loudly) or fix with a

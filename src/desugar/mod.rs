@@ -460,6 +460,10 @@ impl Walker<'_> {
         // — their receiver may be a list/str/map/set. When several structs define `m` with *different*
         // params, a named call can't be bound unambiguously, so that is an error; a plain (no-named)
         // call is left untouched for the checker rather than guessing a default fill.
+        // TRAP for future work: a `recv.field()` call on a *function-typed field* also parses as a
+        // `Field` callee and is indistinguishable from a method here. It's harmless today (calling a
+        // fn-typed field is itself unsupported — see gaps.md), but when that lands this path MUST be
+        // made field-aware, or it could inject a same-named method's default into a fn-field call.
         let method_spec: Option<Vec<PSpec>> = match (&module_spec, &callee.kind) {
             (None, ExprKind::Field { name, .. }) if !is_builtin_method(name) => {
                 match self.ctx.methods.get(name.as_str()) {
