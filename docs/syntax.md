@@ -138,9 +138,13 @@ arguments must precede named ones (`f(y=2, 1)` is an error); each parameter may 
 once. Named arguments are **reordered into parameter-declaration order**, so a side-effecting named
 argument evaluates in parameter order, not source-text order (`f(y=g(), x=h())` runs `h()` before
 `g()`). Defaults — being constant literals — have no observable order. Scope: free functions (own
-module, `from`-imported, or module-qualified `mod.f(...)`) and struct constructors. **Not yet**
-supported on methods, closures, or enum variants; defaults must be constant literals (no `compute()`
-or references to other params).
+module, `from`-imported, or module-qualified `mod.f(...)`), struct constructors, **and struct
+methods** (`p.greet(punct="?")`, `p.scale()` filling a default). Because a method's receiver type is
+unknown to the desugar pass, methods are resolved by name: if two structs define a same-named method
+with **different** parameters, a named call to it is ambiguous and rejected (pass those positionally),
+and a method that reuses a built-in method name (`map`, `push`, `len`, …) does not get default/named
+support. **Not yet** supported on closures or enum variants; defaults must be constant literals (no
+`compute()` or references to other params).
 
 **`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
 **explicit `-> Result[…]`/`-> Option[…]`** return type. The `?` propagates to *that closure's*

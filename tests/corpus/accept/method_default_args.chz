@@ -1,0 +1,5 @@
+# rule: structDecl, fnDecl, params
+struct Greeter:
+    who: str
+    fn greet(self, greeting: str = "Hello", punct: str = "!") -> str:
+        return greeting + punct

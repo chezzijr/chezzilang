@@ -49,7 +49,7 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 ### 🟡 Scripting ergonomics (promoted from future.md)
 
 - **Spread / unpack** — `[*a, *b]`, `{**m}`, `f(*args)`. (No variadic params — pass an explicit
-  `list` instead; default + named args already shipped for fns + struct ctors.)
+  `list` instead; default + named args already shipped for fns, struct ctors, and methods.)
 - **Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`. Bitwise ops shipped but only decimal
   literals exist — awkward for bit work. **Fix:** lexer-only.
 - **`enumerate` / `zip` builtins** — `for i, x in enumerate(xs)`, `for a, b in zip(xs, ys)`. The
@@ -66,10 +66,8 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 
 ### 🟡 Type-system + runtime depth (already-tracked open)
 
-- **Defaults / named args on methods** — shipped for free functions + struct constructors, but not
-  methods: the desugar pass lacks the receiver type. **Fix:** would require engine-native kwarg
-  binding (the desugar can't resolve the receiver). Also still deferred: **non-constant default
-  expressions** (defaults must be constant literals today).
+- **Non-constant default expressions** — defaults must be constant literals today (no `compute()` or
+  references to other params). Still deferred.
 - **Calling a function-typed field** — `self.f(x)` on a struct whose field `f: fn(T)->U` parses as a
   *method* call (`type X has no method 'f'`). **Workaround:** bind first — `g := self.f` then `g(x)`
   (used in `examples/iter_adapters.chz`). **Fix:** in method-call lowering, if the receiver has a
@@ -168,6 +166,12 @@ named args (functions + struct constructors, desugar pass). `examples/match_guar
   return flows into the caller. Generalizes the special-cased `Iterator[T]` (which still recovers its
   arg; user protocols take theirs explicitly). Usable as a bound only, not an existential value type.
   `examples/param_protocol.chz`.
+- **Defaults / named args on methods** — now consistent with free fns + struct ctors. Handled in the
+  pre-type **desugar pass** (`src/desugar`): a program-wide method registry resolves a call by name
+  (the receiver type isn't known pre-check), fills omitted defaults + reorders named args into a
+  positional list — so the checker and both engines stay untouched. Same-named methods on different
+  structs with different params → a named call is ambiguous (rejected); built-in method names are
+  skipped. `examples/method_default_args.chz`.
 
 **Tech debt cleared ✅** · parser `MAX_DEPTH` 128→64 (off the test-stack edge); duplicate type param
 `[T, T]` rejected; nested-`set` equality parity; explicit call-site type args; `?`-in-closure checked

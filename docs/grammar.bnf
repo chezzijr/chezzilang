@@ -91,8 +91,8 @@
            | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" <block>
            | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> <block>
            | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <block>
-# A parameter may carry a default value (`x: int = 10`). Only free `fn` declarations accept it —
-# closures, methods, and protocol signatures reject it, and the default must be a constant literal:
+# A parameter may carry a default value (`x: int = 10`). Free `fn` declarations and struct methods
+# accept it; closures and protocol signatures reject it, and the default must be a constant literal:
 # both are parser-level rules the (permissive) grammar does not model.
 <params> ::= <param> | <param> "COMMA" <params>
 <param>  ::= "IDENT" | "IDENT" "COLON" <type>

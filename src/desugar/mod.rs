@@ -21,10 +21,26 @@ use std::collections::{HashMap, HashSet};
 
 /// A callable's parameter (or struct field), in declaration order, with its optional constant
 /// default. Cloned out of the AST so the per-module registry is independent of the graph we mutate.
-#[derive(Clone)]
+/// `PartialEq` lets us decide whether several same-named struct methods share one binding shape.
+#[derive(Clone, PartialEq)]
 struct PSpec {
     name: String,
     default: Option<Expr>,
+}
+
+/// Built-in / core methods on `str`/`list`/`map`/`set` (kept in sync with the checker's
+/// `*_method_sig` tables + the HOF/`sort` handling in `infer_method_call`). A method call whose name
+/// is one of these is never rewritten by the method path — its receiver may be a builtin type whose
+/// shape we cannot see here. A user struct that happens to reuse one of these names therefore does
+/// not get default/named support on that method (a documented, narrow limitation).
+const BUILTIN_METHODS: &[&str] = &[
+    "len", "upper", "lower", "trim", "message", "split", "chars", "join", "starts_with", "contains",
+    "push", "pop", "reverse", "index_of", "sum", "sort", "map", "filter", "fold", "sort_by", "has",
+    "get", "keys", "values", "remove", "add", "union", "intersection", "difference",
+];
+
+fn is_builtin_method(name: &str) -> bool {
+    BUILTIN_METHODS.contains(&name)
 }
 
 /// Free functions and struct constructors declared by one module.
@@ -45,6 +61,7 @@ impl ModReg {
 /// Desugar every module's calls in place. Errors carry the offending call's span.
 pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
     let regs = build_registries(graph);
+    let methods = collect_methods(graph);
     // Index modules by id so we can resolve each module's imports against the others' registries.
     let mut module_index: HashMap<ModuleId, usize> = HashMap::new();
     for (i, m) in graph.modules.iter().enumerate() {
@@ -81,6 +98,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             own_id: &own_id,
             bare_from: &bare_from,
             aliases: &aliases,
+            methods: &methods,
         };
         let mut walker = Walker {
             ctx,
@@ -101,9 +119,12 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
     let id = ModuleId(std::path::PathBuf::from("<main>"));
     let mut regs = HashMap::new();
     regs.insert(id.clone(), collect_module_reg(&module.stmts));
+    let mut methods = HashMap::new();
+    collect_methods_into(&module.stmts, &mut methods);
     let bare_from = HashMap::new();
     let aliases = HashMap::new();
-    let ctx = Ctx { regs: &regs, own_id: &id, bare_from: &bare_from, aliases: &aliases };
+    let ctx =
+        Ctx { regs: &regs, own_id: &id, bare_from: &bare_from, aliases: &aliases, methods: &methods };
     let mut walker = Walker { ctx, scopes: Vec::new() };
     walker.walk_block(&mut module.stmts)
 }
@@ -115,6 +136,36 @@ fn build_registries(graph: &ModuleGraph) -> HashMap<ModuleId, ModReg> {
         regs.insert(m.id.clone(), collect_module_reg(&m.ast.stmts));
     }
     regs
+}
+
+/// A program-wide registry of struct **methods**, keyed by method name. A method's receiver type is
+/// unknown in this pre-type pass, so a method call is resolved by name; each entry holds one param
+/// spec (the params *after* the receiver `self`) per struct that defines that name. Spans all modules
+/// since a receiver may be an imported struct's value.
+fn collect_methods(graph: &ModuleGraph) -> HashMap<String, Vec<Vec<PSpec>>> {
+    let mut map: HashMap<String, Vec<Vec<PSpec>>> = HashMap::new();
+    for m in &graph.modules {
+        collect_methods_into(&m.ast.stmts, &mut map);
+    }
+    map
+}
+
+/// Add one module's struct methods to `map`. The receiver (`self`, params[0]) is dropped — a call's
+/// explicit args correspond to params[1..].
+fn collect_methods_into(stmts: &[Stmt], map: &mut HashMap<String, Vec<Vec<PSpec>>>) {
+    for stmt in stmts {
+        if let StmtKind::Struct { methods, .. } = &stmt.kind {
+            for method in methods {
+                let spec: Vec<PSpec> = method
+                    .params
+                    .iter()
+                    .skip(1)
+                    .map(|p| PSpec { name: p.name.clone(), default: p.default.clone() })
+                    .collect();
+                map.entry(method.name.clone()).or_default().push(spec);
+            }
+        }
+    }
 }
 
 /// Build the callable registry (free functions + struct constructors) for one module's top level.
@@ -152,6 +203,8 @@ struct Ctx<'a> {
     own_id: &'a ModuleId,
     bare_from: &'a HashMap<String, ModuleId>,
     aliases: &'a HashMap<String, ModuleId>,
+    /// Program-wide struct-method specs (see [`collect_methods`]).
+    methods: &'a HashMap<String, Vec<Vec<PSpec>>>,
 }
 
 impl Ctx<'_> {
@@ -389,8 +442,9 @@ impl Walker<'_> {
             return Ok(());
         };
 
-        // Resolve the callee against the registry (clone the spec so we can then mutate `expr`).
-        let spec: Option<Vec<PSpec>> = match &callee.kind {
+        // Resolve a free function / struct ctor / module-qualified callee (clone the spec so we can
+        // then mutate `expr`).
+        let module_spec: Option<Vec<PSpec>> = match &callee.kind {
             ExprKind::Ident(name) if !self.is_local(name) => self.ctx.resolve_bare(name).cloned(),
             ExprKind::Field { obj, name } => match &obj.kind {
                 ExprKind::Ident(alias) if !self.is_local(alias) => {
@@ -401,12 +455,38 @@ impl Walker<'_> {
             _ => None,
         };
 
-        let Some(params) = spec else {
-            // Not a registered callable. Named args here are unsupported (closures/methods/builtins).
+        // Otherwise, a method call `recv.m(...)`: resolve `m`'s params by name across user structs
+        // (the receiver type is unknown in this pre-type pass). Builtin/core method names are skipped
+        // — their receiver may be a list/str/map/set. When several structs define `m` with *different*
+        // params, a named call can't be bound unambiguously, so that is an error; a plain (no-named)
+        // call is left untouched for the checker rather than guessing a default fill.
+        let method_spec: Option<Vec<PSpec>> = match (&module_spec, &callee.kind) {
+            (None, ExprKind::Field { name, .. }) if !is_builtin_method(name) => {
+                match self.ctx.methods.get(name.as_str()) {
+                    Some(cands) if !cands.is_empty() => {
+                        if cands.iter().all(|c| *c == cands[0]) {
+                            Some(cands[0].clone())
+                        } else if !named.is_empty() {
+                            return Err(err(
+                                span,
+                                format!("cannot bind named arguments for method '{name}': multiple structs define it with different parameters — pass arguments positionally"),
+                            ));
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
+        let Some(params) = module_spec.or(method_spec) else {
+            // Not a registered callable. Named args here are unsupported (closures / builtin methods).
             if !named.is_empty() {
                 return Err(err(
                     span,
-                    "named arguments are only supported on functions and struct constructors"
+                    "named arguments are only supported on functions, struct constructors, and struct methods"
                         .to_string(),
                 ));
             }
@@ -631,7 +711,7 @@ mod tests {
         // a local closure called with a named arg is unsupported
         assert!(desugar_err("g := fn(x: int): x\nr := g(x=1)\n")
             .message
-            .contains("only supported on functions and struct constructors"));
+            .contains("only supported on functions, struct constructors, and struct methods"));
     }
 
     #[test]
@@ -645,6 +725,81 @@ mod tests {
         let StmtKind::Let { value, .. } = &decl.body[1].kind else { panic!("expected r := f(1)") };
         let ExprKind::Call { args, .. } = &value.kind else { panic!("expected call") };
         assert_eq!(args.len(), 1, "shadowed local call must keep its single arg");
+    }
+
+    /// Pull positional arg ints out of a method call `recv.m(...)` in the last statement.
+    fn method_call_arg_ints(stmts: &[Stmt]) -> Vec<i64> {
+        let last = stmts.last().expect("a statement");
+        let expr = match &last.kind {
+            StmtKind::Let { value, .. } => value,
+            StmtKind::Expr(e) => e,
+            other => panic!("expected let/expr, got {other:?}"),
+        };
+        let ExprKind::Call { args, named, callee, .. } = &expr.kind else {
+            panic!("expected a Call, got {:?}", expr.kind)
+        };
+        assert!(matches!(callee.kind, ExprKind::Field { .. }), "expected a method call");
+        assert!(named.is_empty(), "named must be cleared after desugar");
+        args.iter()
+            .map(|a| match a.kind {
+                ExprKind::Int(n) => n,
+                ref other => panic!("expected an int arg, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn method_fills_trailing_default() {
+        let s = desugar_ok(
+            "struct P:\n    n: int\n    fn bump(self, x: int = 5) -> int:\n        return self.n + x\np := P(1)\nr := p.bump()\n",
+        );
+        assert_eq!(method_call_arg_ints(&s), vec![5]);
+    }
+
+    #[test]
+    fn method_reorders_named() {
+        let s = desugar_ok(
+            "struct P:\n    n: int\n    fn span(self, a: int, b: int) -> int:\n        return a + b\np := P(1)\nr := p.span(b=2, a=1)\n",
+        );
+        assert_eq!(method_call_arg_ints(&s), vec![1, 2]);
+    }
+
+    #[test]
+    fn method_positional_plus_named() {
+        let s = desugar_ok(
+            "struct P:\n    n: int\n    fn span(self, a: int, b: int) -> int:\n        return a + b\np := P(1)\nr := p.span(1, b=2)\n",
+        );
+        assert_eq!(method_call_arg_ints(&s), vec![1, 2]);
+    }
+
+    #[test]
+    fn method_unknown_named_errors() {
+        assert!(desugar_err(
+            "struct P:\n    n: int\n    fn bump(self, x: int) -> int:\n        return x\np := P(1)\nr := p.bump(z=2)\n",
+        )
+        .message
+        .contains("unknown named argument 'z'"));
+    }
+
+    #[test]
+    fn ambiguous_method_named_errors() {
+        // Two structs define `set` with different params; a named call can't be bound unambiguously.
+        assert!(desugar_err(
+            "struct A:\n    n: int\n    fn set(self, x: int) -> int:\n        return x\nstruct B:\n    n: int\n    fn set(self, y: int) -> int:\n        return y\na := A(0)\nr := a.set(x=1)\n",
+        )
+        .message
+        .contains("multiple structs"));
+    }
+
+    #[test]
+    fn builtin_method_name_not_normalized() {
+        // `push` is a builtin list method; a 0-arg call must NOT be rewritten even if a struct
+        // happens to define a `push` with a default.
+        let s = desugar_ok(
+            "struct Q:\n    n: int\n    fn push(self, x: int = 9):\n        print(x)\nxs := [1, 2]\nxs.push(3)\n",
+        );
+        // xs.push(3) stays one positional arg (the builtin), not rewritten to the struct spec.
+        assert_eq!(method_call_arg_ints(&s), vec![3]);
     }
 
     #[test]

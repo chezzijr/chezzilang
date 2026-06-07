@@ -4990,6 +4990,12 @@ main()";
     }
 
     #[test]
+    fn parity_method_default_args() {
+        // Method default + named args are normalized in the desugar pass, so both engines agree.
+        assert_file_parity("examples/method_default_args.chz");
+    }
+
+    #[test]
     fn parity_hof_param() {
         let src = "fn apply(f: fn(int) -> int, v: int) -> int:\n    return f(v)\ninc := fn(x: int) -> int: x + 1\nprint(apply(inc, 4))\n";
         assert_parity(src);

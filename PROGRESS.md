@@ -34,6 +34,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `examples/param_protocol.chz` parity-tested. Deferred (per scope): Iterator-style arg *recovery* for
 > user protocols (`[S: Container[T], T]`), and parameterized protocols as value types.
 
+> **M14 — Default + named args on methods.** ✅ DONE (TDD, full suite + conformance green — 978
+> tests). Methods now accept constant-literal defaults and named call args, like free fns + struct
+> ctors. Done entirely in the pre-type **desugar pass** (`src/desugar/mod.rs`) — the single point that
+> reaches the checker and **both** engines (they each re-build the graph, so a checker-side rewrite
+> wouldn't reach them). Since the desugar has no receiver type, it resolves a method call by name via a
+> program-wide method registry (`collect_methods`): fills omitted defaults + reorders named args into a
+> positional list, leaving the checker and engines untouched. Ambiguity guard: same-named methods on
+> different structs with **different** params → a named call is rejected (pass positionally); built-in
+> method names (`map`/`push`/`len`/… — `BUILTIN_METHODS`) are skipped so a user struct reusing one
+> doesn't hijack a list/str/map/set call. Parser: methods parse with `allow_defaults=true`.
+> `examples/method_default_args.chz` parity-tested. Deferred: non-constant default expressions;
+> closures/enum-variant defaults.
+
 > **Default + named arguments.** ✅ DONE (TDD, both engines in lockstep, full suite + conformance
 > green — 935 tests). Free functions and struct constructors take constant-literal **defaults**
 > (`fn f(x: int, y: int = 10)`, `port: int = 8080`) and **named call args** (`f(1, y=2)`,

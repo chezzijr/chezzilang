@@ -503,7 +503,9 @@ impl Parser {
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
             if self.check(&Token::Fn) {
-                methods.push(self.parse_fn(false)?);
+                // Methods accept constant-literal default params (like free fns); the desugar pass
+                // fills omitted args / reorders named args at method call sites.
+                methods.push(self.parse_fn(true)?);
             } else {
                 let fname = self.expect_ident()?;
                 self.expect(&Token::Colon)?;
@@ -1628,6 +1630,19 @@ mod tests {
     }
 
     #[test]
+    fn method_param_default_parses() {
+        let src = "struct P:\n    n: int\n    fn add(self, x: int = 5) -> int:\n        return self.n + x\n";
+        match only(src) {
+            StmtKind::Struct { methods, .. } => {
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].params.len(), 2);
+                assert!(methods[0].params[1].default.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn parameterized_protocol_decl_collects_type_params() {
         match only("protocol Container[T]:\n    fn get(self, i: int) -> T\n") {
             StmtKind::Protocol { name, type_params, methods } => {
@@ -2688,10 +2703,22 @@ mod tests {
     }
 
     #[test]
-    fn method_default_rejected() {
-        assert!(parse_err("struct S:\n    x: int\n    fn scale(self, k: int = 2) -> int:\n        return self.x * k\n")
+    fn method_default_param_allowed() {
+        // Methods now accept constant-literal defaults (filled by the desugar pass at call sites).
+        match only("struct S:\n    x: int\n    fn scale(self, k: int = 2) -> int:\n        return self.x * k\n") {
+            StmtKind::Struct { methods, .. } => {
+                assert!(methods[0].params[1].default.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn method_required_after_default_rejected() {
+        // The trailing-default rule still applies inside methods.
+        assert!(parse_err("struct S:\n    x: int\n    fn f(self, a: int = 1, b: int) -> int:\n        return a\n")
             .message
-            .contains("default"));
+            .contains("required parameter"));
     }
 }
 

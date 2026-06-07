@@ -1,0 +1,18 @@
+# Default + named arguments on methods (consistent with free functions / struct constructors).
+# The desugar pass fills omitted defaults and reorders named args at the call site, so both engines
+# see a plain positional call.
+struct Greeter:
+    who: str
+
+    fn greet(self, greeting: str = "Hello", punct: str = "!") -> str:
+        return greeting + ", " + self.who + punct
+
+    fn span(self, lo: int, hi: int) -> int:
+        return hi - lo
+
+g := Greeter("Ada")
+print(g.greet())                       # both defaults  -> "Hello, Ada!"
+print(g.greet("Hi"))                   # override one   -> "Hi, Ada!"
+print(g.greet(punct="?"))              # name an arg, skip a middle default -> "Hello, Ada?"
+print(g.greet(punct=".", greeting="Hey"))   # all named, any order -> "Hey, Ada."
+print(g.span(hi=10, lo=3))             # reorder named  -> 7
