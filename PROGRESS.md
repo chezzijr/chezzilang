@@ -601,11 +601,12 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 
 ### Ideas — NOT scheduled (record-only)
 
-- **Future directions brainstorm** — `defer`, a non-Go (single-thread cooperative) concurrency
-  model, missing scripting features (comprehensions, slicing, iterators/generators, variadic/default
-  args, …), and VM/GC optimizations (superinstructions, inline caching, NaN-boxing, …) are written
-  up in **[`docs/future.md`](docs/future.md)**. Opinionated + speculative; promote into `gaps.md`
-  when scheduled.
+- **Future directions brainstorm** — `defer`, a shared-nothing (BEAM-style) concurrency **+
+  parallelism** model (`spawn`/`parallel:`/`chan[T]`, per-task heap+GC, move/copy messaging),
+  missing scripting features (comprehensions, slicing, iterators/generators, variadic/default args,
+  …), and VM/GC optimizations (superinstructions, inline caching, NaN-boxing, …) are written up in
+  **[`docs/future.md`](docs/future.md)**. Opinionated + speculative; promote into `gaps.md` when
+  scheduled.
 - **Native FFI / Rust-library bindings** — let Chezzi call into Rust libs (bootstrap the ecosystem
   instead of rewriting everything in Chezzi). Design sketch lives in `docs/spec.md` → *Standard
   library* → "Future idea — native FFI": `NativeFn` value + a `Host` trait (write a binding once,
