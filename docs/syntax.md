@@ -143,6 +143,21 @@ for k in counts:       # iterate a map → its keys (insertion order)
 for k, v in counts:    # iterate a map's entries → key + value
     print("{k}={v}")
 
+# A user struct is iterable too: give it `next(self) -> Option[T]` and `for` drives it lazily,
+# calling next() each step until it returns None (so an infinite iterator + `break` terminates).
+struct Counter:
+    n: int
+    limit: int
+    fn next(self) -> Option[int]:
+        if self.n >= self.limit:
+            return None
+        v := self.n
+        self.n = self.n + 1
+        return Some(v)
+
+for x in Counter(0, 5):    # x binds the element type (int); single loop variable only
+    print(x)
+
 while cond:
     cond = step()
 
@@ -361,8 +376,28 @@ match maybe_pair:             # nested: a tuple inside Some(...)
     Some((a, b)): print(a + b)
 ```
 
-(Nested **nullary** variants like `Cons(h, None)` aren't supported yet — nest a `match`. Match
-guards and range patterns are future additions.)
+(Nested **nullary** variants like `Cons(h, None)` aren't supported yet — nest a `match`.)
+
+**Guards** (`pattern if cond:`) add a boolean test to an arm — it matches only when the pattern
+binds *and* the guard (which sees the pattern's bindings) is true; otherwise the next arm is tried.
+A guarded arm is never irrefutable, so it can't satisfy exhaustiveness on its own — keep a `_`.
+
+```chezzi
+match n:
+    x if x < 0: "neg"
+    0:          "zero"
+    _:          "pos"         # required: guarded arms don't close the match
+```
+
+**Range patterns** (`start..end:`) match an **int** in the half-open range `start <= v < end`
+(int-only, refutable — still need a `_`):
+
+```chezzi
+match score:
+    0..60:  "F"
+    60..90: "B"
+    _:      "A"
+```
 
 ### `match` and `if` as expressions
 

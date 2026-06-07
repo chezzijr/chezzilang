@@ -2,7 +2,7 @@
 
 A fast, statically-typed, Python-feel scripting language. Hand-built in Rust.
 
-> **Status:** M1–M9 shipped; M10 (type-system depth) and M11 (panic recovery + Go-style `Result[T, E]`) in progress — 874 tests passing. This doc is the source of truth for the *language design*; live build status lives in `PROGRESS.md` and the roadmap at the bottom.
+> **Status:** M1–M11 shipped (through panic recovery + Go-style `Result[T, E]`); M12 added the iterator protocol + match guards/range patterns — 904 tests passing. This doc is the source of truth for the *language design*; live build status lives in `PROGRESS.md` and the roadmap at the bottom.
 
 ## Goals (ranked)
 
@@ -58,8 +58,11 @@ and no scheduler, so all stdlib I/O (`std.request`, `std.fs`, …) blocks. A Go-
 keyword + `chan` queue) is a possible future milestone but is large (scheduler, `Rc`→`Arc` value
 sharing, a channel type across grammar/checker/both engines) and not part of v1. Most of the former
 "what's missing" list has since shipped (M8–M11: `std.json`, generic enums, `Stringable`/`Hashable`/
-numeric protocols, panic recovery — see *Shipped post-v1* above); the main remaining gap is
-**iterators**. Open items stay tracked in `gaps.md` → *Roadmap to a complete v1*.
+numeric protocols, panic recovery, the **iterator protocol** (user structs with
+`next(self) -> Option[T]` iterable in `for`), and **match guards + range patterns** — see
+*Shipped post-v1* above); remaining gaps are mostly ergonomics (default/variadic args,
+comprehensions, slicing) and lazy/generator sequences (`yield`). Open items stay tracked in
+`gaps.md` → *Roadmap to a complete v1*.
 
 ### Syntax sketch
 
@@ -217,7 +220,8 @@ tests/          # Rust unit + golden tests
 | ✅ **M8** | Tier-1 stdlib | `std.json` (+ type-directed `decode[T]`), `std.process`, `std.fs`, `std.time`; the `set` type, iterable strings (`s.chars()`) |
 | ✅ **M9** | Tier-2 stdlib | `std.regex` + `std.request` (first runtime crate deps; blocking); `Match`/`Response` structs |
 | ✅ **M10** | Type-system depth | `Stringable`/`Hashable` + operator protocols (`Add`/`Sub`/`Mul`), generic enums, type aliases, multi-bound generics, any-`Hashable` map/set keys |
-| 🟦 **M11** | Panic recovery + Go-style errors | Phase A ✅ `Result[T, E]` + `Error` protocol; Phase B ✅ `recover:` boundary with try-block semantics. Both engines parity-tested |
+| ✅ **M11** | Panic recovery + Go-style errors | Phase A ✅ `Result[T, E]` + `Error` protocol; Phase B ✅ `recover:` boundary with try-block semantics. Both engines parity-tested |
+| ✅ **M12** | Tier-3 ergonomics (part) | **Iterator protocol** (user structs with `next(self) -> Option[T]` iterable in `for`, lazy); **match guards** (`pattern if cond:`) + int **range patterns** (`1..10:`). Both engines parity-tested |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional) |
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c** — see the *Standard library* note
