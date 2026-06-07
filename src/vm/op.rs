@@ -164,6 +164,10 @@ pub enum Op {
     ListClone,
     /// Pop a list; push its length as an int.
     ArrLen,
+    /// Pop a value; push `true` if it is a struct instance, else `false`. Used by `for` to pick the
+    /// struct-iterator path (`next(self) -> Option[T]`) vs the sequence path at runtime, since the
+    /// compiler is type-erased and can't decide statically.
+    IsStruct,
 
     // ----- match -----
     /// Require the scrutinee in `slot` to be an enum, else "cannot match on …".

@@ -643,6 +643,12 @@ impl Vm {
                 };
                 self.push(Value::Int(len));
             }
+            Op::IsStruct => {
+                let v = self.pop();
+                let is_struct =
+                    matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Struct { .. }));
+                self.push(Value::Bool(is_struct));
+            }
             Op::EnsureEnum(slot) => {
                 let v = self.stack[self.base() + *slot];
                 if !matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Enum { .. })) {
@@ -3707,6 +3713,32 @@ print(P(5) >= P(5))
     fn golden_calc_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/calc.chz");
         let expected = include_str!("../../examples/calc.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    // ----- struct iterator protocol (`for x in s` driven by `next(self) -> Option[T]`) -----
+
+    #[test]
+    fn for_over_struct_iterator_counts() {
+        let src = "struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    for x in Counter(0, 5):\n        print(x)\nmain()\n";
+        assert_eq!(run(src), "0\n1\n2\n3\n4\n");
+        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    #[test]
+    fn for_over_struct_iterator_break_lazy() {
+        let src = "struct Fib:\n    a: int\n    b: int\n    fn next(self) -> Option[int]:\n        v := self.a\n        nb := self.a + self.b\n        self.a = self.b\n        self.b = nb\n        return Some(v)\nfn main():\n    for x in Fib(0, 1):\n        if x > 10:\n            break\n        print(x)\nmain()\n";
+        assert_eq!(run(src), "0\n1\n1\n2\n3\n5\n8\n");
+        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Golden: the iterator example runs on the VM with exactly the expected output, matching interp.
+    #[test]
+    fn golden_iterator_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/iterator.chz");
+        let expected = include_str!("../../examples/iterator.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));

@@ -1857,9 +1857,55 @@ impl Interp {
             }
             return Ok(Flow::Normal);
         }
+        let iter_val = self.eval(iter)?;
+        // Struct iterator protocol: a struct with `next(self) -> Option[T]` is iterated LAZILY —
+        // call `next()` each step until it returns `None`, so an infinite iterator with an early
+        // `break` terminates. The struct advances by mutating its own fields in place (its fields
+        // are `Rc<RefCell<…>>`), so re-cloning the receiver handle each step reads the new state.
+        if let Value::Struct { name, .. } = &iter_val
+            && self.structs.get(name.as_ref()).is_some_and(|d| d.methods.contains_key("next"))
+        {
+            let name = name.clone();
+            // Dispatch `next(self)` the same way `eval_method_call` does for a struct method.
+            let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
+                message: format!("unknown struct type '{name}'"),
+                span: iter.span,
+            })?;
+            let decl = def.methods.get("next").cloned().ok_or_else(|| RuntimeError {
+                message: format!("struct '{name}' has no method 'next'"),
+                span: iter.span,
+            })?;
+            loop {
+                let result = self.call(&decl, &def.home, vec![iter_val.clone()], iter.span)?;
+                match result {
+                    Value::Enum { variant, payload, .. } if variant.as_ref() == "Some" => {
+                        let item = payload.into_iter().next().ok_or_else(|| RuntimeError {
+                            message: "iterator next() returned Some with no payload".to_string(),
+                            span: iter.span,
+                        })?;
+                        match self.run_for_body(vars, vec![item], body)? {
+                            Flow::Return(v) => return Ok(Flow::Return(v)),
+                            Flow::Break => break,
+                            Flow::Continue | Flow::Normal => {}
+                        }
+                    }
+                    Value::Enum { variant, .. } if variant.as_ref() == "None" => break,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "iterator next() must return Option, found {}",
+                                other.type_name()
+                            ),
+                            span: iter.span,
+                        });
+                    }
+                }
+            }
+            return Ok(Flow::Normal);
+        }
         // Materialize the per-iteration value tuples up front (clone out) so a body that mutates the
         // collection doesn't disturb iteration, and no borrow is held across the body.
-        let rows: Vec<Vec<Value>> = match self.eval(iter)? {
+        let rows: Vec<Vec<Value>> = match iter_val {
             Value::List(items) => items.borrow().iter().map(|v| vec![v.clone()]).collect(),
             Value::Map(m) => m
                 .borrow()
@@ -3314,6 +3360,30 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/recover.chz");
         let expected = include_str!("../../examples/recover.expected");
         assert_eq!(run_capture(source).expect("recover.chz should run"), expected);
+    }
+
+    // ----- struct iterator protocol (`for x in s` driven by `next(self) -> Option[T]`) -----
+
+    /// A `Counter` struct yields 0..limit lazily via `next`; iteration advances by mutating `self.n`.
+    #[test]
+    fn for_over_struct_iterator_counts() {
+        let src = "struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    for x in Counter(0, 5):\n        print(x)\nmain()\n";
+        assert_eq!(run(src), "0\n1\n2\n3\n4\n");
+    }
+
+    /// A `break` stops an *infinite* iterator early — proving iteration is lazy (next() per step).
+    #[test]
+    fn for_over_struct_iterator_break_lazy() {
+        let src = "struct Fib:\n    a: int\n    b: int\n    fn next(self) -> Option[int]:\n        v := self.a\n        nb := self.a + self.b\n        self.a = self.b\n        self.b = nb\n        return Some(v)\nfn main():\n    for x in Fib(0, 1):\n        if x > 10:\n            break\n        print(x)\nmain()\n";
+        assert_eq!(run(src), "0\n1\n1\n2\n3\n5\n8\n");
+    }
+
+    /// Golden: the iterator example runs on the interp with exactly the expected output.
+    #[test]
+    fn golden_iterator_chz() {
+        let source = include_str!("../../examples/iterator.chz");
+        let expected = include_str!("../../examples/iterator.expected");
+        assert_eq!(run_capture(source).expect("iterator.chz should run"), expected);
     }
 
     /// G3 golden: std.cmp (generic min/max/clamp) + Comparable sort on the interp. (Imports a std

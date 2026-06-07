@@ -2547,3 +2547,38 @@ fn closure_question_mark_inferred_return_rejected() {
         "Result or Option",
     );
 }
+
+// ===== struct iterator protocol: `for x in s` when `s` has `next(self) -> option[T]` =====
+
+#[test]
+fn iterates_struct_with_next_ok() {
+    // A struct with `next(self) -> Option[int]` is iterable; `x` binds the element type (int).
+    ok("struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    for x in Counter(0, 5):\n        print(x)\nmain()\n");
+}
+
+#[test]
+fn struct_iter_two_vars_rejected() {
+    // A struct iterator binds exactly one loop variable (no key/value form).
+    rejects(
+        "struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    for k, v in Counter(0, 5):\n        print(k)\nmain()\n",
+        "single loop variable",
+    );
+}
+
+#[test]
+fn struct_without_next_not_iterable_still_errors() {
+    // A struct lacking `next` is not iterable — the original "cannot iterate" error stands.
+    rejects(
+        "struct Point:\n    x: int\n    y: int\nfn main():\n    for p in Point(1, 2):\n        print(p)\nmain()\n",
+        "cannot iterate over",
+    );
+}
+
+#[test]
+fn struct_iter_binds_element_type() {
+    // The bound element is `int`, so using it as a str (`x + \"s\"`) is a type error.
+    rejects(
+        "struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    for x in Counter(0, 5):\n        print(x + \"s\")\nmain()\n",
+        "cannot apply + to int and str",
+    );
+}
