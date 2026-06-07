@@ -1505,8 +1505,24 @@ impl Checker {
                     }
                     // int/str/bool have no nullary variants, so a bare top-level identifier here is a
                     // binding capturing the whole scrutinee value (irrefutable catch-all). The parser
-                    // emits it as `Variant { bindings: [] }`; reinterpret it as a binding.
+                    // emits it as `Variant { bindings: [] }`; reinterpret it as a binding — UNLESS the
+                    // name is a registered variant (e.g. `None`). The compiler routes by the variant
+                    // registry, so a colliding name would bind in the interp but trap on the VM; reject
+                    // it here so all engines agree. (Rename the binding to fix.)
                     Pattern::Variant { name, bindings } if bindings.is_empty() => {
+                        // Match the compiler's variant registry: user enums PLUS the built-in
+                        // Result/Option variants (which the checker special-cases elsewhere).
+                        if self.variants.contains_key(name)
+                            || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
+                        {
+                            self.error(
+                                span,
+                                format!(
+                                    "'{name}' is a variant name and cannot bind a scrutinee of type {ty}; rename the binding"
+                                ),
+                            );
+                            return false;
+                        }
                         self.declare(name, ty.clone());
                         return true;
                     }

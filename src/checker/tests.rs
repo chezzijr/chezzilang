@@ -2630,6 +2630,16 @@ fn match_guard_stmt_ok() {
     ok("n := 5\nmatch n:\n    x if x > 0: print(\"pos\")\n    _: print(\"other\")\n");
 }
 
+#[test]
+fn bare_ident_binding_colliding_with_variant_rejected() {
+    // `None` is a registered variant; binding it against an int would bind in the interp but trap
+    // on the VM (the compiler routes by the variant registry). Reject so all engines agree.
+    rejects(
+        "match 5:\n    None: print(\"bound\")\n",
+        "is a variant name",
+    );
+}
+
 // ===== integer range patterns (start..end) =====
 
 #[test]
