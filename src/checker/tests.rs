@@ -573,6 +573,102 @@ struct Box[T]:
     rejects(src, "shadows");
 }
 
+// ----- user-defined parameterized protocols (F3, concrete-arg bounds) -----
+
+// A user protocol with its own type param `T`, plus a struct conforming at `Container[int]`.
+const CONTAINER: &str = "\
+protocol Container[T]:
+    fn get(self, i: int) -> T
+    fn put(self, x: T)
+struct IntBox:
+    items: list[int]
+    fn get(self, i: int) -> int:
+        return self.items[i]
+    fn put(self, x: int):
+        self.items.push(x)
+";
+
+#[test]
+fn param_protocol_decl_ok() {
+    ok("protocol Container[T]:\n    fn get(self, i: int) -> T\n");
+}
+
+#[test]
+fn param_protocol_bound_conformance_ok() {
+    // IntBox satisfies Container[int] (T substituted to int), so first(b) type-checks.
+    let src = format!(
+        "{CONTAINER}fn first[X: Container[int]](c: X) -> int:\n    return c.get(0)\nb := IntBox([10, 20])\nn: int = first(b)\n"
+    );
+    ok(&src);
+}
+
+#[test]
+fn param_protocol_body_return_substituted() {
+    // Inside `first`, `c.get(0)` is `T` = int (from the bound's arg). Returning it as str is wrong.
+    let src = format!(
+        "{CONTAINER}fn first[X: Container[int]](c: X) -> str:\n    return c.get(0)\n"
+    );
+    rejects(&src, "int");
+}
+
+#[test]
+fn param_protocol_bound_arity_mismatch_rejected() {
+    // Container takes one type argument; a bare `Container` bound is an arity error.
+    let src = format!(
+        "{CONTAINER}fn first[X: Container](c: X) -> int:\n    return c.get(0)\n"
+    );
+    rejects(&src, "type argument");
+}
+
+#[test]
+fn param_protocol_missing_method_rejected() {
+    // A struct missing `put` does not satisfy Container[int].
+    let src = "\
+protocol Container[T]:
+    fn get(self, i: int) -> T
+    fn put(self, x: T)
+struct Half:
+    items: list[int]
+    fn get(self, i: int) -> int:
+        return self.items[i]
+fn first[X: Container[int]](c: X) -> int:
+    return c.get(0)
+b := Half([1])
+n := first(b)
+";
+    rejects(src, "does not satisfy Container");
+}
+
+#[test]
+fn param_protocol_wrong_substituted_signature_rejected() {
+    // `get` returns str, but Container[int] requires it return int.
+    let src = "\
+protocol Container[T]:
+    fn get(self, i: int) -> T
+struct StrBox:
+    items: list[str]
+    fn get(self, i: int) -> str:
+        return self.items[i]
+fn first[X: Container[int]](c: X) -> int:
+    return 0
+b := StrBox([\"a\"])
+n := first(b)
+";
+    rejects(src, "does not satisfy Container");
+}
+
+#[test]
+fn param_protocol_as_value_type_rejected() {
+    // A parameterized protocol may only be a bound, not an existential value type (out of scope).
+    let src = "\
+protocol Container[T]:
+    fn get(self, i: int) -> T
+fn bad(c: Container[int]) -> int:
+    return c.get(0)
+";
+    rejects(src, "value type");
+}
+
 // ----- review-panel regressions (G1/G2) -----
 
 #[test]
@@ -2868,7 +2964,7 @@ fn iterator_protocol_redeclaration_rejected() {
 fn iterator_bound_wrong_arity_rejected() {
     rejects(
         "fn f[S: Iterator](xs: S):\n    print(1)\n",
-        "Iterator' takes one type argument",
+        "Iterator' takes 1 type argument",
     );
 }
 

@@ -1,0 +1,8 @@
+# rule: protocolDecl, typeParams
+protocol Container[T]:
+    fn get(self, i: int) -> T
+    fn put(self, x: T)
+
+protocol Pair[A, B]:
+    fn first(self) -> A
+    fn second(self) -> B

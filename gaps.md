@@ -108,8 +108,9 @@ manager / registry (spec defers this), debugger, doc comments + docgen.
   (lazy per-step; infinite + early `break` terminates). Both engines.
 - **`Iterator[T]` parameterized bound** (M13) — `[S: Iterator[T], T]` accepts any iterable (built-in
   `list`/`set`/`str`/`map` intrinsically, or a struct via `next`) and recovers element type `T` into
-  loop vars + return types. The language's first protocol that takes type arguments. Lazy adapter
-  structs (Take/Mapped over an infinite source) compose without `yield`. Both engines parity-tested.
+  loop vars + return types. The first protocol that takes type arguments — now generalized to
+  **user-defined parameterized protocols** (M14, `protocol Container[T]`). Lazy adapter structs
+  (Take/Mapped over an infinite source) compose without `yield`. Both engines parity-tested.
   `examples/iterator_bound.chz`, `examples/iter_adapters.chz`.
 
 ---
@@ -157,10 +158,16 @@ structural iterator protocol; match guards (`pat if cond:`) + range patterns (`1
 named args (functions + struct constructors, desugar pass). `examples/match_guard.chz`,
 `match_range.chz`, `default_args.chz`, `named_struct.chz`.
 
-**M14 — method-level type parameters ✅** · a method may introduce its own fresh `[U]` beyond the
-struct's `[T]` (`fn map_to[U](self, f: fn(T) -> U) -> U`); `U` is inferred from the call args, bounds
-enforced, recovered through `Iterator[T]` — the free generic-fn path generalized to method calls
-(`infer_generic_method`). Shadowing the struct's own param is rejected. `examples/method_type_params.chz`.
+**M14 — generics depth ✅** · two gaps closed (TDD, both engines parity-tested):
+- **Method-level type parameters** — a method may introduce its own fresh `[U]` beyond the struct's
+  `[T]` (`fn map_to[U](self, f: fn(T) -> U) -> U`); `U` is inferred from the call args, bounds
+  enforced, recovered through `Iterator[T]` — the free generic-fn path generalized to method calls
+  (`infer_generic_method`). Shadowing the struct's own param is rejected. `examples/method_type_params.chz`.
+- **User-defined parameterized protocols** (concrete-arg bounds) — `protocol Container[T]:` plus
+  bounds like `[X: Container[int]]`; conformance is structural with `T` substituted, the method's
+  return flows into the caller. Generalizes the special-cased `Iterator[T]` (which still recovers its
+  arg; user protocols take theirs explicitly). Usable as a bound only, not an existential value type.
+  `examples/param_protocol.chz`.
 
 **Tech debt cleared ✅** · parser `MAX_DEPTH` 128→64 (off the test-stack edge); duplicate type param
 `[T, T]` rejected; nested-`set` equality parity; explicit call-site type args; `?`-in-closure checked

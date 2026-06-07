@@ -91,9 +91,13 @@ struct StructInfo {
 }
 
 /// A protocol's required method signatures, in declaration order. `Self` appears as `Ty::Param("Self")`
-/// inside these sigs; conformance substitutes it with the candidate type.
+/// inside these sigs; conformance substitutes it with the candidate type. `type_params` are the
+/// protocol's own parameters (`protocol Container[T]` ⇒ `["T"]`); a bound supplies concrete args for
+/// them (`[X: Container[int]]`), substituted into the method sigs before structural matching. Empty
+/// for a bare protocol; the built-in `Iterator` carries one (its element type).
 #[derive(Clone)]
 struct ProtocolInfo {
+    type_params: Vec<String>,
     methods: Vec<(String, FnSig)>,
 }
 
@@ -506,8 +510,8 @@ impl Checker {
     fn hoist(&mut self, stmts: &[Stmt]) {
         // Protocols first: function/struct signatures may reference them in type-parameter bounds.
         for s in stmts {
-            if let StmtKind::Protocol { name, methods } = &s.kind {
-                self.hoist_protocol(name, methods, s.span);
+            if let StmtKind::Protocol { name, type_params, methods } = &s.kind {
+                self.hoist_protocol(name, type_params, methods, s.span);
             }
         }
         for s in stmts {
@@ -844,6 +848,19 @@ impl Checker {
                         }
                     }
                     Ty::Enum(n.clone(), resolved)
+                }
+                // A parameterized protocol may only be a bound (`[X: Container[int]]`), not an
+                // existential value type — `Ty::Protocol` carries no args. Resolve the args anyway so
+                // an unknown type inside is still reported.
+                _ if self.protocols.contains_key(n) => {
+                    for a in args {
+                        let _ = self.resolve_type(a, span);
+                    }
+                    self.error(
+                        span,
+                        format!("parameterized protocol '{n}' can only be used as a bound, not as a value type"),
+                    );
+                    Ty::Unknown
                 }
                 _ => {
                     self.error(span, format!("unknown generic type '{n}'"));
@@ -2637,7 +2654,19 @@ impl Checker {
                     })
                 });
                 if let Some((proto, msig)) = found {
-                    let map = HashMap::from([("Self".to_string(), obj_ty.clone())]);
+                    // Map `Self` to the receiver, plus the parameterized protocol's own params to the
+                    // bound's concrete args (`Container[int]` ⇒ `T ↦ int`), so a method returning `T`
+                    // resolves to `int` in the caller.
+                    let mut map = HashMap::from([("Self".to_string(), obj_ty.clone())]);
+                    let ptps = self
+                        .protocols
+                        .get(&proto.name)
+                        .map(|p| p.type_params.clone())
+                        .unwrap_or_default();
+                    for (pname, parg) in ptps.iter().zip(&proto.args) {
+                        let resolved = self.resolve_type(parg, span);
+                        map.insert(pname.clone(), resolved);
+                    }
                     let expected: Vec<Ty> = match msig.params.split_first() {
                         Some((_recv, rest)) => rest.iter().map(|t| subst(t, &map)).collect(),
                         None => Vec::new(),
@@ -2916,33 +2945,37 @@ impl Checker {
         self.type_params = saved;
     }
 
-    /// Validate the bounds declared on a type parameter: each names a known protocol, and type args
-    /// are only allowed on (and required by) the parameterized protocols. Today only `Iterator[T]`
-    /// takes args (exactly one — its element type); every other protocol must be bare.
+    /// Validate the bounds declared on a type parameter: each names a known protocol, and the number
+    /// of type args matches the protocol's arity (a parameterized `protocol Container[T]` requires
+    /// one; a bare protocol requires none). `Iterator` additionally may appear at most once (its
+    /// element recovery can't disambiguate two).
     fn check_bounds(&mut self, bounds: &[Bound], param: &str, span: Span) {
         let mut seen_iterator = false;
         for b in bounds {
-            if !self.protocols.contains_key(&b.name) {
+            let Some(arity) = self.protocols.get(&b.name).map(|p| p.type_params.len()) else {
                 self.error(span, format!("unknown protocol '{}' in bound on '{param}'", b.name));
                 continue;
+            };
+            if b.args.len() != arity {
+                let msg = if arity == 0 {
+                    format!("protocol '{}' takes no type arguments", b.name)
+                } else {
+                    format!(
+                        "protocol '{}' takes {arity} type argument(s), found {}",
+                        b.name,
+                        b.args.len()
+                    )
+                };
+                self.error(span, msg);
             }
-            match b.name.as_str() {
-                "Iterator" if b.args.len() != 1 => self.error(
-                    span,
-                    format!("protocol 'Iterator' takes one type argument (the element type), found {}", b.args.len()),
-                ),
-                "Iterator" if seen_iterator => {
-                    self.error(span, format!("'{param}' has more than one Iterator bound"))
+            if b.name == "Iterator" {
+                if seen_iterator {
+                    self.error(span, format!("'{param}' has more than one Iterator bound"));
                 }
-                "Iterator" => seen_iterator = true,
-                other if !b.args.is_empty() => self.error(
-                    span,
-                    format!("protocol '{other}' takes no type arguments"),
-                ),
-                _ => {}
+                seen_iterator = true;
             }
             // Resolve the bound's type args (with the surrounding params in scope) so an unknown type
-            // inside a bound — e.g. `Iterator[Bogus]` — is reported rather than silently accepted.
+            // inside a bound — e.g. `Container[Bogus]` — is reported rather than silently accepted.
             for a in &b.args {
                 let _ = self.resolve_type(a, span);
             }
@@ -2950,7 +2983,13 @@ impl Checker {
     }
 
     /// Register a `protocol` declaration's method signatures. `Self` resolves to `Ty::Param("Self")`.
-    fn hoist_protocol(&mut self, name: &str, methods: &[MethodSig], span: Span) {
+    fn hoist_protocol(
+        &mut self,
+        name: &str,
+        type_params: &[TypeParam],
+        methods: &[MethodSig],
+        span: Span,
+    ) {
         if is_reserved_protocol(name) {
             self.error(span, format!("protocol '{name}' is reserved (builtin)"));
             return;
@@ -2961,6 +3000,17 @@ impl Checker {
         let mut saved = self.type_params.clone();
         std::mem::swap(&mut self.type_params, &mut saved); // start clean, with only Self visible
         self.type_params.insert("Self".to_string(), Vec::new());
+        // The protocol's own type params are in scope while resolving its method signatures, so
+        // `fn get(self, i: int) -> T` resolves `T` to `Ty::Param("T")`.
+        for tp in type_params {
+            if tp.name == "Self" {
+                self.error(span, "protocol type parameter cannot be named 'Self'".to_string());
+            }
+            self.type_params.insert(tp.name.clone(), tp.bounds.clone());
+        }
+        for tp in type_params {
+            self.check_bounds(&tp.bounds, &tp.name, span);
+        }
         let sigs = methods
             .iter()
             .map(|m| {
@@ -2981,7 +3031,13 @@ impl Checker {
             })
             .collect();
         self.type_params = saved; // restore
-        self.protocols.insert(name.to_string(), ProtocolInfo { methods: sigs });
+        self.protocols.insert(
+            name.to_string(),
+            ProtocolInfo {
+                type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
+                methods: sigs,
+            },
+        );
     }
 
     /// Does concrete `ty` structurally satisfy `protocol`? Read-only. Primitives intrinsically
@@ -3024,6 +3080,14 @@ impl Checker {
     }
 
     fn satisfies(&self, ty: &Ty, protocol: &str) -> Result<(), String> {
+        self.satisfies_args(ty, protocol, &[])
+    }
+
+    /// Does concrete `ty` satisfy `protocol` instantiated with `args` (the bound's type arguments,
+    /// e.g. `[int]` for `Container[int]`)? `args` is empty for a bare protocol. For a parameterized
+    /// protocol the structural check substitutes the protocol's type params with `args` before
+    /// matching method signatures.
+    fn satisfies_args(&self, ty: &Ty, protocol: &str, args: &[Ty]) -> Result<(), String> {
         let Some(pinfo) = self.protocols.get(protocol) else {
             return Err(format!("unknown protocol '{protocol}'"));
         };
@@ -3082,7 +3146,17 @@ impl Checker {
                 let Some(info) = self.structs.get(sname) else {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 };
+                // Substitute the protocol's own type params with the bound's args (`T ↦ int` for
+                // `Container[int]`) before matching; `Self` is handled inside `method_matches`.
+                let pmap: HashMap<String, Ty> =
+                    pinfo.type_params.iter().cloned().zip(args.iter().cloned()).collect();
                 for (mname, msig) in &pinfo.methods {
+                    let want = FnSig {
+                        params: msig.params.iter().map(|t| subst(t, &pmap)).collect(),
+                        ret: subst(&msig.ret, &pmap),
+                        type_params: Vec::new(),
+                    };
+                    let msig = &want;
                     match info.methods.get(mname) {
                         Some(actual) if method_matches(msig, actual, ty) => {}
                         Some(_) => {
@@ -3226,12 +3300,16 @@ impl Checker {
         }
     }
 
-    /// Enforce each type parameter's declared protocol bounds against its inferred binding.
+    /// Enforce each type parameter's declared protocol bounds against its inferred binding. A
+    /// parameterized bound (`Container[int]`) supplies type args, resolved here (sibling params in
+    /// scope) and checked structurally with the protocol's params substituted.
     fn enforce_bounds(&mut self, tps: &[TypeParam], sub: &HashMap<String, Ty>, span: Span) {
         for tp in tps {
             if let Some(concrete) = sub.get(&tp.name) {
                 for bound in &tp.bounds {
-                    if let Err(msg) = self.satisfies(concrete, &bound.name) {
+                    let bargs: Vec<Ty> =
+                        bound.args.iter().map(|a| self.resolve_bound_arg(a, tps, span)).collect();
+                    if let Err(msg) = self.satisfies_args(concrete, &bound.name, &bargs) {
                         self.error(span, msg);
                     }
                 }
@@ -3328,6 +3406,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
     m.insert(
         "Comparable".to_string(),
         ProtocolInfo {
+            type_params: Vec::new(),
             // receiver `self` (Unknown), `other: Self` (Param "Self"), returning int.
             methods: vec![(
                 "compare".to_string(),
@@ -3338,6 +3417,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
     m.insert(
         "Stringable".to_string(),
         ProtocolInfo {
+            type_params: Vec::new(),
             // receiver `self` (Unknown) only, returning str. A struct with `str(self) -> str`
             // satisfies it; `print`/`str()`/interpolation dispatch to that method at runtime.
             methods: vec![("str".to_string(), FnSig::plain(vec![Ty::Unknown], Ty::Str))],
@@ -3348,12 +3428,14 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         // conforms intrinsically; any struct with `message(self) -> str` conforms structurally.
         "Error".to_string(),
         ProtocolInfo {
+            type_params: Vec::new(),
             methods: vec![("message".to_string(), FnSig::plain(vec![Ty::Unknown], Ty::Str))],
         },
     );
     m.insert(
         "Hashable".to_string(),
         ProtocolInfo {
+            type_params: Vec::new(),
             // receiver `self` (Unknown) only, returning int. A struct with `hash(self) -> int`
             // satisfies it. WIRED TO MAP/SET KEYS: `map`/`set` are real hash tables (insertion-order
             // entries + a hash→position index), so any `Hashable` type can be a key/element — the
@@ -3371,6 +3453,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         m.insert(
             proto.to_string(),
             ProtocolInfo {
+                type_params: Vec::new(),
                 methods: vec![(
                     method.to_string(),
                     FnSig::plain(vec![Ty::Unknown, Ty::Param("Self".into())], Ty::Param("Self".into())),
@@ -3385,6 +3468,9 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
     m.insert(
         "Iterator".to_string(),
         ProtocolInfo {
+            // One type param (the element) so the generic arity check in `check_bounds` treats
+            // `Iterator[T]` uniformly; its conformance + element recovery stay special-cased.
+            type_params: vec!["Elem".to_string()],
             methods: vec![(
                 "next".to_string(),
                 FnSig::plain(vec![Ty::Unknown], Ty::Option(Box::new(Ty::Param("Self".into())))),

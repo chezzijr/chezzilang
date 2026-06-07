@@ -4984,6 +4984,12 @@ main()";
     }
 
     #[test]
+    fn parity_param_protocol() {
+        // A user-defined parameterized protocol bound is checker-only (type-erased); both engines run it.
+        assert_file_parity("examples/param_protocol.chz");
+    }
+
+    #[test]
     fn parity_hof_param() {
         let src = "fn apply(f: fn(int) -> int, v: int) -> int:\n    return f(v)\ninc := fn(x: int) -> int: x + 1\nprint(apply(inc, 4))\n";
         assert_parity(src);

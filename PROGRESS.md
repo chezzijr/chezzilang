@@ -18,7 +18,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Ty::Struct` arm of `infer_method_call` (`src/checker/mod.rs`). A method type param that reuses a
 > struct param's name is rejected (`fn_sig`, "shadows"). Generics are type-erased, so **no engine
 > change** — `examples/method_type_params.chz` runs byte-identical on VM + interp (parity test).
-> Next: user-defined parameterized protocols (generalize the special-cased `Iterator[T]`).
+
+> **M14 — User-defined parameterized protocols (concrete-arg bounds).** ✅ DONE (TDD, full suite +
+> conformance green — 969 tests). `protocol Container[T]:` now takes type parameters; a bound supplies
+> concrete args (`fn first[X: Container[int]](c: X)`), and a struct satisfies it **structurally** with
+> `T` substituted — generalizing the special-cased built-in `Iterator[T]`. AST: `Protocol.type_params`;
+> `ProtocolInfo.type_params` (`src/checker/mod.rs`). Parser/grammar: `parse_protocol` consumes
+> `parse_type_params()`; `<protocolDecl>` gained the `<typeParams>` alternative. Checker: `check_bounds`
+> arity-checks against the protocol's param count (Iterator = 1, others by declaration); `satisfies_args`
+> substitutes the protocol's params into each required method sig before structural matching;
+> `enforce_bounds` resolves + forwards the bound's args; the bounded-param method-dispatch arm
+> substitutes them so `c.get(0)` is `int`. Iterator keeps its intrinsic conformance + element recovery
+> (user protocols take their args explicitly). A parameterized protocol is a **bound only** — using it
+> as an existential value type (`c: Container[int]`) is rejected. Type-erased ⇒ **no engine change**;
+> `examples/param_protocol.chz` parity-tested. Deferred (per scope): Iterator-style arg *recovery* for
+> user protocols (`[S: Container[T], T]`), and parameterized protocols as value types.
 
 > **Default + named arguments.** ✅ DONE (TDD, both engines in lockstep, full suite + conformance
 > green — 935 tests). Free functions and struct constructors take constant-literal **defaults**

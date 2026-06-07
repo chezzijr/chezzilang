@@ -434,6 +434,8 @@ impl Parser {
     fn parse_protocol(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Protocol)?;
         let name = self.expect_ident()?;
+        // `protocol Container[T]:` — optional type parameters, reusing the generic fn/struct parser.
+        let type_params = self.parse_type_params()?;
         self.open_block()?;
         let mut methods = Vec::new();
         self.skip_newlines();
@@ -443,7 +445,7 @@ impl Parser {
             self.skip_newlines();
         }
         self.expect(&Token::Dedent)?;
-        Ok(StmtKind::Protocol { name, methods })
+        Ok(StmtKind::Protocol { name, type_params, methods })
     }
 
     /// Comma-separated `name[: Type]` until (but not consuming) the closing `)`.
@@ -1613,13 +1615,27 @@ mod tests {
     #[test]
     fn protocol_decl_collects_method_sigs() {
         match only("protocol Comparable:\n    fn compare(self, other: Self) -> int\n") {
-            StmtKind::Protocol { name, methods } => {
+            StmtKind::Protocol { name, methods, .. } => {
                 assert_eq!(name, "Comparable");
                 assert_eq!(methods.len(), 1);
                 assert_eq!(methods[0].name, "compare");
                 assert_eq!(methods[0].params.len(), 2);
                 assert_eq!(methods[0].params[1].ty, Some(Type::Named("Self".into())));
                 assert_eq!(methods[0].ret, Some(Type::Named("int".into())));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parameterized_protocol_decl_collects_type_params() {
+        match only("protocol Container[T]:\n    fn get(self, i: int) -> T\n") {
+            StmtKind::Protocol { name, type_params, methods } => {
+                assert_eq!(name, "Container");
+                assert_eq!(type_params.len(), 1);
+                assert_eq!(type_params[0].name, "T");
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].ret, Some(Type::Named("T".into())));
             }
             other => panic!("{other:?}"),
         }

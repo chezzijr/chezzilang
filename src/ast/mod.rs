@@ -49,10 +49,13 @@ pub enum StmtKind {
         fields: Vec<Field>,
         methods: Vec<FnDecl>,
     },
-    /// `protocol Name:` — a structural interface: a list of method signatures (no bodies). A type
-    /// satisfies it by having matching methods (Go-style; no explicit `implements`).
+    /// `protocol Name:` (or `protocol Name[T]:`) — a structural interface: a list of method
+    /// signatures (no bodies). A type satisfies it by having matching methods (Go-style; no explicit
+    /// `implements`). `type_params` is empty for a bare protocol; for `protocol Container[T]` the
+    /// method signatures may reference `T`, and a bound names concrete args (`[X: Container[int]]`).
     Protocol {
         name: String,
+        type_params: Vec<TypeParam>,
         methods: Vec<MethodSig>,
     },
     /// `enum Name:` (or `enum Name[T]:`) with its variants. `type_params` is empty for a

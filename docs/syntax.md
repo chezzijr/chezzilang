@@ -289,12 +289,27 @@ print((Vec2(1, 2) + Vec2(3, 4)).x)   # 4   — `+` calls Vec2.add
 A type parameter may carry **multiple bounds** with `+`: `fn fma[T: Add + Mul](a: T, b: T, c: T)`
 requires `T` to satisfy both.
 
-The prebuilt **`Iterator[T]`** protocol is the one **parameterized** bound: `[S: Iterator[T], T]`
-accepts any iterable `S` and binds `T` to its element type (recovered by unifying the iterand's
-element). It is satisfied **intrinsically** by `list`/`set`/`str`/`map` (str → str, map → its keys)
-and **structurally** by any struct with `next(self) -> Option[T]`. `T` then flows into the body's
-loop variable and the return type. (`Iterator` is the only protocol that takes type arguments; the
-others are bare.)
+A protocol may itself take **type parameters** — `protocol Container[T]:`. A bound then supplies
+concrete arguments, and a type satisfies it structurally with the parameters substituted:
+
+```chezzi
+protocol Container[T]:
+    fn get(self, i: int) -> T
+
+fn first[X: Container[int]](c: X) -> int:   # T pinned to int; c.get(0) is int
+    return c.get(0)
+```
+
+The number of args must match the protocol's arity (a bare protocol takes none). A parameterized
+protocol is usable **only as a bound**, not as an existential value type (`c: Container[int]` is an
+error — its type args have nowhere to live in a value).
+
+The prebuilt **`Iterator[T]`** is a parameterized bound with extra magic: `[S: Iterator[T], T]`
+accepts any iterable `S` and **recovers** `T` from the iterand's element (by unifying it), rather
+than requiring it written out. It is satisfied **intrinsically** by `list`/`set`/`str`/`map`
+(str → str, map → its keys) and **structurally** by any struct with `next(self) -> Option[T]`. `T`
+then flows into the body's loop variable and the return type. (User protocols take their args
+explicitly; only `Iterator` recovers them.)
 
 ```chezzi
 fn to_list[S: Iterator[T], T](xs: S) -> list[T]:

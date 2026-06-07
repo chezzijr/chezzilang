@@ -1,0 +1,26 @@
+# User-defined parameterized protocol: `Container[T]` is a structural interface with its own
+# type parameter. A bound supplies a concrete arg (`[X: Container[int]]`); a type satisfies it by
+# having the methods with `T` substituted. (Generalizes the built-in `Iterator[T]`.)
+protocol Container[T]:
+    fn get(self, i: int) -> T
+    fn size(self) -> int
+
+struct IntBox:
+    items: list[int]
+    fn get(self, i: int) -> int:
+        return self.items[i]
+    fn size(self) -> int:
+        return len(self.items)
+
+# `c.get(0)` is `T` = int here, recovered from the bound's argument.
+fn total[X: Container[int]](c: X) -> int:
+    sum := 0
+    i := 0
+    while i < c.size():
+        sum = sum + c.get(i)
+        i = i + 1
+    return sum
+
+b := IntBox([10, 20, 30])
+print(total(b))     # 60
+print(b.get(1))     # 20
