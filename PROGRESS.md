@@ -10,6 +10,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **M16 — Comprehensions + `std.os.exit(code)`.** ✅ DONE (TDD, full suite + conformance green —
+> 1041 tests, both engines parity-tested).
+> **Comprehensions** `[elem for x in it if g]` (+ set `{e for …}` / map `{k: v for …}`): one `for`
+> clause (binds one name, or two for `for k, v in m`) + optional `if` guard. A first-class
+> `ExprKind::Comprehension { kind, key, elem, vars, iter, guard }` (`src/ast`) — *not* a parse-time
+> desugar (closures are single-expr; `.map`/`.filter` are list-only, so neither reaches ranges,
+> sets, maps, or struct iterators). Parser detects `for` after the first element (`src/parser`,
+> `parse_comp_clause`); grammar `<compClause>` + corpus (drift-checked). Checker `infer_comprehension`
+> reuses `for_bindings` (so every iterable binds like a `for` loop) + the set/map Hashable checks.
+> Interp `eval_comprehension` shares iteration with `exec_for` via the extracted `iter_rows_from_value`.
+> VM `compile_comprehension` reuses `compile_for` by synthesizing the accumulate body (`$comp.push/add`
+> / `$comp[k]=v`) — zero duplicated iteration logic. `examples/comprehensions.chz` (golden, both engines).
+> **`std.os.exit(code)`**: hard, uncatchable cooperative exit — `Host::request_exit` sets a pending
+> code on each engine; the native returns an `Err` sentinel that unwinds past every `recover:` to the
+> top, where the driver reports the code. Threaded through `RunOutput` (new 4th field) + the CLI
+> (`ExitCode::from(code)`, clamped `0..=255`). `examples/exit.chz` (golden, both engines).
+
 > **M15 — Slicing + the `Index`/`IndexSet`/`Slice` protocols.** ✅ DONE (TDD, full suite +
 > conformance green — 1013 tests, both engines parity-tested). `xs[1..3]` / `s[0..2]` slice
 > half-open + bounds-clamped, reusing the existing `..` range (no new lexer token). The earlier
@@ -272,9 +289,9 @@ parity + `cargo test conformance`), clean `cargo clippy`. Details + fix notes in
 **Deferred** (recorded in `gaps.md`): generics / operator-overloading trait (extends #12), a real
 `char` type (extends #10), `sort_by_key` (sugar on #11).
 
-> **Deferred within M6c (small, intentional):** `std.os.exit(code)` — a correct cooperative exit
-> needs an exit-code channel threaded through both run drivers + the CLI; deferred to avoid a
-> misleading half-implementation. `std.io.read_file` is capped at 64 MiB (returns `Err`, no OOM).
+> **`std.os.exit(code)` — shipped (post-M14).** Hard, uncatchable cooperative exit: an exit-code
+> channel is threaded through both run drivers (`RunOutput` 4th field) + the CLI. Unwinds past
+> `recover:`; the process exits with `code` (clamped `0..=255`). `std.io.read_file` is capped at 64 MiB (returns `Err`, no OOM).
 > `std.os.getcwd` reads the real cwd (not injectable via `HostConfig` yet — parity holds, documented).
 > Level-3 dynamic `cdylib`/C-ABI FFI remains out of scope per the spec.
 
@@ -379,8 +396,8 @@ model; Level-3 dynamic `cdylib` loading stays out of scope.
 - ✅ **Tests** — per-module parity (interp == VM on stdout *and* stderr *and* error), checker sig
   tests, resolver virtual-module test, GC stress, `examples/std_demo.chz` golden, conformance. 401
   total, clean `cargo clippy`.
-- ⏸️ **Deferred (intentional):** `std.os.exit(code)` (needs an exit-code channel through both run
-  drivers + CLI); `read_file` capped at 64 MiB; `getcwd` not yet injectable via `HostConfig`.
+- ✅ **`std.os.exit(code)`** (shipped post-M14): hard, uncatchable exit threaded through both run
+  drivers + CLI. ⏸️ Still deferred: `read_file` capped at 64 MiB; `getcwd` not yet injectable via `HostConfig`.
 
 ## Post-M6 — `map[K, V]` dictionary (gap #5)  ✅ DONE
 
@@ -697,8 +714,8 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 
 - **Future directions brainstorm** — `defer`, a shared-nothing (BEAM-style) concurrency **+
   parallelism** model (`spawn`/`parallel:`/`chan[T]`, per-task heap+GC, move/copy messaging),
-  missing scripting features (comprehensions, slicing,
-  …; default + named args and `Iterator[T]` now shipped — `yield`/generators and variadics are
+  missing scripting features (
+  …; default + named args, `Iterator[T]`, slicing, and comprehensions now shipped — `yield`/generators and variadics are
   permanent non-goals),
   and VM/GC optimizations (superinstructions, inline caching, NaN-boxing, …) are written up in
   **[`docs/future.md`](docs/future.md)**. Opinionated + speculative; promote into `gaps.md` when

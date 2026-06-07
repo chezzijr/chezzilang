@@ -1,0 +1,3 @@
+# rule: primary, compClause
+xs := [x * 2 for x in [1, 2, 3] if x > 0]
+ys := [n for n in 0..10]

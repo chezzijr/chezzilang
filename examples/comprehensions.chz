@@ -1,0 +1,24 @@
+# Comprehensions: build a list / set / map by iterating an existing iterable, with an optional
+# `if` guard. They desugar to a loop that accumulates into a fresh collection, so any iterable
+# works — lists, ranges, sets, maps, even a struct iterator.
+
+fn main():
+    nums := [1, 2, 3, 4, 5, 6]
+
+    # list: map every element
+    print([n * n for n in nums])
+    # list: filter with a guard
+    print([n for n in nums if n % 2 == 0])
+    # list: over a range
+    print([i for i in 0..5])
+
+    # set: duplicates collapse (n % 3 repeats)
+    print({n % 3 for n in nums})
+
+    # map: build key -> value pairs
+    print({n: n * n for n in [1, 2, 3]})
+    # map: iterate another map's entries (two loop variables)
+    scores := {"ada": 90, "linus": 85}
+    print({name: s + 5 for name, s in scores})
+
+main()

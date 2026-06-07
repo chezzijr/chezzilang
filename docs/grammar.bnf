@@ -231,9 +231,12 @@
             | "LPAREN" <expr> "COMMA" <exprList> "RPAREN"
             | "LBRACKET" "RBRACKET"
             | "LBRACKET" <exprList> "RBRACKET"
+            | "LBRACKET" <expr> <compClause> "RBRACKET"
             | "LBRACE" "RBRACE"
             | "LBRACE" <mapEntries> "RBRACE"
             | "LBRACE" <exprList> "RBRACE"
+            | "LBRACE" <expr> <compClause> "RBRACE"
+            | "LBRACE" <mapEntry> <compClause> "RBRACE"
             | <closure>
             | <matchExpr>
             | <ifExpr>
@@ -243,6 +246,13 @@
 # (bare exprs, no COLON) is a set. The empty set is `set()`, since `{}` is taken by the map.
 <mapEntries> ::= <mapEntry> | <mapEntry> "COMMA" <mapEntries>
 <mapEntry>   ::= <expr> "COLON" <expr>
+
+# Comprehensions: `[elem for x in it]` (list), `{elem for x in it}` (set), `{k: v for x in it}`
+# (map). One `for` clause binding one name (or two, for `for k, v in m`), an optional `if` guard.
+<compClause> ::= "FOR" "IDENT" "IN" <expr>
+               | "FOR" "IDENT" "IN" <expr> "IF" <expr>
+               | "FOR" <identList> "IN" <expr>
+               | "FOR" <identList> "IN" <expr> "IF" <expr>
 
 # Expression-position `match`/`if` (value-producing, distinct from the statement forms above).
 # `matchExpr` arms are value-expressions (not blocks); it is multiline + exhaustive. A simple

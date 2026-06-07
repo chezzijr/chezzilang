@@ -214,16 +214,20 @@ fn cmd_run(args: &[String]) -> ExitCode {
     // modules read args/env/stdin from a process-backed config.
     let p = std::path::Path::new(&path);
     let cfg = native::HostConfig::from_process(prog_args);
-    let (output, errout, errored) = if use_vm {
-        let (out, err, result) = vm::run_file_with(p, cfg);
-        (out, err, result.err().map(|e| e.to_string()))
+    let (output, errout, errored, exit_code) = if use_vm {
+        let (out, err, result, code) = vm::run_file_with(p, cfg);
+        (out, err, result.err().map(|e| e.to_string()), code)
     } else {
-        let (out, err, result) = interp::run_file_with(p, cfg);
-        (out, err, result.err().map(|e| e.to_string()))
+        let (out, err, result, code) = interp::run_file_with(p, cfg);
+        (out, err, result.err().map(|e| e.to_string()), code)
     };
     print!("{output}");
     // Flush program stderr (std.io.eprint output) to the real stderr.
     eprint!("{errout}");
+    // `std.os.exit(code)` takes precedence: a clean halt with the requested status.
+    if let Some(code) = exit_code {
+        return ExitCode::from(code as u8);
+    }
     match errored {
         None => ExitCode::SUCCESS,
         Some(msg) => {

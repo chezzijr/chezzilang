@@ -148,6 +148,11 @@ pub trait Host {
     fn os_env(&self, key: &str) -> Option<String>;
     /// The current working directory.
     fn os_getcwd(&self) -> Result<String, HostError>;
+
+    /// Record a cooperative-exit request (`std.os.exit(code)`). The engine stores the code and the
+    /// native fn returns an error sentinel that unwinds past any `recover:` to the top level, where
+    /// the driver reports the code as the process exit status. Default: no-op (test hosts).
+    fn request_exit(&mut self, _code: i64) {}
 }
 
 /// A Rust function callable from Chezzi. A bare `fn` pointer (no captured state, no generics) so it

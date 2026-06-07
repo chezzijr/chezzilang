@@ -1,0 +1,17 @@
+import std.os
+
+# `std.os.exit(code)` lets a script signal failure: it halts immediately with the given process
+# exit status, unwinding past any `recover:` (a hard, uncatchable exit). Output already written is
+# preserved; nothing after the call runs.
+fn check(n: int):
+    if n < 0:
+        print("negative input, aborting")
+        os.exit(2)
+    print("ok: {n}")
+
+fn main():
+    check(7)
+    check(0 - 1)
+    print("this line never runs")
+
+main()

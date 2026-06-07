@@ -9,8 +9,8 @@
 mod ty;
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, Bound, Expr, ExprKind, FnDecl, Import, LitPattern, MethodSig, Param,
-    Pattern, Span, Stmt, StmtKind, Type, TypeParam, UnaryOp,
+    AssignOp, BinaryOp, Block, Bound, CompKind, Expr, ExprKind, FnDecl, Import, LitPattern,
+    MethodSig, Param, Pattern, Span, Stmt, StmtKind, Type, TypeParam, UnaryOp,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
 use std::collections::HashMap;
@@ -204,6 +204,9 @@ fn native_module_sig(name: &str) -> ModuleSig {
             func("args", vec![], Ty::list(Ty::Str));
             func("env", vec![Ty::Str], Ty::option(Ty::Str));
             func("getcwd", vec![], Ty::result(Ty::Str));
+            // `exit(code)` never returns, but the checker has no `never` type; `nil` is the
+            // closest void-ish result and lets statements (unreachable in practice) follow it.
+            func("exit", vec![Ty::Int], Ty::Nil);
         }
         "std.process" => {
             func("cmd", vec![Ty::Str], Ty::result(Ty::Str));
@@ -1869,6 +1872,9 @@ impl Checker {
             ExprKind::Tuple(items) => Ty::Tuple(items.iter().map(|e| self.infer(e)).collect()),
             ExprKind::Map(entries) => self.infer_map(entries),
             ExprKind::Set(elems) => self.infer_set(elems),
+            ExprKind::Comprehension { kind, key, elem, vars, iter, guard } => {
+                self.infer_comprehension(*kind, key.as_deref(), elem, vars, iter, guard.as_deref())
+            }
             ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner),
             ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
             ExprKind::Slice { obj, start, end } => self.infer_slice(obj, start, end, expr.span),
@@ -1997,6 +2003,57 @@ impl Checker {
             }
         }
         Ty::map(key, value)
+    }
+
+    /// Infer a comprehension's type. Binds the loop variable(s) to the iterand's element type(s)
+    /// via `for_bindings` (the exact path a `for` loop uses, so every iterable behaves the same),
+    /// checks the optional guard is `Bool`, then infers the element (and key) in that scope. The
+    /// result mirrors `infer_list`/`infer_set`/`infer_map`, including the Hashable check on set
+    /// elements and map keys.
+    fn infer_comprehension(
+        &mut self,
+        kind: CompKind,
+        key: Option<&Expr>,
+        elem: &Expr,
+        vars: &[String],
+        iter: &Expr,
+        guard: Option<&Expr>,
+    ) -> Ty {
+        let bindings = self.for_bindings(vars, iter);
+        self.push_scope();
+        for (name, ty) in bindings {
+            self.declare(&name, ty);
+        }
+        if let Some(g) = guard {
+            self.expect_bool(g, "comprehension guard");
+        }
+        let result = match kind {
+            CompKind::List => Ty::list(self.infer(elem)),
+            CompKind::Set => {
+                let et = self.infer(elem);
+                if !et.is_unknown() && !self.is_hashable_key(&et) {
+                    self.error(
+                        elem.span,
+                        format!("set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {et}"),
+                    );
+                }
+                Ty::set(et)
+            }
+            CompKind::Map => {
+                let key = key.expect("a map comprehension always carries a key expression");
+                let kt = self.infer(key);
+                let vt = self.infer(elem);
+                if !kt.is_unknown() && !self.is_hashable_key(&kt) {
+                    self.error(
+                        key.span,
+                        format!("map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {kt}"),
+                    );
+                }
+                Ty::map(kt, vt)
+            }
+        };
+        self.pop_scope();
+        result
     }
 
     fn infer_unary(&mut self, op: UnaryOp, inner: &Expr) -> Ty {

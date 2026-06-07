@@ -2,8 +2,8 @@
 //! Chezzi before the bytecode VM (M5). Single-file programs run here.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Expr, ExprKind, FnDecl, LitPattern, MatchArm, MatchExprArm, Pattern,
-    Span, Stmt, StmtKind, UnaryOp,
+    AssignOp, BinaryOp, CompKind, Expr, ExprKind, FnDecl, LitPattern, MatchArm, MatchExprArm,
+    Pattern, Span, Stmt, StmtKind, UnaryOp,
 };
 use crate::{lexer, parser};
 
@@ -76,6 +76,11 @@ struct Interp {
     /// No evaluation runs between `?` raising and the boundary catching, so the channel can't be
     /// clobbered.
     propagating: Option<Value>,
+    /// Set by `std.os.exit(code)` (clamped to `0..=255`). While set, the `Err` sentinel returned by
+    /// the native `exit` unwinds the stack like a fault, but every `recover:` boundary and the top
+    /// level re-propagate instead of catching it — so the exit is a hard, uncatchable halt and the
+    /// driver reports `code` as the process exit status.
+    pending_exit: Option<i32>,
     /// Current user-function call depth. Bounds native-stack recursion so an infinite/very deep
     /// Chezzi recursion returns a `RuntimeError` instead of overflowing the host stack (SIGABRT).
     call_depth: usize,
@@ -98,6 +103,7 @@ impl Interp {
             variants: std::collections::HashMap::new(),
             namespaces: std::collections::HashMap::new(),
             propagating: None,
+            pending_exit: None,
             call_depth: 0,
         };
         // Built-in Result / Option variants — available without any declaration.
@@ -219,6 +225,16 @@ impl Interp {
                 }
                 Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map))))
             }
+            ExprKind::Comprehension { kind, key, elem, vars, iter, guard } => self
+                .eval_comprehension(
+                    *kind,
+                    key.as_deref(),
+                    elem,
+                    vars,
+                    iter,
+                    guard.as_deref(),
+                    expr.span,
+                ),
             ExprKind::Set(elems) => {
                 let mut set = SetData::default();
                 for e in elems {
@@ -667,6 +683,7 @@ impl Interp {
             out: &mut self.out,
             stderr: &mut self.stderr,
             cfg: &mut self.host,
+            exit: &mut self.pending_exit,
         };
         let ret = func(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
         Ok(lower_native(ret))
@@ -1756,7 +1773,11 @@ impl Interp {
                 Ok(enum_val("Result", "Ok", vec![v]))
             }
             Err(e) => {
-                if let Some(propagated) = self.propagating.take() {
+                if self.pending_exit.is_some() {
+                    // `std.os.exit(code)` is a hard halt: it unwinds past `recover:` uncaught.
+                    self.propagating = saved_prop;
+                    Err(e)
+                } else if let Some(propagated) = self.propagating.take() {
                     // A `?` Err/None in the block short-circuits here: it becomes the result.
                     self.propagating = saved_prop;
                     Ok(propagated)
@@ -1988,30 +2009,7 @@ impl Interp {
         }
         // Materialize the per-iteration value tuples up front (clone out) so a body that mutates the
         // collection doesn't disturb iteration, and no borrow is held across the body.
-        let rows: Vec<Vec<Value>> = match iter_val {
-            Value::List(items) => items.borrow().iter().map(|v| vec![v.clone()]).collect(),
-            Value::Map(m) => m
-                .borrow()
-                .entries
-                .iter()
-                .map(|(_, k, v)| {
-                    if vars.len() == 2 {
-                        vec![k.clone(), v.clone()]
-                    } else {
-                        vec![k.clone()]
-                    }
-                })
-                .collect(),
-            Value::Set(s) => s.borrow().entries.iter().map(|(_, e)| vec![e.clone()]).collect(),
-            // Strings iterate as 1-char strings (Python-style; the checker binds a single str var).
-            Value::Str(s) => s.chars().map(|c| vec![Value::Str(c.to_string().into())]).collect(),
-            other => {
-                return Err(RuntimeError {
-                    message: format!("cannot iterate over {}", other.type_name()),
-                    span: iter.span,
-                });
-            }
-        };
+        let rows = iter_rows_from_value(&iter_val, vars.len(), iter.span)?;
         for row in rows {
             match self.run_for_body(vars, row, body)? {
                 Flow::Return(v) => return Ok(Flow::Return(v)),
@@ -2038,6 +2036,164 @@ impl Interp {
         let flow = self.exec_block(body);
         self.env.pop();
         flow
+    }
+
+    /// Evaluate a comprehension into a fresh list / set / map. Iteration reuses the same paths as a
+    /// `for` loop (range, struct iterator, or materialized list/map/set/str — see
+    /// `collect_iter_rows`); each row binds `vars` in a fresh scope, the guard (if any) is tested,
+    /// and the element (plus key, for maps) is collected. Set elements and map keys dedupe exactly
+    /// like their literals.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_comprehension(
+        &mut self,
+        kind: CompKind,
+        key: Option<&Expr>,
+        elem: &Expr,
+        vars: &[String],
+        iter: &Expr,
+        guard: Option<&Expr>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let rows = self.collect_iter_rows(vars, iter, span)?;
+        match kind {
+            CompKind::List => {
+                let mut out = Vec::with_capacity(rows.len());
+                for row in rows {
+                    if let Some((_, v)) = self.eval_comp_row(vars, row, None, elem, guard, span)? {
+                        out.push(v);
+                    }
+                }
+                Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(out))))
+            }
+            CompKind::Set => {
+                let mut set = SetData::default();
+                for row in rows {
+                    if let Some((_, v)) = self.eval_comp_row(vars, row, None, elem, guard, span)? {
+                        let hx = self.hash_value(&v, span)?;
+                        if !set.candidates(hx).iter().any(|&p| values_equal(&set.entries[p].1, &v)) {
+                            set.push(hx, v);
+                        }
+                    }
+                }
+                Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(set))))
+            }
+            CompKind::Map => {
+                let mut map = MapData::default();
+                for row in rows {
+                    if let Some((k, v)) = self.eval_comp_row(vars, row, key, elem, guard, span)? {
+                        let k = k.expect("a map comprehension evaluates a key per row");
+                        let hk = self.hash_value(&k, span)?;
+                        match map.candidates(hk).iter().copied().find(|&p| values_equal(&map.entries[p].1, &k)) {
+                            Some(i) => map.entries[i].2 = v,
+                            None => map.push(hk, k, v),
+                        }
+                    }
+                }
+                Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map))))
+            }
+        }
+    }
+
+    /// Evaluate one comprehension row: bind `vars` in a fresh scope, test the guard, and (if it
+    /// passes) evaluate the key (map only) and element. Returns `None` when the guard fails. The
+    /// scope is popped even on error.
+    fn eval_comp_row(
+        &mut self,
+        vars: &[String],
+        row: Vec<Value>,
+        key: Option<&Expr>,
+        elem: &Expr,
+        guard: Option<&Expr>,
+        span: Span,
+    ) -> Result<Option<(Option<Value>, Value)>, RuntimeError> {
+        self.env.push();
+        for (name, val) in vars.iter().zip(row) {
+            self.env.define(name, val);
+        }
+        let result = self.eval_comp_row_inner(key, elem, guard, span);
+        self.env.pop();
+        result
+    }
+
+    fn eval_comp_row_inner(
+        &mut self,
+        key: Option<&Expr>,
+        elem: &Expr,
+        guard: Option<&Expr>,
+        span: Span,
+    ) -> Result<Option<(Option<Value>, Value)>, RuntimeError> {
+        if let Some(g) = guard {
+            match self.eval(g)? {
+                Value::Bool(true) => {}
+                Value::Bool(false) => return Ok(None),
+                // The checker guarantees a bool guard; this is a defensive fallback.
+                other => {
+                    return Err(RuntimeError {
+                        message: format!("comprehension guard must be bool, found {}", other.type_name()),
+                        span,
+                    })
+                }
+            }
+        }
+        let k = match key {
+            Some(k) => Some(self.eval(k)?),
+            None => None,
+        };
+        let v = self.eval(elem)?;
+        Ok(Some((k, v)))
+    }
+
+    /// Collect every row of an iterable for a comprehension (eager: comprehensions have no `break`,
+    /// so unlike `exec_for`'s lazy paths there is nothing to stop early for). Ranges expand to ints,
+    /// a struct iterator's `next(self) -> Option` is driven to `None`, and list/map/set/str reuse
+    /// `iter_rows_from_value` (shared with `exec_for`).
+    fn collect_iter_rows(
+        &mut self,
+        vars: &[String],
+        iter: &Expr,
+        span: Span,
+    ) -> Result<Vec<Vec<Value>>, RuntimeError> {
+        if let ExprKind::Range { start, end } = &iter.kind {
+            let lo = self.eval_int(start)?;
+            let hi = self.eval_int(end)?;
+            return Ok((lo..hi).map(|i| vec![Value::Int(i)]).collect());
+        }
+        let iter_val = self.eval(iter)?;
+        if let Value::Struct { name, .. } = &iter_val
+            && self.structs.get(name.as_ref()).is_some_and(|d| d.methods.contains_key("next"))
+        {
+            let name = name.clone();
+            let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
+                message: format!("unknown struct type '{name}'"),
+                span,
+            })?;
+            let decl = def.methods.get("next").cloned().ok_or_else(|| RuntimeError {
+                message: format!("struct '{name}' has no method 'next'"),
+                span,
+            })?;
+            let mut rows = Vec::new();
+            loop {
+                let result = self.call(&decl, &def.home, vec![iter_val.clone()], span)?;
+                match result {
+                    Value::Enum { variant, payload, .. } if variant.as_ref() == "Some" => {
+                        let item = payload.into_iter().next().ok_or_else(|| RuntimeError {
+                            message: "iterator next() returned Some with no payload".to_string(),
+                            span,
+                        })?;
+                        rows.push(vec![item]);
+                    }
+                    Value::Enum { variant, .. } if variant.as_ref() == "None" => break,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!("iterator next() must return Option, found {}", other.type_name()),
+                            span,
+                        })
+                    }
+                }
+            }
+            return Ok(rows);
+        }
+        iter_rows_from_value(&iter_val, vars.len(), span)
     }
 
     /// Evaluate an expression expected to be an integer (range bounds, list index).
@@ -2273,8 +2429,10 @@ pub fn run_file(entry: &std::path::Path) -> RunOutput {
     run_file_with(entry, crate::native::HostConfig::default())
 }
 
-/// A finished run: captured `(stdout, stderr, outcome)`. Stderr holds `std.io.eprint` output.
-pub type RunOutput = (String, String, Result<(), RuntimeError>);
+/// A finished run: captured `(stdout, stderr, outcome, exit_code)`. Stderr holds `std.io.eprint`
+/// output. `exit_code` is `Some(n)` only when the program called `std.os.exit(n)` (a clean halt,
+/// so `outcome` is `Ok`); `None` for a normal end or a runtime error.
+pub type RunOutput = (String, String, Result<(), RuntimeError>, Option<i32>);
 
 /// Like [`run_file`], but with an explicit [`crate::native::HostConfig`] (args/env/stdin) for the
 /// native std modules. The CLI passes a process-backed config; tests inject a deterministic one.
@@ -2292,7 +2450,7 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     let graph = match crate::resolver::build_graph(entry) {
         Ok(g) => g,
         Err(e) => {
-            return (String::new(), String::new(), Err(RuntimeError { message: e.message, span: e.span }));
+            return (String::new(), String::new(), Err(RuntimeError { message: e.message, span: e.span }), None);
         }
     };
     let mut interp = Interp::new();
@@ -2300,10 +2458,15 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     // Modules are in load order: dependencies first, entry last.
     for lm in &graph.modules {
         if let Err(e) = interp.eval_module(lm) {
-            return (interp.out, interp.stderr, Err(e));
+            // A pending exit means the `Err` is the `exit()` unwind sentinel, not a fault: report
+            // the requested code as a clean halt.
+            if let Some(code) = interp.pending_exit {
+                return (interp.out, interp.stderr, Ok(()), Some(code));
+            }
+            return (interp.out, interp.stderr, Err(e), None);
         }
     }
-    (interp.out, interp.stderr, Ok(()))
+    (interp.out, interp.stderr, Ok(()), None)
 }
 
 /// Run a whole program and return its complete stdout, or the error if it didn't finish.
@@ -2342,6 +2505,7 @@ struct InterpHost<'a> {
     out: &'a mut String,
     stderr: &'a mut String,
     cfg: &'a mut crate::native::HostConfig,
+    exit: &'a mut Option<i32>,
 }
 
 impl crate::native::Host for InterpHost<'_> {
@@ -2393,6 +2557,39 @@ impl crate::native::Host for InterpHost<'_> {
             .map(|p| p.display().to_string())
             .map_err(|e| crate::native::HostError { message: e.to_string() })
     }
+    fn request_exit(&mut self, code: i64) {
+        *self.exit = Some(code.clamp(0, 255) as i32);
+    }
+}
+
+/// Materialize a (non-range, non-struct-iterator) iterable into per-row binding tuples: one value
+/// per row for list/set/str, and `[k]` or `[k, v]` for a map depending on the loop-variable count.
+/// Shared by `exec_for` and `collect_iter_rows` so both iterate every collection identically.
+fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec<Vec<Value>>, RuntimeError> {
+    Ok(match iter_val {
+        Value::List(items) => items.borrow().iter().map(|v| vec![v.clone()]).collect(),
+        Value::Map(m) => m
+            .borrow()
+            .entries
+            .iter()
+            .map(|(_, k, v)| {
+                if vars == 2 {
+                    vec![k.clone(), v.clone()]
+                } else {
+                    vec![k.clone()]
+                }
+            })
+            .collect(),
+        Value::Set(s) => s.borrow().entries.iter().map(|(_, e)| vec![e.clone()]).collect(),
+        // Strings iterate as 1-char strings (Python-style; the checker binds a single str var).
+        Value::Str(s) => s.chars().map(|c| vec![Value::Str(c.to_string().into())]).collect(),
+        other => {
+            return Err(RuntimeError {
+                message: format!("cannot iterate over {}", other.type_name()),
+                span,
+            })
+        }
+    })
 }
 
 /// Lower a native fn's engine-neutral [`crate::native::NativeRet`] into an interpreter `Value`.
@@ -2745,6 +2942,36 @@ mod tests {
 
     fn run(src: &str) -> String {
         run_capture(src).expect("run should succeed")
+    }
+
+    #[test]
+    fn list_comprehension_maps_and_filters() {
+        assert_eq!(run("print([x * 2 for x in [1, 2, 3]])\n"), "[2, 4, 6]\n");
+        assert_eq!(run("print([x for x in [1, 2, 3, 4] if x % 2 == 0])\n"), "[2, 4]\n");
+    }
+
+    #[test]
+    fn list_comprehension_over_range() {
+        assert_eq!(run("print([x * x for x in 0..5])\n"), "[0, 1, 4, 9, 16]\n");
+    }
+
+    #[test]
+    fn set_comprehension_dedupes() {
+        // Squaring mod-collapses duplicates; the set keeps insertion order of first sight.
+        assert_eq!(run("print({x % 3 for x in [0, 1, 2, 3, 4, 5]})\n"), "{0, 1, 2}\n");
+    }
+
+    #[test]
+    fn map_comprehension_builds_entries() {
+        assert_eq!(run("print({x: x * x for x in [1, 2, 3]})\n"), "{1: 1, 2: 4, 3: 9}\n");
+    }
+
+    #[test]
+    fn map_comprehension_over_map_keys_and_values() {
+        assert_eq!(
+            run("m := {\"a\": 1, \"b\": 2}\nprint({k: v * 10 for k, v in m})\n"),
+            "{a: 10, b: 20}\n"
+        );
     }
 
     // ----- M6c: native function values -----
@@ -3485,6 +3712,14 @@ b := Buf([10, 20, 30])
         assert_eq!(run_capture(source).expect("set.chz should run"), expected);
     }
 
+    /// Comprehensions golden: list/set/map comprehensions, a guard, and a range source.
+    #[test]
+    fn golden_comprehensions_chz() {
+        let source = include_str!("../../examples/comprehensions.chz");
+        let expected = include_str!("../../examples/comprehensions.expected");
+        assert_eq!(run_capture(source).expect("comprehensions.chz should run"), expected);
+    }
+
     /// Match-guard golden: `pattern if cond:` arms (expr + stmt forms) produce the expected output.
     #[test]
     fn golden_match_guard_chz() {
@@ -3894,14 +4129,14 @@ mod module_tests {
 
     /// Run an entry file, asserting success and returning its stdout.
     fn run_ok(entry: &std::path::Path) -> String {
-        let (out, _err, res) = run_file(entry);
+        let (out, _err, res, _) = run_file(entry);
         res.expect("run_file should succeed");
         out
     }
 
     /// Run an entry file, asserting it fails, returning the error message.
     fn run_err(entry: &std::path::Path) -> String {
-        let (_out, _err, res) = run_file(entry);
+        let (_out, _err, res, _) = run_file(entry);
         res.expect_err("run_file should fail").message
     }
 

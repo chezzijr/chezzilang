@@ -13,6 +13,9 @@ use crate::ast::*;
 use crate::lexer::{Span, Tok, Token};
 use std::fmt;
 
+/// A parsed comprehension clause: `(loop vars, iterable, optional guard)`.
+type CompClause = (Vec<String>, Box<Expr>, Option<Box<Expr>>);
+
 /// Parsed call arguments: the positional args, then the named (`name = expr`) args, in source order.
 type CallArgs = (Vec<Expr>, Vec<(String, Expr)>);
 
@@ -626,6 +629,25 @@ impl Parser {
         let iter = self.parse_expr()?;
         let body = self.parse_block()?;
         Ok(StmtKind::For { vars, iter, body })
+    }
+
+    /// Parse a comprehension's trailing clause: `for <ident>[, <ident>] in <iter> [if <guard>]`.
+    /// The caller has already parsed the element (and confirmed the next token is `for`) and
+    /// consumes the closing bracket/brace afterward. Mirrors `parse_for`'s var/`in`/iter parsing.
+    fn parse_comp_clause(&mut self) -> PResult<CompClause> {
+        self.expect(&Token::For)?;
+        let mut vars = vec![self.expect_ident()?];
+        while self.eat(&Token::Comma) {
+            vars.push(self.expect_ident()?);
+        }
+        self.expect(&Token::In)?;
+        let iter = Box::new(self.parse_expr()?);
+        let guard = if self.eat(&Token::If) {
+            Some(Box::new(self.parse_expr()?))
+        } else {
+            None
+        };
+        Ok((vars, iter, guard))
     }
 
     fn parse_while(&mut self) -> PResult<StmtKind> {
@@ -1311,42 +1333,83 @@ impl Parser {
                 }
             }
             Token::LBracket => {
-                let mut elems = Vec::new();
-                if !self.check(&Token::RBracket) {
-                    loop {
-                        elems.push(self.parse_expr()?);
-                        if !self.eat(&Token::Comma) {
-                            break;
+                // `[]` is the empty list. A first element followed by `for` is a list
+                // comprehension (`[elem for x in xs if g]`); otherwise a plain list literal.
+                if self.check(&Token::RBracket) {
+                    self.advance();
+                    ExprKind::List(Vec::new())
+                } else {
+                    let first = self.parse_expr()?;
+                    if self.check(&Token::For) {
+                        let (vars, iter, guard) = self.parse_comp_clause()?;
+                        self.expect(&Token::RBracket)?;
+                        ExprKind::Comprehension {
+                            kind: CompKind::List,
+                            key: None,
+                            elem: Box::new(first),
+                            vars,
+                            iter,
+                            guard,
                         }
+                    } else {
+                        let mut elems = vec![first];
+                        while self.eat(&Token::Comma) {
+                            elems.push(self.parse_expr()?);
+                        }
+                        self.expect(&Token::RBracket)?;
+                        ExprKind::List(elems)
                     }
                 }
-                self.expect(&Token::RBracket)?;
-                ExprKind::List(elems)
             }
             Token::LBrace => {
                 // `{}` is the empty map. Otherwise the first element decides: a `key: value` pair
-                // makes it a map literal; a bare expression makes it a set literal `{a, b, c}`.
-                // (The empty set is `set()`, since `{}` is taken.)
+                // makes it a map (or, before `for`, a map comprehension); a bare expression makes
+                // it a set (or a set comprehension before `for`). The empty set is `set()`.
                 if self.check(&Token::RBrace) {
                     self.advance();
                     ExprKind::Map(Vec::new())
                 } else {
                     let first = self.parse_expr()?;
                     if self.eat(&Token::Colon) {
-                        // Map: finish the first pair, then the rest.
-                        let mut entries = Vec::new();
                         let value = self.parse_expr()?;
-                        entries.push((first, value));
-                        while self.eat(&Token::Comma) {
-                            let key = self.parse_expr()?;
-                            self.expect(&Token::Colon)?;
-                            let value = self.parse_expr()?;
-                            entries.push((key, value));
+                        if self.check(&Token::For) {
+                            // Map comprehension: `{k: v for k, v in m}`.
+                            let (vars, iter, guard) = self.parse_comp_clause()?;
+                            self.expect(&Token::RBrace)?;
+                            ExprKind::Comprehension {
+                                kind: CompKind::Map,
+                                key: Some(Box::new(first)),
+                                elem: Box::new(value),
+                                vars,
+                                iter,
+                                guard,
+                            }
+                        } else {
+                            // Map literal: finish the first pair, then the rest.
+                            let mut entries = vec![(first, value)];
+                            while self.eat(&Token::Comma) {
+                                let key = self.parse_expr()?;
+                                self.expect(&Token::Colon)?;
+                                let value = self.parse_expr()?;
+                                entries.push((key, value));
+                            }
+                            self.expect(&Token::RBrace)?;
+                            ExprKind::Map(entries)
                         }
+                    } else if self.check(&Token::For) {
+                        // Set comprehension: `{x for x in xs}`.
+                        let (vars, iter, guard) = self.parse_comp_clause()?;
                         self.expect(&Token::RBrace)?;
-                        ExprKind::Map(entries)
+                        ExprKind::Comprehension {
+                            kind: CompKind::Set,
+                            key: None,
+                            elem: Box::new(first),
+                            vars,
+                            iter,
+                            guard,
+                        }
                     } else {
-                        // Set: a comma-separated list of elements.
+                        // Set literal: a comma-separated list of elements.
                         let mut elems = vec![first];
                         while self.eat(&Token::Comma) {
                             elems.push(self.parse_expr()?);
@@ -2036,6 +2099,69 @@ mod tests {
         };
         match e.kind {
             ExprKind::List(elems) => assert_eq!(elems.len(), 3),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_comprehension_with_guard() {
+        let StmtKind::Expr(e) = only("[x * 2 for x in xs if x > 0]\n") else {
+            panic!()
+        };
+        match e.kind {
+            ExprKind::Comprehension { kind, key, elem, vars, iter, guard } => {
+                assert_eq!(kind, CompKind::List);
+                assert!(key.is_none());
+                assert!(matches!(elem.kind, ExprKind::Binary { .. }));
+                assert_eq!(vars, vec!["x".to_string()]);
+                assert!(matches!(iter.kind, ExprKind::Ident(_)));
+                assert!(guard.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_comprehension_over_range_no_guard() {
+        let StmtKind::Expr(e) = only("[x for x in 0..10]\n") else {
+            panic!()
+        };
+        match e.kind {
+            ExprKind::Comprehension { kind, iter, guard, .. } => {
+                assert_eq!(kind, CompKind::List);
+                assert!(matches!(iter.kind, ExprKind::Range { .. }));
+                assert!(guard.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_comprehension() {
+        let StmtKind::Expr(e) = only("{x for x in xs}\n") else {
+            panic!()
+        };
+        match e.kind {
+            ExprKind::Comprehension { kind, key, .. } => {
+                assert_eq!(kind, CompKind::Set);
+                assert!(key.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_comprehension_two_vars() {
+        let StmtKind::Expr(e) = only("{k: v for k, v in m}\n") else {
+            panic!()
+        };
+        match e.kind {
+            ExprKind::Comprehension { kind, key, elem, vars, .. } => {
+                assert_eq!(kind, CompKind::Map);
+                assert!(matches!(key.unwrap().kind, ExprKind::Ident(_)));
+                assert!(matches!(elem.kind, ExprKind::Ident(_)));
+                assert_eq!(vars, vec!["k".to_string(), "v".to_string()]);
+            }
             other => panic!("{other:?}"),
         }
     }

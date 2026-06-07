@@ -75,6 +75,10 @@ struct Vm {
     /// Active `recover:` boundaries (a stack; the innermost is last). A runtime fault unwinds to the
     /// nearest handler whose frame is owned by the currently-running dispatch loop.
     handlers: Vec<Handler>,
+    /// Set by `std.os.exit(code)` (clamped to `0..=255`). While set, the fault dispatch bypasses
+    /// every `recover:` handler and unwinds to the top — a hard, uncatchable halt; the driver then
+    /// reports `code` as the process exit status.
+    pending_exit: Option<i32>,
     /// Test mode: collect before *every* instruction, to surface any missing GC root.
     gc_stress: bool,
 }
@@ -104,6 +108,7 @@ impl Vm {
             module_objs: Vec::new(),
             cur_base: 0,
             handlers: Vec::new(),
+            pending_exit: None,
             gc_stress: false,
         }
     }
@@ -277,6 +282,10 @@ impl Vm {
             let op = &program.protos[pid].code[ip];
             let span = program.protos[pid].lines[ip];
             if let Err(rte) = self.step(op, span) {
+                // `std.os.exit(code)` is a hard halt: unwind past every `recover:` to the top.
+                if self.pending_exit.is_some() {
+                    return Err(rte);
+                }
                 // Try the nearest `recover:` boundary owned by THIS dispatch loop (its frame is
                 // above `base_level`). A handler below `base_level` belongs to an outer loop, so we
                 // propagate and let that loop catch it.
@@ -2794,6 +2803,9 @@ impl crate::native::Host for VmHost<'_> {
             .map(|p| p.display().to_string())
             .map_err(|e| crate::native::HostError { message: e.to_string() })
     }
+    fn request_exit(&mut self, code: i64) {
+        self.vm.pending_exit = Some(code.clamp(0, 255) as i32);
+    }
 }
 
 fn is_numeric(v: Value) -> bool {
@@ -2916,8 +2928,10 @@ pub fn run_file(entry: &std::path::Path) -> RunOutput {
     run_file_with(entry, crate::native::HostConfig::default())
 }
 
-/// A finished run: captured `(stdout, stderr, outcome)`. Stderr holds `std.io.eprint` output.
-pub type RunOutput = (String, String, Result<(), RuntimeError>);
+/// A finished run: captured `(stdout, stderr, outcome, exit_code)`. Stderr holds `std.io.eprint`
+/// output. `exit_code` is `Some(n)` only when the program called `std.os.exit(n)` (a clean halt,
+/// so `outcome` is `Ok`); `None` for a normal end or a runtime error.
+pub type RunOutput = (String, String, Result<(), RuntimeError>, Option<i32>);
 
 /// Like [`run_file`], but with an explicit [`crate::native::HostConfig`] (args/env/stdin) for the
 /// native std modules. The CLI passes a process-backed config; tests inject a deterministic one.
@@ -2934,16 +2948,21 @@ pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) ->
 fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
     let graph = match crate::resolver::build_graph(entry) {
         Ok(g) => g,
-        Err(e) => return (String::new(), String::new(), Err(RuntimeError { message: e.message, span: e.span })),
+        Err(e) => return (String::new(), String::new(), Err(RuntimeError { message: e.message, span: e.span }), None),
     };
     let program = match crate::compiler::compile_graph(&graph) {
         Ok(p) => p,
-        Err(e) => return (String::new(), String::new(), Err(RuntimeError { message: e.message, span: e.span })),
+        Err(e) => return (String::new(), String::new(), Err(RuntimeError { message: e.message, span: e.span }), None),
     };
     let mut vm = Vm::new(Rc::new(program));
     vm.host = cfg;
     let result = vm.run();
-    (vm.out, vm.stderr, result)
+    // A pending exit means `result` is the `exit()` unwind sentinel, not a fault: report the
+    // requested code as a clean halt.
+    if let Some(code) = vm.pending_exit {
+        return (vm.out, vm.stderr, Ok(()), Some(code));
+    }
+    (vm.out, vm.stderr, result, None)
 }
 
 #[cfg(test)]
@@ -2961,6 +2980,35 @@ mod tests {
             Ok(out) => panic!("expected a runtime error, got output: {out:?}"),
             Err(e) => e.message,
         }
+    }
+
+    #[test]
+    fn list_comprehension_maps_and_filters() {
+        assert_eq!(run("print([x * 2 for x in [1, 2, 3]])\n"), "[2, 4, 6]\n");
+        assert_eq!(run("print([x for x in [1, 2, 3, 4] if x % 2 == 0])\n"), "[2, 4]\n");
+    }
+
+    #[test]
+    fn list_comprehension_over_range() {
+        assert_eq!(run("print([x * x for x in 0..5])\n"), "[0, 1, 4, 9, 16]\n");
+    }
+
+    #[test]
+    fn set_comprehension_dedupes() {
+        assert_eq!(run("print({x % 3 for x in [0, 1, 2, 3, 4, 5]})\n"), "{0, 1, 2}\n");
+    }
+
+    #[test]
+    fn map_comprehension_builds_entries() {
+        assert_eq!(run("print({x: x * x for x in [1, 2, 3]})\n"), "{1: 1, 2: 4, 3: 9}\n");
+    }
+
+    #[test]
+    fn map_comprehension_over_map_keys_and_values() {
+        assert_eq!(
+            run("m := {\"a\": 1, \"b\": 2}\nprint({k: v * 10 for k, v in m})\n"),
+            "{a: 10, b: 20}\n"
+        );
     }
 
     // ----- M6c: native function values -----
@@ -4240,8 +4288,8 @@ mod parity_tests {
             }
         }
         let entry_path = entry_path.expect("entry must be one of the files");
-        let (io, ie_out, ir) = crate::interp::run_file(&entry_path);
-        let (vo, ve_out, vr) = run_file(&entry_path);
+        let (io, ie_out, ir, _) = crate::interp::run_file(&entry_path);
+        let (vo, ve_out, vr, _) = run_file(&entry_path);
         assert_eq!(io, vo, "stdout divergence (interp vs vm) for entry {entry}");
         assert_eq!(ie_out, ve_out, "stderr divergence (interp vs vm) for entry {entry}");
         match (&ir, &vr) {
@@ -4806,12 +4854,42 @@ main()";
         let src = "import std.math\nfn main():\n    print(math.sqrt(0.0 - 1.0))\nmain()";
         let t = TmpDir::new();
         let entry = t.write("main.chz", src);
-        let (_io, _ie, ir) = crate::interp::run_file(&entry);
-        let (_vo, _ve, vr) = run_file(&entry);
+        let (_io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+        let (_vo, _ve, vr, _vc) = run_file(&entry);
         let ie = ir.unwrap_err().to_string();
         let ve = vr.unwrap_err().to_string();
         assert_eq!(ie, ve);
         assert!(ie.contains("sqrt() of a negative number"), "{ie}");
+    }
+
+    #[test]
+    fn exit_threads_code_through_both_engines() {
+        // `std.os.exit(code)` halts the program with that exit code on both engines: output before
+        // the call is preserved, the statement after it never runs, and the run is not an error.
+        let src = "import std.os\nfn main():\n    print(\"before\")\n    os.exit(3)\n    print(\"after\")\nmain()";
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (io, _ie, ir, ic) = crate::interp::run_file(&entry);
+        let (vo, _ve, vr, vc) = run_file(&entry);
+        assert_eq!(io, "before\n", "interp stdout");
+        assert_eq!(vo, "before\n", "vm stdout");
+        assert_eq!(ic, Some(3), "interp exit code");
+        assert_eq!(vc, Some(3), "vm exit code");
+        assert!(ir.is_ok() && vr.is_ok(), "exit is not a runtime error: interp={ir:?} vm={vr:?}");
+    }
+
+    #[test]
+    fn exit_is_not_caught_by_recover() {
+        // A hard exit unwinds past a `recover:` boundary — it is NOT converted to an `Err` value.
+        let src = "import std.os\nfn main():\n    x := recover:\n        os.exit(7)\n    print(\"unreachable\")\nmain()";
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (io, _ie, _ir, ic) = crate::interp::run_file(&entry);
+        let (vo, _ve, _vr, vc) = run_file(&entry);
+        assert_eq!(io, "", "interp: nothing after the recover runs");
+        assert_eq!(vo, "", "vm: nothing after the recover runs");
+        assert_eq!(ic, Some(7), "interp exit code");
+        assert_eq!(vc, Some(7), "vm exit code");
     }
 
     /// Run an entry through both engines with a freshly-built [`crate::native::HostConfig`] each
@@ -4823,8 +4901,8 @@ main()";
     ) -> String {
         let t = TmpDir::new();
         let entry = t.write("main.chz", src);
-        let (io, ie_out, ir) = crate::interp::run_file_with(&entry, mk_cfg());
-        let (vo, ve_out, vr) = run_file_with(&entry, mk_cfg());
+        let (io, ie_out, ir, _ic) = crate::interp::run_file_with(&entry, mk_cfg());
+        let (vo, ve_out, vr, _vc) = run_file_with(&entry, mk_cfg());
         assert_eq!(io, vo, "stdout divergence (interp vs vm)");
         assert_eq!(ie_out, ve_out, "stderr divergence (interp vs vm)");
         assert_eq!(ir.is_ok(), vr.is_ok(), "ok/err divergence: interp={ir:?} vm={vr:?}");
@@ -4847,8 +4925,8 @@ main()";
             "import std.io\nfn main():\n    match io.write_file(\"{data}\", \"hello\\nworld\"):\n        Ok(_): io.print(\"wrote\")\n        Err(e): io.print(e)\n    match io.read_file(\"{data}\"):\n        Ok(s): io.print(s)\n        Err(e): io.print(e)\nmain()"
         );
         let entry = t.write("main.chz", &src);
-        let (io_out, _ie, ir) = crate::interp::run_file(&entry);
-        let (vo, _ve, vr) = run_file(&entry);
+        let (io_out, _ie, ir, _) = crate::interp::run_file(&entry);
+        let (vo, _ve, vr, _) = run_file(&entry);
         assert!(ir.is_ok() && vr.is_ok(), "interp={ir:?} vm={vr:?}");
         assert_eq!(io_out, vo);
         assert_eq!(io_out, "wrote\nhello\nworld\n");
@@ -4888,7 +4966,7 @@ main()";
         assert_eq!(parity_entry(src), "to stdout\n");
         let t = TmpDir::new();
         let entry = t.write("main.chz", src);
-        let (out, err, res) = run_file(&entry);
+        let (out, err, res, _) = run_file(&entry);
         assert!(res.is_ok());
         assert_eq!(out, "to stdout\n");
         assert_eq!(err, "to stderr\n");
@@ -5276,8 +5354,8 @@ main()";
     /// Run a file through both engines and assert identical (stdout, error).
     fn assert_file_parity(rel: &str) {
         let path = fixture(rel);
-        let (vm_out, vm_err, vm_res) = run_file(&path);
-        let (ip_out, ip_err, ip_res) = crate::interp::run_file(&path);
+        let (vm_out, vm_err, vm_res, _) = run_file(&path);
+        let (ip_out, ip_err, ip_res, _) = crate::interp::run_file(&path);
         assert_eq!(vm_out, ip_out, "stdout divergence for {rel}");
         assert_eq!(vm_err, ip_err, "stderr divergence for {rel}");
         assert_eq!(vm_res.err().map(|e| e.to_string()), ip_res.err().map(|e| e.to_string()), "error divergence for {rel}");
@@ -5287,7 +5365,7 @@ main()";
     fn golden_hello_via_run_file() {
         let path = fixture("examples/hello.chz");
         let expected = std::fs::read_to_string(fixture("examples/hello.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok());
         assert_eq!(out, expected);
     }
@@ -5297,7 +5375,7 @@ main()";
     fn golden_methods_via_run_file() {
         let path = fixture("examples/methods.chz");
         let expected = std::fs::read_to_string(fixture("examples/methods.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/methods.chz");
@@ -5308,7 +5386,7 @@ main()";
     fn golden_mutate_via_run_file() {
         let path = fixture("examples/mutate.chz");
         let expected = std::fs::read_to_string(fixture("examples/mutate.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/mutate.chz");
@@ -5320,7 +5398,7 @@ main()";
     fn golden_std_demo_via_run_file() {
         let path = fixture("examples/std_demo.chz");
         let expected = std::fs::read_to_string(fixture("examples/std_demo.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/std_demo.chz");
@@ -5332,7 +5410,7 @@ main()";
     fn golden_stats_app_via_run_file() {
         let path = fixture("examples/stats.chz");
         let expected = std::fs::read_to_string(fixture("examples/stats.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/stats.chz");
@@ -5345,7 +5423,7 @@ main()";
     fn golden_stdlib_cmp_via_run_file() {
         let path = fixture("examples/stdlib_cmp.chz");
         let expected = std::fs::read_to_string(fixture("examples/stdlib_cmp.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/stdlib_cmp.chz");
@@ -5358,7 +5436,7 @@ main()";
     fn golden_json_decode_via_run_file() {
         let path = fixture("examples/json_decode.chz");
         let expected = std::fs::read_to_string(fixture("examples/json_decode.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/json_decode.chz");
@@ -5370,10 +5448,37 @@ main()";
     fn golden_sys_via_run_file() {
         let path = fixture("examples/sys.chz");
         let expected = std::fs::read_to_string(fixture("examples/sys.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/sys.chz");
+    }
+
+    /// Comprehensions golden: `examples/comprehensions.chz` — list/set/map comprehensions, a guard,
+    /// and a range source. Byte-matches `.expected` and stays identical on interp + VM.
+    #[test]
+    fn golden_comprehensions_via_run_file() {
+        let path = fixture("examples/comprehensions.chz");
+        let expected = std::fs::read_to_string(fixture("examples/comprehensions.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/comprehensions.chz");
+    }
+
+    /// `std.os.exit(code)` golden: `examples/exit.chz` halts at the negative branch with status 2.
+    /// Byte-matches `.expected` on both engines and both report the same exit code.
+    #[test]
+    fn golden_exit_via_run_file() {
+        let path = fixture("examples/exit.chz");
+        let expected = std::fs::read_to_string(fixture("examples/exit.expected")).unwrap();
+        let (vo, _ve, vr, vc) = run_file(&path);
+        let (io, _ie, ir, ic) = crate::interp::run_file(&path);
+        assert!(vr.is_ok() && ir.is_ok(), "exit is a clean halt: vm={vr:?} interp={ir:?}");
+        assert_eq!(vo, expected, "vm stdout");
+        assert_eq!(io, expected, "interp stdout");
+        assert_eq!(vc, Some(2), "vm exit code");
+        assert_eq!(ic, Some(2), "interp exit code");
     }
 
     /// M8-M2 golden: `examples/json_dynamic.chz` — `import std.json`, the pure-Chezzi `Json` enum
@@ -5383,7 +5488,7 @@ main()";
     fn golden_json_dynamic_via_run_file() {
         let path = fixture("examples/json_dynamic.chz");
         let expected = std::fs::read_to_string(fixture("examples/json_dynamic.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/json_dynamic.chz");
@@ -5396,7 +5501,7 @@ main()";
     fn golden_regex_demo_via_run_file() {
         let path = fixture("examples/regex_demo.chz");
         let expected = std::fs::read_to_string(fixture("examples/regex_demo.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/regex_demo.chz");
@@ -5408,7 +5513,7 @@ main()";
     fn golden_knapsack_via_run_file() {
         let path = fixture("examples/knapsack.chz");
         let expected = std::fs::read_to_string(fixture("examples/knapsack.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/knapsack.chz");
@@ -5420,7 +5525,7 @@ main()";
     fn golden_iterator_bound_via_run_file() {
         let path = fixture("examples/iterator_bound.chz");
         let expected = std::fs::read_to_string(fixture("examples/iterator_bound.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/iterator_bound.chz");
@@ -5432,7 +5537,7 @@ main()";
     fn golden_iter_adapters_via_run_file() {
         let path = fixture("examples/iter_adapters.chz");
         let expected = std::fs::read_to_string(fixture("examples/iter_adapters.expected")).unwrap();
-        let (out, _err, res) = run_file(&path);
+        let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/iter_adapters.chz");
@@ -5441,7 +5546,7 @@ main()";
     #[test]
     fn golden_multi_file_project_via_vm() {
         let expected = std::fs::read_to_string(fixture("tests/fixtures/proj/main.expected")).unwrap();
-        let (out, _err, res) = run_file(&fixture("tests/fixtures/proj/main.chz"));
+        let (out, _err, res, _) = run_file(&fixture("tests/fixtures/proj/main.chz"));
         assert!(res.is_ok());
         assert_eq!(out, expected);
         assert_file_parity("tests/fixtures/proj/main.chz");
@@ -5452,7 +5557,7 @@ main()";
     /// defines a same-named global with a different value.
     #[test]
     fn imported_fn_uses_home_globals() {
-        let (out, _err, res) = run_file(&fixture("tests/fixtures/homeglobals/main.chz"));
+        let (out, _err, res, _) = run_file(&fixture("tests/fixtures/homeglobals/main.chz"));
         assert!(res.is_ok());
         assert_eq!(out, "from-lib\nfrom-main\n");
         assert_file_parity("tests/fixtures/homeglobals/main.chz");

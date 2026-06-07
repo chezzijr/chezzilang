@@ -228,6 +228,21 @@ half-open and bounds-clamped. `list[T]` slices to `list[T]`, `str` to `str`. Ind
 are **protocols**, so custom types opt in — see `Index`/`IndexSet`/`Slice` in §7b. (Deferred:
 omitted bounds `xs[..n]`/`xs[1..]`, inclusive `..=`, negative indices.)
 
+## 6c. Comprehensions  (M16)
+
+```chezzi
+[x * 2 for x in xs]              # list: map each element
+[x for x in xs if x > 0]         # list: with an `if` guard
+[i for i in 0..10]               # over a range (any iterable works)
+{x % 3 for x in xs}              # set: duplicates collapse
+{k: v * 10 for k, v in scores}   # map: `for k, v` binds a map's entries
+```
+
+One `for` clause (binds one name, or two — `for k, v in m` — over a map's entries) and an optional
+`if` guard. The loop variable is scoped to the comprehension. The iterable is anything a `for` loop
+accepts (list/map/set/str/range and struct iterators); set elements and map keys must be `Hashable`.
+(Deferred: nested clauses, e.g. `[x for x in xs for y in ys]`.)
+
 ## 7. Structs  (M3)
 
 ```chezzi
@@ -746,6 +761,10 @@ Result[T]` deserializes straight into a struct / `map[str, V]` / `list[T]` / sca
 accept null-or-absent; extra keys ignored; recursive/generic struct targets are rejected). Note: a
 JSON *literal in Chezzi source* must double its braces (`{{ }}`) — bare `{…}` is interpolation.
 
+**`std.os`**: `args() -> list[str]`, `env(key) -> str?`, `getcwd() -> Result[str]`, and
+`exit(code)` — a **hard, uncatchable** exit: the program halts immediately with `code` as its process
+exit status (clamped `0..=255`), unwinding past any `recover:`. Output written before the call is
+preserved; statements after it never run.
 **`std.process`** (M8): `cmd(s) -> Result[str]` runs `s` via the shell — `Ok(stdout)` on success,
 `Err(stderr)` otherwise. **`std.fs`**: `list_dir`, `exists`, `is_file`, `is_dir`, `size`, `glob`
 (`*`/`?` in the last path component). **`std.time`**: `now()` (epoch secs), `monotonic()` (secs,

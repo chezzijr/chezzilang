@@ -12,8 +12,8 @@
 //!      forward references resolve) and one proto per `fn` / method / closure.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, LitPattern, MatchArm, MatchExprArm, Module,
-    Pattern, Span, Stmt, StmtKind, UnaryOp,
+    AssignOp, BinaryOp, Block, CompKind, Expr, ExprKind, FnDecl, LitPattern, MatchArm, MatchExprArm,
+    Module, Pattern, Span, Stmt, StmtKind, UnaryOp,
 };
 use crate::resolver::ModuleGraph;
 use crate::vm::op::{
@@ -604,6 +604,72 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile a comprehension by reusing `compile_for`: seed a hidden accumulator, then run a
+    /// synthesized loop body that appends the element (`push`/`add`) or inserts the key→value pair.
+    /// This means comprehensions iterate every collection — and the struct-iterator protocol —
+    /// exactly like a `for` loop, with no duplicated iteration logic. The finished accumulator is
+    /// left on the stack as the expression's value.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_comprehension(
+        &mut self,
+        fc: &mut FnComp,
+        kind: CompKind,
+        key: Option<&Expr>,
+        elem: &Expr,
+        vars: &[String],
+        iter: &Expr,
+        guard: Option<&Expr>,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        fc.begin_scope();
+        // Seed the accumulator and store it in a hidden-named local. The synthesized body refers to
+        // it by name; `$comp` can't collide with a user identifier (the lexer never produces `$`).
+        match kind {
+            CompKind::List => fc.emit(Op::NewList(0), span),
+            CompKind::Set => fc.emit(Op::NewSet(0), span),
+            CompKind::Map => fc.emit(Op::NewMap(0), span),
+        }
+        let acc_name = "$comp".to_string();
+        let acc_slot = fc.add_local(acc_name.clone());
+        fc.emit(Op::SetLocal(acc_slot), span);
+
+        let acc = Expr { kind: ExprKind::Ident(acc_name), span };
+        let body_stmt = match kind {
+            CompKind::List => method_call_stmt(acc, "push", vec![elem.clone()], span),
+            CompKind::Set => method_call_stmt(acc, "add", vec![elem.clone()], span),
+            CompKind::Map => {
+                let key = key.expect("a map comprehension carries a key").clone();
+                Stmt {
+                    kind: StmtKind::Assign {
+                        target: Expr {
+                            kind: ExprKind::Index { obj: Box::new(acc), index: Box::new(key) },
+                            span,
+                        },
+                        op: AssignOp::Eq,
+                        value: elem.clone(),
+                    },
+                    span,
+                }
+            }
+        };
+        let body = match guard {
+            Some(g) => vec![Stmt {
+                kind: StmtKind::If {
+                    branches: vec![(g.clone(), vec![body_stmt])],
+                    else_block: None,
+                },
+                span,
+            }],
+            None => vec![body_stmt],
+        };
+
+        self.compile_for(fc, vars, iter, &body, span)?;
+        // The comprehension's value is the finished accumulator.
+        fc.emit(Op::GetLocal(acc_slot), span);
+        fc.end_scope();
+        Ok(())
+    }
+
     /// Pop the innermost `LoopCtx` and patch its pending jumps: `continue` → `inc_target` (the
     /// loop's increment), `break` → the current position (the loop exit, past the back-edge).
     fn patch_loop(&self, fc: &mut FnComp, inc_target: usize) {
@@ -897,6 +963,17 @@ impl Compiler {
                 }
                 fc.emit(Op::NewSet(elems.len()), expr.span);
             }
+            ExprKind::Comprehension { kind, key, elem, vars, iter, guard } => self
+                .compile_comprehension(
+                    fc,
+                    *kind,
+                    key.as_deref(),
+                    elem,
+                    vars,
+                    iter,
+                    guard.as_deref(),
+                    expr.span,
+                )?,
             ExprKind::Unary { op, expr: inner } => {
                 self.compile_expr(fc, inner)?;
                 match op {
@@ -1151,6 +1228,27 @@ impl Compiler {
         }
         fc.emit(Op::BuildStr(n), span);
         Ok(())
+    }
+}
+
+/// Build a synthesized `obj.method(args)` expression-statement (used to desugar comprehension
+/// accumulation into a method call the existing codegen already handles).
+fn method_call_stmt(obj: Expr, method: &str, args: Vec<Expr>, span: Span) -> Stmt {
+    let callee = Expr {
+        kind: ExprKind::Field { obj: Box::new(obj), name: method.to_string() },
+        span,
+    };
+    Stmt {
+        kind: StmtKind::Expr(Expr {
+            kind: ExprKind::Call {
+                callee: Box::new(callee),
+                args,
+                named: Vec::new(),
+                type_args: Vec::new(),
+            },
+            span,
+        }),
+        span,
     }
 }
 

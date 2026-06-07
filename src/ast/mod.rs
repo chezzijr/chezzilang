@@ -275,6 +275,19 @@ pub enum ExprKind {
     Map(Vec<(Expr, Expr)>),
     /// `{a, b, c}` — set literal (≥1 element; empty `{}` is a map, empty set is `set()`).
     Set(Vec<Expr>),
+    /// A comprehension: `[elem for vars in iter if guard]` (list), `{elem for …}` (set), or
+    /// `{key: elem for …}` (map). One `for` clause, optional `if` guard. `vars` is one binding, or
+    /// two for `for k, v in m`. `key` is `Some` only for the map form. Evaluates by iterating
+    /// `iter` (any iterable — like a `for` loop), binding `vars`, and collecting `elem` (skipping
+    /// rows where `guard` is false) into a fresh list / set / map.
+    Comprehension {
+        kind: CompKind,
+        key: Option<Box<Expr>>,
+        elem: Box<Expr>,
+        vars: Vec<String>,
+        iter: Box<Expr>,
+        guard: Option<Box<Expr>>,
+    },
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,
@@ -364,6 +377,14 @@ pub struct MatchExprArm {
     /// Optional `if <expr>` guard — see [`MatchArm::guard`].
     pub guard: Option<Expr>,
     pub body: Expr,
+}
+
+/// Which collection a comprehension builds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CompKind {
+    List,
+    Set,
+    Map,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

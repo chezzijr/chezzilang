@@ -4,8 +4,9 @@
 //! the real process — so runs are deterministic and testable. `getcwd` queries the real working
 //! directory (an inherent process property, identical across both engines).
 //!
-//! `exit(code)` is intentionally **not** here yet: a correct cooperative exit needs an exit-code
-//! channel threaded through both run drivers and the CLI; that is a focused follow-up.
+//! `exit(code)` is a cooperative hard exit: it records the code on the host and returns an error
+//! sentinel that unwinds past any `recover:` to the top level, where the driver reports it as the
+//! process exit status (clamped to `0..=255`). It is *not* catchable.
 
 use super::{expect_args, Host, HostError, NativeFn, NativeRet};
 
@@ -32,5 +33,16 @@ fn getcwd(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
+/// `exit(code)` — record a cooperative hard exit and unwind. The returned error is a sentinel: the
+/// engine recognizes the pending exit and reports `code` as the process exit status rather than a
+/// runtime error. The message is never surfaced (the unwind is intercepted before it prints).
+fn exit(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "exit", 1)?;
+    let code = h.arg_int(0)?;
+    h.request_exit(code);
+    Err(HostError { message: "exit".into() })
+}
+
 /// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[("args", args), ("env", env), ("getcwd", getcwd)];
+pub const MEMBERS: &[(&str, NativeFn)] =
+    &[("args", args), ("env", env), ("getcwd", getcwd), ("exit", exit)];

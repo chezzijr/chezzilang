@@ -2467,6 +2467,56 @@ fn native_process_cmd_arg_must_be_str() {
 }
 
 #[test]
+fn list_comprehension_infers_element_type() {
+    // `[x * 2 for x in [1, 2, 3]]` is a `list[int]` — the loop var binds to the list's element.
+    ok("xs: list[int] = [x * 2 for x in [1, 2, 3]]\n");
+}
+
+#[test]
+fn list_comprehension_wrong_element_type_rejected() {
+    rejects("xs: list[str] = [x * 2 for x in [1, 2, 3]]\n", "list[int]");
+}
+
+#[test]
+fn comprehension_guard_must_be_bool() {
+    rejects("xs := [x for x in [1, 2, 3] if x]\n", "comprehension guard must be bool");
+}
+
+#[test]
+fn list_comprehension_over_range_is_list_int() {
+    ok("xs: list[int] = [x * x for x in 0..10]\n");
+}
+
+#[test]
+fn set_comprehension_infers_element_type() {
+    ok("s: set[int] = {x for x in [1, 2, 3]}\n");
+}
+
+#[test]
+fn map_comprehension_over_map_entries() {
+    ok("src: map[str, int] = {\"a\": 1}\nm: map[str, int] = {k: v for k, v in src}\n");
+}
+
+#[test]
+fn comprehension_var_out_of_scope_after() {
+    // The loop variable is scoped to the comprehension; referencing it afterward is unknown.
+    rejects("xs := [x for x in [1, 2, 3]]\nprint(x)\n", "x");
+}
+
+#[test]
+fn native_os_exit_takes_int() {
+    entry_ok("import std.os\nfn main():\n    os.exit(1)\n");
+}
+
+#[test]
+fn native_os_exit_arg_must_be_int() {
+    entry_rejects(
+        "import std.os\nfn main():\n    os.exit(\"nope\")\n",
+        "argument 1 of 'exit'",
+    );
+}
+
+#[test]
 fn native_fs_predicates_are_bool_and_size_is_result_int() {
     entry_ok("import std.fs\nfn main():\n    b: bool = fs.is_file(\"x\")\n    e: bool = fs.exists(\"x\")\n    match fs.size(\"x\"):\n        Ok(n): print(str(n))\n        Err(m): print(m)\n");
 }

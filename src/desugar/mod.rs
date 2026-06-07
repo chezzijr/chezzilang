@@ -414,6 +414,23 @@ impl Walker<'_> {
                 self.walk_expr(els)?;
             }
             ExprKind::Recover(block) => self.walk_block(block)?,
+            ExprKind::Comprehension { key, elem, vars, iter, guard, .. } => {
+                // `iter` is evaluated in the outer scope; `vars` are bound only for the element,
+                // key, and guard expressions.
+                self.walk_expr(iter)?;
+                self.push_scope();
+                for v in vars.iter() {
+                    self.bind(v);
+                }
+                if let Some(g) = guard {
+                    self.walk_expr(g)?;
+                }
+                if let Some(k) = key {
+                    self.walk_expr(k)?;
+                }
+                self.walk_expr(elem)?;
+                self.pop_scope();
+            }
             ExprKind::Call { callee, args, named, .. } => {
                 self.walk_expr(callee)?;
                 for a in args.iter_mut() {
