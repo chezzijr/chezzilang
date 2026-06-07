@@ -13,7 +13,12 @@ gap between "complete core" and "language you reach for to write real scripts."
 
 ---
 
-## 1. `defer` (cleanup on scope exit) — strong fit, recommend
+> **Promotion status (2026-06-07):** §1 (`defer`) and the §3 scripting features have been **promoted
+> into `gaps.md` → "Open gaps"** as tracked, near-term work. They stay documented here for the design
+> rationale; `gaps.md` is now the scheduling source of truth for them. §2 (concurrency) and §4
+> (optimizations) remain speculative and live only here.
+
+## 1. `defer` (cleanup on scope exit) — strong fit, recommend → **promoted to `gaps.md`**
 
 Before M11 this was weak: no panic meant nothing to clean up after. **Now there is unwinding** —
 the `recover:` boundary, `?` propagation, and runtime faults all unwind. So `defer` earns its keep
@@ -241,7 +246,7 @@ stop-the-world GC) **untouched** — the whole point of choosing A+C over D.
 
 ---
 
-## 3. Missing features (ranked by leverage for scripting)
+## 3. Missing features (ranked by leverage for scripting) → **all promoted to `gaps.md`**
 
 1. **Comprehensions** — `[x*2 for x in xs if x>0]` (+ dict/set). A Python-feel language without
    these feels broken. Pure parse-time desugar to loop + push. Cheap, large UX win.
@@ -250,23 +255,22 @@ stop-the-world GC) **untouched** — the whole point of choosing A+C over D.
 3. **Iterator protocol + generators (`yield`)** — already the roadmap's #1 next. Lazy sequences,
    user structs usable in `for`, lazy `map`/`filter`. Without it everything is eager → poor on big
    data / streams.
-4. **Variadic args** — `fn log(*args)`. Needed for printf-style APIs; `print` is variadic but users
-   can't write one. (**Default + named args shipped** — `fn f(x, y=0)`, `f(1, y=2)` — for functions
-   and struct constructors; see `gaps.md`. Still open here: variadic, and defaults/named on methods.)
-5. **Spread / unpack** — `f(*args)`, `[*a, *b]`, `{**m}`. Composes with #4.
-6. **Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`. Bitwise ops shipped but (likely) no
+4. **Spread / unpack** — `[*a, *b]`, `{**m}`, `f(*args)`. (No **variadic params** — `fn log(*args)` —
+   decided against: pass an explicit `list` instead. Default + named args shipped for functions and
+   struct constructors; defaults/named on **methods** still open. See `gaps.md`.)
+5. **Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`. Bitwise ops shipped but (likely) no
    non-decimal literals — awkward for bit work. Lexer-only.
-7. **Optional chaining + null-coalescing** — `x?.field`, `a ?? default` on `Option`. `if/else`
+6. **Optional chaining + null-coalescing** — `x?.field`, `a ?? default` on `Option`. `if/else`
    expression + `?` exist; these cut `Option` boilerplate.
-8. **`enumerate` / `zip` builtins** — `for i, x in enumerate(xs)`. Daily-driver scripting.
-9. **Mutable closure capture** — currently snapshot-by-value, so closure counters / accumulators
+7. **`enumerate` / `zip` builtins** — `for i, x in enumerate(xs)`. Daily-driver scripting.
+8. **Mutable closure capture** — currently snapshot-by-value, so closure counters / accumulators
    don't work. Real functional gap. Decide: keep intentional (document loudly) or fix (capture cell).
-10. **Match guards + range patterns** — `n if n>0:`, `1..10:`. Roadmap. Guards subsume the rest.
-11. **`std.os.exit(code)` + real exit codes** — currently deferred, but scripts *must* signal
+9. **Match guards + range patterns** — `n if n>0:`, `1..10:`. Roadmap. Guards subsume the rest.
+10. **`std.os.exit(code)` + real exit codes** — currently deferred, but scripts *must* signal
     failure. Needs an exit-code channel threaded through both run drivers + the CLI.
-12. **String formatting** — width / precision / radix: `"{x:08.2f}"`, `"{n:x}"`. Interpolation
+11. **String formatting** — width / precision / radix: `"{x:08.2f}"`, `"{n:x}"`. Interpolation
     exists; a format spec does not.
-13. **Runtime stack traces** — error + call chain + line numbers. Debuggability is a scripting
+12. **Runtime stack traces** — error + call chain + line numbers. Debuggability is a scripting
     feature.
 
 **Ecosystem (Tier 4, separate track):** REPL (huge for scripting iteration), formatter, `assert` +
