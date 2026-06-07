@@ -111,6 +111,16 @@ nums.map(fn(x): x * 2)             # param/return types inferred in closures
 `return` statements: the first concrete return wins, conflicting returns are a type error,
 and a body with no value-returning `return` infers `nil`. Param types stay required.
 
+**`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
+**explicit `-> Result[…]`/`-> Option[…]`** return type. The `?` propagates to *that closure's*
+return, not the enclosing function. A closure with an inferred or non-`Result`/`Option` return type
+that uses `?` is a type error.
+
+```chezzi
+fn parse(s: str) -> int!: ...
+rs := ["2"].map(fn(s: str) -> int!: Ok(parse(s)? * 2))   # ? lands in the closure's own Result
+```
+
 ## 6. Control flow  (M3)
 
 ```chezzi
@@ -159,8 +169,10 @@ No inheritance (by design). Composition only.
 ## 7b. Generics & protocols  (M7)
 
 **Generic functions** take type parameters in `[…]` after the name. A parameter may carry a
-**bound** — a protocol the instantiating type must satisfy. Type arguments are always inferred
-from the call (no `max[int](…)` form).
+**bound** — a protocol the instantiating type must satisfy. Type arguments are normally **inferred**
+from the call, but may be **given explicitly** at the call site: `id[int](42)`, the struct form
+`Pair[int, str](1, "one")`, and the enum-variant form `Full[int](9)` (see §8). Explicit args pin the
+type; inference fills any that are left off.
 
 ```chezzi
 fn first[T](a: T, b: T) -> T:        # unbounded: works for any type
@@ -321,6 +333,10 @@ fn sum(t: Tree[int]) -> int:
         Leaf:          return 0
         Node(v, l, r): return sum(l) + v + sum(r)   # v is int — T substituted in the match
 ```
+
+A **payload-carrying** variant's type args are inferred from the payload, but may be pinned
+explicitly — `Node[int](1, Leaf, Leaf)` — the same `name[Type, …](…)` form as generic fns and
+structs (§7b).
 
 `match` also works on `Result`/`Option` (they're enums under the hood):
 

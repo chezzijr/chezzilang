@@ -2,7 +2,7 @@
 
 A fast, statically-typed, Python-feel scripting language. Hand-built in Rust.
 
-> **Status:** design locked, pre-M1. This doc is the source of truth for the language; the build roadmap lives at the bottom.
+> **Status:** M1–M9 shipped; M10 (type-system depth) and M11 (panic recovery + Go-style `Result[T, E]`) in progress — 874 tests passing. This doc is the source of truth for the *language design*; live build status lives in `PROGRESS.md` and the roadmap at the bottom.
 
 ## Goals (ranked)
 
@@ -27,17 +27,27 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 
 ## Language v1 — feature set
 
-**Core:** `int float bool str`, `list[T]`, `map[K,V]`, `fn`, `struct`, `enum`, `if/else`, `for/while`,
-`Result[T]` & `Option[T]` + `?`, closures (`fn(x): x*2`), built-in generics (`list`/`map`/`Result`).
+**Core:** `int float bool str`, `list[T]`, `map[K,V]`, `set[T]`, `tuple`, `fn`, `struct`, `enum`,
+`if/else`, `for/while`, `Result[T, E]` & `Option[T]` + `?`, closures (`fn(x): x*2`), built-in generics
+(`list`/`map`/`set`/`Result`). `Result[T, E]` is two-param: `T!` = `Result[T, Error]`, `T!E` =
+`Result[T, E]`, `T?` = `Option[T]` (E defaults to the built-in `Error` protocol).
 
 **Included:**
-- **Pattern matching** — `match` on enums, exhaustiveness-checked.
+- **Pattern matching** — `match` on enums (also int/str/bool + tuple scrutinees), exhaustiveness-checked.
 - **String interpolation** — `"hi {name}, sum {a+b}"`. First-class; string ops are a UX priority.
 - **Struct methods** — `fn dist(self)` on structs. Composition + structural `protocol`s, no classes or inheritance (Rust/Go style).
 - **Pipe `|>`** — functional chaining. Implemented in M6 (parse-time desugar to a call).
+- **Tuples** — `(1, "a")`, fixed-arity, immutable; nestable in patterns.
+- **Transparent type aliases** — `type UserId = int` (M10).
+- **Bitwise ops** — `& | ^ << >>` (int-only, M8/M11).
+- **`recover:` block** — panic-recovery boundary → `Result[T, Error]` catching any runtime fault beneath it (M11).
 
-**Shipped post-v1:** user-defined generics + structural protocols (M7 — generic fns/structs,
-`Comparable`; `std.cmp`).
+**Shipped post-v1 (M7–M11):**
+- **M7** — user-defined generics + structural protocols (generic fns/structs, `Comparable`; `std.cmp`).
+- **M8** — tier-1 stdlib (`std.json`/`process`/`fs`/`time`), the `set` type, iterable strings (`s.chars()`).
+- **M9** — tier-2 stdlib (`std.regex`, `std.request`) — first runtime crate deps.
+- **M10** — type-system depth: `Stringable`/`Hashable` + operator protocols (`Add`/`Sub`/`Mul`), generic enums, type aliases, multi-bound generics (`T: Add + Mul`), any-`Hashable` map/set keys.
+- **M11** — panic recovery (`recover:`) + Go-style `Result[T, E]` with the built-in `Error` protocol (`message(self) -> str`).
 
 **Non-goals (by design, never):** classes & inheritance — Chezzi is composition-only with
 structural `protocol`s, like Rust/Go (see *Locked decisions*).
@@ -46,10 +56,10 @@ structural `protocol`s, like Rust/Go (see *Locked decisions*).
 **single-threaded and synchronous** — both engines run one sequential loop, there is no async/await
 and no scheduler, so all stdlib I/O (`std.request`, `std.fs`, …) blocks. A Go-style model (`go`
 keyword + `chan` queue) is a possible future milestone but is large (scheduler, `Rc`→`Arc` value
-sharing, a channel type across grammar/checker/both engines) and not part of v1. The fuller
-"what's missing to be a complete scripting language" list — `std.json`/stdlib
-breadth, generic enums, `Display`/`Hashable`/numeric protocols, panic recovery, iterators — is
-tracked in `gaps.md` → *Roadmap to a complete v1*.
+sharing, a channel type across grammar/checker/both engines) and not part of v1. Most of the former
+"what's missing" list has since shipped (M8–M11: `std.json`, generic enums, `Stringable`/`Hashable`/
+numeric protocols, panic recovery — see *Shipped post-v1* above); the main remaining gap is
+**iterators**. Open items stay tracked in `gaps.md` → *Roadmap to a complete v1*.
 
 ### Syntax sketch
 
@@ -139,8 +149,9 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
   `Match`/`Response` are program-global reserved type names (a user struct of the same name
   collides). The native seam grew `NativeRet::Struct`/`Map` so a native fn can return a structured
   value.
-- **Later:** generic enums, `Display`/`Hashable` protocols (would let custom `str(x)` and struct
-  map/set keys), custom request headers / non-GET-POST verbs / a first-class compiled `Regex`.
+- **Shipped since (M10):** generic enums; the `Stringable` protocol (custom `str(x)`); the `Hashable`
+  protocol — any `Hashable` type is now a valid map/set key.
+- **Later:** custom request headers / non-GET-POST verbs / a first-class compiled `Regex`.
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 deferred.** Because Chezzi is written in Rust, the
 > native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn and expose it as a
@@ -202,6 +213,11 @@ tests/          # Rust unit + golden tests
 | ✅ **M4.5** | Modules / imports + resolver | Multi-file program runs; `chezzi.toml` root detection works |
 | ✅ **M5** | Bytecode compiler + stack VM + mark-sweep GC | Runs on VM (default); ~4–6.5× over the tree-walker; golden + parity tests match |
 | ✅ **M6** | Stdlib fill-out + pipe `\|>` operator + core-type methods | **Done**: str/list methods + pipe chains, plus M6c — the Level-2 native FFI seam (`NativeFn`+`Host`) shipping `std.math`/`io`/`os` (native) and `std.str` (Chezzi), running identically on both engines |
+| ✅ **M7** | User-defined generics + structural protocols | Generic fns/structs, `Comparable` bound, `std.cmp` (`min`/`max`/`clamp`); golden tests on both engines |
+| ✅ **M8** | Tier-1 stdlib | `std.json` (+ type-directed `decode[T]`), `std.process`, `std.fs`, `std.time`; the `set` type, iterable strings (`s.chars()`) |
+| ✅ **M9** | Tier-2 stdlib | `std.regex` + `std.request` (first runtime crate deps; blocking); `Match`/`Response` structs |
+| ✅ **M10** | Type-system depth | `Stringable`/`Hashable` + operator protocols (`Add`/`Sub`/`Mul`), generic enums, type aliases, multi-bound generics, any-`Hashable` map/set keys |
+| 🟦 **M11** | Panic recovery + Go-style errors | Phase A ✅ `Result[T, E]` + `Error` protocol; Phase B ✅ `recover:` boundary with try-block semantics. Both engines parity-tested |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional) |
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c** — see the *Standard library* note
