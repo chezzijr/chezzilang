@@ -38,18 +38,19 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   range-copy (list + str). Decide step/negative-index semantics up front.
 - ~~**Generators (`yield`) + a formal `Iterator[T]` protocol**~~ — **resolved + descoped.** The
   `Iterator[T]` protocol shipped (M13, see 🟢): `[S: Iterator[T], T]` is a real parameterized bound.
-  `yield`/generators are now a **deliberate non-goal** — it would have needed coroutine/continuation
-  support in *both* engines, and is unnecessary: lazy `map`/`filter`/`take` are written as **adapter
-  structs** over `Iterator[T]` (Rust's `std::iter` model — `examples/iter_adapters.chz`). If a
-  coroutine runtime ever lands (the concurrency track's fibers), `yield` could return as pure sugar
-  over this protocol — but it is not planned.
+  `yield`/generators are a **permanent non-goal** (see `spec.md` *Non-goals*) — they would have
+  needed coroutine/continuation support in *both* engines, and are unnecessary: lazy
+  `map`/`filter`/`take` are written as **adapter structs** over `Iterator[T]` (Rust's `std::iter`
+  model — `examples/iter_adapters.chz`).
 - **`std.os.exit(code)` + real process exit codes** — scripts *must* be able to signal failure.
   **Fix:** thread an exit-code channel through both run drivers + the CLI.
 
 ### 🟡 Scripting ergonomics (promoted from future.md)
 
-- **Spread / unpack** — `[*a, *b]`, `{**m}`, `f(*args)`. (No variadic params — pass an explicit
-  `list` instead; default + named args already shipped for fns, struct ctors, and methods.)
+- **Spread / unpack** — `[*a, *b]`, `{**m}` (spread into a literal). **Variadics are a permanent
+  non-goal** (see `spec.md` *Non-goals*): no variadic params (`f(*args)`) and no variadic generics
+  (`Foo[T...]`) — pass an explicit `list`, and generics are fixed-arity. Default + named args (fns,
+  struct ctors, methods) cover the ergonomic cases.
 - **Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`. Bitwise ops shipped but only decimal
   literals exist — awkward for bit work. **Fix:** lexer-only.
 - **`enumerate` / `zip` builtins** — `for i, x in enumerate(xs)`, `for a, b in zip(xs, ys)`. The

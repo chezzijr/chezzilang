@@ -253,16 +253,15 @@ stop-the-world GC) **untouched** — the whole point of choosing A+C over D.
    these feels broken. Pure parse-time desugar to loop + push. Cheap, large UX win.
 2. **Slicing** — `xs[1:3]`, `s[2:]`, `xs[::-1]`. Scripting essential, fully missing. Lexer has `..`;
    needs `:` inside an index expression.
-3. ~~**Iterator protocol + generators (`yield`)**~~ — **DONE + descoped.** The `Iterator[T]`
-   parameterized protocol shipped (M13): user structs usable in `for`, generic `[S: Iterator[T], T]`
-   bounds, and lazy `map`/`filter`/`take` written as **adapter structs** over it (Rust `std::iter`
-   model — `examples/iter_adapters.chz`). `yield`/generators are a **deliberate non-goal**: they would
-   need coroutine/continuation support in both engines, and the adapter-struct pattern covers lazy
-   streaming without it. (If the §2 fiber scheduler ever lands, `yield` could return as sugar — not
-   planned.)
-4. **Spread / unpack** — `[*a, *b]`, `{**m}`, `f(*args)`. (No **variadic params** — `fn log(*args)` —
-   decided against: pass an explicit `list` instead. Default + named args shipped for functions and
-   struct constructors; defaults/named on **methods** still open. See `gaps.md`.)
+3. ~~**Iterator protocol + generators (`yield`)**~~ — **iterator DONE; generators removed.** The
+   `Iterator[T]` parameterized protocol shipped (M13): user structs usable in `for`, generic
+   `[S: Iterator[T], T]` bounds, and lazy `map`/`filter`/`take` written as **adapter structs** over it
+   (Rust `std::iter` model — `examples/iter_adapters.chz`). **`yield`/generators are a permanent
+   non-goal** (see `spec.md` *Non-goals*): they would need coroutine/continuation support in both
+   engines, and the adapter-struct pattern covers lazy streaming without it.
+4. **Spread / unpack** — `[*a, *b]`, `{**m}`. (Variadics — `f(*args)` arguments and `Foo[T...]`
+   generics — are a permanent **non-goal**, see `spec.md`: pass an explicit `list`, generics are
+   fixed-arity. Spread into a *literal* could still be considered; variadic *params* are not.)
 5. **Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`. Bitwise ops shipped but (likely) no
    non-decimal literals — awkward for bit work. Lexer-only.
 6. **Optional chaining + null-coalescing** — `x?.field`, `a ?? default` on `Option`. `if/else`

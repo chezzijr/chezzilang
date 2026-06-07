@@ -55,6 +55,9 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 **Non-goals (by design, never):** classes & inheritance — Chezzi is composition-only with
 structural `protocol`s, like Rust/Go (see *Locked decisions*). **`yield`/generators** — lazy sequences
 are adapter structs over `Iterator[T]` (Rust model), so no coroutine runtime is ever needed.
+**Variadics** — neither variadic arguments (`fn log(*args)`) nor variadic generics (`Foo[T...]`):
+pass an explicit `list`, and generics are always fixed-arity. Default + named arguments cover the
+ergonomic cases variadics usually serve.
 
 **Still deferred (YAGNI v1):** concurrency, macros, package registry, native backend. Chezzi is
 **single-threaded and synchronous** — both engines run one sequential loop, there is no async/await
@@ -66,7 +69,7 @@ numeric protocols, panic recovery, the **`Iterator[T]` protocol** (a parameteriz
 `[S: Iterator[T], T]` accepts any iterable — built-in `list`/`set`/`str`/`map` intrinsically, or a
 user struct with `next(self) -> Option[T]` — and recovers its element type `T`), and **match guards +
 range patterns** — see *Shipped post-v1* above, plus **default + named arguments** for functions and
-struct constructors); remaining gaps are mostly ergonomics (variadic args, comprehensions, slicing).
+struct constructors); remaining gaps are mostly ergonomics (comprehensions, slicing).
 **`yield`/generators are a deliberate non-goal** — lazy sequences are written as adapter structs over
 `Iterator[T]` (Rust's `Map`/`Take` model), so no coroutine runtime is needed. Open items stay tracked
 in `gaps.md` → *Roadmap to a complete v1*.

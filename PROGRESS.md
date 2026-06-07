@@ -57,8 +57,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > per-engine call-binding logic. AST: `Param.default`, `Field.default`, `Call.named` (always empty
 > post-desugar). Parser: `name = expr` args (positional-before-named enforced), `= const` defaults
 > (const-literal + trailing-default rules; rejected on closures/methods/protocols). Golden +
-> parity: `examples/default_args.chz`, `examples/named_struct.chz`. Deferred: variadic args,
-> defaults/named on methods, non-constant defaults.
+> parity: `examples/default_args.chz`, `examples/named_struct.chz`. Deferred: non-constant defaults.
+> (Defaults/named on methods later shipped in M14; variadic args are a permanent non-goal — see
+> `spec.md`.)
 
 > **Tech-debt sweep — `gaps.md` "Known fragilities" cleared.** ✅ DONE. The three remaining open
 > items landed TDD, both engines in lockstep, full suite + conformance green (874 tests).
@@ -675,8 +676,9 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 
 - **Future directions brainstorm** — `defer`, a shared-nothing (BEAM-style) concurrency **+
   parallelism** model (`spawn`/`parallel:`/`chan[T]`, per-task heap+GC, move/copy messaging),
-  missing scripting features (comprehensions, slicing, variadic args,
-  …; default + named args and `Iterator[T]` now shipped — `yield`/generators dropped as a non-goal),
+  missing scripting features (comprehensions, slicing,
+  …; default + named args and `Iterator[T]` now shipped — `yield`/generators and variadics are
+  permanent non-goals),
   and VM/GC optimizations (superinstructions, inline caching, NaN-boxing, …) are written up in
   **[`docs/future.md`](docs/future.md)**. Opinionated + speculative; promote into `gaps.md` when
   scheduled.
