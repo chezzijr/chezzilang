@@ -5280,6 +5280,30 @@ main()";
         assert_file_parity("examples/knapsack.chz");
     }
 
+    /// `Iterator[T]` golden: a generic fn bounded `[S: Iterator[T], T]` over list/str/set/struct,
+    /// with the element type flowing into returns. Parity-checked across both engines.
+    #[test]
+    fn golden_iterator_bound_via_run_file() {
+        let path = fixture("examples/iterator_bound.chz");
+        let expected = std::fs::read_to_string(fixture("examples/iterator_bound.expected")).unwrap();
+        let (out, _err, res) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/iterator_bound.chz");
+    }
+
+    /// Lazy iterator adapters (Take/Mapped over an infinite Count) — the no-`yield` story. The inner
+    /// `self.inner.next()` recovers the element type through the `I: Iterator[T]` bound on both engines.
+    #[test]
+    fn golden_iter_adapters_via_run_file() {
+        let path = fixture("examples/iter_adapters.chz");
+        let expected = std::fs::read_to_string(fixture("examples/iter_adapters.expected")).unwrap();
+        let (out, _err, res) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/iter_adapters.chz");
+    }
+
     #[test]
     fn golden_multi_file_project_via_vm() {
         let expected = std::fs::read_to_string(fixture("tests/fixtures/proj/main.expected")).unwrap();

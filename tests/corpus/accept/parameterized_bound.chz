@@ -1,0 +1,5 @@
+# rule: fnDecl, typeParams, typeParam, boundList, bound
+fn collect[S: Iterator[T], T](xs: S, d: T) -> T:
+    for x in xs:
+        return x
+    return d

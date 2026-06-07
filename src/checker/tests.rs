@@ -2719,3 +2719,149 @@ fn wrong_typed_field_default_rejected() {
 fn valid_param_default_ok() {
     entry_ok("fn f(x: int, y: int = 7, s: str = \"hi\") -> int:\n    return x + y\nfn main():\n    print(f(1))\nmain()\n");
 }
+
+// ===== Iterator[T] — the parameterized protocol bound =====
+
+// A struct iterator used as a conformance witness across the tests below.
+const COUNTER: &str = "\
+struct Counter:
+    n: int
+    fn next(self) -> int?:
+        if self.n <= 0:
+            return None
+        self.n -= 1
+        return Some(self.n)
+";
+
+#[test]
+fn iterator_bound_over_list_ok() {
+    // `[S: Iterator[T], T]` accepts a list and recovers its element type.
+    ok("fn first[S: Iterator[T], T](xs: S, d: T) -> T:\n    for x in xs:\n        return x\n    return d\nv := first([1, 2, 3], 0)\n");
+}
+
+#[test]
+fn iterator_bound_recovers_element_type() {
+    // first([1,2,3], 0) is int, so binding the result to a str must be rejected — proves T = int
+    // flowed out of the iterand's element type, not stayed erased.
+    rejects(
+        "fn first[S: Iterator[T], T](xs: S, d: T) -> T:\n    for x in xs:\n        return x\n    return d\ns: str = first([1, 2, 3], 0)\n",
+        "cannot assign",
+    );
+}
+
+#[test]
+fn iterator_bound_over_noniterable_rejected() {
+    rejects(
+        "fn first[S: Iterator[T], T](xs: S, d: T) -> T:\n    return d\nv := first(5, 0)\n",
+        "does not satisfy Iterator",
+    );
+}
+
+#[test]
+fn iterator_bound_over_user_struct_ok() {
+    let src = format!(
+        "{COUNTER}fn first[S: Iterator[T], T](xs: S, d: T) -> T:\n    for x in xs:\n        return x\n    return d\nv := first(Counter(3), 0)\n"
+    );
+    ok(&src);
+}
+
+#[test]
+fn iterator_loop_var_typed_as_element() {
+    // Inside the generic body the loop var must be the element type `T` (a param), NOT `Unknown`:
+    // assigning it to an `int` slot is rejected at definition time. If it were `Unknown` this would
+    // type-check (Unknown is assignable to anything), so this discriminates element-typing.
+    rejects(
+        "fn f[S: Iterator[T], T](xs: S):\n    for x in xs:\n        y: int = x\n        print(y)\n",
+        "cannot assign",
+    );
+}
+
+#[test]
+fn iterator_protocol_redeclaration_rejected() {
+    rejects("protocol Iterator:\n    fn next(self) -> int?\n", "reserved");
+}
+
+#[test]
+fn iterator_bound_wrong_arity_rejected() {
+    rejects(
+        "fn f[S: Iterator](xs: S):\n    print(1)\n",
+        "Iterator' takes one type argument",
+    );
+}
+
+#[test]
+fn nonparam_protocol_with_args_rejected() {
+    rejects(
+        "fn f[T: Comparable[int]](a: T) -> T:\n    return a\n",
+        "takes no type arguments",
+    );
+}
+
+#[test]
+fn iterator_adapter_struct_ok() {
+    // A `Take` adapter wraps an inner iterator bounded `I: Iterator[T]`. Inside `next`,
+    // `self.inner.next()` must yield `T?` (the element), so `return Some(x)` type-checks against
+    // the declared `T?` return. This proves `.next()` on a bounded param recovers the element type.
+    let src = "\
+struct Take[I: Iterator[T], T]:
+    inner: I
+    left: int
+    fn next(self) -> T?:
+        if self.left <= 0:
+            return None
+        self.left -= 1
+        return self.inner.next()
+fn main():
+    t := Take([1, 2, 3], 2)
+    for x in t:
+        print(x)
+main()
+";
+    entry_ok(src);
+}
+
+#[test]
+fn iterator_bound_forwards_into_another_iterator_call_ok() {
+    // A `[S: Iterator[T]]` value must satisfy `Iterator` when forwarded into another iterator-generic
+    // (the `Ty::Param` declared-bounds path), not be rejected. Regression for the satisfies/for-loop
+    // drift.
+    ok("fn count[S: Iterator[T], T](xs: S) -> int:\n    n := 0\n    for _ in xs:\n        n = n + 1\n    return n\nfn wrap[S: Iterator[T], T](xs: S) -> int:\n    return count(xs)\nv := wrap([1, 2, 3])\n");
+}
+
+#[test]
+fn iterator_conflicting_explicit_element_arg_rejected() {
+    // Explicit `[list[int], str]` pins T=str, but the list element is int — the recovered element
+    // must conflict (unsound otherwise: static list[str], runtime list[int]).
+    rejects(
+        "fn to_list[S: Iterator[T], T](xs: S) -> list[T]:\n    out := []\n    for x in xs:\n        out.push(x)\n    return out\nr := to_list[list[int], str]([1, 2, 3])\n",
+        "does not match the declared element type",
+    );
+}
+
+#[test]
+fn iterator_bound_unknown_element_type_rejected() {
+    // `Bogus` is neither a declared type param nor a known type — a bound's args are resolved, so
+    // this is reported rather than silently accepted.
+    rejects(
+        "fn f[S: Iterator[Bogus]](xs: S):\n    print(1)\n",
+        "Bogus",
+    );
+}
+
+#[test]
+fn iterator_adapter_element_mismatch_rejected() {
+    // `self.inner.next()` is `T?`; returning a literal `Some(\"x\")` (str) where the declared return
+    // is `T?` is caught once `T` is pinned — guards the element typing of `.next()`.
+    let src = "\
+struct Bad[I: Iterator[T], T]:
+    inner: I
+    fn next(self) -> T?:
+        return Some(\"x\")
+fn main():
+    b := Bad([1, 2, 3])
+    for x in b:
+        print(x)
+main()
+";
+    rejects(src, "expected return type Option[T], found Option[str]");
+}

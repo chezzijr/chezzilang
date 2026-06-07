@@ -279,6 +279,7 @@ fn parser_rules_match_fns() {
         ("protocolDecl", "parse_protocol"),
         ("typeAliasDecl", "parse_type_alias"),
         ("typeParams", "parse_type_params"),
+        ("bound", "parse_bound"),
         ("fnSig", "parse_fn_sig"),
         ("ifStmt", "parse_if"),
         ("forStmt", "parse_for"),
@@ -358,6 +359,7 @@ fn corpus_covers_the_grammar() {
     let required = [
         "letStmt", "assignStmt", "returnStmt", "importStmt", "fnDecl", "structDecl", "enumDecl",
         "ifStmt", "forStmt", "whileStmt", "matchStmt", "closure", "type", "postfix", "rangeExpr",
+        "bound",
     ];
     for r in required {
         assert!(covered.contains(r), "no accept corpus file exercises '{r}'");

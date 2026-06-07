@@ -9,7 +9,7 @@
 mod ty;
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, Expr, ExprKind, FnDecl, Import, LitPattern, MethodSig, Param,
+    AssignOp, BinaryOp, Block, Bound, Expr, ExprKind, FnDecl, Import, LitPattern, MethodSig, Param,
     Pattern, Span, Stmt, StmtKind, Type, TypeParam, UnaryOp,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
@@ -62,7 +62,7 @@ fn is_reserved_type(name: &str) -> bool {
 /// Prebuilt protocols a user program may use as bounds but must not redeclare (mirrors
 /// [`prebuilt_protocols`]).
 fn is_reserved_protocol(name: &str) -> bool {
-    matches!(name, "Comparable" | "Stringable" | "Hashable" | "Add" | "Sub" | "Mul")
+    matches!(name, "Comparable" | "Stringable" | "Hashable" | "Add" | "Sub" | "Mul" | "Iterator")
 }
 
 /// A function (or method) signature: parameter types and return type. `type_params` is non-empty
@@ -233,9 +233,10 @@ struct Checker {
     structs: HashMap<String, StructInfo>,
     /// Structural protocols by name. Program-global (like structs). Pre-seeded with `Comparable`.
     protocols: HashMap<String, ProtocolInfo>,
-    /// Generic type parameters currently in scope (name → optional protocol bound), set while
-    /// building/checking a generic fn's signature and body. Save/restore to nest.
-    type_params: HashMap<String, Vec<String>>,
+    /// Generic type parameters currently in scope (name → its protocol bounds), set while
+    /// building/checking a generic fn's signature and body. Save/restore to nest. Bounds carry their
+    /// type args (`Iterator[T]`) so element-type recovery can read them in scope.
+    type_params: HashMap<String, Vec<Bound>>,
     /// enum name → its variant names, in declaration order (for exhaustiveness).
     enums: HashMap<String, Vec<String>>,
     /// enum name → its generic type parameters (empty for a non-generic enum). Used to build the
@@ -553,14 +554,7 @@ impl Checker {
                     // `Node(T, Tree[T])` resolves `T`). Validate each bound names a known protocol.
                     let saved = self.enter_type_params(type_params);
                     for tp in type_params {
-                        for bound in &tp.bounds {
-                            if !self.protocols.contains_key(bound) {
-                                self.error(
-                                    s.span,
-                                    format!("unknown protocol '{bound}' in bound on '{}'", tp.name),
-                                );
-                            }
-                        }
+                        self.check_bounds(&tp.bounds, &tp.name, s.span);
                     }
                     let mut names = Vec::new();
                     for v in variants {
@@ -593,11 +587,7 @@ impl Checker {
     fn fn_sig(&mut self, decl: &FnDecl, span: Span) -> FnSig {
         let saved = self.enter_type_params(&decl.type_params);
         for tp in &decl.type_params {
-            for bound in &tp.bounds {
-                if !self.protocols.contains_key(bound) {
-                    self.error(span, format!("unknown protocol '{bound}' in bound on '{}'", tp.name));
-                }
-            }
+            self.check_bounds(&tp.bounds, &tp.name, span);
         }
         let params = decl
             .params
@@ -808,7 +798,7 @@ impl Checker {
                         // Enforce each type parameter's protocol bounds against its argument.
                         for (tp, arg) in tps.iter().zip(&resolved) {
                             for bound in &tp.bounds {
-                                if let Err(msg) = self.satisfies(arg, bound) {
+                                if let Err(msg) = self.satisfies(arg, &bound.name) {
                                     self.error(span, msg);
                                 }
                             }
@@ -833,7 +823,7 @@ impl Checker {
                         }
                         for (tp, arg) in tps.iter().zip(&resolved) {
                             for bound in &tp.bounds {
-                                if let Err(msg) = self.satisfies(arg, bound) {
+                                if let Err(msg) = self.satisfies(arg, &bound.name) {
                                     self.error(span, msg);
                                 }
                             }
@@ -1207,6 +1197,30 @@ impl Checker {
         Some(subst(inner, &map))
     }
 
+    /// What iterating `ty` yields per step — the `Iterator` element type. Built-in collections yield
+    /// intrinsically (list/set → element, str → str, map → key, matching the single-variable `for`);
+    /// a user struct yields via its structural `next(self) -> Option[E]`. `None` ⇒ not iterable. This
+    /// is the single source of truth shared by `for`-binding, `satisfies(Iterator)`, and the
+    /// `Iterator[T]` element-recovery in `infer_generic_call`.
+    fn iter_elem(&self, ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::List(e) | Ty::Set(e) => Some((**e).clone()),
+            Ty::Str => Some(Ty::Str),
+            Ty::Map(k, _) => Some((**k).clone()),
+            _ => self.struct_iter_elem(ty),
+        }
+    }
+
+    /// Resolve a bound's type argument (the `T` in `Iterator[T]`) to a `Ty` with the *callee's* type
+    /// parameters in scope, so a bare param name becomes `Ty::Param` even at a call site where those
+    /// params aren't otherwise visible. Restores the prior scope before returning.
+    fn resolve_bound_arg(&mut self, arg: &Type, tps: &[TypeParam], span: Span) -> Ty {
+        let saved = self.enter_type_params(tps);
+        let ty = self.resolve_type(arg, span);
+        self.exit_type_params(saved);
+        ty
+    }
+
     fn for_bindings(&mut self, vars: &[String], iter: &Expr) -> Vec<(String, Ty)> {
         let unknowns = |vars: &[String]| vars.iter().map(|v| (v.clone(), Ty::Unknown)).collect();
         // Ranges are syntactic and always yield a single int.
@@ -1237,6 +1251,24 @@ impl Checker {
             Ty::Set(elem) => vec![(vars[0].clone(), (**elem).clone())],
             Ty::Str => vec![(vars[0].clone(), Ty::Str)],
             Ty::Unknown => unknowns(vars),
+            Ty::Param(name) => {
+                // A type parameter bounded `S: Iterator[T]` is iterable; bind the loop var to its
+                // declared element type `T` (resolved with the surrounding params in scope).
+                let arg = self.type_params.get(name).and_then(|bs| {
+                    bs.iter().find(|b| b.name == "Iterator").and_then(|b| b.args.first().cloned())
+                });
+                match arg {
+                    Some(_) if vars.len() != 1 => {
+                        self.error(iter.span, "a struct iterator binds a single loop variable");
+                        unknowns(vars)
+                    }
+                    Some(t) => vec![(vars[0].clone(), self.resolve_type(&t, iter.span))],
+                    None => {
+                        self.error(iter.span, format!("cannot iterate over {it}"));
+                        unknowns(vars)
+                    }
+                }
+            }
             _ if self.struct_iter_elem(&it).is_some() => {
                 // A user struct with `next(self) -> Option[E]` is iterable; it binds a single element.
                 let elem = self.struct_iter_elem(&it).expect("guarded by the match arm");
@@ -2362,6 +2394,7 @@ impl Checker {
                     for (decl, actual) in field_tys.iter().zip(&arg_tys) {
                         unify(decl, actual, &mut sub);
                     }
+                    self.recover_iter_elems(&tps, &mut sub, span);
                     for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
                         let expected = subst(decl, &sub);
                         if !self.assignable(&expected, actual) {
@@ -2371,16 +2404,7 @@ impl Checker {
                             );
                         }
                     }
-                    // Enforce each type parameter's protocol bounds against its inferred argument.
-                    for tp in &tps {
-                        if let Some(concrete) = sub.get(&tp.name) {
-                            for bound in &tp.bounds {
-                                if let Err(msg) = self.satisfies(concrete, bound) {
-                                    self.error(span, msg);
-                                }
-                            }
-                        }
-                    }
+                    self.enforce_bounds(&tps, &sub, span);
                     let targs =
                         tps.iter().map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown)).collect();
                     return Some(Ty::Struct(name.to_string(), targs));
@@ -2405,6 +2429,7 @@ impl Checker {
                     for (decl, actual) in v.payload.iter().zip(&arg_tys) {
                         unify(decl, actual, &mut sub);
                     }
+                    self.recover_iter_elems(&tps, &mut sub, span);
                     for (decl, (actual, arg)) in v.payload.iter().zip(arg_tys.iter().zip(args)) {
                         let expected = subst(decl, &sub);
                         if !self.assignable(&expected, actual) {
@@ -2414,15 +2439,7 @@ impl Checker {
                             );
                         }
                     }
-                    for tp in &tps {
-                        if let Some(concrete) = sub.get(&tp.name) {
-                            for bound in &tp.bounds {
-                                if let Err(msg) = self.satisfies(concrete, bound) {
-                                    self.error(span, msg);
-                                }
-                            }
-                        }
-                    }
+                    self.enforce_bounds(&tps, &sub, span);
                     let targs =
                         tps.iter().map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown)).collect();
                     return Some(Ty::Enum(v.enum_name, targs));
@@ -2591,18 +2608,30 @@ impl Checker {
                 // Search the param's bounds for a protocol that declares `method` (multi-bound
                 // `T: Add + Mul` exposes the union of both protocols' methods).
                 let bounds = self.type_params.get(pname).cloned().unwrap_or_default();
-                let msig = bounds.iter().find_map(|proto| {
-                    self.protocols
-                        .get(proto)
-                        .and_then(|p| p.methods.iter().find(|(n, _)| n == method).map(|(_, s)| s.clone()))
+                let found = bounds.iter().find_map(|proto| {
+                    self.protocols.get(&proto.name).and_then(|p| {
+                        p.methods
+                            .iter()
+                            .find(|(n, _)| n == method)
+                            .map(|(_, s)| (proto.clone(), s.clone()))
+                    })
                 });
-                if let Some(msig) = msig {
+                if let Some((proto, msig)) = found {
                     let map = HashMap::from([("Self".to_string(), obj_ty.clone())]);
                     let expected: Vec<Ty> = match msig.params.split_first() {
                         Some((_recv, rest)) => rest.iter().map(|t| subst(t, &map)).collect(),
                         None => Vec::new(),
                     };
                     self.check_args(method, &expected, args, span);
+                    // `Iterator[T].next()` yields `Option[T]` — its return is the bound's element arg,
+                    // not `Self` (the registered placeholder). Resolve the arg with sibling params in
+                    // scope (we're inside the bounded type's own generic context).
+                    if proto.name == "Iterator"
+                        && method == "next"
+                        && let Some(arg) = proto.args.first()
+                    {
+                        return Ty::Option(Box::new(self.resolve_type(arg, span)));
+                    }
                     return subst(&msig.ret, &map);
                 }
                 self.infer_all(args);
@@ -2855,7 +2884,7 @@ impl Checker {
     }
 
     /// Install `tps` as the in-scope generic type parameters, returning the previous map to restore.
-    fn enter_type_params(&mut self, tps: &[TypeParam]) -> HashMap<String, Vec<String>> {
+    fn enter_type_params(&mut self, tps: &[TypeParam]) -> HashMap<String, Vec<Bound>> {
         let saved = self.type_params.clone();
         for tp in tps {
             self.type_params.insert(tp.name.clone(), tp.bounds.clone());
@@ -2863,8 +2892,41 @@ impl Checker {
         saved
     }
 
-    fn exit_type_params(&mut self, saved: HashMap<String, Vec<String>>) {
+    fn exit_type_params(&mut self, saved: HashMap<String, Vec<Bound>>) {
         self.type_params = saved;
+    }
+
+    /// Validate the bounds declared on a type parameter: each names a known protocol, and type args
+    /// are only allowed on (and required by) the parameterized protocols. Today only `Iterator[T]`
+    /// takes args (exactly one — its element type); every other protocol must be bare.
+    fn check_bounds(&mut self, bounds: &[Bound], param: &str, span: Span) {
+        let mut seen_iterator = false;
+        for b in bounds {
+            if !self.protocols.contains_key(&b.name) {
+                self.error(span, format!("unknown protocol '{}' in bound on '{param}'", b.name));
+                continue;
+            }
+            match b.name.as_str() {
+                "Iterator" if b.args.len() != 1 => self.error(
+                    span,
+                    format!("protocol 'Iterator' takes one type argument (the element type), found {}", b.args.len()),
+                ),
+                "Iterator" if seen_iterator => {
+                    self.error(span, format!("'{param}' has more than one Iterator bound"))
+                }
+                "Iterator" => seen_iterator = true,
+                other if !b.args.is_empty() => self.error(
+                    span,
+                    format!("protocol '{other}' takes no type arguments"),
+                ),
+                _ => {}
+            }
+            // Resolve the bound's type args (with the surrounding params in scope) so an unknown type
+            // inside a bound — e.g. `Iterator[Bogus]` — is reported rather than silently accepted.
+            for a in &b.args {
+                let _ = self.resolve_type(a, span);
+            }
+        }
     }
 
     /// Register a `protocol` declaration's method signatures. `Self` resolves to `Ty::Param("Self")`.
@@ -2961,6 +3023,18 @@ impl Checker {
         if protocol == "Error" && matches!(ty, Ty::Str) {
             return Ok(());
         }
+        // `Iterator` conformance is exactly "can be iterated" — built-in collections intrinsically,
+        // a user struct via its structural `next(self) -> Option[E]`. Reusing `iter_elem` keeps this
+        // in lockstep with what `for` accepts (single source of truth, no drift). A `Ty::Param` falls
+        // through to the declared-bounds check below (so a `[S: Iterator[T]]` value forwards into
+        // another iterator-generic call), since `iter_elem` can't see through a bare param.
+        if protocol == "Iterator" && !matches!(ty, Ty::Param(_)) {
+            return if self.iter_elem(ty).is_some() {
+                Ok(())
+            } else {
+                Err(format!("type {ty} does not satisfy Iterator"))
+            };
+        }
         // A protocol existential value satisfies a protocol iff it IS that protocol.
         if let Ty::Protocol(p) = ty {
             return if p == protocol {
@@ -2977,7 +3051,7 @@ impl Checker {
         // A bound type parameter satisfies a protocol if that protocol is among its declared bounds —
         // this is what lets a generic forward its `T: P` value into another `[U: P]` call.
         if let Ty::Param(name) = ty {
-            return if self.type_params.get(name).is_some_and(|bs| bs.iter().any(|b| b == protocol)) {
+            return if self.type_params.get(name).is_some_and(|bs| bs.iter().any(|b| b.name == protocol)) {
                 Ok(())
             } else {
                 Err(format!("type {ty} does not satisfy {protocol}"))
@@ -3032,7 +3106,7 @@ impl Checker {
             (Ty::Param(a), Ty::Param(b)) if a == b => self
                 .type_params
                 .get(a)
-                .is_some_and(|bs| bs.iter().any(|proto| self.protocol_has_method(proto, "compare"))),
+                .is_some_and(|bs| bs.iter().any(|proto| self.protocol_has_method(&proto.name, "compare"))),
             (Ty::Struct(a, _), Ty::Struct(b, _)) if a == b => self.satisfies(l, "Comparable").is_ok(),
             _ => false,
         }
@@ -3085,6 +3159,66 @@ impl Checker {
         sub
     }
 
+    /// Recover element types from parameterized `Iterator[T]` bounds: for each type param already
+    /// bound to a concrete iterand in `sub`, bind the bound's element arg `T` to the iterand's element
+    /// type. Mutates `sub` (collects first to avoid borrowing it while iterating). Shared by every
+    /// generic-call site (free fn, struct constructor, enum variant).
+    fn recover_iter_elems(&mut self, tps: &[TypeParam], sub: &mut HashMap<String, Ty>, span: Span) {
+        let mut binds: Vec<(Ty, Ty)> = Vec::new();
+        for tp in tps {
+            if let Some(concrete) = sub.get(&tp.name).cloned() {
+                for b in &tp.bounds {
+                    if b.name == "Iterator"
+                        && let Some(arg) = b.args.first()
+                        && let Some(elem) = self.iter_elem(&concrete)
+                    {
+                        binds.push((self.resolve_bound_arg(arg, tps, span), elem));
+                    }
+                }
+            }
+        }
+        for (arg_ty, elem) in &binds {
+            // Bind the element param if it's still free; otherwise it was already pinned (an explicit
+            // type arg, another argument position, or a concrete `Iterator[int]` bound) and the
+            // recovered element MUST agree — `unify` is a silent no-op there, so check it ourselves.
+            match arg_ty {
+                Ty::Param(n) if !sub.contains_key(n) => {
+                    if !elem.is_unknown() {
+                        sub.insert(n.clone(), elem.clone());
+                    }
+                }
+                _ => {
+                    let pinned = match arg_ty {
+                        Ty::Param(n) => sub.get(n).cloned().unwrap_or(Ty::Unknown),
+                        other => other.clone(),
+                    };
+                    if !pinned.is_unknown()
+                        && !elem.is_unknown()
+                        && !self.assignable(&pinned, elem)
+                    {
+                        self.error(
+                            span,
+                            format!("iterator element type {elem} does not match the declared element type {pinned}"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Enforce each type parameter's declared protocol bounds against its inferred binding.
+    fn enforce_bounds(&mut self, tps: &[TypeParam], sub: &HashMap<String, Ty>, span: Span) {
+        for tp in tps {
+            if let Some(concrete) = sub.get(&tp.name) {
+                for bound in &tp.bounds {
+                    if let Err(msg) = self.satisfies(concrete, &bound.name) {
+                        self.error(span, msg);
+                    }
+                }
+            }
+        }
+    }
+
     /// Type-check a call to a generic function: infer each type parameter from the arguments,
     /// enforce the declared bounds, and substitute into the return type.
     fn infer_generic_call(
@@ -3107,16 +3241,10 @@ impl Checker {
         for (decl, actual) in sig.params.iter().zip(&arg_tys) {
             unify(decl, actual, &mut subst_map);
         }
-        // Enforce declared bounds against each inferred binding.
-        for tp in &sig.type_params {
-            if let Some(concrete) = subst_map.get(&tp.name) {
-                for bound in &tp.bounds {
-                    if let Err(msg) = self.satisfies(concrete, bound) {
-                        self.error(span, msg);
-                    }
-                }
-            }
-        }
+        // Recover element types from parameterized `Iterator[T]` bounds (bind `T` to the iterand's
+        // element), then enforce every declared bound against its inferred binding.
+        self.recover_iter_elems(&sig.type_params, &mut subst_map, span);
+        self.enforce_bounds(&sig.type_params, &subst_map, span);
         // Each argument must match its parameter's substituted type (catches a type param used in
         // two positions with conflicting types, e.g. `max(1, "x")`).
         for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
@@ -3189,6 +3317,19 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             },
         );
     }
+    // `Iterator[T]` — the language's one parameterized protocol. The method shape mirrors the
+    // structural detection (`next(self) -> Option[T]`); conformance is decided in `satisfies` via
+    // `iter_elem` (built-ins intrinsically, user structs via their `next`), NOT the generic structural
+    // loop, and the bound's `[T]` arg recovers the element type at call sites.
+    m.insert(
+        "Iterator".to_string(),
+        ProtocolInfo {
+            methods: vec![(
+                "next".to_string(),
+                FnSig::plain(vec![Ty::Unknown], Ty::Option(Box::new(Ty::Param("Self".into())))),
+            )],
+        },
+    );
     m
 }
 

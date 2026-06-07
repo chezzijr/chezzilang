@@ -382,12 +382,12 @@ impl Parser {
                 if params.iter().any(|p: &TypeParam| p.name == name) {
                     return Err(self.err(format!("duplicate type parameter '{name}'")));
                 }
-                // `T`, `T: Comparable`, or multi-bound `T: Add + Mul`.
+                // `T`, `T: Comparable`, multi-bound `T: Add + Mul`, or parameterized `S: Iterator[T]`.
                 let mut bounds = Vec::new();
                 if self.eat(&Token::Colon) {
-                    bounds.push(self.expect_ident()?);
+                    bounds.push(self.parse_bound()?);
                     while self.eat(&Token::Plus) {
-                        bounds.push(self.expect_ident()?);
+                        bounds.push(self.parse_bound()?);
                     }
                 }
                 params.push(TypeParam { name, bounds });
@@ -398,6 +398,22 @@ impl Parser {
             self.expect(&Token::RBracket)?;
         }
         Ok(params)
+    }
+
+    /// A single protocol bound on a type parameter: a name, optionally with `[T, …]` type arguments
+    /// (`Iterator[T]`). The args reuse `parse_type`, so any type expression is accepted syntactically;
+    /// only `Iterator` gives its args meaning in the checker.
+    fn parse_bound(&mut self) -> PResult<Bound> {
+        let name = self.expect_ident()?;
+        let mut args = Vec::new();
+        if self.eat(&Token::LBracket) {
+            args.push(self.parse_type()?);
+            while self.eat(&Token::Comma) {
+                args.push(self.parse_type()?);
+            }
+            self.expect(&Token::RBracket)?;
+        }
+        Ok(Bound { name, args })
     }
 
     /// A body-less method signature inside a `protocol` block: `fn name(params) -> ret` then NEWLINE.
@@ -1523,9 +1539,30 @@ mod tests {
                 assert_eq!(f.name, "max");
                 assert_eq!(f.type_params.len(), 1);
                 assert_eq!(f.type_params[0].name, "T");
-                assert_eq!(f.type_params[0].bounds, vec!["Comparable".to_string()]);
+                assert_eq!(
+                    f.type_params[0].bounds,
+                    vec![Bound { name: "Comparable".into(), args: vec![] }]
+                );
                 assert_eq!(f.params.len(), 2);
                 assert_eq!(f.ret, Some(Type::Named("T".into())));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_fn_decl_parameterized_bound() {
+        // `S: Iterator[T]` — a parameterized protocol bound records the bound name + its type args.
+        match only("fn collect[S: Iterator[T], T](xs: S) -> T:\n    return xs\n") {
+            StmtKind::Fn(f) => {
+                assert_eq!(f.type_params.len(), 2);
+                assert_eq!(f.type_params[0].name, "S");
+                assert_eq!(
+                    f.type_params[0].bounds,
+                    vec![Bound { name: "Iterator".into(), args: vec![Type::Named("T".into())] }]
+                );
+                assert_eq!(f.type_params[1].name, "T");
+                assert_eq!(f.type_params[1].bounds, Vec::<Bound>::new());
             }
             other => panic!("{other:?}"),
         }
@@ -1552,7 +1589,7 @@ mod tests {
             StmtKind::Fn(f) => {
                 assert_eq!(f.type_params.len(), 2);
                 assert_eq!(f.type_params[0].name, "A");
-                assert_eq!(f.type_params[0].bounds, Vec::<String>::new());
+                assert_eq!(f.type_params[0].bounds, Vec::<Bound>::new());
                 assert_eq!(f.type_params[1].name, "B");
             }
             other => panic!("{other:?}"),

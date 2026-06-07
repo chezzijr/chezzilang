@@ -1,0 +1,52 @@
+# `Iterator[T]` — the language's one parameterized protocol bound.
+#
+# A generic function can accept ANY iterable and recover its element type `T`:
+#   - built-in list / set / str  (they satisfy Iterator intrinsically, like int satisfies Add)
+#   - any user struct with `next(self) -> Option[T]`
+#
+# `T` is inferred by unifying the iterand's element type into the bound's arg — so it flows out into
+# return types (`-> T`, `-> list[T]`) and into the loop variable inside the body.
+
+fn first_or[S: Iterator[T], T](xs: S, default: T) -> T:
+    for x in xs:
+        return x
+    return default
+
+# `T` here is recovered ONLY from the bound (it appears in no parameter), proving element recovery.
+fn count[S: Iterator[T], T](xs: S) -> int:
+    n := 0
+    for _ in xs:
+        n = n + 1
+    return n
+
+fn to_list[S: Iterator[T], T](xs: S) -> list[T]:
+    out := []
+    for x in xs:
+        out.push(x)
+    return out
+
+# A user struct iterator (finite): yields 0,1,2,3,4.
+struct Counter:
+    n: int
+    limit: int
+    fn next(self) -> Option[int]:
+        if self.n >= self.limit:
+            return None
+        v := self.n
+        self.n = self.n + 1
+        return Some(v)
+
+fn main():
+    nums := [10, 20, 30]
+    letters := {"a", "b", "c"}
+
+    print(first_or(nums, 0))         # 10  (list element is int)
+    print(first_or("hello", "?"))    # h   (str element is str)
+    print(first_or(letters, "z"))    # a   (set, insertion-ordered)
+
+    print(count(nums))               # 3
+    print(count(Counter(0, 5)))      # 5  (T recovered from the struct iterator)
+
+    print(to_list(Counter(0, 4)))    # [0, 1, 2, 3]
+
+main()

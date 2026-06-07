@@ -98,11 +98,13 @@
 <param>  ::= "IDENT" | "IDENT" "COLON" <type>
            | "IDENT" "ASSIGN" <expr> | "IDENT" "COLON" <type> "ASSIGN" <expr>
 
-# Generic type parameters on a fn/struct declaration: `[T]`, `[T: Comparable]`, `[A, B]`.
+# Generic type parameters on a fn/struct declaration: `[T]`, `[T: Comparable]`, `[A, B]`, or a
+# parameterized bound `[S: Iterator[T]]` (only `Iterator` gives its type args meaning).
 <typeParams>    ::= "LBRACKET" <typeParamList> "RBRACKET"
 <typeParamList> ::= <typeParam> | <typeParam> "COMMA" <typeParamList>
 <typeParam>     ::= "IDENT" | "IDENT" "COLON" <boundList>
-<boundList>     ::= "IDENT" | "IDENT" "PLUS" <boundList>
+<boundList>     ::= <bound> | <bound> "PLUS" <boundList>
+<bound>         ::= "IDENT" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
 
 <structDecl>    ::= "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <structMembers> "DEDENT"
                   | "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <structMembers> "DEDENT"

@@ -1,0 +1,46 @@
+# Lazy iterator adapters — the Rust model, NO `yield` in the language.
+#
+# Each adapter is a struct that holds an inner iterator (bounded `I: Iterator[T]`) plus some state,
+# and implements `next(self) -> Option[...]`. Composing adapters builds a lazy pipeline: the `for`
+# loop drives the outermost `next()`, which pulls one element from the one below it, on demand.
+#
+# This is exactly how Rust's `std::iter::Map` / `Take` work — hand-written structs over a protocol,
+# not a coroutine. `Iterator[T]` is what lets these be written generically over any inner iterator.
+
+# An INFINITE source: 0, 1, 2, 3, ...
+struct Count:
+    n: int
+    fn next(self) -> Option[int]:
+        v := self.n
+        self.n = self.n + 1
+        return Some(v)
+
+# `take` adapter: yield at most `left` elements from the inner iterator, then stop.
+struct Take[I: Iterator[T], T]:
+    inner: I
+    left: int
+    fn next(self) -> Option[T]:
+        if self.left <= 0:
+            return None
+        self.left = self.left - 1
+        return self.inner.next()
+
+# `map` adapter: apply `f` to every element the inner iterator yields.
+struct Mapped[I: Iterator[T], T, U]:
+    inner: I
+    f: fn(T) -> U
+    fn next(self) -> Option[U]:
+        match self.inner.next():
+            Some(x):
+                g := self.f          # bind the fn-typed field, then call it (not `self.f(x)`)
+                return Some(g(x))
+            None:
+                return None
+
+fn main():
+    # Take 5 from an infinite counter, then double each — fully lazy, never materialized.
+    pipe := Mapped(Take(Count(0), 5), fn(x): x * 2)
+    for v in pipe:
+        print(v)            # 0 2 4 6 8
+
+main()

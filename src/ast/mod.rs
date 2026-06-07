@@ -122,12 +122,22 @@ pub struct FnDecl {
     pub body: Block,
 }
 
-/// A generic type parameter declaration: `T`, `T: Comparable`, or `T: Add + Mul`. `bounds` names the
-/// protocols the instantiating type must structurally satisfy (empty = unbounded).
+/// A generic type parameter declaration: `T`, `T: Comparable`, `T: Add + Mul`, or a parameterized
+/// bound `S: Iterator[T]`. `bounds` lists the protocols the instantiating type must satisfy
+/// (empty = unbounded).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeParam {
     pub name: String,
-    pub bounds: Vec<String>,
+    pub bounds: Vec<Bound>,
+}
+
+/// A single protocol bound on a type parameter. `args` is empty for a bare bound (`Comparable`) and
+/// non-empty for a parameterized one (`Iterator[T]` → name `Iterator`, args `[Named("T")]`). Only
+/// `Iterator` consumes its args today (element-type recovery); other protocols ignore them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bound {
+    pub name: String,
+    pub args: Vec<Type>,
 }
 
 /// A protocol method signature — like an [`FnDecl`] but body-less. `Self` (as `Type::Named("Self")`)
