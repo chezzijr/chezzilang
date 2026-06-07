@@ -330,7 +330,8 @@ impl Interp {
                     }),
                 }
             }
-            ExprKind::Call { callee, args } => self.eval_call(callee, args, expr.span),
+            // `type_args` are type-erased — the interpreter ignores them (checker already used them).
+            ExprKind::Call { callee, args, .. } => self.eval_call(callee, args, expr.span),
             ExprKind::Match { scrutinee, arms } => self.eval_match_expr(scrutinee, arms),
             ExprKind::IfElse { cond, then, els } => {
                 if as_bool(self.eval(cond)?, cond.span)? {
@@ -378,6 +379,7 @@ impl Interp {
                             span: expr.span,
                         }),
                         args: vec![(**arg).clone()],
+                        type_args: Vec::new(),
                     },
                     span: expr.span,
                 };

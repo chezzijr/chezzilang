@@ -362,6 +362,9 @@ impl Parser {
         if self.eat(&Token::LBracket) {
             loop {
                 let name = self.expect_ident()?;
+                if params.iter().any(|p: &TypeParam| p.name == name) {
+                    return Err(self.err(format!("duplicate type parameter '{name}'")));
+                }
                 // `T`, `T: Comparable`, or multi-bound `T: Add + Mul`.
                 let mut bounds = Vec::new();
                 if self.eat(&Token::Colon) {
@@ -920,12 +923,12 @@ impl Parser {
                 // first argument. The RHS must be a call, so checker/interp/VM see a plain call and
                 // need no pipe-specific code.
                 InfixOp::Pipe => match rhs.kind {
-                    ExprKind::Call { callee, args } => {
+                    ExprKind::Call { callee, args, type_args } => {
                         let mut new_args = Vec::with_capacity(args.len() + 1);
                         new_args.push(lhs);
                         new_args.extend(args);
                         Expr {
-                            kind: ExprKind::Call { callee, args: new_args },
+                            kind: ExprKind::Call { callee, args: new_args, type_args },
                             span,
                         }
                     }
@@ -974,20 +977,12 @@ impl Parser {
             e = match self.peek() {
                 Token::LParen => {
                     self.advance();
-                    let mut args = Vec::new();
-                    if !self.check(&Token::RParen) {
-                        loop {
-                            args.push(self.parse_expr()?);
-                            if !self.eat(&Token::Comma) {
-                                break;
-                            }
-                        }
-                    }
-                    self.expect(&Token::RParen)?;
+                    let args = self.parse_call_args()?;
                     Expr {
                         kind: ExprKind::Call {
                             callee: Box::new(e),
                             args,
+                            type_args: Vec::new(),
                         },
                         span,
                     }
@@ -1010,11 +1005,13 @@ impl Parser {
                     // etc.). Only `.decode[<type>](…)` is stolen.
                     let decode = if name == "decode" && self.check(&Token::LBracket) {
                         let save = self.pos;
+                        let save_depth = self.depth; // `parse_type` leaks depth on a swallowed fail
                         self.advance(); // '['
                         match self.try_parse_decode_tail(e.clone(), span) {
                             Some(expr) => Some(expr),
                             None => {
                                 self.pos = save; // restore — not a decode form
+                                self.depth = save_depth;
                                 None
                             }
                         }
@@ -1033,15 +1030,30 @@ impl Parser {
                     }
                 }
                 Token::LBracket => {
-                    self.advance();
-                    let index = self.parse_expr()?;
-                    self.expect(&Token::RBracket)?;
-                    Expr {
-                        kind: ExprKind::Index {
-                            obj: Box::new(e),
-                            index: Box::new(index),
-                        },
-                        span,
+                    // `name[Type, …](args)` — explicit call-site type arguments. Only a bare name
+                    // can be a generic fn / struct / variant, so only try the steal there; anything
+                    // else (`arr[i]`, `obj.f[i]`) is a plain index. SPECULATIVE: if the `[types](`
+                    // shape isn't present we backtrack and parse an index instead, so a numeric or
+                    // non-type subscript (`fns[0](x)`) keeps its index+call meaning.
+                    let type_call = if matches!(e.kind, ExprKind::Ident(_)) {
+                        self.try_parse_type_arg_call(&e, span)?
+                    } else {
+                        None
+                    };
+                    match type_call {
+                        Some(call) => call,
+                        None => {
+                            self.advance(); // '['
+                            let index = self.parse_expr()?;
+                            self.expect(&Token::RBracket)?;
+                            Expr {
+                                kind: ExprKind::Index {
+                                    obj: Box::new(e),
+                                    index: Box::new(index),
+                                },
+                                span,
+                            }
+                        }
                     }
                 }
                 Token::Question => {
@@ -1055,6 +1067,61 @@ impl Parser {
             };
         }
         Ok(e)
+    }
+
+    /// Parse a comma-separated argument list and the closing `)`, assuming the opening `(` has just
+    /// been consumed. A trailing comma is not allowed (the loop breaks on a non-comma).
+    fn parse_call_args(&mut self) -> PResult<Vec<Expr>> {
+        let mut args = Vec::new();
+        if !self.check(&Token::RParen) {
+            loop {
+                args.push(self.parse_expr()?);
+                if !self.eat(&Token::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(args)
+    }
+
+    /// Speculatively parse `[Type, …](args)` as a call with explicit type arguments, assuming the
+    /// `[` has NOT yet been consumed and `callee` is a bare name. Returns `Ok(None)` (position
+    /// restored) when the `[types](` shape isn't present, so the caller falls back to indexing
+    /// (`arr[i]`, `fns[0](x)`). Once `]` `(` is confirmed it commits, so a genuine error inside the
+    /// argument list propagates instead of silently re-parsing as an index.
+    fn try_parse_type_arg_call(&mut self, callee: &Expr, span: Span) -> PResult<Option<Expr>> {
+        let save = self.pos;
+        // `parse_type` bumps `self.depth` and only unwinds it on success; on a swallowed (backtrack)
+        // failure we must restore depth too, else every plain `name[idx]` leaks a level and many
+        // such indexes spuriously trip MAX_DEPTH.
+        let save_depth = self.depth;
+        self.advance(); // '['
+        let mut type_args = Vec::new();
+        loop {
+            match self.parse_type() {
+                Ok(t) => type_args.push(t),
+                Err(_) => {
+                    self.pos = save;
+                    self.depth = save_depth;
+                    return Ok(None);
+                }
+            }
+            if !self.eat(&Token::Comma) {
+                break;
+            }
+        }
+        if !self.eat(&Token::RBracket) || !self.check(&Token::LParen) {
+            self.pos = save;
+            self.depth = save_depth;
+            return Ok(None);
+        }
+        self.advance(); // '(' — committed to a type-argument call now.
+        let args = self.parse_call_args()?;
+        Ok(Some(Expr {
+            kind: ExprKind::Call { callee: Box::new(callee.clone()), args, type_args },
+            span,
+        }))
     }
 
     /// Speculatively parse the tail of a `.decode[Type](arg)` form, assuming the opening `[` has
@@ -1320,6 +1387,21 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn duplicate_type_param_rejected() {
+        assert!(parse_err("fn f[T, T](a: T) -> T:\n    return a\n")
+            .message
+            .contains("duplicate type parameter"));
+        assert!(parse_err("struct S[T, T]:\n    x: T\n")
+            .message
+            .contains("duplicate type parameter"));
+        assert!(parse_err("enum E[T, T]:\n    A(T)\n")
+            .message
+            .contains("duplicate type parameter"));
+        // distinct names still parse fine
+        parse_ok("fn f[T, U](a: T, b: U) -> T:\n    return a\n");
     }
 
     #[test]
@@ -2129,10 +2211,56 @@ mod tests {
     }
 
     #[test]
+    fn explicit_type_args_parse() {
+        // `max[int](3, 7)` → a Call carrying one type arg.
+        let v = let_value("x := max[int](3, 7)\n");
+        let ExprKind::Call { callee, args, type_args } = v.kind else {
+            panic!("expected a Call, got {:?}", v.kind)
+        };
+        assert!(matches!(callee.kind, ExprKind::Ident(ref n) if n == "max"));
+        assert_eq!(args.len(), 2);
+        assert_eq!(type_args, vec![Type::Named("int".into())]);
+
+        // Multi-arg, incl. a compound type — only expressible as type args (comma is not an index).
+        let v = let_value("p := Pair[int, str](1, \"a\")\n");
+        let ExprKind::Call { type_args, .. } = v.kind else {
+            panic!("expected a Call, got {:?}", v.kind)
+        };
+        assert_eq!(type_args, vec![Type::Named("int".into()), Type::Named("str".into())]);
+    }
+
+    #[test]
+    fn index_then_call_still_index() {
+        // A numeric subscript is NOT stolen — `fns[0](5)` stays index-then-call.
+        let v = let_value("x := fns[0](5)\n");
+        let ExprKind::Call { callee, type_args, .. } = v.kind else {
+            panic!("expected a Call, got {:?}", v.kind)
+        };
+        assert!(type_args.is_empty());
+        assert!(matches!(callee.kind, ExprKind::Index { .. }));
+
+        // A bare index with no trailing call stays an index.
+        let v = let_value("x := arr[i]\n");
+        assert!(matches!(v.kind, ExprKind::Index { .. }));
+    }
+
+    #[test]
+    fn speculative_type_arg_steal_does_not_leak_recursion_depth() {
+        // Each bare-name index (`a[0]`) attempts the type-arg steal, which speculatively calls
+        // `parse_type` and backtracks. That must NOT leak the recursion-depth counter, else many
+        // plain indexes spuriously trip MAX_DEPTH. Far more indexes than MAX_DEPTH, all valid.
+        let mut src = String::from("a := [1, 2, 3]\n");
+        for i in 0..200 {
+            src.push_str(&format!("b{i} := a[0]\n"));
+        }
+        parse_ok(&src);
+    }
+
+    #[test]
     fn pipe_desugars_to_call_with_lhs_first() {
         // `x := 5 |> inc()` ⇒ `inc(5)`
         let v = let_value("x := 5 |> inc()\n");
-        let ExprKind::Call { callee, args } = v.kind else {
+        let ExprKind::Call { callee, args, .. } = v.kind else {
             panic!("expected a Call, got {:?}", v.kind)
         };
         assert!(matches!(callee.kind, ExprKind::Ident(ref n) if n == "inc"));
@@ -2156,12 +2284,12 @@ mod tests {
     fn pipe_chain_is_left_associative() {
         // `x := 5 |> inc() |> dbl()` ⇒ `dbl(inc(5))`
         let v = let_value("x := 5 |> inc() |> dbl()\n");
-        let ExprKind::Call { callee, args } = v.kind else {
+        let ExprKind::Call { callee, args, .. } = v.kind else {
             panic!("expected outer Call, got {:?}", v.kind)
         };
         assert!(matches!(callee.kind, ExprKind::Ident(ref n) if n == "dbl"));
         assert_eq!(args.len(), 1);
-        let ExprKind::Call { callee: inner_callee, args: inner_args } = &args[0].kind else {
+        let ExprKind::Call { callee: inner_callee, args: inner_args, .. } = &args[0].kind else {
             panic!("expected inner Call, got {:?}", args[0].kind)
         };
         assert!(matches!(inner_callee.kind, ExprKind::Ident(ref n) if n == "inc"));

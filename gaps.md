@@ -12,6 +12,10 @@ Legend: 🔴 blocks real apps · 🟡 notable friction · 🟢 works (recorded s
 
 Last updated: 2026-06-06. Baseline: post-M6c (native stdlib seam).
 
+> **Forward-looking brainstorm** (defer, a non-Go concurrency model, missing scripting features,
+> VM/GC optimizations) lives in **[`docs/future.md`](docs/future.md)** — speculative, NOT scheduled.
+> Promote items here into `gaps.md` once they're committed work.
+
 > **Status: round-1 gaps (#1–#9) are all ✅ FIXED.** Both engines (tree-walk `interp` + bytecode
 > `vm`) stay in lockstep, verified by the parity + conformance suites (569 tests green). Each gap
 > landed TDD with golden `examples/*.chz` run under both engines.
@@ -323,8 +327,8 @@ nullary variants (`Cons(h, None)`) stay unsupported (clear checker error); **mat
   §7b. **M7-G3** then unified the stdlib onto it: `min`/`max`/`clamp` are generic `[T: Comparable]`
   functions in pure-Chezzi `std.cmp` (native numeric `std.math.min`/`max` + the `numeric_poly` hack
   removed; `abs` stays native), and `list.sort()` widened to any Comparable element. See
-  `examples/stdlib_cmp.chz`. Not yet: explicit call-site type args (`max[int](…)`), generic enums,
-  multi-bound `T: A + B`, a numeric protocol (would let `abs`/`+`/`-` unify too), `Hashable`/`Display`.
+  `examples/stdlib_cmp.chz`. (Since shipped: explicit call-site type args `max[int](…)`, generic
+  enums, multi-bound `T: A + B`, a numeric protocol via `Add`/`Sub`/`Mul`, `Hashable`/`Stringable`.)
 ## Roadmap to a complete v1 (statically-typed scripting language)
 
 The language **core** is feature-complete: scalars, `list`/`map`/`tuple`, structs (generic), sum
@@ -414,24 +418,26 @@ runner, doc comments + docgen.
   a 64 MiB thread). 64 levels ≈ 1 MiB now leaves real headroom — the guard fires cleanly on the bare
   test thread, so the 64 MiB workaround thread was removed (test runs inline). 64 still far exceeds
   any realistic source nesting; full suite + conformance green. `src/parser/mod.rs`.
-- **Duplicate generic type parameter `[T, T]` is silently accepted** — `fn f[T, T]`, `struct S[T, T]`,
-  and `enum E[T, T]` all type-check. No panic (the param map is last-write-wins, so only the last
-  `T`'s inferred arg is bound-checked), but a malformed declaration with surprising semantics gets
-  through. **Fix:** reject a duplicate name in `parse_type_params` (one place catches all three decl
-  kinds) or in each hoist. Surfaced by the M10-G4 generic-enum review (Solidity lens).
-  `src/parser/mod.rs` (`parse_type_params`) or `src/checker/mod.rs` (the struct/enum/fn hoists).
-- **Nested `set` equality diverges across engines (latent parity gap).** Top-level set `==` is
-  unordered on both engines (the dedicated `values_equal` Set arm), but a `set` nested inside a
-  struct/list falls to derived `==`: the VM recurses through its `values_equal` (still unordered)
-  while the interp uses the derived `PartialEq` on `SetData` (order-*sensitive*). So
-  `Wrapper(set([1,2])) == Wrapper(set([2,1]))` is `true` on the VM and `false` on the interp.
-  **Pre-existing** (predates the M10 hash-table rework — confirmed by A/B build vs HEAD), but the
-  parity suite doesn't cover it. **Fix:** route nested-collection equality through `values_equal` on
-  both engines, or make `SetData`'s `PartialEq` order-independent. `src/interp/mod.rs`
-  (`eval_binary` Eq / `values_equal`) + `src/interp/value.rs` (`SetData` `PartialEq`).
-- **No explicit call-site type arguments** — `max[int](…)` / `Stack[int](…)`. Type args are only ever
-  *inferred* from arguments; you can't pin them explicitly. Minor (inference covers the common case),
-  deferred since M7. Checker `infer_generic_call` / variant + struct construction.
+- ~~**Duplicate generic type parameter `[T, T]` is silently accepted**~~ ✅ **FIXED.** `parse_type_params`
+  (the one chokepoint for `fn`/`struct`/`enum` decls) now rejects a repeated name with a
+  `duplicate type parameter '<name>'` parse error before it can reach the last-write-wins checker map.
+  Distinct names (`[T, U]`) still parse. `src/parser/mod.rs` (`parse_type_params`); test
+  `duplicate_type_param_rejected`.
+- ~~**Nested `set` equality diverges across engines (latent parity gap).**~~ ✅ **FIXED.** The interp's
+  `SetData::eq` (reached via `Value`'s derived `==` for a set nested in a struct/list) was
+  order-*sensitive*; it is now order-*independent* (same-size + every element a member, compared with
+  `values_equal`), mirroring the VM's `values_equal` Set arm. So `Wrapper(set([1,2])) ==
+  Wrapper(set([2,1]))` is `true` on both engines. `src/interp/value.rs` (`SetData` `PartialEq`);
+  golden `examples/set_eq.chz` + parity test `nested_set_equality_parity`.
+- ~~**No explicit call-site type arguments** — `max[int](…)` / `Pair[int,str](…)`.~~ ✅ **FIXED.**
+  `ExprKind::Call` gained a `type_args: Vec<Type>`; the parser speculatively steals `name[Types](args)`
+  when the callee is a bare name (mirrors `.decode[T]()`; numeric/non-type subscripts like `fns[0](x)`
+  stay index+call), and the checker seeds the substitution map from the explicit args (validating
+  count, with inference filling the rest). **Type-erased** — the runtime ignores `type_args`. Works for
+  generic fns, struct constructors, and enum-variant constructors. `src/ast/mod.rs`, `src/parser/mod.rs`
+  (`try_parse_type_arg_call`), `src/checker/mod.rs` (`seed_targs`/`name_is_generic`); golden
+  `examples/explicit_type_args.chz`. Accepted tradeoff: `arr[identVar](x)` (index-then-call with a name
+  subscript) now parses as a type-arg call and the checker errors — use a temp binding.
 - ~~**`?` inside a closure isn't checked against the closure's return type**~~ ✅ **FIXED.** Was
   type-unsound: `infer_try` read `self.current_ret` (the enclosing *function*'s return), but
   `infer_closure` never set `current_ret` for the closure body, so a `?` in a closure validated
@@ -442,7 +448,8 @@ runner, doc comments + docgen.
   `?` in a non-`Result`/`Option` closure is now rejected at type-check; a `Result`-returning closure's
   `?` is validated like a named fn's. `src/checker/mod.rs` (`infer_closure`).
 
-**Recommended next:** Tier 1, Tier 2, and Tier 3 panic recovery (M11) are shipped. The highest-leverage
-remaining Tier 3 work is the **iterator protocol** (user structs iterable in `for`; lazy/generator
-sequences), then **match guards** (`pattern if cond:`) + **range patterns**. The closure-`?`
-soundness fix above is a small, high-value cleanup worth doing first.
+**Recommended next:** Tier 1, Tier 2, and Tier 3 panic recovery (M11) are shipped, and the
+"known fragilities" tech debt is now cleared (dup type-param, nested-set parity, explicit call-site
+type args, closure-`?` soundness). The highest-leverage remaining Tier 3 work is the **iterator
+protocol** (user structs iterable in `for`; lazy/generator sequences), then **match guards**
+(`pattern if cond:`) + **range patterns**.

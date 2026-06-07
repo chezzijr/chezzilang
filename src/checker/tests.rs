@@ -107,6 +107,63 @@ fn unbounded_generic_passthrough_ok() {
     ok("fn first[T](a: T, b: T) -> T:\n    return a\nx := first(1, 2)\ny := first(\"a\", \"b\")\n");
 }
 
+// ===== explicit call-site type arguments (`max[int](…)`) =====
+
+const MAX_FN: &str = "fn max[T: Comparable](a: T, b: T) -> T:\n    return a\n";
+
+#[test]
+fn explicit_type_args_fn_ok() {
+    // Pin T=int explicitly; result is int, so an int-typed binding is fine.
+    ok(&format!("{MAX_FN}x: int = max[int](3, 7)\n"));
+}
+
+#[test]
+fn explicit_type_args_pin_result_type() {
+    // `max[int]` returns int → a str binding must be rejected (proves the pin flows to the return).
+    rejects(&format!("{MAX_FN}x: str = max[int](3, 7)\n"), "cannot assign int");
+}
+
+#[test]
+fn explicit_type_args_mismatch_rejected() {
+    // T pinned to str, but the args are int → argument type error.
+    rejects(&format!("{MAX_FN}x := max[str](3, 7)\n"), "expected str");
+}
+
+#[test]
+fn explicit_type_args_wrong_count_rejected() {
+    rejects(&format!("{MAX_FN}x := max[int, int](3, 7)\n"), "expects 1 type argument");
+}
+
+#[test]
+fn explicit_type_args_on_non_generic_rejected() {
+    rejects(
+        "fn inc(a: int) -> int:\n    return a + 1\nx := inc[int](3)\n",
+        "takes no type arguments",
+    );
+}
+
+#[test]
+fn explicit_type_args_struct_ok() {
+    let src = "\
+struct Pair[A, B]:
+    a: A
+    b: B
+p := Pair[int, str](1, \"a\")
+";
+    ok(src);
+}
+
+#[test]
+fn explicit_type_args_struct_mismatch_rejected() {
+    let src = "\
+struct Pair[A, B]:
+    a: A
+    b: B
+p := Pair[str, str](1, \"a\")
+";
+    rejects(src, "expected str");
+}
+
 #[test]
 fn ordering_on_comparable_struct_directly_ok() {
     ok(&format!("{POINT}b := Point(1, 2) < Point(3, 4)\n"));

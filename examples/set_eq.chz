@@ -1,0 +1,22 @@
+# examples/set_eq.chz — set equality is order-independent, even when a set is NESTED inside a
+# struct or list. Top-level `set ==` was already unordered on both engines; this pins the nested
+# case (parity tech-debt fix). A set built in a different insertion order is still `==`.
+
+struct Tags:
+    name: str
+    ids: set[int]
+
+# Top-level: unordered.
+print({1, 2, 3} == {3, 2, 1})                 # true
+print(set([1, 2]) == set([2, 1, 2]))          # true (dedup + unordered)
+
+# Nested in a struct: the field set compares unordered.
+a := Tags("a", set([1, 2, 3]))
+b := Tags("a", set([3, 2, 1]))
+c := Tags("a", set([1, 2]))
+print(a == b)                                 # true
+print(a == c)                                 # false (different members)
+
+# Nested in a list.
+print([set([1, 2])] == [set([2, 1])])         # true
+print([{1, 2}, {3, 4}] == [{2, 1}, {4, 3}])   # true

@@ -192,14 +192,18 @@
              | <mulExpr> "STAR" <unary> | <mulExpr> "SLASH" <unary> | <mulExpr> "PERCENT" <unary>
 <unary>    ::= <postfix> | "NOT" <unary> | "MINUS" <unary>
 
-# postfix chain: calls, field access, indexing, the `?` try operator, and the scoped
-# `.decode[Type](arg)` type-argument call form (JSON decode — the only call with a type argument).
+# postfix chain: calls, field access, indexing, the `?` try operator, explicit call-site type
+# arguments `name[Type, …](args)` on a (generic) name, and the scoped `.decode[Type](arg)` form
+# (JSON decode). The `name[types](` form is parsed speculatively — only when the callee is a bare
+# IDENT and the `[types](` shape is present; otherwise `LBRACKET … RBRACKET` is plain indexing.
 <postfix> ::= <primary>
             | <postfix> "LPAREN" "RPAREN"
             | <postfix> "LPAREN" <exprList> "RPAREN"
             | <postfix> "DOT" "IDENT"
             | <postfix> "DOT" "INT"
             | <postfix> "LBRACKET" <expr> "RBRACKET"
+            | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
+            | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <exprList> "RPAREN"
             | <postfix> "DOT" "IDENT" "LBRACKET" <type> "RBRACKET" "LPAREN" <expr> "RPAREN"
             | <postfix> "QUESTION"
 

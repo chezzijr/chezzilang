@@ -10,6 +10,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **Tech-debt sweep — `gaps.md` "Known fragilities" cleared.** ✅ DONE. The three remaining open
+> items landed TDD, both engines in lockstep, full suite + conformance green (874 tests).
+> - ✅ **Dup generic type param `[T, T]`** rejected at parse — one check in `parse_type_params`
+>   (covers `fn`/`struct`/`enum`); `duplicate type parameter '<name>'`. Test
+>   `duplicate_type_param_rejected`.
+> - ✅ **Nested `set` equality parity** — interp `SetData::eq` made order-independent (via
+>   `values_equal`), mirroring the VM; a set nested in a struct/list now compares equal regardless of
+>   insertion order on both engines. Golden `examples/set_eq.chz`, parity test
+>   `nested_set_equality_parity`.
+> - ✅ **Explicit call-site type args `name[T,…](…)`** — `ExprKind::Call.type_args`; parser
+>   speculative steal on a bare-name callee (`try_parse_type_arg_call`, mirrors `.decode[T]()`;
+>   `fns[0](x)` stays index+call); checker seeds the subst map (`seed_targs`/`name_is_generic`),
+>   inference fills the rest. Type-erased runtime. Works for generic fns/structs/enum-variants.
+>   Grammar + conformance updated. Golden `examples/explicit_type_args.chz`, 7 checker units + 2
+>   parser units.
+
 > **M11 — Tier 3: panic recovery + Go-style errors** (`gaps.md` Tier 3). 🟦 IN PROGRESS. Plan:
 > `~/.claude/plans/see-past-commits-docs-fluttering-turing.md`. Staged A→B (errors first, then the
 > recovery boundary), each TDD + commit.
@@ -585,6 +601,11 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 
 ### Ideas — NOT scheduled (record-only)
 
+- **Future directions brainstorm** — `defer`, a non-Go (single-thread cooperative) concurrency
+  model, missing scripting features (comprehensions, slicing, iterators/generators, variadic/default
+  args, …), and VM/GC optimizations (superinstructions, inline caching, NaN-boxing, …) are written
+  up in **[`docs/future.md`](docs/future.md)**. Opinionated + speculative; promote into `gaps.md`
+  when scheduled.
 - **Native FFI / Rust-library bindings** — let Chezzi call into Rust libs (bootstrap the ecosystem
   instead of rewriting everything in Chezzi). Design sketch lives in `docs/spec.md` → *Standard
   library* → "Future idea — native FFI": `NativeFn` value + a `Host` trait (write a binding once,

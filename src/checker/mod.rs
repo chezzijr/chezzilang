@@ -1614,7 +1614,9 @@ impl Checker {
                 self.expect_int(end, "range bound");
                 Ty::list(Ty::Int)
             }
-            ExprKind::Call { callee, args } => self.infer_call(callee, args, expr.span),
+            ExprKind::Call { callee, args, type_args } => {
+                self.infer_call(callee, args, type_args, expr.span)
+            }
             ExprKind::Field { obj, name } => self.infer_field(obj, name),
             ExprKind::Index { obj, index } => self.infer_index(obj, index),
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
@@ -2082,18 +2084,29 @@ impl Checker {
 
     // ===== calls =====
 
-    fn infer_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Ty {
-        // Method call: `obj.method(args)`.
+    fn infer_call(&mut self, callee: &Expr, args: &[Expr], type_args: &[Type], span: Span) -> Ty {
+        // Explicit call-site type arguments `name[T, …](…)`. Resolved once here; only generic
+        // by-name calls (fn / struct / variant constructors) can consume them.
+        let targs: Vec<Ty> = type_args.iter().map(|t| self.resolve_type(t, span)).collect();
+        // Method call: `obj.method(args)`. The parser never attaches type args to a method callee.
         if let ExprKind::Field { obj, name } = &callee.kind {
             return self.infer_method_call(obj, name, args, span);
         }
         if let ExprKind::Ident(name) = &callee.kind {
             // Shadowing local (e.g. a closure bound to a variable) wins over a global of the same name.
             if self.lookup(name).is_none()
-                && let Some(ty) = self.infer_named_call(name, args, span)
+                && let Some(ty) = self.infer_named_call(name, args, &targs, span)
             {
                 return ty;
             }
+        }
+        // A value-call (closure / arbitrary expr) cannot take explicit type arguments.
+        if !targs.is_empty() {
+            let label = match &callee.kind {
+                ExprKind::Ident(n) => format!("'{n}'"),
+                _ => "this expression".to_string(),
+            };
+            self.error(span, format!("{label} takes no type arguments"));
         }
         // Fall back: the callee is an arbitrary expression; it must evaluate to a function.
         let callee_ty = self.infer(callee);
@@ -2120,7 +2133,17 @@ impl Checker {
 
     /// Resolve a by-name call (builtin / constructor / variant / global fn). Returns `None` if
     /// `name` is none of those, so the caller can treat it as a value-call.
-    fn infer_named_call(&mut self, name: &str, args: &[Expr], span: Span) -> Option<Ty> {
+    fn infer_named_call(&mut self, name: &str, args: &[Expr], targs: &[Ty], span: Span) -> Option<Ty> {
+        // Explicit call-site type arguments are only meaningful on a *generic* user fn / struct /
+        // enum-variant constructor. Reject them on anything else (builtins, non-generic decls)
+        // before the dispatch below, so the seeding logic only has to handle the generic paths.
+        if !targs.is_empty() && !self.name_is_generic(name) {
+            self.error(span, format!("'{name}' takes no type arguments"));
+            for a in args {
+                self.infer(a);
+            }
+            return Some(Ty::Unknown);
+        }
         match name {
             "print" => {
                 for a in args {
@@ -2226,13 +2249,14 @@ impl Checker {
                         self.check_args(name, &field_tys, args, span);
                         return Some(Ty::strukt(name.to_string()));
                     }
-                    // Generic struct: infer its type arguments by unifying the declared field types
-                    // (which contain the struct's `Ty::Param`s) against the argument types.
+                    // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
+                    // when given, else are inferred by unifying the declared field types (which
+                    // contain the struct's `Ty::Param`s) against the argument types.
                     let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
                     if arg_tys.len() != field_tys.len() {
                         self.check_arity(name, field_tys.len(), args, span);
                     }
-                    let mut sub = HashMap::new();
+                    let mut sub = self.seed_targs(name, &tps, targs, span);
                     for (decl, actual) in field_tys.iter().zip(&arg_tys) {
                         unify(decl, actual, &mut sub);
                     }
@@ -2267,14 +2291,15 @@ impl Checker {
                         self.check_args(name, &v.payload, args, span);
                         return Some(Ty::Enum(v.enum_name, Vec::new()));
                     }
-                    // Generic enum: infer the enum's type arguments by unifying the variant's
+                    // Generic enum: type arguments come from explicit call-site args
+                    // (`Node[int](…)`) when given, else are inferred by unifying the variant's
                     // declared payload types (which contain the enum's `Ty::Param`s) against the
                     // argument types, then check each argument against the substituted payload.
                     let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
                     if arg_tys.len() != v.payload.len() {
                         self.check_arity(name, v.payload.len(), args, span);
                     }
-                    let mut sub = HashMap::new();
+                    let mut sub = self.seed_targs(name, &tps, targs, span);
                     for (decl, actual) in v.payload.iter().zip(&arg_tys) {
                         unify(decl, actual, &mut sub);
                     }
@@ -2310,7 +2335,7 @@ impl Checker {
                     // A generic function: infer its type parameters from the arguments, enforce
                     // bounds, and substitute into the return type.
                     if !sig.type_params.is_empty() {
-                        return Some(self.infer_generic_call(name, &sig, args, span));
+                        return Some(self.infer_generic_call(name, &sig, args, targs, span));
                     }
                     self.check_args(name, &sig.params, args, span);
                     return Some(sig.ret);
@@ -2337,7 +2362,7 @@ impl Checker {
                     // A generic module function (`cmp.max`): infer its type parameters from the
                     // arguments, enforce bounds, and substitute into the return type.
                     if !fsig.type_params.is_empty() {
-                        return self.infer_generic_call(method, &fsig, args, span);
+                        return self.infer_generic_call(method, &fsig, args, &[], span);
                     }
                     self.check_args(method, &fsig.params, args, span);
                     return fsig.ret;
@@ -2917,15 +2942,66 @@ impl Checker {
             .is_some_and(|p| p.methods.iter().any(|(n, _)| n == method))
     }
 
+    /// Whether `name` is a *generic* user fn / struct / enum-variant constructor (i.e. one that can
+    /// accept explicit call-site type arguments). Non-generic decls and builtins return `false`.
+    fn name_is_generic(&self, name: &str) -> bool {
+        if let Some(i) = self.structs.get(name) {
+            return !i.type_params.is_empty();
+        }
+        if let Some(v) = self.variants.get(name) {
+            return self.enum_type_params.get(&v.enum_name).is_some_and(|t| !t.is_empty());
+        }
+        if let Some(s) = self.functions.get(name) {
+            return !s.type_params.is_empty();
+        }
+        false
+    }
+
+    /// Seed a substitution map from explicit call-site type arguments, validating their count
+    /// against the declared type parameters. Empty `targs` (the inference-only case) yields an
+    /// empty map. A count mismatch is reported but the overlapping prefix is still seeded so
+    /// inference can recover.
+    fn seed_targs(
+        &mut self,
+        name: &str,
+        tps: &[TypeParam],
+        targs: &[Ty],
+        span: Span,
+    ) -> HashMap<String, Ty> {
+        let mut sub = HashMap::new();
+        if !targs.is_empty() {
+            if targs.len() != tps.len() {
+                self.error(
+                    span,
+                    format!("'{name}' expects {} type argument(s), found {}", tps.len(), targs.len()),
+                );
+            }
+            for (tp, ta) in tps.iter().zip(targs) {
+                sub.insert(tp.name.clone(), ta.clone());
+            }
+        }
+        sub
+    }
+
     /// Type-check a call to a generic function: infer each type parameter from the arguments,
     /// enforce the declared bounds, and substitute into the return type.
-    fn infer_generic_call(&mut self, name: &str, sig: &FnSig, args: &[Expr], span: Span) -> Ty {
+    fn infer_generic_call(
+        &mut self,
+        name: &str,
+        sig: &FnSig,
+        args: &[Expr],
+        targs: &[Ty],
+        span: Span,
+    ) -> Ty {
         if args.len() != sig.params.len() {
             self.check_arity(name, sig.params.len(), args, span);
         }
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
-        // Infer the type-parameter substitution from positional arguments.
-        let mut subst_map: HashMap<String, Ty> = HashMap::new();
+        // Explicit call-site type arguments (`max[int](…)`) seed the substitution; remaining (or
+        // all, when none given) parameters are inferred from positional arguments. `unify` only
+        // binds a parameter that isn't already in the map, so explicit args take precedence and a
+        // conflicting argument is caught by the per-argument check below.
+        let mut subst_map: HashMap<String, Ty> = self.seed_targs(name, &sig.type_params, targs, span);
         for (decl, actual) in sig.params.iter().zip(&arg_tys) {
             unify(decl, actual, &mut subst_map);
         }

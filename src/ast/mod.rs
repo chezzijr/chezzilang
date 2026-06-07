@@ -262,10 +262,14 @@ pub enum ExprKind {
         start: Box<Expr>,
         end: Box<Expr>,
     },
-    /// `callee(args…)`
+    /// `callee(args…)`, optionally with explicit call-site type arguments `callee[T, …](args…)`.
+    /// `type_args` is empty for an ordinary call; non-empty only for `name[Types](…)` where `name`
+    /// is a (generic) function / struct / enum-variant constructor. Type-erased at runtime — the
+    /// engines ignore `type_args`; only the checker consumes them (to pin inference).
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        type_args: Vec<Type>,
     },
     /// `obj.name`
     Field {

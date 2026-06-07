@@ -3548,6 +3548,48 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// Tech-debt golden: `examples/explicit_type_args.chz` (explicit call-site type arguments on a
+    /// generic fn / struct / enum-variant constructor) byte-identical VM, interp, and `.expected`.
+    #[test]
+    fn golden_explicit_type_args_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/explicit_type_args.chz");
+        let expected = include_str!("../../examples/explicit_type_args.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Tech-debt golden: `examples/set_eq.chz` (order-independent set equality incl. nested in a
+    /// struct/list) byte-identical on the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_set_eq_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/set_eq.chz");
+        let expected = include_str!("../../examples/set_eq.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Tech-debt parity: a `set` nested inside a struct / list must compare unordered on BOTH
+    /// engines (top-level set `==` already did). Previously the interp's derived `SetData::eq` was
+    /// order-sensitive, so `W(set([1,2,3])) == W(set([3,2,1]))` was `true` on the VM but `false` on
+    /// the interp.
+    #[test]
+    fn nested_set_equality_parity() {
+        let src = "\
+struct W:
+    s: set[int]
+a := W(set([1, 2, 3]))
+b := W(set([3, 2, 1]))
+print(a == b)
+print([set([1, 2])] == [set([2, 1])])
+";
+        let vm = run_capture(src).expect("vm");
+        let interp = crate::interp::run_capture(src).expect("interp");
+        assert_eq!(vm, interp);
+        assert_eq!(vm, "true\ntrue\n");
+    }
+
     #[test]
     fn sort_over_comparable_structs_on_vm() {
         let src = "\

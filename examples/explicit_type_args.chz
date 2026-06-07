@@ -1,0 +1,38 @@
+# examples/explicit_type_args.chz — explicit call-site type arguments `name[T, …](…)`. Type args
+# were previously inference-only; now they can be pinned at the call site for generic functions,
+# struct constructors, and enum-variant constructors. Type-erased: the pinned form runs identically
+# to the inferred form (the two columns below match).
+
+fn id[T](x: T) -> T:
+    return x
+
+fn max[T: Comparable](a: T, b: T) -> T:
+    if a < b:
+        return b
+    return a
+
+struct Pair[A, B]:
+    a: A
+    b: B
+
+enum Box[T]:
+    Empty
+    Full(T)
+
+# Generic function: explicit vs inferred.
+print(id[int](42))            # 42
+print(id(42))                 # 42
+print(max[int](3, 7))         # 7
+print(max(3, 7))              # 7
+print(max[str]("ab", "cd"))   # cd
+
+# Generic struct constructor: pin both params.
+p := Pair[int, str](1, "one")
+print(p.a)                    # 1
+print(p.b)                    # one
+
+# Generic enum-variant constructor: pin the enum's type arg on the payload-carrying variant.
+b := Full[int](9)
+match b:
+    Empty: print("empty")
+    Full(n): print(n)         # 9

@@ -761,7 +761,8 @@ impl Compiler {
                     span: expr.span,
                 });
             }
-            ExprKind::Call { callee, args } => self.compile_call(fc, callee, args, expr.span)?,
+            // `type_args` are type-erased — the compiler never sees them (checker already used them).
+            ExprKind::Call { callee, args, .. } => self.compile_call(fc, callee, args, expr.span)?,
             ExprKind::Field { obj, name } => {
                 self.compile_expr(fc, obj)?;
                 fc.emit(Op::GetField(name.clone()), expr.span);
@@ -787,6 +788,7 @@ impl Compiler {
                             span: expr.span,
                         }),
                         args: vec![(**arg).clone()],
+                        type_args: Vec::new(),
                     },
                     span: expr.span,
                 };

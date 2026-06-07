@@ -154,12 +154,19 @@ impl SetData {
 }
 
 impl PartialEq for SetData {
-    /// Order-sensitive element comparison (ignoring cached hashes / index) — matches the derived
-    /// `Vec` equality the old assoc-list set had. Order-*independent* set equality lives in
-    /// `interp::values_equal`'s dedicated `Set` arm.
+    /// Order-*independent* element comparison (ignoring cached hashes / index): equal iff the same
+    /// size and every element of `self` is a member of `o`. Mirrors the VM's `values_equal` Set arm
+    /// so a set nested inside a struct/list — which reaches here via `Value`'s derived `PartialEq` —
+    /// compares the same on both engines. (Top-level set `==` goes through `interp::values_equal`'s
+    /// dedicated `Set` arm, which is identical.) Elements are compared with `values_equal` for the
+    /// same numeric/cross-engine semantics; no recursion through `SetData::eq` (that arm reads
+    /// `.entries` directly).
     fn eq(&self, o: &Self) -> bool {
         self.entries.len() == o.entries.len()
-            && self.entries.iter().zip(&o.entries).all(|((_, a), (_, b))| a == b)
+            && self
+                .entries
+                .iter()
+                .all(|(_, a)| o.entries.iter().any(|(_, b)| super::values_equal(a, b)))
     }
 }
 
