@@ -1145,12 +1145,19 @@ impl Parser {
                             self.advance(); // '['
                             let index = self.parse_expr()?;
                             self.expect(&Token::RBracket)?;
-                            Expr {
-                                kind: ExprKind::Index {
-                                    obj: Box::new(e),
-                                    index: Box::new(index),
+                            // A `..` range subscript is a slice; anything else is a plain index.
+                            match index.kind {
+                                ExprKind::Range { start, end } => Expr {
+                                    kind: ExprKind::Slice { obj: Box::new(e), start, end },
+                                    span,
                                 },
-                                span,
+                                _ => Expr {
+                                    kind: ExprKind::Index {
+                                        obj: Box::new(e),
+                                        index: Box::new(index),
+                                    },
+                                    span,
+                                },
                             }
                         }
                     }
@@ -1975,6 +1982,29 @@ mod tests {
             panic!()
         };
         assert!(matches!(e.kind, ExprKind::Index { .. }));
+    }
+
+    #[test]
+    fn index_vs_slice() {
+        // xs[i] → Index (plain subscript)
+        let StmtKind::Expr(e) = only("xs[i]\n") else { panic!() };
+        assert!(matches!(e.kind, ExprKind::Index { .. }));
+        // m["k"] → Index (non-int key still plain index)
+        let StmtKind::Expr(e) = only("m[\"k\"]\n") else { panic!() };
+        assert!(matches!(e.kind, ExprKind::Index { .. }));
+        // xs[1..3] → Slice with int bounds
+        let StmtKind::Expr(e) = only("xs[1..3]\n") else { panic!() };
+        let ExprKind::Slice { start, end, .. } = e.kind else {
+            panic!("expected Slice, got {:?}", e.kind)
+        };
+        assert!(matches!(start.kind, ExprKind::Int(1)));
+        assert!(matches!(end.kind, ExprKind::Int(3)));
+        // nested xs[a..b][0] → Index(Slice)
+        let StmtKind::Expr(e) = only("xs[a..b][0]\n") else { panic!() };
+        let ExprKind::Index { obj, .. } = e.kind else {
+            panic!("expected Index, got {:?}", e.kind)
+        };
+        assert!(matches!(obj.kind, ExprKind::Slice { .. }));
     }
 
     #[test]

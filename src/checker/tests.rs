@@ -3104,3 +3104,171 @@ main()
 ";
     rejects(src, "expected return type Option[T], found Option[str]");
 }
+
+// ===== slicing + Index/IndexSet/Slice protocols =====
+
+#[test]
+fn slice_of_list_types_as_list() {
+    ok("xs := [1, 2, 3, 4]\nys: list[int] = xs[1..3]\n");
+    rejects(
+        "xs := [1, 2, 3, 4]\nys: str = xs[1..3]\n",
+        "cannot assign list[int] to variable of type str",
+    );
+}
+
+#[test]
+fn slice_of_str_types_as_str() {
+    ok("s := \"hello\"\nt: str = s[0..2]\n");
+    rejects("s := \"hello\"\nn: int = s[0..2]\n", "cannot assign str to variable of type int");
+}
+
+#[test]
+fn slice_bounds_must_be_int() {
+    rejects("xs := [1, 2, 3]\nys := xs[\"a\"..2]\n", "slice bound must be int, found str");
+    rejects("xs := [1, 2, 3]\nys := xs[0..\"b\"]\n", "slice bound must be int, found str");
+}
+
+#[test]
+fn map_is_not_sliceable() {
+    rejects(
+        "m: map[int, int] = {}\nx := m[0..2]\n",
+        "cannot slice",
+    );
+}
+
+const BUF: &str = "\
+struct Buf:
+    xs: list[int]
+    fn index(self, key: int) -> int:
+        return self.xs[key]
+    fn set_index(self, key: int, val: int):
+        self.xs[key] = val
+    fn slice(self, start: int, end: int) -> Buf:
+        return self
+";
+
+#[test]
+fn struct_index_read_ok() {
+    ok(&format!("{BUF}b := Buf([1, 2, 3])\nn: int = b[0]\n"));
+    rejects(
+        &format!("{BUF}b := Buf([1, 2, 3])\ns: str = b[0]\n"),
+        "cannot assign int to variable of type str",
+    );
+}
+
+#[test]
+fn struct_index_assign_ok() {
+    ok(&format!("{BUF}b := Buf([1, 2, 3])\nb[0] = 9\n"));
+}
+
+#[test]
+fn struct_slice_ok() {
+    ok(&format!("{BUF}b := Buf([1, 2, 3])\nc: Buf = b[0..2]\n"));
+}
+
+#[test]
+fn struct_without_index_rejected() {
+    rejects(
+        "struct Bad:\n    x: int\nb := Bad(1)\nn := b[0]\n",
+        "cannot index into Bad",
+    );
+}
+
+#[test]
+fn struct_without_set_index_assign_rejected() {
+    // Has `index` (read) but no `set_index` — `b[0] = 9` must be rejected.
+    let read_only = "\
+struct RO:
+    xs: list[int]
+    fn index(self, key: int) -> int:
+        return self.xs[key]
+";
+    rejects(
+        &format!("{read_only}b := RO([1, 2, 3])\nb[0] = 9\n"),
+        "cannot index-assign into RO",
+    );
+}
+
+#[test]
+fn struct_without_slice_rejected() {
+    let no_slice = "\
+struct NS:
+    xs: list[int]
+    fn index(self, key: int) -> int:
+        return self.xs[key]
+";
+    rejects(
+        &format!("{no_slice}b := NS([1, 2, 3])\nc := b[0..2]\n"),
+        "cannot slice NS",
+    );
+}
+
+#[test]
+fn generic_over_index_protocol_ok() {
+    // A struct AND a built-in list both satisfy `Index[int, V]`; the bound recovers `V`.
+    ok(&format!(
+        "{BUF}fn first[C: Index[int, V], V](c: C) -> V:\n    return c[0]\n\
+         b := Buf([1, 2, 3])\nn: int = first(b)\nm: int = first([10, 20])\n"
+    ));
+}
+
+#[test]
+fn index_assign_requires_index_not_just_set_index() {
+    // IndexSet requires BOTH `index` and `set_index` (Rust IndexMut: Index). A struct with only
+    // `set_index` must NOT be index-assignable — otherwise a compound `b[k] += v` (which reads via
+    // `index` first) type-checks then crashes at runtime.
+    let set_only = "\
+struct WO:
+    xs: list[int]
+    fn set_index(self, key: int, val: int):
+        self.xs[key] = val
+";
+    rejects(
+        &format!("{set_only}b := WO([1, 2, 3])\nb[0] = 9\n"),
+        "cannot index-assign into WO",
+    );
+}
+
+#[test]
+fn struct_slice_wrong_bound_types_rejected() {
+    // The `Slice` protocol fixes the bounds as `slice(self, int, int)` — both engines pass int
+    // start/end. A `slice` with non-int bounds must NOT count as a valid `Slice` impl (would crash).
+    let bad = "\
+struct BadSlice:
+    xs: list[int]
+    fn slice(self, start: str, end: str) -> int:
+        return self.xs.len()
+";
+    rejects(
+        &format!("{bad}b := BadSlice([1, 2, 3])\nc := b[0..2]\n"),
+        "cannot slice BadSlice",
+    );
+}
+
+#[test]
+fn generic_indexset_param_assign_ok() {
+    // A bounded `[C: IndexSet[int, int]]` param is index-assignable inside the generic body.
+    ok(&format!(
+        "{BUF}fn put[C: IndexSet[int, int]](c: C):\n    c[0] = 42\n\
+         b := Buf([1, 2, 3])\nput(b)\n"
+    ));
+}
+
+#[test]
+fn generic_indexset_rejects_str() {
+    // `str` is immutable — it satisfies `Index` but NOT `IndexSet`, so a generic bounded by
+    // `IndexSet` must reject a str argument.
+    rejects(
+        &format!("{BUF}fn put[C: IndexSet[int, int]](c: C):\n    c[0] = 42\nput(\"hi\")\n"),
+        "does not satisfy IndexSet",
+    );
+}
+
+#[test]
+fn generic_over_slice_protocol_ok() {
+    // A struct AND a built-in list both satisfy `Slice[R]`; the bound recovers `R`.
+    ok(&format!(
+        "{BUF}fn mid[C: Slice[R], R](c: C) -> R:\n    return c[1..2]\n\
+         b := Buf([1, 2, 3])\nc: Buf = mid(b)\nd: list[int] = mid([1, 2, 3])\n"
+    ));
+}

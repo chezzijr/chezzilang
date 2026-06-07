@@ -218,7 +218,7 @@
             | <postfix> "LPAREN" <argList> "RPAREN"
             | <postfix> "DOT" "IDENT"
             | <postfix> "DOT" "INT"
-            | <postfix> "LBRACKET" <expr> "RBRACKET"
+            | <postfix> "LBRACKET" <expr> "RBRACKET"   # plain index, or a slice when <expr> is a `..` range
             | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
             | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <exprList> "RPAREN"
             | <postfix> "DOT" "IDENT" "LBRACKET" <type> "RBRACKET" "LPAREN" <expr> "RPAREN"

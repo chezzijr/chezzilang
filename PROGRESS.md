@@ -10,6 +10,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **M15 — Slicing + the `Index`/`IndexSet`/`Slice` protocols.** ✅ DONE (TDD, full suite +
+> conformance green — 1013 tests, both engines parity-tested). `xs[1..3]` / `s[0..2]` slice
+> half-open + bounds-clamped, reusing the existing `..` range (no new lexer token). The earlier
+> "hardcode list/str, defer the protocol" plan (`gaps.md`) was **reversed**: this landed the
+> deliberate **pair** as prebuilt structural protocols — `Index[K, V]` (read `obj[k]` via
+> `index(self, key) -> V`), `IndexSet[K, V]` (mutable `obj[k] = v` via `set_index`; requires `index`
+> too), and `Slice[R]` (`obj[a..b]` via `slice(self, int, int) -> R`). Built-in `list`/`map`/`str`
+> conform **intrinsically** (mirroring `Iterator[T]`; `str` is read-only — no `IndexSet`), user structs
+> conform **structurally**. AST: new `ExprKind::Slice { obj, start, end }` (parser emits it when a `[…]`
+> subscript is a `..` range; `src/ast`, `src/parser`). Checker (`src/checker/mod.rs`): the three
+> protocols registered in `prebuilt_protocols` + `is_reserved_protocol`; intrinsic conformance in
+> `satisfies_args`; helpers `index_kv`/`index_set_kv`/`slice_result`; `infer_index` + new `infer_slice`
+> handle struct and bounded-`Ty::Param` receivers; `check_assign` dispatches struct `set_index`; and
+> `recover_index_args` recovers `K`/`V`/`R` at call sites (the `Iterator[T]` recovery generalized — so
+> `fn first[C: Index[int, V], V](c)` works over a list AND a struct). Engines dispatch by runtime
+> operand kind (no type info threaded to the compiler), mirroring operator overloading: interp
+> `eval_slice` + `call_struct_method`; VM `Op::GetSlice` + `dispatch_index_method`, with the sliced
+> list's element handles GC-rooted across the alloc. `examples/slicing.chz` (golden, both engines).
+> Deferred: omitted bounds (`xs[..n]`), inclusive `..=`, negative indices, and arg *recovery* for
+> general user-defined parameterized protocols.
+
 > **M14 — Method-level type parameters.** ✅ DONE (TDD, full suite + conformance green — 961 tests).
 > A struct method may now introduce its **own** fresh type params `[U]` beyond the struct's `[T]`
 > (`fn map_to[U](self, f: fn(T) -> U) -> U`). `U` is inferred from the call arguments, declared

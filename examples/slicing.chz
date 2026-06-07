@@ -1,0 +1,35 @@
+# Slicing + the Index / IndexSet / Slice protocols.
+# Built-in list/map/str and user structs all share one indexing vocabulary.
+
+# Built-in list & string slicing — half-open `start..end`, bounds-clamped.
+xs := [1, 2, 3, 4, 5]
+print(xs[1..3])        # [2, 3]
+print(xs[1..99])       # [2, 3, 4, 5]  (end clamped to len)
+print(xs[2..1])        # []            (start > end → empty)
+print("hello"[0..2])   # he
+
+# A custom collection satisfies the protocols structurally: `index` (read), `set_index`
+# (write), and `slice`. A `Ring` wraps its index around the backing list.
+struct Ring:
+    data: list[int]
+    fn index(self, key: int) -> int:
+        return self.data[key % self.data.len()]
+    fn set_index(self, key: int, val: int):
+        self.data[key % self.data.len()] = val
+    fn slice(self, start: int, end: int) -> list[int]:
+        return self.data[start..end]
+
+r := Ring([10, 20, 30])
+print(r[0])            # 10
+print(r[3])            # 10   (wraps: 3 % 3 == 0)
+r[1] = 99
+print(r[1])            # 99
+print(r[0..2])         # [10, 99]
+
+# A generic bounded by `Index[int, V]` works over the built-in list AND the user struct,
+# recovering `V` from each argument.
+fn first[C: Index[int, V], V](c: C) -> V:
+    return c[0]
+
+print(first(xs))       # 1
+print(first(r))        # 10

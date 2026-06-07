@@ -143,6 +143,8 @@ pub enum Op {
     GetField(String),
     /// Stack `[obj, index]` (index already `AsInt`-checked).
     GetIndex,
+    /// Stack `[obj, start, end]` → `[slice]` — half-open slice of a list/str, or a struct's `slice`.
+    GetSlice,
     /// Stack `[obj, value]` → `[]` — mutate a struct field in place.
     SetField(String),
     /// Stack `[obj, index, value]` (index already `AsInt`-checked) → `[]` — mutate a list element.

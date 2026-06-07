@@ -313,6 +313,13 @@ pub enum ExprKind {
         obj: Box<Expr>,
         index: Box<Expr>,
     },
+    /// `obj[start..end]` — half-open slice. Emitted when the subscript is a `..` range (distinct
+    /// from `Index` so the `Slice` protocol dispatches separately from `Index`).
+    Slice {
+        obj: Box<Expr>,
+        start: Box<Expr>,
+        end: Box<Expr>,
+    },
     /// postfix `expr?` — error propagation.
     Try(Box<Expr>),
     /// `module.decode[Type](arg)` — type-directed JSON decode (M8). `obj` is the json-module

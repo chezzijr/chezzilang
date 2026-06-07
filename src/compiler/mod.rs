@@ -945,6 +945,12 @@ impl Compiler {
                 // `GetIndex` validates int-ness in its list/str arm at runtime.
                 fc.emit(Op::GetIndex, expr.span);
             }
+            ExprKind::Slice { obj, start, end } => {
+                self.compile_expr(fc, obj)?;
+                self.compile_expr(fc, start)?;
+                self.compile_expr(fc, end)?;
+                fc.emit(Op::GetSlice, expr.span);
+            }
             ExprKind::Try(inner) => {
                 self.compile_expr(fc, inner)?;
                 fc.emit(Op::Try, expr.span);

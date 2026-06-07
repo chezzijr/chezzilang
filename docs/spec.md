@@ -236,6 +236,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M12** | Tier-3 ergonomics (part) | **Iterator protocol** (user structs with `next(self) -> Option[T]` iterable in `for`, lazy); **match guards** (`pattern if cond:`) + int **range patterns** (`1..10:`). Both engines parity-tested |
 | ✅ **M13** | `Iterator[T]` protocol | The language's first **parameterized** protocol bound: `[S: Iterator[T], T]` accepts any iterable (built-ins intrinsically, structs via `next`) and recovers element type `T`. Lazy adapters (Take/Mapped) replace `yield` (a non-goal). Checker/parser/grammar only; both engines parity-tested |
 | ✅ **M14** | Generics depth | **Method-level type params** (a method's own `[U]`, inferred at call) + **user-defined parameterized protocols** (`protocol Container[T]`, structural conformance with concrete-arg bounds `[X: Container[int]]`) — the special-cased `Iterator[T]` generalized. Checker/parser/grammar only; both engines parity-tested |
+| ✅ **M15** | Slicing + indexing protocols | `xs[1..3]` / `s[0..2]` (half-open, bounds-clamped, reusing `..`); prebuilt **`Index[K, V]` + `IndexSet[K, V]` + `Slice[R]`** structural protocols — built-in `list`/`map`/`str` conform intrinsically, user structs via `index`/`set_index`/`slice`, so `custom[k]`/`custom[k]=v`/`custom[a..b]` work and a generic can be bounded by `Index[int, V]`. Both engines parity-tested |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional) |
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c** — see the *Standard library* note

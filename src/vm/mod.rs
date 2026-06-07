@@ -566,6 +566,7 @@ impl Vm {
             }
             Op::GetField(name) => self.get_field(name, span)?,
             Op::GetIndex => self.get_index(span)?,
+            Op::GetSlice => self.get_slice(span)?, // Phase 4
             Op::SetField(name) => self.set_field(name, span)?,
             Op::SetIndex => self.set_index(span)?,
             Op::Dup => {
@@ -2129,6 +2130,89 @@ impl Vm {
         }
     }
 
+    /// `obj[start..end]` — bounds-clamped half-open copy of a list/str, or a struct's `slice`.
+    fn get_slice(&mut self, span: Span) -> Result<(), RuntimeError> {
+        let end = self.pop();
+        let start = self.pop();
+        let obj = self.pop();
+        let s = match start {
+            Value::Int(n) => n,
+            other => return Err(self.err(format!("expected int, found {}", self.type_name(other)), span)),
+        };
+        let e = match end {
+            Value::Int(n) => n,
+            other => return Err(self.err(format!("expected int, found {}", self.type_name(other)), span)),
+        };
+        let Value::Obj(h) = obj else {
+            return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span));
+        };
+        // Snapshot the result kind without holding the heap borrow across the alloc / method call.
+        enum Sliced {
+            List(Vec<Value>),
+            Str(String),
+            Struct,
+        }
+        let sliced = match self.heap.get(h) {
+            Obj::List(items) => {
+                let (lo, hi) = clamp_range(s, e, items.len());
+                Sliced::List(items[lo..hi].to_vec())
+            }
+            Obj::Str(string) => {
+                let chars: Vec<char> = string.chars().collect();
+                let (lo, hi) = clamp_range(s, e, chars.len());
+                Sliced::Str(chars[lo..hi].iter().collect())
+            }
+            Obj::Struct { .. } => Sliced::Struct,
+            _ => return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span)),
+        };
+        match sliced {
+            Sliced::List(slice) => {
+                // Root the source across the alloc: the new list shares its element handles, which
+                // are otherwise unreachable (the source was popped) and could be collected by a GC.
+                self.push(obj);
+                let nh = self.heap.alloc(Obj::List(slice));
+                self.pop();
+                self.push(Value::Obj(nh));
+            }
+            Sliced::Str(sub) => {
+                let nh = self.heap.alloc(Obj::Str(sub.into_boxed_str()));
+                self.push(Value::Obj(nh));
+            }
+            Sliced::Struct => {
+                let v = self.dispatch_index_method(h, "slice", vec![obj, Value::Int(s), Value::Int(e)], span)?;
+                self.push(v);
+            }
+        }
+        Ok(())
+    }
+
+    /// Dispatch an `Index`/`IndexSet`/`Slice` protocol method (`index`/`set_index`/`slice`) on a
+    /// struct heap object. `args` already includes the receiver as its first element (bound to
+    /// `self`). Mirrors `struct_arith`'s frame dispatch; the args are rooted as the new frame's locals.
+    fn dispatch_index_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let Obj::Struct { name, .. } = self.heap.get(h) else { unreachable!() };
+        let name = name.clone();
+        let def = self
+            .program
+            .structs
+            .get(name.as_ref())
+            .cloned()
+            .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
+        let proto = *def
+            .methods
+            .get(method)
+            // Wording byte-identical to `interp::call_struct_method` (the engines parity-test stdout).
+            .ok_or_else(|| self.err(format!("struct '{name}' has no method '{method}'"), span))?;
+        let home = self.module_objs[def.module_idx];
+        self.run_proto(proto, home, None, args, true, false, span)
+    }
+
     fn get_index(&mut self, span: Span) -> Result<(), RuntimeError> {
         // The index is NOT pre-validated as int (the `AsInt` was removed so map keys can be
         // str/bool): pop it as a Value and validate per object kind.
@@ -2180,6 +2264,12 @@ impl Vm {
                     None => Err(self.err("key not found".to_string(), span)),
                 }
             }
+            // A struct satisfying `Index` dispatches `obj[k]` to `index(self, k)`.
+            Obj::Struct { .. } => {
+                let v = self.dispatch_index_method(h, "index", vec![obj, key], span)?;
+                self.push(v);
+                Ok(())
+            }
             _ => Err(self.err(format!("cannot index {}", self.type_name(obj)), span)),
         }
     }
@@ -2224,6 +2314,11 @@ impl Vm {
                 Some(i) => m.entries[i].2 = val,
                 None => m.push(hk, key, val),
             }
+            return Ok(());
+        }
+        // A struct satisfying `IndexSet` dispatches `obj[k] = v` to `set_index(self, k, v)`.
+        if matches!(self.heap.get(h), Obj::Struct { .. }) {
+            self.dispatch_index_method(h, "set_index", vec![obj, key, val], span)?;
             return Ok(());
         }
         let idx = match key {
@@ -2703,6 +2798,16 @@ impl crate::native::Host for VmHost<'_> {
 
 fn is_numeric(v: Value) -> bool {
     matches!(v, Value::Int(_) | Value::Float(_))
+}
+
+/// Clamp a half-open `start..end` slice to a length-`len` sequence: both bounds clamp into
+/// `[0, len]`, `start > end` collapses to empty. Returns `(lo, hi)` with `lo <= hi <= len`.
+/// Mirrors `interp::clamp_range` (the two engines keep byte-identical slice semantics).
+fn clamp_range(start: i64, end: i64, len: usize) -> (usize, usize) {
+    let len_i = len as i64;
+    let lo = start.clamp(0, len_i) as usize;
+    let hi = end.clamp(0, len_i) as usize;
+    (lo, hi.max(lo))
 }
 
 fn as_f64(v: Value) -> f64 {
@@ -3467,6 +3572,17 @@ main()";
     fn golden_set_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/set.chz");
         let expected = include_str!("../../examples/set.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Slicing golden: `examples/slicing.chz` (list/str slicing + the `Index`/`IndexSet`/`Slice`
+    /// protocols on a struct + a generic over both) byte-identical on the VM, interp, and `.expected`.
+    #[test]
+    fn golden_slicing_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/slicing.chz");
+        let expected = include_str!("../../examples/slicing.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
@@ -5592,5 +5708,53 @@ main()";
         let src = "t := (\"hi\", [1, 2, 3])\nprint(t.0)\nprint(t.1)\n";
         assert_parity(src);
         assert_eq!(run_capture_stress(src), "hi\n[1, 2, 3]\n", "tuple elements not GC-traced?");
+    }
+
+    // ----- slicing + Index/IndexSet/Slice protocol dispatch (VM ↔ interp parity) -----
+
+    #[test]
+    fn slice_list_and_str_parity() {
+        assert_parity_out("print([1, 2, 3, 4, 5][1..3])\n", "[2, 3]\n");
+        assert_parity_out("print(\"hello\"[0..2])\n", "he\n");
+    }
+
+    #[test]
+    fn slice_clamped_parity() {
+        assert_parity_out("print([1, 2, 3][1..99])\n", "[2, 3]\n");
+        assert_parity_out("print([1, 2, 3][2..1])\n", "[]\n");
+        assert_parity_out("print([1, 2, 3][-1..2])\n", "[1, 2]\n");
+    }
+
+    const BUF_PROG: &str = "\
+struct Buf:
+    xs: list[int]
+    fn index(self, key: int) -> int:
+        return self.xs[key]
+    fn set_index(self, key: int, val: int):
+        self.xs[key] = val
+    fn slice(self, start: int, end: int) -> list[int]:
+        return self.xs[start..end]
+fn main():
+    b := Buf([10, 20, 30])
+    print(b[0])
+    b[1] = 99
+    print(b[1])
+    b[0] += 5
+    print(b[0])
+    print(b[0..2])
+main()";
+
+    #[test]
+    fn struct_index_slice_dispatch_parity() {
+        assert_parity_out(BUF_PROG, "10\n99\n15\n[15, 99]\n");
+    }
+
+    #[test]
+    fn slice_survives_gc_stress() {
+        // The sliced list shares the source's element handles; a GC during the slice alloc must not
+        // collect them. (Source is an inline temporary, unrooted except by the slice path.)
+        let src = "print([1, 2, 3, 4, 5][1..4])\n";
+        assert_parity(src);
+        assert_eq!(run_capture_stress(src), "[2, 3, 4]\n", "slice elements not GC-rooted?");
     }
 }

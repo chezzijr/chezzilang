@@ -324,12 +324,18 @@ impl Interp {
                                 span: expr.span,
                             })
                     }
+                    // A struct satisfying `Index` dispatches `obj[k]` to `index(self, k)`.
+                    Value::Struct { .. } => {
+                        let key = self.eval(index)?;
+                        self.call_struct_method(target.clone(), "index", vec![key], expr.span)
+                    }
                     other => Err(RuntimeError {
                         message: format!("cannot index {}", other.type_name()),
                         span: expr.span,
                     }),
                 }
             }
+            ExprKind::Slice { obj, start, end } => self.eval_slice(obj, start, end, expr.span),
             // `type_args` are type-erased — the interpreter ignores them (checker already used them).
             ExprKind::Call { callee, args, .. } => self.eval_call(callee, args, expr.span),
             ExprKind::Match { scrutinee, arms } => self.eval_match_expr(scrutinee, arms),
@@ -915,6 +921,54 @@ impl Interp {
             })?;
             return self.call_value(member, arg_vals, span);
         }
+        // Anything else (a struct, or an unsupported receiver) goes through the struct-method path,
+        // which dispatches the named method or reports "type … has no method …".
+        self.call_struct_method(receiver, method, arg_vals, span)
+    }
+
+    /// Evaluate `obj[start..end]`: bounds-clamped half-open copy of a list/str, or a struct's
+    /// `slice(self, start, end)`. Kept out of `eval`'s match to keep that frame small (deep recursion).
+    fn eval_slice(
+        &mut self,
+        obj: &Expr,
+        start: &Expr,
+        end: &Expr,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let target = self.eval(obj)?;
+        let s = as_int_val(self.eval(start)?, span)?;
+        let e = as_int_val(self.eval(end)?, span)?;
+        match &target {
+            Value::List(items) => {
+                let items = items.borrow();
+                let (lo, hi) = clamp_range(s, e, items.len());
+                Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(items[lo..hi].to_vec()))))
+            }
+            Value::Str(string) => {
+                let chars: Vec<char> = string.chars().collect();
+                let (lo, hi) = clamp_range(s, e, chars.len());
+                Ok(Value::Str(chars[lo..hi].iter().collect::<String>().into()))
+            }
+            // A struct satisfying `Slice` dispatches `obj[a..b]` to `slice(self, a, b)`.
+            Value::Struct { .. } => {
+                self.call_struct_method(target.clone(), "slice", vec![Value::Int(s), Value::Int(e)], span)
+            }
+            other => {
+                Err(RuntimeError { message: format!("cannot slice {}", other.type_name()), span })
+            }
+        }
+    }
+
+    /// Invoke a struct's named method with an already-evaluated receiver + argument values, binding
+    /// `self` to the receiver. Shared by ordinary method calls and the `Index`/`IndexSet`/`Slice`
+    /// protocol dispatch (`obj[k]` → `index`, `obj[k] = v` → `set_index`, `obj[a..b]` → `slice`).
+    fn call_struct_method(
+        &mut self,
+        receiver: Value,
+        method: &str,
+        arg_vals: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         let Value::Struct { name, .. } = &receiver else {
             return Err(RuntimeError {
                 message: format!("type {} has no method '{method}'", receiver.type_name()),
@@ -2069,6 +2123,28 @@ impl Interp {
                     }
                     return Ok(());
                 }
+                // Struct index-assign dispatches `obj[k] = v` to `set_index(self, k, v)`; a compound
+                // `+=`/`-=` reads the current element via `index` first.
+                if let Value::Struct { .. } = &target_val {
+                    let key = self.eval(index)?;
+                    let new_val = match op {
+                        AssignOp::Eq => self.eval(value)?,
+                        AssignOp::PlusEq | AssignOp::MinusEq => {
+                            let cur = self.call_struct_method(
+                                target_val.clone(),
+                                "index",
+                                vec![key.clone()],
+                                span,
+                            )?;
+                            let rhs = self.eval(value)?;
+                            let bin =
+                                if op == AssignOp::PlusEq { BinaryOp::Add } else { BinaryOp::Sub };
+                            eval_binary(bin, cur, rhs, span)?
+                        }
+                    };
+                    self.call_struct_method(target_val.clone(), "set_index", vec![key, new_val], span)?;
+                    return Ok(());
+                }
                 // Validate an int index at the assignment `span` (matches the VM's `SetIndex` span).
                 let idx = match self.eval(index)? {
                     Value::Int(n) => n,
@@ -2487,6 +2563,25 @@ fn as_bool(v: Value, span: Span) -> Result<bool, RuntimeError> {
             span,
         }),
     }
+}
+
+fn as_int_val(v: Value, span: Span) -> Result<i64, RuntimeError> {
+    match v {
+        Value::Int(n) => Ok(n),
+        other => Err(RuntimeError {
+            message: format!("expected int, found {}", other.type_name()),
+            span,
+        }),
+    }
+}
+
+/// Clamp a half-open `start..end` slice to a length-`len` sequence: both bounds clamp into
+/// `[0, len]`, and `start > end` collapses to an empty range. Returns `(lo, hi)` with `lo <= hi <= len`.
+fn clamp_range(start: i64, end: i64, len: usize) -> (usize, usize) {
+    let len_i = len as i64;
+    let lo = start.clamp(0, len_i) as usize;
+    let hi = end.clamp(0, len_i) as usize;
+    (lo, hi.max(lo))
 }
 
 /// If `v` is an unhandled error (`Err(..)` or `None`) reaching the top level, build the runtime
@@ -3222,6 +3317,64 @@ fn safe_div(a: int, b: int) -> Result[int]:
     }
 
     #[test]
+    fn slices_list_and_str() {
+        assert_eq!(run("print([1, 2, 3, 4, 5][1..3])\n"), "[2, 3]\n");
+        assert_eq!(run("print(\"hello\"[0..2])\n"), "he\n");
+    }
+
+    #[test]
+    fn slice_bounds_are_clamped() {
+        assert_eq!(run("print([1, 2, 3][1..99])\n"), "[2, 3]\n");
+        assert_eq!(run("print([1, 2, 3][0..0])\n"), "[]\n");
+        assert_eq!(run("print([1, 2, 3][2..1])\n"), "[]\n"); // start > end → empty
+        assert_eq!(run("print([1, 2, 3][-1..2])\n"), "[1, 2]\n"); // negative start clamps to 0
+        assert_eq!(run("print(\"hello\"[3..99])\n"), "lo\n");
+    }
+
+    const BUF_PROG: &str = "\
+struct Buf:
+    xs: list[int]
+    fn index(self, key: int) -> int:
+        return self.xs[key]
+    fn set_index(self, key: int, val: int):
+        self.xs[key] = val
+    fn slice(self, start: int, end: int) -> list[int]:
+        return self.xs[start..end]
+b := Buf([10, 20, 30])
+";
+
+    #[test]
+    fn struct_index_read_dispatch() {
+        assert_eq!(run(&format!("{BUF_PROG}print(b[0])\n")), "10\n");
+    }
+
+    #[test]
+    fn struct_index_assign_dispatch() {
+        assert_eq!(run(&format!("{BUF_PROG}b[1] = 99\nprint(b[1])\n")), "99\n");
+    }
+
+    #[test]
+    fn struct_slice_dispatch() {
+        assert_eq!(run(&format!("{BUF_PROG}print(b[0..2])\n")), "[10, 20]\n");
+    }
+
+    #[test]
+    fn struct_compound_index_assign_dispatch() {
+        // `b[0] += 5` reads via `index`, then writes via `set_index`.
+        assert_eq!(run(&format!("{BUF_PROG}b[0] += 5\nprint(b[0])\n")), "15\n");
+    }
+
+    #[test]
+    fn slice_non_sliceable_errors() {
+        assert!(run_capture("print((5)[1..2])\n").is_err());
+    }
+
+    #[test]
+    fn slice_non_int_bound_errors() {
+        assert!(run_capture("print([1, 2, 3][\"a\"..2])\n").is_err());
+    }
+
+    #[test]
     fn field_assign_mutates_in_place() {
         assert_eq!(
             run("struct P:\n    x: int\n    y: int\np := P(1, 2)\np.x = 9\nprint(p.x)\nprint(p.y)\n"),
@@ -3313,6 +3466,15 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/hello.chz");
         let expected = include_str!("../../examples/hello.expected");
         assert_eq!(run_capture(source).expect("hello.chz should run"), expected);
+    }
+
+    /// Slicing golden: list/str slicing (clamped) + a struct satisfying the `Index`/`IndexSet`/
+    /// `Slice` protocols + a generic bounded by `Index[int, V]` over both.
+    #[test]
+    fn golden_slicing_chz() {
+        let source = include_str!("../../examples/slicing.chz");
+        let expected = include_str!("../../examples/slicing.expected");
+        assert_eq!(run_capture(source).expect("slicing.chz should run"), expected);
     }
 
     /// M8-M4 golden: the set type (literals, membership, algebra, iteration).

@@ -10,7 +10,7 @@ in `PROGRESS.md` + the cited `examples/*.chz`.
 
 Legend: 🔴 blocks real apps · 🟡 notable friction · 🟢 works (recorded so we don't re-flag it).
 
-Last updated: 2026-06-07. Baseline: post-M13 (`Iterator[T]` parameterized bound; `yield` dropped).
+Last updated: 2026-06-07. Baseline: post-M15 (slicing + `Index`/`IndexSet`/`Slice` protocols).
 
 > **Forward-looking brainstorm** (a non-Go concurrency model, VM/GC optimizations, far-out ideas)
 > lives in **[`docs/future.md`](docs/future.md)** — speculative, NOT scheduled. Concrete near-term
@@ -23,7 +23,7 @@ Last updated: 2026-06-07. Baseline: post-M13 (`Iterator[T]` parameterized bound;
 
 The language **core** is feature-complete: scalars, `list`/`map`/`set`/`tuple`, structs (generic),
 sum types (`enum` with payloads, generic), `Result`/`Option` + `?`, generics + structural protocols
-(`Comparable`/`Add`/`Sub`/`Mul`/`Hashable`/`Stringable`/`Error`/`Iterator[T]`), exhaustive `match`
+(`Comparable`/`Add`/`Sub`/`Mul`/`Hashable`/`Stringable`/`Error`/`Iterator[T]`/`Index[K,V]`/`IndexSet[K,V]`/`Slice[R]`), exhaustive `match`
 (literals, wildcard, nested/tuple, guards, ranges), closures/HOF, struct methods, modules, GC, two
 backends, string interpolation, pipe, panic recovery (`recover:`), default + named args. What remains
 is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered below by leverage.
@@ -33,18 +33,15 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 - **Comprehensions** — `[x*2 for x in xs if x>0]` (+ dict/set forms). A Python-feel language without
   these reads as broken. **Fix:** parse-time desugar to a loop + `push`; no new opcode, no engine
   change. Cheap, large UX win.
-- **Sub-ranges — Rust-style `xs[1..3]`** — extracting a sub-list / substring today needs a manual
-  `for … push` loop. **Fix (decided):** index with the **existing** `..` range — `xs[start..end]`,
-  `s[start..end]` — half-open (end-exclusive), matching the `..` used in `for i in 1..n` and range
-  patterns. **No new lexer token** (unlike Python's `[a:b:c]`), no step. **Shape:** the parser emits a
-  `Slice { obj, start, end }` when an index expression is a `..` range; the checker types it as the
-  container type (`list[T] → list[T]`, `str → str`; bounds must be `int`); both engines do a
-  bounds-clamped range-copy (list + str). **Hardcoded to list/str** — *not* a protocol: plain
-  indexing `obj[i]` is itself hardcoded (no `Index` protocol; user structs can't be indexed), so a
-  `Sliceable` protocol alone would be backwards. If user-defined collections ever warrant it, add an
-  `Indexable` + `Sliceable` **pair** as a deliberate milestone — not now. **Deferred extensions:**
-  omitted bounds (`xs[..n]`/`xs[1..]`/`xs[..]` — needs optional-bound ranges), inclusive `..=`, and
-  negative indexing on plain `[i]`.
+- ~~**Sub-ranges — Rust-style `xs[1..3]`**~~ — **resolved (M15, see 🟢 + resolved log).** Shipped as
+  `xs[start..end]` / `s[start..end]`, half-open + bounds-clamped, reusing the existing `..` range (no
+  new lexer token). The earlier "hardcoded to list/str, not a protocol — not now" plan was **reversed**:
+  rather than hardcode, the milestone landed the deliberate **pair** — `Index[K, V]` + `IndexSet[K, V]`
+  (read / mutable indexing) and `Slice[R]` — as prebuilt structural protocols. Built-in `list`/`map`/`str`
+  satisfy them intrinsically (like `Iterator[T]`); user structs satisfy them via `index`/`set_index`/`slice`,
+  so `custom[k]`, `custom[k] = v`, and `custom[a..b]` now all work and a generic can be bounded by
+  `Index[int, V]`. **Deferred extensions:** omitted bounds (`xs[..n]`/`xs[1..]`/`xs[..]` — needs
+  optional-bound ranges), inclusive `..=`, and negative indexing on plain `[i]`.
 - ~~**Generators (`yield`) + a formal `Iterator[T]` protocol**~~ — **resolved + descoped.** The
   `Iterator[T]` protocol shipped (M13, see 🟢): `[S: Iterator[T], T]` is a real parameterized bound.
   `yield`/generators are a **permanent non-goal** (see `spec.md` *Non-goals*) — they would have
@@ -187,6 +184,14 @@ named args (functions + struct constructors, desugar pass). `examples/match_guar
   positional list — so the checker and both engines stay untouched. Same-named methods on different
   structs with different params → a named call is ambiguous (rejected); built-in method names are
   skipped. `examples/method_default_args.chz`.
+
+**M15 — slicing + the indexing protocols ✅** · (TDD, both engines parity-tested) — `xs[1..3]` /
+`s[0..2]`, half-open + bounds-clamped, reusing the existing `..` range. Landed the deliberate
+`Index[K, V]` + `IndexSet[K, V]` + `Slice[R]` prebuilt protocol **pair** (reversing the earlier
+"hardcode, not now" plan): built-in `list`/`map`/`str` conform intrinsically (mirroring `Iterator[T]`),
+user structs structurally via `index`/`set_index`/`slice`. So `custom[k]`, `custom[k] = v`,
+`custom[a..b]` work, and a generic can be bounded by `Index[int, V]` (`K`/`V`/`R` recovered at the call
+site). `examples/slicing.chz`.
 
 **Tech debt cleared ✅** · parser `MAX_DEPTH` 128→64 (off the test-stack edge); duplicate type param
 `[T, T]` rejected; nested-`set` equality parity; explicit call-site type args; `?`-in-closure checked

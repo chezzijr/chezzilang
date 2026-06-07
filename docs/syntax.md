@@ -212,6 +212,22 @@ while cond:
 # `break` exits the innermost loop; `continue` skips to the next iteration.
 ```
 
+## 6b. Indexing & slicing  (M15)
+
+```chezzi
+xs := [10, 20, 30, 40]
+print(xs[1])           # 20    — index
+xs[1] = 99             # mutate in place
+sub := xs[1..3]        # slice: half-open, reuses the `..` range → [99, 30]
+print("hello"[0..2])   # he    — strings slice too (→ a new str)
+print(xs[1..99])       # [99, 30, 40]   — bounds are clamped (no panic)
+```
+
+Slicing reuses the existing `..` range (no `[a:b]` colon syntax, no step): `obj[start..end]` is
+half-open and bounds-clamped. `list[T]` slices to `list[T]`, `str` to `str`. Indexing and slicing
+are **protocols**, so custom types opt in — see `Index`/`IndexSet`/`Slice` in §7b. (Deferred:
+omitted bounds `xs[..n]`/`xs[1..]`, inclusive `..=`, negative indices.)
+
 ## 7. Structs  (M3)
 
 ```chezzi
@@ -290,6 +306,33 @@ struct Vec2:
         return Vec2(self.x + o.x, self.y + o.y)
 
 print((Vec2(1, 2) + Vec2(3, 4)).x)   # 4   — `+` calls Vec2.add
+```
+
+Indexing and slicing are overloaded through the prebuilt **`Index[K, V]`** (read `obj[k]` via
+`index(self, key: K) -> V`), **`IndexSet[K, V]`** (mutable `obj[k] = v`, adds `set_index(self, key: K,
+val: V)`), and **`Slice[R]`** (`obj[a..b]` via `slice(self, start: int, end: int) -> R`) protocols.
+Built-in `list`/`map`/`str` satisfy them intrinsically (`str` is read-only — `Index`/`Slice` but not
+`IndexSet`); a struct defining the matching methods becomes indexable/sliceable. Because they are real
+protocols, a generic can be bounded by them — `K`/`V`/`R` are recovered at the call site like
+`Iterator[T]`'s element:
+
+```chezzi
+struct Ring:
+    data: list[int]
+    fn index(self, key: int) -> int:
+        return self.data[key % self.data.len()]
+    fn set_index(self, key: int, val: int):
+        self.data[key % self.data.len()] = val
+    fn slice(self, start: int, end: int) -> list[int]:
+        return self.data[start..end]
+
+r := Ring([10, 20, 30])
+print(r[3])            # 10   — wraps; `index` dispatched
+r[1] = 99              # `set_index` dispatched
+print(r[0..2])         # [10, 99]   — `slice` dispatched
+
+fn first[C: Index[int, V], V](c: C) -> V:   # works over a list OR a Ring
+    return c[0]
 ```
 
 A type parameter may carry **multiple bounds** with `+`: `fn fma[T: Add + Mul](a: T, b: T, c: T)`

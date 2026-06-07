@@ -374,6 +374,11 @@ impl Walker<'_> {
                 self.walk_expr(obj)?;
                 self.walk_expr(index)?;
             }
+            ExprKind::Slice { obj, start, end } => {
+                self.walk_expr(obj)?;
+                self.walk_expr(start)?;
+                self.walk_expr(end)?;
+            }
             ExprKind::Try(inner) => self.walk_expr(inner)?,
             ExprKind::DecodeCall { obj, arg, .. } => {
                 self.walk_expr(obj)?;

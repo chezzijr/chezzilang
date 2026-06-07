@@ -62,7 +62,19 @@ fn is_reserved_type(name: &str) -> bool {
 /// Prebuilt protocols a user program may use as bounds but must not redeclare (mirrors
 /// [`prebuilt_protocols`]).
 fn is_reserved_protocol(name: &str) -> bool {
-    matches!(name, "Comparable" | "Stringable" | "Hashable" | "Add" | "Sub" | "Mul" | "Iterator")
+    matches!(
+        name,
+        "Comparable"
+            | "Stringable"
+            | "Hashable"
+            | "Add"
+            | "Sub"
+            | "Mul"
+            | "Iterator"
+            | "Index"
+            | "IndexSet"
+            | "Slice"
+    )
 }
 
 /// A function (or method) signature: parameter types and return type. `type_params` is non-empty
@@ -1071,9 +1083,30 @@ impl Checker {
                     Ty::Unknown => {
                         self.expect_int(index, "index");
                     }
+                    // A bounded `[C: IndexSet[K, V]]` type parameter is index-assignable in the body.
+                    Ty::Param(name) => {
+                        if let Some((k, v)) = self.param_indexset_kv(&name, target.span) {
+                            let idx_ty = self.infer(index);
+                            if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
+                                self.error(index.span, format!("index must be {k}, found {idx_ty}"));
+                            }
+                            self.check_assign_value(&v, op, &val_ty, target.span);
+                        } else {
+                            self.error(target.span, format!("cannot index-assign into {name}"));
+                        }
+                    }
                     other => {
-                        self.expect_int(index, "index");
-                        self.error(target.span, format!("cannot index-assign into {other}"));
+                        // A struct satisfying `IndexSet` (has `index` + `set_index`) is mutable by index.
+                        if let Some((k, v)) = self.index_set_kv(&other) {
+                            let idx_ty = self.infer(index);
+                            if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
+                                self.error(index.span, format!("index must be {k}, found {idx_ty}"));
+                            }
+                            self.check_assign_value(&v, op, &val_ty, target.span);
+                        } else {
+                            self.expect_int(index, "index");
+                            self.error(target.span, format!("cannot index-assign into {other}"));
+                        }
                     }
                 }
             }
@@ -1239,6 +1272,70 @@ impl Checker {
             Ty::Str => Some(Ty::Str),
             Ty::Map(k, _) => Some((**k).clone()),
             _ => self.struct_iter_elem(ty),
+        }
+    }
+
+    /// The `(key, value)` types of `obj[k]` — the `Index` protocol's args. Built-in collections
+    /// intrinsically (list/str index by int, map by its key); a user struct via its structural
+    /// `index(self, K) -> V`. Single source of truth for `Index` conformance, `infer_index`, and the
+    /// `Index[K,V]` arg-recovery in generic calls. `None` ⇒ not indexable.
+    fn index_kv(&self, ty: &Ty) -> Option<(Ty, Ty)> {
+        match ty {
+            Ty::List(e) => Some((Ty::Int, (**e).clone())),
+            Ty::Str => Some((Ty::Int, Ty::Str)),
+            Ty::Map(k, v) => Some(((**k).clone(), (**v).clone())),
+            Ty::Struct(name, targs) => {
+                let info = self.structs.get(name)?;
+                let sig = info.methods.get("index")?;
+                if sig.params.len() != 2 {
+                    return None; // (self, key)
+                }
+                let map = struct_param_map(info, targs);
+                Some((subst(&sig.params[1], &map), subst(&sig.ret, &map)))
+            }
+            _ => None,
+        }
+    }
+
+    /// The `(key, value)` types of a mutable `obj[k] = v` — the `IndexSet` protocol's args. Built-in
+    /// `list`/`map` are mutable intrinsically (handled directly in `check_assign`); this resolves the
+    /// struct case via `set_index(self, K, V)`. `IndexSet` *requires* `index` too (Rust `IndexMut: Index`):
+    /// a plain `=` only calls `set_index`, but a compound `b[k] += v` reads via `index` first, so a
+    /// struct missing `index` would type-check then crash. `None` ⇒ not index-assignable.
+    fn index_set_kv(&self, ty: &Ty) -> Option<(Ty, Ty)> {
+        let Ty::Struct(name, targs) = ty else { return None };
+        let info = self.structs.get(name)?;
+        let sig = info.methods.get("set_index")?;
+        if sig.params.len() != 3 {
+            return None; // (self, key, val)
+        }
+        // Must also be readable — `index(self, key) -> val` — or compound index-assign would crash.
+        let read = info.methods.get("index")?;
+        if read.params.len() != 2 {
+            return None; // (self, key)
+        }
+        let map = struct_param_map(info, targs);
+        Some((subst(&sig.params[1], &map), subst(&sig.params[2], &map)))
+    }
+
+    /// The result type of `obj[a..b]` — the `Slice` protocol's arg. `list[T] → list[T]`, `str → str`;
+    /// a user struct via `slice(self, int, int) -> R`. `None` ⇒ not sliceable.
+    fn slice_result(&self, ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::List(_) | Ty::Str => Some(ty.clone()),
+            Ty::Struct(name, targs) => {
+                let info = self.structs.get(name)?;
+                let sig = info.methods.get("slice")?;
+                // The `Slice` protocol fixes the bounds: `slice(self, int, int) -> R`. Both engines
+                // pass int start/end, so a non-conforming signature (wrong arity or non-int bounds)
+                // is not a valid `Slice` impl — reject rather than green-light a runtime crash.
+                if sig.params.len() != 3 || sig.params[1] != Ty::Int || sig.params[2] != Ty::Int {
+                    return None;
+                }
+                let map = struct_param_map(info, targs);
+                Some(subst(&sig.ret, &map))
+            }
+            _ => None,
         }
     }
 
@@ -1774,6 +1871,7 @@ impl Checker {
             ExprKind::Set(elems) => self.infer_set(elems),
             ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner),
             ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
+            ExprKind::Slice { obj, start, end } => self.infer_slice(obj, start, end, expr.span),
             ExprKind::Range { start, end } => {
                 self.expect_int(start, "range bound");
                 self.expect_int(end, "range bound");
@@ -2080,9 +2178,82 @@ impl Checker {
                 self.expect_int(index, "index");
                 Ty::Unknown
             }
+            // A bounded `[C: Index[K, V]]` type parameter is indexable inside the generic body; its
+            // value type is the bound's `V` arg (resolved with sibling params in scope).
+            Ty::Param(name) => {
+                if let Some((k, v)) = self.param_index_kv(&name, obj.span) {
+                    let idx_ty = self.infer(index);
+                    if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
+                        self.error(index.span, format!("index must be {k}, found {idx_ty}"));
+                    }
+                    return v;
+                }
+                self.expect_int(index, "index");
+                self.error(obj.span, format!("cannot index into {name}"));
+                Ty::Unknown
+            }
             other => {
+                // A user struct satisfying `Index` (has `index(self, K) -> V`) is indexable by `K`.
+                if let Some((k, v)) = self.index_kv(&other) {
+                    let idx_ty = self.infer(index);
+                    if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
+                        self.error(index.span, format!("index must be {k}, found {idx_ty}"));
+                    }
+                    return v;
+                }
                 self.expect_int(index, "index");
                 self.error(obj.span, format!("cannot index into {other}"));
+                Ty::Unknown
+            }
+        }
+    }
+
+    /// The `(K, V)` of a bounded type parameter's `Index`/`IndexSet` bound, resolved with the
+    /// surrounding params in scope. `None` ⇒ the param has no indexing bound.
+    fn param_index_kv(&mut self, name: &str, span: Span) -> Option<(Ty, Ty)> {
+        let bound = self
+            .type_params
+            .get(name)?
+            .iter()
+            .find(|b| matches!(b.name.as_str(), "Index" | "IndexSet"))
+            .cloned()?;
+        let k = bound.args.first().map(|a| self.resolve_type(a, span)).unwrap_or(Ty::Unknown);
+        let v = bound.args.get(1).map(|a| self.resolve_type(a, span)).unwrap_or(Ty::Unknown);
+        Some((k, v))
+    }
+
+    /// The `(K, V)` of a bounded type parameter's `IndexSet` bound (write requires `IndexSet`
+    /// specifically — a read-only `Index` bound is not assignable). `None` ⇒ no `IndexSet` bound.
+    fn param_indexset_kv(&mut self, name: &str, span: Span) -> Option<(Ty, Ty)> {
+        let bound = self.type_params.get(name)?.iter().find(|b| b.name == "IndexSet").cloned()?;
+        let k = bound.args.first().map(|a| self.resolve_type(a, span)).unwrap_or(Ty::Unknown);
+        let v = bound.args.get(1).map(|a| self.resolve_type(a, span)).unwrap_or(Ty::Unknown);
+        Some((k, v))
+    }
+
+    /// Type `obj[start..end]`. Bounds must be `int`; the result type follows the `Slice` protocol —
+    /// `list[T] → list[T]`, `str → str`, or a struct's `slice(self, int, int) -> R`.
+    fn infer_slice(&mut self, obj: &Expr, start: &Expr, end: &Expr, span: Span) -> Ty {
+        self.expect_int(start, "slice bound");
+        self.expect_int(end, "slice bound");
+        let obj_ty = self.infer(obj);
+        if obj_ty.is_unknown() {
+            return Ty::Unknown;
+        }
+        // A bounded `[C: Slice[R]]` type parameter is sliceable inside the generic body; its result
+        // type is the bound's `R` arg (resolved with sibling params in scope).
+        if let Ty::Param(name) = &obj_ty
+            && let Some(bound) = self
+                .type_params
+                .get(name)
+                .and_then(|bs| bs.iter().find(|b| b.name == "Slice").cloned())
+        {
+            return bound.args.first().map(|a| self.resolve_type(a, span)).unwrap_or(Ty::Unknown);
+        }
+        match self.slice_result(&obj_ty) {
+            Some(r) => r,
+            None => {
+                self.error(span, format!("cannot slice {obj_ty}"));
                 Ty::Unknown
             }
         }
@@ -3173,6 +3344,35 @@ impl Checker {
                 Err(format!("type {ty} does not satisfy Iterator"))
             };
         }
+        // `Index`/`IndexSet`/`Slice` — built-in `list`/`map`/`str` conform intrinsically (a struct
+        // conforms structurally, falling through to the matcher below; a `Ty::Param` forwards to its
+        // declared bounds). `str` is immutable, so it satisfies `Index`/`Slice` but NOT `IndexSet`.
+        if matches!(protocol, "Index" | "IndexSet" | "Slice")
+            && !matches!(ty, Ty::Param(_) | Ty::Struct(..))
+        {
+            let provided: Vec<Ty> = match protocol {
+                "Slice" => match self.slice_result(ty) {
+                    Some(r) => vec![r],
+                    None => return Err(format!("type {ty} does not satisfy Slice")),
+                },
+                _ => {
+                    if protocol == "IndexSet" && !matches!(ty, Ty::List(_) | Ty::Map(_, _)) {
+                        return Err(format!("type {ty} does not satisfy IndexSet"));
+                    }
+                    match self.index_kv(ty) {
+                        Some((k, v)) => vec![k, v],
+                        None => return Err(format!("type {ty} does not satisfy {protocol}")),
+                    }
+                }
+            };
+            // Any args the bound supplied must match what the built-in actually provides.
+            for (want, got) in args.iter().zip(&provided) {
+                if !want.is_unknown() && !got.is_unknown() && !compatible(want, got) {
+                    return Err(format!("type {ty} does not satisfy {protocol}"));
+                }
+            }
+            return Ok(());
+        }
         // A protocol existential value satisfies a protocol iff it IS that protocol.
         if let Ty::Protocol(p) = ty {
             return if p == protocol {
@@ -3359,6 +3559,63 @@ impl Checker {
         }
     }
 
+    /// Recover the `K`/`V` (`Index`/`IndexSet`) and `R` (`Slice`) type args of parameterized bounds
+    /// from each type parameter's inferred binding — the indexing analogue of `recover_iter_elems`,
+    /// so `fn first[C: Index[int, V], V](c: C) -> V` recovers `V` from the argument.
+    fn recover_index_args(&mut self, tps: &[TypeParam], sub: &mut HashMap<String, Ty>, span: Span) {
+        let mut binds: Vec<(Ty, Ty)> = Vec::new();
+        for tp in tps {
+            let Some(concrete) = sub.get(&tp.name).cloned() else { continue };
+            for b in &tp.bounds {
+                match b.name.as_str() {
+                    "Index" | "IndexSet" => {
+                        if let Some((k, v)) = self.index_kv(&concrete) {
+                            if let Some(a) = b.args.first() {
+                                binds.push((self.resolve_bound_arg(a, tps, span), k));
+                            }
+                            if let Some(a) = b.args.get(1) {
+                                binds.push((self.resolve_bound_arg(a, tps, span), v));
+                            }
+                        }
+                    }
+                    "Slice" => {
+                        if let Some(r) = self.slice_result(&concrete)
+                            && let Some(a) = b.args.first()
+                        {
+                            binds.push((self.resolve_bound_arg(a, tps, span), r));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (arg_ty, recovered) in &binds {
+            // Bind the arg param if still free; otherwise it was already pinned and must agree.
+            match arg_ty {
+                Ty::Param(n) if !sub.contains_key(n) => {
+                    if !recovered.is_unknown() {
+                        sub.insert(n.clone(), recovered.clone());
+                    }
+                }
+                _ => {
+                    let pinned = match arg_ty {
+                        Ty::Param(n) => sub.get(n).cloned().unwrap_or(Ty::Unknown),
+                        other => other.clone(),
+                    };
+                    if !pinned.is_unknown()
+                        && !recovered.is_unknown()
+                        && !self.assignable(&pinned, recovered)
+                    {
+                        self.error(
+                            span,
+                            format!("index type {recovered} does not match the declared type {pinned}"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Enforce each type parameter's declared protocol bounds against its inferred binding. A
     /// parameterized bound (`Container[int]`) supplies type args, resolved here (sibling params in
     /// scope) and checked structurally with the protocol's params substituted.
@@ -3366,8 +3623,14 @@ impl Checker {
         for tp in tps {
             if let Some(concrete) = sub.get(&tp.name) {
                 for bound in &tp.bounds {
-                    let bargs: Vec<Ty> =
-                        bound.args.iter().map(|a| self.resolve_bound_arg(a, tps, span)).collect();
+                    // Resolve the bound's args, then substitute any params recovered into `sub` (e.g.
+                    // `Index[int, V]` with `V` recovered to `int`) so the structural/intrinsic check
+                    // sees concrete args, not a still-free `Ty::Param`.
+                    let bargs: Vec<Ty> = bound
+                        .args
+                        .iter()
+                        .map(|a| subst(&self.resolve_bound_arg(a, tps, span), sub))
+                        .collect();
                     if let Err(msg) = self.satisfies_args(concrete, &bound.name, &bargs) {
                         self.error(span, msg);
                     }
@@ -3401,6 +3664,7 @@ impl Checker {
         // Recover element types from parameterized `Iterator[T]` bounds (bind `T` to the iterand's
         // element), then enforce every declared bound against its inferred binding.
         self.recover_iter_elems(&sig.type_params, &mut subst_map, span);
+        self.recover_index_args(&sig.type_params, &mut subst_map, span);
         self.enforce_bounds(&sig.type_params, &subst_map, span);
         // Each argument must match its parameter's substituted type (catches a type param used in
         // two positions with conflicting types, e.g. `max(1, "x")`).
@@ -3458,6 +3722,7 @@ impl Checker {
         }
         // Recover element types from `Iterator[T]` bounds, then enforce every declared bound.
         self.recover_iter_elems(mtps, &mut mmap, span);
+        self.recover_index_args(mtps, &mut mmap, span);
         self.enforce_bounds(mtps, &mmap, span);
         for (decl, (actual, arg)) in expected.iter().zip(arg_tys.iter().zip(args)) {
             let want = subst(decl, &mmap);
@@ -3547,6 +3812,49 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             methods: vec![(
                 "next".to_string(),
                 FnSig::plain(vec![Ty::Unknown], Ty::Option(Box::new(Ty::Param("Self".into())))),
+            )],
+        },
+    );
+    // The indexing pair (Rust `Index`/`IndexMut`-style) + `Slice`. Built-in `list`/`map`/`str`
+    // satisfy these intrinsically (see `satisfies_args`); a user struct satisfies them structurally
+    // via `index`/`set_index`/`slice`. `K`/`V`/`R` are recovered at call sites by `recover_index_args`
+    // (mirrors `Iterator[T]`'s element recovery).
+    m.insert(
+        "Index".to_string(),
+        ProtocolInfo {
+            type_params: vec!["K".to_string(), "V".to_string()],
+            methods: vec![(
+                "index".to_string(),
+                FnSig::plain(vec![Ty::Unknown, Ty::Param("K".into())], Ty::Param("V".into())),
+            )],
+        },
+    );
+    m.insert(
+        "IndexSet".to_string(),
+        ProtocolInfo {
+            type_params: vec!["K".to_string(), "V".to_string()],
+            methods: vec![
+                (
+                    "index".to_string(),
+                    FnSig::plain(vec![Ty::Unknown, Ty::Param("K".into())], Ty::Param("V".into())),
+                ),
+                (
+                    "set_index".to_string(),
+                    FnSig::plain(
+                        vec![Ty::Unknown, Ty::Param("K".into()), Ty::Param("V".into())],
+                        Ty::Nil,
+                    ),
+                ),
+            ],
+        },
+    );
+    m.insert(
+        "Slice".to_string(),
+        ProtocolInfo {
+            type_params: vec!["R".to_string()],
+            methods: vec![(
+                "slice".to_string(),
+                FnSig::plain(vec![Ty::Unknown, Ty::Int, Ty::Int], Ty::Param("R".into())),
             )],
         },
     );
