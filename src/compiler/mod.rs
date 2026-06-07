@@ -437,6 +437,96 @@ impl Compiler {
             fc.emit(Op::Jump(loop_start), span);
             fc.patch_jump(exit);
             self.patch_loop(fc, inc_target);
+        } else if vars.len() == 1 {
+            // Single loop variable. The iterand may be a sequence (list/map-keys/set/str) OR a user
+            // struct implementing the iterator protocol (`next(self) -> Option[T]`). The compiler is
+            // type-erased, so we branch at RUNTIME on `IsStruct`: a struct is driven LAZILY by
+            // `next()` (so an infinite iterator with a `break` terminates); anything else is indexed
+            // as a snapshotted list (existing behaviour).
+            self.compile_expr(fc, iter)?;
+            let iter_slot = fc.add_hidden();
+            fc.emit(Op::SetLocal(iter_slot), span);
+            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit(Op::IsStruct, span);
+            let mode_slot = fc.add_hidden(); // true ⇒ struct-iterator path
+            fc.emit(Op::SetLocal(mode_slot), span);
+            // The loop variable, plus the seq-path bookkeeping slots (allocated unconditionally; the
+            // struct path simply never touches them) and the struct-path's `next()` result slot.
+            let item_slot = fc.add_local(vars[0].clone());
+            let lst_slot = fc.add_hidden();
+            let len_slot = fc.add_hidden();
+            let idx_slot = fc.add_hidden();
+            let opt_slot = fc.add_hidden();
+
+            // Seq init (skipped on the struct path): snapshot the iterand to a list, take its length,
+            // start the index at 0.
+            fc.emit(Op::GetLocal(mode_slot), span);
+            let skip_seq_init = fc.emit_jump(Op::JumpIfFalse(0), span); // false ⇒ run seq init
+            let jump_to_head = fc.emit_jump(Op::Jump(0), span); // struct: no init, go to head
+            fc.patch_jump(skip_seq_init);
+            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit(Op::ListClone, iter.span);
+            fc.emit(Op::SetLocal(lst_slot), span);
+            fc.emit(Op::GetLocal(lst_slot), span);
+            fc.emit(Op::ArrLen, span);
+            fc.emit(Op::SetLocal(len_slot), span);
+            fc.emit(Op::ConstInt(0), span);
+            fc.emit(Op::SetLocal(idx_slot), span);
+            fc.patch_jump(jump_to_head);
+
+            let loop_head = fc.here();
+            fc.emit(Op::GetLocal(mode_slot), span);
+            let to_seq_step = fc.emit_jump(Op::JumpIfFalse(0), span); // false ⇒ seq step
+            // ----- struct step: call next(); None ⇒ exit, Some(v) ⇒ bind v -----
+            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit(Op::CallMethod("next".to_string(), 0), span);
+            fc.emit(Op::SetLocal(opt_slot), span);
+            fc.emit(Op::EnsureEnum(opt_slot), iter.span);
+            // Test `None` first: a match falls through to the exit jump; a mismatch goes to `to_some`.
+            let none_arm = fc.emit_jump(
+                Op::MatchArm { scrut: opt_slot, variant: "None".to_string(), nbind: 0, bind_start: 0, next: 0 },
+                iter.span,
+            );
+            let struct_exit = fc.emit_jump(Op::Jump(0), span); // None matched ⇒ leave the loop
+            fc.patch_jump(none_arm); // not None ⇒ try Some here
+            // `Some(v)`: a match binds the payload into the loop variable's slot and falls through to
+            // the body jump; a non-Some jumps to the trap below.
+            let some_arm = fc.emit_jump(
+                Op::MatchArm { scrut: opt_slot, variant: "Some".to_string(), nbind: 1, bind_start: item_slot, next: 0 },
+                iter.span,
+            );
+            let to_body = fc.emit_jump(Op::Jump(0), span); // Some matched ⇒ run the body
+            fc.patch_jump(some_arm); // neither None nor Some ⇒ the trap
+            fc.emit(Op::MatchNoArm(opt_slot), iter.span); // not Option ⇒ runtime trap
+            // ----- seq step: bounds-check the index, read the element -----
+            fc.patch_jump(to_seq_step);
+            fc.emit(Op::GetLocal(idx_slot), span);
+            fc.emit(Op::GetLocal(len_slot), span);
+            fc.emit(Op::Lt, span);
+            let seq_exit = fc.emit_jump(Op::JumpIfFalse(0), span);
+            fc.emit(Op::GetLocal(lst_slot), span);
+            fc.emit(Op::GetLocal(idx_slot), span);
+            fc.emit(Op::GetIndex, span);
+            fc.emit(Op::SetLocal(item_slot), span);
+
+            fc.patch_jump(to_body);
+            self.compile_block_scoped(fc, body)?;
+            // `continue` lands HERE — the advance step. For a struct, "advance" is just re-looping
+            // (the next `next()` call); for a sequence, it's the index increment.
+            let inc_target = fc.here();
+            fc.emit(Op::GetLocal(mode_slot), span);
+            let to_seq_inc = fc.emit_jump(Op::JumpIfFalse(0), span);
+            fc.emit(Op::Jump(loop_head), span); // struct: re-loop, next() advances
+            fc.patch_jump(to_seq_inc);
+            fc.emit(Op::GetLocal(idx_slot), span);
+            fc.emit(Op::ConstInt(1), span);
+            fc.emit(Op::Add, span);
+            fc.emit(Op::SetLocal(idx_slot), span);
+            fc.emit(Op::Jump(loop_head), span);
+            // Both exit paths land here (past the back-edge).
+            fc.patch_jump(struct_exit);
+            fc.patch_jump(seq_exit);
+            self.patch_loop(fc, inc_target);
         } else {
             // Iterate a sequence by index. `ListClone` normalises the iterand: a list is cloned, a
             // map yields its keys (gap #14). For `for k, v in m:` we ALSO snapshot the values up

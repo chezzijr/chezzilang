@@ -415,8 +415,11 @@ interpolation, pipe. What remains to make it a language you'd reach for to write
   semantics: a `?` inside short-circuits to the boundary, so one `recover:` handles both panics and
   propagated errors. Errors are now Go-style: `Result[T, E]` (`T!` = `Result[T, Error]`, `T!E`
   explicit), `Error` protocol (`message(self) -> str`) with `str` conforming intrinsically.
-- **Iterator protocol** — `for` only iterates built-in containers; a user struct can't be iterable,
-  and there are no lazy/generator sequences.
+- **Iterator protocol** — ✅ FIXED for user structs: a struct with `next(self) -> Option[T]` is
+  iterable in `for x in s` (lazy — `next()` is called per step, so infinite iterators with an early
+  `break` terminate). Structural detection (no formal generic `Iterator[T]`); both engines agree
+  (the type-erased VM branches at runtime via `Op::IsStruct`). Still missing: lazy/generator
+  sequences (`yield`).
 - **Match guards** (`pattern if cond:`) and **range patterns** (`1..10:`) (extend #15): guards are
   the general mechanism (subsume range / less-than / greater-than).
 - **Default / named / variadic args**; **`sort_by_key`** (sugar on #11).

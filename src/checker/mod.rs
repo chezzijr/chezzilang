@@ -1159,6 +1159,22 @@ impl Checker {
     /// (`for k, v in m:`) to destructure a map's entries. A range/list/str binds a single value; a
     /// map binds its key (1 name) or key+value (2 names). Any other arity/iterand combination is an
     /// error (a dummy `Unknown` binding is returned per name so checking continues).
+    /// If `ty` is a user struct with a method `next(self) -> Option[E]` (self-only, no extra params),
+    /// return the element type `E` (with the struct's type arguments substituted in). This is the
+    /// structural "iterator protocol": such a struct is iterable in a `for`. Mirrors the type-arg
+    /// substitution `infer_method_call` does for the `Ty::Struct` arm.
+    fn struct_iter_elem(&self, ty: &Ty) -> Option<Ty> {
+        let Ty::Struct(name, targs) = ty else { return None };
+        let info = self.structs.get(name)?;
+        let sig = info.methods.get("next")?;
+        if sig.params.len() != 1 {
+            return None; // (self) only — no extra args
+        }
+        let Ty::Option(inner) = &sig.ret else { return None };
+        let map = struct_param_map(info, targs);
+        Some(subst(inner, &map))
+    }
+
     fn for_bindings(&mut self, vars: &[String], iter: &Expr) -> Vec<(String, Ty)> {
         let unknowns = |vars: &[String]| vars.iter().map(|v| (v.clone(), Ty::Unknown)).collect();
         // Ranges are syntactic and always yield a single int.
@@ -1189,6 +1205,15 @@ impl Checker {
             Ty::Set(elem) => vec![(vars[0].clone(), (**elem).clone())],
             Ty::Str => vec![(vars[0].clone(), Ty::Str)],
             Ty::Unknown => unknowns(vars),
+            _ if self.struct_iter_elem(&it).is_some() => {
+                // A user struct with `next(self) -> Option[E]` is iterable; it binds a single element.
+                let elem = self.struct_iter_elem(&it).expect("guarded by the match arm");
+                if vars.len() != 1 {
+                    self.error(iter.span, "a struct iterator binds a single loop variable");
+                    return unknowns(vars);
+                }
+                vec![(vars[0].clone(), elem)]
+            }
             other => {
                 self.error(iter.span, format!("cannot iterate over {other}"));
                 unknowns(vars)

@@ -1,0 +1,45 @@
+# Iterable user structs: a `for` drives any struct with `next(self) -> Option[T]`,
+# calling next() lazily each step until it yields None. No new syntax — just a wider
+# iterand type. Both engines (tree-walk interp + bytecode VM) must agree.
+
+# A finite iterator: yields 0, 1, 2, 3, 4.
+struct Counter:
+    n: int
+    limit: int
+    fn next(self) -> Option[int]:
+        if self.n >= self.limit:
+            return None
+        v := self.n
+        self.n = self.n + 1
+        return Some(v)
+
+# An INFINITE iterator: the Fibonacci sequence. Only a `break` stops it — proof that
+# iteration is lazy (next() is called per step, never materialized up front).
+struct Fib:
+    a: int
+    b: int
+    fn next(self) -> Option[int]:
+        v := self.a
+        nb := self.a + self.b
+        self.a = self.b
+        self.b = nb
+        return Some(v)
+
+fn main():
+    print("counter:")
+    for x in Counter(0, 5):
+        print(x)
+
+    print("evens (continue):")
+    for x in Counter(0, 6):
+        if x % 2 == 1:
+            continue
+        print(x)
+
+    print("fib < 50 (break):")
+    for f in Fib(0, 1):
+        if f >= 50:
+            break
+        print(f)
+
+main()
