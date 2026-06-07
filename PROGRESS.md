@@ -629,8 +629,8 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 
 - **Future directions brainstorm** — `defer`, a shared-nothing (BEAM-style) concurrency **+
   parallelism** model (`spawn`/`parallel:`/`chan[T]`, per-task heap+GC, move/copy messaging),
-  missing scripting features (comprehensions, slicing, iterators/generators, variadic/default args,
-  …), and VM/GC optimizations (superinstructions, inline caching, NaN-boxing, …) are written up in
+  missing scripting features (comprehensions, slicing, iterators/generators, variadic args,
+  …; default + named args now shipped), and VM/GC optimizations (superinstructions, inline caching, NaN-boxing, …) are written up in
   **[`docs/future.md`](docs/future.md)**. Opinionated + speculative; promote into `gaps.md` when
   scheduled.
 - **Native FFI / Rust-library bindings** — let Chezzi call into Rust libs (bootstrap the ecosystem
