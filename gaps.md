@@ -392,6 +392,22 @@ interpolation, pipe. What remains to make it a language you'd reach for to write
   cycle guard; reserved/dup names rejected. Both engines dispatch via `run_proto`/`call` (mirrors
   `compare`). See `examples/operators.chz`, `examples/type_alias.chz`. Not done: unifying
   `abs`/`min`/`max` onto the numeric protocol (optional follow-up).
+- **Method-level type parameters** — a method may use the struct's params but **cannot introduce its
+  own**. `self` is auto-typed to the enclosing struct (`Pair[A, B]` / `Point`) and the struct's
+  params are in scope, but a fresh `[U]` on a method parses and is then never seeded into the
+  substitution map, so it stays unbound:
+  ```chezzi
+  struct Box[T]:
+      v: T
+      fn map_to[U](self, f: fn(T) -> U) -> U:   # U never inferred
+          return f(self.v)
+  # b.map_to(fn(x: int) -> str: str(x))
+  # → type error: argument 1 of 'map_to': expected fn(int) -> U, found fn(int) -> str
+  ```
+  Free generic functions infer their own `[T, U]` fine — only methods are affected. Workaround: lift
+  the method to a free `fn map_to[T, U](b: Box[T], f: fn(T) -> U) -> U`. Fix shape: seed method-decl
+  type params into the checker subst map at call time (mirror `seed_targs` / the free-fn path) in
+  `src/checker/mod.rs`.
 
 ### Tier 3 — runtime robustness + ergonomics
 - ✅ **Panic recovery (M11).** `recover:` block → `Result[T, Error]` catches any runtime fault
