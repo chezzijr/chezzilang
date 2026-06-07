@@ -432,24 +432,15 @@ runner, doc comments + docgen.
 - **No explicit call-site type arguments** — `max[int](…)` / `Stack[int](…)`. Type args are only ever
   *inferred* from arguments; you can't pin them explicitly. Minor (inference covers the common case),
   deferred since M7. Checker `infer_generic_call` / variant + struct construction.
-- **`?` inside a closure isn't checked against the closure's return type** — type-unsound. The `?`
-  validator (`infer_try`) reads `self.current_ret` (the enclosing *function*'s return), but
-  `infer_closure` never sets `current_ret` for the closure body, so a `?` in a closure is validated
-  against the enclosing function (often `nil` at top level / `main`, which is allowed) instead of the
-  closure's own declared return. The `?` then early-returns an `Err` as the closure's value, which can
-  be dropped into a slot typed otherwise. Verified (both engines identical):
-  ```
-  fn parse(s: str) -> int!:
-      if s == "2": return Ok(2)
-      return Err("bad: '{s}'")
-  doubled := ["2", "x"].map(fn(s: str) -> int: parse(s)? * 2)
-  print(doubled)        # [4, Err(bad: 'x')] — an Err in a list[int]
-  ```
-  **Pre-existing** (closures + `?` predate M11; surfaced by the M11 recover cold-pass review).
-  **Fix:** in `infer_closure`, save/restore `current_ret` = the closure's resolved/inferred return
-  type around checking its body (mirrors `check_fn_body`), so `?` validates against it — and rejects
-  `?` in a closure whose return isn't `Result`/`Option`. `src/checker/mod.rs` (`infer_closure`,
-  `infer_try`).
+- ~~**`?` inside a closure isn't checked against the closure's return type**~~ ✅ **FIXED.** Was
+  type-unsound: `infer_try` read `self.current_ret` (the enclosing *function*'s return), but
+  `infer_closure` never set `current_ret` for the closure body, so a `?` in a closure validated
+  against the enclosing function (often `nil`/`main`, allowed) instead of the closure's own return,
+  leaking an `Err` into a slot typed otherwise (e.g. `["2","x"].map(fn(s: str) -> int: parse(s)?*2)`
+  → `[4, Err(...)]` in a `list[int]`). Fixed by setting `current_ret` to the closure's resolved
+  return (or `Unknown` when unannotated) around its body in `infer_closure` (mirrors `check_fn_body`):
+  `?` in a non-`Result`/`Option` closure is now rejected at type-check; a `Result`-returning closure's
+  `?` is validated like a named fn's. `src/checker/mod.rs` (`infer_closure`).
 
 **Recommended next:** Tier 1, Tier 2, and Tier 3 panic recovery (M11) are shipped. The highest-leverage
 remaining Tier 3 work is the **iterator protocol** (user structs iterable in `for`; lazy/generator

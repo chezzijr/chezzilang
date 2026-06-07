@@ -2464,3 +2464,29 @@ fn recover_question_mark_on_option_rejected() {
         "Option is not allowed inside a recover block",
     );
 }
+
+// ===== `?` inside a closure is checked against the closure's return (soundness fix) =====
+
+#[test]
+fn closure_question_mark_on_nonresult_return_rejected() {
+    // A closure declared `-> int` may not use `?` — it would leak an Err into a list[int].
+    rejects(
+        "fn parse(s: str) -> int!:\n    return Err(\"x\")\nfn main():\n    ys := [\"2\"].map(fn(s: str) -> int: parse(s)? * 2)\n    print(ys)\nmain()\n",
+        "not Result or Option",
+    );
+}
+
+#[test]
+fn closure_question_mark_on_result_return_ok() {
+    // A closure declared to return Result may use `?` (yields the Ok type).
+    ok("fn parse(s: str) -> int!:\n    return Ok(2)\nfn main():\n    rs := [\"2\"].map(fn(s: str) -> int!: Ok(parse(s)? * 2))\n    print(rs)\nmain()\n");
+}
+
+#[test]
+fn closure_question_mark_inferred_return_rejected() {
+    // No return annotation → `?` has no Result/Option context → rejected (annotate to allow).
+    rejects(
+        "fn parse(s: str) -> int!:\n    return Err(\"x\")\nfn main():\n    ys := [\"2\"].map(fn(s): parse(s)?)\n    print(ys)\nmain()\n",
+        "Result or Option",
+    );
+}

@@ -2045,6 +2045,11 @@ impl Checker {
         // the closure's definition must not make a `break`/`continue` inside it legal.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
+        // `?` inside the body targets THIS closure's return, not the enclosing function's. With no
+        // annotation there is no Result/Option context, so `?` is rejected (`Unknown` → `infer_try`
+        // errors). Mirrors `check_fn_body`'s `current_ret` handling.
+        let declared_ret = ret.map(|t| self.resolve_type(t, body.span)).unwrap_or(Ty::Unknown);
+        let saved_ret = std::mem::replace(&mut self.current_ret, declared_ret);
         self.push_scope();
         let param_tys: Vec<Ty> = params
             .iter()
@@ -2058,6 +2063,7 @@ impl Checker {
         self.pop_scope();
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
+        self.current_ret = saved_ret;
         let ret_ty = match ret {
             Some(t) => {
                 let declared = self.resolve_type(t, body.span);
