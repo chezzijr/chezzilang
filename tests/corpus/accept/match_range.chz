@@ -1,0 +1,12 @@
+# rule: matchStmt, arm, pattern
+fn grade(n: int):
+    match n:
+        0..60: print("F")
+        60..90: print("B")
+        _: print("A")
+
+fn bucket(n: int):
+    match n:
+        0..10: print("lo")
+        10..20: print("hi")
+        _: print("other")

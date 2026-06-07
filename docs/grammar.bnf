@@ -138,21 +138,27 @@
 
 <matchStmt> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <arms> "DEDENT"
 <arms>      ::= <arm> | <arm> <arms>
+# An arm may carry an optional `if <expr>` guard: the arm matches only if the pattern binds AND the
+# guard (a bool, evaluated with the pattern's bindings in scope) is true.
 <arm>       ::= <pattern> <block>
+                | <pattern> "IF" <expr> <block>
 # A top-level arm pattern. A bare "IDENT" names a (nullary) variant; "IDENT" "(" … ")" a variant
-# with sub-patterns; "(" … ")" a tuple pattern; or an int/str/bool literal. Sub-patterns nest
-# (gap #15): a variant payload slot or tuple element is itself a <subpattern>.
+# with sub-patterns; "(" … ")" a tuple pattern; an int/str/bool literal; or a half-open integer
+# range "INT" ".." "INT" (matches `start <= v < end`). Sub-patterns nest (gap #15): a variant payload
+# slot or tuple element is itself a <subpattern>.
 <pattern>     ::= "IDENT"
                 | "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | "INT" | "STR" | "TRUE" | "FALSE"
+                | "INT" "DOTDOT" "INT"
 # A sub-pattern (nested position). A bare "IDENT" here is a binding name, not a variant.
 <subpattern>  ::= "IDENT"
                 | "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | "INT" | "STR" | "TRUE" | "FALSE"
+                | "INT" "DOTDOT" "INT"
 <subpatterns> ::= <subpattern> | <subpattern> "COMMA" <subpatterns>
 <tuplePattern> ::= "LPAREN" <subpatterns> "RPAREN"
 
@@ -234,6 +240,7 @@
 <matchExpr> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <exprArms> "DEDENT"
 <exprArms>  ::= <exprArm> | <exprArm> <exprArms>
 <exprArm>   ::= <pattern> "COLON" <expr> "NEWLINE"
+                | <pattern> "IF" <expr> "COLON" <expr> "NEWLINE"
 <ifExpr>    ::= "IF" <expr> "COLON" <expr> "ELSE" "COLON" <expr>
 # Panic-recovery boundary: runs a block, yields `Result[T, Error]` (Ok = trailing value, Err = a
 # caught runtime fault). Reuses <block> (inline or indented).

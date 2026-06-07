@@ -2548,7 +2548,7 @@ fn closure_question_mark_inferred_return_rejected() {
     );
 }
 
-// ===== struct iterator protocol: `for x in s` when `s` has `next(self) -> option[T]` =====
+// ===== struct iterator protocol: `for x in s` when `s` has `next(self) -> Option[T]` =====
 
 #[test]
 fn iterates_struct_with_next_ok() {
@@ -2581,4 +2581,75 @@ fn struct_iter_binds_element_type() {
         "struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    for x in Counter(0, 5):\n        print(x + \"s\")\nmain()\n",
         "cannot apply + to int and str",
     );
+}
+
+// ===== match guards (pattern if cond) =====
+
+#[test]
+fn match_guard_non_bool_rejected() {
+    // A guard expression must be bool; an int guard is a type error.
+    rejects(
+        "n := 3\nmatch n:\n    x if x: print(\"y\")\n    _: print(\"n\")\n",
+        "must be bool",
+    );
+}
+
+#[test]
+fn match_guard_str_rejected() {
+    rejects(
+        "n := 3\nmatch n:\n    x if \"hi\": print(\"y\")\n    _: print(\"n\")\n",
+        "must be bool",
+    );
+}
+
+#[test]
+fn guarded_wildcard_does_not_make_exhaustive() {
+    // The only catch-all is `_ if cond:` — guarded, so refutable; the match is non-exhaustive.
+    rejects(
+        "n := 3\nmatch n:\n    0: print(\"z\")\n    _ if n > 0: print(\"pos\")\n",
+        "non-exhaustive",
+    );
+}
+
+#[test]
+fn guarded_binding_does_not_make_exhaustive() {
+    rejects(
+        "n := 3\nmatch n:\n    x if x > 0: print(\"pos\")\n",
+        "non-exhaustive",
+    );
+}
+
+#[test]
+fn match_guard_ok() {
+    // A guard sees the pattern's bindings; with a trailing `_` the match is exhaustive.
+    ok("fn classify(n: int) -> str:\n    return match n:\n        x if x < 0: \"neg\"\n        0: \"zero\"\n        _: \"pos\"\nclassify(1)\n");
+}
+
+#[test]
+fn match_guard_stmt_ok() {
+    ok("n := 5\nmatch n:\n    x if x > 0: print(\"pos\")\n    _: print(\"other\")\n");
+}
+
+// ===== integer range patterns (start..end) =====
+
+#[test]
+fn range_pattern_on_str_rejected() {
+    rejects(
+        "s := \"x\"\nmatch s:\n    0..10: print(\"lo\")\n    _: print(\"hi\")\n",
+        "range pattern",
+    );
+}
+
+#[test]
+fn range_pattern_non_exhaustive_without_wildcard() {
+    // Ranges are refutable and never close the int domain — a `_` is still required.
+    rejects(
+        "n := 3\nmatch n:\n    0..10: print(\"lo\")\n    10..20: print(\"hi\")\n",
+        "non-exhaustive",
+    );
+}
+
+#[test]
+fn range_pattern_ok() {
+    ok("fn grade(n: int) -> str:\n    return match n:\n        0..60: \"F\"\n        60..90: \"B\"\n        _: \"A\"\ngrade(50)\n");
 }

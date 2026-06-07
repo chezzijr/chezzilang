@@ -740,6 +740,21 @@ impl Interp {
                 for (name, v) in binds {
                     self.env.define(&name, v);
                 }
+                // Evaluate the optional guard with the pattern's bindings in scope; a false guard
+                // falls through to the next arm.
+                if let Some(guard) = &arm.guard {
+                    match self.eval(guard) {
+                        Ok(Value::Bool(true)) => {}
+                        Ok(_) => {
+                            self.env.pop();
+                            continue;
+                        }
+                        Err(e) => {
+                            self.env.pop();
+                            return Err(e);
+                        }
+                    }
+                }
                 let flow = self.exec_block(&arm.body);
                 self.env.pop();
                 return flow;
@@ -773,6 +788,19 @@ impl Interp {
                 self.env.push();
                 for (name, v) in binds {
                     self.env.define(&name, v);
+                }
+                if let Some(guard) = &arm.guard {
+                    match self.eval(guard) {
+                        Ok(Value::Bool(true)) => {}
+                        Ok(_) => {
+                            self.env.pop();
+                            continue;
+                        }
+                        Err(e) => {
+                            self.env.pop();
+                            return Err(e);
+                        }
+                    }
                 }
                 let result = self.eval(&arm.body);
                 self.env.pop();
@@ -2552,10 +2580,14 @@ fn literal_matches(lit: &LitPattern, value: &Value) -> bool {
 }
 
 /// Whether a top-level arm pattern requires the scrutinee to be an enum (so a non-enum value is a
-/// clean "cannot match on …" error rather than silently falling through). A nullary `Variant`
-/// (`None`, `Red`) and a variant-with-payload both do; literals/wildcards/tuples don't.
+/// clean "cannot match on …" error rather than silently falling through). Only a variant *with a
+/// payload* (`Some(x)`) qualifies; literals/wildcards/tuples don't, and a bare identifier is
+/// ambiguous (it may be a binding capturing a literal value), so it doesn't force the enum guard.
 fn pattern_needs_enum(pattern: &Pattern) -> bool {
-    matches!(pattern, Pattern::Variant { .. })
+    // Only a payload-bearing variant unambiguously requires an enum scrutinee. A bare identifier
+    // (empty bindings) is ambiguous — it may be a binding capturing a literal value — so it doesn't
+    // force the enum guard (`try_bind` handles a bare ident against a non-enum as a binding).
+    matches!(pattern, Pattern::Variant { bindings, .. } if !bindings.is_empty())
 }
 
 /// Try to match `value` against `pattern`, returning the name→value bindings to install on success,
@@ -2567,6 +2599,10 @@ fn try_bind(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
         Pattern::Wildcard => Some(Vec::new()),
         Pattern::Ident(name) => Some(vec![(name.clone(), value.clone())]),
         Pattern::Literal(lit) => literal_matches(lit, value).then(Vec::new),
+        Pattern::Range { start, end } => match value {
+            Value::Int(v) => (*start <= *v && *v < *end).then(Vec::new),
+            _ => None,
+        },
         Pattern::Tuple(subs) => {
             let Value::Tuple(elems) = value else { return None };
             if elems.len() != subs.len() {
@@ -2579,7 +2615,14 @@ fn try_bind(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
             Some(out)
         }
         Pattern::Variant { name, bindings } => {
-            let Value::Enum { variant, payload, .. } = value else { return None };
+            let Value::Enum { variant, payload, .. } = value else {
+                // A bare top-level identifier (no payload) against a non-enum value is a binding
+                // capturing the whole value — the checker permits this only for literal scrutinees.
+                if bindings.is_empty() {
+                    return Some(vec![(name.clone(), value.clone())]);
+                }
+                return None;
+            };
             if name != variant.as_ref() || bindings.len() != payload.len() {
                 return None;
             }
@@ -3273,6 +3316,22 @@ fn safe_div(a: int, b: int) -> Result[int]:
         let source = include_str!("../../examples/set.chz");
         let expected = include_str!("../../examples/set.expected");
         assert_eq!(run_capture(source).expect("set.chz should run"), expected);
+    }
+
+    /// Match-guard golden: `pattern if cond:` arms (expr + stmt forms) produce the expected output.
+    #[test]
+    fn golden_match_guard_chz() {
+        let source = include_str!("../../examples/match_guard.chz");
+        let expected = include_str!("../../examples/match_guard.expected");
+        assert_eq!(run_capture(source).expect("match_guard.chz should run"), expected);
+    }
+
+    /// Range-pattern golden: half-open `start..end` int patterns produce the expected output.
+    #[test]
+    fn golden_match_range_chz() {
+        let source = include_str!("../../examples/match_range.chz");
+        let expected = include_str!("../../examples/match_range.expected");
+        assert_eq!(run_capture(source).expect("match_range.chz should run"), expected);
     }
 
     /// M1 (tier-1) golden: Python-style char handling — `s.chars()` + iterable strings.

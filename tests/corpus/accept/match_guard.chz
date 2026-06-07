@@ -1,0 +1,11 @@
+# rule: matchStmt, arm, pattern
+fn report(n: int):
+    match n:
+        x if x < 0: print("neg")
+        0: print("zero")
+        _: print("pos")
+
+fn check(n: int):
+    match n:
+        x if x > 100: print("big")
+        _: print("small")

@@ -612,8 +612,23 @@ impl Compiler {
         }
     }
 
+    /// True if these arms form a literal/range/wildcard/binding match (no enum or tuple patterns), so
+    /// it takes the lighter `compile_match_lit` path (no `EnsureEnum`, no `MatchNoArm`). A bare
+    /// top-level identifier is a *binding* unless it names a known enum variant — that distinction is
+    /// type-free thanks to the program-global variant registry, mirroring the runtime.
+    fn arms_are_literal<'a>(&self, patterns: impl Iterator<Item = &'a Pattern>) -> bool {
+        patterns.into_iter().all(|p| match p {
+            Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => true,
+            // empty-binding `Name`: a binding unless it's a real variant.
+            Pattern::Variant { name, bindings } if bindings.is_empty() => {
+                !self.program.variants.contains_key(name)
+            }
+            _ => false,
+        })
+    }
+
     fn compile_match(&mut self, fc: &mut FnComp, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<(), CompileError> {
-        if arms_are_literal(arms.iter().map(|a| &a.pattern)) {
+        if self.arms_are_literal(arms.iter().map(|a| &a.pattern)) {
             return self.compile_match_lit(fc, scrutinee, arms, span, |s, fc, body| {
                 s.compile_block_flat(fc, body)
             });
@@ -654,6 +669,9 @@ impl Compiler {
             fc.begin_scope();
             let mut fails = Vec::new();
             self.emit_pattern(fc, arm.pattern(), scrut, &mut fails, scrutinee.span)?;
+            // The guard runs with the pattern's bindings in scope; a false guard joins `fails` and
+            // falls through to the next arm.
+            self.emit_guard(fc, arm.guard(), &mut fails)?;
             run_body(self, fc, arm.body())?;
             end_jumps.push(fc.emit_jump(Op::Jump(0), span));
             // Any failed test in this arm jumps here — the start of the next arm.
@@ -668,6 +686,17 @@ impl Compiler {
             fc.patch_jump(j);
         }
         fc.end_scope();
+        Ok(())
+    }
+
+    /// Emit an optional arm guard `if <expr>`: compile the bool expr and, on `false`, jump to the
+    /// next arm (the jump is pushed onto `fails`, which the caller patches). A `None` guard emits
+    /// nothing.
+    fn emit_guard(&mut self, fc: &mut FnComp, guard: Option<&Expr>, fails: &mut Vec<usize>) -> Result<(), CompileError> {
+        if let Some(g) = guard {
+            self.compile_expr(fc, g)?;
+            fails.push(fc.emit_jump(Op::JumpIfFalse(0), g.span));
+        }
         Ok(())
     }
 
@@ -689,6 +718,9 @@ impl Compiler {
                 emit_lit_const(fc, lit, span);
                 fc.emit(Op::Eq, span);
                 fails.push(fc.emit_jump(Op::JumpIfFalse(0), span));
+            }
+            Pattern::Range { start, end } => {
+                emit_range_test(fc, scrut, *start, *end, fails, span);
             }
             Pattern::Tuple(subs) => {
                 for (i, sub) in subs.iter().enumerate() {
@@ -754,23 +786,67 @@ impl Compiler {
         for arm in arms {
             match arm.pattern() {
                 Pattern::Literal(lit) => {
+                    fc.begin_scope();
                     fc.emit(Op::GetLocal(scrut), scrutinee.span);
                     emit_lit_const(fc, lit, span);
                     fc.emit(Op::Eq, span);
-                    let next = fc.emit_jump(Op::JumpIfFalse(0), span);
+                    let mut fails = vec![fc.emit_jump(Op::JumpIfFalse(0), span)];
+                    self.emit_guard(fc, arm.guard(), &mut fails)?;
                     run_body(self, fc, arm.body())?;
                     end_jumps.push(fc.emit_jump(Op::Jump(0), span));
-                    fc.patch_jump(next);
+                    let next = fc.here();
+                    for j in fails {
+                        fc.patch_jump_to(j, next);
+                    }
+                    fc.end_scope();
+                }
+                Pattern::Range { start, end } => {
+                    fc.begin_scope();
+                    let mut fails = Vec::new();
+                    emit_range_test(fc, scrut, *start, *end, &mut fails, span);
+                    self.emit_guard(fc, arm.guard(), &mut fails)?;
+                    run_body(self, fc, arm.body())?;
+                    end_jumps.push(fc.emit_jump(Op::Jump(0), span));
+                    let next = fc.here();
+                    for j in fails {
+                        fc.patch_jump_to(j, next);
+                    }
+                    fc.end_scope();
                 }
                 Pattern::Wildcard => {
-                    // Unconditional fallback; the checker guarantees exactly one wildcard, and that
-                    // it (or a prior literal) covers every reachable path — including the
-                    // expression form, where the wildcard body leaves the result value.
+                    // A bare `_` is the unconditional fallback (the checker guarantees exactly one
+                    // covers every reachable path). A *guarded* `_ if g:` is refutable: its guard may
+                    // fail, so it tests the guard and falls through to the next arm on a miss.
+                    fc.begin_scope();
+                    let mut fails = Vec::new();
+                    self.emit_guard(fc, arm.guard(), &mut fails)?;
                     run_body(self, fc, arm.body())?;
                     end_jumps.push(fc.emit_jump(Op::Jump(0), span));
+                    let next = fc.here();
+                    for j in fails {
+                        fc.patch_jump_to(j, next);
+                    }
+                    fc.end_scope();
+                }
+                // A bare top-level identifier that isn't a known variant is a binding catch-all
+                // capturing the whole scrutinee (irrefutable, like `_` but named).
+                Pattern::Variant { name, bindings } if bindings.is_empty() => {
+                    fc.begin_scope();
+                    let s = fc.add_local(name.clone());
+                    fc.emit(Op::GetLocal(scrut), span);
+                    fc.emit(Op::SetLocal(s), span);
+                    let mut fails = Vec::new();
+                    self.emit_guard(fc, arm.guard(), &mut fails)?;
+                    run_body(self, fc, arm.body())?;
+                    end_jumps.push(fc.emit_jump(Op::Jump(0), span));
+                    let next = fc.here();
+                    for j in fails {
+                        fc.patch_jump_to(j, next);
+                    }
+                    fc.end_scope();
                 }
                 Pattern::Variant { .. } | Pattern::Tuple(_) | Pattern::Ident(_) => {
-                    unreachable!("literal match has only literal/wildcard arms (arms_are_literal)")
+                    unreachable!("literal match has only literal/range/wildcard/binding arms (arms_are_literal)")
                 }
             }
         }
@@ -930,7 +1006,7 @@ impl Compiler {
     /// Expression-position `match`: like `compile_match`, but each arm body is compiled as an
     /// expression that leaves its value on the stack, so the whole `match` yields one value.
     fn compile_match_expr(&mut self, fc: &mut FnComp, scrutinee: &Expr, arms: &[MatchExprArm], span: Span) -> Result<(), CompileError> {
-        if arms_are_literal(arms.iter().map(|a| &a.pattern)) {
+        if self.arms_are_literal(arms.iter().map(|a| &a.pattern)) {
             return self.compile_match_lit(fc, scrutinee, arms, span, |s, fc, body| {
                 s.compile_expr(fc, body) // leaves the arm's value on the stack
             });
@@ -1095,6 +1171,7 @@ fn binary_op(op: BinaryOp) -> Op {
 trait MatchArmLike {
     type Body;
     fn pattern(&self) -> &Pattern;
+    fn guard(&self) -> Option<&Expr>;
     fn body(&self) -> &Self::Body;
 }
 
@@ -1102,6 +1179,9 @@ impl MatchArmLike for MatchArm {
     type Body = Block;
     fn pattern(&self) -> &Pattern {
         &self.pattern
+    }
+    fn guard(&self) -> Option<&Expr> {
+        self.guard.as_ref()
     }
     fn body(&self) -> &Block {
         &self.body
@@ -1113,18 +1193,27 @@ impl MatchArmLike for MatchExprArm {
     fn pattern(&self) -> &Pattern {
         &self.pattern
     }
+    fn guard(&self) -> Option<&Expr> {
+        self.guard.as_ref()
+    }
     fn body(&self) -> &Expr {
         &self.body
     }
 }
 
-/// True if these arms form a literal/wildcard match (vs an all-variant match). The checker
-/// rejects mixing the two, so any `Literal`/`Wildcard` arm means the whole match is literal-mode.
-/// Whether a `match` is a pure literal/wildcard match (int/str/bool scrutinee) — every arm is a
-/// `Literal` or `_`. Such matches take the lighter `compile_match_lit` path (no `EnsureEnum`, no
-/// `MatchNoArm`). Any `Variant`/`Tuple` arm routes to `compile_match_general` instead.
-fn arms_are_literal<'a>(mut patterns: impl Iterator<Item = &'a Pattern>) -> bool {
-    patterns.all(|p| matches!(p, Pattern::Literal(_) | Pattern::Wildcard))
+/// Emit a half-open range test `start <= scrut < end`: two comparisons, each jumping to the next
+/// arm on failure (jumps pushed onto `fails`). Reuses `GtEq`/`Lt` + `JumpIfFalse` (no new opcode).
+fn emit_range_test(fc: &mut FnComp, scrut: usize, start: i64, end: i64, fails: &mut Vec<usize>, span: Span) {
+    // scrut >= start
+    fc.emit(Op::GetLocal(scrut), span);
+    fc.emit(Op::ConstInt(start), span);
+    fc.emit(Op::GtEq, span);
+    fails.push(fc.emit_jump(Op::JumpIfFalse(0), span));
+    // scrut < end
+    fc.emit(Op::GetLocal(scrut), span);
+    fc.emit(Op::ConstInt(end), span);
+    fc.emit(Op::Lt, span);
+    fails.push(fc.emit_jump(Op::JumpIfFalse(0), span));
 }
 
 /// Emit the constant op that pushes a literal pattern's value (mirrors `compile_expr`'s literal

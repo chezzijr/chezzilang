@@ -174,9 +174,16 @@ parity + `cargo test conformance`), clean `cargo clippy`. Details + fix notes in
 - ✅ **#13 bitwise** — `& | ^ << >>` (int-only) across lexer→parser→checker→both engines +
   `grammar.bnf`; Python precedence; shift-out-of-range is a runtime error (no panic).
   `examples/bits.chz`.
+- ✅ **match guards + range patterns** (extends #15) — `pattern if cond:` (optional bool guard on
+  both `MatchArm`/`MatchExprArm`; a guarded arm is never irrefutable, so it can't make a match
+  exhaustive) and half-open int `start..end` patterns (`start <= v < end`, int-only, refutable).
+  No new token/opcode: parser reuses `If`/`DotDot`, engines reuse `JumpIfFalse` + `GtEq`/`Lt`. A
+  bare top-level identifier on a literal scrutinee is now a value-binding catch-all (disambiguated
+  from nullary variants via the program-global variant registry / runtime enum check).
+  `examples/match_guard.chz`, `examples/match_range.chz`.
 
-**Deferred** (recorded in `gaps.md`): generics / operator-overloading trait (extends #12), match
-guards + range patterns (extend #15), a real `char` type (extends #10), `sort_by_key` (sugar on #11).
+**Deferred** (recorded in `gaps.md`): generics / operator-overloading trait (extends #12), a real
+`char` type (extends #10), `sort_by_key` (sugar on #11).
 
 > **Deferred within M6c (small, intentional):** `std.os.exit(code)` — a correct cooperative exit
 > needs an exit-code channel threaded through both run drivers + the CLI; deferred to avoid a
