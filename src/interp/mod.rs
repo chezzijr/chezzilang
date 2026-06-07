@@ -379,6 +379,7 @@ impl Interp {
                             span: expr.span,
                         }),
                         args: vec![(**arg).clone()],
+                        named: Vec::new(),
                         type_args: Vec::new(),
                     },
                     span: expr.span,
@@ -2172,10 +2173,14 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
                 span: e.span,
             })
         });
-    let module = match parsed {
+    let mut module = match parsed {
         Ok(m) => m,
         Err(e) => return (String::new(), Err(e)),
     };
+    // Mirror the file-backed path: normalize named/default call arguments before evaluating.
+    if let Err(e) = crate::desugar::run_standalone(&mut module) {
+        return (String::new(), Err(RuntimeError { message: e.message, span: e.span }));
+    }
 
     let mut interp = Interp::new();
     let result = interp.execute(&module.stmts);

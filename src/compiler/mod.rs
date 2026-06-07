@@ -60,6 +60,11 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
 /// Compile a single in-memory module (test helper — no imports, treated as the entry).
 #[cfg(test)]
 pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileError> {
+    // Mirror the file-backed path: normalize named/default call arguments before compiling.
+    let mut module = module.clone();
+    crate::desugar::run_standalone(&mut module)
+        .map_err(|e| CompileError { message: e.message, span: e.span })?;
+    let module = &module;
     let mut c = Compiler::new();
     c.hoist_types(&module.stmts)?;
     let toplevel = c.compile_module(0, module)?;
@@ -954,6 +959,7 @@ impl Compiler {
                             span: expr.span,
                         }),
                         args: vec![(**arg).clone()],
+                        named: Vec::new(),
                         type_args: Vec::new(),
                     },
                     span: expr.span,

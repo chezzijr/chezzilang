@@ -2663,3 +2663,59 @@ fn range_pattern_non_exhaustive_without_wildcard() {
 fn range_pattern_ok() {
     ok("fn grade(n: int) -> str:\n    return match n:\n        0..60: \"F\"\n        60..90: \"B\"\n        _: \"A\"\ngrade(50)\n");
 }
+
+// ===== default + named arguments (end-to-end through desugar) =====
+
+#[test]
+fn default_arg_typechecks_ok() {
+    // The omitted `y` is filled with its default (10:int) before checking.
+    entry_ok("fn f(x: int, y: int = 10) -> int:\n    return x + y\nfn main():\n    print(f(1))\nmain()\n");
+}
+
+#[test]
+fn named_arg_type_mismatch_rejected() {
+    // `f(1, y="bad")` desugars to `f(1, "bad")`; arg 2 must fail int vs str.
+    entry_rejects(
+        "fn f(x: int, y: int):\n    print(x)\nfn main():\n    f(1, y=\"bad\")\nmain()\n",
+        "argument 2 of 'f'",
+    );
+}
+
+#[test]
+fn default_arg_type_mismatch_rejected() {
+    // A defaulted value of the wrong type is still checked against the param type when filled in.
+    entry_rejects(
+        "fn f(x: int, y: int = 10):\n    print(x)\nfn main():\n    f(\"oops\")\nmain()\n",
+        "argument 1 of 'f'",
+    );
+}
+
+#[test]
+fn named_struct_field_type_mismatch_rejected() {
+    entry_rejects(
+        "struct P:\n    x: int\n    y: int = 0\nfn main():\n    p := P(x=\"bad\")\n    print(p.x)\nmain()\n",
+        "expected int",
+    );
+}
+
+#[test]
+fn wrong_typed_param_default_rejected_even_when_overridden() {
+    // `y: int = true` is invalid at the declaration even though every call passes `y`.
+    entry_rejects(
+        "fn f(x: int, y: int = true) -> int:\n    return x\nfn main():\n    print(f(1, 2))\nmain()\n",
+        "default value for parameter 'y'",
+    );
+}
+
+#[test]
+fn wrong_typed_field_default_rejected() {
+    entry_rejects(
+        "struct P:\n    x: int\n    y: int = \"no\"\nfn main():\n    print(0)\nmain()\n",
+        "default value for field 'y'",
+    );
+}
+
+#[test]
+fn valid_param_default_ok() {
+    entry_ok("fn f(x: int, y: int = 7, s: str = \"hi\") -> int:\n    return x + y\nfn main():\n    print(f(1))\nmain()\n");
+}

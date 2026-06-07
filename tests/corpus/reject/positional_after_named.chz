@@ -1,0 +1,4 @@
+# rule: argList
+# expect: positional argument after named argument
+fn main():
+    g(y=2, 1)

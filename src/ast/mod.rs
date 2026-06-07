@@ -140,17 +140,24 @@ pub struct MethodSig {
 }
 
 /// A function or closure parameter. `ty` is `None` for closure params, whose types are inferred.
+/// `default` is `Some` for a defaulted param (`x: int = 10`) — restricted to a constant literal
+/// expression. Only free functions allow it (not closures or methods); the desugar pass fills it in
+/// at omitting call sites. Always `None` for closure/method params.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
     pub ty: Option<Type>,
+    pub default: Option<Expr>,
 }
 
-/// A struct field: `name: Type`.
+/// A struct field: `name: Type`, optionally with a default (`name: Type = const`). A defaulted field
+/// is filled in by the desugar pass when a constructor call omits it. The default is a constant
+/// literal expression.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: String,
     pub ty: Type,
+    pub default: Option<Expr>,
 }
 
 /// An enum variant: `Circle(int)` → payload `[int]`; `Point` → payload `[]`.
@@ -276,6 +283,11 @@ pub enum ExprKind {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        /// Call-site named arguments (`f(x=1)`), parsed alongside positional `args`. The desugar pass
+        /// (run in `resolver::build_graph`) resolves these against the callee's params, producing a
+        /// fully positional `args` list and clearing `named`. So the checker and both engines only
+        /// ever see `named` empty — they read `args` and ignore this field.
+        named: Vec<(String, Expr)>,
         type_args: Vec<Type>,
     },
     /// `obj.name`

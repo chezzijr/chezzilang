@@ -137,7 +137,11 @@ pub fn build_graph(entry: &Path) -> Result<ModuleGraph, ResolveError> {
     };
     let entry_id = ModuleId(canonical_or_abs(&entry_abs));
     b.visit(&entry_id, &[], Span { line: 1, col: 1 })?;
-    Ok(ModuleGraph { entry: entry_id, modules: b.order })
+    let mut graph = ModuleGraph { entry: entry_id, modules: b.order };
+    // Normalize named/default call arguments into positional ones, so the checker and both engines
+    // consume an identical, already-desugared AST.
+    crate::desugar::run(&mut graph)?;
+    Ok(graph)
 }
 
 struct Builder {

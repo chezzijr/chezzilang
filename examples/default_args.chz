@@ -1,0 +1,26 @@
+# Default arguments + named arguments on free functions.
+
+fn greet(name: str, greeting: str = "Hello", punct: str = "!") -> str:
+    return greeting + ", " + name + punct
+
+fn power(base: int, exp: int = 2) -> int:
+    result := 1
+    for _ in 0..exp:
+        result = result * base
+    return result
+
+fn main():
+    # all defaults
+    print(greet("Ada"))                       # Hello, Ada!
+    # override one trailing default positionally
+    print(greet("Ada", "Hi"))                 # Hi, Ada!
+    # named argument skips a middle default
+    print(greet("Ada", punct="?"))            # Hello, Ada?
+    # all named, reordered
+    print(greet(punct=".", name="Bo", greeting="Hey"))   # Hey, Bo.
+
+    print(power(5))          # 25  (exp defaults to 2)
+    print(power(2, 10))      # 1024
+    print(power(3, exp=3))   # 27
+
+main()

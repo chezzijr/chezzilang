@@ -1,0 +1,23 @@
+# Named + default arguments on struct constructors (fields act as the constructor's params).
+
+struct Server:
+    host: str
+    port: int = 8080
+    tls: bool = false
+
+    fn url(self) -> str:
+        scheme := if self.tls: "https" else: "http"
+        return scheme + "://" + self.host + ":" + str(self.port)
+
+fn main():
+    a := Server("localhost")                  # port=8080, tls=false
+    print(a.url())                            # http://localhost:8080
+
+    b := Server("example.com", port=443, tls=true)
+    print(b.url())                            # https://example.com:443
+
+    # all named, reordered; tls defaults
+    c := Server(port=9000, host="db")
+    print(c.url())                            # http://db:9000
+
+main()

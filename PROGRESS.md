@@ -10,6 +10,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **Default + named arguments.** ✅ DONE (TDD, both engines in lockstep, full suite + conformance
+> green — 935 tests). Free functions and struct constructors take constant-literal **defaults**
+> (`fn f(x: int, y: int = 10)`, `port: int = 8080`) and **named call args** (`f(1, y=2)`,
+> `Server("db", port=9000)`). Implemented as a scope-aware **desugar pass** in `resolver::build_graph`
+> (`src/desugar/mod.rs`): it resolves each call's callee (own-module / `from`-import / `mod.f(...)`
+> alias, never a shadowing local) and normalizes named/omitted args into a positional list, so the
+> checker and **both** engines consume an identical, already-desugared AST — no new opcodes, no
+> per-engine call-binding logic. AST: `Param.default`, `Field.default`, `Call.named` (always empty
+> post-desugar). Parser: `name = expr` args (positional-before-named enforced), `= const` defaults
+> (const-literal + trailing-default rules; rejected on closures/methods/protocols). Golden +
+> parity: `examples/default_args.chz`, `examples/named_struct.chz`. Deferred: variadic args,
+> defaults/named on methods, non-constant defaults.
+
 > **Tech-debt sweep — `gaps.md` "Known fragilities" cleared.** ✅ DONE. The three remaining open
 > items landed TDD, both engines in lockstep, full suite + conformance green (874 tests).
 > - ✅ **Dup generic type param `[T, T]`** rejected at parse — one check in `parse_type_params`

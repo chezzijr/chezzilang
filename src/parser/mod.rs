@@ -13,6 +13,9 @@ use crate::ast::*;
 use crate::lexer::{Span, Tok, Token};
 use std::fmt;
 
+/// Parsed call arguments: the positional args, then the named (`name = expr`) args, in source order.
+type CallArgs = (Vec<Expr>, Vec<(String, Expr)>);
+
 /// A syntax error, with the source location it was detected at.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
@@ -231,7 +234,7 @@ impl Parser {
         // Compound statements own a block and end at its `Dedent`; line-oriented statements
         // (let/assign/expr/return/import) must be followed by a line terminator.
         let kind = match self.peek() {
-            Token::Fn => StmtKind::Fn(self.parse_fn()?),
+            Token::Fn => StmtKind::Fn(self.parse_fn(true)?),
             Token::Struct => self.parse_struct()?,
             Token::Enum => self.parse_enum()?,
             Token::Protocol => self.parse_protocol()?,
@@ -346,12 +349,12 @@ impl Parser {
         })
     }
 
-    fn parse_fn(&mut self) -> PResult<FnDecl> {
+    fn parse_fn(&mut self, allow_defaults: bool) -> PResult<FnDecl> {
         self.expect(&Token::Fn)?;
         let name = self.expect_ident()?;
         let type_params = self.parse_type_params()?;
         self.expect(&Token::LParen)?;
-        let params = self.parse_params()?;
+        let params = self.parse_params(allow_defaults)?;
         self.expect(&Token::RParen)?;
         let ret = if self.eat(&Token::Arrow) {
             Some(self.parse_type()?)
@@ -402,7 +405,7 @@ impl Parser {
         self.expect(&Token::Fn)?;
         let name = self.expect_ident()?;
         self.expect(&Token::LParen)?;
-        let params = self.parse_params()?;
+        let params = self.parse_params(false)?;
         self.expect(&Token::RParen)?;
         let ret = if self.eat(&Token::Arrow) {
             Some(self.parse_type()?)
@@ -428,8 +431,12 @@ impl Parser {
     }
 
     /// Comma-separated `name[: Type]` until (but not consuming) the closing `)`.
-    fn parse_params(&mut self) -> PResult<Vec<Param>> {
+    /// Parse a parameter list. `allow_defaults` is true only for free `fn` declarations — closures,
+    /// methods, and protocol signatures reject `= default`. A defaulted param may not be followed by
+    /// a required (non-defaulted) one. Default values are restricted to constant literals.
+    fn parse_params(&mut self, allow_defaults: bool) -> PResult<Vec<Param>> {
         let mut params = Vec::new();
+        let mut seen_default = false;
         if !self.check(&Token::RParen) {
             loop {
                 let name = self.expect_ident()?;
@@ -438,7 +445,27 @@ impl Parser {
                 } else {
                     None
                 };
-                params.push(Param { name, ty });
+                let default = if self.eat(&Token::Assign) {
+                    if !allow_defaults {
+                        return Err(self
+                            .err("default arguments are not supported here".to_string()));
+                    }
+                    let e = self.parse_expr()?;
+                    if !is_const_literal(&e) {
+                        return Err(self.err("default value must be a constant literal".to_string()));
+                    }
+                    Some(e)
+                } else {
+                    None
+                };
+                if default.is_some() {
+                    seen_default = true;
+                } else if seen_default {
+                    return Err(self.err(format!(
+                        "required parameter '{name}' cannot follow a default parameter"
+                    )));
+                }
+                params.push(Param { name, ty, default });
                 if !self.eat(&Token::Comma) {
                     break;
                 }
@@ -454,15 +481,32 @@ impl Parser {
         self.open_block()?;
         let mut fields = Vec::new();
         let mut methods = Vec::new();
+        let mut seen_default = false;
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
             if self.check(&Token::Fn) {
-                methods.push(self.parse_fn()?);
+                methods.push(self.parse_fn(false)?);
             } else {
                 let fname = self.expect_ident()?;
                 self.expect(&Token::Colon)?;
                 let ty = self.parse_type()?;
-                fields.push(Field { name: fname, ty });
+                let default = if self.eat(&Token::Assign) {
+                    let e = self.parse_expr()?;
+                    if !is_const_literal(&e) {
+                        return Err(self.err("default value must be a constant literal".to_string()));
+                    }
+                    Some(e)
+                } else {
+                    None
+                };
+                if default.is_some() {
+                    seen_default = true;
+                } else if seen_default {
+                    return Err(self.err(format!(
+                        "required field '{fname}' cannot follow a default field"
+                    )));
+                }
+                fields.push(Field { name: fname, ty, default });
             }
             self.skip_newlines();
         }
@@ -952,12 +996,17 @@ impl Parser {
                 // first argument. The RHS must be a call, so checker/interp/VM see a plain call and
                 // need no pipe-specific code.
                 InfixOp::Pipe => match rhs.kind {
-                    ExprKind::Call { callee, args, type_args } => {
+                    ExprKind::Call { callee, args, named, type_args } => {
+                        if !named.is_empty() {
+                            return Err(self.err(
+                                "named arguments are not supported on the right side of '|>'".to_string(),
+                            ));
+                        }
                         let mut new_args = Vec::with_capacity(args.len() + 1);
                         new_args.push(lhs);
                         new_args.extend(args);
                         Expr {
-                            kind: ExprKind::Call { callee, args: new_args, type_args },
+                            kind: ExprKind::Call { callee, args: new_args, named, type_args },
                             span,
                         }
                     }
@@ -1006,11 +1055,12 @@ impl Parser {
             e = match self.peek() {
                 Token::LParen => {
                     self.advance();
-                    let args = self.parse_call_args()?;
+                    let (args, named) = self.parse_call_args()?;
                     Expr {
                         kind: ExprKind::Call {
                             callee: Box::new(e),
                             args,
+                            named,
                             type_args: Vec::new(),
                         },
                         span,
@@ -1099,19 +1149,39 @@ impl Parser {
     }
 
     /// Parse a comma-separated argument list and the closing `)`, assuming the opening `(` has just
-    /// been consumed. A trailing comma is not allowed (the loop breaks on a non-comma).
-    fn parse_call_args(&mut self) -> PResult<Vec<Expr>> {
+    /// been consumed. A trailing comma is not allowed (the loop breaks on a non-comma). Returns the
+    /// positional args and the named args (`name = expr`) separately. A named argument is recognised
+    /// by a bare `IDENT` immediately followed by a single `=` (`Token::Assign`, distinct from `==`).
+    /// Once a named argument appears, every later argument must also be named.
+    fn parse_call_args(&mut self) -> PResult<CallArgs> {
         let mut args = Vec::new();
+        let mut named: Vec<(String, Expr)> = Vec::new();
         if !self.check(&Token::RParen) {
             loop {
-                args.push(self.parse_expr()?);
+                // `name = expr` — only when an IDENT is directly followed by a single `=`.
+                if let Token::Ident(name) = self.peek()
+                    && self.peek_at(1) == &Token::Assign
+                {
+                    let name = name.clone();
+                    self.advance(); // ident
+                    self.advance(); // '='
+                    let value = self.parse_expr()?;
+                    named.push((name, value));
+                } else {
+                    if !named.is_empty() {
+                        return Err(
+                            self.err("positional argument after named argument".to_string())
+                        );
+                    }
+                    args.push(self.parse_expr()?);
+                }
                 if !self.eat(&Token::Comma) {
                     break;
                 }
             }
         }
         self.expect(&Token::RParen)?;
-        Ok(args)
+        Ok((args, named))
     }
 
     /// Speculatively parse `[Type, …](args)` as a call with explicit type arguments, assuming the
@@ -1146,9 +1216,14 @@ impl Parser {
             return Ok(None);
         }
         self.advance(); // '(' — committed to a type-argument call now.
-        let args = self.parse_call_args()?;
+        let (args, named) = self.parse_call_args()?;
+        if !named.is_empty() {
+            return Err(
+                self.err("named arguments are not supported with explicit type arguments".to_string())
+            );
+        }
         Ok(Some(Expr {
-            kind: ExprKind::Call { callee: Box::new(callee.clone()), args, type_args },
+            kind: ExprKind::Call { callee: Box::new(callee.clone()), args, named, type_args },
             span,
         }))
     }
@@ -1273,7 +1348,7 @@ impl Parser {
     /// `fn(params) [-> ret]: expr` — the `fn` keyword has already been consumed.
     fn parse_closure(&mut self, span: Span) -> PResult<Expr> {
         self.expect(&Token::LParen)?;
-        let params = self.parse_params()?;
+        let params = self.parse_params(false)?;
         self.expect(&Token::RParen)?;
         let ret = if self.eat(&Token::Arrow) {
             Some(self.parse_type()?)
@@ -1294,6 +1369,44 @@ impl Parser {
 }
 
 /// Render a token as the user would recognize it, for error messages — `':='` not `Walrus`.
+/// True when `e` is a constant literal usable as a parameter/field default: a scalar literal
+/// (int/float/str/bool), a unary minus on a numeric literal, or a list/set/tuple/map literal whose
+/// elements are themselves constant literals. Interpolated strings (`"{x}"`) reference variables, so
+/// they are rejected. Idents, calls, field/index access, and binary ops are not constant.
+fn is_const_literal(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+        // A string literal is constant only if it has no `{…}` interpolation (escaped `{{`/`}}` ok).
+        ExprKind::Str(s) => !has_interpolation(s),
+        ExprKind::Unary { op: UnaryOp::Neg, expr } => {
+            matches!(expr.kind, ExprKind::Int(_) | ExprKind::Float(_))
+        }
+        ExprKind::List(xs) | ExprKind::Set(xs) | ExprKind::Tuple(xs) => {
+            xs.iter().all(is_const_literal)
+        }
+        ExprKind::Map(pairs) => pairs.iter().all(|(k, v)| is_const_literal(k) && is_const_literal(v)),
+        _ => false,
+    }
+}
+
+/// True if a raw string literal contains a `{…}` interpolation. `{{` and `}}` are escaped literal
+/// braces and do not count.
+fn has_interpolation(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                i += 2; // escaped `{{`
+                continue;
+            }
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn describe(tok: &Token) -> String {
     use Token::*;
     let s = match tok {
@@ -2243,7 +2356,7 @@ mod tests {
     fn explicit_type_args_parse() {
         // `max[int](3, 7)` → a Call carrying one type arg.
         let v = let_value("x := max[int](3, 7)\n");
-        let ExprKind::Call { callee, args, type_args } = v.kind else {
+        let ExprKind::Call { callee, args, type_args, .. } = v.kind else {
             panic!("expected a Call, got {:?}", v.kind)
         };
         assert!(matches!(callee.kind, ExprKind::Ident(ref n) if n == "max"));
@@ -2424,6 +2537,108 @@ mod tests {
         };
         assert_eq!(args.len(), 1);
         assert!(matches!(args[0].kind, ExprKind::Binary { op: BinaryOp::Add, .. }));
+    }
+
+    // ---- default args + named args (parser layer) ----
+
+    #[test]
+    fn param_default_parses() {
+        match only("fn f(x: int, y: int = 10):\n    print(x)\n") {
+            StmtKind::Fn(f) => {
+                assert_eq!(f.params.len(), 2);
+                assert!(f.params[0].default.is_none());
+                assert!(matches!(f.params[1].default, Some(Expr { kind: ExprKind::Int(10), .. })));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn named_call_args_parse() {
+        let v = let_value("r := f(1, y=2, z=3)\n");
+        let ExprKind::Call { args, named, .. } = v.kind else {
+            panic!("expected a Call, got {:?}", v.kind)
+        };
+        assert_eq!(args.len(), 1);
+        assert!(matches!(args[0].kind, ExprKind::Int(1)));
+        assert_eq!(named.len(), 2);
+        assert_eq!(named[0].0, "y");
+        assert!(matches!(named[0].1.kind, ExprKind::Int(2)));
+        assert_eq!(named[1].0, "z");
+    }
+
+    #[test]
+    fn eqeq_arg_is_not_named() {
+        // `f(x == 1)` is a positional boolean expression, NOT a named arg.
+        let v = let_value("r := f(x == 1)\n");
+        let ExprKind::Call { args, named, .. } = v.kind else { panic!() };
+        assert_eq!(args.len(), 1);
+        assert!(named.is_empty());
+        assert!(matches!(args[0].kind, ExprKind::Binary { op: BinaryOp::Eq, .. }));
+    }
+
+    #[test]
+    fn positional_after_named_rejected() {
+        assert!(parse_err("r := f(y=2, 1)\n")
+            .message
+            .contains("positional argument after named argument"));
+    }
+
+    #[test]
+    fn non_const_default_rejected() {
+        assert!(parse_err("fn f(x: int = g()):\n    print(x)\n")
+            .message
+            .contains("constant literal"));
+        assert!(parse_err("fn f(x: int = y):\n    print(x)\n")
+            .message
+            .contains("constant literal"));
+    }
+
+    #[test]
+    fn const_collection_default_ok() {
+        // literal collections of constants are allowed
+        parse_ok("fn f(xs: list[int] = [1, 2]):\n    print(xs)\n");
+        parse_ok("fn f(b: bool = false, s: str = \"hi\"):\n    print(b)\n");
+    }
+
+    #[test]
+    fn default_before_required_rejected() {
+        assert!(parse_err("fn f(x: int = 1, y: int):\n    print(x)\n")
+            .message
+            .contains("required parameter"));
+    }
+
+    #[test]
+    fn closure_default_rejected() {
+        assert!(parse_err("c := fn(x: int = 1): x\n")
+            .message
+            .contains("default"));
+    }
+
+    #[test]
+    fn struct_field_default_parses() {
+        match only("struct S:\n    x: int\n    y: int = 0\n") {
+            StmtKind::Struct { fields, .. } => {
+                assert_eq!(fields.len(), 2);
+                assert!(fields[0].default.is_none());
+                assert!(matches!(fields[1].default, Some(Expr { kind: ExprKind::Int(0), .. })));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn struct_field_default_before_required_rejected() {
+        assert!(parse_err("struct S:\n    x: int = 0\n    y: int\n")
+            .message
+            .contains("required field"));
+    }
+
+    #[test]
+    fn method_default_rejected() {
+        assert!(parse_err("struct S:\n    x: int\n    fn scale(self, k: int = 2) -> int:\n        return self.x * k\n")
+            .message
+            .contains("default"));
     }
 }
 
