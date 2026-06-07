@@ -426,7 +426,15 @@ interpolation, pipe. What remains to make it a language you'd reach for to write
   No new token/opcode (reuse `If`/`DotDot` + `JumpIfFalse`/`GtEq`/`Lt`); both engines agree. A bare
   top-level identifier on a literal scrutinee now value-binds (disambiguated from nullary variants
   via the variant registry). `examples/match_guard.chz`, `examples/match_range.chz`.
-- **Default / named / variadic args**; **`sort_by_key`** (sugar on #11).
+- **Default + named args** — ✅ FIXED. `fn f(x: int, y: int = 10)` and `f(1, y=2)` work on free
+  functions (own module + `from`-imported + module-qualified) and struct constructors (default
+  fields + named fields). Defaults are constant literals. Implemented as a scope-aware **desugar
+  pass** in `resolver::build_graph` (`src/desugar/mod.rs`) that normalizes named/omitted args into a
+  positional list, so the checker and **both** engines consume an identical AST — no new opcodes, no
+  per-engine call-binding code. `examples/default_args.chz`, `examples/named_struct.chz` (golden +
+  parity, both engines). Still deferred: **variadic args**; defaults/named on **methods** (need a
+  receiver type the desugar lacks — would require engine-native kwarg binding); non-constant default
+  expressions. **`sort_by_key`** (sugar on #11) still open.
 - **Integers:** `i64` only — no overflow policy, no `byte`/bignum.
 
 ### Tier 4 — ecosystem (toolchain, not the language)
@@ -474,7 +482,8 @@ runner, doc comments + docgen.
 **Recommended next:** Tier 1, Tier 2, Tier 3 panic recovery (M11), the **iterator protocol**
 (structural `next(self) -> Option[T]`), and **match guards + range patterns** are all shipped; the
 "known fragilities" tech debt is cleared (dup type-param, nested-set parity, explicit call-site
-type args, closure-`?` soundness). Remaining Tier 3 work: **default / named / variadic args** +
+type args, closure-`?` soundness); **default + named args** now ship too (functions + struct
+constructors). Remaining Tier 3 work: **variadic args**, defaults/named on **methods**, and
 `sort_by_key`. Deferred to a future milestone (needs coroutine/continuation support in both
 engines): **generators (`yield`)** and **lazy/generator sequences**; a follow-up that would unlock
 reusable lazy `map`/`filter`/`zip` adapters is a formal **generic `Iterator[T]` protocol** (the

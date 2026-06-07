@@ -250,8 +250,9 @@ stop-the-world GC) **untouched** — the whole point of choosing A+C over D.
 3. **Iterator protocol + generators (`yield`)** — already the roadmap's #1 next. Lazy sequences,
    user structs usable in `for`, lazy `map`/`filter`. Without it everything is eager → poor on big
    data / streams.
-4. **Variadic + default + named args** — `fn log(*args)`, `fn f(x, y=0)`. Needed for printf-style
-   APIs and ergonomics. `print` is variadic but users can't write one.
+4. **Variadic args** — `fn log(*args)`. Needed for printf-style APIs; `print` is variadic but users
+   can't write one. (**Default + named args shipped** — `fn f(x, y=0)`, `f(1, y=2)` — for functions
+   and struct constructors; see `gaps.md`. Still open here: variadic, and defaults/named on methods.)
 5. **Spread / unpack** — `f(*args)`, `[*a, *b]`, `{**m}`. Composes with #4.
 6. **Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`. Bitwise ops shipped but (likely) no
    non-decimal literals — awkward for bit work. Lexer-only.

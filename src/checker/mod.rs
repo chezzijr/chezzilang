@@ -895,10 +895,27 @@ impl Checker {
                     self.check_fn_body(decl, None, sig);
                 }
             }
-            StmtKind::Struct { name, type_params, methods, .. } => {
+            StmtKind::Struct { name, type_params, fields, methods } => {
                 let self_ty = self.struct_self_ty(name);
                 // The struct's type parameters are in scope across its method bodies.
                 let saved = self.enter_type_params(type_params);
+                // A constant-literal field default must be assignable to the field's type (checked
+                // here so a wrong-typed default is caught at the declaration, not only when omitted).
+                for field in fields {
+                    if let Some(def) = &field.default {
+                        let expected = self.resolve_type(&field.ty, def.span);
+                        let actual = self.infer(def);
+                        if !matches!(expected, Ty::Unknown) && !self.assignable(&expected, &actual) {
+                            self.error(
+                                def.span,
+                                format!(
+                                    "default value for field '{}': expected {expected}, found {actual}",
+                                    field.name
+                                ),
+                            );
+                        }
+                    }
+                }
                 for m in methods {
                     // Panic-safe: a redeclared struct name means `structs[name]` is a *different*
                     // struct whose method table may not contain `m.name`.
@@ -1141,6 +1158,21 @@ impl Checker {
             } else {
                 sig.params.get(i).cloned().unwrap_or(Ty::Unknown)
             };
+            // A constant-literal default must itself be assignable to the parameter's type — checked
+            // here (where type params are in scope) so a wrong-typed default is caught at the
+            // declaration even when every call overrides it.
+            if let Some(def) = &param.default {
+                let actual = self.infer(def);
+                if !matches!(ty, Ty::Unknown) && !self.assignable(&ty, &actual) {
+                    self.error(
+                        def.span,
+                        format!(
+                            "default value for parameter '{}': expected {ty}, found {actual}",
+                            param.name
+                        ),
+                    );
+                }
+            }
             self.declare(&param.name, ty);
         }
         for stmt in &decl.body {
@@ -1684,7 +1716,7 @@ impl Checker {
                 self.expect_int(end, "range bound");
                 Ty::list(Ty::Int)
             }
-            ExprKind::Call { callee, args, type_args } => {
+            ExprKind::Call { callee, args, type_args, .. } => {
                 self.infer_call(callee, args, type_args, expr.span)
             }
             ExprKind::Field { obj, name } => self.infer_field(obj, name),

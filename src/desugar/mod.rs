@@ -1,0 +1,662 @@
+//! Call-argument desugaring: normalize **named arguments** (`f(x=1)`) and **default arguments**
+//! (`fn f(x: int, y: int = 10)`) into a plain positional `args` list.
+//!
+//! This pass runs inside [`crate::resolver::build_graph`], so the checker and **both** engines
+//! (tree-walk interpreter + bytecode VM) consume the already-normalized AST — they only ever see
+//! `Call.named` empty and a fully positional `Call.args`. That keeps the two engines in lockstep by
+//! construction: there is no per-engine call-binding logic for defaults/named args.
+//!
+//! Scope: free functions (own module + `from`-imported + module-qualified `alias.f(...)`) and struct
+//! constructors. Enum-variant constructors are excluded (payloads are unnamed) and methods are
+//! deferred (resolving a receiver type needs the checker). Default values are constant literals,
+//! validated at parse time.
+//!
+//! The pass is **scope-aware**: a local binding may shadow a top-level function name, so a call is
+//! only rewritten when its callee resolves to a registered callable and is *not* shadowed by a local
+//! (mirroring the checker, which treats a call as a named function only when the name is not a local).
+
+use crate::ast::{Block, Expr, ExprKind, Import, Module, Pattern, Stmt, StmtKind};
+use crate::resolver::{ModuleGraph, ModuleId, ResolveError};
+use std::collections::{HashMap, HashSet};
+
+/// A callable's parameter (or struct field), in declaration order, with its optional constant
+/// default. Cloned out of the AST so the per-module registry is independent of the graph we mutate.
+#[derive(Clone)]
+struct PSpec {
+    name: String,
+    default: Option<Expr>,
+}
+
+/// Free functions and struct constructors declared by one module.
+#[derive(Default)]
+struct ModReg {
+    fns: HashMap<String, Vec<PSpec>>,
+    structs: HashMap<String, Vec<PSpec>>,
+}
+
+impl ModReg {
+    /// Look up a name as either a function or a struct constructor (functions take precedence; a
+    /// well-formed module never declares both with the same name).
+    fn callable(&self, name: &str) -> Option<&Vec<PSpec>> {
+        self.fns.get(name).or_else(|| self.structs.get(name))
+    }
+}
+
+/// Desugar every module's calls in place. Errors carry the offending call's span.
+pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
+    let regs = build_registries(graph);
+    // Index modules by id so we can resolve each module's imports against the others' registries.
+    let mut module_index: HashMap<ModuleId, usize> = HashMap::new();
+    for (i, m) in graph.modules.iter().enumerate() {
+        module_index.insert(m.id.clone(), i);
+    }
+
+    for mi in 0..graph.modules.len() {
+        // Build this module's resolution context: own id + bare from-imports + module aliases.
+        let own_id = graph.modules[mi].id.clone();
+        let mut bare_from: HashMap<String, ModuleId> = HashMap::new();
+        let mut aliases: HashMap<String, ModuleId> = HashMap::new();
+        for imp in &graph.modules[mi].imports {
+            match &imp.import {
+                Import::Module { path, alias } => {
+                    let local = alias
+                        .clone()
+                        .or_else(|| path.last().cloned())
+                        .unwrap_or_default();
+                    if !local.is_empty() {
+                        aliases.insert(local, imp.target.clone());
+                    }
+                }
+                Import::From { names, .. } => {
+                    for (name, alias) in names {
+                        let local = alias.clone().unwrap_or_else(|| name.clone());
+                        bare_from.insert(local, imp.target.clone());
+                    }
+                }
+            }
+        }
+
+        let ctx = Ctx {
+            regs: &regs,
+            own_id: &own_id,
+            bare_from: &bare_from,
+            aliases: &aliases,
+        };
+        let mut walker = Walker {
+            ctx,
+            scopes: Vec::new(),
+        };
+        // Borrow the module's AST mutably; everything `walker` reads lives in `regs`/the maps above.
+        let ast: &mut Module = &mut graph.modules[mi].ast;
+        walker.walk_block(&mut ast.stmts)?;
+    }
+    Ok(())
+}
+
+/// Desugar a single standalone module (no imports) in place. Used by the test/standalone runners,
+/// which bypass [`build_graph`](crate::resolver::build_graph) and so must apply this pass themselves
+/// to stay consistent with the file-backed graph path.
+#[cfg(test)]
+pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
+    let id = ModuleId(std::path::PathBuf::from("<main>"));
+    let mut regs = HashMap::new();
+    regs.insert(id.clone(), collect_module_reg(&module.stmts));
+    let bare_from = HashMap::new();
+    let aliases = HashMap::new();
+    let ctx = Ctx { regs: &regs, own_id: &id, bare_from: &bare_from, aliases: &aliases };
+    let mut walker = Walker { ctx, scopes: Vec::new() };
+    walker.walk_block(&mut module.stmts)
+}
+
+/// Snapshot each module's free functions and struct constructors into a registry keyed by module id.
+fn build_registries(graph: &ModuleGraph) -> HashMap<ModuleId, ModReg> {
+    let mut regs = HashMap::new();
+    for m in &graph.modules {
+        regs.insert(m.id.clone(), collect_module_reg(&m.ast.stmts));
+    }
+    regs
+}
+
+/// Build the callable registry (free functions + struct constructors) for one module's top level.
+fn collect_module_reg(stmts: &[Stmt]) -> ModReg {
+    let mut reg = ModReg::default();
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Fn(decl) => {
+                reg.fns.insert(
+                    decl.name.clone(),
+                    decl.params
+                        .iter()
+                        .map(|p| PSpec { name: p.name.clone(), default: p.default.clone() })
+                        .collect(),
+                );
+            }
+            StmtKind::Struct { name, fields, .. } => {
+                reg.structs.insert(
+                    name.clone(),
+                    fields
+                        .iter()
+                        .map(|f| PSpec { name: f.name.clone(), default: f.default.clone() })
+                        .collect(),
+                );
+            }
+            _ => {}
+        }
+    }
+    reg
+}
+
+/// Per-module resolution context (all borrows outlive the mutable AST walk).
+struct Ctx<'a> {
+    regs: &'a HashMap<ModuleId, ModReg>,
+    own_id: &'a ModuleId,
+    bare_from: &'a HashMap<String, ModuleId>,
+    aliases: &'a HashMap<String, ModuleId>,
+}
+
+impl Ctx<'_> {
+    /// Resolve a bare name (`f(...)`) to a callable's param spec: own module first, then a
+    /// `from`-imported name. Returns `None` for builtins, native-module members, or unknown names.
+    fn resolve_bare(&self, name: &str) -> Option<&Vec<PSpec>> {
+        if let Some(spec) = self.regs.get(self.own_id).and_then(|r| r.callable(name)) {
+            return Some(spec);
+        }
+        let target = self.bare_from.get(name)?;
+        self.regs.get(target).and_then(|r| r.callable(name))
+    }
+
+    /// Resolve a module-qualified name (`alias.f(...)`).
+    fn resolve_qualified(&self, alias: &str, name: &str) -> Option<&Vec<PSpec>> {
+        let target = self.aliases.get(alias)?;
+        self.regs.get(target).and_then(|r| r.callable(name))
+    }
+}
+
+struct Walker<'a> {
+    ctx: Ctx<'a>,
+    scopes: Vec<HashSet<String>>,
+}
+
+impl Walker<'_> {
+    fn is_local(&self, name: &str) -> bool {
+        self.scopes.iter().any(|s| s.contains(name))
+    }
+
+    fn bind(&mut self, name: &str) {
+        if let Some(top) = self.scopes.last_mut() {
+            top.insert(name.to_string());
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(HashSet::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    /// Walk a block in its own lexical scope (sequential `let`s bind into this scope).
+    fn walk_block(&mut self, stmts: &mut Block) -> Result<(), ResolveError> {
+        self.push_scope();
+        for stmt in stmts.iter_mut() {
+            self.walk_stmt(stmt)?;
+        }
+        self.pop_scope();
+        Ok(())
+    }
+
+    fn walk_stmt(&mut self, stmt: &mut Stmt) -> Result<(), ResolveError> {
+        match &mut stmt.kind {
+            StmtKind::Let { names, value, .. } => {
+                self.walk_expr(value)?;
+                for n in names.iter() {
+                    self.bind(n);
+                }
+            }
+            StmtKind::Assign { target, value, .. } => {
+                self.walk_expr(target)?;
+                self.walk_expr(value)?;
+            }
+            StmtKind::Fn(decl) => {
+                // Nested/top-level function body: params are a fresh scope.
+                self.push_scope();
+                for p in &decl.params {
+                    self.bind(&p.name);
+                }
+                self.walk_block(&mut decl.body)?;
+                self.pop_scope();
+            }
+            StmtKind::Struct { methods, .. } => {
+                for m in methods.iter_mut() {
+                    self.push_scope();
+                    for p in &m.params {
+                        self.bind(&p.name);
+                    }
+                    self.walk_block(&mut m.body)?;
+                    self.pop_scope();
+                }
+            }
+            StmtKind::If { branches, else_block } => {
+                for (cond, body) in branches.iter_mut() {
+                    self.walk_expr(cond)?;
+                    self.walk_block(body)?;
+                }
+                if let Some(b) = else_block {
+                    self.walk_block(b)?;
+                }
+            }
+            StmtKind::For { vars, iter, body } => {
+                self.walk_expr(iter)?;
+                self.push_scope();
+                for v in vars.iter() {
+                    self.bind(v);
+                }
+                for s in body.iter_mut() {
+                    self.walk_stmt(s)?;
+                }
+                self.pop_scope();
+            }
+            StmtKind::While { cond, body } => {
+                self.walk_expr(cond)?;
+                self.walk_block(body)?;
+            }
+            StmtKind::Match { scrutinee, arms } => {
+                self.walk_expr(scrutinee)?;
+                for arm in arms.iter_mut() {
+                    self.push_scope();
+                    bind_pattern(&arm.pattern, &mut |n| {
+                        if let Some(top) = self.scopes.last_mut() {
+                            top.insert(n);
+                        }
+                    });
+                    if let Some(g) = &mut arm.guard {
+                        self.walk_expr(g)?;
+                    }
+                    for s in arm.body.iter_mut() {
+                        self.walk_stmt(s)?;
+                    }
+                    self.pop_scope();
+                }
+            }
+            StmtKind::Return(Some(e)) => self.walk_expr(e)?,
+            StmtKind::Expr(e) => self.walk_expr(e)?,
+            // No nested expressions / bindings to rewrite.
+            StmtKind::Return(None)
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Import(_)
+            | StmtKind::Protocol { .. }
+            | StmtKind::Enum { .. }
+            | StmtKind::TypeAlias { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn walk_expr(&mut self, expr: &mut Expr) -> Result<(), ResolveError> {
+        // Recurse into children first, so nested calls are normalized regardless of this node.
+        match &mut expr.kind {
+            ExprKind::Unary { expr: inner, .. } => self.walk_expr(inner)?,
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.walk_expr(lhs)?;
+                self.walk_expr(rhs)?;
+            }
+            ExprKind::Range { start, end } => {
+                self.walk_expr(start)?;
+                self.walk_expr(end)?;
+            }
+            ExprKind::List(xs) | ExprKind::Set(xs) | ExprKind::Tuple(xs) => {
+                for x in xs.iter_mut() {
+                    self.walk_expr(x)?;
+                }
+            }
+            ExprKind::Map(pairs) => {
+                for (k, v) in pairs.iter_mut() {
+                    self.walk_expr(k)?;
+                    self.walk_expr(v)?;
+                }
+            }
+            ExprKind::Field { obj, .. } => self.walk_expr(obj)?,
+            ExprKind::Index { obj, index } => {
+                self.walk_expr(obj)?;
+                self.walk_expr(index)?;
+            }
+            ExprKind::Try(inner) => self.walk_expr(inner)?,
+            ExprKind::DecodeCall { obj, arg, .. } => {
+                self.walk_expr(obj)?;
+                self.walk_expr(arg)?;
+            }
+            ExprKind::Closure { params, body, .. } => {
+                self.push_scope();
+                for p in params.iter() {
+                    self.bind(&p.name);
+                }
+                self.walk_expr(body)?;
+                self.pop_scope();
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.walk_expr(scrutinee)?;
+                for arm in arms.iter_mut() {
+                    self.push_scope();
+                    bind_pattern(&arm.pattern, &mut |n| {
+                        if let Some(top) = self.scopes.last_mut() {
+                            top.insert(n);
+                        }
+                    });
+                    if let Some(g) = &mut arm.guard {
+                        self.walk_expr(g)?;
+                    }
+                    self.walk_expr(&mut arm.body)?;
+                    self.pop_scope();
+                }
+            }
+            ExprKind::IfElse { cond, then, els } => {
+                self.walk_expr(cond)?;
+                self.walk_expr(then)?;
+                self.walk_expr(els)?;
+            }
+            ExprKind::Recover(block) => self.walk_block(block)?,
+            ExprKind::Call { callee, args, named, .. } => {
+                self.walk_expr(callee)?;
+                for a in args.iter_mut() {
+                    self.walk_expr(a)?;
+                }
+                for (_, v) in named.iter_mut() {
+                    self.walk_expr(v)?;
+                }
+            }
+            // Leaves.
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Ident(_) => {}
+        }
+
+        // Now normalize this node if it is a resolvable call.
+        if let ExprKind::Call { .. } = &expr.kind {
+            self.normalize_call(expr)?;
+        }
+        Ok(())
+    }
+
+    /// Resolve `expr` (a `Call`) to a callable and rewrite named/omitted args into positional. Leaves
+    /// the call untouched when the callee is not a registered callable (unless it carries named args,
+    /// which is then an error).
+    fn normalize_call(&self, expr: &mut Expr) -> Result<(), ResolveError> {
+        let span = expr.span;
+        let ExprKind::Call { callee, args, named, .. } = &expr.kind else {
+            return Ok(());
+        };
+
+        // Resolve the callee against the registry (clone the spec so we can then mutate `expr`).
+        let spec: Option<Vec<PSpec>> = match &callee.kind {
+            ExprKind::Ident(name) if !self.is_local(name) => self.ctx.resolve_bare(name).cloned(),
+            ExprKind::Field { obj, name } => match &obj.kind {
+                ExprKind::Ident(alias) if !self.is_local(alias) => {
+                    self.ctx.resolve_qualified(alias, name).cloned()
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+
+        let Some(params) = spec else {
+            // Not a registered callable. Named args here are unsupported (closures/methods/builtins).
+            if !named.is_empty() {
+                return Err(err(
+                    span,
+                    "named arguments are only supported on functions and struct constructors"
+                        .to_string(),
+                ));
+            }
+            return Ok(());
+        };
+
+        // Decide whether this call needs rewriting. Plain positional calls whose arity is wrong (too
+        // many, or too few without defaults to fill) are left untouched so the type checker reports
+        // its usual arity error. We only rewrite when there are named args, or when every omitted
+        // trailing slot has a default to fill.
+        let under_arity_fillable = args.len() < params.len()
+            && (args.len()..params.len()).all(|i| params[i].default.is_some());
+        if named.is_empty() && !under_arity_fillable {
+            return Ok(());
+        }
+        // Named args present alongside too many positional ones: a clear error.
+        if args.len() > params.len() {
+            return Err(err(
+                span,
+                format!("too many arguments: expected at most {}, got {}", params.len(), args.len()),
+            ));
+        }
+
+        // Re-borrow mutably to take ownership of the existing arg lists.
+        let ExprKind::Call { args, named, .. } = &mut expr.kind else {
+            return Ok(());
+        };
+        let positional = std::mem::take(args);
+        let named_list = std::mem::take(named);
+        let np = positional.len();
+
+        let mut slots: Vec<Option<Expr>> = (0..params.len()).map(|_| None).collect();
+        for (i, a) in positional.into_iter().enumerate() {
+            slots[i] = Some(a);
+        }
+        for (n, e) in named_list {
+            let Some(idx) = params.iter().position(|p| p.name == n) else {
+                return Err(err(span, format!("unknown named argument '{n}'")));
+            };
+            if idx < np {
+                return Err(err(
+                    span,
+                    format!("argument '{n}' specified both positionally and by name"),
+                ));
+            }
+            if slots[idx].is_some() {
+                return Err(err(span, format!("duplicate named argument '{n}'")));
+            }
+            slots[idx] = Some(e);
+        }
+
+        let mut out = Vec::with_capacity(params.len());
+        for (i, slot) in slots.into_iter().enumerate() {
+            match slot {
+                Some(e) => out.push(e),
+                None => match &params[i].default {
+                    Some(d) => out.push(d.clone()),
+                    None => {
+                        return Err(err(
+                            span,
+                            format!("missing required argument '{}'", params[i].name),
+                        ))
+                    }
+                },
+            }
+        }
+        *args = out;
+        Ok(())
+    }
+}
+
+/// Collect the binding names introduced by a `match` pattern.
+fn bind_pattern(pat: &Pattern, f: &mut impl FnMut(String)) {
+    match pat {
+        Pattern::Ident(n) => f(n.clone()),
+        Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) => {
+            for b in bindings {
+                bind_pattern(b, f);
+            }
+        }
+        Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
+    }
+}
+
+fn err(span: crate::lexer::Span, message: String) -> ResolveError {
+    ResolveError { message, span, module: None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::ExprKind;
+    use crate::lexer;
+    use crate::resolver::LoadedModule;
+    use std::path::PathBuf;
+
+    /// Parse `src` into a single-module graph (no imports), run desugar, return the module's stmts.
+    fn desugar_ok(src: &str) -> Vec<Stmt> {
+        let ast = crate::parser::parse(lexer::tokenize(src).unwrap()).expect("parse");
+        let id = ModuleId(PathBuf::from("<test>"));
+        let mut graph = ModuleGraph {
+            entry: id.clone(),
+            modules: vec![LoadedModule {
+                id,
+                dotted: vec![],
+                ast,
+                imports: vec![],
+                native: None,
+            }],
+        };
+        run(&mut graph).expect("desugar");
+        graph.modules.remove(0).ast.stmts
+    }
+
+    fn desugar_err(src: &str) -> ResolveError {
+        let ast = crate::parser::parse(lexer::tokenize(src).unwrap()).expect("parse");
+        let id = ModuleId(PathBuf::from("<test>"));
+        let mut graph = ModuleGraph {
+            entry: id.clone(),
+            modules: vec![LoadedModule { id, dotted: vec![], ast, imports: vec![], native: None }],
+        };
+        run(&mut graph).expect_err("expected a desugar error")
+    }
+
+    /// Pull the positional arg ints out of the call inside the last statement (`x := CALL` or `CALL`).
+    fn call_arg_ints(stmts: &[Stmt]) -> Vec<i64> {
+        let last = stmts.last().expect("a statement");
+        let expr = match &last.kind {
+            StmtKind::Let { value, .. } => value,
+            StmtKind::Expr(e) => e,
+            other => panic!("expected let/expr, got {other:?}"),
+        };
+        let ExprKind::Call { args, named, .. } = &expr.kind else {
+            panic!("expected a Call, got {:?}", expr.kind)
+        };
+        assert!(named.is_empty(), "named must be cleared after desugar");
+        args.iter()
+            .map(|a| match a.kind {
+                ExprKind::Int(n) => n,
+                ref other => panic!("expected an int arg, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fills_trailing_default() {
+        let s = desugar_ok("fn f(x: int, y: int = 10):\n    print(x)\nr := f(1)\n");
+        assert_eq!(call_arg_ints(&s), vec![1, 10]);
+    }
+
+    #[test]
+    fn fills_multiple_defaults() {
+        let s = desugar_ok("fn f(x: int, y: int = 2, z: int = 3):\n    print(x)\nr := f(1)\n");
+        assert_eq!(call_arg_ints(&s), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn reorders_named() {
+        let s = desugar_ok("fn f(x: int, y: int):\n    print(x)\nr := f(y=2, x=1)\n");
+        assert_eq!(call_arg_ints(&s), vec![1, 2]);
+    }
+
+    #[test]
+    fn positional_plus_named() {
+        let s = desugar_ok("fn f(x: int, y: int):\n    print(x)\nr := f(1, y=2)\n");
+        assert_eq!(call_arg_ints(&s), vec![1, 2]);
+    }
+
+    #[test]
+    fn named_fills_remaining_default() {
+        let s = desugar_ok(
+            "fn f(x: int, y: int = 2, z: int = 3):\n    print(x)\nr := f(1, z=9)\n",
+        );
+        assert_eq!(call_arg_ints(&s), vec![1, 2, 9]);
+    }
+
+    #[test]
+    fn struct_ctor_named_and_default() {
+        let s = desugar_ok(
+            "struct P:\n    x: int\n    y: int = 0\nr := P(x=5)\n",
+        );
+        assert_eq!(call_arg_ints(&s), vec![5, 0]);
+    }
+
+    #[test]
+    fn plain_full_arity_unchanged() {
+        let s = desugar_ok("fn f(x: int, y: int):\n    print(x)\nr := f(1, 2)\n");
+        assert_eq!(call_arg_ints(&s), vec![1, 2]);
+    }
+
+    #[test]
+    fn under_arity_no_default_left_for_checker() {
+        // No default on `y`: desugar leaves it (checker will report the arity error).
+        let s = desugar_ok("fn f(x: int, y: int):\n    print(x)\nr := f(1)\n");
+        // unchanged: a single positional arg, no named
+        assert_eq!(call_arg_ints(&s), vec![1]);
+    }
+
+    #[test]
+    fn unknown_named_errors() {
+        assert!(desugar_err("fn f(x: int):\n    print(x)\nr := f(z=1)\n")
+            .message
+            .contains("unknown named argument 'z'"));
+    }
+
+    #[test]
+    fn duplicate_positional_and_named_errors() {
+        assert!(desugar_err("fn f(x: int, y: int):\n    print(x)\nr := f(1, x=2)\n")
+            .message
+            .contains("both positionally and by name"));
+    }
+
+    #[test]
+    fn missing_required_with_named_errors() {
+        assert!(desugar_err("fn f(x: int, y: int):\n    print(x)\nr := f(y=2)\n")
+            .message
+            .contains("missing required argument 'x'"));
+    }
+
+    #[test]
+    fn named_on_non_callable_errors() {
+        // a local closure called with a named arg is unsupported
+        assert!(desugar_err("g := fn(x: int): x\nr := g(x=1)\n")
+            .message
+            .contains("only supported on functions and struct constructors"));
+    }
+
+    #[test]
+    fn local_shadows_function_not_rewritten() {
+        // `f` is shadowed by a local binding; the call must NOT pull the top-level fn's default.
+        let s = desugar_ok(
+            "fn f(x: int, y: int = 9):\n    print(x)\nfn main():\n    f := fn(a: int): a\n    r := f(1)\nmain()\n",
+        );
+        // find the inner call: in main's body, `r := f(1)` stays a single positional arg.
+        let StmtKind::Fn(decl) = &s[1].kind else { panic!("expected main fn") };
+        let StmtKind::Let { value, .. } = &decl.body[1].kind else { panic!("expected r := f(1)") };
+        let ExprKind::Call { args, .. } = &value.kind else { panic!("expected call") };
+        assert_eq!(args.len(), 1, "shadowed local call must keep its single arg");
+    }
+
+    #[test]
+    fn nested_call_normalized() {
+        // a defaulted call nested as an argument is also filled
+        let s = desugar_ok(
+            "fn g(a: int, b: int = 7):\n    print(a)\nfn f(x: int):\n    print(x)\nr := f(g(1))\n",
+        );
+        let last = s.last().unwrap();
+        let StmtKind::Let { value, .. } = &last.kind else { panic!() };
+        let ExprKind::Call { args, .. } = &value.kind else { panic!() };
+        let ExprKind::Call { args: inner, .. } = &args[0].kind else { panic!("inner call") };
+        assert_eq!(inner.len(), 2, "nested g(1) should fill default -> g(1, 7)");
+    }
+}

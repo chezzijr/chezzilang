@@ -60,8 +60,9 @@ sharing, a channel type across grammar/checker/both engines) and not part of v1.
 "what's missing" list has since shipped (M8–M11: `std.json`, generic enums, `Stringable`/`Hashable`/
 numeric protocols, panic recovery, the **iterator protocol** (user structs with
 `next(self) -> Option[T]` iterable in `for`), and **match guards + range patterns** — see
-*Shipped post-v1* above); remaining gaps are mostly ergonomics (default/variadic args,
-comprehensions, slicing) and lazy/generator sequences (`yield`). Open items stay tracked in
+*Shipped post-v1* above, plus **default + named arguments** for functions and struct constructors);
+remaining gaps are mostly ergonomics (variadic args, comprehensions, slicing) and lazy/generator
+sequences (`yield`). Open items stay tracked in
 `gaps.md` → *Roadmap to a complete v1*.
 
 ### Syntax sketch

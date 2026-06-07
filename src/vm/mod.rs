@@ -3483,6 +3483,28 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// Default + named arguments on free functions: `examples/default_args.chz` byte-identical on
+    /// the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_default_args_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/default_args.chz");
+        let expected = include_str!("../../examples/default_args.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Default + named arguments on struct constructors: `examples/named_struct.chz` byte-identical
+    /// on the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_named_struct_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/named_struct.chz");
+        let expected = include_str!("../../examples/named_struct.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     /// Gap #5 golden: `examples/map.chz` is byte-identical to its `.expected` on the VM,
     /// and to the interpreter (the cross-engine acceptance bar for maps).
     #[test]

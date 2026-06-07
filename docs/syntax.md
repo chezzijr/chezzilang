@@ -111,6 +111,37 @@ nums.map(fn(x): x * 2)             # param/return types inferred in closures
 `return` statements: the first concrete return wins, conflicting returns are a type error,
 and a body with no value-returning `return` infers `nil`. Param types stay required.
 
+**Default + named arguments.** A free function (or a struct constructor) may give trailing
+parameters a **default** — restricted to a constant literal — and callers may pass arguments **by
+name**:
+
+```chezzi
+fn greet(name: str, greeting: str = "Hello", punct: str = "!") -> str:
+    return greeting + ", " + name + punct
+
+greet("Ada")                       # "Hello, Ada!"  — both defaults
+greet("Ada", "Hi")                 # "Hi, Ada!"     — override one positionally
+greet("Ada", punct="?")            # "Hello, Ada?"  — name an arg, skip a middle default
+greet(punct=".", name="Bo", greeting="Hey")        # all named, any order
+
+struct Server:
+    host: str
+    port: int = 8080               # default field
+    tls: bool = false
+
+Server("localhost")                # port=8080, tls=false
+Server("db", port=9000)            # named field; tls defaults
+```
+
+Rules: a parameter with a default may not be followed by a required one; at a call, positional
+arguments must precede named ones (`f(y=2, 1)` is an error); each parameter may be supplied at most
+once. Named arguments are **reordered into parameter-declaration order**, so a side-effecting named
+argument evaluates in parameter order, not source-text order (`f(y=g(), x=h())` runs `h()` before
+`g()`). Defaults — being constant literals — have no observable order. Scope: free functions (own
+module, `from`-imported, or module-qualified `mod.f(...)`) and struct constructors. **Not yet**
+supported on methods, closures, or enum variants; defaults must be constant literals (no `compute()`
+or references to other params).
+
 **`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
 **explicit `-> Result[…]`/`-> Option[…]`** return type. The `?` propagates to *that closure's*
 return, not the enclosing function. A closure with an inferred or non-`Result`/`Option` return type

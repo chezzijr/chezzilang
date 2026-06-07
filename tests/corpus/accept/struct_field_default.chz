@@ -1,0 +1,4 @@
+# rule: structDecl, field
+struct P:
+    x: int
+    y: int = 0

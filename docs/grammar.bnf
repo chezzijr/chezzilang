@@ -91,8 +91,12 @@
            | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" <block>
            | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> <block>
            | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <block>
+# A parameter may carry a default value (`x: int = 10`). Only free `fn` declarations accept it —
+# closures, methods, and protocol signatures reject it, and the default must be a constant literal:
+# both are parser-level rules the (permissive) grammar does not model.
 <params> ::= <param> | <param> "COMMA" <params>
 <param>  ::= "IDENT" | "IDENT" "COLON" <type>
+           | "IDENT" "ASSIGN" <expr> | "IDENT" "COLON" <type> "ASSIGN" <expr>
 
 # Generic type parameters on a fn/struct declaration: `[T]`, `[T: Comparable]`, `[A, B]`.
 <typeParams>    ::= "LBRACKET" <typeParamList> "RBRACKET"
@@ -104,7 +108,10 @@
                   | "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <structMembers> "DEDENT"
 <structMembers> ::= <structMember> | <structMember> <structMembers>
 <structMember>  ::= <field> | <fnDecl>
+# A field may carry a constant-literal default (`port: int = 8080`), used to fill omitted args in a
+# constructor call. Const-ness and the "no required field after a default" rule are parser-level.
 <field>         ::= "IDENT" "COLON" <type> "NEWLINE"
+                  | "IDENT" "COLON" <type> "ASSIGN" <expr> "NEWLINE"
 
 # A protocol is a Go-style structural interface: a block of body-less method signatures. A type
 # satisfies it by having matching methods (no explicit `implements`).
@@ -204,7 +211,7 @@
 # IDENT and the `[types](` shape is present; otherwise `LBRACKET … RBRACKET` is plain indexing.
 <postfix> ::= <primary>
             | <postfix> "LPAREN" "RPAREN"
-            | <postfix> "LPAREN" <exprList> "RPAREN"
+            | <postfix> "LPAREN" <argList> "RPAREN"
             | <postfix> "DOT" "IDENT"
             | <postfix> "DOT" "INT"
             | <postfix> "LBRACKET" <expr> "RBRACKET"
@@ -252,3 +259,13 @@
             | "FN" "LPAREN" <params> "RPAREN" "ARROW" <type> "COLON" <expr>
 
 <exprList> ::= <expr> | <expr> "COMMA" <exprList>
+
+# A call argument list: zero or more positional args, then zero or more named args (`name = expr`).
+# Positional must precede named — `f(y=2, 1)` is rejected by both the grammar and the parser. Used
+# only for ordinary calls; pipe (`|>`) and explicit-type-arg calls take positional <exprList> only.
+<argList>       ::= <posArgList>
+                  | <namedArgList>
+                  | <posArgList> "COMMA" <namedArgList>
+<posArgList>    ::= <expr> | <expr> "COMMA" <posArgList>
+<namedArgList>  ::= <namedArg> | <namedArg> "COMMA" <namedArgList>
+<namedArg>      ::= "IDENT" "ASSIGN" <expr>
