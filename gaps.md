@@ -28,11 +28,12 @@ sum types (`enum` with payloads, generic), `Result`/`Option` + `?`, generics + s
 backends, string interpolation, pipe, panic recovery (`recover:`), default + named args. What remains
 is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered below by leverage.
 
-### 🔴 Scripting essentials (promoted from future.md)
+### 🔴 Scripting essentials (promoted from future.md) — ✅ all resolved
 
-- **Comprehensions** — `[x*2 for x in xs if x>0]` (+ dict/set forms). A Python-feel language without
-  these reads as broken. **Fix:** parse-time desugar to a loop + `push`; no new opcode, no engine
-  change. Cheap, large UX win.
+- ~~**Comprehensions** — `[x*2 for x in xs if x>0]`~~ — **resolved (`481514b`).** List, set, and dict
+  forms (`{k: v for … if …}`), with optional guard, parse-time desugared to a loop + `push`/insert
+  (no new opcode). Loop var scoped per `infer_comprehension` (deliberately not marked immutable —
+  body is an expression, can't be assigned). Both engines.
 - ~~**Sub-ranges — Rust-style `xs[1..3]`**~~ — **resolved (M15, see 🟢 + resolved log).** Shipped as
   `xs[start..end]` / `s[start..end]`, half-open + bounds-clamped, reusing the existing `..` range (no
   new lexer token). The earlier "hardcoded to list/str, not a protocol — not now" plan was **reversed**:
@@ -48,8 +49,10 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   needed coroutine/continuation support in *both* engines, and are unnecessary: lazy
   `map`/`filter`/`take` are written as **adapter structs** over `Iterator[T]` (Rust's `std::iter`
   model — `examples/iter_adapters.chz`).
-- **`std.os.exit(code)` + real process exit codes** — scripts *must* be able to signal failure.
-  **Fix:** thread an exit-code channel through both run drivers + the CLI.
+- ~~**`std.os.exit(code)` + real process exit codes**~~ — **resolved (`481514b`).** `os.exit(code)`
+  halts immediately with the given process status, unwinding past `recover:` and skipping `defer`
+  (hard exit). Exit code threads through both run drivers + the CLI. `examples/exit.chz`; both engines
+  parity-tested (`vm::tests::exit_threads_code_through_both_engines`).
 
 ### 🟡 Scripting ergonomics (promoted from future.md)
 
