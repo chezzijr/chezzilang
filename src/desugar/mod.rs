@@ -77,6 +77,12 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
         module_index.insert(m.id.clone(), i);
     }
 
+    // Two passes. Pass 1 lowers bodies + declaration-site defaults and splices each omitted default
+    // into its call site — but the spliced copy comes from the registry (raw, un-lowered), so a
+    // default that contains a `?.`/`??` carrier or a call to a defaulted function is still raw. Pass 2
+    // re-walks, lowering those spliced default expressions in place. Already-lowered nodes and
+    // already-filled calls are no-ops on the second pass, so this is idempotent.
+    for _pass in 0..2 {
     for mi in 0..graph.modules.len() {
         // Build this module's resolution context: own id + bare from-imports + module aliases.
         let own_id = graph.modules[mi].id.clone();
@@ -120,6 +126,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
         let ast: &mut Module = &mut graph.modules[mi].ast;
         walker.walk_block(&mut ast.stmts)?;
     }
+    }
     Ok(())
 }
 
@@ -138,16 +145,20 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
     collect_fn_fields_into(&module.stmts, &mut fn_fields);
     let bare_from = HashMap::new();
     let aliases = HashMap::new();
-    let ctx = Ctx {
-        regs: &regs,
-        own_id: &id,
-        bare_from: &bare_from,
-        aliases: &aliases,
-        methods: &methods,
-        fn_fields: &fn_fields,
-    };
-    let mut walker = Walker { ctx, scopes: Vec::new(), next_tmp: 0, skip_normalize: false };
-    walker.walk_block(&mut module.stmts)
+    // Two passes — see the comment in [`run`] (spliced defaults are lowered on the second pass).
+    for _pass in 0..2 {
+        let ctx = Ctx {
+            regs: &regs,
+            own_id: &id,
+            bare_from: &bare_from,
+            aliases: &aliases,
+            methods: &methods,
+            fn_fields: &fn_fields,
+        };
+        let mut walker = Walker { ctx, scopes: Vec::new(), next_tmp: 0, skip_normalize: false };
+        walker.walk_block(&mut module.stmts)?;
+    }
+    Ok(())
 }
 
 /// Lower `?.`/`??` carrier nodes to `match` in a single standalone expression. String-interpolation
@@ -497,6 +508,14 @@ impl Walker<'_> {
                 self.walk_expr(value)?;
             }
             StmtKind::Fn(decl) => {
+                // Param defaults are evaluated in the caller's scope (no params bound), so normalize
+                // their inner calls + lower their `?.`/`??` carriers here, outside the param scope.
+                // `validate_defaults` guarantees a default references no param, so this is sound.
+                for p in decl.params.iter_mut() {
+                    if let Some(d) = &mut p.default {
+                        self.walk_expr(d)?;
+                    }
+                }
                 // Nested/top-level function body: params are a fresh scope.
                 self.push_scope();
                 for p in &decl.params {
@@ -505,8 +524,20 @@ impl Walker<'_> {
                 self.walk_block(&mut decl.body)?;
                 self.pop_scope();
             }
-            StmtKind::Struct { methods, .. } => {
+            StmtKind::Struct { fields, methods, .. } => {
+                // Field defaults are spliced into the constructor call site — normalize them like
+                // param defaults (outside any scope; they reference no field, per `validate_defaults`).
+                for f in fields.iter_mut() {
+                    if let Some(d) = &mut f.default {
+                        self.walk_expr(d)?;
+                    }
+                }
                 for m in methods.iter_mut() {
+                    for p in m.params.iter_mut() {
+                        if let Some(d) = &mut p.default {
+                            self.walk_expr(d)?;
+                        }
+                    }
                     self.push_scope();
                     for p in &m.params {
                         self.bind(&p.name);
@@ -1244,5 +1275,29 @@ mod tests {
     fn method_param_referencing_default_rejected() {
         let e = desugar_err("struct S:\n    n: int\n    fn go(self, x: int, y: int = x):\n        return y\n");
         assert!(e.to_string().contains("cannot reference parameter 'x'"), "got: {e}");
+    }
+
+    #[test]
+    fn defaulted_fn_call_in_default_is_normalized() {
+        // `f(x = g())` where `g(a = 7)`: the spliced default `g()` must itself be normalized to
+        // `g(7)` (second pass), not left under-arity.
+        let s = desugar_ok("fn g(a: int = 7) -> int:\n    return a\nfn f(x: int = g()):\n    print(x)\nr := f()\n");
+        let last = s.last().unwrap();
+        let StmtKind::Let { value, .. } = &last.kind else { panic!("let") };
+        let ExprKind::Call { args, .. } = &value.kind else { panic!("call f") };
+        // f's single arg is the spliced default `g(7)` — a Call with one positional arg.
+        let ExprKind::Call { args: ginner, .. } = &args[0].kind else { panic!("inner call g") };
+        assert_eq!(ginner.len(), 1, "g()'s own default was filled in the spliced default");
+    }
+
+    #[test]
+    fn carrier_in_default_is_lowered() {
+        // A `??` carrier inside a default must be lowered to a `match` (else the checker/VM panics).
+        let s = desugar_ok("fn h() -> int?:\n    return Some(5)\nfn f(x: int = h() ?? 0):\n    print(x)\nr := f()\n");
+        let last = s.last().unwrap();
+        let StmtKind::Let { value, .. } = &last.kind else { panic!("let") };
+        let ExprKind::Call { args, .. } = &value.kind else { panic!("call f") };
+        // The spliced default must be a lowered `match` (NullCoalesce carrier is gone).
+        assert!(matches!(args[0].kind, ExprKind::Match { .. }), "carrier lowered to match, got {:?}", args[0].kind);
     }
 }

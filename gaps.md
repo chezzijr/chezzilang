@@ -108,8 +108,10 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   substituted) when no method matches; both engines (`call_struct_method` / VM struct dispatch) fall
   back to calling the field value. `examples/fn_field.chz` (golden + parity); `examples/iter_adapters.chz`
   now calls `self.f(x)` directly. **Narrow limitation (accepted):** if a program uses a name as both
-  a `fn`-typed field *and* a defaulted method on different structs, that method loses default-fill
-  (the receiver type is unknown pre-check) — call it positionally.
+  a `fn`-typed field *and* a method on different structs, that method loses desugar-time argument
+  normalization — an omitted default isn't filled (→ arity error) and a named-arg call is rejected;
+  call it positionally with all args. The receiver type is unknown in the pre-type desugar pass, so
+  the field-vs-method ambiguity can't be resolved there.
 - ~~**`sort_by_key`**~~ — **resolved.** Native list method `xs.sort_by_key(f: fn(T) -> K)` — sorts in
   place by a derived key, sugar over `sort_by` (#11). `K` must be Comparable (int/float/str or a
   struct with `compare`); keys are computed once per element, then compared by natural order (scalar

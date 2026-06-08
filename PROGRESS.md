@@ -11,7 +11,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 ## Current focus
 
 > **Gaps pass II — type-system + runtime depth.** ✅ DONE (TDD, full suite + conformance green —
-> 1164 tests, both engines parity-tested, clippy clean). Five tractable `gaps.md` items closed;
+> 1167 tests, both engines parity-tested, clippy clean; reviewed by an agent panel — two bugs found
+> and fixed: defaults-in-defaults weren't lowered/normalized by the desugar pass, and the VM's
+> defer-superseded-fault trace diverged from the interp). Five tractable `gaps.md` items closed;
 > integers (#6: `byte`/bignum) deferred to its own milestone.
 > - **`Ref[T]` mutable box** ✅ — pure-Chezzi `std/ref.chz`: `struct Ref[T]: value: T` with
 >   `get`/`set`/`update`. No engine change (generic struct + self-mutation + fn-param call already

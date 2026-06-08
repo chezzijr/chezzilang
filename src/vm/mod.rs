@@ -155,10 +155,13 @@ struct Vm {
     /// every `recover:` handler and unwinds to the top — a hard, uncatchable halt; the driver then
     /// reports `code` as the process exit status.
     pending_exit: Option<i32>,
-    /// The stack trace of the first uncaught fault, captured before the frames unwind. `None` until
-    /// an uncaught fault occurs; reset to `None` whenever a `recover:` boundary catches a fault (so a
-    /// later uncaught fault captures a fresh trace). Read by the driver to print the trace.
+    /// The stack trace of the uncaught fault that propagates, captured before frames unwind. The
+    /// **deepest** fault wins (`fault_trace_depth` = frame count at capture): the original fault site
+    /// captures first; a `defer`red call that itself faults runs while its owning frame is still on
+    /// the stack (so it is deeper) and supersedes — matching Go's defer-supersedes semantics and the
+    /// interpreter. Reset whenever a `recover:` boundary catches a fault. Read by the driver.
     fault_trace: Option<Vec<TraceFrame>>,
+    fault_trace_depth: usize,
     /// Test mode: collect before *every* instruction, to surface any missing GC root.
     gc_stress: bool,
 }
@@ -198,6 +201,7 @@ impl Vm {
             handlers: Vec::new(),
             pending_exit: None,
             fault_trace: None,
+            fault_trace_depth: 0,
             gc_stress: false,
         }
     }
@@ -401,11 +405,14 @@ impl Vm {
                     return Err(rte);
                 }
                 // Capture the stack trace of an uncaught fault now, while the frames are still intact
-                // (the unwind below drops them). Innermost capture wins (`is_none`); a fault this loop
-                // CAN catch resets it below, so a stale trace never survives a `recover:`.
+                // (the unwind below drops them). The deepest fault wins: the original fault captures
+                // first, and a deeper deferred-call fault (run while its frame is still live) replaces
+                // it. A fault this loop CAN catch resets the capture below, so no stale trace survives
+                // a `recover:`.
                 let caught_here = matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
-                if !caught_here && self.fault_trace.is_none() {
+                if !caught_here && self.frames.len() > self.fault_trace_depth {
                     self.fault_trace = Some(self.capture_trace());
+                    self.fault_trace_depth = self.frames.len();
                 }
                 // The nearest `recover:` boundary owned by THIS dispatch loop catches the fault; a
                 // handler at/below `base_level` belongs to an outer loop, so we unwind to
@@ -427,6 +434,7 @@ impl Vm {
                         // This `recover:` caught the fault — discard any trace captured deeper in (it
                         // belongs to a fault that is now handled), so a later uncaught fault re-captures.
                         self.fault_trace = None;
+                        self.fault_trace_depth = 0;
                         // `unwind_deferred` already dropped frames down to `h.frame_len`; restore the
                         // operand stack / call-depth / ip to the boundary's snapshot.
                         self.stack.truncate(h.stack_len);
@@ -6396,6 +6404,27 @@ main()";
         let e = res.expect_err("should fault");
         let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
         assert_eq!(names, vec!["deeper", "main"], "no stale 'boom'/'safe' frames");
+    }
+
+    /// A `defer`red call that itself faults supersedes the original fault (Go semantics); the trace
+    /// must reflect the DEFERRED fault's chain (deeper, includes the deferred fn), identically on
+    /// both engines — not the original body fault's chain.
+    #[test]
+    fn deferred_fault_trace_supersedes_on_both_engines() {
+        let src = "fn boom() -> int:\n    return 1 / 0\nfn worker() -> int:\n    defer boom()\n    xs := [1, 2]\n    return xs[9]\nfn main():\n    print(worker())\nmain()\n";
+        let dir = std::env::temp_dir().join("chezzi_defer_trace_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dt.chz");
+        std::fs::write(&path, src).unwrap();
+        let (_o, _e, res, _) = run_file(&path);
+        let e = res.expect_err("should fault");
+        let vm_names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+        assert_eq!(vm_names, vec!["boom", "worker", "main"], "deferred fault's chain");
+        let vm_fmt = format_trace(&e.message, e.span, &e.trace);
+        let (_o2, _e2, ip_res, _) = crate::interp::run_file(&path);
+        let ie = ip_res.expect_err("should fault");
+        let ip_fmt = crate::interp::format_trace(&ie.message, ie.span, &ie.trace);
+        assert_eq!(vm_fmt, ip_fmt, "engines must agree on a deferred-fault trace");
     }
 
     /// Non-constant default golden: `examples/default_expr.chz` — defaults that are arithmetic on

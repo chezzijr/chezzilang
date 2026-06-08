@@ -20,6 +20,20 @@ fn capacity(extra: int = DEFAULT_CAP * 2) -> int:
 fn make(id: int = next_id()) -> int:
     return id
 
+# default = a call to a *defaulted* function (its own default fills in)
+fn base(n: int = 5) -> int:
+    return n * 2
+
+fn scaled(v: int = base()) -> int:
+    return v
+
+# default = an expression with null-coalescing (a `??` carrier, lowered inside the default)
+fn maybe() -> int?:
+    return Some(9)
+
+fn pick(v: int = maybe() ?? 0) -> int:
+    return v
+
 # struct field defaults = expressions
 struct Config:
     retries: int = 1 + 2
@@ -31,6 +45,8 @@ fn main():
     print(capacity())         # 16
     print(capacity(3))        # 3
     print(make())             # 1000
+    print(scaled())           # base() = 5*2 = 10
+    print(pick())             # maybe() ?? 0 = 9
     c := Config()
     print(c.retries)          # 3
     print(c.limit)            # 8
