@@ -1,0 +1,14 @@
+-- transactions --
+alice +50 -> 150
+bob -20 -> 30
+REJECTED: carol overdraft: have 0, need 10
+carol +200 -> 200
+REJECTED: alice overdraft: have 150, need 999
+REJECTED: no account 'dave'
+-- books closed --
+-- report --
+total: 380
+carol: 200
+alice: 150
+bob: 30
+below 100: [bob]

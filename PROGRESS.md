@@ -759,6 +759,32 @@ patterns) are friction. Confirmed working 🟢: recursive/self-referential struc
 list), mutable `self` across method calls, nested-list DP, empty-map `K,V` inference. No `src/`
 changes this pass — surfacing only; full 569-test suite still green.
 
+## Gaps — round 3 (open, document-only)
+
+Coverage pass: gave every deterministic orphaned example a **golden** test (exact output + parity,
+not just engine-parity) and added three comprehensive multi-feature programs, all green + byte-
+identical on both engines:
+
+- `examples/edge_cases.chz` — arithmetic faults under `recover:`, int/float boundaries, empty/nested
+  collection printing, slice clamping, index faults, truthiness, block-scoped shadowing, closure
+  capture-by-value, defer LIFO, comprehensions.
+- `examples/evaluator.chz` — tokenizer + recursive-descent parser + AST evaluator with `Result`/`?`
+  error paths (bad char, unbalanced parens, trailing input, divide-by-zero).
+- `examples/ledger.chz` — map of mutable structs, overdraft `Result`s, `defer`, `sort_by`, guarded
+  comprehensions.
+
+Promoted to golden (were parity-only): `method_default_args`, `method_type_params`, `param_protocol`;
+filled `.expected` for `hof`, `list_hof`, `list_methods`, `loops`, `match_value`, `pair`.
+`request_demo.chz` stays manual-only (real network → non-deterministic).
+
+Confirmed working 🟢: toward-zero integer division (`-7/2 == -3`, `-7%3 == -1`), block-scoped
+shadowing, closure value-snapshot semantics, mutating a struct reached via `map.get(...)`, `sort_by`
+on a list of structs, `defer` running on the `?` short-circuit path. Friction surfaced (no `src/`
+changes): **collection literals must be single-line** (a newline inside `[`/`{` ends the expression);
+a `match` cannot have multiple `Some(...)` arms nor nested nullary-variant patterns (must nest a
+second `match`); **float division by zero is a runtime fault**, not an IEEE `Inf`/`NaN`. Full suite
+(1071 tests) + conformance green, clippy clean.
+
 ## Notes
 
 - Recursive structs "just work" via the checker's two-pass name collection — trees and linked lists

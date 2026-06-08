@@ -3800,6 +3800,133 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    // ----- golden coverage for the formerly-orphaned examples + the comprehensive torture
+    // programs (edge_cases / evaluator / ledger). Each pins exact output AND cross-engine parity.
+
+    /// `examples/hof.chz` — a function-typed parameter applied to a closure.
+    #[test]
+    fn golden_hof_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/hof.chz");
+        let expected = include_str!("../../examples/hof.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `examples/list_hof.chz` — `map`/`filter`/`fold`, incl. an element-type-changing map.
+    #[test]
+    fn golden_list_hof_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/list_hof.chz");
+        let expected = include_str!("../../examples/list_hof.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `examples/list_methods.chz` — pop/reverse/contains/index_of/sum (int + float).
+    #[test]
+    fn golden_list_methods_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/list_methods.chz");
+        let expected = include_str!("../../examples/list_methods.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `examples/loops.chz` — break/continue across for-range, for-list, and while loops.
+    #[test]
+    fn golden_loops_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/loops.chz");
+        let expected = include_str!("../../examples/loops.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `examples/match_value.chz` — `match` on int/str literals with `_`, stmt + expr forms.
+    #[test]
+    fn golden_match_value_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/match_value.chz");
+        let expected = include_str!("../../examples/match_value.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `examples/pair.chz` — tuples, multi-return, destructuring let, `.0`/`.1` access.
+    #[test]
+    fn golden_pair_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/pair.chz");
+        let expected = include_str!("../../examples/pair.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `examples/method_default_args.chz` — default + named args on methods (was parity-only).
+    #[test]
+    fn golden_method_default_args_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/method_default_args.chz");
+        let expected = include_str!("../../examples/method_default_args.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `examples/method_type_params.chz` — a method's own `[U]` inferred per call (was parity-only).
+    #[test]
+    fn golden_method_type_params_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/method_type_params.chz");
+        let expected = include_str!("../../examples/method_type_params.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `examples/param_protocol.chz` — a user-defined parameterized protocol bound (was parity-only).
+    #[test]
+    fn golden_param_protocol_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/param_protocol.chz");
+        let expected = include_str!("../../examples/param_protocol.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `examples/edge_cases.chz` — torture test: arithmetic faults under `recover:`, int/float
+    /// boundaries, empty/nested collection printing, slice clamping, index faults, truthiness,
+    /// block-scoped shadowing, closure capture-by-value, defer LIFO, and comprehensions.
+    #[test]
+    fn golden_edge_cases_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/edge_cases.chz");
+        let expected = include_str!("../../examples/edge_cases.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `examples/evaluator.chz` — a full tokenizer + recursive-descent parser + AST evaluator with
+    /// `Result`/`?` error paths (bad char, unbalanced parens, trailing input, divide-by-zero).
+    #[test]
+    fn golden_evaluator_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/evaluator.chz");
+        let expected = include_str!("../../examples/evaluator.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `examples/ledger.chz` — account ledger: a map of mutable structs, overdraft `Result`s, a
+    /// `defer` closing line, `sort_by` ranking, and guarded comprehensions.
+    #[test]
+    fn golden_ledger_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/ledger.chz");
+        let expected = include_str!("../../examples/ledger.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     /// M1 (tier-1) golden: `examples/string_iter.chz` (chars + iterable strings) byte-identical
     /// on the VM, the interpreter, and its `.expected`.
     #[test]
@@ -5335,23 +5462,9 @@ main()";
         );
     }
 
-    #[test]
-    fn parity_method_type_params() {
-        // A generic method's own `[U]` is type-erased at runtime, so both engines run it identically.
-        assert_file_parity("examples/method_type_params.chz");
-    }
-
-    #[test]
-    fn parity_param_protocol() {
-        // A user-defined parameterized protocol bound is checker-only (type-erased); both engines run it.
-        assert_file_parity("examples/param_protocol.chz");
-    }
-
-    #[test]
-    fn parity_method_default_args() {
-        // Method default + named args are normalized in the desugar pass, so both engines agree.
-        assert_file_parity("examples/method_default_args.chz");
-    }
+    // NOTE: method_type_params / param_protocol / method_default_args were parity-only; they are
+    // now full golden tests (`golden_*_chz_matches_expected_and_interp` above), which assert exact
+    // output AND cross-engine parity, so the weaker `parity_*` file tests were removed.
 
     #[test]
     fn parity_hof_param() {

@@ -1,0 +1,67 @@
+# examples/ledger.chz — a small account-ledger / data-pipeline program.
+#
+# Exercises: enums with payloads (transactions), a `map[str, Account]` of mutable structs (mutating
+# a struct reached through `map.get(...)` persists, because structs are references), `Result`/`?`
+# for the overdraft / unknown-account error paths, `defer` for an end-of-run message, `sort_by` for
+# a ranked report, and list/`if` comprehensions for the summary. Fully deterministic.
+
+# `defer` targets a function/method call, so wrap the built-in `print`.
+fn note(msg: str):
+    print(msg)
+
+enum Txn:
+    Deposit(str, int)     # (account name, amount)
+    Withdraw(str, int)
+
+struct Account:
+    name: str
+    balance: int
+
+# Apply one transaction, mutating the account in place. Overdrafts and unknown accounts are Err.
+fn apply(accounts: map[str, Account], t: Txn) -> str!:
+    match t:
+        Deposit(who, amt):
+            match accounts.get(who):
+                None: return Err("no account '{who}'")
+                Some(acc):
+                    acc.balance += amt
+                    return Ok("{who} +{amt} -> {acc.balance}")
+        Withdraw(who, amt):
+            match accounts.get(who):
+                None: return Err("no account '{who}'")
+                Some(acc):
+                    if amt > acc.balance:
+                        return Err("{who} overdraft: have {acc.balance}, need {amt}")
+                    acc.balance -= amt
+                    return Ok("{who} -{amt} -> {acc.balance}")
+
+# Run the batch. A `defer` guarantees the closing line prints however the loop exits.
+fn run(accounts: map[str, Account], txns: list[Txn]):
+    defer note("-- books closed --")
+    print("-- transactions --")
+    for t in txns:
+        match apply(accounts, t):
+            Ok(msg): print(msg)
+            Err(e):  print("REJECTED: {e.message()}")
+
+# Summary report: total, a balance-descending ranking, and a guarded comprehension.
+fn report(accounts: map[str, Account]):
+    print("-- report --")
+    balances := [v.balance for k, v in accounts]
+    print("total: {balances.sum()}")
+
+    accs := [v for k, v in accounts]
+    accs.sort_by(fn(a: Account, b: Account) -> int: b.balance - a.balance)
+    for a in accs:
+        print("{a.name}: {a.balance}")
+
+    below := [a.name for a in accs if a.balance < 100]
+    print("below 100: {below}")
+
+fn main():
+    accounts := {"alice": Account("alice", 100), "bob": Account("bob", 50), "carol": Account("carol", 0)}
+    txns := [Deposit("alice", 50), Withdraw("bob", 20), Withdraw("carol", 10), Deposit("carol", 200), Withdraw("alice", 999), Deposit("dave", 5)]
+    run(accounts, txns)
+    report(accounts)
+
+main()

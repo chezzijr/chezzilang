@@ -3845,6 +3845,93 @@ b := Buf([10, 20, 30])
         assert_eq!(run_capture(source).expect("comprehensions.chz should run"), expected);
     }
 
+    // ----- golden coverage for the formerly-orphaned examples + the comprehensive torture
+    // programs. Cross-engine parity for each is asserted in `vm`'s twin `golden_*` test.
+
+    #[test]
+    fn golden_hof_chz() {
+        let source = include_str!("../../examples/hof.chz");
+        let expected = include_str!("../../examples/hof.expected");
+        assert_eq!(run_capture(source).expect("hof.chz should run"), expected);
+    }
+
+    #[test]
+    fn golden_list_hof_chz() {
+        let source = include_str!("../../examples/list_hof.chz");
+        let expected = include_str!("../../examples/list_hof.expected");
+        assert_eq!(run_capture(source).expect("list_hof.chz should run"), expected);
+    }
+
+    #[test]
+    fn golden_list_methods_chz() {
+        let source = include_str!("../../examples/list_methods.chz");
+        let expected = include_str!("../../examples/list_methods.expected");
+        assert_eq!(run_capture(source).expect("list_methods.chz should run"), expected);
+    }
+
+    #[test]
+    fn golden_loops_chz() {
+        let source = include_str!("../../examples/loops.chz");
+        let expected = include_str!("../../examples/loops.expected");
+        assert_eq!(run_capture(source).expect("loops.chz should run"), expected);
+    }
+
+    #[test]
+    fn golden_match_value_chz() {
+        let source = include_str!("../../examples/match_value.chz");
+        let expected = include_str!("../../examples/match_value.expected");
+        assert_eq!(run_capture(source).expect("match_value.chz should run"), expected);
+    }
+
+    #[test]
+    fn golden_pair_chz() {
+        let source = include_str!("../../examples/pair.chz");
+        let expected = include_str!("../../examples/pair.expected");
+        assert_eq!(run_capture(source).expect("pair.chz should run"), expected);
+    }
+
+    #[test]
+    fn golden_method_default_args_chz() {
+        let source = include_str!("../../examples/method_default_args.chz");
+        let expected = include_str!("../../examples/method_default_args.expected");
+        assert_eq!(run_capture(source).expect("method_default_args.chz should run"), expected);
+    }
+
+    #[test]
+    fn golden_method_type_params_chz() {
+        let source = include_str!("../../examples/method_type_params.chz");
+        let expected = include_str!("../../examples/method_type_params.expected");
+        assert_eq!(run_capture(source).expect("method_type_params.chz should run"), expected);
+    }
+
+    #[test]
+    fn golden_param_protocol_chz() {
+        let source = include_str!("../../examples/param_protocol.chz");
+        let expected = include_str!("../../examples/param_protocol.expected");
+        assert_eq!(run_capture(source).expect("param_protocol.chz should run"), expected);
+    }
+
+    #[test]
+    fn golden_edge_cases_chz() {
+        let source = include_str!("../../examples/edge_cases.chz");
+        let expected = include_str!("../../examples/edge_cases.expected");
+        assert_eq!(run_capture(source).expect("edge_cases.chz should run"), expected);
+    }
+
+    #[test]
+    fn golden_evaluator_chz() {
+        let source = include_str!("../../examples/evaluator.chz");
+        let expected = include_str!("../../examples/evaluator.expected");
+        assert_eq!(run_capture(source).expect("evaluator.chz should run"), expected);
+    }
+
+    #[test]
+    fn golden_ledger_chz() {
+        let source = include_str!("../../examples/ledger.chz");
+        let expected = include_str!("../../examples/ledger.expected");
+        assert_eq!(run_capture(source).expect("ledger.chz should run"), expected);
+    }
+
     /// Match-guard golden: `pattern if cond:` arms (expr + stmt forms) produce the expected output.
     #[test]
     fn golden_match_guard_chz() {

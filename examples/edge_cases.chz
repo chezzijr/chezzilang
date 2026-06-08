@@ -1,0 +1,220 @@
+# examples/edge_cases.chz — a deterministic torture test for the corners of the language.
+#
+# Every runtime fault is wrapped in `recover:` so the program runs to completion and prints a
+# stable line for each case. This pins exact output on BOTH engines (VM + interp), so it catches
+# wrong-but-agreeing behaviour, not just engine divergence. No clocks / network / args — fully
+# reproducible.
+
+# A faulting thunk runner: prints "label: ok V" on success or "label: <message>" on a caught fault.
+fn probe(label: str, f: fn() -> int):
+    r := recover:
+        f()
+    match r:
+        Ok(v): print("{label}: ok {v}")
+        Err(e): print("{label}: {e.message()}")
+
+# ---- arithmetic faults (all caught) --------------------------------------------------------------
+
+fn f_div0() -> int: 1 / 0
+fn f_mod0() -> int: 7 % 0
+fn f_overflow() -> int: 9223372036854775807 + 1
+fn f_underflow() -> int: 0 - 9223372036854775807 - 2
+fn f_shift_hi() -> int: 1 << 99
+fn f_shift_neg() -> int: 1 << (0 - 1)
+fn f_fdiv0() -> int:
+    x := 1.0 / 0.0
+    return int(x)
+
+fn faults():
+    print("-- faults --")
+    probe("div0", f_div0)
+    probe("mod0", f_mod0)
+    probe("overflow", f_overflow)
+    probe("underflow", f_underflow)
+    probe("shift_hi", f_shift_hi)
+    probe("shift_neg", f_shift_neg)
+    probe("fdiv0", f_fdiv0)
+
+# ---- integer / float boundaries that DON'T fault -------------------------------------------------
+
+fn numbers():
+    print("-- numbers --")
+    print(9223372036854775807)        # i64 max
+    print(0 - 9223372036854775807 - 1) # i64 min
+    print(7 / 2)                       # int div truncates toward zero
+    print((0 - 7) / 2)                 # toward zero, not floor
+    print(7 % 3)
+    print((0 - 7) % 3)                 # sign of dividend
+    print(2.0)                         # float prints with a decimal
+    print(1 + 2.5)                     # int promoted to float in mixed arith
+    print(10.0 / 4.0)
+    print(float(7) / float(2))
+    print(int(3.9))                    # truncates
+    print(1 << 10)
+    print(255 & 15)
+    print(10 | 5)
+    print(6 ^ 3)
+
+# ---- collections: empty, nested, mutation -------------------------------------------------------
+
+fn collections():
+    print("-- collections --")
+    print([])
+    print({})
+    print(set())
+    print(len([]))
+    print([[1, 2], [3]])              # nested list
+    print({"a": [1, 2], "b": []})     # map of lists; keys printed unquoted
+    print((1, "x", true))             # tuple; str element unquoted
+    print([(1, 2), (3, 4)])           # list of tuples
+
+    xs := [1, 2, 3]
+    xs.push(4)
+    xs[0] = 10
+    xs[1] += 5
+    print(xs)
+    print(xs.pop())                   # Some(4)
+    print(xs)
+
+    m := {"x": 1}
+    m["y"] = 2
+    print(m.get("x"))                 # Some(1)
+    print(m.get("z"))                 # None
+    print(m.has("y"))
+    print(m.remove("x"))              # Some(1)
+    print(m.len())
+
+    a := {1, 2, 3}
+    b := {3, 4}
+    print(a.union(b).len())
+    print(a.intersection(b).len())
+    print(a.difference(b).len())
+
+# ---- slicing: half-open + bounds-clamped --------------------------------------------------------
+
+fn slicing():
+    print("-- slicing --")
+    xs := [10, 20, 30, 40, 50]
+    print(xs[1..3])                   # [20, 30]
+    print(xs[0..99])                  # clamps to len
+    print(xs[3..1])                   # start > end -> []
+    print(xs[2..2])                   # empty
+    s := "hello"
+    print(s[0..2])                    # he
+    print(s[1..99])                   # ello
+    print(s[2])                       # single char -> "l"
+
+# ---- index faults (caught) ----------------------------------------------------------------------
+
+fn f_oob() -> int:
+    xs := [1, 2, 3]
+    return xs[9]
+fn f_neg() -> int:
+    xs := [1, 2, 3]
+    return xs[0 - 1]
+fn f_stroob() -> int:
+    s := "ab"
+    return ord(s[5])
+fn f_misskey() -> int:
+    m := {"k": 1}
+    return m["nope"]
+
+fn index_faults():
+    print("-- index faults --")
+    probe("list_oob", f_oob)
+    probe("list_neg", f_neg)
+    probe("str_oob", f_stroob)
+    probe("missing_key", f_misskey)
+
+# ---- truthiness is bool-only (no implicit coercion) ---------------------------------------------
+
+fn truthy():
+    print("-- truthiness --")
+    xs := []
+    if len(xs) > 0:
+        print("nonempty")
+    else:
+        print("empty")
+    name := ""
+    print(len(name) == 0)
+    print(true and false)
+    print(true or false)
+    print(not (1 < 2))
+
+# ---- shadowing: an inner binding hides the outer one --------------------------------------------
+
+fn shadow():
+    print("-- shadowing --")
+    x := 1
+    if true:
+        x := 100          # new binding in this block, shadows outer
+        print(x)          # 100
+    print(x)              # 1 (outer unchanged)
+
+# ---- closures capture by value (snapshot at definition; reassign is invisible) ------------------
+
+fn make_reader() -> fn() -> int:
+    v := 10
+    g := fn() -> int: v
+    v = 99                # closure captured the value 10, not the variable
+    return g
+
+fn adder(n: int) -> fn(int) -> int:
+    return fn(x: int) -> int: x + n
+
+fn closures():
+    print("-- closures --")
+    print(make_reader()())    # 10
+    add5 := adder(5)
+    add10 := adder(10)
+    print(add5(1))            # 6
+    print(add10(1))           # 11
+
+# ---- defer: LIFO order + runs on the `?` short-circuit path -------------------------------------
+
+fn note(msg: str):
+    print(msg)
+
+fn defer_lifo():
+    defer note("third")
+    defer note("second")
+    defer note("first")
+    note("body")
+
+fn defer_q() -> int!:
+    defer note("cleanup ran")
+    return Err("boom")        # `?` caller sees this; defer still runs
+
+fn defers():
+    print("-- defer --")
+    defer_lifo()
+    r := recover:
+        n := defer_q()?
+        n
+    match r:
+        Ok(v): print("ok {v}")
+        Err(e): print("caught {e.message()}")
+
+# ---- comprehensions ----------------------------------------------------------------------------
+
+fn comprehensions():
+    print("-- comprehensions --")
+    nums := [1, 2, 3, 4, 5, 6]
+    print([n * n for n in nums])
+    print([n for n in nums if n % 2 == 0])
+    print({n % 3 for n in nums})              # set, dedups
+    print({n: n * n for n in [1, 2, 3]})      # map
+
+fn main():
+    faults()
+    numbers()
+    collections()
+    slicing()
+    index_faults()
+    truthy()
+    shadow()
+    closures()
+    defers()
+    comprehensions()
+
+main()
