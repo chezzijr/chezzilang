@@ -114,6 +114,38 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   engine. See `src/checker/mod.rs` (`is_loop_var`/`mark_loop_var`) + checker tests
   `for_*_reassign_rejected`.
 
+### 🟡 Stdlib breadth (low priority — language is feature-complete; this is library fill)
+
+> **Not necessary for now.** The current stdlib (`std.fs`/`io`/`os`/`process`/`time`/`request`/
+> `regex`/`json`/`math`/`cmp`/`str`/`iter`) covers **read-and-transform** scripting well — text
+> processing, JSON/HTTP/API work, file *reading*, shelling out, regex, DSA. The gaps below block
+> **write-heavy automation, randomness, binary/crypto, and CLI tooling**. Ranked by leverage.
+>
+> Split matters (ties to the bootstrap/tooling track): the **native** items touch syscalls/entropy
+> and must be Rust; the **pure-Chezzi** items are writable as `std/*.chz` modules today (the language
+> is feature-complete) and make good dogfood / bootstrap-feasibility probes.
+
+**Must be native (Rust):**
+- **`std.rand`** — no RNG anywhere today (`std.math` has none). Highest leverage: unblocks shuffling,
+  sampling, test data, tokens, sims, games. Small to add (OS entropy → seedable PRNG).
+- **fs mutations** — `std.fs` is read-mostly (`exists`/`is_dir`/`is_file`/`list_dir`/`size`/`glob` +
+  `io.read_file`/`write_file`). Missing `mkdir`/`remove`/`rename`/`copy`/`append` → can't manage files/dirs.
+- **Encoding / crypto** — no base64, hex, sha/md5, uuid, url-encode. Common for API + hashing scripts.
+- **`std.math` fill** — no trig (`sin`/`cos`/`tan`), no `log`/`ln`/`exp`. Blocks geometry/scientific.
+- **`std.process` polish** — only `sh -c` (shell-injection-prone); captures stdout **or** stderr, not
+  both + exit code. Want a structured result + an args-array form (no shell).
+- **`std.request` polish** — get/post only (no put/delete/patch), thin header/timeout/query control.
+
+**Writable as pure-Chezzi `std/*.chz` now (no native needed):**
+- **path ops** (`join`/`basename`/`dirname`/`ext`/`normalize` — scripts hardcode `/` today),
+  **`argparse`** (raw `os.args` only), **CSV** (json exists, csv doesn't), **duration / date
+  decomposition** (timestamps only — no year/month/day/parse/duration math), and higher-level
+  **data structures** (heap / priority-queue, deque, counter, ordered map) — all expressible with the
+  current generics + protocols.
+
+**Language-level (separate, see *Type-system + runtime depth*):** `i64`-only + no `byte` type blocks
+clean binary/buffer work — relevant to encoding above and to any future self-host.
+
 ### Tier 4 — ecosystem (toolchain, not the language)
 REPL (huge for scripting iteration), formatter, `assert` + built-in test runner, LSP, package
 manager / registry (spec defers this), debugger, doc comments + docgen.
