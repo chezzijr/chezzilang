@@ -292,9 +292,6 @@ struct Checker {
     /// Reset to 0 when descending into a (nested) function or closure body so an inner `break`
     /// can't escape into an outer loop. `> 0` ⇒ `break`/`continue` are legal here.
     loop_depth: usize,
-    /// Whether we're checking inside a function/method body. `defer` is only legal there (not at
-    /// module top level). Set when descending into a body, restored on the way out.
-    in_fn: bool,
 }
 
 impl Checker {
@@ -322,7 +319,6 @@ impl Checker {
             imported_poly: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
-            in_fn: false,
         };
         c.seed_stdlib_structs();
         c
@@ -704,7 +700,6 @@ impl Checker {
         let saved_ret = std::mem::replace(&mut self.current_ret, Ty::Unknown);
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         let saved_rets = std::mem::take(&mut self.collected_rets);
-        let saved_in_fn = std::mem::replace(&mut self.in_fn, true);
         self.push_scope();
         for (i, param) in decl.params.iter().enumerate() {
             let ty = if param.name == "self" {
@@ -721,7 +716,6 @@ impl Checker {
         let found = std::mem::replace(&mut self.collected_rets, saved_rets);
         self.inferring_ret = saved_flag;
         self.current_ret = saved_ret;
-        self.in_fn = saved_in_fn;
         self.exit_type_params(saved_tps);
         self.errors.truncate(mark); // discard inference-time errors; pass 2 re-reports them for real
         if let Some(t) = found.iter().find(|t| !t.is_unknown() && **t != Ty::Nil) {
@@ -1006,9 +1000,8 @@ impl Checker {
             StmtKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms),
             StmtKind::Return(value) => self.check_return(value.as_ref(), span),
             StmtKind::Defer(e) => {
-                if !self.in_fn {
-                    self.error(span, "defer outside function");
-                }
+                // Block-scoped defer: any indented block — including the module body — is a defer
+                // scope, so top-level `defer` is legal (no `in_fn` requirement).
                 // `defer` targets a method call or a call to a first-class callable value (a user
                 // function/closure, or a name bound to one). Built-ins (`print`, `len`, …) and
                 // struct/enum constructors are not first-class values — wrap them in a function.
@@ -1240,7 +1233,6 @@ impl Checker {
         // A nested fn opens a fresh `?`-target context: a `?` in this body targets this function,
         // not an enclosing recover at the definition site.
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
-        let saved_in_fn = std::mem::replace(&mut self.in_fn, true);
         self.push_scope();
         for (i, param) in decl.params.iter().enumerate() {
             let ty = if param.name == "self" {
@@ -1273,7 +1265,6 @@ impl Checker {
         self.inferring_ret = saved_inferring;
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
-        self.in_fn = saved_in_fn;
         self.exit_type_params(saved_tps);
     }
 

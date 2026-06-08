@@ -3337,8 +3337,9 @@ fn defer_value_call_ok() {
 }
 
 #[test]
-fn defer_outside_function_rejected() {
-    rejects("defer print(\"x\")\n", "defer outside function");
+fn defer_at_top_level_ok() {
+    // Block-scoped defer: the module body is the outermost scope, so top-level defer is legal.
+    ok("fn cleanup():\n    print(\"x\")\ndefer cleanup()\n");
 }
 
 #[test]
