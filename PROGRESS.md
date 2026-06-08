@@ -27,7 +27,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   calling the field value. `examples/fn_field.chz`; `iter_adapters.chz` now uses `self.f(x)` direct.
 >   Narrow limitation: a name used as both fn-field and defaulted method loses that method's
 >   default-fill (pre-type receiver unknown).
-> - **relax non-const defaults** ⬜ · **runtime stack traces** ⬜.
+> - **relax non-const defaults** ✅ — a default may be any expression not referencing another
+>   param/field (`compute()`, `1+2`, `GLOBAL*2`). Parser dropped the const-literal check; desugar
+>   `validate_defaults` rejects param/field-referencing defaults (cloned into caller scope at the
+>   omitting call site). `examples/default_expr.chz`. Param-ref defaults (`y = x+1`) still out.
+> - **runtime stack traces** ⬜.
 
 > **Scripting-ergonomics gap pass.** ✅ DONE (TDD, full suite + conformance green — 1143 tests,
 > both engines parity-tested, clippy clean). Five `gaps.md` items closed in sequence, each with a

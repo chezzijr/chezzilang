@@ -8,15 +8,17 @@
 //!
 //! Scope: free functions (own module + `from`-imported + module-qualified `alias.f(...)`) and struct
 //! constructors. Enum-variant constructors are excluded (payloads are unnamed) and methods are
-//! deferred (resolving a receiver type needs the checker). Default values are constant literals,
-//! validated at parse time.
+//! deferred (resolving a receiver type needs the checker). A default may be any expression that does
+//! not reference another parameter/field — `validate_defaults` enforces this (the default is cloned
+//! into the caller's scope at the omitting call site, where parameters/fields are not bound).
 //!
 //! The pass is **scope-aware**: a local binding may shadow a top-level function name, so a call is
 //! only rewritten when its callee resolves to a registered callable and is *not* shadowed by a local
 //! (mirroring the checker, which treats a call as a named function only when the name is not a local).
 
 use crate::ast::{
-    Block, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Pattern, Span, Stmt, StmtKind, Type,
+    Block, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Param, Pattern, Span, Stmt,
+    StmtKind, Type,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolveError};
 use std::collections::{HashMap, HashSet};
@@ -63,6 +65,9 @@ impl ModReg {
 
 /// Desugar every module's calls in place. Errors carry the offending call's span.
 pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
+    for m in &graph.modules {
+        validate_defaults(&m.ast.stmts)?;
+    }
     let regs = build_registries(graph);
     let methods = collect_methods(graph);
     let fn_fields = collect_fn_fields(graph);
@@ -123,6 +128,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
 /// to stay consistent with the file-backed graph path.
 #[cfg(test)]
 pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
+    validate_defaults(&module.stmts)?;
     let id = ModuleId(std::path::PathBuf::from("<main>"));
     let mut regs = HashMap::new();
     regs.insert(id.clone(), collect_module_reg(&module.stmts));
@@ -206,6 +212,150 @@ fn collect_methods_into(stmts: &[Stmt], map: &mut HashMap<String, Vec<Vec<PSpec>
                 map.entry(method.name.clone()).or_default().push(spec);
             }
         }
+    }
+}
+
+/// Reject any parameter/field default that references another parameter/field in the same signature.
+/// A default is **cloned into the caller's scope** at the omitting call site (see `normalize_call`),
+/// where those parameters/fields are not bound — so a non-param-referencing expression (`compute()`,
+/// `1 + 2`, `GLOBAL * 2`) is fine, but `y: int = x + 1` is not. Covers top-level functions and struct
+/// methods/fields (the only places defaults are collected). Runs before the call-rewrite pass.
+fn validate_defaults(stmts: &[Stmt]) -> Result<(), ResolveError> {
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Fn(decl) => check_param_defaults(&decl.params)?,
+            StmtKind::Struct { fields, methods, .. } => {
+                let fnames: HashSet<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+                for fld in fields {
+                    if let Some(d) = &fld.default
+                        && let Some(n) = default_referenced_name(d, &fnames)
+                    {
+                        return Err(err(
+                            d.span,
+                            format!("default value cannot reference field '{n}' (defaults are evaluated at the call site, where fields are not in scope)"),
+                        ));
+                    }
+                }
+                for m in methods {
+                    check_param_defaults(&m.params)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Reject a param default that references any parameter in the same list.
+fn check_param_defaults(params: &[Param]) -> Result<(), ResolveError> {
+    let names: HashSet<&str> = params.iter().map(|p| p.name.as_str()).collect();
+    for p in params {
+        if let Some(d) = &p.default
+            && let Some(n) = default_referenced_name(d, &names)
+        {
+            return Err(err(
+                d.span,
+                format!("default value cannot reference parameter '{n}' (defaults are evaluated at the call site, where parameters are not in scope)"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The first name in `names` referenced as an identifier anywhere in `e`, if any. A `Field`'s member
+/// name and a `Closure`'s own params are not treated specially (conservative: a default reusing a
+/// param name as a closure binding is rejected — a non-issue in practice).
+fn default_referenced_name(e: &Expr, names: &HashSet<&str>) -> Option<String> {
+    let mut found: Option<String> = None;
+    walk_idents(e, &mut |n| {
+        if found.is_none() && names.contains(n) {
+            found = Some(n.to_string());
+        }
+    });
+    found
+}
+
+/// Visit every identifier reference in an expression (a `Field`/`OptChain` member name is the member,
+/// not a reference, so only the receiver is visited).
+fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
+    match &e.kind {
+        ExprKind::Ident(n) => f(n),
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {}
+        ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
+            xs.iter().for_each(|x| walk_idents(x, f))
+        }
+        ExprKind::Map(ps) => ps.iter().for_each(|(k, v)| {
+            walk_idents(k, f);
+            walk_idents(v, f);
+        }),
+        ExprKind::Comprehension { key, elem, iter, guard, .. } => {
+            if let Some(k) = key {
+                walk_idents(k, f);
+            }
+            walk_idents(elem, f);
+            walk_idents(iter, f);
+            if let Some(g) = guard {
+                walk_idents(g, f);
+            }
+        }
+        ExprKind::Unary { expr, .. } => walk_idents(expr, f),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            walk_idents(lhs, f);
+            walk_idents(rhs, f);
+        }
+        ExprKind::Range { start, end } => {
+            walk_idents(start, f);
+            walk_idents(end, f);
+        }
+        ExprKind::Call { callee, args, named, .. } => {
+            walk_idents(callee, f);
+            args.iter().for_each(|a| walk_idents(a, f));
+            named.iter().for_each(|(_, a)| walk_idents(a, f));
+        }
+        ExprKind::Field { obj, .. } => walk_idents(obj, f),
+        ExprKind::Index { obj, index } => {
+            walk_idents(obj, f);
+            walk_idents(index, f);
+        }
+        ExprKind::Slice { obj, start, end } => {
+            walk_idents(obj, f);
+            walk_idents(start, f);
+            walk_idents(end, f);
+        }
+        ExprKind::Try(x) => walk_idents(x, f),
+        ExprKind::OptChain { obj, call, .. } => {
+            walk_idents(obj, f);
+            if let Some(c) = call {
+                c.args.iter().for_each(|a| walk_idents(a, f));
+                c.named.iter().for_each(|(_, a)| walk_idents(a, f));
+            }
+        }
+        ExprKind::NullCoalesce { lhs, rhs } => {
+            walk_idents(lhs, f);
+            walk_idents(rhs, f);
+        }
+        ExprKind::DecodeCall { obj, arg, .. } => {
+            walk_idents(obj, f);
+            walk_idents(arg, f);
+        }
+        ExprKind::Closure { body, .. } => walk_idents(body, f),
+        ExprKind::Match { scrutinee, arms } => {
+            walk_idents(scrutinee, f);
+            arms.iter().for_each(|a| {
+                if let Some(g) = &a.guard {
+                    walk_idents(g, f);
+                }
+                walk_idents(&a.body, f);
+            });
+        }
+        ExprKind::IfElse { cond, then, els } => {
+            walk_idents(cond, f);
+            walk_idents(then, f);
+            walk_idents(els, f);
+        }
+        // A `recover:` block is never a realistic default expression; its block statements are not
+        // walked (conservative under-detection only for this absurd case).
+        ExprKind::Recover(_) => {}
     }
 }
 
@@ -1063,5 +1213,36 @@ mod tests {
             n.clone()
         };
         assert_ne!(name_of(&lhs), name_of(&rhs), "temps must be unique");
+    }
+
+    // ===== non-constant default expressions =====
+
+    #[test]
+    fn non_const_default_filled() {
+        // A call expression as a default is cloned into the call site (left as a Call to evaluate).
+        let s = desugar_ok("fn g() -> int:\n    return 9\nfn f(x: int = g() + 1):\n    print(x)\nr := f()\n");
+        let last = s.last().unwrap();
+        let StmtKind::Let { value, .. } = &last.kind else { panic!("let") };
+        let ExprKind::Call { args, .. } = &value.kind else { panic!("call") };
+        assert_eq!(args.len(), 1, "the omitted default was filled");
+        assert!(matches!(args[0].kind, ExprKind::Binary { .. }), "default is the `g() + 1` expr");
+    }
+
+    #[test]
+    fn param_referencing_default_rejected() {
+        let e = desugar_err("fn f(x: int, y: int = x + 1):\n    print(y)\n");
+        assert!(e.to_string().contains("cannot reference parameter 'x'"), "got: {e}");
+    }
+
+    #[test]
+    fn field_referencing_default_rejected() {
+        let e = desugar_err("struct S:\n    a: int = 1\n    b: int = a\n");
+        assert!(e.to_string().contains("cannot reference field 'a'"), "got: {e}");
+    }
+
+    #[test]
+    fn method_param_referencing_default_rejected() {
+        let e = desugar_err("struct S:\n    n: int\n    fn go(self, x: int, y: int = x):\n        return y\n");
+        assert!(e.to_string().contains("cannot reference parameter 'x'"), "got: {e}");
     }
 }

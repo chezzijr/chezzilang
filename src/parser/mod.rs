@@ -459,7 +459,8 @@ impl Parser {
     /// Comma-separated `name[: Type]` until (but not consuming) the closing `)`.
     /// Parse a parameter list. `allow_defaults` is true only for free `fn` declarations — closures,
     /// methods, and protocol signatures reject `= default`. A defaulted param may not be followed by
-    /// a required (non-defaulted) one. Default values are restricted to constant literals.
+    /// a required (non-defaulted) one. A default may be any expression; the desugar pass rejects one
+    /// that references another parameter (defaults are evaluated at the call site).
     fn parse_params(&mut self, allow_defaults: bool) -> PResult<Vec<Param>> {
         let mut params = Vec::new();
         let mut seen_default = false;
@@ -476,10 +477,10 @@ impl Parser {
                         return Err(self
                             .err("default arguments are not supported here".to_string()));
                     }
+                    // Any expression is allowed as a default; the desugar pass rejects one that
+                    // references another parameter (it is cloned into the caller's scope at the call
+                    // site, where parameters are not bound).
                     let e = self.parse_expr()?;
-                    if !is_const_literal(&e) {
-                        return Err(self.err("default value must be a constant literal".to_string()));
-                    }
                     Some(e)
                 } else {
                     None
@@ -511,18 +512,17 @@ impl Parser {
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
             if self.check(&Token::Fn) {
-                // Methods accept constant-literal default params (like free fns); the desugar pass
-                // fills omitted args / reorders named args at method call sites.
+                // Methods accept default params (like free fns); the desugar pass fills omitted args
+                // / reorders named args at method call sites and rejects param-referencing defaults.
                 methods.push(self.parse_fn(true)?);
             } else {
                 let fname = self.expect_ident()?;
                 self.expect(&Token::Colon)?;
                 let ty = self.parse_type()?;
                 let default = if self.eat(&Token::Assign) {
+                    // Any expression is allowed; the desugar pass rejects one that references another
+                    // field (it is cloned into the caller's scope at the constructor call site).
                     let e = self.parse_expr()?;
-                    if !is_const_literal(&e) {
-                        return Err(self.err("default value must be a constant literal".to_string()));
-                    }
                     Some(e)
                 } else {
                     None
@@ -1503,44 +1503,6 @@ impl Parser {
 }
 
 /// Render a token as the user would recognize it, for error messages — `':='` not `Walrus`.
-/// True when `e` is a constant literal usable as a parameter/field default: a scalar literal
-/// (int/float/str/bool), a unary minus on a numeric literal, or a list/set/tuple/map literal whose
-/// elements are themselves constant literals. Interpolated strings (`"{x}"`) reference variables, so
-/// they are rejected. Idents, calls, field/index access, and binary ops are not constant.
-fn is_const_literal(e: &Expr) -> bool {
-    match &e.kind {
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
-        // A string literal is constant only if it has no `{…}` interpolation (escaped `{{`/`}}` ok).
-        ExprKind::Str(s) => !has_interpolation(s),
-        ExprKind::Unary { op: UnaryOp::Neg, expr } => {
-            matches!(expr.kind, ExprKind::Int(_) | ExprKind::Float(_))
-        }
-        ExprKind::List(xs) | ExprKind::Set(xs) | ExprKind::Tuple(xs) => {
-            xs.iter().all(is_const_literal)
-        }
-        ExprKind::Map(pairs) => pairs.iter().all(|(k, v)| is_const_literal(k) && is_const_literal(v)),
-        _ => false,
-    }
-}
-
-/// True if a raw string literal contains a `{…}` interpolation. `{{` and `}}` are escaped literal
-/// braces and do not count.
-fn has_interpolation(raw: &str) -> bool {
-    let bytes = raw.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'{' {
-            if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
-                i += 2; // escaped `{{`
-                continue;
-            }
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
 fn describe(tok: &Token) -> String {
     use Token::*;
     let s = match tok {
@@ -2934,13 +2896,11 @@ mod tests {
     }
 
     #[test]
-    fn non_const_default_rejected() {
-        assert!(parse_err("fn f(x: int = g()):\n    print(x)\n")
-            .message
-            .contains("constant literal"));
-        assert!(parse_err("fn f(x: int = y):\n    print(x)\n")
-            .message
-            .contains("constant literal"));
+    fn non_const_default_parses() {
+        // The parser accepts any expression as a default; the desugar pass (not the parser) rejects
+        // a default that references another parameter.
+        parse_ok("fn f(x: int = g()):\n    print(x)\n");
+        parse_ok("fn f(x: int = 1 + 2):\n    print(x)\n");
     }
 
     #[test]

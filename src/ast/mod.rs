@@ -158,9 +158,9 @@ pub struct MethodSig {
 }
 
 /// A function or closure parameter. `ty` is `None` for closure params, whose types are inferred.
-/// `default` is `Some` for a defaulted param (`x: int = 10`) — restricted to a constant literal
-/// expression. Only free functions allow it (not closures or methods); the desugar pass fills it in
-/// at omitting call sites. Always `None` for closure/method params.
+/// `default` is `Some` for a defaulted param (`x: int = 10`). The default may be any expression that
+/// does not reference another parameter (the desugar pass enforces this and fills it in at omitting
+/// call sites). Free functions and struct methods allow defaults; closures do not.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
@@ -168,9 +168,9 @@ pub struct Param {
     pub default: Option<Expr>,
 }
 
-/// A struct field: `name: Type`, optionally with a default (`name: Type = const`). A defaulted field
-/// is filled in by the desugar pass when a constructor call omits it. The default is a constant
-/// literal expression.
+/// A struct field: `name: Type`, optionally with a default (`name: Type = expr`). A defaulted field
+/// is filled in by the desugar pass when a constructor call omits it. The default may be any
+/// expression that does not reference another field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: String,

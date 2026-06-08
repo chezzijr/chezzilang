@@ -6280,6 +6280,19 @@ main()";
         assert_file_parity("examples/optchain.chz");
     }
 
+    /// Non-constant default golden: `examples/default_expr.chz` — defaults that are arithmetic on
+    /// literals, a global times a literal, and a function call (free fns + struct fields). Byte-matches
+    /// `.expected`, identical on interp + VM.
+    #[test]
+    fn golden_default_expr_via_run_file() {
+        let path = fixture("examples/default_expr.chz");
+        let expected = std::fs::read_to_string(fixture("examples/default_expr.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/default_expr.chz");
+    }
+
     /// Function-typed field call golden: `examples/fn_field.chz` — `recv.f(args)` where `f` is a
     /// `fn`-typed field resolves to field-access-then-call (on `self` and on an external receiver),
     /// not a method. Byte-matches `.expected`, identical on interp + VM.

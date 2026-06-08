@@ -1,0 +1,38 @@
+# examples/default_expr.chz — non-constant default expressions. A default may be any expression that
+# does NOT reference another parameter/field: a computed constant, a global, or a function call.
+# (Defaults are evaluated at the omitting call site, so param-referencing defaults like `y = x + 1`
+# are rejected.) Function calls in defaults run once per omitting call.
+
+DEFAULT_CAP := 8
+
+fn next_id() -> int:
+    return 1000
+
+# default = arithmetic on literals
+fn box(w: int, h: int = 2 + 3) -> int:
+    return w * h
+
+# default = a global * literal
+fn capacity(extra: int = DEFAULT_CAP * 2) -> int:
+    return extra
+
+# default = a function call
+fn make(id: int = next_id()) -> int:
+    return id
+
+# struct field defaults = expressions
+struct Config:
+    retries: int = 1 + 2
+    limit: int = DEFAULT_CAP
+
+fn main():
+    print(box(4))             # 4 * 5 = 20
+    print(box(4, 10))         # 40
+    print(capacity())         # 16
+    print(capacity(3))        # 3
+    print(make())             # 1000
+    c := Config()
+    print(c.retries)          # 3
+    print(c.limit)            # 8
+
+main()

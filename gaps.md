@@ -92,8 +92,14 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 
 ### 🟡 Type-system + runtime depth (already-tracked open)
 
-- **Non-constant default expressions** — defaults must be constant literals today (no `compute()` or
-  references to other params). Still deferred.
+- ~~**Non-constant default expressions**~~ — **resolved (relaxed).** A default may now be any
+  expression that does **not** reference another parameter/field — `compute()`, `1 + 2`,
+  `GLOBAL * 2` all work (params + struct fields). The parser dropped its const-literal restriction;
+  the desugar pass (`validate_defaults`) rejects a default that references another param/field
+  (defaults are cloned into the **caller's** scope at the omitting call site, where params/fields are
+  not bound). Function-call defaults run once per omitting call. `examples/default_expr.chz` (golden +
+  parity). **Still out:** param-referencing defaults (`y: int = x + 1`) — would need call-time eval
+  in the callee frame.
 - ~~**Calling a function-typed field**~~ — **resolved.** `recv.f(x)` where field `f: fn(T)->U` now
   resolves to field-access-then-call (on `self` and on an external receiver). Three layers:
   desugar `normalize_call` is **field-aware** (a program-wide set of `fn`-typed field names skips

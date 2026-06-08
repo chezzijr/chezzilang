@@ -113,8 +113,10 @@ nums.map(fn(x): x * 2)             # param/return types inferred in closures
 and a body with no value-returning `return` infers `nil`. Param types stay required.
 
 **Default + named arguments.** A free function (or a struct constructor) may give trailing
-parameters a **default** — restricted to a constant literal — and callers may pass arguments **by
-name**:
+parameters a **default** — any expression that does **not** reference another parameter (`= 10`,
+`= 1 + 2`, `= GLOBAL * 2`, `= compute()`; a call runs once per omitting call). Defaults are evaluated
+at the call site, so a param-referencing default (`y: int = x + 1`) is rejected. Callers may also
+pass arguments **by name**:
 
 ```chezzi
 fn greet(name: str, greeting: str = "Hello", punct: str = "!") -> str:
