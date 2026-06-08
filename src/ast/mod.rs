@@ -340,6 +340,22 @@ pub enum ExprKind {
     },
     /// postfix `expr?` — error propagation.
     Try(Box<Expr>),
+    /// Optional chaining `obj?.name` (field) or `obj?.name(args)` (method). `obj` is an `Option[T]`:
+    /// `None` short-circuits to `None`, `Some(v)` applies the access to `v` and re-wraps in `Some`.
+    /// A **carrier** node produced by the parser and lowered to a `Match` by the desugar pass
+    /// (`resolver::build_graph`), so the checker and engines never see it.
+    OptChain {
+        obj: Box<Expr>,
+        name: String,
+        /// `Some(args)` ⇒ method call `obj?.name(args)`; `None` ⇒ field access `obj?.name`.
+        call: Option<OptCall>,
+    },
+    /// Null-coalescing `lhs ?? rhs`. `lhs` is an `Option[T]`: `Some(v)` ⇒ `v`, `None` ⇒ `rhs`.
+    /// A **carrier** node lowered to a `Match` by the desugar pass; never reaches checker/engines.
+    NullCoalesce {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
     /// `module.decode[Type](arg)` — type-directed JSON decode (M8). `obj` is the json-module
     /// expression (so the engine can reach its `parse`), `ty` is the target type to decode into,
     /// `arg` is the source string. Evaluates to `Result[ty]`. Scoped to the `.decode[T](…)` shape;
@@ -373,6 +389,14 @@ pub enum ExprKind {
     /// transitively beneath it is caught and converted to `Err(Error)`, otherwise the block's
     /// trailing-expression value is wrapped in `Ok`. Evaluates to `Result[T, Error]`.
     Recover(Block),
+}
+
+/// The call part of an optional-chained method call `obj?.name(args)` — see [`ExprKind::OptChain`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct OptCall {
+    pub args: Vec<Expr>,
+    pub named: Vec<(String, Expr)>,
+    pub type_args: Vec<Type>,
 }
 
 /// One arm of an expression-position `match`: `pattern [if guard]: value-expr`.

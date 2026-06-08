@@ -1106,6 +1106,10 @@ impl Compiler {
                 self.compile_expr(fc, inner)?;
                 fc.emit(Op::Try, expr.span);
             }
+            // `?.`/`??` carriers are lowered to `match` by the desugar pass before compilation.
+            ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } => {
+                unreachable!("`?.`/`??` must be lowered by the desugar pass before compiling")
+            }
             ExprKind::DecodeCall { obj, ty, arg } => {
                 // Reuse the module's own `parse` (`obj.parse(arg)` → Result[Json]), then coerce the
                 // parsed value into the target type with a descriptor built from `ty`.

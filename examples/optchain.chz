@@ -1,0 +1,38 @@
+# examples/optchain.chz — optional chaining `?.` and null-coalescing `??` on Option.
+# Both desugar to a `match`: None short-circuits, Some(v) applies the access and re-wraps.
+
+struct Profile:
+    name: str
+    age: int
+
+struct User:
+    profile: Profile
+
+    fn display(self) -> str:
+        return self.profile.name
+
+# --- null-coalescing: pick the inner value, or the fallback on None ---
+some_name := Some("alice")
+no_name: Option[str] = None
+print(some_name ?? "anon")     # alice
+print(no_name ?? "anon")       # anon
+
+# `??` is right-associative and chains.
+a: Option[int] = None
+b: Option[int] = None
+print(a ?? b ?? 99)            # 99
+
+# --- optional chaining: field access through an Option ---
+u := Some(User(Profile("bob", 30)))
+none_user: Option[User] = None
+
+# u?.profile yields Option[Profile]; chain again for the name, then default with ??.
+print(u?.profile?.name ?? "nobody")          # bob
+print(none_user?.profile?.name ?? "nobody")  # nobody  (short-circuits at the first None)
+
+# --- optional chaining a method call ---
+print(u?.display() ?? "—")        # bob
+print(none_user?.display() ?? "—")  # —
+
+# Mixing: a field that is itself Option is NOT flattened (Option[Option[int]]).
+print(u?.profile?.age ?? 0)       # 30

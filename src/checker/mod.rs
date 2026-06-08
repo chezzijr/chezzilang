@@ -1973,6 +1973,13 @@ impl Checker {
             ExprKind::Field { obj, name } => self.infer_field(obj, name),
             ExprKind::Index { obj, index } => self.infer_index(obj, index),
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
+            // Optional-chaining `?.` / null-coalescing `??` are carrier nodes lowered to `match` by
+            // the desugar pass (`resolver::build_graph` → `desugar::run`), which always runs before
+            // the checker. Reaching here means the pipeline skipped desugar — an internal invariant
+            // break, not a user error.
+            ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } => {
+                unreachable!("`?.`/`??` must be lowered by the desugar pass before checking")
+            }
             ExprKind::DecodeCall { obj, ty, arg } => self.infer_decode(obj, ty, arg, expr.span),
             ExprKind::Closure { params, ret, body } => self.infer_closure(params, ret.as_ref(), body),
             ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms),

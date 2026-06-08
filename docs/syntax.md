@@ -616,6 +616,20 @@ match query():
 
 `Option[T]` (shorthand `T?`) is the same shape for "maybe absent": `Some(v)` / `None`, also usable with `?`.
 
+**Optional chaining `?.` and null-coalescing `??`** (on `Option`) cut the `Some`/`None` boilerplate:
+
+```chezzi
+name := user?.profile?.name ?? "anon"   # None anywhere short-circuits to None, then ?? defaults
+len  := s?.trim()?.len() ?? 0           # ?. also chains method calls
+```
+
+`x?.field` / `x?.method(args)` on an `Option[T]`: `None` short-circuits to `None`, `Some(v)` applies
+the access to `v` and re-wraps — so the result is always an `Option` (a field that is itself `Option`
+is **not** flattened: `Option[Option[U]]`). `a ?? b` returns `a`'s inner value if `Some`, else `b`;
+it is **right-associative** (`a ?? b ?? c` = `a ?? (b ?? c)`). Both require the chars **adjacent**
+(`x?.f`, not `x? .f` — the spaced form is the try `?` then `.field`). Sugar only: both desugar to a
+`match` on the `Option`.
+
 **Unhandled errors at the top level exit the program.** An `Err`/`None` that reaches the top level —
 a bare top-level expression statement that evaluates to one (e.g. `compute()` whose result is `Err`),
 or a top-level `?` that hits one — terminates the program with `unhandled error: <detail>` and a

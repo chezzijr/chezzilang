@@ -66,6 +66,8 @@ pub enum Token {
     Arrow,      // ->
     Pipe,       // |>
     Question,   // ?
+    QuestionDot, // ?.  (optional chaining — only when the chars are adjacent)
+    QuestionQuestion, // ??  (null-coalescing — only when the chars are adjacent)
     Bang,       // !  (used in type position: `T!` = Result[T])
     Amp,        // &  (bitwise and)
     Caret,      // ^  (bitwise xor)
@@ -389,7 +391,15 @@ impl Lexer {
             '|' => if self.match_char('>') { Token::Pipe } else { Token::BitOr },
             '&' => Token::Amp,
             '^' => Token::Caret,
-            '?' => Token::Question,
+            // `??` / `?.` are recognized only when adjacent (no whitespace): `match_char` checks the
+            // very next char. `x? .field` (space) stays `Question` + `Dot` (try-then-field).
+            '?' => if self.match_char('?') {
+                Token::QuestionQuestion
+            } else if self.match_char('.') {
+                Token::QuestionDot
+            } else {
+                Token::Question
+            },
             '(' => Token::LParen,
             ')' => Token::RParen,
             '[' => Token::LBracket,
@@ -925,6 +935,41 @@ mod tests {
     #[test]
     fn zero_dot_float_unaffected() {
         assert_eq!(kinds("0.5"), vec![Token::Float(0.5), Token::Newline, Token::Eof]);
+    }
+
+    // ----- optional chaining `?.` and null-coalescing `??` (adjacency-sensitive) -----
+
+    #[test]
+    fn lexes_question_question_adjacent() {
+        assert_eq!(
+            kinds("a ?? b"),
+            vec![Token::Ident("a".into()), Token::QuestionQuestion, Token::Ident("b".into()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lexes_question_dot_adjacent() {
+        assert_eq!(
+            kinds("x?.f"),
+            vec![Token::Ident("x".into()), Token::QuestionDot, Token::Ident("f".into()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn space_keeps_question_and_dot_separate() {
+        // `x? .field` is try-then-field, NOT optional chaining: a bare `?` then a `.`.
+        assert_eq!(
+            kinds("x? .f"),
+            vec![Token::Ident("x".into()), Token::Question, Token::Dot, Token::Ident("f".into()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn bare_question_still_try() {
+        assert_eq!(
+            kinds("x?"),
+            vec![Token::Ident("x".into()), Token::Question, Token::Newline, Token::Eof]
+        );
     }
 
     #[test]

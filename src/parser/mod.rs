@@ -1046,6 +1046,13 @@ impl Parser {
                     },
                     span,
                 },
+                InfixOp::Coalesce => Expr {
+                    kind: ExprKind::NullCoalesce {
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    },
+                    span,
+                },
                 // `lhs |> f(args)` desugars at parse time to `f(lhs, args)` — threading `lhs` as the
                 // first argument. The RHS must be a call, so checker/interp/VM see a plain call and
                 // need no pipe-specific code.
@@ -1200,6 +1207,29 @@ impl Parser {
                     self.advance();
                     Expr {
                         kind: ExprKind::Try(Box::new(e)),
+                        span,
+                    }
+                }
+                Token::QuestionDot => {
+                    self.advance();
+                    // `obj?.field` or `obj?.method(args)`. Field name mirrors `.` (ident or tuple
+                    // index). A following `(` makes it an optional-chained method call.
+                    let name = if let Token::Int(n) = self.peek() {
+                        let n = *n;
+                        self.advance();
+                        n.to_string()
+                    } else {
+                        self.expect_ident()?
+                    };
+                    let call = if self.check(&Token::LParen) {
+                        self.advance();
+                        let (args, named) = self.parse_call_args()?;
+                        Some(OptCall { args, named, type_args: Vec::new() })
+                    } else {
+                        None
+                    };
+                    Expr {
+                        kind: ExprKind::OptChain { obj: Box::new(e), name, call },
                         span,
                     }
                 }
@@ -1560,6 +1590,8 @@ enum InfixOp {
     Bin(BinaryOp),
     Range,
     Pipe,
+    /// Null-coalescing `??` — right-associative carrier, lowered to a `match` by the desugar pass.
+    Coalesce,
 }
 
 /// Map a token to its infix operator and (left, right) binding powers, per `docs/syntax.md` §4.
@@ -1574,6 +1606,10 @@ fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
         // is threaded into the call on its right. Left-associative (`a |> f |> g` = `(a|>f)|>g`).
         Token::Pipe => (Pipe, 1),
         Token::Or => (Bin(Or), 3),
+        // Null-coalescing `??`: looser than `and`/comparisons, tighter than `or`. RIGHT-associative
+        // (`a ?? b ?? c` = `a ?? (b ?? c)`) — the one exception to the `l+1` left-assoc rule below,
+        // so it returns early with equal left/right binding powers.
+        Token::QuestionQuestion => return Some((Coalesce, 4, 4)),
         Token::And => (Bin(And), 5),
         Token::EqEq => (Bin(Eq), 7),
         Token::NotEq => (Bin(NotEq), 7),
@@ -1616,6 +1652,65 @@ mod tests {
         let mut m = parse_ok(src);
         assert_eq!(m.stmts.len(), 1, "expected exactly one statement");
         m.stmts.remove(0).kind
+    }
+
+    #[test]
+    fn parses_null_coalesce_right_assoc() {
+        // `a ?? b ?? c` = `a ?? (b ?? c)`.
+        match let_value("x := a ?? b ?? c\n").kind {
+            ExprKind::NullCoalesce { lhs, rhs } => {
+                assert!(matches!(lhs.kind, ExprKind::Ident(ref n) if n == "a"));
+                assert!(matches!(rhs.kind, ExprKind::NullCoalesce { .. }), "rhs must nest");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_opt_chain_field() {
+        match let_value("x := y?.f\n").kind {
+            ExprKind::OptChain { obj, name, call } => {
+                assert!(matches!(obj.kind, ExprKind::Ident(ref n) if n == "y"));
+                assert_eq!(name, "f");
+                assert!(call.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_opt_chain_method() {
+        match let_value("x := y?.f(1, 2)\n").kind {
+            ExprKind::OptChain { name, call, .. } => {
+                assert_eq!(name, "f");
+                assert_eq!(call.expect("a call").args.len(), 2);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn opt_chain_chains_left_assoc() {
+        // `y?.a?.b` = `(y?.a)?.b`.
+        match let_value("x := y?.a?.b\n").kind {
+            ExprKind::OptChain { obj, name, .. } => {
+                assert_eq!(name, "b");
+                assert!(matches!(obj.kind, ExprKind::OptChain { .. }), "obj must be the inner chain");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn opt_chain_binds_tighter_than_coalesce() {
+        // `y?.f ?? z` = `(y?.f) ?? z`.
+        match let_value("x := y?.f ?? z\n").kind {
+            ExprKind::NullCoalesce { lhs, rhs } => {
+                assert!(matches!(lhs.kind, ExprKind::OptChain { .. }));
+                assert!(matches!(rhs.kind, ExprKind::Ident(ref n) if n == "z"));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

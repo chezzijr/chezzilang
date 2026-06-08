@@ -77,8 +77,13 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   `std/iter.chz` (no builtins, no checker arm) — empty-list element type flows from the `-> list[(...)]`
   annotation. Composes with comprehensions (`[a + b for a, b in iter.zip(xs, ys)]`).
   `examples/for_tuple.chz` (golden + parity).
-- **Optional chaining + null-coalescing** — `x?.field`, `a ?? default` on `Option`. Cuts `Option`
-  boilerplate; `if/else` expr + `?` already exist.
+- ~~**Optional chaining + null-coalescing** — `x?.field`, `a ?? default` on `Option`~~ — **resolved.**
+  `x?.field` / `x?.method(args)` (None short-circuits, Some(v) applies + re-wraps → always `Option`,
+  no auto-flatten) and right-assoc `a ?? b`. Lexer-adjacent `?.`/`??` tokens (`x? .f` stays
+  try-then-field). Parser builds carrier nodes (`OptChain`/`NullCoalesce`); the **desugar pass** lowers
+  them to a `match` on the `Option` (`match x: Some(__c): Some(__c.f); None: None`) — so the checker
+  and **both engines need zero new code** (match + Some/None already work). `??` at bp 4 (looser than
+  `and`, tighter than `or`). `examples/optchain.chz` (golden + parity).
 - ~~**`defer` (cleanup on scope exit)**~~ — **resolved (M16, **block-scoped since M18**; see resolved
   log + `examples/defer.chz`).** Block/lexical-scoped: runs when the enclosing indented block exits
   (loop body, `if`/branch, `recover:`, `match` arm, fn body, module top level), LIFO, inner-first,

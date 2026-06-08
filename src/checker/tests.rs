@@ -29,6 +29,34 @@ fn rejects(src: &str, needle: &str) {
     );
 }
 
+/// Type-check a source string after running the desugar pass (which lowers `?.`/`??` carriers to
+/// `match`). Production always desugars before the checker (`resolver::build_graph`); these tests
+/// otherwise bypass it. Returns the collected errors.
+fn check_desugared(src: &str) -> Vec<CheckError> {
+    let tokens = lexer::tokenize(src).expect("lex should succeed");
+    let mut module = parser::parse(tokens).expect("parse should succeed");
+    crate::desugar::run_standalone(&mut module).expect("desugar should succeed");
+    match check(&module) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    }
+}
+
+/// Assert the desugared source type-checks clean.
+fn ok_desugared(src: &str) {
+    let errs = check_desugared(src);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// Assert the desugared source produces an error containing `needle`.
+fn rejects_desugared(src: &str, needle: &str) {
+    let errs = check_desugared(src);
+    assert!(
+        errs.iter().any(|e| e.message.contains(needle)),
+        "expected an error containing {needle:?}, got: {errs:?}"
+    );
+}
+
 // ===== 1. unknown name =====
 
 #[test]
@@ -3495,5 +3523,57 @@ fn defer_constructor_rejected() {
     rejects(
         "struct P:\n    x: int\nfn w():\n    defer P(1)\n",
         "built-ins and constructors must be wrapped",
+    );
+}
+
+// ===== optional chaining `?.` + null-coalescing `??` (desugared to `match`) =====
+
+#[test]
+fn null_coalesce_some_picks_value() {
+    ok_desugared("o := Some(5)\nx: int = o ?? 0\nprint(x)\n");
+}
+
+#[test]
+fn null_coalesce_result_type() {
+    // `a ?? b` evaluates to the inner type, usable in arithmetic.
+    ok_desugared("o := Some(5)\ny := (o ?? 0) + 1\nprint(y)\n");
+}
+
+#[test]
+fn null_coalesce_lhs_must_be_option() {
+    // A Result LHS has Ok/Err, not Some/None — the desugared match is rejected.
+    rejects_desugared("r := Ok(5)\nx := r ?? 0\n", "");
+}
+
+#[test]
+fn opt_chain_returns_option_of_field() {
+    ok_desugared("struct P:\n    x: int\nop := Some(P(1))\nr: Option[int] = op?.x\n");
+}
+
+#[test]
+fn opt_chain_method_returns_option() {
+    ok_desugared(
+        "struct P:\n    x: int\n    fn get(self) -> int:\n        return self.x\nop := Some(P(1))\nr: Option[int] = op?.get()\n",
+    );
+}
+
+#[test]
+fn opt_chain_chains_nested() {
+    // `a?.b?.c` — each layer operates on the Option result of the inner.
+    ok_desugared(
+        "struct Inner:\n    v: int\nstruct Outer:\n    inner: Inner\no := Some(Outer(Inner(7)))\nr: Option[int] = o?.inner?.v\n",
+    );
+}
+
+#[test]
+fn opt_chain_double_option_not_flattened() {
+    // A field that is itself `Option[int]` yields `Option[Option[int]]` — NOT flattened.
+    ok_desugared(
+        "struct P:\n    maybe: Option[int]\nop := Some(P(Some(1)))\nr: Option[Option[int]] = op?.maybe\n",
+    );
+    // ...so binding the same expression to `Option[int]` must fail.
+    rejects_desugared(
+        "struct P:\n    maybe: Option[int]\nop := Some(P(Some(1)))\nbad: Option[int] = op?.maybe\n",
+        "",
     );
 }

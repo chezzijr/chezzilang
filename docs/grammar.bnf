@@ -195,7 +195,10 @@
 # desugars `a |> f(x)` to `f(a, x)` at parse time.)
 <pipeExpr> ::= <orExpr> | <pipeExpr> "PIPE" <pipeCall>
 <pipeCall> ::= <postfix> "LPAREN" "RPAREN" | <postfix> "LPAREN" <exprList> "RPAREN"
-<orExpr>   ::= <andExpr> | <orExpr> "OR" <andExpr>
+<orExpr>   ::= <coalesceExpr> | <orExpr> "OR" <coalesceExpr>
+# null-coalescing `??` (gap): looser than `and`/comparisons, tighter than `or`. RIGHT-associative
+# (`a ?? b ?? c` = `a ?? (b ?? c)`) — modeled by right-recursion. Lowered to a `match` at desugar.
+<coalesceExpr> ::= <andExpr> | <andExpr> "QUESTIONQUESTION" <coalesceExpr>
 <andExpr>  ::= <eqExpr>  | <andExpr> "AND" <eqExpr>
 <eqExpr>   ::= <relExpr> | <eqExpr> "EQEQ" <relExpr> | <eqExpr> "NOTEQ" <relExpr>
 <relExpr>  ::= <bitOrExpr>
@@ -227,6 +230,11 @@
             | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <exprList> "RPAREN"
             | <postfix> "DOT" "IDENT" "LBRACKET" <type> "RBRACKET" "LPAREN" <expr> "RPAREN"
             | <postfix> "QUESTION"
+            # optional chaining `?.` (gap): field, tuple-element, or method call through an Option.
+            | <postfix> "QUESTIONDOT" "IDENT"
+            | <postfix> "QUESTIONDOT" "INT"
+            | <postfix> "QUESTIONDOT" "IDENT" "LPAREN" "RPAREN"
+            | <postfix> "QUESTIONDOT" "IDENT" "LPAREN" <argList> "RPAREN"
 
 # A parenthesized expression is grouping when it holds one expr (`(e)`) and a tuple literal when it
 # holds two or more (`(e1, e2, …)`). A 1-element `(e,)` and the empty `()` are not valid.

@@ -6128,6 +6128,19 @@ main()";
         assert_file_parity("examples/for_tuple.chz");
     }
 
+    /// Optional chaining + null-coalescing golden: `examples/optchain.chz` — `?.field`, `?.method()`,
+    /// `??`, chaining + None short-circuit. Desugared to `match`; byte-matches `.expected`, identical
+    /// on interp + VM.
+    #[test]
+    fn golden_optchain_via_run_file() {
+        let path = fixture("examples/optchain.chz");
+        let expected = std::fs::read_to_string(fixture("examples/optchain.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/optchain.chz");
+    }
+
     /// `std.os.exit(code)` golden: `examples/exit.chz` halts at the negative branch with status 2.
     /// Byte-matches `.expected` on both engines and both report the same exit code.
     #[test]

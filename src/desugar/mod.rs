@@ -15,7 +15,9 @@
 //! only rewritten when its callee resolves to a registered callable and is *not* shadowed by a local
 //! (mirroring the checker, which treats a call as a named function only when the name is not a local).
 
-use crate::ast::{Block, Expr, ExprKind, Import, Module, Pattern, Stmt, StmtKind};
+use crate::ast::{
+    Block, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Pattern, Span, Stmt, StmtKind,
+};
 use crate::resolver::{ModuleGraph, ModuleId, ResolveError};
 use std::collections::{HashMap, HashSet};
 
@@ -103,6 +105,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
         let mut walker = Walker {
             ctx,
             scopes: Vec::new(),
+            next_tmp: 0,
         };
         // Borrow the module's AST mutably; everything `walker` reads lives in `regs`/the maps above.
         let ast: &mut Module = &mut graph.modules[mi].ast;
@@ -125,7 +128,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
     let aliases = HashMap::new();
     let ctx =
         Ctx { regs: &regs, own_id: &id, bare_from: &bare_from, aliases: &aliases, methods: &methods };
-    let mut walker = Walker { ctx, scopes: Vec::new() };
+    let mut walker = Walker { ctx, scopes: Vec::new(), next_tmp: 0 };
     walker.walk_block(&mut module.stmts)
 }
 
@@ -228,6 +231,9 @@ impl Ctx<'_> {
 struct Walker<'a> {
     ctx: Ctx<'a>,
     scopes: Vec<HashSet<String>>,
+    /// Counter for fresh temp names minted when lowering `?.`/`??` to `match` (`__opt0`, `__opt1`, …).
+    /// `__`-prefixed names can't be written by user code, so they never collide with a real binding.
+    next_tmp: usize,
 }
 
 impl Walker<'_> {
@@ -441,6 +447,13 @@ impl Walker<'_> {
                     self.walk_expr(v)?;
                 }
             }
+            // Optional chaining `?.` / null-coalescing `??`: lower the carrier to a `match` in place,
+            // then re-walk the resulting `Match` so its scrutinee and arm bodies (the synthesized
+            // field/method access) are normalized like any other expression.
+            ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } => {
+                self.lower_carrier(expr);
+                return self.walk_expr(expr);
+            }
             // Leaves.
             ExprKind::Int(_)
             | ExprKind::Float(_)
@@ -454,6 +467,80 @@ impl Walker<'_> {
             self.normalize_call(expr)?;
         }
         Ok(())
+    }
+
+    /// Mint a fresh, collision-proof temp name (`__opt0`, `__opt1`, …) for an opt-chain payload bind.
+    fn fresh_opt_name(&mut self) -> String {
+        let n = self.next_tmp;
+        self.next_tmp += 1;
+        format!("__opt{n}")
+    }
+
+    /// Lower an `OptChain` / `NullCoalesce` carrier (in place) to an expression-position `match`:
+    ///   `a ?? b`     → `match a: Some(__c): __c; None: b`
+    ///   `x?.field`   → `match x: Some(__c): Some(__c.field); None: None`
+    ///   `x?.m(args)` → `match x: Some(__c): Some(__c.m(args)); None: None`
+    /// The scrutinee is evaluated once by `match`; the payload binds to a fresh `__c`. The arm bodies
+    /// and field/method access use only nodes the checker + both engines already handle.
+    fn lower_carrier(&mut self, expr: &mut Expr) {
+        let span = expr.span;
+        let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
+        expr.kind = match kind {
+            ExprKind::NullCoalesce { lhs, rhs } => {
+                let c = self.fresh_opt_name();
+                ExprKind::Match {
+                    scrutinee: lhs,
+                    arms: vec![
+                        MatchExprArm {
+                            pattern: variant_pat("Some", vec![Pattern::Ident(c.clone())]),
+                            guard: None,
+                            body: ident_expr(&c, span),
+                        },
+                        MatchExprArm { pattern: variant_pat("None", vec![]), guard: None, body: *rhs },
+                    ],
+                }
+            }
+            ExprKind::OptChain { obj, name, call } => {
+                let c = self.fresh_opt_name();
+                let field = Expr {
+                    kind: ExprKind::Field { obj: Box::new(ident_expr(&c, span)), name },
+                    span,
+                };
+                // `__c.field` or `__c.method(args)`, then wrapped in `Some(...)`.
+                let access = match call {
+                    None => field,
+                    Some(OptCall { args, named, type_args }) => Expr {
+                        kind: ExprKind::Call { callee: Box::new(field), args, named, type_args },
+                        span,
+                    },
+                };
+                let some_body = Expr {
+                    kind: ExprKind::Call {
+                        callee: Box::new(ident_expr("Some", span)),
+                        args: vec![access],
+                        named: vec![],
+                        type_args: vec![],
+                    },
+                    span,
+                };
+                ExprKind::Match {
+                    scrutinee: obj,
+                    arms: vec![
+                        MatchExprArm {
+                            pattern: variant_pat("Some", vec![Pattern::Ident(c)]),
+                            guard: None,
+                            body: some_body,
+                        },
+                        MatchExprArm {
+                            pattern: variant_pat("None", vec![]),
+                            guard: None,
+                            body: ident_expr("None", span),
+                        },
+                    ],
+                }
+            }
+            other => other, // unreachable: caller guards on the two carrier kinds
+        };
     }
 
     /// Resolve `expr` (a `Call`) to a callable and rewrite named/omitted args into positional. Leaves
@@ -600,6 +687,16 @@ fn bind_pattern(pat: &Pattern, f: &mut impl FnMut(String)) {
 
 fn err(span: crate::lexer::Span, message: String) -> ResolveError {
     ResolveError { message, span, module: None }
+}
+
+/// A nullary-or-payload variant pattern (`Some(__c)` / `None`) for desugared opt-chain `match` arms.
+fn variant_pat(name: &str, bindings: Vec<Pattern>) -> Pattern {
+    Pattern::Variant { name: name.to_string(), bindings }
+}
+
+/// A bare identifier expression at `span`.
+fn ident_expr(name: &str, span: Span) -> Expr {
+    Expr { kind: ExprKind::Ident(name.to_string()), span }
 }
 
 #[cfg(test)]
@@ -840,5 +937,57 @@ mod tests {
         let ExprKind::Call { args, .. } = &value.kind else { panic!() };
         let ExprKind::Call { args: inner, .. } = &args[0].kind else { panic!("inner call") };
         assert_eq!(inner.len(), 2, "nested g(1) should fill default -> g(1, 7)");
+    }
+
+    /// The value expr of the last `name := <expr>` statement.
+    fn last_let_value(stmts: &[Stmt]) -> Expr {
+        match &stmts.last().expect("a statement").kind {
+            StmtKind::Let { value, .. } => value.clone(),
+            other => panic!("expected a let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn null_coalesce_desugars_to_match() {
+        let stmts = desugar_ok("a := Some(1)\nx := a ?? 0\n");
+        match last_let_value(&stmts).kind {
+            ExprKind::Match { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                // Some(__optN): __optN ; None: 0
+                assert!(matches!(&arms[0].pattern, Pattern::Variant { name, .. } if name == "Some"));
+                assert!(matches!(&arms[1].pattern, Pattern::Variant { name, bindings } if name == "None" && bindings.is_empty()));
+            }
+            other => panic!("expected a Match, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn opt_chain_field_desugars_to_match() {
+        let stmts = desugar_ok("struct P:\n    x: int\na := Some(P(1))\nv := a?.x\n");
+        match last_let_value(&stmts).kind {
+            ExprKind::Match { arms, .. } => {
+                // Some arm wraps the field access in `Some(...)`; None arm yields the `None` ident.
+                assert!(matches!(&arms[0].body.kind, ExprKind::Call { callee, .. }
+                    if matches!(&callee.kind, ExprKind::Ident(n) if n == "Some")));
+                assert!(matches!(&arms[1].body.kind, ExprKind::Ident(n) if n == "None"));
+            }
+            other => panic!("expected a Match, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_coalesce_in_one_expr_get_unique_temps() {
+        // `(a ?? 0) + (b ?? 0)` — each desugared match must bind a DISTINCT temp name.
+        let stmts = desugar_ok("a := Some(1)\nb := Some(2)\nx := (a ?? 0) + (b ?? 0)\n");
+        let ExprKind::Binary { lhs, rhs, .. } = last_let_value(&stmts).kind else {
+            panic!("expected a Binary");
+        };
+        let name_of = |e: &Expr| -> String {
+            let ExprKind::Match { arms, .. } = &e.kind else { panic!("expected Match") };
+            let Pattern::Variant { bindings, .. } = &arms[0].pattern else { panic!("variant") };
+            let Pattern::Ident(n) = &bindings[0] else { panic!("ident binding") };
+            n.clone()
+        };
+        assert_ne!(name_of(&lhs), name_of(&rhs), "temps must be unique");
     }
 }
