@@ -23,6 +23,7 @@ For the *why* behind each choice see [`spec.md`](spec.md); for token names see [
 ```chezzi
 42            # int   (i64)
 1_000_000     # int   — '_' is a digit-group separator (only between digits)
+0xFF 0b1010 0o17   # int — hex / binary / octal literals ('_' ok between digits)
 3.14          # float (f64)
 1_234.567_8   # float — '_' works in both parts
 true  false   # bool

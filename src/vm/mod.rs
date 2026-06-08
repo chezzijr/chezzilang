@@ -6017,6 +6017,18 @@ main()";
         assert_file_parity("examples/comprehensions.chz");
     }
 
+    /// Radix-literal golden: `examples/hex.chz` — hex/binary/octal literals feeding bitwise +
+    /// arithmetic. Byte-matches `.expected` and stays identical on interp + VM.
+    #[test]
+    fn golden_hex_via_run_file() {
+        let path = fixture("examples/hex.chz");
+        let expected = std::fs::read_to_string(fixture("examples/hex.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/hex.chz");
+    }
+
     /// `std.os.exit(code)` golden: `examples/exit.chz` halts at the negative branch with status 2.
     /// Byte-matches `.expected` on both engines and both report the same exit code.
     #[test]

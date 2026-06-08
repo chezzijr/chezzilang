@@ -1,0 +1,17 @@
+# examples/hex.chz — radix-prefixed integer literals: hex (0x), binary (0b), octal (0o).
+# All lex to plain ints, so they compose with arithmetic and the bitwise ops (gap #13).
+
+print(0xFF)          # 255
+print(0b1010)        # 10
+print(0o17)          # 15
+print(0xFF_FF)       # 65535  (underscores allowed between digits)
+
+# Feed them straight into bitwise work — the original motivation for this gap.
+mask := 0xF0 | 0x0F
+print(mask)          # 255
+print(0b1100 & 0b1010)   # 8
+print(0xFF ^ 0x0F)       # 240
+print(0x1 << 4)          # 16
+
+# Mixed radix + decimal in one expression.
+print(0x10 + 8)          # 24

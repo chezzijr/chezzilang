@@ -62,8 +62,10 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   `.merge`/`.update` method — both reuse existing operator/method dispatch, no new syntax.
   (Spread/unpack `[*a, *b]`, `{**m}`, `f(*args)` is **dropped** — variadics are a non-goal, see
   `spec.md`, and concat/merge cover the literal case more cleanly.)
-- **Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`. Bitwise ops shipped but only decimal
-  literals exist — awkward for bit work. **Fix:** lexer-only.
+- ~~**Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`~~ — **resolved.** Lexer-only:
+  `number()` detects a `0x`/`0b`/`0o` prefix (case-insensitive) and parses the body via
+  `i64::from_str_radix`, `_` allowed between digits. Token stays `Int(i64)` so the value flows
+  through unchanged on both engines. `examples/hex.chz` (golden + parity).
 - **Tuple-destructuring `for` (+ `enumerate` / `zip`)** — `for a, b in pairs:` over a `list[(A, B)]`
   (and N-var over `list[tupleN]`). Today two-var `for` is **map-only** (`for k, v in m`); over a list
   of tuples the checker errors (`` `for k, v` requires a map ``, `src/checker/mod.rs:1378`). **This —

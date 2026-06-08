@@ -514,6 +514,44 @@ impl Lexer {
     /// (`10_000_000`) but only **between two digits** — leading/trailing/doubled/dot-adjacent
     /// underscores are a `LexError`.
     fn number(&mut self, start: usize) -> Result<Token, LexError> {
+        // Radix-prefixed integer literals: `0x`/`0X` (hex), `0b`/`0B` (binary), `0o`/`0O` (octal).
+        // The leading `0` is already consumed; `start` indexes it and the cursor sits on the marker.
+        // A `.` after the body is postfix (field/range), never a fraction — so no float path here.
+        if self.chars[start] == '0' {
+            let (radix, name) = match self.peek() {
+                'x' | 'X' => (16, "hexadecimal"),
+                'b' | 'B' => (2, "binary"),
+                'o' | 'O' => (8, "octal"),
+                _ => (0, ""),
+            };
+            if radix != 0 {
+                self.advance(); // consume the radix marker
+                let body_start = self.pos;
+                while self.peek().is_ascii_alphanumeric() || self.peek() == '_' {
+                    self.advance();
+                }
+                let body: Vec<char> = self.chars[body_start..self.pos].to_vec();
+                if body.is_empty() {
+                    return Err(self.error(&format!("empty {name} literal")));
+                }
+                // Underscores: only between two valid digits (mirrors decimal rule).
+                let is_digit = |c: char| c.is_digit(radix);
+                for (i, &c) in body.iter().enumerate() {
+                    if c == '_' {
+                        let prev_ok = i > 0 && is_digit(body[i - 1]);
+                        let next_ok = body.get(i + 1).is_some_and(|n| is_digit(*n));
+                        if !(prev_ok && next_ok) {
+                            return Err(self.error("'_' in a number must be between digits"));
+                        }
+                    }
+                }
+                let digits: String = body.into_iter().filter(|c| *c != '_').collect();
+                let v = i64::from_str_radix(&digits, radix)
+                    .map_err(|e| self.error(&format!("invalid {name} literal: {e}")))?;
+                return Ok(Token::Int(v));
+            }
+        }
+
         let mut is_float = false;
 
         // integer part (digits + group separators)
@@ -839,6 +877,62 @@ mod tests {
         assert_eq!(
             kinds("0..10"),
             vec![Token::Int(0), Token::DotDot, Token::Int(10), Token::Newline, Token::Eof]
+        );
+    }
+
+    // ----- radix-prefixed integer literals (hex / binary / octal) -----
+
+    #[test]
+    fn lexes_hex_literal() {
+        assert_eq!(kinds("0xFF"), vec![Token::Int(255), Token::Newline, Token::Eof]);
+        assert_eq!(kinds("0x1a"), vec![Token::Int(26), Token::Newline, Token::Eof]);
+        assert_eq!(kinds("0XfF"), vec![Token::Int(255), Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn lexes_binary_literal() {
+        assert_eq!(kinds("0b1010"), vec![Token::Int(10), Token::Newline, Token::Eof]);
+        assert_eq!(kinds("0B1111"), vec![Token::Int(15), Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn lexes_octal_literal() {
+        assert_eq!(kinds("0o17"), vec![Token::Int(15), Token::Newline, Token::Eof]);
+        assert_eq!(kinds("0O777"), vec![Token::Int(511), Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn radix_literals_allow_underscores() {
+        assert_eq!(kinds("0xFF_FF"), vec![Token::Int(65535), Token::Newline, Token::Eof]);
+        assert_eq!(kinds("0b1010_0101"), vec![Token::Int(165), Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn bad_radix_digit_errors() {
+        assert!(tokenize("0xG").is_err(), "non-hex digit");
+        assert!(tokenize("0b2").is_err(), "non-binary digit");
+        assert!(tokenize("0o8").is_err(), "non-octal digit");
+        assert!(tokenize("0x").is_err(), "empty hex body");
+        assert!(tokenize("0x_FF").is_err(), "leading underscore after prefix");
+    }
+
+    #[test]
+    fn bare_zero_still_decimal() {
+        assert_eq!(kinds("0"), vec![Token::Int(0), Token::Newline, Token::Eof]);
+        assert_eq!(kinds("007"), vec![Token::Int(7), Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn zero_dot_float_unaffected() {
+        assert_eq!(kinds("0.5"), vec![Token::Float(0.5), Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn hex_field_access_not_eaten() {
+        // `0xFF.bit_length` style — a `.` after a hex literal is postfix, not a fraction.
+        assert_eq!(
+            kinds("0xFF..0x2"),
+            vec![Token::Int(255), Token::DotDot, Token::Int(2), Token::Newline, Token::Eof]
         );
     }
 
