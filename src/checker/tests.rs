@@ -3546,6 +3546,18 @@ fn null_coalesce_lhs_must_be_option() {
 }
 
 #[test]
+fn opt_chain_on_non_option_does_not_leak_temp_name() {
+    // `x?.f` on a non-Option is an error, but the desugared match's internal `__opt` binding must
+    // NOT leak into a spurious "unknown name '__opt…'" cascade.
+    let errs = check_desugared("x := 5\ny := x?.f\n");
+    assert!(!errs.is_empty(), "non-option opt-chain should error");
+    assert!(
+        !errs.iter().any(|e| e.message.contains("__opt")),
+        "internal temp name leaked into a diagnostic: {errs:?}"
+    );
+}
+
+#[test]
 fn opt_chain_returns_option_of_field() {
     ok_desugared("struct P:\n    x: int\nop := Some(P(1))\nr: Option[int] = op?.x\n");
 }

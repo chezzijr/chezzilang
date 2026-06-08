@@ -34,5 +34,9 @@ print(none_user?.profile?.name ?? "nobody")  # nobody  (short-circuits at the fi
 print(u?.display() ?? "—")        # bob
 print(none_user?.display() ?? "—")  # —
 
-# Mixing: a field that is itself Option is NOT flattened (Option[Option[int]]).
+# Chaining through to a plain-int field, defaulted with ??.
 print(u?.profile?.age ?? 0)       # 30
+
+# Inside string interpolation — fragments are re-parsed per engine but still lower identically.
+fallback := "nobody"
+print("name={u?.profile?.name ?? fallback}, age={none_user?.profile?.age ?? -1}")  # name=bob, age=-1

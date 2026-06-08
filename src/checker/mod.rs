@@ -1805,7 +1805,16 @@ impl Checker {
                         self.declare(name, ty.clone());
                         return true;
                     }
-                    Pattern::Variant { .. } => self.error(span, format!("cannot match a variant against {ty}")),
+                    Pattern::Variant { bindings, .. } => {
+                        self.error(span, format!("cannot match a variant against {ty}"));
+                        // Still bind the payload sub-patterns (as Unknown) so the arm body doesn't
+                        // cascade into spurious "unknown name" errors — notably the desugared `?.`
+                        // case, where the payload binding is an internal `__opt` temp the user can't
+                        // see. (The `cannot match` error already flags the real problem.)
+                        for b in bindings {
+                            self.bind_subpattern(b, &Ty::Unknown, span);
+                        }
+                    }
                     Pattern::Tuple(_) => self.error(span, format!("cannot match a tuple against {ty}")),
                     Pattern::Ident(_) | Pattern::Wildcard => {
                         unreachable!("ident/wildcard handled elsewhere")

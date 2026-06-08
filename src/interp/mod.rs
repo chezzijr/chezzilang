@@ -2685,10 +2685,13 @@ fn parse_expr_str(src: &str) -> Result<Expr, RuntimeError> {
         message: e.to_string(),
         span: Span { line: 1, col: 1 },
     })?;
-    parser::parse_expr(tokens).map_err(|e| RuntimeError {
+    let mut expr = parser::parse_expr(tokens).map_err(|e| RuntimeError {
         message: e.message,
         span: e.span,
-    })
+    })?;
+    // Fragments bypass the module-wide desugar pass; lower `?.`/`??` carriers here (both engines do).
+    crate::desugar::lower_carriers(&mut expr);
+    Ok(expr)
 }
 
 /// The interpreter's [`crate::native::Host`] adapter: lets a native fn read the evaluated `Value`
@@ -2768,10 +2771,17 @@ fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec
             .borrow()
             .iter()
             .map(|v| match v {
-                Value::Tuple(t) if vars > 1 => t.iter().cloned().collect(),
-                _ => vec![v.clone()],
+                // A tuple with FEWER elements than loop vars is an arity error — matching the VM,
+                // which fails on the first missing `GetField`. (The checker catches this statically
+                // unless the element type was `Unknown`, e.g. an empty/unannotated list.)
+                Value::Tuple(t) if vars > 1 && t.len() < vars => Err(RuntimeError {
+                    message: format!("tuple has no element '.{}' (len {})", t.len(), t.len()),
+                    span,
+                }),
+                Value::Tuple(t) if vars > 1 => Ok(t.iter().cloned().collect()),
+                _ => Ok(vec![v.clone()]),
             })
-            .collect(),
+            .collect::<Result<Vec<_>, _>>()?,
         Value::Map(m) => m
             .borrow()
             .entries
@@ -3161,6 +3171,24 @@ mod tests {
 
     fn run(src: &str) -> String {
         run_capture(src).expect("run should succeed")
+    }
+
+    #[test]
+    fn for_tuple_arity_mismatch_errors_at_runtime() {
+        // An empty list (Unknown element type) bypasses the checker's arity guard; the interp must
+        // still error like the VM rather than silently under-binding (cross-engine parity).
+        let err = run_capture("xs := []\nxs.push((1, 2))\nfor a, b, c in xs:\n    print(a)\n")
+            .expect_err("arity mismatch should error");
+        assert!(err.message.contains("tuple has no element '.2' (len 2)"), "{}", err.message);
+    }
+
+    #[test]
+    fn optchain_in_interpolation_lowers_and_evaluates() {
+        // `?.`/`??` inside `{…}` are re-parsed after the module desugar pass; they must still lower.
+        assert_eq!(
+            run("o := Some(7)\nn: Option[int] = None\nprint(\"{o ?? 0}/{n ?? -1}\")\n"),
+            "7/-1\n"
+        );
     }
 
     #[test]

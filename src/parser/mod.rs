@@ -1213,15 +1213,17 @@ impl Parser {
                 Token::QuestionDot => {
                     self.advance();
                     // `obj?.field` or `obj?.method(args)`. Field name mirrors `.` (ident or tuple
-                    // index). A following `(` makes it an optional-chained method call.
-                    let name = if let Token::Int(n) = self.peek() {
+                    // index). A following `(` makes it an optional-chained method CALL — but only on
+                    // a named method, never a tuple index (`t?.0()` is meaningless; the `(` there is
+                    // left to a following postfix iteration, keeping the grammar and parser aligned).
+                    let (name, is_ident) = if let Token::Int(n) = self.peek() {
                         let n = *n;
                         self.advance();
-                        n.to_string()
+                        (n.to_string(), false)
                     } else {
-                        self.expect_ident()?
+                        (self.expect_ident()?, true)
                     };
-                    let call = if self.check(&Token::LParen) {
+                    let call = if is_ident && self.check(&Token::LParen) {
                         self.advance();
                         let (args, named) = self.parse_call_args()?;
                         Some(OptCall { args, named, type_args: Vec::new() })

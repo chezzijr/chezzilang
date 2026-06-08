@@ -106,6 +106,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             ctx,
             scopes: Vec::new(),
             next_tmp: 0,
+            skip_normalize: false,
         };
         // Borrow the module's AST mutably; everything `walker` reads lives in `regs`/the maps above.
         let ast: &mut Module = &mut graph.modules[mi].ast;
@@ -128,8 +129,27 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
     let aliases = HashMap::new();
     let ctx =
         Ctx { regs: &regs, own_id: &id, bare_from: &bare_from, aliases: &aliases, methods: &methods };
-    let mut walker = Walker { ctx, scopes: Vec::new(), next_tmp: 0 };
+    let mut walker = Walker { ctx, scopes: Vec::new(), next_tmp: 0, skip_normalize: false };
     walker.walk_block(&mut module.stmts)
+}
+
+/// Lower `?.`/`??` carrier nodes to `match` in a single standalone expression. String-interpolation
+/// fragments (`"{ … }"`) are re-parsed AFTER the module-wide [`run`] pass — by each engine, at
+/// compile/eval time — so their carriers would otherwise reach the checker-less interpolation path
+/// (a hard VM `unreachable!` panic, a graceful interp error → a parity break). Calling this on every
+/// fragment in BOTH engines keeps them in lockstep. Ctx-free: call normalization is skipped (it was
+/// never applied to fragments), only the carriers are rewritten.
+pub fn lower_carriers(expr: &mut Expr) {
+    let regs: HashMap<ModuleId, ModReg> = HashMap::new();
+    let own_id = ModuleId(std::path::PathBuf::from("<fragment>"));
+    let bare_from: HashMap<String, ModuleId> = HashMap::new();
+    let aliases: HashMap<String, ModuleId> = HashMap::new();
+    let methods: HashMap<String, Vec<Vec<PSpec>>> = HashMap::new();
+    let ctx =
+        Ctx { regs: &regs, own_id: &own_id, bare_from: &bare_from, aliases: &aliases, methods: &methods };
+    let mut walker = Walker { ctx, scopes: Vec::new(), next_tmp: 0, skip_normalize: true };
+    // Infallible: `skip_normalize` suppresses the only error path (`normalize_call`).
+    let _ = walker.walk_expr(expr);
 }
 
 /// Snapshot each module's free functions and struct constructors into a registry keyed by module id.
@@ -234,6 +254,10 @@ struct Walker<'a> {
     /// Counter for fresh temp names minted when lowering `?.`/`??` to `match` (`__opt0`, `__opt1`, …).
     /// `__`-prefixed names can't be written by user code, so they never collide with a real binding.
     next_tmp: usize,
+    /// When set, skip `normalize_call` (named/default-arg resolution) — used for string-interpolation
+    /// fragments, which are re-parsed after the module-wide pass and need only carrier lowering
+    /// (their call-normalization was already skipped before this pass existed; kept identical).
+    skip_normalize: bool,
 }
 
 impl Walker<'_> {
@@ -462,8 +486,11 @@ impl Walker<'_> {
             | ExprKind::Ident(_) => {}
         }
 
-        // Now normalize this node if it is a resolvable call.
-        if let ExprKind::Call { .. } = &expr.kind {
+        // Now normalize this node if it is a resolvable call (skipped for interpolation fragments,
+        // which carry no module context and only need carrier lowering).
+        if !self.skip_normalize
+            && let ExprKind::Call { .. } = &expr.kind
+        {
             self.normalize_call(expr)?;
         }
         Ok(())

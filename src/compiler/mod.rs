@@ -1509,7 +1509,10 @@ fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, CompileError
 
 fn parse_expr_str(src: &str, span: Span) -> Result<Expr, CompileError> {
     let tokens = lexer::tokenize(src).map_err(|e| CompileError { message: e.to_string(), span })?;
-    parser::parse_expr(tokens).map_err(|e| CompileError { message: e.message, span })
+    let mut expr = parser::parse_expr(tokens).map_err(|e| CompileError { message: e.message, span })?;
+    // Fragments bypass the module-wide desugar pass; lower `?.`/`??` carriers here (both engines do).
+    crate::desugar::lower_carriers(&mut expr);
+    Ok(expr)
 }
 
 // ===== per-function compile state =====
