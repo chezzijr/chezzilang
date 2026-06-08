@@ -1139,6 +1139,12 @@ impl Compiler {
             fc.emit(Op::Nil, span);
         }
         fc.end_scope();
+        // The recover block is a defer scope: drain its own defers at the boundary (Ok path), before
+        // wrapping the value. The fault and `?` paths drain via the handler in the VM. Only emit when
+        // the block directly holds a `defer`, keeping defer-free recovers byte-identical.
+        if block_has_defer(block) {
+            fc.emit(Op::DrainHandlerDefers, span);
+        }
         fc.emit(Op::NewEnum("Result".to_string(), "Ok".to_string(), 1), span);
         fc.emit(Op::PopHandler, span);
         let done = fc.here();

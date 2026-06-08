@@ -122,6 +122,10 @@ struct Handler {
     frame_len: usize,
     call_depth: usize,
     ip: usize,
+    /// `deferred.len()` of the boundary's frame when the handler was installed. A caught fault, a
+    /// `?` short-circuit, or the Ok path drains the frame's defers down to this marker — the
+    /// recover block's own cleanup — before binding the recovered value.
+    defer_len: usize,
 }
 
 impl Vm {
@@ -349,6 +353,13 @@ impl Vm {
                         self.call_depth = h.call_depth;
                         self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
                         self.frames[h.frame_len - 1].ip = h.ip;
+                        // `unwind_deferred` ran the defers of frames ABOVE the boundary, but the
+                        // boundary frame's own (recover-block) defers remain — drain them now, before
+                        // binding the result. A fault in one supersedes the original.
+                        let rte = self.drain_frame_to(h.defer_len).unwrap_or(rte);
+                        if self.pending_exit.is_some() {
+                            return Err(rte);
+                        }
                         // Convert the fault message (a `str`, i.e. an `Error`) into `Err(msg)`; the
                         // boundary's `done` label receives a ready `Result`.
                         let msg = self.alloc_str(rte.message);
@@ -516,6 +527,7 @@ impl Vm {
                 frame_len: self.frames.len(),
                 call_depth: self.call_depth,
                 ip: *target,
+                defer_len: self.frames.last().map(|f| f.deferred.len()).unwrap_or(0),
             }),
             Op::PopHandler => {
                 self.handlers.pop();
@@ -550,6 +562,16 @@ impl Vm {
             }
             Op::LeaveDeferScope => {
                 if let Some(e) = self.leave_defer_scope() {
+                    return Err(e);
+                }
+            }
+            Op::DrainHandlerDefers => {
+                // The live recover handler is still installed (its `PopHandler` follows). Drain the
+                // block's defers down to its marker; a fault propagates and is caught by that same
+                // handler (becoming the recover's `Err`).
+                if let Some(marker) = self.handlers.last().map(|h| h.defer_len)
+                    && let Some(e) = self.drain_frame_to(marker)
+                {
                     return Err(e);
                 }
             }
@@ -2162,9 +2184,18 @@ impl Vm {
             "LeaveDeferScope without a matching EnterDeferScope (compiler scope-count desync)"
         );
         let marker = self.frames[fi].defer_markers.pop().unwrap_or(0);
+        self.drain_frame_to(marker)
+    }
+
+    /// Drain the current (top) frame's pending defers down to `marker` (the count to leave behind),
+    /// LIFO. The block-scoped analogue of `drain_top_frame_deferred` for an explicit marker — used
+    /// by `LeaveDeferScope` and by every `recover:` boundary path. Skipped on a hard `std.os.exit`.
+    /// Returns the latest fault from a deferred call, if any.
+    fn drain_frame_to(&mut self, marker: usize) -> Option<RuntimeError> {
         if self.pending_exit.is_some() {
             return None;
         }
+        let fi = self.frames.len() - 1;
         let mut err = None;
         while self.frames[fi].deferred.len() > marker {
             let d = self.frames[fi].deferred.pop().unwrap();
@@ -2239,7 +2270,17 @@ impl Vm {
                     let h = self.handlers.pop().unwrap();
                     self.stack.truncate(h.stack_len);
                     self.call_depth = h.call_depth;
-                    self.push(v); // the propagated Result/Option value IS the recover's result
+                    // Drain the recover block's own defers before binding the result. A fault in one
+                    // supersedes the propagated value (becomes the recover's `Err`).
+                    match self.drain_frame_to(h.defer_len) {
+                        Some(e) if self.pending_exit.is_some() => return Err(e),
+                        Some(e) => {
+                            let msg = self.alloc_str(e.message);
+                            let err = self.alloc_enum("Result", "Err", vec![msg]);
+                            self.push(err);
+                        }
+                        None => self.push(v), // the propagated Result/Option value IS the result
+                    }
                     self.jump(h.ip);
                     return Ok(());
                 }
@@ -3907,6 +3948,46 @@ main()";
         assert_defer_scope(
             "fn log(s: str):\n    print(s)\nfn main():\n    for i in 0..3:\n        defer log(\"loop{i}\")\n        if i == 1:\n            defer log(\"if{i}\")\n            break\n        log(\"body{i}\")\n    log(\"done\")\nmain()\n",
             "body0\nloop0\nif1\nloop1\ndone\n",
+        );
+    }
+
+    /// A `recover:`-block defer runs at the recover boundary on the **Ok** path — after the trailing
+    /// expression is evaluated, before the result is bound.
+    #[test]
+    fn defer_recover_runs_on_ok_path() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return Ok(1)\n    return Err(\"boom\")\nfn main():\n    r := recover:\n        defer log(\"release\")\n        x := risky(true)?\n        x\n    log(\"got\")\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err {e.message()}\")\nmain()\n",
+            "release\ngot\nok 1\n",
+        );
+    }
+
+    /// A `recover:`-block defer runs on the **`?` short-circuit** path, before the propagated
+    /// `Err`/`None` is bound as the recover's result.
+    #[test]
+    fn defer_recover_runs_on_try_path() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return Ok(1)\n    return Err(\"boom\")\nfn main():\n    r := recover:\n        defer log(\"release\")\n        x := risky(false)?\n        x\n    log(\"got\")\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err {e.message()}\")\nmain()\n",
+            "release\ngot\nerr boom\n",
+        );
+    }
+
+    /// A `recover:`-block defer runs on the **genuine-fault** path, as the panic unwinds to the
+    /// boundary, before the `Err(message)` is bound.
+    #[test]
+    fn defer_recover_runs_on_fault_path() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn main():\n    r := recover:\n        defer log(\"release\")\n        xs := [1]\n        y := xs[5]\n        y\n    log(\"got\")\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err {e.message()}\")\nmain()\n",
+            "release\ngot\nerr index 5 out of bounds (len 1)\n",
+        );
+    }
+
+    /// A defer that itself faults during a `recover:` unwind supersedes the in-flight result — its
+    /// fault becomes the recover's `Err`.
+    #[test]
+    fn defer_recover_fault_supersedes() {
+        assert_defer_scope(
+            "fn boom():\n    xs := [1]\n    x := xs[9]\nfn main():\n    r := recover:\n        defer boom()\n        42\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err {e.message()}\")\nmain()\n",
+            "err index 9 out of bounds (len 1)\n",
         );
     }
 

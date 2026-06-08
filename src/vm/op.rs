@@ -127,6 +127,11 @@ pub enum Op {
     /// Leave such a block: run (LIFO) and discard the defers registered since the matching
     /// `EnterDeferScope`, then pop the marker.
     LeaveDeferScope,
+    /// Drain (LIFO) the defers a `recover:` block registered, down to the live handler's snapshot.
+    /// Emitted on the recover Ok path (before wrapping the value in `Ok`) so the block's cleanup
+    /// runs at the recover boundary, like the fault and `?`-short-circuit paths. Keyed off the
+    /// top handler's marker, so it touches no `EnterDeferScope` bookkeeping.
+    DrainHandlerDefers,
     /// `?` — unwrap `Ok`/`Some`, else propagate `Err`/`None` out of the enclosing function.
     Try,
     /// `json.decode[T](s)` coercion step. Stack: `[result_json]` where `result_json` is the

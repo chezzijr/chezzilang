@@ -1907,10 +1907,26 @@ impl Interp {
         }
     }
 
-    /// Evaluate a `recover` block to its value: the trailing expression statement (or `nil`). The
-    /// non-final statements run for their effects; control flow (`return`/`break`/`continue`) inside
-    /// a recover block is rejected (the boundary is a value, not a flow target).
+    /// Evaluate a `recover` block to its value, with the block as a **defer scope**: its defers run
+    /// at the recover boundary on every path (Ok, `?` short-circuit, or genuine fault), before the
+    /// recovered value is produced. A fault in a deferred call supersedes the in-flight result —
+    /// clearing `propagating` so `eval_recover` reports it as the recover's `Err`, not the `?` value.
     fn eval_recover_body(&mut self, block: &[Stmt]) -> Result<Value, RuntimeError> {
+        if !block_has_defer(block) {
+            return self.eval_recover_body_inner(block);
+        }
+        self.deferred.push(Vec::new());
+        let result = self.eval_recover_body_inner(block);
+        if let Some(e) = self.drain_block_defers() {
+            self.propagating = None; // a defer fault supersedes any in-flight `?` value
+            return Err(e);
+        }
+        result
+    }
+
+    /// The recover body proper: run the leading statements for effect (rejecting control flow), then
+    /// evaluate the trailing expression statement (or `nil`).
+    fn eval_recover_body_inner(&mut self, block: &[Stmt]) -> Result<Value, RuntimeError> {
         let Some((last, init)) = block.split_last() else {
             return Ok(Value::Nil);
         };
