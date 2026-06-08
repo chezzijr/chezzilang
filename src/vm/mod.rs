@@ -3991,6 +3991,15 @@ main()";
         );
     }
 
+    /// Top-level (module-body) defers run LIFO when the program ends normally.
+    #[test]
+    fn defer_top_level_runs_lifo_at_exit() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\ndefer log(\"first\")\ndefer log(\"second\")\nlog(\"body\")\n",
+            "body\nsecond\nfirst\n",
+        );
+    }
+
     // ----- golden coverage for the formerly-orphaned examples + the comprehensive torture
     // programs (edge_cases / evaluator / ledger). Each pins exact output AND cross-engine parity.
 
@@ -5358,6 +5367,36 @@ main()";
         assert_eq!(ic, Some(3), "interp exit code");
         assert_eq!(vc, Some(3), "vm exit code");
         assert!(ir.is_ok() && vr.is_ok(), "exit is not a runtime error: interp={ir:?} vm={vr:?}");
+    }
+
+    #[test]
+    fn defer_top_level_skipped_by_os_exit() {
+        // `std.os.exit` is a hard halt — top-level defers do NOT run through it (matches Go's
+        // `os.Exit`, and the existing frame/recover bypass).
+        let src = "import std.os\nfn log(s: str):\n    print(s)\ndefer log(\"cleanup\")\nprint(\"before\")\nos.exit(2)\nprint(\"after\")\n";
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (io, _ie, ir, ic) = crate::interp::run_file(&entry);
+        let (vo, _ve, vr, vc) = run_file(&entry);
+        assert_eq!(io, "before\n", "interp: cleanup defer skipped by os.exit");
+        assert_eq!(vo, "before\n", "vm: cleanup defer skipped by os.exit");
+        assert_eq!(ic, Some(2), "interp exit code");
+        assert_eq!(vc, Some(2), "vm exit code");
+        assert!(ir.is_ok() && vr.is_ok(), "exit is not a runtime error: interp={ir:?} vm={vr:?}");
+    }
+
+    #[test]
+    fn defer_top_level_runs_on_unhandled_error() {
+        // An unhandled top-level `?` error still unwinds through the module body's defers (cleanup
+        // runs before the program reports the error).
+        let src = "fn log(s: str):\n    print(s)\nfn boom() -> int!:\n    return Err(\"nope\")\ndefer log(\"cleanup\")\nprint(\"before\")\nx := boom()?\nprint(\"after\")\n";
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+        let (vo, _ve, vr, _vc) = run_file(&entry);
+        assert_eq!(io, "before\ncleanup\n", "interp: top-level defer runs on unhandled error");
+        assert_eq!(vo, "before\ncleanup\n", "vm: top-level defer runs on unhandled error");
+        assert!(ir.is_err() && vr.is_err(), "unhandled `?` is an error: interp={ir:?} vm={vr:?}");
     }
 
     #[test]
