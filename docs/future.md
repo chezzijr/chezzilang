@@ -19,7 +19,12 @@ real scripts."
 > rationale; `gaps.md` is now the scheduling source of truth for them. §2 (concurrency) and §4
 > (optimizations) remain speculative and live only here.
 
-## 1. `defer` (cleanup on scope exit) — ✅ **SHIPPED (M17)** — see `gaps.md` resolved log + `examples/defer.chz`
+## 1. `defer` (cleanup on scope exit) — ✅ **SHIPPED (M17)**, **block-scoped since M18** — see `gaps.md` resolved log + `examples/defer.chz`
+
+> **M18 update:** shipped frame-scoped in M17, then moved to **block/lexical scope** — a `defer` runs
+> when its enclosing indented block exits (loop body, branch, `recover:`, `match` arm, function body,
+> module top level), not just at function return. Realises the "cleanup on scope exit" intent below
+> more literally. See the M18 entry in `PROGRESS.md` and the `defer` section of `docs/syntax.md`.
 
 Before M11 this was weak: no panic meant nothing to clean up after. **Now there is unwinding** —
 the `recover:` boundary, `?` propagation, and runtime faults all unwind. So `defer` earns its keep

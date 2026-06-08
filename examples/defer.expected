@@ -12,6 +12,13 @@ i=0
 i=1
 i=2
 loop done
+== block scope ==
+iter 0 work
+iter 0 cleanup
+breaking
+if cleanup
+iter 1 cleanup
+loop exited
 == panic + recover ==
 faults cleanup
 recovered err: index 5 out of bounds (len 2)

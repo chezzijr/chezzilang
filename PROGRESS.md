@@ -10,6 +10,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **M18 — `defer` → block/lexical scope.** ✅ DONE (TDD, full suite + conformance green — 1084
+> tests, both engines parity-tested). **Supersedes M17's frame-scoping.** A `defer` now runs when its
+> **enclosing lexical block** exits (every indented block is a scope: function body, loop body,
+> `if`/branch, `recover:`, statement-form `match` arm, and the module top level), on every path:
+> fall-through, `break`/`continue`, return, `?`, panic — LIFO within a block, inner-block-first across
+> nesting. Fixes the Go loop footgun and makes `recover:` cleanup local. Checker: dropped the
+> `in_fn` "defer outside function" ban (`in_fn` flag removed) — top-level defer is legal; call-only
+> target check kept. **VM**: new `Op::EnterDeferScope`/`LeaveDeferScope` + `CallFrame.defer_markers`
+> bracket each defer-holding block (emitted only when the block statically contains a `defer`, so
+> defer-free code is byte-identical); `break`/`continue` emit drains down to the loop-body scope
+> (`FnComp.defer_scopes` count + `LoopCtx.defer_floor`). Return/`?`/panic keep the whole-frame LIFO
+> drain (inner-first falls out for free). `recover:` boundary drains via `Handler.defer_len` on all
+> three paths — Ok (`Op::DrainHandlerDefers`), genuine-fault catch, and `?`-short-circuit (`drain_frame_to`);
+> a defer that faults mid-unwind supersedes. **Interp**: `exec_block` split into a per-block
+> defer-scope wrapper (`block_has_defer` gate, finally-drain on every exit incl. the `Err`/`?` path)
+> over `exec_block_inner`; the function body uses `exec_block_inner` (its defers stay on the per-call
+> list drained by `finish_frame`); `eval_recover_body` got the same finally-drain (clearing
+> `propagating` so a defer fault supersedes the `?` value). `std.os.exit` still bypasses every drain.
+> `examples/defer.chz` gained a `block scope` section (golden, both engines).
+
 > **M17 — `defer` (Go-style, frame-scoped).** ✅ DONE (TDD, full suite + conformance green —
 > 1050 tests, both engines parity-tested). `defer <call>` runs a call when the enclosing
 > function/method/closure **frame** exits — on every path: normal return, `?` short-circuit, panic —

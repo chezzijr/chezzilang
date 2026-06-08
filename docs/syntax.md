@@ -653,12 +653,16 @@ escape it are rejected; a `?` on an `Option` inside it is rejected (its result i
 use `match`). Reach for `recover:` at boundaries (a request, a REPL line, a plugin, a test), not as
 everyday error handling — `Result`/`?` remain the tool for expected failures.
 
-### `defer` — cleanup on frame exit  (M16)
+### `defer` — block-scoped cleanup  (M16)
 
-`defer <call>` schedules a call to run when the **enclosing function/method/closure** exits — on
-**every** path: normal return, a `?` short-circuit, or a panic. Deferred calls run **LIFO** (last
-registered, first run). The receiver and arguments are evaluated **at the `defer` statement** (Go
+`defer <call>` schedules a call to run when the **enclosing lexical block** exits — on **every**
+path: fall-through, `break`/`continue`, normal return, a `?` short-circuit, or a panic. Deferred
+calls run **LIFO** (last registered, first run); an unwind crossing several blocks runs each block's
+defers inner-block-first. The receiver and arguments are evaluated **at the `defer` statement** (Go
 semantics); only the call itself is delayed.
+
+Every indented block is a defer scope: the function body, a loop body, an `if`/`elif`/`else` branch,
+a `recover:` block, a statement-form `match` arm, and the module top level.
 
 ```chezzi
 fn process(path: str) -> int!:
@@ -666,13 +670,20 @@ fn process(path: str) -> int!:
     defer f.close()           # runs however `process` exits
     n := f.read_int()?        # if this short-circuits, f.close() still runs
     return Ok(n * 2)
+
+for path in paths:
+    f := open(path)
+    defer f.close()           # runs at the END of each iteration — no leak across the loop
+    use(f)
 ```
 
 `defer` targets a **method call** or a call to a **first-class callable value** (a function or
 closure, or a name bound to one). Built-ins (`print`, `len`, …) and constructors aren't first-class
 values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`. `defer` composes with
-`recover:` (deferred cleanup runs as a panic unwinds, before the boundary catches it). `std.os.exit`
-is a hard halt and does **not** run deferred calls (matching Go's `os.Exit`).
+`recover:` — a defer inside a `recover:` block runs as that block unwinds, before the boundary binds
+its value. Top-level defers run LIFO when the program ends (or while unwinding an unhandled
+top-level error). `std.os.exit` is a hard halt and does **not** run deferred calls (matching Go's
+`os.Exit`).
 
 ## 9b. Program entry — there is no automatic `main`
 

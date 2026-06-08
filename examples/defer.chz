@@ -1,6 +1,8 @@
-# `defer` — Go-style cleanup that runs when the enclosing function/method/closure frame exits,
-# LIFO, on every exit path: normal return, `?` short-circuit, and panic. The receiver + arguments
-# are evaluated at the `defer` statement; the call itself runs at frame exit.
+# `defer` — block-scoped cleanup that runs when the enclosing lexical block exits, LIFO, on every
+# exit path: fall-through, `break`/`continue`, normal return, `?` short-circuit, and panic. Every
+# indented block is a scope (function body, loop body, `if`/branch, `recover:`, `match` arm, and the
+# module top level). The receiver + arguments are evaluated at the `defer` statement; only the call
+# is delayed. (`std.os.exit` is a hard halt and skips defers.)
 
 import std.os
 
@@ -34,11 +36,24 @@ fn use_q() -> int!:
     n := parse(false)?   # short-circuits here; both frames' defers still run
     return Ok(n)
 
-# --- args evaluated at the defer statement (Go): each loop iteration snapshots its own `i` ---
+# --- block scope: a loop-body defer runs at the END of each iteration; each iteration snapshots
+#     its own `i` at the defer statement (Go arg semantics) ---
 fn args_now():
     for i in 0..3:
         defer log("i={i}")
     log("loop done")
+
+# --- block scope across nesting: an `if`-branch defer fires at the branch's end, before the code
+#     after the `if`; `break` runs the current iteration's body defers before leaving the loop ---
+fn block_scope():
+    for i in 0..3:
+        defer log("iter {i} cleanup")
+        if i == 1:
+            defer log("if cleanup")
+            log("breaking")
+            break
+        log("iter {i} work")
+    log("loop exited")
 
 # --- defers run as a panic unwinds, before a `recover:` boundary regains control ---
 fn faults():
@@ -69,6 +84,9 @@ fn main():
 
     log("== args now ==")
     args_now()
+
+    log("== block scope ==")
+    block_scope()
 
     log("== panic + recover ==")
     res := recover:
