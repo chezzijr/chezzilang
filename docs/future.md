@@ -265,18 +265,17 @@ stop-the-world GC) **untouched** — the whole point of choosing A+C over D.
    (Rust `std::iter` model — `examples/iter_adapters.chz`). **`yield`/generators are a permanent
    non-goal** (see `spec.md` *Non-goals*): they would need coroutine/continuation support in both
    engines, and the adapter-struct pattern covers lazy streaming without it.
-4. **List concat + map merge** — `+`/`.concat`/`.extend` for lists and `.merge`/`.update` for maps;
-   today combining two needs a manual `for … push`. (Spread/unpack `[*a, *b]`, `{**m}`, `f(*args)` is
-   **dropped** — variadics are a permanent non-goal, see `spec.md`; concat/merge cover the real need
-   with no new syntax.)
-5. **Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`. Bitwise ops shipped but (likely) no
-   non-decimal literals — awkward for bit work. Lexer-only.
-6. **Optional chaining + null-coalescing** — `x?.field`, `a ?? default` on `Option`. `if/else`
-   expression + `?` exist; these cut `Option` boilerplate.
-7. **Tuple-destructuring `for` (+ `enumerate` / `zip`)** — `for a, b in pairs:` over a `list[(A, B)]`.
-   The real gap is two-var `for` being **map-only** today; `enumerate` / `zip` are already writable in
-   plain Chezzi (empty-list element type flows from the return annotation), so once `for` destructures
-   tuples they are ordinary library funcs (`std.iter`), **not** builtins. Composes with comprehensions.
+4. ~~**List concat + map merge**~~ — **DONE.** Method-based: list `.concat`/`.extend`, map
+   `.merge`/`.update` (concat/merge new, extend/update mutate). No new syntax; spread/unpack stays
+   dropped. `examples/concat_merge.chz`. (See the `gaps.md` resolved log.)
+5. ~~**Hex / binary / octal literals**~~ — **DONE.** `0xFF`/`0b1010`/`0o17`, lexer-only via
+   `i64::from_str_radix`, `_` between digits. `examples/hex.chz`.
+6. ~~**Optional chaining + null-coalescing**~~ — **DONE.** `x?.field`/`x?.method()` + right-assoc
+   `a ?? b` on `Option`, lowered to a `match` by the desugar pass (zero checker/engine code).
+   `examples/optchain.chz`.
+7. ~~**Tuple-destructuring `for` (+ `enumerate` / `zip`)**~~ — **DONE.** `for a, b in list[(A,B)]`
+   (N-var over `list[tupleN]`); VM splits map vs list-of-tuples at runtime on a new `Op::IsMap`.
+   `enumerate`/`zip` shipped as pure-Chezzi `std/iter.chz`. `examples/for_tuple.chz`.
 8. **Mutable closure capture** — currently snapshot-by-value, so closure counters / accumulators
    don't work. Real functional gap. Decide: keep intentional (document loudly) or fix (capture cell).
 9. **Match guards + range patterns** — `n if n>0:`, `1..10:`. Roadmap. Guards subsume the rest.

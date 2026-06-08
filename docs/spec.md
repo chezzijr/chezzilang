@@ -71,7 +71,10 @@ numeric protocols, panic recovery, the **`Iterator[T]` protocol** (a parameteriz
 `[S: Iterator[T], T]` accepts any iterable — built-in `list`/`set`/`str`/`map` intrinsically, or a
 user struct with `next(self) -> Option[T]` — and recovers its element type `T`), and **match guards +
 range patterns** — see *Shipped post-v1* above, plus **default + named arguments** for functions and
-struct constructors, **slicing** `xs[1..3]`, and **comprehensions** `[x*2 for x in xs if x>0]`).
+struct constructors, **slicing** `xs[1..3]`, **comprehensions** `[x*2 for x in xs if x>0]`, and the
+**scripting-ergonomics gap pass**: hex/binary/octal literals (`0xFF`/`0b1010`/`0o17`), list
+`.concat`/`.extend` + map `.merge`/`.update`, tuple-destructuring `for` (`for a, b in pairs`) with
+`std.iter` `enumerate`/`zip`, and optional chaining `?.` + null-coalescing `??`).
 **`yield`/generators are a deliberate non-goal** — lazy sequences are written as adapter structs over
 `Iterator[T]` (Rust's `Map`/`Take` model), so no coroutine runtime is needed. Open items stay tracked
 in `gaps.md` → *Roadmap to a complete v1*.
