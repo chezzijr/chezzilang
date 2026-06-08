@@ -32,8 +32,7 @@ struct Mapped[I: Iterator[T], T, U]:
     fn next(self) -> Option[U]:
         match self.inner.next():
             Some(x):
-                g := self.f          # bind the fn-typed field, then call it (not `self.f(x)`)
-                return Some(g(x))
+                return Some(self.f(x))   # call the fn-typed field directly
             None:
                 return None
 

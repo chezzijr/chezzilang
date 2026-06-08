@@ -1,0 +1,23 @@
+# examples/fn_field.chz — calling a function-typed field. `recv.f(args)` where `f: fn(...) -> ...`
+# is a struct field resolves to field-access-then-call (NOT a method) — both on `self` inside a
+# method and on an external receiver. (Previously needed the workaround `g := self.f; g(x)`.)
+
+struct Adder:
+    base: int
+    op: fn(int) -> int
+
+    fn run(self, x: int) -> int:
+        return self.op(x) + self.base       # fn-typed field call through self
+
+a := Adder(100, fn(x: int) -> int: x * 2)
+print(a.run(5))           # 110
+print(a.op(7))            # 14 — fn-field call on an external receiver
+
+# Multiple fn-typed fields, varied arity / types.
+struct Ops:
+    g: fn(int, int) -> int
+    h: fn(str) -> str
+
+o := Ops(fn(x: int, y: int) -> int: x + y, fn(s: str) -> str: s.upper())
+print(o.g(6, 7))          # 13
+print(o.h("hi"))          # HI

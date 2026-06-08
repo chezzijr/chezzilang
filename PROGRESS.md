@@ -20,8 +20,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   `compare`); stable. Mirrors `sort_by`'s GC-rooted re-entrant merge sort in both engines (VM roots
 >   a parallel keys list). Desugar `BUILTIN_METHODS` + checker `infer_list_hof` arm + interp
 >   `eval_list_sort_by_key` + VM `list_sort_by_key`/`order_key`. `examples/sort_by_key.chz`.
-> - **call fn-typed field `self.f(x)`** ⬜ · **relax non-const defaults** ⬜ · **runtime stack
->   traces** ⬜.
+> - **call fn-typed field `self.f(x)`** ✅ — `recv.f(x)` where `f: fn(T)->U` is a field now resolves
+>   to field-access-then-call (on `self` + external receiver). Desugar `normalize_call` made
+>   field-aware (a program-wide `fn`-field-name set skips method-default injection — the gaps.md
+>   GOTCHA); checker `infer_method_call` falls back to a `Ty::Func` field; both engines fall back to
+>   calling the field value. `examples/fn_field.chz`; `iter_adapters.chz` now uses `self.f(x)` direct.
+>   Narrow limitation: a name used as both fn-field and defaulted method loses that method's
+>   default-fill (pre-type receiver unknown).
+> - **relax non-const defaults** ⬜ · **runtime stack traces** ⬜.
 
 > **Scripting-ergonomics gap pass.** ✅ DONE (TDD, full suite + conformance green — 1143 tests,
 > both engines parity-tested, clippy clean). Five `gaps.md` items closed in sequence, each with a

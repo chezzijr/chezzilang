@@ -16,7 +16,7 @@
 //! (mirroring the checker, which treats a call as a named function only when the name is not a local).
 
 use crate::ast::{
-    Block, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Pattern, Span, Stmt, StmtKind,
+    Block, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Pattern, Span, Stmt, StmtKind, Type,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolveError};
 use std::collections::{HashMap, HashSet};
@@ -65,6 +65,7 @@ impl ModReg {
 pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
     let regs = build_registries(graph);
     let methods = collect_methods(graph);
+    let fn_fields = collect_fn_fields(graph);
     // Index modules by id so we can resolve each module's imports against the others' registries.
     let mut module_index: HashMap<ModuleId, usize> = HashMap::new();
     for (i, m) in graph.modules.iter().enumerate() {
@@ -102,6 +103,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             bare_from: &bare_from,
             aliases: &aliases,
             methods: &methods,
+            fn_fields: &fn_fields,
         };
         let mut walker = Walker {
             ctx,
@@ -126,10 +128,18 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
     regs.insert(id.clone(), collect_module_reg(&module.stmts));
     let mut methods = HashMap::new();
     collect_methods_into(&module.stmts, &mut methods);
+    let mut fn_fields = HashSet::new();
+    collect_fn_fields_into(&module.stmts, &mut fn_fields);
     let bare_from = HashMap::new();
     let aliases = HashMap::new();
-    let ctx =
-        Ctx { regs: &regs, own_id: &id, bare_from: &bare_from, aliases: &aliases, methods: &methods };
+    let ctx = Ctx {
+        regs: &regs,
+        own_id: &id,
+        bare_from: &bare_from,
+        aliases: &aliases,
+        methods: &methods,
+        fn_fields: &fn_fields,
+    };
     let mut walker = Walker { ctx, scopes: Vec::new(), next_tmp: 0, skip_normalize: false };
     walker.walk_block(&mut module.stmts)
 }
@@ -146,8 +156,15 @@ pub fn lower_carriers(expr: &mut Expr) {
     let bare_from: HashMap<String, ModuleId> = HashMap::new();
     let aliases: HashMap<String, ModuleId> = HashMap::new();
     let methods: HashMap<String, Vec<Vec<PSpec>>> = HashMap::new();
-    let ctx =
-        Ctx { regs: &regs, own_id: &own_id, bare_from: &bare_from, aliases: &aliases, methods: &methods };
+    let fn_fields: HashSet<String> = HashSet::new();
+    let ctx = Ctx {
+        regs: &regs,
+        own_id: &own_id,
+        bare_from: &bare_from,
+        aliases: &aliases,
+        methods: &methods,
+        fn_fields: &fn_fields,
+    };
     let mut walker = Walker { ctx, scopes: Vec::new(), next_tmp: 0, skip_normalize: true };
     // Infallible: `skip_normalize` suppresses the only error path (`normalize_call`).
     let _ = walker.walk_expr(expr);
@@ -192,6 +209,31 @@ fn collect_methods_into(stmts: &[Stmt], map: &mut HashMap<String, Vec<Vec<PSpec>
     }
 }
 
+/// Program-wide set of struct **field** names whose declared type is a function (`f: fn(T) -> U`).
+/// A `recv.f(args)` call on such a field parses identically to a method call; we use this set to keep
+/// `normalize_call` from injecting a same-named *method*'s defaults into a fn-field call (the field
+/// is field-access-then-call, resolved by the checker + engines, not a method). Spans all modules
+/// since the receiver may be an imported struct's value.
+fn collect_fn_fields(graph: &ModuleGraph) -> HashSet<String> {
+    let mut set = HashSet::new();
+    for m in &graph.modules {
+        collect_fn_fields_into(&m.ast.stmts, &mut set);
+    }
+    set
+}
+
+fn collect_fn_fields_into(stmts: &[Stmt], set: &mut HashSet<String>) {
+    for stmt in stmts {
+        if let StmtKind::Struct { fields, .. } = &stmt.kind {
+            for f in fields {
+                if matches!(f.ty, Type::Func { .. }) {
+                    set.insert(f.name.clone());
+                }
+            }
+        }
+    }
+}
+
 /// Build the callable registry (free functions + struct constructors) for one module's top level.
 fn collect_module_reg(stmts: &[Stmt]) -> ModReg {
     let mut reg = ModReg::default();
@@ -229,6 +271,8 @@ struct Ctx<'a> {
     aliases: &'a HashMap<String, ModuleId>,
     /// Program-wide struct-method specs (see [`collect_methods`]).
     methods: &'a HashMap<String, Vec<Vec<PSpec>>>,
+    /// Program-wide function-typed field names (see [`collect_fn_fields`]).
+    fn_fields: &'a HashSet<String>,
 }
 
 impl Ctx<'_> {
@@ -598,12 +642,14 @@ impl Walker<'_> {
         // — their receiver may be a list/str/map/set. When several structs define `m` with *different*
         // params, a named call can't be bound unambiguously, so that is an error; a plain (no-named)
         // call is left untouched for the checker rather than guessing a default fill.
-        // TRAP for future work: a `recv.field()` call on a *function-typed field* also parses as a
-        // `Field` callee and is indistinguishable from a method here. It's harmless today (calling a
-        // fn-typed field is itself unsupported — see gaps.md), but when that lands this path MUST be
-        // made field-aware, or it could inject a same-named method's default into a fn-field call.
+        // Field-aware: a `recv.f(...)` call where `f` is a function-typed *field* also parses as a
+        // `Field` callee but is field-access-then-call (resolved by the checker + engines), not a
+        // method. Skip method-default normalization for such names so a same-named method's default
+        // can't be injected into a fn-field call.
         let method_spec: Option<Vec<PSpec>> = match (&module_spec, &callee.kind) {
-            (None, ExprKind::Field { name, .. }) if !is_builtin_method(name) => {
+            (None, ExprKind::Field { name, .. })
+                if !is_builtin_method(name) && !self.ctx.fn_fields.contains(name) =>
+            {
                 match self.ctx.methods.get(name.as_str()) {
                     Some(cands) if !cands.is_empty() => {
                         if cands.iter().all(|c| *c == cands[0]) {

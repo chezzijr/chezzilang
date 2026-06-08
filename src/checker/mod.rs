@@ -2902,6 +2902,21 @@ impl Checker {
                     }
                     return ret;
                 }
+                // No method named `method`: fall back to a function-typed *field* of the same name —
+                // `recv.f(x)` where `f: fn(T) -> U` is field-access-then-call. (Parsed as a method
+                // call; the desugar pass leaves fn-field names un-normalized so no method default is
+                // injected here.) Mirrors `infer_field`'s field lookup + type-arg substitution.
+                let field_fn = self.structs.get(sname).and_then(|info| {
+                    let map = struct_param_map(info, targs);
+                    info.fields
+                        .iter()
+                        .find(|(f, _)| f == method)
+                        .map(|(_, ty)| subst(ty, &map))
+                });
+                if let Some(Ty::Func { params, ret }) = field_fn {
+                    self.check_args(method, &params, args, span);
+                    return *ret;
+                }
                 self.infer_all(args);
                 self.error(span, format!("type {obj_ty} has no method '{method}'"));
                 Ty::Unknown

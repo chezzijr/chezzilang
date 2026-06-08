@@ -3619,3 +3619,37 @@ fn sort_by_key_wrong_arity_rejected() {
         "sort_by_key expects a key function",
     );
 }
+
+// ===== calling a function-typed field =====
+
+#[test]
+fn fn_typed_field_call_through_self_ok() {
+    ok_desugared(
+        "struct A:\n    op: fn(int) -> int\n    fn run(self, x: int) -> int:\n        return self.op(x)\na := A(fn(x: int) -> int: x + 1)\nprint(a.run(5))\n",
+    );
+}
+
+#[test]
+fn fn_typed_field_call_on_external_receiver_ok() {
+    ok_desugared(
+        "struct A:\n    op: fn(int) -> int\na := A(fn(x: int) -> int: x + 1)\nprint(a.op(7))\n",
+    );
+}
+
+#[test]
+fn fn_typed_field_call_arg_type_checked() {
+    // The field's fn type is enforced: a str where an int is expected is rejected.
+    rejects_desugared(
+        "struct A:\n    op: fn(int) -> int\na := A(fn(x: int) -> int: x + 1)\nprint(a.op(\"no\"))\n",
+        "",
+    );
+}
+
+#[test]
+fn non_fn_field_call_still_rejected() {
+    // A non-function field is not callable: still a "no method" error (no spurious field-call).
+    rejects_desugared(
+        "struct A:\n    n: int\na := A(1)\nprint(a.n(2))\n",
+        "has no method 'n'",
+    );
+}

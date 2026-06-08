@@ -1570,20 +1570,30 @@ impl Vm {
                 self.stack.extend(args);
                 self.do_call(argc, span)
             }
-            Obj::Struct { name, .. } => {
+            Obj::Struct { name, fields } => {
                 let def = self.program.structs.get(name.as_ref()).cloned().ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
-                let proto = *def.methods.get(method).ok_or_else(|| self.err(format!("struct '{name}' has no method '{method}'"), span))?;
-                let home = self.module_objs[def.module_idx];
-                if self.program.protos[proto].arity != argc + 1 {
-                    // `self` + explicit args.
-                    return Err(self.err(format!("function '{}' expects {} argument(s), got {}", self.program.protos[proto].name, self.program.protos[proto].arity, argc + 1), span));
+                if let Some(&proto) = def.methods.get(method) {
+                    let home = self.module_objs[def.module_idx];
+                    if self.program.protos[proto].arity != argc + 1 {
+                        // `self` + explicit args.
+                        return Err(self.err(format!("function '{}' expects {} argument(s), got {}", self.program.protos[proto].name, self.program.protos[proto].arity, argc + 1), span));
+                    }
+                    let mut call_args = Vec::with_capacity(argc + 1);
+                    call_args.push(recv);
+                    call_args.extend(args);
+                    let v = self.run_proto(proto, home, None, call_args, true, false, span)?;
+                    self.push(v);
+                    return Ok(());
                 }
-                let mut call_args = Vec::with_capacity(argc + 1);
-                call_args.push(recv);
-                call_args.extend(args);
-                let v = self.run_proto(proto, home, None, call_args, true, false, span)?;
-                self.push(v);
-                Ok(())
+                // No method named `method`: fall back to a function-typed *field* — `recv.f(args)`
+                // where `f` holds a function value (the checker verified `f: fn(...) -> ...`).
+                // Invoked as a value (no `self` bound — it's not a method).
+                if let Some((_, fval)) = fields.iter().find(|(k, _)| k.as_ref() == method) {
+                    let v = self.invoke_value(*fval, args, span)?;
+                    self.push(v);
+                    return Ok(());
+                }
+                Err(self.err(format!("struct '{name}' has no method '{method}'"), span))
             }
             _ => Err(self.err(format!("type {} has no method '{method}'", self.type_name(recv)), span)),
         }
@@ -6268,6 +6278,19 @@ main()";
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/optchain.chz");
+    }
+
+    /// Function-typed field call golden: `examples/fn_field.chz` — `recv.f(args)` where `f` is a
+    /// `fn`-typed field resolves to field-access-then-call (on `self` and on an external receiver),
+    /// not a method. Byte-matches `.expected`, identical on interp + VM.
+    #[test]
+    fn golden_fn_field_via_run_file() {
+        let path = fixture("examples/fn_field.chz");
+        let expected = std::fs::read_to_string(fixture("examples/fn_field.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/fn_field.chz");
     }
 
     /// `sort_by_key` golden: `examples/sort_by_key.chz` — sort in place by a derived key (int/str

@@ -94,13 +94,16 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 
 - **Non-constant default expressions** — defaults must be constant literals today (no `compute()` or
   references to other params). Still deferred.
-- **Calling a function-typed field** — `self.f(x)` on a struct whose field `f: fn(T)->U` parses as a
-  *method* call (`type X has no method 'f'`). **Workaround:** bind first — `g := self.f` then `g(x)`
-  (used in `examples/iter_adapters.chz`). **Fix:** in method-call lowering, if the receiver has a
-  field matching the name with a `fn` type, treat it as field-access-then-call. Found during M13.
-  **GOTCHA when fixing:** the desugar method-arg pass (`src/desugar/mod.rs::normalize_call`) treats
-  every `recv.name(...)` as a possible method — make it field-aware then, or a same-named method's
-  default could be injected into a fn-field call.
+- ~~**Calling a function-typed field**~~ — **resolved.** `recv.f(x)` where field `f: fn(T)->U` now
+  resolves to field-access-then-call (on `self` and on an external receiver). Three layers:
+  desugar `normalize_call` is **field-aware** (a program-wide set of `fn`-typed field names skips
+  method-default normalization → no same-named method's default is injected into a fn-field call);
+  the checker's `infer_method_call` struct arm falls back to a `Ty::Func` field (type-arg
+  substituted) when no method matches; both engines (`call_struct_method` / VM struct dispatch) fall
+  back to calling the field value. `examples/fn_field.chz` (golden + parity); `examples/iter_adapters.chz`
+  now calls `self.f(x)` directly. **Narrow limitation (accepted):** if a program uses a name as both
+  a `fn`-typed field *and* a defaulted method on different structs, that method loses default-fill
+  (the receiver type is unknown pre-check) — call it positionally.
 - ~~**`sort_by_key`**~~ — **resolved.** Native list method `xs.sort_by_key(f: fn(T) -> K)` — sorts in
   place by a derived key, sugar over `sort_by` (#11). `K` must be Comparable (int/float/str or a
   struct with `compare`); keys are computed once per element, then compared by natural order (scalar

@@ -1073,7 +1073,7 @@ impl Interp {
         arg_vals: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Value::Struct { name, .. } = &receiver else {
+        let Value::Struct { name, fields } = &receiver else {
             return Err(RuntimeError {
                 message: format!("type {} has no method '{method}'", receiver.type_name()),
                 span,
@@ -1083,14 +1083,22 @@ impl Interp {
             message: format!("unknown struct type '{name}'"),
             span,
         })?;
-        let decl = def.methods.get(method).cloned().ok_or_else(|| RuntimeError {
+        if let Some(decl) = def.methods.get(method).cloned() {
+            let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
+            call_args.push(receiver.clone());
+            call_args.extend(arg_vals);
+            return self.call(&decl, &def.home, call_args, span);
+        }
+        // No method named `method`: fall back to a function-typed *field* — `recv.f(args)` where
+        // `f` holds a function value (the checker verified `f: fn(...) -> ...`). Calls the field
+        // value directly (no `self` is bound — it's not a method).
+        if let Some(f) = fields.borrow().iter().find(|(k, _)| k == method).map(|(_, v)| v.clone()) {
+            return self.call_value(f, arg_vals, span);
+        }
+        Err(RuntimeError {
             message: format!("struct '{name}' has no method '{method}'"),
             span,
-        })?;
-        let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
-        call_args.push(receiver.clone());
-        call_args.extend(arg_vals);
-        self.call(&decl, &def.home, call_args, span)
+        })
     }
 
     /// Render a value the way `print` / `str()` / `{…}` interpolation should: a struct that defines
