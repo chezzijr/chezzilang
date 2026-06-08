@@ -19,7 +19,7 @@ real scripts."
 > rationale; `gaps.md` is now the scheduling source of truth for them. §2 (concurrency) and §4
 > (optimizations) remain speculative and live only here.
 
-## 1. `defer` (cleanup on scope exit) — strong fit, recommend → **promoted to `gaps.md`**
+## 1. `defer` (cleanup on scope exit) — ✅ **SHIPPED (M17)** — see `gaps.md` resolved log + `examples/defer.chz`
 
 Before M11 this was weak: no panic meant nothing to clean up after. **Now there is unwinding** —
 the `recover:` boundary, `?` propagation, and runtime faults all unwind. So `defer` earns its keep
@@ -268,15 +268,16 @@ stop-the-world GC) **untouched** — the whole point of choosing A+C over D.
    non-decimal literals — awkward for bit work. Lexer-only.
 6. **Optional chaining + null-coalescing** — `x?.field`, `a ?? default` on `Option`. `if/else`
    expression + `?` exist; these cut `Option` boilerplate.
-7. **`enumerate` / `zip` builtins** — `for i, x in enumerate(xs)`. Daily-driver scripting.
+7. **Tuple-destructuring `for` (+ `enumerate` / `zip`)** — `for a, b in pairs:` over a `list[(A, B)]`.
+   The real gap is two-var `for` being **map-only** today; `enumerate` / `zip` are already writable in
+   plain Chezzi (empty-list element type flows from the return annotation), so once `for` destructures
+   tuples they are ordinary library funcs (`std.iter`), **not** builtins. Composes with comprehensions.
 8. **Mutable closure capture** — currently snapshot-by-value, so closure counters / accumulators
    don't work. Real functional gap. Decide: keep intentional (document loudly) or fix (capture cell).
 9. **Match guards + range patterns** — `n if n>0:`, `1..10:`. Roadmap. Guards subsume the rest.
 10. **`std.os.exit(code)` + real exit codes** — currently deferred, but scripts *must* signal
     failure. Needs an exit-code channel threaded through both run drivers + the CLI.
-11. **String formatting** — width / precision / radix: `"{x:08.2f}"`, `"{n:x}"`. Interpolation
-    exists; a format spec does not.
-12. **Runtime stack traces** — error + call chain + line numbers. Debuggability is a scripting
+11. **Runtime stack traces** — error + call chain + line numbers. Debuggability is a scripting
     feature.
 
 **Ecosystem (Tier 4, separate track):** REPL (huge for scripting iteration), formatter, `assert` +

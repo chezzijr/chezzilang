@@ -10,7 +10,7 @@ in `PROGRESS.md` + the cited `examples/*.chz`.
 
 Legend: 🔴 blocks real apps · 🟡 notable friction · 🟢 works (recorded so we don't re-flag it).
 
-Last updated: 2026-06-07. Baseline: post-M15 (slicing + `Index`/`IndexSet`/`Slice` protocols).
+Last updated: 2026-06-08. Baseline: post-M16 (`defer`).
 
 > **Forward-looking brainstorm** (a non-Go concurrency model, VM/GC optimizations, far-out ideas)
 > lives in **[`docs/future.md`](docs/future.md)** — speculative, NOT scheduled. Concrete near-term
@@ -61,17 +61,22 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   `spec.md`, and concat/merge cover the literal case more cleanly.)
 - **Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`. Bitwise ops shipped but only decimal
   literals exist — awkward for bit work. **Fix:** lexer-only.
-- **`enumerate` / `zip` builtins** — `for i, x in enumerate(xs)`, `for a, b in zip(xs, ys)`. The
-  two-var `for` form already exists (maps); wire these builtins to it. Daily-driver scripting.
+- **Tuple-destructuring `for` (+ `enumerate` / `zip`)** — `for a, b in pairs:` over a `list[(A, B)]`
+  (and N-var over `list[tupleN]`). Today two-var `for` is **map-only** (`for k, v in m`); over a list
+  of tuples the checker errors (`` `for k, v` requires a map ``, `src/checker/mod.rs:1378`). **This —
+  not the builtins — is the actual gap.** `enumerate` / `zip` are already **writable in plain Chezzi**
+  (verified: empty-list element type flows from the `-> list[(int, T)]` annotation; both engines run),
+  so once `for` destructures tuples they are ordinary library functions returning `list[(...)]` — **no
+  builtin special-casing, no checker arm**. Bonus: this composes with comprehensions
+  (`[a + b for a, b in zip(xs, ys)]`). **Fix:** in `for_bindings`, when the element is `Ty::Tuple(ts)`
+  and `vars.len() == ts.len()`, bind each var to its element type; both engines unpack the tuple row
+  (interp `iter_rows_from_value`, VM `compile_for`'s two-name path generalized). Then add `enumerate` /
+  `zip` to a stdlib module (`std.iter`, pure Chezzi). Decided: library funcs, **not** builtins.
 - **Optional chaining + null-coalescing** — `x?.field`, `a ?? default` on `Option`. Cuts `Option`
   boilerplate; `if/else` expr + `?` already exist.
-- **String formatting** — width / precision / radix in interpolation: `"{x:08.2f}"`, `"{n:x}"`.
-  Interpolation exists; a format spec does not.
-- **`defer` (cleanup on scope exit)** — runs on all three exit paths now that M11 added unwinding:
-  normal return, `?` short-circuit, panic. **Fix:** per-frame LIFO deferred-call stack drained at
-  every frame exit (interp `Flow`/recover path; VM `Return` + handler-stack unwind); evaluate `defer`
-  args at the statement (Go semantics). Composes with `recover:`. (Considered & rejected:
-  Python-style `with` — needs a new protocol + block.)
+- ~~**`defer` (cleanup on scope exit)**~~ — **resolved (M16, see resolved log + `examples/defer.chz`).**
+  Frame-scoped (fn/method/closure), LIFO, runs on all three exit paths; args evaluated at the `defer`
+  statement (Go). (Considered & rejected: Python-style `with` — needs a new protocol + block.)
 
 ### 🟡 Type-system + runtime depth (already-tracked open)
 
@@ -192,6 +197,16 @@ named args (functions + struct constructors, desugar pass). `examples/match_guar
 user structs structurally via `index`/`set_index`/`slice`. So `custom[k]`, `custom[k] = v`,
 `custom[a..b]` work, and a generic can be bounded by `Index[int, V]` (`K`/`V`/`R` recovered at the call
 site). `examples/slicing.chz`.
+
+**M16 — `defer` ✅** · (TDD, both engines parity-tested) — Go-style `defer <call>`: frame-scoped
+(function/method/closure), LIFO, drained on every exit path (normal return, `?` short-circuit,
+panic). Receiver + args evaluated at the `defer` statement; the call runs at exit. Per-frame
+deferred stack drained via the existing re-entrant invoke (`call_value` / `invoke_value` + method
+dispatch); interp `finish_frame` teardown, VM `do_return` + handler-stack unwind (`unwind_deferred`),
+GC-rooted on the frame. Targets a method or first-class-value call (built-ins/ctors must be wrapped —
+checker-enforced); composes with `recover:`; `std.os.exit` skips defers (matches Go). Interp thread
+stack 256→384 MB to keep the `MAX_CALL_DEPTH` guard ahead of the slightly larger frames.
+`examples/defer.chz`.
 
 **Tech debt cleared ✅** · parser `MAX_DEPTH` 128→64 (off the test-stack edge); duplicate type param
 `[T, T]` rejected; nested-`set` equality parity; explicit call-site type args; `?`-in-closure checked

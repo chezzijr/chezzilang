@@ -1,0 +1,87 @@
+# `defer` — Go-style cleanup that runs when the enclosing function/method/closure frame exits,
+# LIFO, on every exit path: normal return, `?` short-circuit, and panic. The receiver + arguments
+# are evaluated at the `defer` statement; the call itself runs at frame exit.
+
+import std.os
+
+# `defer` targets a method or a first-class callable value (built-ins like `print` are wrapped).
+fn log(msg: str):
+    print(msg)
+
+struct File:
+    name: str
+
+    fn close(self):
+        log("closing {self.name}")
+
+# --- LIFO order, mixing a method call and free-function calls ---
+fn lifo():
+    f := File("data.txt")
+    defer f.close()
+    defer log("second")
+    defer log("first")
+    log("body")
+
+# --- runs on the `?` short-circuit error path ---
+fn parse(ok: bool) -> int!:
+    defer log("parse cleanup")
+    if not ok:
+        return Err("bad input")
+    return Ok(7)
+
+fn use_q() -> int!:
+    defer log("use_q cleanup")
+    n := parse(false)?   # short-circuits here; both frames' defers still run
+    return Ok(n)
+
+# --- args evaluated at the defer statement (Go): each loop iteration snapshots its own `i` ---
+fn args_now():
+    for i in 0..3:
+        defer log("i={i}")
+    log("loop done")
+
+# --- defers run as a panic unwinds, before a `recover:` boundary regains control ---
+fn faults():
+    defer log("faults cleanup")
+    xs := [10, 20]
+    log("{xs[5]}")   # index out of bounds → fault
+
+# --- a fault inside a deferred call: the others still run, the fault is caught by recover ---
+fn boom():
+    ys := [1]
+    log("{ys[9]}")
+
+fn bad_defer():
+    defer log("after")
+    defer boom()
+    defer log("before")
+    log("bad_defer body")
+
+fn main():
+    log("== lifo ==")
+    lifo()
+
+    log("== ? path ==")
+    r := use_q()
+    match r:
+        Ok(n): log("ok {n}")
+        Err(e): log("err {e}")
+
+    log("== args now ==")
+    args_now()
+
+    log("== panic + recover ==")
+    res := recover:
+        faults()
+    match res:
+        Ok(_): log("recovered ok")
+        Err(e): log("recovered err: {e}")
+
+    log("== deferred fault ==")
+    res2 := recover:
+        bad_defer()
+    match res2:
+        Ok(_): log("ok")
+        Err(e): log("caught: {e}")
+
+main()

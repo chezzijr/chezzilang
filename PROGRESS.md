@@ -10,6 +10,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **M17 — `defer` (Go-style, frame-scoped).** ✅ DONE (TDD, full suite + conformance green —
+> 1050 tests, both engines parity-tested). `defer <call>` runs a call when the enclosing
+> function/method/closure **frame** exits — on every path: normal return, `?` short-circuit, panic —
+> in **LIFO** order. Receiver + args are evaluated **at the `defer` statement** (Go); only the call
+> is delayed. New `Token::Defer` + `StmtKind::Defer(Expr)` + `parse_defer` + grammar `<deferStmt>`
+> (drift-checked). Checker: `in_fn` flag rejects top-level `defer`; the target must be a method call
+> or a first-class-value call (built-ins/ctors must be wrapped — `lookup`/`functions` classify).
+> A per-frame deferred list drains via the existing **re-entrant invoke** (`call_value`/`invoke_value`
+> + method dispatch) — the same path `map`/`filter`/`sort_by` use. **Interp**: `Interp.deferred:
+> Vec<Vec<Deferred>>`; `exec_defer` records (args eval'd now); teardown extracted to a non-inlined
+> `finish_frame` (keeps `call`/`call_closure` recursion frames small) that drains LIFO, a deferred
+> fault superseding the result. **VM**: `Op::DeferCall`/`DeferMethod` + `CallFrame.deferred`
+> (GC-rooted in `collect`); drained in `do_return` (covers return + `?` via `do_try`) and on panic by
+> `unwind_deferred` over the frames the handler-stack discards (defers run before `recover:` catches).
+> `std.os.exit` skips defers (matches Go's `os.Exit`). Interp thread stack 256→384 MB so the
+> `MAX_CALL_DEPTH` (10 000) guard still fires ahead of host-stack overflow with the slightly larger
+> frames. `examples/defer.chz` (golden, both engines).
+
 > **M16 — Comprehensions + `std.os.exit(code)`.** ✅ DONE (TDD, full suite + conformance green —
 > 1041 tests, both engines parity-tested).
 > **Comprehensions** `[elem for x in it if g]` (+ set `{e for …}` / map `{k: v for …}`): one `for`

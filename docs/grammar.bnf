@@ -32,7 +32,7 @@
 <compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
-<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <exprStmt>
+<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <deferStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <exprStmt>
 
 # ===== simple statements =====
 # The third form is a destructuring let: `a, b, … := expr` binds a tuple's elements positionally.
@@ -56,6 +56,10 @@
            | <postfix> "LBRACKET" <expr> "RBRACKET"
 
 <returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <expr> "NEWLINE"
+
+# `defer <call>` — the call-only restriction is enforced by the checker (context-sensitive),
+# not the grammar.
+<deferStmt> ::= "DEFER" <expr> "NEWLINE"
 
 # `break` / `continue` are bare line-oriented statements; "inside a loop" is enforced by the
 # checker (context-sensitive), not the grammar.

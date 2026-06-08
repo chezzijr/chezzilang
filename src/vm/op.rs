@@ -114,6 +114,12 @@ pub enum Op {
     CallBuiltin(String, usize),
     CallPrint(usize),
     Return,
+    /// `defer f(args)` — stack `[callee, arg0, …]`; pops `argc + 1` and records a deferred call on
+    /// the current frame. Drained LIFO when the frame exits (return / `?` / panic).
+    DeferCall(usize),
+    /// `defer recv.name(args)` — stack `[recv, arg0, …]`; pops `argc + 1` and records a deferred
+    /// method call on the current frame.
+    DeferMethod(String, usize),
     /// `?` — unwrap `Ok`/`Some`, else propagate `Err`/`None` out of the enclosing function.
     Try,
     /// `json.decode[T](s)` coercion step. Stack: `[result_json]` where `result_json` is the

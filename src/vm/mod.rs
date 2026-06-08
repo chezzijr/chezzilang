@@ -55,6 +55,32 @@ struct CallFrame {
     /// Module toplevel frame — an `Err`/`None` unhandled here (a `?` or a bare expression
     /// statement) is a top-level unhandled error that exits the program.
     is_toplevel: bool,
+    /// Calls registered by `defer` in this frame, in source order. Drained LIFO when the frame
+    /// exits (return / `?` / panic). Receiver/args are evaluated at the `defer` statement and held
+    /// here as values; the call runs at drain. GC-rooted in [`Vm::collect`].
+    deferred: Vec<Deferred>,
+}
+
+/// A call registered by `defer`, with its receiver/arguments already evaluated. The held values are
+/// GC roots while the deferred call is pending.
+enum Deferred {
+    /// `defer f(args)` — invoke the callable value with the args (`invoke_value`).
+    Call { callee: Value, args: Vec<Value>, span: Span },
+    /// `defer recv.name(args)` — dispatch the named method on the receiver.
+    Method { recv: Value, name: String, args: Vec<Value>, span: Span },
+}
+
+impl Deferred {
+    /// The GcRefs this deferred call keeps alive (callee/receiver + arguments).
+    fn roots(&self) -> impl Iterator<Item = GcRef> + '_ {
+        let (head, args) = match self {
+            Deferred::Call { callee, args, .. } => (callee, args),
+            Deferred::Method { recv, args, .. } => (recv, args),
+        };
+        std::iter::once(head)
+            .chain(args.iter())
+            .filter_map(|v| if let Value::Obj(h) = v { Some(*h) } else { None })
+    }
 }
 
 struct Vm {
@@ -256,7 +282,16 @@ impl Vm {
         while self.stack.len() < base + n_slots {
             self.stack.push(Value::Nil);
         }
-        self.frames.push(CallFrame { proto, ip: 0, base, home, closure, counted, is_toplevel });
+        self.frames.push(CallFrame {
+            proto,
+            ip: 0,
+            base,
+            home,
+            closure,
+            counted,
+            is_toplevel,
+            deferred: Vec::new(),
+        });
         self.cur_base = base;
         Ok(())
     }
@@ -286,13 +321,25 @@ impl Vm {
                 if self.pending_exit.is_some() {
                     return Err(rte);
                 }
-                // Try the nearest `recover:` boundary owned by THIS dispatch loop (its frame is
-                // above `base_level`). A handler below `base_level` belongs to an outer loop, so we
-                // propagate and let that loop catch it.
+                // The nearest `recover:` boundary owned by THIS dispatch loop catches the fault; a
+                // handler at/below `base_level` belongs to an outer loop, so we unwind to
+                // `base_level` and propagate. Either way, every frame discarded on the way runs its
+                // deferred calls first (Go: defers run as the panic unwinds, before recover regains
+                // control). A fault inside a deferred call supersedes the original.
+                let target = match self.handlers.last().copied() {
+                    Some(h) if h.frame_len > base_level => h.frame_len,
+                    _ => base_level,
+                };
+                let rte = self.unwind_deferred(target).unwrap_or(rte);
+                // A deferred `std.os.exit` turns the unwind into a hard halt.
+                if self.pending_exit.is_some() {
+                    return Err(rte);
+                }
                 match self.handlers.last().copied() {
                     Some(h) if h.frame_len > base_level => {
                         self.handlers.pop();
-                        self.frames.truncate(h.frame_len);
+                        // `unwind_deferred` already dropped frames down to `h.frame_len`; restore the
+                        // operand stack / call-depth / ip to the boundary's snapshot.
                         self.stack.truncate(h.stack_len);
                         self.call_depth = h.call_depth;
                         self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
@@ -324,6 +371,9 @@ impl Vm {
             work.push(f.home);
             if let Some(c) = f.closure {
                 work.push(c);
+            }
+            for d in &f.deferred {
+                work.extend(d.roots());
             }
         }
         work.extend(self.module_objs.iter().copied());
@@ -485,7 +535,9 @@ impl Vm {
             Op::CallMethod(name, argc) => self.do_method_call(name, *argc, span)?,
             Op::CallBuiltin(name, argc) => self.do_builtin(name, *argc, span)?,
             Op::CallPrint(argc) => self.do_print(*argc, span)?,
-            Op::Return => self.do_return(false),
+            Op::Return => self.do_return(false)?,
+            Op::DeferCall(argc) => self.do_defer(None, *argc, span),
+            Op::DeferMethod(name, argc) => self.do_defer(Some(name.clone()), *argc, span),
             Op::Try => self.do_try(span)?,
             Op::JsonDecode(desc) => {
                 let desc = desc.clone();
@@ -2000,7 +2052,14 @@ impl Vm {
 
     /// Return from the current frame. `propagated` true ⇒ the value came from `?` (no observable
     /// difference here; the caller treats it as the function's result, exactly like the interp).
-    fn do_return(&mut self, _propagated: bool) {
+    ///
+    /// Deferred calls (`defer`) run LIFO first, while the frame is still live so the GC keeps their
+    /// values — and the return value — rooted. A fault in a deferred call supersedes the frame's
+    /// result (Go: a panic in a defer wins): it returns `Err` and the frame is still torn down.
+    fn do_return(&mut self, _propagated: bool) -> Result<(), RuntimeError> {
+        // Drain with the return value still on top of the stack (rooted) and the frame still on
+        // `self.frames` (so `collect` roots the pending records).
+        let defer_err = self.drain_top_frame_deferred();
         let ret = self.pop();
         let frame = self.frames.pop().unwrap();
         if frame.counted {
@@ -2013,7 +2072,99 @@ impl Vm {
         while self.handlers.last().is_some_and(|h| h.frame_len > self.frames.len()) {
             self.handlers.pop();
         }
+        if let Some(e) = defer_err {
+            return Err(e);
+        }
         self.push(ret);
+        Ok(())
+    }
+
+    /// `defer f(args)` / `defer recv.m(args)` — pop the callee/receiver + `argc` args off the stack
+    /// and record a deferred call on the current frame (drained LIFO at frame exit). The values were
+    /// evaluated now (Go semantics); the call runs at exit.
+    fn do_defer(&mut self, method: Option<String>, argc: usize, span: Span) {
+        let at = self.stack.len() - argc;
+        let args: Vec<Value> = self.stack.split_off(at);
+        let head = self.pop();
+        let d = match method {
+            Some(name) => Deferred::Method { recv: head, name, args, span },
+            None => Deferred::Call { callee: head, args, span },
+        };
+        self.frames.last_mut().unwrap().deferred.push(d);
+    }
+
+    /// Run one deferred call to completion (the result is discarded). `Call` rides `invoke_value`;
+    /// `Method` re-uses the normal method dispatch by pushing the receiver + args and popping the
+    /// discarded result. The pop→push window has no instruction boundary, so the moved-out values
+    /// can't be collected before they're re-rooted.
+    fn run_one_deferred(&mut self, d: Deferred) -> Result<(), RuntimeError> {
+        match d {
+            Deferred::Call { callee, args, span } => {
+                self.invoke_value(callee, args, span)?;
+                Ok(())
+            }
+            Deferred::Method { recv, name, args, span } => {
+                let argc = args.len();
+                self.push(recv);
+                for a in args {
+                    self.push(a);
+                }
+                self.do_method_call(&name, argc, span)?;
+                self.pop(); // discard the deferred call's result
+                Ok(())
+            }
+        }
+    }
+
+    /// Drain the current (top) frame's deferred calls, LIFO, popping one at a time from the frame's
+    /// own list so the not-yet-run records stay GC-rooted in the frame. Skipped on a hard
+    /// `std.os.exit` (Go: `os.Exit` does not run deferred calls). Returns the latest fault, if any.
+    fn drain_top_frame_deferred(&mut self) -> Option<RuntimeError> {
+        if self.pending_exit.is_some() {
+            return None;
+        }
+        let fi = self.frames.len() - 1;
+        let mut err = None;
+        while let Some(d) = self.frames[fi].deferred.pop() {
+            if let Err(e) = self.run_one_deferred(d) {
+                err = Some(e);
+                if self.pending_exit.is_some() {
+                    break;
+                }
+            }
+        }
+        err
+    }
+
+    /// Unwind frames from the current depth down to `target_frame_len`, running each discarded
+    /// frame's deferred calls (innermost first) before dropping it. Used on a fault: deferred
+    /// cleanup runs as the stack unwinds, before a `recover:` boundary regains control (or before
+    /// the program exits on an uncaught fault). A fault in a deferred call supersedes the original.
+    fn unwind_deferred(&mut self, target_frame_len: usize) -> Option<RuntimeError> {
+        let mut err = None;
+        while self.frames.len() > target_frame_len {
+            let fi = self.frames.len() - 1;
+            if self.pending_exit.is_none() {
+                while let Some(d) = self.frames[fi].deferred.pop() {
+                    if let Err(e) = self.run_one_deferred(d) {
+                        err = Some(e);
+                        if self.pending_exit.is_some() {
+                            break;
+                        }
+                    }
+                }
+            }
+            let frame = self.frames.pop().unwrap();
+            if frame.counted {
+                self.call_depth -= 1;
+            }
+            self.stack.truncate(frame.base);
+            self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
+            while self.handlers.last().is_some_and(|h| h.frame_len > self.frames.len()) {
+                self.handlers.pop();
+            }
+        }
+        err
     }
 
     fn do_try(&mut self, span: Span) -> Result<(), RuntimeError> {
@@ -2058,9 +2209,10 @@ impl Vm {
                         self.err(format!("unhandled error: {}", self.display(v)), span)
                     }));
                 }
-                // Otherwise early-return this value from the enclosing function.
+                // Otherwise early-return this value from the enclosing function (running its
+                // deferred calls first; a fault in one propagates as a fault).
                 self.push(v);
-                self.do_return(true);
+                self.do_return(true)?;
                 return Ok(());
             }
         }
@@ -3631,6 +3783,18 @@ main()";
     fn golden_slicing_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/slicing.chz");
         let expected = include_str!("../../examples/slicing.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `defer` golden: LIFO order, method + free-fn calls, the `?` short-circuit path, args evaluated
+    /// at the defer statement (per-iteration snapshot), defers running before a `recover:` catch, and
+    /// a fault inside a deferred call. Byte-identical on the VM, the interpreter, and its `.expected`.
+    #[test]
+    fn golden_defer_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/defer.chz");
+        let expected = include_str!("../../examples/defer.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));

@@ -3322,3 +3322,40 @@ fn generic_over_slice_protocol_ok() {
          b := Buf([1, 2, 3])\nc: Buf = mid(b)\nd: list[int] = mid([1, 2, 3])\n"
     ));
 }
+
+// ===== defer =====
+
+#[test]
+fn defer_method_call_ok() {
+    ok("struct F:\n    n: int\n    fn close(self):\n        print(\"x\")\nfn w():\n    f := F(1)\n    defer f.close()\n");
+}
+
+#[test]
+fn defer_value_call_ok() {
+    // A call to a first-class function value is allowed.
+    ok("fn cleanup():\n    print(\"x\")\nfn w():\n    defer cleanup()\n");
+}
+
+#[test]
+fn defer_outside_function_rejected() {
+    rejects("defer print(\"x\")\n", "defer outside function");
+}
+
+#[test]
+fn defer_non_call_rejected() {
+    rejects("fn w():\n    defer 1 + 2\n", "defer requires a function or method call");
+}
+
+#[test]
+fn defer_builtin_rejected() {
+    // Built-ins are not first-class values — they must be wrapped in a function.
+    rejects("fn w():\n    defer print(\"x\")\n", "built-ins and constructors must be wrapped");
+}
+
+#[test]
+fn defer_constructor_rejected() {
+    rejects(
+        "struct P:\n    x: int\nfn w():\n    defer P(1)\n",
+        "built-ins and constructors must be wrapped",
+    );
+}

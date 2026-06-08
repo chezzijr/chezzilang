@@ -298,6 +298,7 @@ impl Compiler {
                 }
                 Ok(())
             }
+            StmtKind::Defer(call) => self.compile_defer(fc, call, stmt.span),
             StmtKind::If { branches, else_block } => self.compile_if(fc, branches, else_block.as_deref(), stmt.span),
             StmtKind::While { cond, body } => self.compile_while(fc, cond, body),
             StmtKind::For { vars, iter, body } => self.compile_for(fc, vars, iter, body, stmt.span),
@@ -1130,6 +1131,32 @@ impl Compiler {
             return;
         }
         self.emit_load(fc, name, span);
+    }
+
+    /// `defer <call>` — evaluate the receiver/args now (Go semantics) and register a deferred call
+    /// on the frame; the call runs LIFO when the frame exits. Mirrors `compile_call`'s method-vs-value
+    /// split: `DeferMethod` for `obj.m(a)`, `DeferCall` for a value callee.
+    fn compile_defer(&mut self, fc: &mut FnComp, call: &Expr, span: Span) -> Result<(), CompileError> {
+        let ExprKind::Call { callee, args, .. } = &call.kind else {
+            return Err(CompileError {
+                message: "defer requires a function or method call".to_string(),
+                span,
+            });
+        };
+        if let ExprKind::Field { obj, name } = &callee.kind {
+            self.compile_expr(fc, obj)?;
+            for a in args {
+                self.compile_expr(fc, a)?;
+            }
+            fc.emit(Op::DeferMethod(name.clone(), args.len()), call.span);
+            return Ok(());
+        }
+        self.compile_expr(fc, callee)?;
+        for a in args {
+            self.compile_expr(fc, a)?;
+        }
+        fc.emit(Op::DeferCall(args.len()), call.span);
+        Ok(())
     }
 
     fn compile_call(&mut self, fc: &mut FnComp, callee: &Expr, args: &[Expr], span: Span) -> Result<(), CompileError> {

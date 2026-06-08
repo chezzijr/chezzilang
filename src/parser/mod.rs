@@ -255,6 +255,11 @@ impl Parser {
                 self.expect_stmt_end()?;
                 k
             }
+            Token::Defer => {
+                let k = self.parse_defer()?;
+                self.expect_stmt_end()?;
+                k
+            }
             Token::Break => {
                 self.advance();
                 self.expect_stmt_end()?;
@@ -832,6 +837,13 @@ impl Parser {
         } else {
             Ok(StmtKind::Return(Some(self.parse_expr()?)))
         }
+    }
+
+    /// `defer <expr>` — the expression must be a call; the checker enforces that (the parser keeps
+    /// the arm uniform with the other line-oriented statements).
+    fn parse_defer(&mut self) -> PResult<StmtKind> {
+        self.expect(&Token::Defer)?;
+        Ok(StmtKind::Defer(self.parse_expr()?))
     }
 
     fn parse_import(&mut self) -> PResult<Import> {
@@ -1944,6 +1956,22 @@ mod tests {
             panic!()
         };
         assert!(matches!(g.body[0].kind, StmtKind::Return(Some(_))));
+    }
+
+    #[test]
+    fn defer_parses_call_in_fn_body() {
+        let StmtKind::Fn(f) = only("fn f():\n    defer cleanup()\n    defer obj.close(1)\n") else {
+            panic!()
+        };
+        assert!(matches!(f.body[0].kind, StmtKind::Defer(_)));
+        let StmtKind::Defer(Expr { kind: ExprKind::Call { .. }, .. }) = &f.body[0].kind else {
+            panic!("first defer not a call")
+        };
+        let StmtKind::Defer(Expr { kind: ExprKind::Call { callee, .. }, .. }) = &f.body[1].kind
+        else {
+            panic!("second defer not a call")
+        };
+        assert!(matches!(callee.kind, ExprKind::Field { .. }));
     }
 
     #[test]

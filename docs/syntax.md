@@ -653,6 +653,27 @@ escape it are rejected; a `?` on an `Option` inside it is rejected (its result i
 use `match`). Reach for `recover:` at boundaries (a request, a REPL line, a plugin, a test), not as
 everyday error handling — `Result`/`?` remain the tool for expected failures.
 
+### `defer` — cleanup on frame exit  (M16)
+
+`defer <call>` schedules a call to run when the **enclosing function/method/closure** exits — on
+**every** path: normal return, a `?` short-circuit, or a panic. Deferred calls run **LIFO** (last
+registered, first run). The receiver and arguments are evaluated **at the `defer` statement** (Go
+semantics); only the call itself is delayed.
+
+```chezzi
+fn process(path: str) -> int!:
+    f := open(path)
+    defer f.close()           # runs however `process` exits
+    n := f.read_int()?        # if this short-circuits, f.close() still runs
+    return Ok(n * 2)
+```
+
+`defer` targets a **method call** or a call to a **first-class callable value** (a function or
+closure, or a name bound to one). Built-ins (`print`, `len`, …) and constructors aren't first-class
+values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`. `defer` composes with
+`recover:` (deferred cleanup runs as a panic unwinds, before the boundary catches it). `std.os.exit`
+is a hard halt and does **not** run deferred calls (matching Go's `os.Exit`).
+
 ## 9b. Program entry — there is no automatic `main`
 
 Chezzi is a scripting language: a program runs **top-to-bottom**. There is **no automatic entry

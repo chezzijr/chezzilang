@@ -1,0 +1,22 @@
+== lifo ==
+body
+first
+second
+closing data.txt
+== ? path ==
+parse cleanup
+use_q cleanup
+err bad input
+== args now ==
+loop done
+i=2
+i=1
+i=0
+== panic + recover ==
+faults cleanup
+recovered err: index 5 out of bounds (len 2)
+== deferred fault ==
+bad_defer body
+before
+after
+caught: index 9 out of bounds (len 1)

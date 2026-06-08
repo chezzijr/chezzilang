@@ -97,6 +97,11 @@ pub enum StmtKind {
     },
     /// `return` with an optional value.
     Return(Option<Expr>),
+    /// `defer <call>` — register a call to run when the enclosing function/method/closure frame
+    /// exits (normal return, `?` short-circuit, or panic), in LIFO order. The expression must be a
+    /// call (`f(a)` / `obj.m(a)`); its receiver + arguments are evaluated at the `defer` statement
+    /// (Go semantics), the call itself at frame exit.
+    Defer(Expr),
     /// `break` — exit the innermost enclosing loop. Carries only its `Span` (via `Stmt`).
     Break,
     /// `continue` — skip to the next iteration of the innermost enclosing loop.

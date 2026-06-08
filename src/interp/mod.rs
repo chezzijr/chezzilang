@@ -84,6 +84,20 @@ struct Interp {
     /// Current user-function call depth. Bounds native-stack recursion so an infinite/very deep
     /// Chezzi recursion returns a `RuntimeError` instead of overflowing the host stack (SIGABRT).
     call_depth: usize,
+    /// One entry per active call frame (function/method/closure): the calls registered by `defer`
+    /// in that frame, in source order. Drained LIFO when the frame exits (normal return, `?`
+    /// short-circuit, or panic). The receiver/args are evaluated at the `defer` statement (Go
+    /// semantics) and stored here as values; the call itself runs at drain.
+    deferred: Vec<Vec<Deferred>>,
+}
+
+/// A call registered by `defer`, with its receiver/arguments already evaluated. Drained at frame
+/// exit via [`Interp::run_deferred`].
+enum Deferred {
+    /// `defer f(args)` — invoke the callable value with the args.
+    Call { callee: Value, args: Vec<Value>, span: Span },
+    /// `defer recv.name(args)` — dispatch the named method on the receiver.
+    Method { recv: Value, name: String, args: Vec<Value>, span: Span },
 }
 
 /// Maximum user-function call depth. Bounds recursion well within the dedicated interpreter
@@ -105,6 +119,7 @@ impl Interp {
             propagating: None,
             pending_exit: None,
             call_depth: 0,
+            deferred: Vec::new(),
         };
         // Built-in Result / Option variants — available without any declaration.
         interp.register_variant("Ok", "Result", 1);
@@ -669,6 +684,57 @@ impl Interp {
         }
     }
 
+    /// `defer <call>` — evaluate the receiver + arguments now (Go semantics) and register the call on
+    /// the current frame; it runs at frame exit. The checker guarantees `call` is an `ExprKind::Call`.
+    fn exec_defer(&mut self, call: &Expr, span: Span) -> Result<Flow, RuntimeError> {
+        let ExprKind::Call { callee, args, .. } = &call.kind else {
+            return Err(RuntimeError {
+                message: "defer requires a function or method call".to_string(),
+                span,
+            });
+        };
+        let arg_vals = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+        let deferred = if let ExprKind::Field { obj, name } = &callee.kind {
+            let recv = self.eval(obj)?;
+            Deferred::Method { recv, name: name.clone(), args: arg_vals, span: call.span }
+        } else {
+            let callee_val = self.eval(callee)?;
+            Deferred::Call { callee: callee_val, args: arg_vals, span: call.span }
+        };
+        if let Some(frame) = self.deferred.last_mut() {
+            frame.push(deferred);
+        }
+        Ok(Flow::Normal)
+    }
+
+    /// Run a frame's deferred calls in LIFO order (last `defer` registered runs first). Each call
+    /// gets a clean propagation channel (saved/restored) so it can't consume the frame's in-flight
+    /// `?` value. A fault in a deferred call is remembered and returned after the rest still run
+    /// (Go: all defers run; the latest fault wins) — but a deferred `std.os.exit` stops the drain.
+    fn run_deferred(&mut self, mut defers: Vec<Deferred>) -> Result<(), RuntimeError> {
+        let mut err = None;
+        while let Some(d) = defers.pop() {
+            let saved_prop = self.propagating.take();
+            let r = match d {
+                Deferred::Call { callee, args, span } => self.call_value(callee, args, span),
+                Deferred::Method { recv, name, args, span } => {
+                    self.dispatch_method(recv, &name, args, span)
+                }
+            };
+            self.propagating = saved_prop;
+            if let Err(e) = r {
+                err = Some(e);
+                if self.pending_exit.is_some() {
+                    break;
+                }
+            }
+        }
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     /// Invoke a native (Rust) function value (M6c). Builds an [`InterpHost`] over the evaluated
     /// args, runs the binding, and lowers its engine-neutral [`NativeRet`] into a `Value`. A
     /// [`HostError`] becomes a `RuntimeError` carrying the call site's span.
@@ -714,16 +780,14 @@ impl Interp {
         let mut new_locals = clo.captured.clone();
         new_locals.push(frame);
         self.enter_call(span)?;
+        self.deferred.push(Vec::new());
         let saved_globals = self.env.swap_globals(clo.home.clone());
         let saved = self.env.swap_locals(new_locals);
         let result = self.eval(&clo.body);
-        self.env.swap_locals(saved);
-        self.env.swap_globals(saved_globals);
-        self.call_depth -= 1;
-        if let Some(v) = self.propagating.take() {
-            return Ok(v);
+        match self.finish_frame(saved, saved_globals)? {
+            Some(v) => Ok(v),
+            None => result,
         }
-        result
     }
 
     /// Increment the call-depth counter, erroring (instead of overflowing the host stack) past
@@ -878,6 +942,19 @@ impl Interp {
         // op. Without this, `(5).frob(1 / 0)` would error on the receiver type here while the VM
         // errors on the argument, breaking interp/VM parity (caught by the parity suite).
         let arg_vals = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+        self.dispatch_method(receiver, method, arg_vals, span)
+    }
+
+    /// Dispatch a method on an already-evaluated receiver + argument values. Split out of
+    /// `eval_method_call` so `defer obj.m(a)` can re-invoke the same dispatch at frame exit with the
+    /// receiver/args it captured at the `defer` statement.
+    fn dispatch_method(
+        &mut self,
+        receiver: Value,
+        method: &str,
+        arg_vals: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         // `compare` on a primitive (int/float/str): these intrinsically satisfy `Comparable`, so an
         // erased generic body may call `.compare()` on a concrete primitive receiver. Return the
         // sign of the ordering (-1/0/1). Structs with their own `compare` fall through to the
@@ -1586,23 +1663,55 @@ impl Interp {
             frame.insert(param.name.clone(), arg);
         }
         self.enter_call(span)?;
+        self.deferred.push(Vec::new());
         // Resolve the callee's top-level names against *its* module, not the caller's.
         let saved_globals = self.env.swap_globals(home.clone());
         let saved = self.env.swap_locals(vec![frame]);
         let result = self.exec_block(&decl.body);
+        // Teardown (defer drain + scope restore + `?`/defer-fault selection) is a separate,
+        // non-inlined frame so its locals don't enlarge `call`'s frame on the deep-recursion path.
+        match self.finish_frame(saved, saved_globals)? {
+            Some(v) => Ok(v),
+            None => match result? {
+                Flow::Return(v) => Ok(v),
+                // A function body falling off the end (or a stray break/continue the checker would
+                // have rejected) yields nil.
+                Flow::Normal | Flow::Break | Flow::Continue => Ok(Value::Nil),
+            },
+        }
+    }
+
+    /// Shared call-frame teardown for `call` / `call_closure`: drain this frame's deferred calls
+    /// (LIFO), restore the caller's scope, and decrement the depth. Returns `Err` if a deferred call
+    /// faulted (it supersedes the frame's result), `Ok(Some(v))` if a `?` propagated a value out of
+    /// the body, or `Ok(None)` to use the body's own result. Kept out of the callers' frames
+    /// (`#[inline(never)]`) so deep recursion stays within the stack budget.
+    #[inline(never)]
+    fn finish_frame(
+        &mut self,
+        saved: Vec<std::collections::HashMap<String, Value>>,
+        saved_globals: value::ModEnv,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let defer_err = self.drain_frame_defers();
         self.env.swap_locals(saved);
         self.env.swap_globals(saved_globals);
         self.call_depth -= 1;
-        // A `?` inside the body early-returns its Err/None value as this function's result.
-        if let Some(v) = self.propagating.take() {
-            return Ok(v);
+        if let Some(e) = defer_err {
+            self.propagating = None;
+            return Err(e);
         }
-        match result? {
-            Flow::Return(v) => Ok(v),
-            // A function body falling off the end (or a stray break/continue the checker would
-            // have rejected) yields nil.
-            Flow::Normal | Flow::Break | Flow::Continue => Ok(Value::Nil),
+        Ok(self.propagating.take())
+    }
+
+    /// Pop the current frame's deferred-call list and drain it (LIFO). Skipped on a hard
+    /// `std.os.exit` (Go: `os.Exit` does not run deferred calls). Returns a fault from a deferred
+    /// call, if any.
+    fn drain_frame_defers(&mut self) -> Option<RuntimeError> {
+        let frame_defers = self.deferred.pop().unwrap_or_default();
+        if self.pending_exit.is_some() {
+            return None;
         }
+        self.run_deferred(frame_defers).err()
     }
 
     /// Drive a single-file module (the `run_program` test path): the whole program shares one set
@@ -1908,6 +2017,9 @@ impl Interp {
                 };
                 Ok(Flow::Return(v))
             }
+            // Kept out of this match (its locals are large) so `exec_stmt`'s frame stays small for
+            // deep recursion — same reason as `eval_slice`.
+            StmtKind::Defer(call) => self.exec_defer(call, stmt.span),
             StmtKind::Break => Ok(Flow::Break),
             StmtKind::Continue => Ok(Flow::Continue),
             StmtKind::If {
@@ -2375,8 +2487,12 @@ impl Interp {
 
 /// Stack size for the interpreter thread. The tree-walk interpreter recurses on the host stack
 /// (several frames per Chezzi call), so it runs on a dedicated large-stack thread; this decouples
-/// the recursion limit from the caller's (possibly small, e.g. 2 MB test) thread stack.
-const INTERP_STACK_BYTES: usize = 256 * 1024 * 1024;
+/// the recursion limit from the caller's (possibly small, e.g. 2 MB test) thread stack. Sized so the
+/// `MAX_CALL_DEPTH` (10_000) guard fires *before* the host stack overflows in **release** builds —
+/// with headroom for per-frame growth (e.g. the `defer` bookkeeping added a few % per frame). Debug
+/// frames are far larger and can still overflow at the limit (a pre-existing property, not specific
+/// to `defer`).
+const INTERP_STACK_BYTES: usize = 384 * 1024 * 1024;
 
 /// Run a whole program from a source string, returning the output produced **so far** alongside
 /// the outcome. The single-file test entry point — the CLI uses [`run_file`] so multi-file
@@ -3710,6 +3826,15 @@ b := Buf([10, 20, 30])
         let source = include_str!("../../examples/set.chz");
         let expected = include_str!("../../examples/set.expected");
         assert_eq!(run_capture(source).expect("set.chz should run"), expected);
+    }
+
+    /// `defer` golden: LIFO cleanup across every frame-exit path (normal return, `?`, panic), with
+    /// args evaluated at the defer statement. Cross-engine parity is asserted in `vm`'s twin test.
+    #[test]
+    fn golden_defer_chz() {
+        let source = include_str!("../../examples/defer.chz");
+        let expected = include_str!("../../examples/defer.expected");
+        assert_eq!(run_capture(source).expect("defer.chz should run"), expected);
     }
 
     /// Comprehensions golden: list/set/map comprehensions, a guard, and a range source.

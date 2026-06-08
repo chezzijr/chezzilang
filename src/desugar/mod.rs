@@ -333,6 +333,7 @@ impl Walker<'_> {
                 }
             }
             StmtKind::Return(Some(e)) => self.walk_expr(e)?,
+            StmtKind::Defer(e) => self.walk_expr(e)?,
             StmtKind::Expr(e) => self.walk_expr(e)?,
             // No nested expressions / bindings to rewrite.
             StmtKind::Return(None)
