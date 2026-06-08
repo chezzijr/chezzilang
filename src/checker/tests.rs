@@ -2264,7 +2264,34 @@ fn for_over_map_value_type_is_v() {
 
 #[test]
 fn for_kv_over_list_rejected() {
+    // A list of plain ints (not tuples) still can't bind two names.
     rejects("xs := [1,2,3]\nfor a, b in xs:\n    print(a)\n", "requires a map");
+}
+
+#[test]
+fn for_tuple_list_binds_each_element() {
+    ok("xs := [(1, \"a\"), (2, \"b\")]\nfor n, s in xs:\n    i: int = n\n    t: str = s\n    print(\"{i}{t}\")\n");
+}
+
+#[test]
+fn for_tuple_list_one_var_binds_whole_tuple() {
+    ok("xs := [(1, \"a\")]\nfor p in xs:\n    i: int = p.0\n    s: str = p.1\n    print(\"{i}{s}\")\n");
+}
+
+#[test]
+fn for_tuple_list_three_names_over_triple() {
+    ok("xs := [(1, 2, 3)]\nfor a, b, c in xs:\n    print(a + b + c)\n");
+}
+
+#[test]
+fn for_tuple_arity_mismatch_rejected() {
+    rejects("xs := [(1, \"a\")]\nfor a, b, c in xs:\n    print(a)\n", "");
+}
+
+#[test]
+fn for_tuple_element_types_checked() {
+    // `s` is the str element; assigning it to an int slot must fail.
+    rejects("xs := [(1, \"a\")]\nfor n, s in xs:\n    bad: int = s\n", "");
 }
 
 #[test]

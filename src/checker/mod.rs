@@ -1438,7 +1438,27 @@ impl Checker {
                     unknowns(vars)
                 }
             },
-            Ty::List(_) | Ty::Str | Ty::Set(_) if vars.len() != 1 => {
+            // Tuple-destructuring `for`: over a `list[(A, B, …)]` with N>1 names, bind each name to
+            // the matching tuple element. One name still binds the whole tuple (the `Ty::List` arm
+            // below). A list of non-tuples (or an arity mismatch) with N>1 names is an error.
+            Ty::List(inner) if vars.len() > 1 => match &**inner {
+                Ty::Tuple(ts) if ts.len() == vars.len() => {
+                    vars.iter().cloned().zip(ts.iter().cloned()).collect()
+                }
+                Ty::Tuple(ts) => {
+                    self.error(iter.span, format!(
+                        "tuple-destructuring `for` binds {} names but the element has {} ({inner})",
+                        vars.len(), ts.len()
+                    ));
+                    unknowns(vars)
+                }
+                Ty::Unknown => unknowns(vars),
+                _ => {
+                    self.error(iter.span, format!("`for k, v` requires a map or a list of tuples, found {it}"));
+                    unknowns(vars)
+                }
+            },
+            Ty::Str | Ty::Set(_) if vars.len() != 1 => {
                 self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
                 unknowns(vars)
             }

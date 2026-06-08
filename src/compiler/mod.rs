@@ -587,64 +587,84 @@ impl Compiler {
             fc.patch_jump(seq_exit);
             self.patch_loop(fc, inc_target);
         } else {
-            // Iterate a sequence by index. `ListClone` normalises the iterand: a list is cloned, a
-            // map yields its keys (gap #14). For `for k, v in m:` we ALSO snapshot the values up
-            // front (via `values()`) and index them in lockstep — matching the interpreter's
-            // pair-snapshot semantics, so a body that mutates the map mid-loop can't perturb the
-            // values bound (and can't crash the key→value lookup).
-            let vals_slot = if vars.len() == 2 {
-                self.compile_expr(fc, iter)?;
-                let m = fc.add_hidden();
-                fc.emit(Op::SetLocal(m), span);
-                // keys snapshot (the sequence we iterate)
-                fc.emit(Op::GetLocal(m), span);
-                fc.emit(Op::ListClone, iter.span);
-                let keys = fc.add_hidden();
-                fc.emit(Op::SetLocal(keys), span);
-                // values snapshot, aligned with keys (same insertion order, same instant)
-                fc.emit(Op::GetLocal(m), span);
-                fc.emit(Op::CallMethod("values".to_string(), 0), span);
-                let vals = fc.add_hidden();
-                fc.emit(Op::SetLocal(vals), span);
-                fc.emit(Op::GetLocal(keys), span); // leave keys on the stack as the iterand
-                Some(vals)
-            } else {
-                self.compile_expr(fc, iter)?;
-                fc.emit(Op::ListClone, iter.span);
-                None
-            };
-            let lst = fc.add_hidden();
+            // Multi-name `for`: either `for k, v in m` over a MAP (key, value) or tuple-destructuring
+            // `for a, b, … in xs` over a `list[(A, B, …)]`. The compiler is type-erased, so we branch
+            // at RUNTIME on `IsMap` (mirroring the single-var `IsStruct` split):
+            //   - map: snapshot keys + values up front and index them in lockstep (so a body that
+            //     mutates the map mid-loop can't perturb the bindings; matches the interpreter);
+            //   - list of tuples: index the list, then destructure each element tuple into the N
+            //     loop vars via `GetField(j)` (the destructure-`:=` pattern, generalized to N).
+            self.compile_expr(fc, iter)?;
+            let src_slot = fc.add_hidden();
+            fc.emit(Op::SetLocal(src_slot), span);
+            fc.emit(Op::GetLocal(src_slot), span);
+            fc.emit(Op::IsMap, span);
+            let mode_slot = fc.add_hidden(); // true ⇒ map path
+            fc.emit(Op::SetLocal(mode_slot), span);
+
+            let lst = fc.add_hidden(); // the list we index (map keys, or the list of tuples)
+            let vals = fc.add_hidden(); // map values snapshot (map path only)
+            let len = fc.add_hidden();
+            let idx = fc.add_hidden();
+            let elem = fc.add_hidden(); // the element read at lst[idx]
+            let var_slots: Vec<usize> = vars.iter().map(|v| fc.add_local(v.clone())).collect();
+
+            // ----- init: branch map vs list -----
+            fc.emit(Op::GetLocal(mode_slot), span);
+            let to_list_init = fc.emit_jump(Op::JumpIfFalse(0), span); // false ⇒ list init
+            // map init: keys snapshot into `lst`, values snapshot into `vals` (same instant/order)
+            fc.emit(Op::GetLocal(src_slot), span);
+            fc.emit(Op::ListClone, iter.span);
             fc.emit(Op::SetLocal(lst), span);
+            fc.emit(Op::GetLocal(src_slot), span);
+            fc.emit(Op::CallMethod("values".to_string(), 0), span);
+            fc.emit(Op::SetLocal(vals), span);
+            let after_init = fc.emit_jump(Op::Jump(0), span);
+            // list init: clone the list of tuples into `lst`
+            fc.patch_jump(to_list_init);
+            fc.emit(Op::GetLocal(src_slot), span);
+            fc.emit(Op::ListClone, iter.span);
+            fc.emit(Op::SetLocal(lst), span);
+            fc.patch_jump(after_init);
+            // common: len = lst.len(), idx = 0
             fc.emit(Op::GetLocal(lst), span);
             fc.emit(Op::ArrLen, span);
-            let len = fc.add_hidden();
             fc.emit(Op::SetLocal(len), span);
             fc.emit(Op::ConstInt(0), span);
-            let idx = fc.add_hidden();
             fc.emit(Op::SetLocal(idx), span);
-            // The loop variable(s): the sequence element binds the first (key for a map); for the
-            // two-name map form the value is read from the values snapshot at the same index.
-            let key_slot = fc.add_local(vars[0].clone());
-            let val_slot = vals_slot.map(|_| fc.add_local(vars[1].clone()));
 
             let loop_start = fc.here();
             fc.emit(Op::GetLocal(idx), span);
             fc.emit(Op::GetLocal(len), span);
             fc.emit(Op::Lt, span);
             let exit = fc.emit_jump(Op::JumpIfFalse(0), span);
+            // elem = lst[idx]
             fc.emit(Op::GetLocal(lst), span);
             fc.emit(Op::GetLocal(idx), span);
             fc.emit(Op::GetIndex, span);
-            fc.emit(Op::SetLocal(key_slot), span);
-            if let (Some(vals), Some(v)) = (vals_slot, val_slot) {
-                fc.emit(Op::GetLocal(vals), span);
-                fc.emit(Op::GetLocal(idx), span);
-                fc.emit(Op::GetIndex, span);
-                fc.emit(Op::SetLocal(v), span);
+            fc.emit(Op::SetLocal(elem), span);
+            // ----- bind: branch map vs list -----
+            fc.emit(Op::GetLocal(mode_slot), span);
+            let to_list_bind = fc.emit_jump(Op::JumpIfFalse(0), span);
+            // map bind: var[0] = key (elem), var[1] = vals[idx]
+            fc.emit(Op::GetLocal(elem), span);
+            fc.emit(Op::SetLocal(var_slots[0]), span);
+            fc.emit(Op::GetLocal(vals), span);
+            fc.emit(Op::GetLocal(idx), span);
+            fc.emit(Op::GetIndex, span);
+            fc.emit(Op::SetLocal(var_slots[1]), span);
+            let after_bind = fc.emit_jump(Op::Jump(0), span);
+            // list bind: destructure the tuple element into each loop var (var[j] = elem.j)
+            fc.patch_jump(to_list_bind);
+            for (j, &vs) in var_slots.iter().enumerate() {
+                fc.emit(Op::GetLocal(elem), span);
+                fc.emit(Op::GetField(j.to_string()), span);
+                fc.emit(Op::SetLocal(vs), span);
             }
+            fc.patch_jump(after_bind);
+
             self.compile_defer_scoped_block(fc, body)?;
-            // `continue` must land HERE — on the index increment, so the loop advances to the
-            // next element instead of re-testing the same index forever.
+            // `continue` lands HERE — the index increment, so the loop advances instead of looping.
             let inc_target = fc.here();
             fc.emit(Op::GetLocal(idx), span);
             fc.emit(Op::ConstInt(1), span);

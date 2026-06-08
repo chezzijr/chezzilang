@@ -188,6 +188,10 @@ pub enum Op {
     /// struct-iterator path (`next(self) -> Option[T]`) vs the sequence path at runtime, since the
     /// compiler is type-erased and can't decide statically.
     IsStruct,
+    /// Pop a value; push `true` if it is a map, else `false`. Used by the multi-name `for` to pick
+    /// the map (key, value) path vs the list-of-tuples destructuring path at runtime, since the
+    /// compiler is type-erased and can't decide statically.
+    IsMap,
 
     // ----- match -----
     /// Require the scrutinee in `slot` to be an enum, else "cannot match on …".

@@ -181,6 +181,9 @@ for k in counts:       # iterate a map → its keys (insertion order)
 for k, v in counts:    # iterate a map's entries → key + value
     print("{k}={v}")
 
+for a, b in pairs:     # destructure a list[(A, B)] — N names over a list[tupleN]
+    print("{a}:{b}")   # (one name binds the whole tuple). enumerate/zip live in std.iter.
+
 # A user struct is iterable too: give it `next(self) -> Option[T]` and `for` drives it lazily,
 # calling next() each step until it returns None (so an infinite iterator + `break` terminates).
 struct Counter:

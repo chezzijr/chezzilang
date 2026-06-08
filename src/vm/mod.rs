@@ -757,6 +757,11 @@ impl Vm {
                     matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Struct { .. }));
                 self.push(Value::Bool(is_struct));
             }
+            Op::IsMap => {
+                let v = self.pop();
+                let is_map = matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Map(_)));
+                self.push(Value::Bool(is_map));
+            }
             Op::EnsureEnum(slot) => {
                 let v = self.stack[self.base() + *slot];
                 if !matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Enum { .. })) {
@@ -6108,6 +6113,19 @@ main()";
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/concat_merge.chz");
+    }
+
+    /// Tuple-destructuring `for` + `std.iter` golden: `examples/for_tuple.chz` — destructure a list
+    /// of tuples, one-var whole-tuple, triples, `enumerate`/`zip`, comprehension combo. Byte-matches
+    /// `.expected`, identical on interp + VM (the `IsMap` runtime split is exercised alongside maps).
+    #[test]
+    fn golden_for_tuple_via_run_file() {
+        let path = fixture("examples/for_tuple.chz");
+        let expected = std::fs::read_to_string(fixture("examples/for_tuple.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/for_tuple.chz");
     }
 
     /// `std.os.exit(code)` golden: `examples/exit.chz` halts at the negative branch with status 2.

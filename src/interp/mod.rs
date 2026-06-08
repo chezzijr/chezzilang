@@ -2762,7 +2762,16 @@ impl crate::native::Host for InterpHost<'_> {
 /// Shared by `exec_for` and `collect_iter_rows` so both iterate every collection identically.
 fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec<Vec<Value>>, RuntimeError> {
     Ok(match iter_val {
-        Value::List(items) => items.borrow().iter().map(|v| vec![v.clone()]).collect(),
+        // Over a list with >1 loop var, each element is a tuple to destructure into a row (the
+        // checker guarantees the element is a tuple of matching arity). One var → whole-element row.
+        Value::List(items) => items
+            .borrow()
+            .iter()
+            .map(|v| match v {
+                Value::Tuple(t) if vars > 1 => t.iter().cloned().collect(),
+                _ => vec![v.clone()],
+            })
+            .collect(),
         Value::Map(m) => m
             .borrow()
             .entries

@@ -67,17 +67,16 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   `number()` detects a `0x`/`0b`/`0o` prefix (case-insensitive) and parses the body via
   `i64::from_str_radix`, `_` allowed between digits. Token stays `Int(i64)` so the value flows
   through unchanged on both engines. `examples/hex.chz` (golden + parity).
-- **Tuple-destructuring `for` (+ `enumerate` / `zip`)** — `for a, b in pairs:` over a `list[(A, B)]`
-  (and N-var over `list[tupleN]`). Today two-var `for` is **map-only** (`for k, v in m`); over a list
-  of tuples the checker errors (`` `for k, v` requires a map ``, `src/checker/mod.rs:1378`). **This —
-  not the builtins — is the actual gap.** `enumerate` / `zip` are already **writable in plain Chezzi**
-  (verified: empty-list element type flows from the `-> list[(int, T)]` annotation; both engines run),
-  so once `for` destructures tuples they are ordinary library functions returning `list[(...)]` — **no
-  builtin special-casing, no checker arm**. Bonus: this composes with comprehensions
-  (`[a + b for a, b in zip(xs, ys)]`). **Fix:** in `for_bindings`, when the element is `Ty::Tuple(ts)`
-  and `vars.len() == ts.len()`, bind each var to its element type; both engines unpack the tuple row
-  (interp `iter_rows_from_value`, VM `compile_for`'s two-name path generalized). Then add `enumerate` /
-  `zip` to a stdlib module (`std.iter`, pure Chezzi). Decided: library funcs, **not** builtins.
+- ~~**Tuple-destructuring `for` (+ `enumerate` / `zip`)**~~ — **resolved.** `for a, b in pairs:` over a
+  `list[(A, B)]` (N names over `list[tupleN]`); one name still binds the whole tuple. Checker
+  `for_bindings` gained a `Ty::List(Ty::Tuple(ts))` arm (arity-checked) ahead of the multivar-error
+  arm. Interp `iter_rows_from_value` expands a tuple element into a row when `vars > 1`. VM was
+  type-erased, so `compile_for`'s multivar branch now splits at runtime on a new `Op::IsMap`: map →
+  keys/values lockstep (unchanged); list-of-tuples → index the list + destructure each element via
+  `GetField(j)` (the destructure-`:=` pattern, generalized). `enumerate` / `zip` shipped as pure-Chezzi
+  `std/iter.chz` (no builtins, no checker arm) — empty-list element type flows from the `-> list[(...)]`
+  annotation. Composes with comprehensions (`[a + b for a, b in iter.zip(xs, ys)]`).
+  `examples/for_tuple.chz` (golden + parity).
 - **Optional chaining + null-coalescing** — `x?.field`, `a ?? default` on `Option`. Cuts `Option`
   boilerplate; `if/else` expr + `?` already exist.
 - ~~**`defer` (cleanup on scope exit)**~~ — **resolved (M16, **block-scoped since M18**; see resolved

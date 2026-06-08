@@ -1,0 +1,26 @@
+# std.iter — small iterator helpers as generic functions over lists.
+#
+# Written entirely in Chezzi: these return `list[(...)]`, so they compose with the
+# tuple-destructuring `for` (`for i, x in iter.enumerate(xs)`) and comprehensions
+# (`[a + b for a, b in iter.zip(xs, ys)]`). No builtin special-casing — ordinary library funcs.
+# The empty accumulator `out := []` recovers its element type from each function's return
+# annotation (`-> list[(int, T)]`), so the first `push` of a tuple type-checks.
+
+# Pair each element with its 0-based index: `[a, b]` → `[(0, a), (1, b)]`.
+fn enumerate[T](xs: list[T]) -> list[(int, T)]:
+    out := []
+    i := 0
+    for x in xs:
+        out.push((i, x))
+        i = i + 1
+    return out
+
+# Zip two lists into a list of pairs, truncating to the shorter length.
+fn zip[A, B](xs: list[A], ys: list[B]) -> list[(A, B)]:
+    out := []
+    n := xs.len()
+    if ys.len() < n:
+        n = ys.len()
+    for i in 0..n:
+        out.push((xs[i], ys[i]))
+    return out
