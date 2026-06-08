@@ -122,7 +122,15 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   already work). Types are program-global, so `import std.ref` makes `Ref` usable by its bare name.
   `examples/ref.chz` (golden + parity). The cross-task counterpart **`Shared[T]`** (owner-task +
   channel, same API) lives in `docs/future.md` §2 — not built here.
-- **Runtime stack traces** — error + call chain + line numbers. Debuggability is a scripting feature.
+- ~~**Runtime stack traces**~~ — **resolved.** An uncaught runtime fault now prints the error line
+  plus the call chain (innermost first) with each call's line:
+  `runtime error (line 12, col 12): division by zero` / `  at divide (called at line 15, col 12)` /
+  `  at compute (…)` / `  at main (…)`. Both engines produce **identical** traces (each frame carries
+  the call-site span + function name). VM captures from `self.frames` at the uncaught fault before the
+  unwind (`fault_trace`, reset by `recover:`); interp keeps a `call_stack` popped only on success
+  (`recover:` truncates it). `RunError` wraps `RuntimeError` + trace at the run boundary — engine
+  `RuntimeError` and the parity-tested `Display` are unchanged. `examples/stack_trace.chz`. (Cost: a
+  fn-name clone per interp call — acceptable for a scripting language; optimizable later.)
 - **Integers** — `i64` only; no `byte`, no bignum, no configurable overflow policy (overflow → error).
 - **✅ Reassigning a loop variable** — `for i in 0..3: i = i + 100` used to diverge (VM mutated the
   live counter slot → one iteration; interp advanced an internal counter → ran all three). **Fixed:**

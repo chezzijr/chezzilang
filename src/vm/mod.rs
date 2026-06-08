@@ -30,6 +30,49 @@ impl std::fmt::Display for RuntimeError {
     }
 }
 
+/// One frame of a runtime stack trace: a function and the call site that entered it. Mirrors
+/// `interp::TraceFrame`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraceFrame {
+    pub function: String,
+    pub span: Span,
+}
+
+/// A runtime error enriched with a stack trace, produced at the run boundary for an uncaught fault.
+/// `Display` matches [`RuntimeError`] exactly (message only — the trace is printed separately) so
+/// parity tests that compare error strings are unaffected. Mirrors `interp::RunError`.
+#[derive(Debug, Clone)]
+pub struct RunError {
+    pub message: String,
+    pub span: Span,
+    pub trace: Vec<TraceFrame>,
+}
+
+impl RunError {
+    fn from_error(e: RuntimeError, trace: Vec<TraceFrame>) -> Self {
+        RunError { message: e.message, span: e.span, trace }
+    }
+    fn plain(e: RuntimeError) -> Self {
+        RunError { message: e.message, span: e.span, trace: Vec::new() }
+    }
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "runtime error ({}): {}", self.span, self.message)
+    }
+}
+
+/// Render a runtime error plus its stack trace for the CLI: the error line, then one indented
+/// `  at <function> (<call site>)` line per frame, innermost first. Shared by both engines' drivers.
+pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
+    let mut s = format!("runtime error ({span}): {message}");
+    for frame in trace {
+        s.push_str(&format!("\n  at {} (called at {})", frame.function, frame.span));
+    }
+    s
+}
+
 /// Maximum user-function call depth — mirrors the interpreter, so infinite recursion is a clean
 /// runtime error rather than a host stack overflow.
 const MAX_CALL_DEPTH: usize = 10_000;
@@ -63,6 +106,9 @@ struct CallFrame {
     /// `LeaveDeferScope` drains `deferred` back down to the top marker, giving block-scoped defer:
     /// a block's defers run when that block exits, not when the whole frame does.
     defer_markers: Vec<usize>,
+    /// Source span of the call site that pushed this frame (where the function was invoked). Used to
+    /// build a runtime stack trace; not part of execution.
+    call_span: Span,
 }
 
 /// A call registered by `defer`, with its receiver/arguments already evaluated. The held values are
@@ -109,6 +155,10 @@ struct Vm {
     /// every `recover:` handler and unwinds to the top — a hard, uncatchable halt; the driver then
     /// reports `code` as the process exit status.
     pending_exit: Option<i32>,
+    /// The stack trace of the first uncaught fault, captured before the frames unwind. `None` until
+    /// an uncaught fault occurs; reset to `None` whenever a `recover:` boundary catches a fault (so a
+    /// later uncaught fault captures a fresh trace). Read by the driver to print the trace.
+    fault_trace: Option<Vec<TraceFrame>>,
     /// Test mode: collect before *every* instruction, to surface any missing GC root.
     gc_stress: bool,
 }
@@ -147,6 +197,7 @@ impl Vm {
             cur_base: 0,
             handlers: Vec::new(),
             pending_exit: None,
+            fault_trace: None,
             gc_stress: false,
         }
     }
@@ -304,9 +355,24 @@ impl Vm {
             is_toplevel,
             deferred: Vec::new(),
             defer_markers: Vec::new(),
+            call_span: span,
         });
         self.cur_base = base;
         Ok(())
+    }
+
+    /// Build a stack trace from the live frames (innermost first), skipping module-toplevel frames.
+    /// Valid only while the frames are intact — i.e. on the uncaught-error path, before unwinding.
+    fn capture_trace(&self) -> Vec<TraceFrame> {
+        self.frames
+            .iter()
+            .rev()
+            .filter(|f| !f.is_toplevel)
+            .map(|f| TraceFrame {
+                function: self.program.protos[f.proto].name.clone(),
+                span: f.call_span,
+            })
+            .collect()
     }
 
     // ----- the dispatch loop -----
@@ -334,6 +400,13 @@ impl Vm {
                 if self.pending_exit.is_some() {
                     return Err(rte);
                 }
+                // Capture the stack trace of an uncaught fault now, while the frames are still intact
+                // (the unwind below drops them). Innermost capture wins (`is_none`); a fault this loop
+                // CAN catch resets it below, so a stale trace never survives a `recover:`.
+                let caught_here = matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
+                if !caught_here && self.fault_trace.is_none() {
+                    self.fault_trace = Some(self.capture_trace());
+                }
                 // The nearest `recover:` boundary owned by THIS dispatch loop catches the fault; a
                 // handler at/below `base_level` belongs to an outer loop, so we unwind to
                 // `base_level` and propagate. Either way, every frame discarded on the way runs its
@@ -351,6 +424,9 @@ impl Vm {
                 match self.handlers.last().copied() {
                     Some(h) if h.frame_len > base_level => {
                         self.handlers.pop();
+                        // This `recover:` caught the fault — discard any trace captured deeper in (it
+                        // belongs to a fault that is now handled), so a later uncaught fault re-captures.
+                        self.fault_trace = None;
                         // `unwind_deferred` already dropped frames down to `h.frame_len`; restore the
                         // operand stack / call-depth / ip to the boundary's snapshot.
                         self.stack.truncate(h.stack_len);
@@ -3391,7 +3467,7 @@ pub fn run_file(entry: &std::path::Path) -> RunOutput {
 /// A finished run: captured `(stdout, stderr, outcome, exit_code)`. Stderr holds `std.io.eprint`
 /// output. `exit_code` is `Some(n)` only when the program called `std.os.exit(n)` (a clean halt,
 /// so `outcome` is `Ok`); `None` for a normal end or a runtime error.
-pub type RunOutput = (String, String, Result<(), RuntimeError>, Option<i32>);
+pub type RunOutput = (String, String, Result<(), RunError>, Option<i32>);
 
 /// Like [`run_file`], but with an explicit [`crate::native::HostConfig`] (args/env/stdin) for the
 /// native std modules. The CLI passes a process-backed config; tests inject a deterministic one.
@@ -3408,11 +3484,11 @@ pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) ->
 fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
     let graph = match crate::resolver::build_graph(entry) {
         Ok(g) => g,
-        Err(e) => return (String::new(), String::new(), Err(RuntimeError { message: e.message, span: e.span }), None),
+        Err(e) => return (String::new(), String::new(), Err(RunError::plain(RuntimeError { message: e.message, span: e.span })), None),
     };
     let program = match crate::compiler::compile_graph(&graph) {
         Ok(p) => p,
-        Err(e) => return (String::new(), String::new(), Err(RuntimeError { message: e.message, span: e.span }), None),
+        Err(e) => return (String::new(), String::new(), Err(RunError::plain(RuntimeError { message: e.message, span: e.span })), None),
     };
     let mut vm = Vm::new(Rc::new(program));
     vm.host = cfg;
@@ -3422,6 +3498,9 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     if let Some(code) = vm.pending_exit {
         return (vm.out, vm.stderr, Ok(()), Some(code));
     }
+    // The stack trace was captured at the uncaught fault (before frames unwound); attach it.
+    let trace = vm.fault_trace.take().unwrap_or_default();
+    let result = result.map_err(|e| RunError::from_error(e, trace));
     (vm.out, vm.stderr, result, None)
 }
 
@@ -6278,6 +6357,45 @@ main()";
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/optchain.chz");
+    }
+
+    /// Runtime stack trace: a faulting nested call reports the error line + the call chain (innermost
+    /// first) with each call's line. Asserted on the VM, and the interp must produce the IDENTICAL
+    /// formatted trace (frames carry the same call-site spans on both engines).
+    #[test]
+    fn stack_trace_reports_call_chain_on_both_engines() {
+        let path = fixture("examples/stack_trace.chz");
+        let (_out, _err, res, _) = run_file(&path);
+        let e = res.expect_err("program should fault");
+        assert_eq!(e.message, "division by zero");
+        let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+        assert_eq!(names, vec!["divide", "compute", "main"]);
+        // Call-site lines, innermost first.
+        let lines: Vec<usize> = e.trace.iter().map(|f| f.span.line).collect();
+        assert_eq!(lines, vec![15, 18, 20]);
+        let vm_fmt = format_trace(&e.message, e.span, &e.trace);
+        assert!(vm_fmt.contains("at divide (called at line 15"), "got: {vm_fmt}");
+
+        // Interp parity: identical formatted trace.
+        let (_o, _er, ip_res, _) = crate::interp::run_file(&path);
+        let ie = ip_res.expect_err("program should fault");
+        let ip_fmt = crate::interp::format_trace(&ie.message, ie.span, &ie.trace);
+        assert_eq!(vm_fmt, ip_fmt, "engines must produce the same stack trace");
+    }
+
+    /// A `recover:`-caught fault leaves no stale frames: a *later* uncaught fault's trace shows only
+    /// its own chain, not the recovered call.
+    #[test]
+    fn recovered_fault_does_not_pollute_later_trace() {
+        let src = "fn boom() -> int:\n    return 1 / 0\nfn safe() -> int:\n    r := recover:\n        boom()\n    return 7\nfn deeper() -> int:\n    xs := [1, 2]\n    return xs[9]\nfn main():\n    print(safe())\n    print(deeper())\nmain()\n";
+        let dir = std::env::temp_dir().join("chezzi_recover_trace_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rt.chz");
+        std::fs::write(&path, src).unwrap();
+        let (_o, _e, res, _) = run_file(&path);
+        let e = res.expect_err("should fault");
+        let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+        assert_eq!(names, vec!["deeper", "main"], "no stale 'boom'/'safe' frames");
     }
 
     /// Non-constant default golden: `examples/default_expr.chz` — defaults that are arithmetic on

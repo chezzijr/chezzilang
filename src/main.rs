@@ -216,10 +216,10 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let cfg = native::HostConfig::from_process(prog_args);
     let (output, errout, errored, exit_code) = if use_vm {
         let (out, err, result, code) = vm::run_file_with(p, cfg);
-        (out, err, result.err().map(|e| e.to_string()), code)
+        (out, err, result.err().map(|e| vm::format_trace(&e.message, e.span, &e.trace)), code)
     } else {
         let (out, err, result, code) = interp::run_file_with(p, cfg);
-        (out, err, result.err().map(|e| e.to_string()), code)
+        (out, err, result.err().map(|e| interp::format_trace(&e.message, e.span, &e.trace)), code)
     };
     print!("{output}");
     // Flush program stderr (std.io.eprint output) to the real stderr.

@@ -1,0 +1,20 @@
+# examples/stack_trace.chz — a runtime fault reports a stack trace: the error line, then the call
+# chain (innermost first) with the line of each call. Run it to see:
+#
+#   runtime error (line 12, col 12): division by zero
+#     at divide (called at line 15, col 12)
+#     at compute (called at line 18, col 11)
+#     at main (called at line 20, col 1)
+#
+# (This program intentionally faults — it exits non-zero. Both engines print the same trace.)
+
+fn divide(a: int, b: int) -> int:
+    return a / b
+
+fn compute(x: int) -> int:
+    return divide(x, 0)
+
+fn main():
+    print(compute(10))
+
+main()

@@ -27,6 +27,49 @@ impl std::fmt::Display for RuntimeError {
     }
 }
 
+/// One frame of a runtime stack trace: a function and the call site that entered it. Mirrors
+/// `vm::TraceFrame`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraceFrame {
+    pub function: String,
+    pub span: Span,
+}
+
+/// A runtime error enriched with a stack trace, produced at the run boundary for an uncaught fault.
+/// `Display` matches [`RuntimeError`] exactly (message only — the trace is printed separately) so
+/// parity tests that compare error strings are unaffected. Mirrors `vm::RunError`.
+#[derive(Debug, Clone)]
+pub struct RunError {
+    pub message: String,
+    pub span: Span,
+    pub trace: Vec<TraceFrame>,
+}
+
+impl RunError {
+    fn from_error(e: RuntimeError, trace: Vec<TraceFrame>) -> Self {
+        RunError { message: e.message, span: e.span, trace }
+    }
+    fn plain(e: RuntimeError) -> Self {
+        RunError { message: e.message, span: e.span, trace: Vec::new() }
+    }
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "runtime error ({}): {}", self.span, self.message)
+    }
+}
+
+/// Render a runtime error plus its stack trace for the CLI: the error line, then one indented
+/// `  at <function> (<call site>)` line per frame, innermost first. Mirrors `vm::format_trace`.
+pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
+    let mut s = format!("runtime error ({span}): {message}");
+    for frame in trace {
+        s.push_str(&format!("\n  at {} (called at {})", frame.function, frame.span));
+    }
+    s
+}
+
 /// Control-flow signal threaded out of statement execution so `return` (and `?` propagation)
 /// can unwind cleanly through nested blocks.
 enum Flow {
@@ -95,6 +138,11 @@ struct Interp {
     /// short-circuit, or panic). The receiver/args are evaluated at the `defer` statement (Go
     /// semantics) and stored here as values; the call itself runs at drain.
     deferred: Vec<Vec<Deferred>>,
+    /// Active call frames (function/method/closure), outermost first, for runtime stack traces. A
+    /// frame is pushed on entry and popped only on a **successful** return — on the error path it is
+    /// left in place, so when an uncaught fault reaches the driver this holds the call chain from the
+    /// outermost call down to the fault. `recover:` truncates it back to its entry depth on catch.
+    call_stack: Vec<TraceFrame>,
 }
 
 /// A call registered by `defer`, with its receiver/arguments already evaluated. Drained at frame
@@ -126,6 +174,7 @@ impl Interp {
             pending_exit: None,
             call_depth: 0,
             deferred: Vec::new(),
+            call_stack: Vec::new(),
         };
         // Built-in Result / Option variants — available without any declaration.
         interp.register_variant("Ok", "Result", 1);
@@ -787,13 +836,19 @@ impl Interp {
         new_locals.push(frame);
         self.enter_call(span)?;
         self.deferred.push(Vec::new());
+        self.call_stack.push(TraceFrame { function: "<closure>".to_string(), span });
         let saved_globals = self.env.swap_globals(clo.home.clone());
         let saved = self.env.swap_locals(new_locals);
         let result = self.eval(&clo.body);
-        match self.finish_frame(saved, saved_globals)? {
-            Some(v) => Ok(v),
-            None => result,
+        let outcome = match self.finish_frame(saved, saved_globals) {
+            Err(e) => Err(e),
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => result,
+        };
+        if outcome.is_ok() {
+            self.call_stack.pop();
         }
+        outcome
     }
 
     /// Increment the call-depth counter, erroring (instead of overflowing the host stack) past
@@ -1787,6 +1842,9 @@ impl Interp {
         }
         self.enter_call(span)?;
         self.deferred.push(Vec::new());
+        // Record this frame for stack traces; popped below only on a successful return (an error
+        // path leaves it so the driver can read the call chain at the fault).
+        self.call_stack.push(TraceFrame { function: decl.name.clone(), span });
         // Resolve the callee's top-level names against *its* module, not the caller's.
         let saved_globals = self.env.swap_globals(home.clone());
         let saved = self.env.swap_locals(vec![frame]);
@@ -1795,15 +1853,21 @@ impl Interp {
         let result = self.exec_block_inner(&decl.body);
         // Teardown (defer drain + scope restore + `?`/defer-fault selection) is a separate,
         // non-inlined frame so its locals don't enlarge `call`'s frame on the deep-recursion path.
-        match self.finish_frame(saved, saved_globals)? {
-            Some(v) => Ok(v),
-            None => match result? {
-                Flow::Return(v) => Ok(v),
+        let outcome = match self.finish_frame(saved, saved_globals) {
+            Err(e) => Err(e),
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => match result {
+                Ok(Flow::Return(v)) => Ok(v),
                 // A function body falling off the end (or a stray break/continue the checker would
                 // have rejected) yields nil.
-                Flow::Normal | Flow::Break | Flow::Continue => Ok(Value::Nil),
+                Ok(Flow::Normal) | Ok(Flow::Break) | Ok(Flow::Continue) => Ok(Value::Nil),
+                Err(e) => Err(e),
             },
+        };
+        if outcome.is_ok() {
+            self.call_stack.pop();
         }
+        outcome
     }
 
     /// Shared call-frame teardown for `call` / `call_closure`: drain this frame's deferred calls
@@ -1998,6 +2062,9 @@ impl Interp {
     /// balanced here.
     fn eval_recover(&mut self, block: &[Stmt]) -> Result<Value, RuntimeError> {
         let saved_prop = self.propagating.take();
+        // A caught fault leaves the faulted call chain on `call_stack` (frames pop only on success);
+        // restore it to this depth so a later fault's trace isn't polluted by recovered frames.
+        let stack_depth = self.call_stack.len();
         self.env.push();
         let result = self.eval_recover_body(block);
         self.env.pop();
@@ -2014,10 +2081,12 @@ impl Interp {
                 } else if let Some(propagated) = self.propagating.take() {
                     // A `?` Err/None in the block short-circuits here: it becomes the result.
                     self.propagating = saved_prop;
+                    self.call_stack.truncate(stack_depth);
                     Ok(propagated)
                 } else {
                     // A genuine runtime fault: its message (a `str`, i.e. an `Error`) becomes Err.
                     self.propagating = saved_prop;
+                    self.call_stack.truncate(stack_depth);
                     Ok(enum_val("Result", "Err", vec![Value::Str(e.message.into())]))
                 }
             }
@@ -2719,7 +2788,7 @@ pub fn run_file(entry: &std::path::Path) -> RunOutput {
 /// A finished run: captured `(stdout, stderr, outcome, exit_code)`. Stderr holds `std.io.eprint`
 /// output. `exit_code` is `Some(n)` only when the program called `std.os.exit(n)` (a clean halt,
 /// so `outcome` is `Ok`); `None` for a normal end or a runtime error.
-pub type RunOutput = (String, String, Result<(), RuntimeError>, Option<i32>);
+pub type RunOutput = (String, String, Result<(), RunError>, Option<i32>);
 
 /// Like [`run_file`], but with an explicit [`crate::native::HostConfig`] (args/env/stdin) for the
 /// native std modules. The CLI passes a process-backed config; tests inject a deterministic one.
@@ -2737,7 +2806,7 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     let graph = match crate::resolver::build_graph(entry) {
         Ok(g) => g,
         Err(e) => {
-            return (String::new(), String::new(), Err(RuntimeError { message: e.message, span: e.span }), None);
+            return (String::new(), String::new(), Err(RunError::plain(RuntimeError { message: e.message, span: e.span })), None);
         }
     };
     let mut interp = Interp::new();
@@ -2750,7 +2819,10 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
             if let Some(code) = interp.pending_exit {
                 return (interp.out, interp.stderr, Ok(()), Some(code));
             }
-            return (interp.out, interp.stderr, Err(e), None);
+            // On an uncaught fault, `call_stack` holds the chain (outermost first, frames pop only on
+            // success); reverse to innermost-first for the trace.
+            let trace: Vec<TraceFrame> = interp.call_stack.iter().rev().cloned().collect();
+            return (interp.out, interp.stderr, Err(RunError::from_error(e, trace)), None);
         }
     }
     (interp.out, interp.stderr, Ok(()), None)
