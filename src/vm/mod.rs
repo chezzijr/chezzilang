@@ -2157,6 +2157,10 @@ impl Vm {
     /// Skipped on a hard `std.os.exit`. Returns the latest fault from a deferred call, if any.
     fn leave_defer_scope(&mut self) -> Option<RuntimeError> {
         let fi = self.frames.len() - 1;
+        debug_assert!(
+            !self.frames[fi].defer_markers.is_empty(),
+            "LeaveDeferScope without a matching EnterDeferScope (compiler scope-count desync)"
+        );
         let marker = self.frames[fi].defer_markers.pop().unwrap_or(0);
         if self.pending_exit.is_some() {
             return None;
@@ -3882,6 +3886,27 @@ main()";
         assert_defer_scope(
             "fn log(s: str):\n    print(s)\nfn main():\n    x := 1\n    match x:\n        1:\n            defer log(\"arm\")\n            log(\"body\")\n        _: log(\"other\")\n    log(\"after\")\nmain()\n",
             "body\narm\nafter\n",
+        );
+    }
+
+    /// `continue` drains the current iteration's loop-body defers then advances; `break` drains them
+    /// then leaves the loop.
+    #[test]
+    fn defer_break_continue_drain_loop_body() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn main():\n    for i in 0..4:\n        defer log(\"d{i}\")\n        if i == 1:\n            continue\n        if i == 2:\n            break\n        log(\"body{i}\")\nmain()\n",
+            "body0\nd0\nd1\nd2\n",
+        );
+    }
+
+    /// A `break` nested inside an `if` (its own defer scope) inside the loop drains BOTH the
+    /// if-branch and the loop-body defers, inner-first, before leaving — the post-loop `done` must
+    /// print AFTER the cleanup (proving the drain happens at break, not at function return).
+    #[test]
+    fn defer_break_inside_if_drains_inner_first() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn main():\n    for i in 0..3:\n        defer log(\"loop{i}\")\n        if i == 1:\n            defer log(\"if{i}\")\n            break\n        log(\"body{i}\")\n    log(\"done\")\nmain()\n",
+            "body0\nloop0\nif1\nloop1\ndone\n",
         );
     }
 

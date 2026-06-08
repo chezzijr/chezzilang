@@ -221,10 +221,12 @@ impl Compiler {
         let has_defer = block_has_defer(stmts);
         if has_defer {
             fc.emit(Op::EnterDeferScope, stmts[0].span);
+            fc.defer_scopes += 1;
         }
         self.compile_block_scoped(fc, stmts)?;
         if has_defer {
             fc.emit(Op::LeaveDeferScope, stmts[stmts.len() - 1].span);
+            fc.defer_scopes -= 1;
         }
         Ok(())
     }
@@ -236,12 +238,28 @@ impl Compiler {
         let has_defer = block_has_defer(stmts);
         if has_defer {
             fc.emit(Op::EnterDeferScope, stmts[0].span);
+            fc.defer_scopes += 1;
         }
         self.compile_block_flat(fc, stmts)?;
         if has_defer {
             fc.emit(Op::LeaveDeferScope, stmts[stmts.len() - 1].span);
+            fc.defer_scopes -= 1;
         }
         Ok(())
+    }
+
+    /// Emit one `LeaveDeferScope` per defer scope between the current point and the enclosing loop
+    /// body (inclusive), draining them LIFO before a `break`/`continue` jumps away. These ops run on
+    /// the jump path only; the blocks' own end-of-scope `LeaveDeferScope`s are skipped by the jump,
+    /// so each marker is popped exactly once. The compiler's `defer_scopes` count is unchanged — the
+    /// scopes remain lexically open and emit their natural leaves on the fall-through path.
+    fn emit_loop_body_drain(&mut self, fc: &mut FnComp, span: Span) {
+        let Some(floor) = fc.loops.last().map(|c| c.defer_floor) else {
+            return; // no enclosing loop — the checker rejects this `break`/`continue`
+        };
+        for _ in 0..(fc.defer_scopes - floor) {
+            fc.emit(Op::LeaveDeferScope, span);
+        }
     }
 
     fn compile_stmt(&mut self, fc: &mut FnComp, stmt: &Stmt) -> Result<(), CompileError> {
@@ -308,6 +326,9 @@ impl Compiler {
                 Ok(())
             }
             StmtKind::Break => {
+                // Drain the current iteration's loop-body defers (and any nested block defers) before
+                // jumping out, so they run at the `break`, not at function return.
+                self.emit_loop_body_drain(fc, stmt.span);
                 let j = fc.emit_jump(Op::Jump(0), stmt.span);
                 match fc.current_loop() {
                     Some(ctx) => ctx.break_jumps.push(j),
@@ -319,6 +340,7 @@ impl Compiler {
                 Ok(())
             }
             StmtKind::Continue => {
+                self.emit_loop_body_drain(fc, stmt.span);
                 let j = fc.emit_jump(Op::Jump(0), stmt.span);
                 match fc.current_loop() {
                     Some(ctx) => ctx.continue_jumps.push(j),
@@ -427,7 +449,7 @@ impl Compiler {
         self.compile_expr(fc, cond)?;
         fc.emit(Op::AsBool, cond.span);
         let exit = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
-        fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new() });
+        fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new(), defer_floor: fc.defer_scopes });
         self.compile_defer_scoped_block(fc, body)?;
         fc.emit(Op::Jump(loop_start), cond.span);
         fc.patch_jump(exit);
@@ -445,7 +467,7 @@ impl Compiler {
 
     fn compile_for(&mut self, fc: &mut FnComp, vars: &[String], iter: &Expr, body: &[Stmt], span: Span) -> Result<(), CompileError> {
         fc.begin_scope();
-        fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new() });
+        fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new(), defer_floor: fc.defer_scopes });
         if let ExprKind::Range { start, end } = &iter.kind {
             // Lazy counting loop — the range is never materialized. The checker guarantees a single
             // loop variable for a range.
@@ -1476,6 +1498,10 @@ struct LocalVar {
 struct LoopCtx {
     continue_jumps: Vec<usize>,
     break_jumps: Vec<usize>,
+    /// Number of open defer scopes enclosing this loop (captured at loop entry, before the body's
+    /// own defer scope). A `break`/`continue` drains every defer scope from the break point down to
+    /// (and including) the loop-body scope — i.e. `fc.defer_scopes - defer_floor` of them.
+    defer_floor: usize,
 }
 
 /// Whether a block directly contains a `defer` statement (so it needs defer-scope brackets). Nested
@@ -1501,6 +1527,10 @@ struct FnComp {
     /// outside any loop. A closure compiles in its own `FnComp` with an empty stack, so a
     /// `break`/`continue` there has no current loop (the checker rejects it; we defend anyway).
     loops: Vec<LoopCtx>,
+    /// Count of defer scopes currently open during compilation (incremented at `EnterDeferScope`,
+    /// decremented at the matching `LeaveDeferScope`). Read by `break`/`continue` to know how many
+    /// scopes to drain down to the loop body.
+    defer_scopes: usize,
 }
 
 impl FnComp {
@@ -1517,6 +1547,7 @@ impl FnComp {
             max_slots: 0,
             captured_names: Vec::new(),
             loops: Vec::new(),
+            defer_scopes: 0,
         }
     }
 
