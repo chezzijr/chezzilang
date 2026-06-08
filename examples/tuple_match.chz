@@ -1,0 +1,36 @@
+# examples/tuple_match.chz — tuple destructuring (general) + match-on-tuple + guards.
+# All of this already worked pre-gap-pass; this is the coverage example that proves it.
+
+# A function returning a tuple, destructured at the call site.
+fn divmod(a: int, b: int) -> (int, int):
+    return (a / b, a % b)
+
+q, r := divmod(17, 5)
+print("{q} rem {r}")        # 3 rem 2
+
+# Tuple as a first-class typed value + element access via .0 / .1.
+pair: (str, int) = ("age", 30)
+print("{pair.0}={pair.1}")  # age=30
+
+# match on a tuple: literal arm, binding arm, and a guard arm.
+fn classify(p: (int, int)) -> str:
+    match p:
+        (0, 0): return "origin"
+        (x, y) if x == y: return "diagonal"
+        (x, 0): return "on x-axis"
+        (x, y): return "point {x},{y}"
+
+print(classify((0, 0)))     # origin
+print(classify((4, 4)))     # diagonal
+print(classify((7, 0)))     # on x-axis
+print(classify((2, 5)))     # point 2,5
+
+# Nested: an Option wrapping a tuple, destructured in the Some arm.
+fn first_pair(xs: list[(int, str)]) -> Option[(int, str)]:
+    for p in xs:
+        return Some(p)
+    return None
+
+match first_pair([(1, "a"), (2, "b")]):
+    Some((n, s)): print("first: {n}{s}")   # first: 1a
+    None: print("empty")

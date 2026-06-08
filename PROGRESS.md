@@ -10,6 +10,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **Scripting-ergonomics gap pass.** ✅ DONE (TDD, full suite + conformance green — 1143 tests,
+> both engines parity-tested, clippy clean). Five `gaps.md` items closed in sequence, each with a
+> golden + parity example:
+> - **Hex/binary/octal literals** (`0xFF`/`0b1010`/`0o17`) — lexer-only: `number()` detects the
+>   prefix and parses via `i64::from_str_radix`, `_` allowed between digits. Token stays `Int(i64)`.
+>   `examples/hex.chz`.
+> - **List `.concat`/`.extend` + map `.merge`/`.update`** — method-based (no operator overload).
+>   concat/merge return a NEW collection; extend/update mutate in place → nil. Checker sigs +
+>   interp (`builtins`/`eval_map_method` + `map_upsert`) + VM `core_method` (`expect_list_obj`/
+>   `map_upsert_in_heap`); new collections built fully before the single GC alloc; self-ops snapshot
+>   the other side first. `examples/concat_merge.chz`.
+> - **Tuple-destructuring `for`** (`for a, b in list[(A,B)]`, N-var over `list[tupleN]`; one var binds
+>   the whole tuple) + `std/iter.chz` `enumerate`/`zip` (pure Chezzi). Checker `for_bindings` tuple
+>   arm; interp `iter_rows_from_value` row-expansion; VM was type-erased so `compile_for`'s multivar
+>   branch now splits at runtime on a new **`Op::IsMap`** (map keys/values lockstep vs list-of-tuples
+>   `GetField(j)` destructure). `examples/for_tuple.chz`.
+> - **Optional chaining `?.` + null-coalescing `??`** — lexer-adjacent `?.`/`??` tokens, parser
+>   carrier nodes (`OptChain`/`NullCoalesce`, `??` right-assoc bp 4), lowered to a `match` on the
+>   `Option` by the **desugar pass** → zero checker/engine semantic code (match + Some/None already
+>   work). None short-circuits; `Some(v)` re-wraps (no auto-flatten → `Option[Option[U]]`).
+>   `examples/optchain.chz`.
+> - **Tuple destructuring (general) + match-on-tuple + guards** — verified already working
+>   (`a, b := fn()`, typed tuple values, `match (a,b): (1,x) if …`, `Some((a,b))`); added
+>   `examples/tuple_match.chz` as coverage.
+
 > **Fix — loop variable is immutable (cross-engine divergence).** ✅ DONE (TDD, full suite +
 > conformance green — 1094 tests). `for i in 0..3: i = i + 100` used to diverge: the **VM** mutated
 > the live counter slot (one iteration), the **interp** advanced an internal counter (all three).

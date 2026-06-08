@@ -6141,6 +6141,19 @@ main()";
         assert_file_parity("examples/optchain.chz");
     }
 
+    /// Tuple destructuring + match-on-tuple + guards golden: `examples/tuple_match.chz` — `a, b :=
+    /// fn()`, typed tuple value + `.0`/`.1`, `match` literal/binding/guard arms, `Some((a, b))`.
+    /// Coverage for behavior that already worked. Byte-matches `.expected`, identical on interp + VM.
+    #[test]
+    fn golden_tuple_match_via_run_file() {
+        let path = fixture("examples/tuple_match.chz");
+        let expected = std::fs::read_to_string(fixture("examples/tuple_match.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/tuple_match.chz");
+    }
+
     /// `std.os.exit(code)` golden: `examples/exit.chz` halts at the negative branch with status 2.
     /// Byte-matches `.expected` on both engines and both report the same exit code.
     #[test]
