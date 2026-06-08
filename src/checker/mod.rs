@@ -2920,7 +2920,7 @@ impl Checker {
                 // Higher-order methods whose result/param types depend on the closure's
                 // `Ty::Func` can't be expressed by the fixed `list_method_sig` table, so handle
                 // them here. `Ty::Unknown` arguments are tolerated permissively (no cascade).
-                if matches!(method, "map" | "filter" | "fold" | "sort_by") {
+                if matches!(method, "map" | "filter" | "fold" | "sort_by" | "sort_by_key") {
                     let elem = (**elem).clone();
                     return self.infer_list_hof(method, &elem, args, span);
                 }
@@ -3143,6 +3143,49 @@ impl Checker {
                             args[0].span,
                             format!(
                                 "sort_by expects a comparator fn({elem}, {elem}) -> int, found {other}"
+                            ),
+                        );
+                        Ty::Nil
+                    }
+                }
+            }
+            // sort_by_key(f: fn(T) -> K) -> nil — sorts in place by a derived key (sugar over
+            // sort_by). `K` must be orderable like `sort()`'s element: int/float/str or a struct
+            // satisfying `Comparable`. Keys are compared by their natural order at runtime.
+            "sort_by_key" => {
+                if args.len() != 1 {
+                    self.error(
+                        span,
+                        format!("'sort_by_key' expects 1 argument(s), got {}", args.len()),
+                    );
+                    self.infer_all(args);
+                    return Ty::Nil;
+                }
+                let ft = self.infer(&args[0]);
+                match ft {
+                    Ty::Unknown => Ty::Nil,
+                    Ty::Func { params, ret }
+                        if params.len() == 1 && compatible(&params[0], elem) =>
+                    {
+                        let key = (*ret).clone();
+                        if is_orderable(&key)
+                            || key.is_unknown()
+                            || self.satisfies(&key, "Comparable").is_ok()
+                        {
+                            Ty::Nil
+                        } else {
+                            self.error(
+                                args[0].span,
+                                format!("sort_by_key key type must be Comparable (int, float, str, or a struct with a `compare` method), found {key}"),
+                            );
+                            Ty::Nil
+                        }
+                    }
+                    other => {
+                        self.error(
+                            args[0].span,
+                            format!(
+                                "sort_by_key expects a key function fn({elem}) -> K, found {other}"
                             ),
                         );
                         Ty::Nil

@@ -37,8 +37,9 @@ struct PSpec {
 /// not get default/named support on that method (a documented, narrow limitation).
 const BUILTIN_METHODS: &[&str] = &[
     "len", "upper", "lower", "trim", "message", "split", "chars", "join", "starts_with", "contains",
-    "push", "pop", "reverse", "index_of", "sum", "sort", "map", "filter", "fold", "sort_by", "has",
-    "get", "keys", "values", "remove", "add", "union", "intersection", "difference",
+    "push", "pop", "reverse", "index_of", "sum", "sort", "map", "filter", "fold", "sort_by",
+    "sort_by_key", "has", "get", "keys", "values", "remove", "add", "union", "intersection",
+    "difference",
 ];
 
 fn is_builtin_method(name: &str) -> bool {

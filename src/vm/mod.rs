@@ -1548,6 +1548,12 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
+        // `sort_by_key` calls a key extractor once per element, then sorts in place by key.
+        if matches!(self.heap.get(h), Obj::List(_)) && method == "sort_by_key" {
+            let result = self.list_sort_by_key(h, args, span)?;
+            self.push(result);
+            return Ok(());
+        }
         // Core-type methods (M6): built-in methods on `str` / `list`. Handled before the clone-match
         // so `list.push` mutates the heap object in place (the match below clones the Obj). Mirrors
         // `interp::builtins::call_method` exactly — error strings included (parity-tested).
@@ -1760,6 +1766,129 @@ impl Vm {
             Value::Int(n) => Ok(n),
             other => Err(self.err(format!("sort_by comparator must return int, got {}", self.type_name(other)), span)),
         }
+    }
+
+    /// `xs.sort_by_key(f)` — stable in-place sort by a derived key `f: fn(T) -> K`. Mirrors
+    /// `list_sort_by`'s GC discipline: the source list, an element snapshot, AND a parallel **keys**
+    /// list are all rooted on the operand stack so the re-entrant extractor (and a Comparable-struct
+    /// key's `compare`) can GC freely. Keys are computed once per element; the merge sort permutes
+    /// `usize` indices, re-reading keys from the rooted keys list per comparison. Returns `nil`.
+    fn list_sort_by_key(&mut self, src_h: GcRef, mut args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+        if args.len() != 1 {
+            return Err(self.err(format!("'sort_by_key' expects 1 argument(s), got {}", args.len()), span));
+        }
+        let f = args.swap_remove(0);
+        self.push(Value::Obj(src_h)); // ROOT the source list
+        let snap_h = {
+            let elems = match self.heap.get(src_h) {
+                Obj::List(v) => v.clone(),
+                _ => unreachable!("list_sort_by_key on non-list"),
+            };
+            self.heap.alloc(Obj::List(elems))
+        };
+        self.push(Value::Obj(snap_h)); // ROOT the snapshot
+        let n = match self.heap.get(snap_h) {
+            Obj::List(v) => v.len(),
+            _ => unreachable!(),
+        };
+        // Compute keys once per element into a rooted list. Each `invoke_value` may GC; already-pushed
+        // keys survive because `keys_h` is rooted (a `Vec::push` into it does not itself GC).
+        let keys_h = self.heap.alloc(Obj::List(Vec::with_capacity(n)));
+        self.push(Value::Obj(keys_h)); // ROOT the keys
+        for i in 0..n {
+            let e = match self.heap.get(snap_h) {
+                Obj::List(v) => v[i],
+                _ => unreachable!(),
+            };
+            match self.invoke_value(f, vec![e], span) {
+                Ok(k) => {
+                    if let Obj::List(v) = self.heap.get_mut(keys_h) {
+                        v.push(k);
+                    }
+                }
+                Err(err) => {
+                    self.pop(); // unroot keys
+                    self.pop(); // unroot snapshot
+                    self.pop(); // unroot source
+                    return Err(err);
+                }
+            }
+        }
+        let order = match self.msort_indices_by_key(keys_h, (0..n).collect(), span) {
+            Ok(o) => o,
+            Err(e) => {
+                self.pop(); // unroot keys
+                self.pop(); // unroot snapshot
+                self.pop(); // unroot source
+                return Err(e);
+            }
+        };
+        // No extractor/compare calls remain, so no GC: reorder the snapshot and write back.
+        let reordered: Vec<Value> = match self.heap.get(snap_h) {
+            Obj::List(v) => order.iter().map(|&i| v[i]).collect(),
+            _ => unreachable!(),
+        };
+        if let Obj::List(v) = self.heap.get_mut(src_h) {
+            *v = reordered;
+        }
+        self.pop(); // unroot keys
+        self.pop(); // unroot snapshot
+        self.pop(); // unroot source
+        Ok(Value::Nil)
+    }
+
+    /// Stable top-down merge sort over `idx` (positions into the rooted keys list `keys_h`), ordering
+    /// by each key's natural order via [`order_key`].
+    fn msort_indices_by_key(&mut self, keys_h: GcRef, idx: Vec<usize>, span: Span) -> Result<Vec<usize>, RuntimeError> {
+        let n = idx.len();
+        if n <= 1 {
+            return Ok(idx);
+        }
+        let mut idx = idx;
+        let right = idx.split_off(n / 2);
+        let left = self.msort_indices_by_key(keys_h, idx, span)?;
+        let right = self.msort_indices_by_key(keys_h, right, span)?;
+        let mut out = Vec::with_capacity(n);
+        let (mut li, mut ri) = (0, 0);
+        while li < left.len() && ri < right.len() {
+            let a = match self.heap.get(keys_h) {
+                Obj::List(v) => v[left[li]],
+                _ => unreachable!(),
+            };
+            let b = match self.heap.get(keys_h) {
+                Obj::List(v) => v[right[ri]],
+                _ => unreachable!(),
+            };
+            // `<= Equal` keeps the left element first on ties → stable.
+            if self.order_key(a, b, span)?.is_le() {
+                out.push(left[li]);
+                li += 1;
+            } else {
+                out.push(right[ri]);
+                ri += 1;
+            }
+        }
+        out.extend_from_slice(&left[li..]);
+        out.extend_from_slice(&right[ri..]);
+        Ok(out)
+    }
+
+    /// Natural order over two `sort_by_key` keys: a Comparable struct key dispatches to its
+    /// `compare`; scalar keys (int/float/str) use the built-in [`Vm::compare`]. The checker has
+    /// verified the key type is orderable.
+    fn order_key(&mut self, a: Value, b: Value, span: Span) -> Result<std::cmp::Ordering, RuntimeError> {
+        if let (Value::Obj(ha), Value::Obj(hb)) = (a, b)
+            && matches!(self.heap.get(ha), Obj::Struct { .. })
+            && matches!(self.heap.get(hb), Obj::Struct { .. })
+        {
+            return self.struct_compare(a, b, span);
+        }
+        self.compare(a, b).ok_or_else(|| {
+            self.err(
+                format!("sort_by_key keys are not comparable: {} vs {}", self.type_name(a), self.type_name(b)),
+                span,
+            )
+        })
     }
 
     /// Built-in methods on `str` / `list` (M6). The result is returned (not pushed) so the caller
@@ -6139,6 +6268,19 @@ main()";
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/optchain.chz");
+    }
+
+    /// `sort_by_key` golden: `examples/sort_by_key.chz` — sort in place by a derived key (int/str
+    /// keys, stable, descending-via-negation, and a Comparable *struct* key). Byte-matches
+    /// `.expected`, identical on interp + VM.
+    #[test]
+    fn golden_sort_by_key_via_run_file() {
+        let path = fixture("examples/sort_by_key.chz");
+        let expected = std::fs::read_to_string(fixture("examples/sort_by_key.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/sort_by_key.chz");
     }
 
     /// `Ref[T]` golden: `examples/ref.chz` — a pure-Chezzi one-field mutable box (`std.ref`):

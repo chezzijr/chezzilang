@@ -1,0 +1,36 @@
+# examples/sort_by_key.chz — sort_by_key(f): sort in place by a derived key, sugar over sort_by.
+# The key extractor `fn(T) -> K` is called once per element; keys are compared by their natural
+# order (`K` must be Comparable — int/float/str or a struct with `compare`). Stable, like sort_by.
+
+struct Money:
+    cents: int
+
+    fn compare(self, other: Money) -> int:
+        return self.cents - other.cents
+
+# Sort (word, count) pairs by count ascending — int key. Stable: the two 7s keep input order.
+pairs := [("apple", 3), ("pear", 7), ("fig", 1), ("kiwi", 7)]
+pairs.sort_by_key(fn(p: (str, int)) -> int: p.1)
+for p in pairs:
+    print("{p.0}: {p.1}")
+
+# Strings by length — stable: equal lengths keep their input order.
+words := ["bb", "a", "cccc", "dd", "e"]
+words.sort_by_key(fn(s: str) -> int: s.len())
+print(words)
+
+# Descending ints: negate the key.
+xs := [3, 1, 4, 1, 5, 9, 2, 6]
+xs.sort_by_key(fn(x: int) -> int: -x)
+print(xs)
+
+# Key by the string itself (str is Comparable).
+names := ["charlie", "alice", "bob"]
+names.sort_by_key(fn(s: str) -> str: s)
+print(names)
+
+# Key by a Comparable *struct* (dispatches to Money.compare).
+items := [("cheap", Money(5)), ("rich", Money(900)), ("mid", Money(50))]
+items.sort_by_key(fn(it: (str, Money)) -> Money: it.1)
+for it in items:
+    print(it.0)

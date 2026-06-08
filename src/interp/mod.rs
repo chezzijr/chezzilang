@@ -975,7 +975,7 @@ impl Interp {
         // Higher-order list methods call a Chezzi function value per element, so they need the
         // interpreter handle (`self.call_value`) and can't live in the pure `builtins` table.
         if let Value::List(items) = &receiver
-            && matches!(method, "map" | "filter" | "fold" | "sort_by")
+            && matches!(method, "map" | "filter" | "fold" | "sort_by" | "sort_by_key")
         {
             // Clone the elements out so we don't hold the `RefCell` borrow across `call_value`
             // (the closure body could re-borrow this same list).
@@ -984,6 +984,10 @@ impl Interp {
                 // `sort_by` sorts in place; keep the `Rc` so we can write the result back.
                 let list = std::rc::Rc::clone(items);
                 return self.eval_list_sort_by(list, elems, arg_vals, span);
+            }
+            if method == "sort_by_key" {
+                let list = std::rc::Rc::clone(items);
+                return self.eval_list_sort_by_key(list, elems, arg_vals, span);
             }
             return self.eval_list_hof(method, elems, arg_vals, span);
         }
@@ -1614,6 +1618,86 @@ impl Interp {
         let sorted = self.merge_sort_by(elems, &cmp, span)?;
         *list.borrow_mut() = sorted;
         Ok(Value::Nil)
+    }
+
+    /// `xs.sort_by_key(f)` — sort `xs` in place by a derived key `f: fn(T) -> K`. The key extractor
+    /// is called once per element (re-entrant); keys are compared by their natural order (`order_key`:
+    /// scalar ordering, or a Comparable struct key's `compare`). Stable. Returns `nil`.
+    fn eval_list_sort_by_key(
+        &mut self,
+        list: std::rc::Rc<std::cell::RefCell<Vec<Value>>>,
+        elems: Vec<Value>,
+        mut arg_vals: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        if arg_vals.len() != 1 {
+            return Err(RuntimeError {
+                message: format!("'sort_by_key' expects 1 argument(s), got {}", arg_vals.len()),
+                span,
+            });
+        }
+        let f = arg_vals.swap_remove(0);
+        // Precompute keys once per element (Python `sorted(key=…)` / Rust `sort_by_key`).
+        let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(elems.len());
+        for e in elems {
+            let k = self.call_value(f.clone(), vec![e.clone()], span)?;
+            pairs.push((k, e));
+        }
+        let sorted = self.merge_sort_by_key(pairs, span)?;
+        *list.borrow_mut() = sorted.into_iter().map(|(_, e)| e).collect();
+        Ok(Value::Nil)
+    }
+
+    /// Stable top-down merge sort over `(key, value)` pairs, ordering by `key` via [`order_key`].
+    fn merge_sort_by_key(
+        &mut self,
+        mut xs: Vec<(Value, Value)>,
+        span: Span,
+    ) -> Result<Vec<(Value, Value)>, RuntimeError> {
+        let n = xs.len();
+        if n <= 1 {
+            return Ok(xs);
+        }
+        let right = xs.split_off(n / 2);
+        let left = self.merge_sort_by_key(xs, span)?;
+        let right = self.merge_sort_by_key(right, span)?;
+        let mut out = Vec::with_capacity(n);
+        let mut li = left.into_iter().peekable();
+        let mut ri = right.into_iter().peekable();
+        loop {
+            match (li.peek(), ri.peek()) {
+                (Some(l), Some(r)) => {
+                    // `<= Equal` keeps left first on ties → stable.
+                    let ord = self.order_key(&l.0, &r.0, span)?;
+                    if ord.is_le() {
+                        out.push(li.next().unwrap());
+                    } else {
+                        out.push(ri.next().unwrap());
+                    }
+                }
+                (Some(_), None) => out.push(li.next().unwrap()),
+                (None, Some(_)) => out.push(ri.next().unwrap()),
+                (None, None) => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// Natural order over two `sort_by_key` keys: a Comparable struct key dispatches to its
+    /// `compare`; scalar keys (int/float/str) use the built-in ordering. The checker has verified the
+    /// key type is orderable, so any other shape is an internal invariant break.
+    fn order_key(&mut self, a: &Value, b: &Value, span: Span) -> Result<std::cmp::Ordering, RuntimeError> {
+        if matches!(a, Value::Struct { .. }) && matches!(b, Value::Struct { .. }) {
+            return self.struct_compare(a.clone(), b.clone(), span);
+        }
+        compare(a, b).ok_or_else(|| RuntimeError {
+            message: format!(
+                "sort_by_key keys are not comparable: {} vs {}",
+                a.type_name(),
+                b.type_name()
+            ),
+            span,
+        })
     }
 
     /// Stable top-down merge sort driven by a Chezzi comparator value.

@@ -15,8 +15,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > - **`Ref[T]` mutable box** ✅ — pure-Chezzi `std/ref.chz`: `struct Ref[T]: value: T` with
 >   `get`/`set`/`update`. No engine change (generic struct + self-mutation + fn-param call already
 >   work). Types are program-global, so `import std.ref` makes `Ref` usable bare. `examples/ref.chz`.
-> - **`sort_by_key`** ⬜ · **call fn-typed field `self.f(x)`** ⬜ · **relax non-const defaults** ⬜ ·
->   **runtime stack traces** ⬜.
+> - **`sort_by_key`** ✅ — native list method `xs.sort_by_key(f: fn(T) -> K)`, sugar over `sort_by`.
+>   `K` Comparable; keys computed once per element, compared by natural order (scalar / struct
+>   `compare`); stable. Mirrors `sort_by`'s GC-rooted re-entrant merge sort in both engines (VM roots
+>   a parallel keys list). Desugar `BUILTIN_METHODS` + checker `infer_list_hof` arm + interp
+>   `eval_list_sort_by_key` + VM `list_sort_by_key`/`order_key`. `examples/sort_by_key.chz`.
+> - **call fn-typed field `self.f(x)`** ⬜ · **relax non-const defaults** ⬜ · **runtime stack
+>   traces** ⬜.
 
 > **Scripting-ergonomics gap pass.** ✅ DONE (TDD, full suite + conformance green — 1143 tests,
 > both engines parity-tested, clippy clean). Five `gaps.md` items closed in sequence, each with a

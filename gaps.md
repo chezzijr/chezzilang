@@ -101,7 +101,11 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   **GOTCHA when fixing:** the desugar method-arg pass (`src/desugar/mod.rs::normalize_call`) treats
   every `recv.name(...)` as a possible method — make it field-aware then, or a same-named method's
   default could be injected into a fn-field call.
-- **`sort_by_key`** — sugar on `sort_by` (#11). Still open.
+- ~~**`sort_by_key`**~~ — **resolved.** Native list method `xs.sort_by_key(f: fn(T) -> K)` — sorts in
+  place by a derived key, sugar over `sort_by` (#11). `K` must be Comparable (int/float/str or a
+  struct with `compare`); keys are computed once per element, then compared by natural order (scalar
+  ordering / struct `compare`). Stable. Mirrors `sort_by`'s GC-rooted re-entrant merge sort in both
+  engines (VM roots a parallel keys list). `examples/sort_by_key.chz` (golden + parity).
 - ~~**`Ref[T]` — a lightweight mutable box**~~ — **resolved.** Pure-Chezzi `std/ref.chz`:
   `struct Ref[T]: value: T` + `get`/`set`/`update(f)`. Capture-by-value snapshots a bare `int`, but a
   `Ref[T]` is a shared struct (`Rc<RefCell>`), so a closure that closes over it and mutates it through

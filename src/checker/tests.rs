@@ -3589,3 +3589,33 @@ fn opt_chain_double_option_not_flattened() {
         "",
     );
 }
+
+// ===== sort_by_key =====
+
+#[test]
+fn sort_by_key_int_key_ok() {
+    ok("xs := [3, 1, 2]\nxs.sort_by_key(fn(x: int) -> int: -x)\n");
+}
+
+#[test]
+fn sort_by_key_struct_key_ok() {
+    // A key function returning a Comparable struct is accepted (compared via `compare`).
+    ok("struct M:\n    n: int\n    fn compare(self, o: M) -> int:\n        return self.n - o.n\nxs := [M(2), M(1)]\nxs.sort_by_key(fn(m: M) -> M: m)\n");
+}
+
+#[test]
+fn sort_by_key_non_comparable_key_rejected() {
+    // A key function returning a non-Comparable struct (no `compare`) is rejected.
+    rejects(
+        "struct B:\n    n: int\nxs := [B(2), B(1)]\nxs.sort_by_key(fn(b: B) -> B: b)\n",
+        "sort_by_key key type must be Comparable",
+    );
+}
+
+#[test]
+fn sort_by_key_wrong_arity_rejected() {
+    rejects(
+        "xs := [1, 2]\nxs.sort_by_key(fn(a: int, b: int) -> int: a - b)\n",
+        "sort_by_key expects a key function",
+    );
+}
