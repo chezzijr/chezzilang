@@ -10,7 +10,7 @@ in `PROGRESS.md` + the cited `examples/*.chz`.
 
 Legend: 🔴 blocks real apps · 🟡 notable friction · 🟢 works (recorded so we don't re-flag it).
 
-Last updated: 2026-06-08. Baseline: post-M16 (`defer`).
+Last updated: 2026-06-08. Baseline: post-M18 (`defer` → block-scoped).
 
 > **Forward-looking brainstorm** (a non-Go concurrency model, VM/GC optimizations, far-out ideas)
 > lives in **[`docs/future.md`](docs/future.md)** — speculative, NOT scheduled. Concrete near-term
@@ -74,9 +74,11 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   `zip` to a stdlib module (`std.iter`, pure Chezzi). Decided: library funcs, **not** builtins.
 - **Optional chaining + null-coalescing** — `x?.field`, `a ?? default` on `Option`. Cuts `Option`
   boilerplate; `if/else` expr + `?` already exist.
-- ~~**`defer` (cleanup on scope exit)**~~ — **resolved (M16, see resolved log + `examples/defer.chz`).**
-  Frame-scoped (fn/method/closure), LIFO, runs on all three exit paths; args evaluated at the `defer`
-  statement (Go). (Considered & rejected: Python-style `with` — needs a new protocol + block.)
+- ~~**`defer` (cleanup on scope exit)**~~ — **resolved (M16, **block-scoped since M18**; see resolved
+  log + `examples/defer.chz`).** Block/lexical-scoped: runs when the enclosing indented block exits
+  (loop body, `if`/branch, `recover:`, `match` arm, fn body, module top level), LIFO, inner-first,
+  on every exit path (fall-through, `break`/`continue`, return, `?`, panic). Args evaluated at the
+  `defer` statement (Go). (Considered & rejected: Python-style `with` — needs a new protocol + block.)
 
 ### 🟡 Type-system + runtime depth (already-tracked open)
 
@@ -95,6 +97,14 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   capture cell.
 - **Runtime stack traces** — error + call chain + line numbers. Debuggability is a scripting feature.
 - **Integers** — `i64` only; no `byte`, no bignum, no configurable overflow policy (overflow → error).
+- **🔴 Reassigning a range loop variable diverges across engines** — `for i in 0..3: i = i + 100`
+  behaves differently: the **VM** mutates the live counter slot (so the next bound-check ends the
+  loop after one iteration → prints `now=100`), while the **interp** advances an internal counter
+  independent of the user binding (→ `now=100/101/102`). Pre-dates block-scoped defer (surfaced by
+  the M18 review's differential testing). **Fix sketch:** the cleanest is to make the **checker
+  reject** assignment to a `for` loop variable (treat it as a fresh per-iteration binding, like
+  Python/Rust) — sidesteps deciding which engine's runtime is "right." Alternatively pick one
+  semantics and align the other engine. Until then, don't reassign a range loop var.
 
 ### Tier 4 — ecosystem (toolchain, not the language)
 REPL (huge for scripting iteration), formatter, `assert` + built-in test runner, LSP, package
@@ -198,15 +208,26 @@ user structs structurally via `index`/`set_index`/`slice`. So `custom[k]`, `cust
 `custom[a..b]` work, and a generic can be bounded by `Index[int, V]` (`K`/`V`/`R` recovered at the call
 site). `examples/slicing.chz`.
 
-**M16 — `defer` ✅** · (TDD, both engines parity-tested) — Go-style `defer <call>`: frame-scoped
-(function/method/closure), LIFO, drained on every exit path (normal return, `?` short-circuit,
-panic). Receiver + args evaluated at the `defer` statement; the call runs at exit. Per-frame
-deferred stack drained via the existing re-entrant invoke (`call_value` / `invoke_value` + method
-dispatch); interp `finish_frame` teardown, VM `do_return` + handler-stack unwind (`unwind_deferred`),
-GC-rooted on the frame. Targets a method or first-class-value call (built-ins/ctors must be wrapped —
-checker-enforced); composes with `recover:`; `std.os.exit` skips defers (matches Go). Interp thread
-stack 256→384 MB to keep the `MAX_CALL_DEPTH` guard ahead of the slightly larger frames.
-`examples/defer.chz`.
+**M18 — `defer` → block-scoped ✅** · (TDD, both engines parity-tested; reviewed) — supersedes M17's
+frame-scoping. A `defer` runs when its **enclosing lexical block** exits (loop body, `if`/branch,
+`recover:`, statement-form `match` arm, fn body, module top level), LIFO within a block, inner-first
+across nesting, on every path (fall-through, `break`/`continue`, return, `?`, panic). Return/`?`/panic
+keep the whole-frame LIFO drain (inner-first falls out free); only fall-through/break/continue/recover
+got new drains. VM: `Op::EnterDeferScope`/`LeaveDeferScope` + `CallFrame.defer_markers` (emitted only
+for defer-holding blocks → defer-free code byte-identical); `recover:` drains via `Handler.defer_len`
+on Ok (`DrainHandlerDefers`) / fault / `?` paths, with `Handler.markers_len` truncating leaked
+nested-scope markers (review fix). Interp: per-block `exec_block` finally-drain + `eval_recover_body`
+finally. Top-level defer now legal (`in_fn` ban dropped). `examples/defer.chz` (block-scope section).
+
+**M16 — `defer` (frame-scoped) ✅** · (TDD, both engines parity-tested) — Go-style `defer <call>`:
+frame-scoped (function/method/closure), LIFO, drained on every exit path (normal return, `?`
+short-circuit, panic). Receiver + args evaluated at the `defer` statement; the call runs at exit.
+Per-frame deferred stack drained via the existing re-entrant invoke (`call_value` / `invoke_value` +
+method dispatch); interp `finish_frame` teardown, VM `do_return` + handler-stack unwind
+(`unwind_deferred`), GC-rooted on the frame. Targets a method or first-class-value call
+(built-ins/ctors must be wrapped — checker-enforced); composes with `recover:`; `std.os.exit` skips
+defers (matches Go). Interp thread stack 256→384 MB to keep the `MAX_CALL_DEPTH` guard ahead of the
+slightly larger frames. `examples/defer.chz`.
 
 **Tech debt cleared ✅** · parser `MAX_DEPTH` 128→64 (off the test-stack edge); duplicate type param
 `[T, T]` rejected; nested-`set` equality parity; explicit call-site type args; `?`-in-closure checked
