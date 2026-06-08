@@ -97,14 +97,12 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   capture cell.
 - **Runtime stack traces** — error + call chain + line numbers. Debuggability is a scripting feature.
 - **Integers** — `i64` only; no `byte`, no bignum, no configurable overflow policy (overflow → error).
-- **🔴 Reassigning a range loop variable diverges across engines** — `for i in 0..3: i = i + 100`
-  behaves differently: the **VM** mutates the live counter slot (so the next bound-check ends the
-  loop after one iteration → prints `now=100`), while the **interp** advances an internal counter
-  independent of the user binding (→ `now=100/101/102`). Pre-dates block-scoped defer (surfaced by
-  the M18 review's differential testing). **Fix sketch:** the cleanest is to make the **checker
-  reject** assignment to a `for` loop variable (treat it as a fresh per-iteration binding, like
-  Python/Rust) — sidesteps deciding which engine's runtime is "right." Alternatively pick one
-  semantics and align the other engine. Until then, don't reassign a range loop var.
+- **✅ Reassigning a loop variable** — `for i in 0..3: i = i + 100` used to diverge (VM mutated the
+  live counter slot → one iteration; interp advanced an internal counter → ran all three). **Fixed:**
+  the checker now rejects assignment (`=`/`+=`/`-=`) to any `for`-loop variable — they're fresh
+  per-iteration bindings (Python/Rust semantics), so the divergent program never reaches either
+  engine. See `src/checker/mod.rs` (`is_loop_var`/`mark_loop_var`) + checker tests
+  `for_*_reassign_rejected`.
 
 ### Tier 4 — ecosystem (toolchain, not the language)
 REPL (huge for scripting iteration), formatter, `assert` + built-in test runner, LSP, package

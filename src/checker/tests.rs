@@ -2257,6 +2257,81 @@ fn for_over_int_still_rejected() {
     rejects("for x in 5:\n    print(x)\n", "cannot iterate over int");
 }
 
+// ===== loop variable is immutable (gap: cross-engine divergence on reassignment) =====
+
+#[test]
+fn for_range_var_reassign_rejected() {
+    rejects("for i in 0..3:\n    i = i + 100\n", "loop variable");
+}
+
+#[test]
+fn for_range_var_compound_assign_rejected() {
+    rejects("for i in 0..3:\n    i += 1\n", "loop variable");
+}
+
+#[test]
+fn for_list_var_reassign_rejected() {
+    rejects("for x in [1, 2, 3]:\n    x = 0\n", "loop variable");
+}
+
+#[test]
+fn for_map_key_reassign_rejected() {
+    rejects("m := {\"a\": 1}\nfor k, v in m:\n    k = \"z\"\n", "loop variable");
+}
+
+#[test]
+fn for_map_value_reassign_rejected() {
+    rejects("m := {\"a\": 1}\nfor k, v in m:\n    v = 9\n", "loop variable");
+}
+
+#[test]
+fn for_body_local_var_still_assignable() {
+    // Only the loop variable is frozen — locals declared in the body remain mutable.
+    ok("for i in 0..3:\n    x := i * 2\n    x = x + 1\n    print(x)\n");
+}
+
+#[test]
+fn loop_var_shadowed_in_inner_block_assignable() {
+    // A name re-bound by `:=` in an inner scope is a fresh local, not the loop var → assignable.
+    ok("for i in 0..3:\n    if i >= 0:\n        i := 99\n        i = i + 1\n        print(i)\n");
+}
+
+#[test]
+fn for_set_var_reassign_rejected() {
+    rejects("s := {1, 2, 3}\nfor x in s:\n    x = 0\n", "loop variable");
+}
+
+#[test]
+fn for_str_var_reassign_rejected() {
+    rejects("for c in \"ab\":\n    c = \"z\"\n", "loop variable");
+}
+
+#[test]
+fn nested_loop_same_name_inner_reassign_rejected() {
+    // `is_loop_var` resolves to the inner loop's binding — still a loop var → rejected.
+    rejects("for i in 0..2:\n    for i in 0..2:\n        i = 9\n", "loop variable");
+}
+
+#[test]
+fn reassign_after_loop_is_undeclared_not_loop_var() {
+    // The loop var doesn't leak past the loop; assigning it afterward is plain-undeclared.
+    let errs = check_src("for i in 0..3:\n    print(i)\ni = 5\n");
+    assert!(
+        errs.iter().any(|e| e.message.contains("undeclared variable")),
+        "expected an 'undeclared variable' error, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("loop variable")),
+        "loop-var mark must not leak past the loop, got: {errs:?}"
+    );
+}
+
+#[test]
+fn outer_local_shadowed_by_later_loop_var_stays_mutable() {
+    // A pre-existing local reused as a later loop's var name stays assignable after the loop.
+    ok("i := 5\ni = 7\nfor i in 0..3:\n    print(i)\ni = 9\nprint(i)\n");
+}
+
 
 // ===== break / continue =====
 

@@ -248,6 +248,10 @@ fn native_module_sig(name: &str) -> ModuleSig {
 struct Checker {
     errors: Vec<CheckError>,
     scopes: Vec<HashMap<String, Ty>>,
+    /// Per-scope set of names bound as `for`-loop variables. Mirrors `scopes` index-for-index (a
+    /// loop var is immutable — rebound fresh each iteration — so assigning to it is rejected; this
+    /// sidesteps a VM/interp divergence where the VM's counter slot IS the loop var).
+    loop_vars: Vec<std::collections::HashSet<String>>,
     functions: HashMap<String, FnSig>,
     structs: HashMap<String, StructInfo>,
     /// Structural protocols by name. Program-global (like structs). Pre-seeded with `Comparable`.
@@ -299,6 +303,7 @@ impl Checker {
         let mut c = Checker {
             errors: Vec::new(),
             scopes: Vec::new(),
+            loop_vars: Vec::new(),
             functions: HashMap::new(),
             structs: HashMap::new(),
             protocols: prebuilt_protocols(),
@@ -369,6 +374,7 @@ impl Checker {
     /// `module_sigs`) and accumulated `errors` are kept.
     fn begin_module(&mut self, label: Option<String>) {
         self.scopes.clear();
+        self.loop_vars.clear();
         self.functions.clear();
         self.type_params.clear();
         self.imported_modules.clear();
@@ -466,15 +472,38 @@ impl Checker {
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.loop_vars.push(std::collections::HashSet::new());
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.loop_vars.pop();
     }
     fn declare(&mut self, name: &str, ty: Ty) {
         self.scopes.last_mut().unwrap().insert(name.to_string(), ty);
+        // Re-declaring a name (e.g. `:=` shadowing a loop var in the same scope) yields a fresh,
+        // mutable binding — clear any loop-var mark so assignment to it isn't wrongly rejected.
+        if let Some(set) = self.loop_vars.last_mut() {
+            set.remove(name);
+        }
     }
     fn lookup(&self, name: &str) -> Option<Ty> {
         self.scopes.iter().rev().find_map(|s| s.get(name).cloned())
+    }
+    /// Mark `name` (already declared in the current scope) as an immutable `for`-loop variable.
+    fn mark_loop_var(&mut self, name: &str) {
+        if let Some(set) = self.loop_vars.last_mut() {
+            set.insert(name.to_string());
+        }
+    }
+    /// Is `name`'s nearest binding a `for`-loop variable? Resolves to the binding's defining scope
+    /// so an inner `:=` shadow (a fresh local) is correctly reported as not-a-loop-var.
+    fn is_loop_var(&self, name: &str) -> bool {
+        for i in (0..self.scopes.len()).rev() {
+            if self.scopes[i].contains_key(name) {
+                return self.loop_vars[i].contains(name);
+            }
+        }
+        false
     }
 
     // ===== pass 1: hoist declarations =====
@@ -983,6 +1012,9 @@ impl Checker {
                 self.push_scope();
                 for (name, ty) in bindings {
                     self.declare(&name, ty);
+                    // Loop vars are rebound each iteration → immutable; reassigning one diverges
+                    // across engines, so the checker forbids it (see `check_assign`).
+                    self.mark_loop_var(&name);
                 }
                 self.loop_depth += 1;
                 for stmt in body {
@@ -1084,6 +1116,13 @@ impl Checker {
                     self.error(span, format!("cannot assign to undeclared variable '{name}'"));
                     return;
                 };
+                if self.is_loop_var(name) {
+                    self.error(
+                        target.span,
+                        format!("cannot assign to loop variable '{name}' (loop variables are rebound each iteration)"),
+                    );
+                    return;
+                }
                 self.check_assign_value(&var_ty, op, &val_ty, target.span);
             }
             // `xs[i] = v` — only lists are mutable by index. Strings are immutable; other types
@@ -2047,6 +2086,9 @@ impl Checker {
         let bindings = self.for_bindings(vars, iter);
         self.push_scope();
         for (name, ty) in bindings {
+            // Intentionally NOT `mark_loop_var`: a comprehension body is an expression, so its
+            // binding can't be assigned to — no divergence to guard against. If a statement-bearing
+            // comprehension is ever added, mark these too (see `check_assign` / for-loop handling).
             self.declare(&name, ty);
         }
         if let Some(g) = guard {

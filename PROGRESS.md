@@ -10,6 +10,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **Fix — loop variable is immutable (cross-engine divergence).** ✅ DONE (TDD, full suite +
+> conformance green — 1094 tests). `for i in 0..3: i = i + 100` used to diverge: the **VM** mutated
+> the live counter slot (one iteration), the **interp** advanced an internal counter (all three).
+> The **checker** now rejects assignment (`=`/`+=`/`-=`) to any `for`-loop variable — they're fresh
+> per-iteration bindings (Python/Rust), so the divergent program is caught at the type-check gate and
+> never reaches either engine. Impl in `src/checker/mod.rs`: a `loop_vars: Vec<HashSet<String>>`
+> mirroring `scopes`, `mark_loop_var` (set in `StmtKind::For`), `is_loop_var` (resolves to the
+> binding's defining scope so an inner `:=` shadow stays mutable), and a guard in `check_assign`'s
+> `Ident` arm. `declare` clears the mark on re-declare. Tests `for_*_reassign_rejected`,
+> `for_body_local_var_still_assignable`, `loop_var_shadowed_in_inner_block_assignable`.
+
 > **M18 — `defer` → block/lexical scope.** ✅ DONE (TDD, full suite + conformance green — 1084
 > tests, both engines parity-tested). **Supersedes M17's frame-scoping.** A `defer` now runs when its
 > **enclosing lexical block** exits (every indented block is a scope: function body, loop body,
