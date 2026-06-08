@@ -1807,6 +1807,26 @@ fn list_non_hof_methods_ok() {
 }
 
 #[test]
+fn list_concat_returns_list() {
+    ok("xs := [1, 2]\nys := xs.concat([3, 4])\nn: int = ys[0]\nprint(n)\n");
+}
+
+#[test]
+fn list_extend_returns_nil() {
+    ok("xs := [1, 2]\nxs.extend([3, 4])\nprint(xs.len())\n");
+}
+
+#[test]
+fn list_concat_element_type_checked() {
+    rejects("xs := [1, 2]\nys := xs.concat([\"a\"])\n", "argument 1 of 'concat'");
+}
+
+#[test]
+fn list_extend_element_type_checked() {
+    rejects("xs := [1, 2]\nxs.extend([\"a\"])\n", "argument 1 of 'extend'");
+}
+
+#[test]
 fn list_sum_float_is_float() {
     ok("xs := [1.0, 2.0]\ns := xs.sum()\nt := s + 0.5\n");
 }
@@ -2475,6 +2495,21 @@ fn map_remove_method_is_option_of_value() {
 #[test]
 fn map_unknown_method_rejected() {
     rejects("m := {\"a\": 1}\nm.frobnicate()\n", "no method");
+}
+
+#[test]
+fn map_merge_returns_map() {
+    ok("a := {\"x\": 1}\nb := {\"y\": 2}\nc := a.merge(b)\nv: int = c[\"x\"]\nprint(v)\n");
+}
+
+#[test]
+fn map_update_returns_nil() {
+    ok("a := {\"x\": 1}\nb := {\"y\": 2}\na.update(b)\nprint(a.len())\n");
+}
+
+#[test]
+fn map_merge_value_type_checked() {
+    rejects("a := {\"x\": 1}\nb := {\"y\": \"s\"}\nc := a.merge(b)\n", "argument 1 of 'merge'");
 }
 
 // ===== gap #8: tuples + multi-return + destructuring =====

@@ -1760,6 +1760,30 @@ impl Vm {
     /// Built-in methods on `str` / `list` (M6). The result is returned (not pushed) so the caller
     /// owns stack discipline. Multi-allocation paths (`split`) are safe: the GC only collects at
     /// instruction boundaries, never mid-opcode, so all `alloc`s here complete uninterrupted.
+    /// Clone the elements of a `list`-typed argument for `concat`/`extend`. The checker guarantees
+    /// the type; a non-list here is an internal invariant break, reported for safety.
+    fn expect_list_obj(&self, method: &str, arg: Value, span: Span) -> Result<Vec<Value>, RuntimeError> {
+        match arg {
+            Value::Obj(ah) => match self.heap.get(ah) {
+                Obj::List(items) => Ok(items.clone()),
+                _ => Err(self.err(format!("{method}() expects a list argument, got {}", self.type_name(arg)), span)),
+            },
+            other => Err(self.err(format!("{method}() expects a list argument, got {}", self.type_name(other)), span)),
+        }
+    }
+
+    /// Insert-or-overwrite `(hk, key, val)` into the heap map at `h` (last write wins). Used by
+    /// `map.update`. No allocation, so no GC concerns.
+    fn map_upsert_in_heap(&mut self, h: GcRef, hk: u64, key: Value, val: Value) {
+        let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
+        let pos = m.candidates(hk).iter().copied().find(|&p| self.values_equal(m.entries[p].1, key));
+        let Obj::Map(m) = self.heap.get_mut(h) else { unreachable!() };
+        match pos {
+            Some(i) => m.entries[i].2 = val,
+            None => m.push(hk, key, val),
+        }
+    }
+
     fn core_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         // A str argument's owned text, with a uniform type error matching the interp.
         let str_arg = |vm: &Vm, i: usize| -> Result<String, RuntimeError> {
@@ -1916,6 +1940,21 @@ impl Vm {
                     let idx = elems.iter().position(|v| self.values_equal(*v, target));
                     Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
                 }
+                "concat" => {
+                    self.arity_err("concat", args, 1, span)?;
+                    let mut out = items.clone();
+                    out.extend(self.expect_list_obj("concat", args[0], span)?);
+                    // `out` is fully built and moved into the new Obj before any GC can run.
+                    Ok(Value::Obj(self.heap.alloc(Obj::List(out))))
+                }
+                "extend" => {
+                    self.arity_err("extend", args, 1, span)?;
+                    // Snapshot the other side first so `xs.extend(xs)` (self-extend) terminates.
+                    let appended = self.expect_list_obj("extend", args[0], span)?;
+                    let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
+                    items.extend(appended);
+                    Ok(Value::Nil)
+                }
                 "sum" => {
                     self.arity_err("sum", args, 0, span)?;
                     let any_float = items.iter().any(|v| matches!(v, Value::Float(_)));
@@ -1995,6 +2034,36 @@ impl Vm {
                             Ok(self.alloc_enum("Option", "Some", vec![v]))
                         }
                         None => Ok(self.alloc_enum("Option", "None", vec![])),
+                    }
+                }
+                "merge" | "update" => {
+                    self.arity_err(method, args, 1, span)?;
+                    // Snapshot the incoming entries (with their cached hashes — engine-wide
+                    // consistent, so reuse is sound) first; handles `m.merge(m)`/`m.update(m)`.
+                    let incoming = match args[0] {
+                        Value::Obj(oh) => match self.heap.get(oh) {
+                            Obj::Map(o) => o.entries.clone(),
+                            _ => return Err(self.err(format!("{method}() expects a map argument, got {}", self.type_name(args[0])), span)),
+                        },
+                        other => return Err(self.err(format!("{method}() expects a map argument, got {}", self.type_name(other)), span)),
+                    };
+                    if method == "merge" {
+                        let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
+                        let mut out = m.clone();
+                        for (hk, key, val) in incoming {
+                            let pos = out.candidates(hk).iter().copied().find(|&p| self.values_equal(out.entries[p].1, key));
+                            match pos {
+                                Some(i) => out.entries[i].2 = val,
+                                None => out.push(hk, key, val),
+                            }
+                        }
+                        // `out` is fully built and moved into the new Obj before any GC can run.
+                        Ok(Value::Obj(self.heap.alloc(Obj::Map(out))))
+                    } else {
+                        for (hk, key, val) in incoming {
+                            self.map_upsert_in_heap(h, hk, key, val);
+                        }
+                        Ok(Value::Nil)
                     }
                 }
                 _ => Err(self.err(format!("type map has no method '{method}'"), span)),
@@ -6027,6 +6096,18 @@ main()";
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/hex.chz");
+    }
+
+    /// List concat/extend + map merge/update golden: `examples/concat_merge.chz`. New-vs-mutate
+    /// semantics + arg-wins-on-key-clash. Byte-matches `.expected`, identical on interp + VM.
+    #[test]
+    fn golden_concat_merge_via_run_file() {
+        let path = fixture("examples/concat_merge.chz");
+        let expected = std::fs::read_to_string(fixture("examples/concat_merge.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/concat_merge.chz");
     }
 
     /// `std.os.exit(code)` golden: `examples/exit.chz` halts at the negative branch with status 2.

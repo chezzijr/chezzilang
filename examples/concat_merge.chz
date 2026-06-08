@@ -1,0 +1,30 @@
+# examples/concat_merge.chz — list concat/extend + map merge/update.
+# concat/merge return a NEW collection; extend/update mutate the receiver in place.
+
+# --- list concat: returns a new list, leaves the originals untouched ---
+a := [1, 2, 3]
+b := [4, 5]
+c := a.concat(b)
+print(c)            # [1, 2, 3, 4, 5]
+print(a)            # [1, 2, 3]  (unchanged)
+
+# --- list extend: mutates the receiver, returns nil ---
+a.extend(b)
+print(a)            # [1, 2, 3, 4, 5]
+
+# chained concat builds a fresh list each step
+print([0].concat([1]).concat([2]))   # [0, 1, 2]
+
+# --- map merge: new map, the argument wins on a key clash ---
+m := {"a": 1, "b": 2}
+n := {"b": 20, "c": 30}
+merged := m.merge(n)
+print(merged["a"])  # 1
+print(merged["b"])  # 20  (n wins)
+print(merged["c"])  # 30
+print(m["b"])       # 2   (m unchanged)
+
+# --- map update: mutates the receiver in place ---
+m.update(n)
+print(m["b"])       # 20
+print(m.len())      # 3

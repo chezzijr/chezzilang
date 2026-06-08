@@ -199,6 +199,21 @@ fn list_method(
             let idx = items.borrow().iter().position(|v| v == target);
             Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
         }
+        "concat" => {
+            arity("concat", &args, 1, span)?;
+            let other = expect_list_arg("concat", &args[0], span)?;
+            let mut out = items.borrow().clone();
+            out.extend(other.borrow().iter().cloned());
+            Ok(Value::List(Rc::new(RefCell::new(out))))
+        }
+        "extend" => {
+            arity("extend", &args, 1, span)?;
+            let other = expect_list_arg("extend", &args[0], span)?;
+            // Snapshot the other side first so `xs.extend(xs)` (self-extend) terminates.
+            let appended: Vec<Value> = other.borrow().iter().cloned().collect();
+            items.borrow_mut().extend(appended);
+            Ok(Value::Nil)
+        }
         "sum" => {
             arity("sum", &args, 0, span)?;
             let items = items.borrow();
@@ -236,6 +251,22 @@ fn list_method(
         }
         _ => Err(RuntimeError {
             message: format!("type list has no method '{method}'"),
+            span,
+        }),
+    }
+}
+
+/// Unwrap a `list` argument for `concat`/`extend`. The checker guarantees the type, so a non-list
+/// here is an internal invariant break — reported as a runtime error for safety.
+fn expect_list_arg<'a>(
+    method: &str,
+    arg: &'a Value,
+    span: Span,
+) -> Result<&'a Rc<RefCell<Vec<Value>>>, RuntimeError> {
+    match arg {
+        Value::List(items) => Ok(items),
+        other => Err(RuntimeError {
+            message: format!("{method}() expects a list argument, got {}", other.type_name()),
             span,
         }),
     }

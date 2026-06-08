@@ -56,12 +56,13 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 
 ### 🟡 Scripting ergonomics (promoted from future.md)
 
-- **List concat + map merge** — combining two lists / maps today needs a manual `for … push` loop
-  (`+` is str/numeric-only; there is no list `+`, `.concat`/`.extend`, or map `.merge`/`.update`).
-  **Fix:** add list concatenation (extend `Add` to lists, or a `.concat`/`.extend` method) and a map
-  `.merge`/`.update` method — both reuse existing operator/method dispatch, no new syntax.
-  (Spread/unpack `[*a, *b]`, `{**m}`, `f(*args)` is **dropped** — variadics are a non-goal, see
-  `spec.md`, and concat/merge cover the literal case more cleanly.)
+- ~~**List concat + map merge**~~ — **resolved.** Method-based (no operator overload, decided):
+  list `.concat(ys)→list` (new) / `.extend(ys)→nil` (in place); map `.merge(n)→map` (new, `n` wins on
+  key clash) / `.update(n)→nil` (in place). New collections built fully before the single `alloc`
+  (GC-safe); self-`extend`/`merge` snapshot the other side first. Reuses the existing list/map method
+  dispatch — checker sigs (`list_method_sig`/`map_method_sig`), interp `builtins`/`eval_map_method`,
+  VM `core_method`. `examples/concat_merge.chz` (golden + parity). (Spread/unpack `[*a, *b]`, `{**m}`,
+  `f(*args)` stays **dropped** — variadics are a non-goal.)
 - ~~**Hex / binary / octal literals** — `0xFF`, `0b1010`, `0o17`~~ — **resolved.** Lexer-only:
   `number()` detects a `0x`/`0b`/`0o` prefix (case-insensitive) and parses the body via
   `i64::from_str_radix`, `_` allowed between digits. Token stays `Int(i64)` so the value flows

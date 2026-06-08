@@ -4182,6 +4182,9 @@ fn list_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
         "reverse" => (vec![], Ty::Nil),
         "contains" => (vec![elem.clone()], Ty::Bool),
         "index_of" => (vec![elem.clone()], Ty::Int),
+        // `concat` returns a NEW list (receiver + other); `extend` appends in place (returns nil).
+        "concat" => (vec![Ty::list(elem.clone())], Ty::list(elem.clone())),
+        "extend" => (vec![Ty::list(elem.clone())], Ty::Nil),
         // `sum` is only valid on numeric lists; an unknown element type is tolerated
         // (it flows from an empty/unannotated list). Non-numeric is rejected at the call site.
         "sum" if elem.is_numeric() || elem.is_unknown() => (vec![], elem.clone()),
@@ -4208,6 +4211,9 @@ fn map_method_sig(method: &str, k: &Ty, v: &Ty) -> Option<FnSig> {
         "keys" => (vec![], Ty::list(k.clone())),
         "values" => (vec![], Ty::list(v.clone())),
         "remove" => (vec![k.clone()], Ty::option(v.clone())),
+        // `merge` returns a NEW map (other wins on key clash); `update` writes into the receiver.
+        "merge" => (vec![Ty::map(k.clone(), v.clone())], Ty::map(k.clone(), v.clone())),
+        "update" => (vec![Ty::map(k.clone(), v.clone())], Ty::Nil),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))

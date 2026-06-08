@@ -734,12 +734,14 @@ A character is just a 1-char `str` (Python-style — there is no `char` type): i
 iterate with `for c in s:` or `s.chars()`, and bridge to codepoints with `ord`/`chr`.
 
 List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.contains(v)`
-`xs.index_of(v)` `xs.sum()` `xs.sort()` (ascending, in place); higher-order `xs.map(f)`
-`xs.filter(p)` `xs.fold(init, f)`; and `xs.sort_by(fn(a, b) -> int)` — a custom comparator
-(negative = `a` before `b`), stable, in place.
+`xs.index_of(v)` `xs.sum()` `xs.sort()` (ascending, in place); `xs.concat(ys)→list` (new list) and
+`xs.extend(ys)` (append in place, → nil); higher-order `xs.map(f)` `xs.filter(p)` `xs.fold(init, f)`;
+and `xs.sort_by(fn(a, b) -> int)` — a custom comparator (negative = `a` before `b`), stable, in place.
 
-Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`; `m[k]`
-reads (errors on a missing key), `m[k] = v` inserts/updates. Iterate with `for k in m` / `for k, v in m`.
+Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
+`m.merge(n)→map` (new map, `n` wins on a key clash) and `m.update(n)` (write `n` into `m` in place,
+→ nil); `m[k]` reads (errors on a missing key), `m[k] = v` inserts/updates. Iterate with `for k in m`
+/ `for k, v in m`.
 
 Sets: `{a, b, c}` is a set literal (deduped, insertion-ordered; `{}` is the empty *map*, the empty
 set is `set()`; `set(list)` builds one from a list). Elements are hashable scalars (int/str/bool).

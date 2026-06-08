@@ -1477,6 +1477,31 @@ impl Interp {
                     None => Ok(none()),
                 }
             }
+            "merge" | "update" => {
+                builtins::arity(method, &args, 1, span)?;
+                let other = match &args[0] {
+                    Value::Map(o) => o,
+                    other => return Err(RuntimeError {
+                        message: format!("{method}() expects a map argument, got {}", other.type_name()),
+                        span,
+                    }),
+                };
+                // Snapshot the incoming entries first so `m.merge(m)` / `m.update(m)` terminate.
+                let incoming: Vec<(u64, Value, Value)> = other.borrow().entries.clone();
+                if method == "merge" {
+                    let mut out = m.borrow().clone();
+                    for (h, k, v) in incoming {
+                        map_upsert(&mut out, h, k, v);
+                    }
+                    Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(out))))
+                } else {
+                    let mut mm = m.borrow_mut();
+                    for (h, k, v) in incoming {
+                        map_upsert(&mut mm, h, k, v);
+                    }
+                    Ok(Value::Nil)
+                }
+            }
             _ => Err(RuntimeError { message: format!("type map has no method '{method}'"), span }),
         }
     }
@@ -3008,6 +3033,21 @@ pub(super) fn scalar_hash(v: &Value) -> u64 {
             hr.finish()
         }
         _ => 0,
+    }
+}
+
+/// Insert-or-overwrite `(h, k, v)` into `map`: if `k` already exists, replace its value (last write
+/// wins — used by `merge`/`update` so the incoming map wins on a key clash); else append. The hash
+/// `h` is the key's cached hash (engine-wide consistent, so reusing the source map's hash is sound).
+fn map_upsert(map: &mut MapData, h: u64, k: Value, v: Value) {
+    let pos = map
+        .candidates(h)
+        .iter()
+        .copied()
+        .find(|&p| values_equal(&map.entries[p].1, &k));
+    match pos {
+        Some(p) => map.entries[p].2 = v,
+        None => map.push(h, k, v),
     }
 }
 
