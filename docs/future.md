@@ -134,8 +134,11 @@ for i := 0; i < 1000; i++ { go func() { counter++ }() }
 # Chezzi A+C — the bug is unrepresentable
 counter := 0
 spawn fn(): counter++     # ✗ checker error: captures mutable `counter`; not sendable.
-                          #    captured bindings are read-only copies — use a chan.
+                          #    captured bindings are read-only copies — use a chan,
+                          #    or a Shared[int] (cross-task box) for shared mutable state.
 ```
+
+(In-task, reach for a `Ref[int]` box; across tasks, a `Shared[int]` — see "`Shared[T]`" below.)
 
 Trade in one line: **D lets you share → fast sends, but races are your problem (caught at runtime,
 if lucky). A+C forbids sharing → the race literally cannot be expressed.** Same price Rust `move`
@@ -198,9 +201,41 @@ bindings are **read-only inside the task** — reassigning one is a compile erro
 semantics are obvious: read captured config freely, but produce output only via channels.
 
 **Sendable** (capturable / channel-passable): scalars; containers + structs whose contents are all
-sendable; **channels themselves** (pass a `chan` over a `chan` for reply-channels, like Go). **Not
-sendable:** closures (bound to a heap), native handles (file/regex/Level-3 userdata). The checker
-gates capture and `send` on sendability, with the fix in the error message.
+sendable; **channels themselves** (pass a `chan` over a `chan` for reply-channels, like Go); **a
+`Shared[T]` handle** (a capability to a value's owner task, like a channel handle). **Not sendable:**
+closures (bound to a heap), native handles (file/regex/Level-3 userdata), **`Ref[T]`** (an
+in-task-only `Rc<RefCell>` cell — copied on spawn, so each task gets its own independent box). The
+checker gates capture and `send` on sendability, with the fix in the error message.
+
+### `Shared[T]` — the cross-task mutable box (escape hatch)
+
+`Ref[T]` (an in-task one-field box — `get`/`set`/`update`, shipped as a stdlib struct; see
+`gaps.md`) is **not** sendable: copy-on-spawn gives each task its own copy, so it can't share state
+*across* tasks. When you genuinely need shared mutable state between tasks, the sanctioned answer is
+**`Shared[T]`** — **the same `get`/`set`/`update` API**, but mediated by a task:
+
+```
+s := Shared(0)            # one owner task holds the value
+spawn worker(s)           # the HANDLE is copied in — both reach the same owner
+s.update(fn(x): x + 1)    # a message to the owner; the owner serialises all writes
+n := s.get()              # request/reply over a channel
+```
+
+- **No locks, no `Arc<Mutex>`, no data races** — a single owner task serialises every write, so the
+  torn-write race is unrepresentable (same guarantee as the rest of the shared-nothing model).
+- **Cost is visible in the type:** a `Ref` op is a pointer deref; a `Shared` op is a message hop
+  (request/reply latency). Picking the type picks the scope *and* declares the cost — no hidden
+  cross-task round-trips.
+- **Built on the primitives already in this section:** a `Shared[T]` is an owner task + a channel,
+  wrapped so the user writes `get`/`set`/`update` instead of hand-rolling the mailbox protocol
+  (Elixir's `Agent` is the same trick). Ships with the task/concurrency milestone, **not** before.
+
+**The ladder:** bare value (copied) → `Ref[T]` (in-task box) → `Shared[T]` (cross-task box). One
+`get`/`set`/`update` API across the two boxes; the type names the scope.
+
+**Naming:** `Ref` (a box *here*) ↔ `Shared` (a box other tasks can reach too). Considered and
+rejected: `Agent` (Elixir — unclear what it is out of context) and `ChanRef` (leaks the transport —
+the channel is an implementation detail, not the concept).
 
 ### Surface syntax (no closure dependency)
 

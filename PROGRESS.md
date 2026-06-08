@@ -10,6 +10,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **Gaps pass II — type-system + runtime depth.** 🟦 IN PROGRESS (TDD, both engines parity-tested).
+> Five tractable `gaps.md` items; integers (#6: `byte`/bignum) deferred to its own milestone.
+> - **`Ref[T]` mutable box** ✅ — pure-Chezzi `std/ref.chz`: `struct Ref[T]: value: T` with
+>   `get`/`set`/`update`. No engine change (generic struct + self-mutation + fn-param call already
+>   work). Types are program-global, so `import std.ref` makes `Ref` usable bare. `examples/ref.chz`.
+> - **`sort_by_key`** ⬜ · **call fn-typed field `self.f(x)`** ⬜ · **relax non-const defaults** ⬜ ·
+>   **runtime stack traces** ⬜.
+
 > **Scripting-ergonomics gap pass.** ✅ DONE (TDD, full suite + conformance green — 1143 tests,
 > both engines parity-tested, clippy clean). Five `gaps.md` items closed in sequence, each with a
 > golden + parity example:

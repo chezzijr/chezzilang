@@ -10,7 +10,7 @@ in `PROGRESS.md` + the cited `examples/*.chz`.
 
 Legend: 🔴 blocks real apps · 🟡 notable friction · 🟢 works (recorded so we don't re-flag it).
 
-Last updated: 2026-06-08. Baseline: post-M18 (`defer` → block-scoped).
+Last updated: 2026-06-09. Baseline: post-M18 (`defer` → block-scoped); gaps pass II in progress.
 
 > **Forward-looking brainstorm** (a non-Go concurrency model, VM/GC optimizations, far-out ideas)
 > lives in **[`docs/future.md`](docs/future.md)** — speculative, NOT scheduled. Concrete near-term
@@ -102,9 +102,13 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   every `recv.name(...)` as a possible method — make it field-aware then, or a same-named method's
   default could be injected into a fn-field call.
 - **`sort_by_key`** — sugar on `sort_by` (#11). Still open.
-- **Mutable closure capture** — captures are snapshot-by-value, so closure counters / accumulators
-  don't work (real functional gap). **Decide:** keep intentional (document loudly) or fix with a
-  capture cell.
+- ~~**`Ref[T]` — a lightweight mutable box**~~ — **resolved.** Pure-Chezzi `std/ref.chz`:
+  `struct Ref[T]: value: T` + `get`/`set`/`update(f)`. Capture-by-value snapshots a bare `int`, but a
+  `Ref[T]` is a shared struct (`Rc<RefCell>`), so a closure that closes over it and mutates it through
+  a method persists the change. **No engine change** (generic struct + self-mutation + fn-param call
+  already work). Types are program-global, so `import std.ref` makes `Ref` usable by its bare name.
+  `examples/ref.chz` (golden + parity). The cross-task counterpart **`Shared[T]`** (owner-task +
+  channel, same API) lives in `docs/future.md` §2 — not built here.
 - **Runtime stack traces** — error + call chain + line numbers. Debuggability is a scripting feature.
 - **Integers** — `i64` only; no `byte`, no bignum, no configurable overflow policy (overflow → error).
 - **✅ Reassigning a loop variable** — `for i in 0..3: i = i + 100` used to diverge (VM mutated the
@@ -139,9 +143,9 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 **Writable as pure-Chezzi `std/*.chz` now (no native needed):**
 - **path ops** (`join`/`basename`/`dirname`/`ext`/`normalize` — scripts hardcode `/` today),
   **`argparse`** (raw `os.args` only), **CSV** (json exists, csv doesn't), **duration / date
-  decomposition** (timestamps only — no year/month/day/parse/duration math), and higher-level
+  decomposition** (timestamps only — no year/month/day/parse/duration math), higher-level
   **data structures** (heap / priority-queue, deque, counter, ordered map) — all expressible with the
-  current generics + protocols.
+  current generics + protocols. (**`Ref[T]`** shipped — see resolved log.)
 
 **Language-level (separate, see *Type-system + runtime depth*):** `i64`-only + no `byte` type blocks
 clean binary/buffer work — relevant to encoding above and to any future self-host.
