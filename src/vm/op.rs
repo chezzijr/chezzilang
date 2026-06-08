@@ -120,6 +120,13 @@ pub enum Op {
     /// `defer recv.name(args)` — stack `[recv, arg0, …]`; pops `argc + 1` and records a deferred
     /// method call on the current frame.
     DeferMethod(String, usize),
+    /// Enter a lexical block that contains a `defer`: push a scope marker (the current count of
+    /// pending defers) on the frame. Emitted by the compiler only for blocks that statically hold a
+    /// `defer`, so defer-free code is unchanged.
+    EnterDeferScope,
+    /// Leave such a block: run (LIFO) and discard the defers registered since the matching
+    /// `EnterDeferScope`, then pop the marker.
+    LeaveDeferScope,
     /// `?` — unwrap `Ok`/`Some`, else propagate `Err`/`None` out of the enclosing function.
     Try,
     /// `json.decode[T](s)` coercion step. Stack: `[result_json]` where `result_json` is the

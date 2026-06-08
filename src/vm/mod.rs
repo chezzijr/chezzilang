@@ -59,6 +59,10 @@ struct CallFrame {
     /// exits (return / `?` / panic). Receiver/args are evaluated at the `defer` statement and held
     /// here as values; the call runs at drain. GC-rooted in [`Vm::collect`].
     deferred: Vec<Deferred>,
+    /// Stack of lexical defer-scope markers (each = `deferred.len()` at `EnterDeferScope`). A
+    /// `LeaveDeferScope` drains `deferred` back down to the top marker, giving block-scoped defer:
+    /// a block's defers run when that block exits, not when the whole frame does.
+    defer_markers: Vec<usize>,
 }
 
 /// A call registered by `defer`, with its receiver/arguments already evaluated. The held values are
@@ -291,6 +295,7 @@ impl Vm {
             counted,
             is_toplevel,
             deferred: Vec::new(),
+            defer_markers: Vec::new(),
         });
         self.cur_base = base;
         Ok(())
@@ -538,6 +543,16 @@ impl Vm {
             Op::Return => self.do_return(false)?,
             Op::DeferCall(argc) => self.do_defer(None, *argc, span),
             Op::DeferMethod(name, argc) => self.do_defer(Some(name.clone()), *argc, span),
+            Op::EnterDeferScope => {
+                let frame = self.frames.last_mut().unwrap();
+                let marker = frame.deferred.len();
+                frame.defer_markers.push(marker);
+            }
+            Op::LeaveDeferScope => {
+                if let Some(e) = self.leave_defer_scope() {
+                    return Err(e);
+                }
+            }
             Op::Try => self.do_try(span)?,
             Op::JsonDecode(desc) => {
                 let desc = desc.clone();
@@ -2126,6 +2141,29 @@ impl Vm {
         let fi = self.frames.len() - 1;
         let mut err = None;
         while let Some(d) = self.frames[fi].deferred.pop() {
+            if let Err(e) = self.run_one_deferred(d) {
+                err = Some(e);
+                if self.pending_exit.is_some() {
+                    break;
+                }
+            }
+        }
+        err
+    }
+
+    /// Leave a lexical defer scope (`LeaveDeferScope`): pop the top marker and run the current
+    /// frame's defers registered since it, LIFO. This is the block-scoped analogue of
+    /// `drain_top_frame_deferred` — it drains down to a marker, not to the bottom of the frame.
+    /// Skipped on a hard `std.os.exit`. Returns the latest fault from a deferred call, if any.
+    fn leave_defer_scope(&mut self) -> Option<RuntimeError> {
+        let fi = self.frames.len() - 1;
+        let marker = self.frames[fi].defer_markers.pop().unwrap_or(0);
+        if self.pending_exit.is_some() {
+            return None;
+        }
+        let mut err = None;
+        while self.frames[fi].deferred.len() > marker {
+            let d = self.frames[fi].deferred.pop().unwrap();
             if let Err(e) = self.run_one_deferred(d) {
                 err = Some(e);
                 if self.pending_exit.is_some() {
@@ -3798,6 +3836,53 @@ main()";
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Block-scoped defer: assert VM == interp == `expected` for a snippet.
+    fn assert_defer_scope(src: &str, expected: &str) {
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected, "vm output");
+        assert_eq!(
+            crate::interp::run_capture(src).expect("interp run"),
+            expected,
+            "interp output"
+        );
+    }
+
+    /// A `for`-body defer runs at the END of each iteration (block scope), not at function return.
+    #[test]
+    fn defer_for_body_runs_per_iteration() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn main():\n    for i in 0..3:\n        defer log(\"i={i}\")\n    log(\"done\")\nmain()\n",
+            "i=0\ni=1\ni=2\ndone\n",
+        );
+    }
+
+    /// A `while`-body defer runs at the END of each iteration.
+    #[test]
+    fn defer_while_body_runs_per_iteration() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn main():\n    i := 0\n    while i < 3:\n        defer log(\"w={i}\")\n        i = i + 1\n    log(\"done\")\nmain()\n",
+            "w=0\nw=1\nw=2\ndone\n",
+        );
+    }
+
+    /// An `if`-branch defer fires at the branch's end, before the statement after the `if`.
+    #[test]
+    fn defer_if_branch_runs_at_branch_end() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn main():\n    if true:\n        defer log(\"cleanup\")\n        log(\"work\")\n    log(\"after\")\nmain()\n",
+            "work\ncleanup\nafter\n",
+        );
+    }
+
+    /// A statement-form `match` arm defer fires at the arm's end.
+    #[test]
+    fn defer_match_arm_runs_at_arm_end() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn main():\n    x := 1\n    match x:\n        1:\n            defer log(\"arm\")\n            log(\"body\")\n        _: log(\"other\")\n    log(\"after\")\nmain()\n",
+            "body\narm\nafter\n",
+        );
     }
 
     // ----- golden coverage for the formerly-orphaned examples + the comprehensive torture

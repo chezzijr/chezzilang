@@ -213,6 +213,37 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile a lexical block that is also a **defer scope**: any `defer` directly inside it runs
+    /// when this block exits, not when the whole frame does. When the block statically holds a
+    /// `defer` we bracket it with `EnterDeferScope`/`LeaveDeferScope`; otherwise this is exactly
+    /// `compile_block_scoped` and emits nothing extra (defer-free code is byte-identical).
+    fn compile_defer_scoped_block(&mut self, fc: &mut FnComp, stmts: &[Stmt]) -> Result<(), CompileError> {
+        let has_defer = block_has_defer(stmts);
+        if has_defer {
+            fc.emit(Op::EnterDeferScope, stmts[0].span);
+        }
+        self.compile_block_scoped(fc, stmts)?;
+        if has_defer {
+            fc.emit(Op::LeaveDeferScope, stmts[stmts.len() - 1].span);
+        }
+        Ok(())
+    }
+
+    /// A statement-form `match` arm body as a defer scope. The arm's lexical scope is already
+    /// opened/closed by `compile_match_general`, so this brackets the *flat* body with defer-scope
+    /// ops when (and only when) it directly contains a `defer`.
+    fn compile_defer_scoped_arm(&mut self, fc: &mut FnComp, stmts: &[Stmt]) -> Result<(), CompileError> {
+        let has_defer = block_has_defer(stmts);
+        if has_defer {
+            fc.emit(Op::EnterDeferScope, stmts[0].span);
+        }
+        self.compile_block_flat(fc, stmts)?;
+        if has_defer {
+            fc.emit(Op::LeaveDeferScope, stmts[stmts.len() - 1].span);
+        }
+        Ok(())
+    }
+
     fn compile_stmt(&mut self, fc: &mut FnComp, stmt: &Stmt) -> Result<(), CompileError> {
         match &stmt.kind {
             StmtKind::Let { names, value, .. } => {
@@ -378,12 +409,12 @@ impl Compiler {
             self.compile_expr(fc, cond)?;
             fc.emit(Op::AsBool, cond.span);
             let skip = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
-            self.compile_block_scoped(fc, body)?;
+            self.compile_defer_scoped_block(fc, body)?;
             end_jumps.push(fc.emit_jump(Op::Jump(0), cond.span));
             fc.patch_jump(skip);
         }
         if let Some(body) = else_block {
-            self.compile_block_scoped(fc, body)?;
+            self.compile_defer_scoped_block(fc, body)?;
         }
         for j in end_jumps {
             fc.patch_jump(j);
@@ -397,7 +428,7 @@ impl Compiler {
         fc.emit(Op::AsBool, cond.span);
         let exit = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
         fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new() });
-        self.compile_block_scoped(fc, body)?;
+        self.compile_defer_scoped_block(fc, body)?;
         fc.emit(Op::Jump(loop_start), cond.span);
         fc.patch_jump(exit);
         let ctx = fc.loops.pop().expect("loop ctx pushed above");
@@ -432,7 +463,7 @@ impl Compiler {
             fc.emit(Op::GetLocal(end_slot), span);
             fc.emit(Op::Lt, span);
             let exit = fc.emit_jump(Op::JumpIfFalse(0), span);
-            self.compile_block_scoped(fc, body)?;
+            self.compile_defer_scoped_block(fc, body)?;
             // `continue` must land HERE — on the increment, not the condition (re-testing without
             // advancing `i` would loop forever) and not after it (skipping the advance also hangs).
             let inc_target = fc.here();
@@ -516,7 +547,7 @@ impl Compiler {
             fc.emit(Op::SetLocal(item_slot), span);
 
             fc.patch_jump(to_body);
-            self.compile_block_scoped(fc, body)?;
+            self.compile_defer_scoped_block(fc, body)?;
             // `continue` lands HERE — the advance step. For a struct, "advance" is just re-looping
             // (the next `next()` call); for a sequence, it's the index increment.
             let inc_target = fc.here();
@@ -589,7 +620,7 @@ impl Compiler {
                 fc.emit(Op::GetIndex, span);
                 fc.emit(Op::SetLocal(v), span);
             }
-            self.compile_block_scoped(fc, body)?;
+            self.compile_defer_scoped_block(fc, body)?;
             // `continue` must land HERE — on the index increment, so the loop advances to the
             // next element instead of re-testing the same index forever.
             let inc_target = fc.here();
@@ -702,11 +733,11 @@ impl Compiler {
     fn compile_match(&mut self, fc: &mut FnComp, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<(), CompileError> {
         if self.arms_are_literal(arms.iter().map(|a| &a.pattern)) {
             return self.compile_match_lit(fc, scrutinee, arms, span, |s, fc, body| {
-                s.compile_block_flat(fc, body)
+                s.compile_defer_scoped_arm(fc, body)
             });
         }
         self.compile_match_general(fc, scrutinee, arms, span, |s, fc, body| {
-            s.compile_block_flat(fc, body)
+            s.compile_defer_scoped_arm(fc, body)
         })
     }
 
@@ -1445,6 +1476,12 @@ struct LocalVar {
 struct LoopCtx {
     continue_jumps: Vec<usize>,
     break_jumps: Vec<usize>,
+}
+
+/// Whether a block directly contains a `defer` statement (so it needs defer-scope brackets). Nested
+/// blocks own their own scope, so they are NOT inspected here.
+fn block_has_defer(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| matches!(s.kind, StmtKind::Defer(_)))
 }
 
 struct FnComp {

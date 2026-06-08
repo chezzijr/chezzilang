@@ -40,6 +40,12 @@ enum Flow {
     Continue,
 }
 
+/// Whether a block directly contains a `defer` statement (so it is a defer scope). Nested blocks
+/// own their own scope and are not inspected. Mirrors the compiler's predicate.
+fn block_has_defer(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| matches!(s.kind, StmtKind::Defer(_)))
+}
+
 /// A struct type's runtime shape: ordered field names + methods by name, plus the module globals
 /// its methods resolve top-level names against (the module that defined the struct).
 struct StructDef {
@@ -1667,7 +1673,9 @@ impl Interp {
         // Resolve the callee's top-level names against *its* module, not the caller's.
         let saved_globals = self.env.swap_globals(home.clone());
         let saved = self.env.swap_locals(vec![frame]);
-        let result = self.exec_block(&decl.body);
+        // The function body's *direct* defers belong to the per-call list (pushed above, drained by
+        // `finish_frame`); nested blocks open their own defer scopes via `exec_block`.
+        let result = self.exec_block_inner(&decl.body);
         // Teardown (defer drain + scope restore + `?`/defer-fault selection) is a separate,
         // non-inlined frame so its locals don't enlarge `call`'s frame on the deep-recursion path.
         match self.finish_frame(saved, saved_globals)? {
@@ -1928,7 +1936,27 @@ impl Interp {
         }
     }
 
+    /// Execute a block as a **defer scope**: any `defer` directly inside it runs when the block
+    /// exits, on *every* path (fall-through, return/break/continue flow signal, or an `Err`/`?`
+    /// fault), LIFO — the tree-walk analogue of a per-block `finally`. Blocks with no direct
+    /// `defer` skip the push/drain entirely, so defer-free code is unaffected.
     fn exec_block(&mut self, stmts: &[Stmt]) -> Result<Flow, RuntimeError> {
+        if !block_has_defer(stmts) {
+            return self.exec_block_inner(stmts);
+        }
+        self.deferred.push(Vec::new());
+        let result = self.exec_block_inner(stmts);
+        // Drain this block's defers before propagating whatever the body produced. A fault in a
+        // deferred call supersedes the body's result (Go semantics).
+        if let Some(e) = self.drain_block_defers() {
+            return Err(e);
+        }
+        result
+    }
+
+    /// The raw statement loop, without a defer scope. Used directly for the function body (whose
+    /// defers are owned by the per-call list drained in `finish_frame`) and by `exec_block`.
+    fn exec_block_inner(&mut self, stmts: &[Stmt]) -> Result<Flow, RuntimeError> {
         for stmt in stmts {
             match self.exec_stmt(stmt)? {
                 Flow::Normal => {}
@@ -1938,6 +1966,16 @@ impl Interp {
             }
         }
         Ok(Flow::Normal)
+    }
+
+    /// Pop and drain (LIFO) the innermost block's deferred-call list. Skipped on a hard
+    /// `std.os.exit`. Returns the latest fault from a deferred call, if any.
+    fn drain_block_defers(&mut self) -> Option<RuntimeError> {
+        let block_defers = self.deferred.pop().unwrap_or_default();
+        if self.pending_exit.is_some() {
+            return None;
+        }
+        self.run_deferred(block_defers).err()
     }
 
     /// Execute a block in a fresh child scope (locals don't leak), popping it even on error.

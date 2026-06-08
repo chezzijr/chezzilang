@@ -8,10 +8,10 @@ parse cleanup
 use_q cleanup
 err bad input
 == args now ==
-loop done
-i=2
-i=1
 i=0
+i=1
+i=2
+loop done
 == panic + recover ==
 faults cleanup
 recovered err: index 5 out of bounds (len 2)
