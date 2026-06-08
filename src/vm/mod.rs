@@ -126,6 +126,10 @@ struct Handler {
     /// `?` short-circuit, or the Ok path drains the frame's defers down to this marker — the
     /// recover block's own cleanup — before binding the recovered value.
     defer_len: usize,
+    /// `defer_markers.len()` of the boundary's frame at install. A fault / `?` short-circuit jumps
+    /// past the `LeaveDeferScope`s of any defer scopes opened *inside* the recover block, so their
+    /// markers would leak; the catch paths truncate `defer_markers` back to this length.
+    markers_len: usize,
 }
 
 impl Vm {
@@ -357,6 +361,10 @@ impl Vm {
                         // boundary frame's own (recover-block) defers remain — drain them now, before
                         // binding the result. A fault in one supersedes the original.
                         let rte = self.drain_frame_to(h.defer_len).unwrap_or(rte);
+                        // Drop the scope markers of any defer scopes opened inside the recover block:
+                        // the fault jumped past their `LeaveDeferScope`s, so they would otherwise leak
+                        // and corrupt later drains in this frame.
+                        self.frames[h.frame_len - 1].defer_markers.truncate(h.markers_len);
                         if self.pending_exit.is_some() {
                             return Err(rte);
                         }
@@ -528,6 +536,7 @@ impl Vm {
                 call_depth: self.call_depth,
                 ip: *target,
                 defer_len: self.frames.last().map(|f| f.deferred.len()).unwrap_or(0),
+                markers_len: self.frames.last().map(|f| f.defer_markers.len()).unwrap_or(0),
             }),
             Op::PopHandler => {
                 self.handlers.pop();
@@ -2270,6 +2279,9 @@ impl Vm {
                     let h = self.handlers.pop().unwrap();
                     self.stack.truncate(h.stack_len);
                     self.call_depth = h.call_depth;
+                    // Drop scope markers of defer scopes opened inside the recover block — the `?`
+                    // jumps past their `LeaveDeferScope`s, so they would otherwise leak.
+                    self.frames.last_mut().unwrap().defer_markers.truncate(h.markers_len);
                     // Drain the recover block's own defers before binding the result. A fault in one
                     // supersedes the propagated value (becomes the recover's `Err`).
                     match self.drain_frame_to(h.defer_len) {
@@ -3988,6 +4000,38 @@ main()";
         assert_defer_scope(
             "fn boom():\n    xs := [1]\n    x := xs[9]\nfn main():\n    r := recover:\n        defer boom()\n        42\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err {e.message()}\")\nmain()\n",
             "err index 9 out of bounds (len 1)\n",
+        );
+    }
+
+    /// A `break` in an INNER loop drains only that loop's body defers; the outer loop-body defer
+    /// still fires at the end of each outer iteration. Locks the per-loop `defer_floor` capture.
+    #[test]
+    fn defer_inner_loop_break_drains_only_inner() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn main():\n    for i in 0..2:\n        defer log(\"outer{i}\")\n        for j in 0..3:\n            defer log(\"inner{i}-{j}\")\n            if j == 1:\n                break\n        log(\"after{i}\")\nmain()\n",
+            "inner0-0\ninner0-1\nafter0\nouter0\ninner1-0\ninner1-1\nafter1\nouter1\n",
+        );
+    }
+
+    /// A defer scope (here an `if`) nested INSIDE a `recover:` block that faults must not leak its
+    /// scope marker past the recover boundary: the enclosing loop-body defer still drains at each
+    /// iteration's end, not at function return. (Regression: VM leaked `defer_markers` on the recover
+    /// catch path, corrupting later `LeaveDeferScope`s and diverging from the interp.)
+    #[test]
+    fn defer_nested_scope_in_faulting_recover_no_marker_leak() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn main():\n    for i in 0..2:\n        defer log(\"loop{i}\")\n        r := recover:\n            if true:\n                defer log(\"inner{i}\")\n                xs := [1]\n                y := xs[5]\n                y\n            0\n        log(\"end{i}\")\nmain()\n",
+            "inner0\nend0\nloop0\ninner1\nend1\nloop1\n",
+        );
+    }
+
+    /// Same leak via the `?`-short-circuit catch path (not a genuine fault): a defer scope nested in
+    /// the recover block must not strand its marker when `?` jumps to the boundary.
+    #[test]
+    fn defer_nested_scope_in_try_recover_no_marker_leak() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn boom() -> int!:\n    return Err(\"x\")\nfn main():\n    for i in 0..2:\n        defer log(\"loop{i}\")\n        r := recover:\n            if true:\n                defer log(\"inner{i}\")\n                n := boom()?\n                n\n            0\n        log(\"end{i}\")\nmain()\n",
+            "inner0\nend0\nloop0\ninner1\nend1\nloop1\n",
         );
     }
 
