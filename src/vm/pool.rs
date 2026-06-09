@@ -56,15 +56,19 @@ fn worker_loop(queue: &Queue) {
     let (lock, cv) = &**queue;
     loop {
         let job = {
-            let mut q = lock.lock().unwrap();
+            let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if let Some(job) = q.pop_front() {
                     break job;
                 }
-                q = cv.wait(q).unwrap();
+                q = cv.wait(q).unwrap_or_else(|e| e.into_inner());
             }
         };
-        job();
+        // Defense in depth: a job already converts its task's panic into a fault slot + signals
+        // completion via its `DoneSignal` guard, so `job()` should not unwind — but if it ever does
+        // (e.g. a panic in the slot write itself), catching it here keeps this pool thread alive for
+        // the next job instead of silently shrinking the pool.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
     }
 }
 

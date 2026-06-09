@@ -297,11 +297,12 @@ struct Handler {
     nursery_len: usize,
 }
 
-/// B3.2 — what a synchronously-run isolated worker hands back across the airlock: the task's return
-/// value serialized in the worker heap, plus the worker's captured stdout/stderr (decision F —
+/// B3.2 — what a run isolated worker hands back across the airlock: the task's return value
+/// serialized in the worker heap, plus the worker's captured stdout/stderr (decision F —
 /// buffer-per-worker, returned to the parent rather than interleaved live).
-// Forward-plumbing: exercised by the B3.2 unit tests in isolation; B3.3 wires the worker path into
-// the `--parallel` engine (`join_nursery`), at which point this becomes reachable in the bin build.
+// `value` is read only by the worker unit tests: the `--parallel` join discards each task's return
+// value (data exits a spawn via `Shared`/`Channel`, not a return), so the field is dead in the bin
+// build — hence the allow. `out`/`stderr` are live (flushed at join).
 #[allow(dead_code)]
 #[derive(Debug)]
 struct WorkerResult {
@@ -317,7 +318,6 @@ struct WorkerResult {
 /// worker can resolve the rebuilt module obj for global / sibling-fn resolution; `None` when the
 /// home is a standalone module not in `module_objs` (the unit-test fixtures), which falls back to a
 /// fresh empty home.
-#[allow(dead_code)] // forward-plumbing for B3.3 `--parallel`; see `WorkerResult`.
 enum Lowered {
     Closure { proto: ProtoId, captured: Vec<(String, WireValue)>, args: Vec<WireValue>, home: Option<usize>, span: Span },
     Func { proto: ProtoId, args: Vec<WireValue>, home: Option<usize>, span: Span },
@@ -330,13 +330,39 @@ enum Lowered {
 /// until that task finishes). Shared with the pool threads via `Arc`; each fills its own index.
 type TaskSlots = Arc<Mutex<Vec<Option<Result<WorkerResult, RuntimeError>>>>>;
 
+/// B3.3-threads — a completion guard for a farmed pool task: its `Drop` bumps the nursery's
+/// finished-count and wakes the joining thread **on every exit path**, including a panic unwinding
+/// through the task body. This is what makes [`Vm::run_parallel_nursery`]'s join robust — without it
+/// a panicking worker would leave the counter short and hang the joiner forever (the join's wait loop
+/// would never see `count == pool_count`). Poison-tolerant so a poisoned counter can't re-panic here.
+struct DoneSignal(Arc<(Mutex<usize>, std::sync::Condvar)>);
+
+impl Drop for DoneSignal {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.0;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        cv.notify_all();
+    }
+}
+
+/// B3.3-threads — turn a caught panic payload (from `catch_unwind` around a worker task) into a
+/// `RuntimeError` so a Rust panic inside a `--parallel` task surfaces as an ordinary task fault
+/// (joined + reported) instead of hanging the join or aborting the process opaquely.
+fn panic_to_fault(payload: Box<dyn std::any::Any + Send>, span: Span) -> RuntimeError {
+    let msg = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string());
+    RuntimeError { message: format!("internal error: a parallel task panicked: {msg}"), span }
+}
+
 /// B3.3-threads — a worker `Vm` with its task already reconstructed in its own heap, ready to run on
 /// whatever thread owns it. [`Vm::prepare_worker`] builds this (the parent-heap-touching half of the
 /// old `run_task_isolated`); [`ReadyWorker::run`] is the thread-side half (invoke + wire the result
 /// back). Splitting the two lets the bounded pool prepare a task on the parent thread, then **move**
 /// the whole `ReadyWorker` (it is `Send` — `Vm` is `Send`, `Value`/`String` are `Send`) onto a pool
 /// thread to execute. Single-thread `run_task_isolated` = `prepare_worker(task)?.run()`.
-#[allow(dead_code)] // reachable once the pool wires it in (sub-step 4); exercised by unit tests now.
 struct ReadyWorker {
     worker: Vm,
     call: ReadyCall,
@@ -344,7 +370,6 @@ struct ReadyWorker {
 }
 
 /// How a [`ReadyWorker`]'s task is invoked, with all values already reconstructed in the worker heap.
-#[allow(dead_code)]
 enum ReadyCall {
     /// A `spawn f(x)` / `spawn:` block — invoke the rebuilt callable with its rebuilt args.
     Invoke { callee: Value, args: Vec<Value> },
@@ -358,7 +383,6 @@ impl ReadyWorker {
     /// task that blocks on `recv` would leave no result on the stack; under `--parallel` the blocking
     /// `recv` instead waits on the channel condvar (it never returns the suspend sentinel), so the
     /// `suspend` guard is a safety net against a future regression, not a live path.
-    #[allow(dead_code)] // reachable once the pool wires it in (sub-step 4); exercised by unit tests now.
     fn run(mut self) -> Result<WorkerResult, RuntimeError> {
         let span = self.span;
         let ret = match self.call {
@@ -2935,33 +2959,43 @@ impl Vm {
         let results: TaskSlots = Arc::new(Mutex::new((0..n).map(|_| None).collect()));
         let done: Arc<(Mutex<usize>, std::sync::Condvar)> = Arc::new((Mutex::new(0), std::sync::Condvar::new()));
 
-        // 2. Farm tasks[1..] to the pool; keep tasks[0] to run inline.
+        // 2. Farm tasks[1..] to the pool; keep tasks[0] to run inline. Every farmed job runs under a
+        //    `DoneSignal` guard whose `Drop` bumps the completion counter + wakes the joiner on EVERY
+        //    exit path — including a Rust panic unwinding through `rw.run()` (a worker-VM `unwrap` /
+        //    poisoned core lock). Without it a panicking task would leave the counter short and hang
+        //    the join forever; with it the panic is caught, converted to a fault slot, and joined like
+        //    any other error. (Review: panic→hang was the one blocking defect.)
         let mut iter = ready.into_iter().enumerate();
         let first = iter.next();
         for (i, rw) in iter {
             let results = Arc::clone(&results);
             let done = Arc::clone(&done);
+            let span = rw.span;
             pool::submit(Box::new(move || {
-                let r = rw.run();
-                results.lock().unwrap()[i] = Some(r);
-                let (lock, cv) = &*done;
-                *lock.lock().unwrap() += 1;
-                cv.notify_all();
+                // Drop runs LAST (declared first), so the slot is committed before the counter bumps.
+                let _signal = DoneSignal(done);
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run()))
+                    .unwrap_or_else(|p| Err(panic_to_fault(p, span)));
+                results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
             }));
         }
         // 3. Parent participates: run task[0] on this thread (it may block on `recv`, woken by a pool
-        //    sibling's `send`).
+        //    sibling's `send`). Caught the same way so an inline-task panic still joins the pool tasks
+        //    and reports rather than unwinding past the still-pending wait.
         if let Some((i, rw)) = first {
-            let r = rw.run();
-            results.lock().unwrap()[i] = Some(r);
+            let span = rw.span;
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run()))
+                .unwrap_or_else(|p| Err(panic_to_fault(p, span)));
+            results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
         }
-        // 4a. Wait for the farmed tasks (n-1) to finish.
+        // 4a. Wait for the farmed tasks (n-1) to finish (the `DoneSignal` guard guarantees the counter
+        //     reaches `pool_count` even if some tasks panicked).
         let pool_count = n.saturating_sub(1);
         {
             let (lock, cv) = &*done;
-            let mut g = lock.lock().unwrap();
+            let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
             while *g < pool_count {
-                g = cv.wait(g).unwrap();
+                g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
             }
         }
         // 4b. Flush worker output in task order (decision F); first fault wins. A faulting worker's
@@ -2970,7 +3004,7 @@ impl Vm {
         let slots = Arc::try_unwrap(results)
             .expect("all pool tasks finished, so no other Arc holder remains")
             .into_inner()
-            .unwrap();
+            .unwrap_or_else(|e| e.into_inner());
         let mut first_err = None;
         for slot in slots {
             match slot.expect("every task slot was filled before join returned") {
@@ -3262,7 +3296,6 @@ impl Vm {
     /// worker is exercised under the same GC pressure as the parent; `host` is left inert (B3.2's
     /// isolation tasks don't touch host I/O — B3.3 threads it through when real workers run user I/O).
     /// No OS thread yet; the caller drives the returned worker synchronously.
-    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
     fn spawn_worker(&self) -> Vm {
         let mut worker = Vm::new(Arc::clone(&self.program));
         worker.gc_stress = self.gc_stress;
@@ -3308,7 +3341,10 @@ impl Vm {
     /// (`spawn recv.m()`) dispatch against that rebuilt graph. Still deferred to B3.3-threads: real OS
     /// threads + a condvar `recv` (a method that blocks on `recv` faults here, no scheduler yet).
     /// The whole graph is reconstructed per task (correctness-first; pooling is a B3.3-threads concern).
-    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
+    /// The synchronous single-thread driver: prepare + run on the calling thread. The `--parallel`
+    /// engine calls `prepare_worker` and `ReadyWorker::run` separately (across the pool boundary), so
+    /// this convenience wrapper is now only used by the B3.2–B3.3d worker unit tests.
+    #[cfg(test)]
     fn run_task_isolated(&mut self, task: PendingCall) -> Result<WorkerResult, RuntimeError> {
         self.prepare_worker(task)?.run()
     }
@@ -3318,7 +3354,6 @@ impl Vm {
     /// rebuild the callee/receiver + args **into the worker heap**, yielding a [`ReadyWorker`] that
     /// can be moved to a pool thread and `run()`. Everything that reads the parent heap happens here;
     /// nothing in `ReadyWorker::run` touches `self`.
-    #[allow(dead_code)] // reachable once the pool wires it in (sub-step 4); exercised by unit tests now.
     fn prepare_worker(&mut self, task: PendingCall) -> Result<ReadyWorker, RuntimeError> {
         // 1. Lower the task to a `Send` description in THIS (parent) heap (read-only serialize),
         //    rejecting any value that can't cross a heap boundary as-is.
@@ -3390,7 +3425,6 @@ impl Vm {
     /// Reject a wired value that still carries a by-reference [`Handle`](WireValue::has_handle) — a
     /// heap-local `GcRef` that cannot cross into another heap as-is (B3.2). `str`/closure crossing by
     /// value lands in B3.3; until then this converts a would-be dangling handle into a clean fault.
-    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
     fn ensure_crossable(&self, w: &WireValue, span: Span) -> Result<(), RuntimeError> {
         if w.has_handle() {
             return Err(self.err(
@@ -3405,7 +3439,6 @@ impl Vm {
 
     /// Serialize a task's argument list across the airlock (read-only walk of this heap), rejecting any
     /// argument that can't cross a heap boundary as-is (see [`Vm::ensure_crossable`]).
-    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
     fn wire_args(&self, args: Vec<Value>, span: Span) -> Result<Vec<WireValue>, RuntimeError> {
         args.into_iter()
             .map(|a| {
@@ -3419,21 +3452,18 @@ impl Vm {
     /// A fresh empty module to serve as a worker closure's `home`. The parent's `home` `GcRef` can't
     /// cross heaps; used as the fallback when the task's home is not a real `module_objs` entry (the
     /// hand-built unit-test fixtures) — real spawns resolve a reconstructed module (see `worker_home`).
-    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
     fn fresh_worker_home(&mut self) -> GcRef {
         self.heap.alloc(Obj::Module { name: "<worker>".into(), globals: Default::default() })
     }
 
     /// B3.3c — the index of a `home` module `GcRef` in this VM's `module_objs`, so the worker can
     /// resolve the corresponding rebuilt module. `None` for a home not in the table (test fixtures).
-    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable.
     fn home_index(&self, home: GcRef) -> Option<usize> {
         self.module_objs.iter().position(|&m| m == home)
     }
 
     /// B3.3c — resolve a lowered home index to this (worker) VM's reconstructed module obj, falling
     /// back to a fresh empty home when the parent home was not a real module (test fixtures).
-    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable.
     fn worker_home(&mut self, idx: Option<usize>) -> GcRef {
         match idx {
             Some(i) if i < self.module_objs.len() => self.module_objs[i],
@@ -3451,7 +3481,6 @@ impl Vm {
     /// 1. alloc one fresh empty `Module` per parent module (preserving index order so `module_idx`
     ///    lines up) and record a parent→worker `GcRef` map;
     /// 2. populate each worker module's globals, mapping every value into the worker heap.
-    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable.
     fn build_worker_modules(&self, worker: &mut Vm) {
         use std::collections::HashMap;
         // Pass 1: alloc the module objects + build the parent→worker handle map.
@@ -3493,7 +3522,6 @@ impl Vm {
     ///   recursively); import-alias `Module` ref → the worker's rebuilt module obj; `Native` →
     ///   re-allocated (same fn pointer); containers → mapped element-wise (cached map/set hashes are
     ///   value-derived, so they carry over unchanged).
-    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable.
     fn map_global_value(&self, worker: &mut Vm, v: Value, map: &std::collections::HashMap<GcRef, GcRef>) -> Value {
         let h = match v {
             Value::Obj(h) => h,
@@ -6156,6 +6184,31 @@ main()";
                    fn outer(s: Shared[int]):\n    parallel:\n        spawn inner(s)\n        spawn inner(s)\n\
                    fn main():\n    s := Shared(0)\n    parallel:\n        spawn outer(s)\n        spawn outer(s)\n    print(s.get())\nmain()\n";
         assert_eq!(run_capture_parallel(src).expect("parallel run"), "4\n");
+    }
+
+    /// B3.3-threads (review C1): the per-task `DoneSignal` guard bumps the nursery's completion
+    /// counter even when the task body **panics** — so a panicking `--parallel` worker can't leave the
+    /// joining thread waiting forever. Proves the `Drop`-runs-on-unwind contract the join relies on.
+    #[test]
+    fn done_signal_bumps_counter_on_panic() {
+        let done = Arc::new((Mutex::new(0usize), std::sync::Condvar::new()));
+        let d2 = Arc::clone(&done);
+        let h = std::thread::spawn(move || {
+            let _sig = DoneSignal(d2);
+            panic!("boom in a task");
+        });
+        let _ = h.join(); // swallow the panic
+        assert_eq!(*done.0.lock().unwrap(), 1, "DoneSignal::drop must bump the counter even on panic");
+    }
+
+    /// B3.3-threads (decision F, review coverage gap): each worker buffers its own stdout and the join
+    /// flushes them **in task order** — so three concurrently-run tasks that each `print` produce a
+    /// deterministic, task-ordered transcript regardless of thread interleaving.
+    #[test]
+    fn parallel_output_flushes_in_task_order() {
+        let src = "fn emit(s: str):\n    print(s)\n\
+                   fn main():\n    parallel:\n        spawn emit(\"alpha\")\n        spawn emit(\"beta\")\n        spawn emit(\"gamma\")\nmain()\n";
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), "alpha\nbeta\ngamma\n");
     }
 
     /// B3.3-threads: a fault in a **pool** task (not the inline task[0]) propagates out of the join as
