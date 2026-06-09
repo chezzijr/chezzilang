@@ -15,14 +15,20 @@
 use super::value::GcRef;
 use super::wire::WireValue;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// `Channel[T]` core (B3.1): the shared mailbox, an unbounded FIFO of wire-form messages. `send`
-/// locks + `push_back`; `recv`/`try_recv` lock + `pop_front`; `len` locks + len. Single-thread at
-/// B3.1 (the lock is uncontended); B3.3 adds a `Condvar` so a real OS thread can block on `recv`.
+/// locks + `push_back`; `recv`/`try_recv` lock + `pop_front`; `len` locks + len.
+///
+/// B3.3-threads: `cv` is the real-OS-thread blocking primitive. Under `--parallel` a `recv` on an
+/// empty queue waits on `cv` (paired with `q`'s `Mutex`); a `send` `notify_all`s it after pushing.
+/// `cv` is **dead on the cooperative default engine** — there a `recv` parks the *fiber* (it never
+/// touches `cv`), so single-thread runs never wait on it. The wait loop re-checks the queue on every
+/// wake (spurious-wakeup-safe), which is also the hook B3.4 will extend for cancel wake-ups.
 #[derive(Debug, Default)]
 pub struct ChannelCore {
     pub q: Mutex<VecDeque<WireValue>>,
+    pub cv: Condvar,
 }
 
 /// `Shared[T]` core (B3.1): the one box every task reaches. `get` locks + clones out; `set` locks +

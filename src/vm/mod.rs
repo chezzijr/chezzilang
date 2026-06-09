@@ -3458,11 +3458,33 @@ impl Vm {
                 self.arity_err("send", args, 1, span)?;
                 // B3.1: serialize once into the core (the wire form IS the airlock copy).
                 let w = self.to_wire(args[0])?;
-                self.channel_core(h).q.lock().unwrap().push_back(w);
+                let core = self.channel_core(h);
+                core.q.lock().unwrap().push_back(w);
+                // B3.3-threads: wake any OS thread blocked in `recv` on this core. No-op on the
+                // cooperative engine (nothing ever waits on `cv` there — fibers park instead).
+                core.cv.notify_all();
                 Ok(Value::Nil)
             }
             "recv" => {
                 self.arity_err("recv", args, 0, span)?;
+                // B3.3-threads: on the `--parallel` engine, an empty channel BLOCKS the OS thread on
+                // the core's condvar until a sibling `send`s (real blocking — there is no fiber to
+                // park; the worker owns its thread). The wait is a re-checking loop so a spurious
+                // wakeup just re-polls. The `native_reentry == 0` guard mirrors the cooperative
+                // path: inside a native callback we keep the existing fault rather than blocking the
+                // host stack. Genuine all-blocked deadlocks hang until detection lands (B3.5).
+                if self.parallel && self.native_reentry == 0 {
+                    let core = self.channel_core(h);
+                    let mut q = core.q.lock().unwrap();
+                    let w = loop {
+                        if let Some(w) = q.pop_front() {
+                            break w;
+                        }
+                        q = core.cv.wait(q).unwrap();
+                    };
+                    drop(q);
+                    return Ok(self.from_wire(w));
+                }
                 let popped = self.channel_core(h).q.lock().unwrap().pop_front();
                 match popped {
                     Some(w) => Ok(self.from_wire(w)),
@@ -5047,6 +5069,27 @@ mod tests {
         vm.channel_method(h1, "send", &[Value::Int(7)], sp).unwrap();
         // recv through the OTHER handle sees the message.
         assert_eq!(vm.channel_method(h2, "recv", &[], sp).unwrap(), Value::Int(7));
+    }
+
+    /// B3.3-threads sub-step 2: under `--parallel`, a `recv` on an empty channel **blocks the OS
+    /// thread** on the core's `Condvar` and is woken by a `send` from another thread (real
+    /// cross-thread blocking, not a fiber park). Two `Vm`s share one `ChannelCore` via `Arc`; the
+    /// worker blocks in `recv` on its own thread, the main thread `send`s and wakes it. The outcome
+    /// is `42` regardless of interleaving (send-first → immediate pop; block-first → cv wake), so the
+    /// test is deterministic without sleeps. Also a compile-time proof that `Vm: Send` (it moves into
+    /// `thread::spawn`), the load-bearing fact for the whole thread-flip.
+    #[test]
+    fn parallel_recv_blocks_until_send_wakes_it() {
+        let core = Arc::new(ChannelCore::default());
+        let mut worker = Vm::new(Arc::new(empty_program()));
+        worker.parallel = true;
+        let wh = worker.heap.alloc(Obj::Channel(Arc::clone(&core)));
+        let mut sender = Vm::new(Arc::new(empty_program()));
+        let sh = sender.heap.alloc(Obj::Channel(Arc::clone(&core)));
+        let sp = Span { line: 1, col: 1 };
+        let handle = std::thread::spawn(move || worker.channel_method(wh, "recv", &[], sp).unwrap());
+        sender.channel_method(sh, "send", &[Value::Int(42)], sp).unwrap();
+        assert_eq!(handle.join().unwrap(), Value::Int(42));
     }
 
     /// B3.1: `shut` lives in the shared core, so a `from_wire`'d alias observes a shutdown done through
