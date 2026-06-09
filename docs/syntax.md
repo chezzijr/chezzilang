@@ -785,6 +785,45 @@ result := [1, 2, 3, 4]
 # sum(map(filter([1,2,3,4], fn(x): x % 2 == 0), fn(x): x * 10))
 ```
 
+## 11b. Concurrency — `spawn` / `parallel:`  (planned — see [`concurrency.md`](concurrency.md))
+
+> **Not yet implemented.** Syntax is fixed; the engine ships staged (a sequential run-to-completion
+> executor first, real multicore later). Full design + roadmap in [`concurrency.md`](concurrency.md).
+
+```chezzi
+fn worker(id: int, prefix: str, out: Channel[str]):
+    out.send("{prefix}-{id}")
+
+fn main():
+    ch := Channel[str]()
+    label := "task"
+    parallel:                          # nursery — joins all children at the dedent
+        spawn worker(1, label, ch)     # form 1: a named call (Go's `go f(x)`); args COPIED in
+        spawn worker(2, label, ch)
+        spawn:                         # form 2: an anonymous indented block
+            out := heavy()
+            ch.send(out)
+    # reaching here ⇒ all children finished. No WaitGroup, no leaks.
+    for _ in 0..3:
+        print(ch.recv())               # results moved into main's heap
+
+main()
+```
+
+- **`parallel:` is a nursery** — all tasks spawned inside join at the dedent, then the parent
+  proceeds. `spawn` returns immediately (the parent continues); tasks run at the barrier.
+- **`spawn` is only legal inside a `parallel:`** (a bare `spawn` is a checker error), and it binds to
+  a nursery **in its own function** — a task can't outlive the function that spawned it. A
+  "background" task = one spawned into a longer-lived *outer* `parallel:`.
+- **`Channel[T]`** — a mailbox (buffered FIFO): `ch.send(v)`, `ch.recv() -> T`, `ch.len()`. Values
+  **move/copy** across the boundary; the sender can't reuse a sent value.
+- **`Shared[T]`** — the cross-task mutable box: `s.get()`, `s.set(v)`, `s.update(fn(x): ...)`. The
+  ladder is `value` (copied) → `Ref[T]` (in-task) → `Shared[T]` (cross-task). `Ref` is **not**
+  sendable; `Shared` is.
+- **Sendability:** captures are copies, **read-only** inside a task (reassign = error); only sendable
+  types (scalars/str/containers+structs of sendable/`Channel`/`Shared`) cross — not closures, native
+  handles, or `Ref`.
+
 ## 12. Imports & modules  (M4.5)
 
 ```chezzi

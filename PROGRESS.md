@@ -827,7 +827,9 @@ collision-detected for now); next-to-binary std discovery / install story; re-ex
 ### Ideas — NOT scheduled (record-only)
 
 - **Future directions brainstorm** — `defer`, a shared-nothing (BEAM-style) concurrency **+
-  parallelism** model (`spawn`/`parallel:`/`chan[T]`, per-task heap+GC, move/copy messaging),
+  parallelism** model (`spawn`/`parallel:`/`Channel[T]`/`Shared[T]`, per-task heap+GC, move/copy
+  messaging) — now fully designed in its own doc **[`docs/concurrency.md`](docs/concurrency.md)**
+  (sequential-first C1–C5 staging; still speculative, promote to `gaps.md` when scheduled) —
   missing scripting features (
   …; default + named args, `Iterator[T]`, slicing, and comprehensions now shipped — `yield`/generators and variadics are
   permanent non-goals),
