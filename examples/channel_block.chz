@@ -1,0 +1,30 @@
+# B1 + B2 (VM engine): blocking `recv`. The consumer is spawned first, so the cooperative scheduler
+# starts it first; it blocks on an empty channel, the scheduler switches to the producer, the
+# producer sends, and the consumer then RESUMES exactly where it parked and receives. This is the
+# canonical mid-flight producer/consumer that the sequential executor could not express.
+#
+# NOTE: VM-only. Under the tree-walking interpreter (`--interp`) this still faults `deadlock` — the
+# interpreter has no suspendable execution yet (B1 for the interp is a later milestone). The output
+# below is the VM's.
+
+fn consumer(ch: Channel[int]):
+    print("consumer: waiting")
+    a := ch.recv()
+    print("consumer: got {a}")
+    b := ch.recv()
+    print("consumer: got {b}")
+
+fn producer(ch: Channel[int]):
+    print("producer: send 1")
+    ch.send(1)
+    print("producer: send 2")
+    ch.send(2)
+
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn consumer(ch)       # spawned first ⇒ runs first ⇒ blocks on the empty channel
+        spawn producer(ch)       # the scheduler switches here; its sends wake the consumer
+    print("done")
+
+main()

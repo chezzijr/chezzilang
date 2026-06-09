@@ -200,6 +200,67 @@ struct Vm {
     /// program-exit auto-drain (C5 / A2) reaps any executor never explicitly shut down — the VM
     /// parity counterpart of the interpreter's `Rc` registry.
     executors: Vec<GcRef>,
+    /// Concurrency B1/B2: set by a blocking `recv` (empty channel) running inside an active nursery
+    /// scheduler. It records the channel handle the running fiber is waiting on; `run_until` and the
+    /// re-entrant call path break (without unwinding defers) when it is set, returning control to the
+    /// scheduler so a sibling can run. Cleared by the scheduler when it resumes a fiber. It is a
+    /// VM-global (not part of [`FiberCtx`]): only one fiber runs at a time, so at most one suspend is
+    /// pending. See [`Vm::run_scheduler`].
+    suspend: Option<GcRef>,
+    /// Depth of native (Rust) callbacks currently on the host stack that re-enter Chezzi (operator
+    /// overloads, `compare`/`hash`/`str` hooks, list HOFs, sorts, `Shared.update`, the executor
+    /// drain, deferred calls). Their loop / recursion state lives on the Rust stack and cannot be
+    /// parked into a [`Fiber`], so a `recv` reached while this is `> 0` cannot suspend — it faults
+    /// `deadlock` instead (B1 v1 limitation). Maintained by [`Vm::guarded`].
+    native_reentry: usize,
+    /// Active cooperative-scheduler levels (B1/B2), innermost last. Each [`Nursery`] holds the parked
+    /// joining (parent) fiber's context plus its child fibers; non-empty means a `recv` may suspend.
+    /// Every parked fiber here is a GC root (see [`Vm::collect`]).
+    scheduler_stack: Vec<Nursery>,
+}
+
+/// A fiber's saved execution context (B1): every `Vm` field that `run_until` reads or writes keyed by
+/// per-execution indices. Swapped with the live `Vm` fields ([`Vm::swap_ctx`]) when a fiber is
+/// scheduled in or out. `pending_exit` is deliberately NOT here — `std.os.exit` halts the whole
+/// program, so it stays VM-global.
+#[derive(Default)]
+struct FiberCtx {
+    frames: Vec<CallFrame>,
+    stack: Vec<Value>,
+    call_depth: usize,
+    cur_base: usize,
+    handlers: Vec<Handler>,
+    nurseries: Vec<Vec<PendingCall>>,
+    fault_trace: Option<Vec<TraceFrame>>,
+    fault_trace_depth: usize,
+}
+
+/// Scheduling state of a child fiber within a [`Nursery`].
+enum FiberState {
+    /// Spawned but not yet started; holds the task to launch on first schedule.
+    Pending(PendingCall),
+    /// Started and runnable — resume by re-entering its `run_until`.
+    Ready,
+    /// Parked on an empty channel; runnable again once that channel is non-empty.
+    Blocked(GcRef),
+    /// Ran to completion.
+    Done,
+}
+
+/// One child fiber: its saved context plus scheduling state. While the fiber is the one actively
+/// running, its context lives in the live `Vm` fields and `ctx` is empty (see the scheduler).
+struct Fiber {
+    ctx: FiberCtx,
+    state: FiberState,
+}
+
+/// One active `parallel:` scheduler level (B1/B2): the parked context of the joining (parent) fiber
+/// and the child fibers spawned into the nursery. Pushed on `JoinNursery`, popped when every child
+/// is `Done`.
+struct Nursery {
+    /// The joining fiber's context, parked while its children run cooperatively.
+    parent: FiberCtx,
+    children: Vec<Fiber>,
 }
 
 /// A snapshot taken at a `recover:` boundary (`Op::PushHandler`). On a caught fault the VM restores
@@ -245,11 +306,39 @@ impl Vm {
             gc_stress: false,
             nurseries: Vec::new(),
             executors: Vec::new(),
+            suspend: None,
+            native_reentry: 0,
+            scheduler_stack: Vec::new(),
         }
     }
 
     fn err(&self, message: String, span: Span) -> RuntimeError {
         RuntimeError { message, span }
+    }
+
+    /// Swap the live per-execution `Vm` fields with `ctx` (B1). Used by the nursery scheduler to
+    /// schedule a fiber in (its saved context becomes live) or out (the running context is parked
+    /// back into the fiber). Exactly the fields [`FiberCtx`] holds — `pending_exit` stays global.
+    fn swap_ctx(&mut self, ctx: &mut FiberCtx) {
+        std::mem::swap(&mut self.frames, &mut ctx.frames);
+        std::mem::swap(&mut self.stack, &mut ctx.stack);
+        std::mem::swap(&mut self.call_depth, &mut ctx.call_depth);
+        std::mem::swap(&mut self.cur_base, &mut ctx.cur_base);
+        std::mem::swap(&mut self.handlers, &mut ctx.handlers);
+        std::mem::swap(&mut self.nurseries, &mut ctx.nurseries);
+        std::mem::swap(&mut self.fault_trace, &mut ctx.fault_trace);
+        std::mem::swap(&mut self.fault_trace_depth, &mut ctx.fault_trace_depth);
+    }
+
+    /// Run `f` with the native-reentry guard raised (B1). A blocking `recv` reached while the guard
+    /// is up cannot park (its caller's loop/recursion state lives on the Rust stack, not in a
+    /// [`Fiber`]), so it faults `deadlock` instead of suspending. Wraps every site that re-enters
+    /// Chezzi code from native Rust.
+    fn guarded<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>) -> Result<T, RuntimeError> {
+        self.native_reentry += 1;
+        let r = f(self);
+        self.native_reentry -= 1;
+        r
     }
 
     /// If `v` is an unhandled error (`Err(..)`/`None`) reaching the top level, build the runtime
@@ -358,6 +447,12 @@ impl Vm {
         let base_level = self.frames.len();
         self.push_frame(proto, home, closure, args, counted, is_toplevel, span)?;
         self.run_until(base_level)?;
+        // B1: a blocking `recv` parked this call's fiber mid-flight. The frames stay live (they
+        // replay on resume); propagate the signal up without popping a result — the caller gates on
+        // `suspend` before using the (sentinel) return value.
+        if self.suspend.is_some() {
+            return Ok(Value::Nil);
+        }
         Ok(self.stack.pop().unwrap_or(Value::Nil))
     }
 
@@ -507,6 +602,12 @@ impl Vm {
                     _ => return Err(rte),
                 }
             }
+            // B1: a blocking `recv` parked the running fiber. Stop the dispatch loop WITHOUT
+            // unwinding (frames + defers stay intact to replay on resume) and hand control back to
+            // the nursery scheduler, which parks this fiber and runs a sibling.
+            if self.suspend.is_some() {
+                return Ok(());
+            }
         }
         Ok(())
     }
@@ -514,6 +615,31 @@ impl Vm {
     /// Mark-sweep collection. Roots: the whole operand stack (which contains every frame's local
     /// slots *and* any in-flight expression temporaries), each frame's home module + backing
     /// closure, and the module namespace cache. Everything else is garbage.
+    /// Collect the GC roots held in a parked fiber context (B1): operand-stack objects, each frame's
+    /// home/closure and pending deferred calls, and not-yet-run nursery tasks. Mirrors the
+    /// live-context rooting in [`Vm::collect`].
+    fn root_ctx(ctx: &FiberCtx, work: &mut Vec<GcRef>) {
+        for v in &ctx.stack {
+            if let Value::Obj(h) = v {
+                work.push(*h);
+            }
+        }
+        for f in &ctx.frames {
+            work.push(f.home);
+            if let Some(c) = f.closure {
+                work.push(c);
+            }
+            for d in &f.deferred {
+                work.extend(d.roots());
+            }
+        }
+        for nursery in &ctx.nurseries {
+            for task in nursery {
+                work.extend(task.roots());
+            }
+        }
+    }
+
     fn collect(&mut self) {
         let mut work: Vec<GcRef> = Vec::new();
         for v in &self.stack {
@@ -541,6 +667,20 @@ impl Vm {
         // even when no in-program handle remains.
         work.extend(self.executors.iter().copied());
         work.extend(self.module_objs.iter().copied());
+        // Parked fibers in active cooperative schedulers (B1/B2): each level's joining-fiber context
+        // plus every child fiber's context are roots while the children run. The CURRENTLY running
+        // fiber's context is the live `self.{stack,frames,nurseries}` already rooted above; a parked
+        // fiber's context lives in its `FiberCtx` (or, for a not-yet-started child, in its `Pending`
+        // task). Without this, a blocked fiber's locals would be swept while it waits.
+        for nursery in &self.scheduler_stack {
+            Self::root_ctx(&nursery.parent, &mut work);
+            for child in &nursery.children {
+                Self::root_ctx(&child.ctx, &mut work);
+                if let FiberState::Pending(task) = &child.state {
+                    work.extend(task.roots());
+                }
+            }
+        }
 
         while let Some(h) = work.pop() {
             if self.heap.mark(h) {
@@ -1040,7 +1180,7 @@ impl Vm {
             .get(method)
             .ok_or_else(|| self.err(format!("struct '{name}' has no '{method}' method"), span))?;
         let home = self.module_objs[def.module_idx];
-        self.run_proto(proto, home, None, vec![l, r], true, false, span)
+        self.guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))
     }
 
     /// Bitwise / shift ops — int-only (gap #13). Shift amounts outside `0..64` are a runtime error
@@ -1140,7 +1280,7 @@ impl Vm {
             self.err(format!("struct '{name}' has no 'compare' method (needed to order its values)"), span)
         })?;
         let home = self.module_objs[def.module_idx];
-        match self.run_proto(proto, home, None, vec![l, r], true, false, span)? {
+        match self.guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))? {
             Value::Int(n) => Ok(n.cmp(&0)),
             other => Err(self.err(format!("compare() must return int, got {}", self.type_name(other)), span)),
         }
@@ -1201,7 +1341,7 @@ impl Vm {
             self.err(format!("struct '{name}' has no 'hash' method (needed to use it as a map/set key)"), span)
         })?;
         let home = self.module_objs[def.module_idx];
-        match self.run_proto(proto, home, None, vec![v], true, false, span)? {
+        match self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))? {
             Value::Int(n) => Ok(n as u64),
             other => Err(self.err(format!("hash() must return int, got {}", self.type_name(other)), span)),
         }
@@ -1379,6 +1519,9 @@ impl Vm {
         let args: Vec<Value> = self.stack.split_off(at);
         let callee = self.pop();
         let v = self.invoke_value(callee, args, span)?;
+        if self.suspend.is_some() {
+            return Ok(()); // B1: callee parked on a blocking `recv`; don't push a sentinel result.
+        }
         self.push(v);
         Ok(())
     }
@@ -1723,6 +1866,9 @@ impl Vm {
         // re-enters the VM), so dispatch them directly off the handle, like the core-type methods.
         if matches!(self.heap.get(h), Obj::Channel(_)) {
             let result = self.channel_method(h, method, &args, span)?;
+            if self.suspend.is_some() {
+                return Ok(()); // B1: `recv` parked this fiber and re-rooted the receiver itself.
+            }
             self.push(result);
             return Ok(());
         }
@@ -1764,6 +1910,9 @@ impl Vm {
                     call_args.push(recv);
                     call_args.extend(args);
                     let v = self.run_proto(proto, home, None, call_args, true, false, span)?;
+                    if self.suspend.is_some() {
+                        return Ok(()); // B1: the method parked on a blocking `recv`.
+                    }
                     self.push(v);
                     return Ok(());
                 }
@@ -1772,6 +1921,9 @@ impl Vm {
                 // Invoked as a value (no `self` bound — it's not a method).
                 if let Some((_, fval)) = fields.iter().find(|(k, _)| k.as_ref() == method) {
                     let v = self.invoke_value(*fval, args, span)?;
+                    if self.suspend.is_some() {
+                        return Ok(()); // B1: the function-field call parked on a blocking `recv`.
+                    }
                     self.push(v);
                     return Ok(());
                 }
@@ -1812,7 +1964,7 @@ impl Vm {
                         _ => unreachable!(),
                     };
                     // May GC; both source and result lists are rooted, so their elements survive.
-                    let out = self.invoke_value(f, vec![elem], span)?;
+                    let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
                     if is_filter {
                         match out {
                             Value::Bool(true) => {
@@ -1853,7 +2005,7 @@ impl Vm {
                         _ => unreachable!(),
                     };
                     let acc = self.stack[acc_slot];
-                    let new = self.invoke_value(f, vec![acc, elem], span)?;
+                    let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, elem], span))?;
                     self.stack[acc_slot] = new;
                 }
                 let acc = self.pop(); // unroot accumulator
@@ -1954,7 +2106,7 @@ impl Vm {
 
     /// Run the comparator on `(a, b)` and return its int result (errors if it returns non-int).
     fn compare_with(&mut self, cmp: Value, a: Value, b: Value, span: Span) -> Result<i64, RuntimeError> {
-        match self.invoke_value(cmp, vec![a, b], span)? {
+        match self.guarded(|vm| vm.invoke_value(cmp, vec![a, b], span))? {
             Value::Int(n) => Ok(n),
             other => Err(self.err(format!("sort_by comparator must return int, got {}", self.type_name(other)), span)),
         }
@@ -1992,7 +2144,7 @@ impl Vm {
                 Obj::List(v) => v[i],
                 _ => unreachable!(),
             };
-            match self.invoke_value(f, vec![e], span) {
+            match self.guarded(|vm| vm.invoke_value(f, vec![e], span)) {
                 Ok(k) => {
                     if let Obj::List(v) = self.heap.get_mut(keys_h) {
                         v.push(k);
@@ -2539,22 +2691,24 @@ impl Vm {
     /// discarded result. The pop→push window has no instruction boundary, so the moved-out values
     /// can't be collected before they're re-rooted.
     fn run_one_deferred(&mut self, d: Deferred) -> Result<(), RuntimeError> {
-        match d {
+        // Guarded: a deferred call runs during frame teardown (the LIFO drain loop is Rust-stack
+        // state), so a blocking `recv` inside it cannot park — it faults `deadlock` (B1).
+        self.guarded(|vm| match d {
             Deferred::Call { callee, args, span } => {
-                self.invoke_value(callee, args, span)?;
+                vm.invoke_value(callee, args, span)?;
                 Ok(())
             }
             Deferred::Method { recv, name, args, span } => {
                 let argc = args.len();
-                self.push(recv);
+                vm.push(recv);
                 for a in args {
-                    self.push(a);
+                    vm.push(a);
                 }
-                self.do_method_call(&name, argc, span)?;
-                self.pop(); // discard the deferred call's result
+                vm.do_method_call(&name, argc, span)?;
+                vm.pop(); // discard the deferred call's result
                 Ok(())
             }
-        }
+        })
     }
 
     // ----- concurrency C4: sequential, run-to-completion executor (mirrors the interpreter) -----
@@ -2615,25 +2769,121 @@ impl Vm {
         }
     }
 
-    /// `parallel:` dedent — drain the innermost nursery FIFO, running each task to completion. Tasks
-    /// are removed from the front one at a time so the not-yet-run siblings stay GC-rooted in
-    /// `self.nurseries`. The first fault propagates (aborting the rest); the empty nursery is then
-    /// popped. On the fault path the nursery is left in place for the `recover:` boundary (or program
-    /// exit) to reclaim via `Handler::nursery_len`.
+    /// `parallel:` dedent — run the nursery's spawned tasks as cooperative fibers (B1/B2). The
+    /// joining (parent) fiber is parked while the children run; a child that blocks on an empty
+    /// `recv` suspends and the scheduler switches to a runnable sibling, resuming it once a sibling
+    /// `send`s. A child that never blocks runs to completion before the next starts — identical to
+    /// the old FIFO run-to-completion drain, so non-blocking programs are byte-for-byte unchanged.
+    /// The first child fault (or `std.os.exit`) aborts the remaining siblings and propagates; on that
+    /// path the parent's restored `run_until` handles `recover:`/unwind in its own context.
     fn join_nursery(&mut self) -> Result<(), RuntimeError> {
-        loop {
-            let task = match self.nurseries.last_mut() {
-                Some(n) if !n.is_empty() => n.remove(0),
-                _ => break,
-            };
-            self.run_pending(task)?;
+        // Consume this nursery's tasks (FIFO). Popping the entry now (as the old drain did at the
+        // end) keeps the parent's `Handler::nursery_len` accounting correct on a later fault.
+        let tasks = self.nurseries.pop().unwrap_or_default();
+        if tasks.is_empty() {
+            return Ok(());
         }
-        self.nurseries.pop();
-        Ok(())
+        let children = tasks
+            .into_iter()
+            .map(|t| Fiber { ctx: FiberCtx::default(), state: FiberState::Pending(t) })
+            .collect();
+        // Park the parent: move its live context into the nursery, leaving `self.*` as the fresh,
+        // empty arena the children execute in. The nursery (parent + children) is GC-rooted while on
+        // `scheduler_stack`.
+        let mut nursery = Nursery { parent: FiberCtx::default(), children };
+        self.swap_ctx(&mut nursery.parent);
+        self.scheduler_stack.push(nursery);
+        let result = self.run_scheduler();
+        // Tear the level down and restore the parent context on every path (normal / fault / exit).
+        let mut nursery = self.scheduler_stack.pop().expect("scheduler level present");
+        self.swap_ctx(&mut nursery.parent);
+        result
     }
 
-    /// Run one registered task to completion (result discarded), mirroring `run_one_deferred`.
-    fn run_pending(&mut self, task: PendingCall) -> Result<(), RuntimeError> {
+    /// Cooperatively drive the children of the innermost scheduler level until all are `Done`. Picks
+    /// the lowest-index runnable child each turn (FIFO); a child blocked on a channel becomes
+    /// runnable when that channel has data. If no child is runnable and not all are done, every
+    /// remaining child is parked on an empty channel no sibling can fill — a deadlock.
+    fn run_scheduler(&mut self) -> Result<(), RuntimeError> {
+        loop {
+            match self.pick_runnable() {
+                Some(i) => self.run_child(i)?,
+                None => {
+                    if self.all_children_done() {
+                        return Ok(());
+                    }
+                    return Err(self.err(
+                        "deadlock: every task in this parallel: block is blocked on an empty \
+                         channel recv() and no sibling can send — the nursery cannot progress"
+                            .to_string(),
+                        Span { line: 1, col: 1 },
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Index of the next runnable child in the top scheduler level, or `None` if none can run now.
+    fn pick_runnable(&self) -> Option<usize> {
+        let children = &self.scheduler_stack.last().expect("scheduler level present").children;
+        children.iter().position(|c| match &c.state {
+            FiberState::Pending(_) | FiberState::Ready => true,
+            FiberState::Blocked(h) => matches!(self.heap.get(*h), Obj::Channel(q) if !q.is_empty()),
+            FiberState::Done => false,
+        })
+    }
+
+    fn all_children_done(&self) -> bool {
+        self.scheduler_stack
+            .last()
+            .expect("scheduler level present")
+            .children
+            .iter()
+            .all(|c| matches!(c.state, FiberState::Done))
+    }
+
+    /// Run (start or resume) child `i` of the top scheduler level until it completes or blocks. The
+    /// child is taken out of the level (replaced by a `Done` placeholder) so its context can be
+    /// swapped into `self.*` without holding a `scheduler_stack` borrow across the run — a nested
+    /// `parallel:` pushes/pops its own level meanwhile. On return the child's context is parked back
+    /// and its new state recorded.
+    fn run_child(&mut self, i: usize) -> Result<(), RuntimeError> {
+        let mut child = {
+            let level = self.scheduler_stack.last_mut().expect("scheduler level present");
+            std::mem::replace(&mut level.children[i], Fiber { ctx: FiberCtx::default(), state: FiberState::Done })
+        };
+        self.swap_ctx(&mut child.ctx); // self.* = child's execution context
+        self.suspend = None; // clear any prior wait before (re)running
+        let outcome = match std::mem::replace(&mut child.state, FiberState::Ready) {
+            FiberState::Pending(task) => self.start_task(task),
+            // Resume: the saved frames replay via the rewound `recv` op and ordinary `Return`s — no
+            // host-stack nesting is rebuilt (run_until is frame-count driven).
+            FiberState::Ready | FiberState::Blocked(_) => self.run_until(0),
+            FiberState::Done => unreachable!("run_child on a Done fiber"),
+        };
+        self.swap_ctx(&mut child.ctx); // park the (possibly-suspended) context back into the child
+        let result = match outcome {
+            Ok(()) => {
+                child.state = match self.suspend.take() {
+                    Some(h) => FiberState::Blocked(h),
+                    None => FiberState::Done,
+                };
+                Ok(())
+            }
+            Err(e) => {
+                child.state = FiberState::Done;
+                Err(e)
+            }
+        };
+        self.scheduler_stack.last_mut().expect("scheduler level present").children[i] = child;
+        result
+    }
+
+    /// Launch a fiber's initial task in the (already swapped-in) child context. Mirrors the old
+    /// `run_pending`, but a blocking `recv` may park the fiber mid-flight: the `do_method_call` /
+    /// `invoke_value` paths leave `self.suspend` set and the frames live, so the discard-pop is
+    /// skipped (there is no result yet) and the scheduler resumes the fiber later.
+    fn start_task(&mut self, task: PendingCall) -> Result<(), RuntimeError> {
         match task {
             PendingCall::Call { callee, args, span } => {
                 self.invoke_value(callee, args, span)?;
@@ -2646,7 +2896,9 @@ impl Vm {
                     self.push(a);
                 }
                 self.do_method_call(&name, argc, span)?;
-                self.pop(); // discard the task's result
+                if self.suspend.is_none() {
+                    self.pop(); // discard the completed task's result (none pending if suspended)
+                }
                 Ok(())
             }
         }
@@ -2728,6 +2980,20 @@ impl Vm {
                 };
                 match popped {
                     Some(v) => Ok(v),
+                    // Empty channel. Under an active nursery scheduler (and not inside a native
+                    // callback, whose Rust-stack state can't be parked), B1/B2 SUSPENDS the running
+                    // fiber instead of faulting: re-root the receiver, rewind `ip` so this very
+                    // `CallMethod(recv)` re-executes on resume, and signal the scheduler to run a
+                    // sibling. `do_method_call` skips its result-push while `suspend` is set; the
+                    // scheduler resumes this fiber once `h` has data (a sibling `send`).
+                    None if !self.scheduler_stack.is_empty() && self.native_reentry == 0 => {
+                        self.push(Value::Obj(h));
+                        self.frames.last_mut().unwrap().ip -= 1;
+                        self.suspend = Some(h);
+                        Ok(Value::Nil) // sentinel; never observed (callers gate on `suspend`)
+                    }
+                    // No scheduler (top level / single fiber) or inside a native callback: there is
+                    // no sibling that could ever fill the channel here — a real deadlock. Unchanged.
                     None => Err(self.err(
                         "recv on an empty channel: deadlock — nothing is queued and the \
                          sequential executor cannot block waiting for a producer (a \
@@ -2783,7 +3049,7 @@ impl Vm {
                 };
                 let cur = self.deep_clone(inner);
                 self.push(Value::Obj(h));
-                let next = self.invoke_value(f, vec![cur], span);
+                let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 let next = next?;
                 let stored = self.deep_clone(next);
@@ -2840,7 +3106,7 @@ impl Vm {
                     let Some(task) = task else { break };
                     // The popped task is no longer in the queue → root it on the stack across its call.
                     self.push(task);
-                    let r = self.invoke_value(task, vec![], span);
+                    let r = self.guarded(|vm| vm.invoke_value(task, vec![], span));
                     self.pop();
                     r?;
                 }
@@ -3191,7 +3457,10 @@ impl Vm {
             // Wording byte-identical to `interp::call_struct_method` (the engines parity-test stdout).
             .ok_or_else(|| self.err(format!("struct '{name}' has no method '{method}'"), span))?;
         let home = self.module_objs[def.module_idx];
-        self.run_proto(proto, home, None, args, true, false, span)
+        // Guarded (B1): `index`/`slice`/`set_index` overloads run from native opcode handlers whose
+        // operand state is on the host stack, so a blocking `recv` inside one cannot park — it faults
+        // `deadlock` instead of suspending (matches `struct_arith`/`compare`/`hash`).
+        self.guarded(|vm| vm.run_proto(proto, home, None, args, true, false, span))
     }
 
     fn get_index(&mut self, span: Span) -> Result<(), RuntimeError> {
@@ -3684,7 +3953,7 @@ impl Vm {
                     && self.program.protos[proto].arity == 1
                 {
                     let home = self.module_objs[def.module_idx];
-                    let res = self.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span)?;
+                    let res = self.guarded(|vm| vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span))?;
                     return self.stringify(res, span);
                 }
                 let mut rendered = Vec::with_capacity(fields.len());
@@ -4673,6 +4942,86 @@ main()";
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// B1+B2 golden (VM-only): blocking `recv`. The consumer is scheduled first, parks on the empty
+    /// channel, the cooperative scheduler runs the producer, and the consumer resumes to receive. The
+    /// interpreter still faults `deadlock` on the same program (documented parity gap — see the interp
+    /// twin `channel_block_chz_faults_deadlock_on_interp`), so this asserts the VM output + `.expected`
+    /// only, NOT cross-engine parity.
+    #[test]
+    fn golden_channel_block_chz_matches_expected() {
+        let src = include_str!("../../examples/channel_block.chz");
+        let expected = include_str!("../../examples/channel_block.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        // Parked fibers must survive collection: the same program under GC stress is byte-identical.
+        assert_eq!(run_capture_stress(src), expected);
+    }
+
+    // ----- B1 + B2: cooperative fibers + blocking recv (VM engine) -----
+
+    /// Ping-pong across two channels exercises many suspend↔resume cycles: each fiber repeatedly
+    /// parks on an empty `recv`, the scheduler runs the sibling whose `send` wakes it, and the parked
+    /// fiber resumes mid-`while`-loop with its locals intact.
+    #[test]
+    fn fibers_ping_pong_interleaves() {
+        let src = "fn ping(a: Channel[int], b: Channel[int]):\n    i := 0\n    while i < 3:\n        b.send(i)\n        x := a.recv()\n        print(\"ping {x}\")\n        i = i + 1\nfn pong(a: Channel[int], b: Channel[int]):\n    i := 0\n    while i < 3:\n        y := b.recv()\n        print(\"pong {y}\")\n        a.send(y + 100)\n        i = i + 1\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn ping(a, b)\n        spawn pong(a, b)\nmain()\n";
+        let expected = "pong 0\nping 100\npong 1\nping 101\npong 2\nping 102\n";
+        assert_eq!(run(src), expected);
+        // Same result under GC stress — parked fibers' frames/locals are rooted while they wait.
+        assert_eq!(run_capture_stress(src), expected);
+    }
+
+    /// All siblings parked on empty channels that no one will fill ⇒ a real deadlock (detected by the
+    /// scheduler when no fiber is runnable yet not all are done).
+    #[test]
+    fn fibers_all_blocked_is_deadlock() {
+        let src = "fn waiter(c: Channel[int]):\n    c.recv()\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn waiter(a)\n        spawn waiter(b)\nmain()\n";
+        assert!(run_err(src).contains("deadlock"), "expected deadlock");
+    }
+
+    /// Native-reentry guard: a blocking `recv` reached inside a list-HOF callback cannot park (the
+    /// HOF's loop state is on the Rust stack), so it faults `deadlock` even though a sibling could
+    /// otherwise supply the value — the documented B1 v1 limitation, kept memory-safe.
+    #[test]
+    fn fibers_recv_inside_map_callback_faults() {
+        let src = "fn use_map(ch: Channel[int]):\n    xs := [0]\n    ys := xs.map(fn(x): ch.recv())\n    print(ys)\nfn fill(ch: Channel[int]):\n    ch.send(1)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn use_map(ch)\n        spawn fill(ch)\nmain()\n";
+        assert!(run_err(src).contains("deadlock"), "recv inside map must fault, not suspend");
+    }
+
+    /// Native-reentry guard: a blocking `recv` inside a struct `index`/`slice`/`set_index` operator
+    /// overload (run from the native indexing opcodes, host-stack state) cannot park — it faults
+    /// `deadlock`. Regression for a guard gap that would otherwise corrupt the operand stack.
+    #[test]
+    fn fibers_recv_inside_index_overload_faults() {
+        let src = "struct Src:\n    ch: Channel[int]\n    fn index(self, k: int) -> int:\n        return self.ch.recv()\nfn use_index(s: Src):\n    print(s[0])\nfn fill(ch: Channel[int]):\n    ch.send(7)\nfn main():\n    ch := Channel[int]()\n    s := Src(ch)\n    parallel:\n        spawn use_index(s)\n        spawn fill(ch)\nmain()\n";
+        assert!(run_err(src).contains("deadlock"), "recv inside index overload must fault, not suspend");
+    }
+
+    /// Native-reentry guard: a blocking `recv` inside a `defer`red call (run during frame teardown,
+    /// off the suspendable path) faults rather than parking. The `recv` is in the deferred function's
+    /// body — only the receiver handle is captured at the `defer` statement — so it runs at teardown.
+    #[test]
+    fn fibers_recv_inside_defer_faults() {
+        let src = "fn consume(ch: Channel[int]):\n    ch.recv()\nfn worker(ch: Channel[int]):\n    defer consume(ch)\n    print(\"body\")\nfn sender(ch: Channel[int]):\n    ch.send(5)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn worker(ch)\n        spawn sender(ch)\nmain()\n";
+        assert!(run_err(src).contains("deadlock"), "recv inside defer must fault, not suspend");
+    }
+
+    /// A nested `parallel:` inside a child fiber runs its own scheduler level (recursively); the
+    /// child resumes after its grandchildren join, and the outer sibling runs afterward.
+    #[test]
+    fn fibers_nested_parallel() {
+        let src = "fn child():\n    parallel:\n        spawn:\n            print(\"grandchild\")\n    print(\"child after nested\")\nfn main():\n    parallel:\n        spawn child()\n        spawn:\n            print(\"sibling\")\nmain()\n";
+        assert_eq!(run(src), "grandchild\nchild after nested\nsibling\n");
+    }
+
+    /// A `recover:` inside a child fiber catches a fault in that fiber's own context (its handlers /
+    /// frames are per-fiber); the sibling is unaffected and runs normally.
+    #[test]
+    fn fibers_recover_inside_child_is_isolated() {
+        let src = "fn boom():\n    xs := [1]\n    print(xs[9])\nfn child():\n    r := recover:\n        boom()\n        0\n    print(\"caught\")\nfn main():\n    parallel:\n        spawn child()\n        spawn:\n            print(\"sibling ok\")\nmain()\n";
+        assert_eq!(run(src), "caught\nsibling ok\n");
     }
 
     /// C3 golden: `Shared[T]` cross-task box — three tasks bump one serialised counter. Byte-identical
@@ -6505,6 +6854,23 @@ main()";
         assert_eq!(vo, "", "vm: nothing after the recover runs");
         assert_eq!(ic, Some(7), "interp exit code");
         assert_eq!(vc, Some(7), "vm exit code");
+    }
+
+    #[test]
+    fn exit_in_spawned_child_aborts_siblings() {
+        // B1/B2: `std.os.exit` inside a child fiber is a hard halt — it aborts the remaining siblings
+        // and the rest of the program. The first child prints then exits(3); the second child and the
+        // post-`parallel:` statement never run. Identical on both engines (no blocking involved).
+        let src = "import std.os\nfn a():\n    print(\"a\")\n    os.exit(3)\nfn b():\n    print(\"b\")\nfn main():\n    parallel:\n        spawn a()\n        spawn b()\n    print(\"after\")\nmain()\n";
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (io, _ie, ir, ic) = crate::interp::run_file(&entry);
+        let (vo, _ve, vr, vc) = run_file(&entry);
+        assert_eq!(vo, "a\n", "vm: sibling and post-parallel statement aborted by os.exit");
+        assert_eq!(io, "a\n", "interp: sibling and post-parallel statement aborted by os.exit");
+        assert_eq!(vc, Some(3), "vm exit code");
+        assert_eq!(ic, Some(3), "interp exit code");
+        assert!(ir.is_ok() && vr.is_ok(), "os.exit is a clean halt, not an error: interp={ir:?} vm={vr:?}");
     }
 
     /// Run an entry through both engines with a freshly-built [`crate::native::HostConfig`] each

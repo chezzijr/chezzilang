@@ -1,0 +1,6 @@
+consumer: waiting
+producer: send 1
+producer: send 2
+consumer: got 1
+consumer: got 2
+done

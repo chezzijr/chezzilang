@@ -14,16 +14,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 Core language is feature-complete through **M18** plus several gap-closing passes. Concurrency
 **C1 + C2 + C3 + C4** have landed (both engines), plus the **`Executor` escape hatch** (C5's
 sequential subset) with **program-exit auto-drain** (C5 / A2) and the C5 checker refinements. So
-`spawn` / `parallel:` / `Channel[T]` / `Shared[T]` / `Executor` all run on **both** engines. Latest
-suite: **1259 tests** green (unit + parity + `cargo test conformance`), both engines parity-tested,
-`cargo clippy` clean.
+`spawn` / `parallel:` / `Channel[T]` / `Shared[T]` / `Executor` all run on **both** engines.
+**Group B's B1 + B2 (cooperative fibers + blocking `recv`) have now landed on the VM engine**: a
+`recv` on an empty channel suspends the running fiber and the scheduler resumes it when a sibling
+`send`s, so mid-flight producer/consumer works (`examples/channel_block.chz`). Latest suite:
+**1268 tests** green (unit + parity + `cargo test conformance`), `cargo clippy` clean.
 
-**Next candidate:** **Group B** of concurrency **C5** — the real engine (a multi-session epic):
-cooperative fibers (**B1** suspendable execution — the recursive-`eval` rewrite, which everything else
-gates on), the **B2** cooperative scheduler (real blocking `recv` + mid-flight comms), and/or **B3**
-Tier-C OS-thread multicore; then **B4** real `Shared` and **B5** real `Executor` background pool. The
-surface of `spawn` / `parallel:` / `Channel` / `Shared` / `Executor` is **unchanged**. The full A/B
-breakdown is in **[`docs/concurrency.md`](docs/concurrency.md)** §9 (Group A done; Group B deferred).
+**Next candidate:** finish **Group B**. The remaining work: **B1/B2 for the interpreter** (the
+tree-walker needs stackful coroutines or a CPS rewrite — closing the documented parity gap below),
+**B3** Tier-C OS-thread multicore (alternative bet), then **B4** real `Shared` and **B5** real
+`Executor` background pool (incl. the deferred A3b `submit`-capture gate). The surface of `spawn` /
+`parallel:` / `Channel` / `Shared` / `Executor` is **unchanged**. Full A/B breakdown:
+**[`docs/concurrency.md`](docs/concurrency.md)** §9.
+
+**Parity gap (intentional, documented):** B1/B2 are **VM-only** for now. Under `--interp`, a blocking
+`recv` still faults `deadlock` (the interpreter has no suspendable execution yet). Programs that never
+block (C1–C5 goldens) stay byte-identical on both engines; only mid-flight blocking diverges, pinned
+by `interp::tests::channel_block_chz_faults_deadlock_on_interp` vs the VM golden. **Known v1 limits
+(VM):** a blocking `recv` cannot suspend inside a native callback (list HOFs, `sort`, `compare`/`hash`/
+`str` hooks, `Shared.update`, the executor drain, or a `defer`red call) — it faults `deadlock`
+instead (the callback's loop/recursion state lives on the host stack, not in a fiber); and a fiber in
+an outer nursery cannot be woken by progress in an inner one (structured-concurrency scoping).
 
 **Group A status (sequential refinements, no engine rewrite):** **A2 (`Executor` program-exit
 auto-drain) is done** (this session, both engines). **A3a** (reject a non-sendable read smuggled
@@ -43,6 +54,21 @@ no `byte`/`u8` scalar).
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
 
+- ✅ **Concurrency C5 / Group B — B1 + B2 cooperative fibers + blocking `recv`** (VM engine). The
+  bytecode VM gained *suspendable execution*: a `recv` on an empty channel under an active `parallel:`
+  scheduler **parks** the running fiber (rewind-and-retry at the instruction boundary — push the
+  receiver back, `ip -= 1`, set a suspend flag that breaks `run_until`/the re-entrant call path
+  without unwinding defers) and the **nursery-local cooperative scheduler** runs a runnable sibling,
+  resuming the parked fiber once its channel has data. A child that never blocks still runs to
+  completion FIFO, so non-blocking programs are byte-for-byte unchanged. Each fiber owns its full
+  execution context (`frames`/`stack`/`call_depth`/`cur_base`/`handlers`/`nurseries`/`fault_trace`),
+  swapped in/out around scheduling; parked fibers are GC-rooted; nested `parallel:` recurses into a
+  fresh scheduler level; a child fault or `std.os.exit` aborts its siblings. A wide native-reentry
+  guard converts a `recv` that can't be parked (inside a HOF/sort/`compare`/`hash`/`str`/`update`/
+  executor-drain/`defer`) into the deadlock fault. `examples/channel_block.chz` golden (VM + GC-stress)
+  + ping-pong, deadlock-detection, guard, nested-`parallel:`, recover-in-child, and os.exit-in-child
+  tests. **VM-only** — interp parity is a later milestone (gap pinned by an interp test). See the
+  Current-focus parity-gap note and [`docs/concurrency.md`](docs/concurrency.md) §9.
 - ✅ **Concurrency C5 / A2 — `Executor` program-exit auto-drain** (both engines). An executor
   submitted to but never explicitly `shutdown`/`shutdown_now`-ed is now gracefully drained at a clean
   program exit (FIFO, creation order) instead of silently dropping its queued work — mirrors a
@@ -172,11 +198,12 @@ Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.ch
 
 ## Roadmap (later)
 
-- ⬜ **Concurrency C5 — Group B (real engine)** — cooperative fibers (**B1** suspendable execution →
-  **B2** scheduler) and/or **B3** OS-thread multicore, then **B4** real `Shared` / **B5** real
-  `Executor` pool (incl. the deferred `submit`-capture gate). Group A is done: C1–C4, the `Executor`
-  sequential subset, **A2 auto-drain**, the C5 checker refinements, and **A3a** (pinned). See the A/B
-  breakdown in `docs/concurrency.md` §9.
+- 🟦 **Concurrency C5 — Group B (real engine)** — **B1 + B2 (cooperative fibers + blocking `recv`)
+  done on the VM** this session. Remaining: **B1/B2 for the interpreter** (close the VM-only parity
+  gap — stackful coroutines or CPS), **B3** OS-thread multicore (alternative bet), **B4** real
+  `Shared`, **B5** real `Executor` pool (incl. the deferred `submit`-capture gate A3b). Group A is
+  done: C1–C4, the `Executor` sequential subset, **A2 auto-drain**, the C5 checker refinements, and
+  **A3a** (pinned). See the A/B breakdown in `docs/concurrency.md` §9.
 - VM/GC optimizations (superinstructions, inline caching, NaN-boxing) — written up in
   **[`docs/future.md`](docs/future.md)**.
 

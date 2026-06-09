@@ -473,16 +473,47 @@ and shippable now; Group B is gated on **B1**. The surface of `spawn` / `paralle
 
 **Group B — the real engine (deferred epic)**
 
-| # | Item |
-|---|------|
-| **B1** | **Suspendable execution** — rewrite the recursive `eval` / VM loop into a resumable form. The fiber core; **everything else in B gates on it**. |
-| **B2** | **Cooperative scheduler** — task interleaving; real **blocking `recv`** (replaces the deadlock-detect fault); mid-flight producer↔consumer. |
-| **B3** | **Tier-C OS-thread multicore** — per-thread heap + GC; true parallelism. An *alternative bet* to B1/B2. |
-| **B4** | **Real `Shared[T]`** — owner-task + channel (today single-thread-serialised, already correct). |
-| **B5** | **Real `Executor` background pool** — actually-backgrounded tasks + graceful exit drain under real concurrency; plus A3b (submit-capture gating). |
+| # | Item | Status |
+|---|------|--------|
+| **B1** | **Suspendable execution** — make the engine loop resumable. The fiber core; **everything else in B gates on it**. | ✅ **VM done** · ⬜ interp |
+| **B2** | **Cooperative scheduler** — task interleaving; real **blocking `recv`** (replaces the deadlock-detect fault); mid-flight producer↔consumer. | ✅ **VM done** · ⬜ interp |
+| **B3** | **Tier-C OS-thread multicore** — per-thread heap + GC; true parallelism. An *alternative bet* to B1/B2. | ⬜ |
+| **B4** | **Real `Shared[T]`** — owner-task + channel (today single-thread-serialised, already correct). | ⬜ |
+| **B5** | **Real `Executor` background pool** — actually-backgrounded tasks + graceful exit drain under real concurrency; plus A3b (submit-capture gating). | ⬜ |
 
 **Dependency:** Group A is independent and shippable; Group B is gated on **B1**. A2 is unchanged
 after B lands; A3a becomes load-bearing (not merely emergent) once captures truly cross threads.
+
+#### B1 + B2 as shipped on the VM (cooperative fibers + blocking `recv`)
+
+Rather than the full recursive-`eval` rewrite, the **bytecode VM** got suspendable execution cheaply
+because `run_until(base_level)` is **frame-count driven** (`while frames.len() > base_level`), not
+host-recursion driven: a fiber's saved frame stack *replays* on resume via ordinary `Return` opcodes —
+no host call stack to rebuild. The design (all in `src/vm/mod.rs`):
+
+- **Suspend = rewind-and-retry at an instruction boundary.** A `recv` on an empty channel, under an
+  active scheduler and outside any native callback, re-pushes the receiver, does `ip -= 1` so the
+  `CallMethod(recv)` re-executes on resume, and sets `self.suspend`. `run_until` and every re-entrant
+  call site (`run_proto`, `do_call`, the struct-method / function-field / channel dispatch) break out
+  **without** running defers, returning control to the scheduler. No mid-instruction state is saved.
+- **Nursery-local cooperative scheduler.** `JoinNursery` parks the joining (parent) fiber's context
+  and runs the spawned tasks as child `Fiber`s, each owning a full `FiberCtx`
+  (`frames`/`stack`/`call_depth`/`cur_base`/`handlers`/`nurseries`/`fault_trace`) swapped in/out around
+  scheduling. A child that never blocks runs to completion FIFO (so non-blocking programs are
+  byte-identical to the old sequential drain); a blocked child parks and a runnable sibling runs; a
+  sibling's `send` makes it runnable again. All-blocked-none-runnable ⇒ deadlock fault. Nested
+  `parallel:` recurses into a fresh scheduler level. Parked fibers are GC roots.
+- **Native-reentry guard.** A `recv` reached inside a native callback (list HOFs, `sort`,
+  `compare`/`hash`/`str` hooks, `Shared.update`, the executor drain, a `defer`red call) cannot park —
+  that loop/recursion state lives on the host stack — so it faults `deadlock` instead (v1 limitation).
+- **`std.os.exit` in a child** aborts its siblings and the program (rides the existing `pending_exit`
+  hard-halt path, which stays VM-global, not per-fiber).
+
+**Still open (after the VM):** **interp B1/B2** — the tree-walker needs stackful coroutines or a CPS
+rewrite; until then a blocking `recv` is **VM-only** and the interpreter still faults `deadlock` (the
+documented parity gap). **Cross-nursery blocking** — a fiber in an outer nursery is not woken by
+progress in an inner one (structured-concurrency scoping). **A1** (`Channel.try_recv`) becomes
+implementable once interp parity lands.
 
 ---
 

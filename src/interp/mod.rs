@@ -4705,6 +4705,17 @@ b := Buf([10, 20, 30])
         assert!(err.message.contains("deadlock"), "got: {}", err.message);
     }
 
+    /// Parity-gap pin (B1/B2 is VM-only for now): a mid-flight blocking `recv` that the VM resolves
+    /// via cooperative fibers still faults `deadlock` under the tree-walking interpreter, which has
+    /// no suspendable execution yet. The VM twin `golden_channel_block_chz_matches_expected` asserts
+    /// the working behavior. When the interp gains B1, this test flips to a golden.
+    #[test]
+    fn channel_block_chz_faults_deadlock_on_interp() {
+        let source = include_str!("../../examples/channel_block.chz");
+        let err = run_capture(source).unwrap_err();
+        assert!(err.message.contains("deadlock"), "got: {}", err.message);
+    }
+
     #[test]
     fn channel_send_recv_fifo() {
         let src = "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    ch.send(2)\n    print(ch.recv())\n    print(ch.recv())\nmain()\n";
