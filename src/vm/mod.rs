@@ -325,6 +325,63 @@ enum Lowered {
     Method { recv: WireValue, name: String, args: Vec<WireValue>, span: Span },
 }
 
+/// B3.3-threads — a worker `Vm` with its task already reconstructed in its own heap, ready to run on
+/// whatever thread owns it. [`Vm::prepare_worker`] builds this (the parent-heap-touching half of the
+/// old `run_task_isolated`); [`ReadyWorker::run`] is the thread-side half (invoke + wire the result
+/// back). Splitting the two lets the bounded pool prepare a task on the parent thread, then **move**
+/// the whole `ReadyWorker` (it is `Send` — `Vm` is `Send`, `Value`/`String` are `Send`) onto a pool
+/// thread to execute. Single-thread `run_task_isolated` = `prepare_worker(task)?.run()`.
+#[allow(dead_code)] // reachable once the pool wires it in (sub-step 4); exercised by unit tests now.
+struct ReadyWorker {
+    worker: Vm,
+    call: ReadyCall,
+    span: Span,
+}
+
+/// How a [`ReadyWorker`]'s task is invoked, with all values already reconstructed in the worker heap.
+#[allow(dead_code)]
+enum ReadyCall {
+    /// A `spawn f(x)` / `spawn:` block — invoke the rebuilt callable with its rebuilt args.
+    Invoke { callee: Value, args: Vec<Value> },
+    /// A `spawn recv.m(args)` method task — dispatch `name` on the rebuilt receiver/args (B3.3d).
+    Method { recv: Value, name: String, args: Vec<Value> },
+}
+
+impl ReadyWorker {
+    /// Run the prepared task to completion **on the current thread** and hand back its return value
+    /// (wired into a `Send` form) plus the worker's captured `out`/`stderr` (decision F). A method
+    /// task that blocks on `recv` would leave no result on the stack; under `--parallel` the blocking
+    /// `recv` instead waits on the channel condvar (it never returns the suspend sentinel), so the
+    /// `suspend` guard is a safety net against a future regression, not a live path.
+    #[allow(dead_code)] // reachable once the pool wires it in (sub-step 4); exercised by unit tests now.
+    fn run(mut self) -> Result<WorkerResult, RuntimeError> {
+        let span = self.span;
+        let ret = match self.call {
+            ReadyCall::Invoke { callee, args } => self.worker.invoke_value(callee, args, span)?,
+            ReadyCall::Method { recv, name, args } => {
+                let argc = args.len();
+                self.worker.push(recv);
+                for a in args {
+                    self.worker.push(a);
+                }
+                self.worker.do_method_call(&name, argc, span)?;
+                if self.worker.suspend.is_some() {
+                    return Err(self.worker.err(
+                        "spawn: a method task blocked on recv in an isolated worker (no scheduler until B3.3-threads)".to_string(),
+                        span,
+                    ));
+                }
+                self.worker.pop()
+            }
+        };
+        // The result must be cross-safe too — a worker returning a `str`/closure can't hand a
+        // worker-heap `GcRef` back to the parent.
+        let value = self.worker.to_wire(ret)?;
+        self.worker.ensure_crossable(&value, span)?;
+        Ok(WorkerResult { value, out: self.worker.out, stderr: self.worker.stderr })
+    }
+}
+
 impl Vm {
     fn new(program: Arc<Program>) -> Self {
         Vm {
@@ -3147,6 +3204,16 @@ impl Vm {
     /// The whole graph is reconstructed per task (correctness-first; pooling is a B3.3-threads concern).
     #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
     fn run_task_isolated(&mut self, task: PendingCall) -> Result<WorkerResult, RuntimeError> {
+        self.prepare_worker(task)?.run()
+    }
+
+    /// B3.3-threads — the parent-thread half of [`Vm::run_task_isolated`]: lower the task to a `Send`
+    /// description against THIS heap, build the worker + reconstruct the module graph in its heap, and
+    /// rebuild the callee/receiver + args **into the worker heap**, yielding a [`ReadyWorker`] that
+    /// can be moved to a pool thread and `run()`. Everything that reads the parent heap happens here;
+    /// nothing in `ReadyWorker::run` touches `self`.
+    #[allow(dead_code)] // reachable once the pool wires it in (sub-step 4); exercised by unit tests now.
+    fn prepare_worker(&mut self, task: PendingCall) -> Result<ReadyWorker, RuntimeError> {
         // 1. Lower the task to a `Send` description in THIS (parent) heap (read-only serialize),
         //    rejecting any value that can't cross a heap boundary as-is.
         let lowered = match task {
@@ -3187,51 +3254,31 @@ impl Vm {
         };
 
         // 2. Build the worker + reconstruct the parent's module graph in its heap (B3.3c) so tasks can
-        //    read globals, call sibling/imported fns, and dispatch struct methods. 3. rebuild + run.
+        //    read globals, call sibling/imported fns, and dispatch struct methods. 3. rebuild the
+        //    callable/receiver + args into the worker heap. The actual invoke is `ReadyWorker::run`.
         let mut worker = self.spawn_worker();
         self.build_worker_modules(&mut worker);
-        let (ret, span) = match lowered {
+        let (call, span) = match lowered {
             Lowered::Closure { proto, captured, args, home, span } => {
                 let home = worker.worker_home(home);
                 let cap = captured.into_iter().map(|(k, w)| (k, worker.from_wire(w))).collect();
                 let callee = Value::Obj(worker.heap.alloc(Obj::Closure { proto, captured: cap, home }));
                 let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
-                (worker.invoke_value(callee, args, span)?, span)
+                (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Func { proto, args, home, span } => {
                 let home = worker.worker_home(home);
                 let callee = Value::Obj(worker.heap.alloc(Obj::Func { proto, home }));
                 let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
-                (worker.invoke_value(callee, args, span)?, span)
+                (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Method { recv, name, args, span } => {
                 let recv = worker.from_wire(recv);
-                let argc = args.len();
-                worker.push(recv);
-                for w in args {
-                    let a = worker.from_wire(w);
-                    worker.push(a);
-                }
-                worker.do_method_call(&name, argc, span)?;
-                // A blocking `recv` inside the method would park the fiber (leaving no result on the
-                // stack) — but a worker has no scheduler yet, so a top-level blocking `recv` faults as
-                // a deadlock rather than suspending. Guard the invariant so a future change can't turn
-                // it into an operand-stack underflow panic; real blocking lands with B3.3-threads.
-                if worker.suspend.is_some() {
-                    return Err(worker.err(
-                        "spawn: a method task blocked on recv in an isolated worker (no scheduler until B3.3-threads)".to_string(),
-                        span,
-                    ));
-                }
-                (worker.pop(), span)
+                let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
+                (ReadyCall::Method { recv, name, args }, span)
             }
         };
-
-        // 4. Hand the result + captured output back across the airlock (result must be cross-safe too —
-        //    a worker returning a `str`/closure can't hand a worker-heap `GcRef` back to the parent).
-        let value = worker.to_wire(ret)?;
-        worker.ensure_crossable(&value, span)?;
-        Ok(WorkerResult { value, out: worker.out, stderr: worker.stderr })
+        Ok(ReadyWorker { worker, call, span })
     }
 
     /// Reject a wired value that still carries a by-reference [`Handle`](WireValue::has_handle) — a
