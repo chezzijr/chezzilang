@@ -390,6 +390,11 @@ fn main():
 
 ## 9. Implementation roadmap (C1–C5)
 
+> **B3's detailed execution plan lives in [`concurrency-b3.md`](concurrency-b3.md)** — a phased,
+> multi-session breakdown (B3.0…B3.6) with the validated shared-nothing architecture, decisions, risk
+> register, and per-phase TDD focus. Items deliberately *not* in B3–B5 are in
+> [§11 Deferred / backlog](#11-deferred--backlog-not-b3b5).
+
 C1–C4 deliver a complete, shippable, deterministic concurrency feature on the sequential executor; C5
 is the deferrable multicore upgrade. Each milestone is **TDD**: failing tests first (unit + corpus),
 then implement **lexer → grammar/conformance → AST → parser → checker → engine → tests/examples**;
@@ -557,3 +562,44 @@ and cross-nursery wakeups (a fiber in an outer nursery is not woken by an inner 
   `JoinNursery`; block parsing/scoping (`parse_block`, `exec_scoped_block`/`exec_block`, defer-scope
   markers); `Option` constructors (`some`/`none`, `alloc_enum`) for `recv`; `Ref[T]` (`std/ref.chz`)
   as the `Shared[T]` template.
+
+---
+
+## 11. Deferred / backlog (not B3–B5)
+
+Concurrency work that is real but **outside the B3–B5 multicore epic**. Recorded so it isn't lost or
+reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md`](concurrency-b3.md).)
+
+- **Cross-nursery wakeups** *(cooperative-engine limit)*. `pick_runnable` scans only the **innermost**
+  scheduler level (`src/vm/mod.rs` — `pick_runnable`), so a fiber blocked in an *outer* nursery is not
+  woken by an *inner* nursery's `send` until the inner scheduler completes. The common case (consumer
+  in the outer nursery, producer in an inner one that *does* finish) already works — the gap is only a
+  fiber whose filler is an outer sibling the inner scheduler can't run, which then faults `deadlock`.
+  **Why deferred:** a true fix needs a flat/global scheduler and partly conflicts with
+  structured-concurrency scoping (inner should join before outer proceeds). **Mooted by B3** — real
+  OS-thread blocking `recv` has no level-local polling — so revisit only if the *cooperative default*
+  engine must lift it. Acceptable v1 limit (also noted in `PROGRESS.md`).
+
+- **`recv` inside a native callback** *(cooperative-engine limit)*. The `native_reentry` guard
+  (`src/vm/mod.rs`) faults `deadlock` when a blocking `recv` is reached inside a Rust callback (list
+  HOFs, `sort`, `compare`/`hash`/`str`, `Shared.update`, the executor drain, a `defer`red call),
+  because that loop/recursion state lives on the host stack and can't be parked into a fiber. **Mooted
+  by B3** — under real OS threads a `recv` inside a callback just blocks the thread on a condvar, no
+  parking needed; the guard becomes **mode-conditional** (live in cooperative mode, disabled under
+  `--parallel`). Acceptable v1 limit until then.
+
+- **`Channel.close()` + closed-channel semantics** *(surface addition — needs an explicit decision)*.
+  Not part of the currently-fixed surface (§5). The natural complement to B1/B2's blocking `recv`: a
+  consumer looping `while true: ch.recv()` currently deadlock-faults when the producer is done.
+  Go's `close(ch)` + consumer-side end-detection (a closed-and-empty `recv` returns a sentinel /
+  `try_recv` distinguishes empty-vs-closed, or a `for v in ch:` form) gives clean producer→consumer
+  termination. Bounded, both engines, very TDD-able. **Blocked on a surface decision** — it extends the
+  `Channel` method set and possibly adds a `for`-over-channel form, so it needs sign-off on syntax +
+  semantics (what `recv` on a closed channel returns; whether `send` after `close` faults) before
+  implementation.
+
+- **A3b — `Executor.submit` capture sendability gate** *(correctly deferred; lands in B3.6/B5)*.
+  `submit` runs the closure in-heap at the drain (no airlock, unlike `spawn`'s deep-clone), so a
+  non-sendable capture is *benign under today's only engine* — gating it now would reject valid
+  programs. It becomes load-bearing once captures truly cross threads (B3.6). See §9 Group B and
+  [`concurrency-b3.md` §4 B3.6](concurrency-b3.md#4-phased-breakdown).

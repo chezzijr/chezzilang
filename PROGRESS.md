@@ -21,10 +21,21 @@ sequential subset) with **program-exit auto-drain** (C5 / A2) and the C5 checker
 (A1) — the non-blocking poll — now ships on both engines** (`examples/try_recv.chz`). Latest suite:
 **1279 tests** green (unit + parity + `cargo test conformance`), `cargo clippy` clean.
 
-**Next candidate:** finish **Group B** *on the VM*: **B3** Tier-C OS-thread multicore (alternative
-bet), then **B4** real `Shared` and **B5** real `Executor` background pool (incl. the deferred A3b
-`submit`-capture gate). The surface of `spawn` / `parallel:` / `Channel` / `Shared` / `Executor` is
-**unchanged**. Full A/B breakdown: **[`docs/concurrency.md`](docs/concurrency.md)** §9.
+**B3 is now decomposed into a persistent, multi-session plan.** Tier-C OS-thread multicore (B3) — with
+B4 (real `Shared`) and B5 (real `Executor` pool) folded in, since under shared-nothing threads they're
+the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
+**[`docs/concurrency-b3.md`](docs/concurrency-b3.md)** (validated shared-nothing architecture,
+decisions A–G, risk register, per-phase TDD focus). The surface of `spawn` / `parallel:` / `Channel` /
+`Shared` / `Executor` stays **unchanged**.
+
+**Next candidate:** **B3.0 — wire-format airlock, single-thread, parity-preserved.** Define `WireValue`
++ `to_wire`/`from_wire` and route the `deep_clone` airlock sites through it into the *same* heap
+(byte-identical behavior — every existing concurrency golden + GC-stress stays green). This de-risks
+the serialization layer before any thread is spawned. Phases B3.0–B3.2 ship behind unchanged behavior;
+`--parallel` (and nondeterminism) appears at B3.3. The #1 risk to resolve before B3.3: **mutable module
+globals can't cross threads** (likely a spec restriction). Items *not* in B3–B5 (cross-nursery wakeups,
+recv-in-native-callback, `Channel.close()`, A3b) are now documented in
+**[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
 > **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,
 > not a TODO.** The interpreter stays frozen at the **sequential concurrency subset** and serves as
@@ -67,6 +78,19 @@ overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
 
+- ✅ **Concurrency B3 — decomposition + documentation** (planning session, no engine code). Broke the
+  Tier-C OS-thread multicore epic (B3, with B4/B5 folded in) into seven independently-shippable,
+  TDD'd phases **B3.0…B3.6** in **[`docs/concurrency-b3.md`](docs/concurrency-b3.md)** — a persistent
+  multi-session plan with the validated shared-nothing architecture (per-thread `Vm`+heap;
+  `Arc<Program>`; a `WireValue` airlock replacing `deep_clone`; `Channel`/`Shared` cores as
+  `Arc<…Core>` outside every heap; bounded pool; cooperative cancel), recorded decisions **A–G**
+  (chief among them **A**: keep cooperative single-thread as the *default* and gate OS-thread
+  multicore behind `--parallel`, so existing byte-identical goldens + VM==interp parity survive
+  untouched), a risk register (top risk: **mutable module globals can't cross threads**), and a
+  per-phase TDD focus. B3.0–B3.2 ship behind unchanged behavior; `--parallel` lands at B3.3.
+  Also documented the non-B3–B5 backlog (cross-nursery wakeups, recv-in-native-callback,
+  `Channel.close()`, A3b) in **[`docs/concurrency.md` §11](docs/concurrency.md)**. Docs-only — no
+  `src/` changes; suite unchanged.
 - ✅ **Concurrency A1 — `Channel.try_recv() -> T?`** (both engines). A **non-blocking** poll: `Some(v)`
   if the mailbox has a queued value, `None` if empty — it never blocks, faults, or suspends a fiber
   (the opposite of `recv`, which faults `deadlock` / parks under the scheduler on an empty channel).
@@ -225,8 +249,10 @@ Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.ch
 ## Roadmap (later)
 
 - 🟦 **Concurrency C5 — Group B (real engine, VM)** — **B1 + B2 (cooperative fibers + blocking
-  `recv`) done on the VM** this session. Remaining: **B3** OS-thread multicore (alternative bet),
-  **B4** real `Shared`, **B5** real `Executor` pool (incl. the deferred `submit`-capture gate A3b).
+  `recv`) done on the VM**. Remaining **B3/B4/B5 now planned as a phased epic** in
+  [`docs/concurrency-b3.md`](docs/concurrency-b3.md) (B3.0…B3.6; B4 real `Shared` + B5 real `Executor`
+  pool + A3b are folded into B3.4–B3.6 since shared-nothing threads make them the same machinery).
+  Next code step: **B3.0** (wire-format airlock, single-thread, parity-preserved).
   **interp B1/B2 is a deliberate non-goal** (see the DECISION box in Current focus — the interp stays
   the sequential-subset parity oracle; the VM is the sole concurrent engine). Group A is done: C1–C4,
   the `Executor` sequential subset, **A2 auto-drain**, the C5 checker refinements, **A3a** (pinned),
