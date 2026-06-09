@@ -9,7 +9,9 @@
 //! data arms — the only `GcRef` is the by-reference `Handle` arm, which B3.1 replaces with the
 //! shared `Arc` core).
 
+use super::core::{ChannelCore, ExecutorCore, SharedCore};
 use super::value::GcRef;
+use std::sync::Arc;
 
 /// A `Send`-able serialization of a sendable [`Value`](super::value::Value).
 ///
@@ -18,11 +20,13 @@ use super::value::GcRef;
 /// cross as [`WireValue::Handle`] — the existing heap handle in B3.0 (same heap), becoming an
 /// `Arc<…Core>` at B3.1. `Map`/`Set` carry their cached `u64` hashes so reconstruction never
 /// re-hashes (byte-identical iteration order + index — see [`super::heap::MapData`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum WireValue {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// The default wire value (an empty `Shared` box starts here before its first `set`).
+    #[default]
     Nil,
     List(Vec<WireValue>),
     Tuple(Vec<WireValue>),
@@ -39,9 +43,18 @@ pub enum WireValue {
         variant: Box<str>,
         payload: Vec<WireValue>,
     },
-    /// A by-reference object carried across the airlock as its existing heap handle (B3.0,
-    /// single-thread / same heap). Covers `Str`, `Func`/`Closure`/`Module`/`Native`, and the
-    /// `Channel`/`Shared`/`Executor` handles. B3.1 replaces the shared-core handles here with the
-    /// `Arc<…Core>` itself so they can cross a real thread boundary.
+    /// A by-reference object carried across the airlock as its existing heap handle (single-thread /
+    /// same heap). Covers `Str`, `Func`/`Closure`/`Module`/`Native`. At B3.3 the handles whose object
+    /// cannot cross an OS thread (`Module` with mutable globals, `Func`/`Closure`) gain real `Err`
+    /// arms in `to_wire`; `Str` will instead cross by value (an owned-bytes arm). For now (B3.1) all
+    /// of them stay same-heap handles.
     Handle(GcRef),
+    /// A `Channel` handle crossing the airlock as its shared [`ChannelCore`] (B3.1). `from_wire`
+    /// allocates a *fresh* heap handle wrapping this same `Arc`, so two tasks reach one mailbox — the
+    /// identity the language observes lives in the `Arc`, not the `GcRef`.
+    Channel(Arc<ChannelCore>),
+    /// A `Shared` handle crossing the airlock as its shared [`SharedCore`] (B3.1). See [`Channel`].
+    Shared(Arc<SharedCore>),
+    /// An `Executor` handle crossing the airlock as its shared [`ExecutorCore`] (B3.1). See [`Channel`].
+    Executor(Arc<ExecutorCore>),
 }

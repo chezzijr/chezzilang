@@ -3,14 +3,17 @@
 //! cross-check the two engines). M5a: handle-addressed values, no collector yet (the mark-sweep
 //! GC lands in M5b).
 
+pub mod core;
 pub mod heap;
 pub mod op;
 pub mod value;
 pub mod wire;
 
+use core::{ChannelCore, ExecutorCore, SharedCore};
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, Op, Program, ProtoId};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use value::{GcRef, Value};
 use wire::WireValue;
 
@@ -1069,19 +1072,18 @@ impl Vm {
             Op::SpawnMethod(name, argc) => self.do_spawn(Some(name.clone()), *argc, span)?,
             Op::SpawnBlock(proto, entries) => self.do_spawn_block(*proto, entries, span)?,
             Op::NewChannel => {
-                let h = self.heap.alloc(Obj::Channel(std::collections::VecDeque::new()));
+                let h = self.heap.alloc(Obj::Channel(Arc::new(ChannelCore::default())));
                 self.push(Value::Obj(h));
             }
             Op::NewShared => {
                 let init = self.pop();
-                let init = self.deep_clone(init);
-                let h = self.heap.alloc(Obj::Shared(init));
+                // The box holds the wire form (single serialization == the old deep_clone-in).
+                let init = self.to_wire(init).expect("Shared init must be sendable (B3.1 single-thread)");
+                let h = self.heap.alloc(Obj::Shared(Arc::new(SharedCore { v: Mutex::new(init) })));
                 self.push(Value::Obj(h));
             }
             Op::NewExecutor => {
-                let h = self
-                    .heap
-                    .alloc(Obj::Executor { queue: std::collections::VecDeque::new(), shut: false });
+                let h = self.heap.alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
                 // Register for the program-exit auto-drain; the handle is also a GC root, so the
                 // executor's queued work survives even after every in-program handle is gone.
                 self.executors.push(h);
@@ -1879,7 +1881,7 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
-        if matches!(self.heap.get(h), Obj::Executor { .. }) {
+        if matches!(self.heap.get(h), Obj::Executor(_)) {
             let result = self.executor_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
@@ -2830,7 +2832,10 @@ impl Vm {
         let children = &self.scheduler_stack.last().expect("scheduler level present").children;
         children.iter().position(|c| match &c.state {
             FiberState::Pending(_) | FiberState::Ready => true,
-            FiberState::Blocked(h) => matches!(self.heap.get(*h), Obj::Channel(q) if !q.is_empty()),
+            FiberState::Blocked(h) => match self.heap.get(*h) {
+                Obj::Channel(core) => !core.q.lock().unwrap().is_empty(),
+                _ => false,
+            },
             FiberState::Done => false,
         })
     }
@@ -2950,10 +2955,12 @@ impl Vm {
                 | Obj::Func { .. }
                 | Obj::Closure { .. }
                 | Obj::Module { .. }
-                | Obj::Native { .. }
-                | Obj::Channel(_)
-                | Obj::Shared(_)
-                | Obj::Executor { .. } => WireValue::Handle(h),
+                | Obj::Native { .. } => WireValue::Handle(h),
+                // B3.1: the shared cores cross as the `Arc` itself (clone = refcount bump), so a
+                // `from_wire` in any heap reaches the same mailbox/box/queue.
+                Obj::Channel(core) => WireValue::Channel(Arc::clone(core)),
+                Obj::Shared(core) => WireValue::Shared(Arc::clone(core)),
+                Obj::Executor(core) => WireValue::Executor(Arc::clone(core)),
                 Obj::List(items) => {
                     let mut out = Vec::with_capacity(items.len());
                     for x in items {
@@ -3016,6 +3023,12 @@ impl Vm {
             WireValue::Bool(b) => Value::Bool(b),
             WireValue::Nil => Value::Nil,
             WireValue::Handle(h) => Value::Obj(h),
+            // B3.1: rebuild a fresh heap handle onto the SAME shared core (`Arc` already cloned in
+            // `to_wire`). Not registered in `self.executors` — the original `NewExecutor` handle there
+            // drives the program-exit auto-drain and shares this core, so the alias needs no entry.
+            WireValue::Channel(core) => Value::Obj(self.heap.alloc(Obj::Channel(core))),
+            WireValue::Shared(core) => Value::Obj(self.heap.alloc(Obj::Shared(core))),
+            WireValue::Executor(core) => Value::Obj(self.heap.alloc(Obj::Executor(core))),
             WireValue::List(items) => {
                 let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::List(cloned)))
@@ -3052,6 +3065,30 @@ impl Vm {
         }
     }
 
+    /// B3.1 — clone out the shared `Arc<ChannelCore>` behind a `Channel` handle (refcount bump). The
+    /// `Arc` is held only for the duration of the calling method, so locking it does not borrow the
+    /// heap, leaving `self` free for the re-entrant value paths (`from_wire`, `invoke_value`).
+    fn channel_core(&self, h: GcRef) -> Arc<ChannelCore> {
+        match self.heap.get(h) {
+            Obj::Channel(core) => Arc::clone(core),
+            _ => unreachable!("channel_core on non-channel"),
+        }
+    }
+
+    fn shared_core(&self, h: GcRef) -> Arc<SharedCore> {
+        match self.heap.get(h) {
+            Obj::Shared(core) => Arc::clone(core),
+            _ => unreachable!("shared_core on non-shared"),
+        }
+    }
+
+    fn executor_core(&self, h: GcRef) -> Arc<ExecutorCore> {
+        match self.heap.get(h) {
+            Obj::Executor(core) => Arc::clone(core),
+            _ => unreachable!("executor_core on non-executor"),
+        }
+    }
+
     /// `Channel[T]` methods (C2/C4): `send` (move-on-send, deep-copied in), `recv` (FIFO; empty =
     /// deadlock fault under the sequential executor), `len`. Mirrors `interp::eval_channel_method` —
     /// error strings byte-identical (parity-tested).
@@ -3059,21 +3096,16 @@ impl Vm {
         match method {
             "send" => {
                 self.arity_err("send", args, 1, span)?;
-                let v = self.deep_clone(args[0]);
-                match self.heap.get_mut(h) {
-                    Obj::Channel(q) => q.push_back(v),
-                    _ => unreachable!("channel_method on non-channel"),
-                }
+                // B3.1: serialize once into the core (the wire form IS the airlock copy).
+                let w = self.to_wire(args[0])?;
+                self.channel_core(h).q.lock().unwrap().push_back(w);
                 Ok(Value::Nil)
             }
             "recv" => {
                 self.arity_err("recv", args, 0, span)?;
-                let popped = match self.heap.get_mut(h) {
-                    Obj::Channel(q) => q.pop_front(),
-                    _ => unreachable!("channel_method on non-channel"),
-                };
+                let popped = self.channel_core(h).q.lock().unwrap().pop_front();
                 match popped {
-                    Some(v) => Ok(v),
+                    Some(w) => Ok(self.from_wire(w)),
                     // Empty channel. Under an active nursery scheduler (and not inside a native
                     // callback, whose Rust-stack state can't be parked), B1/B2 SUSPENDS the running
                     // fiber instead of faulting: re-root the receiver, rewind `ip` so this very
@@ -3102,21 +3134,18 @@ impl Vm {
                 // `native_reentry` / `suspend` / `ip` — it always returns immediately with an
                 // `Option`: `Some(v)` if queued, `None` if empty. Mirrors `interp::eval_channel_method`.
                 self.arity_err("try_recv", args, 0, span)?;
-                let popped = match self.heap.get_mut(h) {
-                    Obj::Channel(q) => q.pop_front(),
-                    _ => unreachable!("channel_method on non-channel"),
-                };
+                let popped = self.channel_core(h).q.lock().unwrap().pop_front();
                 Ok(match popped {
-                    Some(v) => self.alloc_enum("Option", "Some", vec![v]),
+                    Some(w) => {
+                        let v = self.from_wire(w);
+                        self.alloc_enum("Option", "Some", vec![v])
+                    }
                     None => self.alloc_enum("Option", "None", vec![]),
                 })
             }
             "len" => {
                 self.arity_err("len", args, 0, span)?;
-                let n = match self.heap.get(h) {
-                    Obj::Channel(q) => q.len(),
-                    _ => unreachable!("channel_method on non-channel"),
-                };
+                let n = self.channel_core(h).q.lock().unwrap().len();
                 Ok(Value::Int(n as i64))
             }
             _ => Err(self.err(format!("type Channel has no method '{method}'"), span)),
@@ -3130,41 +3159,32 @@ impl Vm {
         match method {
             "get" => {
                 self.arity_err("get", args, 0, span)?;
-                let inner = match self.heap.get(h) {
-                    Obj::Shared(v) => *v,
-                    _ => unreachable!("shared_method on non-shared"),
-                };
-                Ok(self.deep_clone(inner))
+                // Clone the wire form out under the lock, then reconstruct into this heap (one
+                // round-trip == the old deep_clone-out).
+                let w = self.shared_core(h).v.lock().unwrap().clone();
+                Ok(self.from_wire(w))
             }
             "set" => {
                 self.arity_err("set", args, 1, span)?;
-                let v = self.deep_clone(args[0]);
-                match self.heap.get_mut(h) {
-                    Obj::Shared(slot) => *slot = v,
-                    _ => unreachable!("shared_method on non-shared"),
-                }
+                let w = self.to_wire(args[0])?;
+                *self.shared_core(h).v.lock().unwrap() = w;
                 Ok(Value::Nil)
             }
             "update" => {
                 self.arity_err("update", args, 1, span)?;
                 let f = args[0];
-                // Read the current value out (deep-copied) before the call: the user fn may re-enter
-                // this same box. Re-root the box on the operand stack so the nested call's GC can't
-                // collect it (the receiver was popped off the stack in `do_method_call`).
-                let inner = match self.heap.get(h) {
-                    Obj::Shared(v) => *v,
-                    _ => unreachable!("shared_method on non-shared"),
-                };
-                let cur = self.deep_clone(inner);
+                // Read the current value out before the call (lock dropped immediately — the user fn
+                // may re-enter this same box, and we must never hold the lock across `invoke_value`).
+                // Re-root the box handle on the operand stack so the nested call's GC keeps the core's
+                // contents traced (the receiver was popped off the stack in `do_method_call`).
+                let w = self.shared_core(h).v.lock().unwrap().clone();
+                let cur = self.from_wire(w);
                 self.push(Value::Obj(h));
                 let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 let next = next?;
-                let stored = self.deep_clone(next);
-                match self.heap.get_mut(h) {
-                    Obj::Shared(slot) => *slot = stored,
-                    _ => unreachable!("shared_method on non-shared"),
-                }
+                let stored = self.to_wire(next)?;
+                *self.shared_core(h).v.lock().unwrap() = stored;
                 Ok(Value::Nil)
             }
             _ => Err(self.err(format!("type Shared has no method '{method}'"), span)),
@@ -3180,38 +3200,34 @@ impl Vm {
         match method {
             "submit" => {
                 self.arity_err("submit", args, 1, span)?;
-                let shut = match self.heap.get(h) {
-                    Obj::Executor { shut, .. } => *shut,
-                    _ => unreachable!("executor_method on non-executor"),
-                };
-                if shut {
-                    return Err(self.err(
-                        "submit on a shut-down Executor (it no longer accepts work)".to_string(),
-                        span,
-                    ));
-                }
-                let f = args[0];
-                match self.heap.get_mut(h) {
-                    Obj::Executor { queue, .. } => queue.push_back(f),
-                    _ => unreachable!("executor_method on non-executor"),
+                let core = self.executor_core(h);
+                {
+                    let mut g = core.inner.lock().unwrap();
+                    if g.shut {
+                        return Err(self.err(
+                            "submit on a shut-down Executor (it no longer accepts work)".to_string(),
+                            span,
+                        ));
+                    }
+                    // The task closure crosses by handle at B3.1 (`Handle(closure)`), kept rooted via
+                    // the executor handle's `children()`.
+                    let w = self.to_wire(args[0])?;
+                    g.queue.push_back(w);
                 }
                 Ok(Value::Nil)
             }
             "shutdown" => {
                 self.arity_err("shutdown", args, 0, span)?;
+                let core = self.executor_core(h);
                 // Mark shut first so a task that re-enters this executor (submit/shutdown) sees it.
-                match self.heap.get_mut(h) {
-                    Obj::Executor { shut, .. } => *shut = true,
-                    _ => unreachable!("executor_method on non-executor"),
-                }
-                // Root the executor across the drain (its remaining queue is traced via the handle).
+                core.inner.lock().unwrap().shut = true;
+                // Root the executor handle across the drain (its remaining queue is traced via it).
                 self.push(Value::Obj(h));
                 loop {
-                    let task = match self.heap.get_mut(h) {
-                        Obj::Executor { queue, .. } => queue.pop_front(),
-                        _ => unreachable!("executor_method on non-executor"),
-                    };
+                    // Pop under the lock, then DROP the guard before the re-entrant call.
+                    let task = core.inner.lock().unwrap().queue.pop_front();
                     let Some(task) = task else { break };
+                    let task = self.from_wire(task);
                     // The popped task is no longer in the queue → root it on the stack across its call.
                     self.push(task);
                     let r = self.guarded(|vm| vm.invoke_value(task, vec![], span));
@@ -3223,13 +3239,10 @@ impl Vm {
             }
             "shutdown_now" => {
                 self.arity_err("shutdown_now", args, 0, span)?;
-                match self.heap.get_mut(h) {
-                    Obj::Executor { queue, shut } => {
-                        *shut = true;
-                        queue.clear();
-                    }
-                    _ => unreachable!("executor_method on non-executor"),
-                }
+                let core = self.executor_core(h);
+                let mut g = core.inner.lock().unwrap();
+                g.shut = true;
+                g.queue.clear();
                 Ok(Value::Nil)
             }
             _ => Err(self.err(format!("type Executor has no method '{method}'"), span)),
@@ -3249,7 +3262,7 @@ impl Vm {
         // exit (parity with the interpreter's `Vec<Rc>` snapshot).
         let execs = self.executors.clone();
         for h in execs {
-            let shut = matches!(self.heap.get(h), Obj::Executor { shut: true, .. });
+            let shut = self.executor_core(h).inner.lock().unwrap().shut;
             if shut {
                 continue;
             }
@@ -3949,7 +3962,7 @@ impl Vm {
                 Obj::Native { .. } => "function",
                 Obj::Channel(_) => "Channel",
                 Obj::Shared(_) => "Shared",
-                Obj::Executor { .. } => "Executor",
+                Obj::Executor(_) => "Executor",
             },
         }
     }
@@ -4004,10 +4017,65 @@ impl Vm {
                 Obj::Closure { .. } => "<closure>".to_string(),
                 Obj::Module { name, .. } => format!("<module {name}>"),
                 Obj::Native { name, .. } => format!("<native fn {name}>"),
-                Obj::Channel(q) => format!("Channel(len={})", q.len()),
-                Obj::Shared(v) => format!("Shared({})", self.display(*v)),
-                Obj::Executor { queue, .. } => format!("Executor(pending={})", queue.len()),
+                Obj::Channel(core) => format!("Channel(len={})", core.q.lock().unwrap().len()),
+                // B3.1: the box holds the wire form; render it directly (`display` is `&self` and
+                // cannot `from_wire`, which allocates — `display_wire` is the read-only equivalent).
+                Obj::Shared(core) => format!("Shared({})", self.display_wire(&core.v.lock().unwrap())),
+                Obj::Executor(core) => format!("Executor(pending={})", core.inner.lock().unwrap().queue.len()),
             },
+        }
+    }
+
+    /// `Display` form of a [`WireValue`] — the read-only (`&self`) counterpart of [`display`] for
+    /// values that live in a core (only `Shared` renders its contents). Mirrors `display` arm-for-arm;
+    /// a `Handle(GcRef)` resolves back through the heap via `display`, a nested core renders like its
+    /// heap counterpart. B3.1: total over the sendable set.
+    fn display_wire(&self, w: &WireValue) -> String {
+        match w {
+            WireValue::Int(n) => n.to_string(),
+            WireValue::Float(x) => format_float(*x),
+            WireValue::Bool(b) => b.to_string(),
+            WireValue::Nil => "nil".to_string(),
+            WireValue::Handle(h) => self.display(Value::Obj(*h)),
+            WireValue::List(items) => {
+                let inner = items.iter().map(|v| self.display_wire(v)).collect::<Vec<_>>().join(", ");
+                format!("[{inner}]")
+            }
+            WireValue::Tuple(items) => {
+                let inner = items.iter().map(|v| self.display_wire(v)).collect::<Vec<_>>().join(", ");
+                format!("({inner})")
+            }
+            WireValue::Map(entries) => {
+                let inner = entries
+                    .iter()
+                    .map(|(_, k, v)| format!("{}: {}", self.display_wire(k), self.display_wire(v)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{{inner}}}")
+            }
+            WireValue::Set(entries) => {
+                if entries.is_empty() {
+                    "set()".to_string()
+                } else {
+                    let inner = entries.iter().map(|(_, v)| self.display_wire(v)).collect::<Vec<_>>().join(", ");
+                    format!("{{{inner}}}")
+                }
+            }
+            WireValue::Struct { name, fields } => {
+                let inner = fields.iter().map(|(k, v)| format!("{k}={}", self.display_wire(v))).collect::<Vec<_>>().join(", ");
+                format!("{name}({inner})")
+            }
+            WireValue::Enum { variant, payload, .. } => {
+                if payload.is_empty() {
+                    variant.to_string()
+                } else {
+                    let inner = payload.iter().map(|v| self.display_wire(v)).collect::<Vec<_>>().join(", ");
+                    format!("{variant}({inner})")
+                }
+            }
+            WireValue::Channel(core) => format!("Channel(len={})", core.q.lock().unwrap().len()),
+            WireValue::Shared(core) => format!("Shared({})", self.display_wire(&core.v.lock().unwrap())),
+            WireValue::Executor(core) => format!("Executor(pending={})", core.inner.lock().unwrap().queue.len()),
         }
     }
 
@@ -4083,7 +4151,7 @@ impl Vm {
             Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
             // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
             // (matches the interpreter's `stringify` catch-all falling back to `Display`).
-            Obj::Channel(_) | Obj::Shared(_) | Obj::Executor { .. } => Ok(self.display(Value::Obj(h))),
+            Obj::Channel(_) | Obj::Shared(_) | Obj::Executor(_) => Ok(self.display(Value::Obj(h))),
         }
     }
 
@@ -4492,21 +4560,82 @@ mod tests {
         assert_eq!(rebuilt.candidates(7), &[1]);
     }
 
-    /// Immutable / by-reference objects (`Str`, callables, `Channel`/`Shared`/`Executor`) cross the
-    /// airlock **by handle** — `to_wire`→`from_wire` returns the *same* `GcRef` (matching the old
-    /// `deep_clone` by-handle arm), so every task reaches the one shared mailbox/box.
+    /// Immutable / by-reference objects (`Str`, callables) cross the airlock **by handle** —
+    /// `to_wire`→`from_wire` returns the *same* `GcRef` (matching the old `deep_clone` by-handle arm).
     #[test]
     fn wire_passes_by_reference_objects_as_same_handle() {
         let mut vm = Vm::new(Rc::new(empty_program()));
-        let ch = vm.heap.alloc(Obj::Channel(Default::default()));
-        let sh = vm.heap.alloc(Obj::Shared(Value::Int(0)));
-        let ex = vm.heap.alloc(Obj::Executor { queue: Default::default(), shut: false });
         let st = vm.heap.alloc(Obj::Str("imm".into()));
-        for h in [ch, sh, ex, st] {
+        let v = Value::Obj(st);
+        let w = vm.to_wire(v).expect("by-ref object should serialize");
+        assert_eq!(vm.from_wire(w), v, "by-reference object must round-trip to the same handle");
+    }
+
+    /// B3.1: `Channel`/`Shared`/`Executor` cross the airlock as their shared `Arc<…Core>`. The
+    /// round-trip yields a *fresh* `GcRef` (a new handle obj) wrapping the **same** core — identity is
+    /// at the `Arc`, not the handle, so two tasks still reach one mailbox/box/queue.
+    #[test]
+    fn wire_shares_core_across_a_fresh_handle() {
+        let mut vm = Vm::new(Rc::new(empty_program()));
+        let ch = vm.heap.alloc(Obj::Channel(Arc::new(ChannelCore::default())));
+        let sh = vm.heap.alloc(Obj::Shared(Arc::new(SharedCore::default())));
+        let ex = vm.heap.alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
+        for h in [ch, sh, ex] {
             let v = Value::Obj(h);
-            let w = vm.to_wire(v).expect("by-ref object should serialize");
-            assert_eq!(vm.from_wire(w), v, "by-reference object must round-trip to the same handle");
+            let w = vm.to_wire(v).expect("core handle should serialize");
+            let wired = vm.from_wire(w);
+            assert_ne!(wired, v, "a crossed core gets a fresh handle (new GcRef)");
+            // Same underlying core: an `Arc::ptr_eq` between the two handles' cores.
+            let same = match (vm.heap.get(h), vm.heap.get(match wired { Value::Obj(g) => g, _ => unreachable!() })) {
+                (Obj::Channel(a), Obj::Channel(b)) => Arc::ptr_eq(a, b),
+                (Obj::Shared(a), Obj::Shared(b)) => Arc::ptr_eq(a, b),
+                (Obj::Executor(a), Obj::Executor(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            };
+            assert!(same, "the fresh handle must point at the SAME shared core");
         }
+    }
+
+    /// B3.1: two handles produced from one core (the `from_wire` airlock copy) reach the SAME mailbox
+    /// — `send` on one handle is `recv`-able through the other. Proves the `Arc` core is shared, not
+    /// duplicated, across the wire.
+    #[test]
+    fn channel_core_shared_across_handles() {
+        let mut vm = Vm::new(Rc::new(empty_program()));
+        let h1 = vm.heap.alloc(Obj::Channel(Arc::new(ChannelCore::default())));
+        // Cross the airlock → a second handle onto the same core.
+        let w = vm.to_wire(Value::Obj(h1)).unwrap();
+        let Value::Obj(h2) = vm.from_wire(w) else { panic!("expected handle") };
+        let sp = Span { line: 1, col: 1 };
+        vm.channel_method(h1, "send", &[Value::Int(7)], sp).unwrap();
+        // recv through the OTHER handle sees the message.
+        assert_eq!(vm.channel_method(h2, "recv", &[], sp).unwrap(), Value::Int(7));
+    }
+
+    /// B3.1: `shut` lives in the shared core, so a `from_wire`'d alias observes a shutdown done through
+    /// the original handle — `submit` on the alias then fails with the byte-identical message.
+    #[test]
+    fn executor_core_shut_is_shared_across_handles() {
+        let mut vm = Vm::new(Rc::new(empty_program()));
+        let h1 = vm.heap.alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
+        let w = vm.to_wire(Value::Obj(h1)).unwrap();
+        let Value::Obj(h2) = vm.from_wire(w) else { panic!("expected handle") };
+        let sp = Span { line: 1, col: 1 };
+        vm.executor_method(h1, "shutdown", &[], sp).unwrap();
+        let dummy = vm.heap.alloc(Obj::Str("task".into()));
+        let err = vm.executor_method(h2, "submit", &[Value::Obj(dummy)], sp).unwrap_err();
+        assert_eq!(err.message, "submit on a shut-down Executor (it no longer accepts work)");
+    }
+
+    /// B3.1: `display` of a `Shared` box renders its contents through `display_wire` (which resolves a
+    /// boxed `Str` `Handle` back through the heap), since `display` is `&self` and can't `from_wire`.
+    #[test]
+    fn display_shared_renders_contents() {
+        let mut vm = Vm::new(Rc::new(empty_program()));
+        let s = vm.heap.alloc(Obj::Str("hi".into()));
+        let boxed = vm.to_wire(Value::Obj(s)).unwrap();
+        let sh = vm.heap.alloc(Obj::Shared(Arc::new(SharedCore { v: Mutex::new(boxed) })));
+        assert_eq!(vm.display(Value::Obj(sh)), "Shared(hi)");
     }
 
     // ----- arithmetic -----
@@ -6320,6 +6449,29 @@ main()";
         let normal = run_capture(src).unwrap();
         assert_eq!(run_capture_stress(src), normal);
         assert_eq!(normal, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// B3.1 regression: a core nested *inside* another core. The channel core is reachable ONLY
+    /// through the `Shared` box's wire value once `stash`'s local channel handle is gone — its queued
+    /// `"hello"` (a heap `Str` handle embedded in the channel core's wire queue) must still be traced
+    /// as a GC root, or `gc_stress` sweeps it and `recv` dangles. Pins that `collect_gcrefs` recurses
+    /// into nested cores.
+    #[test]
+    fn nested_core_contents_survive_gc_stress() {
+        let src = "\
+fn stash(s: Shared[Channel[str]]):
+    ch := s.get()
+    ch.send(\"hello\")
+fn main():
+    s := Shared(Channel[str]())
+    stash(s)
+    base := str(100)
+    ch := s.get()
+    print(ch.recv())
+main()";
+        let normal = run_capture(src).unwrap();
+        assert_eq!(normal, "hello\n");
+        assert_eq!(run_capture_stress(src), normal, "nested core contents must survive GC");
     }
 
     /// `Shared` box + `update`'s re-entrant call survive GC stress (the box is re-rooted across the

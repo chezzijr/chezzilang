@@ -4,9 +4,11 @@
 //! lands in M5b). Objects are addressed by [`GcRef`] (a slot index), so handle copies alias one
 //! object. The VM owns the heap and mutates objects through `&mut heap[h]` — no `RefCell` needed.
 
+use super::core::{ChannelCore, ExecutorCore, SharedCore};
 use super::op::ProtoId;
 use super::value::{GcRef, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// A real hash table that *also* preserves insertion order. `entries` is the insertion-ordered
 /// store (so iteration, `keys()`, set equality, and GC tracing stay deterministic); `index` maps a
@@ -122,23 +124,19 @@ pub enum Obj {
         name: Box<str>,
         func: crate::native::NativeFn,
     },
-    /// `Channel[T]` (C2) — a shared mailbox (buffered, unbounded FIFO) for cross-task messages.
-    /// Shared by reference (the handle is what `spawn` copies across the airlock); values move in on
-    /// `send` (deep-copied) and out on `recv`. Queued values may be heap objects, so they are traced
-    /// as GC children.
-    Channel(std::collections::VecDeque<Value>),
-    /// `Shared[T]` (C3) — the cross-task mutable box. Shared by reference (the handle is what `spawn`
-    /// copies across the airlock); the value lives in the one box and is copied in on
-    /// `set`/construction and out on `get`. The boxed value may be a heap object → a GC child.
-    Shared(Value),
-    /// `Executor` (C5 escape hatch) — an explicitly-owned work queue. Shared by reference (the handle
-    /// is what `spawn` copies across the airlock). Holds detached task closures that drain at
-    /// `shutdown()` and are discarded by `shutdown_now()`; `shut` rejects further `submit`s. Queued
-    /// closures may be heap objects → GC children.
-    Executor {
-        queue: std::collections::VecDeque<Value>,
-        shut: bool,
-    },
+    /// `Channel[T]` (C2) — a *handle* to the shared mailbox [`ChannelCore`]. B3.1: the queue itself
+    /// moved OUT of the heap into the `Arc` (it holds wire-form messages, not `GcRef`s); the heap
+    /// keeps only this handle, and two handles can alias one core. `children()` still traces the
+    /// `Handle`s embedded in the core's queued messages (e.g. a `Channel[str]`'s `Str` handles).
+    Channel(Arc<ChannelCore>),
+    /// `Shared[T]` (C3) — a *handle* to the cross-task mutable box [`SharedCore`] (B3.1). See
+    /// [`Channel`](Obj::Channel) for the handle/core split.
+    Shared(Arc<SharedCore>),
+    /// `Executor` (C5 escape hatch) — a *handle* to the shared work queue [`ExecutorCore`] (B3.1).
+    /// The queued task closures live in the core as wire values (`Handle(closure)` at B3.1); `shut`
+    /// lives in the shared core so aliasing handles agree on shutdown state. See
+    /// [`Channel`](Obj::Channel).
+    Executor(Arc<ExecutorCore>),
 }
 
 /// One heap slot: the object (or a hole, for swept/free slots) + its GC mark bit.
@@ -270,9 +268,28 @@ impl Heap {
             }
             Obj::Module { globals, .. } => globals.values().for_each(&mut push),
             Obj::Native { .. } => {}
-            Obj::Channel(q) => q.iter().for_each(&mut push),
-            Obj::Shared(v) => push(v),
-            Obj::Executor { queue, .. } => queue.iter().for_each(&mut push),
+            // B3.1: the core lives in an `Arc` outside this heap and holds `WireValue`s, but those
+            // can still carry `Handle(GcRef)`s into *this* heap (a `Channel[str]`'s `Str` handles, an
+            // `Executor`'s queued closures, and any core nested inside another core). Trace every
+            // reachable embedded handle so those objects stay rooted while the core holds them; `seen`
+            // breaks `Arc` cycles. (The doc's "drop these arms" is wrong at B3.1 — closures can't
+            // cross by value until B3.3/G1, so cores still hold heap refs.)
+            Obj::Channel(core) => {
+                let mut seen = vec![Arc::as_ptr(core) as usize];
+                for w in core.q.lock().unwrap().iter() {
+                    crate::vm::core::collect_core_gcrefs(w, &mut out, &mut seen);
+                }
+            }
+            Obj::Shared(core) => {
+                let mut seen = vec![Arc::as_ptr(core) as usize];
+                crate::vm::core::collect_core_gcrefs(&core.v.lock().unwrap(), &mut out, &mut seen);
+            }
+            Obj::Executor(core) => {
+                let mut seen = vec![Arc::as_ptr(core) as usize];
+                for w in core.inner.lock().unwrap().queue.iter() {
+                    crate::vm::core::collect_core_gcrefs(w, &mut out, &mut seen);
+                }
+            }
         }
         out
     }

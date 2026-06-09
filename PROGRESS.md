@@ -21,8 +21,14 @@ sequential subset) with **program-exit auto-drain** (C5 / A2) and the C5 checker
 (A1) — the non-blocking poll — now ships on both engines** (`examples/try_recv.chz`). **B3.0 — the
 wire-format airlock — has now landed** (VM): the task-airlock `deep_clone` is implemented as a
 `WireValue` serialize → reconstruct round-trip (`src/vm/wire.rs` + `Vm::to_wire`/`from_wire`),
-byte-identical to the old direct deep-copy. Latest suite: **1282 tests** green (1279 + 3 new `wire_*`
-units; unit + parity + `cargo test conformance`), `cargo clippy` clean.
+byte-identical to the old direct deep-copy. **B3.1 — cores out of the heap — has now landed** (VM):
+`Channel`/`Shared`/`Executor` data moved out of the GC heap into `Arc<…Core>` holding `WireValue`
+(`src/vm/core.rs`), so the heap keeps only an `Obj::X(Arc<…Core>)` handle and a crossed core is shared
+(not copied). The airlock serializes at the core boundary now; `children()` was *rewritten* (not
+dropped — single-thread cores still embed `Handle(GcRef)`s) to keep queued strings/closures rooted.
+Still single-thread + cooperative, behavior byte-identical. Latest suite: **1286 tests** green (1282 +
+4 new B3.1 units, incl. shared-core / shut-sharing / `display_wire`; unit + parity + `cargo test
+conformance`), `cargo clippy -- -D warnings` clean.
 
 **B3 is decomposed into a persistent, multi-session plan.** Tier-C OS-thread multicore (B3) — with
 B4 (real `Shared`) and B5 (real `Executor` pool) folded in, since under shared-nothing threads they're
@@ -31,10 +37,10 @@ the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
 decisions A–G, risk register, per-phase TDD focus). The surface of `spawn` / `parallel:` / `Channel` /
 `Shared` / `Executor` stays **unchanged**.
 
-**Next candidate:** **B3.1 — move `Channel`/`Shared`/`Executor` cores out of the heap into
-`Arc<…Core>`** holding `WireValue`, drop their `children()` arms (`heap.rs`), and have the cooperative
-scheduler's `pick_runnable` poll core length via the lock. Still single-thread, still cooperative —
-behavior stays unchanged (every existing golden + GC-stress stays green). Phases B3.1–B3.2 continue to
+**Next candidate:** **B3.2 — `Arc<Program>` + worker-VM construction (no threads).** `spawn` builds a
+fresh worker `Vm` sharing `Arc<Program>`, runs the task **synchronously** in its own heap, and
+wire-copies args in + result/`out` back — resolving the worker-VM/heap-handoff plumbing in isolation.
+Still single-thread, behavior unchanged. Phase B3.2 continues to
 ship behind unchanged behavior; `--parallel` (and nondeterminism) appears at B3.3. The #1 risk to
 resolve before B3.3: **mutable module globals can't cross threads** (likely a spec restriction). When
 B3.3 lands real `Err` arms, `to_wire`'s `Result` (forward-plumbed in B3.0) goes load-bearing.

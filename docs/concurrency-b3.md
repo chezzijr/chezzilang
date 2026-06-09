@@ -57,14 +57,15 @@ concurrent engine.**
    into *that* heap → cannot be shared. Under B3:
    - The shared object lives outside every heap: `Arc<ChannelCore>` where
      `ChannelCore { q: Mutex<VecDeque<WireValue>>, cv: Condvar, /* + close/cancel bits later */ }`.
-   - The heap holds only a **handle** (`Obj::Channel(Arc<ChannelCore>)`), and the `children()` arm for
-     `Channel` is **dropped** (nothing in *this* heap to trace — the core holds `WireValue`, no
-     `GcRef`).
-   - `send` = lock + `push_back(to_wire(v))` + `notify_one`; `recv` = lock + `pop_front`-or-
-     **`cv.wait` (real OS-thread blocking)**; `try_recv` = lock + pop-or-`None`; `len` = lock + len.
+   - The heap holds only a **handle** (`Obj::Channel(Arc<ChannelCore>)`). The `children()` arm is
+     **rewritten** to trace `Handle(GcRef)`s embedded in the core's `WireValue`s (B3.1 — see decision
+     E), and only **dropped** once `WireValue` is fully `GcRef`-free at B3.3. (B3.1 ships
+     `ChannelCore { q: Mutex<VecDeque<WireValue>> }`; the `cv`/close/cancel bits land at B3.3/B3.4.)
+   - `send` = lock + `push_back(to_wire(v))`; `recv` = lock + `pop_front` + `from_wire` (B3.3 adds the
+     `cv.wait` real-OS-thread blocking path); `try_recv` = lock + pop-or-`None`; `len` = lock + len.
 
 4. **`Shared` core moves OUT of the heap** (this **subsumes B4**). `Arc<SharedCore { Mutex<WireValue> }>`;
-   the heap holds the handle, `children()` `Shared` arm dropped. `get`/`set` lock + wire-convert;
+   the heap holds the handle, `children()` `Shared` arm rewritten (B3.1; dropped at B3.3). `get`/`set` lock + wire-convert;
    `update` locks, `from_wire`s the value into the **calling** thread's heap, runs the user closure
    there, then `to_wire`s the result back under the lock.
 
@@ -145,11 +146,20 @@ race-prone — a false-positive deadlock fault is the failure mode to test again
 
 ### E. GC + Arc cores
 
-- **Per-thread GC never traces into a core.** After B3 the heap holds `Obj::Channel(Arc<ChannelCore>)`
-  (etc.); `children()` returns nothing for it (cores hold `WireValue`, no `GcRef`). The heap object is
-  still reachable via its handle (so the `Arc` isn't dropped while reachable), but tracing **stops at
-  the `Arc` boundary**. The `Channel`/`Shared`/`Executor` arms in `src/vm/heap.rs:273–275` are
-  removed. Clean.
+- **Per-thread GC and the cores.** The end-state goal is that `children()` returns nothing for a core
+  (tracing stops at the `Arc` boundary). **But this is only reachable once `WireValue` is fully
+  `GcRef`-free**, which it is *not* until B3.3: at B3.1 the cores hold `WireValue`s that can still
+  embed `Handle(GcRef)`s — a `Channel[str]` queues `Str` handles, and an `Executor` queues submitted
+  **closures** as `Handle(closure)` (closures can't cross by value until the G1 module-globals
+  decision lands at B3.3). Those GcRefs point into the live heap and must stay rooted.
+  - **B3.1 (landed): the `children()` arms are NOT dropped — they are *rewritten*.** For
+    `Obj::Channel/Shared/Executor(Arc<…Core>)` `children()` locks the core and walks its `WireValue`s
+    via `WireValue::collect_gcrefs`, yielding the embedded `Handle` GcRefs (it stops at a nested core —
+    that core is rooted via its own handle). This is what keeps `Channel[str]`/executor closures alive
+    under `gc_stress` (proof: `executor_autodrain_survives_gc_stress`, `executor_tasks_survive_gc_stress`,
+    `shared_box_survives_gc_stress`, `spawn_pending_tasks_survive_gc_stress`).
+  - **B3.3 (future): drop the arms** once `Str` crosses by value (owned-bytes wire arm) and G1 lets
+    closures cross by value — only then do cores genuinely hold no `GcRef`.
 - **Known leak — do NOT claim "no cycles".** Reply-channel `Arc` cycles are reachable: `ChannelCore A`'s
   queue holds `WireValue::Channel(Arc<B>)` and B's holds `Arc<A>`; drop both handles and the pair
   leaks for the program's lifetime — `Arc` is refcounted, not cycle-collected. A proper fix needs a
@@ -193,7 +203,7 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 | Phase | What | TDD focus | Behavior |
 |-------|------|-----------|----------|
 | **B3.0** | **Wire-format airlock, single-thread.** Define `WireValue`; replace the `deep_clone` call sites (spawn / `Channel.send` / `Shared` get-set: re-grep — today they route through `deep_clone`, `src/vm/mod.rs:2913`) with a `to_wire`+`from_wire` round-trip into the *same* heap. | All existing concurrency goldens + GC-stress stay green (byte-identical); unit test `from_wire(to_wire(v))` structurally equals `deep_clone(v)` over the sendable set; a non-sendable value hits the defensive fault, not `unreachable!`. | **unchanged** |
-| **B3.1** | **Move Channel/Shared/Executor cores out of the heap** into `Arc<…Core>` holding `WireValue`; drop the `children()` arms (`heap.rs:273–275`); the cooperative scheduler's `pick_runnable` (`mod.rs:2827`) polls `ChannelCore` length via the lock instead of `Obj::Channel(q).is_empty()`. Still single-thread, still cooperative. | Same goldens green incl. `channel_block.expected` and the all-blocked deadlock golden; GC-stress still green (parked fibers + cores survive). | **unchanged** |
+| **B3.1** ✅ | **Move Channel/Shared/Executor cores out of the heap** into `Arc<…Core>` holding `WireValue`. Cores: `ChannelCore { q: Mutex<VecDeque<WireValue>> }`, `SharedCore { v: Mutex<WireValue> }`, `ExecutorCore { inner: Mutex<ExecState{queue,shut}> }` (`src/vm/core.rs`; no `Condvar` yet — cooperative `recv` parks the fiber, a condvar would be dead until B3.3). `to_wire`/`from_wire` gain `Channel/Shared/Executor(Arc<…Core>)` arms (cross as the shared `Arc`; `from_wire` allocs a fresh handle onto the same core). **`children()` arms REWRITTEN, not dropped** (see decision E — cores still embed `Handle(GcRef)`s single-thread). `pick_runnable` polls `core.q.lock()` length. | Same goldens green incl. `channel_block.expected` and the all-blocked deadlock golden; GC-stress still green (parked fibers + cores survive). | **unchanged** |
 | **B3.2** | **`Arc<Program>` + worker-VM construction (no threads).** `spawn` builds a fresh worker `Vm` sharing `Arc<Program>`, runs the task **synchronously** in it, wire-copies args in and result + `out` back. Resolves the worker-VM/heap-handoff plumbing in isolation. | Goldens green; a unit test proves a task runs in a distinct heap and its result/`out` come back correctly. | **unchanged** |
 | **B3.3** | **Real OS threads behind `--parallel`.** Bounded pool (decision B), condvar `recv` (decision C blocking), buffer-flush-on-join (decision F). Cooperative engine stays the **default**. **Resolve decision G(1) — module globals — first.** | NEW `--parallel`-only goldens that are deterministic-by-construction (collect→drain→sort→print) + order-insensitive (set-of-lines) assertions; every existing golden stays on the default engine and stays green. | **`--parallel` new** |
 | **B3.4** | **Cancellation + cross-thread `os.exit`.** Per-nursery `cancel` flag, condvar wake-on-cancel, exit-code propagation up the join (decision C). | First-fault-aborts-running-siblings; a child `os.exit` halts the process with the right code; `recover:`/`defer` still compose. | `--parallel` |
@@ -203,8 +213,8 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 **Status checklist** (tick as phases land):
 
 - [x] B3.0 — wire-format airlock (single-thread, parity-preserved) ✅ **landed**
-- [ ] B3.1 — cores out of heap (`Arc<…Core>`) ← **next session starts here**
-- [ ] B3.2 — `Arc<Program>` + worker-VM construction (no threads)
+- [x] B3.1 — cores out of heap (`Arc<…Core>`, single-thread, parity-preserved) ✅ **landed**
+- [ ] B3.2 — `Arc<Program>` + worker-VM construction (no threads) ← **next session starts here**
 - [ ] B3.3 — real OS threads behind `--parallel`
 - [ ] B3.4 — cancellation + cross-thread `os.exit`
 - [ ] B3.5 — nursery-local deadlock detection under threads
@@ -222,6 +232,24 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 > `Heap::alloc` never collects, so it inherits `deep_clone`'s GC-safety. 3 unit tests (`wire_*`) pin
 > round-trip value-equality, map hash/order preservation, and by-handle identity; all existing
 > concurrency goldens + GC-stress stayed byte-identical.
+
+> **B3.1 landed note (for the B3.2+ maintainer):** The cores live in `src/vm/core.rs`
+> (`ChannelCore`/`SharedCore`/`ExecutorCore` + `ExecState`), each a `Mutex` (uncontended at B3.1; the
+> `Condvar`/cancel bits are deferred to B3.3/B3.4). The heap holds `Obj::Channel/Shared/Executor(Arc<…Core>)`
+> (`src/vm/heap.rs`). The airlock now serializes *at the core boundary*: `send`/`set`/`submit` =
+> `to_wire`→store `WireValue`; `recv`/`get`/`update`/`shutdown` = pop/clone `WireValue`→`from_wire`
+> (net == old `deep_clone`, one round-trip). `to_wire`/`from_wire` gained `Channel/Shared/Executor(Arc)`
+> arms; `from_wire` allocs a **fresh** handle onto the **same** `Arc`, so a crossed core is shared, not
+> copied (`wire_shares_core_across_a_fresh_handle`, `channel_core_shared_across_handles`). **The GC
+> `children()` arms were REWRITTEN, not dropped** (decision E): they lock the core and yield embedded
+> `Handle(GcRef)`s via `WireValue::collect_gcrefs`. `deep_clone` still exists (spawn args/captures
+> route through it) and stays total. **Never hold a `MutexGuard` across `invoke_value`** (`Shared.update`,
+> `Executor.shutdown` drain loop lock→read→drop-guard→call→relock). `display` can't `from_wire` (it's
+> `&self`), so `display_wire(&self, &WireValue)` renders a `Shared` box's contents. `executors:
+> Vec<GcRef>` (autodrain registry) is unchanged; `shut` moved into the shared core so a `from_wire`'d
+> alias can't be double-drained (`executor_core_shut_is_shared_across_handles`). B3.2 next: `Arc<Program>`
+> + a worker `Vm` that runs a `spawn`'d task **synchronously** in its own heap, wire-copying args in /
+> result+`out` back — still no threads.
 
 ---
 
