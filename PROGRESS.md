@@ -17,8 +17,9 @@ sequential subset) with **program-exit auto-drain** (C5 / A2) and the C5 checker
 `spawn` / `parallel:` / `Channel[T]` / `Shared[T]` / `Executor` all run on **both** engines.
 **Group B's B1 + B2 (cooperative fibers + blocking `recv`) have now landed on the VM engine**: a
 `recv` on an empty channel suspends the running fiber and the scheduler resumes it when a sibling
-`send`s, so mid-flight producer/consumer works (`examples/channel_block.chz`). Latest suite:
-**1268 tests** green (unit + parity + `cargo test conformance`), `cargo clippy` clean.
+`send`s, so mid-flight producer/consumer works (`examples/channel_block.chz`). **`Channel.try_recv()`
+(A1) — the non-blocking poll — now ships on both engines** (`examples/try_recv.chz`). Latest suite:
+**1279 tests** green (unit + parity + `cargo test conformance`), `cargo clippy` clean.
 
 **Next candidate:** finish **Group B** *on the VM*: **B3** Tier-C OS-thread multicore (alternative
 bet), then **B4** real `Shared` and **B5** real `Executor` background pool (incl. the deferred A3b
@@ -50,9 +51,11 @@ one (structured-concurrency scoping).
 auto-drain) is done** (this session, both engines). **A3a** (reject a non-sendable read smuggled
 through a *nested closure* in a `spawn:` block) was found **already enforced** — emergent from the
 persistent `capture_floors` + the `infer_ident` read gate — and is now **pinned by a regression
-test**. **Dropped:** **A1** (`Channel.try_recv`) — a primitive whose motivating mid-flight-producer
-scenario needs the engine; **A3b** (`Executor.submit` capture gate) — `submit` runs the closure
-in-heap at the drain, so gating it now would wrongly reject valid programs (lands with Group B).
+test**. **A1** (`Channel.try_recv`) — originally dropped (its mid-flight-producer scenario needed the
+engine), **now shipped on both engines** once B1/B2 unblocked it (a non-blocking poll runs identically
+on the interp, so it stays parity-tested). **Still dropped:** **A3b** (`Executor.submit` capture gate)
+— `submit` runs the closure in-heap at the drain, so gating it now would wrongly reject valid programs
+(lands with Group B).
 
 **Permanent non-goals:** **interp B1/B2 (suspendable tree-walker)** — see the DECISION box above;
 `yield`/generators, variadic args, Level-3 dynamic `cdylib`/C-ABI FFI, bignum (`i64`-only — every
@@ -64,6 +67,19 @@ overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
 
+- ✅ **Concurrency A1 — `Channel.try_recv() -> T?`** (both engines). A **non-blocking** poll: `Some(v)`
+  if the mailbox has a queued value, `None` if empty — it never blocks, faults, or suspends a fiber
+  (the opposite of `recv`, which faults `deadlock` / parks under the scheduler on an empty channel).
+  One mirrored arm per engine (checker `channel_method_sig` → `Ty::option(elem)`; interp
+  `eval_channel_method`; VM `channel_method` via `alloc_enum` — and crucially the VM arm never touches
+  `scheduler_stack`/`native_reentry`/`suspend`/`ip`, so it can't route through the `recv` park path).
+  Originally **dropped** (its motivating mid-flight-producer scenario was unreachable under
+  run-to-completion) and **un-deferred** once B1/B2 landed; because it's non-blocking it runs
+  *identically* on the sequential interp and the VM, so it ships on both and stays parity-tested.
+  `examples/try_recv.chz` golden (VM + interp byte-identical + GC-stress) + checker type/arity tests +
+  per-engine empty/`Some`/in-`parallel`-no-suspend tests + a VM `try_recv`-drains-residue-after-a-
+  blocking-`recv`-resumes test (pins the resume path leaves `suspend`/`ip` clean). Reviewed by two
+  parallel S++ reviewers — no correctness findings. `docs/concurrency.md` §5/§9 + `docs/syntax.md`.
 - ✅ **Concurrency C5 / Group B — B1 + B2 cooperative fibers + blocking `recv`** (VM engine). The
   bytecode VM gained *suspendable execution*: a `recv` on an empty channel under an active `parallel:`
   scheduler **parks** the running fiber (rewind-and-retry at the instruction boundary — push the
@@ -213,8 +229,9 @@ Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.ch
   **B4** real `Shared`, **B5** real `Executor` pool (incl. the deferred `submit`-capture gate A3b).
   **interp B1/B2 is a deliberate non-goal** (see the DECISION box in Current focus — the interp stays
   the sequential-subset parity oracle; the VM is the sole concurrent engine). Group A is done: C1–C4,
-  the `Executor` sequential subset, **A2 auto-drain**, the C5 checker refinements, and **A3a**
-  (pinned). See the A/B breakdown in `docs/concurrency.md` §9.
+  the `Executor` sequential subset, **A2 auto-drain**, the C5 checker refinements, **A3a** (pinned),
+  and **A1** (`Channel.try_recv`, both engines). Only A3b is left (lands with Group B). See the A/B
+  breakdown in `docs/concurrency.md` §9.
 - VM/GC optimizations (superinstructions, inline caching, NaN-boxing) — written up in
   **[`docs/future.md`](docs/future.md)**.
 

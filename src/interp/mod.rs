@@ -1943,6 +1943,15 @@ impl Interp {
                     }),
                 }
             }
+            "try_recv" => {
+                // A1: non-blocking poll. `Some(v)` if queued, `None` if empty — never the deadlock
+                // fault `recv` raises (and never suspends; the VM twin mirrors this exactly).
+                builtins::arity("try_recv", &args, 0, span)?;
+                Ok(match q.borrow_mut().pop_front() {
+                    Some(v) => Value::Enum { ty: "Option".into(), variant: "Some".into(), payload: vec![v] },
+                    None => Value::Enum { ty: "Option".into(), variant: "None".into(), payload: vec![] },
+                })
+            }
             "len" => {
                 builtins::arity("len", &args, 0, span)?;
                 Ok(Value::Int(q.borrow().len() as i64))
@@ -4597,6 +4606,16 @@ b := Buf([10, 20, 30])
         assert_eq!(run_capture(source).expect("channel.chz should run"), expected);
     }
 
+    /// A1 concurrency golden: `Channel[T].try_recv()` — a non-blocking poll. Workers `send` at the
+    /// dedent; the parent drains the mailbox with `try_recv` (`Some` per value, `None` once empty)
+    /// instead of guarding every `recv` with `len()`. Non-blocking, so byte-identical on both engines.
+    #[test]
+    fn golden_try_recv_chz() {
+        let source = include_str!("../../examples/try_recv.chz");
+        let expected = include_str!("../../examples/try_recv.expected");
+        assert_eq!(run_capture(source).expect("try_recv.chz should run"), expected);
+    }
+
     /// C3 concurrency golden: the canonical `Shared[T]` cross-task counter — three spawned tasks
     /// each `update` the same box through a copied handle; the parent reads `3` after the join, then
     /// `set`/`get` round-trips. Interp-only until C4.
@@ -4703,6 +4722,21 @@ b := Buf([10, 20, 30])
         let err = run_capture("fn main():\n    ch := Channel[int]()\n    print(ch.recv())\nmain()\n")
             .unwrap_err();
         assert!(err.message.contains("deadlock"), "got: {}", err.message);
+    }
+
+    /// A1: `try_recv` on an empty channel returns `None` — never the deadlock fault `recv` raises
+    /// (contrast `channel_recv_on_empty_is_deadlock_error`). The non-blocking poll.
+    #[test]
+    fn channel_try_recv_on_empty_returns_none() {
+        let src = "fn main():\n    ch := Channel[int]()\n    match ch.try_recv():\n        Some(v): print(\"got {v}\")\n        None: print(\"empty\")\nmain()\n";
+        assert_eq!(run(src), "empty\n");
+    }
+
+    /// A1: `try_recv` on a non-empty channel returns `Some(v)` (FIFO, like `recv`).
+    #[test]
+    fn channel_try_recv_with_value_returns_some() {
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.send(42)\n    match ch.try_recv():\n        Some(v): print(v)\n        None: print(\"empty\")\nmain()\n";
+        assert_eq!(run(src), "42\n");
     }
 
     /// Parity-gap pin (B1/B2 is VM-only for now): a mid-flight blocking `recv` that the VM resolves

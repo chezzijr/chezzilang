@@ -1,0 +1,24 @@
+# Concurrency A1: `Channel[T].try_recv()` — a non-blocking poll returning `T?`. Workers run at the
+# nursery's dedent and queue their results FIFO; the parent then DRAINS the mailbox with `try_recv`
+# (`Some(v)` per queued value, `None` once empty) instead of guarding every `recv` with `len()`.
+# `try_recv` never blocks and never faults on an empty channel — byte-identical on both engines.
+
+fn worker(id: int, out: Channel[int]):
+    out.send(id * 10)
+
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn worker(1, ch)
+        spawn worker(2, ch)
+        spawn worker(3, ch)
+    # Four polls: three `Some` (the queued results), then `None` — the channel is drained, and
+    # `try_recv` reports empty rather than blocking or faulting like `recv` would.
+    for _ in 0..4:
+        match ch.try_recv():
+            Some(v):
+                print("got {v}")
+            None:
+                print("empty")
+
+main()

@@ -4671,6 +4671,7 @@ fn channel_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
     let (params, ret) = match method {
         "send" => (vec![elem.clone()], Ty::Nil),
         "recv" => (vec![], elem.clone()),
+        "try_recv" => (vec![], Ty::option(elem.clone())),
         "len" => (vec![], Ty::Int),
         _ => return None,
     };
@@ -4821,6 +4822,40 @@ mod graph_tests {
         let errs = errors(&entry);
         assert!(
             errs.iter().any(|m| m.contains("'Point' is already defined")),
+            "got: {errs:?}"
+        );
+    }
+
+    // 22. A1: `Channel[T].try_recv()` is typed `T?` (Option[T]). A correct `int?` return checks
+    // clean; a `str?` return is a type mismatch (pins the element-typed Option result).
+    #[test]
+    fn channel_try_recv_returns_option_of_elem() {
+        let t = TmpDir::new();
+        let ok = t.write(
+            "ok.chz",
+            "fn f() -> int?:\n    ch := Channel[int]()\n    return ch.try_recv()\nfn main(): print(1)\n",
+        );
+        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
+
+        let bad = t.write(
+            "bad.chz",
+            "fn f() -> str?:\n    ch := Channel[int]()\n    return ch.try_recv()\nfn main(): print(1)\n",
+        );
+        let errs = errors(&bad);
+        assert!(errs.iter().any(|m| m.contains("str")), "expected Option type mismatch: {errs:?}");
+    }
+
+    // 23. A1: `try_recv` takes no arguments — a call with one is rejected on arity.
+    #[test]
+    fn channel_try_recv_arity_rejected() {
+        let t = TmpDir::new();
+        let bad = t.write(
+            "bad.chz",
+            "fn f() -> int?:\n    ch := Channel[int]()\n    return ch.try_recv(5)\nfn main(): print(1)\n",
+        );
+        let errs = errors(&bad);
+        assert!(
+            errs.iter().any(|m| m.contains("try_recv") && m.contains("argument")),
             "got: {errs:?}"
         );
     }

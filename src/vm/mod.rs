@@ -3003,6 +3003,20 @@ impl Vm {
                     )),
                 }
             }
+            "try_recv" => {
+                // A1: non-blocking poll. Unlike `recv` it never touches `scheduler_stack` /
+                // `native_reentry` / `suspend` / `ip` — it always returns immediately with an
+                // `Option`: `Some(v)` if queued, `None` if empty. Mirrors `interp::eval_channel_method`.
+                self.arity_err("try_recv", args, 0, span)?;
+                let popped = match self.heap.get_mut(h) {
+                    Obj::Channel(q) => q.pop_front(),
+                    _ => unreachable!("channel_method on non-channel"),
+                };
+                Ok(match popped {
+                    Some(v) => self.alloc_enum("Option", "Some", vec![v]),
+                    None => self.alloc_enum("Option", "None", vec![]),
+                })
+            }
             "len" => {
                 self.arity_err("len", args, 0, span)?;
                 let n = match self.heap.get(h) {
@@ -4944,6 +4958,19 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// A1 golden: `Channel[T].try_recv()` — a non-blocking poll returning `T?`. Workers `send` at the
+    /// dedent; the parent drains with `try_recv` (`Some` per value, then `None`). Never blocks/faults,
+    /// so byte-identical on the VM, the interpreter, and the `.expected` file.
+    #[test]
+    fn golden_try_recv_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/try_recv.chz");
+        let expected = include_str!("../../examples/try_recv.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(run_capture_stress(src), expected);
+    }
+
     /// B1+B2 golden (VM-only): blocking `recv`. The consumer is scheduled first, parks on the empty
     /// channel, the cooperative scheduler runs the producer, and the consumer resumes to receive. The
     /// interpreter still faults `deadlock` on the same program (documented parity gap — see the interp
@@ -5066,6 +5093,42 @@ main()";
     fn channel_recv_on_empty_is_deadlock_error() {
         let err = run_err("fn main():\n    ch := Channel[int]()\n    print(ch.recv())\nmain()\n");
         assert!(err.contains("deadlock"), "got: {err}");
+    }
+
+    /// A1: `try_recv` on an empty channel returns `None` (never the `recv` deadlock fault).
+    #[test]
+    fn channel_try_recv_on_empty_returns_none() {
+        let src = "fn main():\n    ch := Channel[int]()\n    match ch.try_recv():\n        Some(v): print(\"got {v}\")\n        None: print(\"empty\")\nmain()\n";
+        assert_eq!(run(src), "empty\n");
+    }
+
+    /// A1: `try_recv` on a non-empty channel returns `Some(v)` (FIFO).
+    #[test]
+    fn channel_try_recv_with_value_returns_some() {
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.send(42)\n    match ch.try_recv():\n        Some(v): print(v)\n        None: print(\"empty\")\nmain()\n";
+        assert_eq!(run(src), "42\n");
+    }
+
+    /// A1 × B1/B2 (VM-only): `try_recv` must drain the residue left after a *blocking* `recv` resumed.
+    /// The consumer parks on an empty `recv`; the producer sends two values; the consumer resumes,
+    /// `recv`s the first, then polls the rest with `try_recv` (the second value, then `None`). Pins
+    /// that the resume path leaves `suspend`/`ip` clean so the following non-blocking polls behave.
+    #[test]
+    fn try_recv_drains_residue_after_blocking_recv_resumes() {
+        let src = "fn producer(ch: Channel[int]):\n    ch.send(1)\n    ch.send(2)\nfn consumer(ch: Channel[int]):\n    a := ch.recv()\n    print(\"recv {a}\")\n    match ch.try_recv():\n        Some(v): print(\"try {v}\")\n        None: print(\"try empty\")\n    match ch.try_recv():\n        Some(v): print(\"try {v}\")\n        None: print(\"try empty\")\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn consumer(ch)\n        spawn producer(ch)\nmain()\n";
+        let expected = "recv 1\ntry 2\ntry empty\n";
+        assert_eq!(run(src), expected);
+        assert_eq!(run_capture_stress(src), expected);
+    }
+
+    /// A1 regression guard: `try_recv` on an empty channel INSIDE an active `parallel:` scheduler must
+    /// return `None` — it must NOT route through the `recv` park path (which would suspend the lone
+    /// child and then deadlock, since no sibling can ever send). Pins try_recv as truly non-blocking.
+    #[test]
+    fn channel_try_recv_in_parallel_does_not_suspend() {
+        let src = "fn probe(ch: Channel[int]):\n    match ch.try_recv():\n        Some(v): print(v)\n        None: print(\"empty\")\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn probe(ch)\nmain()\n";
+        assert_eq!(run(src), "empty\n");
+        assert_eq!(run_capture_stress(src), "empty\n");
     }
 
     #[test]

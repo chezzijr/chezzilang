@@ -210,6 +210,7 @@ the airlock, never live in two heaps at once.
 ch := Channel[str]()       # construct; capitalized like Shared[T] / Option[T]
 ch.send(x)                 # x moved/copied OUT of the sender's heap → channel queue
 v := ch.recv()             # value reconstructed IN the receiver's heap
+opt := ch.try_recv()       # non-blocking poll: Some(v) if queued, None if empty
 n := ch.len()              # current queued count
 ```
 
@@ -217,6 +218,7 @@ n := ch.len()              # current queued count
 |--------|-----------|-------|
 | `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); sender can't reuse a moved value |
 | `recv` | `recv(self) -> T` | dequeue (FIFO); blocking surface (see below) |
+| `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll (A1): `Some(v)` if queued, `None` if empty — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
 | `len`  | `len(self) -> int` | queued count — use to guard a `recv` |
 
 - **Buffered (unbounded) FIFO** under the sequential executor, so `send` never blocks.
@@ -228,8 +230,11 @@ n := ch.len()              # current queued count
   — the checker enforces it, like a Rust channel). Deep-copy is the fallback when the sender wants to
   keep its copy.
 - **Channels are themselves sendable** — pass a `Channel` over a `Channel` for reply channels.
-- *(Candidate, pin when C2 is built:* a non-blocking `try_recv() -> Option[T]` alongside the blocking
-  `recv`. The doc records both; `recv -> T` is primary for C5 fidelity.)*
+- **`try_recv() -> T?` is shipped (A1, both engines).** The non-blocking sibling of `recv`: it
+  pops-or-returns-`None` and never blocks, faults, or suspends a fiber — so it is identical under the
+  sequential interpreter and the VM (parity-tested). With B1/B2's blocking `recv` on the VM, a fiber
+  can also drain a mailbox's residue after a blocking `recv` resumes. `recv -> T` stays primary; reach
+  for `try_recv` to poll without guarding on `len()`.
 
 ---
 
@@ -464,12 +469,11 @@ and shippable now; Group B is gated on **B1**. The surface of `spawn` / `paralle
 |---|------|--------|
 | **A2** | `Executor` **program-exit auto-drain** — reap any executor never explicitly `shutdown`-ed at a clean exit (per-engine registry that doubles as a GC root; FIFO creation order; `os.exit` skips it; a faulting program is not drained). | ✅ **done, both engines** (see [§8](#the-escape-hatch-c5-executor--a-separately-owned-work-queue)) |
 | **A3a** | Reject a non-sendable **read through a nested closure** inside a `spawn:` block. | ✅ **already enforced** — emergent from the persistent `capture_floors` + the `infer_ident` read gate; pinned by a regression test (`read_captured_closure_through_nested_closure_in_spawn_block_rejected`). |
+| **A1** | `Channel.try_recv() -> T?` — a **non-blocking poll** (`Some(v)`/`None`, never blocks/faults/suspends). Originally deferred (its motivating mid-flight-producer scenario needed the engine), un-deferred once B1/B2 landed. | ✅ **done, both engines, parity-tested** (it never suspends, so the interp runs it identically — see [§5](#5-channelt--a-mailbox-outside-every-heap)). |
 
-> *Dropped from Group A:* **A1** (`Channel.try_recv() -> T?`) — a non-blocking poll whose motivating
-> scenario (a live mid-flight producer) is unreachable under run-to-completion; a primitive awaiting
-> the engine. **A3b** (`Executor.submit` capture sendability gate) — `submit` runs the closure
-> in-heap at the drain, so a non-sendable capture is *benign today*; gating it now would wrongly
-> reject valid programs. Both belong with Group B.
+> *Dropped from Group A:* **A3b** (`Executor.submit` capture sendability gate) — `submit` runs the
+> closure in-heap at the drain, so a non-sendable capture is *benign today*; gating it now would
+> wrongly reject valid programs. It belongs with Group B.
 
 **Group B — the real engine (deferred epic)**
 
@@ -519,7 +523,9 @@ agree on the sequential subset (including all non-blocking `parallel:`/`spawn`/`
 `Executor` programs, byte-identical, parity-tested), while a **blocking `recv` is VM-only** — under
 `--interp` it faults `deadlock` (pinned: `interp::tests::channel_block_chz_faults_deadlock_on_interp`
 vs the VM golden `golden_channel_block_chz_matches_expected`). This is the stated contract, not a bug
-to fix. Consequence: **A1** (`Channel.try_recv`) lands on the VM, not gated on interp parity.
+to fix. Note: **A1** (`Channel.try_recv`) shipped on **both** engines after all — being *non-blocking*
+it never suspends, so the interp runs it identically and it stays parity-tested (it is not gated on the
+blocking-`recv` divergence).
 
 **Still open (VM):** **B3** OS-thread multicore (alternative bet), **B4** real `Shared`, **B5** real
 `Executor` pool (+ A3b). VM v1 limits to lift if wanted: blocking `recv` inside a native callback,
