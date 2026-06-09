@@ -39,6 +39,24 @@ behavior byte-identical. Latest suite: **1292 tests** green (1287 + 5 new B3.2 u
 result+out / program-Arc-sharing / str-rejection / method-rejection; unit + parity + `cargo test
 conformance`), `cargo clippy -- -D warnings` clean.
 
+**B3.3a — `str` crosses the airlock by value — has now landed** (VM): an owned-bytes
+`WireValue::Str(Box<str>)` arm replaces the by-reference `Handle` for `str` in `to_wire`/`from_wire`/
+`display_wire`/`collect_core_gcrefs`, so a `str` (and any data containing it) now crosses a worker
+boundary instead of being rejected as a dangling `GcRef`. Parity-safe — `str` is immutable, value-
+compared, has no identity operator — so a fresh handle on reconstruction is unobservable; all goldens
+byte-identical.
+
+**B3.3b — the G1 module-globals checker gate — has now landed** (checker): a reassignment of a module
+global reachable, directly or transitively through free-function calls, from a `spawn` task is a type
+error (*"cannot mutate module global '…' from a parallel task; use Shared[T]"*). Flow-scoped to spawn
+reachability; scope-aware name resolution (params/`let`/`for`/`match`/closure/comprehension binders, so
+a local shadowing a free fn or global is never mis-flagged); descends `recover:` blocks. Direct in-
+`spawn:`-block writes stay caught by the existing `is_captured` gate. Reviewed by a 4-agent S++ panel
++ a cold pass (caught and fixed a false-positive on shadowed spawn targets and a `recover:`-block
+false-negative before they shipped). Two indirect-dispatch gaps documented (global-closure spawn
+target, method chains) → B3.3-threads. Latest suite: **1306 tests** green (unit + parity + `cargo test
+conformance`), `cargo clippy` clean.
+
 **B3 is decomposed into a persistent, multi-session plan.** Tier-C OS-thread multicore (B3) — with
 B4 (real `Shared`) and B5 (real `Executor` pool) folded in, since under shared-nothing threads they're
 the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
@@ -46,18 +64,16 @@ the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
 decisions A–G, risk register, per-phase TDD focus). The surface of `spawn` / `parallel:` / `Channel` /
 `Shared` / `Executor` stays **unchanged**.
 
-**Next candidate:** **B3.3 — real OS threads behind `--parallel`.** Wire `run_task_isolated` into a
-bounded-pool `join_nursery` under a new `--parallel` flag (cooperative engine stays the default);
-condvar `recv` blocking + buffer-flush-on-join. `--parallel` is where nondeterminism first appears, so
-it gets its own deterministic-by-construction test suite (collect→sort→print). **Decision G1 is
-resolved — Option A:** under `--parallel`, module globals are **read-only after init** (a `SetGlobal`
-reachable from a `spawn` task is a checker error) and cross-task mutation goes through `Shared[T]` —
-applying the existing `value → Ref[T] (in-task) → Shared[T] (cross-task)` ladder (the same rule that
-makes `Ref` non-sendable at a `spawn`) to globals; the worker gets a read-only `home` snapshot.
-B3.3 also owes `str`/closure **cross-by-value**
-(owned-bytes `WireValue::Str` + `Closure` arm, then relax `ensure_crossable`) and method-task support;
-when those `Err` arms go load-bearing, `to_wire`'s `Result` (forward-plumbed since B3.0) is used for real.
-Items *not* in B3–B5 (cross-nursery wakeups,
+**Next candidate:** **B3.3-threads — real OS threads behind `--parallel`.** Wire `run_task_isolated`
+into a bounded-pool `join_nursery` under a new `--parallel` flag (cooperative engine stays the
+default); condvar `recv` blocking + buffer-flush-on-join. `--parallel` is where nondeterminism first
+appears, so it gets its own deterministic-by-construction test suite (collect→sort→print). The two
+remaining B3.3 "owes" fold in here because both are module-graph reconstruction (top-level fns resolve
+via `GetGlobal`→`home`; imports via `module_objs`): the **read-only `home` snapshot** (replacing the
+worker's fresh-empty placeholder so tasks can read globals + call sibling fns) and **method tasks**
+(`spawn obj.m()`). The G1 checker gate and `str`-by-value already shipped (B3.3a/b). A `Closure` wire
+arm is deferred until a live path needs it (`Executor.submit` capture crossing = A3b/B3.6) — adding it
+now would be untested dead code. Items *not* in B3–B5 (cross-nursery wakeups,
 recv-in-native-callback, `Channel.close()`, A3b) are now documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
@@ -102,6 +118,24 @@ overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
 
+- ✅ **Concurrency B3.3b — G1 module-globals checker gate** (checker, parity-preserved). A
+  reassignment (`=`/`+=`/`-=`) of a module global reachable — directly or transitively through
+  free-function calls — from a `spawn` task is a type error (*"…use Shared[T]"*). New
+  `Checker::check_spawn_global_mutation` + scope-aware AST walkers (`collect_spawn_roots` /
+  `collect_free_calls_*` / `find_global_mutations` / `find_mutations_in_expr`): flow-scoped to spawn
+  reachability, transitive over the free-fn call graph (cycle-guarded), and scope-aware down to
+  closure-params/comprehension-vars so a shadowing binder is never mis-flagged; descends `recover:`
+  blocks. Direct in-`spawn:`-block writes stay caught by the existing `is_captured` gate. 4-agent S++
+  panel + cold pass caught a shadowed-spawn-target false positive and a `recover:` false negative
+  pre-merge. Documented gaps (→ B3.3-threads): global-closure spawn targets, method chains. 16 new
+  checker tests. `docs/concurrency-b3.md` B3.3b row.
+- ✅ **Concurrency B3.3a — `str` crosses the airlock by value** (VM, single-thread, parity-preserved).
+  Owned-bytes `WireValue::Str(Box<str>)` arm; `to_wire`/`from_wire`/`display_wire`/`collect_core_gcrefs`
+  handle it; `str` is no longer a by-reference `Handle`, so `ensure_crossable` lets `str` (and data
+  containing it) cross a worker boundary. Parity-safe (immutable, value-compared, no identity operator
+  → fresh handle is unobservable; cached map/set hashes preserved). 3 new VM units (incl. str map-key
+  round-trip); the B3.2 str-rejection test became `worker_crosses_str_by_value`. All concurrency +
+  GC-stress goldens byte-identical. `docs/concurrency-b3.md` B3.3a row.
 - ✅ **Concurrency B3.2 — `Arc<Program>` + isolated worker-VM construction** (VM, single-thread,
   parity-preserved). `program: Rc<Program>` → `Arc<Program>` (the compiled program is immutable after
   compile, so a worker shares it read-only — `Program` is plain owned data, `Send + Sync`). New
