@@ -475,8 +475,8 @@ and shippable now; Group B is gated on **B1**. The surface of `spawn` / `paralle
 
 | # | Item | Status |
 |---|------|--------|
-| **B1** | **Suspendable execution** — make the engine loop resumable. The fiber core; **everything else in B gates on it**. | ✅ **VM done** · ⬜ interp |
-| **B2** | **Cooperative scheduler** — task interleaving; real **blocking `recv`** (replaces the deadlock-detect fault); mid-flight producer↔consumer. | ✅ **VM done** · ⬜ interp |
+| **B1** | **Suspendable execution** — make the engine loop resumable. The fiber core; **everything else in B gates on it**. | ✅ **VM done** · 🚫 interp (non-goal) |
+| **B2** | **Cooperative scheduler** — task interleaving; real **blocking `recv`** (replaces the deadlock-detect fault); mid-flight producer↔consumer. | ✅ **VM done** · 🚫 interp (non-goal) |
 | **B3** | **Tier-C OS-thread multicore** — per-thread heap + GC; true parallelism. An *alternative bet* to B1/B2. | ⬜ |
 | **B4** | **Real `Shared[T]`** — owner-task + channel (today single-thread-serialised, already correct). | ⬜ |
 | **B5** | **Real `Executor` background pool** — actually-backgrounded tasks + graceful exit drain under real concurrency; plus A3b (submit-capture gating). | ⬜ |
@@ -509,11 +509,21 @@ no host call stack to rebuild. The design (all in `src/vm/mod.rs`):
 - **`std.os.exit` in a child** aborts its siblings and the program (rides the existing `pending_exit`
   hard-halt path, which stays VM-global, not per-fiber).
 
-**Still open (after the VM):** **interp B1/B2** — the tree-walker needs stackful coroutines or a CPS
-rewrite; until then a blocking `recv` is **VM-only** and the interpreter still faults `deadlock` (the
-documented parity gap). **Cross-nursery blocking** — a fiber in an outer nursery is not woken by
-progress in an inner one (structured-concurrency scoping). **A1** (`Channel.try_recv`) becomes
-implementable once interp parity lands.
+**Decision — interp B1/B2 is a deliberate NON-GOAL (do not build it).** The tree-walking interpreter
+stays frozen at the **sequential concurrency subset** and serves as the **differential-testing parity
+oracle** for the non-blocking language surface — its real value is catching VM / GC / compiler bugs,
+not running concurrent workloads. Suspendable execution would require stackful coroutines or a full
+CPS rewrite of `eval`: a large, risky cost to cover a narrow slice the oracle does not need. **The VM
+is the sole concurrent engine.** This makes the parity contract *narrowed by design*: the engines
+agree on the sequential subset (including all non-blocking `parallel:`/`spawn`/`Channel`/`Shared`/
+`Executor` programs, byte-identical, parity-tested), while a **blocking `recv` is VM-only** — under
+`--interp` it faults `deadlock` (pinned: `interp::tests::channel_block_chz_faults_deadlock_on_interp`
+vs the VM golden `golden_channel_block_chz_matches_expected`). This is the stated contract, not a bug
+to fix. Consequence: **A1** (`Channel.try_recv`) lands on the VM, not gated on interp parity.
+
+**Still open (VM):** **B3** OS-thread multicore (alternative bet), **B4** real `Shared`, **B5** real
+`Executor` pool (+ A3b). VM v1 limits to lift if wanted: blocking `recv` inside a native callback,
+and cross-nursery wakeups (a fiber in an outer nursery is not woken by an inner one).
 
 ---
 

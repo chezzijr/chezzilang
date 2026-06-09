@@ -20,21 +20,31 @@ sequential subset) with **program-exit auto-drain** (C5 / A2) and the C5 checker
 `send`s, so mid-flight producer/consumer works (`examples/channel_block.chz`). Latest suite:
 **1268 tests** green (unit + parity + `cargo test conformance`), `cargo clippy` clean.
 
-**Next candidate:** finish **Group B**. The remaining work: **B1/B2 for the interpreter** (the
-tree-walker needs stackful coroutines or a CPS rewrite — closing the documented parity gap below),
-**B3** Tier-C OS-thread multicore (alternative bet), then **B4** real `Shared` and **B5** real
-`Executor` background pool (incl. the deferred A3b `submit`-capture gate). The surface of `spawn` /
-`parallel:` / `Channel` / `Shared` / `Executor` is **unchanged**. Full A/B breakdown:
-**[`docs/concurrency.md`](docs/concurrency.md)** §9.
+**Next candidate:** finish **Group B** *on the VM*: **B3** Tier-C OS-thread multicore (alternative
+bet), then **B4** real `Shared` and **B5** real `Executor` background pool (incl. the deferred A3b
+`submit`-capture gate). The surface of `spawn` / `parallel:` / `Channel` / `Shared` / `Executor` is
+**unchanged**. Full A/B breakdown: **[`docs/concurrency.md`](docs/concurrency.md)** §9.
 
-**Parity gap (intentional, documented):** B1/B2 are **VM-only** for now. Under `--interp`, a blocking
-`recv` still faults `deadlock` (the interpreter has no suspendable execution yet). Programs that never
-block (C1–C5 goldens) stay byte-identical on both engines; only mid-flight blocking diverges, pinned
-by `interp::tests::channel_block_chz_faults_deadlock_on_interp` vs the VM golden. **Known v1 limits
-(VM):** a blocking `recv` cannot suspend inside a native callback (list HOFs, `sort`, `compare`/`hash`/
-`str` hooks, `Shared.update`, the executor drain, or a `defer`red call) — it faults `deadlock`
-instead (the callback's loop/recursion state lives on the host stack, not in a fiber); and a fiber in
-an outer nursery cannot be woken by progress in an inner one (structured-concurrency scoping).
+> **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,
+> not a TODO.** The interpreter stays frozen at the **sequential concurrency subset** and serves as
+> the **differential-testing parity oracle** for the non-blocking language surface (its real value:
+> catching VM / GC / compiler bugs). Giving it suspendable execution would need stackful coroutines
+> or a full CPS rewrite of `eval` — a large, risky cost to cover a narrow slice the oracle does not
+> need. **The VM is the sole concurrent engine.** Future sessions: spend effort on B3/B4/B5, not on
+> closing this gap. Revisit only if interp maintenance ever costs more than the bugs it catches.
+
+**Parity contract (narrowed, intentional):** the engines agree on the **sequential subset** —
+including all *non-blocking* `parallel:` / `spawn` / `Channel` / `Shared` / `Executor` programs
+(C1–C5 goldens, byte-identical, parity-tested). **Suspendable concurrency (blocking `recv`) is
+VM-only by design**: under `--interp` a blocking `recv` faults `deadlock`, pinned by
+`interp::tests::channel_block_chz_faults_deadlock_on_interp` vs the VM golden
+`golden_channel_block_chz_matches_expected`. This divergence is the stated contract, not a bug.
+
+**Known VM v1 limits (acceptable; not parity issues):** a blocking `recv` cannot suspend inside a
+native callback (list HOFs, `sort`, `compare`/`hash`/`str` hooks, `Shared.update`, the executor
+drain, or a `defer`red call) — it faults `deadlock` (the callback's loop/recursion state lives on the
+host stack, not in a fiber); and a fiber in an outer nursery cannot be woken by progress in an inner
+one (structured-concurrency scoping).
 
 **Group A status (sequential refinements, no engine rewrite):** **A2 (`Executor` program-exit
 auto-drain) is done** (this session, both engines). **A3a** (reject a non-sendable read smuggled
@@ -44,9 +54,9 @@ test**. **Dropped:** **A1** (`Channel.try_recv`) — a primitive whose motivatin
 scenario needs the engine; **A3b** (`Executor.submit` capture gate) — `submit` runs the closure
 in-heap at the drain, so gating it now would wrongly reject valid programs (lands with Group B).
 
-**Permanent non-goals:** `yield`/generators, variadic args, Level-3 dynamic `cdylib`/C-ABI FFI,
-bignum (`i64`-only — every overflow is a recoverable fault; binary work → a future `bytes` *sequence*,
-no `byte`/`u8` scalar).
+**Permanent non-goals:** **interp B1/B2 (suspendable tree-walker)** — see the DECISION box above;
+`yield`/generators, variadic args, Level-3 dynamic `cdylib`/C-ABI FFI, bignum (`i64`-only — every
+overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no `byte`/`u8` scalar).
 
 ---
 
@@ -198,12 +208,13 @@ Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.ch
 
 ## Roadmap (later)
 
-- 🟦 **Concurrency C5 — Group B (real engine)** — **B1 + B2 (cooperative fibers + blocking `recv`)
-  done on the VM** this session. Remaining: **B1/B2 for the interpreter** (close the VM-only parity
-  gap — stackful coroutines or CPS), **B3** OS-thread multicore (alternative bet), **B4** real
-  `Shared`, **B5** real `Executor` pool (incl. the deferred `submit`-capture gate A3b). Group A is
-  done: C1–C4, the `Executor` sequential subset, **A2 auto-drain**, the C5 checker refinements, and
-  **A3a** (pinned). See the A/B breakdown in `docs/concurrency.md` §9.
+- 🟦 **Concurrency C5 — Group B (real engine, VM)** — **B1 + B2 (cooperative fibers + blocking
+  `recv`) done on the VM** this session. Remaining: **B3** OS-thread multicore (alternative bet),
+  **B4** real `Shared`, **B5** real `Executor` pool (incl. the deferred `submit`-capture gate A3b).
+  **interp B1/B2 is a deliberate non-goal** (see the DECISION box in Current focus — the interp stays
+  the sequential-subset parity oracle; the VM is the sole concurrent engine). Group A is done: C1–C4,
+  the `Executor` sequential subset, **A2 auto-drain**, the C5 checker refinements, and **A3a**
+  (pinned). See the A/B breakdown in `docs/concurrency.md` §9.
 - VM/GC optimizations (superinstructions, inline caching, NaN-boxing) — written up in
   **[`docs/future.md`](docs/future.md)**.
 
