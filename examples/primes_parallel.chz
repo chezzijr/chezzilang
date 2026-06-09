@@ -1,0 +1,41 @@
+# CPU-bound demo: count primes in [2, 2_000_000) split across 4 spawned tasks.
+# Same source runs on both engines:
+#   chezzi run            examples/primes_parallel.chz   # cooperative: tasks run one-by-one, 1 core
+#   chezzi run --parallel examples/primes_parallel.chz   # real threads: 4 tasks across cores
+# Each task counts a quarter-range and sends its count down a channel; the parent sums after join.
+
+fn is_prime(n: int) -> bool:
+    if n < 2:
+        return false
+    i := 2
+    while i * i <= n:
+        if n % i == 0:
+            return false
+        i += 1
+    return true
+
+fn count_primes(lo: int, hi: int) -> int:
+    c := 0
+    n := lo
+    while n < hi:
+        if is_prime(n):
+            c += 1
+        n += 1
+    return c
+
+fn worker(lo: int, hi: int, out: Channel[int]):
+    out.send(count_primes(lo, hi))
+
+fn main():
+    out := Channel[int]()
+    parallel:
+        spawn worker(2, 500000, out)
+        spawn worker(500000, 1000000, out)
+        spawn worker(1000000, 1500000, out)
+        spawn worker(1500000, 2000000, out)
+    total := 0
+    for _ in 0..4:
+        total += out.recv()
+    print("primes below 2,000,000: {total}")
+
+main()

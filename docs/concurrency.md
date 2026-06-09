@@ -555,6 +555,74 @@ and cross-nursery wakeups (a fiber in an outer nursery is not woken by an inner 
   their scope — `submit` detached work, reap with `defer ex.shutdown()` (graceful) or `shutdown_now()`
   (cancel); program exit drains. Keeps `parallel:` pure and all background work visibly owned —
   see [§8](#8-daemon--background-tasks).
+### Tier-D — M:N scheduler + async I/O (post-B3 frontier, not yet scheduled)
+
+B3 gives **CPU-bound** multicore (`--parallel`: a bounded OS-thread pool, one worker `Vm` per task,
+blocking `recv` parks the whole thread on a condvar). It deliberately does **not** handle I/O-bound
+concurrency: a task doing blocking I/O pins its pool thread, and enough of them starve the pool (risk
+**G3**). Closing that gap is a separate, larger effort recorded here so the design is not relitigated.
+
+**Two orthogonal axes — don't conflate them.** *Memory model* (how tasks share data) is independent
+of *scheduler* (how tasks map to cores + how blocking is handled). Chezzi already has **Erlang/BEAM's
+memory model** (own heap per task, message-copy across the boundary, races unrepresentable — §2); what
+it lacks is BEAM/Go's *scheduler*. Share-nothing does **not** imply "ignore I/O" — Erlang proves you can
+have both. The I/O gap is engine immaturity, not a model constraint.
+
+**You don't classify tasks as I/O vs CPU.** A real scheduler discovers it dynamically by *where a task
+blocks*: a task that hits a blocking point is parked there (thread freed); a CPU task runs until it
+yields / is preempted / finishes. (The one exception is opaque native calls — Erlang's *dirty
+schedulers* need a `dirty_cpu`/`dirty_io` label precisely because the runtime can't see where a NIF
+blocks. The Chezzi analogue is the `native_reentry` sites.)
+
+**Two tiers of solution — pick by goal, do NOT default to full M:N:**
+
+- **Goal A — just don't starve on a handful of blocking-I/O tasks.** *No M:N needed.* Either
+  **grow-on-stall** (spawn another pool thread when all are blocked — what Go does for syscalls) or a
+  **separate elastic "blocking" pool** (keep the CPU pool core-sized; route blocking I/O ops to a second
+  growable pool so they never pin a CPU thread). This is Erlang's *async thread pool* / Tokio's
+  `spawn_blocking`. No suspendable tasks, no pollset — just two pools + routing. **Recommended first
+  step** if/when I/O matters: small, fits the current share-nothing design, removes G3.
+
+- **Goal B — cheap *massive* I/O concurrency (10k connections) + CPU parallelism at once.** *This is
+  where you genuinely need M:N:* suspendable tasks parked on a **pollset** (epoll/kqueue via `mio`/
+  `polling`), multiplexed over a core-sized thread pool with per-thread run queues + work-stealing.
+  Only build this if the workload actually demands that scale.
+
+**Why Chezzi is unusually well-positioned for M:N (the two worst sub-problems are already gone):**
+
+1. **Bytecode VM ⇒ suspend is a data snapshot, not stack magic.** A task's state is explicit data
+   (`FiberCtx`: frames/stack/ip), not the C call stack — so park/resume-on-another-thread is moving
+   structs, not stackful-coroutine / split-stack / asm context-switch machinery (the bulk of Go's
+   runtime). The cooperative engine *already* suspends/resumes at `recv` — it is effectively an **M:1
+   scheduler today**; M:N is "run several of those in parallel + work-steal + pollset."
+2. **Share-nothing per-thread GC ⇒ no concurrent-GC nightmare.** Each task's heap is private and
+   collected independently — no stop-the-world coordination, no cross-thread write barriers, no tri-color
+   marking across threads (Go's hardest runtime engineering). The model removes it for free.
+
+**What is genuinely still hard (the real work):**
+
+- **Task cost.** Current per-task = a full `Vm` + per-task heap reconstruction (the ~2s in the prime
+  demo). Wrong cost model for green-thread scale — would need lightweight task contexts sharing the
+  program/read-only snapshot, not Vm rebuild. Likely the first thing to fix.
+- **Suspend at *every* yield point, not just `recv`** — including a `recv`/I/O reached **inside a native
+  callback** (HOF, `sort`, `Shared.update`, executor drain), whose loop state is on the Rust stack and
+  can't be parked. Today the `native_reentry` guard faults instead; a real scheduler must handle it (the
+  fiddly bit Go's runtime also wrestles with).
+- **Correct lock-free work-stealing + pollset wake-ups + preemption.** Preemption is the *easy* part
+  here: reduction-style cooperative yield — check a "should-yield" flag at back-edges, reusing the
+  existing `cancel`/`gc_stress` dispatch check sites (Erlang's model). Signal-based preemption (Go 1.14)
+  is not needed. Work-stealing + pollset are medium and copyable from prior art (Tokio/Go/Rayon).
+
+**Effort:** a multi-month subsystem, not a weekend — but *tractable*, because the foundations
+(suspendable fibers, dispatch-loop check sites, private-heap GC) already exist.
+
+**When `--parallel` can become the default** (and serial demoted to an explicit flag): gated on
+(1) **B3.4 + B3.5** landing — a deadlocked default must *fail loudly*, not hang; (2) the per-task
+overhead dropping; (3) a determinism-contract decision — accept **task-ordered** output (decision F's
+flush-on-join) as the default and demote VM==interp parity to a *sequential-subset* contract run under
+an explicit `--serial` flag. Serial is **never deleted** — it stays permanently as the deterministic
+parity oracle + reproducible-debug engine. Not a date; a checklist.
+
 - **Reuse map for the implementer:** builtin method dispatch (`list_method`/`map_method` —
   `src/interp/builtins.rs`, `src/interp/mod.rs`; VM `core_method` — `src/vm/mod.rs`); parameterized
   types (`Type::Generic` — `src/ast/mod.rs`; `Ty::List/Map/Set` — `src/checker/ty.rs`;

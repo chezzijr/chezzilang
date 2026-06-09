@@ -423,3 +423,10 @@ sequenced after it, because under shared-nothing threads they *are* the same mac
 parallelism) — is **not pursued**: B1/B2 already shipped the cooperative engine, and the remaining
 demand is genuine multicore. Items deliberately *not* in B3–B5 live in the
 [`concurrency.md` "Deferred / backlog"](concurrency.md#11-deferred--backlog-not-b3b5) section.
+
+**I/O-bound concurrency is explicitly NOT a B3 goal.** B3 delivers CPU-bound multicore; a blocking-I/O
+task pins its pool thread (risk G3). Smart I/O handling — an elastic blocking pool (cheap) or a full
+**M:N scheduler + async-I/O pollset** (for massive-connection scale) — is the **Tier-D post-B3
+frontier**, designed in [`concurrency.md` §10 "Tier-D"](concurrency.md#10-future-evolution) (why
+Chezzi's bytecode-VM + share-nothing-GC architecture is unusually well-positioned for it, what is
+genuinely hard, and the checklist for making `--parallel` the default). Not scheduled.
