@@ -429,6 +429,7 @@ impl Checker {
         for stmt in stmts {
             self.check_stmt(stmt);
         }
+        self.check_spawn_global_mutation(stmts);
         let sig = self.capture_sig(stmts);
         self.pop_scope();
         sig
@@ -492,6 +493,74 @@ impl Checker {
             }
         }
         sig
+    }
+
+    /// G1 (B3.3b): under `--parallel` a module global is **read-only after init** — cross-task
+    /// mutable state must go through `Shared[T]` (the `value → Ref[T] → Shared[T]` mutation ladder's
+    /// top rung). A reassignment of a module global reachable — directly or **transitively through
+    /// free-function calls** — from a `spawn` task is an error. Flow-scoped to `spawn` reachability:
+    /// the same global mutated only from sequential code stays legal (the default cooperative engine
+    /// is single-heap and unaffected). Method-mediated chains (`obj.m()` / `spawn obj.m()`) are a
+    /// documented gap that lands with method-task support (B3.3 thread flip).
+    fn check_spawn_global_mutation(&mut self, stmts: &[Stmt]) {
+        // Module globals = top-level `let` binding names.
+        let mut globals: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for s in stmts {
+            if let StmtKind::Let { names, .. } = &s.kind {
+                globals.extend(names.iter().cloned());
+            }
+        }
+        if globals.is_empty() {
+            return;
+        }
+
+        // Free (top-level) functions by name — the only `Ident`-callable nodes in the call graph.
+        let mut fns: HashMap<&str, &FnDecl> = HashMap::new();
+        for s in stmts {
+            if let StmtKind::Fn(d) = &s.kind {
+                fns.insert(d.name.as_str(), d);
+            }
+        }
+
+        // Spawn roots: every `spawn` anywhere in the module contributes its target free fn(s).
+        let mut roots: Vec<String> = Vec::new();
+        collect_spawn_roots(stmts, &fns, &mut roots);
+
+        // Transitive closure over the free-function call graph (`reachable` doubles as the cycle guard).
+        let mut reachable: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut work = roots;
+        while let Some(name) = work.pop() {
+            if !reachable.insert(name.clone()) {
+                continue;
+            }
+            if let Some(d) = fns.get(name.as_str()) {
+                let mut callees = Vec::new();
+                collect_call_idents_block(&d.body, &mut callees);
+                for c in callees {
+                    if fns.contains_key(c.as_str()) && !reachable.contains(&c) {
+                        work.push(c);
+                    }
+                }
+            }
+        }
+
+        // Each reachable free fn: flag its module-global reassignments (shadow-aware).
+        let mut hits: Vec<(Span, String)> = Vec::new();
+        for name in &reachable {
+            if let Some(d) = fns.get(name.as_str()) {
+                let mut scopes: Vec<std::collections::HashSet<String>> =
+                    vec![d.params.iter().map(|p| p.name.clone()).collect()];
+                find_global_mutations(&d.body, &globals, &mut scopes, &mut hits);
+            }
+        }
+        // Deterministic diagnostic order (the reachable set's iteration order is not stable).
+        hits.sort_by_key(|(sp, _)| (sp.line, sp.col));
+        for (sp, name) in hits {
+            self.error(
+                sp,
+                format!("cannot mutate module global '{name}' from a parallel task; use Shared[T]"),
+            );
+        }
     }
 
     // ===== scopes =====
@@ -4293,6 +4362,278 @@ impl Checker {
         }
         subst(ret, &mmap)
     }
+}
+
+// ===== G1 (B3.3b) AST walkers: spawn-reachable module-global mutation =====
+
+/// Collect `spawn` targets across every block in `stmts`, recursing into all nested bodies (fn /
+/// method / `if` / `for` / `while` / `match` / `parallel` / `spawn:` blocks) — a `spawn` inside any
+/// function makes its target a task root, even if that enclosing function is itself only called
+/// sequentially. A `spawn f(...)` with a free-fn `Ident` callee roots `f`; a `spawn:` block roots
+/// every free fn it directly calls. Method spawns (`spawn obj.m()`) are out of scope (documented gap).
+fn collect_spawn_roots(stmts: &[Stmt], fns: &HashMap<&str, &FnDecl>, out: &mut Vec<String>) {
+    for s in stmts {
+        if let StmtKind::Spawn(target) = &s.kind {
+            match target {
+                SpawnTarget::Call(e) => {
+                    if let ExprKind::Call { callee, .. } = &e.kind
+                        && let ExprKind::Ident(name) = &callee.kind
+                        && fns.contains_key(name.as_str())
+                    {
+                        out.push(name.clone());
+                    }
+                }
+                SpawnTarget::Block(body) => {
+                    let mut callees = Vec::new();
+                    collect_call_idents_block(body, &mut callees);
+                    for c in callees {
+                        if fns.contains_key(c.as_str()) {
+                            out.push(c);
+                        }
+                    }
+                }
+            }
+        }
+        for b in stmt_child_blocks(&s.kind) {
+            collect_spawn_roots(b, fns, out);
+        }
+    }
+}
+
+/// The nested statement-blocks directly owned by a statement (for generic recursion).
+fn stmt_child_blocks(kind: &StmtKind) -> Vec<&Block> {
+    let mut v = Vec::new();
+    match kind {
+        StmtKind::Fn(d) => v.push(&d.body),
+        StmtKind::Struct { methods, .. } => v.extend(methods.iter().map(|m| &m.body)),
+        StmtKind::If { branches, else_block } => {
+            v.extend(branches.iter().map(|(_, b)| b));
+            if let Some(b) = else_block {
+                v.push(b);
+            }
+        }
+        StmtKind::For { body, .. } | StmtKind::While { body, .. } => v.push(body),
+        StmtKind::Match { arms, .. } => v.extend(arms.iter().map(|a| &a.body)),
+        StmtKind::Parallel { body } => v.push(body),
+        StmtKind::Spawn(SpawnTarget::Block(body)) => v.push(body),
+        _ => {}
+    }
+    v
+}
+
+/// Collect the names of every `Ident`-callee call (`f(...)`) appearing anywhere in a block — its
+/// statements, their sub-expressions, and nested blocks. Backs both the call-graph edges and a
+/// `spawn:` block's roots.
+fn collect_call_idents_block(block: &Block, out: &mut Vec<String>) {
+    for s in block {
+        match &s.kind {
+            StmtKind::Let { value, .. } => collect_call_idents_expr(value, out),
+            StmtKind::Assign { target, value, .. } => {
+                collect_call_idents_expr(target, out);
+                collect_call_idents_expr(value, out);
+            }
+            StmtKind::Return(Some(e)) | StmtKind::Expr(e) | StmtKind::Defer(e) => {
+                collect_call_idents_expr(e, out)
+            }
+            StmtKind::If { branches, else_block } => {
+                for (c, b) in branches {
+                    collect_call_idents_expr(c, out);
+                    collect_call_idents_block(b, out);
+                }
+                if let Some(b) = else_block {
+                    collect_call_idents_block(b, out);
+                }
+            }
+            StmtKind::For { iter, body, .. } => {
+                collect_call_idents_expr(iter, out);
+                collect_call_idents_block(body, out);
+            }
+            StmtKind::While { cond, body } => {
+                collect_call_idents_expr(cond, out);
+                collect_call_idents_block(body, out);
+            }
+            StmtKind::Match { scrutinee, arms } => {
+                collect_call_idents_expr(scrutinee, out);
+                for a in arms {
+                    if let Some(g) = &a.guard {
+                        collect_call_idents_expr(g, out);
+                    }
+                    collect_call_idents_block(&a.body, out);
+                }
+            }
+            StmtKind::Parallel { body } => collect_call_idents_block(body, out),
+            StmtKind::Spawn(SpawnTarget::Call(e)) => collect_call_idents_expr(e, out),
+            StmtKind::Spawn(SpawnTarget::Block(body)) => collect_call_idents_block(body, out),
+            // Nested fn/struct/enum/protocol/alias/import/control-flow-without-exprs: no calls to
+            // attribute to the enclosing function body (chezzi has no nested fn/struct declarations).
+            _ => {}
+        }
+    }
+}
+
+/// Collect `Ident`-callee call names reachable from a single expression (recursing through every
+/// sub-expression). Exhaustive over [`ExprKind`] so a call nested in an argument / operand /
+/// comprehension / closure body is not missed.
+fn collect_call_idents_expr(e: &Expr, out: &mut Vec<String>) {
+    match &e.kind {
+        ExprKind::Call { callee, args, named, .. } => {
+            if let ExprKind::Ident(name) = &callee.kind {
+                out.push(name.clone());
+            } else {
+                collect_call_idents_expr(callee, out);
+            }
+            for a in args {
+                collect_call_idents_expr(a, out);
+            }
+            for (_, a) in named {
+                collect_call_idents_expr(a, out);
+            }
+        }
+        ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
+            xs.iter().for_each(|x| collect_call_idents_expr(x, out))
+        }
+        ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
+            collect_call_idents_expr(k, out);
+            collect_call_idents_expr(v, out);
+        }),
+        ExprKind::Comprehension { key, elem, iter, guard, .. } => {
+            if let Some(k) = key {
+                collect_call_idents_expr(k, out);
+            }
+            collect_call_idents_expr(elem, out);
+            collect_call_idents_expr(iter, out);
+            if let Some(g) = guard {
+                collect_call_idents_expr(g, out);
+            }
+        }
+        ExprKind::Unary { expr, .. } => collect_call_idents_expr(expr, out),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
+            collect_call_idents_expr(lhs, out);
+            collect_call_idents_expr(rhs, out);
+        }
+        ExprKind::Range { start, end } => {
+            collect_call_idents_expr(start, out);
+            collect_call_idents_expr(end, out);
+        }
+        ExprKind::Field { obj, .. } => collect_call_idents_expr(obj, out),
+        ExprKind::Index { obj, index } => {
+            collect_call_idents_expr(obj, out);
+            collect_call_idents_expr(index, out);
+        }
+        ExprKind::Slice { obj, start, end } => {
+            collect_call_idents_expr(obj, out);
+            collect_call_idents_expr(start, out);
+            collect_call_idents_expr(end, out);
+        }
+        ExprKind::Try(inner) => collect_call_idents_expr(inner, out),
+        ExprKind::OptChain { obj, call, .. } => {
+            collect_call_idents_expr(obj, out);
+            if let Some(c) = call {
+                c.args.iter().for_each(|a| collect_call_idents_expr(a, out));
+                c.named.iter().for_each(|(_, a)| collect_call_idents_expr(a, out));
+            }
+        }
+        ExprKind::DecodeCall { obj, arg, .. } => {
+            collect_call_idents_expr(obj, out);
+            collect_call_idents_expr(arg, out);
+        }
+        ExprKind::Closure { body, .. } => collect_call_idents_expr(body, out),
+        ExprKind::Match { scrutinee, arms } => {
+            collect_call_idents_expr(scrutinee, out);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    collect_call_idents_expr(g, out);
+                }
+                collect_call_idents_expr(&a.body, out);
+            }
+        }
+        ExprKind::IfElse { cond, then, els } => {
+            collect_call_idents_expr(cond, out);
+            collect_call_idents_expr(then, out);
+            collect_call_idents_expr(els, out);
+        }
+        ExprKind::Recover(block) => collect_call_idents_block(block, out),
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Ident(_) => {}
+    }
+}
+
+/// Walk a block for reassignments (`= / += / -=`) of a module global that is **not shadowed** by a
+/// local binding in scope, recording `(span, global_name)` for each. `scopes` is a stack of
+/// local-name sets (params at the base); nested blocks push/pop their own frame so a local
+/// shadowing a global is correctly excluded only within its scope.
+fn find_global_mutations(
+    block: &Block,
+    globals: &std::collections::HashSet<String>,
+    scopes: &mut Vec<std::collections::HashSet<String>>,
+    out: &mut Vec<(Span, String)>,
+) {
+    scopes.push(std::collections::HashSet::new());
+    for s in block {
+        match &s.kind {
+            StmtKind::Let { names, .. } => {
+                for n in names {
+                    scopes.last_mut().unwrap().insert(n.clone());
+                }
+            }
+            StmtKind::Assign { target, op: _, .. } => {
+                if let ExprKind::Ident(name) = &target.kind {
+                    let shadowed = scopes.iter().any(|s| s.contains(name));
+                    if !shadowed && globals.contains(name) {
+                        out.push((target.span, name.clone()));
+                    }
+                }
+            }
+            StmtKind::If { branches, else_block } => {
+                for (_, b) in branches {
+                    find_global_mutations(b, globals, scopes, out);
+                }
+                if let Some(b) = else_block {
+                    find_global_mutations(b, globals, scopes, out);
+                }
+            }
+            StmtKind::For { vars, body, .. } => {
+                scopes.push(vars.iter().cloned().collect());
+                find_global_mutations(body, globals, scopes, out);
+                scopes.pop();
+            }
+            StmtKind::While { body, .. } => find_global_mutations(body, globals, scopes, out),
+            StmtKind::Match { arms, .. } => {
+                for a in arms {
+                    scopes.push(pattern_bindings(&a.pattern));
+                    find_global_mutations(&a.body, globals, scopes, out);
+                    scopes.pop();
+                }
+            }
+            StmtKind::Parallel { body } => find_global_mutations(body, globals, scopes, out),
+            StmtKind::Spawn(SpawnTarget::Block(body)) => {
+                find_global_mutations(body, globals, scopes, out)
+            }
+            _ => {}
+        }
+    }
+    scopes.pop();
+}
+
+/// The names a match pattern binds (variant payload slots, tuple elements, sub-bindings).
+fn pattern_bindings(p: &Pattern) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    fn go(p: &Pattern, out: &mut std::collections::HashSet<String>) {
+        match p {
+            Pattern::Ident(n) => {
+                out.insert(n.clone());
+            }
+            Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) => {
+                bindings.iter().for_each(|b| go(b, out))
+            }
+            Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
+        }
+    }
+    go(p, &mut out);
+    out
 }
 
 /// The prebuilt protocols every program starts with. `Comparable` requires

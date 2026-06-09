@@ -3950,6 +3950,61 @@ fn read_captured_closure_through_nested_closure_in_spawn_block_rejected() {
     );
 }
 
+// ----- G1 (B3.3b): module globals are read-only across tasks (`--parallel`) -----
+
+#[test]
+fn spawn_transitive_global_mutation_rejected() {
+    // A module global reassigned inside a function reachable from `spawn` is illegal — cross-task
+    // mutable state must go through Shared[T] (the value → Ref → Shared mutation ladder's top rung).
+    rejects(
+        "n := 0\nfn bump():\n    n = n + 1\nfn main():\n    parallel:\n        spawn bump()\nmain()\n",
+        "use Shared[T]",
+    );
+}
+
+#[test]
+fn spawn_block_calls_global_mutator_rejected() {
+    // The mutator is reached through a `spawn:` block that calls it (not a direct `spawn f()`).
+    rejects(
+        "n := 0\nfn bump():\n    n = n + 1\nfn main():\n    parallel:\n        spawn:\n            bump()\nmain()\n",
+        "use Shared[T]",
+    );
+}
+
+#[test]
+fn spawn_deeply_transitive_global_mutation_rejected() {
+    // `spawn a()` → `a()` calls `b()` → `b()` mutates the global. Proves transitive reachability.
+    rejects(
+        "n := 0\nfn b():\n    n = n + 1\nfn a():\n    b()\nfn main():\n    parallel:\n        spawn a()\nmain()\n",
+        "use Shared[T]",
+    );
+}
+
+#[test]
+fn sequential_global_mutation_ok() {
+    // Flow-scoped: the same mutation reached only from sequential (non-spawn) code stays legal.
+    ok("n := 0\nfn bump():\n    n = n + 1\nfn main():\n    bump()\n    print(n)\nmain()\n");
+}
+
+#[test]
+fn spawn_local_shadows_global_ok() {
+    // A spawn-reachable function whose local shadows the global name mutates the LOCAL, not the
+    // global — it must not be flagged.
+    ok("n := 0\nfn work():\n    n := 5\n    n = n + 1\n    print(n)\nfn main():\n    parallel:\n        spawn work()\nmain()\n");
+}
+
+#[test]
+fn spawn_reads_global_ok() {
+    // Reading a (post-init constant) global from a task is fine; only mutation is gated.
+    ok("n := 7\nfn work():\n    print(n)\nfn main():\n    parallel:\n        spawn work()\nmain()\n");
+}
+
+#[test]
+fn shared_update_in_spawn_ok() {
+    // The prescribed cross-task mutation path: a global `Shared`, mutated via `update()` in a task.
+    ok("c := Shared(0)\nfn bump():\n    c.update(fn(x): x + 1)\nfn main():\n    parallel:\n        spawn bump()\n    print(c.get())\nmain()\n");
+}
+
 // ----- C5 refinement #2: `Ref` non-sendability keys on origin, not the bare name -----
 
 #[test]
