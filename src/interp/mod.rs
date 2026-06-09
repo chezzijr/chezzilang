@@ -2,8 +2,8 @@
 //! Chezzi before the bytecode VM (M5). Single-file programs run here.
 
 use crate::ast::{
-    AssignOp, BinaryOp, CompKind, Expr, ExprKind, FnDecl, LitPattern, MatchArm, MatchExprArm,
-    Pattern, Span, Stmt, StmtKind, UnaryOp,
+    AssignOp, BinaryOp, Block, CompKind, Expr, ExprKind, FnDecl, LitPattern, MatchArm,
+    MatchExprArm, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp,
 };
 use crate::{lexer, parser};
 
@@ -89,6 +89,61 @@ fn block_has_defer(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| matches!(s.kind, StmtKind::Defer(_)))
 }
 
+/// Deep-copy a value across a task airlock (`spawn`): data — scalars, `str`, collections, structs,
+/// enums — is recursively cloned into fresh `Rc<RefCell<…>>` cells so a spawned task can't share
+/// mutable state with the spawner. Callables and modules pass by handle (a task's entry point, not
+/// data that crosses the airlock); sendability of what a task uses is enforced statically by the
+/// checker in C2. (Channel / Shared handles, added in C2 / C3, pass by handle too.)
+fn deep_clone(v: &Value) -> Value {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    match v {
+        Value::Int(_)
+        | Value::Float(_)
+        | Value::Bool(_)
+        | Value::Str(_)
+        | Value::Nil
+        | Value::Func(_, _)
+        | Value::Closure(_)
+        | Value::Native(_)
+        | Value::Module(_) => v.clone(),
+        Value::List(items) => {
+            let cloned = items.borrow().iter().map(deep_clone).collect::<Vec<_>>();
+            Value::List(Rc::new(RefCell::new(cloned)))
+        }
+        Value::Tuple(items) => Value::Tuple(Rc::new(items.iter().map(deep_clone).collect())),
+        Value::Map(m) => {
+            let src = m.borrow();
+            let mut out = value::MapData::default();
+            for (h, k, val) in &src.entries {
+                out.push(*h, deep_clone(k), deep_clone(val));
+            }
+            Value::Map(Rc::new(RefCell::new(out)))
+        }
+        Value::Set(s) => {
+            let src = s.borrow();
+            let mut out = value::SetData::default();
+            for (h, e) in &src.entries {
+                out.push(*h, deep_clone(e));
+            }
+            Value::Set(Rc::new(RefCell::new(out)))
+        }
+        Value::Struct { name, fields } => {
+            let cloned = fields
+                .borrow()
+                .iter()
+                .map(|(k, val)| (k.clone(), deep_clone(val)))
+                .collect::<Vec<_>>();
+            Value::Struct { name: name.clone(), fields: Rc::new(RefCell::new(cloned)) }
+        }
+        Value::Enum { ty, variant, payload } => Value::Enum {
+            ty: ty.clone(),
+            variant: variant.clone(),
+            payload: payload.iter().map(deep_clone).collect(),
+        },
+    }
+}
+
 /// A struct type's runtime shape: ordered field names + methods by name, plus the module globals
 /// its methods resolve top-level names against (the module that defined the struct).
 struct StructDef {
@@ -143,6 +198,28 @@ struct Interp {
     /// left in place, so when an uncaught fault reaches the driver this holds the call chain from the
     /// outermost call down to the fault. `recover:` truncates it back to its entry depth on catch.
     call_stack: Vec<TraceFrame>,
+    /// Active `parallel:` nurseries, innermost last. Each `spawn` registers a [`Task`] onto the
+    /// innermost list; at the nursery's dedent the list is drained and its tasks run to completion
+    /// FIFO (the sequential executor). Empty outside any `parallel:` block.
+    nurseries: Vec<Vec<Task>>,
+}
+
+/// A task registered by `spawn`, awaiting its nursery's join barrier. The callee/receiver and
+/// arguments are evaluated and deep-copied across the airlock at the `spawn` statement (Go's
+/// arg-evaluation timing); the body runs at the `parallel:` dedent. Mirrors [`Deferred`].
+enum Task {
+    /// `spawn f(args)` — invoke the callable value with the (already deep-copied) args.
+    Call { callee: Value, args: Vec<Value>, span: Span },
+    /// `spawn recv.name(args)` — dispatch the named method on the (deep-copied) receiver.
+    Method { recv: Value, name: String, args: Vec<Value>, span: Span },
+    /// `spawn:` block — run the statement body against a deep-copied snapshot of the captured
+    /// locals plus the home module globals.
+    Block {
+        body: Block,
+        locals: Vec<std::collections::HashMap<String, Value>>,
+        home: value::ModEnv,
+        span: Span,
+    },
 }
 
 /// A call registered by `defer`, with its receiver/arguments already evaluated. Drained at frame
@@ -175,6 +252,7 @@ impl Interp {
             call_depth: 0,
             deferred: Vec::new(),
             call_stack: Vec::new(),
+            nurseries: Vec::new(),
         };
         // Built-in Result / Option variants — available without any declaration.
         interp.register_variant("Ok", "Result", 1);
@@ -760,6 +838,111 @@ impl Interp {
             frame.push(deferred);
         }
         Ok(Flow::Normal)
+    }
+
+    /// `parallel:` — open a nursery, run its body (spawn statements register tasks; inline
+    /// statements run immediately), then at the dedent run the registered tasks to completion FIFO.
+    /// The first task to fault aborts the remaining siblings and propagates (composing with
+    /// `recover:` / `defer`, which see it as an ordinary `Err`). A fault in the body itself
+    /// propagates without running any queued task.
+    fn exec_parallel(&mut self, body: &[Stmt]) -> Result<Flow, RuntimeError> {
+        self.nurseries.push(Vec::new());
+        let body_result = self.exec_scoped_block(body);
+        // Always reclaim our task list, even if the body faulted, so it can't dangle.
+        let tasks = self.nurseries.pop().unwrap_or_default();
+        let body_flow = body_result?;
+        for task in tasks {
+            self.run_task(task)?;
+        }
+        Ok(body_flow)
+    }
+
+    /// `spawn` — register a task on the innermost nursery (the checker guarantees one is open). The
+    /// receiver/args (form 1) or captured locals (form 2) are deep-copied across the airlock now;
+    /// the body runs later, at the nursery's dedent.
+    fn exec_spawn(&mut self, target: &SpawnTarget, span: Span) -> Result<Flow, RuntimeError> {
+        let task = match target {
+            SpawnTarget::Call(call) => {
+                let ExprKind::Call { callee, args, .. } = &call.kind else {
+                    return Err(RuntimeError {
+                        message: "spawn requires a function or method call".to_string(),
+                        span,
+                    });
+                };
+                let arg_vals = args
+                    .iter()
+                    .map(|a| self.eval(a).map(|v| deep_clone(&v)))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let ExprKind::Field { obj, name } = &callee.kind {
+                    let recv = deep_clone(&self.eval(obj)?);
+                    Task::Method { recv, name: name.clone(), args: arg_vals, span: call.span }
+                } else {
+                    let callee_val = self.eval(callee)?;
+                    Task::Call { callee: callee_val, args: arg_vals, span: call.span }
+                }
+            }
+            SpawnTarget::Block(body) => {
+                // Deep-copy the captured locals so the task can't share mutable state with the
+                // parent (the airlock). Functions/modules pass by handle — sendability of the
+                // bindings a task actually uses is enforced statically by the checker in C2.
+                let locals = self
+                    .env
+                    .snapshot_locals()
+                    .iter()
+                    .map(|frame| frame.iter().map(|(k, v)| (k.clone(), deep_clone(v))).collect())
+                    .collect();
+                Task::Block { body: body.clone(), locals, home: self.env.globals_rc(), span }
+            }
+        };
+        match self.nurseries.last_mut() {
+            Some(nursery) => nursery.push(task),
+            None => {
+                return Err(RuntimeError {
+                    message: "spawn must be inside a parallel: block".to_string(),
+                    span,
+                });
+            }
+        }
+        Ok(Flow::Normal)
+    }
+
+    /// Run one registered task to completion. Its return value is discarded — tasks communicate
+    /// only through side effects (C1) and, later, channels / shared boxes (C2 / C3).
+    fn run_task(&mut self, task: Task) -> Result<(), RuntimeError> {
+        match task {
+            Task::Call { callee, args, span } => self.call_value(callee, args, span).map(|_| ()),
+            Task::Method { recv, name, args, span } => {
+                self.dispatch_method(recv, &name, args, span).map(|_| ())
+            }
+            Task::Block { body, locals, home, span } => {
+                self.run_block_task(&body, locals, home, span)
+            }
+        }
+    }
+
+    /// Run a `spawn:` block task in its own call frame against the captured locals + home globals
+    /// (mirrors [`Interp::call_closure`]'s frame setup). Any `return` / fall-through ends the task.
+    fn run_block_task(
+        &mut self,
+        body: &[Stmt],
+        locals: Vec<std::collections::HashMap<String, Value>>,
+        home: value::ModEnv,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        self.enter_call(span)?;
+        self.deferred.push(Vec::new());
+        self.call_stack.push(TraceFrame { function: "<spawned task>".to_string(), span });
+        let saved_globals = self.env.swap_globals(home);
+        let saved = self.env.swap_locals(locals);
+        let result = self.exec_block_inner(body);
+        let outcome = match self.finish_frame(saved, saved_globals) {
+            Err(e) => Err(e),
+            Ok(_) => result.map(|_| ()),
+        };
+        if outcome.is_ok() {
+            self.call_stack.pop();
+        }
+        outcome
     }
 
     /// Run a frame's deferred calls in LIFO order (last `defer` registered runs first). Each call
@@ -2260,6 +2443,9 @@ impl Interp {
             // Kept out of this match (its locals are large) so `exec_stmt`'s frame stays small for
             // deep recursion — same reason as `eval_slice`.
             StmtKind::Defer(call) => self.exec_defer(call, stmt.span),
+            // Kept out of this match (their locals are large) so `exec_stmt`'s frame stays small.
+            StmtKind::Parallel { body } => self.exec_parallel(body),
+            StmtKind::Spawn(target) => self.exec_spawn(target, stmt.span),
             StmtKind::Break => Ok(Flow::Break),
             StmtKind::Continue => Ok(Flow::Continue),
             StmtKind::If {
@@ -4138,6 +4324,16 @@ b := Buf([10, 20, 30])
         let source = include_str!("../../examples/comprehensions.chz");
         let expected = include_str!("../../examples/comprehensions.expected");
         assert_eq!(run_capture(source).expect("comprehensions.chz should run"), expected);
+    }
+
+    /// C1 concurrency golden: `parallel:` nursery + `spawn` (both forms) on the sequential
+    /// executor — tasks join FIFO at the dedent; inline statements run before spawned bodies. No
+    /// VM twin until C4 (concurrency runs on `--interp` only for now).
+    #[test]
+    fn golden_parallel_chz() {
+        let source = include_str!("../../examples/parallel.chz");
+        let expected = include_str!("../../examples/parallel.expected");
+        assert_eq!(run_capture(source).expect("parallel.chz should run"), expected);
     }
 
     // ----- golden coverage for the formerly-orphaned examples + the comprehensive torture

@@ -102,6 +102,13 @@ pub enum StmtKind {
     /// call (`f(a)` / `obj.m(a)`); its receiver + arguments are evaluated at the `defer` statement
     /// (Go semantics), the call itself at frame exit.
     Defer(Expr),
+    /// `parallel:` — a structured-concurrency nursery. Spawned children run to completion at the
+    /// block's dedent (the join barrier); the first child error aborts the rest and propagates.
+    Parallel { body: Block },
+    /// `spawn <call>` (form 1) or `spawn:` block (form 2) — register a task on the innermost
+    /// enclosing `parallel:` nursery. Legal only inside a `parallel:` (checker-enforced). Under the
+    /// sequential executor the task is registered here and run at the nursery's dedent.
+    Spawn(SpawnTarget),
     /// `break` — exit the innermost enclosing loop. Carries only its `Span` (via `Stmt`).
     Break,
     /// `continue` — skip to the next iteration of the innermost enclosing loop.
@@ -110,6 +117,17 @@ pub enum StmtKind {
     Import(Import),
     /// A bare expression used as a statement, e.g. `print(x)`.
     Expr(Expr),
+}
+
+/// The target of a `spawn` statement: a named call (`spawn f(x)`) or an anonymous indented block
+/// (`spawn:`). Form 1 sidesteps the single-expression closure limit for the common case; form 2
+/// allows a multi-statement task body.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpawnTarget {
+    /// `spawn f(args)` — the expression must be a call (parser-enforced).
+    Call(Expr),
+    /// `spawn:` followed by an indented block.
+    Block(Block),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

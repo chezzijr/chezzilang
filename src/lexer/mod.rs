@@ -38,6 +38,8 @@ pub enum Token {
     Match,
     Recover,
     Defer,
+    Spawn,
+    Parallel,
     Import,
     From,
     As,
@@ -149,6 +151,8 @@ fn keyword(word: &str) -> Option<Token> {
         "match" => Token::Match,
         "recover" => Token::Recover,
         "defer" => Token::Defer,
+        "spawn" => Token::Spawn,
+        "parallel" => Token::Parallel,
         "import" => Token::Import,
         "from" => Token::From,
         "as" => Token::As,
@@ -855,6 +859,14 @@ mod tests {
             .find(|t| t.kind == Token::Ident("z".to_string()))
             .unwrap();
         assert_eq!(z.span.line, 1);
+    }
+
+    #[test]
+    fn lexes_concurrency_keywords() {
+        assert_eq!(
+            kinds("spawn parallel"),
+            vec![Token::Spawn, Token::Parallel, Token::Newline, Token::Eof]
+        );
     }
 
     // ----- numeric underscores -----

@@ -250,6 +250,8 @@ impl Parser {
             Token::For => self.parse_for()?,
             Token::While => self.parse_while()?,
             Token::Match => self.parse_match()?,
+            Token::Parallel => self.parse_parallel()?,
+            Token::Spawn => self.parse_spawn()?,
             Token::Return => {
                 let k = self.parse_return()?;
                 self.expect_stmt_end()?;
@@ -844,6 +846,34 @@ impl Parser {
     fn parse_defer(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Defer)?;
         Ok(StmtKind::Defer(self.parse_expr()?))
+    }
+
+    /// `parallel:` — a nursery whose body is an indented (or inline) block. Compound: ends at its
+    /// own `Dedent`, so the caller does not require a line terminator.
+    fn parse_parallel(&mut self) -> PResult<StmtKind> {
+        self.expect(&Token::Parallel)?;
+        let body = self.parse_block()?;
+        Ok(StmtKind::Parallel { body })
+    }
+
+    /// `spawn:` block (form 2) or `spawn <call>` (form 1). Form 1 must be a call expression (mirrors
+    /// `defer`); a non-call is rejected with a clear message. Form 1 is line-oriented (terminated
+    /// here); form 2 is compound (its block ends at its own `Dedent`).
+    fn parse_spawn(&mut self) -> PResult<StmtKind> {
+        self.expect(&Token::Spawn)?;
+        if self.check(&Token::Colon) {
+            let body = self.parse_block()?;
+            return Ok(StmtKind::Spawn(SpawnTarget::Block(body)));
+        }
+        let expr = self.parse_expr()?;
+        if !matches!(expr.kind, ExprKind::Call { .. }) {
+            return Err(self.err(
+                "spawn requires a function or method call (`spawn f(x)`) or a block (`spawn:`)"
+                    .to_string(),
+            ));
+        }
+        self.expect_stmt_end()?;
+        Ok(StmtKind::Spawn(SpawnTarget::Call(expr)))
     }
 
     fn parse_import(&mut self) -> PResult<Import> {
@@ -1616,6 +1646,36 @@ mod tests {
         let mut m = parse_ok(src);
         assert_eq!(m.stmts.len(), 1, "expected exactly one statement");
         m.stmts.remove(0).kind
+    }
+
+    #[test]
+    fn parses_parallel_with_spawn_call() {
+        match only("parallel:\n    spawn worker(1)\n    spawn worker(2)\n") {
+            StmtKind::Parallel { body } => {
+                assert_eq!(body.len(), 2);
+                assert!(matches!(body[0].kind, StmtKind::Spawn(SpawnTarget::Call(_))));
+                assert!(matches!(body[1].kind, StmtKind::Spawn(SpawnTarget::Call(_))));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_spawn_block_form() {
+        match only("parallel:\n    spawn:\n        x := 1\n        f(x)\n") {
+            StmtKind::Parallel { body } => match &body[0].kind {
+                StmtKind::Spawn(SpawnTarget::Block(b)) => assert_eq!(b.len(), 2),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_non_call_form1_rejected() {
+        assert!(parse_err("parallel:\n    spawn x + 1\n")
+            .message
+            .contains("spawn requires a function or method call"));
     }
 
     #[test]

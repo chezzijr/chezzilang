@@ -10,7 +10,7 @@ mod ty;
 
 use crate::ast::{
     AssignOp, BinaryOp, Block, Bound, CompKind, Expr, ExprKind, FnDecl, Import, LitPattern,
-    MethodSig, Param, Pattern, Span, Stmt, StmtKind, Type, TypeParam, UnaryOp,
+    MethodSig, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, TypeParam, UnaryOp,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
 use std::collections::HashMap;
@@ -296,6 +296,10 @@ struct Checker {
     /// Reset to 0 when descending into a (nested) function or closure body so an inner `break`
     /// can't escape into an outer loop. `> 0` ⇒ `break`/`continue` are legal here.
     loop_depth: usize,
+    /// How many enclosing `parallel:` nurseries we're inside *within the current function body*.
+    /// Reset to 0 across a (nested) fn/closure boundary so a task binds to a nursery within its own
+    /// function (the function-boundary rule). `> 0` ⇒ `spawn` is legal here.
+    nursery_depth: usize,
 }
 
 impl Checker {
@@ -324,6 +328,7 @@ impl Checker {
             imported_poly: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
+            nursery_depth: 0,
         };
         c.seed_stdlib_structs();
         c
@@ -1056,6 +1061,34 @@ impl Checker {
                 // Type-check the call (and its args); the result is discarded, like an expr stmt.
                 self.infer(e);
             }
+            StmtKind::Parallel { body } => {
+                self.push_scope();
+                self.nursery_depth += 1;
+                for stmt in body {
+                    self.check_stmt(stmt);
+                }
+                self.nursery_depth -= 1;
+                self.pop_scope();
+            }
+            StmtKind::Spawn(target) => {
+                if self.nursery_depth == 0 {
+                    self.error(span, "spawn must be inside a parallel: block");
+                }
+                match target {
+                    SpawnTarget::Call(e) => {
+                        // The target must be a call (parser-enforced); type-check it like an
+                        // expression statement — its result is discarded.
+                        self.infer(e);
+                    }
+                    SpawnTarget::Block(body) => {
+                        self.push_scope();
+                        for stmt in body {
+                            self.check_stmt(stmt);
+                        }
+                        self.pop_scope();
+                    }
+                }
+            }
             StmtKind::Break => {
                 if self.loop_depth == 0 {
                     self.error(span, "break outside loop");
@@ -1272,6 +1305,9 @@ impl Checker {
         // A nested fn opens a fresh `?`-target context: a `?` in this body targets this function,
         // not an enclosing recover at the definition site.
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
+        // A function body opens a fresh nursery context: a `spawn` here binds to a `parallel:`
+        // within this function, never one at the definition site (the function-boundary rule).
+        let saved_nursery = std::mem::replace(&mut self.nursery_depth, 0);
         self.push_scope();
         for (i, param) in decl.params.iter().enumerate() {
             let ty = if param.name == "self" {
@@ -1304,6 +1340,7 @@ impl Checker {
         self.inferring_ret = saved_inferring;
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
+        self.nursery_depth = saved_nursery;
         self.exit_type_params(saved_tps);
     }
 
@@ -2543,6 +2580,7 @@ impl Checker {
         // the closure's definition must not make a `break`/`continue` inside it legal.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
+        let saved_nursery = std::mem::replace(&mut self.nursery_depth, 0);
         // `?` inside the body targets THIS closure's return, not the enclosing function's. With no
         // annotation there is no Result/Option context, so `?` is rejected (`Unknown` → `infer_try`
         // errors). Mirrors `check_fn_body`'s `current_ret` handling.
@@ -2561,6 +2599,7 @@ impl Checker {
         self.pop_scope();
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
+        self.nursery_depth = saved_nursery;
         self.current_ret = saved_ret;
         let ret_ty = match ret {
             Some(t) => {
@@ -4243,6 +4282,19 @@ fn recover_escaping_flow(stmts: &[Stmt], in_loop: bool) -> Option<(Span, &'stati
                     if let Some(x) = recover_escaping_flow(&arm.body, in_loop) {
                         return Some(x);
                     }
+                }
+            }
+            // A `parallel:` body and a `spawn:` task body run within this function frame, so an
+            // escaping `return`/`break`/`continue` inside them must still be detected. A `for`/loop
+            // is not introduced, so `in_loop` is unchanged.
+            StmtKind::Parallel { body } => {
+                if let Some(x) = recover_escaping_flow(body, in_loop) {
+                    return Some(x);
+                }
+            }
+            StmtKind::Spawn(SpawnTarget::Block(body)) => {
+                if let Some(x) = recover_escaping_flow(body, in_loop) {
+                    return Some(x);
                 }
             }
             StmtKind::Fn(_) => {} // nested function: its control flow is its own

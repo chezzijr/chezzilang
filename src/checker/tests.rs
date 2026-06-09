@@ -3653,3 +3653,38 @@ fn non_fn_field_call_still_rejected() {
         "has no method 'n'",
     );
 }
+
+// ----- concurrency C1: spawn / parallel: nursery scoping -----
+
+#[test]
+fn spawn_outside_parallel_rejected() {
+    rejects(
+        "fn w():\n    print(1)\nfn main():\n    spawn w()\nmain()\n",
+        "spawn must be inside a parallel: block",
+    );
+}
+
+#[test]
+fn spawn_inside_parallel_ok() {
+    ok("fn w():\n    print(1)\nfn main():\n    parallel:\n        spawn w()\n        spawn w()\nmain()\n");
+}
+
+#[test]
+fn nested_parallel_ok() {
+    ok("fn w():\n    print(1)\nfn main():\n    parallel:\n        parallel:\n            spawn w()\nmain()\n");
+}
+
+#[test]
+fn spawn_block_form_ok() {
+    ok("fn main():\n    parallel:\n        spawn:\n            print(1)\nmain()\n");
+}
+
+#[test]
+fn spawn_in_plain_fn_rejected() {
+    // The function-boundary rule (reset at fn entry): a `spawn` in a function whose body has no
+    // `parallel:` is illegal even when that function is *called* from inside another's nursery.
+    rejects(
+        "fn w():\n    spawn other()\nfn other():\n    print(1)\nfn main():\n    parallel:\n        w()\nmain()\n",
+        "spawn must be inside a parallel: block",
+    );
+}

@@ -1,0 +1,29 @@
+# C1 concurrency: `parallel:` nursery + `spawn` (sequential executor).
+# Spawned tasks register at the spawn point and run to completion at the block's dedent (FIFO);
+# the parent continues only after every child has finished — no leaks, no WaitGroup.
+
+fn worker(id: int, label: str):
+    print("{label} worker {id} ran")
+
+fn main():
+    label := "fanout"
+    print("before nursery")
+    parallel:
+        # form 1: spawn a named call. Args are evaluated + copied at the spawn point.
+        spawn worker(1, label)
+        spawn worker(2, label)
+        # form 2: spawn an anonymous block.
+        spawn:
+            n := 3
+            print("{label} worker {n} ran")
+    # Reaching here means all three tasks finished.
+    print("after nursery")
+
+    # Tasks run at the dedent, so statements that lexically follow a spawn *inside* the block
+    # run before the spawned bodies (the deterministic sequential approximation).
+    parallel:
+        spawn worker(10, "second")
+        print("queued, not yet run")
+    print("done")
+
+main()

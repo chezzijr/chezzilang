@@ -29,7 +29,7 @@
 <stmts>  ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
-<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt>
+<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
 <simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <deferStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <exprStmt>
@@ -151,6 +151,13 @@
 <forStmt>   ::= "FOR" "IDENT" "IN" <expr> <block>
             | "FOR" <identList> "IN" <expr> <block>
 <whileStmt> ::= "WHILE" <expr> <block>
+
+# Concurrency (C1): a `parallel:` nursery and the two `spawn` forms. `parallel:` and the block form
+# of `spawn` are block-ending (no trailing NEWLINE); the call form of `spawn` is line-oriented and
+# consumes its NEWLINE, like `defer`. The call-only restriction on the form-1 expression and the
+# "spawn only inside a parallel:" rule are enforced by the parser/checker, not the grammar.
+<parallelStmt> ::= "PARALLEL" <block>
+<spawnStmt>    ::= "SPAWN" <expr> "NEWLINE" | "SPAWN" <block>
 
 <matchStmt> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <arms> "DEDENT"
 <arms>      ::= <arm> | <arm> <arms>

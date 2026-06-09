@@ -1,0 +1,8 @@
+# rule: parallelStmt, spawnStmt
+fn main():
+    parallel:
+        spawn worker(1)
+        spawn obj.method(2)
+        spawn:
+            x := 3
+            print(x)

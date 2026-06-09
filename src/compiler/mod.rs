@@ -356,6 +356,13 @@ impl Compiler {
             StmtKind::While { cond, body } => self.compile_while(fc, cond, body),
             StmtKind::For { vars, iter, body } => self.compile_for(fc, vars, iter, body, stmt.span),
             StmtKind::Match { scrutinee, arms } => self.compile_match(fc, scrutinee, arms, stmt.span),
+            // Concurrency (C1–C3) lands on the tree-walk interpreter first; VM parity arrives in C4.
+            // Fail cleanly instead of emitting unimplemented bytecode.
+            StmtKind::Parallel { .. } | StmtKind::Spawn(_) => Err(CompileError {
+                message: "concurrency (spawn / parallel:) runs on `--interp` until VM parity lands (C4)"
+                    .to_string(),
+                span: stmt.span,
+            }),
         }
     }
 
