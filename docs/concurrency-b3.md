@@ -202,13 +202,26 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 
 **Status checklist** (tick as phases land):
 
-- [ ] B3.0 — wire-format airlock (single-thread, parity-preserved) ← **next session starts here**
-- [ ] B3.1 — cores out of heap (`Arc<…Core>`)
+- [x] B3.0 — wire-format airlock (single-thread, parity-preserved) ✅ **landed**
+- [ ] B3.1 — cores out of heap (`Arc<…Core>`) ← **next session starts here**
 - [ ] B3.2 — `Arc<Program>` + worker-VM construction (no threads)
 - [ ] B3.3 — real OS threads behind `--parallel`
 - [ ] B3.4 — cancellation + cross-thread `os.exit`
 - [ ] B3.5 — nursery-local deadlock detection under threads
 - [ ] B3.6 — `Executor`/B5 on the pool + A3b
+
+> **B3.0 landed note (for the B3.1+ maintainer):** `WireValue` lives in `src/vm/wire.rs`;
+> `Vm::to_wire` / `Vm::from_wire` + the rewritten `deep_clone` (the round-trip) are in
+> `src/vm/mod.rs` (search the symbols). In B3.0 `to_wire` is **total / statically infallible** — every
+> `Obj` variant maps to a wire arm and the by-reference set (`Str`/`Func`/`Closure`/`Module`/`Native`/
+> `Channel`/`Shared`/`Executor`) crosses as `WireValue::Handle(GcRef)` (same heap). The `Result`
+> return + the `.expect()` in `deep_clone` are forward-plumbing: B3.1 swaps the `Channel`/`Shared`/
+> `Executor` handle arms for the `Arc<…Core>` itself, and **B3.3 must *add* the real `Err` arms**
+> (for `Module` with mutable globals / `Func` / `Closure` that can't cross a thread) — they don't
+> exist yet, so don't assume a defensive fault is already wired. `from_wire` builds bottom-up and
+> `Heap::alloc` never collects, so it inherits `deep_clone`'s GC-safety. 3 unit tests (`wire_*`) pin
+> round-trip value-equality, map hash/order preservation, and by-handle identity; all existing
+> concurrency goldens + GC-stress stayed byte-identical.
 
 ---
 

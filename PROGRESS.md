@@ -18,22 +18,27 @@ sequential subset) with **program-exit auto-drain** (C5 / A2) and the C5 checker
 **Group B's B1 + B2 (cooperative fibers + blocking `recv`) have now landed on the VM engine**: a
 `recv` on an empty channel suspends the running fiber and the scheduler resumes it when a sibling
 `send`s, so mid-flight producer/consumer works (`examples/channel_block.chz`). **`Channel.try_recv()`
-(A1) — the non-blocking poll — now ships on both engines** (`examples/try_recv.chz`). Latest suite:
-**1279 tests** green (unit + parity + `cargo test conformance`), `cargo clippy` clean.
+(A1) — the non-blocking poll — now ships on both engines** (`examples/try_recv.chz`). **B3.0 — the
+wire-format airlock — has now landed** (VM): the task-airlock `deep_clone` is implemented as a
+`WireValue` serialize → reconstruct round-trip (`src/vm/wire.rs` + `Vm::to_wire`/`from_wire`),
+byte-identical to the old direct deep-copy. Latest suite: **1282 tests** green (1279 + 3 new `wire_*`
+units; unit + parity + `cargo test conformance`), `cargo clippy` clean.
 
-**B3 is now decomposed into a persistent, multi-session plan.** Tier-C OS-thread multicore (B3) — with
+**B3 is decomposed into a persistent, multi-session plan.** Tier-C OS-thread multicore (B3) — with
 B4 (real `Shared`) and B5 (real `Executor` pool) folded in, since under shared-nothing threads they're
 the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
 **[`docs/concurrency-b3.md`](docs/concurrency-b3.md)** (validated shared-nothing architecture,
 decisions A–G, risk register, per-phase TDD focus). The surface of `spawn` / `parallel:` / `Channel` /
 `Shared` / `Executor` stays **unchanged**.
 
-**Next candidate:** **B3.0 — wire-format airlock, single-thread, parity-preserved.** Define `WireValue`
-+ `to_wire`/`from_wire` and route the `deep_clone` airlock sites through it into the *same* heap
-(byte-identical behavior — every existing concurrency golden + GC-stress stays green). This de-risks
-the serialization layer before any thread is spawned. Phases B3.0–B3.2 ship behind unchanged behavior;
-`--parallel` (and nondeterminism) appears at B3.3. The #1 risk to resolve before B3.3: **mutable module
-globals can't cross threads** (likely a spec restriction). Items *not* in B3–B5 (cross-nursery wakeups,
+**Next candidate:** **B3.1 — move `Channel`/`Shared`/`Executor` cores out of the heap into
+`Arc<…Core>`** holding `WireValue`, drop their `children()` arms (`heap.rs`), and have the cooperative
+scheduler's `pick_runnable` poll core length via the lock. Still single-thread, still cooperative —
+behavior stays unchanged (every existing golden + GC-stress stays green). Phases B3.1–B3.2 continue to
+ship behind unchanged behavior; `--parallel` (and nondeterminism) appears at B3.3. The #1 risk to
+resolve before B3.3: **mutable module globals can't cross threads** (likely a spec restriction). When
+B3.3 lands real `Err` arms, `to_wire`'s `Result` (forward-plumbed in B3.0) goes load-bearing.
+Items *not* in B3–B5 (cross-nursery wakeups,
 recv-in-native-callback, `Channel.close()`, A3b) are now documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
@@ -78,6 +83,23 @@ overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
 
+- ✅ **Concurrency B3.0 — `WireValue` airlock** (VM, single-thread, parity-preserved). The task-airlock
+  deep-copy `deep_clone` (`spawn` / `Channel.send` / `Shared` get-set) is now a **`WireValue`
+  round-trip**: `Vm::to_wire` serializes a heap `Value` into an owned, `Send`-shaped `WireValue`
+  (`src/vm/wire.rs`) and `Vm::from_wire` reconstructs it into the destination heap — **byte-identical**
+  to the old direct deep-copy. Data (list/tuple/map/set/struct/enum) recurses; by-reference objects
+  (`Str`, callables, modules, `Channel`/`Shared`/`Executor`) cross as `WireValue::Handle` (the same
+  `GcRef`, same heap in B3.0); `Map`/`Set` carry their cached hashes so reconstruction never re-hashes
+  (identical order + index). This de-risks the serialization layer before any thread is spawned: B3.1
+  swaps the shared-core handle arms for `Arc<…Core>`, B3.3 makes `WireValue` the form that crosses a
+  real OS thread. `to_wire` is total in B3.0 (statically infallible — the `Result` + `deep_clone`'s
+  `.expect` are forward-plumbing; B3.3 *adds* the real `Err` arms for `Module`/`Func` that can't cross
+  a thread). `from_wire` builds bottom-up and `Heap::alloc` never collects, so it inherits
+  `deep_clone`'s GC-safety. 3 `wire_*` unit tests (round-trip value-equality over a nested mix; map
+  hash/order preservation under a collision; by-handle identity for `Channel`/`Shared`/`Executor`/
+  `Str`); all existing concurrency goldens + GC-stress stayed byte-identical green. Reviewed by 3
+  parallel S++ reviewers — no correctness/byte-identity/GC findings; the one unanimous note (docs
+  claimed a defensive fault arm that doesn't exist yet) was applied (comment-only). Surface unchanged.
 - ✅ **Concurrency B3 — decomposition + documentation** (planning session, no engine code). Broke the
   Tier-C OS-thread multicore epic (B3, with B4/B5 folded in) into seven independently-shippable,
   TDD'd phases **B3.0…B3.6** in **[`docs/concurrency-b3.md`](docs/concurrency-b3.md)** — a persistent
@@ -252,7 +274,8 @@ Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.ch
   `recv`) done on the VM**. Remaining **B3/B4/B5 now planned as a phased epic** in
   [`docs/concurrency-b3.md`](docs/concurrency-b3.md) (B3.0…B3.6; B4 real `Shared` + B5 real `Executor`
   pool + A3b are folded into B3.4–B3.6 since shared-nothing threads make them the same machinery).
-  Next code step: **B3.0** (wire-format airlock, single-thread, parity-preserved).
+  **B3.0 (wire-format airlock) is done**; next code step: **B3.1** (move `Channel`/`Shared`/`Executor`
+  cores out of the heap into `Arc<…Core>`, single-thread, parity-preserved).
   **interp B1/B2 is a deliberate non-goal** (see the DECISION box in Current focus — the interp stays
   the sequential-subset parity oracle; the VM is the sole concurrent engine). Group A is done: C1–C4,
   the `Executor` sequential subset, **A2 auto-drain**, the C5 checker refinements, **A3a** (pinned),

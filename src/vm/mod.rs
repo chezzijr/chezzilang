@@ -6,11 +6,13 @@
 pub mod heap;
 pub mod op;
 pub mod value;
+pub mod wire;
 
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, Op, Program, ProtoId};
 use std::rc::Rc;
 use value::{GcRef, Value};
+use wire::WireValue;
 
 use crate::ast::Span;
 #[cfg(test)]
@@ -2910,49 +2912,141 @@ impl Vm {
     /// and `Channel` / `Shared` handles pass by reference (the handle is what crosses). Mirrors
     /// `interp::deep_clone` exactly. Allocates, but only at the instruction boundary that called it
     /// (no GC runs mid-clone), so intermediate handles can't be collected.
+    ///
+    /// B3.0: implemented as a [`WireValue`] round-trip — `to_wire` (read-only serialize) then
+    /// `from_wire` (reconstruct into this heap). Byte-identical to the old direct deep-copy; the
+    /// wire form is what de-risks B3.1 (cores → `Arc`) and B3.3 (the value crosses a real thread).
+    /// The `.expect` cannot fire in B3.0: `to_wire` is total (every `Obj` variant maps to a wire
+    /// arm — by-reference objects cross as `Handle`), so it is statically infallible here. Its
+    /// `Result` return is forward-plumbing for B3.3, where by-reference handles (`Module` / `Func` /
+    /// closures) can no longer cross an OS-thread boundary and `to_wire` gains real `Err` arms; at
+    /// that point callers switch to direct `to_wire?` / `from_wire`.
     fn deep_clone(&mut self, v: Value) -> Value {
-        let Value::Obj(h) = v else { return v };
-        match self.heap.get(h).clone() {
-            // Immutable / by-handle: share the existing object (matches interp passing the `Rc`).
-            Obj::Str(_)
-            | Obj::Func { .. }
-            | Obj::Closure { .. }
-            | Obj::Module { .. }
-            | Obj::Native { .. }
-            | Obj::Channel(_)
-            | Obj::Shared(_)
-            | Obj::Executor { .. } => v,
-            Obj::List(items) => {
-                let cloned: Vec<Value> = items.into_iter().map(|x| self.deep_clone(x)).collect();
+        let w = self.to_wire(v).expect("deep_clone: airlock value must be sendable (B3.0 single-thread)");
+        self.from_wire(w)
+    }
+
+    /// B3.0 — serialize a value into its [`WireValue`] form (the airlock's outbound half). A
+    /// read-only walk of the heap, structurally identical to `deep_clone`'s old recursion but
+    /// allocating nothing. Data (list/tuple/map/set/struct/enum) recurses; immutable / by-reference
+    /// objects (`Str`, callables, modules, `Channel`/`Shared`/`Executor`) cross as
+    /// [`WireValue::Handle`] (the existing handle, same heap in B3.0). `Map`/`Set` carry their cached
+    /// hashes through so reconstruction never re-hashes.
+    ///
+    /// **B3.0: this is total — every `Value` and every `Obj` variant maps to a wire arm, so it never
+    /// returns `Err`** (the `?` only forwards from recursion, which is itself infallible). The
+    /// `Result` return is deliberate forward-plumbing: at B3.3, by-reference handles whose object
+    /// cannot cross an OS thread (`Module` with mutable globals, `Func`/`Closure`) stop mapping to
+    /// `Handle` and instead return a real `Err` defensive fault here. No such arm exists yet.
+    fn to_wire(&self, v: Value) -> Result<WireValue, RuntimeError> {
+        Ok(match v {
+            Value::Int(n) => WireValue::Int(n),
+            Value::Float(f) => WireValue::Float(f),
+            Value::Bool(b) => WireValue::Bool(b),
+            Value::Nil => WireValue::Nil,
+            Value::Obj(h) => match self.heap.get(h) {
+                // Immutable / by-handle: cross as the existing handle (matches the old deep_clone arm).
+                Obj::Str(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Module { .. }
+                | Obj::Native { .. }
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::Executor { .. } => WireValue::Handle(h),
+                Obj::List(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for x in items {
+                        out.push(self.to_wire(*x)?);
+                    }
+                    WireValue::List(out)
+                }
+                Obj::Tuple(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for x in items {
+                        out.push(self.to_wire(*x)?);
+                    }
+                    WireValue::Tuple(out)
+                }
+                Obj::Map(m) => {
+                    let mut out = Vec::with_capacity(m.entries.len());
+                    for (hash, k, val) in &m.entries {
+                        out.push((*hash, self.to_wire(*k)?, self.to_wire(*val)?));
+                    }
+                    WireValue::Map(out)
+                }
+                Obj::Set(s) => {
+                    let mut out = Vec::with_capacity(s.entries.len());
+                    for (hash, e) in &s.entries {
+                        out.push((*hash, self.to_wire(*e)?));
+                    }
+                    WireValue::Set(out)
+                }
+                Obj::Struct { name, fields } => {
+                    let mut out = Vec::with_capacity(fields.len());
+                    for (k, val) in fields {
+                        out.push((k.clone(), self.to_wire(*val)?));
+                    }
+                    WireValue::Struct { name: name.clone(), fields: out }
+                }
+                Obj::Enum { ty, variant, payload } => {
+                    let mut out = Vec::with_capacity(payload.len());
+                    for x in payload {
+                        out.push(self.to_wire(*x)?);
+                    }
+                    WireValue::Enum { ty: ty.clone(), variant: variant.clone(), payload: out }
+                }
+            },
+        })
+    }
+
+    /// B3.0 — reconstruct a [`WireValue`] into a heap [`Value`] (the airlock's inbound half). Data
+    /// arms `alloc` fresh objects into *this* `Vm`'s heap (mirroring the old deep_clone allocation);
+    /// [`WireValue::Handle`] returns the same handle (by-reference preserved). `Map`/`Set` rebuild
+    /// via `push(hash, …)` with the carried hash, so iteration order + index are identical. Builds
+    /// bottom-up (children before parent alloc) and `alloc` never collects, so — like deep_clone —
+    /// no intermediate is lost mid-reconstruction.
+    // `&mut self` is intentional: `from_wire` reconstructs *into* this VM's heap (it allocates),
+    // so it is not the usual ownership-less `from_*` constructor the lint expects.
+    #[allow(clippy::wrong_self_convention)]
+    fn from_wire(&mut self, w: WireValue) -> Value {
+        match w {
+            WireValue::Int(n) => Value::Int(n),
+            WireValue::Float(f) => Value::Float(f),
+            WireValue::Bool(b) => Value::Bool(b),
+            WireValue::Nil => Value::Nil,
+            WireValue::Handle(h) => Value::Obj(h),
+            WireValue::List(items) => {
+                let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::List(cloned)))
             }
-            Obj::Tuple(items) => {
-                let cloned: Vec<Value> = items.into_iter().map(|x| self.deep_clone(x)).collect();
+            WireValue::Tuple(items) => {
+                let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::Tuple(cloned)))
             }
-            Obj::Map(m) => {
+            WireValue::Map(entries) => {
                 let mut out = MapData::default();
-                for (hash, k, val) in m.entries {
-                    let (ck, cv) = (self.deep_clone(k), self.deep_clone(val));
+                for (hash, k, val) in entries {
+                    let (ck, cv) = (self.from_wire(k), self.from_wire(val));
                     out.push(hash, ck, cv);
                 }
                 Value::Obj(self.heap.alloc(Obj::Map(out)))
             }
-            Obj::Set(s) => {
+            WireValue::Set(entries) => {
                 let mut out = SetData::default();
-                for (hash, e) in s.entries {
-                    let ce = self.deep_clone(e);
+                for (hash, e) in entries {
+                    let ce = self.from_wire(e);
                     out.push(hash, ce);
                 }
                 Value::Obj(self.heap.alloc(Obj::Set(out)))
             }
-            Obj::Struct { name, fields } => {
+            WireValue::Struct { name, fields } => {
                 let cloned: Vec<(Box<str>, Value)> =
-                    fields.into_iter().map(|(k, val)| (k, self.deep_clone(val))).collect();
+                    fields.into_iter().map(|(k, val)| (k, self.from_wire(val))).collect();
                 Value::Obj(self.heap.alloc(Obj::Struct { name, fields: cloned }))
             }
-            Obj::Enum { ty, variant, payload } => {
-                let cloned: Vec<Value> = payload.into_iter().map(|x| self.deep_clone(x)).collect();
+            WireValue::Enum { ty, variant, payload } => {
+                let cloned: Vec<Value> = payload.into_iter().map(|x| self.from_wire(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::Enum { ty, variant, payload: cloned }))
             }
         }
@@ -4328,6 +4422,91 @@ mod tests {
         vm.do_call(0, Span { line: 1, col: 1 }).unwrap();
         let result = vm.pop();
         assert_eq!(vm.display(result), "hi");
+    }
+
+    // ----- B3.0: WireValue airlock (to_wire / from_wire) -----
+
+    /// A round-trip through the wire form, into the *same* heap, must be value-equal to the original
+    /// over a deeply-nested sendable mix (scalars, str, list, tuple, map, set, struct, enum). This is
+    /// the airlock's correctness invariant (B3.0): serialize then reconstruct loses nothing.
+    #[test]
+    fn wire_roundtrip_preserves_value_equality() {
+        let mut vm = Vm::new(Rc::new(empty_program()));
+        let s = vm.heap.alloc(Obj::Str("s".into()));
+        let tup = vm.heap.alloc(Obj::Tuple(vec![Value::Bool(true), Value::Nil]));
+        let st = vm.heap.alloc(Obj::Struct {
+            name: "P".into(),
+            fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Obj(s))],
+        });
+        let en = vm.heap.alloc(Obj::Enum {
+            ty: "Option".into(),
+            variant: "Some".into(),
+            payload: vec![Value::Int(9)],
+        });
+        let mut m = MapData::default();
+        m.push(10, Value::Int(1), Value::Int(100));
+        m.push(20, Value::Obj(s), Value::Int(200));
+        let map = vm.heap.alloc(Obj::Map(m));
+        let mut set = SetData::default();
+        set.push(5, Value::Int(1));
+        set.push(6, Value::Int(2));
+        let setobj = vm.heap.alloc(Obj::Set(set));
+        let list = vm.heap.alloc(Obj::List(vec![
+            Value::Int(1),
+            Value::Obj(s),
+            Value::Obj(tup),
+            Value::Obj(st),
+            Value::Obj(en),
+            Value::Obj(map),
+            Value::Obj(setobj),
+        ]));
+        let v = Value::Obj(list);
+
+        let w = vm.to_wire(v).expect("nested sendable value should serialize");
+        let wired = vm.from_wire(w);
+        assert!(vm.values_equal(v, wired), "wire round-trip changed the value");
+        // Data is reconstructed into a *fresh* handle (deep copy, not aliasing the original).
+        assert_ne!(v, wired, "round-tripped data should be a distinct heap object");
+    }
+
+    /// `Map`/`Set` cross the wire carrying their **cached hashes** and **insertion order** unchanged —
+    /// `from_wire` rebuilds via `push(hash, …)`, never re-hashing. Pins byte-identical reconstruction
+    /// (the iteration order + index a later `print`/lookup observes) even when two keys collide.
+    #[test]
+    fn wire_preserves_map_hashes_and_order() {
+        let mut vm = Vm::new(Rc::new(empty_program()));
+        let mut m = MapData::default();
+        m.push(42, Value::Int(1), Value::Int(10)); // collides with the third entry on hash 42
+        m.push(7, Value::Int(2), Value::Int(20));
+        m.push(42, Value::Int(3), Value::Int(30));
+        let map = Value::Obj(vm.heap.alloc(Obj::Map(m)));
+
+        let w = vm.to_wire(map).expect("map should serialize");
+        let wired = vm.from_wire(w);
+        let Value::Obj(h) = wired else { panic!("expected heap obj") };
+        let Obj::Map(rebuilt) = vm.heap.get(h) else { panic!("expected map") };
+        let hashes: Vec<u64> = rebuilt.entries.iter().map(|(hash, ..)| *hash).collect();
+        assert_eq!(hashes, vec![42, 7, 42], "cached hashes / order must survive the round-trip");
+        // The index must reflect the cached hashes (collision bucket points at positions 0 and 2).
+        assert_eq!(rebuilt.candidates(42), &[0, 2]);
+        assert_eq!(rebuilt.candidates(7), &[1]);
+    }
+
+    /// Immutable / by-reference objects (`Str`, callables, `Channel`/`Shared`/`Executor`) cross the
+    /// airlock **by handle** — `to_wire`→`from_wire` returns the *same* `GcRef` (matching the old
+    /// `deep_clone` by-handle arm), so every task reaches the one shared mailbox/box.
+    #[test]
+    fn wire_passes_by_reference_objects_as_same_handle() {
+        let mut vm = Vm::new(Rc::new(empty_program()));
+        let ch = vm.heap.alloc(Obj::Channel(Default::default()));
+        let sh = vm.heap.alloc(Obj::Shared(Value::Int(0)));
+        let ex = vm.heap.alloc(Obj::Executor { queue: Default::default(), shut: false });
+        let st = vm.heap.alloc(Obj::Str("imm".into()));
+        for h in [ch, sh, ex, st] {
+            let v = Value::Obj(h);
+            let w = vm.to_wire(v).expect("by-ref object should serialize");
+            assert_eq!(vm.from_wire(w), v, "by-reference object must round-trip to the same handle");
+        }
     }
 
     // ----- arithmetic -----
