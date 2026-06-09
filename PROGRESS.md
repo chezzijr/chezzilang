@@ -26,8 +26,17 @@ byte-identical to the old direct deep-copy. **B3.1 — cores out of the heap —
 (`src/vm/core.rs`), so the heap keeps only an `Obj::X(Arc<…Core>)` handle and a crossed core is shared
 (not copied). The airlock serializes at the core boundary now; `children()` was *rewritten* (not
 dropped — single-thread cores still embed `Handle(GcRef)`s) to keep queued strings/closures rooted.
-Still single-thread + cooperative, behavior byte-identical. Latest suite: **1286 tests** green (1282 +
-4 new B3.1 units, incl. shared-core / shut-sharing / `display_wire`; unit + parity + `cargo test
+**B3.2 — `Arc<Program>` + isolated worker-VM construction — has now landed** (VM): `program: Rc<Program>`
+→ `Arc<Program>` (read-only sharable across workers), plus `Vm::spawn_worker` / `Vm::run_task_isolated`
+— build a fresh worker `Vm` with its **own heap**, wire-copy a `spawn`'d function/closure task's
+args+captures IN (callee lowered to `ProtoId` + wire'd captures, never a parent-heap handle), run it
+**synchronously** (no threads), and wire result + per-worker `out`/`stderr` back. Cross-heap safety is
+**enforced** (`WireValue::has_handle` + `Vm::ensure_crossable`): a `str`/closure value crossing — which
+would be a dangling `GcRef` in another heap — is a clean fault, not silent corruption; method tasks are
+gated off (a worker's `module_objs` is empty). All `#[allow(dead_code)]` until B3.3's `--parallel`
+wires it in (decision A keeps the cooperative engine the default through B3.2). Still single-thread,
+behavior byte-identical. Latest suite: **1292 tests** green (1287 + 5 new B3.2 units: distinct-heap /
+result+out / program-Arc-sharing / str-rejection / method-rejection; unit + parity + `cargo test
 conformance`), `cargo clippy -- -D warnings` clean.
 
 **B3 is decomposed into a persistent, multi-session plan.** Tier-C OS-thread multicore (B3) — with
@@ -37,13 +46,14 @@ the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
 decisions A–G, risk register, per-phase TDD focus). The surface of `spawn` / `parallel:` / `Channel` /
 `Shared` / `Executor` stays **unchanged**.
 
-**Next candidate:** **B3.2 — `Arc<Program>` + worker-VM construction (no threads).** `spawn` builds a
-fresh worker `Vm` sharing `Arc<Program>`, runs the task **synchronously** in its own heap, and
-wire-copies args in + result/`out` back — resolving the worker-VM/heap-handoff plumbing in isolation.
-Still single-thread, behavior unchanged. Phase B3.2 continues to
-ship behind unchanged behavior; `--parallel` (and nondeterminism) appears at B3.3. The #1 risk to
-resolve before B3.3: **mutable module globals can't cross threads** (likely a spec restriction). When
-B3.3 lands real `Err` arms, `to_wire`'s `Result` (forward-plumbed in B3.0) goes load-bearing.
+**Next candidate:** **B3.3 — real OS threads behind `--parallel`.** Wire `run_task_isolated` into a
+bounded-pool `join_nursery` under a new `--parallel` flag (cooperative engine stays the default);
+condvar `recv` blocking + buffer-flush-on-join. `--parallel` is where nondeterminism first appears, so
+it gets its own deterministic-by-construction test suite (collect→sort→print). **Resolve first — the
+#1 risk: mutable module globals can't cross threads (decision G1)** — a spec call: globals immutable
+after init (simpler) vs per-worker snapshots (riskier). B3.3 also owes `str`/closure **cross-by-value**
+(owned-bytes `WireValue::Str` + `Closure` arm, then relax `ensure_crossable`) and method-task support;
+when those `Err` arms go load-bearing, `to_wire`'s `Result` (forward-plumbed since B3.0) is used for real.
 Items *not* in B3–B5 (cross-nursery wakeups,
 recv-in-native-callback, `Channel.close()`, A3b) are now documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
@@ -89,6 +99,24 @@ overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
 
+- ✅ **Concurrency B3.2 — `Arc<Program>` + isolated worker-VM construction** (VM, single-thread,
+  parity-preserved). `program: Rc<Program>` → `Arc<Program>` (the compiled program is immutable after
+  compile, so a worker shares it read-only — `Program` is plain owned data, `Send + Sync`). New
+  `Vm::spawn_worker` builds a fresh worker `Vm` with its **own heap** sharing `Arc::clone(program)`;
+  `Vm::run_task_isolated` lowers a `spawn`'d function/closure task to its `ProtoId` + wire'd
+  captures/args (the callee is **never** crossed as a parent-heap `GcRef` — the proto lives in the
+  shared `Arc<Program>`), `from_wire`s them into the worker heap, rebuilds the closure over a fresh
+  empty `home`, runs it **synchronously** (no threads), and crosses the result + per-worker
+  `out`/`stderr` back as a `WorkerResult` (decision F). **Cross-heap safety enforced** —
+  `WireValue::has_handle` + `Vm::ensure_crossable` reject any `str`/closure value (a dangling `GcRef`
+  in another heap) on captures, args, **and the returned result** with a clean fault instead of silent
+  corruption; method tasks gated off (worker `module_objs` is empty). All `#[allow(dead_code)]` until
+  B3.3's `--parallel` wires it in (decision A keeps the cooperative engine the default through B3.2).
+  5 new units (distinct-heap / result+out / program-Arc-sharing / str-rejection / method-rejection);
+  **1292 tests** green, `cargo test conformance` + `cargo clippy -- -D warnings` clean; all existing
+  concurrency goldens + GC-stress byte-identical. Reviewed by 2 parallel S++ panels — the silent-
+  dangling-handle risk they flagged is now the enforced `ensure_crossable` guard. `docs/concurrency-b3.md`
+  §4 + B3.2 landed note.
 - ✅ **Concurrency B3.0 — `WireValue` airlock** (VM, single-thread, parity-preserved). The task-airlock
   deep-copy `deep_clone` (`spawn` / `Channel.send` / `Shared` get-set) is now a **`WireValue`
   round-trip**: `Vm::to_wire` serializes a heap `Value` into an owned, `Send`-shaped `WireValue`

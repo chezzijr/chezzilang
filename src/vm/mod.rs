@@ -12,7 +12,6 @@ pub mod wire;
 use core::{ChannelCore, ExecutorCore, SharedCore};
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, Op, Program, ProtoId};
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use value::{GcRef, Value};
 use wire::WireValue;
@@ -164,7 +163,7 @@ impl PendingCall {
 }
 
 struct Vm {
-    program: Rc<Program>,
+    program: Arc<Program>,
     heap: Heap,
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
@@ -291,8 +290,30 @@ struct Handler {
     nursery_len: usize,
 }
 
+/// B3.2 — what a synchronously-run isolated worker hands back across the airlock: the task's return
+/// value serialized in the worker heap, plus the worker's captured stdout/stderr (decision F —
+/// buffer-per-worker, returned to the parent rather than interleaved live).
+// Forward-plumbing: exercised by the B3.2 unit tests in isolation; B3.3 wires the worker path into
+// the `--parallel` engine (`join_nursery`), at which point this becomes reachable in the bin build.
+#[allow(dead_code)]
+#[derive(Debug)]
+struct WorkerResult {
+    value: WireValue,
+    out: String,
+    stderr: String,
+}
+
+/// B3.2 — a spawned task lowered to a `Send` description (no parent-heap `GcRef`s), ready to rebuild
+/// in a worker heap. The callee crosses as its `ProtoId` (the proto lives in the shared `Arc<Program>`)
+/// plus wire'd captures/args.
+#[allow(dead_code)] // forward-plumbing for B3.3 `--parallel`; see `WorkerResult`.
+enum Lowered {
+    Closure { proto: ProtoId, captured: Vec<(String, WireValue)>, args: Vec<WireValue>, span: Span },
+    Func { proto: ProtoId, args: Vec<WireValue>, span: Span },
+}
+
 impl Vm {
-    fn new(program: Rc<Program>) -> Self {
+    fn new(program: Arc<Program>) -> Self {
         Vm {
             program,
             heap: Heap::new(),
@@ -524,7 +545,7 @@ impl Vm {
     // ----- the dispatch loop -----
 
     fn run_until(&mut self, base_level: usize) -> Result<(), RuntimeError> {
-        let program = Rc::clone(&self.program);
+        let program = Arc::clone(&self.program);
         while self.frames.len() > base_level {
             // Collect at instruction boundaries only: here every live value is reachable from the
             // VM roots (operand stack, frame slots, frame homes/closures, module namespaces) —
@@ -537,7 +558,7 @@ impl Vm {
             let ip = self.frames[fi].ip;
             self.frames[fi].ip = ip + 1;
             // Borrow the instruction (no per-step clone — the hot path must not allocate). The
-            // `Rc` clone is a single refcount bump per loop entry; `op` then borrows program data
+            // `Arc` clone is a single refcount bump per loop entry; `op` then borrows program data
             // that is disjoint from the `&mut self` fields `step` touches.
             let op = &program.protos[pid].code[ip];
             let span = program.protos[pid].lines[ip];
@@ -3065,6 +3086,144 @@ impl Vm {
         }
     }
 
+    /// B3.2 — construct a fresh worker `Vm` that shares this VM's compiled program by `Arc`
+    /// (read-only) but owns its own empty heap. Execution-shaping flags (`gc_stress`) carry over so a
+    /// worker is exercised under the same GC pressure as the parent; `host` is left inert (B3.2's
+    /// isolation tasks don't touch host I/O — B3.3 threads it through when real workers run user I/O).
+    /// No OS thread yet; the caller drives the returned worker synchronously.
+    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
+    fn spawn_worker(&self) -> Vm {
+        let mut worker = Vm::new(Arc::clone(&self.program));
+        worker.gc_stress = self.gc_stress;
+        worker
+    }
+
+    /// B3.2 — run a spawned task in an isolated worker (`spawn_worker`): its args/captures cross IN as
+    /// [`WireValue`] (serialized in *this* parent heap, reconstructed in the worker heap) and its
+    /// return value + captured `out`/`stderr` cross back OUT. The worker runs **synchronously** on the
+    /// calling thread (no OS thread until B3.3), proving the `Arc<Program>` + heap-handoff plumbing in
+    /// isolation.
+    ///
+    /// The callee is **not** crossed as a parent-heap `Handle` (a `GcRef` is meaningless in another
+    /// heap); instead the task is lowered to its `ProtoId` + wire'd captures (the proto lives in the
+    /// shared `Arc<Program>`) and the worker rebuilds the closure over its own heap.
+    ///
+    /// **Cross-heap safety (enforced, not just documented).** A `WireValue` that still carries a
+    /// by-reference [`Handle`](WireValue::has_handle) — a `str`, a closure/func value, a module — is a
+    /// parent-heap `GcRef` that means nothing in the worker heap, so every crossed value (captures,
+    /// args, and the returned result) is checked with [`Vm::ensure_crossable`] and a clean
+    /// `RuntimeError` is raised rather than silently reconstructing a dangling handle. Plain data and
+    /// `Channel`/`Shared`/`Executor` handles (which cross as a shared `Arc`, not a `GcRef`) pass.
+    /// `str`/closure crossing **by value** lands in B3.3.
+    ///
+    /// Two further B3.2 limits, deliberate and gated: module globals (a `Closure`'s `home`) do **not**
+    /// cross — the worker gets a fresh empty home — so a task reading a mutable module global faults
+    /// (deferred decision **G1**); and **method tasks** (`spawn recv.m()`) are rejected outright,
+    /// because a worker never runs module init so its `module_objs` table is empty (method dispatch
+    /// would index out of bounds). Both are resolved at B3.3. B3.2 handles only self-contained
+    /// function/closure tasks over sendable data, which is all the heap-handoff proof needs.
+    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
+    fn run_task_isolated(&mut self, task: PendingCall) -> Result<WorkerResult, RuntimeError> {
+        // 1. Lower the task to a `Send` description in THIS (parent) heap (read-only serialize),
+        //    rejecting any value that can't cross a heap boundary as-is.
+        let lowered = match task {
+            PendingCall::Call { callee, args, span } => {
+                let wargs = self.wire_args(args, span)?;
+                match callee {
+                    Value::Obj(h) => match self.heap.get(h).clone() {
+                        Obj::Closure { proto, captured, .. } => {
+                            let mut wcap = Vec::with_capacity(captured.len());
+                            for (k, v) in captured {
+                                let w = self.to_wire(v)?;
+                                self.ensure_crossable(&w, span)?;
+                                wcap.push((k, w));
+                            }
+                            Lowered::Closure { proto, captured: wcap, args: wargs, span }
+                        }
+                        Obj::Func { proto, .. } => Lowered::Func { proto, args: wargs, span },
+                        _ => return Err(self.err(
+                            format!("spawn: '{}' is not an isolable task", self.type_name(callee)),
+                            span,
+                        )),
+                    },
+                    _ => return Err(self.err(
+                        format!("spawn: '{}' is not an isolable task", self.type_name(callee)),
+                        span,
+                    )),
+                }
+            }
+            // Method tasks need the worker's module-globals table, which a worker never populates
+            // (no module init) — gate them off cleanly until B3.3 (see the doc-comment).
+            PendingCall::Method { span, .. } => {
+                return Err(self.err(
+                    "spawn: method tasks are not yet isolable (B3.2 runs only function/closure tasks)"
+                        .to_string(),
+                    span,
+                ));
+            }
+        };
+
+        // 2. Build the worker, 3. reconstruct the task in its heap, run it synchronously.
+        let mut worker = self.spawn_worker();
+        let (ret, span) = match lowered {
+            Lowered::Closure { proto, captured, args, span } => {
+                let home = worker.fresh_worker_home();
+                let cap = captured.into_iter().map(|(k, w)| (k, worker.from_wire(w))).collect();
+                let callee = Value::Obj(worker.heap.alloc(Obj::Closure { proto, captured: cap, home }));
+                let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
+                (worker.invoke_value(callee, args, span)?, span)
+            }
+            Lowered::Func { proto, args, span } => {
+                let home = worker.fresh_worker_home();
+                let callee = Value::Obj(worker.heap.alloc(Obj::Func { proto, home }));
+                let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
+                (worker.invoke_value(callee, args, span)?, span)
+            }
+        };
+
+        // 4. Hand the result + captured output back across the airlock (result must be cross-safe too —
+        //    a worker returning a `str`/closure can't hand a worker-heap `GcRef` back to the parent).
+        let value = worker.to_wire(ret)?;
+        worker.ensure_crossable(&value, span)?;
+        Ok(WorkerResult { value, out: worker.out, stderr: worker.stderr })
+    }
+
+    /// Reject a wired value that still carries a by-reference [`Handle`](WireValue::has_handle) — a
+    /// heap-local `GcRef` that cannot cross into another heap as-is (B3.2). `str`/closure crossing by
+    /// value lands in B3.3; until then this converts a would-be dangling handle into a clean fault.
+    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
+    fn ensure_crossable(&self, w: &WireValue, span: Span) -> Result<(), RuntimeError> {
+        if w.has_handle() {
+            return Err(self.err(
+                "spawn: this task value can't cross a worker boundary yet — only plain data and \
+                 Channel/Shared/Executor handles are sendable in B3.2 (str/closure cross by value in B3.3)"
+                    .to_string(),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Serialize a task's argument list across the airlock (read-only walk of this heap), rejecting any
+    /// argument that can't cross a heap boundary as-is (see [`Vm::ensure_crossable`]).
+    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
+    fn wire_args(&self, args: Vec<Value>, span: Span) -> Result<Vec<WireValue>, RuntimeError> {
+        args.into_iter()
+            .map(|a| {
+                let w = self.to_wire(a)?;
+                self.ensure_crossable(&w, span)?;
+                Ok(w)
+            })
+            .collect()
+    }
+
+    /// A fresh empty module to serve as a worker closure's `home`. The parent's `home` `GcRef` can't
+    /// cross heaps; B3.2 tasks don't read globals, so an empty namespace suffices (see `run_task_isolated`).
+    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
+    fn fresh_worker_home(&mut self) -> GcRef {
+        self.heap.alloc(Obj::Module { name: "<worker>".into(), globals: Default::default() })
+    }
+
     /// B3.1 — clone out the shared `Arc<ChannelCore>` behind a `Channel` handle (refcount bump). The
     /// `Arc` is held only for the duration of the calling method, so locking it does not borrow the
     /// heap, leaving `self` free for the re-entrant value paths (`from_wire`, `invoke_value`).
@@ -4294,7 +4453,7 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
         Ok(p) => p,
         Err(e) => return (String::new(), Err(RuntimeError { message: e.message, span: e.span })),
     };
-    let mut vm = Vm::new(Rc::new(program));
+    let mut vm = Vm::new(Arc::new(program));
     let result = vm
         .run()
         .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
@@ -4329,7 +4488,7 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
                 Ok(p) => p,
                 Err(e) => return (Err(RuntimeError { message: e.message, span: e.span }), 0),
             };
-            let mut vm = Vm::new(Rc::new(program));
+            let mut vm = Vm::new(Arc::new(program));
             vm.gc_stress = stress;
             let result = vm
                 .run()
@@ -4384,7 +4543,7 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
         Ok(p) => p,
         Err(e) => return (String::new(), String::new(), Err(RunError::plain(RuntimeError { message: e.message, span: e.span })), None),
     };
-    let mut vm = Vm::new(Rc::new(program));
+    let mut vm = Vm::new(Arc::new(program));
     vm.host = cfg;
     // On a clean finish, gracefully reap any Executor never explicitly shut down (C5 / A2). Skipped
     // on a fault (the program is already erroring) and on a hard `std.os.exit` (handled inside
@@ -4467,7 +4626,7 @@ mod tests {
             crate::native::expect_args(h, "add", 2)?;
             Ok(NativeRet::Int(h.arg_int(0)? + h.arg_int(1)?))
         }
-        let mut vm = Vm::new(Rc::new(empty_program()));
+        let mut vm = Vm::new(Arc::new(empty_program()));
         let h = vm.heap.alloc(Obj::Native { name: "add".into(), func: add });
         vm.push(Value::Obj(h));
         vm.push(Value::Int(40));
@@ -4482,7 +4641,7 @@ mod tests {
         fn greet(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
             Ok(NativeRet::Str("hi".into()))
         }
-        let mut vm = Vm::new(Rc::new(empty_program()));
+        let mut vm = Vm::new(Arc::new(empty_program()));
         let nat = vm.heap.alloc(Obj::Native { name: "greet".into(), func: greet });
         // A native fn handle has no GC children (guards the mark-phase claim).
         assert!(vm.heap.children(nat).is_empty());
@@ -4499,7 +4658,7 @@ mod tests {
     /// the airlock's correctness invariant (B3.0): serialize then reconstruct loses nothing.
     #[test]
     fn wire_roundtrip_preserves_value_equality() {
-        let mut vm = Vm::new(Rc::new(empty_program()));
+        let mut vm = Vm::new(Arc::new(empty_program()));
         let s = vm.heap.alloc(Obj::Str("s".into()));
         let tup = vm.heap.alloc(Obj::Tuple(vec![Value::Bool(true), Value::Nil]));
         let st = vm.heap.alloc(Obj::Struct {
@@ -4542,7 +4701,7 @@ mod tests {
     /// (the iteration order + index a later `print`/lookup observes) even when two keys collide.
     #[test]
     fn wire_preserves_map_hashes_and_order() {
-        let mut vm = Vm::new(Rc::new(empty_program()));
+        let mut vm = Vm::new(Arc::new(empty_program()));
         let mut m = MapData::default();
         m.push(42, Value::Int(1), Value::Int(10)); // collides with the third entry on hash 42
         m.push(7, Value::Int(2), Value::Int(20));
@@ -4564,7 +4723,7 @@ mod tests {
     /// `to_wire`→`from_wire` returns the *same* `GcRef` (matching the old `deep_clone` by-handle arm).
     #[test]
     fn wire_passes_by_reference_objects_as_same_handle() {
-        let mut vm = Vm::new(Rc::new(empty_program()));
+        let mut vm = Vm::new(Arc::new(empty_program()));
         let st = vm.heap.alloc(Obj::Str("imm".into()));
         let v = Value::Obj(st);
         let w = vm.to_wire(v).expect("by-ref object should serialize");
@@ -4576,7 +4735,7 @@ mod tests {
     /// at the `Arc`, not the handle, so two tasks still reach one mailbox/box/queue.
     #[test]
     fn wire_shares_core_across_a_fresh_handle() {
-        let mut vm = Vm::new(Rc::new(empty_program()));
+        let mut vm = Vm::new(Arc::new(empty_program()));
         let ch = vm.heap.alloc(Obj::Channel(Arc::new(ChannelCore::default())));
         let sh = vm.heap.alloc(Obj::Shared(Arc::new(SharedCore::default())));
         let ex = vm.heap.alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
@@ -4601,7 +4760,7 @@ mod tests {
     /// duplicated, across the wire.
     #[test]
     fn channel_core_shared_across_handles() {
-        let mut vm = Vm::new(Rc::new(empty_program()));
+        let mut vm = Vm::new(Arc::new(empty_program()));
         let h1 = vm.heap.alloc(Obj::Channel(Arc::new(ChannelCore::default())));
         // Cross the airlock → a second handle onto the same core.
         let w = vm.to_wire(Value::Obj(h1)).unwrap();
@@ -4616,7 +4775,7 @@ mod tests {
     /// the original handle — `submit` on the alias then fails with the byte-identical message.
     #[test]
     fn executor_core_shut_is_shared_across_handles() {
-        let mut vm = Vm::new(Rc::new(empty_program()));
+        let mut vm = Vm::new(Arc::new(empty_program()));
         let h1 = vm.heap.alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
         let w = vm.to_wire(Value::Obj(h1)).unwrap();
         let Value::Obj(h2) = vm.from_wire(w) else { panic!("expected handle") };
@@ -4631,11 +4790,101 @@ mod tests {
     /// boxed `Str` `Handle` back through the heap), since `display` is `&self` and can't `from_wire`.
     #[test]
     fn display_shared_renders_contents() {
-        let mut vm = Vm::new(Rc::new(empty_program()));
+        let mut vm = Vm::new(Arc::new(empty_program()));
         let s = vm.heap.alloc(Obj::Str("hi".into()));
         let boxed = vm.to_wire(Value::Obj(s)).unwrap();
         let sh = vm.heap.alloc(Obj::Shared(Arc::new(SharedCore { v: Mutex::new(boxed) })));
         assert_eq!(vm.display(Value::Obj(sh)), "Shared(hi)");
+    }
+
+    // ----- B3.2: isolated worker-VM construction (no threads) -----
+
+    /// Build a one-proto program + a parent `Vm`, plus a zero-arg closure over proto 0 with a dummy
+    /// home module (the test protos never read globals). Mirrors how `do_spawn_block` shapes a task.
+    fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
+        let sp = Span { line: 1, col: 1 };
+        let proto = op::Proto { name: "task".into(), arity: 0, n_slots: 0, lines: vec![sp; code.len()], code };
+        let program = Program { protos: vec![proto], ..empty_program() };
+        let mut vm = Vm::new(Arc::new(program));
+        let home = vm.heap.alloc(Obj::Module { name: "<test>".into(), globals: Default::default() });
+        let clo = vm.heap.alloc(Obj::Closure { proto: 0, captured: Default::default(), home });
+        (vm, PendingCall::Call { callee: Value::Obj(clo), args: Vec::new(), span: sp })
+    }
+
+    /// The worker allocates into its OWN heap, not the parent's: a task that builds a fresh list runs
+    /// to completion in the worker, the parent heap's live-object count is unchanged, and the result
+    /// crosses back as a `WireValue` that reconstructs (in the parent) to the expected value.
+    #[test]
+    fn worker_runs_in_distinct_heap() {
+        // () -> [1, 2]
+        let (mut vm, task) =
+            worker_fixture(vec![Op::ConstInt(1), Op::ConstInt(2), Op::NewList(2), Op::Return]);
+        let before = vm.heap.live();
+        let res = vm.run_task_isolated(task).expect("isolated task runs");
+        assert_eq!(vm.heap.live(), before, "worker must not allocate into the parent heap");
+        let got = vm.from_wire(res.value);
+        let want = Value::Obj(vm.heap.alloc(Obj::List(vec![Value::Int(1), Value::Int(2)])));
+        assert!(vm.values_equal(got, want), "result must round-trip back to [1, 2]");
+    }
+
+    /// A worker's stdout is captured in ITS `out` and returned on the `WorkerResult` (decision F:
+    /// buffer-per-worker), and never leaks into the parent's `out`. The return value crosses back too.
+    #[test]
+    fn worker_returns_value_and_out() {
+        // () -> { print("hi from worker"); 7 }
+        let (mut vm, task) = worker_fixture(vec![
+            Op::ConstStr("hi from worker".into()),
+            Op::CallPrint(1),
+            Op::Pop,
+            Op::ConstInt(7),
+            Op::Return,
+        ]);
+        let res = vm.run_task_isolated(task).expect("isolated task runs");
+        assert_eq!(res.out, "hi from worker\n", "worker stdout returns on the result");
+        assert_eq!(res.stderr, "", "stderr is captured separately and empty here");
+        assert_eq!(vm.from_wire(res.value), Value::Int(7), "return value crosses back");
+        assert_eq!(vm.out, "", "worker output must not leak into the parent's stdout");
+    }
+
+    /// A worker shares the compiled program by `Arc` (read-only), never copying it: `spawn_worker`
+    /// bumps the strong count and points at the SAME allocation, and drops its clone when finished.
+    #[test]
+    fn worker_shares_program_arc() {
+        let program = Arc::new(empty_program());
+        let vm = Vm::new(Arc::clone(&program)); // program + vm = 2 refs
+        assert_eq!(Arc::strong_count(&program), 2);
+        let worker = vm.spawn_worker();
+        assert_eq!(Arc::strong_count(&program), 3, "worker shares the program (no copy)");
+        assert!(Arc::ptr_eq(&program, &worker.program), "same Program allocation, not a clone");
+        drop(worker);
+        assert_eq!(Arc::strong_count(&program), 2, "worker releases its program ref on drop");
+    }
+
+    /// A `str` return value can't cross back as-is (it would be a worker-heap `GcRef`, dangling in the
+    /// parent). B3.2 enforces the boundary with a clean fault instead of silently handing back a
+    /// dangling handle — `str`/closure crossing by value lands in B3.3.
+    #[test]
+    fn worker_rejects_str_value_crossing() {
+        // () -> "oops"  — returns a by-reference Str handle
+        let (mut vm, task) = worker_fixture(vec![Op::ConstStr("oops".into()), Op::Return]);
+        let err = vm.run_task_isolated(task).expect_err("a str result must be rejected, not dangling");
+        assert!(err.message.contains("can't cross a worker boundary"), "got: {}", err.message);
+    }
+
+    /// Method tasks (`spawn recv.m()`) are gated off in B3.2: a worker never runs module init, so its
+    /// `module_objs` table is empty and method dispatch would index out of bounds. Reject cleanly.
+    #[test]
+    fn worker_rejects_method_task() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        let recv = vm.heap.alloc(Obj::Str("x".into()));
+        let task = PendingCall::Method {
+            recv: Value::Obj(recv),
+            name: "len".into(),
+            args: Vec::new(),
+            span: Span { line: 1, col: 1 },
+        };
+        let err = vm.run_task_isolated(task).expect_err("method tasks are not isolable in B3.2");
+        assert!(err.message.contains("method tasks are not yet isolable"), "got: {}", err.message);
     }
 
     // ----- arithmetic -----
@@ -7381,7 +7630,7 @@ main()";
         let entry = t.write("main.chz", src);
         let graph = crate::resolver::build_graph(&entry).unwrap();
         let program = crate::compiler::compile_graph(&graph).unwrap();
-        let mut vm = Vm::new(Rc::new(program));
+        let mut vm = Vm::new(Arc::new(program));
         vm.gc_stress = true;
         vm.host = cfg;
         vm.run().unwrap_or_else(|e| panic!("unexpected error under GC stress: {e}"));
@@ -8118,7 +8367,7 @@ main()";
         let expected = std::fs::read_to_string(fixture("tests/fixtures/proj/main.expected")).unwrap();
         let graph = crate::resolver::build_graph(&fixture("tests/fixtures/proj/main.chz")).unwrap();
         let program = crate::compiler::compile_graph(&graph).unwrap();
-        let mut vm = Vm::new(Rc::new(program));
+        let mut vm = Vm::new(Arc::new(program));
         vm.gc_stress = true;
         vm.run().unwrap();
         assert_eq!(vm.out, expected);

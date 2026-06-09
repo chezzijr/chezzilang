@@ -58,3 +58,25 @@ pub enum WireValue {
     /// An `Executor` handle crossing the airlock as its shared [`ExecutorCore`] (B3.1). See [`Channel`].
     Executor(Arc<ExecutorCore>),
 }
+
+impl WireValue {
+    /// B3.2 — does this value graph carry a by-reference [`Handle`](WireValue::Handle), i.e. a
+    /// heap-local `GcRef`? Such a value cannot cross into another heap as-is — the slot index is
+    /// meaningless there — so the worker airlock ([`Vm::run_task_isolated`](super::Vm)) rejects it
+    /// with a clean fault until B3.3 teaches `Str`/closures to cross by value. The shared-core arms
+    /// (`Channel`/`Shared`/`Executor`) are cross-safe — they carry an `Arc`, not a `GcRef` — so they
+    /// are *not* flagged (the `Str` handles a `Channel[str]` queues *inside* its core are a separate
+    /// B3.3 concern, not part of this value's directly-crossed graph).
+    pub fn has_handle(&self) -> bool {
+        match self {
+            WireValue::Handle(_) => true,
+            WireValue::List(xs) | WireValue::Tuple(xs) | WireValue::Enum { payload: xs, .. } => {
+                xs.iter().any(WireValue::has_handle)
+            }
+            WireValue::Map(es) => es.iter().any(|(_, k, v)| k.has_handle() || v.has_handle()),
+            WireValue::Set(es) => es.iter().any(|(_, e)| e.has_handle()),
+            WireValue::Struct { fields, .. } => fields.iter().any(|(_, v)| v.has_handle()),
+            _ => false,
+        }
+    }
+}

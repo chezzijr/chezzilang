@@ -204,7 +204,7 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 |-------|------|-----------|----------|
 | **B3.0** | **Wire-format airlock, single-thread.** Define `WireValue`; replace the `deep_clone` call sites (spawn / `Channel.send` / `Shared` get-set: re-grep — today they route through `deep_clone`, `src/vm/mod.rs:2913`) with a `to_wire`+`from_wire` round-trip into the *same* heap. | All existing concurrency goldens + GC-stress stay green (byte-identical); unit test `from_wire(to_wire(v))` structurally equals `deep_clone(v)` over the sendable set; a non-sendable value hits the defensive fault, not `unreachable!`. | **unchanged** |
 | **B3.1** ✅ | **Move Channel/Shared/Executor cores out of the heap** into `Arc<…Core>` holding `WireValue`. Cores: `ChannelCore { q: Mutex<VecDeque<WireValue>> }`, `SharedCore { v: Mutex<WireValue> }`, `ExecutorCore { inner: Mutex<ExecState{queue,shut}> }` (`src/vm/core.rs`; no `Condvar` yet — cooperative `recv` parks the fiber, a condvar would be dead until B3.3). `to_wire`/`from_wire` gain `Channel/Shared/Executor(Arc<…Core>)` arms (cross as the shared `Arc`; `from_wire` allocs a fresh handle onto the same core). **`children()` arms REWRITTEN, not dropped** (see decision E — cores still embed `Handle(GcRef)`s single-thread). `pick_runnable` polls `core.q.lock()` length. | Same goldens green incl. `channel_block.expected` and the all-blocked deadlock golden; GC-stress still green (parked fibers + cores survive). | **unchanged** |
-| **B3.2** | **`Arc<Program>` + worker-VM construction (no threads).** `spawn` builds a fresh worker `Vm` sharing `Arc<Program>`, runs the task **synchronously** in it, wire-copies args in and result + `out` back. Resolves the worker-VM/heap-handoff plumbing in isolation. | Goldens green; a unit test proves a task runs in a distinct heap and its result/`out` come back correctly. | **unchanged** |
+| **B3.2** ✅ | **`Arc<Program>` + worker-VM construction (no threads).** `spawn` builds a fresh worker `Vm` sharing `Arc<Program>`, runs the task **synchronously** in it, wire-copies args in and result + `out` back. Resolves the worker-VM/heap-handoff plumbing in isolation. | Goldens green; a unit test proves a task runs in a distinct heap and its result/`out` come back correctly. | **unchanged** |
 | **B3.3** | **Real OS threads behind `--parallel`.** Bounded pool (decision B), condvar `recv` (decision C blocking), buffer-flush-on-join (decision F). Cooperative engine stays the **default**. **Resolve decision G(1) — module globals — first.** | NEW `--parallel`-only goldens that are deterministic-by-construction (collect→drain→sort→print) + order-insensitive (set-of-lines) assertions; every existing golden stays on the default engine and stays green. | **`--parallel` new** |
 | **B3.4** | **Cancellation + cross-thread `os.exit`.** Per-nursery `cancel` flag, condvar wake-on-cancel, exit-code propagation up the join (decision C). | First-fault-aborts-running-siblings; a child `os.exit` halts the process with the right code; `recover:`/`defer` still compose. | `--parallel` |
 | **B3.5** | **Nursery-local deadlock detection under threads** (blocked-count vs live-count, decision D). | Port the all-blocked deadlock golden to `--parallel`; a near-miss (one sibling that *does* send) must NOT false-positive. | `--parallel` |
@@ -214,8 +214,8 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 
 - [x] B3.0 — wire-format airlock (single-thread, parity-preserved) ✅ **landed**
 - [x] B3.1 — cores out of heap (`Arc<…Core>`, single-thread, parity-preserved) ✅ **landed**
-- [ ] B3.2 — `Arc<Program>` + worker-VM construction (no threads) ← **next session starts here**
-- [ ] B3.3 — real OS threads behind `--parallel`
+- [x] B3.2 — `Arc<Program>` + worker-VM construction (no threads) ✅ **landed**
+- [ ] B3.3 — real OS threads behind `--parallel` ← **next session starts here (resolve G1 first)**
 - [ ] B3.4 — cancellation + cross-thread `os.exit`
 - [ ] B3.5 — nursery-local deadlock detection under threads
 - [ ] B3.6 — `Executor`/B5 on the pool + A3b
@@ -250,6 +250,33 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 > alias can't be double-drained (`executor_core_shut_is_shared_across_handles`). B3.2 next: `Arc<Program>`
 > + a worker `Vm` that runs a `spawn`'d task **synchronously** in its own heap, wire-copying args in /
 > result+`out` back — still no threads.
+
+> **B3.2 landed note (for the B3.3 maintainer):** `program: Rc<Program>` → `Arc<Program>` everywhere
+> (`Program` is plain owned data — `Send + Sync`, no internal `Rc`). The worker-VM machinery lives in
+> `src/vm/mod.rs`: `Vm::spawn_worker(&self) -> Vm` (fresh empty heap, shares `Arc::clone(program)`,
+> copies `gc_stress`; `host` left inert — **B3.3 must thread `host` through** so workers doing file/env
+> I/O don't silently diverge), and `Vm::run_task_isolated(&mut self, PendingCall) -> Result<WorkerResult>`
+> which (1) lowers a `Call` task to `Lowered::{Closure,Func}` = `ProtoId` + wire'd captures/args (the
+> callee is **never** crossed as a parent-heap `Handle` — the proto is in the shared `Arc<Program>`),
+> (2) builds the worker, `from_wire`s captures/args into its heap, rebuilds the closure/func over a
+> **fresh empty `home`** module, `invoke_value`s synchronously, (3) crosses the result + `out`/`stderr`
+> back as a `WorkerResult` (decision F: per-worker buffers, not interleaved). **Everything is
+> `#[allow(dead_code)]`** — decision A keeps the cooperative engine the default through B3.2, so the
+> helper can't be on the live path without breaking the interleave/parity goldens; B3.3's `--parallel`
+> `join_nursery` is what wires it in.
+>
+> **Cross-heap safety is enforced, not just documented** (both review panels flagged the silent-dangling-
+> handle risk): `WireValue::has_handle()` (`src/vm/wire.rs`) detects any by-reference `Handle` leaf
+> (a heap-local `GcRef`), and `Vm::ensure_crossable` rejects captures/args/**and the returned result**
+> with a clean fault — so a `str`/closure value crossing today is a `RuntimeError`, not a dangling
+> read (`worker_rejects_str_value_crossing`). `Channel/Shared/Executor` pass (they cross as a shared
+> `Arc`, not a `GcRef`). **B3.3 owes**: (1) **decision G1** — module globals across threads (the fresh-
+> empty-`home` means global reads fault today); (2) **`str`/closure cross-by-value** — add the owned-
+> bytes `WireValue::Str` arm + a `Closure` wire arm so `has_handle`-rejected values actually cross,
+> then relax `ensure_crossable`; (3) **method tasks** (`spawn recv.m()`) are rejected outright in B3.2
+> (`worker_rejects_method_task`) because a worker's `module_objs` is empty (method dispatch would index
+> OOB) — wire them once module state crosses. Tests: `worker_runs_in_distinct_heap`,
+> `worker_returns_value_and_out`, `worker_shares_program_arc`, plus the two rejection tests above.
 
 ---
 
