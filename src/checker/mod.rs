@@ -855,6 +855,10 @@ impl Checker {
                     }
                     Ty::channel(elem)
                 }
+                // `Shared[T]` (C3): the cross-task mutable box. Unlike a `Channel`, its element type
+                // isn't gated on sendability — the value lives in one owner and is copied in/out
+                // through `get`/`set`; the *handle* is what crosses (always sendable).
+                ("Shared", [inner]) => Ty::shared(self.resolve_type(inner, span)),
                 ("map", [k, v]) => {
                     let key = self.resolve_type(k, span);
                     let value = self.resolve_type(v, span);
@@ -2883,6 +2887,13 @@ impl Checker {
                 }
                 Some(Ty::channel(elem))
             }
+            "Shared" => {
+                // `Shared(v)` — a fresh cross-task box initialised with `v`. The element type is
+                // inferred from the value (value-first, unlike `Channel[T]()`); a `[T]` type arg is
+                // rejected upstream by the `name_is_generic` gate.
+                let elem = self.one_arg("Shared", args, span);
+                Some(Ty::shared(elem))
+            }
             // Generic built-in constructors for Result / Option.
             // `Ok(x)`: success type known, error type open (unifies with the declared `E`).
             "Ok" => Some(Ty::result_e(self.one_arg(name, args, span), Ty::Unknown)),
@@ -3144,6 +3155,17 @@ impl Checker {
                 // element type `T`, which is itself sendable-checked at the channel's construction
                 // — so a well-typed `send` is always sendable.
                 if let Some(sig) = channel_method_sig(method, elem) {
+                    self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
+            Ty::Shared(elem) => {
+                // `get()->T`, `set(T)->nil`, `update(fn(T)->T)->nil` — the same box API as `Ref[T]`,
+                // but reachable across tasks.
+                if let Some(sig) = shared_method_sig(method, elem) {
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -3674,6 +3696,7 @@ impl Checker {
                 ("set", [x]) => Ty::set(self.resolve_ty_ro(x)),
                 ("Option", [x]) => Ty::option(self.resolve_ty_ro(x)),
                 ("Channel", [x]) => Ty::channel(self.resolve_ty_ro(x)),
+                ("Shared", [x]) => Ty::shared(self.resolve_ty_ro(x)),
                 ("Result", [x]) => Ty::result(self.resolve_ty_ro(x)),
                 ("Result", [x, e]) => Ty::result_e(self.resolve_ty_ro(x), self.resolve_ty_ro(e)),
                 ("map", [k, v]) => Ty::map(self.resolve_ty_ro(k), self.resolve_ty_ro(v)),
@@ -3874,12 +3897,21 @@ impl Checker {
     fn sendable_rec(&self, ty: &Ty, stack: &mut Vec<String>) -> bool {
         match ty {
             Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Nil | Ty::Unknown | Ty::Param(_) => true,
+            // A `Shared[T]` handle always crosses — that's its whole point (one box, many tasks);
+            // its element type is *not* a constraint (the value never crosses, only the handle).
+            Ty::Shared(_) => true,
             Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Channel(t) => self.sendable_rec(t, stack),
             Ty::Map(k, v) => self.sendable_rec(k, stack) && self.sendable_rec(v, stack),
             Ty::Result(t, e) => self.sendable_rec(t, stack) && self.sendable_rec(e, stack),
             Ty::Tuple(elems) => elems.iter().all(|t| self.sendable_rec(t, stack)),
             Ty::Func { .. } | Ty::Module(_) | Ty::Protocol(_) => false,
             Ty::Struct(name, args) => {
+                // `Ref[T]` (std.ref) is the *in-task* box: copying it across a spawn would silently
+                // give each task its own box (a footgun), so it's non-sendable — reach for the
+                // cross-task box `Shared[T]` instead (spec §7).
+                if name == "Ref" {
+                    return false;
+                }
                 if !args.iter().all(|a| self.sendable_rec(a, stack)) {
                     return false;
                 }
@@ -4565,6 +4597,21 @@ fn channel_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
         "send" => (vec![elem.clone()], Ty::Nil),
         "recv" => (vec![], elem.clone()),
         "len" => (vec![], Ty::Int),
+        _ => return None,
+    };
+    Some(FnSig::plain(params, ret))
+}
+
+/// Built-in method signatures on `Shared[T]` (C3). `elem` is the box's element type. Mirrors the
+/// `Ref[T]` box API (`std/ref.chz`) — one `get`/`set`/`update` shape across both boxes.
+fn shared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
+    let (params, ret) = match method {
+        "get" => (vec![], elem.clone()),
+        "set" => (vec![elem.clone()], Ty::Nil),
+        "update" => (
+            vec![Ty::Func { params: vec![elem.clone()], ret: Box::new(elem.clone()) }],
+            Ty::Nil,
+        ),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))

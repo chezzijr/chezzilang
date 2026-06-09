@@ -214,6 +214,11 @@ pub enum Value {
     /// Shared by reference (the handle is what `spawn` copies across the airlock); values move in
     /// on `send` (deep-copied) and out on `recv`.
     Channel(Rc<RefCell<std::collections::VecDeque<Value>>>),
+    /// `Shared[T]` (C3) — the cross-task mutable box. Shared by reference (the handle is what
+    /// `spawn` copies across the airlock); the value lives in the one box and is copied in on
+    /// `set`/construction and out on `get`. Under the sequential executor a single thread already
+    /// serialises every write, so no locking is needed.
+    Shared(Rc<RefCell<Value>>),
     /// The result of a statement-like expression (e.g. `print(...)`) or a function with no
     /// `return`. Not directly constructible in source.
     Nil,
@@ -238,6 +243,7 @@ impl Value {
             Value::Struct { .. } => "struct",
             Value::Enum { .. } => "enum",
             Value::Channel(_) => "Channel",
+            Value::Shared(_) => "Shared",
             Value::Nil => "nil",
         }
     }
@@ -314,6 +320,7 @@ impl std::fmt::Display for Value {
                 }
             }
             Value::Channel(q) => write!(f, "Channel(len={})", q.borrow().len()),
+            Value::Shared(cell) => write!(f, "Shared({})", cell.borrow()),
             Value::Nil => write!(f, "nil"),
         }
     }

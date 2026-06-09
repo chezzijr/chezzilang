@@ -39,6 +39,10 @@ pub enum Ty {
     /// `Channel[T]` — a shared mailbox for cross-task messages (C2). Element type `T` must be
     /// sendable. The handle itself is sendable, so reply channels work.
     Channel(Box<Ty>),
+    /// `Shared[T]` — the cross-task mutable box (C3): one owner holds the value, writes are
+    /// serialised. The handle is sendable (it's what `spawn` copies in — every task reaches the
+    /// same box); the value isn't copied. Constructed value-first as `Shared(v)` (`T` = `typeof v`).
+    Shared(Box<Ty>),
     /// A protocol used *as a value type* (existential), e.g. the default error type `Error`. A
     /// concrete type is assignable to it iff it satisfies the protocol; only the protocol's own
     /// methods are callable on it. Type-erased at runtime (methods dispatch by name).
@@ -78,6 +82,9 @@ impl Ty {
     pub fn channel(inner: Ty) -> Ty {
         Ty::Channel(Box::new(inner))
     }
+    pub fn shared(inner: Ty) -> Ty {
+        Ty::Shared(Box::new(inner))
+    }
     /// A non-generic struct type (no type arguments) — the common case.
     pub fn strukt(name: impl Into<String>) -> Ty {
         Ty::Struct(name.into(), Vec::new())
@@ -100,7 +107,9 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
     match (expected, actual) {
         (Unknown, _) | (_, Unknown) => true,
         (Int, Int) | (Float, Float) | (Bool, Bool) | (Str, Str) | (Nil, Nil) => true,
-        (List(a), List(b)) | (Option(a), Option(b)) | (Channel(a), Channel(b)) => compatible(a, b),
+        (List(a), List(b)) | (Option(a), Option(b)) | (Channel(a), Channel(b)) | (Shared(a), Shared(b)) => {
+            compatible(a, b)
+        }
         (Result(at, ae), Result(bt, be)) => compatible(at, bt) && compatible(ae, be),
         // A protocol existential: identity matches; `str` conforms to `Error` intrinsically.
         // Struct conformance needs the registry — handled by `Checker::assignable`, not here.
@@ -142,6 +151,7 @@ impl fmt::Display for Ty {
             },
             Ty::Option(t) => write!(f, "Option[{t}]"),
             Ty::Channel(t) => write!(f, "Channel[{t}]"),
+            Ty::Shared(t) => write!(f, "Shared[{t}]"),
             Ty::Protocol(n) => write!(f, "{n}"),
             Ty::Struct(n, args) | Ty::Enum(n, args) => {
                 write!(f, "{n}")?;

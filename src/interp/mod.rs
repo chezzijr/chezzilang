@@ -108,8 +108,10 @@ fn deep_clone(v: &Value) -> Value {
         | Value::Native(_)
         | Value::Module(_)
         // A Channel is a shared mailbox: the handle crosses the airlock by reference (clone the
-        // `Rc`), never deep-copied — both ends must see the same queue.
-        | Value::Channel(_) => v.clone(),
+        // `Rc`), never deep-copied — both ends must see the same queue. A `Shared` box is the same:
+        // the handle is copied so every task reaches the one box (that's the point of `Shared`).
+        | Value::Channel(_)
+        | Value::Shared(_) => v.clone(),
         Value::List(items) => {
             let cloned = items.borrow().iter().map(deep_clone).collect::<Vec<_>>();
             Value::List(Rc::new(RefCell::new(cloned)))
@@ -789,6 +791,18 @@ impl Interp {
                     std::collections::VecDeque::new(),
                 ))));
             }
+            // `Shared(v)` (C3) — a fresh cross-task box owning a copy of `v` (move-in across the
+            // airlock keeps the box isolated from the caller's binding).
+            if name == "Shared" {
+                if arg_vals.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!("Shared(v) takes exactly one argument, got {}", arg_vals.len()),
+                        span,
+                    });
+                }
+                let init = deep_clone(&arg_vals[0]);
+                return Ok(Value::Shared(std::rc::Rc::new(std::cell::RefCell::new(init))));
+            }
             if builtins::is_builtin(name) {
                 return builtins::call(name, arg_vals, span);
             }
@@ -1276,6 +1290,10 @@ impl Interp {
         if let Value::Channel(q) = &receiver {
             let q = std::rc::Rc::clone(q);
             return self.eval_channel_method(&q, method, arg_vals, span);
+        }
+        if let Value::Shared(cell) = &receiver {
+            let cell = std::rc::Rc::clone(cell);
+            return self.eval_shared_method(&cell, method, arg_vals, span);
         }
         // Core-type methods (M6): built-in methods on `str` and `list` dispatch on the value.
         if matches!(receiver, Value::Str(_) | Value::List(_)) {
@@ -1906,6 +1924,50 @@ impl Interp {
             }
             _ => Err(RuntimeError {
                 message: format!("type Channel has no method '{method}'"),
+                span,
+            }),
+        }
+    }
+
+    /// `Shared[T]` methods (C3). The box owns its value; `get` copies it out and `set` copies the
+    /// new value in (so neither aliases the box's interior — the shared-nothing airlock). `update`
+    /// is read-modify-write: it reads the current value out, drops the borrow, runs the user
+    /// function (which may itself touch this box), then stores the result. Under the sequential
+    /// executor a single thread serialises every write, so no lock is needed.
+    fn eval_shared_method(
+        &mut self,
+        cell: &std::rc::Rc<std::cell::RefCell<Value>>,
+        method: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            "get" => {
+                builtins::arity("get", &args, 0, span)?;
+                let cur = cell.borrow();
+                Ok(deep_clone(&cur))
+            }
+            "set" => {
+                builtins::arity("set", &args, 1, span)?;
+                *cell.borrow_mut() = deep_clone(&args[0]);
+                Ok(Value::Nil)
+            }
+            "update" => {
+                builtins::arity("update", &args, 1, span)?;
+                let f = args.into_iter().next().expect("arity checked 1 arg");
+                // Read the current value out and release the borrow *before* calling `f`: the
+                // closure may re-enter this same box (`get`/`set`), which would panic on a held
+                // `RefCell` borrow.
+                let cur = {
+                    let g = cell.borrow();
+                    deep_clone(&g)
+                };
+                let next = self.call_value(f, vec![cur], span)?;
+                *cell.borrow_mut() = deep_clone(&next);
+                Ok(Value::Nil)
+            }
+            _ => Err(RuntimeError {
+                message: format!("type Shared has no method '{method}'"),
                 span,
             }),
         }
@@ -4412,6 +4474,35 @@ b := Buf([10, 20, 30])
         let source = include_str!("../../examples/channel.chz");
         let expected = include_str!("../../examples/channel.expected");
         assert_eq!(run_capture(source).expect("channel.chz should run"), expected);
+    }
+
+    /// C3 concurrency golden: the canonical `Shared[T]` cross-task counter — three spawned tasks
+    /// each `update` the same box through a copied handle; the parent reads `3` after the join, then
+    /// `set`/`get` round-trips. Interp-only until C4.
+    #[test]
+    fn golden_shared_chz() {
+        let source = include_str!("../../examples/shared.chz");
+        let expected = include_str!("../../examples/shared.expected");
+        assert_eq!(run_capture(source).expect("shared.chz should run"), expected);
+    }
+
+    #[test]
+    fn shared_get_set_round_trip() {
+        let src = "fn main():\n    s := Shared(1)\n    print(s.get())\n    s.set(42)\n    print(s.get())\nmain()\n";
+        assert_eq!(run(src), "1\n42\n");
+    }
+
+    #[test]
+    fn shared_update_read_modify_write() {
+        let src = "fn main():\n    s := Shared(10)\n    s.update(fn(x): x * 2)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n";
+        assert_eq!(run(src), "21\n");
+    }
+
+    #[test]
+    fn shared_get_does_not_alias_box() {
+        // `get` copies out: mutating the returned list must not change what the box holds.
+        let src = "fn main():\n    s := Shared([1, 2])\n    xs := s.get()\n    xs.push(3)\n    print(s.get())\nmain()\n";
+        assert_eq!(run(src), "[1, 2]\n");
     }
 
     #[test]

@@ -1271,6 +1271,12 @@ impl Compiler {
                     span,
                 });
             }
+            if name == "Shared" {
+                return Err(CompileError {
+                    message: "Shared runs on `--interp` until VM parity lands (C4)".to_string(),
+                    span,
+                });
+            }
             if name == "print" {
                 for a in args {
                     self.compile_expr(fc, a)?;

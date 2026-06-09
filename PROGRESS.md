@@ -12,17 +12,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 ## Current focus
 
 Core language is feature-complete through **M18** plus several gap-closing passes. Concurrency
-**C1 + C2** have landed on the tree-walk interpreter (see below). Latest suite: **1199 tests** green
-(unit + parity + `cargo test conformance`), both engines parity-tested, `cargo clippy` clean.
+**C1 + C2 + C3** have landed on the tree-walk interpreter (see below). Latest suite: **1211 tests**
+green (unit + parity + `cargo test conformance`), both engines parity-tested, `cargo clippy` clean.
 
-**Next candidate:** concurrency **C3** — `Shared[T]` cross-task mutable box (interp), then **C4** —
-port C1–C3 to the bytecode VM for the standing parity invariant. Designed in
+**Next candidate:** concurrency **C4** — port C1–C3 to the bytecode VM (`src/vm`, `src/compiler`)
+for the standing parity invariant: `Obj::Channel`/`Obj::Shared` heap objects, nursery/spawn ops, a VM
+`deep_clone`, and a differential parity assertion in the golden harness. Designed in
 **[`docs/concurrency.md`](docs/concurrency.md)** (shared-nothing BEAM-style
 `spawn`/`parallel:`/`Channel[T]`/`Shared[T]`, sequential-first C1–C5 staging).
 
 **Concurrency staging note:** C1–C3 ship on `--interp` only; the bytecode VM (default engine) and
 compiler emit a clean *"runs on `--interp` until VM parity lands (C4)"* error for `parallel:` /
-`spawn` / `Channel`, so the default engine never panics on a concurrency program. VM parity is C4.
+`spawn` / `Channel` / `Shared`, so the default engine never panics on a concurrency program. VM
+parity is C4.
 
 **Deferred refinement (post-C2):** read-only-capture and sendability are enforced for `spawn`
 arguments (incl. closures smuggled inside struct/enum fields — deep field inspection) and for
@@ -41,6 +43,16 @@ no `byte`/`u8` scalar).
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
 (Concurrency C1–C3 are the documented exception: interp-only until VM parity in C4.)
 
+- ✅ **Concurrency C3 — `Shared[T]` cross-task mutable box** (interp). `Shared(v)` (value-first — the
+  element type is inferred from `v`, unlike `Channel[T]()`); methods `get()->T` (copies out), `set(T)`
+  (copies in), `update(fn(T)->T)` (read-modify-write; releases the box borrow before calling the user
+  fn so a re-entrant `get`/`set` can't panic). The handle is sendable and copied across the airlock —
+  every task reaches the one box, whose single owner serialises writes (no locking under the sequential
+  executor). The element type is *not* sendability-gated (only the handle crosses — the surprising
+  asymmetry vs `Channel`, locked by a test). `Ref[T]` (the in-task box, `std/ref.chz`) is now forced
+  **non-sendable** so passing it across a `spawn` is a compile error pointing at `Shared` (spec §7).
+  *Known limit:* the `Ref` gate is a struct-name check (a user struct named `Ref` would also be
+  non-sendable) — a `StructInfo` origin flag is the principled fix, deferred. `examples/shared.chz`.
 - ✅ **Concurrency C2 — `Channel[T]` + sendability** (interp). `Channel[T]()` buffered/unbounded
   FIFO mailbox; methods `send` (move-on-send, deep-copied across the airlock), `recv` (FIFO; empty =
   deadlock-detect fault, not a hang), `len`. A `sendable(Ty)` predicate gates channel element types,

@@ -1,0 +1,21 @@
+# C3 concurrency: `Shared[T]` — the sanctioned cross-task mutable box (Elixir's `Agent` trick).
+# Captured values are *copies*, so a task can't mutate the parent's state; when you genuinely need
+# shared mutable state across tasks, reach for `Shared[T]`. The HANDLE is copied into each task
+# (it's sendable), but the value isn't — every task reaches the same box, whose single owner
+# serialises writes, so the torn-write race is unrepresentable.
+
+fn bump(s: Shared[int]):
+    s.update(fn(x): x + 1)
+
+fn main():
+    s := Shared(0)               # one owner holds the value
+    parallel:
+        spawn bump(s)            # the handle is copied in — all three reach the same box
+        spawn bump(s)
+        spawn bump(s)
+    print(s.get())               # 3 — every increment landed (writes are serialised)
+
+    s.set(10)                    # overwrite
+    print(s.get())               # 10
+
+main()

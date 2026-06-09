@@ -3785,3 +3785,66 @@ fn spawn_in_plain_fn_rejected() {
         "spawn must be inside a parallel: block",
     );
 }
+
+// ----- concurrency C3: Shared[T], the cross-task mutable box -----
+
+#[test]
+fn shared_construct_and_methods_ok() {
+    // `Shared(v)` infers its element type from the value (no `[T]` type arg, unlike Channel).
+    ok("fn main():\n    s := Shared(0)\n    s.set(5)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n");
+}
+
+#[test]
+fn shared_get_returns_element_type() {
+    // `get()` yields `T`, so it must compose where a `T` is expected (here, str concat).
+    ok("fn main():\n    s := Shared(\"hi\")\n    msg := s.get() + \"!\"\n    print(msg)\nmain()\n");
+}
+
+#[test]
+fn shared_set_wrong_type_rejected() {
+    rejects(
+        "fn main():\n    s := Shared(0)\n    s.set(\"x\")\nmain()\n",
+        "expected int",
+    );
+}
+
+#[test]
+fn shared_update_fn_arity_rejected() {
+    // `update` takes `fn(T) -> T`; a two-param closure must not type-check.
+    rejects(
+        "fn main():\n    s := Shared(0)\n    s.update(fn(x, y): x + y)\nmain()\n",
+        "argument 1 of 'update'",
+    );
+}
+
+#[test]
+fn shared_rejects_type_arg() {
+    // The element type comes from the value — `Shared[int](...)` is not the constructor form.
+    rejects(
+        "fn main():\n    s := Shared[int](0)\n    print(s.get())\nmain()\n",
+        "'Shared' takes no type arguments",
+    );
+}
+
+#[test]
+fn shared_is_sendable() {
+    // A `Shared[T]` handle crosses the airlock — both spawned tasks reach the same box.
+    ok("fn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\nfn main():\n    s := Shared(0)\n    parallel:\n        spawn bump(s)\n        spawn bump(s)\n    print(s.get())\nmain()\n");
+}
+
+#[test]
+fn shared_handle_sendable_regardless_of_element() {
+    // The asymmetry vs Channel: a `Shared` handle is sendable even when its element type isn't
+    // (the value never crosses the airlock — only the handle does). Locks in the intent.
+    ok("fn use_it(s: Shared[fn() -> int]):\n    f := s.get()\n    print(f())\nfn main():\n    g := fn() -> int: 1\n    s := Shared(g)\n    parallel:\n        spawn use_it(s)\nmain()\n");
+}
+
+#[test]
+fn ref_is_not_sendable() {
+    // `Ref[T]` is the *in-task* box (std.ref); passing it across a spawn would silently copy it,
+    // so the checker rejects it — the cross-task box is `Shared[T]`. (Spec §7.)
+    entry_rejects(
+        "import std.ref\nfn bump(r: Ref[int]):\n    r.set(r.get() + 1)\nfn main():\n    r := Ref(0)\n    parallel:\n        spawn bump(r)\nmain()\n",
+        "non-sendable value of type Ref[int]",
+    );
+}
