@@ -320,6 +320,21 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 
 ### The escape hatch (C5): `Executor` — a separately-owned work queue
 
+> **Status (shipped, sequential subset — both engines):** `Executor()` + `submit` / `shutdown` /
+> `shutdown_now` run on the sequential executor today. `submit` enqueues; `shutdown` drains the queue
+> FIFO to completion at the reap point (the first task to fault aborts the rest and propagates, like a
+> nursery), leaving any not-yet-run siblings in place for a later reap; `shutdown_now` discards
+> pending work; `submit` after either is a fault. Reap with `defer ex.shutdown()` as shown.
+> **Program-exit auto-drain now ships too (both engines):** an executor never explicitly
+> `shutdown`/`shutdown_now`-ed is gracefully drained at a clean program exit (a per-engine executor
+> registry that doubles as a GC root reaps each live executor FIFO in creation order — its submitted
+> work runs instead of silently vanishing). A hard `std.os.exit` skips it (consistent with how it
+> skips `defer`); a faulting program is not auto-drained (it is already erroring).
+> **One piece is still deferred to real-C5:** **sendability-gating of the submitted closure's
+> captures** — `submit` takes the closure by handle and runs it in-heap at the drain (consistent with
+> `Shared.update` / list HOFs), so a non-sendable capture is benign now and the gate lands with real
+> parallelism.
+
 The sanctioned tool for "a task that **outlives its scope** / runs in the background" is **not** a
 nursery and **not** an unscoped `spawn` — it is a distinct, **explicitly-owned `Executor`**: a
 long-lived task pool / work queue you create, submit detached work to, and reap yourself. This is
@@ -436,11 +451,38 @@ Port C1–C3 to the bytecode engine (`src/vm`, `src/compiler`) — the standing 
 - **Tests:** every C1–C3 example runs identically under the VM (default) and `--interp` — add a
   differential parity assertion to the golden harness.
 
-### C5 — real concurrency (later epic)
-Cooperative fibers (suspendable execution — the recursive-`eval` rewrite) and/or Tier-C OS-thread
-multicore, plus the **`Executor`** escape hatch (`submit` / `shutdown` / `shutdown_now`, reaped via
-`defer`, per [§8](#8-daemon--background-tasks)). The surface of `spawn` / `parallel:` / `Channel` /
-`Shared` is **unchanged**.
+### C5 — what's left, divided
+
+C5 splits into **Group A** (small refinements that work on today's *sequential* executor — no engine
+rewrite) and **Group B** (the real concurrency engine — a multi-session epic). Group A is independent
+and shippable now; Group B is gated on **B1**. The surface of `spawn` / `parallel:` / `Channel` /
+`Shared` / `Executor` is **unchanged** throughout.
+
+**Group A — sequential refinements**
+
+| # | Item | Status |
+|---|------|--------|
+| **A2** | `Executor` **program-exit auto-drain** — reap any executor never explicitly `shutdown`-ed at a clean exit (per-engine registry that doubles as a GC root; FIFO creation order; `os.exit` skips it; a faulting program is not drained). | ✅ **done, both engines** (see [§8](#the-escape-hatch-c5-executor--a-separately-owned-work-queue)) |
+| **A3a** | Reject a non-sendable **read through a nested closure** inside a `spawn:` block. | ✅ **already enforced** — emergent from the persistent `capture_floors` + the `infer_ident` read gate; pinned by a regression test (`read_captured_closure_through_nested_closure_in_spawn_block_rejected`). |
+
+> *Dropped from Group A:* **A1** (`Channel.try_recv() -> T?`) — a non-blocking poll whose motivating
+> scenario (a live mid-flight producer) is unreachable under run-to-completion; a primitive awaiting
+> the engine. **A3b** (`Executor.submit` capture sendability gate) — `submit` runs the closure
+> in-heap at the drain, so a non-sendable capture is *benign today*; gating it now would wrongly
+> reject valid programs. Both belong with Group B.
+
+**Group B — the real engine (deferred epic)**
+
+| # | Item |
+|---|------|
+| **B1** | **Suspendable execution** — rewrite the recursive `eval` / VM loop into a resumable form. The fiber core; **everything else in B gates on it**. |
+| **B2** | **Cooperative scheduler** — task interleaving; real **blocking `recv`** (replaces the deadlock-detect fault); mid-flight producer↔consumer. |
+| **B3** | **Tier-C OS-thread multicore** — per-thread heap + GC; true parallelism. An *alternative bet* to B1/B2. |
+| **B4** | **Real `Shared[T]`** — owner-task + channel (today single-thread-serialised, already correct). |
+| **B5** | **Real `Executor` background pool** — actually-backgrounded tasks + graceful exit drain under real concurrency; plus A3b (submit-capture gating). |
+
+**Dependency:** Group A is independent and shippable; Group B is gated on **B1**. A2 is unchanged
+after B lands; A3a becomes load-bearing (not merely emergent) once captures truly cross threads.
 
 ---
 

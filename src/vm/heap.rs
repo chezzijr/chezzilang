@@ -131,6 +131,14 @@ pub enum Obj {
     /// copies across the airlock); the value lives in the one box and is copied in on
     /// `set`/construction and out on `get`. The boxed value may be a heap object → a GC child.
     Shared(Value),
+    /// `Executor` (C5 escape hatch) — an explicitly-owned work queue. Shared by reference (the handle
+    /// is what `spawn` copies across the airlock). Holds detached task closures that drain at
+    /// `shutdown()` and are discarded by `shutdown_now()`; `shut` rejects further `submit`s. Queued
+    /// closures may be heap objects → GC children.
+    Executor {
+        queue: std::collections::VecDeque<Value>,
+        shut: bool,
+    },
 }
 
 /// One heap slot: the object (or a hole, for swept/free slots) + its GC mark bit.
@@ -264,6 +272,7 @@ impl Heap {
             Obj::Native { .. } => {}
             Obj::Channel(q) => q.iter().for_each(&mut push),
             Obj::Shared(v) => push(v),
+            Obj::Executor { queue, .. } => queue.iter().for_each(&mut push),
         }
         out
     }

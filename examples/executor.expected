@@ -1,0 +1,7 @@
+submitted; nothing has run yet
+job 1 ran
+job 2 ran
+drained
+inside deferred(), before reap
+job 3 ran
+discarded; job 99 never ran

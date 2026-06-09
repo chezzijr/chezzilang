@@ -12,25 +12,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 ## Current focus
 
 Core language is feature-complete through **M18** plus several gap-closing passes. Concurrency
-**C1 + C2 + C3 + C4** have landed — C4 brings the bytecode VM (default engine) to parity with the
-interpreter, so `spawn` / `parallel:` / `Channel[T]` / `Shared[T]` now run on **both** engines.
-Latest suite: **1224 tests** green (unit + parity + `cargo test conformance`), both engines
-parity-tested, `cargo clippy` clean.
+**C1 + C2 + C3 + C4** have landed (both engines), plus the **`Executor` escape hatch** (C5's
+sequential subset) with **program-exit auto-drain** (C5 / A2) and the C5 checker refinements. So
+`spawn` / `parallel:` / `Channel[T]` / `Shared[T]` / `Executor` all run on **both** engines. Latest
+suite: **1259 tests** green (unit + parity + `cargo test conformance`), both engines parity-tested,
+`cargo clippy` clean.
 
-**Next candidate:** concurrency **C5** — real concurrency (a later epic): cooperative fibers
-(suspendable execution — the recursive-`eval` rewrite) and/or Tier-C OS-thread multicore, plus the
-**`Executor`** escape hatch (`submit` / `shutdown` / `shutdown_now`, reaped via `defer`). The surface
-of `spawn` / `parallel:` / `Channel` / `Shared` is **unchanged**. Designed in
-**[`docs/concurrency.md`](docs/concurrency.md)** §8–§9 (shared-nothing BEAM-style, sequential-first
-C1–C4 → real-parallel C5 staging).
+**Next candidate:** **Group B** of concurrency **C5** — the real engine (a multi-session epic):
+cooperative fibers (**B1** suspendable execution — the recursive-`eval` rewrite, which everything else
+gates on), the **B2** cooperative scheduler (real blocking `recv` + mid-flight comms), and/or **B3**
+Tier-C OS-thread multicore; then **B4** real `Shared` and **B5** real `Executor` background pool. The
+surface of `spawn` / `parallel:` / `Channel` / `Shared` / `Executor` is **unchanged**. The full A/B
+breakdown is in **[`docs/concurrency.md`](docs/concurrency.md)** §9 (Group A done; Group B deferred).
 
-**Deferred refinement (→ C5):** read-only-capture and sendability are enforced for `spawn`
-arguments (incl. closures smuggled inside struct/enum fields — deep field inspection) and for
-`spawn:` block *reassignment* of captures. Still open: **rejecting a non-sendable value merely
-*read* (not reassigned) inside a `spawn:` block** (e.g. capturing a closure and calling it) — benign
-under the sequential executor; tighten when C5 brings real parallelism. Also deferred to C5: the
-`Ref[T]` non-sendability gate is a struct-name check (the principled fix is a `StructInfo` origin
-flag).
+**Group A status (sequential refinements, no engine rewrite):** **A2 (`Executor` program-exit
+auto-drain) is done** (this session, both engines). **A3a** (reject a non-sendable read smuggled
+through a *nested closure* in a `spawn:` block) was found **already enforced** — emergent from the
+persistent `capture_floors` + the `infer_ident` read gate — and is now **pinned by a regression
+test**. **Dropped:** **A1** (`Channel.try_recv`) — a primitive whose motivating mid-flight-producer
+scenario needs the engine; **A3b** (`Executor.submit` capture gate) — `submit` runs the closure
+in-heap at the drain, so gating it now would wrongly reject valid programs (lands with Group B).
 
 **Permanent non-goals:** `yield`/generators, variadic args, Level-3 dynamic `cdylib`/C-ABI FFI,
 bignum (`i64`-only — every overflow is a recoverable fault; binary work → a future `bytes` *sequence*,
@@ -42,6 +43,38 @@ no `byte`/`u8` scalar).
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
 
+- ✅ **Concurrency C5 / A2 — `Executor` program-exit auto-drain** (both engines). An executor
+  submitted to but never explicitly `shutdown`/`shutdown_now`-ed is now gracefully drained at a clean
+  program exit (FIFO, creation order) instead of silently dropping its queued work — mirrors a
+  top-level `defer ex.shutdown()`. A per-engine **executor registry** (interp `Vec<Rc<RefCell<…>>>`;
+  VM `Vec<GcRef>` that also joins the GC root set so un-shut work survives to the drain) drives it via
+  the shipped `shutdown` path (first-fault-aborts-siblings). Hooked into every driver
+  (`run_program_inner` / `run_with` stress / `run_file_inner`, both engines). A hard `std.os.exit`
+  skips it (like `defer`); a faulting program is not drained. Also pinned **A3a** with a regression
+  test — a non-sendable read smuggled through a *nested closure* in a `spawn:` block is rejected
+  (already enforced, emergent from `capture_floors`). `examples/executor_autodrain.chz` golden + VM/
+  interp parity + GC-stress + os.exit-suppression + fault-propagation tests. *Dropped: A1, A3b
+  (see Current focus).*
+- ✅ **Concurrency C5 (sequential subset) — `Executor` escape hatch** (both engines). `Executor()` +
+  `submit(fn())` / `shutdown()` / `shutdown_now()`, reaped via `defer ex.shutdown()` (docs
+  [`concurrency.md`](docs/concurrency.md) §8). New `Ty::Executor` (non-generic, sendable handle,
+  reserved type name); interp `Value::Executor(Rc<RefCell<ExecState>>)`; VM `Obj::Executor { queue,
+  shut }` + `Op::NewExecutor` + GC child-tracing. `submit` enqueues by handle (rejected once shut);
+  `shutdown` drains the **live** queue FIFO one task at a time via the re-entrant call path (first
+  fault aborts the rest + propagates, like a nursery; not-yet-run siblings stay for a later reap);
+  `shutdown_now` discards pending. Both engines drain the live queue identically (a re-entrant
+  `shutdown_now`/fault mid-drain behaves the same) — parity-pinned. `examples/executor.chz` golden +
+  VM/interp parity + GC-stress + re-entrancy/fault-during-drain tests. *Deferred to real-C5:*
+  program-exit auto-drain + closure-capture sendability gating (see Current focus).
+- ✅ **Concurrency C5 refinement — `spawn:` block read sendability gate** (checker). A non-sendable
+  *function-local* capture merely **read** inside a `spawn:` block (e.g. capturing a closure and
+  calling it) is now a compile error, not just a *reassignment* (closes the C2-era gap). Module
+  imports / top-level bindings are excluded (globals resolvable in every task, like free functions),
+  so reading an imported module inside a task stays legal.
+- ✅ **Concurrency C5 refinement — `StructInfo` origin flag** (checker). The `Ref[T]` non-sendability
+  gate now keys on a `StructOrigin::{Builtin,User}` flag (threaded from `check_graph` via a
+  `current_module_is_stdlib` flag set per module) instead of a bare struct-name string — so a *user*
+  struct merely named `Ref` is sendable, while the builtin `std.ref` `Ref[T]` stays non-sendable.
 - ✅ **Concurrency C4 — VM parity for `spawn`/`parallel:`/`Channel`/`Shared`** (bytecode VM +
   compiler). Ported C1–C3 off `--interp`-only onto the default engine: heap `Obj::Channel(VecDeque)`
   / `Obj::Shared(Value)` with GC child-tracing; ops `EnterNursery`/`JoinNursery`/`SpawnCall`/
@@ -139,8 +172,11 @@ Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.ch
 
 ## Roadmap (later)
 
-- ⬜ **Concurrency C5** — real concurrency (cooperative fibers / OS-thread multicore + the `Executor`
-  escape hatch). C1–C4 done (both engines); see `docs/concurrency.md` §8–§9.
+- ⬜ **Concurrency C5 — Group B (real engine)** — cooperative fibers (**B1** suspendable execution →
+  **B2** scheduler) and/or **B3** OS-thread multicore, then **B4** real `Shared` / **B5** real
+  `Executor` pool (incl. the deferred `submit`-capture gate). Group A is done: C1–C4, the `Executor`
+  sequential subset, **A2 auto-drain**, the C5 checker refinements, and **A3a** (pinned). See the A/B
+  breakdown in `docs/concurrency.md` §9.
 - VM/GC optimizations (superinstructions, inline caching, NaN-boxing) — written up in
   **[`docs/future.md`](docs/future.md)**.
 

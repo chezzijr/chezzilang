@@ -110,8 +110,10 @@ fn deep_clone(v: &Value) -> Value {
         // A Channel is a shared mailbox: the handle crosses the airlock by reference (clone the
         // `Rc`), never deep-copied — both ends must see the same queue. A `Shared` box is the same:
         // the handle is copied so every task reaches the one box (that's the point of `Shared`).
+        // An `Executor` likewise: the handle is copied so every task reaches the one work queue.
         | Value::Channel(_)
-        | Value::Shared(_) => v.clone(),
+        | Value::Shared(_)
+        | Value::Executor(_) => v.clone(),
         Value::List(items) => {
             let cloned = items.borrow().iter().map(deep_clone).collect::<Vec<_>>();
             Value::List(Rc::new(RefCell::new(cloned)))
@@ -207,6 +209,11 @@ struct Interp {
     /// innermost list; at the nursery's dedent the list is drained and its tasks run to completion
     /// FIFO (the sequential executor). Empty outside any `parallel:` block.
     nurseries: Vec<Vec<Task>>,
+    /// Every `Executor` created during the run, in creation order. Keeping the `Rc` here both keeps
+    /// each executor's queued work alive (the interp analog of a GC root) and lets the driver
+    /// gracefully drain any executor never explicitly `shutdown`/`shutdown_now`-ed at program exit
+    /// (C5 / A2) — without it, that submitted work would silently never run.
+    executors: Vec<std::rc::Rc<std::cell::RefCell<value::ExecState>>>,
 }
 
 /// A task registered by `spawn`, awaiting its nursery's join barrier. The callee/receiver and
@@ -258,6 +265,7 @@ impl Interp {
             deferred: Vec::new(),
             call_stack: Vec::new(),
             nurseries: Vec::new(),
+            executors: Vec::new(),
         };
         // Built-in Result / Option variants — available without any declaration.
         interp.register_variant("Ok", "Result", 1);
@@ -803,6 +811,19 @@ impl Interp {
                 let init = deep_clone(&arg_vals[0]);
                 return Ok(Value::Shared(std::rc::Rc::new(std::cell::RefCell::new(init))));
             }
+            // `Executor()` (C5 escape hatch) — a fresh, empty, explicitly-owned work queue.
+            if name == "Executor" {
+                if !arg_vals.is_empty() {
+                    return Err(RuntimeError {
+                        message: "Executor() takes no arguments".to_string(),
+                        span,
+                    });
+                }
+                let ex = std::rc::Rc::new(std::cell::RefCell::new(value::ExecState::new()));
+                // Register for the program-exit auto-drain (and to keep its queued work alive).
+                self.executors.push(std::rc::Rc::clone(&ex));
+                return Ok(Value::Executor(ex));
+            }
             if builtins::is_builtin(name) {
                 return builtins::call(name, arg_vals, span);
             }
@@ -1294,6 +1315,10 @@ impl Interp {
         if let Value::Shared(cell) = &receiver {
             let cell = std::rc::Rc::clone(cell);
             return self.eval_shared_method(&cell, method, arg_vals, span);
+        }
+        if let Value::Executor(ex) = &receiver {
+            let ex = std::rc::Rc::clone(ex);
+            return self.eval_executor_method(&ex, method, arg_vals, span);
         }
         // Core-type methods (M6): built-in methods on `str` and `list` dispatch on the value.
         if matches!(receiver, Value::Str(_) | Value::List(_)) {
@@ -1971,6 +1996,91 @@ impl Interp {
                 span,
             }),
         }
+    }
+
+    /// `Executor` methods (C5 escape hatch). `submit(f)` enqueues a detached zero-arg task closure
+    /// (rejected once shut down); `shutdown()` is graceful — it takes the queue out (so a task that
+    /// re-submits during the drain hits the shut gate), then runs each task FIFO to completion via
+    /// the re-entrant call path, first error aborting the rest (mirrors the nursery); `shutdown_now()`
+    /// discards pending work. Under the sequential executor submitted work runs at the reap point.
+    fn eval_executor_method(
+        &mut self,
+        ex: &std::rc::Rc<std::cell::RefCell<value::ExecState>>,
+        method: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            "submit" => {
+                builtins::arity("submit", &args, 1, span)?;
+                let mut st = ex.borrow_mut();
+                if st.shut {
+                    return Err(RuntimeError {
+                        message: "submit on a shut-down Executor (it no longer accepts work)"
+                            .to_string(),
+                        span,
+                    });
+                }
+                let f = args.into_iter().next().expect("arity checked 1 arg");
+                st.queue.push_back(f);
+                Ok(Value::Nil)
+            }
+            "shutdown" => {
+                builtins::arity("shutdown", &args, 0, span)?;
+                // Mark shut, then drain the *live* queue one task at a time, popping under a tight
+                // borrow and releasing it before `call_value` — a drained task may re-enter this
+                // executor (it must see `shut`, and `call_value` would panic on a held `RefCell`
+                // borrow). Popping from the live queue (not a taken snapshot) means a task that
+                // faults leaves the not-yet-run siblings in place, and a re-entrant
+                // `shutdown`/`shutdown_now` observes the same queue — matching the VM exactly.
+                loop {
+                    let task = {
+                        let mut st = ex.borrow_mut();
+                        st.shut = true;
+                        st.queue.pop_front()
+                    };
+                    let Some(task) = task else { break };
+                    self.call_value(task, Vec::new(), span)?;
+                }
+                Ok(Value::Nil)
+            }
+            "shutdown_now" => {
+                builtins::arity("shutdown_now", &args, 0, span)?;
+                let mut st = ex.borrow_mut();
+                st.shut = true;
+                st.queue.clear();
+                Ok(Value::Nil)
+            }
+            _ => Err(RuntimeError {
+                message: format!("type Executor has no method '{method}'"),
+                span,
+            }),
+        }
+    }
+
+    /// At a clean program end, gracefully drain every `Executor` that was created but never
+    /// explicitly `shutdown`/`shutdown_now`-ed — mirrors a top-level `defer ex.shutdown()`, so the
+    /// submitted work runs instead of silently vanishing (C5 / A2). Executors drain in creation
+    /// order; each reuses the shipped `shutdown` path (FIFO, first-fault-aborts-siblings). A hard
+    /// `std.os.exit` is *not* drained (it skips `defer` too) — the caller gates on `pending_exit`,
+    /// and a task that calls `os.exit` mid-drain stops the remaining drain here.
+    fn drain_live_executors(&mut self, span: Span) -> Result<(), RuntimeError> {
+        if self.pending_exit.is_some() {
+            return Ok(());
+        }
+        // Snapshot the handles: a drained task may itself create new executors; reap only those
+        // alive at exit (a newly-created one is the caller's to reap, like nested `defer`).
+        let execs: Vec<_> = self.executors.clone();
+        for ex in execs {
+            if ex.borrow().shut {
+                continue;
+            }
+            self.eval_executor_method(&ex, "shutdown", Vec::new(), span)?;
+            if self.pending_exit.is_some() {
+                break; // a drained task called os.exit — hard halt, stop draining
+            }
+        }
+        Ok(())
     }
 
     /// `xs.sort_by(cmp)` — sort `xs` in place using a Chezzi comparator `fn(T, T) -> int`
@@ -3087,7 +3197,9 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
     }
 
     let mut interp = Interp::new();
-    let result = interp.execute(&module.stmts);
+    let result = interp
+        .execute(&module.stmts)
+        .and_then(|()| interp.drain_live_executors(Span { line: 1, col: 1 }));
     (interp.out, result)
 }
 
@@ -3140,6 +3252,15 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
             let trace: Vec<TraceFrame> = interp.call_stack.iter().rev().cloned().collect();
             return (interp.out, interp.stderr, Err(RunError::from_error(e, trace)), None);
         }
+    }
+    // Clean end: gracefully reap any Executor never explicitly shut down (C5 / A2). Skipped on a
+    // hard `std.os.exit` (handled inside `drain_live_executors`).
+    if let Err(e) = interp.drain_live_executors(Span { line: 1, col: 1 }) {
+        if let Some(code) = interp.pending_exit {
+            return (interp.out, interp.stderr, Ok(()), Some(code));
+        }
+        let trace: Vec<TraceFrame> = interp.call_stack.iter().rev().cloned().collect();
+        return (interp.out, interp.stderr, Err(RunError::from_error(e, trace)), None);
     }
     (interp.out, interp.stderr, Ok(()), None)
 }
@@ -4496,6 +4617,78 @@ b := Buf([10, 20, 30])
     fn shared_update_read_modify_write() {
         let src = "fn main():\n    s := Shared(10)\n    s.update(fn(x): x * 2)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n";
         assert_eq!(run(src), "21\n");
+    }
+
+    /// C5 concurrency golden: the `Executor` escape hatch — `submit` enqueues detached work that
+    /// runs at `shutdown()` (FIFO), `defer ex.shutdown()` reaps on function exit, and `shutdown_now`
+    /// discards. Cross-engine parity is asserted in `vm`'s twin test.
+    #[test]
+    fn golden_executor_chz() {
+        let source = include_str!("../../examples/executor.chz");
+        let expected = include_str!("../../examples/executor.expected");
+        assert_eq!(run_capture(source).expect("executor.chz should run"), expected);
+    }
+
+    #[test]
+    fn executor_submit_runs_fifo_at_shutdown() {
+        // Submitted tasks do not run when submitted — they drain FIFO at shutdown().
+        let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\n    ex.shutdown()\nmain()\n";
+        assert_eq!(run(src), "0\n1\n2\n");
+    }
+
+    #[test]
+    fn executor_submit_after_shutdown_errors() {
+        let src = "fn main():\n    ex := Executor()\n    ex.shutdown()\n    ex.submit(fn(): print(1))\nmain()\n";
+        let err = run_capture(src).expect_err("submit after shutdown should fault");
+        assert!(err.message.contains("shut-down Executor"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn executor_shutdown_now_discards_pending() {
+        let src = "fn j():\n    print(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    ex.shutdown_now()\n    print(0)\nmain()\n";
+        assert_eq!(run(src), "0\n");
+    }
+
+    // ----- C5 (A2): program-exit auto-drain of an Executor never explicitly shut down -----
+
+    #[test]
+    fn golden_executor_autodrain_chz() {
+        let source = include_str!("../../examples/executor_autodrain.chz");
+        let expected = include_str!("../../examples/executor_autodrain.expected");
+        assert_eq!(run_capture(source).expect("executor_autodrain.chz should run"), expected);
+    }
+
+    #[test]
+    fn executor_autodrain_runs_unshut_at_exit() {
+        // An Executor submitted to but never shut down is gracefully drained at program exit — its
+        // queued work runs FIFO after main() returns (mirrors a top-level `defer ex.shutdown()`).
+        // Without the auto-drain this work would silently never run.
+        let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\nmain()\n";
+        assert_eq!(run(src), "0\n1\n2\n");
+    }
+
+    #[test]
+    fn executor_autodrain_fifo_across_executors() {
+        // Multiple un-shut executors drain in creation order at exit.
+        let src = "fn j(n: int):\n    print(n)\nfn main():\n    a := Executor()\n    b := Executor()\n    a.submit(fn(): j(1))\n    b.submit(fn(): j(2))\nmain()\n";
+        assert_eq!(run(src), "1\n2\n");
+    }
+
+    #[test]
+    fn executor_autodrain_not_redrained_after_explicit_shutdown() {
+        // An explicitly shut-down executor is not re-drained at exit (its `shut` flag is set, so the
+        // auto-drain skips it) — its work runs exactly once, at the explicit shutdown.
+        let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.shutdown()\n    print(0)\nmain()\n";
+        assert_eq!(run(src), "1\n0\n");
+    }
+
+    #[test]
+    fn executor_autodrain_fault_surfaces() {
+        // A fault inside an auto-drained task surfaces as the program's runtime error (the drain
+        // uses the same re-entrant call path + first-fault-aborts semantics as `shutdown()`).
+        let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\nmain()\n";
+        let err = run_capture(src).expect_err("auto-drain fault should surface");
+        assert!(err.message.contains("out of bounds") || err.message.contains("index"), "got: {}", err.message);
     }
 
     #[test]

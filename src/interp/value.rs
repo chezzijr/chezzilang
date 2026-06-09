@@ -219,9 +219,28 @@ pub enum Value {
     /// `set`/construction and out on `get`. Under the sequential executor a single thread already
     /// serialises every write, so no locking is needed.
     Shared(Rc<RefCell<Value>>),
+    /// `Executor` (C5 escape hatch) — an explicitly-owned work queue. Shared by reference (the
+    /// handle is what `spawn` copies across the airlock). Holds detached task closures that drain at
+    /// `shutdown()` (graceful) and are discarded by `shutdown_now()`. Under the sequential executor
+    /// submitted work runs at the reap point, not in the background.
+    Executor(Rc<RefCell<ExecState>>),
     /// The result of a statement-like expression (e.g. `print(...)`) or a function with no
     /// `return`. Not directly constructible in source.
     Nil,
+}
+
+/// The mutable interior of an [`Value::Executor`]: a FIFO queue of submitted task closures and a
+/// `shut` flag (once set, `submit` is rejected and a re-drain is a no-op).
+#[derive(Debug, PartialEq)]
+pub struct ExecState {
+    pub queue: std::collections::VecDeque<Value>,
+    pub shut: bool,
+}
+
+impl ExecState {
+    pub fn new() -> Self {
+        ExecState { queue: std::collections::VecDeque::new(), shut: false }
+    }
 }
 
 impl Value {
@@ -244,6 +263,7 @@ impl Value {
             Value::Enum { .. } => "enum",
             Value::Channel(_) => "Channel",
             Value::Shared(_) => "Shared",
+            Value::Executor(_) => "Executor",
             Value::Nil => "nil",
         }
     }
@@ -321,6 +341,7 @@ impl std::fmt::Display for Value {
             }
             Value::Channel(q) => write!(f, "Channel(len={})", q.borrow().len()),
             Value::Shared(cell) => write!(f, "Shared({})", cell.borrow()),
+            Value::Executor(ex) => write!(f, "Executor(pending={})", ex.borrow().queue.len()),
             Value::Nil => write!(f, "nil"),
         }
     }

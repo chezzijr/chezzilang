@@ -3848,3 +3848,113 @@ fn ref_is_not_sendable() {
         "non-sendable value of type Ref[int]",
     );
 }
+
+// ----- C5: the `Executor` escape hatch -----
+
+#[test]
+fn executor_construct_and_methods_ok() {
+    ok("fn job():\n    print(1)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): job())\n    ex.shutdown()\nmain()\n");
+}
+
+#[test]
+fn executor_shutdown_now_ok() {
+    ok("fn main():\n    ex := Executor()\n    ex.shutdown_now()\nmain()\n");
+}
+
+#[test]
+fn executor_defer_shutdown_ok() {
+    ok("fn job():\n    print(1)\nfn main():\n    ex := Executor()\n    defer ex.shutdown()\n    ex.submit(fn(): job())\nmain()\n");
+}
+
+#[test]
+fn executor_type_arg_rejected() {
+    rejects(
+        "fn main():\n    ex := Executor[int]()\nmain()\n",
+        "takes no type arguments",
+    );
+}
+
+#[test]
+fn executor_unknown_method_rejected() {
+    rejects(
+        "fn main():\n    ex := Executor()\n    ex.run()\nmain()\n",
+        "has no method 'run'",
+    );
+}
+
+#[test]
+fn executor_is_sendable() {
+    // The handle crosses the airlock like Channel/Shared — submitting from a spawned task is legal.
+    ok("fn use_ex(ex: Executor):\n    ex.submit(fn(): print(1))\nfn main():\n    ex := Executor()\n    parallel:\n        spawn use_ex(ex)\n    ex.shutdown()\nmain()\n");
+}
+
+#[test]
+fn executor_user_struct_named_executor_rejected() {
+    rejects(
+        "struct Executor:\n    n: int\nfn main():\n    print(1)\nmain()\n",
+        "reserved",
+    );
+}
+
+// ----- C5 refinement #1: a non-sendable value merely *read* inside a `spawn:` block -----
+
+#[test]
+fn read_captured_closure_in_spawn_block_rejected() {
+    // Capturing a closure (non-sendable) and *calling* it inside a task is a read across the
+    // airlock — rejected even though it's never reassigned (the gap closed in this milestone).
+    rejects(
+        "fn main():\n    g := fn() -> int: 1\n    parallel:\n        spawn:\n            print(g())\nmain()\n",
+        "non-sendable captured binding 'g'",
+    );
+}
+
+#[test]
+fn read_captured_int_in_spawn_block_ok() {
+    // A sendable capture (int) gets its own copy — reading it freely is the whole point.
+    ok("fn main():\n    n := 42\n    parallel:\n        spawn:\n            print(n)\nmain()\n");
+}
+
+#[test]
+fn read_captured_channel_in_spawn_block_ok() {
+    // A Channel handle is sendable — capturing and using it inside a task is fine.
+    ok("fn main():\n    ch := Channel[int]()\n    parallel:\n        spawn:\n            ch.send(1)\nmain()\n");
+}
+
+#[test]
+fn imported_module_used_in_spawn_block_ok() {
+    // Regression: a whole-module import is bound at module scope (a global namespace resolvable in
+    // every task, like a free function), not a per-task value capture — the read gate must not flag
+    // it even though `Ty::Module` is non-sendable.
+    entry_ok("import std.math\nfn main():\n    parallel:\n        spawn:\n            print(math.floor(2.7))\nmain()\n");
+}
+
+#[test]
+fn top_level_closure_used_in_spawn_block_ok() {
+    // Regression: a top-level (module-scope) binding is a global, not a per-task capture — reading
+    // it inside a `spawn:` block is fine even when it's non-sendable.
+    ok("g := fn() -> int: 7\nfn main():\n    parallel:\n        spawn:\n            print(g())\nmain()\n");
+}
+
+#[test]
+fn read_captured_closure_through_nested_closure_in_spawn_block_rejected() {
+    // (C5 / A2-session regression pin.) A non-sendable function-local closure smuggled into a
+    // `spawn:` block through a *nested* closure must still be rejected. This is currently an
+    // EMERGENT property, not a dedicated nested-closure walk: `capture_floors` is pushed only at the
+    // `spawn:` boundary and is NOT reset by `infer_closure`, so the read gate in `infer_ident`
+    // (`is_local_capture` + `!sendable`) fires at any closure-nesting depth. This test locks that
+    // behavior so a future refactor of the capture machinery can't silently reopen the hole — see
+    // `docs/concurrency.md` §9 (Group A / A3a).
+    rejects(
+        "fn main():\n    g := fn() -> int: 1\n    parallel:\n        spawn:\n            h := fn() -> int: g()\n            print(h())\nmain()\n",
+        "non-sendable captured binding 'g'",
+    );
+}
+
+// ----- C5 refinement #2: `Ref` non-sendability keys on origin, not the bare name -----
+
+#[test]
+fn user_struct_named_ref_is_sendable() {
+    // A *user-defined* struct that happens to be named `Ref` (no std.ref import) is an ordinary
+    // sendable struct — the non-sendability gate applies only to the builtin std.ref `Ref[T]`.
+    entry_ok("struct Ref:\n    val: int\nfn use_it(r: Ref):\n    print(r.val)\nfn main():\n    r := Ref(1)\n    parallel:\n        spawn use_it(r)\nmain()\n");
+}

@@ -195,6 +195,11 @@ struct Vm {
     /// its install-time length on catch (see [`Handler::nursery_len`]), so a fault in the nursery
     /// body or a task can't leave a stale entry.
     nurseries: Vec<Vec<PendingCall>>,
+    /// Every `Executor` created during the run (`Op::NewExecutor`), in creation order. These handles
+    /// are GC roots (see [`Vm::collect`]) so an un-shut executor's queued work survives until the
+    /// program-exit auto-drain (C5 / A2) reaps any executor never explicitly shut down — the VM
+    /// parity counterpart of the interpreter's `Rc` registry.
+    executors: Vec<GcRef>,
 }
 
 /// A snapshot taken at a `recover:` boundary (`Op::PushHandler`). On a caught fault the VM restores
@@ -239,6 +244,7 @@ impl Vm {
             fault_trace_depth: 0,
             gc_stress: false,
             nurseries: Vec::new(),
+            executors: Vec::new(),
         }
     }
 
@@ -531,6 +537,9 @@ impl Vm {
                 work.extend(task.roots());
             }
         }
+        // Live executors (C5 / A2): their queued work must survive to the program-exit auto-drain
+        // even when no in-program handle remains.
+        work.extend(self.executors.iter().copied());
         work.extend(self.module_objs.iter().copied());
 
         while let Some(h) = work.pop() {
@@ -925,6 +934,15 @@ impl Vm {
                 let init = self.pop();
                 let init = self.deep_clone(init);
                 let h = self.heap.alloc(Obj::Shared(init));
+                self.push(Value::Obj(h));
+            }
+            Op::NewExecutor => {
+                let h = self
+                    .heap
+                    .alloc(Obj::Executor { queue: std::collections::VecDeque::new(), shut: false });
+                // Register for the program-exit auto-drain; the handle is also a GC root, so the
+                // executor's queued work survives even after every in-program handle is gone.
+                self.executors.push(h);
                 self.push(Value::Obj(h));
             }
         }
@@ -1710,6 +1728,11 @@ impl Vm {
         }
         if matches!(self.heap.get(h), Obj::Shared(_)) {
             let result = self.shared_method(h, method, &args, span)?;
+            self.push(result);
+            return Ok(());
+        }
+        if matches!(self.heap.get(h), Obj::Executor { .. }) {
+            let result = self.executor_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
         }
@@ -2645,7 +2668,8 @@ impl Vm {
             | Obj::Module { .. }
             | Obj::Native { .. }
             | Obj::Channel(_)
-            | Obj::Shared(_) => v,
+            | Obj::Shared(_)
+            | Obj::Executor { .. } => v,
             Obj::List(items) => {
                 let cloned: Vec<Value> = items.into_iter().map(|x| self.deep_clone(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::List(cloned)))
@@ -2771,6 +2795,96 @@ impl Vm {
             }
             _ => Err(self.err(format!("type Shared has no method '{method}'"), span)),
         }
+    }
+
+    /// `Executor` methods (C5/escape hatch): `submit` (enqueue a detached task closure, rejected once
+    /// shut), `shutdown` (graceful — drain FIFO via the re-entrant call path), `shutdown_now` (discard
+    /// pending). Mirrors `interp::eval_executor_method` — error strings byte-identical (parity-tested).
+    /// The executor handle is re-rooted on the operand stack across the drain, and each popped task is
+    /// rooted across its nested call (the receiver was popped in `do_method_call`).
+    fn executor_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        match method {
+            "submit" => {
+                self.arity_err("submit", args, 1, span)?;
+                let shut = match self.heap.get(h) {
+                    Obj::Executor { shut, .. } => *shut,
+                    _ => unreachable!("executor_method on non-executor"),
+                };
+                if shut {
+                    return Err(self.err(
+                        "submit on a shut-down Executor (it no longer accepts work)".to_string(),
+                        span,
+                    ));
+                }
+                let f = args[0];
+                match self.heap.get_mut(h) {
+                    Obj::Executor { queue, .. } => queue.push_back(f),
+                    _ => unreachable!("executor_method on non-executor"),
+                }
+                Ok(Value::Nil)
+            }
+            "shutdown" => {
+                self.arity_err("shutdown", args, 0, span)?;
+                // Mark shut first so a task that re-enters this executor (submit/shutdown) sees it.
+                match self.heap.get_mut(h) {
+                    Obj::Executor { shut, .. } => *shut = true,
+                    _ => unreachable!("executor_method on non-executor"),
+                }
+                // Root the executor across the drain (its remaining queue is traced via the handle).
+                self.push(Value::Obj(h));
+                loop {
+                    let task = match self.heap.get_mut(h) {
+                        Obj::Executor { queue, .. } => queue.pop_front(),
+                        _ => unreachable!("executor_method on non-executor"),
+                    };
+                    let Some(task) = task else { break };
+                    // The popped task is no longer in the queue → root it on the stack across its call.
+                    self.push(task);
+                    let r = self.invoke_value(task, vec![], span);
+                    self.pop();
+                    r?;
+                }
+                self.pop(); // the executor root
+                Ok(Value::Nil)
+            }
+            "shutdown_now" => {
+                self.arity_err("shutdown_now", args, 0, span)?;
+                match self.heap.get_mut(h) {
+                    Obj::Executor { queue, shut } => {
+                        *shut = true;
+                        queue.clear();
+                    }
+                    _ => unreachable!("executor_method on non-executor"),
+                }
+                Ok(Value::Nil)
+            }
+            _ => Err(self.err(format!("type Executor has no method '{method}'"), span)),
+        }
+    }
+
+    /// Mirrors `interp::Interp::drain_live_executors` (C5 / A2): at a clean program end, gracefully
+    /// drain every `Executor` created but never explicitly `shutdown`/`shutdown_now`-ed, in creation
+    /// order, reusing the shipped `shutdown` path (FIFO, first-fault-aborts-siblings). A hard
+    /// `std.os.exit` is not drained (the caller gates on `pending_exit`); a task that calls
+    /// `os.exit` mid-drain stops the remaining drain.
+    fn drain_live_executors(&mut self, span: Span) -> Result<(), RuntimeError> {
+        if self.pending_exit.is_some() {
+            return Ok(());
+        }
+        // Snapshot the handles: a drained task may create new executors; reap only those alive at
+        // exit (parity with the interpreter's `Vec<Rc>` snapshot).
+        let execs = self.executors.clone();
+        for h in execs {
+            let shut = matches!(self.heap.get(h), Obj::Executor { shut: true, .. });
+            if shut {
+                continue;
+            }
+            self.executor_method(h, "shutdown", &[], span)?;
+            if self.pending_exit.is_some() {
+                break; // a drained task called os.exit — hard halt, stop draining
+            }
+        }
+        Ok(())
     }
 
     /// Drain the current (top) frame's deferred calls, LIFO, popping one at a time from the frame's
@@ -3458,6 +3572,7 @@ impl Vm {
                 Obj::Native { .. } => "function",
                 Obj::Channel(_) => "Channel",
                 Obj::Shared(_) => "Shared",
+                Obj::Executor { .. } => "Executor",
             },
         }
     }
@@ -3514,6 +3629,7 @@ impl Vm {
                 Obj::Native { name, .. } => format!("<native fn {name}>"),
                 Obj::Channel(q) => format!("Channel(len={})", q.len()),
                 Obj::Shared(v) => format!("Shared({})", self.display(*v)),
+                Obj::Executor { queue, .. } => format!("Executor(pending={})", queue.len()),
             },
         }
     }
@@ -3588,9 +3704,9 @@ impl Vm {
             Obj::Closure { .. } => Ok("<closure>".to_string()),
             Obj::Module { name, .. } => Ok(format!("<module {name}>")),
             Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
-            // Channel / Shared have no protocol hook — reuse the structural `Display` (matches the
-            // interpreter's `stringify` catch-all falling back to `Display`).
-            Obj::Channel(_) | Obj::Shared(_) => Ok(self.display(Value::Obj(h))),
+            // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
+            // (matches the interpreter's `stringify` catch-all falling back to `Display`).
+            Obj::Channel(_) | Obj::Shared(_) | Obj::Executor { .. } => Ok(self.display(Value::Obj(h))),
         }
     }
 
@@ -3734,7 +3850,9 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
         Err(e) => return (String::new(), Err(RuntimeError { message: e.message, span: e.span })),
     };
     let mut vm = Vm::new(Rc::new(program));
-    let result = vm.run();
+    let result = vm
+        .run()
+        .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
     (vm.out, result)
 }
 
@@ -3768,7 +3886,9 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
             };
             let mut vm = Vm::new(Rc::new(program));
             vm.gc_stress = stress;
-            let result = vm.run();
+            let result = vm
+                .run()
+                .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
             let live = vm.heap.live();
             (result.map(|()| vm.out), live)
         })
@@ -3821,7 +3941,12 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     };
     let mut vm = Vm::new(Rc::new(program));
     vm.host = cfg;
-    let result = vm.run();
+    // On a clean finish, gracefully reap any Executor never explicitly shut down (C5 / A2). Skipped
+    // on a fault (the program is already erroring) and on a hard `std.os.exit` (handled inside
+    // `drain_live_executors` via `pending_exit`).
+    let result = vm
+        .run()
+        .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
     // A pending exit means `result` is the `exit()` unwind sentinel, not a fault: report the
     // requested code as a clean halt.
     if let Some(code) = vm.pending_exit {
@@ -4561,6 +4686,17 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// C5 golden: the `Executor` escape hatch — submit/shutdown (FIFO drain), `defer ex.shutdown()`,
+    /// shutdown_now (discard). Byte-identical on the VM, the interpreter, and the `.expected` file.
+    #[test]
+    fn golden_executor_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/executor.chz");
+        let expected = include_str!("../../examples/executor.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     // Micro-tests mirroring the interpreter's C2/C3 unit tests (src/interp/mod.rs), to pin the VM's
     // channel/shared/spawn semantics directly (not just via the example goldens).
 
@@ -4600,6 +4736,85 @@ main()";
         // `get` copies out: mutating the returned list must not change what the box holds.
         let src = "fn main():\n    s := Shared([1, 2])\n    xs := s.get()\n    xs.push(3)\n    print(s.get())\nmain()\n";
         assert_eq!(run(src), "[1, 2]\n");
+    }
+
+    #[test]
+    fn executor_submit_runs_fifo_at_shutdown() {
+        let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\n    ex.shutdown()\nmain()\n";
+        assert_eq!(run(src), "0\n1\n2\n");
+        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    #[test]
+    fn executor_submit_after_shutdown_errors() {
+        let src = "fn main():\n    ex := Executor()\n    ex.shutdown()\n    ex.submit(fn(): print(1))\nmain()\n";
+        let err = run_err(src);
+        assert!(err.contains("shut-down Executor"), "got: {err}");
+        // Parity: same fault message on the interpreter.
+        let interp = crate::interp::run_capture(src).expect_err("interp should fault").message;
+        assert_eq!(err, interp, "VM/interp error divergence");
+    }
+
+    #[test]
+    fn executor_shutdown_now_discards_pending() {
+        let src = "fn j():\n    print(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    ex.shutdown_now()\n    print(0)\nmain()\n";
+        assert_eq!(run(src), "0\n");
+        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    // ----- C5 (A2): program-exit auto-drain (VM parity) -----
+
+    #[test]
+    fn golden_executor_autodrain_matches_expected_and_interp() {
+        let src = include_str!("../../examples/executor_autodrain.chz");
+        let expected = include_str!("../../examples/executor_autodrain.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    #[test]
+    fn executor_autodrain_runs_unshut_at_exit() {
+        let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\nmain()\n";
+        assert_eq!(run(src), "0\n1\n2\n");
+        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    #[test]
+    fn executor_autodrain_not_redrained_after_explicit_shutdown() {
+        let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.shutdown()\n    print(0)\nmain()\n";
+        assert_eq!(run(src), "1\n0\n");
+        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    #[test]
+    fn executor_autodrain_survives_gc_stress() {
+        // The VM executor registry roots un-shut work so it isn't collected before the exit drain.
+        // Under collect-before-every-instruction, the drained closures must still be reachable.
+        let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\nmain()\n";
+        let normal = run(src);
+        assert_eq!(run_capture_stress(src), normal, "VM gc_stress diverged (executor auto-drain rooting bug?)");
+    }
+
+    #[test]
+    fn executor_fault_during_drain_leaves_siblings_for_reap() {
+        // A task that faults mid-drain leaves the not-yet-run siblings in the queue; `defer
+        // ex.shutdown()` then reaps them on the fault exit path. Both engines must drain the *live*
+        // queue (not a snapshot) so leftover work survives — pins the C1 parity fix.
+        let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    defer ex.shutdown()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): boom())\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\nfn main():\n    r := recover:\n        run()\n        0\n    print(\"done\")\nmain()\n";
+        let vm = run_capture(src).expect("vm run");
+        assert_eq!(vm, "A\nC\ndone\n");
+        assert_eq!(vm, crate::interp::run_capture(src).expect("interp run"), "VM/interp divergence");
+    }
+
+    #[test]
+    fn executor_reentrant_shutdown_now_during_drain() {
+        // A task that calls `shutdown_now()` mid-drain discards the remaining siblings on BOTH
+        // engines (the drain pops from the live queue, so the clear takes effect) — pins the C1 fix.
+        let src = "fn stop(e: Executor):\n    e.shutdown_now()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): stop(ex))\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n";
+        let vm = run_capture(src).expect("vm run");
+        assert_eq!(vm, "A\nend\n");
+        assert_eq!(vm, crate::interp::run_capture(src).expect("interp run"), "VM/interp divergence");
     }
 
     #[test]
@@ -5537,6 +5752,29 @@ main()";
         assert_eq!(run_capture_stress(src), normal);
         assert_eq!(normal, crate::interp::run_capture(src).expect("interp run"));
     }
+
+    /// Executor: submitted task closures (queued in the heap obj) and the popped task drained at
+    /// `shutdown` must survive GC firing between submit and drain, and across each task's re-entrant
+    /// call. Each task allocates a string into a Channel — a missing root would corrupt the output or
+    /// dangle a `GcRef`.
+    #[test]
+    fn executor_tasks_survive_gc_stress() {
+        let src = "\
+fn work(tag: str, out: Channel[str]):
+    out.send(\"{tag}!\")
+fn main():
+    ch := Channel[str]()
+    ex := Executor()
+    ex.submit(fn(): work(str(1), ch))
+    ex.submit(fn(): work(str(2), ch))
+    ex.shutdown()
+    for _ in 0..2:
+        print(ch.recv())
+main()";
+        let normal = run_capture(src).unwrap();
+        assert_eq!(run_capture_stress(src), normal, "VM gc_stress diverged (executor rooting bug?)");
+        assert_eq!(normal, crate::interp::run_capture(src).expect("interp run"));
+    }
 }
 
 #[cfg(test)]
@@ -5616,6 +5854,19 @@ mod parity_tests {
     /// Convenience: a single entry file (the common std-module case).
     fn parity_entry(src: &str) -> String {
         assert_parity_file(&[("main.chz", src)], "main.chz")
+    }
+
+    // ----- C5 (A2): program-exit auto-drain is skipped on a hard `os.exit` -----
+
+    #[test]
+    fn executor_autodrain_skipped_on_os_exit() {
+        // `os.exit` is a hard halt — like `defer`, the program-exit auto-drain is skipped, so a
+        // submitted-but-un-shut executor's work must NOT run. Driven through the file path on both
+        // engines (parity), since it imports std.os.
+        let out = parity_entry(
+            "import std.os\nfn j():\n    print(\"RAN\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    print(\"before exit\")\n    os.exit(0)\nmain()\n",
+        );
+        assert_eq!(out, "before exit\n");
     }
 
     // ----- M9: std.regex parity (exercises NativeRet::Struct lowering on both engines) -----

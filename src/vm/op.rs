@@ -233,6 +233,8 @@ pub enum Op {
     NewChannel,
     /// `Shared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Shared(init)`.
     NewShared,
+    /// `Executor()` — push a fresh, empty, explicitly-owned work queue (`Obj::Executor`). C5.
+    NewExecutor,
 }
 
 /// A compiled function (or the synthetic module-toplevel) — its code, parallel spans, arity, and

@@ -56,7 +56,7 @@ fn module_label(import: &Import) -> String {
 /// both engines key on these literal names, so a user type that shadows them would collide. Reject
 /// the redefinition at declaration.
 fn is_reserved_type(name: &str) -> bool {
-    name == "Result" || name == "Option"
+    name == "Result" || name == "Option" || name == "Executor"
 }
 
 /// Prebuilt protocols a user program may use as bounds but must not redeclare (mirrors
@@ -93,6 +93,15 @@ impl FnSig {
     }
 }
 
+/// Where a struct was declared: a stdlib module (`std.*`) vs a user/entry module. Lets a sendability
+/// rule key on the *builtin* `Ref[T]` (std.ref) without snaring a user struct that's merely named
+/// `Ref` (the principled replacement for the old bare-name check).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StructOrigin {
+    Builtin,
+    User,
+}
+
 /// A struct's shape: its generic type parameters (empty for a non-generic struct), ordered
 /// `(field, type)` pairs, and its methods by name. Field/method types may contain `Ty::Param`s
 /// naming the struct's type parameters; they're substituted at each use site.
@@ -100,6 +109,7 @@ struct StructInfo {
     type_params: Vec<TypeParam>,
     fields: Vec<(String, Ty)>,
     methods: HashMap<String, FnSig>,
+    origin: StructOrigin,
 }
 
 /// A protocol's required method signatures, in declaration order. `Self` appears as `Ty::Param("Self")`
@@ -159,6 +169,7 @@ pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
         }
         let label = if lm.id == graph.entry { None } else { Some(lm.label()) };
         c.begin_module(label);
+        c.current_module_is_stdlib = lm.dotted.first().map(String::as_str) == Some("std");
         let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
         c.module_sigs.insert(lm.id.clone(), sig);
     }
@@ -305,6 +316,8 @@ struct Checker {
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
     /// Empty outside any `spawn:` block.
     capture_floors: Vec<usize>,
+    /// True while checking a `std.*` module — structs hoisted now are tagged `StructOrigin::Builtin`.
+    current_module_is_stdlib: bool,
 }
 
 impl Checker {
@@ -335,6 +348,7 @@ impl Checker {
             loop_depth: 0,
             nursery_depth: 0,
             capture_floors: Vec::new(),
+            current_module_is_stdlib: false,
         };
         c.seed_stdlib_structs();
         c
@@ -350,6 +364,7 @@ impl Checker {
             type_params: Vec::new(),
             fields: fields.into_iter().map(|(n, t)| (n.to_string(), t)).collect(),
             methods: HashMap::new(),
+            origin: StructOrigin::Builtin,
         };
         self.structs.insert(
             "Match".into(),
@@ -531,6 +546,22 @@ impl Checker {
         }
         false
     }
+    /// Like [`is_captured`], but excludes module-level (scope 0) bindings — imports and top-level
+    /// declarations are globals resolvable identically in every task (like free functions), not
+    /// per-task value captures. Used by the *read* sendability gate so reading an imported module or
+    /// a top-level closure inside a `spawn:` block isn't flagged; the *reassign* gate keeps the
+    /// broader [`is_captured`] (writing a copy of any capture, global or not, can't leak out).
+    fn is_local_capture(&self, name: &str) -> bool {
+        let Some(&floor) = self.capture_floors.last() else {
+            return false;
+        };
+        for i in (0..self.scopes.len()).rev() {
+            if self.scopes[i].contains_key(name) {
+                return i > 0 && i < floor;
+            }
+        }
+        false
+    }
 
     // ===== pass 1: hoist declarations =====
 
@@ -612,9 +643,14 @@ impl Checker {
                         .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
                         .collect();
                     self.exit_type_params(saved);
+                    let origin = if self.current_module_is_stdlib {
+                        StructOrigin::Builtin
+                    } else {
+                        StructOrigin::User
+                    };
                     self.structs.insert(
                         name.clone(),
-                        StructInfo { type_params: type_params.clone(), fields, methods },
+                        StructInfo { type_params: type_params.clone(), fields, methods, origin },
                     );
                 }
                 StmtKind::Enum { name, type_params, variants } => {
@@ -792,6 +828,8 @@ impl Checker {
                 "bool" => Ty::Bool,
                 "str" => Ty::Str,
                 "nil" => Ty::Nil,
+                // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation).
+                "Executor" => Ty::Executor,
                 // A generic type parameter (`T`) or `Self`, in scope while checking a generic
                 // fn signature/body or a protocol method — checked BEFORE type names so an
                 // in-scope type parameter shadows a same-named struct/enum.
@@ -2160,6 +2198,20 @@ impl Checker {
 
     fn infer_ident(&mut self, name: &str, span: Span) -> Ty {
         if let Some(ty) = self.lookup(name) {
+            // A function-local binding captured by an enclosing `spawn:` task crosses the airlock as
+            // a copy; a *non-sendable* one (e.g. a captured closure that's then called) can't, so
+            // reading it inside the task is an error — the read-side counterpart to the reassignment
+            // gate. Module globals/imports are excluded (`is_local_capture`): they resolve in every
+            // task like free functions, so reading an imported module here is fine.
+            if self.is_local_capture(name) && !self.sendable(&ty) {
+                self.error(
+                    span,
+                    format!(
+                        "cannot use non-sendable captured binding '{name}' of type {ty} inside a \
+                         spawned task (captures cross the airlock — communicate via a Channel or Shared)"
+                    ),
+                );
+            }
             return ty;
         }
         if let Some(sig) = self.functions.get(name) {
@@ -2894,6 +2946,12 @@ impl Checker {
                 let elem = self.one_arg("Shared", args, span);
                 Some(Ty::shared(elem))
             }
+            "Executor" => {
+                // `Executor()` — a fresh, empty, explicitly-owned work queue (C5 escape hatch).
+                // Non-generic and zero-arg; a `[T]` type arg is rejected upstream.
+                self.check_arity("Executor", 0, args, span);
+                Some(Ty::Executor)
+            }
             // Generic built-in constructors for Result / Option.
             // `Ok(x)`: success type known, error type open (unifies with the declared `E`).
             "Ok" => Some(Ty::result_e(self.one_arg(name, args, span), Ty::Unknown)),
@@ -3166,6 +3224,16 @@ impl Checker {
                 // `get()->T`, `set(T)->nil`, `update(fn(T)->T)->nil` — the same box API as `Ref[T]`,
                 // but reachable across tasks.
                 if let Some(sig) = shared_method_sig(method, elem) {
+                    self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
+            Ty::Executor => {
+                // `submit(fn() -> _)->nil`, `shutdown()->nil`, `shutdown_now()->nil` (C5 escape hatch).
+                if let Some(sig) = executor_method_sig(method) {
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -3685,6 +3753,7 @@ impl Checker {
                 "bool" => Ty::Bool,
                 "str" => Ty::Str,
                 "nil" => Ty::Nil,
+                "Executor" => Ty::Executor,
                 _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
                 _ if self.struct_names.contains(n) => Ty::strukt(n.clone()),
                 _ if self.enum_names.contains(n) => Ty::Enum(n.clone(), Vec::new()),
@@ -3900,16 +3969,22 @@ impl Checker {
             // A `Shared[T]` handle always crosses — that's its whole point (one box, many tasks);
             // its element type is *not* a constraint (the value never crosses, only the handle).
             Ty::Shared(_) => true,
+            // An `Executor` handle crosses the airlock like a `Channel`/`Shared` handle (the queue
+            // lives outside every heap; tasks reach the one work queue).
+            Ty::Executor => true,
             Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Channel(t) => self.sendable_rec(t, stack),
             Ty::Map(k, v) => self.sendable_rec(k, stack) && self.sendable_rec(v, stack),
             Ty::Result(t, e) => self.sendable_rec(t, stack) && self.sendable_rec(e, stack),
             Ty::Tuple(elems) => elems.iter().all(|t| self.sendable_rec(t, stack)),
             Ty::Func { .. } | Ty::Module(_) | Ty::Protocol(_) => false,
             Ty::Struct(name, args) => {
-                // `Ref[T]` (std.ref) is the *in-task* box: copying it across a spawn would silently
-                // give each task its own box (a footgun), so it's non-sendable — reach for the
-                // cross-task box `Shared[T]` instead (spec §7).
-                if name == "Ref" {
+                // The *builtin* `Ref[T]` (std.ref) is the in-task box: copying it across a spawn
+                // would silently give each task its own box (a footgun), so it's non-sendable —
+                // reach for the cross-task box `Shared[T]` instead (spec §7). Keyed on origin (not
+                // the bare name), so a user struct that merely happens to be named `Ref` is sendable.
+                if name == "Ref"
+                    && self.structs.get(name).map(|i| i.origin) == Some(StructOrigin::Builtin)
+                {
                     return false;
                 }
                 if !args.iter().all(|a| self.sendable_rec(a, stack)) {
@@ -4612,6 +4687,18 @@ fn shared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
             vec![Ty::Func { params: vec![elem.clone()], ret: Box::new(elem.clone()) }],
             Ty::Nil,
         ),
+        _ => return None,
+    };
+    Some(FnSig::plain(params, ret))
+}
+
+/// Built-in method signatures on `Executor` (C5 escape hatch). `submit` takes a detached, zero-arg
+/// task closure (its return value is discarded — `Unknown` ret accepts any `fn() -> _`).
+fn executor_method_sig(method: &str) -> Option<FnSig> {
+    let (params, ret) = match method {
+        "submit" => (vec![Ty::Func { params: vec![], ret: Box::new(Ty::Unknown) }], Ty::Nil),
+        "shutdown" => (vec![], Ty::Nil),
+        "shutdown_now" => (vec![], Ty::Nil),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))

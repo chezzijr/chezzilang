@@ -1327,6 +1327,11 @@ impl Compiler {
                 fc.emit(Op::NewShared, span);
                 return Ok(());
             }
+            // C5: `Executor()` → a fresh work queue (checker validated 0 args).
+            if name == "Executor" {
+                fc.emit(Op::NewExecutor, span);
+                return Ok(());
+            }
             if name == "print" {
                 for a in args {
                     self.compile_expr(fc, a)?;

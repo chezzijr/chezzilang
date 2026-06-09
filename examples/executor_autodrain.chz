@@ -1,0 +1,16 @@
+# C5 concurrency: program-exit auto-drain. An `Executor` you submit work to but never explicitly
+# `shutdown`/`shutdown_now` is gracefully drained at program exit — its queued tasks run FIFO after
+# `main()` returns, exactly as a top-level `defer ex.shutdown()` would reap them. Without this, the
+# submitted work would silently never run. `os.exit` stays a hard halt and does NOT auto-drain.
+
+fn job(id: int):
+    print("job {id} ran (auto-drained at exit)")
+
+fn main():
+    ex := Executor()
+    ex.submit(fn(): job(1))
+    ex.submit(fn(): job(2))
+    print("main() done; executor never shut down")
+    # No ex.shutdown() — the runtime reaps it at program exit.
+
+main()

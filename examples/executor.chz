@@ -1,0 +1,35 @@
+# C5 concurrency: `Executor` — the escape hatch for detached work that outlives a `parallel:` scope.
+# An Executor is an explicitly-owned work queue: `submit` enqueues a detached task, `shutdown`
+# gracefully drains it (FIFO), `shutdown_now` discards pending work. Reap it deterministically with
+# `defer ex.shutdown()`. Under the sequential executor submitted work runs at the reap point, not in
+# the background — same surface as real-concurrency C5, deterministic semantics now.
+
+fn job(id: int):
+    print("job {id} ran")
+
+# `defer ex.shutdown()` ties the reap to this function's exit: submitted work runs after the rest of
+# the body, on every exit path.
+fn deferred():
+    ex := Executor()
+    defer ex.shutdown()
+    ex.submit(fn(): job(3))
+    print("inside deferred(), before reap")
+
+fn main():
+    # Graceful drain: submitted tasks run at shutdown(), FIFO — not when submitted.
+    ex := Executor()
+    ex.submit(fn(): job(1))
+    ex.submit(fn(): job(2))
+    print("submitted; nothing has run yet")
+    ex.shutdown()
+    print("drained")
+
+    deferred()
+
+    # shutdown_now discards pending work without running it.
+    ex2 := Executor()
+    ex2.submit(fn(): job(99))
+    ex2.shutdown_now()
+    print("discarded; job 99 never ran")
+
+main()
