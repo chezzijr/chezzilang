@@ -165,12 +165,18 @@ fn cmd_check(args: &[String]) -> ExitCode {
     }
 }
 
-/// `chezzi run <file> [--errors=json] [--interp]` — type-check first (M4 gate), then execute on
-/// the bytecode VM (default, M5) or the tree-walk interpreter (`--interp`, the reference engine).
+/// `chezzi run <file> [--errors=json] [--interp] [--parallel]` — type-check first (M4 gate), then
+/// execute on the bytecode VM (default, M5) or the tree-walk interpreter (`--interp`, the reference
+/// engine). `--parallel` (VM-only) selects the real OS-thread engine (B3.3-threads); without it the
+/// cooperative single-thread VM runs (decision A — the default stays the byte-identical oracle).
 fn cmd_run(args: &[String]) -> ExitCode {
     let mut path = None;
     let mut json = false;
     let mut use_vm = true;
+    // B3.3-threads: `--parallel` selects the real OS-thread engine (bounded pool + condvar `recv`);
+    // the cooperative single-thread VM stays the default (decision A). VM-only — `--interp` is the
+    // frozen sequential oracle and never runs parallel.
+    let mut parallel = false;
     // Positional args after the script path are the program's own args (std.os.args).
     // GOTCHA: this means flags MUST precede the file — `chezzi run prog.chz --interp`
     // treats `--interp` as a program arg (path is already set) and silently runs the
@@ -182,6 +188,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
             "--errors=json" => json = true,
             "--vm" => use_vm = true,
             "--interp" => use_vm = false,
+            "--parallel" => parallel = true,
             other if other.starts_with("--") => {
                 eprintln!("chezzi run: unknown flag '{other}'");
                 return ExitCode::FAILURE;
@@ -190,9 +197,13 @@ fn cmd_run(args: &[String]) -> ExitCode {
         }
     }
     let Some(path) = path else {
-        eprintln!("chezzi run: missing file argument\nusage: chezzi run <file.chz> [--errors=json] [--interp]");
+        eprintln!("chezzi run: missing file argument\nusage: chezzi run <file.chz> [--errors=json] [--interp] [--parallel]");
         return ExitCode::FAILURE;
     };
+    if parallel && !use_vm {
+        eprintln!("chezzi run: --parallel is VM-only and cannot combine with --interp (the interpreter is the frozen sequential engine)");
+        return ExitCode::FAILURE;
+    }
     if read_source(&path).is_none() {
         return ExitCode::FAILURE;
     }
@@ -215,7 +226,11 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let p = std::path::Path::new(&path);
     let cfg = native::HostConfig::from_process(prog_args);
     let (output, errout, errored, exit_code) = if use_vm {
-        let (out, err, result, code) = vm::run_file_with(p, cfg);
+        let (out, err, result, code) = if parallel {
+            vm::run_file_parallel(p, cfg)
+        } else {
+            vm::run_file_with(p, cfg)
+        };
         (out, err, result.err().map(|e| vm::format_trace(&e.message, e.span, &e.trace)), code)
     } else {
         let (out, err, result, code) = interp::run_file_with(p, cfg);

@@ -193,6 +193,12 @@ struct Vm {
     fault_trace_depth: usize,
     /// Test mode: collect before *every* instruction, to surface any missing GC root.
     gc_stress: bool,
+    /// B3.3-threads: `--parallel` engine selected. When set, `join_nursery` runs a nursery's tasks
+    /// on the real OS-thread pool (each in its own worker `Vm`) instead of cooperative fibers, and a
+    /// blocking `recv` on an empty channel waits on the channel's `Condvar` rather than parking a
+    /// fiber. Default `false` keeps the cooperative single-thread engine (decision A). Workers
+    /// inherit it (see [`Vm::spawn_worker`]) so nested `parallel:` recurses onto the pool too.
+    parallel: bool,
     /// Active `parallel:` nurseries (C4), innermost last. `EnterNursery` pushes; each `spawn`
     /// registers a [`PendingCall`] on the innermost list; `JoinNursery` drains it FIFO at the
     /// dedent. Tasks are GC roots while pending. A `recover:` boundary truncates this stack back to
@@ -337,6 +343,7 @@ impl Vm {
             fault_trace: None,
             fault_trace_depth: 0,
             gc_stress: false,
+            parallel: false,
             nurseries: Vec::new(),
             executors: Vec::new(),
             suspend: None,
@@ -3107,6 +3114,9 @@ impl Vm {
     fn spawn_worker(&self) -> Vm {
         let mut worker = Vm::new(Arc::clone(&self.program));
         worker.gc_stress = self.gc_stress;
+        // Workers run on the pool too, so a nested `parallel:` inside a task recurses onto threads
+        // (and a worker's `recv` blocks on the condvar, not a fiber). B3.3-threads.
+        worker.parallel = self.parallel;
         worker
     }
 
@@ -4659,6 +4669,27 @@ pub fn run_capture(src: &str) -> Result<String, RuntimeError> {
     result.map(|()| out)
 }
 
+/// B3.3-threads — run a single-file program on the `--parallel` engine (real OS-thread pool +
+/// condvar `recv`) and return its stdout or error. The deterministic-by-construction `--parallel`
+/// unit tests/goldens drive this (decision A: the cooperative default stays the parity oracle).
+#[cfg(test)]
+pub fn run_capture_parallel(src: &str) -> Result<String, RuntimeError> {
+    let src = src.to_string();
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let tokens = lexer::tokenize(&src).map_err(|e| RuntimeError { message: e.to_string(), span: Span { line: 1, col: 1 } })?;
+            let module = parser::parse(tokens).map_err(|e| RuntimeError { message: e.message, span: e.span })?;
+            let program = crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError { message: e.message, span: e.span })?;
+            let mut vm = Vm::new(Arc::new(program));
+            vm.parallel = true;
+            vm.run().and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 })).map(|()| vm.out)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked")
+}
+
 /// Run a single-file program, returning stdout (or error) plus the final live-object count.
 /// `stress` collects before every instruction (surfaces missing GC roots); otherwise the normal
 /// allocation-threshold trigger drives collection (test helper for GC assertions).
@@ -4717,16 +4748,27 @@ pub type RunOutput = (String, String, Result<(), RunError>, Option<i32>);
 /// Like [`run_file`], but with an explicit [`crate::native::HostConfig`] (args/env/stdin) for the
 /// native std modules. The CLI passes a process-backed config; tests inject a deterministic one.
 pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
+    run_file_engine(entry, cfg, false)
+}
+
+/// Like [`run_file_with`], but runs on the **B3.3-threads `--parallel` engine** (real OS-thread
+/// pool + condvar `recv`) rather than the cooperative default. The CLI selects this for
+/// `chezzi run --parallel <file>`.
+pub fn run_file_parallel(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
+    run_file_engine(entry, cfg, true)
+}
+
+fn run_file_engine(entry: &std::path::Path, cfg: crate::native::HostConfig, parallel: bool) -> RunOutput {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
-        .spawn(move || run_file_inner(&entry, cfg))
+        .spawn(move || run_file_inner(&entry, cfg, parallel))
         .expect("failed to spawn VM thread")
         .join()
         .expect("VM thread panicked")
 }
 
-fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
+fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig, parallel: bool) -> RunOutput {
     let graph = match crate::resolver::build_graph(entry) {
         Ok(g) => g,
         Err(e) => return (String::new(), String::new(), Err(RunError::plain(RuntimeError { message: e.message, span: e.span })), None),
@@ -4737,6 +4779,7 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     };
     let mut vm = Vm::new(Arc::new(program));
     vm.host = cfg;
+    vm.parallel = parallel;
     // On a clean finish, gracefully reap any Executor never explicitly shut down (C5 / A2). Skipped
     // on a fault (the program is already erroring) and on a hard `std.os.exit` (handled inside
     // `drain_live_executors` via `pending_exit`).
@@ -5849,6 +5892,17 @@ main()";
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// B3.3-threads sub-step 1: the `--parallel` engine is selectable (`run_capture_parallel` sets
+    /// `Vm::parallel`). Until the pool is wired (sub-step 4), a `parallel:` with task-order output
+    /// (no cross-task blocking) yields the same result as the cooperative engine — proving the flag
+    /// plumbs through without changing well-ordered output.
+    #[test]
+    fn parallel_engine_runs_simple_program() {
+        let src = include_str!("../../examples/parallel.chz");
+        let expected = include_str!("../../examples/parallel.expected");
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
     }
 
     /// C2 golden: `Channel[T]` fan-out — workers `send` at the dedent, the parent `recv`s after the
