@@ -152,7 +152,11 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
   `std.str` + `std.cmp` (written in Chezzi; `std.cmp` adds M7-G3). Imported with
   `import std.math` / `import f from std.io`. `std.cmp` holds generic `min`/`max`/`clamp`
   (`[T: Comparable]`); `list.sort()` is likewise Comparable. (`std.math.min`/`max` were retired into
-  `std.cmp`; `abs` stays native.)
+  `std.cmp`; `abs` stays native.) **Integer overflow policy:** the one integer type is `i64`; every
+  overflow — arithmetic (`+ - * / %`), negation, `MIN / -1`, and `math.abs(MIN)` — is a *recoverable
+  panic* (`"integer overflow in <op>"`, catchable by `recover:`), never a silent wrap and never a host
+  crash. No `byte`/`u8` scalar (Python model — binary data is a future `bytes` *sequence*, not a
+  scalar) and no bignum (a non-goal).
 - **Std modules — M8 (shipped):** `std.json` (pure-Chezzi `Json` enum + `parse`/`stringify`/
   accessors **and** type-directed `json.decode[T](s)` into a struct/map/list/scalar);
   `std.process` (`cmd(s) -> Result[str]`); `std.fs` (`list_dir`/`exists`/`is_file`/`is_dir`/

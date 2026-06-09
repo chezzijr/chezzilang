@@ -133,7 +133,17 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   (`recover:` truncates it). `RunError` wraps `RuntimeError` + trace at the run boundary — engine
   `RuntimeError` and the parity-tested `Display` are unchanged. `examples/stack_trace.chz`. (Cost: a
   fn-name clone per interp call — acceptable for a scripting language; optimizable later.)
-- **Integers** — `i64` only; no `byte`, no bignum, no configurable overflow policy (overflow → error).
+- **Integers** — ~~overflow policy~~ **resolved.** Overflow is now a single, documented, fully-tested
+  policy: **every `i64` overflow is a recoverable panic** (`RuntimeError "integer overflow in <op>"`,
+  catchable by `recover:`) — never a silent wrap, never a host crash. Was 95% there (`checked_*` on
+  `+ - * / % neg`, shifts bounds-checked, literal overflow → `LexError`); the one leak was
+  `std.math.abs(i64::MIN)` using raw `i64::abs()` (panic in debug / wrap in release) — fixed to
+  `checked_abs` → recoverable fault. `examples/overflow.chz` (golden + parity, both engines).
+  **Still `i64`-only by design:** no `byte`/`u8` scalar (Python model — Python has no byte scalar
+  either; binary data is a `bytes` *sequence* of ints 0..255, and Chezzi already mirrors this for
+  chars: "no `char` type", 1-char `str`). Binary/buffer work is deferred to a future **`bytes`
+  sequence type** (stdlib-breadth track, see "binary/crypto" above), not a new scalar. **bignum**
+  (arbitrary precision) stays a non-goal.
 - **✅ Reassigning a loop variable** — `for i in 0..3: i = i + 100` used to diverge (VM mutated the
   live counter slot → one iteration; interp advanced an internal counter → ran all three). **Fixed:**
   the checker now rejects assignment (`=`/`+=`/`-=`) to any `for`-loop variable — they're fresh
@@ -187,8 +197,9 @@ manager / registry (spec defers this), debugger, doc comments + docgen.
 - **List-of-structs**, field access `ps[1].y`; **nested-list read** `g[i][j]`; **by-reference
   sharing** — a list passed to a fn and `.push`ed is mutated for the caller.
 - **`if` / `match` as expressions**, incl. inside interpolation `"{if a>b: a else: b}"`.
-- **`Result` / `Option` + `?`**, exhaustive-match checking, deep recursion, integer overflow → error
-  (not wrap), int division truncation, `%` on negatives.
+- **`Result` / `Option` + `?`**, exhaustive-match checking, deep recursion, **integer overflow → a
+  recoverable panic** (every op + negation + `MIN / -1` + `math.abs(MIN)`; `recover:`-catchable, never
+  wraps), int division truncation, `%` on negatives. `examples/overflow.chz`.
 - **`std.math` / `std.io` / `std.os` / `std.str` / `std.cmp` / `std.json` / `std.time` / `std.fs` /
   `std.process` / `std.regex` / `std.request`** on both engines.
 - **Recursive / self-referential structs** (BST, linked list) build, walk, GC fine.
@@ -299,3 +310,11 @@ slightly larger frames. `examples/defer.chz`.
 **Tech debt cleared ✅** · parser `MAX_DEPTH` 128→64 (off the test-stack edge); duplicate type param
 `[T, T]` rejected; nested-`set` equality parity; explicit call-site type args; `?`-in-closure checked
 against the closure's own return type.
+
+**Integer overflow policy ✅** · (TDD, both engines parity-tested) — formalized "every `i64` overflow
+is a recoverable panic, never a wrap or host crash." Fixed the one leak: `std.math.abs(i64::MIN)` used
+raw `i64::abs()` (panic in debug / wrap in release) → now `checked_abs` → `"integer overflow in abs"`,
+catchable by `recover:` (`src/native/math.rs`). All other paths (`checked_*` arith, negation,
+`MIN / -1`, bounds-checked shifts, lexer literal overflow) were already correct — now guarded by
+regression tests. `i64`-only kept by design: no `byte`/`u8` scalar (Python model — binary work →
+future `bytes` sequence type); bignum a non-goal. `examples/overflow.chz` (golden + parity).

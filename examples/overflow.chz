@@ -1,0 +1,41 @@
+# Integer overflow policy: every `i64` overflow is a *recoverable panic* — never a silent wrap, never
+# a host crash. Both engines surface the identical "integer overflow in <op>" message, and `recover:`
+# turns it into an `Err` like any other fault. Covers the arithmetic ops, negation, division
+# (`MIN / -1`), and the one native that used to leak — `math.abs(MIN)`.
+import std.math
+
+fn show(label: str, r: int!):
+    match r:
+        Ok(v): print("{label}: ok {v}")
+        Err(e): print("{label}: {e.message()}")
+
+fn main():
+    big := 9223372036854775807          # i64::MAX
+    lo := -big - 1                      # i64::MIN (its literal can't be written — it overflows the lexer)
+
+    # Each op that has no representable result is caught at the boundary.
+    a := recover:
+        big + 1
+    show("add", a)
+
+    m := recover:
+        big * 2
+    show("mul", m)
+
+    n := recover:
+        -lo
+    show("neg", n)
+
+    d := recover:
+        lo / -1
+    show("div", d)
+
+    ab := recover:
+        math.abs(lo)
+    show("abs", ab)
+
+    # The non-overflowing case still works — recovered into Ok.
+    ok := recover:
+        math.abs(-5)
+    show("abs ok", ok)
+main()

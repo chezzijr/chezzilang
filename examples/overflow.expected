@@ -1,0 +1,6 @@
+add: integer overflow in Add
+mul: integer overflow in Mul
+neg: integer overflow in negation
+div: integer overflow in Div
+abs: integer overflow in abs
+abs ok: ok 5

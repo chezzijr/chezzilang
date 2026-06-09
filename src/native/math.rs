@@ -15,7 +15,13 @@ use super::{expect_args, Host, HostError, NativeFn, NativeRet};
 fn abs(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "abs", 1)?;
     if h.arg_is_int(0) {
-        Ok(NativeRet::Int(h.arg_int(0)?.abs()))
+        // `i64::MIN.abs()` has no representable result (panics in debug, wraps in release). Surface a
+        // recoverable overflow instead — matches the engines' checked `"integer overflow in <Op>"`.
+        let v = h
+            .arg_int(0)?
+            .checked_abs()
+            .ok_or(HostError { message: "integer overflow in abs".to_string() })?;
+        Ok(NativeRet::Int(v))
     } else {
         Ok(NativeRet::Float(h.arg_float(0)?.abs()))
     }

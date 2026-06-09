@@ -3616,6 +3616,15 @@ mod tests {
     }
 
     #[test]
+    fn int_min_neg_and_div_overflow() {
+        // The two other unrepresentable results: -i64::MIN and i64::MIN / -1. Both must error.
+        let neg = "fn main():\n    x := -9223372036854775807 - 1\n    print(-x)\nmain()\n";
+        assert!(run_err(neg).contains("integer overflow"));
+        let div = "fn main():\n    x := -9223372036854775807 - 1\n    print(x / -1)\nmain()\n";
+        assert!(run_err(div).contains("integer overflow"));
+    }
+
+    #[test]
     fn float_promotion_when_either_side_float() {
         assert_eq!(run("print(1 + 2.0)"), "3.0\n");
         assert_eq!(run("print(7.0 / 2.0)"), "3.5\n");
@@ -5698,6 +5707,29 @@ main()";
     }
 
     #[test]
+    fn math_abs_min_overflows() {
+        // `math.abs(i64::MIN)` has no representable result. Raw `i64::abs()` would panic (debug) or
+        // wrap (release); the native fn must surface a recoverable overflow like every other op,
+        // identically on both engines. i64::MIN is built as `-MAX - 1` (the literal
+        // `9223372036854775808` overflows the lexer).
+        let src = "import std.math\nfn main():\n    x := -9223372036854775807 - 1\n    print(math.abs(x))\nmain()";
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let ie = crate::interp::run_file(&entry).2.unwrap_err().to_string();
+        let ve = run_file(&entry).2.unwrap_err().to_string();
+        assert_eq!(ie, ve, "abs-overflow error must be identical on both engines");
+        assert!(ie.contains("integer overflow in abs"), "{ie}");
+    }
+
+    #[test]
+    fn math_abs_min_overflow_is_recoverable() {
+        // The overflow is a normal recoverable fault: `recover:` turns it into an Err, not a crash.
+        let src = "import std.math\nfn main():\n    x := -9223372036854775807 - 1\n    r := recover:\n        math.abs(x)\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()";
+        let out = parity_entry(src);
+        assert!(out.contains("integer overflow in abs"), "{out}");
+    }
+
+    #[test]
     fn exit_threads_code_through_both_engines() {
         // `std.os.exit(code)` halts the program with that exit code on both engines: output before
         // the call is preserved, the statement after it never runs, and the run is not an error.
@@ -6257,6 +6289,18 @@ main()";
 
     /// A complete self-contained program (merge sort + binary search + stats over std.math) runs on
     /// the VM, byte-matches `.expected`, and stays identical to the interpreter.
+    #[test]
+    fn golden_overflow_via_run_file() {
+        // The integer-overflow policy, end-to-end: every overflow (arith, neg, div, math.abs) is a
+        // recoverable fault, identical on both engines.
+        let path = fixture("examples/overflow.chz");
+        let expected = std::fs::read_to_string(fixture("examples/overflow.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/overflow.chz");
+    }
+
     #[test]
     fn golden_stats_app_via_run_file() {
         let path = fixture("examples/stats.chz");

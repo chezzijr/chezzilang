@@ -4531,6 +4531,17 @@ print(P(5) >= P(5))
         assert_eq!(eval("1 + 2.0"), Value::Float(3.0));
     }
 
+    // `math.abs(i64::MIN)` overflow is covered cross-engine by `vm::tests::math_abs_min_overflows`
+    // (file-based, so `import std.math` resolves; asserts interp==vm error text).
+
+    #[test]
+    fn int_min_neg_and_div_overflow() {
+        let neg = "fn main():\n    x := -9223372036854775807 - 1\n    print(-x)\nmain()\n";
+        assert!(run_capture(neg).expect_err("neg overflow").message.contains("integer overflow"));
+        let div = "fn main():\n    x := -9223372036854775807 - 1\n    print(x / -1)\nmain()\n";
+        assert!(run_capture(div).expect_err("div overflow").message.contains("integer overflow"));
+    }
+
     #[test]
     fn modulo_keeps_rust_remainder_sign() {
         assert_eq!(eval("-7 % 3"), Value::Int(-1));

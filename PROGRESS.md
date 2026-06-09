@@ -10,6 +10,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+> **Integer overflow policy.** ✅ DONE (TDD, both engines parity-tested, clippy clean). Formalized
+> "every `i64` overflow is a recoverable panic — never a wrap, never a host crash." The policy was
+> already 95% in place (`checked_*` arith + negation, bounds-checked shifts, lexer literal overflow);
+> the one leak was `std.math.abs(i64::MIN)` using raw `i64::abs()` (panics in debug / wraps in
+> release) — fixed to `checked_abs` → `"integer overflow in abs"`, catchable by `recover:`
+> (`src/native/math.rs`). Regression tests now pin negation/`MIN / -1`/abs across both engines;
+> `examples/overflow.chz` (golden + parity) demos the whole policy. `i64`-only kept by design — no
+> `byte`/`u8` scalar (Python model: binary work → a future `bytes` *sequence*), bignum a non-goal.
+> Closes the `gaps.md` **Integers** overflow subpart.
+
 > **Gaps pass II — type-system + runtime depth.** ✅ DONE (TDD, full suite + conformance green —
 > 1167 tests, both engines parity-tested, clippy clean; reviewed by an agent panel — two bugs found
 > and fixed: defaults-in-defaults weren't lowered/normalized by the desugar pass, and the VM's
