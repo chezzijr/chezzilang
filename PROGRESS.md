@@ -49,9 +49,12 @@ decisions A–G, risk register, per-phase TDD focus). The surface of `spawn` / `
 **Next candidate:** **B3.3 — real OS threads behind `--parallel`.** Wire `run_task_isolated` into a
 bounded-pool `join_nursery` under a new `--parallel` flag (cooperative engine stays the default);
 condvar `recv` blocking + buffer-flush-on-join. `--parallel` is where nondeterminism first appears, so
-it gets its own deterministic-by-construction test suite (collect→sort→print). **Resolve first — the
-#1 risk: mutable module globals can't cross threads (decision G1)** — a spec call: globals immutable
-after init (simpler) vs per-worker snapshots (riskier). B3.3 also owes `str`/closure **cross-by-value**
+it gets its own deterministic-by-construction test suite (collect→sort→print). **Decision G1 is
+resolved — Option A:** under `--parallel`, module globals are **read-only after init** (a `SetGlobal`
+reachable from a `spawn` task is a checker error) and cross-task mutation goes through `Shared[T]` —
+applying the existing `value → Ref[T] (in-task) → Shared[T] (cross-task)` ladder (the same rule that
+makes `Ref` non-sendable at a `spawn`) to globals; the worker gets a read-only `home` snapshot.
+B3.3 also owes `str`/closure **cross-by-value**
 (owned-bytes `WireValue::Str` + `Closure` arm, then relax `ensure_crossable`) and method-task support;
 when those `Err` arms go load-bearing, `to_wire`'s `Result` (forward-plumbed since B3.0) is used for real.
 Items *not* in B3–B5 (cross-nursery wakeups,

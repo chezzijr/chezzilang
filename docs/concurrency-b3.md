@@ -176,12 +176,45 @@ show — fine, because such goldens stay on the cooperative default engine per d
 
 ### G. Hardest problems, ranked
 
-1. **Mutable module globals across threads.** `do_spawn_block` passes `home` (the module-globals
-   object) **by handle** today; under threads that `GcRef` points into the *parent* heap and cannot
-   cross, and mutable globals can't be trivially wire-copied (mutations wouldn't propagate back).
-   Likely forces a language decision: **module globals immutable after init** (a spec restriction) or
-   per-worker snapshots (a semantic change). **Must be resolved before B3.3.** Highest chance of a spec
-   change and multiple attempts.
+1. **Mutable module globals across threads — ✅ RESOLVED (Option A).** `do_spawn_block` passes `home`
+   (the module-globals object) **by handle** today; under threads that `GcRef` points into the *parent*
+   heap and cannot cross, and mutable globals can't be trivially wire-copied (mutations wouldn't
+   propagate back). The two candidates were **(A) module globals immutable after init** (a spec
+   restriction) vs **(B) per-worker snapshots** (a semantic change where a worker's writes silently
+   never propagate back).
+
+   **Decision: Option A.** A module global is just a value at the top scope; mutating it across a task
+   is the **same move the checker already bans for `Ref[T]`** at the `spawn` boundary
+   (`Ref` is non-sendable — `src/checker/tests.rs` *"non-sendable value of type Ref[int]"*). Chezzi's
+   mutation ladder is already **`value` (copy) → `Ref[T]` (in-task box) → `Shared[T]` (cross-task box)**
+   (`docs/syntax.md` §11); Option A simply applies the existing top rung to globals. Option B was
+   rejected: it makes a write that *looks* global silently local-only — a footgun with no precedent in
+   the language, and it contradicts shared-nothing (there is no place for the write to propagate *to*).
+
+   **What Option A means concretely (B3.3 implements):**
+   - Under `--parallel`, a module global is **read-only after the module's init prologue runs**: a
+     `SetGlobal` (`counter = …` / `counter += …`) reachable from inside a `spawn`'d task (directly or
+     transitively) is a **checker error** — *"cannot mutate module global `counter` from a parallel task;
+     use Shared[T]"*. Reads of post-init-constant globals are fine.
+   - The worker still gets its `home`, but as a **read-only snapshot** of the parent's globals (wire-
+     copied in at spawn; never copied back). Safe because nothing writes them.
+   - Cross-task mutable state goes through `Shared[T]` (sendable, crosses as the shared `Arc`), exactly
+     as the ladder already directs:
+     ```chezzi
+     counter := Shared(0)                      # not  counter := 0
+     fn bump(): counter.update(fn(n): n + 1)
+     parallel:
+         spawn bump()
+         spawn bump()
+     print(counter.get())                      # 2
+     ```
+   - **Default (cooperative, non-`--parallel`) engine is unchanged** — global mutation stays legal there
+     (single heap, decision A keeps it the default). The restriction is scoped to `--parallel` task
+     bodies, mirroring how blocking-`recv` semantics already differ by engine.
+
+   Open sub-question for the B3.3 session: whether the checker gate is **whole-program** (any global
+   reassigned anywhere ⇒ unsendable as a captured read) or **flow-scoped to `spawn` reachability**. Lean
+   flow-scoped to avoid over-restricting purely-sequential code in a program that also uses `--parallel`.
 2. **Cancellation of a condvar-blocked `recv`** (decision C) — lost-wakeup bugs; naive design hangs
    siblings forever.
 3. **Pool sizing vs blocking tasks** (decision B) — bounded pool + blocking recv is a classic
@@ -270,8 +303,10 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 > (a heap-local `GcRef`), and `Vm::ensure_crossable` rejects captures/args/**and the returned result**
 > with a clean fault — so a `str`/closure value crossing today is a `RuntimeError`, not a dangling
 > read (`worker_rejects_str_value_crossing`). `Channel/Shared/Executor` pass (they cross as a shared
-> `Arc`, not a `GcRef`). **B3.3 owes**: (1) **decision G1** — module globals across threads (the fresh-
-> empty-`home` means global reads fault today); (2) **`str`/closure cross-by-value** — add the owned-
+> `Arc`, not a `GcRef`). **B3.3 owes**: (1) **decision G1 — now RESOLVED (Option A)**: globals are
+> read-only after init under `--parallel`, cross-task mutation goes through `Shared[T]`; B3.3 adds the
+> checker gate (a `SetGlobal` reachable from a `spawn` task = error) and wire-copies a **read-only**
+> `home` snapshot into the worker instead of B3.2's fresh-empty placeholder; (2) **`str`/closure cross-by-value** — add the owned-
 > bytes `WireValue::Str` arm + a `Closure` wire arm so `has_handle`-rejected values actually cross,
 > then relax `ensure_crossable`; (3) **method tasks** (`spawn recv.m()`) are rejected outright in B3.2
 > (`worker_rejects_method_task`) because a worker's `module_objs` is empty (method dispatch would index
@@ -282,7 +317,10 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 
 ## 5. Risk register (carry across sessions)
 
-1. **Module globals across threads** (decision G1) — may need a spec change; gate B3.3 on it.
+1. **Module globals across threads** (decision G1) — ✅ **resolved: Option A** (globals read-only after
+   init under `--parallel`; cross-task mutation via `Shared[T]`, mirroring the `Ref`-non-sendable rule).
+   B3.3 implements the checker gate (`SetGlobal` reachable from a `spawn` task = error) + read-only
+   `home` snapshot. See decision G(1).
 2. **Condvar-blocked-recv cancellation** (G2) — lost wakeups; the dual-wait (channel cv + nursery
    cancel cv) must be a re-checking loop.
 3. **Pool starvation** (G3) — parent-participates + documented rule for v1.
