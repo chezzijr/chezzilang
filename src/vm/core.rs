@@ -51,8 +51,8 @@ pub struct ExecutorCore {
 
 /// B3.1 GC support — collect every `GcRef` reachable from a core's wire contents into `out`, so the
 /// heap's `children()` can keep those heap objects rooted. A core's `WireValue`s can still carry
-/// `Handle(GcRef)`s into the live heap (a `Channel[str]` queues `Str` handles; an `Executor` queues
-/// `Closure` handles — closures can't cross by value until B3.3/G1).
+/// `Handle(GcRef)`s into the live heap (an `Executor` queues `Closure` handles — closures can't cross
+/// by value until B3.3/G1; a `Channel[str]` now queues owned bytes (B3.3a), rooting nothing).
 ///
 /// It **recurses into nested cores** (a `Channel` stored inside a `Shared`, etc.): a nested core may
 /// be reachable *only* through its parent core (its own heap handle already swept), so its embedded
@@ -82,7 +82,12 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         WireValue::Executor(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
             core.inner.lock().unwrap().queue.iter().for_each(|w| collect_core_gcrefs(w, out, s))
         }),
-        WireValue::Int(_) | WireValue::Float(_) | WireValue::Bool(_) | WireValue::Nil => {}
+        // B3.3a: `Str` crosses by value (owned bytes in the core) — it roots no heap object.
+        WireValue::Str(_)
+        | WireValue::Int(_)
+        | WireValue::Float(_)
+        | WireValue::Bool(_)
+        | WireValue::Nil => {}
     }
 }
 

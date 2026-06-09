@@ -15,11 +15,12 @@ use std::sync::Arc;
 
 /// A `Send`-able serialization of a sendable [`Value`](super::value::Value).
 ///
-/// Data arms (`List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`) own their contents recursively. Immutable
-/// / by-reference objects (`Str`, callables, modules, and `Channel`/`Shared`/`Executor` handles)
-/// cross as [`WireValue::Handle`] — the existing heap handle in B3.0 (same heap), becoming an
-/// `Arc<…Core>` at B3.1. `Map`/`Set` carry their cached `u64` hashes so reconstruction never
-/// re-hashes (byte-identical iteration order + index — see [`super::heap::MapData`]).
+/// Data arms (`List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`) own their contents recursively; `Str`
+/// crosses **by value** (owned bytes — [`WireValue::Str`]). By-reference callables (`Func`/`Closure`/
+/// `Module`/`Native`) cross as [`WireValue::Handle`] — the existing heap handle (same heap). The
+/// `Channel`/`Shared`/`Executor` handles cross as their shared `Arc<…Core>` (B3.1). `Map`/`Set` carry
+/// their cached `u64` hashes so reconstruction never re-hashes (byte-identical iteration order +
+/// index — see [`super::heap::MapData`]).
 #[derive(Debug, Clone, Default)]
 pub enum WireValue {
     Int(i64),
@@ -34,6 +35,11 @@ pub enum WireValue {
     Map(Vec<(u64, WireValue, WireValue)>),
     /// `(cached hash, element)` pairs in insertion order.
     Set(Vec<(u64, WireValue)>),
+    /// B3.3a — a `str` carried across the airlock **by value** (owned bytes). `str` is immutable and
+    /// value-compared (Chezzi has no identity operator), so `from_wire` allocating a fresh heap `str`
+    /// is observationally identical to sharing the original handle — and unlike a `Handle(GcRef)`,
+    /// owned bytes are meaningful across an OS-thread heap boundary (B3.3).
+    Str(Box<str>),
     Struct {
         name: Box<str>,
         fields: Vec<(Box<str>, WireValue)>,
@@ -44,10 +50,9 @@ pub enum WireValue {
         payload: Vec<WireValue>,
     },
     /// A by-reference object carried across the airlock as its existing heap handle (single-thread /
-    /// same heap). Covers `Str`, `Func`/`Closure`/`Module`/`Native`. At B3.3 the handles whose object
-    /// cannot cross an OS thread (`Module` with mutable globals, `Func`/`Closure`) gain real `Err`
-    /// arms in `to_wire`; `Str` will instead cross by value (an owned-bytes arm). For now (B3.1) all
-    /// of them stay same-heap handles.
+    /// same heap). Covers the callables `Func`/`Closure`/`Module`/`Native` (`Str` now crosses by value
+    /// — see [`WireValue::Str`]). At B3.3 the handles whose object cannot cross an OS thread (`Module`
+    /// with mutable globals, `Func`/`Closure`) gain real `Err` arms in `to_wire`.
     Handle(GcRef),
     /// A `Channel` handle crossing the airlock as its shared [`ChannelCore`] (B3.1). `from_wire`
     /// allocates a *fresh* heap handle wrapping this same `Arc`, so two tasks reach one mailbox — the
@@ -63,10 +68,10 @@ impl WireValue {
     /// B3.2 — does this value graph carry a by-reference [`Handle`](WireValue::Handle), i.e. a
     /// heap-local `GcRef`? Such a value cannot cross into another heap as-is — the slot index is
     /// meaningless there — so the worker airlock ([`Vm::run_task_isolated`](super::Vm)) rejects it
-    /// with a clean fault until B3.3 teaches `Str`/closures to cross by value. The shared-core arms
-    /// (`Channel`/`Shared`/`Executor`) are cross-safe — they carry an `Arc`, not a `GcRef` — so they
-    /// are *not* flagged (the `Str` handles a `Channel[str]` queues *inside* its core are a separate
-    /// B3.3 concern, not part of this value's directly-crossed graph).
+    /// with a clean fault. As of B3.3a `Str` crosses by value (it is no longer a `Handle`), so the
+    /// remaining flagged leaves are the callables (`Func`/`Closure`/`Module`/`Native`), which cross by
+    /// value only once G1/B3.3 lands. The shared-core arms (`Channel`/`Shared`/`Executor`) are
+    /// cross-safe — they carry an `Arc`, not a `GcRef` — so they are *not* flagged.
     pub fn has_handle(&self) -> bool {
         match self {
             WireValue::Handle(_) => true,

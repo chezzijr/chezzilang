@@ -126,8 +126,9 @@ pub enum Obj {
     },
     /// `Channel[T]` (C2) — a *handle* to the shared mailbox [`ChannelCore`]. B3.1: the queue itself
     /// moved OUT of the heap into the `Arc` (it holds wire-form messages, not `GcRef`s); the heap
-    /// keeps only this handle, and two handles can alias one core. `children()` still traces the
-    /// `Handle`s embedded in the core's queued messages (e.g. a `Channel[str]`'s `Str` handles).
+    /// keeps only this handle, and two handles can alias one core. `children()` still traces any
+    /// `Handle`s embedded in the core's queued messages (e.g. queued closures; B3.3a: `str` messages
+    /// queue as owned bytes and root nothing).
     Channel(Arc<ChannelCore>),
     /// `Shared[T]` (C3) — a *handle* to the cross-task mutable box [`SharedCore`] (B3.1). See
     /// [`Channel`](Obj::Channel) for the handle/core split.
@@ -269,8 +270,9 @@ impl Heap {
             Obj::Module { globals, .. } => globals.values().for_each(&mut push),
             Obj::Native { .. } => {}
             // B3.1: the core lives in an `Arc` outside this heap and holds `WireValue`s, but those
-            // can still carry `Handle(GcRef)`s into *this* heap (a `Channel[str]`'s `Str` handles, an
-            // `Executor`'s queued closures, and any core nested inside another core). Trace every
+            // can still carry `Handle(GcRef)`s into *this* heap (an `Executor`'s queued closures and
+            // any core nested inside another core; B3.3a: `str` messages queue as owned bytes, rooting
+            // nothing). Trace every
             // reachable embedded handle so those objects stay rooted while the core holds them; `seen`
             // breaks `Arc` cycles. (The doc's "drop these arms" is wrong at B3.1 — closures can't
             // cross by value until B3.3/G1, so cores still hold heap refs.)

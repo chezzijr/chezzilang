@@ -2971,9 +2971,12 @@ impl Vm {
             Value::Bool(b) => WireValue::Bool(b),
             Value::Nil => WireValue::Nil,
             Value::Obj(h) => match self.heap.get(h) {
-                // Immutable / by-handle: cross as the existing handle (matches the old deep_clone arm).
-                Obj::Str(_)
-                | Obj::Func { .. }
+                // B3.3a: `str` crosses by value (owned bytes) so it can survive an OS-thread heap
+                // boundary; immutable + value-compared, so a fresh handle on reconstruction is
+                // observationally identical to sharing this one.
+                Obj::Str(s) => WireValue::Str(s.clone()),
+                // By-reference callables: cross as the existing handle (matches the old deep_clone arm).
+                Obj::Func { .. }
                 | Obj::Closure { .. }
                 | Obj::Module { .. }
                 | Obj::Native { .. } => WireValue::Handle(h),
@@ -3043,6 +3046,8 @@ impl Vm {
             WireValue::Float(f) => Value::Float(f),
             WireValue::Bool(b) => Value::Bool(b),
             WireValue::Nil => Value::Nil,
+            // B3.3a: rebuild a fresh heap `str` from the owned bytes (by value, not the old handle).
+            WireValue::Str(s) => Value::Obj(self.heap.alloc(Obj::Str(s))),
             WireValue::Handle(h) => Value::Obj(h),
             // B3.1: rebuild a fresh heap handle onto the SAME shared core (`Arc` already cloned in
             // `to_wire`). Not registered in `self.executors` — the original `NewExecutor` handle there
@@ -4195,6 +4200,7 @@ impl Vm {
             WireValue::Float(x) => format_float(*x),
             WireValue::Bool(b) => b.to_string(),
             WireValue::Nil => "nil".to_string(),
+            WireValue::Str(s) => s.to_string(),
             WireValue::Handle(h) => self.display(Value::Obj(*h)),
             WireValue::List(items) => {
                 let inner = items.iter().map(|v| self.display_wire(v)).collect::<Vec<_>>().join(", ");
@@ -4719,15 +4725,32 @@ mod tests {
         assert_eq!(rebuilt.candidates(7), &[1]);
     }
 
-    /// Immutable / by-reference objects (`Str`, callables) cross the airlock **by handle** —
+    /// By-reference callables (`Func`/`Closure`/`Module`/`Native`) cross the airlock **by handle** —
     /// `to_wire`→`from_wire` returns the *same* `GcRef` (matching the old `deep_clone` by-handle arm).
+    /// (`Str` no longer qualifies — it crosses by value as of B3.3a; see `wire_crosses_str_by_value`.)
     #[test]
     fn wire_passes_by_reference_objects_as_same_handle() {
         let mut vm = Vm::new(Arc::new(empty_program()));
-        let st = vm.heap.alloc(Obj::Str("imm".into()));
-        let v = Value::Obj(st);
+        let m = vm.heap.alloc(Obj::Module { name: "m".into(), globals: Default::default() });
+        let v = Value::Obj(m);
         let w = vm.to_wire(v).expect("by-ref object should serialize");
         assert_eq!(vm.from_wire(w), v, "by-reference object must round-trip to the same handle");
+    }
+
+    /// B3.3a: a `str` crosses the airlock **by value** (owned bytes), not as a by-reference
+    /// `Handle(GcRef)`: `from_wire` allocates a *fresh* heap `str` that is value-equal but a distinct
+    /// handle. This is what lets a `str` cross a real OS-thread heap boundary at B3.3 (a `GcRef` would
+    /// be a meaningless slot index there). Parity-safe: `str` is immutable + value-compared and Chezzi
+    /// has no identity operator, so a fresh handle is observationally identical to the shared one.
+    #[test]
+    fn wire_crosses_str_by_value() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        let s = vm.heap.alloc(Obj::Str("imm".into()));
+        let v = Value::Obj(s);
+        let w = vm.to_wire(v).expect("str should serialize");
+        let wired = vm.from_wire(w);
+        assert_ne!(wired, v, "a crossed str gets a fresh handle (by value, not by handle)");
+        assert!(vm.values_equal(v, wired), "the fresh str must be value-equal to the original");
     }
 
     /// B3.1: `Channel`/`Shared`/`Executor` cross the airlock as their shared `Arc<…Core>`. The
@@ -4786,8 +4809,8 @@ mod tests {
         assert_eq!(err.message, "submit on a shut-down Executor (it no longer accepts work)");
     }
 
-    /// B3.1: `display` of a `Shared` box renders its contents through `display_wire` (which resolves a
-    /// boxed `Str` `Handle` back through the heap), since `display` is `&self` and can't `from_wire`.
+    /// B3.1: `display` of a `Shared` box renders its contents through `display_wire` (a boxed `str`
+    /// renders from its owned bytes — B3.3a), since `display` is `&self` and can't `from_wire`.
     #[test]
     fn display_shared_renders_contents() {
         let mut vm = Vm::new(Arc::new(empty_program()));
@@ -4860,15 +4883,17 @@ mod tests {
         assert_eq!(Arc::strong_count(&program), 2, "worker releases its program ref on drop");
     }
 
-    /// A `str` return value can't cross back as-is (it would be a worker-heap `GcRef`, dangling in the
-    /// parent). B3.2 enforces the boundary with a clean fault instead of silently handing back a
-    /// dangling handle — `str`/closure crossing by value lands in B3.3.
+    /// B3.3a: a `str` return value crosses the worker boundary **by value** — the worker serializes its
+    /// own-heap `str` to owned bytes, and the parent reconstructs a fresh `str` from them (no dangling
+    /// `GcRef`). Replaces B3.2's reject-the-str fault now that `str` is sendable by value.
     #[test]
-    fn worker_rejects_str_value_crossing() {
-        // () -> "oops"  — returns a by-reference Str handle
+    fn worker_crosses_str_by_value() {
+        // () -> "oops"
         let (mut vm, task) = worker_fixture(vec![Op::ConstStr("oops".into()), Op::Return]);
-        let err = vm.run_task_isolated(task).expect_err("a str result must be rejected, not dangling");
-        assert!(err.message.contains("can't cross a worker boundary"), "got: {}", err.message);
+        let res = vm.run_task_isolated(task).expect("a str result now crosses by value");
+        let got = vm.from_wire(res.value);
+        let want = Value::Obj(vm.heap.alloc(Obj::Str("oops".into())));
+        assert!(vm.values_equal(got, want), "str result round-trips to \"oops\"");
     }
 
     /// Method tasks (`spawn recv.m()`) are gated off in B3.2: a worker never runs module init, so its
