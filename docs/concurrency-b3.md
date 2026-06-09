@@ -242,7 +242,7 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 | **B3.3b** ✅ | **G1 module-globals checker gate.** A reassignment (`=`/`+=`/`-=`) of a module global reachable — directly or transitively through free-function calls — from a `spawn` task is a checker error (*"…use Shared[T]"*). Flow-scoped to spawn-reachability; scope-aware name resolution (params/`let`/`for`/`match`/closure/comprehension binders). Direct in-`spawn:`-block writes stay caught by the existing `is_captured` gate. | `spawn_{transitive,deeply_transitive,block_calls,compound_assign,…inside_if,…through_arg_expr,…inside_recover}_*_rejected` + `{sequential,local_shadows,reads,shared_update,callee_shadowed_by_local}_*_ok`. Reviewed by a 4-agent panel + cold pass. | **unchanged** |
 | **B3.3c** ✅ | **Read-only `home` snapshot — worker module-graph reconstruction** (single-thread, parity-preserved). `Vm::build_worker_modules` snapshots the parent's initialized `module_objs` into the worker heap (two-pass); `map_global_value` rebuilds `Func`/`Closure`/`Module`/`Native` explicitly and recurses through containers so no nested callable smuggles a parent `GcRef`. A task can now read post-init globals + call sibling/imported fns. | `worker_reads_module_global`, `worker_calls_sibling_free_fn`, `worker_calls_imported_fn`, `worker_calls_through_global_fn_container` (GcRef-smuggle regression), `worker_reconstruction_survives_gc_stress`. Existing goldens byte-identical. | **unchanged** |
 | **B3.3d** ✅ | **Method tasks** (`spawn obj.m()`): `run_task_isolated` lowers to `Lowered::Method` (recv + args by wire) and dispatches via `do_method_call` against the reconstructed `module_objs`. A blocking `recv` faults cleanly (no scheduler in a sync worker). | `worker_runs_method_task`, `worker_method_on_struct` (reads a module global through the rebuilt home). | **unchanged** |
-| **B3.3-threads** | **Real OS threads behind `--parallel`.** Bounded pool (decision B), condvar `recv` (decision C blocking), buffer-flush-on-join (decision F). Cooperative engine stays the **default**. The two B3.3 "owes" (read-only `home` snapshot + method tasks) are now **discharged by B3.3c/d** — this phase is purely the thread-flip: the `--parallel` flag + pool + condvar `recv` wire `run_task_isolated` (which is reachable today only from unit tests) onto real threads. | NEW `--parallel`-only goldens that are deterministic-by-construction (collect→drain→sort→print) + order-insensitive (set-of-lines) assertions; every existing golden stays on the default engine and stays green. | **`--parallel` new** |
+| **B3.3-threads** ✅ | **Real OS threads behind `--parallel`.** Bounded pool (decision B), condvar `recv` (decision C blocking), buffer-flush-on-join (decision F). Cooperative engine stays the **default**. The two B3.3 "owes" (read-only `home` snapshot + method tasks) are now **discharged by B3.3c/d** — this phase is purely the thread-flip: the `--parallel` flag + pool + condvar `recv` wire `run_task_isolated` (which is reachable today only from unit tests) onto real threads. | NEW `--parallel`-only goldens that are deterministic-by-construction (collect→drain→sort→print) + order-insensitive (set-of-lines) assertions; every existing golden stays on the default engine and stays green. | **`--parallel` new** |
 | **B3.4** | **Cancellation + cross-thread `os.exit`.** Per-nursery `cancel` flag, condvar wake-on-cancel, exit-code propagation up the join (decision C). | First-fault-aborts-running-siblings; a child `os.exit` halts the process with the right code; `recover:`/`defer` still compose. | `--parallel` |
 | **B3.5** | **Nursery-local deadlock detection under threads** (blocked-count vs live-count, decision D). | Port the all-blocked deadlock golden to `--parallel`; a near-miss (one sibling that *does* send) must NOT false-positive. | `--parallel` |
 | **B3.6** | **`Executor` / B5 on the pool + A3b submit-capture sendability gate.** Submitted tasks run on pool threads; the checker now gates `submit`'s closure captures like `spawn` does. | `submit` of a non-sendable capture is a checker error; executor tasks run on pool threads + the autodrain/`shutdown` semantics survive. | `--parallel` |
@@ -256,8 +256,8 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 - [x] B3.3b — G1 module-globals checker gate (mutation reachable from `spawn` = error) ✅ **landed**
 - [x] B3.3c — read-only `home` snapshot: worker module-graph reconstruction (single-thread, parity-preserved) ✅ **landed**
 - [x] B3.3d — method tasks (`spawn obj.m()`) dispatch in the worker via the rebuilt graph ✅ **landed**
-- [ ] B3.3-threads — real OS threads behind `--parallel` ← **next session starts here** (the two `home`-snapshot/method-task owes are now discharged by B3.3c/d; this is now purely the thread-flip: `--parallel` flag + bounded pool + condvar `recv` + flush-on-join)
-- [ ] B3.4 — cancellation + cross-thread `os.exit`
+- [x] B3.3-threads — real OS threads behind `--parallel` ✅ **landed** (`--parallel` flag + bounded pool + condvar `recv` + flush-on-join; `Shared.update` made cross-thread-atomic)
+- [ ] B3.4 — cancellation + cross-thread `os.exit` ← **next session starts here**
 - [ ] B3.5 — nursery-local deadlock detection under threads
 - [ ] B3.6 — `Executor`/B5 on the pool + A3b
 
@@ -352,6 +352,30 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 > correctness-first — consider caching/sharing the read-only snapshot across a nursery's workers when
 > profiling the pool. The reconstruction shares the parent's `Arc<Program>` (protos), so only the heap
 > graph is rebuilt.
+
+> **B3.3-threads landed note (for the B3.4 maintainer):** the thread-flip shipped. `Vm.parallel`
+> (set by `run_file_parallel` / the `chezzi run --parallel` flag; inherited by `spawn_worker`)
+> selects the engine: `join_nursery` branches to `run_parallel_nursery` (`src/vm/mod.rs`), which
+> `prepare_worker`s every task against the parent heap, farms `tasks[1..]` to the bounded pool
+> (`src/vm/pool.rs` — one process-wide `OnceLock<Pool>` of `available_parallelism()` threads, each
+> spawned with `VM_STACK_BYTES`), runs `tasks[0]` inline on the joining thread (decision B —
+> parent participates, so nested `parallel:` can't explode the thread count), waits on a
+> completion condvar, then flushes each worker's `out`/`stderr` in **task order** (decision F) and
+> propagates the first (lowest-index) fault. `run_task_isolated` was split into `prepare_worker`
+> (parent-heap half) + `ReadyWorker::run` (thread-side half, moved across the boundary — `Vm` is
+> `Send`). Blocking `recv` under `--parallel` waits on `ChannelCore.cv` (`send` `notify_all`s);
+> `Shared.update` now takes a per-core `update_lock` **only under `--parallel`** so concurrent RMWs
+> can't lose each other (the lost-update race the first golden caught). Worker `host` now inherits the
+> parent's read-only args+env (stdin stays `Empty` — a single consumable stream isn't shared).
+> **Owed at B3.4/B3.5 (deliberately not done here):** no cancellation — first fault joins-then-reports
+> rather than aborting siblings, and a child `os.exit` does not yet halt the process from a pool
+> thread (B3.4); **no nursery-local deadlock detection under threads** — a genuinely all-blocked
+> `--parallel` nursery *hangs* (B3.5), so every `--parallel` golden is deterministic-by-construction
+> and cannot deadlock. `Executor` does not yet ride the pool + the A3b `submit`-capture gate is unbuilt
+> (B3.6). New goldens: `examples/parallel_shared.chz` (cross-thread `Shared` count), `parallel_channel.chz`
+> (cross-thread condvar `recv` + sort). Tests: `golden_parallel_{shared,channel}_chz_matches_expected`,
+> `parallel_recv_blocks_until_send_wakes_it`, `parallel_nested_nursery_on_pool`,
+> `parallel_pool_task_fault_propagates`, `worker_inherits_host_args_and_env`.
 
 ---
 

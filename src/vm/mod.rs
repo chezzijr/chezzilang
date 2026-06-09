@@ -3269,6 +3269,17 @@ impl Vm {
         // Workers run on the pool too, so a nested `parallel:` inside a task recurses onto threads
         // (and a worker's `recv` blocks on the condvar, not a fiber). B3.3-threads.
         worker.parallel = self.parallel;
+        // B3.3-threads: thread the parent's **read-only** host state (process args + env) through so a
+        // `--parallel` task reading `std.os.args` / an env var sees the same values instead of inert
+        // defaults (the B3.2 silent-divergence owe). `stdin` is deliberately NOT shared: it is a
+        // single consumable stream owned by the main thread; handing each worker a copy of
+        // `Stdin::Lines` would duplicate input and concurrent `Stdin::Real` reads would race — a task
+        // reading stdin gets EOF (documented). `HostConfig` isn't `Clone`, so build it field-wise.
+        worker.host = crate::native::HostConfig {
+            args: self.host.args.clone(),
+            env: self.host.env.clone(),
+            stdin: crate::native::Stdin::Empty,
+        };
         worker
     }
 
@@ -5295,6 +5306,21 @@ mod tests {
         let got = vm.from_wire(res.value);
         let want = Value::Obj(vm.heap.alloc(Obj::List(vec![Value::Int(1), Value::Int(2)])));
         assert!(vm.values_equal(got, want), "result must round-trip back to [1, 2]");
+    }
+
+    /// B3.3-threads: a worker inherits the parent's read-only host state (process args + env) so a
+    /// `--parallel` task reading `std.os.args` / an env var isn't silently inert; `stdin` is reset to
+    /// `Empty` (a single consumable stream is not shared across worker threads).
+    #[test]
+    fn worker_inherits_host_args_and_env() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        vm.host.args = vec!["prog".into(), "--flag".into()];
+        vm.host.env.insert("KEY".into(), "val".into());
+        vm.host.stdin = crate::native::Stdin::Real;
+        let worker = vm.spawn_worker();
+        assert_eq!(worker.host.args, vec!["prog".to_string(), "--flag".to_string()]);
+        assert_eq!(worker.host.env.get("KEY").map(String::as_str), Some("val"));
+        assert!(matches!(worker.host.stdin, crate::native::Stdin::Empty), "stdin must not be shared to workers");
     }
 
     /// A worker's stdout is captured in ITS `out` and returned on the `WorkerResult` (decision F:

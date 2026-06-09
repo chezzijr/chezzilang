@@ -74,6 +74,30 @@ to `Lowered::Method` (recv + args by wire) and dispatches via `do_method_call` a
 2-agent panel (caught + fixed a container-of-callables GcRef-smuggle and a method-suspend pop underflow
 before they shipped).
 
+**B3.3-threads — real OS threads behind `--parallel` — has now landed** (VM): the thread-flip. A new
+`--parallel` flag (`chezzi run --parallel`, VM-only; the cooperative single-thread engine stays the
+**default** per decision A) sets `Vm.parallel`, switching `join_nursery` to `run_parallel_nursery`,
+which runs a nursery's tasks on a **bounded OS-thread pool** (`src/vm/pool.rs` — one process-wide
+pool of `available_parallelism()` threads, each with the 256 MiB VM stack). The joining thread runs
+`tasks[0]` inline (decision B — **parent participates**, so nested `parallel:` never explodes the
+thread count) and farms the rest to the pool; results join, each worker's `out`/`stderr` flushes in
+**task order** (decision F — deterministic despite concurrency), and the first fault propagates.
+`run_task_isolated` was split into `prepare_worker` (parent-heap half) + `ReadyWorker::run`
+(thread-side half) — the prepared worker `Vm` **moves** onto a pool thread (`Vm` is `Send`: plain
+data + `fn` pointers + `Arc<…Core>`, proven by a 2-thread unit test). A blocking `recv` under
+`--parallel` waits on a real `ChannelCore` **condvar** (`send` wakes it) instead of parking a fiber;
+**`Shared.update` now takes a per-core `update_lock` under `--parallel`** so concurrent
+read-modify-writes can't lose each other (a lost-update race the first cross-thread golden caught —
+`Shared[T]`'s whole contract is serialised writes). Worker `host` inherits the parent's read-only
+args+env (stdin stays inert — a consumable stream isn't shared). Deterministic-by-construction
+goldens: `examples/parallel_shared.chz` (N threads bump one `Shared` → exact count) and
+`parallel_channel.chz` (a collector recv-blocks across threads, sorts → fixed order). Every existing
+golden + the 3-way VM==interp parity stays on the default engine, **byte-identical green**. Latest
+suite: **1319 tests** green (unit + parity + `cargo test conformance`), `cargo clippy` clean.
+**Still owed (later phases):** no cancellation / cross-thread `os.exit` (B3.4), so a genuinely
+deadlocked `--parallel` nursery *hangs* (no nursery-local detector under threads until B3.5);
+`Executor` doesn't yet ride the pool + the A3b `submit`-capture gate (B3.6).
+
 **B3 is decomposed into a persistent, multi-session plan.** Tier-C OS-thread multicore (B3) — with
 B4 (real `Shared`) and B5 (real `Executor` pool) folded in, since under shared-nothing threads they're
 the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
@@ -81,15 +105,15 @@ the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
 decisions A–G, risk register, per-phase TDD focus). The surface of `spawn` / `parallel:` / `Channel` /
 `Shared` / `Executor` stays **unchanged**.
 
-**Next candidate:** **B3.3-threads — real OS threads behind `--parallel`.** Now purely the thread-flip:
-the two `home`-snapshot/method-task owes are **discharged (B3.3c/d)**, so `run_task_isolated` is
-functionally complete except for real threads. Remaining: wire it into a bounded-pool `join_nursery`
-under a new `--parallel` flag (cooperative engine stays the default); condvar `recv` blocking +
-buffer-flush-on-join. `--parallel` is where nondeterminism first appears, so it gets its own
-deterministic-by-construction test suite (collect→sort→print). The G1 checker gate, `str`-by-value, the
-read-only `home` snapshot, and method tasks all shipped (B3.3a–d). A `Closure` wire arm is deferred
-until a live path needs it (`Executor.submit` capture crossing = A3b/B3.6) — adding it now would be
-untested dead code. Items *not* in B3–B5 (cross-nursery wakeups,
+**Next candidate:** **B3.4 — cancellation + cross-thread `os.exit`.** On the `--parallel` engine, a
+per-nursery `cancel` flag (checked at the dispatch back-edges, like `pending_exit`/`gc_stress`) so the
+first child fault aborts running siblings instead of join-then-report; a condvar-blocked `recv` must
+also wake on cancel (dual-wait: channel `cv` + a nursery cancel `cv`, re-checking loop — risk #2); a
+child `std.os.exit` halts the process with the right code propagated up the join; `recover:`/`defer`
+still compose. Then **B3.5** (nursery-local deadlock detection under threads: blocked-count vs
+live-count) and **B3.6** (`Executor` on the pool + the A3b `submit`-capture gate; a `Closure` wire arm
+becomes load-bearing here — the `Executor.submit` capture crossing — so it lands then, not as untested
+dead code now). Items *not* in B3–B5 (cross-nursery wakeups,
 recv-in-native-callback, `Channel.close()`, A3b) are now documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
