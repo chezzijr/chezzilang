@@ -32,10 +32,21 @@ pub struct ChannelCore {
 }
 
 /// `Shared[T]` core (B3.1): the one box every task reaches. `get` locks + clones out; `set` locks +
-/// overwrites; `update` reads out (lock dropped), runs the user fn, then writes back under the lock.
+/// overwrites; `update` reads out (value lock dropped so the closure can re-enter), runs the user fn,
+/// then writes back.
+///
+/// B3.3-threads: `update`'s read-modify-write must be **atomic across threads** — that is the entire
+/// promise of `Shared[T]` ("the single owner serialises writes, so the torn-write race is
+/// unrepresentable"). The value lock `v` cannot be held across the user closure (it would deadlock a
+/// closure that re-enters `get`/`set` on the same box — `Mutex` is not reentrant), so a **separate**
+/// `update_lock` serialises whole updates: held for the entire RMW *only under `--parallel`*, while
+/// `v` is still locked only for the brief read and the brief write-back. The cooperative engine
+/// never takes `update_lock` (single-thread; taking it would needlessly deadlock a same-box nested
+/// update that merely lost-updated before).
 #[derive(Debug, Default)]
 pub struct SharedCore {
     pub v: Mutex<WireValue>,
+    pub update_lock: Mutex<()>,
 }
 
 /// The mutable inside of an [`ExecutorCore`]: the pending-task FIFO + the shut flag, behind one lock

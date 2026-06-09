@@ -1,0 +1,29 @@
+# B3.3-threads `--parallel` golden: cross-thread channel blocking. The collector task `recv`s before
+# any producer has run, so on the real-thread engine it BLOCKS on the channel's condvar and is woken
+# by producer `send`s from other pool threads. Deterministic-by-construction (decision A): the
+# collector sorts what it gathers, so the printed order is fixed however the threads interleave.
+# Run with: chezzi run --parallel examples/parallel_channel.chz
+
+fn produce(ch: Channel[int], v: int):
+    ch.send(v)
+
+fn collect(ch: Channel[int], out: Channel[int], n: int):
+    nums := []
+    for _ in 0..n:
+        nums.push(ch.recv())            # blocks on an empty channel until a producer sends
+    nums.sort_by(fn(a: int, b: int) -> int: a - b)
+    for x in nums:
+        out.send(x)
+
+fn main():
+    ch := Channel[int]()
+    out := Channel[int]()
+    parallel:
+        spawn collect(ch, out, 3)       # task[0] — runs inline on the joining thread, recv-blocks
+        spawn produce(ch, 30)           # task[1..] — run on the pool, wake the collector
+        spawn produce(ch, 10)
+        spawn produce(ch, 20)
+    for _ in 0..3:
+        print(out.recv())               # 10, 20, 30 — sorted by the collector
+
+main()

@@ -6,6 +6,7 @@
 pub mod core;
 pub mod heap;
 pub mod op;
+mod pool;
 pub mod value;
 pub mod wire;
 
@@ -324,6 +325,10 @@ enum Lowered {
     /// against the worker's reconstructed `module_objs` (struct methods index `module_objs[module_idx]`).
     Method { recv: WireValue, name: String, args: Vec<WireValue>, span: Span },
 }
+
+/// B3.3-threads — the per-task outcome slots a `--parallel` nursery collects (task order; `None`
+/// until that task finishes). Shared with the pool threads via `Arc`; each fills its own index.
+type TaskSlots = Arc<Mutex<Vec<Option<Result<WorkerResult, RuntimeError>>>>>;
 
 /// B3.3-threads — a worker `Vm` with its task already reconstructed in its own heap, ready to run on
 /// whatever thread owns it. [`Vm::prepare_worker`] builds this (the parent-heap-touching half of the
@@ -1171,7 +1176,7 @@ impl Vm {
                 let init = self.pop();
                 // The box holds the wire form (single serialization == the old deep_clone-in).
                 let init = self.to_wire(init).expect("Shared init must be sendable (B3.1 single-thread)");
-                let h = self.heap.alloc(Obj::Shared(Arc::new(SharedCore { v: Mutex::new(init) })));
+                let h = self.heap.alloc(Obj::Shared(Arc::new(SharedCore { v: Mutex::new(init), ..Default::default() })));
                 self.push(Value::Obj(h));
             }
             Op::NewExecutor => {
@@ -2879,6 +2884,11 @@ impl Vm {
         if tasks.is_empty() {
             return Ok(());
         }
+        // B3.3-threads: under `--parallel`, run the tasks on the real OS-thread pool instead of
+        // cooperative fibers (decision A keeps the cooperative path the default below).
+        if self.parallel {
+            return self.run_parallel_nursery(tasks);
+        }
         let children = tasks
             .into_iter()
             .map(|t| Fiber { ctx: FiberCtx::default(), state: FiberState::Pending(t) })
@@ -2894,6 +2904,91 @@ impl Vm {
         let mut nursery = self.scheduler_stack.pop().expect("scheduler level present");
         self.swap_ctx(&mut nursery.parent);
         result
+    }
+
+    /// B3.3-threads — the `--parallel` counterpart of [`Vm::join_nursery`]'s cooperative scheduler:
+    /// run a nursery's tasks on real OS threads (decision B's bounded pool + decision F's
+    /// flush-on-join).
+    ///
+    /// 1. **Prepare every task in the parent heap** ([`Vm::prepare_worker`], serial, read-only): each
+    ///    becomes a [`ReadyWorker`] owning its own worker `Vm` with the task reconstructed inside.
+    /// 2. **Farm tasks `[1..]` to the pool**, each storing its outcome into a shared result slot and
+    ///    bumping a completion counter.
+    /// 3. **The joining thread runs task `[0]` inline** (decision B — the parent participates), so a
+    ///    nested `parallel:` can't explode the thread count: each nesting level adds only its own
+    ///    joining thread, never a thread per task. Real concurrency holds because task `[0]`'s
+    ///    blocking `recv` waits on the channel condvar while pool tasks `send`.
+    /// 4. **Wait for all pool tasks**, then **flush each worker's `out`/`stderr` in task order**
+    ///    (decision F — deterministic even though execution was concurrent) and propagate the
+    ///    first (lowest-index) fault. Sibling-abort on fault is B3.4; here we join all then report.
+    ///
+    /// A genuinely deadlocked nursery **hangs** (no nursery-local detector under threads until B3.5);
+    /// all `--parallel` goldens this phase are deterministic-by-construction and cannot deadlock.
+    fn run_parallel_nursery(&mut self, tasks: Vec<PendingCall>) -> Result<(), RuntimeError> {
+        // 1. Prepare every task against the parent heap (must happen on this thread).
+        let mut ready: Vec<ReadyWorker> = Vec::with_capacity(tasks.len());
+        for t in tasks {
+            ready.push(self.prepare_worker(t)?);
+        }
+        let n = ready.len();
+        // Per-task outcome slots (task order) + a finished-count condvar the pool bumps.
+        let results: TaskSlots = Arc::new(Mutex::new((0..n).map(|_| None).collect()));
+        let done: Arc<(Mutex<usize>, std::sync::Condvar)> = Arc::new((Mutex::new(0), std::sync::Condvar::new()));
+
+        // 2. Farm tasks[1..] to the pool; keep tasks[0] to run inline.
+        let mut iter = ready.into_iter().enumerate();
+        let first = iter.next();
+        for (i, rw) in iter {
+            let results = Arc::clone(&results);
+            let done = Arc::clone(&done);
+            pool::submit(Box::new(move || {
+                let r = rw.run();
+                results.lock().unwrap()[i] = Some(r);
+                let (lock, cv) = &*done;
+                *lock.lock().unwrap() += 1;
+                cv.notify_all();
+            }));
+        }
+        // 3. Parent participates: run task[0] on this thread (it may block on `recv`, woken by a pool
+        //    sibling's `send`).
+        if let Some((i, rw)) = first {
+            let r = rw.run();
+            results.lock().unwrap()[i] = Some(r);
+        }
+        // 4a. Wait for the farmed tasks (n-1) to finish.
+        let pool_count = n.saturating_sub(1);
+        {
+            let (lock, cv) = &*done;
+            let mut g = lock.lock().unwrap();
+            while *g < pool_count {
+                g = cv.wait(g).unwrap();
+            }
+        }
+        // 4b. Flush worker output in task order (decision F); first fault wins. A faulting worker's
+        //     buffered output is dropped here (its exact ordering vs siblings is a B3.4 concern; the
+        //     goldens are fault-free).
+        let slots = Arc::try_unwrap(results)
+            .expect("all pool tasks finished, so no other Arc holder remains")
+            .into_inner()
+            .unwrap();
+        let mut first_err = None;
+        for slot in slots {
+            match slot.expect("every task slot was filled before join returned") {
+                Ok(wr) => {
+                    self.out.push_str(&wr.out);
+                    self.stderr.push_str(&wr.stderr);
+                }
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Cooperatively drive the children of the innermost scheduler level until all are `Done`. Picks
@@ -3602,18 +3697,25 @@ impl Vm {
             "update" => {
                 self.arity_err("update", args, 1, span)?;
                 let f = args[0];
-                // Read the current value out before the call (lock dropped immediately — the user fn
-                // may re-enter this same box, and we must never hold the lock across `invoke_value`).
-                // Re-root the box handle on the operand stack so the nested call's GC keeps the core's
-                // contents traced (the receiver was popped off the stack in `do_method_call`).
-                let w = self.shared_core(h).v.lock().unwrap().clone();
+                let core = self.shared_core(h);
+                // B3.3-threads: serialise the whole read-modify-write so concurrent OS-thread updates
+                // can't lose each other (Shared[T]'s core contract). Held only under `--parallel`
+                // (the cooperative engine is single-thread, so it keeps its current behavior and
+                // never risks deadlocking a same-box nested update). The value lock `v` is still held
+                // only briefly — read here, write at the end — so the closure may freely re-enter
+                // `get`/`set` (or `update` on a *different* box). A `--parallel` closure that re-enters
+                // `update` on the SAME box deadlocks: a documented edge (it could only lose-update
+                // before). The handle is re-rooted on the operand stack so the nested call's GC keeps
+                // the core's contents traced (the receiver was popped off the stack in `do_method_call`).
+                let _serialise = if self.parallel { Some(core.update_lock.lock().unwrap()) } else { None };
+                let w = core.v.lock().unwrap().clone();
                 let cur = self.from_wire(w);
                 self.push(Value::Obj(h));
                 let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 let next = next?;
                 let stored = self.to_wire(next)?;
-                *self.shared_core(h).v.lock().unwrap() = stored;
+                *core.v.lock().unwrap() = stored;
                 Ok(Value::Nil)
             }
             _ => Err(self.err(format!("type Shared has no method '{method}'"), span)),
@@ -5161,7 +5263,7 @@ mod tests {
         let mut vm = Vm::new(Arc::new(empty_program()));
         let s = vm.heap.alloc(Obj::Str("hi".into()));
         let boxed = vm.to_wire(Value::Obj(s)).unwrap();
-        let sh = vm.heap.alloc(Obj::Shared(Arc::new(SharedCore { v: Mutex::new(boxed) })));
+        let sh = vm.heap.alloc(Obj::Shared(Arc::new(SharedCore { v: Mutex::new(boxed), ..Default::default() })));
         assert_eq!(vm.display(Value::Obj(sh)), "Shared(hi)");
     }
 
@@ -5985,14 +6087,62 @@ main()";
     }
 
     /// B3.3-threads sub-step 1: the `--parallel` engine is selectable (`run_capture_parallel` sets
-    /// `Vm::parallel`). Until the pool is wired (sub-step 4), a `parallel:` with task-order output
-    /// (no cross-task blocking) yields the same result as the cooperative engine — proving the flag
-    /// plumbs through without changing well-ordered output.
+    /// `Vm::parallel`). A `parallel:` with task-order output (no cross-task blocking) yields the same
+    /// result as the cooperative engine — proving the flag plumbs through without changing
+    /// well-ordered output.
     #[test]
     fn parallel_engine_runs_simple_program() {
         let src = include_str!("../../examples/parallel.chz");
         let expected = include_str!("../../examples/parallel.expected");
         assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    }
+
+    /// B3.3-threads golden: N real OS-thread tasks `update` one `Shared[int]` concurrently; the box
+    /// serialises every write, so the count is exactly the spawn count (lost-update race fixed by the
+    /// `update_lock`). Deterministic-by-construction (order-independent) — proves the bounded pool +
+    /// `Shared` cross-thread atomicity. The default cooperative engine runs it too (still `5`).
+    #[test]
+    fn golden_parallel_shared_chz_matches_expected() {
+        let src = include_str!("../../examples/parallel_shared.chz");
+        let expected = include_str!("../../examples/parallel_shared.expected");
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+        // Same program on the cooperative default engine is identical (decision A oracle).
+        assert_eq!(run_capture(src).expect("vm run"), expected);
+    }
+
+    /// B3.3-threads golden: the collector task `recv`s before any producer runs, so on the real-thread
+    /// engine it BLOCKS on the channel condvar and is woken by producer `send`s from pool threads.
+    /// It sorts what it gathers → the printed order is fixed however threads interleave
+    /// (deterministic-by-construction). Exercises condvar `recv` + flush-on-join.
+    #[test]
+    fn golden_parallel_channel_chz_matches_expected() {
+        let src = include_str!("../../examples/parallel_channel.chz");
+        let expected = include_str!("../../examples/parallel_channel.expected");
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    }
+
+    /// B3.3-threads: a nested `parallel:` runs on the same bounded pool without exploding the thread
+    /// count (each join level adds only its own participating thread). Two outer tasks each spawn two
+    /// inner tasks, all bumping one `Shared` → `4`, deterministic.
+    #[test]
+    fn parallel_nested_nursery_on_pool() {
+        let src = "fn inner(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
+                   fn outer(s: Shared[int]):\n    parallel:\n        spawn inner(s)\n        spawn inner(s)\n\
+                   fn main():\n    s := Shared(0)\n    parallel:\n        spawn outer(s)\n        spawn outer(s)\n    print(s.get())\nmain()\n";
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), "4\n");
+    }
+
+    /// B3.3-threads: a fault in a **pool** task (not the inline task[0]) propagates out of the join as
+    /// the nursery's error after all siblings finish (sibling-abort is B3.4; here we join-then-report
+    /// the first fault). The ok task and the faulting task are independent (no channel) so there is no
+    /// deadlock without cancellation.
+    #[test]
+    fn parallel_pool_task_fault_propagates() {
+        let src = "fn ok_task(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
+                   fn boom():\n    xs := [1]\n    print(xs[9])\n\
+                   fn main():\n    s := Shared(0)\n    parallel:\n        spawn ok_task(s)\n        spawn boom()\n    print(\"unreached\")\nmain()\n";
+        let err = run_capture_parallel(src).expect_err("expected the pool task fault to propagate");
+        assert!(err.message.contains("out of bounds"), "got: {}", err.message);
     }
 
     /// C2 golden: `Channel[T]` fan-out — workers `send` at the dedent, the parent `recv`s after the
