@@ -12,25 +12,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 ## Current focus
 
 Core language is feature-complete through **M18** plus several gap-closing passes. Concurrency
-**C1 + C2 + C3** have landed on the tree-walk interpreter (see below). Latest suite: **1211 tests**
-green (unit + parity + `cargo test conformance`), both engines parity-tested, `cargo clippy` clean.
+**C1 + C2 + C3 + C4** have landed — C4 brings the bytecode VM (default engine) to parity with the
+interpreter, so `spawn` / `parallel:` / `Channel[T]` / `Shared[T]` now run on **both** engines.
+Latest suite: **1224 tests** green (unit + parity + `cargo test conformance`), both engines
+parity-tested, `cargo clippy` clean.
 
-**Next candidate:** concurrency **C4** — port C1–C3 to the bytecode VM (`src/vm`, `src/compiler`)
-for the standing parity invariant: `Obj::Channel`/`Obj::Shared` heap objects, nursery/spawn ops, a VM
-`deep_clone`, and a differential parity assertion in the golden harness. Designed in
-**[`docs/concurrency.md`](docs/concurrency.md)** (shared-nothing BEAM-style
-`spawn`/`parallel:`/`Channel[T]`/`Shared[T]`, sequential-first C1–C5 staging).
+**Next candidate:** concurrency **C5** — real concurrency (a later epic): cooperative fibers
+(suspendable execution — the recursive-`eval` rewrite) and/or Tier-C OS-thread multicore, plus the
+**`Executor`** escape hatch (`submit` / `shutdown` / `shutdown_now`, reaped via `defer`). The surface
+of `spawn` / `parallel:` / `Channel` / `Shared` is **unchanged**. Designed in
+**[`docs/concurrency.md`](docs/concurrency.md)** §8–§9 (shared-nothing BEAM-style, sequential-first
+C1–C4 → real-parallel C5 staging).
 
-**Concurrency staging note:** C1–C3 ship on `--interp` only; the bytecode VM (default engine) and
-compiler emit a clean *"runs on `--interp` until VM parity lands (C4)"* error for `parallel:` /
-`spawn` / `Channel` / `Shared`, so the default engine never panics on a concurrency program. VM
-parity is C4.
-
-**Deferred refinement (post-C2):** read-only-capture and sendability are enforced for `spawn`
+**Deferred refinement (→ C5):** read-only-capture and sendability are enforced for `spawn`
 arguments (incl. closures smuggled inside struct/enum fields — deep field inspection) and for
 `spawn:` block *reassignment* of captures. Still open: **rejecting a non-sendable value merely
 *read* (not reassigned) inside a `spawn:` block** (e.g. capturing a closure and calling it) — benign
-under the sequential executor; tighten when C5 brings real parallelism.
+under the sequential executor; tighten when C5 brings real parallelism. Also deferred to C5: the
+`Ref[T]` non-sendability gate is a struct-name check (the principled fix is a `StructInfo` origin
+flag).
 
 **Permanent non-goals:** `yield`/generators, variadic args, Level-3 dynamic `cdylib`/C-ABI FFI,
 bignum (`i64`-only — every overflow is a recoverable fault; binary work → a future `bytes` *sequence*,
@@ -41,8 +41,18 @@ no `byte`/`u8` scalar).
 ## Done (newest → oldest)
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
-(Concurrency C1–C3 are the documented exception: interp-only until VM parity in C4.)
 
+- ✅ **Concurrency C4 — VM parity for `spawn`/`parallel:`/`Channel`/`Shared`** (bytecode VM +
+  compiler). Ported C1–C3 off `--interp`-only onto the default engine: heap `Obj::Channel(VecDeque)`
+  / `Obj::Shared(Value)` with GC child-tracing; ops `EnterNursery`/`JoinNursery`/`SpawnCall`/
+  `SpawnMethod`/`SpawnBlock`/`NewChannel`/`NewShared`; a VM `deep_clone` (data deep-copied, str/func/
+  closure/module/Channel/Shared by handle — mirrors interp). The `spawn:` block compiles to a
+  synthetic zero-arg closure proto captured like any closure. Sequential executor: a `nurseries`
+  stack drains FIFO at the join, first error aborts siblings; pending tasks are GC roots; a
+  `recover:` boundary reclaims a fault-orphaned nursery via `Handler::nursery_len`; `Shared.update`
+  re-roots the box across its re-entrant call. Differential parity goldens for all three examples +
+  micro-tests + GC-stress tests. The four staging-error stubs are gone. *No checker changes* (it was
+  already engine-agnostic). Reviewed by two parallel S++ reviewers — no Critical/Important findings.
 - ✅ **Concurrency C3 — `Shared[T]` cross-task mutable box** (interp). `Shared(v)` (value-first — the
   element type is inferred from `v`, unlike `Channel[T]()`); methods `get()->T` (copies out), `set(T)`
   (copies in), `update(fn(T)->T)` (read-modify-write; releases the box borrow before calling the user
@@ -129,7 +139,8 @@ Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.ch
 
 ## Roadmap (later)
 
-- ⬜ **Concurrency (C1–C5)** — see `docs/concurrency.md`. Speculative; schedule via `gaps.md` first.
+- ⬜ **Concurrency C5** — real concurrency (cooperative fibers / OS-thread multicore + the `Executor`
+  escape hatch). C1–C4 done (both engines); see `docs/concurrency.md` §8–§9.
 - VM/GC optimizations (superinstructions, inline caching, NaN-boxing) — written up in
   **[`docs/future.md`](docs/future.md)**.
 

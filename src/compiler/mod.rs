@@ -13,7 +13,7 @@
 
 use crate::ast::{
     AssignOp, BinaryOp, Block, CompKind, Expr, ExprKind, FnDecl, LitPattern, MatchArm, MatchExprArm,
-    Module, Pattern, Span, Stmt, StmtKind, UnaryOp,
+    Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp,
 };
 use crate::resolver::ModuleGraph;
 use crate::vm::op::{
@@ -356,13 +356,65 @@ impl Compiler {
             StmtKind::While { cond, body } => self.compile_while(fc, cond, body),
             StmtKind::For { vars, iter, body } => self.compile_for(fc, vars, iter, body, stmt.span),
             StmtKind::Match { scrutinee, arms } => self.compile_match(fc, scrutinee, arms, stmt.span),
-            // Concurrency (C1–C3) lands on the tree-walk interpreter first; VM parity arrives in C4.
-            // Fail cleanly instead of emitting unimplemented bytecode.
-            StmtKind::Parallel { .. } | StmtKind::Spawn(_) => Err(CompileError {
-                message: "concurrency (spawn / parallel:) runs on `--interp` until VM parity lands (C4)"
-                    .to_string(),
-                span: stmt.span,
-            }),
+            // Concurrency C4 — sequential, run-to-completion executor (mirrors the interpreter).
+            StmtKind::Parallel { body } => self.compile_parallel(fc, body, stmt.span),
+            StmtKind::Spawn(target) => self.compile_spawn(fc, target, stmt.span),
+        }
+    }
+
+    /// `parallel:` — open a nursery, run the body (spawns register tasks; inline statements run
+    /// immediately), then join at the dedent. The body is also a defer scope (mirrors the
+    /// interpreter's `exec_scoped_block`), so a `defer` directly inside the block runs at the dedent.
+    fn compile_parallel(&mut self, fc: &mut FnComp, body: &[Stmt], span: Span) -> Result<(), CompileError> {
+        fc.emit(Op::EnterNursery, span);
+        self.compile_defer_scoped_block(fc, body)?;
+        fc.emit(Op::JoinNursery, span);
+        Ok(())
+    }
+
+    /// `spawn` — register a task on the innermost nursery. Form 1 (`spawn f(args)` / `spawn
+    /// recv.m(args)`) evaluates the callee/receiver + args here and emits `SpawnCall`/`SpawnMethod`
+    /// (mirrors `compile_defer`). Form 2 (`spawn:` block) compiles the block as a synthetic zero-arg
+    /// proto and emits `SpawnBlock`, capturing the enclosing bindings (like a closure).
+    fn compile_spawn(&mut self, fc: &mut FnComp, target: &SpawnTarget, span: Span) -> Result<(), CompileError> {
+        match target {
+            SpawnTarget::Call(call) => {
+                let ExprKind::Call { callee, args, .. } = &call.kind else {
+                    return Err(CompileError {
+                        message: "spawn requires a function or method call".to_string(),
+                        span,
+                    });
+                };
+                if let ExprKind::Field { obj, name } = &callee.kind {
+                    self.compile_expr(fc, obj)?;
+                    for a in args {
+                        self.compile_expr(fc, a)?;
+                    }
+                    fc.emit(Op::SpawnMethod(name.clone(), args.len()), call.span);
+                } else {
+                    self.compile_expr(fc, callee)?;
+                    for a in args {
+                        self.compile_expr(fc, a)?;
+                    }
+                    fc.emit(Op::SpawnCall(args.len()), call.span);
+                }
+                Ok(())
+            }
+            SpawnTarget::Block(body) => {
+                // Capture every visible enclosing binding (like a closure); the values are
+                // deep-copied across the airlock at `SpawnBlock`. The block becomes a synthetic
+                // zero-arg proto whose free names resolve via `GetCaptured`.
+                let entries = fc.snapshot_entries();
+                let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+                let mut child = FnComp::new("<spawned task>".to_string(), 0, false);
+                child.captured_names = captured_names;
+                self.compile_block_scoped(&mut child, body)?;
+                child.emit(Op::Nil, span);
+                child.emit(Op::Return, span);
+                let pid = self.finish(child);
+                fc.emit(Op::SpawnBlock(pid, entries), span);
+                Ok(())
+            }
         }
     }
 
@@ -1262,20 +1314,18 @@ impl Compiler {
         // Bare-ident callees resolve by name in the interpreter's order:
         // print → builtin → struct ctor → variant ctor → value.
         if let ExprKind::Ident(name) = &callee.kind {
-            // Concurrency (C2) `Channel[T]()` lands on the interpreter first; VM parity is C4.
-            // Guard here so a channel-only program (no `parallel:`) gives the staging hint rather
-            // than a misleading "undefined name 'Channel'". Mirrors the Parallel/Spawn guard.
+            // Concurrency C4: `Channel[T]()` → a fresh mailbox; `Shared(v)` → a fresh box over the
+            // deep-copied init value. The checker validated arity (Channel: 0 args, Shared: 1).
             if name == "Channel" {
-                return Err(CompileError {
-                    message: "Channel runs on `--interp` until VM parity lands (C4)".to_string(),
-                    span,
-                });
+                fc.emit(Op::NewChannel, span);
+                return Ok(());
             }
             if name == "Shared" {
-                return Err(CompileError {
-                    message: "Shared runs on `--interp` until VM parity lands (C4)".to_string(),
-                    span,
-                });
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(Op::NewShared, span);
+                return Ok(());
             }
             if name == "print" {
                 for a in args {

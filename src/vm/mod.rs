@@ -8,7 +8,7 @@ pub mod op;
 pub mod value;
 
 use heap::{Heap, MapData, Obj, SetData};
-use op::{CapSrc, Op, Program, ProtoId};
+use op::{CapEntry, CapSrc, Op, Program, ProtoId};
 use std::rc::Rc;
 use value::{GcRef, Value};
 
@@ -133,6 +133,31 @@ impl Deferred {
     }
 }
 
+/// A task registered by `spawn`, awaiting its nursery's join barrier (C4). The callee/receiver and
+/// arguments are evaluated and deep-copied across the airlock at the `spawn` statement (Go's
+/// arg-evaluation timing); the body runs at the `parallel:` dedent. Mirrors the interpreter's
+/// `Task` enum — a `spawn:` block is lowered to a zero-arg closure, so it rides the `Call` variant.
+/// The held values are GC roots while the task is pending (see [`Vm::collect`]).
+enum PendingCall {
+    /// `spawn f(args)` (or a `spawn:` block, lowered to a zero-arg closure) — invoke the callable.
+    Call { callee: Value, args: Vec<Value>, span: Span },
+    /// `spawn recv.name(args)` — dispatch the named method on the receiver.
+    Method { recv: Value, name: String, args: Vec<Value>, span: Span },
+}
+
+impl PendingCall {
+    /// The GcRefs this pending task keeps alive (callee/receiver + arguments).
+    fn roots(&self) -> impl Iterator<Item = GcRef> + '_ {
+        let (head, args) = match self {
+            PendingCall::Call { callee, args, .. } => (callee, args),
+            PendingCall::Method { recv, args, .. } => (recv, args),
+        };
+        std::iter::once(head)
+            .chain(args.iter())
+            .filter_map(|v| if let Value::Obj(h) = v { Some(*h) } else { None })
+    }
+}
+
 struct Vm {
     program: Rc<Program>,
     heap: Heap,
@@ -164,6 +189,12 @@ struct Vm {
     fault_trace_depth: usize,
     /// Test mode: collect before *every* instruction, to surface any missing GC root.
     gc_stress: bool,
+    /// Active `parallel:` nurseries (C4), innermost last. `EnterNursery` pushes; each `spawn`
+    /// registers a [`PendingCall`] on the innermost list; `JoinNursery` drains it FIFO at the
+    /// dedent. Tasks are GC roots while pending. A `recover:` boundary truncates this stack back to
+    /// its install-time length on catch (see [`Handler::nursery_len`]), so a fault in the nursery
+    /// body or a task can't leave a stale entry.
+    nurseries: Vec<Vec<PendingCall>>,
 }
 
 /// A snapshot taken at a `recover:` boundary (`Op::PushHandler`). On a caught fault the VM restores
@@ -183,6 +214,10 @@ struct Handler {
     /// past the `LeaveDeferScope`s of any defer scopes opened *inside* the recover block, so their
     /// markers would leak; the catch paths truncate `defer_markers` back to this length.
     markers_len: usize,
+    /// `nurseries.len()` at install. A fault inside a `parallel:` body or a spawned task jumps past
+    /// the `JoinNursery` that would pop the nursery; the catch path truncates `nurseries` back to
+    /// this length so the stale nursery (and its aborted siblings) is reclaimed.
+    nursery_len: usize,
 }
 
 impl Vm {
@@ -203,6 +238,7 @@ impl Vm {
             fault_trace: None,
             fault_trace_depth: 0,
             gc_stress: false,
+            nurseries: Vec::new(),
         }
     }
 
@@ -449,6 +485,10 @@ impl Vm {
                         // the fault jumped past their `LeaveDeferScope`s, so they would otherwise leak
                         // and corrupt later drains in this frame.
                         self.frames[h.frame_len - 1].defer_markers.truncate(h.markers_len);
+                        // Reclaim any `parallel:` nursery the fault unwound past (its `JoinNursery`
+                        // never ran), dropping the aborted siblings — mirrors the interpreter always
+                        // reclaiming its nursery list.
+                        self.nurseries.truncate(h.nursery_len);
                         if self.pending_exit.is_some() {
                             return Err(rte);
                         }
@@ -482,6 +522,13 @@ impl Vm {
             }
             for d in &f.deferred {
                 work.extend(d.roots());
+            }
+        }
+        // Pending `spawn` tasks (C4): their captured callee/receiver/args are roots until the task
+        // runs at the nursery's join.
+        for nursery in &self.nurseries {
+            for task in nursery {
+                work.extend(task.roots());
             }
         }
         work.extend(self.module_objs.iter().copied());
@@ -621,6 +668,7 @@ impl Vm {
                 ip: *target,
                 defer_len: self.frames.last().map(|f| f.deferred.len()).unwrap_or(0),
                 markers_len: self.frames.last().map(|f| f.defer_markers.len()).unwrap_or(0),
+                nursery_len: self.nurseries.len(),
             }),
             Op::PopHandler => {
                 self.handlers.pop();
@@ -863,6 +911,21 @@ impl Vm {
                     _ => String::new(),
                 };
                 return Err(self.err(format!("no match arm for variant '{variant}'"), span));
+            }
+            Op::EnterNursery => self.nurseries.push(Vec::new()),
+            Op::JoinNursery => self.join_nursery()?,
+            Op::SpawnCall(argc) => self.do_spawn(None, *argc, span)?,
+            Op::SpawnMethod(name, argc) => self.do_spawn(Some(name.clone()), *argc, span)?,
+            Op::SpawnBlock(proto, entries) => self.do_spawn_block(*proto, entries, span)?,
+            Op::NewChannel => {
+                let h = self.heap.alloc(Obj::Channel(std::collections::VecDeque::new()));
+                self.push(Value::Obj(h));
+            }
+            Op::NewShared => {
+                let init = self.pop();
+                let init = self.deep_clone(init);
+                let h = self.heap.alloc(Obj::Shared(init));
+                self.push(Value::Obj(h));
             }
         }
         Ok(())
@@ -1635,6 +1698,18 @@ impl Vm {
         // `sort_by_key` calls a key extractor once per element, then sorts in place by key.
         if matches!(self.heap.get(h), Obj::List(_)) && method == "sort_by_key" {
             let result = self.list_sort_by_key(h, args, span)?;
+            self.push(result);
+            return Ok(());
+        }
+        // Concurrency C4: `Channel` / `Shared` methods mutate the heap object in place (and `update`
+        // re-enters the VM), so dispatch them directly off the handle, like the core-type methods.
+        if matches!(self.heap.get(h), Obj::Channel(_)) {
+            let result = self.channel_method(h, method, &args, span)?;
+            self.push(result);
+            return Ok(());
+        }
+        if matches!(self.heap.get(h), Obj::Shared(_)) {
+            let result = self.shared_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
         }
@@ -2459,6 +2534,245 @@ impl Vm {
         }
     }
 
+    // ----- concurrency C4: sequential, run-to-completion executor (mirrors the interpreter) -----
+
+    /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands, deep-copy the args (and, for
+    /// the method form, the receiver) across the airlock, and register the task on the innermost
+    /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock. Mirrors
+    /// the interpreter's `exec_spawn`.
+    fn do_spawn(&mut self, method: Option<String>, argc: usize, span: Span) -> Result<(), RuntimeError> {
+        let at = self.stack.len() - argc;
+        let raw_args: Vec<Value> = self.stack.split_off(at);
+        let head = self.pop();
+        let args: Vec<Value> = raw_args.into_iter().map(|a| self.deep_clone(a)).collect();
+        let task = match method {
+            Some(name) => {
+                let recv = self.deep_clone(head);
+                PendingCall::Method { recv, name, args, span }
+            }
+            None => PendingCall::Call { callee: head, args, span },
+        };
+        self.register_task(task, span)
+    }
+
+    /// `spawn:` block — snapshot the captured bindings from the current frame (like `MakeClosure`),
+    /// deep-copy each captured value across the airlock, build a zero-arg closure over the synthetic
+    /// block proto, and register it as a `Call` task. Mirrors the interpreter's `Task::Block`
+    /// (captured locals deep-copied; home globals by handle).
+    fn do_spawn_block(&mut self, proto: ProtoId, entries: &[CapEntry], span: Span) -> Result<(), RuntimeError> {
+        let frame = self.frames.last().unwrap();
+        let (base, home, enclosing) = (frame.base, frame.home, frame.closure);
+        let mut captured = std::collections::HashMap::new();
+        for e in entries {
+            let v = match e.src {
+                CapSrc::Slot(i) => self.stack[base + i],
+                CapSrc::Captured => enclosing
+                    .and_then(|h| match self.heap.get(h) {
+                        Obj::Closure { captured, .. } => captured.get(&e.name).copied(),
+                        _ => None,
+                    })
+                    .unwrap_or(Value::Nil),
+            };
+            // Deep-copy across the airlock: the task can't share mutable state with the parent.
+            captured.insert(e.name.clone(), self.deep_clone(v));
+        }
+        let h = self.heap.alloc(Obj::Closure { proto, captured, home });
+        self.register_task(PendingCall::Call { callee: Value::Obj(h), args: Vec::new(), span }, span)
+    }
+
+    /// Push a registered task onto the innermost nursery. The checker guarantees a `parallel:` is
+    /// open, but we guard for parity with the interpreter's runtime error.
+    fn register_task(&mut self, task: PendingCall, span: Span) -> Result<(), RuntimeError> {
+        match self.nurseries.last_mut() {
+            Some(nursery) => {
+                nursery.push(task);
+                Ok(())
+            }
+            None => Err(self.err("spawn must be inside a parallel: block".to_string(), span)),
+        }
+    }
+
+    /// `parallel:` dedent — drain the innermost nursery FIFO, running each task to completion. Tasks
+    /// are removed from the front one at a time so the not-yet-run siblings stay GC-rooted in
+    /// `self.nurseries`. The first fault propagates (aborting the rest); the empty nursery is then
+    /// popped. On the fault path the nursery is left in place for the `recover:` boundary (or program
+    /// exit) to reclaim via `Handler::nursery_len`.
+    fn join_nursery(&mut self) -> Result<(), RuntimeError> {
+        loop {
+            let task = match self.nurseries.last_mut() {
+                Some(n) if !n.is_empty() => n.remove(0),
+                _ => break,
+            };
+            self.run_pending(task)?;
+        }
+        self.nurseries.pop();
+        Ok(())
+    }
+
+    /// Run one registered task to completion (result discarded), mirroring `run_one_deferred`.
+    fn run_pending(&mut self, task: PendingCall) -> Result<(), RuntimeError> {
+        match task {
+            PendingCall::Call { callee, args, span } => {
+                self.invoke_value(callee, args, span)?;
+                Ok(())
+            }
+            PendingCall::Method { recv, name, args, span } => {
+                let argc = args.len();
+                self.push(recv);
+                for a in args {
+                    self.push(a);
+                }
+                self.do_method_call(&name, argc, span)?;
+                self.pop(); // discard the task's result
+                Ok(())
+            }
+        }
+    }
+
+    /// Deep-copy a value across a task airlock (`spawn` / `Channel.send` / `Shared` get-set):
+    /// data — scalars, collections, structs, enums — is recursively cloned into fresh heap objects
+    /// so a task can't share mutable state with the spawner. `str` (immutable), callables, modules,
+    /// and `Channel` / `Shared` handles pass by reference (the handle is what crosses). Mirrors
+    /// `interp::deep_clone` exactly. Allocates, but only at the instruction boundary that called it
+    /// (no GC runs mid-clone), so intermediate handles can't be collected.
+    fn deep_clone(&mut self, v: Value) -> Value {
+        let Value::Obj(h) = v else { return v };
+        match self.heap.get(h).clone() {
+            // Immutable / by-handle: share the existing object (matches interp passing the `Rc`).
+            Obj::Str(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module { .. }
+            | Obj::Native { .. }
+            | Obj::Channel(_)
+            | Obj::Shared(_) => v,
+            Obj::List(items) => {
+                let cloned: Vec<Value> = items.into_iter().map(|x| self.deep_clone(x)).collect();
+                Value::Obj(self.heap.alloc(Obj::List(cloned)))
+            }
+            Obj::Tuple(items) => {
+                let cloned: Vec<Value> = items.into_iter().map(|x| self.deep_clone(x)).collect();
+                Value::Obj(self.heap.alloc(Obj::Tuple(cloned)))
+            }
+            Obj::Map(m) => {
+                let mut out = MapData::default();
+                for (hash, k, val) in m.entries {
+                    let (ck, cv) = (self.deep_clone(k), self.deep_clone(val));
+                    out.push(hash, ck, cv);
+                }
+                Value::Obj(self.heap.alloc(Obj::Map(out)))
+            }
+            Obj::Set(s) => {
+                let mut out = SetData::default();
+                for (hash, e) in s.entries {
+                    let ce = self.deep_clone(e);
+                    out.push(hash, ce);
+                }
+                Value::Obj(self.heap.alloc(Obj::Set(out)))
+            }
+            Obj::Struct { name, fields } => {
+                let cloned: Vec<(Box<str>, Value)> =
+                    fields.into_iter().map(|(k, val)| (k, self.deep_clone(val))).collect();
+                Value::Obj(self.heap.alloc(Obj::Struct { name, fields: cloned }))
+            }
+            Obj::Enum { ty, variant, payload } => {
+                let cloned: Vec<Value> = payload.into_iter().map(|x| self.deep_clone(x)).collect();
+                Value::Obj(self.heap.alloc(Obj::Enum { ty, variant, payload: cloned }))
+            }
+        }
+    }
+
+    /// `Channel[T]` methods (C2/C4): `send` (move-on-send, deep-copied in), `recv` (FIFO; empty =
+    /// deadlock fault under the sequential executor), `len`. Mirrors `interp::eval_channel_method` —
+    /// error strings byte-identical (parity-tested).
+    fn channel_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        match method {
+            "send" => {
+                self.arity_err("send", args, 1, span)?;
+                let v = self.deep_clone(args[0]);
+                match self.heap.get_mut(h) {
+                    Obj::Channel(q) => q.push_back(v),
+                    _ => unreachable!("channel_method on non-channel"),
+                }
+                Ok(Value::Nil)
+            }
+            "recv" => {
+                self.arity_err("recv", args, 0, span)?;
+                let popped = match self.heap.get_mut(h) {
+                    Obj::Channel(q) => q.pop_front(),
+                    _ => unreachable!("channel_method on non-channel"),
+                };
+                match popped {
+                    Some(v) => Ok(v),
+                    None => Err(self.err(
+                        "recv on an empty channel: deadlock — nothing is queued and the \
+                         sequential executor cannot block waiting for a producer (a \
+                         consumer that waits mid-flight on a live producer needs C5)"
+                            .to_string(),
+                        span,
+                    )),
+                }
+            }
+            "len" => {
+                self.arity_err("len", args, 0, span)?;
+                let n = match self.heap.get(h) {
+                    Obj::Channel(q) => q.len(),
+                    _ => unreachable!("channel_method on non-channel"),
+                };
+                Ok(Value::Int(n as i64))
+            }
+            _ => Err(self.err(format!("type Channel has no method '{method}'"), span)),
+        }
+    }
+
+    /// `Shared[T]` methods (C3/C4): `get` (copies out), `set` (copies in), `update` (read-modify-write
+    /// via the re-entrant call path). Mirrors `interp::eval_shared_method`. The box is re-rooted on
+    /// the operand stack across `update`'s nested call (the receiver was popped in `do_method_call`).
+    fn shared_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        match method {
+            "get" => {
+                self.arity_err("get", args, 0, span)?;
+                let inner = match self.heap.get(h) {
+                    Obj::Shared(v) => *v,
+                    _ => unreachable!("shared_method on non-shared"),
+                };
+                Ok(self.deep_clone(inner))
+            }
+            "set" => {
+                self.arity_err("set", args, 1, span)?;
+                let v = self.deep_clone(args[0]);
+                match self.heap.get_mut(h) {
+                    Obj::Shared(slot) => *slot = v,
+                    _ => unreachable!("shared_method on non-shared"),
+                }
+                Ok(Value::Nil)
+            }
+            "update" => {
+                self.arity_err("update", args, 1, span)?;
+                let f = args[0];
+                // Read the current value out (deep-copied) before the call: the user fn may re-enter
+                // this same box. Re-root the box on the operand stack so the nested call's GC can't
+                // collect it (the receiver was popped off the stack in `do_method_call`).
+                let inner = match self.heap.get(h) {
+                    Obj::Shared(v) => *v,
+                    _ => unreachable!("shared_method on non-shared"),
+                };
+                let cur = self.deep_clone(inner);
+                self.push(Value::Obj(h));
+                let next = self.invoke_value(f, vec![cur], span);
+                self.pop();
+                let next = next?;
+                let stored = self.deep_clone(next);
+                match self.heap.get_mut(h) {
+                    Obj::Shared(slot) => *slot = stored,
+                    _ => unreachable!("shared_method on non-shared"),
+                }
+                Ok(Value::Nil)
+            }
+            _ => Err(self.err(format!("type Shared has no method '{method}'"), span)),
+        }
+    }
+
     /// Drain the current (top) frame's deferred calls, LIFO, popping one at a time from the frame's
     /// own list so the not-yet-run records stay GC-rooted in the frame. Skipped on a hard
     /// `std.os.exit` (Go: `os.Exit` does not run deferred calls). Returns the latest fault, if any.
@@ -3142,6 +3456,8 @@ impl Vm {
                 Obj::Func { .. } | Obj::Closure { .. } => "function",
                 Obj::Module { .. } => "module",
                 Obj::Native { .. } => "function",
+                Obj::Channel(_) => "Channel",
+                Obj::Shared(_) => "Shared",
             },
         }
     }
@@ -3196,6 +3512,8 @@ impl Vm {
                 Obj::Closure { .. } => "<closure>".to_string(),
                 Obj::Module { name, .. } => format!("<module {name}>"),
                 Obj::Native { name, .. } => format!("<native fn {name}>"),
+                Obj::Channel(q) => format!("Channel(len={})", q.len()),
+                Obj::Shared(v) => format!("Shared({})", self.display(*v)),
             },
         }
     }
@@ -3270,6 +3588,9 @@ impl Vm {
             Obj::Closure { .. } => Ok("<closure>".to_string()),
             Obj::Module { name, .. } => Ok(format!("<module {name}>")),
             Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
+            // Channel / Shared have no protocol hook — reuse the structural `Display` (matches the
+            // interpreter's `stringify` catch-all falling back to `Display`).
+            Obj::Channel(_) | Obj::Shared(_) => Ok(self.display(Value::Obj(h))),
         }
     }
 
@@ -4204,6 +4525,104 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    // ----- concurrency C4 (VM parity for spawn / parallel: / Channel / Shared) -----
+
+    /// C1 golden: `parallel:` nursery + both `spawn` forms run to completion at the dedent (FIFO),
+    /// the parent resuming only after the join. Byte-identical on the VM, the interpreter, and the
+    /// `.expected` file.
+    #[test]
+    fn golden_parallel_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/parallel.chz");
+        let expected = include_str!("../../examples/parallel.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// C2 golden: `Channel[T]` fan-out — workers `send` at the dedent, the parent `recv`s after the
+    /// join. Byte-identical on the VM, the interpreter, and the `.expected` file.
+    #[test]
+    fn golden_channel_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/channel.chz");
+        let expected = include_str!("../../examples/channel.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// C3 golden: `Shared[T]` cross-task box — three tasks bump one serialised counter. Byte-identical
+    /// on the VM, the interpreter, and the `.expected` file.
+    #[test]
+    fn golden_shared_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/shared.chz");
+        let expected = include_str!("../../examples/shared.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    // Micro-tests mirroring the interpreter's C2/C3 unit tests (src/interp/mod.rs), to pin the VM's
+    // channel/shared/spawn semantics directly (not just via the example goldens).
+
+    #[test]
+    fn channel_send_recv_fifo() {
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    ch.send(2)\n    print(ch.recv())\n    print(ch.recv())\nmain()\n";
+        assert_eq!(run(src), "1\n2\n");
+    }
+
+    #[test]
+    fn channel_send_deep_copies_value() {
+        // Mutating the original list after send must NOT change what the channel holds (airlock).
+        let src = "fn main():\n    ch := Channel[list[int]]()\n    xs := [1, 2]\n    ch.send(xs)\n    xs.push(3)\n    print(ch.recv())\nmain()\n";
+        assert_eq!(run(src), "[1, 2]\n");
+    }
+
+    #[test]
+    fn channel_recv_on_empty_is_deadlock_error() {
+        let err = run_err("fn main():\n    ch := Channel[int]()\n    print(ch.recv())\nmain()\n");
+        assert!(err.contains("deadlock"), "got: {err}");
+    }
+
+    #[test]
+    fn shared_get_set_round_trip() {
+        let src = "fn main():\n    s := Shared(1)\n    print(s.get())\n    s.set(42)\n    print(s.get())\nmain()\n";
+        assert_eq!(run(src), "1\n42\n");
+    }
+
+    #[test]
+    fn shared_update_read_modify_write() {
+        let src = "fn main():\n    s := Shared(10)\n    s.update(fn(x): x * 2)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n";
+        assert_eq!(run(src), "21\n");
+    }
+
+    #[test]
+    fn shared_get_does_not_alias_box() {
+        // `get` copies out: mutating the returned list must not change what the box holds.
+        let src = "fn main():\n    s := Shared([1, 2])\n    xs := s.get()\n    xs.push(3)\n    print(s.get())\nmain()\n";
+        assert_eq!(run(src), "[1, 2]\n");
+    }
+
+    #[test]
+    fn spawn_first_error_aborts_siblings() {
+        // The first task to fault aborts the remaining siblings and propagates out of `parallel:`.
+        let src = "fn boom():\n    x := [1]\n    print(x[5])\nfn quiet():\n    print(\"ran\")\nfn main():\n    parallel:\n        spawn boom()\n        spawn quiet()\nmain()\n";
+        let vm = run_err(src);
+        let interp = match crate::interp::run_capture(src) {
+            Ok(o) => panic!("expected error, got {o:?}"),
+            Err(e) => e.message,
+        };
+        assert_eq!(vm, interp, "VM/interp error divergence");
+    }
+
+    #[test]
+    fn spawn_composes_with_recover() {
+        // A task fault is catchable by a `recover:` enclosing the nursery (parity-checked).
+        let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn main():\n    r := recover:\n        parallel:\n            spawn boom()\n        0\n    print(\"recovered\")\nmain()\n";
+        let vm = run_capture(src).expect("vm run");
+        assert_eq!(vm, "recovered\n");
+        assert_eq!(vm, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     /// Block-scoped defer: assert VM == interp == `expected` for a snippet.
     fn assert_defer_scope(src: &str, expected: &str) {
         let vm_out = run_capture(src).expect("vm run");
@@ -5069,6 +5488,54 @@ fn main():
 main()";
         let normal = run_capture(src).unwrap();
         assert_eq!(run_capture_stress(src), normal);
+    }
+
+    /// Concurrency C4 rooting: a `spawn`'s deep-copied args, a pending task's captured closure env,
+    /// and the values queued in a `Channel` / boxed in a `Shared` must all survive collections that
+    /// fire (under stress) between registration and the nursery's join. Each task allocates strings
+    /// so a missing root would corrupt the output (or panic on a dangling `GcRef`).
+    #[test]
+    fn spawn_pending_tasks_survive_gc_stress() {
+        let src = "\
+fn work(tag: str, out: Channel[str]):
+    out.send(\"{tag}!\")
+fn main():
+    ch := Channel[str]()
+    base := str(100)
+    parallel:
+        spawn work(str(1), ch)
+        spawn work(str(2), ch)
+        spawn:
+            ch.send(\"blk-{base}\")
+    print(ch.len())
+    for _ in 0..3:
+        print(ch.recv())
+main()";
+        let normal = run_capture(src).unwrap();
+        assert_eq!(run_capture_stress(src), normal);
+        assert_eq!(normal, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `Shared` box + `update`'s re-entrant call survive GC stress (the box is re-rooted across the
+    /// nested user-fn call; the boxed list's elements stay reachable through collections).
+    #[test]
+    fn shared_box_survives_gc_stress() {
+        let src = "\
+fn appended(xs: list[str], v: str) -> list[str]:
+    xs.push(v)
+    return xs
+fn push_one(s: Shared[list[str]], v: str):
+    s.update(fn(xs): appended(xs, v))
+fn main():
+    s := Shared([str(0)])
+    parallel:
+        spawn push_one(s, str(1))
+        spawn push_one(s, str(2))
+    print(s.get())
+main()";
+        let normal = run_capture(src).unwrap();
+        assert_eq!(run_capture_stress(src), normal);
+        assert_eq!(normal, crate::interp::run_capture(src).expect("interp run"));
     }
 }
 

@@ -122,6 +122,15 @@ pub enum Obj {
         name: Box<str>,
         func: crate::native::NativeFn,
     },
+    /// `Channel[T]` (C2) — a shared mailbox (buffered, unbounded FIFO) for cross-task messages.
+    /// Shared by reference (the handle is what `spawn` copies across the airlock); values move in on
+    /// `send` (deep-copied) and out on `recv`. Queued values may be heap objects, so they are traced
+    /// as GC children.
+    Channel(std::collections::VecDeque<Value>),
+    /// `Shared[T]` (C3) — the cross-task mutable box. Shared by reference (the handle is what `spawn`
+    /// copies across the airlock); the value lives in the one box and is copied in on
+    /// `set`/construction and out on `get`. The boxed value may be a heap object → a GC child.
+    Shared(Value),
 }
 
 /// One heap slot: the object (or a hole, for swept/free slots) + its GC mark bit.
@@ -253,6 +262,8 @@ impl Heap {
             }
             Obj::Module { globals, .. } => globals.values().for_each(&mut push),
             Obj::Native { .. } => {}
+            Obj::Channel(q) => q.iter().for_each(&mut push),
+            Obj::Shared(v) => push(v),
         }
         out
     }

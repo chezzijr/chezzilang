@@ -208,6 +208,31 @@ pub enum Op {
     },
     /// No arm matched the enum in `slot` — runtime error.
     MatchNoArm(usize),
+
+    // ----- concurrency (C4: sequential, run-to-completion executor) -----
+    /// `parallel:` entry — push a fresh, empty task list on the VM's nursery stack. The block body
+    /// follows; spawned tasks register on this list; the matching `JoinNursery` drains it.
+    EnterNursery,
+    /// `parallel:` dedent (the join barrier) — drain the innermost nursery FIFO, running each
+    /// registered task to completion (results discarded). The first task to fault aborts the
+    /// remaining siblings and propagates (composing with `recover:` / `defer`).
+    JoinNursery,
+    /// `spawn f(args)` — stack `[callee, arg0, …]`; pops `argc + 1`, deep-copies the args across the
+    /// airlock (the callee passes by handle, like `defer`), and registers the task on the innermost
+    /// nursery. Mirrors `DeferCall`.
+    SpawnCall(usize),
+    /// `spawn recv.name(args)` — stack `[recv, arg0, …]`; pops `argc + 1`, deep-copies the receiver
+    /// AND the args across the airlock, and registers the method task. Mirrors `DeferMethod`.
+    SpawnMethod(String, usize),
+    /// `spawn:` block — snapshot each `CapEntry`'s value from the enclosing frame (like
+    /// `MakeClosure`), deep-copy the captured values across the airlock, build a zero-arg closure
+    /// over `ProtoId`, and register it as a `Call` task. (Form 2; the block was compiled to a
+    /// synthetic zero-arg proto.)
+    SpawnBlock(ProtoId, Vec<CapEntry>),
+    /// `Channel[T]()` — push a fresh empty mailbox (`Obj::Channel`).
+    NewChannel,
+    /// `Shared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Shared(init)`.
+    NewShared,
 }
 
 /// A compiled function (or the synthetic module-toplevel) — its code, parallel spans, arity, and
