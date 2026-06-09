@@ -306,10 +306,17 @@ struct WorkerResult {
 /// B3.2 — a spawned task lowered to a `Send` description (no parent-heap `GcRef`s), ready to rebuild
 /// in a worker heap. The callee crosses as its `ProtoId` (the proto lives in the shared `Arc<Program>`)
 /// plus wire'd captures/args.
+/// `home`: the index of the callee's home module in the parent's `module_objs` (B3.3c), so the
+/// worker can resolve the rebuilt module obj for global / sibling-fn resolution; `None` when the
+/// home is a standalone module not in `module_objs` (the unit-test fixtures), which falls back to a
+/// fresh empty home.
 #[allow(dead_code)] // forward-plumbing for B3.3 `--parallel`; see `WorkerResult`.
 enum Lowered {
-    Closure { proto: ProtoId, captured: Vec<(String, WireValue)>, args: Vec<WireValue>, span: Span },
-    Func { proto: ProtoId, args: Vec<WireValue>, span: Span },
+    Closure { proto: ProtoId, captured: Vec<(String, WireValue)>, args: Vec<WireValue>, home: Option<usize>, span: Span },
+    Func { proto: ProtoId, args: Vec<WireValue>, home: Option<usize>, span: Span },
+    /// `spawn recv.m(args)` (B3.3d) — the receiver + args cross by wire; dispatch resolves the method
+    /// against the worker's reconstructed `module_objs` (struct methods index `module_objs[module_idx]`).
+    Method { recv: WireValue, name: String, args: Vec<WireValue>, span: Span },
 }
 
 impl Vm {
@@ -3121,12 +3128,13 @@ impl Vm {
     /// `Channel`/`Shared`/`Executor` handles (which cross as a shared `Arc`, not a `GcRef`) pass.
     /// `str`/closure crossing **by value** lands in B3.3.
     ///
-    /// Two further B3.2 limits, deliberate and gated: module globals (a `Closure`'s `home`) do **not**
-    /// cross — the worker gets a fresh empty home — so a task reading a mutable module global faults
-    /// (deferred decision **G1**); and **method tasks** (`spawn recv.m()`) are rejected outright,
-    /// because a worker never runs module init so its `module_objs` table is empty (method dispatch
-    /// would index out of bounds). Both are resolved at B3.3. B3.2 handles only self-contained
-    /// function/closure tasks over sendable data, which is all the heap-handoff proof needs.
+    /// B3.3c/d: the worker's `home` is a **read-only snapshot** of the parent's module graph
+    /// ([`Vm::build_worker_modules`]) — top-level fns resolve via the rebuilt home globals, imports via
+    /// the rebuilt `module_objs` — so a task may read post-init globals and call sibling/imported fns
+    /// (module globals are read-only under `--parallel`, decision G1 / gate B3.3b). **Method tasks**
+    /// (`spawn recv.m()`) dispatch against that rebuilt graph. Still deferred to B3.3-threads: real OS
+    /// threads + a condvar `recv` (a method that blocks on `recv` faults here, no scheduler yet).
+    /// The whole graph is reconstructed per task (correctness-first; pooling is a B3.3-threads concern).
     #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
     fn run_task_isolated(&mut self, task: PendingCall) -> Result<WorkerResult, RuntimeError> {
         // 1. Lower the task to a `Send` description in THIS (parent) heap (read-only serialize),
@@ -3136,16 +3144,16 @@ impl Vm {
                 let wargs = self.wire_args(args, span)?;
                 match callee {
                     Value::Obj(h) => match self.heap.get(h).clone() {
-                        Obj::Closure { proto, captured, .. } => {
+                        Obj::Closure { proto, captured, home } => {
                             let mut wcap = Vec::with_capacity(captured.len());
                             for (k, v) in captured {
                                 let w = self.to_wire(v)?;
                                 self.ensure_crossable(&w, span)?;
                                 wcap.push((k, w));
                             }
-                            Lowered::Closure { proto, captured: wcap, args: wargs, span }
+                            Lowered::Closure { proto, captured: wcap, args: wargs, home: self.home_index(home), span }
                         }
-                        Obj::Func { proto, .. } => Lowered::Func { proto, args: wargs, span },
+                        Obj::Func { proto, home } => Lowered::Func { proto, args: wargs, home: self.home_index(home), span },
                         _ => return Err(self.err(
                             format!("spawn: '{}' is not an isolable task", self.type_name(callee)),
                             span,
@@ -3157,32 +3165,55 @@ impl Vm {
                     )),
                 }
             }
-            // Method tasks need the worker's module-globals table, which a worker never populates
-            // (no module init) — gate them off cleanly until B3.3 (see the doc-comment).
-            PendingCall::Method { span, .. } => {
-                return Err(self.err(
-                    "spawn: method tasks are not yet isolable (B3.2 runs only function/closure tasks)"
-                        .to_string(),
-                    span,
-                ));
+            // B3.3d: the receiver + args cross by wire; dispatch resolves against the worker's
+            // reconstructed `module_objs` (built below). `ensure_crossable` keeps a non-sendable
+            // receiver (e.g. a closure) from silently dangling.
+            PendingCall::Method { recv, name, args, span } => {
+                let wrecv = self.to_wire(recv)?;
+                self.ensure_crossable(&wrecv, span)?;
+                let wargs = self.wire_args(args, span)?;
+                Lowered::Method { recv: wrecv, name, args: wargs, span }
             }
         };
 
-        // 2. Build the worker, 3. reconstruct the task in its heap, run it synchronously.
+        // 2. Build the worker + reconstruct the parent's module graph in its heap (B3.3c) so tasks can
+        //    read globals, call sibling/imported fns, and dispatch struct methods. 3. rebuild + run.
         let mut worker = self.spawn_worker();
+        self.build_worker_modules(&mut worker);
         let (ret, span) = match lowered {
-            Lowered::Closure { proto, captured, args, span } => {
-                let home = worker.fresh_worker_home();
+            Lowered::Closure { proto, captured, args, home, span } => {
+                let home = worker.worker_home(home);
                 let cap = captured.into_iter().map(|(k, w)| (k, worker.from_wire(w))).collect();
                 let callee = Value::Obj(worker.heap.alloc(Obj::Closure { proto, captured: cap, home }));
                 let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
                 (worker.invoke_value(callee, args, span)?, span)
             }
-            Lowered::Func { proto, args, span } => {
-                let home = worker.fresh_worker_home();
+            Lowered::Func { proto, args, home, span } => {
+                let home = worker.worker_home(home);
                 let callee = Value::Obj(worker.heap.alloc(Obj::Func { proto, home }));
                 let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
                 (worker.invoke_value(callee, args, span)?, span)
+            }
+            Lowered::Method { recv, name, args, span } => {
+                let recv = worker.from_wire(recv);
+                let argc = args.len();
+                worker.push(recv);
+                for w in args {
+                    let a = worker.from_wire(w);
+                    worker.push(a);
+                }
+                worker.do_method_call(&name, argc, span)?;
+                // A blocking `recv` inside the method would park the fiber (leaving no result on the
+                // stack) — but a worker has no scheduler yet, so a top-level blocking `recv` faults as
+                // a deadlock rather than suspending. Guard the invariant so a future change can't turn
+                // it into an operand-stack underflow panic; real blocking lands with B3.3-threads.
+                if worker.suspend.is_some() {
+                    return Err(worker.err(
+                        "spawn: a method task blocked on recv in an isolated worker (no scheduler until B3.3-threads)".to_string(),
+                        span,
+                    ));
+                }
+                (worker.pop(), span)
             }
         };
 
@@ -3223,10 +3254,165 @@ impl Vm {
     }
 
     /// A fresh empty module to serve as a worker closure's `home`. The parent's `home` `GcRef` can't
-    /// cross heaps; B3.2 tasks don't read globals, so an empty namespace suffices (see `run_task_isolated`).
+    /// cross heaps; used as the fallback when the task's home is not a real `module_objs` entry (the
+    /// hand-built unit-test fixtures) — real spawns resolve a reconstructed module (see `worker_home`).
     #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable (see `WorkerResult`).
     fn fresh_worker_home(&mut self) -> GcRef {
         self.heap.alloc(Obj::Module { name: "<worker>".into(), globals: Default::default() })
+    }
+
+    /// B3.3c — the index of a `home` module `GcRef` in this VM's `module_objs`, so the worker can
+    /// resolve the corresponding rebuilt module. `None` for a home not in the table (test fixtures).
+    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable.
+    fn home_index(&self, home: GcRef) -> Option<usize> {
+        self.module_objs.iter().position(|&m| m == home)
+    }
+
+    /// B3.3c — resolve a lowered home index to this (worker) VM's reconstructed module obj, falling
+    /// back to a fresh empty home when the parent home was not a real module (test fixtures).
+    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable.
+    fn worker_home(&mut self, idx: Option<usize>) -> GcRef {
+        match idx {
+            Some(i) if i < self.module_objs.len() => self.module_objs[i],
+            _ => self.fresh_worker_home(),
+        }
+    }
+
+    /// B3.3c — reconstruct the parent's initialized module graph into the `worker` heap so a spawned
+    /// task can read module globals, call sibling/imported free functions, and dispatch struct methods
+    /// (which index `module_objs[module_idx]` for their home). The graph is *snapshotted*, never
+    /// re-initialized: re-running each module's top-level would duplicate its side effects (prints /
+    /// I/O). Module globals are read-only under `--parallel` (decision G1, gate shipped B3.3b), so a
+    /// per-worker copy is safe — nothing writes back. Two passes so cross-module refs resolve:
+    ///
+    /// 1. alloc one fresh empty `Module` per parent module (preserving index order so `module_idx`
+    ///    lines up) and record a parent→worker `GcRef` map;
+    /// 2. populate each worker module's globals, mapping every value into the worker heap.
+    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable.
+    fn build_worker_modules(&self, worker: &mut Vm) {
+        use std::collections::HashMap;
+        // Pass 1: alloc the module objects + build the parent→worker handle map.
+        let mut map: HashMap<GcRef, GcRef> = HashMap::with_capacity(self.module_objs.len());
+        for &pm in &self.module_objs {
+            let name = match self.heap.get(pm) {
+                Obj::Module { name, .. } => name.clone(),
+                _ => "<worker>".into(),
+            };
+            let wm = worker.heap.alloc(Obj::Module { name, globals: HashMap::new() });
+            map.insert(pm, wm);
+            worker.module_objs.push(wm);
+        }
+        // Pass 2: populate globals, mapping each value into the worker heap.
+        for &pm in &self.module_objs {
+            let globals: Vec<(String, Value)> = match self.heap.get(pm) {
+                Obj::Module { globals, .. } => globals.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                _ => continue,
+            };
+            let wm = map[&pm];
+            for (k, v) in globals {
+                let wv = self.map_global_value(worker, v, &map);
+                worker.module_define(wm, &k, wv);
+            }
+        }
+    }
+
+    /// B3.3c — map one parent-heap global value into the `worker` heap. A `GcRef` is heap-local, so a
+    /// callable's parent-heap `home`/captures and an import-alias module ref must be **rebuilt**, never
+    /// carried by reference. Crucially this recurses *structurally* through containers: a global that
+    /// embeds a callable (a `[fn …]` handler list, a `{k: fn …}` dispatch map, a struct with a
+    /// function field) would otherwise wire its nested `Func` across as a by-reference `Handle` —
+    /// smuggling a parent-heap `GcRef` into the worker heap (the very invariant this phase protects).
+    ///
+    /// - **Fast path:** a value whose wire form has no by-reference `Handle` is pure data (`str` by
+    ///   value) or a `Channel`/`Shared`/`Executor` core (crosses as a shared `Arc`) — the wire
+    ///   round-trip is exact. Only values that embed a callable/module fall through to rebuild.
+    /// - `Func`/`Closure` → re-allocated over the worker's corresponding home module (captures mapped
+    ///   recursively); import-alias `Module` ref → the worker's rebuilt module obj; `Native` →
+    ///   re-allocated (same fn pointer); containers → mapped element-wise (cached map/set hashes are
+    ///   value-derived, so they carry over unchanged).
+    #[allow(dead_code)] // B3.2 forward-plumbing; B3.3 `--parallel` makes it reachable.
+    fn map_global_value(&self, worker: &mut Vm, v: Value, map: &std::collections::HashMap<GcRef, GcRef>) -> Value {
+        let h = match v {
+            Value::Obj(h) => h,
+            scalar => return scalar,
+        };
+        // Fast path: no embedded callable/module → the wire round-trip is exact and cheap.
+        if let Ok(w) = self.to_wire(v)
+            && !w.has_handle()
+        {
+            return worker.from_wire(w);
+        }
+        match self.heap.get(h).clone() {
+            Obj::Func { proto, home } => {
+                let whome = map.get(&home).copied().unwrap_or_else(|| worker.fresh_worker_home());
+                Value::Obj(worker.heap.alloc(Obj::Func { proto, home: whome }))
+            }
+            Obj::Closure { proto, captured, home } => {
+                let whome = map.get(&home).copied().unwrap_or_else(|| worker.fresh_worker_home());
+                let wcap = captured
+                    .iter()
+                    .map(|(k, cv)| (k.clone(), self.map_global_value(worker, *cv, map)))
+                    .collect();
+                Value::Obj(worker.heap.alloc(Obj::Closure { proto, captured: wcap, home: whome }))
+            }
+            // An import alias bound to another module obj — map to the worker's rebuilt module.
+            Obj::Module { name, globals } => match map.get(&h).copied() {
+                Some(wm) => Value::Obj(wm),
+                // A module not in `module_objs` (shouldn't occur for a bound import) — rebuild a
+                // shallow copy so resolution still finds its members.
+                None => {
+                    let entries: Vec<(String, Value)> = globals.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                    let wm = worker.heap.alloc(Obj::Module { name, globals: std::collections::HashMap::new() });
+                    for (k, mv) in entries {
+                        let mapped = self.map_global_value(worker, mv, map);
+                        worker.module_define(wm, &k, mapped);
+                    }
+                    Value::Obj(wm)
+                }
+            },
+            Obj::Native { name, func } => Value::Obj(worker.heap.alloc(Obj::Native { name, func })),
+            // Containers embedding a callable: map each element so the nested callable is rebuilt, not
+            // carried by reference. (Pure-data containers took the fast path above.)
+            Obj::List(items) => {
+                let mapped: Vec<Value> = items.iter().map(|x| self.map_global_value(worker, *x, map)).collect();
+                Value::Obj(worker.heap.alloc(Obj::List(mapped)))
+            }
+            Obj::Tuple(items) => {
+                let mapped: Vec<Value> = items.iter().map(|x| self.map_global_value(worker, *x, map)).collect();
+                Value::Obj(worker.heap.alloc(Obj::Tuple(mapped)))
+            }
+            Obj::Struct { name, fields } => {
+                let mapped: Vec<(Box<str>, Value)> =
+                    fields.iter().map(|(k, fv)| (k.clone(), self.map_global_value(worker, *fv, map))).collect();
+                Value::Obj(worker.heap.alloc(Obj::Struct { name, fields: mapped }))
+            }
+            Obj::Enum { ty, variant, payload } => {
+                let mapped: Vec<Value> = payload.iter().map(|x| self.map_global_value(worker, *x, map)).collect();
+                Value::Obj(worker.heap.alloc(Obj::Enum { ty, variant, payload: mapped }))
+            }
+            Obj::Map(m) => {
+                let mut out = MapData::default();
+                for (hash, k, val) in &m.entries {
+                    let (ck, cv) = (self.map_global_value(worker, *k, map), self.map_global_value(worker, *val, map));
+                    out.push(*hash, ck, cv);
+                }
+                Value::Obj(worker.heap.alloc(Obj::Map(out)))
+            }
+            Obj::Set(s) => {
+                let mut out = SetData::default();
+                for (hash, e) in &s.entries {
+                    let ce = self.map_global_value(worker, *e, map);
+                    out.push(*hash, ce);
+                }
+                Value::Obj(worker.heap.alloc(Obj::Set(out)))
+            }
+            // Leaf data / cores are handled by the fast path; if `to_wire` ever errored above we land
+            // here for a `str`/core (always sendable) — round-trip it.
+            Obj::Str(_) | Obj::Channel(_) | Obj::Shared(_) | Obj::Executor(_) => {
+                let w = self.to_wire(v).expect("str / channel / shared / executor is always sendable");
+                worker.from_wire(w)
+            }
+        }
     }
 
     /// B3.1 — clone out the shared `Arc<ChannelCore>` behind a `Channel` handle (refcount bump). The
@@ -4922,20 +5108,130 @@ mod tests {
         assert!(vm.values_equal(got, want), "str result round-trips to \"oops\"");
     }
 
-    /// Method tasks (`spawn recv.m()`) are gated off in B3.2: a worker never runs module init, so its
-    /// `module_objs` table is empty and method dispatch would index out of bounds. Reject cleanly.
+    // ----- B3.3c: read-only `home` snapshot (worker module-graph reconstruction) -----
+
+    /// Compile + run a single-module program, returning the populated parent `Vm` (its `module_objs[0]`
+    /// holds the top-level globals). Mirrors the live load path so a worker reconstructs a real graph.
+    fn ran_standalone(src: &str) -> Vm {
+        let tokens = lexer::tokenize(src).expect("tokenize");
+        let module = parser::parse(tokens).expect("parse");
+        let program = crate::compiler::compile_module_standalone(&module).expect("compile");
+        let mut vm = Vm::new(Arc::new(program));
+        vm.run().expect("run");
+        vm
+    }
+
+    /// Compile + run a multi-file graph from its entry path, returning the populated parent `Vm`
+    /// (all imported modules present in `module_objs`).
+    fn ran_graph(entry: &std::path::Path) -> Vm {
+        let graph = crate::resolver::build_graph(entry).expect("graph");
+        let program = crate::compiler::compile_graph(&graph).expect("compile");
+        let mut vm = Vm::new(Arc::new(program));
+        vm.run().expect("run");
+        vm
+    }
+
+    /// Look up a top-level global in the entry module (modules run deps-first, entry last).
+    fn entry_global(vm: &Vm, name: &str) -> Value {
+        let m = *vm.module_objs.last().expect("at least one module");
+        vm.module_global(m, name).unwrap_or_else(|| panic!("no global '{name}'"))
+    }
+
+    fn sp() -> Span {
+        Span { line: 1, col: 1 }
+    }
+
+    /// A spawned task reads a module-level constant — needs the read-only `home` snapshot (B3.3c):
+    /// the worker's `home` is a reconstruction of the parent module's globals, not a fresh-empty one.
     #[test]
-    fn worker_rejects_method_task() {
+    fn worker_reads_module_global() {
+        let mut vm = ran_standalone("answer := 42\nfn get_answer() -> int:\n    return answer\n");
+        let task = PendingCall::Call { callee: entry_global(&vm, "get_answer"), args: Vec::new(), span: sp() };
+        let res = vm.run_task_isolated(task).expect("task reads a module global in its worker");
+        assert_eq!(vm.from_wire(res.value), Value::Int(42));
+    }
+
+    /// A spawned task calls another top-level fn in its module — sibling resolution via the
+    /// reconstructed `home` globals (the sibling `Func` is re-allocated over the worker's home).
+    #[test]
+    fn worker_calls_sibling_free_fn() {
+        let mut vm = ran_standalone("fn helper() -> int:\n    return 7\nfn task() -> int:\n    return helper() + 1\n");
+        let task = PendingCall::Call { callee: entry_global(&vm, "task"), args: Vec::new(), span: sp() };
+        let res = vm.run_task_isolated(task).expect("task calls a sibling fn in its worker");
+        assert_eq!(vm.from_wire(res.value), Value::Int(8));
+    }
+
+    /// A spawned task calls a function from an IMPORTED module — proves cross-module `module_objs`
+    /// reconstruction (the `text` import alias maps to the worker's std.str module obj, whose own
+    /// globals are reconstructed too).
+    #[test]
+    fn worker_calls_imported_fn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static C: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir()
+            .join(format!("chezzi_b33c_{}_{}", std::process::id(), C.fetch_add(1, Ordering::SeqCst)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(&entry, "import std.str as text\nfn task() -> str:\n    return text.repeat(\"ab\", 2)\n").unwrap();
+        let mut vm = ran_graph(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        let task = PendingCall::Call { callee: entry_global(&vm, "task"), args: Vec::new(), span: sp() };
+        let res = vm.run_task_isolated(task).expect("task calls an imported fn in its worker");
+        let got = vm.from_wire(res.value);
+        let want = Value::Obj(vm.heap.alloc(Obj::Str("abab".into())));
+        assert!(vm.values_equal(got, want), "imported repeat returns abab");
+    }
+
+    // ----- B3.3d: method tasks (`spawn recv.m()`) -----
+
+    /// A method task on a primitive receiver — `"hello".len()` dispatches in the worker (B3.3d,
+    /// replaces the B3.2 reject). Core-type methods need no module graph, but exercise the new path.
+    #[test]
+    fn worker_runs_method_task() {
         let mut vm = Vm::new(Arc::new(empty_program()));
-        let recv = vm.heap.alloc(Obj::Str("x".into()));
-        let task = PendingCall::Method {
-            recv: Value::Obj(recv),
-            name: "len".into(),
-            args: Vec::new(),
-            span: Span { line: 1, col: 1 },
-        };
-        let err = vm.run_task_isolated(task).expect_err("method tasks are not isolable in B3.2");
-        assert!(err.message.contains("method tasks are not yet isolable"), "got: {}", err.message);
+        let recv = vm.heap.alloc(Obj::Str("hello".into()));
+        let task = PendingCall::Method { recv: Value::Obj(recv), name: "len".into(), args: Vec::new(), span: sp() };
+        let res = vm.run_task_isolated(task).expect("method task now runs in a worker");
+        assert_eq!(vm.from_wire(res.value), Value::Int(5));
+    }
+
+    /// A struct method resolved through reconstructed `module_objs` — and its body **reads a module
+    /// global** (`scale`), so dispatch must resolve through the rebuilt home *contents*, not merely
+    /// index an in-bounds placeholder. `(3 + 4) * 10 == 70`.
+    #[test]
+    fn worker_method_on_struct() {
+        let mut vm = ran_standalone(
+            "scale := 10\nstruct Point:\n    x: int\n    y: int\n    fn weighted(self) -> int:\n        return (self.x + self.y) * scale\np := Point(3, 4)\n",
+        );
+        let task = PendingCall::Method { recv: entry_global(&vm, "p"), name: "weighted".into(), args: Vec::new(), span: sp() };
+        let res = vm.run_task_isolated(task).expect("struct method task dispatches in its worker");
+        assert_eq!(vm.from_wire(res.value), Value::Int(70));
+    }
+
+    /// Cross-heap safety: a module global that is a **container of callables** (`[fn …]`) must have its
+    /// nested `Func` *rebuilt* in the worker heap, not carried across as a by-reference `Handle` (a
+    /// parent-heap `GcRef`). A task that calls through the list exercises the reconstructed funcs; a
+    /// smuggled `GcRef` would read a wrong/out-of-range worker slot. `bump(20) == 21`.
+    #[test]
+    fn worker_calls_through_global_fn_container() {
+        let mut vm = ran_standalone(
+            "fn bump(n: int) -> int:\n    return n + 1\nhandlers := [bump]\nfn task() -> int:\n    return handlers[0](20)\n",
+        );
+        let task = PendingCall::Call { callee: entry_global(&vm, "task"), args: Vec::new(), span: sp() };
+        let res = vm.run_task_isolated(task).expect("task calls a fn from a global container in its worker");
+        assert_eq!(vm.from_wire(res.value), Value::Int(21));
+    }
+
+    /// The module-graph reconstruction must be GC-safe: with `gc_stress` on (collect before every
+    /// instruction), a task that reads a **heap-typed** module global (a list) through the rebuilt home
+    /// must still round-trip — the reconstructed globals stay rooted via `module_objs`.
+    #[test]
+    fn worker_reconstruction_survives_gc_stress() {
+        let mut vm = ran_standalone("data := [1, 2, 3]\nfn total() -> int:\n    s := 0\n    for x in data:\n        s += x\n    return s\n");
+        vm.gc_stress = true;
+        let task = PendingCall::Call { callee: entry_global(&vm, "total"), args: Vec::new(), span: sp() };
+        let res = vm.run_task_isolated(task).expect("reconstruction survives GC stress");
+        assert_eq!(vm.from_wire(res.value), Value::Int(6));
     }
 
     // ----- arithmetic -----

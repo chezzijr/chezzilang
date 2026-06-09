@@ -240,7 +240,9 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 | **B3.2** ✅ | **`Arc<Program>` + worker-VM construction (no threads).** `spawn` builds a fresh worker `Vm` sharing `Arc<Program>`, runs the task **synchronously** in it, wire-copies args in and result + `out` back. Resolves the worker-VM/heap-handoff plumbing in isolation. | Goldens green; a unit test proves a task runs in a distinct heap and its result/`out` come back correctly. | **unchanged** |
 | **B3.3a** ✅ | **`str` crosses the airlock by value.** Add an owned-bytes `WireValue::Str(Box<str>)` arm; `to_wire`/`from_wire`/`display_wire`/`collect_core_gcrefs` handle it; `str` is no longer a by-reference `Handle`, so `ensure_crossable` lets it (and data containing it) cross a worker boundary. Single-thread, parity-preserved. | `worker_crosses_str_by_value` (was the reject test); `wire_crosses_str_by_value` (fresh handle, value-equal); `wire_str_map_key_survives_roundtrip` (cached hash preserved). All existing concurrency + GC-stress goldens byte-identical. | **unchanged** |
 | **B3.3b** ✅ | **G1 module-globals checker gate.** A reassignment (`=`/`+=`/`-=`) of a module global reachable — directly or transitively through free-function calls — from a `spawn` task is a checker error (*"…use Shared[T]"*). Flow-scoped to spawn-reachability; scope-aware name resolution (params/`let`/`for`/`match`/closure/comprehension binders). Direct in-`spawn:`-block writes stay caught by the existing `is_captured` gate. | `spawn_{transitive,deeply_transitive,block_calls,compound_assign,…inside_if,…through_arg_expr,…inside_recover}_*_rejected` + `{sequential,local_shadows,reads,shared_update,callee_shadowed_by_local}_*_ok`. Reviewed by a 4-agent panel + cold pass. | **unchanged** |
-| **B3.3-threads** | **Real OS threads behind `--parallel`.** Bounded pool (decision B), condvar `recv` (decision C blocking), buffer-flush-on-join (decision F). Cooperative engine stays the **default**. Now also carries the two remaining B3.3 "owes" (below): the **read-only `home` snapshot** (module-graph reconstruction — top-level fns resolve via `GetGlobal`→home; imports via `module_objs`) and **method tasks** (`spawn obj.m()`), since both are module-graph reconstruction = thread-flip machinery, not separable single-thread units. | NEW `--parallel`-only goldens that are deterministic-by-construction (collect→drain→sort→print) + order-insensitive (set-of-lines) assertions; every existing golden stays on the default engine and stays green. | **`--parallel` new** |
+| **B3.3c** ✅ | **Read-only `home` snapshot — worker module-graph reconstruction** (single-thread, parity-preserved). `Vm::build_worker_modules` snapshots the parent's initialized `module_objs` into the worker heap (two-pass); `map_global_value` rebuilds `Func`/`Closure`/`Module`/`Native` explicitly and recurses through containers so no nested callable smuggles a parent `GcRef`. A task can now read post-init globals + call sibling/imported fns. | `worker_reads_module_global`, `worker_calls_sibling_free_fn`, `worker_calls_imported_fn`, `worker_calls_through_global_fn_container` (GcRef-smuggle regression), `worker_reconstruction_survives_gc_stress`. Existing goldens byte-identical. | **unchanged** |
+| **B3.3d** ✅ | **Method tasks** (`spawn obj.m()`): `run_task_isolated` lowers to `Lowered::Method` (recv + args by wire) and dispatches via `do_method_call` against the reconstructed `module_objs`. A blocking `recv` faults cleanly (no scheduler in a sync worker). | `worker_runs_method_task`, `worker_method_on_struct` (reads a module global through the rebuilt home). | **unchanged** |
+| **B3.3-threads** | **Real OS threads behind `--parallel`.** Bounded pool (decision B), condvar `recv` (decision C blocking), buffer-flush-on-join (decision F). Cooperative engine stays the **default**. The two B3.3 "owes" (read-only `home` snapshot + method tasks) are now **discharged by B3.3c/d** — this phase is purely the thread-flip: the `--parallel` flag + pool + condvar `recv` wire `run_task_isolated` (which is reachable today only from unit tests) onto real threads. | NEW `--parallel`-only goldens that are deterministic-by-construction (collect→drain→sort→print) + order-insensitive (set-of-lines) assertions; every existing golden stays on the default engine and stays green. | **`--parallel` new** |
 | **B3.4** | **Cancellation + cross-thread `os.exit`.** Per-nursery `cancel` flag, condvar wake-on-cancel, exit-code propagation up the join (decision C). | First-fault-aborts-running-siblings; a child `os.exit` halts the process with the right code; `recover:`/`defer` still compose. | `--parallel` |
 | **B3.5** | **Nursery-local deadlock detection under threads** (blocked-count vs live-count, decision D). | Port the all-blocked deadlock golden to `--parallel`; a near-miss (one sibling that *does* send) must NOT false-positive. | `--parallel` |
 | **B3.6** | **`Executor` / B5 on the pool + A3b submit-capture sendability gate.** Submitted tasks run on pool threads; the checker now gates `submit`'s closure captures like `spawn` does. | `submit` of a non-sendable capture is a checker error; executor tasks run on pool threads + the autodrain/`shutdown` semantics survive. | `--parallel` |
@@ -252,7 +254,9 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 - [x] B3.2 — `Arc<Program>` + worker-VM construction (no threads) ✅ **landed**
 - [x] B3.3a — `str` crosses the airlock by value (single-thread, parity-preserved) ✅ **landed**
 - [x] B3.3b — G1 module-globals checker gate (mutation reachable from `spawn` = error) ✅ **landed**
-- [ ] B3.3-threads — real OS threads behind `--parallel` ← **next session starts here** (also owes the read-only `home` snapshot + method tasks; `str`-by-value + G1 gate already discharged)
+- [x] B3.3c — read-only `home` snapshot: worker module-graph reconstruction (single-thread, parity-preserved) ✅ **landed**
+- [x] B3.3d — method tasks (`spawn obj.m()`) dispatch in the worker via the rebuilt graph ✅ **landed**
+- [ ] B3.3-threads — real OS threads behind `--parallel` ← **next session starts here** (the two `home`-snapshot/method-task owes are now discharged by B3.3c/d; this is now purely the thread-flip: `--parallel` flag + bounded pool + condvar `recv` + flush-on-join)
 - [ ] B3.4 — cancellation + cross-thread `os.exit`
 - [ ] B3.5 — nursery-local deadlock detection under threads
 - [ ] B3.6 — `Executor`/B5 on the pool + A3b
@@ -313,19 +317,41 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 >   (`src/checker/mod.rs`) errors on a module-global reassignment reachable from a `spawn` task; flow-
 >   scoped, scope-aware, transitive over the free-function call graph. Direct in-`spawn:`-block writes
 >   stay caught by the pre-existing `is_captured` gate.
-> - (1b) **read-only `home` snapshot — STILL OWED (→ B3.3-threads).** A worker still gets a fresh-empty
->   `home`. A correct snapshot must reconstruct the module object graph (top-level fns resolve via
->   `GetGlobal`→`home` globals; imports via `module_objs`), which is thread-flip machinery — its only
->   consumer (`run_task_isolated`) is dead-code until `--parallel`, so it lands with the flip.
+> - (1b) **read-only `home` snapshot — ✅ DONE (B3.3c).** `Vm::build_worker_modules` + `map_global_value`
+>   reconstruct the parent's initialized module graph into the worker heap (two-pass: alloc module objs,
+>   then map globals). It **snapshots, never re-inits** (re-running a toplevel would duplicate side
+>   effects). The map is GcRef-safe: `Func`/`Closure`/`Module`/`Native` are rebuilt explicitly over the
+>   worker's home; containers recurse element-wise so a nested callable can't smuggle a parent `GcRef`
+>   across; only pure data + `Channel`/`Shared`/`Executor` cores go through the wire round-trip.
 > - (2) **`str` cross-by-value — ✅ DONE (B3.3a).** Owned-bytes `WireValue::Str` arm; `ensure_crossable`
 >   now lets `str` (and data containing it) cross. A **`Closure` wire arm** is *not* yet added — no live
 >   path needs it (the checker blocks closures from crossing as captures/args/channel-elems; the
 >   `Executor.submit` closure case is A3b/B3.6), so adding it now would be untested dead code.
-> - (3) **method tasks** (`spawn recv.m()`) — STILL OWED (→ B3.3-threads), same `module_objs`
->   reconstruction as (1b).
+> - (3) **method tasks** (`spawn recv.m()`) — ✅ DONE (B3.3d).** `run_task_isolated` lowers a method task
+>   to `Lowered::Method` (recv + args by wire) and dispatches via `do_method_call` against the rebuilt
+>   `module_objs` (so struct-method `module_objs[def.module_idx]` resolves). A method that blocks on
+>   `recv` faults cleanly (no scheduler in a sync worker — real condvar blocking is B3.3-threads).
 >
 > Tests: `worker_runs_in_distinct_heap`, `worker_returns_value_and_out`, `worker_shares_program_arc`,
-> `worker_crosses_str_by_value`, `worker_rejects_method_task` (still gated).
+> `worker_crosses_str_by_value`, `worker_reads_module_global`, `worker_calls_sibling_free_fn`,
+> `worker_calls_imported_fn`, `worker_calls_through_global_fn_container` (GcRef-smuggle regression),
+> `worker_reconstruction_survives_gc_stress`, `worker_runs_method_task`, `worker_method_on_struct`.
+
+> **B3.3c/d landed note (for the B3.3-threads maintainer):** the two `home`-snapshot/method-task owes
+> are discharged — `run_task_isolated` is now functionally complete *except for real threads*. New
+> machinery in `src/vm/mod.rs`: `Lowered` carries a `home: Option<usize>` (the callee's home index in
+> `module_objs`) and a `Method { recv, name, args }` variant; `build_worker_modules` (two-pass) +
+> `map_global_value` reconstruct the parent's module graph in the worker heap; `home_index` /
+> `worker_home` resolve the rebuilt home (falling back to `fresh_worker_home` for hand-built test
+> fixtures whose home isn't a real module). **Cross-heap GcRef safety is the load-bearing property:**
+> `map_global_value` rebuilds every callable/module by hand and recurses through containers, so a
+> `[fn …]` / `{k: fn …}` global cannot smuggle a parent `GcRef` (regression: `worker_*_global_fn_container`).
+> **Still owed at the flip:** (a) wire `run_task_isolated` onto a bounded pool under `--parallel`
+> (it is dead-code/test-only today); (b) condvar `recv` — a method/fn that blocks on `recv` currently
+> faults in the sync worker (guarded, not a panic); (c) the per-task full-graph reconstruction is
+> correctness-first — consider caching/sharing the read-only snapshot across a nursery's workers when
+> profiling the pool. The reconstruction shares the parent's `Arc<Program>` (protos), so only the heap
+> graph is rebuilt.
 
 ---
 
@@ -333,10 +359,12 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 
 1. **Module globals across threads** (decision G1) — ✅ **resolved: Option A** (globals read-only after
    init under `--parallel`; cross-task mutation via `Shared[T]`, mirroring the `Ref`-non-sendable rule).
-   The **checker gate is implemented (B3.3b)**; the **read-only `home` snapshot is still owed**
-   (→ B3.3-threads — module-graph reconstruction). Known gate gaps (documented in the walker comment,
-   land with the flip): a module-global *closure* used as a `spawn` target (`g := fn():…; spawn g()`),
-   and method-mediated call chains — both indirect-dispatch the static call graph can't follow.
+   The **checker gate is implemented (B3.3b)** and the **read-only `home` snapshot is implemented
+   (B3.3c — `Vm::build_worker_modules`)**. Known gate gaps (documented in the walker comment, land with
+   the flip): a module-global *closure* used as a `spawn` target (`g := fn():…; spawn g()`), and
+   method-mediated call chains — both indirect-dispatch the static call graph can't follow. (The
+   *runtime* reconstruction now handles a module-global closure/dispatch-table correctly; the gap is
+   purely the *checker's* G1 reachability analysis through those indirect targets.)
 2. **Condvar-blocked-recv cancellation** (G2) — lost wakeups; the dual-wait (channel cv + nursery
    cancel cv) must be a re-checking loop.
 3. **Pool starvation** (G3) — parent-participates + documented rule for v1.

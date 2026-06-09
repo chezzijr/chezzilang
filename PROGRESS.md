@@ -57,6 +57,23 @@ false-negative before they shipped). Two indirect-dispatch gaps documented (glob
 target, method chains) → B3.3-threads. Latest suite: **1306 tests** green (unit + parity + `cargo test
 conformance`), `cargo clippy` clean.
 
+**B3.3c + B3.3d — worker module-graph reconstruction — have now landed** (VM, single-thread, parity-
+preserved): the two remaining B3.3 "owes". **B3.3c (read-only `home` snapshot):** `Vm::build_worker_modules`
+snapshots the parent's initialized `module_objs` into the worker heap (two-pass — alloc module objs,
+then map globals), so a spawned task can read post-init module globals and call sibling/imported free
+functions. It **snapshots, never re-inits** (re-running a toplevel would duplicate prints/I/O). The map
+is the load-bearing GcRef-safety boundary: `map_global_value` rebuilds every `Func`/`Closure`/`Module`/
+`Native` explicitly over the worker's home and **recurses structurally through containers**, so a
+`[fn …]` handler list or `{k: fn …}` dispatch map cannot smuggle a parent-heap `GcRef` into the worker
+(pinned by `worker_calls_through_global_fn_container`); only pure data + `Channel`/`Shared`/`Executor`
+cores take the exact wire round-trip. **B3.3d (method tasks):** `run_task_isolated` lowers `spawn obj.m()`
+to `Lowered::Method` (recv + args by wire) and dispatches via `do_method_call` against the rebuilt
+`module_objs`; a method that blocks on `recv` faults cleanly (no scheduler in a sync worker). Still
+`#[allow(dead_code)]`/test-only until the `--parallel` flip wires it onto threads. Latest suite:
+**1312 tests** green (unit + parity + `cargo test conformance`), `cargo clippy` clean. Reviewed by a
+2-agent panel (caught + fixed a container-of-callables GcRef-smuggle and a method-suspend pop underflow
+before they shipped).
+
 **B3 is decomposed into a persistent, multi-session plan.** Tier-C OS-thread multicore (B3) — with
 B4 (real `Shared`) and B5 (real `Executor` pool) folded in, since under shared-nothing threads they're
 the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
@@ -64,16 +81,15 @@ the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
 decisions A–G, risk register, per-phase TDD focus). The surface of `spawn` / `parallel:` / `Channel` /
 `Shared` / `Executor` stays **unchanged**.
 
-**Next candidate:** **B3.3-threads — real OS threads behind `--parallel`.** Wire `run_task_isolated`
-into a bounded-pool `join_nursery` under a new `--parallel` flag (cooperative engine stays the
-default); condvar `recv` blocking + buffer-flush-on-join. `--parallel` is where nondeterminism first
-appears, so it gets its own deterministic-by-construction test suite (collect→sort→print). The two
-remaining B3.3 "owes" fold in here because both are module-graph reconstruction (top-level fns resolve
-via `GetGlobal`→`home`; imports via `module_objs`): the **read-only `home` snapshot** (replacing the
-worker's fresh-empty placeholder so tasks can read globals + call sibling fns) and **method tasks**
-(`spawn obj.m()`). The G1 checker gate and `str`-by-value already shipped (B3.3a/b). A `Closure` wire
-arm is deferred until a live path needs it (`Executor.submit` capture crossing = A3b/B3.6) — adding it
-now would be untested dead code. Items *not* in B3–B5 (cross-nursery wakeups,
+**Next candidate:** **B3.3-threads — real OS threads behind `--parallel`.** Now purely the thread-flip:
+the two `home`-snapshot/method-task owes are **discharged (B3.3c/d)**, so `run_task_isolated` is
+functionally complete except for real threads. Remaining: wire it into a bounded-pool `join_nursery`
+under a new `--parallel` flag (cooperative engine stays the default); condvar `recv` blocking +
+buffer-flush-on-join. `--parallel` is where nondeterminism first appears, so it gets its own
+deterministic-by-construction test suite (collect→sort→print). The G1 checker gate, `str`-by-value, the
+read-only `home` snapshot, and method tasks all shipped (B3.3a–d). A `Closure` wire arm is deferred
+until a live path needs it (`Executor.submit` capture crossing = A3b/B3.6) — adding it now would be
+untested dead code. Items *not* in B3–B5 (cross-nursery wakeups,
 recv-in-native-callback, `Channel.close()`, A3b) are now documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
@@ -118,6 +134,14 @@ overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
 
+- ✅ **Concurrency B3.3c/d — worker module-graph reconstruction** (VM, single-thread, parity-preserved).
+  `Vm::build_worker_modules` + `map_global_value` snapshot the parent's initialized module graph into
+  the worker heap (read-only `home`): tasks read post-init globals + call sibling/imported fns; method
+  tasks (`spawn obj.m()`) dispatch via the rebuilt `module_objs`. Structural container recursion keeps a
+  nested callable from smuggling a parent `GcRef` across the airlock. `run_task_isolated` is now
+  functionally complete bar real threads (still test-only until `--parallel`). 7 new `worker_*` units
+  incl. a GcRef-smuggle regression + a `gc_stress` reconstruction test. `docs/concurrency-b3.md`
+  B3.3c/d rows + landed note. **1312 tests** green, clippy clean.
 - ✅ **Concurrency B3.3b — G1 module-globals checker gate** (checker, parity-preserved). A
   reassignment (`=`/`+=`/`-=`) of a module global reachable — directly or transitively through
   free-function calls — from a `spawn` task is a type error (*"…use Shared[T]"*). New
