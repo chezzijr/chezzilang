@@ -4005,6 +4005,50 @@ fn shared_update_in_spawn_ok() {
     ok("c := Shared(0)\nfn bump():\n    c.update(fn(x): x + 1)\nfn main():\n    parallel:\n        spawn bump()\n    print(c.get())\nmain()\n");
 }
 
+#[test]
+fn spawn_compound_assign_global_rejected() {
+    // `+=` / `-=` are reassignments too — the gate must treat them like `=`.
+    rejects(
+        "n := 0\nfn bump():\n    n += 1\nfn main():\n    parallel:\n        spawn bump()\nmain()\n",
+        "use Shared[T]",
+    );
+}
+
+#[test]
+fn spawn_global_mutation_inside_if_rejected() {
+    // Mutation nested in control flow (not at the function-body top level) is still caught.
+    rejects(
+        "n := 0\nfn bump(c: bool):\n    if c:\n        n = n + 1\nfn main():\n    parallel:\n        spawn bump(true)\nmain()\n",
+        "use Shared[T]",
+    );
+}
+
+#[test]
+fn spawn_reaches_mutator_through_arg_expr_rejected() {
+    // The call graph follows a callee buried in an argument expression (`print(mutator())`).
+    rejects(
+        "n := 0\nfn mutate() -> int:\n    n = n + 1\n    return n\nfn caller():\n    print(mutate())\nfn main():\n    parallel:\n        spawn caller()\nmain()\n",
+        "use Shared[T]",
+    );
+}
+
+#[test]
+fn spawn_callee_shadowed_by_local_ok() {
+    // A local binding shadowing a free function's name at the spawn site means `spawn bump()`
+    // targets the LOCAL (inert) closure, not the global-mutating free fn — must not be flagged.
+    ok("n := 0\nfn bump():\n    n = n + 1\nfn main():\n    bump := fn(): 1\n    parallel:\n        spawn bump()\nmain()\n");
+}
+
+#[test]
+fn spawn_global_mutation_inside_recover_rejected() {
+    // A `recover:` block is an expression that embeds a full statement block — a global mutation
+    // hidden inside one in a spawn-reachable fn must still be caught.
+    rejects(
+        "n := 0\nfn bump():\n    x := recover:\n        n = n + 1\n    print(x)\nfn main():\n    parallel:\n        spawn bump()\nmain()\n",
+        "use Shared[T]",
+    );
+}
+
 // ----- C5 refinement #2: `Ref` non-sendability keys on origin, not the bare name -----
 
 #[test]

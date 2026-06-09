@@ -4753,6 +4753,32 @@ mod tests {
         assert!(vm.values_equal(v, wired), "the fresh str must be value-equal to the original");
     }
 
+    /// B3.3a: a `str` used as a **map key** crosses by value and stays findable — the cached hash is
+    /// carried through and `from_wire` rebuilds the key as a fresh handle whose content hashes
+    /// identically (hashing keys on bytes, not `GcRef`), so the reconstructed map's bucket index is
+    /// preserved. Guards against a future change that hashed/compared str keys by handle identity.
+    #[test]
+    fn wire_str_map_key_survives_roundtrip() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        let key = vm.heap.alloc(Obj::Str("k".into()));
+        let mut m = MapData::default();
+        let h = vm.scalar_hash(Value::Obj(key));
+        m.push(h, Value::Obj(key), Value::Int(42));
+        let map = Value::Obj(vm.heap.alloc(Obj::Map(m)));
+
+        let w = vm.to_wire(map).expect("map with a str key should serialize");
+        let wired = vm.from_wire(w);
+        let Value::Obj(mh) = wired else { panic!("expected map handle") };
+        let Obj::Map(rebuilt) = vm.heap.get(mh) else { panic!("expected map") };
+        // Same single entry: a fresh str key, value-equal, same cached hash → same bucket.
+        assert_eq!(rebuilt.entries.len(), 1);
+        let (rh, rk, rv) = &rebuilt.entries[0];
+        assert_eq!(*rh, h, "cached hash preserved");
+        assert_eq!(*rv, Value::Int(42));
+        assert_eq!(rebuilt.candidates(h), &[0], "index bucket points at the rebuilt key");
+        assert!(vm.values_equal(*rk, Value::Obj(key)), "rebuilt str key is value-equal");
+    }
+
     /// B3.1: `Channel`/`Shared`/`Executor` cross the airlock as their shared `Arc<…Core>`. The
     /// round-trip yields a *fresh* `GcRef` (a new handle obj) wrapping the **same** core — identity is
     /// at the `Arc`, not the handle, so two tasks still reach one mailbox/box/queue.

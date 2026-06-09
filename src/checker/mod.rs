@@ -535,9 +535,10 @@ impl Checker {
             }
             if let Some(d) = fns.get(name.as_str()) {
                 let mut callees = Vec::new();
-                collect_call_idents_block(&d.body, &mut callees);
+                let mut scopes = vec![d.params.iter().map(|p| p.name.clone()).collect()];
+                collect_free_calls_block(&d.body, &fns, &mut scopes, &mut callees);
                 for c in callees {
-                    if fns.contains_key(c.as_str()) && !reachable.contains(&c) {
+                    if !reachable.contains(&c) {
                         work.push(c);
                     }
                 }
@@ -4365,194 +4366,258 @@ impl Checker {
 }
 
 // ===== G1 (B3.3b) AST walkers: spawn-reachable module-global mutation =====
+//
+// Name resolution here is **scope-aware**: a call or `spawn` target `f()` references the free
+// function `f` only when `f` is not shadowed by a local binding in scope (params, `let`, `for`/
+// `match` binders, closure params, comprehension vars). Two indirect-dispatch cases are deliberately
+// NOT modelled (the static call graph can't follow them), consistent with the documented
+// method-mediated gap; both land with the B3.3 thread flip:
+//   1. a module-global bound to a *closure* used as a `spawn`/call target (`g := fn(): …; spawn g()`);
+//   2. method calls (`obj.m()` / `spawn obj.m()`).
 
-/// Collect `spawn` targets across every block in `stmts`, recursing into all nested bodies (fn /
-/// method / `if` / `for` / `while` / `match` / `parallel` / `spawn:` blocks) — a `spawn` inside any
-/// function makes its target a task root, even if that enclosing function is itself only called
-/// sequentially. A `spawn f(...)` with a free-fn `Ident` callee roots `f`; a `spawn:` block roots
-/// every free fn it directly calls. Method spawns (`spawn obj.m()`) are out of scope (documented gap).
+/// Is `name` shadowed by a local binding currently in scope?
+fn is_locally_shadowed(name: &str, scopes: &[std::collections::HashSet<String>]) -> bool {
+    scopes.iter().any(|s| s.contains(name))
+}
+
+/// Collect `spawn` task roots across the whole module — the free functions a `spawn` makes reachable.
+/// A `spawn` inside *any* function roots its target even if that function is only called sequentially
+/// (the spawn still fires when the function runs). Scope-aware: a `spawn f()` whose `f` is shadowed by
+/// a local targets that local, not the free fn, so it is not rooted.
 fn collect_spawn_roots(stmts: &[Stmt], fns: &HashMap<&str, &FnDecl>, out: &mut Vec<String>) {
-    for s in stmts {
-        if let StmtKind::Spawn(target) = &s.kind {
-            match target {
-                SpawnTarget::Call(e) => {
-                    if let ExprKind::Call { callee, .. } = &e.kind
-                        && let ExprKind::Ident(name) = &callee.kind
-                        && fns.contains_key(name.as_str())
-                    {
-                        out.push(name.clone());
-                    }
-                }
-                SpawnTarget::Block(body) => {
-                    let mut callees = Vec::new();
-                    collect_call_idents_block(body, &mut callees);
-                    for c in callees {
-                        if fns.contains_key(c.as_str()) {
-                            out.push(c);
-                        }
-                    }
-                }
-            }
-        }
-        for b in stmt_child_blocks(&s.kind) {
-            collect_spawn_roots(b, fns, out);
-        }
-    }
+    let mut scopes: Vec<std::collections::HashSet<String>> = vec![std::collections::HashSet::new()];
+    walk_spawn_roots(stmts, fns, &mut scopes, out);
 }
 
-/// The nested statement-blocks directly owned by a statement (for generic recursion).
-fn stmt_child_blocks(kind: &StmtKind) -> Vec<&Block> {
-    let mut v = Vec::new();
-    match kind {
-        StmtKind::Fn(d) => v.push(&d.body),
-        StmtKind::Struct { methods, .. } => v.extend(methods.iter().map(|m| &m.body)),
-        StmtKind::If { branches, else_block } => {
-            v.extend(branches.iter().map(|(_, b)| b));
-            if let Some(b) = else_block {
-                v.push(b);
-            }
-        }
-        StmtKind::For { body, .. } | StmtKind::While { body, .. } => v.push(body),
-        StmtKind::Match { arms, .. } => v.extend(arms.iter().map(|a| &a.body)),
-        StmtKind::Parallel { body } => v.push(body),
-        StmtKind::Spawn(SpawnTarget::Block(body)) => v.push(body),
-        _ => {}
-    }
-    v
-}
-
-/// Collect the names of every `Ident`-callee call (`f(...)`) appearing anywhere in a block — its
-/// statements, their sub-expressions, and nested blocks. Backs both the call-graph edges and a
-/// `spawn:` block's roots.
-fn collect_call_idents_block(block: &Block, out: &mut Vec<String>) {
+/// Walk a block (under `scopes`) for `spawn` roots: descend nested control flow with pushed scopes,
+/// and each `fn`/method body under a fresh parameter scope (chezzi has no nested `fn` declarations,
+/// so a fresh stack per body is sound).
+fn walk_spawn_roots(
+    block: &[Stmt],
+    fns: &HashMap<&str, &FnDecl>,
+    scopes: &mut Vec<std::collections::HashSet<String>>,
+    out: &mut Vec<String>,
+) {
+    scopes.push(std::collections::HashSet::new());
     for s in block {
         match &s.kind {
-            StmtKind::Let { value, .. } => collect_call_idents_expr(value, out),
-            StmtKind::Assign { target, value, .. } => {
-                collect_call_idents_expr(target, out);
-                collect_call_idents_expr(value, out);
+            StmtKind::Let { names, .. } => {
+                scopes.last_mut().unwrap().extend(names.iter().cloned());
             }
-            StmtKind::Return(Some(e)) | StmtKind::Expr(e) | StmtKind::Defer(e) => {
-                collect_call_idents_expr(e, out)
+            StmtKind::Spawn(SpawnTarget::Call(e)) => {
+                if let ExprKind::Call { callee, .. } = &e.kind
+                    && let ExprKind::Ident(name) = &callee.kind
+                    && fns.contains_key(name.as_str())
+                    && !is_locally_shadowed(name, scopes)
+                {
+                    out.push(name.clone());
+                }
+            }
+            StmtKind::Spawn(SpawnTarget::Block(body)) => {
+                // The block runs as the task: free fns it calls are roots (scope-aware).
+                collect_free_calls_block(body, fns, scopes, out);
+                walk_spawn_roots(body, fns, scopes, out); // nested spawns
             }
             StmtKind::If { branches, else_block } => {
-                for (c, b) in branches {
-                    collect_call_idents_expr(c, out);
-                    collect_call_idents_block(b, out);
+                for (_, b) in branches {
+                    walk_spawn_roots(b, fns, scopes, out);
                 }
                 if let Some(b) = else_block {
-                    collect_call_idents_block(b, out);
+                    walk_spawn_roots(b, fns, scopes, out);
                 }
             }
-            StmtKind::For { iter, body, .. } => {
-                collect_call_idents_expr(iter, out);
-                collect_call_idents_block(body, out);
+            StmtKind::For { vars, body, .. } => {
+                scopes.push(vars.iter().cloned().collect());
+                walk_spawn_roots(body, fns, scopes, out);
+                scopes.pop();
             }
-            StmtKind::While { cond, body } => {
-                collect_call_idents_expr(cond, out);
-                collect_call_idents_block(body, out);
+            StmtKind::While { body, .. } | StmtKind::Parallel { body } => {
+                walk_spawn_roots(body, fns, scopes, out)
             }
-            StmtKind::Match { scrutinee, arms } => {
-                collect_call_idents_expr(scrutinee, out);
+            StmtKind::Match { arms, .. } => {
                 for a in arms {
-                    if let Some(g) = &a.guard {
-                        collect_call_idents_expr(g, out);
-                    }
-                    collect_call_idents_block(&a.body, out);
+                    scopes.push(pattern_bindings(&a.pattern));
+                    walk_spawn_roots(&a.body, fns, scopes, out);
+                    scopes.pop();
                 }
             }
-            StmtKind::Parallel { body } => collect_call_idents_block(body, out),
-            StmtKind::Spawn(SpawnTarget::Call(e)) => collect_call_idents_expr(e, out),
-            StmtKind::Spawn(SpawnTarget::Block(body)) => collect_call_idents_block(body, out),
-            // Nested fn/struct/enum/protocol/alias/import/control-flow-without-exprs: no calls to
-            // attribute to the enclosing function body (chezzi has no nested fn/struct declarations).
+            StmtKind::Fn(d) => {
+                let mut s2 = vec![d.params.iter().map(|p| p.name.clone()).collect()];
+                walk_spawn_roots(&d.body, fns, &mut s2, out);
+            }
+            StmtKind::Struct { methods, .. } => {
+                for m in methods {
+                    let mut s2 = vec![m.params.iter().map(|p| p.name.clone()).collect()];
+                    walk_spawn_roots(&m.body, fns, &mut s2, out);
+                }
+            }
             _ => {}
         }
     }
+    scopes.pop();
 }
 
-/// Collect `Ident`-callee call names reachable from a single expression (recursing through every
-/// sub-expression). Exhaustive over [`ExprKind`] so a call nested in an argument / operand /
-/// comprehension / closure body is not missed.
-fn collect_call_idents_expr(e: &Expr, out: &mut Vec<String>) {
+/// Collect the free functions called (by bare `Ident`) anywhere in `block`, scope-aware (a call to a
+/// locally-shadowed name is not a free-fn reference). Backs both call-graph edges (seed `scopes` with
+/// the caller's params) and a `spawn:` block's roots. Including the calls inside a nested `spawn` is
+/// harmless — those targets are already roots via [`walk_spawn_roots`], so they never add reachability
+/// the root set does not already have.
+fn collect_free_calls_block(
+    block: &[Stmt],
+    fns: &HashMap<&str, &FnDecl>,
+    scopes: &mut Vec<std::collections::HashSet<String>>,
+    out: &mut Vec<String>,
+) {
+    scopes.push(std::collections::HashSet::new());
+    for s in block {
+        match &s.kind {
+            StmtKind::Let { names, value, .. } => {
+                collect_free_calls_expr(value, fns, scopes, out);
+                scopes.last_mut().unwrap().extend(names.iter().cloned());
+            }
+            StmtKind::Assign { target, value, .. } => {
+                collect_free_calls_expr(target, fns, scopes, out);
+                collect_free_calls_expr(value, fns, scopes, out);
+            }
+            StmtKind::Return(Some(e)) | StmtKind::Expr(e) | StmtKind::Defer(e) => {
+                collect_free_calls_expr(e, fns, scopes, out)
+            }
+            StmtKind::If { branches, else_block } => {
+                for (c, b) in branches {
+                    collect_free_calls_expr(c, fns, scopes, out);
+                    collect_free_calls_block(b, fns, scopes, out);
+                }
+                if let Some(b) = else_block {
+                    collect_free_calls_block(b, fns, scopes, out);
+                }
+            }
+            StmtKind::For { vars, iter, body } => {
+                collect_free_calls_expr(iter, fns, scopes, out);
+                scopes.push(vars.iter().cloned().collect());
+                collect_free_calls_block(body, fns, scopes, out);
+                scopes.pop();
+            }
+            StmtKind::While { cond, body } => {
+                collect_free_calls_expr(cond, fns, scopes, out);
+                collect_free_calls_block(body, fns, scopes, out);
+            }
+            StmtKind::Match { scrutinee, arms } => {
+                collect_free_calls_expr(scrutinee, fns, scopes, out);
+                for a in arms {
+                    scopes.push(pattern_bindings(&a.pattern));
+                    if let Some(g) = &a.guard {
+                        collect_free_calls_expr(g, fns, scopes, out);
+                    }
+                    collect_free_calls_block(&a.body, fns, scopes, out);
+                    scopes.pop();
+                }
+            }
+            StmtKind::Parallel { body } => collect_free_calls_block(body, fns, scopes, out),
+            StmtKind::Spawn(SpawnTarget::Call(e)) => collect_free_calls_expr(e, fns, scopes, out),
+            StmtKind::Spawn(SpawnTarget::Block(body)) => {
+                collect_free_calls_block(body, fns, scopes, out)
+            }
+            _ => {}
+        }
+    }
+    scopes.pop();
+}
+
+/// Scope-aware free-fn call collection within a single expression (exhaustive over [`ExprKind`]).
+/// Closure params and comprehension vars are pushed as scopes so a binder shadowing a free-fn name is
+/// respected even in expression position.
+fn collect_free_calls_expr(
+    e: &Expr,
+    fns: &HashMap<&str, &FnDecl>,
+    scopes: &mut Vec<std::collections::HashSet<String>>,
+    out: &mut Vec<String>,
+) {
     match &e.kind {
         ExprKind::Call { callee, args, named, .. } => {
             if let ExprKind::Ident(name) = &callee.kind {
-                out.push(name.clone());
+                if fns.contains_key(name.as_str()) && !is_locally_shadowed(name, scopes) {
+                    out.push(name.clone());
+                }
             } else {
-                collect_call_idents_expr(callee, out);
+                collect_free_calls_expr(callee, fns, scopes, out);
             }
             for a in args {
-                collect_call_idents_expr(a, out);
+                collect_free_calls_expr(a, fns, scopes, out);
             }
             for (_, a) in named {
-                collect_call_idents_expr(a, out);
+                collect_free_calls_expr(a, fns, scopes, out);
             }
         }
         ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
-            xs.iter().for_each(|x| collect_call_idents_expr(x, out))
+            xs.iter().for_each(|x| collect_free_calls_expr(x, fns, scopes, out))
         }
         ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
-            collect_call_idents_expr(k, out);
-            collect_call_idents_expr(v, out);
+            collect_free_calls_expr(k, fns, scopes, out);
+            collect_free_calls_expr(v, fns, scopes, out);
         }),
-        ExprKind::Comprehension { key, elem, iter, guard, .. } => {
+        ExprKind::Comprehension { key, elem, iter, guard, vars, .. } => {
+            collect_free_calls_expr(iter, fns, scopes, out); // iter binds in the OUTER scope
+            scopes.push(vars.iter().cloned().collect());
             if let Some(k) = key {
-                collect_call_idents_expr(k, out);
+                collect_free_calls_expr(k, fns, scopes, out);
             }
-            collect_call_idents_expr(elem, out);
-            collect_call_idents_expr(iter, out);
+            collect_free_calls_expr(elem, fns, scopes, out);
             if let Some(g) = guard {
-                collect_call_idents_expr(g, out);
+                collect_free_calls_expr(g, fns, scopes, out);
             }
+            scopes.pop();
         }
-        ExprKind::Unary { expr, .. } => collect_call_idents_expr(expr, out),
+        ExprKind::Unary { expr, .. } => collect_free_calls_expr(expr, fns, scopes, out),
         ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
-            collect_call_idents_expr(lhs, out);
-            collect_call_idents_expr(rhs, out);
+            collect_free_calls_expr(lhs, fns, scopes, out);
+            collect_free_calls_expr(rhs, fns, scopes, out);
         }
         ExprKind::Range { start, end } => {
-            collect_call_idents_expr(start, out);
-            collect_call_idents_expr(end, out);
+            collect_free_calls_expr(start, fns, scopes, out);
+            collect_free_calls_expr(end, fns, scopes, out);
         }
-        ExprKind::Field { obj, .. } => collect_call_idents_expr(obj, out),
+        ExprKind::Field { obj, .. } => collect_free_calls_expr(obj, fns, scopes, out),
         ExprKind::Index { obj, index } => {
-            collect_call_idents_expr(obj, out);
-            collect_call_idents_expr(index, out);
+            collect_free_calls_expr(obj, fns, scopes, out);
+            collect_free_calls_expr(index, fns, scopes, out);
         }
         ExprKind::Slice { obj, start, end } => {
-            collect_call_idents_expr(obj, out);
-            collect_call_idents_expr(start, out);
-            collect_call_idents_expr(end, out);
+            collect_free_calls_expr(obj, fns, scopes, out);
+            collect_free_calls_expr(start, fns, scopes, out);
+            collect_free_calls_expr(end, fns, scopes, out);
         }
-        ExprKind::Try(inner) => collect_call_idents_expr(inner, out),
+        ExprKind::Try(inner) => collect_free_calls_expr(inner, fns, scopes, out),
         ExprKind::OptChain { obj, call, .. } => {
-            collect_call_idents_expr(obj, out);
+            collect_free_calls_expr(obj, fns, scopes, out);
             if let Some(c) = call {
-                c.args.iter().for_each(|a| collect_call_idents_expr(a, out));
-                c.named.iter().for_each(|(_, a)| collect_call_idents_expr(a, out));
+                c.args.iter().for_each(|a| collect_free_calls_expr(a, fns, scopes, out));
+                c.named.iter().for_each(|(_, a)| collect_free_calls_expr(a, fns, scopes, out));
             }
         }
         ExprKind::DecodeCall { obj, arg, .. } => {
-            collect_call_idents_expr(obj, out);
-            collect_call_idents_expr(arg, out);
+            collect_free_calls_expr(obj, fns, scopes, out);
+            collect_free_calls_expr(arg, fns, scopes, out);
         }
-        ExprKind::Closure { body, .. } => collect_call_idents_expr(body, out),
+        ExprKind::Closure { params, body, .. } => {
+            scopes.push(params.iter().map(|p| p.name.clone()).collect());
+            collect_free_calls_expr(body, fns, scopes, out);
+            scopes.pop();
+        }
         ExprKind::Match { scrutinee, arms } => {
-            collect_call_idents_expr(scrutinee, out);
+            collect_free_calls_expr(scrutinee, fns, scopes, out);
             for a in arms {
                 if let Some(g) = &a.guard {
-                    collect_call_idents_expr(g, out);
+                    collect_free_calls_expr(g, fns, scopes, out);
                 }
-                collect_call_idents_expr(&a.body, out);
+                collect_free_calls_expr(&a.body, fns, scopes, out);
             }
         }
         ExprKind::IfElse { cond, then, els } => {
-            collect_call_idents_expr(cond, out);
-            collect_call_idents_expr(then, out);
-            collect_call_idents_expr(els, out);
+            collect_free_calls_expr(cond, fns, scopes, out);
+            collect_free_calls_expr(then, fns, scopes, out);
+            collect_free_calls_expr(els, fns, scopes, out);
         }
-        ExprKind::Recover(block) => collect_call_idents_block(block, out),
+        ExprKind::Recover(block) => collect_free_calls_block(block, fns, scopes, out),
         ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::Str(_)
@@ -4563,8 +4628,11 @@ fn collect_call_idents_expr(e: &Expr, out: &mut Vec<String>) {
 
 /// Walk a block for reassignments (`= / += / -=`) of a module global that is **not shadowed** by a
 /// local binding in scope, recording `(span, global_name)` for each. `scopes` is a stack of
-/// local-name sets (params at the base); nested blocks push/pop their own frame so a local
-/// shadowing a global is correctly excluded only within its scope.
+/// local-name sets (params at the base); nested blocks push/pop their own frame so a local shadowing
+/// a global is excluded only within its scope. A `spawn:` block's *own* direct mutations are NOT
+/// flagged here — the normal-pass `is_captured` gate already rejects them — but a `recover:` block
+/// (an expression embedding a statement block) and closure/comprehension bodies are descended into so
+/// a mutation hidden in one is still caught.
 fn find_global_mutations(
     block: &Block,
     globals: &std::collections::HashSet<String>,
@@ -4574,48 +4642,160 @@ fn find_global_mutations(
     scopes.push(std::collections::HashSet::new());
     for s in block {
         match &s.kind {
-            StmtKind::Let { names, .. } => {
+            StmtKind::Let { names, value, .. } => {
+                find_mutations_in_expr(value, globals, scopes, out);
                 for n in names {
                     scopes.last_mut().unwrap().insert(n.clone());
                 }
             }
-            StmtKind::Assign { target, op: _, .. } => {
+            StmtKind::Assign { target, value, op: _ } => {
+                find_mutations_in_expr(value, globals, scopes, out);
                 if let ExprKind::Ident(name) = &target.kind {
-                    let shadowed = scopes.iter().any(|s| s.contains(name));
-                    if !shadowed && globals.contains(name) {
+                    if !is_locally_shadowed(name, scopes) && globals.contains(name) {
                         out.push((target.span, name.clone()));
                     }
+                } else {
+                    find_mutations_in_expr(target, globals, scopes, out);
                 }
             }
+            StmtKind::Return(Some(e)) | StmtKind::Expr(e) | StmtKind::Defer(e) => {
+                find_mutations_in_expr(e, globals, scopes, out)
+            }
             StmtKind::If { branches, else_block } => {
-                for (_, b) in branches {
+                for (c, b) in branches {
+                    find_mutations_in_expr(c, globals, scopes, out);
                     find_global_mutations(b, globals, scopes, out);
                 }
                 if let Some(b) = else_block {
                     find_global_mutations(b, globals, scopes, out);
                 }
             }
-            StmtKind::For { vars, body, .. } => {
+            StmtKind::For { vars, iter, body } => {
+                find_mutations_in_expr(iter, globals, scopes, out);
                 scopes.push(vars.iter().cloned().collect());
                 find_global_mutations(body, globals, scopes, out);
                 scopes.pop();
             }
-            StmtKind::While { body, .. } => find_global_mutations(body, globals, scopes, out),
-            StmtKind::Match { arms, .. } => {
+            StmtKind::While { cond, body } => {
+                find_mutations_in_expr(cond, globals, scopes, out);
+                find_global_mutations(body, globals, scopes, out);
+            }
+            StmtKind::Match { scrutinee, arms } => {
+                find_mutations_in_expr(scrutinee, globals, scopes, out);
                 for a in arms {
                     scopes.push(pattern_bindings(&a.pattern));
+                    if let Some(g) = &a.guard {
+                        find_mutations_in_expr(g, globals, scopes, out);
+                    }
                     find_global_mutations(&a.body, globals, scopes, out);
                     scopes.pop();
                 }
             }
             StmtKind::Parallel { body } => find_global_mutations(body, globals, scopes, out),
-            StmtKind::Spawn(SpawnTarget::Block(body)) => {
-                find_global_mutations(body, globals, scopes, out)
+            StmtKind::Spawn(SpawnTarget::Call(e)) => {
+                find_mutations_in_expr(e, globals, scopes, out)
             }
             _ => {}
         }
     }
     scopes.pop();
+}
+
+/// Find module-global mutations hidden inside an expression: a `recover:` block (statement block in
+/// expression position) is descended via [`find_global_mutations`]; closure/comprehension bodies push
+/// their binders as scopes so a shadowing binder is respected. Exhaustive over [`ExprKind`].
+fn find_mutations_in_expr(
+    e: &Expr,
+    globals: &std::collections::HashSet<String>,
+    scopes: &mut Vec<std::collections::HashSet<String>>,
+    out: &mut Vec<(Span, String)>,
+) {
+    match &e.kind {
+        ExprKind::Recover(block) => find_global_mutations(block, globals, scopes, out),
+        ExprKind::Closure { params, body, .. } => {
+            scopes.push(params.iter().map(|p| p.name.clone()).collect());
+            find_mutations_in_expr(body, globals, scopes, out);
+            scopes.pop();
+        }
+        ExprKind::Comprehension { key, elem, iter, guard, vars, .. } => {
+            find_mutations_in_expr(iter, globals, scopes, out);
+            scopes.push(vars.iter().cloned().collect());
+            if let Some(k) = key {
+                find_mutations_in_expr(k, globals, scopes, out);
+            }
+            find_mutations_in_expr(elem, globals, scopes, out);
+            if let Some(g) = guard {
+                find_mutations_in_expr(g, globals, scopes, out);
+            }
+            scopes.pop();
+        }
+        ExprKind::Call { callee, args, named, .. } => {
+            find_mutations_in_expr(callee, globals, scopes, out);
+            for a in args {
+                find_mutations_in_expr(a, globals, scopes, out);
+            }
+            for (_, a) in named {
+                find_mutations_in_expr(a, globals, scopes, out);
+            }
+        }
+        ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
+            xs.iter().for_each(|x| find_mutations_in_expr(x, globals, scopes, out))
+        }
+        ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
+            find_mutations_in_expr(k, globals, scopes, out);
+            find_mutations_in_expr(v, globals, scopes, out);
+        }),
+        ExprKind::Unary { expr, .. } => find_mutations_in_expr(expr, globals, scopes, out),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
+            find_mutations_in_expr(lhs, globals, scopes, out);
+            find_mutations_in_expr(rhs, globals, scopes, out);
+        }
+        ExprKind::Range { start, end } => {
+            find_mutations_in_expr(start, globals, scopes, out);
+            find_mutations_in_expr(end, globals, scopes, out);
+        }
+        ExprKind::Field { obj, .. } => find_mutations_in_expr(obj, globals, scopes, out),
+        ExprKind::Index { obj, index } => {
+            find_mutations_in_expr(obj, globals, scopes, out);
+            find_mutations_in_expr(index, globals, scopes, out);
+        }
+        ExprKind::Slice { obj, start, end } => {
+            find_mutations_in_expr(obj, globals, scopes, out);
+            find_mutations_in_expr(start, globals, scopes, out);
+            find_mutations_in_expr(end, globals, scopes, out);
+        }
+        ExprKind::Try(inner) => find_mutations_in_expr(inner, globals, scopes, out),
+        ExprKind::OptChain { obj, call, .. } => {
+            find_mutations_in_expr(obj, globals, scopes, out);
+            if let Some(c) = call {
+                c.args.iter().for_each(|a| find_mutations_in_expr(a, globals, scopes, out));
+                c.named.iter().for_each(|(_, a)| find_mutations_in_expr(a, globals, scopes, out));
+            }
+        }
+        ExprKind::DecodeCall { obj, arg, .. } => {
+            find_mutations_in_expr(obj, globals, scopes, out);
+            find_mutations_in_expr(arg, globals, scopes, out);
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            find_mutations_in_expr(scrutinee, globals, scopes, out);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    find_mutations_in_expr(g, globals, scopes, out);
+                }
+                find_mutations_in_expr(&a.body, globals, scopes, out);
+            }
+        }
+        ExprKind::IfElse { cond, then, els } => {
+            find_mutations_in_expr(cond, globals, scopes, out);
+            find_mutations_in_expr(then, globals, scopes, out);
+            find_mutations_in_expr(els, globals, scopes, out);
+        }
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Ident(_) => {}
+    }
 }
 
 /// The names a match pattern binds (variant payload slots, tuple elements, sub-bindings).
