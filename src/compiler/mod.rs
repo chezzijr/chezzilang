@@ -1262,6 +1262,15 @@ impl Compiler {
         // Bare-ident callees resolve by name in the interpreter's order:
         // print → builtin → struct ctor → variant ctor → value.
         if let ExprKind::Ident(name) = &callee.kind {
+            // Concurrency (C2) `Channel[T]()` lands on the interpreter first; VM parity is C4.
+            // Guard here so a channel-only program (no `parallel:`) gives the staging hint rather
+            // than a misleading "undefined name 'Channel'". Mirrors the Parallel/Spawn guard.
+            if name == "Channel" {
+                return Err(CompileError {
+                    message: "Channel runs on `--interp` until VM parity lands (C4)".to_string(),
+                    span,
+                });
+            }
             if name == "print" {
                 for a in args {
                     self.compile_expr(fc, a)?;

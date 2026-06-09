@@ -106,7 +106,10 @@ fn deep_clone(v: &Value) -> Value {
         | Value::Func(_, _)
         | Value::Closure(_)
         | Value::Native(_)
-        | Value::Module(_) => v.clone(),
+        | Value::Module(_)
+        // A Channel is a shared mailbox: the handle crosses the airlock by reference (clone the
+        // `Rc`), never deep-copied — both ends must see the same queue.
+        | Value::Channel(_) => v.clone(),
         Value::List(items) => {
             let cloned = items.borrow().iter().map(deep_clone).collect::<Vec<_>>();
             Value::List(Rc::new(RefCell::new(cloned)))
@@ -774,6 +777,18 @@ impl Interp {
             if name == "set" {
                 return self.builtin_set(arg_vals, span);
             }
+            // `Channel[T]()` (C2) — a fresh empty mailbox (type arg erased at runtime).
+            if name == "Channel" {
+                if !arg_vals.is_empty() {
+                    return Err(RuntimeError {
+                        message: "Channel() takes no arguments".to_string(),
+                        span,
+                    });
+                }
+                return Ok(Value::Channel(std::rc::Rc::new(std::cell::RefCell::new(
+                    std::collections::VecDeque::new(),
+                ))));
+            }
             if builtins::is_builtin(name) {
                 return builtins::call(name, arg_vals, span);
             }
@@ -869,15 +884,22 @@ impl Interp {
                         span,
                     });
                 };
-                let arg_vals = args
-                    .iter()
-                    .map(|a| self.eval(a).map(|v| deep_clone(&v)))
-                    .collect::<Result<Vec<_>, _>>()?;
+                // Evaluate the receiver (method form) before the arguments, matching
+                // `eval_method_call`'s documented order so `spawn obj.m(a)` and a direct call agree
+                // (interp/VM parity).
                 if let ExprKind::Field { obj, name } = &callee.kind {
                     let recv = deep_clone(&self.eval(obj)?);
+                    let arg_vals = args
+                        .iter()
+                        .map(|a| self.eval(a).map(|v| deep_clone(&v)))
+                        .collect::<Result<Vec<_>, _>>()?;
                     Task::Method { recv, name: name.clone(), args: arg_vals, span: call.span }
                 } else {
                     let callee_val = self.eval(callee)?;
+                    let arg_vals = args
+                        .iter()
+                        .map(|a| self.eval(a).map(|v| deep_clone(&v)))
+                        .collect::<Result<Vec<_>, _>>()?;
                     Task::Call { callee: callee_val, args: arg_vals, span: call.span }
                 }
             }
@@ -1250,6 +1272,10 @@ impl Interp {
         if let Value::Set(s) = &receiver {
             let s = std::rc::Rc::clone(s);
             return self.eval_set_method(&s, method, arg_vals, span);
+        }
+        if let Value::Channel(q) = &receiver {
+            let q = std::rc::Rc::clone(q);
+            return self.eval_channel_method(&q, method, arg_vals, span);
         }
         // Core-type methods (M6): built-in methods on `str` and `list` dispatch on the value.
         if matches!(receiver, Value::Str(_) | Value::List(_)) {
@@ -1840,6 +1866,48 @@ impl Interp {
                 Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(out))))
             }
             _ => Err(RuntimeError { message: format!("type set has no method '{method}'"), span }),
+        }
+    }
+
+    /// `Channel[T]` methods (C2). The channel is a buffered, unbounded FIFO under the sequential
+    /// executor: `send` never blocks; `recv` on an empty channel is a deadlock-detect fault (all
+    /// tasks have finished and nothing is queued), *not* a hang — that preserves the C5 blocking
+    /// surface. Values move across the airlock on `send` (deep-copied in) so the queue never shares
+    /// mutable state with the sender.
+    fn eval_channel_method(
+        &mut self,
+        q: &std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Value>>>,
+        method: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            "send" => {
+                builtins::arity("send", &args, 1, span)?;
+                q.borrow_mut().push_back(deep_clone(&args[0]));
+                Ok(Value::Nil)
+            }
+            "recv" => {
+                builtins::arity("recv", &args, 0, span)?;
+                match q.borrow_mut().pop_front() {
+                    Some(v) => Ok(v),
+                    None => Err(RuntimeError {
+                        message: "recv on an empty channel: deadlock — nothing is queued and the \
+                                  sequential executor cannot block waiting for a producer (a \
+                                  consumer that waits mid-flight on a live producer needs C5)"
+                            .to_string(),
+                        span,
+                    }),
+                }
+            }
+            "len" => {
+                builtins::arity("len", &args, 0, span)?;
+                Ok(Value::Int(q.borrow().len() as i64))
+            }
+            _ => Err(RuntimeError {
+                message: format!("type Channel has no method '{method}'"),
+                span,
+            }),
         }
     }
 
@@ -4334,6 +4402,36 @@ b := Buf([10, 20, 30])
         let source = include_str!("../../examples/parallel.chz");
         let expected = include_str!("../../examples/parallel.expected");
         assert_eq!(run_capture(source).expect("parallel.chz should run"), expected);
+    }
+
+    /// C2 concurrency golden: the canonical `Channel[T]` fan-out worker — spawned workers `send`
+    /// results into a shared mailbox that the parent collects after the join (FIFO). Interp-only
+    /// until C4.
+    #[test]
+    fn golden_channel_chz() {
+        let source = include_str!("../../examples/channel.chz");
+        let expected = include_str!("../../examples/channel.expected");
+        assert_eq!(run_capture(source).expect("channel.chz should run"), expected);
+    }
+
+    #[test]
+    fn channel_recv_on_empty_is_deadlock_error() {
+        let err = run_capture("fn main():\n    ch := Channel[int]()\n    print(ch.recv())\nmain()\n")
+            .unwrap_err();
+        assert!(err.message.contains("deadlock"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn channel_send_recv_fifo() {
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    ch.send(2)\n    print(ch.recv())\n    print(ch.recv())\nmain()\n";
+        assert_eq!(run(src), "1\n2\n");
+    }
+
+    #[test]
+    fn channel_send_deep_copies_value() {
+        // Mutating the original list after send must NOT change what the channel holds (airlock).
+        let src = "fn main():\n    ch := Channel[list[int]]()\n    xs := [1, 2]\n    ch.send(xs)\n    xs.push(3)\n    print(ch.recv())\nmain()\n";
+        assert_eq!(run(src), "[1, 2]\n");
     }
 
     // ----- golden coverage for the formerly-orphaned examples + the comprehensive torture

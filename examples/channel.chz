@@ -1,0 +1,20 @@
+# C2 concurrency: `Channel[T]` fan-out. Workers run at the nursery's dedent and drop their results
+# into a shared mailbox; the parent collects them after the join. Move-on-send keeps each task's
+# heap isolated — only the channel handle is shared.
+
+fn worker(id: int, prefix: str, out: Channel[str]):
+    out.send("{prefix}-{id}")
+
+fn main():
+    ch := Channel[str]()
+    label := "task"
+    parallel:
+        spawn worker(1, label, ch)       # 1, label COPIED in; ch is the shared mailbox handle
+        spawn worker(2, label, ch)
+        spawn worker(3, label, ch)
+    # Reaching here ⇒ all three workers finished. Their strings are queued FIFO.
+    print("received {ch.len()} messages")
+    for _ in 0..3:
+        print(ch.recv())
+
+main()

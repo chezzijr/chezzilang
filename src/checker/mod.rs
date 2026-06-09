@@ -300,6 +300,11 @@ struct Checker {
     /// Reset to 0 across a (nested) fn/closure boundary so a task binds to a nursery within its own
     /// function (the function-boundary rule). `> 0` ⇒ `spawn` is legal here.
     nursery_depth: usize,
+    /// For each `spawn:` block body currently being checked, the local-scope depth (`scopes.len()`)
+    /// at the point the task body opened. A binding living at a scope index *below* the innermost
+    /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
+    /// Empty outside any `spawn:` block.
+    capture_floors: Vec<usize>,
 }
 
 impl Checker {
@@ -329,6 +334,7 @@ impl Checker {
             current_module_label: None,
             loop_depth: 0,
             nursery_depth: 0,
+            capture_floors: Vec::new(),
         };
         c.seed_stdlib_structs();
         c
@@ -506,6 +512,21 @@ impl Checker {
         for i in (0..self.scopes.len()).rev() {
             if self.scopes[i].contains_key(name) {
                 return self.loop_vars[i].contains(name);
+            }
+        }
+        false
+    }
+    /// Is `name` a binding **captured** by an enclosing `spawn:` task — i.e. defined in a local
+    /// scope below the innermost task's floor? Such bindings are read-only inside the task body
+    /// (the airlock: a task gets its own copy, so reassigning the capture can't leak out). A
+    /// task-local binding (declared inside the task) and a global/function are not captures.
+    fn is_captured(&self, name: &str) -> bool {
+        let Some(&floor) = self.capture_floors.last() else {
+            return false;
+        };
+        for i in (0..self.scopes.len()).rev() {
+            if self.scopes[i].contains_key(name) {
+                return i < floor;
             }
         }
         false
@@ -824,6 +845,16 @@ impl Checker {
                     Ty::result_e(self.resolve_type(t, span), self.resolve_type(e, span))
                 }
                 ("Option", [inner]) => Ty::option(self.resolve_type(inner, span)),
+                ("Channel", [inner]) => {
+                    let elem = self.resolve_type(inner, span);
+                    if !self.sendable(&elem) {
+                        self.error(
+                            span,
+                            format!("Channel element type must be sendable, found {elem}"),
+                        );
+                    }
+                    Ty::channel(elem)
+                }
                 ("map", [k, v]) => {
                     let key = self.resolve_type(k, span);
                     let value = self.resolve_type(v, span);
@@ -1076,16 +1107,73 @@ impl Checker {
                 }
                 match target {
                     SpawnTarget::Call(e) => {
-                        // The target must be a call (parser-enforced); type-check it like an
-                        // expression statement — its result is discarded.
+                        // `spawn` targets a method call or a call to a first-class callable (a user
+                        // function/closure, or a name bound to one). Built-ins (`print`, `len`, …)
+                        // and struct/enum constructors are not first-class values — wrap them in a
+                        // function. Mirrors `defer`'s guard so the two features agree.
+                        if let ExprKind::Call { callee, .. } = &e.kind {
+                            match &callee.kind {
+                                ExprKind::Field { .. } => {} // method call
+                                ExprKind::Ident(name)
+                                    if self.lookup(name).is_none()
+                                        && !self.functions.contains_key(name) =>
+                                {
+                                    self.error(
+                                        e.span,
+                                        "spawn requires a function or method call (built-ins and \
+                                         constructors must be wrapped in a function)",
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                        // Full type-check of the call (callee, arity, args) — the single source of
+                        // type diagnostics for the sub-expressions.
                         self.infer(e);
+                        // Every value crossing the airlock must be sendable: the arguments, and
+                        // (for a method spawn) the receiver the task talks through. Re-inferring
+                        // here would duplicate the type errors `infer(e)` already reported, so we
+                        // truncate any errors this re-inference adds and keep only the sendability
+                        // diagnostics.
+                        if let ExprKind::Call { callee, args, .. } = &e.kind {
+                            let checkpoint = self.errors.len();
+                            let mut bad: Vec<(Span, String)> = Vec::new();
+                            if let ExprKind::Field { obj, .. } = &callee.kind {
+                                let rty = self.infer(obj);
+                                if !self.sendable(&rty) {
+                                    bad.push((
+                                        obj.span,
+                                        format!("cannot spawn on a non-sendable receiver of type {rty}"),
+                                    ));
+                                }
+                            }
+                            for arg in args {
+                                let aty = self.infer(arg);
+                                if !self.sendable(&aty) {
+                                    bad.push((
+                                        arg.span,
+                                        format!("cannot pass a non-sendable value of type {aty} to a spawned task"),
+                                    ));
+                                }
+                            }
+                            self.errors.truncate(checkpoint);
+                            for (sp, msg) in bad {
+                                self.error(sp, msg);
+                            }
+                        }
                     }
                     SpawnTarget::Block(body) => {
+                        // Bindings visible now are captured by the task and are read-only inside
+                        // it (the airlock); bindings the body declares (at this floor or deeper)
+                        // are task-local. `enter`/`leave` is balanced even if checking errors.
+                        let floor = self.scopes.len();
+                        self.capture_floors.push(floor);
                         self.push_scope();
                         for stmt in body {
                             self.check_stmt(stmt);
                         }
                         self.pop_scope();
+                        self.capture_floors.pop();
                     }
                 }
             }
@@ -1153,6 +1241,13 @@ impl Checker {
                     self.error(
                         target.span,
                         format!("cannot assign to loop variable '{name}' (loop variables are rebound each iteration)"),
+                    );
+                    return;
+                }
+                if self.is_captured(name) {
+                    self.error(
+                        target.span,
+                        format!("cannot reassign captured binding '{name}' inside a spawned task (captures are read-only — communicate via a Channel or Shared)"),
                     );
                     return;
                 }
@@ -2768,6 +2863,26 @@ impl Checker {
                     }
                 }
             }
+            "Channel" => {
+                // `Channel[T]()` — a fresh empty mailbox. The element type comes from the explicit
+                // type argument (it can't be inferred from a no-arg call), and must be sendable.
+                self.check_arity("Channel", 0, args, span);
+                let elem = match targs {
+                    [t] => t.clone(),
+                    [] => {
+                        self.error(span, "Channel() needs an element type — write Channel[T]()");
+                        Ty::Unknown
+                    }
+                    _ => {
+                        self.error(span, "Channel[T]() takes exactly one type argument");
+                        Ty::Unknown
+                    }
+                };
+                if !elem.is_unknown() && !self.sendable(&elem) {
+                    self.error(span, format!("Channel element type must be sendable, found {elem}"));
+                }
+                Some(Ty::channel(elem))
+            }
             // Generic built-in constructors for Result / Option.
             // `Ok(x)`: success type known, error type open (unifies with the declared `E`).
             "Ok" => Some(Ty::result_e(self.one_arg(name, args, span), Ty::Unknown)),
@@ -3017,6 +3132,18 @@ impl Checker {
             }
             Ty::Set(elem) => {
                 if let Some(sig) = set_method_sig(method, elem) {
+                    self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
+            Ty::Channel(elem) => {
+                // `send(v)` moves `v` across the airlock; `check_args` enforces it matches the
+                // element type `T`, which is itself sendable-checked at the channel's construction
+                // — so a well-typed `send` is always sendable.
+                if let Some(sig) = channel_method_sig(method, elem) {
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -3546,6 +3673,7 @@ impl Checker {
                 ("list", [x]) => Ty::list(self.resolve_ty_ro(x)),
                 ("set", [x]) => Ty::set(self.resolve_ty_ro(x)),
                 ("Option", [x]) => Ty::option(self.resolve_ty_ro(x)),
+                ("Channel", [x]) => Ty::channel(self.resolve_ty_ro(x)),
                 ("Result", [x]) => Ty::result(self.resolve_ty_ro(x)),
                 ("Result", [x, e]) => Ty::result_e(self.resolve_ty_ro(x), self.resolve_ty_ro(e)),
                 ("map", [k, v]) => Ty::map(self.resolve_ty_ro(k), self.resolve_ty_ro(v)),
@@ -3730,7 +3858,73 @@ impl Checker {
 
     /// Whether `name` is a *generic* user fn / struct / enum-variant constructor (i.e. one that can
     /// accept explicit call-site type arguments). Non-generic decls and builtins return `false`.
+    /// Can a value of this type cross a task boundary (`spawn` capture / argument, `Channel.send`)?
+    /// Scalars, strings, and containers of sendable elements can; `Channel` (and `Shared`, C3)
+    /// handles can. Closures/functions (bound to a heap), modules, and protocol existentials (which
+    /// may wrap a closure) cannot. A struct/enum is sendable iff *all its field/payload types* are —
+    /// inspected via the registry so a closure smuggled inside a struct field is caught. A generic
+    /// type parameter (`Param`) is treated as sendable (the opaque-body case; concrete call sites
+    /// resolve to a real type that is checked).
+    fn sendable(&self, ty: &Ty) -> bool {
+        self.sendable_rec(ty, &mut Vec::new())
+    }
+
+    /// `sendable` with a cycle guard (`stack` holds the struct/enum names currently being walked,
+    /// so a recursive type like `Node { next: Option[Node] }` terminates).
+    fn sendable_rec(&self, ty: &Ty, stack: &mut Vec<String>) -> bool {
+        match ty {
+            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Nil | Ty::Unknown | Ty::Param(_) => true,
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Channel(t) => self.sendable_rec(t, stack),
+            Ty::Map(k, v) => self.sendable_rec(k, stack) && self.sendable_rec(v, stack),
+            Ty::Result(t, e) => self.sendable_rec(t, stack) && self.sendable_rec(e, stack),
+            Ty::Tuple(elems) => elems.iter().all(|t| self.sendable_rec(t, stack)),
+            Ty::Func { .. } | Ty::Module(_) | Ty::Protocol(_) => false,
+            Ty::Struct(name, args) => {
+                if !args.iter().all(|a| self.sendable_rec(a, stack)) {
+                    return false;
+                }
+                if stack.contains(name) {
+                    return true; // already being walked — the cycle adds no new type
+                }
+                match self.structs.get(name) {
+                    Some(info) => {
+                        let fields = info.fields.clone();
+                        stack.push(name.clone());
+                        let ok = fields.iter().all(|(_, fty)| self.sendable_rec(fty, stack));
+                        stack.pop();
+                        ok
+                    }
+                    None => true, // unknown struct: be permissive (any error is reported elsewhere)
+                }
+            }
+            Ty::Enum(name, args) => {
+                if !args.iter().all(|a| self.sendable_rec(a, stack)) {
+                    return false;
+                }
+                if stack.contains(name) {
+                    return true;
+                }
+                // Built-in Result/Option are erased here (their payloads are the type args, already
+                // checked above); a user enum's variant payloads come from the registry.
+                let payloads: Vec<Ty> = self
+                    .variants
+                    .values()
+                    .filter(|v| &v.enum_name == name)
+                    .flat_map(|v| v.payload.clone())
+                    .collect();
+                stack.push(name.clone());
+                let ok = payloads.iter().all(|pty| self.sendable_rec(pty, stack));
+                stack.pop();
+                ok
+            }
+        }
+    }
+
     fn name_is_generic(&self, name: &str) -> bool {
+        // The built-in `Channel[T]()` constructor takes its element type as an explicit type arg.
+        if name == "Channel" {
+            return true;
+        }
         if let Some(i) = self.structs.get(name) {
             return !i.type_params.is_empty();
         }
@@ -4360,6 +4554,17 @@ fn map_method_sig(method: &str, k: &Ty, v: &Ty) -> Option<FnSig> {
         // `merge` returns a NEW map (other wins on key clash); `update` writes into the receiver.
         "merge" => (vec![Ty::map(k.clone(), v.clone())], Ty::map(k.clone(), v.clone())),
         "update" => (vec![Ty::map(k.clone(), v.clone())], Ty::Nil),
+        _ => return None,
+    };
+    Some(FnSig::plain(params, ret))
+}
+
+/// Built-in method signatures on `Channel[T]` (C2). `elem` is the channel's element type.
+fn channel_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
+    let (params, ret) = match method {
+        "send" => (vec![elem.clone()], Ty::Nil),
+        "recv" => (vec![], elem.clone()),
+        "len" => (vec![], Ty::Int),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))

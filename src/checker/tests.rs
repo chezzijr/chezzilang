@@ -3679,6 +3679,103 @@ fn spawn_block_form_ok() {
     ok("fn main():\n    parallel:\n        spawn:\n            print(1)\nmain()\n");
 }
 
+// ----- concurrency C2: Channel[T] + sendability -----
+
+#[test]
+fn channel_construct_and_methods_ok() {
+    ok("fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    x := ch.recv()\n    n := ch.len()\n    print(x + n)\nmain()\n");
+}
+
+#[test]
+fn channel_send_wrong_type_rejected() {
+    rejects(
+        "fn main():\n    ch := Channel[int]()\n    ch.send(\"x\")\nmain()\n",
+        "expected int",
+    );
+}
+
+#[test]
+fn channel_needs_element_type() {
+    rejects(
+        "fn main():\n    ch := Channel()\n    print(ch.len())\nmain()\n",
+        "Channel() needs an element type",
+    );
+}
+
+#[test]
+fn channel_non_sendable_element_rejected() {
+    rejects(
+        "fn main():\n    ch := Channel[fn() -> int]()\n    print(ch.len())\nmain()\n",
+        "Channel element type must be sendable",
+    );
+}
+
+#[test]
+fn spawn_non_sendable_arg_rejected() {
+    rejects(
+        "fn run(f: fn() -> int):\n    print(f())\nfn main():\n    g := fn(): 1\n    parallel:\n        spawn run(g)\nmain()\n",
+        "non-sendable value of type fn() -> int",
+    );
+}
+
+#[test]
+fn spawn_sendable_args_ok() {
+    ok("fn worker(id: int, prefix: str, out: Channel[str]):\n    out.send(\"{prefix}-{id}\")\nfn main():\n    ch := Channel[str]()\n    parallel:\n        spawn worker(1, \"t\", ch)\nmain()\n");
+}
+
+#[test]
+fn spawn_builtin_rejected_like_defer() {
+    rejects(
+        "fn main():\n    parallel:\n        spawn print(\"hi\")\nmain()\n",
+        "spawn requires a function or method call",
+    );
+}
+
+#[test]
+fn spawn_bad_arg_reports_one_error() {
+    // The sendability gate must not double-report a type error already raised by inferring the call.
+    let errs = check_src("fn w(x: int):\n    print(x)\nfn main():\n    parallel:\n        spawn w(nope)\nmain()\n");
+    let dups = errs.iter().filter(|e| e.message.contains("unknown name 'nope'")).count();
+    assert_eq!(dups, 1, "expected exactly one 'unknown name' error, got: {errs:?}");
+}
+
+#[test]
+fn channel_non_sendable_struct_field_rejected() {
+    // A closure smuggled inside a struct field must be caught (deep field sendability).
+    rejects(
+        "struct Holder:\n    f: fn() -> int\nfn main():\n    ch := Channel[Holder]()\n    print(ch.len())\nmain()\n",
+        "Channel element type must be sendable",
+    );
+}
+
+#[test]
+fn spawn_non_sendable_struct_field_arg_rejected() {
+    rejects(
+        "struct Holder:\n    f: fn() -> int\nfn run_it(h: Holder):\n    print(h.f())\nfn main():\n    bump := fn() -> int: 99\n    h := Holder(bump)\n    parallel:\n        spawn run_it(h)\nmain()\n",
+        "non-sendable value of type Holder",
+    );
+}
+
+#[test]
+fn sendable_recursive_struct_ok() {
+    // A self-referential struct of sendable fields must terminate (cycle guard) and be sendable.
+    ok("struct Node:\n    val: int\n    next: Node\nfn use_it(n: Node):\n    print(n.val)\nfn main():\n    parallel:\n        spawn:\n            print(1)\nmain()\n");
+}
+
+#[test]
+fn reassign_captured_binding_in_spawn_block_rejected() {
+    rejects(
+        "fn main():\n    counter := 0\n    parallel:\n        spawn:\n            counter = counter + 1\nmain()\n",
+        "cannot reassign captured binding 'counter'",
+    );
+}
+
+#[test]
+fn task_local_binding_in_spawn_block_assignable() {
+    // A binding declared *inside* the task body is task-local, not a capture — assignable.
+    ok("fn main():\n    parallel:\n        spawn:\n            x := 0\n            x = x + 1\n            print(x)\nmain()\n");
+}
+
 #[test]
 fn spawn_in_plain_fn_rejected() {
     // The function-boundary rule (reset at fn entry): a `spawn` in a function whose body has no

@@ -210,6 +210,10 @@ pub enum Value {
         variant: Rc<str>,
         payload: Vec<Value>,
     },
+    /// `Channel[T]` (C2) — a shared mailbox (buffered, unbounded FIFO) for cross-task messages.
+    /// Shared by reference (the handle is what `spawn` copies across the airlock); values move in
+    /// on `send` (deep-copied) and out on `recv`.
+    Channel(Rc<RefCell<std::collections::VecDeque<Value>>>),
     /// The result of a statement-like expression (e.g. `print(...)`) or a function with no
     /// `return`. Not directly constructible in source.
     Nil,
@@ -233,6 +237,7 @@ impl Value {
             Value::Module(_) => "module",
             Value::Struct { .. } => "struct",
             Value::Enum { .. } => "enum",
+            Value::Channel(_) => "Channel",
             Value::Nil => "nil",
         }
     }
@@ -308,6 +313,7 @@ impl std::fmt::Display for Value {
                     write!(f, "{variant}({inner})")
                 }
             }
+            Value::Channel(q) => write!(f, "Channel(len={})", q.borrow().len()),
             Value::Nil => write!(f, "nil"),
         }
     }

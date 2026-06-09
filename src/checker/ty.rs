@@ -36,6 +36,9 @@ pub enum Ty {
     /// `E` to the `Error` protocol existential (`Protocol("Error")`); `T!E` sets it explicitly.
     Result(Box<Ty>, Box<Ty>),
     Option(Box<Ty>),
+    /// `Channel[T]` — a shared mailbox for cross-task messages (C2). Element type `T` must be
+    /// sendable. The handle itself is sendable, so reply channels work.
+    Channel(Box<Ty>),
     /// A protocol used *as a value type* (existential), e.g. the default error type `Error`. A
     /// concrete type is assignable to it iff it satisfies the protocol; only the protocol's own
     /// methods are callable on it. Type-erased at runtime (methods dispatch by name).
@@ -72,6 +75,9 @@ impl Ty {
     pub fn option(inner: Ty) -> Ty {
         Ty::Option(Box::new(inner))
     }
+    pub fn channel(inner: Ty) -> Ty {
+        Ty::Channel(Box::new(inner))
+    }
     /// A non-generic struct type (no type arguments) — the common case.
     pub fn strukt(name: impl Into<String>) -> Ty {
         Ty::Struct(name.into(), Vec::new())
@@ -94,7 +100,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
     match (expected, actual) {
         (Unknown, _) | (_, Unknown) => true,
         (Int, Int) | (Float, Float) | (Bool, Bool) | (Str, Str) | (Nil, Nil) => true,
-        (List(a), List(b)) | (Option(a), Option(b)) => compatible(a, b),
+        (List(a), List(b)) | (Option(a), Option(b)) | (Channel(a), Channel(b)) => compatible(a, b),
         (Result(at, ae), Result(bt, be)) => compatible(at, bt) && compatible(ae, be),
         // A protocol existential: identity matches; `str` conforms to `Error` intrinsically.
         // Struct conformance needs the registry — handled by `Checker::assignable`, not here.
@@ -135,6 +141,7 @@ impl fmt::Display for Ty {
                 _ => write!(f, "Result[{t}, {e}]"),
             },
             Ty::Option(t) => write!(f, "Option[{t}]"),
+            Ty::Channel(t) => write!(f, "Channel[{t}]"),
             Ty::Protocol(n) => write!(f, "{n}"),
             Ty::Struct(n, args) | Ty::Enum(n, args) => {
                 write!(f, "{n}")?;

@@ -11,13 +11,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-Core language is feature-complete through **M18** plus several gap-closing passes. Latest suite:
-**1167 tests** green (unit + parity + `cargo test conformance`), both engines parity-tested,
-`cargo clippy` clean.
+Core language is feature-complete through **M18** plus several gap-closing passes. Concurrency
+**C1 + C2** have landed on the tree-walk interpreter (see below). Latest suite: **1199 tests** green
+(unit + parity + `cargo test conformance`), both engines parity-tested, `cargo clippy` clean.
 
-**Next candidate:** concurrency — designed in **[`docs/concurrency.md`](docs/concurrency.md)**
-(shared-nothing BEAM-style `spawn`/`parallel:`/`Channel[T]`/`Shared[T]`, sequential-first C1–C5
-staging). **Still speculative** — promote into `gaps.md` and schedule before starting.
+**Next candidate:** concurrency **C3** — `Shared[T]` cross-task mutable box (interp), then **C4** —
+port C1–C3 to the bytecode VM for the standing parity invariant. Designed in
+**[`docs/concurrency.md`](docs/concurrency.md)** (shared-nothing BEAM-style
+`spawn`/`parallel:`/`Channel[T]`/`Shared[T]`, sequential-first C1–C5 staging).
+
+**Concurrency staging note:** C1–C3 ship on `--interp` only; the bytecode VM (default engine) and
+compiler emit a clean *"runs on `--interp` until VM parity lands (C4)"* error for `parallel:` /
+`spawn` / `Channel`, so the default engine never panics on a concurrency program. VM parity is C4.
+
+**Deferred refinement (post-C2):** read-only-capture and sendability are enforced for `spawn`
+arguments (incl. closures smuggled inside struct/enum fields — deep field inspection) and for
+`spawn:` block *reassignment* of captures. Still open: **rejecting a non-sendable value merely
+*read* (not reassigned) inside a `spawn:` block** (e.g. capturing a closure and calling it) — benign
+under the sequential executor; tighten when C5 brings real parallelism.
 
 **Permanent non-goals:** `yield`/generators, variadic args, Level-3 dynamic `cdylib`/C-ABI FFI,
 bignum (`i64`-only — every overflow is a recoverable fault; binary work → a future `bytes` *sequence*,
@@ -28,7 +39,20 @@ no `byte`/`u8` scalar).
 ## Done (newest → oldest)
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
+(Concurrency C1–C3 are the documented exception: interp-only until VM parity in C4.)
 
+- ✅ **Concurrency C2 — `Channel[T]` + sendability** (interp). `Channel[T]()` buffered/unbounded
+  FIFO mailbox; methods `send` (move-on-send, deep-copied across the airlock), `recv` (FIFO; empty =
+  deadlock-detect fault, not a hang), `len`. A `sendable(Ty)` predicate gates channel element types,
+  `spawn` arguments, and `spawn:` capture reassignment — recursing into struct/enum fields (a closure
+  smuggled inside a struct field is caught) with a cycle guard. `spawn`'s call target is restricted to
+  a function/method like `defer`. `examples/channel.chz` (the canonical fan-out worker).
+- ✅ **Concurrency C1 — `spawn` / `parallel:` nursery** (interp, sequential executor). `parallel:` is a
+  structured-concurrency nursery; `spawn f(x)` (form 1) and `spawn:` block (form 2) register tasks that
+  run to completion FIFO at the dedent (first error aborts siblings + propagates, composing with
+  `recover:`/`defer`). `spawn` legal only inside a `parallel:` (checker `nursery_depth`, reset across fn
+  boundaries). `deep_clone` isolates task data across the airlock; channels/functions pass by handle.
+  Grammar + conformance updated. `examples/parallel.chz`.
 - ✅ **Integer overflow policy** — every `i64` overflow is a recoverable fault (never wrap/crash);
   closed the last leak (`std.math.abs(i64::MIN)` → `checked_abs`). `examples/overflow.chz`.
 - ✅ **Gaps pass II** — `Ref[T]` mutable box (pure-Chezzi `std/ref.chz`); `sort_by_key`; call fn-typed
