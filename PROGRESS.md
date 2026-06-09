@@ -94,9 +94,34 @@ goldens: `examples/parallel_shared.chz` (N threads bump one `Shared` → exact c
 `parallel_channel.chz` (a collector recv-blocks across threads, sorts → fixed order). Every existing
 golden + the 3-way VM==interp parity stays on the default engine, **byte-identical green**. Latest
 suite: **1319 tests** green (unit + parity + `cargo test conformance`), `cargo clippy` clean.
-**Still owed (later phases):** no cancellation / cross-thread `os.exit` (B3.4), so a genuinely
-deadlocked `--parallel` nursery *hangs* (no nursery-local detector under threads until B3.5);
-`Executor` doesn't yet ride the pool + the A3b `submit`-capture gate (B3.6).
+**Still owed (later phases):** `Executor` doesn't yet ride the pool + the A3b `submit`-capture gate
+(B3.6); no nursery-local deadlock detector under threads, so a genuinely all-blocked `--parallel`
+nursery still *hangs* (B3.5).
+
+**B3.4 — cancellation + cross-thread `os.exit` — has now landed** (VM, `--parallel`). Each worker
+`Vm` carries a per-nursery `cancel: Arc<AtomicBool>` (cloned in by `run_parallel_nursery`) plus a
+`cancelled` latch. `ReadyWorker::run_outcome` classifies each task into a `TaskOutcome`
+(`Done`/`Cancelled`/`Exit{code}`/`Fault`); the **first sibling to fault or `os.exit` trips the flag**
+(`Vm::trip_cancel`), and the join scans outcomes in task order — flushing `Done`/`Exit` output and
+propagating the lowest-index `Exit` (→ parent `pending_exit`, a hard halt with the child's code) or
+`Fault` (normal unwind, so an outer `recover:` still catches it). Running siblings observe the flag
+at the **dispatch back-edge** (`run_until` loop top, beside the `gc_stress` check, gated by
+`!self.cancelled` so a cancelled task's `defer`s still run) and a **`recv` `wait_timeout`
+re-checking loop** (50ms) — the latter chosen over a separate cancel condvar because the faulting
+worker can't know which channel cores siblings park on; the bounded re-check eliminates the
+lost-wakeup hazard (risk #2) at a ≤50ms abort-latency cost. So the first child fault now **aborts
+running siblings** (a recv-blocked sibling whose producer faults no longer hangs the join), and a
+child `std.os.exit(code)` halts the whole process cross-thread with the right code. `recover:` /
+`defer` compose — crucially, the cancel sentinel **bypasses `recover:`** (a cancelled task must die,
+not resume) while still running `defer`s via `unwind_deferred`, on *both* the back-edge and recv
+paths. An `os.exit` **wins over** any sibling fault regardless of index (a hard halt is never demoted
+to a catchable error). New: `examples/parallel_cancel.chz`. Reviewed by a 2-agent concurrency/safety
+panel: caught + fixed three real defects before commit — (1) the cancel sentinel was catchable by a
+worker-internal `recover:` and skipped `defer`s on the CPU path; (2) `os.exit`-vs-fault precedence;
+(3) an `Arc::try_unwrap` join race (a finished pool thread still holding a `results` clone) → now
+`mem::take` under the lock. Latest suite: **1328 tests** green (unit + parity + `cargo test
+conformance`), `cargo clippy` clean. Single-level cancel only — nested-nursery cancel propagation is
+a documented, deferred limitation (`docs/concurrency-b3.md`).
 
 **B3 is decomposed into a persistent, multi-session plan.** Tier-C OS-thread multicore (B3) — with
 B4 (real `Shared`) and B5 (real `Executor` pool) folded in, since under shared-nothing threads they're
@@ -105,15 +130,14 @@ the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
 decisions A–G, risk register, per-phase TDD focus). The surface of `spawn` / `parallel:` / `Channel` /
 `Shared` / `Executor` stays **unchanged**.
 
-**Next candidate:** **B3.4 — cancellation + cross-thread `os.exit`.** On the `--parallel` engine, a
-per-nursery `cancel` flag (checked at the dispatch back-edges, like `pending_exit`/`gc_stress`) so the
-first child fault aborts running siblings instead of join-then-report; a condvar-blocked `recv` must
-also wake on cancel (dual-wait: channel `cv` + a nursery cancel `cv`, re-checking loop — risk #2); a
-child `std.os.exit` halts the process with the right code propagated up the join; `recover:`/`defer`
-still compose. Then **B3.5** (nursery-local deadlock detection under threads: blocked-count vs
-live-count) and **B3.6** (`Executor` on the pool + the A3b `submit`-capture gate; a `Closure` wire arm
-becomes load-bearing here — the `Executor.submit` capture crossing — so it lands then, not as untested
-dead code now). Items *not* in B3–B5 (cross-nursery wakeups,
+**Next candidate:** **B3.5 — nursery-local deadlock detection under threads.** Under `--parallel` a
+genuinely all-blocked nursery hangs (B3.4's `recv` re-check only aborts on *cancel*, not on a real
+deadlock). Add a per-nursery counter of siblings-currently-blocked-in-`recv` vs live-sibling-count
+(decision D); when all live siblings are blocked with nothing queued, fault `deadlock` instead of
+hanging. Port the cooperative all-blocked deadlock golden to `--parallel`; a near-miss (one sibling
+that *does* send) must NOT false-positive. Then **B3.6** (`Executor` on the pool + the A3b
+`submit`-capture gate; a `Closure` wire arm becomes load-bearing here — the `Executor.submit` capture
+crossing — so it lands then, not as untested dead code now). Items *not* in B3–B5 (cross-nursery wakeups,
 recv-in-native-callback, `Channel.close()`, A3b) are now documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 

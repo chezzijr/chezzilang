@@ -243,7 +243,7 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 | **B3.3c** ✅ | **Read-only `home` snapshot — worker module-graph reconstruction** (single-thread, parity-preserved). `Vm::build_worker_modules` snapshots the parent's initialized `module_objs` into the worker heap (two-pass); `map_global_value` rebuilds `Func`/`Closure`/`Module`/`Native` explicitly and recurses through containers so no nested callable smuggles a parent `GcRef`. A task can now read post-init globals + call sibling/imported fns. | `worker_reads_module_global`, `worker_calls_sibling_free_fn`, `worker_calls_imported_fn`, `worker_calls_through_global_fn_container` (GcRef-smuggle regression), `worker_reconstruction_survives_gc_stress`. Existing goldens byte-identical. | **unchanged** |
 | **B3.3d** ✅ | **Method tasks** (`spawn obj.m()`): `run_task_isolated` lowers to `Lowered::Method` (recv + args by wire) and dispatches via `do_method_call` against the reconstructed `module_objs`. A blocking `recv` faults cleanly (no scheduler in a sync worker). | `worker_runs_method_task`, `worker_method_on_struct` (reads a module global through the rebuilt home). | **unchanged** |
 | **B3.3-threads** ✅ | **Real OS threads behind `--parallel`.** Bounded pool (decision B), condvar `recv` (decision C blocking), buffer-flush-on-join (decision F). Cooperative engine stays the **default**. The two B3.3 "owes" (read-only `home` snapshot + method tasks) are now **discharged by B3.3c/d** — this phase is purely the thread-flip: the `--parallel` flag + pool + condvar `recv` wire `run_task_isolated` (which is reachable today only from unit tests) onto real threads. | NEW `--parallel`-only goldens that are deterministic-by-construction (collect→drain→sort→print) + order-insensitive (set-of-lines) assertions; every existing golden stays on the default engine and stays green. | **`--parallel` new** |
-| **B3.4** | **Cancellation + cross-thread `os.exit`.** Per-nursery `cancel` flag, condvar wake-on-cancel, exit-code propagation up the join (decision C). | First-fault-aborts-running-siblings; a child `os.exit` halts the process with the right code; `recover:`/`defer` still compose. | `--parallel` |
+| **B3.4** ✅ | **Cancellation + cross-thread `os.exit`.** Per-nursery `cancel: Arc<AtomicBool>` (decision C), cross-thread exit-code propagation up the join. Wake-on-cancel uses a **`recv` `wait_timeout` re-checking loop**, not a separate cancel condvar (see decision-C note below). | First-fault-aborts-running-siblings; a child `os.exit` halts the process with the right code; `recover:`/`defer` still compose. | `--parallel` |
 | **B3.5** | **Nursery-local deadlock detection under threads** (blocked-count vs live-count, decision D). | Port the all-blocked deadlock golden to `--parallel`; a near-miss (one sibling that *does* send) must NOT false-positive. | `--parallel` |
 | **B3.6** | **`Executor` / B5 on the pool + A3b submit-capture sendability gate.** Submitted tasks run on pool threads; the checker now gates `submit`'s closure captures like `spawn` does. | `submit` of a non-sendable capture is a checker error; executor tasks run on pool threads + the autodrain/`shutdown` semantics survive. | `--parallel` |
 
@@ -257,8 +257,8 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 - [x] B3.3c — read-only `home` snapshot: worker module-graph reconstruction (single-thread, parity-preserved) ✅ **landed**
 - [x] B3.3d — method tasks (`spawn obj.m()`) dispatch in the worker via the rebuilt graph ✅ **landed**
 - [x] B3.3-threads — real OS threads behind `--parallel` ✅ **landed** (`--parallel` flag + bounded pool + condvar `recv` + flush-on-join; `Shared.update` made cross-thread-atomic)
-- [ ] B3.4 — cancellation + cross-thread `os.exit` ← **next session starts here**
-- [ ] B3.5 — nursery-local deadlock detection under threads
+- [x] B3.4 — cancellation + cross-thread `os.exit` ✅ **landed** (per-nursery `Arc<AtomicBool>` cancel flag tripped by the first sibling fault/`os.exit`; observed at the dispatch back-edge + a `wait_timeout` re-checking `recv`; first-fault aborts running siblings; child `os.exit` propagates its code up the join to halt the parent; `recover:`/`defer` compose)
+- [ ] B3.5 — nursery-local deadlock detection under threads ← **next session starts here**
 - [ ] B3.6 — `Executor`/B5 on the pool + A3b
 
 > **B3.0 landed note (for the B3.1+ maintainer):** `WireValue` lives in `src/vm/wire.rs`;
@@ -376,6 +376,47 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 > (cross-thread condvar `recv` + sort). Tests: `golden_parallel_{shared,channel}_chz_matches_expected`,
 > `parallel_recv_blocks_until_send_wakes_it`, `parallel_nested_nursery_on_pool`,
 > `parallel_pool_task_fault_propagates`, `worker_inherits_host_args_and_env`.
+
+> **B3.4 landed note (for the B3.5 maintainer):** cancellation + cross-thread `os.exit` shipped.
+> Each `--parallel` worker `Vm` carries `cancel: Option<Arc<AtomicBool>>` (cloned in by
+> `run_parallel_nursery`) + a `cancelled: bool` latch. `ReadyWorker::run_outcome` classifies each
+> task into a `TaskOutcome` (`Done`/`Cancelled`/`Exit{code}`/`Fault`); the first sibling to fault or
+> `os.exit` calls `Vm::trip_cancel`, and the join scans outcomes in task order, flushing `Done`/`Exit`
+> output and propagating the lowest-index `Exit` (→ parent `pending_exit`, hard halt) or `Fault`.
+> Running siblings observe the flag at the dispatch back-edge (`run_until` loop top, beside the
+> `gc_stress` check, guarded by `!self.cancelled` so a cancelled task's `defer`s still run) and
+> unwind as a `"cancelled"` sentinel the join swallows.
+>
+> **The cancel unwind bypasses `recover:`** (a cancelled task must die, not resume) while still
+> running `defer`s — on *both* paths it goes through `unwind_deferred(base_level)` and returns,
+> never reaching the handler match. This is essential: the sentinel is a plain `RuntimeError`, so a
+> worker-internal `recover:` would otherwise catch it and resume (then the `!self.cancelled` latch
+> would disable further observation → the task runs to completion / hangs the join). Pinned by
+> `parallel_recover_inside_worker_does_not_catch_cancel` and `parallel_defer_runs_on_back_edge_cancel`.
+> **Precedence:** the join prefers the lowest-index `Exit` over any `Fault` (an `os.exit` is an
+> unconditional hard halt, never demoted to a catchable error); lowest index wins within a kind.
+>
+> **Decision-C deviation — wake-on-cancel.** Decision C suggested a per-nursery cancel *condvar* that
+> `notify_all`s blocked `recv`s. Shipped instead: the blocking `recv` waits on the channel `cv` with
+> a **50ms `wait_timeout` re-checking loop**. Rationale — the faulting worker cannot know which
+> channel cores its siblings park on, so a pure-notify scheme needs a per-nursery registry of blocked
+> cores *and still* carries the lost-wakeup hazard (risk #2). The bounded re-check **eliminates**
+> that hazard by construction; the cost is a ≤50ms abort latency on a recv-blocked sibling (invisible
+> to tests/users). If zero-latency cancel ever matters, revisit with a blocked-core registry.
+>
+> **Known limitation (deferred):** cancellation is **single-level**. A nested `parallel:` inside a
+> worker creates its own independent cancel token; an *outer* nursery's cancel does not yet propagate
+> into a worker that is itself blocked in its child nursery's join wait. No test depends on nested
+> cancel propagation; left for a later phase if needed.
+>
+> New: `examples/parallel_cancel.chz` (cross-thread `os.exit` aborts a CPU sibling, exit code 7).
+> Tests: `parallel_recv_blocked_sibling_aborts_on_sibling_fault`, `parallel_cpu_sibling_aborts_on_sibling_fault`,
+> `parallel_defer_runs_on_cancelled_sibling`, `parallel_defer_runs_on_back_edge_cancel`,
+> `parallel_recover_inside_worker_does_not_catch_cancel` (in `mod tests`);
+> `parallel_child_os_exit_halts_with_code`, `parallel_os_exit_aborts_recv_blocked_sibling` (in
+> `parity_tests`, via `run_file_parallel`). The partial-work tests use a `Channel` handshake so the
+> victim provably starts before the trigger faults (no timing flake); the trigger faults/exits inline
+> so cancel is tripped without depending on pool scheduling.
 
 ---
 

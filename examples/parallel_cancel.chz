@@ -1,0 +1,29 @@
+# B3.4 — cancellation + cross-thread `os.exit` on the `--parallel` OS-thread pool.
+#
+# `quitter` runs inline on the joining thread; it prints, then `std.os.exit(7)`. That trips the
+# nursery's cancel flag, so the CPU-bound `worker` running on a pool thread observes the flag at its
+# next loop back-edge and aborts mid-flight (its partial output is dropped, and it never writes `s`).
+# The exiting child's buffered output is flushed, the exit code propagates up the join to halt the
+# whole process, and the post-`parallel:` statement never runs.
+#
+# Run:  chezzi run --parallel examples/parallel_cancel.chz ; echo $?   # prints the line, then 7
+import std.os
+
+fn quitter():
+    print("quitter: exiting with code 7")
+    os.exit(7)
+
+fn worker(s: Shared[int]):
+    i := 0
+    while i < 100000000:
+        i = i + 1
+    s.set(i)            # never reached — cancelled when the sibling exits
+
+fn main():
+    s := Shared(0)
+    parallel:
+        spawn quitter()
+        spawn worker(s)
+    print("unreached")  # the post-parallel statement never runs after os.exit
+
+main()

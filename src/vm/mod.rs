@@ -13,7 +13,9 @@ pub mod wire;
 use core::{ChannelCore, ExecutorCore, SharedCore};
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, Op, Program, ProtoId};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use value::{GcRef, Value};
 use wire::WireValue;
 
@@ -228,6 +230,17 @@ struct Vm {
     /// joining (parent) fiber's context plus its child fibers; non-empty means a `recv` may suspend.
     /// Every parked fiber here is a GC root (see [`Vm::collect`]).
     scheduler_stack: Vec<Nursery>,
+    /// B3.4: the cancel flag of the `parallel:` nursery this worker `Vm` runs under (`--parallel`
+    /// only; cloned in by [`Vm::run_parallel_nursery`]). The first sibling to fault or `os.exit`
+    /// sets it; every other worker observes it at a dispatch back-edge (loop top) or inside a
+    /// blocking `recv`'s re-checking wait, and unwinds as the `cancelled` sentinel — so a faulted
+    /// nursery aborts running siblings instead of join-then-report. `None` on the cooperative engine
+    /// (it already aborts via the scheduler unwind) and on the top-level VM (never a worker).
+    cancel: Option<Arc<AtomicBool>>,
+    /// B3.4: set true only when *this* worker observed [`Vm::cancel`] and bailed, so the join can
+    /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
+    /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
+    cancelled: bool,
 }
 
 /// A fiber's saved execution context (B1): every `Vm` field that `run_until` reads or writes keyed by
@@ -326,9 +339,25 @@ enum Lowered {
     Method { recv: WireValue, name: String, args: Vec<WireValue>, span: Span },
 }
 
+/// B3.4 — how a `--parallel` task ended, recorded in its slot. The join (`run_parallel_nursery`)
+/// scans these in task order: `Done`/`Exit` flush their buffered output; the lowest-index `Exit` or
+/// `Fault` propagates (an `Exit` hard-halts the parent, a `Fault` unwinds normally so an outer
+/// `recover:` can catch it); `Cancelled` is swallowed (a sibling-abort, its partial output dropped).
+#[derive(Debug)]
+enum TaskOutcome {
+    /// Ran to completion. Its return value crossed the airlock; output flushed in task order.
+    Done(WorkerResult),
+    /// Observed the nursery cancel flag and unwound (a sibling faulted/exited first). Dropped.
+    Cancelled,
+    /// Called `std.os.exit(code)`. Buffered output is flushed, then the parent hard-halts with `code`.
+    Exit { code: i32, out: String, stderr: String },
+    /// Faulted (runtime error or caught panic). The lowest-index fault propagates out of the join.
+    Fault(RuntimeError),
+}
+
 /// B3.3-threads — the per-task outcome slots a `--parallel` nursery collects (task order; `None`
 /// until that task finishes). Shared with the pool threads via `Arc`; each fills its own index.
-type TaskSlots = Arc<Mutex<Vec<Option<Result<WorkerResult, RuntimeError>>>>>;
+type TaskSlots = Arc<Mutex<Vec<Option<TaskOutcome>>>>;
 
 /// B3.3-threads — a completion guard for a farmed pool task: its `Drop` bumps the nursery's
 /// finished-count and wakes the joining thread **on every exit path**, including a panic unwinding
@@ -383,31 +412,79 @@ impl ReadyWorker {
     /// task that blocks on `recv` would leave no result on the stack; under `--parallel` the blocking
     /// `recv` instead waits on the channel condvar (it never returns the suspend sentinel), so the
     /// `suspend` guard is a safety net against a future regression, not a live path.
+    #[cfg(test)]
     fn run(mut self) -> Result<WorkerResult, RuntimeError> {
         let span = self.span;
-        let ret = match self.call {
-            ReadyCall::Invoke { callee, args } => self.worker.invoke_value(callee, args, span)?,
-            ReadyCall::Method { recv, name, args } => {
-                let argc = args.len();
-                self.worker.push(recv);
-                for a in args {
-                    self.worker.push(a);
-                }
-                self.worker.do_method_call(&name, argc, span)?;
-                if self.worker.suspend.is_some() {
-                    return Err(self.worker.err(
-                        "spawn: a method task blocked on recv in an isolated worker (no scheduler until B3.3-threads)".to_string(),
-                        span,
-                    ));
-                }
-                self.worker.pop()
-            }
-        };
+        let ret = Self::invoke(&mut self.worker, self.call, span)?;
         // The result must be cross-safe too — a worker returning a `str`/closure can't hand a
         // worker-heap `GcRef` back to the parent.
         let value = self.worker.to_wire(ret)?;
         self.worker.ensure_crossable(&value, span)?;
         Ok(WorkerResult { value, out: self.worker.out, stderr: self.worker.stderr })
+    }
+
+    /// Invoke the prepared task on the worker VM, leaving its return value on the stack popped into
+    /// `ret`. Borrows `worker` and consumes `call` (disjoint fields), so the caller keeps `worker`
+    /// afterward to inspect `pending_exit`/`cancelled` (B3.4).
+    fn invoke(worker: &mut Vm, call: ReadyCall, span: Span) -> Result<Value, RuntimeError> {
+        match call {
+            ReadyCall::Invoke { callee, args } => worker.invoke_value(callee, args, span),
+            ReadyCall::Method { recv, name, args } => {
+                let argc = args.len();
+                worker.push(recv);
+                for a in args {
+                    worker.push(a);
+                }
+                worker.do_method_call(&name, argc, span)?;
+                if worker.suspend.is_some() {
+                    return Err(worker.err(
+                        "spawn: a method task blocked on recv in an isolated worker (no scheduler until B3.3-threads)".to_string(),
+                        span,
+                    ));
+                }
+                Ok(worker.pop())
+            }
+        }
+    }
+
+    /// B3.4 — the `--parallel` join's entry point: run the task and classify how it ended into a
+    /// [`TaskOutcome`]. On any abnormal end (fault, panic-as-fault upstream, or `os.exit`) it trips
+    /// the nursery cancel flag so running siblings abort at their next back-edge / blocked `recv`.
+    /// Precedence: a deliberate `os.exit` (worker `pending_exit`) → `Exit`; an observed sibling
+    /// cancel (`worker.cancelled`) → `Cancelled` (swallowed); else the invoke result maps to
+    /// `Fault`/`Done`. Output buffers are moved out only on the paths that flush them.
+    fn run_outcome(mut self) -> TaskOutcome {
+        let span = self.span;
+        let res = Self::invoke(&mut self.worker, self.call, span);
+        // A child `std.os.exit(code)` is a fault-that-cancels: it surfaces as an `Err` sentinel with
+        // `pending_exit` set. Trip cancel, flush its output, and hand the code up for a hard halt.
+        if let Some(code) = self.worker.pending_exit {
+            self.worker.trip_cancel();
+            return TaskOutcome::Exit { code, out: self.worker.out, stderr: self.worker.stderr };
+        }
+        // This worker observed a sibling's cancel and unwound — swallow it (partial output dropped).
+        if self.worker.cancelled {
+            return TaskOutcome::Cancelled;
+        }
+        match res {
+            Err(e) => {
+                self.worker.trip_cancel();
+                TaskOutcome::Fault(e)
+            }
+            Ok(ret) => {
+                let crossed = self
+                    .worker
+                    .to_wire(ret)
+                    .and_then(|value| self.worker.ensure_crossable(&value, span).map(|()| value));
+                match crossed {
+                    Ok(value) => TaskOutcome::Done(WorkerResult { value, out: self.worker.out, stderr: self.worker.stderr }),
+                    Err(e) => {
+                        self.worker.trip_cancel();
+                        TaskOutcome::Fault(e)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -435,11 +512,21 @@ impl Vm {
             suspend: None,
             native_reentry: 0,
             scheduler_stack: Vec::new(),
+            cancel: None,
+            cancelled: false,
         }
     }
 
     fn err(&self, message: String, span: Span) -> RuntimeError {
         RuntimeError { message, span }
+    }
+
+    /// B3.4 — set this VM's nursery cancel flag (if it runs under one), so sibling workers abort.
+    /// No-op on the cooperative engine / top-level VM (`cancel` is `None`).
+    fn trip_cancel(&self) {
+        if let Some(c) = &self.cancel {
+            c.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Swap the live per-execution `Vm` fields with `ctx` (B1). Used by the nursery scheduler to
@@ -653,6 +740,22 @@ impl Vm {
             if self.gc_stress || self.heap.should_collect() {
                 self.collect();
             }
+            // B3.4: a `--parallel` worker observes its nursery's cancel flag at this back-edge (the
+            // same boundary `gc_stress` is checked at). A sibling having faulted / `os.exit`d set it;
+            // unwind the whole worker so this still-running task aborts promptly instead of burning
+            // cycles to completion. Cancellation behaves like an uncaught fault that bypasses
+            // `recover:`: `unwind_deferred(base_level)` runs every frame's `defer`s (Go semantics)
+            // AND drops their handlers, so a `recover:` inside the task cannot catch the cancel and
+            // resume it (a cancelled task must die). `!self.cancelled` latches on the first
+            // observation: while the cancel unwind runs the task's `defer`s back through this loop,
+            // re-firing would skip them — so we stop observing once cancellation is in flight.
+            if !self.cancelled && self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                self.cancelled = true;
+                let span = self.frames[self.frames.len() - 1].call_span;
+                let rte = self.err("cancelled".to_string(), span);
+                let rte = self.unwind_deferred(base_level).unwrap_or(rte);
+                return Err(rte);
+            }
             let fi = self.frames.len() - 1;
             let pid = self.frames[fi].proto;
             let ip = self.frames[fi].ip;
@@ -665,6 +768,14 @@ impl Vm {
             if let Err(rte) = self.step(op, span) {
                 // `std.os.exit(code)` is a hard halt: unwind past every `recover:` to the top.
                 if self.pending_exit.is_some() {
+                    return Err(rte);
+                }
+                // B3.4: a cancel observed deeper in this step (a blocking `recv` that woke on the
+                // nursery cancel flag set `self.cancelled` and returned the sentinel) unwinds the
+                // whole worker — run defers, bypass `recover:`, mirroring the loop-top check. A
+                // cancelled task must not be caught and resumed.
+                if self.cancelled {
+                    let rte = self.unwind_deferred(base_level).unwrap_or(rte);
                     return Err(rte);
                 }
                 // Capture the stack trace of an uncaught fault now, while the frames are still intact
@@ -2944,15 +3055,28 @@ impl Vm {
     ///    blocking `recv` waits on the channel condvar while pool tasks `send`.
     /// 4. **Wait for all pool tasks**, then **flush each worker's `out`/`stderr` in task order**
     ///    (decision F — deterministic even though execution was concurrent) and propagate the
-    ///    first (lowest-index) fault. Sibling-abort on fault is B3.4; here we join all then report.
+    ///    lowest-index terminal outcome.
+    ///
+    /// B3.4 — **cancellation**: every worker shares a per-nursery `cancel: Arc<AtomicBool>`. The
+    /// first sibling to fault or `os.exit` trips it ([`Vm::trip_cancel`]); the others observe it at
+    /// a dispatch back-edge or inside a blocking `recv` and unwind as the `cancelled` sentinel, so a
+    /// faulted nursery aborts its running siblings instead of joining them all first. The completion
+    /// barrier is unchanged — a cancelled worker still finishes (returns `Err`) and bumps the
+    /// counter, so no slot is ever missing. A child `os.exit(code)` propagates up as a parent
+    /// `pending_exit` (hard halt with `code`). `recover:`/`defer` compose: the cancel unwind is an
+    /// ordinary `Err`, so deferred calls run and an outer `recover:` can still catch a real fault.
     ///
     /// A genuinely deadlocked nursery **hangs** (no nursery-local detector under threads until B3.5);
     /// all `--parallel` goldens this phase are deterministic-by-construction and cannot deadlock.
     fn run_parallel_nursery(&mut self, tasks: Vec<PendingCall>) -> Result<(), RuntimeError> {
-        // 1. Prepare every task against the parent heap (must happen on this thread).
+        // 1. Prepare every task against the parent heap (must happen on this thread). Each worker
+        //    gets a clone of this nursery's cancel flag so a sibling fault/exit can abort the rest.
+        let cancel = Arc::new(AtomicBool::new(false));
         let mut ready: Vec<ReadyWorker> = Vec::with_capacity(tasks.len());
         for t in tasks {
-            ready.push(self.prepare_worker(t)?);
+            let mut rw = self.prepare_worker(t)?;
+            rw.worker.cancel = Some(Arc::clone(&cancel));
+            ready.push(rw);
         }
         let n = ready.len();
         // Per-task outcome slots (task order) + a finished-count condvar the pool bumps.
@@ -2974,8 +3098,8 @@ impl Vm {
             pool::submit(Box::new(move || {
                 // Drop runs LAST (declared first), so the slot is committed before the counter bumps.
                 let _signal = DoneSignal(done);
-                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run()))
-                    .unwrap_or_else(|p| Err(panic_to_fault(p, span)));
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run_outcome()))
+                    .unwrap_or_else(|p| TaskOutcome::Fault(panic_to_fault(p, span)));
                 results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
             }));
         }
@@ -2984,8 +3108,8 @@ impl Vm {
         //    and reports rather than unwinding past the still-pending wait.
         if let Some((i, rw)) = first {
             let span = rw.span;
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run()))
-                .unwrap_or_else(|p| Err(panic_to_fault(p, span)));
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run_outcome()))
+                .unwrap_or_else(|p| TaskOutcome::Fault(panic_to_fault(p, span)));
             results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
         }
         // 4a. Wait for the farmed tasks (n-1) to finish (the `DoneSignal` guard guarantees the counter
@@ -2998,30 +3122,57 @@ impl Vm {
                 g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
             }
         }
-        // 4b. Flush worker output in task order (decision F); first fault wins. A faulting worker's
-        //     buffered output is dropped here (its exact ordering vs siblings is a B3.4 concern; the
-        //     goldens are fault-free).
-        let slots = Arc::try_unwrap(results)
-            .expect("all pool tasks finished, so no other Arc holder remains")
-            .into_inner()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut first_err = None;
+        // 4b. Flush worker output in task order (decision F) and select the terminal outcome.
+        //     `Done`/`Exit` output is flushed; `Fault`/`Cancelled` output is dropped (a faulting
+        //     worker's partial output never had a deterministic position; a cancelled worker's work
+        //     is incomplete). The fault-free goldens only ever hit `Done`, so they stay byte-identical.
+        //
+        //     Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the lowest-index `Exit`
+        //     wins over any `Fault` regardless of index — otherwise a recoverable sibling fault at a
+        //     lower index could demote a child's `os.exit` to a catchable error (a `recover:` around
+        //     the `parallel:` would swallow it and the process would not exit). Within a kind, the
+        //     lowest index wins (scan order + `is_none()` guard), matching the cooperative engine's
+        //     first-fault rule.
+        // Take the slots out under the lock rather than `Arc::try_unwrap`: a just-finished pool
+        // thread bumps the `done` counter (in `DoneSignal::drop`) *before* its closure environment —
+        // which still owns a `results` `Arc` clone — is dropped, so the joiner can wake with
+        // `strong_count > 1` and `try_unwrap` would spuriously fail. `mem::take` needs only the lock.
+        let slots = std::mem::take(&mut *results.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut first_exit: Option<i32> = None;
+        let mut first_fault: Option<RuntimeError> = None;
         for slot in slots {
             match slot.expect("every task slot was filled before join returned") {
-                Ok(wr) => {
+                TaskOutcome::Done(wr) => {
                     self.out.push_str(&wr.out);
                     self.stderr.push_str(&wr.stderr);
                 }
-                Err(e) => {
-                    if first_err.is_none() {
-                        first_err = Some(e);
+                TaskOutcome::Exit { code, out, stderr } => {
+                    self.out.push_str(&out);
+                    self.stderr.push_str(&stderr);
+                    if first_exit.is_none() {
+                        first_exit = Some(code);
                     }
                 }
+                TaskOutcome::Fault(e) => {
+                    if first_fault.is_none() {
+                        first_fault = Some(e);
+                    }
+                }
+                TaskOutcome::Cancelled => {}
             }
         }
-        match first_err {
-            Some(e) => Err(e),
-            None => Ok(()),
+        match (first_exit, first_fault) {
+            // A child `os.exit` hard-halts the parent: set `pending_exit` and return the exit
+            // sentinel. The op→`step`→`run_until` chain sees `pending_exit` and unwinds past every
+            // `recover:` to the driver, which reports `code` as the process exit status (decision C).
+            // It wins over any sibling fault — a hard halt is never demoted to a catchable error.
+            (Some(code), _) => {
+                self.pending_exit = Some(code);
+                Err(self.err("exit".to_string(), Span { line: 1, col: 1 }))
+            }
+            // A real fault propagates normally so an outer `recover:` can still catch it.
+            (None, Some(e)) => Err(e),
+            (None, None) => Ok(()),
         }
     }
 
@@ -3661,7 +3812,25 @@ impl Vm {
                         if let Some(w) = q.pop_front() {
                             break w;
                         }
-                        q = core.cv.wait(q).unwrap();
+                        // B3.4: re-check the nursery cancel flag on each wake. A sibling fault /
+                        // `os.exit` set it; abort the blocked `recv` as the `cancelled` sentinel
+                        // rather than waiting for a `send` that will never arrive — otherwise the
+                        // join hangs forever (risk #2).
+                        if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                            drop(q);
+                            self.cancelled = true;
+                            return Err(self.err("cancelled".to_string(), span));
+                        }
+                        // Bounded re-checking wait (not an infinite `cv.wait`): wakes on a sibling's
+                        // `send` (`notify_all`) OR every 50ms to re-poll the cancel flag. The timeout
+                        // eliminates the lost-wakeup hazard a separate cancel condvar would carry (the
+                        // faulting worker can't know which channel cores siblings park on); the cost is
+                        // a ≤50ms abort latency on a recv-blocked sibling. See docs/concurrency-b3.md.
+                        let (g, _timeout) = core
+                            .cv
+                            .wait_timeout(q, Duration::from_millis(50))
+                            .unwrap_or_else(|e| e.into_inner());
+                        q = g;
                     };
                     drop(q);
                     return Ok(self.from_wire(w));
@@ -6224,6 +6393,78 @@ main()";
         assert!(err.message.contains("out of bounds"), "got: {}", err.message);
     }
 
+    /// B3.4: a `recv`-blocked sibling must ABORT when a sibling faults before sending, instead of
+    /// hanging the join forever. `boom` is spawned first so it runs inline on the joining thread —
+    /// it faults immediately and trips the nursery cancel flag without depending on pool scheduling
+    /// (avoids the G3 pool-starvation hazard on low-core CI). `consumer` runs on the pool, blocks on
+    /// the empty channel, and its re-checking `recv` wait observes the cancel and unwinds — so the
+    /// join completes and reports the producer's fault rather than deadlocking.
+    #[test]
+    fn parallel_recv_blocked_sibling_aborts_on_sibling_fault() {
+        let src = "fn boom(ch: Channel[int]):\n    xs := [1]\n    print(xs[9])\n\
+                   fn consumer(ch: Channel[int]):\n    ch.recv()\n    print(\"consumed\")\n\
+                   fn main():\n    ch := Channel[int]()\n    parallel:\n        spawn boom(ch)\n        spawn consumer(ch)\nmain()\n";
+        let err = run_capture_parallel(src).expect_err("expected the producer fault to propagate, not hang");
+        assert!(err.message.contains("out of bounds"), "got: {}", err.message);
+    }
+
+    /// B3.4: a CPU-bound sibling aborts mid-flight when a sibling faults, observing the cancel flag
+    /// at a dispatch back-edge. `looper` runs inline (task[0]); it writes `1`, hands `trigger` a
+    /// channel token (so the fault happens-after `looper` has started — no timing race), then spins
+    /// and would write `99` only after the (huge) loop. `trigger` (pool) waits for the token, then
+    /// faults → trips cancel → `looper` aborts mid-loop. Asserting `1` proves `looper` started AND
+    /// was cancelled before completing; without the back-edge cancel check it would print `99`.
+    #[test]
+    fn parallel_cpu_sibling_aborts_on_sibling_fault() {
+        let src = "fn looper(go: Channel[int], s: Shared[int]):\n    s.set(1)\n    go.send(0)\n    i := 0\n    while i < 1000000000:\n        i = i + 1\n    s.set(99)\n\
+                   fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+                   fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn looper(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
+        let out = run_capture_parallel(src).expect("the fault is recovered, so the program completes");
+        assert_eq!(out, "1\n", "looper started (1) but was cancelled before completing (never wrote 99)");
+    }
+
+    /// B3.4: `defer` still composes with cancellation. The blocked consumer is aborted when the
+    /// producer faults; its `defer cleanup(s)` must still run on the cancel unwind (writing the
+    /// shared sentinel), proving deferred calls fire even on a cancelled task.
+    #[test]
+    fn parallel_defer_runs_on_cancelled_sibling() {
+        let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+                   fn consumer(ch: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    ch.recv()\n\
+                   fn boom(ch: Channel[int]):\n    xs := [1]\n    print(xs[9])\n\
+                   fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        parallel:\n            spawn consumer(ch, s)\n            spawn boom(ch)\n        0\n    print(s.get())\nmain()\n";
+        let out = run_capture_parallel(src).expect("the producer fault is recovered, so the program completes");
+        assert_eq!(out, "42\n", "the cancelled consumer's defer ran on the unwind");
+    }
+
+    /// B3.4: `defer` runs even when a task is cancelled at the CPU **back-edge** (not only on the
+    /// recv path). `worker` (inline) registers `defer cleanup(s)`, signals `trigger` it has started,
+    /// then spins; cancelled mid-loop, the unwind must run the defer (writing 42). Regression guard:
+    /// a raw `return Err` from the loop top would bypass the defer machinery — this asserts the
+    /// cancel unwinds through `unwind_deferred`. (Without the fix this prints `0`.)
+    #[test]
+    fn parallel_defer_runs_on_back_edge_cancel() {
+        let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+                   fn worker(go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    i := 0\n    while i < 1000000000:\n        i = i + 1\n\
+                   fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+                   fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn worker(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
+        let out = run_capture_parallel(src).expect("the trigger fault is recovered, so the program completes");
+        assert_eq!(out, "42\n", "the CPU-cancelled worker's defer ran on the back-edge unwind");
+    }
+
+    /// B3.4: cancellation is NOT catchable by a `recover:` inside a worker — a cancelled task must
+    /// die, not resume. `victim` (inline) writes `1`, signals it has started, then wraps a long loop
+    /// in `recover:` and would write `99` after it. If the cancel sentinel were an ordinary catchable
+    /// fault, the inner `recover:` would swallow it and `victim` would reach `s.set(99)`; the bypass
+    /// unwinds past the recover instead, so the sentinel stays at the pre-loop `1`. (Buggy: `99`.)
+    #[test]
+    fn parallel_recover_inside_worker_does_not_catch_cancel() {
+        let src = "fn victim(go: Channel[int], s: Shared[int]):\n    s.set(1)\n    go.send(0)\n    r := recover:\n        i := 0\n        while i < 1000000000:\n            i = i + 1\n        0\n    s.set(99)\n\
+                   fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+                   fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn victim(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
+        let out = run_capture_parallel(src).expect("the trigger fault is recovered, so the program completes");
+        assert_eq!(out, "1\n", "victim's inner recover must NOT catch the cancel; it never reaches s.set(99)");
+    }
+
     /// C2 golden: `Channel[T]` fan-out — workers `send` at the dedent, the parent `recv`s after the
     /// join. Byte-identical on the VM, the interpreter, and the `.expected` file.
     #[test]
@@ -8234,6 +8475,36 @@ main()";
         assert_eq!(vc, Some(3), "vm exit code");
         assert_eq!(ic, Some(3), "interp exit code");
         assert!(ir.is_ok() && vr.is_ok(), "os.exit is a clean halt, not an error: interp={ir:?} vm={vr:?}");
+    }
+
+    /// B3.4: a child `std.os.exit(code)` on the `--parallel` OS-thread pool is a clean hard-halt,
+    /// not a fault. Cross-thread: the worker's `pending_exit` propagates up the join to the parent
+    /// VM, the exiting child's buffered output is flushed, and the post-`parallel:` statement never
+    /// runs. The `--parallel` counterpart of `exit_in_spawned_child_aborts_siblings`.
+    #[test]
+    fn parallel_child_os_exit_halts_with_code() {
+        let src = "import std.os\nfn a():\n    print(\"a\")\n    os.exit(3)\nfn b():\n    print(\"b\")\nfn main():\n    parallel:\n        spawn a()\n        spawn b()\n    print(\"after\")\nmain()\n";
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (out, _err, res, code) = run_file_parallel(&entry, crate::native::HostConfig::default());
+        assert_eq!(code, Some(3), "child os.exit code propagates cross-thread to the parent");
+        assert!(res.is_ok(), "os.exit is a clean halt, not an error: {res:?}");
+        assert!(out.contains('a'), "the exiting child's buffered output is flushed: got {out:?}");
+        assert!(!out.contains("after"), "the post-parallel statement never runs after os.exit: got {out:?}");
+    }
+
+    /// B3.4: `os.exit` in one child aborts a `recv`-blocked sibling too (same machinery as a fault —
+    /// it trips the nursery cancel flag), so the join completes with the exit code instead of hanging.
+    /// `exiter` is spawned first → runs inline on the joining thread (the exit trips cancel without
+    /// depending on pool scheduling); the recv-blocked `consumer` runs on the pool and aborts.
+    #[test]
+    fn parallel_os_exit_aborts_recv_blocked_sibling() {
+        let src = "import std.os\nfn exiter(ch: Channel[int]):\n    os.exit(5)\nfn consumer(ch: Channel[int]):\n    ch.recv()\n    print(\"consumed\")\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn exiter(ch)\n        spawn consumer(ch)\nmain()\n";
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (out, _err, _res, code) = run_file_parallel(&entry, crate::native::HostConfig::default());
+        assert_eq!(code, Some(5), "os.exit code propagates; the recv-blocked consumer aborts, no hang");
+        assert!(!out.contains("consumed"), "the aborted consumer never ran past its blocked recv: got {out:?}");
     }
 
     /// Run an entry through both engines with a freshly-built [`crate::native::HostConfig`] each
