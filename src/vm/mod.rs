@@ -534,34 +534,41 @@ const DEADLOCK_MSG: &str = "deadlock: every task in this parallel: block is bloc
 /// block the thread on `recv`" model with **lightweight fibers parked on `recv`** multiplexed over a
 /// core-sized pool: an empty `recv` files the running fiber into `parked` (keyed by `ChannelCore`
 /// pointer) and the worker grabs the next runnable fiber instead of blocking the thread; a `send`
-/// drains the matching bucket back onto `runq` and wakes a worker.
+/// drains the matching bucket back onto the global queue and wakes a worker.
 ///
-/// A single `Mutex<SchedCore>` guards the run queue, the park set, the per-task outcome slots, and
-/// the scheduling counts together, so every transition is atomic and the deadlock predicate is
-/// evaluated without races. The lock is NEVER held across a `swap_ctx` / `run_until`: the worker
-/// loop takes a fiber out under the lock, releases it, runs the fiber, then re-locks to settle. `cv`
-/// is the single wait point — a worker with no runnable fiber parks here until a `send`/finish/
-/// terminate.
+/// D4 — the single shared run queue is split into a per-worker local (`locals[wid]`) + a shared
+/// `global` overflow queue; a worker drains its own local, batch-grabs from `global`, then steals
+/// from a sibling. A single `Mutex<SchedCore>` still guards `global`, the park set, the per-task
+/// outcome slots, and the scheduling counts together; per-worker locals have their own locks (class
+/// **B**, taken alone). The core lock is NEVER held across a `swap_ctx` / `run_until`: the worker
+/// loop takes a fiber out, releases the lock, runs the fiber, then re-locks to settle. `cv` is the
+/// wait point — a worker with no runnable fiber parks here (bounded `wait_timeout`) until a
+/// `send`/finish/terminate or it re-steals.
 ///
-/// **Deadlock** (the M:N redefinition of B3.5): `running == 0 && runq empty && parked > 0 && done <
-/// total` — every not-done fiber is parked on some channel and none is running or runnable, so no
-/// `send` can ever come. It is an exact local predicate under the single coordinator, so the legacy
+/// **Deadlock** (the M:N redefinition of B3.5): `running == 0 && runnable == 0 && parked > 0 &&
+/// done < total` — every not-done fiber is parked on some channel and none is running or queued
+/// anywhere (the `runnable` atomic counts all locals + `global`), so no `send` can ever come. It is
+/// an exact predicate under the single coordinator, so the legacy
 /// barrier-confirm epoch dance ([`DeadlockWatch`]) is unnecessary here. For D2b the run queue is one
 /// shared `VecDeque` (per-worker rings + work-stealing + a targeted-wake StoreLoad barrier are D4).
-/// D4b — a per-worker run queue (Go's P-local queue): a single `runnext` slot (the next fiber to
-/// run, for locality — a just-woken receiver lands here so a ping-pong stays on one worker) plus a
-/// FIFO `ring` of further runnable fibers. Each worker owns one behind its own `Mutex` (lock class
-/// **B**), so the common case — a worker pushing/popping its own queue — never touches the global
-/// core lock. Bounded: when the ring is full a push spills half to the global overflow queue (D4c).
-/// In D4b the scheduler never *populates* a local (seed + every requeue still go to the global
-/// queue), so behavior is byte-identical to D2b; D4c starts routing requeues + stolen work here.
+/// D4b — a per-worker run queue (Go's P-local queue): a single `runnext` slot (reserved for the
+/// ping-pong-locality optimization) plus a FIFO `ring` of runnable fibers. Each worker owns one
+/// behind its own `Mutex` (lock class **B**), so the common case — a worker draining its own queue —
+/// never touches the global core lock. In D4c a local is populated only by the owning worker's
+/// batch-grab from the global queue and by work it steals, and a worker grabs again only once its
+/// local is empty, so a local never accumulates across grabs: it holds at most one grab-batch
+/// (`≤ LOCAL_RING_CAP/2`) or steal-haul at a time (no hard cap or spill is needed). `runnext` is not
+/// populated at runtime yet (only a `recv`-wake/spawn routed through a local would); `try_steal`
+/// already drains it so the deadlock predicate stays sound if a future commit starts using it.
 struct LocalQ {
     runnext: Option<Fiber>,
     ring: std::collections::VecDeque<Fiber>,
 }
 
-/// Bound on a local ring before a `yield` push spills half to the global overflow queue (Go uses
-/// 256). Keeps an unbounded yield loop from ballooning one worker's local while siblings idle.
+/// Caps the per-grab batch a worker pulls from the global queue into its local (`LOCAL_RING_CAP/2`),
+/// so one worker can't drain the whole global queue into its local and starve stealing. Go uses 256
+/// as the local ring bound; here it serves only as the grab-batch cap (a local is drained before the
+/// next grab, so it is not also enforced as a hard push bound).
 const LOCAL_RING_CAP: usize = 256;
 
 /// D4c — how long an idle worker parks before waking to re-steal. Bounds the cost of a lost wakeup
@@ -739,10 +746,18 @@ impl MnSched {
                 let extra: Vec<Fiber> = (1..take).filter_map(|_| c.global.pop_front()).collect();
                 drop(c);
                 if !extra.is_empty() {
-                    let mut lq = self.lock_local(wid);
-                    for f in extra {
-                        lq.ring.push_back(f);
+                    {
+                        let mut lq = self.lock_local(wid);
+                        for f in extra {
+                            lq.ring.push_back(f);
+                        }
                     }
+                    // D4c — the surplus is now stealable by idle siblings, but it landed in a local
+                    // with no accompanying `notify_all` (unlike the global-queue requeue paths), so
+                    // without this wake an idle sibling would wait out the full `STEAL_POLL` before
+                    // stealing it (a throughput cliff for a quiet-after-fan-out workload). Notify
+                    // after releasing the local lock (B) — `cv` is the core's, not held here.
+                    self.cv.notify_all();
                 }
                 return Take::Run(first);
             }
@@ -819,11 +834,16 @@ impl MnSched {
 
     /// D4c — try to steal runnable work for an idle worker `wid` from a sibling's local queue. Probes
     /// every other worker (rotating start via a shared counter, to avoid convoying) and steals
-    /// **half** (ceil) of the first non-empty victim's ring, taken from the BACK (the victim runs its
-    /// front + `runnext`, so thief and victim rarely contend on the same fiber). Returns the stolen
-    /// fibers (the caller pushes them onto its own local). Locks one victim local at a time (class
-    /// **B**, alone), never while holding the core lock → no ABBA. Net-zero on `runnable` (the fibers
-    /// stay runnable, just move locals), so it never perturbs the deadlock predicate.
+    /// **half** (ceil) of the first non-empty victim, taken from the ring BACK first (the victim runs
+    /// its front, so thief and victim rarely contend on the same fiber) and falling back to the
+    /// victim's `runnext` once the ring is exhausted. Draining `runnext` too is what keeps the
+    /// deadlock predicate sound: a fiber stranded in a victim's `runnext` is counted in `runnable`
+    /// (suppressing the deadlock fire) but, if a thief could not reach it, no one would run it → a
+    /// silent hang. `runnext` is unused at runtime today (only `recv`-wake/spawn would populate it,
+    /// neither of which routes through a local yet), but stealing it now makes the contract hold for
+    /// any future commit that does. Returns the stolen fibers (the caller pushes them onto its own
+    /// local). Locks one victim local at a time (class **B**, alone), never while holding the core
+    /// lock → no ABBA. Net-zero on `runnable` (the fibers stay runnable, just move locals).
     fn try_steal(&self, wid: usize) -> Vec<Fiber> {
         let n = self.locals.len();
         if n <= 1 {
@@ -836,15 +856,18 @@ impl MnSched {
                 continue;
             }
             let mut vq = self.lock_local(v);
-            let len = vq.ring.len();
+            let len = vq.ring.len() + usize::from(vq.runnext.is_some());
             if len == 0 {
                 continue;
             }
             let take = len.div_ceil(2); // ceil-half, so a victim with 1 still yields it
             let mut stolen = Vec::with_capacity(take);
             for _ in 0..take {
-                if let Some(f) = vq.ring.pop_back() {
+                // Ring BACK first, then the `runnext` slot as a last resort.
+                if let Some(f) = vq.ring.pop_back().or_else(|| vq.runnext.take()) {
                     stolen.push(f);
+                } else {
+                    break;
                 }
             }
             if !stolen.is_empty() {
@@ -855,7 +878,7 @@ impl MnSched {
     }
 
     /// A `send` into channel `key`: enqueue the message AND move every fiber parked on it back onto
-    /// `runq` (as `Ready`), atomically under the core lock — so it serializes with [`MnSched::park`]'s
+    /// the global queue (as `Ready`), atomically under the core lock — so it serializes with [`MnSched::park`]'s
     /// gap re-check and a fiber parking concurrently is never lost. `notify_all` may over-notify (a
     /// spuriously woken worker finds the queue empty and re-parks) — targeted wake + the StoreLoad
     /// barrier are D4. Lock order: core-OUTER, channel-`q`-INNER (matches `park`).
@@ -887,7 +910,7 @@ impl MnSched {
         self.cv.notify_all();
     }
 
-    /// B3.4 — after cancel is tripped, move every parked fiber back onto `runq` so a worker resumes it
+    /// B3.4 — after cancel is tripped, move every parked fiber back onto the global queue so a worker resumes it
     /// and it observes the cancel flag (at the recv re-check / a dispatch back-edge) and unwinds.
     fn cancel_drain(&self) {
         let mut c = self.lock();
@@ -1077,7 +1100,7 @@ impl ReadyWorker {
 /// queue under the sched lock) or finish it with a terminal outcome.
 enum Disp {
     Park(usize, Arc<ChannelCore>),
-    /// D3 — the fiber exhausted its reduction budget; the worker requeues it at the tail of `runq`.
+    /// D3 — the fiber exhausted its reduction budget; the worker requeues it at the tail of the global queue.
     Yield,
     Finish(TaskOutcome),
 }
@@ -3725,7 +3748,7 @@ impl Vm {
     /// B3.4 — **cancellation**: the shared `cancel: Arc<AtomicBool>` (cloned onto every shell) aborts
     /// running fibers at a dispatch back-edge and parked fibers via [`MnSched::cancel_drain`] (they are
     /// requeued and observe the flag on resume). B3.5 — **deadlock** is redefined as the exact
-    /// predicate `running == 0 && runq empty && parked > 0 && done < total`, evaluated atomically by
+    /// predicate `running == 0 && runnable == 0 && parked > 0 && done < total`, evaluated atomically by
     /// [`MnSched::take_runnable`] (no barrier-confirm needed under a single coordinator). Residual
     /// hangs (decision D): deadlocks spanning nurseries or involving `Executor` work — `MnSched.parked`
     /// is per-nursery, so a cross-nursery `send` delivers the message but does not wake across scheds.
@@ -6636,7 +6659,7 @@ mod tests {
         assert_eq!(sched.runnable.load(Ordering::Relaxed), 2);
         sched.finish(f.task_index, TaskOutcome::Cancelled);
         assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "finish transitions running→done (no change)");
-        // The invariant: in the single-queue engine, runnable == runq.len() at every quiescent point.
+        // The invariant: with no per-worker locals populated, runnable == global.len() at quiescence.
         assert_eq!(sched.runnable.load(Ordering::Relaxed), sched.lock().global.len());
     }
 
