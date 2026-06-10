@@ -569,6 +569,11 @@ const LOCAL_RING_CAP: usize = 256;
 /// on the common path, so this only fires on the rare missed-notify race.
 const STEAL_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 
+/// D4d — every Nth schedule a worker checks the global queue before its own local, bounding the
+/// latency of global work while a worker is continuously fed by stealing. Go uses 61 (prime, to
+/// avoid resonating with common batch sizes).
+const GLOBAL_CHECK_INTERVAL: u64 = 61;
+
 impl LocalQ {
     fn new() -> Self {
         LocalQ { runnext: None, ring: std::collections::VecDeque::new() }
@@ -680,8 +685,22 @@ impl MnSched {
     /// queue to test under the split); `running == 0` is the key — while any fiber runs it might
     /// `send`/`yield` and make a sibling runnable, so an idle worker waits rather than declaring
     /// deadlock. (D4c will insert work-stealing passes between the local and the park.)
-    fn take_runnable(&self, wid: usize) -> Take {
+    fn take_runnable(&self, wid: usize, tick: u64) -> Take {
         loop {
+            // 0. D4d — every `GLOBAL_CHECK_INTERVAL`th schedule, pull from the global queue FIRST
+            //    (before own local / stealing). Without this a worker continuously refilled by
+            //    stealing a busy sibling's local could leave older global work waiting; the periodic
+            //    pull bounds that latency (Go's `schedtick % 61`). A single fiber is enough — it is a
+            //    fairness nudge, not the main grab path.
+            if tick.is_multiple_of(GLOBAL_CHECK_INTERVAL) {
+                let mut c = self.lock();
+                if let Some(f) = c.global.pop_front() {
+                    c.running += 1;
+                    self.runnable.fetch_sub(1, Ordering::Relaxed); // runnable → running
+                    return Take::Run(f);
+                }
+                drop(c);
+            }
             // 1. Own local queue — lock B alone, release before touching the core lock.
             if let Some(f) = self.lock_local(wid).pop() {
                 let mut c = self.lock();
@@ -3771,8 +3790,10 @@ impl Vm {
     /// repeat until the scheduler terminates. Generalizes the cooperative [`Vm::run_child`] to a
     /// shared run queue + park set across threads.
     fn mn_worker_loop(&mut self, sched: &Arc<MnSched>, wid: usize) {
+        let mut tick: u64 = 0;
         loop {
-            let mut fiber = match sched.take_runnable(wid) {
+            tick = tick.wrapping_add(1);
+            let mut fiber = match sched.take_runnable(wid, tick) {
                 Take::Run(f) => f,
                 Take::Stop => return,
             };
@@ -6573,7 +6594,9 @@ mod tests {
         Arc::as_ptr(core) as usize
     }
     fn take_run(s: &MnSched) -> Fiber {
-        match s.take_runnable(0) {
+        // tick=1 → not a periodic-global-check schedule, so the normal own-local-then-global order
+        // applies (what the existing unit tests assert).
+        match s.take_runnable(0, 1) {
             Take::Run(f) => f,
             Take::Stop => panic!("expected a runnable fiber, got Stop"),
         }
@@ -6661,6 +6684,33 @@ mod tests {
         assert_eq!(stolen.len(), 2, "ceil(4/2) stolen");
         assert_eq!(sched.lock_local(1).ring.len(), 2, "half left with the victim");
         assert_eq!(sched.runnable.load(Ordering::Relaxed), 4, "stealing is net-zero on runnable");
+    }
+
+    /// D4d: on a `GLOBAL_CHECK_INTERVAL`th schedule a worker pulls from the global queue before its
+    /// own local (anti-starvation); on any other tick it drains its own local first.
+    #[test]
+    fn schedule_pulls_global_every_61st_tick() {
+        // tick=61 (a multiple) → the global fiber wins over the local one.
+        let periodic = mk_sched(4);
+        periodic.lock_local(0).ring.push_back(mk_fiber(0)); // local
+        periodic.seed(vec![mk_fiber(1)]); // global (bumps runnable)
+        periodic.runnable.fetch_add(1, Ordering::Relaxed); // for the local fiber
+        let got = match periodic.take_runnable(0, GLOBAL_CHECK_INTERVAL) {
+            Take::Run(f) => f.task_index,
+            Take::Stop => panic!("expected a runnable fiber"),
+        };
+        assert_eq!(got, 1, "periodic tick drains the global queue first");
+
+        // tick=1 (not a multiple) → the local fiber wins (normal order).
+        let normal = mk_sched(4);
+        normal.lock_local(0).ring.push_back(mk_fiber(0));
+        normal.seed(vec![mk_fiber(1)]);
+        normal.runnable.fetch_add(1, Ordering::Relaxed);
+        let got = match normal.take_runnable(0, 1) {
+            Take::Run(f) => f.task_index,
+            Take::Stop => panic!("expected a runnable fiber"),
+        };
+        assert_eq!(got, 0, "non-periodic tick drains the own local first");
     }
 
     /// D4c: a thief never steals from itself and skips empty victims (returns nothing when only its
@@ -6885,7 +6935,7 @@ main()
         let b = take_run(&sched);
         sched.park(core_key(&c1), &c1, a);
         sched.park(core_key(&c2), &c2, b);
-        assert!(matches!(sched.take_runnable(0), Take::Stop));
+        assert!(matches!(sched.take_runnable(0, 1), Take::Stop));
         let slots = sched.take_slots();
         assert_eq!(slots.len(), 2);
         for s in slots {
@@ -6913,7 +6963,7 @@ main()
             assert_eq!(c.done, 2);
             assert!(c.terminate);
         }
-        assert!(matches!(sched.take_runnable(0), Take::Stop));
+        assert!(matches!(sched.take_runnable(0, 1), Take::Stop));
     }
 
     /// D2b/U5 (mechanics half): `cancel_drain` moves every parked fiber back onto the run queue so a
