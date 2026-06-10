@@ -1,8 +1,9 @@
 # Chezzi — B3: Tier-C Shared-Nothing OS-Thread Multicore (phased, multi-session plan)
 
-> **Status:** design + phased implementation plan — **engine code not started**. This is the
-> persistent, multi-session source of truth for **B3**. A future session picks the lowest unfinished
-> phase, implements it TDD, ships it, and ticks it here. The high-level A/B roadmap lives in
+> **Status: B3 epic COMPLETE** (B3.0–B3.6 all landed; see the checklist below). Superseded by
+> **Tier-D** ([`concurrency-tier-d.md`](concurrency-tier-d.md)), which rebuilt `--parallel` as an M:N
+> work-stealing scheduler on top of B3's share-nothing OS-thread foundation. This file is retained as
+> the persistent source of truth for **B3** (the original phased plan + landing notes). The high-level A/B roadmap lives in
 > [`concurrency.md` §9](concurrency.md#9-implementation-roadmap-c1c5); this file is the *execution
 > plan* for the B3 epic specifically.
 >
@@ -244,8 +245,8 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 | **B3.3d** ✅ | **Method tasks** (`spawn obj.m()`): `run_task_isolated` lowers to `Lowered::Method` (recv + args by wire) and dispatches via `do_method_call` against the reconstructed `module_objs`. A blocking `recv` faults cleanly (no scheduler in a sync worker). | `worker_runs_method_task`, `worker_method_on_struct` (reads a module global through the rebuilt home). | **unchanged** |
 | **B3.3-threads** ✅ | **Real OS threads behind `--parallel`.** Bounded pool (decision B), condvar `recv` (decision C blocking), buffer-flush-on-join (decision F). Cooperative engine stays the **default**. The two B3.3 "owes" (read-only `home` snapshot + method tasks) are now **discharged by B3.3c/d** — this phase is purely the thread-flip: the `--parallel` flag + pool + condvar `recv` wire `run_task_isolated` (which is reachable today only from unit tests) onto real threads. | NEW `--parallel`-only goldens that are deterministic-by-construction (collect→drain→sort→print) + order-insensitive (set-of-lines) assertions; every existing golden stays on the default engine and stays green. | **`--parallel` new** |
 | **B3.4** ✅ | **Cancellation + cross-thread `os.exit`.** Per-nursery `cancel: Arc<AtomicBool>` (decision C), cross-thread exit-code propagation up the join. Wake-on-cancel uses a **`recv` `wait_timeout` re-checking loop**, not a separate cancel condvar (see decision-C note below). | First-fault-aborts-running-siblings; a child `os.exit` halts the process with the right code; `recover:`/`defer` still compose. | `--parallel` |
-| **B3.5** | **Nursery-local deadlock detection under threads** (blocked-count vs live-count, decision D). | Port the all-blocked deadlock golden to `--parallel`; a near-miss (one sibling that *does* send) must NOT false-positive. | `--parallel` |
-| **B3.6** | **`Executor` / B5 on the pool + A3b submit-capture sendability gate.** Submitted tasks run on pool threads; the checker now gates `submit`'s closure captures like `spawn` does. | `submit` of a non-sendable capture is a checker error; executor tasks run on pool threads + the autodrain/`shutdown` semantics survive. | `--parallel` |
+| **B3.5** ✅ | **Nursery-local deadlock detection under threads** (blocked-count vs live-count, decision D). | Port the all-blocked deadlock golden to `--parallel`; a near-miss (one sibling that *does* send) must NOT false-positive. | `--parallel` |
+| **B3.6** ✅ | **`Executor` / B5 on the pool + A3b submit-capture sendability gate.** Submitted tasks run on pool threads; the checker now gates `submit`'s closure captures like `spawn` does. | `submit` of a non-sendable capture is a checker error; executor tasks run on pool threads + the autodrain/`shutdown` semantics survive. | `--parallel` |
 
 **Status checklist** (tick as phases land):
 

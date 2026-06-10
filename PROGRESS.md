@@ -289,9 +289,14 @@ guard ×1, `timer` unit ×3, `timer_offload` park ×1, `d5_owe1` process.cmd pro
 `cargo clippy --all-targets -- -D warnings` clean, `primes_parallel=148933` (VM + `--parallel`),
 VM==interp parity suite green, `sleep_ms` fan-out runs ~max not sum (timer path). 2-agent S++ panel
 (SRE + Backend Architect): zero Critical; both Importants applied (timer-deadline `checked_add`
-saturation; bare-name-collision guard test). **Remaining owe:** the `recv`-inside-native-callback
-unblock (a documented acceptable v1 limit — needs stackful fibers / CPS, deferred); then **D6
-(epoll/kqueue pollset + `std.net`) is next on the ladder.** Items *not* in B3–B5
+saturation; bare-name-collision guard test). **Remaining owe #3:** the `recv`-inside-native-callback
+unblock — **resolution strategy now documented** (`docs/concurrency-tier-d.md` § "D5 owe #3"): Path A
+moves the suspendable HOFs into chezzi source (`std/iter.chz`, like BEAM's `Enum.map` — *proven* to
+park: a chezzi-defined HOF with a `recv` in its closure suspends fine under `--parallel`; only native
+Rust frames break the snapshot chain), Path C Go-`handoffp`-demotes the fiber to a thread for the
+intrinsically-native islands (`Shared.update`'s lock, hash/compare/str hooks, fast `sort`), Path B
+stackful fibers rejected. Not a D6 prerequisite. Then **D6 (epoll/kqueue pollset + `std.net`) is next
+on the ladder.** Items *not* in B3–B5
 (cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are
 documented in **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 

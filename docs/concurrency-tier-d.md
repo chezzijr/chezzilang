@@ -424,8 +424,10 @@ Goldens byte-identical.
 > it at the deadline through the same `inflight`/`complete_offload` path (deadlock predicate stays
 > sound). 10⁴ sleepers ≈ 1 thread; `checked_add` saturates a pathological `ms`. D6 will fold this
 > timer deadline into the pollset `poll()` timeout (one blocking wait covers I/O + timers).
-> **Still deferred:** the `recv`-inside-native-callback unblock (a larger change — stackful fibers /
-> CPS; an accepted v1 limit, untouched).
+> **Still deferred — owe #3:** the `recv`-inside-native-callback unblock. Its **resolution strategy is
+> now documented** (the "D5 owe #3" section below — Path A: move HOFs into `std/iter.chz` chezzi source,
+> proven to park; Path C: Go-`handoffp` thread-demote for the native-lock/hook islands; Path B stackful
+> rejected). Not yet implemented; not a D6 prerequisite.
 
 **Goal.** A blocking native call (`std.io.read_file` / `write_file`, `std.fs.*`, `std.time.sleep_ms`)
 must not pin a core-pool worker (G3, live today). Route it to a **growable blocking pool** so the
@@ -450,6 +452,84 @@ concurrently (wall-clock ≈ max, not sum). (2) `sleep_ms(100)` ×100 fibers on 
 
 **Risk.** Medium. Classification correctness (mislabel CPU as I/O → starve). `io` stdout writes must
 respect decision-F flush. **Reuse:** `NativeFn` table, `guarded` / `native_reentry`, the D4 wake path.
+
+### D5 owe #3 — `recv` inside a native callback: resolution strategy *(A + C; B rejected)*
+
+**Status:** documented strategy, **not yet implemented**. Not a D6 prerequisite — do it only when real
+programs hit the wall.
+
+**The bug.** A blocking `recv` reached inside a native Rust callback (`list.map`/`filter`, `sort`,
+`compare`/`hash`/`str` hooks, `Shared.update`, the executor drain, a `defer`red call) faults
+`deadlock`. It is gated by the `native_reentry` guard (`guarded()`, `src/vm/mod.rs` — the *only* site
+that raises it, around the `invoke_value` re-entry inside each native HOF loop).
+
+**The invariant** (the thing to internalize):
+
+> `recv` can park **⟺** every frame between the fiber's entry and the `recv` is a **VM frame**
+> (snapshotted into `FiberCtx`). **One native Rust frame anywhere in that chain → fault.** The suspend
+> mechanism snapshots VM frames and returns out of `run_until`; it cannot snapshot a live Rust stack
+> (the `map` `for`-loop frame, `i`, the partial result), so the half-finished native call would be
+> lost.
+
+**Correction to the old §11 note.** [`concurrency.md` §11](concurrency.md) said this was "mooted by
+B3 — under real OS threads a `recv` inside a callback just blocks the thread on a condvar." That was
+true for the **B3.3 thread-per-task** model, but **D2's M:N transition un-mooted it**: fibers now park
+by *snapshot*, not by blocking their thread, so a native frame breaks the chain again. The guard is
+**live under `--parallel`** today (pinned by `d5_blocking_native_in_callback_runs_inline`).
+
+**Proven finding — the fix is "be bytecode."** A callback running through **pure chezzi frames** has
+*no* native frame in the chain, so it **already parks**. Verified live: a chezzi-defined HOF
+`fn apply[T](f: fn() -> T) -> T: return f()` invoked as `apply(fn() -> int: ch.recv())` under
+`--parallel` parks and resumes correctly (no fault). So this is **not** closure-vs-function and **not**
+inlining — it is purely *"does the path to `recv` cross native Rust?"*
+
+This is exactly the **Go / BEAM split**: Go is stackful so Go-on-Go never hits it (only cgo, handled
+by `handoffp`); BEAM's `Enum.map` is **Elixir bytecode** (parks fine) and only **NIFs** (C) hit the
+wall (handled by dirty schedulers + yielding NIFs). chezzi's only mistake was implementing its HOFs in
+**native Rust** where BEAM implemented them in the language.
+
+**Path A — move suspendable HOFs into chezzilang** *(primary fix; infra already exists).* Write
+`map` / `filter` / `fold` / `each` / `reduce` as chezzi functions in `std/iter.chz` (the `std/*.chz`
+chezzi-source stdlib is already resolved by `src/resolver/mod.rs`; function-typed params + generics
+already work — `examples/hof.chz`, `std/ref.chz`). They compile to bytecode → a blocking `recv` in
+their closure parks. **Zero Rust change, zero compiler magic.** This is BEAM's `Enum.map`.
+- *Surface choice:* the free function `iter.map(xs, f)` works immediately. The **builtin method**
+  `xs.map(f)` stays native Rust (`call_method`) → keep it as the fast non-blocking path and document
+  "use `iter.map` if the body blocks," **or** later make builtin-method dispatch fall back to the
+  chezzi stdlib fn (a dispatch indirection) so `xs.map()` is also suspendable.
+- *Cost:* a bytecode HOF is modestly slower than the Rust loop (the per-element `invoke_value`
+  re-entry was already paid; only the loop counter moves to bytecode). BEAM accepts the same trade.
+- *Coverage:* the iteration HOFs (the common case). `sort` can also move (a chezzi `iter.sort`
+  mergesort — suspendable but slower than Rust's; offer alongside the fast native `.sort`).
+
+**Path C — demote the fiber to a thread, Go-`handoffp`-style** *(residual; the native islands A can't
+move).* For callbacks that are **intrinsically native** — `Shared.update` (the RMW **lock** is the
+feature), `compare`/`hash`/`str` hooks (called by native dict/set/GC/format machinery), a fast native
+`sort`, embedder NIFs — the fiber cannot become bytecode. When a `recv` inside such a callback would
+block, the executing worker **blocks in place** on `ChannelCore.cv` (the B3.3 thread-block path is
+still in the tree) and **spins up a replacement worker** so the core pool stays at N; on `send` the
+condvar wakes it, it finishes the callback, returns. **No live-stack migration** (impossible without
+Path B) — the stuck thread stays stuck, a fresh one covers. This is literally Go's `handoffp` /
+BEAM's dirty schedulers.
+- *Overhead:* **zero when the callback doesn't block**; **+1 OS thread per fiber actually blocked in a
+  callback**, only while blocked (Go's exact cost). Bounded by concurrent-blocked-in-callback count.
+- *Reuse:* `ChannelCore.cv` (B3.3), the blocking pool, the `inflight`/deadlock accounting, the D4 wake
+  path. `send_wake` gains a **dual wake** (requeue a snapshot-parked fiber **or** `notify` a
+  thread-blocked one).
+- *The `Shared.update` hazard survives every path:* parking mid-RMW holds the update lock while
+  blocked, so a sender needing the **same** `Shared` deadlocks. The honest rule — BEAM's — is **"don't
+  block inside `update`"** (enforce or document), independent of A/B/C.
+
+**Path B — stackful fibers — REJECTED.** A native stack per fiber (corosensei-style) would fix
+*everything* uniformly with cheap runtime switching, but it is a **substrate rewrite**: unsafe stack
+switching, memory-per-fiber, and a re-audit of every native for re-entrancy. It is the same
+large/risky cost already declared a **non-goal** for interp B1/B2. The **A + C** combo delivers the
+same *observable* behaviour ("`recv` works in callbacks") at a fraction of the risk, so B is not
+pursued unless chezzi adopts Go/BEAM-grade uniformity as a core goal.
+
+**Plan of record.** (1) Add `map`/`filter`/`fold`/`each` to `std/iter.chz` (chezzi source) + a
+`--parallel` test that `recv`s inside the closure. (2) Decide the builtin-method fate (keep fast vs
+dispatch-to-stdlib). (3) Path C only if real programs hit `update`/hooks/fast-`sort`. **B never.**
 
 ### D6 — epoll / kqueue pollset + minimal `std.net` (TCP) *(Go netpoller)*
 

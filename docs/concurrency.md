@@ -486,9 +486,9 @@ and shippable now; Group B is gated on **B1**. The surface of `spawn` / `paralle
 |---|------|--------|
 | **B1** | **Suspendable execution** — make the engine loop resumable. The fiber core; **everything else in B gates on it**. | ✅ **VM done** · 🚫 interp (non-goal) |
 | **B2** | **Cooperative scheduler** — task interleaving; real **blocking `recv`** (replaces the deadlock-detect fault); mid-flight producer↔consumer. | ✅ **VM done** · 🚫 interp (non-goal) |
-| **B3** | **Tier-C OS-thread multicore** — per-thread heap + GC; true parallelism. An *alternative bet* to B1/B2. | ⬜ |
-| **B4** | **Real `Shared[T]`** — owner-task + channel (today single-thread-serialised, already correct). | ⬜ |
-| **B5** | **Real `Executor` background pool** — actually-backgrounded tasks + graceful exit drain under real concurrency; plus A3b (submit-capture gating). | ⬜ |
+| **B3** | **Tier-C OS-thread multicore** — per-thread heap + GC; true parallelism. An *alternative bet* to B1/B2 (the one taken). | ✅ **VM done** (B3.0–B3.6; superseded by Tier-D D1/D2's M:N fibers) |
+| **B4** | **Real `Shared[T]`** — owner-task + channel (today single-thread-serialised, already correct). | ✅ **VM done** (folded into B3.1/B3.4) |
+| **B5** | **Real `Executor` background pool** — actually-backgrounded tasks + graceful exit drain under real concurrency; plus A3b (submit-capture gating). | ✅ **VM done** (B3.6 + A3b) |
 
 **Dependency:** Group A is independent and shippable; Group B is gated on **B1**. A2 is unchanged
 after B lands; A3a becomes load-bearing (not merely emergent) once captures truly cross threads.
@@ -532,9 +532,12 @@ to fix. Note: **A1** (`Channel.try_recv`) shipped on **both** engines after all 
 it never suspends, so the interp runs it identically and it stays parity-tested (it is not gated on the
 blocking-`recv` divergence).
 
-**Still open (VM):** **B3** OS-thread multicore (alternative bet), **B4** real `Shared`, **B5** real
-`Executor` pool (+ A3b). VM v1 limits to lift if wanted: blocking `recv` inside a native callback,
-and cross-nursery wakeups (a fiber in an outer nursery is not woken by an inner one).
+**Landed (VM):** **B3** OS-thread multicore (the alternative bet, taken — B3.0–B3.6), **B4** real
+`Shared`, **B5** real `Executor` pool (+ A3b) — then **Tier-D** rebuilt `--parallel` as an M:N
+work-stealing scheduler (D0–D5 + owes #1/#2). **Still open:** Tier-D **D6** (epoll/`std.net`) and the
+VM v1 limits to lift if wanted — blocking `recv` inside a native callback (**D5 owe #3**, resolution
+strategy in [`concurrency-tier-d.md`](concurrency-tier-d.md)) and cross-nursery wakeups (a fiber in an
+outer nursery is not woken by an inner one).
 
 ---
 
@@ -557,10 +560,12 @@ and cross-nursery wakeups (a fiber in an outer nursery is not woken by an inner 
   see [§8](#8-daemon--background-tasks).
 ### Tier-D — M:N scheduler + async I/O (post-B3 frontier, not yet scheduled)
 
-B3 gives **CPU-bound** multicore (`--parallel`: a bounded OS-thread pool, one worker `Vm` per task,
-blocking `recv` parks the whole thread on a condvar). It deliberately does **not** handle I/O-bound
-concurrency: a task doing blocking I/O pins its pool thread, and enough of them starve the pool (risk
-**G3**). Closing that gap is a separate, larger effort recorded here so the design is not relitigated.
+B3 *originally* gave **CPU-bound** multicore (`--parallel`: a bounded OS-thread pool, one worker `Vm`
+per task, blocking `recv` parking the whole thread on a condvar). **Tier-D D1/D2 have since superseded
+that baseline** — `--parallel` is now an M:N work-stealing scheduler of lightweight fibers (own heap,
+park by `FiberCtx` snapshot, not by blocking a thread), and **D5 closed the I/O-bound gap** (blocking
+natives offload to a dirty pool; `sleep_ms` rides a timer thread) so a blocking call no longer pins a
+worker (the **G3** starvation, fixed). The text below records the design as it was reasoned through.
 
 **Two orthogonal axes — don't conflate them.** *Memory model* (how tasks share data) is independent
 of *scheduler* (how tasks map to cores + how blocking is handled). Chezzi already has **Erlang/BEAM's
@@ -601,13 +606,16 @@ blocks. The Chezzi analogue is the `native_reentry` sites.)
 
 **What is genuinely still hard (the real work):**
 
-- **Task cost.** Current per-task = a full `Vm` + per-task heap reconstruction (the ~2s in the prime
-  demo). Wrong cost model for green-thread scale — would need lightweight task contexts sharing the
-  program/read-only snapshot, not Vm rebuild. Likely the first thing to fix.
+- **Task cost** — ✅ **addressed (Tier-D D1/D2).** The old per-task full-`Vm` + heap reconstruction
+  (the ~2 s in the prime demo) was replaced by lightweight fibers sharing an `Arc`'d module snapshot
+  (D1) with the heap swapped into the fiber context (D2a). "The first thing to fix" — fixed.
 - **Suspend at *every* yield point, not just `recv`** — including a `recv`/I/O reached **inside a native
   callback** (HOF, `sort`, `Shared.update`, executor drain), whose loop state is on the Rust stack and
-  can't be parked. Today the `native_reentry` guard faults instead; a real scheduler must handle it (the
-  fiddly bit Go's runtime also wrestles with).
+  can't be snapshotted. Today the `native_reentry` guard faults instead. **This is D5 owe #3** — its
+  resolution strategy (Path A: move HOFs into chezzi `std/iter.chz`, like BEAM's `Enum.map`; Path C:
+  Go-`handoffp` thread-demote for the native-lock/hook islands; Path B stackful rejected) is written up
+  in [`concurrency-tier-d.md` § "D5 owe #3"](concurrency-tier-d.md). The same fiddly bit Go's runtime
+  wrestles with for cgo.
 - **Correct lock-free work-stealing + pollset wake-ups + preemption.** Preemption is the *easy* part
   here: reduction-style cooperative yield — check a "should-yield" flag at back-edges, reusing the
   existing `cancel`/`gc_stress` dispatch check sites (Erlang's model). Signal-based preemption (Go 1.14)
@@ -617,8 +625,9 @@ blocks. The Chezzi analogue is the `native_reentry` sites.)
 (suspendable fibers, dispatch-loop check sites, private-heap GC) already exist.
 
 **When `--parallel` can become the default** (and serial demoted to an explicit flag): gated on
-(1) **B3.4 + B3.5** landing — a deadlocked default must *fail loudly*, not hang; (2) the per-task
-overhead dropping; (3) a determinism-contract decision — accept **task-ordered** output (decision F's
+(1) ✅ **B3.4 + B3.5 landed** — a deadlocked default fails loudly (cancellation + nursery-local
+deadlock detection), not hangs; (2) ✅ **per-task overhead dropped** (D1/D2); (3) a still-open
+determinism-contract decision — accept **task-ordered** output (decision F's
 flush-on-join) as the default and demote VM==interp parity to a *sequential-subset* contract run under
 an explicit `--serial` flag. Serial is **never deleted** — it stays permanently as the deterministic
 parity oracle + reproducible-debug engine. Not a date; a checklist.
@@ -652,7 +661,8 @@ One line: *Go skeleton, BEAM brain — because Chezzi is a share-nothing bytecod
 world.* The full per-mechanism ledger + the phased breakdown **D0…D6** (each independently TDD-able,
 D0 = the O(N²) ready-queue fix from §11) live in
 **[`concurrency-tier-d.md`](concurrency-tier-d.md)** — the companion to this section the way
-[`concurrency-b3.md`](concurrency-b3.md) is to §9. **Status: broken down, D0 next.**
+[`concurrency-b3.md`](concurrency-b3.md) is to §9. **Status: D0–D5 + owes #1/#2 landed (the `--parallel`
+engine is now a true M:N work-stealing scheduler); D6 (epoll/kqueue pollset + `std.net`) next.**
 
 ---
 
@@ -661,23 +671,34 @@ D0 = the O(N²) ready-queue fix from §11) live in
 Concurrency work that is real but **outside the B3–B5 multicore epic**. Recorded so it isn't lost or
 reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md`](concurrency-b3.md).)
 
-- **Cross-nursery wakeups** *(cooperative-engine limit)*. `pick_runnable` scans only the **innermost**
-  scheduler level (`src/vm/mod.rs` — `pick_runnable`), so a fiber blocked in an *outer* nursery is not
-  woken by an *inner* nursery's `send` until the inner scheduler completes. The common case (consumer
-  in the outer nursery, producer in an inner one that *does* finish) already works — the gap is only a
-  fiber whose filler is an outer sibling the inner scheduler can't run, which then faults `deadlock`.
+- **Cross-nursery wakeups** *(cooperative-engine limit)*. The cooperative scheduler (`run_scheduler` +
+  the per-nursery `ready: BTreeSet`; cross-level wake via `wake_on_send`, `src/vm/mod.rs`) wakes only
+  within the **innermost** scheduler level, so a fiber blocked in an *outer* nursery is not woken by an
+  *inner* nursery's `send` until the inner scheduler completes. The common case (consumer in the outer
+  nursery, producer in an inner one that *does* finish) already works — the gap is only a fiber whose
+  filler is an outer sibling the inner scheduler can't run, which then faults `deadlock`.
   **Why deferred:** a true fix needs a flat/global scheduler and partly conflicts with
-  structured-concurrency scoping (inner should join before outer proceeds). **Mooted by B3** — real
-  OS-thread blocking `recv` has no level-local polling — so revisit only if the *cooperative default*
-  engine must lift it. Acceptable v1 limit (also noted in `PROGRESS.md`).
+  structured-concurrency scoping (inner should join before outer proceeds). **(Symbol note:** the old
+  `pick_runnable` linear scan named in earlier drafts is gone — replaced by D0's `ready`-set.)
+  **Correction:** this was once "mooted by B3" on the theory that real OS-thread `recv` blocks the
+  thread (no level-local polling) — but **Tier-D D2's M:N transition un-mooted it**: `--parallel` now
+  parks fibers by *snapshot* into the level's park set, not by blocking a thread, so the level scoping
+  is back. Now a limit on **both** engines; revisit only if it bites real programs. Acceptable v1 limit
+  (also noted in `PROGRESS.md`).
 
-- **`recv` inside a native callback** *(cooperative-engine limit)*. The `native_reentry` guard
-  (`src/vm/mod.rs`) faults `deadlock` when a blocking `recv` is reached inside a Rust callback (list
-  HOFs, `sort`, `compare`/`hash`/`str`, `Shared.update`, the executor drain, a `defer`red call),
-  because that loop/recursion state lives on the host stack and can't be parked into a fiber. **Mooted
-  by B3** — under real OS threads a `recv` inside a callback just blocks the thread on a condvar, no
-  parking needed; the guard becomes **mode-conditional** (live in cooperative mode, disabled under
-  `--parallel`). Acceptable v1 limit until then.
+- **`recv` inside a native callback** *(now a `--parallel` M:N limit too — D5 owe #3)*. The
+  `native_reentry` guard (`src/vm/mod.rs`, `guarded()`) faults `deadlock` when a blocking `recv` is
+  reached inside a Rust callback (list HOFs, `sort`, `compare`/`hash`/`str`, `Shared.update`, the
+  executor drain, a `defer`red call), because that loop/recursion state lives on the host stack and
+  can't be snapshotted into a fiber. **Note (corrected):** this was once "mooted by B3" — true for the
+  **B3.3 thread-per-task** model (a callback `recv` just blocked the thread on a condvar) — but **D2's
+  M:N transition un-mooted it**: fibers now park by *snapshot*, not by blocking their thread, so a
+  native frame breaks the chain again. The guard is **live under `--parallel`** (pinned by
+  `d5_blocking_native_in_callback_runs_inline`). **Resolution strategy (A + C; B rejected)** is written
+  up in [`concurrency-tier-d.md` § "D5 owe #3"](concurrency-tier-d.md): move the suspendable HOFs into
+  chezzi (`std/iter.chz`, like BEAM's `Enum.map` — proven to park) and Go-`handoffp`-demote the fiber
+  to a thread for the intrinsically-native islands (`Shared.update`'s lock, hash/compare hooks). An
+  accepted v1 limit until then.
 
 - **`Channel.close()` + closed-channel semantics** *(surface addition — needs an explicit decision)*.
   Not part of the currently-fixed surface (§5). The natural complement to B1/B2's blocking `recv`: a
@@ -696,14 +717,11 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   **B3.6** (the `submit` arm pushes a `capture_floor` like `spawn`). See §9 Group B and
   [`concurrency-b3.md` §4 B3.6](concurrency-b3.md#4-phased-breakdown).
 
-- **Cooperative scheduler is O(N²) in the per-nursery task count** *(cooperative-engine perf limit)*.
-  `run_scheduler` calls `pick_runnable` (`src/vm/mod.rs`) each turn, which **linear-scans all live
-  children** for the lowest-index runnable one; with N children finishing ~one per turn that is O(N²).
-  Measured (N trivial fibers in one `parallel:`): 1k→1.4 ms, 10k→51 ms, 20k→246 ms, 50k→2.34 s —
-  doubling N roughly quadruples the time, so the practical cooperative fan-out ceiling is **~10k–20k
-  tasks** before the scheduler dominates. **Fix:** maintain an explicit FIFO **ready-queue** of
-  runnable child indices (push on unblock/spawn, pop to run) so a turn is O(1) amortized → whole nursery
-  O(N). Bounded, both correctness-preserving (FIFO order is already the contract), and TDD-able.
-  **Not mooted by B3** — this is purely the *cooperative default* engine; `--parallel` farms tasks to
-  the pool and never runs `run_scheduler`. (It does *not* make cooperative tasks "green-thread cheap" on
-  its own — that is the Tier-D per-task-cost work in §10 — but it removes the quadratic wall.)
+- **Cooperative scheduler O(N²) in the per-nursery task count** — ✅ **LANDED as Tier-D D0.** The old
+  `pick_runnable` linear-scan-per-turn (lowest-index runnable, O(N²); measured 1k→1.4 ms, 10k→51 ms,
+  20k→246 ms, 50k→2.34 s) was replaced by a per-nursery **`ready: BTreeSet`** of runnable child indices
+  (lowest-index pop, O(log N) per turn → whole nursery O(N·log N); `src/vm/mod.rs` — `run_scheduler` +
+  `Nursery.ready`). Byte-identical scheduling order to the old scan (lowest-index is the contract), so
+  all goldens stayed green. (Note: this was always purely the *cooperative default* engine; `--parallel`
+  uses the M:N `mn_worker_loop`, never `run_scheduler`. D0 removed the quadratic wall but is orthogonal
+  to the Tier-D per-task-cost work that makes fibers green-thread-cheap.)
