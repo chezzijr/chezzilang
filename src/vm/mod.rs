@@ -13,7 +13,7 @@ pub mod wire;
 use core::{ChannelCore, ExecutorCore, SharedCore};
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, Op, Program, ProtoId};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use value::{GcRef, Value};
 use wire::WireValue;
@@ -558,6 +558,14 @@ struct MnSched {
     /// The prebuilt `deadlock` fault, cloned into every still-parked fiber's slot when the predicate
     /// fires, so the join's lowest-index-fault reduce propagates it byte-identically (`DEADLOCK_MSG`).
     deadlock_err: RuntimeError,
+    /// D4a — the authoritative count of *runnable* fibers (queued and waiting to be picked up; not
+    /// running, parked, or done). In D2b's single shared queue this exactly mirrors `runq.len()`, but
+    /// it lives here as an atomic so D4b can split `runq` into per-worker local rings + a global
+    /// overflow (no single queue to `.len()`) while the deadlock predicate stays a cheap O(1) read.
+    /// Maintained under the core lock alongside every queue mutation; read by `take_runnable` to test
+    /// "no work anywhere". A `send`/`yield`/`steal` from a *running* worker is the only out-of-core-
+    /// lock mutator that could race the predicate, and `running == 0` already excludes that case.
+    runnable: AtomicUsize,
 }
 
 struct SchedCore {
@@ -600,6 +608,7 @@ impl MnSched {
             cv: Condvar::new(),
             cancel,
             deadlock_err,
+            runnable: AtomicUsize::new(0),
         }
     }
 
@@ -611,6 +620,7 @@ impl MnSched {
 
     /// Seed the run queue with the nursery's fibers (task order).
     fn seed(&self, fibers: Vec<Fiber>) {
+        self.runnable.fetch_add(fibers.len(), Ordering::Relaxed);
         self.lock().runq.extend(fibers);
     }
 
@@ -627,6 +637,7 @@ impl MnSched {
             }
             if let Some(f) = c.runq.pop_front() {
                 c.running += 1;
+                self.runnable.fetch_sub(1, Ordering::Relaxed); // runnable → running
                 return Take::Run(f);
             }
             if c.done == c.total {
@@ -634,7 +645,12 @@ impl MnSched {
                 self.cv.notify_all();
                 return Take::Stop;
             }
-            if c.running == 0 && c.parked_n > 0 {
+            // D4a — deadlock predicate reads the authoritative `runnable` count rather than
+            // `runq.is_empty()`: under D4b's split queues there is no single queue to test, but
+            // `runnable == 0` means no fiber is queued anywhere. Sound here because we hold the core
+            // lock and `running == 0` excludes the only out-of-lock mutator (a running worker's
+            // local push/steal), so no fiber can be in flight to become runnable.
+            if c.running == 0 && self.runnable.load(Ordering::Relaxed) == 0 && c.parked_n > 0 {
                 c.flag_deadlock(&self.deadlock_err);
                 self.cv.notify_all();
                 return Take::Stop;
@@ -660,9 +676,10 @@ impl MnSched {
         if message_waiting || self.cancel.load(Ordering::Relaxed) {
             fiber.state = FiberState::Ready;
             c.runq.push_back(fiber);
+            self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued)
             self.cv.notify_all();
         } else {
-            fiber.state = FiberState::Blocked;
+            fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
             c.parked.entry(key).or_default().push(fiber);
             c.parked_n += 1;
         }
@@ -680,6 +697,7 @@ impl MnSched {
         c.running -= 1;
         fiber.state = FiberState::Ready;
         c.runq.push_back(fiber);
+        self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (round-robin requeue)
         self.cv.notify_all();
     }
 
@@ -693,6 +711,7 @@ impl MnSched {
         core.q.lock().unwrap_or_else(|e| e.into_inner()).push_back(w);
         if let Some(woken) = c.parked.remove(&key) {
             c.parked_n -= woken.len();
+            self.runnable.fetch_add(woken.len(), Ordering::Relaxed); // parked → ready
             for mut f in woken {
                 f.state = FiberState::Ready;
                 c.runq.push_back(f);
@@ -723,7 +742,9 @@ impl MnSched {
             return;
         }
         let buckets: Vec<Vec<Fiber>> = c.parked.drain().map(|(_, v)| v).collect();
+        let drained: usize = buckets.iter().map(|v| v.len()).sum();
         c.parked_n = 0;
+        self.runnable.fetch_add(drained, Ordering::Relaxed); // parked → ready
         for v in buckets {
             for mut f in v {
                 f.state = FiberState::Ready;
@@ -6429,6 +6450,33 @@ mod tests {
         assert_eq!(take_run(&sched).task_index, 0);
         assert_eq!(take_run(&sched).task_index, 1);
         assert_eq!(sched.lock().running, 2);
+    }
+
+    /// D4a: `runnable` is the authoritative count of runnable (queued, not running/parked/done)
+    /// fibers — in D2b's single-queue world it mirrors `runq.len()` exactly, but it is maintained as
+    /// an atomic so D4b's per-worker split (local rings + global, no single queue to `.len()`) can
+    /// keep using it for the deadlock predicate. This pins the bump/decrement discipline: seed +N,
+    /// pop −1 (runnable→running), park unchanged (running→parked), send_wake +woken (parked→ready),
+    /// finish unchanged (running→done).
+    #[test]
+    fn mnsched_runnable_tracks_single_queue() {
+        let sched = mk_sched(3);
+        let core = empty_core();
+        let key = core_key(&core);
+        sched.seed(vec![mk_fiber(0), mk_fiber(1), mk_fiber(2)]);
+        assert_eq!(sched.runnable.load(Ordering::Relaxed), 3, "seed bumps runnable");
+        let f0 = take_run(&sched);
+        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "pop transitions runnable→running");
+        sched.park(key, &core, f0);
+        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "park transitions running→parked (no change)");
+        sched.send_wake(key, &core, WireValue::Int(7));
+        assert_eq!(sched.runnable.load(Ordering::Relaxed), 3, "send_wake transitions parked→ready");
+        let f = take_run(&sched);
+        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2);
+        sched.finish(f.task_index, TaskOutcome::Cancelled);
+        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "finish transitions running→done (no change)");
+        // The invariant: in the single-queue engine, runnable == runq.len() at every quiescent point.
+        assert_eq!(sched.runnable.load(Ordering::Relaxed), sched.lock().runq.len());
     }
 
     /// D2b/U2: parking the running fiber on an EMPTY channel frees the worker (`running--`,
