@@ -168,6 +168,22 @@ except faster; the new loop is D2. **Reuse:** `swap_ctx`, `to_wire` / `from_wire
 
 ### D2 — GMP run queues + unified M:N scheduler loop *(no stealing yet)*
 
+> **Status: D1's deferred heap-into-`FiberCtx` half LANDED (D2a).** `FiberCtx` now carries
+> `heap: Option<Heap>`; `swap_ctx` swaps it **only for M:N fibers** (`Some`), while cooperative
+> fibers carry `None` and keep aliasing the single `Vm::heap` (decision A — share-by-ref), so the
+> cooperative engine is byte-identical **by construction** (every runtime `FiberCtx` is built via
+> `FiberCtx::default()` → `None`; the `Some` arm is reached only by unit tests). A `Fiber: Send`
+> compile-time guard + `debug_assert!`s in `swap_ctx`/`collect` pin the invariant; a parked M:N
+> fiber's heap is share-nothing + quiescent and is **never traced cross-heap** (collect runs only on
+> the swapped-in `self.heap`). **No runtime site sets `Some` yet** — the FIFO pool still runs one
+> fiber per worker (D1), so D2a is observably identical except that a `Fiber` is now self-contained
+> (owns its heap, `Send`), the prerequisite for parking it across worker threads. Tests:
+> `swap_ctx_round_trips_an_mn_fiber_heap`, `swap_ctx_leaves_heap_untouched_for_cooperative_fiber`,
+> `collect_under_swapped_in_fiber_heap_{preserves_parked_host_object,leaves_parked_host_heap_quiescent}`;
+> all `--parallel` goldens byte-identical, `primes_parallel=148933` both engines, 1350 tests green.
+> **The run queues + park-on-`recv` half (D2b below) is next** — that is where the share-nothing
+> fiber model becomes observable.
+
 **Goal.** Replace `run_parallel_nursery`'s "one `Vm` per task on a FIFO pool" with **per-worker run
 queues of lightweight fibers**, parking on `recv` instead of pinning threads.
 

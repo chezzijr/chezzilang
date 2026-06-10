@@ -280,6 +280,13 @@ struct FiberCtx {
     nurseries: Vec<Vec<PendingCall>>,
     fault_trace: Option<Vec<TraceFrame>>,
     fault_trace_depth: usize,
+    /// D2a — an M:N fiber carries its OWN heap (share-nothing): `swap_ctx` swaps it with the host
+    /// `Vm::heap` when this fiber schedules in, and back out when it parks. `None` for cooperative
+    /// fibers, which all alias the single `Vm::heap` (decision A — share-by-ref), so their swap
+    /// leaves the heap untouched and the cooperative engine stays byte-identical. No M:N call site
+    /// sets `Some` yet — the FIFO pool runs one fiber per worker (D1); a parked fiber that must carry
+    /// its heap off the worker arrives with the run-queue + park-on-`recv` engine in D2b.
+    heap: Option<Heap>,
 }
 
 /// Scheduling state of a child fiber within a [`Nursery`].
@@ -302,6 +309,17 @@ struct Fiber {
     ctx: FiberCtx,
     state: FiberState,
 }
+
+// D2a — a `Fiber` now carries its own `Heap` (via `FiberCtx::heap`), and D2b parks fibers across
+// worker threads (parked on one worker, requeued by a `send` on another, resumed on a third). That
+// requires `Fiber: Send`. `Heap` is already `Send` (a plain `Vec` of `Obj`, no `Rc`/`RefCell`; a
+// whole `Vm`/`Heap` already crosses the pool boundary via `ReadyWorker`), so this holds today — the
+// guard makes a future non-`Send` field on `Fiber`/`FiberCtx` a loud compile error, not a D2b
+// surprise.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<Fiber>();
+};
 
 /// One active `parallel:` scheduler level (B1/B2): the parked context of the joining (parent) fiber
 /// and the child fibers spawned into the nursery. Pushed on `JoinNursery`, popped when every child
@@ -729,6 +747,13 @@ impl Vm {
         std::mem::swap(&mut self.nurseries, &mut ctx.nurseries);
         std::mem::swap(&mut self.fault_trace, &mut ctx.fault_trace);
         std::mem::swap(&mut self.fault_trace_depth, &mut ctx.fault_trace_depth);
+        // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
+        // (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched and the
+        // cooperative engine stays byte-identical by construction.
+        if let Some(ctx_heap) = ctx.heap.as_mut() {
+            debug_assert!(self.parallel, "cooperative fiber must never carry its own heap (decision A)");
+            std::mem::swap(&mut self.heap, ctx_heap);
+        }
     }
 
     /// Run `f` with the native-reentry guard raised (B1). A blocking `recv` reached while the guard
@@ -1097,9 +1122,18 @@ impl Vm {
         // fiber's context is the live `self.{stack,frames,nurseries}` already rooted above; a parked
         // fiber's context lives in its `FiberCtx` (or, for a not-yet-started child, in its `Pending`
         // task). Without this, a blocked fiber's locals would be swept while it waits.
+        // D2a — `scheduler_stack` is the COOPERATIVE engine's parked fibers, which all alias this
+        // single `self.heap` (decision A), so `root_ctx` traces their roots into it directly. They
+        // carry no heap of their own (`ctx.heap == None`); a parked M:N fiber (D2b) instead owns a
+        // share-nothing heap that lives off this `Vm` and is quiescent while parked — it is NEVER
+        // traced cross-heap here, only collected when that fiber is next scheduled in and runs its
+        // own `run_until` safepoint. (A `--parallel` worker `Vm` has an empty `scheduler_stack`, so
+        // this loop is a no-op on workers.)
         for nursery in &self.scheduler_stack {
+            debug_assert!(nursery.parent.heap.is_none(), "a cooperative parked fiber must not own a heap (decision A)");
             Self::root_ctx(&nursery.parent, &mut work);
             for child in &nursery.children {
+                debug_assert!(child.ctx.heap.is_none(), "a cooperative child fiber must not own a heap (decision A)");
                 Self::root_ctx(&child.ctx, &mut work);
                 if let FiberState::Pending(task) = &child.state {
                     work.extend(task.roots());
@@ -5927,6 +5961,107 @@ mod tests {
         let handle = std::thread::spawn(move || worker.channel_method(wh, "recv", &[], sp).unwrap());
         sender.channel_method(sh, "send", &[Value::Int(42)], sp).unwrap();
         assert_eq!(handle.join().unwrap(), Value::Int(42));
+    }
+
+    /// D2a: an M:N fiber carries its OWN heap (share-nothing). `swap_ctx` swaps that heap with the
+    /// host `Vm`'s when the fiber is scheduled in, and back out when it parks — the prerequisite for
+    /// D2b parking a fiber across worker threads. Round-trip: a fiber heap holding `"fiber-obj"` and
+    /// a host heap holding `"vm-obj"` exchange on swap-in and restore on swap-out.
+    #[test]
+    fn swap_ctx_round_trips_an_mn_fiber_heap() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        vm.parallel = true; // M:N fibers only carry their own heap under --parallel (decision A).
+        let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
+
+        let mut fiber_heap = Heap::new();
+        let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
+        let mut ctx = FiberCtx { heap: Some(fiber_heap), ..FiberCtx::default() };
+
+        // Swap the fiber in: self.heap becomes the fiber's heap; the host heap parks in the ctx.
+        vm.swap_ctx(&mut ctx);
+        assert!(matches!(vm.heap.get(hf), Obj::Str(s) if &s[..] == "fiber-obj"));
+        assert!(matches!(ctx.heap.as_ref().unwrap().get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
+
+        // Swap back out: the host heap is restored, the fiber keeps its own heap.
+        vm.swap_ctx(&mut ctx);
+        assert!(matches!(vm.heap.get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
+        assert!(matches!(ctx.heap.as_ref().unwrap().get(hf), Obj::Str(s) if &s[..] == "fiber-obj"));
+    }
+
+    /// D2a: a cooperative fiber carries NO heap (`heap: None`) — every cooperative fiber aliases the
+    /// single `Vm::heap` (decision A, share-by-ref). `swap_ctx` must leave `self.heap` untouched, so
+    /// the cooperative engine stays byte-identical.
+    #[test]
+    fn swap_ctx_leaves_heap_untouched_for_cooperative_fiber() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
+        let mut ctx = FiberCtx::default();
+        assert!(ctx.heap.is_none(), "a default (cooperative) fiber carries no heap");
+        vm.swap_ctx(&mut ctx);
+        assert!(matches!(vm.heap.get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
+        assert!(ctx.heap.is_none(), "swap must not give a cooperative fiber a heap");
+    }
+
+    /// D2a GC canary: a `collect` while an M:N fiber is swapped in must trace the FIBER's heap (via
+    /// the swapped-in operand stack) and must NOT touch the parked host heap. After the fiber parks
+    /// back out, the host heap and its stack-rooted object are intact. This is the one path the
+    /// swap-with-heap logic adds that the goldens can't reach (no runtime site parks a fiber until
+    /// D2b), so it guards the moved-heap rooting directly.
+    #[test]
+    fn collect_under_swapped_in_fiber_heap_preserves_parked_host_object() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        vm.parallel = true;
+        let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
+        vm.push(Value::Obj(hv)); // keep the host object stack-rooted
+
+        let mut fiber_heap = Heap::new();
+        let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
+        let mut ctx = FiberCtx {
+            heap: Some(fiber_heap),
+            stack: vec![Value::Obj(hf)], // the fiber's own stack roots its object
+            ..FiberCtx::default()
+        };
+
+        // Schedule in: host heap + stack park into the ctx; self.{heap,stack} are the fiber's.
+        vm.swap_ctx(&mut ctx);
+        vm.collect(); // roots self.stack (the fiber's) → hf survives in the fiber heap
+        assert!(matches!(vm.heap.get(hf), Obj::Str(s) if &s[..] == "fiber-obj"));
+
+        // Park back out: the untouched host heap + its object are restored.
+        vm.swap_ctx(&mut ctx);
+        assert!(matches!(vm.heap.get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
+        assert_eq!(vm.pop(), Value::Obj(hv));
+    }
+
+    /// D2a share-nothing lock: a `collect` while an M:N fiber is swapped in must leave the parked
+    /// HOST heap fully quiescent — not even sweeping its UNROOTED garbage. An object rooted by
+    /// nothing in any context would be swept by a normal host-heap collect; here the collect runs on
+    /// the fiber heap, so the host heap is never traced and the garbage survives. This proves the
+    /// parked heap is untouched (the positive canary only shows a *stack-rooted* host object
+    /// survives; this shows the collect didn't run on the host heap at all) — the guarantee D2b
+    /// relies on when parking fibers across worker threads.
+    #[test]
+    fn collect_under_swapped_in_fiber_heap_leaves_parked_host_heap_quiescent() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        vm.parallel = true;
+        // Rooted by nothing — a host-heap collect would sweep it.
+        let garbage = vm.heap.alloc(Obj::Str("host-garbage".into()));
+
+        let mut fiber_heap = Heap::new();
+        let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
+        let mut ctx = FiberCtx {
+            heap: Some(fiber_heap),
+            stack: vec![Value::Obj(hf)],
+            ..FiberCtx::default()
+        };
+
+        vm.swap_ctx(&mut ctx);
+        vm.collect(); // runs on the fiber heap only — the parked host heap is not traced
+        vm.swap_ctx(&mut ctx);
+
+        // The unrooted host object is still alive: collect never ran on the host heap. (Were it
+        // swept, `heap.get` would panic on the dangling GcRef.)
+        assert!(matches!(vm.heap.get(garbage), Obj::Str(s) if &s[..] == "host-garbage"));
     }
 
     /// B3.1: `shut` lives in the shared core, so a `from_wire`'d alias observes a shutdown done through

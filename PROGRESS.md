@@ -193,10 +193,21 @@ skeleton + BEAM-style reduction-counting preemption & dirty pool for opaque bloc
 (full Go-vs-BEAM borrow ledger in that file). **D0 has landed** — the cooperative scheduler's
 O(N²) per-turn linear scan (`pick_runnable`) is replaced by an explicit per-nursery ready-set
 (O(log N)/turn), so 50k cooperative fibers run in ~tens of ms instead of seconds. **D1's
-lazy-module-snapshot half has landed** (see below). **D2 is next** — GMP run queues + the unified
-M:N scheduler loop (park-on-`recv` instead of pinning a thread), which is also where D1's other
-half (`Heap` into the swappable `FiberCtx`) lands, since the share-nothing fiber model is what
-makes it observable. Items *not* in B3–B5
+lazy-module-snapshot half has landed** (see below). **D2a has landed** — D1's deferred other half:
+`Heap` is now part of the swappable `FiberCtx` as `heap: Option<Heap>`, swapped only for M:N fibers
+(`Some`); cooperative fibers carry `None` and keep aliasing the single `Vm::heap` (decision A —
+share-by-ref), so the engine stays byte-identical by construction. No runtime site sets `Some` yet
+(the FIFO pool still runs one fiber per worker); D2a is the parity-preserving prerequisite that makes
+a `Fiber` self-contained + `Send` so D2b can park it across worker threads. Tests:
+`swap_ctx_round_trips_an_mn_fiber_heap`, `swap_ctx_leaves_heap_untouched_for_cooperative_fiber`, and
+two GC canaries (`collect_under_swapped_in_fiber_heap_{preserves_parked_host_object,leaves_parked_host_heap_quiescent}`)
+that lock the share-nothing rooting goldens can't reach; `Fiber: Send` compile-time guard +
+`debug_assert!`s pin the decision-A invariant. **1350 tests** green, `cargo clippy` clean,
+`primes_parallel=148933` both engines; reviewed by a 2-agent panel (zero Critical/Important).
+**D2b is next** — GMP run queues (per-P local ring + `runnext` + global overflow) + park-on-`recv`
+(empty `recv` parks the fiber, worker picks the next; `send` requeues + `wakep`) + redefined deadlock
+detection. Headline test: 1000 fibers / 4 threads producer-consumer completes instead of starving.
+Items *not* in B3–B5
 (cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
