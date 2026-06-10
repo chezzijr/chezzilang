@@ -15,6 +15,7 @@
 pub mod fs;
 pub mod io;
 pub mod math;
+pub mod net;
 pub mod os;
 pub mod process;
 pub mod regex;
@@ -233,6 +234,7 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
             "time" => Some("std.time"),
             "regex" => Some("std.regex"),
             "request" => Some("std.request"),
+            "net" => Some("std.net"),
             _ => None,
         },
         _ => None,
@@ -252,6 +254,7 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn)] {
         "std.time" => time::MEMBERS,
         "std.regex" => regex::MEMBERS,
         "std.request" => request::MEMBERS,
+        "std.net" => net::MEMBERS,
         _ => &[],
     }
 }

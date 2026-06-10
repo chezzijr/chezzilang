@@ -222,6 +222,14 @@ fn native_module_sig(name: &str) -> ModuleSig {
         "std.process" => {
             func("cmd", vec![Ty::Str], Ty::result(Ty::Str));
         }
+        "std.net" => {
+            // D6 — minimal TCP surface. `connect`/`listen` take a `"host:port"` address; the sockets
+            // are non-blocking (a would-block op parks the fiber on the netpoller). The `connect`/
+            // `listen`/`read`/`write`/`accept` calls are intercepted in the VM (they allocate a
+            // `Socket`/`Listener` handle + register poller interest), not run as off-heap natives.
+            func("connect", vec![Ty::Str], Ty::result(Ty::Socket));
+            func("listen", vec![Ty::Str], Ty::result(Ty::Listener));
+        }
         "std.fs" => {
             func("list_dir", vec![Ty::Str], Ty::result(Ty::list(Ty::Str)));
             func("exists", vec![Ty::Str], Ty::Bool);
@@ -3322,6 +3330,27 @@ impl Checker {
                 self.error(span, format!("type {obj_ty} has no method '{method}'"));
                 Ty::Unknown
             }
+            // D6 — `Socket` / `Listener` (std.net): a small fixed method set. The runtime parks the
+            // fiber on a would-block `read`/`write`/`accept`; from the type system they just return
+            // their `Result`.
+            Ty::Socket => {
+                if let Some(sig) = socket_method_sig(method) {
+                    self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
+            Ty::Listener => {
+                if let Some(sig) = listener_method_sig(method) {
+                    self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
             // A bound generic type parameter exposes its protocol's methods (e.g. `a.compare(b)`
             // where `a: T` and `T: Comparable`).
             Ty::Param(pname) => {
@@ -4053,6 +4082,10 @@ impl Checker {
             // An `Executor` handle crosses the airlock like a `Channel`/`Shared` handle (the queue
             // lives outside every heap; tasks reach the one work queue).
             Ty::Executor => true,
+            // D6 — a `Socket`/`Listener` handle crosses the airlock like the other core handles (the
+            // fd lives in an `Arc`'d core outside every heap), so a `parallel:` accept-loop can
+            // `spawn handle(conn)` onto a fiber.
+            Ty::Socket | Ty::Listener => true,
             Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Channel(t) => self.sendable_rec(t, stack),
             Ty::Map(k, v) => self.sendable_rec(k, stack) && self.sendable_rec(v, stack),
             Ty::Result(t, e) => self.sendable_rec(t, stack) && self.sendable_rec(e, stack),
@@ -5220,6 +5253,30 @@ fn shared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
             vec![Ty::Func { params: vec![elem.clone()], ret: Box::new(elem.clone()) }],
             Ty::Nil,
         ),
+        _ => return None,
+    };
+    Some(FnSig::plain(params, ret))
+}
+
+/// D6 — built-in method signatures on `Socket` (std.net). `read(n)` returns up to `n` bytes as a
+/// `str` (empty on a clean EOF / peer close); `write(s)` returns the byte count written; both are
+/// `Result` (I/O can fail). `close()` releases the fd.
+fn socket_method_sig(method: &str) -> Option<FnSig> {
+    let (params, ret) = match method {
+        "read" => (vec![Ty::Int], Ty::result(Ty::Str)),
+        "write" => (vec![Ty::Str], Ty::result(Ty::Int)),
+        "close" => (vec![], Ty::Nil),
+        _ => return None,
+    };
+    Some(FnSig::plain(params, ret))
+}
+
+/// D6 — built-in method signatures on `Listener` (std.net). `accept()` yields the next inbound
+/// connection as a `Socket` (`Result` — accept can fail); `close()` releases the fd.
+fn listener_method_sig(method: &str) -> Option<FnSig> {
+    let (params, ret) = match method {
+        "accept" => (vec![], Ty::result(Ty::Socket)),
+        "close" => (vec![], Ty::Nil),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))
