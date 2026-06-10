@@ -272,8 +272,10 @@ enum FiberState {
     Pending(PendingCall),
     /// Started and runnable — resume by re-entering its `run_until`.
     Ready,
-    /// Parked on an empty channel; runnable again once that channel is non-empty.
-    Blocked(GcRef),
+    /// Parked on an empty channel; runnable again once a sibling `send`s (D0 records the parked
+    /// index in [`Nursery::blocked_on`] under the channel's core pointer — the receiver handle
+    /// itself stays rooted on the fiber's own operand stack, so this variant carries no payload).
+    Blocked,
     /// Ran to completion.
     Done,
 }
@@ -292,6 +294,17 @@ struct Nursery {
     /// The joining fiber's context, parked while its children run cooperatively.
     parent: FiberCtx,
     children: Vec<Fiber>,
+    /// D0 — runnable child indices, ordered (a `BTreeSet`, not a FIFO queue, so `pop_first` always
+    /// returns the **lowest-index** runnable child — byte-identical to the old `pick_runnable`
+    /// linear scan, but O(log N) instead of O(N) per turn). Seeded with every child index on
+    /// `JoinNursery` (all start `Pending`); a child re-enters only via [`Vm::wake_on_send`].
+    ready: std::collections::BTreeSet<usize>,
+    /// D0 — child indices parked on an empty channel, keyed by the channel's `ChannelCore` pointer
+    /// (`Arc::as_ptr as usize`), NOT its `GcRef`: cooperative `spawn` deep-clones a channel
+    /// (`from_wire` allocs a fresh handle onto the same `Arc<ChannelCore>`), so sibling fibers hold
+    /// distinct handles aliasing one core — a handle key would lose the wakeup. A sibling `send`
+    /// drains the matching bucket back onto `ready`.
+    blocked_on: std::collections::HashMap<usize, Vec<usize>>,
 }
 
 /// A snapshot taken at a `recover:` boundary (`Op::PushHandler`). On a caught fault the VM restores
@@ -3125,14 +3138,16 @@ impl Vm {
         if self.parallel {
             return self.run_parallel_nursery(tasks);
         }
-        let children = tasks
+        let children: Vec<Fiber> = tasks
             .into_iter()
             .map(|t| Fiber { ctx: FiberCtx::default(), state: FiberState::Pending(t) })
             .collect();
+        // D0: every child starts `Pending` ⇒ runnable, so seed `ready` with all indices in order.
+        let ready = (0..children.len()).collect();
         // Park the parent: move its live context into the nursery, leaving `self.*` as the fresh,
         // empty arena the children execute in. The nursery (parent + children) is GC-rooted while on
         // `scheduler_stack`.
-        let mut nursery = Nursery { parent: FiberCtx::default(), children };
+        let mut nursery = Nursery { parent: FiberCtx::default(), children, ready, blocked_on: std::collections::HashMap::new() };
         self.swap_ctx(&mut nursery.parent);
         self.scheduler_stack.push(nursery);
         let result = self.run_scheduler();
@@ -3299,13 +3314,16 @@ impl Vm {
         }
     }
 
-    /// Cooperatively drive the children of the innermost scheduler level until all are `Done`. Picks
-    /// the lowest-index runnable child each turn (FIFO); a child blocked on a channel becomes
-    /// runnable when that channel has data. If no child is runnable and not all are done, every
-    /// remaining child is parked on an empty channel no sibling can fill — a deadlock.
+    /// Cooperatively drive the children of the innermost scheduler level until all are `Done`. D0:
+    /// pops the lowest-index runnable child from the level's `ready` set each turn (O(log N), vs the
+    /// old O(N) `pick_runnable` linear scan — same lowest-index order, so byte-identical). A child
+    /// that blocks on an empty channel leaves `ready` and is re-added by a sibling `send`
+    /// ([`Vm::wake_on_send`]). When `ready` empties: all children `Done` ⇒ the nursery is finished;
+    /// otherwise every remaining child is parked on an empty channel no sibling can fill — a deadlock.
     fn run_scheduler(&mut self) -> Result<(), RuntimeError> {
         loop {
-            match self.pick_runnable() {
+            let next = self.scheduler_stack.last_mut().expect("scheduler level present").ready.pop_first();
+            match next {
                 Some(i) => self.run_child(i)?,
                 None => {
                     if self.all_children_done() {
@@ -3315,19 +3333,6 @@ impl Vm {
                 }
             }
         }
-    }
-
-    /// Index of the next runnable child in the top scheduler level, or `None` if none can run now.
-    fn pick_runnable(&self) -> Option<usize> {
-        let children = &self.scheduler_stack.last().expect("scheduler level present").children;
-        children.iter().position(|c| match &c.state {
-            FiberState::Pending(_) | FiberState::Ready => true,
-            FiberState::Blocked(h) => match self.heap.get(*h) {
-                Obj::Channel(core) => !core.q.lock().unwrap().is_empty(),
-                _ => false,
-            },
-            FiberState::Done => false,
-        })
     }
 
     fn all_children_done(&self) -> bool {
@@ -3355,14 +3360,27 @@ impl Vm {
             FiberState::Pending(task) => self.start_task(task),
             // Resume: the saved frames replay via the rewound `recv` op and ordinary `Return`s — no
             // host-stack nesting is rebuilt (run_until is frame-count driven).
-            FiberState::Ready | FiberState::Blocked(_) => self.run_until(0),
+            FiberState::Ready | FiberState::Blocked => self.run_until(0),
             FiberState::Done => unreachable!("run_child on a Done fiber"),
         };
         self.swap_ctx(&mut child.ctx); // park the (possibly-suspended) context back into the child
+        // D0: a run always ends `Done` or `Blocked` (never left `Ready`), so a finished child is
+        // simply dropped from scheduling; a blocked child registers in `blocked_on` under its
+        // channel's core pointer so a sibling `send` can re-add it to `ready` ([`wake_on_send`]).
         let result = match outcome {
             Ok(()) => {
                 child.state = match self.suspend.take() {
-                    Some(h) => FiberState::Blocked(h),
+                    Some(h) => {
+                        let key = self.channel_core_ptr(h);
+                        self.scheduler_stack
+                            .last_mut()
+                            .expect("scheduler level present")
+                            .blocked_on
+                            .entry(key)
+                            .or_default()
+                            .push(i);
+                        FiberState::Blocked
+                    }
                     None => FiberState::Done,
                 };
                 Ok(())
@@ -3374,6 +3392,37 @@ impl Vm {
         };
         self.scheduler_stack.last_mut().expect("scheduler level present").children[i] = child;
         result
+    }
+
+    /// D0 — the `ChannelCore` identity (`Arc::as_ptr as usize`) behind a channel handle, the stable
+    /// key for [`Nursery::blocked_on`]. Stable across the distinct `GcRef`s sibling fibers hold for
+    /// the same channel (cooperative `spawn` deep-clones the handle onto the shared `Arc`).
+    fn channel_core_ptr(&self, h: GcRef) -> usize {
+        match self.heap.get(h) {
+            Obj::Channel(core) => Arc::as_ptr(core) as usize,
+            // A fiber only ever parks via a `recv` on a `Channel`, so `suspend` always holds a
+            // channel handle. Fail loud (matching `channel_core` above) rather than silently filing
+            // the park under a sentinel key `wake_on_send` would never match — a silent mis-key
+            // would mis-report a `deadlock` (review: Incident Response Commander).
+            _ => unreachable!("channel_core_ptr on a non-channel park handle"),
+        }
+    }
+
+    /// D0 — a `send` into channel `h` may unblock siblings parked on its `recv`. Drain the matching
+    /// `blocked_on` bucket back onto `ready` for **every** scheduler level (not just the innermost):
+    /// a fiber nested in an inner `parallel:` can `send` to a channel an outer-level sibling parked
+    /// on, and that outer fiber must become runnable once control unwinds back to its level. No-op
+    /// under `--parallel` (workers never push `scheduler_stack`) and when no sibling is parked.
+    fn wake_on_send(&mut self, h: GcRef) {
+        if self.scheduler_stack.is_empty() {
+            return;
+        }
+        let key = self.channel_core_ptr(h);
+        for level in &mut self.scheduler_stack {
+            if let Some(woken) = level.blocked_on.remove(&key) {
+                level.ready.extend(woken);
+            }
+        }
     }
 
     /// Launch a fiber's initial task in the (already swapped-in) child context. Mirrors the old
@@ -3990,6 +4039,9 @@ impl Vm {
                 // B3.3-threads: wake any OS thread blocked in `recv` on this core. No-op on the
                 // cooperative engine (nothing ever waits on `cv` there — fibers park instead).
                 core.cv.notify_all();
+                // D0: on the cooperative engine, re-add any sibling fiber parked on this channel's
+                // `recv` to its scheduler level's `ready` set. No-op under `--parallel`.
+                self.wake_on_send(h);
                 Ok(Value::Nil)
             }
             "recv" => {
@@ -6867,6 +6919,57 @@ main()";
     fn fibers_nested_parallel() {
         let src = "fn child():\n    parallel:\n        spawn:\n            print(\"grandchild\")\n    print(\"child after nested\")\nfn main():\n    parallel:\n        spawn child()\n        spawn:\n            print(\"sibling\")\nmain()\n";
         assert_eq!(run(src), "grandchild\nchild after nested\nsibling\n");
+    }
+
+    /// D0 — the cooperative scheduler must run a large nursery in ~O(N·logN), not O(N²). 50k trivial
+    /// fibers each bump one `Shared` counter; the sum proves every fiber was scheduled, and the
+    /// wall-clock ceiling is the regression guard: the old `pick_runnable` linear-scan-per-turn took
+    /// ~2.3 s at 50k (RED), the ready-set takes tens of ms (GREEN). The 5 s ceiling is generous for
+    /// CI noise yet far below the old quadratic wall.
+    #[test]
+    fn fibers_scale_ready_queue_not_quadratic() {
+        let n = 50_000;
+        let src = format!(
+            "fn work(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
+             fn main():\n    s := Shared(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn work(s)\n    print(s.get())\nmain()\n"
+        );
+        let start = std::time::Instant::now();
+        let out = run(&src);
+        let elapsed = start.elapsed();
+        assert_eq!(out, format!("{n}\n"), "every fiber must run exactly once");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "scheduler is quadratic: {n} fibers took {elapsed:?} (ceiling 5s)"
+        );
+    }
+
+    /// D0 — the `blocked_on` wake path: one consumer parks on a shared channel and is re-woken by each
+    /// of many producers' `send`s. Sibling fibers hold DISTINCT `GcRef`s aliasing the same
+    /// `Arc<ChannelCore>` (cooperative `spawn` deep-clones the channel), so the wake map must key on
+    /// the core pointer, not the handle — a `GcRef` key would lose every wakeup and fault `deadlock`.
+    #[test]
+    fn fibers_many_producers_one_consumer() {
+        let n = 200;
+        let src = format!(
+            "fn produce(ch: Channel[int]):\n    ch.send(1)\n\
+             fn consume(ch: Channel[int], k: int, s: Shared[int]):\n    total := 0\n    for _ in 0..k:\n        total += ch.recv()\n    s.set(total)\n\
+             fn main():\n    ch := Channel[int]()\n    s := Shared(0)\n    parallel:\n        spawn consume(ch, {n}, s)\n        for _ in 0..{n}:\n            spawn produce(ch)\n    print(s.get())\nmain()\n"
+        );
+        assert_eq!(run(&src), format!("{n}\n"), "consumer must receive every produced value");
+    }
+
+    /// D0 — cross-level wakeup: a fiber nested in an INNER `parallel:` `send`s to a channel an
+    /// OUTER-level sibling is parked on. The `send` arm must drain the blocked set of EVERY scheduler
+    /// level (not just the innermost), or the outer consumer never wakes and the nursery faults
+    /// `deadlock` after the inner level joins. (The old `pick_runnable` re-scanned all levels each
+    /// turn, so this worked; the ready-set must preserve it.)
+    #[test]
+    fn fibers_cross_level_wakeup() {
+        let src = "fn consumer(ch: Channel[int], s: Shared[int]):\n    s.set(ch.recv())\n\
+                   fn inner_sender(ch: Channel[int]):\n    ch.send(42)\n\
+                   fn middle(ch: Channel[int]):\n    parallel:\n        spawn inner_sender(ch)\n\
+                   fn main():\n    ch := Channel[int]()\n    s := Shared(0)\n    parallel:\n        spawn consumer(ch, s)\n        spawn middle(ch)\n    print(s.get())\nmain()\n";
+        assert_eq!(run(src), "42\n", "outer consumer must wake from an inner-level send");
     }
 
     /// A `recover:` inside a child fiber catches a fault in that fiber's own context (its handlers /

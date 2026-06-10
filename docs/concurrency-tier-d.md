@@ -85,7 +85,18 @@ must stay byte-identical throughout.** Sequence: **D0 → D1 → D2 → D3 → D
 standalone (cooperative engine). D1 is the foundation everything else builds on. D5 and D6 can swap
 order (D5 has real surface today; D6 needs the new `net` surface).
 
-### D0 — O(N²) → O(N) ready-queue *(cooperative engine; standalone; FIRST)*
+### D0 — O(N²) → O(N) ready-queue *(cooperative engine; standalone; FIRST)* — ✅ LANDED
+
+> **Shipped** as O(N·logN) (a `BTreeSet`, not a `VecDeque`) with **three deviations from the plan
+> below, each verified against the code:** (1) `blocked_on` is keyed by the **`ChannelCore` pointer**
+> (`Arc::as_ptr as usize`), not `GcRef` — cooperative `spawn` deep-clones a channel (`from_wire`
+> allocs a fresh handle onto the same `Arc<ChannelCore>`), so siblings hold distinct handles aliasing
+> one core and a `GcRef` key would lose every wakeup. (2) **`BTreeSet` (lowest-index pop)** preserves
+> the old `pick_runnable` scan order; a FIFO `VecDeque` would re-queue a woken low-index fiber behind
+> pending higher-index ones and reorder output. (3) `wake_on_send` **drains every scheduler level**,
+> not just the innermost, to preserve cross-level wakeup. `FiberState::Blocked` dropped its now-unused
+> `GcRef` payload (handle stays rooted on the fiber's operand stack). See `src/vm/mod.rs`
+> (`run_scheduler` / `run_child` / `channel_core_ptr` / `wake_on_send`) + PROGRESS.md.
 
 **Goal.** `run_scheduler` calls `pick_runnable` each turn, which **linear-scans all live children**
 for the lowest-index runnable one → O(N²) (measured: 1 k→1.4 ms, 10 k→51 ms, 20 k→246 ms,

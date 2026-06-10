@@ -190,8 +190,10 @@ frontier:** **Tier-D** (M:N scheduler + async-I/O pollset), designed in
 **[`docs/concurrency.md` §10](docs/concurrency.md)** and now **broken down into seven TDD phases
 D0…D6** in **[`docs/concurrency-tier-d.md`](docs/concurrency-tier-d.md)** — Go-style GMP work-stealing
 skeleton + BEAM-style reduction-counting preemption & dirty pool for opaque blocking native calls
-(full Go-vs-BEAM borrow ledger in that file). **D0 is next** — the O(N²)→O(N) cooperative ready-queue
-(§11). Items *not* in B3–B5
+(full Go-vs-BEAM borrow ledger in that file). **D0 has landed** — the cooperative scheduler's
+O(N²) per-turn linear scan (`pick_runnable`) is replaced by an explicit per-nursery ready-set
+(O(log N)/turn), so 50k cooperative fibers run in ~tens of ms instead of seconds. **D1 is next** —
+the lightweight-fiber refactor (heap into the swappable context). Items *not* in B3–B5
 (cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
@@ -236,6 +238,25 @@ overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
 
+- ✅ **Concurrency D0 — O(N²)→O(N·logN) cooperative ready-queue** (VM cooperative engine only;
+  `--parallel` unaffected). `run_scheduler` no longer linear-scans every live child per turn
+  (`pick_runnable`, deleted); each `Nursery` carries a `ready: BTreeSet<usize>` (lowest-index pop —
+  byte-identical scheduling order to the old scan) + a `blocked_on: HashMap<usize, Vec<usize>>` of
+  parked indices. A `recv`-park registers its index; a sibling `send` (`wake_on_send`) drains the
+  bucket back onto `ready`. 50k trivial fibers: ~7 s (debug, old) → tens of ms.
+  **Three deliberate deviations from the literal `docs/concurrency-tier-d.md` §D0 spec, each verified
+  against the code:** (1) **key `blocked_on` by `ChannelCore` pointer, not `GcRef`** — cooperative
+  `spawn` deep-clones a channel (`from_wire` allocs a fresh handle onto the same `Arc<ChannelCore>`),
+  so siblings hold distinct handles aliasing one core; a handle key would lose every wakeup. (2)
+  **`BTreeSet` (lowest-index-first), not `VecDeque` (FIFO)** — FIFO would re-queue a woken low-index
+  fiber behind pending higher-index ones, reordering output; the `BTreeSet` reproduces the old
+  scan's order exactly (goldens byte-identical). (3) **`wake_on_send` drains every scheduler level,
+  not just the innermost** — preserves the old re-scan's cross-level wakeup (an inner-nursery `send`
+  waking an outer parked sibling). `FiberState::Blocked` dropped its now-redundant `GcRef` payload
+  (the receiver handle stays GC-rooted on the fiber's operand stack). 3 new fiber units (50k-scale
+  ceiling, many-producers/one-consumer over the core-ptr map, cross-level wakeup); review-panel
+  finding applied (the core-ptr resolver fails loud via `unreachable!`, matching `channel_core`,
+  rather than a silent sentinel key). **1344 tests** green, clippy clean.
 - ✅ **Concurrency B3.3c/d — worker module-graph reconstruction** (VM, single-thread, parity-preserved).
   `Vm::build_worker_modules` + `map_global_value` snapshot the parent's initialized module graph into
   the worker heap (read-only `home`): tasks read post-init globals + call sibling/imported fns; method
