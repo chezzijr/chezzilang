@@ -192,8 +192,11 @@ D0…D6** in **[`docs/concurrency-tier-d.md`](docs/concurrency-tier-d.md)** — 
 skeleton + BEAM-style reduction-counting preemption & dirty pool for opaque blocking native calls
 (full Go-vs-BEAM borrow ledger in that file). **D0 has landed** — the cooperative scheduler's
 O(N²) per-turn linear scan (`pick_runnable`) is replaced by an explicit per-nursery ready-set
-(O(log N)/turn), so 50k cooperative fibers run in ~tens of ms instead of seconds. **D1 is next** —
-the lightweight-fiber refactor (heap into the swappable context). Items *not* in B3–B5
+(O(log N)/turn), so 50k cooperative fibers run in ~tens of ms instead of seconds. **D1's
+lazy-module-snapshot half has landed** (see below). **D2 is next** — GMP run queues + the unified
+M:N scheduler loop (park-on-`recv` instead of pinning a thread), which is also where D1's other
+half (`Heap` into the swappable `FiberCtx`) lands, since the share-nothing fiber model is what
+makes it observable. Items *not* in B3–B5
 (cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
@@ -238,6 +241,31 @@ overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
 
+- ✅ **Concurrency D1 (lazy module snapshot) — kill the per-task module-graph rebuild** (`--parallel`
+  engine). Old: `prepare_worker` / `prepare_worker_from_wire` called `build_worker_modules`, which
+  **eagerly reconstructed the entire parent module graph into every worker heap, per task** (N tasks
+  → N full rebuilds via `map_global_value`). Now: `snapshot_modules` builds a heap-independent,
+  read-only `Arc<ModuleSnapshot>` **once** (memoized on the top-level VM in `snapshot_memo`; a nested
+  worker reuses its installed `module_snapshot` Arc since `--parallel` globals are frozen, G1), shared
+  by every worker via a cheap `Arc` clone. Each worker pre-allocs **empty** module objs
+  (`install_snapshot`, index order preserved so home indices line up) and **faults a module's globals
+  into its heap lazily on first access** (`fault_module` / `replay_snap`, gated by
+  `module_faulted: Vec<bool>`) — a task that touches only its home module rebuilds only that module,
+  one that touches none rebuilds nothing. `SnapValue` mirrors the deleted `map_global_value`
+  structural recursion exactly (Func/Closure home → `module_objs` index, import-alias → `ModuleAlias`,
+  `Native` fn-pointer, containers element-wise, value-derived map/set hashes carried). Lazy fault-in
+  is hooked at the four module-global read sites — `Op::GetGlobal`, the `Op::GetCaptured` home
+  fallback, `get_field` (module member), and the `module.fn(...)` dispatch — each preceded by
+  `ensure_module_faulted` (a no-op on the top-level / cooperative VM, which never fault: their
+  `module_objs` are the real populated modules, `module_snapshot` stays `None`). **The
+  `Heap`-into-`FiberCtx` half of the literal §D1 spec is deferred to D2**, where the M:N share-nothing
+  fiber model makes it observable; under the unchanged FIFO pool it buys nothing and would risk the
+  cooperative share-by-ref single heap (decision A). 2 new characterization units (sibling-fn + global
+  resolution under `--parallel`; 2 000-spawn correctness + loose wall-clock ceiling); all `worker_*`
+  reconstruction units + `--parallel` goldens byte-identical; `primes_parallel` still prints
+  `148933` on both engines. Two parallel review-panel reviewers returned clean (no Critical/Important);
+  applied the comment-only `module_global` invariant note for future read sites. **1346 tests** green,
+  clippy clean.
 - ✅ **Concurrency D0 — O(N²)→O(N·logN) cooperative ready-queue** (VM cooperative engine only;
   `--parallel` unaffected). `run_scheduler` no longer linear-scans every live child per turn
   (`pick_runnable`, deleted); each `Nursery` carries a `ready: BTreeSet<usize>` (lowest-index pop —

@@ -129,6 +129,16 @@ children. **Reuse:** `Nursery`, `FiberState::Blocked(h)`, `DEADLOCK_MSG`, existi
 
 ### D1 — Lightweight fiber: heap into the swappable context + lazy module snapshot *(foundation)*
 
+> **Status: lazy-module-snapshot half LANDED.** The per-task `build_worker_modules` eager
+> reconstruction is replaced by a heap-independent, read-only `Arc<ModuleSnapshot>` built once
+> (`snapshot_modules`/`to_snap`) and **faulted into each worker heap lazily, one module at a time, on
+> first global access** (`install_snapshot`/`fault_module`/`replay_snap`/`ensure_module_faulted`,
+> gated by `module_faulted`). FIFO pool unchanged → observably identical except faster; all
+> `--parallel` goldens byte-identical, `primes_parallel` → `148933` on both engines, 1346 tests green.
+> **The `Heap`-into-`FiberCtx` half is intentionally deferred to D2** — under the unchanged FIFO pool
+> (one worker `Vm` per task) it has no observable effect and would risk the cooperative engine's
+> share-by-ref single heap (decision A); it lands with the M:N share-nothing fiber model in D2.
+
 **Goal.** Kill the per-task `Vm`-rebuild cost. Today `prepare_worker` builds a fresh `Vm` + eagerly
 reconstructs the whole module graph (`build_worker_modules`) per task. A fiber should be **`FiberCtx`
 + its own small `Heap` + an `Arc` to a read-only module snapshot**, faulted in lazily — not a full

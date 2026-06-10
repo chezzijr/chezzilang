@@ -248,6 +248,22 @@ struct Vm {
     /// and on the top-level VM (a top-level empty `recv` under `--parallel` has no sibling that
     /// could ever send, so it faults immediately rather than blocking — see `channel_method`).
     deadlock: Option<Arc<DeadlockWatch>>,
+    /// D1 — on a `--parallel` **worker** VM, the read-only [`ModuleSnapshot`] of the parent's module
+    /// graph that this worker faults into its own heap lazily, one module at a time, on first global
+    /// access ([`Vm::fault_module`]). `None` on the top-level VM and the cooperative engine (which
+    /// never fault — the top-level's `module_objs` are the real, fully-populated modules; a worker's
+    /// start empty and fill on demand). A nested `spawn` inside a worker hands this same `Arc` down
+    /// (its faulted graph is identical to the snapshot — module globals are read-only under
+    /// `--parallel`), so the snapshot propagates across worker generations with stable indices.
+    module_snapshot: Option<Arc<ModuleSnapshot>>,
+    /// D1 — parallel to `module_objs` on a worker VM: whether module `i` has been faulted in yet
+    /// (its globals replayed from `module_snapshot`). Empty on the top-level / cooperative VM.
+    module_faulted: Vec<bool>,
+    /// D1 — the top-level VM's memoized snapshot of its own (real) module graph, built once on the
+    /// first `spawn`/`submit` drain and shared by every worker it prepares. Read-only after build
+    /// (module globals are frozen under `--parallel`, decision G1), so one build serves the whole
+    /// run. A worker reuses its `module_snapshot` instead of this (see [`Vm::ensure_snapshot`]).
+    snapshot_memo: Option<Arc<ModuleSnapshot>>,
 }
 
 /// A fiber's saved execution context (B1): every `Vm` field that `run_until` reads or writes keyed by
@@ -357,6 +373,61 @@ enum Lowered {
     /// `spawn recv.m(args)` (B3.3d) — the receiver + args cross by wire; dispatch resolves the method
     /// against the worker's reconstructed `module_objs` (struct methods index `module_objs[module_idx]`).
     Method { recv: WireValue, name: String, args: Vec<WireValue>, span: Span },
+}
+
+/// D1 — a heap-independent, read-only snapshot of the parent's initialized module graph, shared
+/// across a nursery's workers via `Arc` (like `Arc<Program>`) and **faulted into each worker heap
+/// lazily, one module at a time, on first global access** (see [`Vm::fault_module`]). It replaces
+/// the eager per-task `build_worker_modules` reconstruction: N tasks now share one snapshot build
+/// + cheap `Arc` clones, and a task that touches only its home module rebuilds only that module.
+///
+/// `modules` is parallel to the parent's `module_objs` by index, so a callable's `home` /
+/// `module_idx` (already an index under the airlock — see [`Vm::home_index`]) lines up directly
+/// with the worker's pre-allocated (empty) module objects. Built once by [`Vm::snapshot_modules`].
+struct ModuleSnapshot {
+    modules: Vec<ModuleSnap>,
+}
+
+/// D1 — one module in a [`ModuleSnapshot`]: its name plus its top-level globals as heap-independent
+/// [`SnapValue`]s (insertion order preserved so replay is deterministic).
+struct ModuleSnap {
+    name: Box<str>,
+    globals: Vec<(String, SnapValue)>,
+}
+
+/// D1 — one global value in heap-independent form, the snapshot analogue of what
+/// [`Vm::map_global_value`] rebuilt eagerly. `WireValue` already encodes pure data, `str`-by-value,
+/// and `Channel`/`Shared`/`Executor` cores (Arc-shared, meaningful in any heap), so the common case
+/// is [`SnapValue::Wire`]; the other variants cover exactly the values `to_wire` cannot carry
+/// heap-independently — a callable's parent-heap `GcRef` home/captures, an import-alias module ref,
+/// a native fn, and any container that embeds one of those. `Send` (every field is), so an
+/// `Arc<ModuleSnapshot>` crosses to pool threads.
+enum SnapValue {
+    /// Fast path: a value whose wire form carries no by-reference `Handle` (pure data / `str` by
+    /// value / a `Channel`/`Shared`/`Executor` core). Replayed via `from_wire`.
+    Wire(WireValue),
+    /// A named function — re-allocated over the worker's home module on replay. `home` is an index
+    /// into `module_objs` (resolved via [`Vm::worker_home`], which falls back to a fresh empty module
+    /// for `None` — a home not in the table, i.e. the hand-built unit-test fixtures).
+    Func { proto: ProtoId, home: Option<usize> },
+    /// An anonymous function + its captured environment (each capture itself a `SnapValue`).
+    Closure { proto: ProtoId, captured: Vec<(String, SnapValue)>, home: Option<usize> },
+    /// An import-alias global bound to another module — replays to the worker's `module_objs[idx]`
+    /// (the pre-alloced module obj, which faults its own globals lazily — no eager cascade).
+    ModuleAlias(usize),
+    /// A module value NOT in `module_objs` (defensive — shouldn't occur for a bound import; mirrors
+    /// the `None` arm of the old `map_global_value`): replayed as a fresh, eagerly-populated module.
+    ModuleInline { name: Box<str>, globals: Vec<(String, SnapValue)> },
+    /// A native (Rust) fn — re-allocated with the same fn pointer (`NativeFn` is `Clone`/`Send`).
+    Native { name: Box<str>, func: crate::native::NativeFn },
+    List(Vec<SnapValue>),
+    Tuple(Vec<SnapValue>),
+    Enum { ty: Box<str>, variant: Box<str>, payload: Vec<SnapValue> },
+    Struct { name: Box<str>, fields: Vec<(Box<str>, SnapValue)> },
+    /// `(cached hash, key, value)` triples — hashes are value-derived, so they carry over unchanged.
+    Map(Vec<(u64, SnapValue, SnapValue)>),
+    /// `(cached hash, element)` pairs.
+    Set(Vec<(u64, SnapValue)>),
 }
 
 /// B3.4 — how a `--parallel` task ended, recorded in its slot. The join (`run_parallel_nursery`)
@@ -615,6 +686,9 @@ impl Vm {
             cancel: None,
             cancelled: false,
             deadlock: None,
+            module_snapshot: None,
+            module_faulted: Vec::new(),
+            snapshot_memo: None,
         }
     }
 
@@ -1091,6 +1165,7 @@ impl Vm {
             }
             Op::GetGlobal(name) => {
                 let home = self.frames.last().unwrap().home;
+                self.ensure_module_faulted(home); // D1: lazily reconstruct the worker's home module
                 let v = self.module_global(home, name).ok_or_else(|| self.err(format!("undefined name '{name}'"), span))?;
                 self.push(v);
             }
@@ -1108,15 +1183,14 @@ impl Vm {
             }
             Op::GetCaptured(name) => {
                 let clo = self.frames.last().unwrap().closure;
+                let home = self.frames.last().unwrap().home;
+                self.ensure_module_faulted(home); // D1: home-global fallback may hit a not-yet-faulted module
                 let v = clo
                     .and_then(|h| match self.heap.get(h) {
                         Obj::Closure { captured, .. } => captured.get(name).copied(),
                         _ => None,
                     })
-                    .or_else(|| {
-                        let home = self.frames.last().unwrap().home;
-                        self.module_global(home, name)
-                    })
+                    .or_else(|| self.module_global(home, name))
                     .ok_or_else(|| self.err(format!("undefined name '{name}'"), span))?;
                 self.push(v);
             }
@@ -2240,6 +2314,7 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
+        self.ensure_module_faulted(h); // D1: `module.fn(...)` on a not-yet-faulted worker module
         match self.heap.get(h).clone() {
             // `module.fn(args)` — plain call on the looked-up member, no `self`.
             Obj::Module { name, globals } => {
@@ -3722,11 +3797,15 @@ impl Vm {
             }
         };
 
-        // 2. Build the worker + reconstruct the parent's module graph in its heap (B3.3c) so tasks can
-        //    read globals, call sibling/imported fns, and dispatch struct methods. 3. rebuild the
-        //    callable/receiver + args into the worker heap. The actual invoke is `ReadyWorker::run`.
+        // 2. Build the worker + install the shared read-only module snapshot (D1): pre-alloc empty
+        //    module objs (indices line up with the parent), faulting each module's globals into the
+        //    worker heap lazily on first access — instead of eagerly reconstructing the whole graph
+        //    per task. 3. rebuild the callable/receiver + args into the worker heap (a `home` index
+        //    resolves to a pre-alloced empty module that faults on first global read). The actual
+        //    invoke is `ReadyWorker::run`.
+        let snap = self.ensure_snapshot();
         let mut worker = self.spawn_worker();
-        self.build_worker_modules(&mut worker);
+        worker.install_snapshot(snap);
         let (call, span) = match lowered {
             Lowered::Closure { proto, captured, args, home, span } => {
                 let home = worker.worker_home(home);
@@ -3750,14 +3829,15 @@ impl Vm {
         Ok(ReadyWorker { worker, call, span })
     }
 
-    /// B3.6 — the `Executor`-drain analogue of [`prepare_worker`]: build a worker, reconstruct the
-    /// parent's module graph into its heap ([`build_worker_modules`]), and rebuild a submitted closure
-    /// (a [`WireValue::Closure`] drained from the executor queue) into that heap as a zero-arg call.
-    /// Infallible — the closure already crossed `to_wire`/`ensure_crossable` at `submit`. `--parallel`
-    /// only.
+    /// B3.6 — the `Executor`-drain analogue of [`prepare_worker`]: build a worker, install the shared
+    /// read-only [`ModuleSnapshot`] (D1 — modules fault in lazily on first global access), and rebuild
+    /// a submitted closure (a [`WireValue::Closure`] drained from the executor queue) into that heap as
+    /// a zero-arg call. Infallible — the closure already crossed `to_wire`/`ensure_crossable` at
+    /// `submit`. `--parallel` only.
     fn prepare_worker_from_wire(&mut self, task: WireValue, span: Span) -> ReadyWorker {
+        let snap = self.ensure_snapshot();
         let mut worker = self.spawn_worker();
-        self.build_worker_modules(&mut worker);
+        worker.install_snapshot(snap);
         let callee = worker.from_wire(task);
         ReadyWorker { worker, call: ReadyCall::Invoke { callee, args: Vec::new() }, span }
     }
@@ -3859,137 +3939,209 @@ impl Vm {
         }
     }
 
-    /// B3.3c — reconstruct the parent's initialized module graph into the `worker` heap so a spawned
-    /// task can read module globals, call sibling/imported free functions, and dispatch struct methods
-    /// (which index `module_objs[module_idx]` for their home). The graph is *snapshotted*, never
-    /// re-initialized: re-running each module's top-level would duplicate its side effects (prints /
-    /// I/O). Module globals are read-only under `--parallel` (decision G1, gate shipped B3.3b), so a
-    /// per-worker copy is safe — nothing writes back. Two passes so cross-module refs resolve:
-    ///
-    /// 1. alloc one fresh empty `Module` per parent module (preserving index order so `module_idx`
-    ///    lines up) and record a parent→worker `GcRef` map;
-    /// 2. populate each worker module's globals, mapping every value into the worker heap.
-    fn build_worker_modules(&self, worker: &mut Vm) {
-        use std::collections::HashMap;
-        // Pass 1: alloc the module objects + build the parent→worker handle map.
-        let mut map: HashMap<GcRef, GcRef> = HashMap::with_capacity(self.module_objs.len());
-        for &pm in &self.module_objs {
-            let name = match self.heap.get(pm) {
-                Obj::Module { name, .. } => name.clone(),
-                _ => "<worker>".into(),
-            };
-            let wm = worker.heap.alloc(Obj::Module { name, globals: HashMap::new() });
-            map.insert(pm, wm);
-            worker.module_objs.push(wm);
+    /// D1 — the shared, read-only [`ModuleSnapshot`] of this VM's initialized module graph, built once
+    /// and reused for every worker it prepares. On a **worker** VM the snapshot it was handed already
+    /// describes its (lazily-faulted) graph exactly — module globals are frozen under `--parallel`
+    /// (decision G1) — so a nested `spawn` reuses that same `Arc` rather than re-snapshotting a partial
+    /// heap; on the **top-level** VM the snapshot is built from the real, fully-populated modules and
+    /// memoized in `snapshot_memo`.
+    fn ensure_snapshot(&mut self) -> Arc<ModuleSnapshot> {
+        if let Some(s) = &self.module_snapshot {
+            return Arc::clone(s);
         }
-        // Pass 2: populate globals, mapping each value into the worker heap.
-        for &pm in &self.module_objs {
-            let globals: Vec<(String, Value)> = match self.heap.get(pm) {
-                Obj::Module { globals, .. } => globals.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                _ => continue,
-            };
-            let wm = map[&pm];
-            for (k, v) in globals {
-                let wv = self.map_global_value(worker, v, &map);
-                worker.module_define(wm, &k, wv);
+        if let Some(s) = &self.snapshot_memo {
+            return Arc::clone(s);
+        }
+        let snap = Arc::new(self.snapshot_modules());
+        self.snapshot_memo = Some(Arc::clone(&snap));
+        snap
+    }
+
+    /// D1 — read this VM's initialized module graph (read-only) into a heap-independent
+    /// [`ModuleSnapshot`]: one [`ModuleSnap`] per module in `module_objs` order (so a callable's home
+    /// index lines up with a worker's pre-alloced modules), each global lowered by [`Vm::to_snap`].
+    /// Replaces the eager per-task `build_worker_modules` reconstruction — built once, replayed lazily.
+    fn snapshot_modules(&self) -> ModuleSnapshot {
+        let modules = self
+            .module_objs
+            .iter()
+            .map(|&pm| {
+                let (name, globals): (Box<str>, Vec<(String, Value)>) = match self.heap.get(pm) {
+                    Obj::Module { name, globals } => {
+                        (name.clone(), globals.iter().map(|(k, v)| (k.clone(), *v)).collect())
+                    }
+                    _ => ("<worker>".into(), Vec::new()),
+                };
+                let globals = globals.into_iter().map(|(k, v)| (k, self.to_snap(v))).collect();
+                ModuleSnap { name, globals }
+            })
+            .collect();
+        ModuleSnapshot { modules }
+    }
+
+    /// D1 — lower one parent-heap global value into a heap-independent [`SnapValue`]. The snapshot
+    /// analogue of the old `map_global_value`: a `GcRef` is heap-local, so a callable's home/captures,
+    /// an import-alias module ref, and any container embedding one of those must be encoded
+    /// structurally, never by reference.
+    ///
+    /// - **Fast path:** a value whose wire form has no by-reference `Handle` is pure data (`str` by
+    ///   value) or a `Channel`/`Shared`/`Executor` core (Arc-shared) — encode the exact wire form.
+    /// - `Func`/`Closure` → record the home as a `module_objs` index (captures recursed); import-alias
+    ///   `Module` → `ModuleAlias(idx)`; `Native` → fn pointer; containers → element-wise (map/set
+    ///   hashes are value-derived, carried unchanged).
+    fn to_snap(&self, v: Value) -> SnapValue {
+        let h = match v {
+            Value::Obj(h) => h,
+            scalar => return SnapValue::Wire(self.to_wire(scalar).expect("scalar is always sendable")),
+        };
+        // Fast path: no embedded callable/module → the wire form is exact and cheap.
+        if let Ok(w) = self.to_wire(v)
+            && !w.has_handle()
+        {
+            return SnapValue::Wire(w);
+        }
+        match self.heap.get(h).clone() {
+            Obj::Func { proto, home } => SnapValue::Func { proto, home: self.home_index(home) },
+            Obj::Closure { proto, captured, home } => {
+                let captured = captured.iter().map(|(k, cv)| (k.clone(), self.to_snap(*cv))).collect();
+                SnapValue::Closure { proto, captured, home: self.home_index(home) }
+            }
+            // An import alias bound to another module obj.
+            Obj::Module { name, globals } => match self.home_index(h) {
+                Some(idx) => SnapValue::ModuleAlias(idx),
+                // A module not in `module_objs` (shouldn't occur for a bound import) — encode inline.
+                None => {
+                    let globals = globals.iter().map(|(k, mv)| (k.clone(), self.to_snap(*mv))).collect();
+                    SnapValue::ModuleInline { name, globals }
+                }
+            },
+            Obj::Native { name, func } => SnapValue::Native { name, func },
+            // Containers embedding a callable: encode each element. (Pure-data containers took the fast
+            // path above.)
+            Obj::List(items) => SnapValue::List(items.iter().map(|x| self.to_snap(*x)).collect()),
+            Obj::Tuple(items) => SnapValue::Tuple(items.iter().map(|x| self.to_snap(*x)).collect()),
+            Obj::Struct { name, fields } => {
+                let fields = fields.iter().map(|(k, fv)| (k.clone(), self.to_snap(*fv))).collect();
+                SnapValue::Struct { name, fields }
+            }
+            Obj::Enum { ty, variant, payload } => {
+                let payload = payload.iter().map(|x| self.to_snap(*x)).collect();
+                SnapValue::Enum { ty, variant, payload }
+            }
+            Obj::Map(m) => SnapValue::Map(
+                m.entries.iter().map(|(hash, k, val)| (*hash, self.to_snap(*k), self.to_snap(*val))).collect(),
+            ),
+            Obj::Set(s) => SnapValue::Set(s.entries.iter().map(|(hash, e)| (*hash, self.to_snap(*e))).collect()),
+            // Leaf data / cores are handled by the fast path; if `to_wire` ever errored above we land
+            // here for a `str`/core (always sendable) — encode its wire form.
+            Obj::Str(_) | Obj::Channel(_) | Obj::Shared(_) | Obj::Executor(_) => {
+                SnapValue::Wire(self.to_wire(v).expect("str / channel / shared / executor is always sendable"))
             }
         }
     }
 
-    /// B3.3c — map one parent-heap global value into the `worker` heap. A `GcRef` is heap-local, so a
-    /// callable's parent-heap `home`/captures and an import-alias module ref must be **rebuilt**, never
-    /// carried by reference. Crucially this recurses *structurally* through containers: a global that
-    /// embeds a callable (a `[fn …]` handler list, a `{k: fn …}` dispatch map, a struct with a
-    /// function field) would otherwise wire its nested `Func` across as a by-reference `Handle` —
-    /// smuggling a parent-heap `GcRef` into the worker heap (the very invariant this phase protects).
-    ///
-    /// - **Fast path:** a value whose wire form has no by-reference `Handle` is pure data (`str` by
-    ///   value) or a `Channel`/`Shared`/`Executor` core (crosses as a shared `Arc`) — the wire
-    ///   round-trip is exact. Only values that embed a callable/module fall through to rebuild.
-    /// - `Func`/`Closure` → re-allocated over the worker's corresponding home module (captures mapped
-    ///   recursively); import-alias `Module` ref → the worker's rebuilt module obj; `Native` →
-    ///   re-allocated (same fn pointer); containers → mapped element-wise (cached map/set hashes are
-    ///   value-derived, so they carry over unchanged).
-    fn map_global_value(&self, worker: &mut Vm, v: Value, map: &std::collections::HashMap<GcRef, GcRef>) -> Value {
-        let h = match v {
-            Value::Obj(h) => h,
-            scalar => return scalar,
-        };
-        // Fast path: no embedded callable/module → the wire round-trip is exact and cheap.
-        if let Ok(w) = self.to_wire(v)
-            && !w.has_handle()
-        {
-            return worker.from_wire(w);
+    /// D1 — install a shared [`ModuleSnapshot`] into a freshly-built worker: pre-alloc one **empty**
+    /// `Module` per snapshot entry (index order preserved so a callable's home index lines up), seed
+    /// the per-module faulted flags, and keep the `Arc` so each module's globals fault in lazily on
+    /// first access ([`Vm::fault_module`]). The cheap replacement for eager `build_worker_modules`.
+    fn install_snapshot(&mut self, snap: Arc<ModuleSnapshot>) {
+        debug_assert!(self.module_objs.is_empty(), "install_snapshot expects a fresh worker");
+        for m in &snap.modules {
+            let wm = self.heap.alloc(Obj::Module { name: m.name.clone(), globals: std::collections::HashMap::new() });
+            self.module_objs.push(wm);
         }
-        match self.heap.get(h).clone() {
-            Obj::Func { proto, home } => {
-                let whome = map.get(&home).copied().unwrap_or_else(|| worker.fresh_worker_home());
-                Value::Obj(worker.heap.alloc(Obj::Func { proto, home: whome }))
+        self.module_faulted = vec![false; snap.modules.len()];
+        self.module_snapshot = Some(snap);
+    }
+
+    /// D1 — fault module `idx`'s globals into this worker's heap from the snapshot, the first time any
+    /// global of that module is read. Idempotent (guarded by `module_faulted`); the flag is set
+    /// *before* replaying so a self-referential global (e.g. a [`SnapValue::ModuleAlias`] back to this
+    /// same module) resolves to the already-alloced module obj without re-entering. No-op once faulted.
+    fn fault_module(&mut self, idx: usize) {
+        if self.module_faulted[idx] {
+            return;
+        }
+        self.module_faulted[idx] = true;
+        let snap = Arc::clone(self.module_snapshot.as_ref().expect("worker has a snapshot"));
+        let module = self.module_objs[idx];
+        for (name, sv) in &snap.modules[idx].globals {
+            let val = self.replay_snap(sv);
+            self.module_define(module, name, val);
+        }
+    }
+
+    /// D1 — if this is a worker VM (a snapshot is installed), ensure the module that owns `home` has
+    /// been faulted in before its globals are read. No-op on the top-level / cooperative VM (no
+    /// snapshot — `module_objs` are the real, already-populated modules), so those engines are
+    /// untouched. Called at every module-global read site (`GetGlobal`, the `GetCaptured` home
+    /// fallback, module member access, and a `module.fn(...)` call).
+    fn ensure_module_faulted(&mut self, home: GcRef) {
+        if self.module_snapshot.is_none() {
+            return;
+        }
+        if let Some(idx) = self.module_objs.iter().position(|&m| m == home) {
+            self.fault_module(idx);
+        }
+    }
+
+    /// D1 — replay a [`SnapValue`] into this worker's heap (the inverse of [`Vm::to_snap`]): the
+    /// snapshot is shared behind an `Arc`, so this borrows and clones leaf data (`WireValue`, fn
+    /// pointer) rather than moving. `ModuleAlias(idx)` resolves to the pre-alloced `module_objs[idx]`
+    /// — which faults its own globals lazily on first access, so no eager cascade.
+    fn replay_snap(&mut self, snap: &SnapValue) -> Value {
+        match snap {
+            SnapValue::Wire(w) => self.from_wire(w.clone()),
+            SnapValue::Func { proto, home } => {
+                let whome = self.worker_home(*home);
+                Value::Obj(self.heap.alloc(Obj::Func { proto: *proto, home: whome }))
             }
-            Obj::Closure { proto, captured, home } => {
-                let whome = map.get(&home).copied().unwrap_or_else(|| worker.fresh_worker_home());
-                let wcap = captured
-                    .iter()
-                    .map(|(k, cv)| (k.clone(), self.map_global_value(worker, *cv, map)))
-                    .collect();
-                Value::Obj(worker.heap.alloc(Obj::Closure { proto, captured: wcap, home: whome }))
+            SnapValue::Closure { proto, captured, home } => {
+                let whome = self.worker_home(*home);
+                let cap = captured.iter().map(|(k, cv)| (k.clone(), self.replay_snap(cv))).collect();
+                Value::Obj(self.heap.alloc(Obj::Closure { proto: *proto, captured: cap, home: whome }))
             }
-            // An import alias bound to another module obj — map to the worker's rebuilt module.
-            Obj::Module { name, globals } => match map.get(&h).copied() {
-                Some(wm) => Value::Obj(wm),
-                // A module not in `module_objs` (shouldn't occur for a bound import) — rebuild a
-                // shallow copy so resolution still finds its members.
-                None => {
-                    let entries: Vec<(String, Value)> = globals.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                    let wm = worker.heap.alloc(Obj::Module { name, globals: std::collections::HashMap::new() });
-                    for (k, mv) in entries {
-                        let mapped = self.map_global_value(worker, mv, map);
-                        worker.module_define(wm, &k, mapped);
-                    }
-                    Value::Obj(wm)
+            SnapValue::ModuleAlias(idx) => Value::Obj(self.module_objs[*idx]),
+            SnapValue::ModuleInline { name, globals } => {
+                let wm = self.heap.alloc(Obj::Module { name: name.clone(), globals: std::collections::HashMap::new() });
+                for (k, gv) in globals {
+                    let val = self.replay_snap(gv);
+                    self.module_define(wm, k, val);
                 }
-            },
-            Obj::Native { name, func } => Value::Obj(worker.heap.alloc(Obj::Native { name, func })),
-            // Containers embedding a callable: map each element so the nested callable is rebuilt, not
-            // carried by reference. (Pure-data containers took the fast path above.)
-            Obj::List(items) => {
-                let mapped: Vec<Value> = items.iter().map(|x| self.map_global_value(worker, *x, map)).collect();
-                Value::Obj(worker.heap.alloc(Obj::List(mapped)))
+                Value::Obj(wm)
             }
-            Obj::Tuple(items) => {
-                let mapped: Vec<Value> = items.iter().map(|x| self.map_global_value(worker, *x, map)).collect();
-                Value::Obj(worker.heap.alloc(Obj::Tuple(mapped)))
+            SnapValue::Native { name, func } => Value::Obj(self.heap.alloc(Obj::Native { name: name.clone(), func: *func })),
+            SnapValue::List(xs) => {
+                let v = xs.iter().map(|x| self.replay_snap(x)).collect();
+                Value::Obj(self.heap.alloc(Obj::List(v)))
             }
-            Obj::Struct { name, fields } => {
-                let mapped: Vec<(Box<str>, Value)> =
-                    fields.iter().map(|(k, fv)| (k.clone(), self.map_global_value(worker, *fv, map))).collect();
-                Value::Obj(worker.heap.alloc(Obj::Struct { name, fields: mapped }))
+            SnapValue::Tuple(xs) => {
+                let v = xs.iter().map(|x| self.replay_snap(x)).collect();
+                Value::Obj(self.heap.alloc(Obj::Tuple(v)))
             }
-            Obj::Enum { ty, variant, payload } => {
-                let mapped: Vec<Value> = payload.iter().map(|x| self.map_global_value(worker, *x, map)).collect();
-                Value::Obj(worker.heap.alloc(Obj::Enum { ty, variant, payload: mapped }))
+            SnapValue::Struct { name, fields } => {
+                let f = fields.iter().map(|(k, fv)| (k.clone(), self.replay_snap(fv))).collect();
+                Value::Obj(self.heap.alloc(Obj::Struct { name: name.clone(), fields: f }))
             }
-            Obj::Map(m) => {
+            SnapValue::Enum { ty, variant, payload } => {
+                let p = payload.iter().map(|x| self.replay_snap(x)).collect();
+                Value::Obj(self.heap.alloc(Obj::Enum { ty: ty.clone(), variant: variant.clone(), payload: p }))
+            }
+            SnapValue::Map(entries) => {
                 let mut out = MapData::default();
-                for (hash, k, val) in &m.entries {
-                    let (ck, cv) = (self.map_global_value(worker, *k, map), self.map_global_value(worker, *val, map));
+                for (hash, k, val) in entries {
+                    let (ck, cv) = (self.replay_snap(k), self.replay_snap(val));
                     out.push(*hash, ck, cv);
                 }
-                Value::Obj(worker.heap.alloc(Obj::Map(out)))
+                Value::Obj(self.heap.alloc(Obj::Map(out)))
             }
-            Obj::Set(s) => {
+            SnapValue::Set(entries) => {
                 let mut out = SetData::default();
-                for (hash, e) in &s.entries {
-                    let ce = self.map_global_value(worker, *e, map);
+                for (hash, e) in entries {
+                    let ce = self.replay_snap(e);
                     out.push(*hash, ce);
                 }
-                Value::Obj(worker.heap.alloc(Obj::Set(out)))
-            }
-            // Leaf data / cores are handled by the fast path; if `to_wire` ever errored above we land
-            // here for a `str`/core (always sendable) — round-trip it.
-            Obj::Str(_) | Obj::Channel(_) | Obj::Shared(_) | Obj::Executor(_) => {
-                let w = self.to_wire(v).expect("str / channel / shared / executor is always sendable");
-                worker.from_wire(w)
+                Value::Obj(self.heap.alloc(Obj::Set(out)))
             }
         }
     }
@@ -4519,6 +4671,7 @@ impl Vm {
         let Value::Obj(h) = obj else {
             return Err(self.err(format!("cannot read field '{name}' of {}", self.type_name(obj)), span));
         };
+        self.ensure_module_faulted(h); // D1: `module.member` on a not-yet-faulted worker module
         match self.heap.get(h) {
             // `t.0`, `t.1`, … — tuple element access. The field name is the element index.
             Obj::Tuple(items) => {
@@ -4971,6 +5124,10 @@ impl Vm {
 
     // ----- module namespace helpers -----
 
+    /// Read a module global. **D1 invariant:** on a `--parallel` worker VM a module's globals are
+    /// faulted in lazily, so any NEW caller that reads globals on a worker must call
+    /// [`Vm::ensure_module_faulted`] for `module` first (the existing op/field/method read sites do);
+    /// otherwise it may observe an empty, not-yet-faulted module and spuriously fail to resolve.
     fn module_global(&self, module: GcRef, name: &str) -> Option<Value> {
         match self.heap.get(module) {
             Obj::Module { globals, .. } => globals.get(name).copied(),
@@ -6678,6 +6835,53 @@ main()";
         let expected = include_str!("../../examples/executor_pool.expected");
         assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
         assert_eq!(run_capture(src).expect("vm run"), expected);
+    }
+
+    /// D1 (lazy module snapshot): a `--parallel` task that calls a sibling free function which in
+    /// turn reads a module-level global must resolve both against the worker's *own* home module —
+    /// exercising lazy fault-in of that module into the worker heap on first global access. The
+    /// cooperative default engine is the equivalence oracle (same output). Characterization test:
+    /// green before D1 (eager `build_worker_modules`) and after (lazy snapshot).
+    #[test]
+    fn parallel_task_resolves_sibling_fn_and_global() {
+        let src = "\
+G := 100
+fn helper(x: int) -> int:
+    return x + G
+fn send_one(ch: Channel[int], x: int):
+    ch.send(helper(x))
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn send_one(ch, 1)
+        spawn send_one(ch, 2)
+    a := ch.recv()
+    b := ch.recv()
+    print(a + b)
+main()
+";
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), "203\n");
+        assert_eq!(run_capture(src).expect("vm run"), "203\n");
+    }
+
+    /// D1 (lazy module snapshot): many trivial `--parallel` spawns no longer pay a full
+    /// per-task module-graph rebuild. Correctness gate — every one of N tasks reaches the same
+    /// `Shared` box, so the serialised count is exactly N. A *loose* wall-clock ceiling is a smoke
+    /// guard that the per-task O(graph) reconstruction is gone (kept generous to avoid CI flake; the
+    /// real perf delta is shown via `primes_parallel` timing in the milestone verification).
+    #[test]
+    fn parallel_many_spawns_cheap_and_correct() {
+        const N: usize = 2000;
+        let mut src = String::from("fn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\nfn main():\n    s := Shared(0)\n    parallel:\n");
+        for _ in 0..N {
+            src.push_str("        spawn bump(s)\n");
+        }
+        src.push_str("    print(s.get())\nmain()\n");
+        let start = std::time::Instant::now();
+        let out = run_capture_parallel(&src).expect("parallel run");
+        let elapsed = start.elapsed();
+        assert_eq!(out, format!("{N}\n"));
+        assert!(elapsed < std::time::Duration::from_secs(30), "{N} spawns took {elapsed:?} (>30s ceiling)");
     }
 
     /// B3.6: a submitted closure capturing a plain value (`int`) observes it **by value** across the
