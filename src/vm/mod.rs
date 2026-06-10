@@ -235,6 +235,13 @@ struct Vm {
     /// Like `suspend` it is a VM-global (one fiber runs at a time) and gates the result-push at the
     /// call site (via [`Vm::paused`]). Reset per schedule-in; never preserved across a park/offload.
     offload: Option<OffloadReq>,
+    /// D6 — set when a non-blocking socket op (`read`/`write`/`accept`) returns `WouldBlock` under the
+    /// M:N engine: instead of busy-retrying, `socket_method`/`listener_method` rewinds `ip` (the op
+    /// re-executes on resume), records the fd + interest here, and returns a sentinel; the worker loop
+    /// hands it to the netpoller ([`Disp::PollPark`]) and is freed. Sibling of `offload`/`suspend` (one
+    /// fiber runs at a time) — gates the result-push at the call site via [`Vm::paused`]. Reset per
+    /// schedule-in; never preserved across a park.
+    poll_park: Option<PollPark>,
     /// Depth of native (Rust) callbacks currently on the host stack that re-enter Chezzi (operator
     /// overloads, `compare`/`hash`/`str` hooks, list HOFs, sorts, `Shared.update`, the executor
     /// drain, deferred calls). Their loop / recursion state lives on the Rust stack and cannot be
@@ -1073,12 +1080,29 @@ impl MnSched {
         }));
     }
 
+    /// D6 — hand a fiber whose socket op returned `WouldBlock` to the netpoller, freeing this core
+    /// worker. Transitions running→inflight under the core lock (so the deadlock predicate is
+    /// immediately sound — a socket-parked fiber is accounted as in-flight, vetoing a false deadlock;
+    /// it WILL be woken by the OS), then registers fd interest. The poller `complete_offload`s the
+    /// fiber back onto the run queue on readiness (inflight→runnable), exactly like the blocking pool.
+    /// Takes `&Arc<Self>` so the poller can hold the scheduler for that completion.
+    fn poll_park_offload(self: &Arc<Self>, fiber: Fiber, pp: PollPark) {
+        {
+            let mut c = self.lock();
+            c.running -= 1;
+            self.inflight.fetch_add(1, Ordering::Relaxed); // running → inflight
+        }
+        poller::register(pp.key, pp.fd, pp.interest, fiber, Arc::clone(self));
+    }
+
     /// D5 — the blocking pool finished an offloaded native: re-enqueue the fiber (with its result
     /// stashed in `resume_native`) as `Ready` on the global queue and wake a worker. Transitions
     /// inflight→runnable under the core lock; the `notify_all` is the wakep (reusing the D4 wake
     /// path). The `runnable.fetch_add` here happens under the core lock and is followed by `notify`,
     /// so D4e's runnable-gated park is lost-wakeup-free: a worker parking concurrently either sees
     /// `runnable > 0` and does not sleep, or is already in `cv.wait` and is reached by this `notify`.
+    /// D6 reuses this verbatim as the netpoller's inject path (a socket op re-runs, so it stashes no
+    /// `resume_native` — the fiber's stays `None`).
     fn complete_offload(&self, mut fiber: Fiber) {
         let mut c = self.lock();
         self.inflight.fetch_sub(1, Ordering::Relaxed); // inflight → runnable
@@ -1272,7 +1296,21 @@ enum Disp {
     /// dirty/blocking pool and is freed to schedule other work. The pool re-enqueues the fiber on
     /// completion (`MnSched::complete_offload`).
     Offload(OffloadReq),
+    /// D6 — the fiber's socket op returned `WouldBlock`; the worker hands the fiber + fd to the
+    /// netpoller (`MnSched::poll_park_offload`) and is freed. The poller re-enqueues the fiber on OS
+    /// readiness (`MnSched::complete_offload`); the rewound op then re-runs.
+    PollPark(PollPark),
     Finish(TaskOutcome),
+}
+
+/// D6 — a socket op parked on fd readiness: the `key` (the `SocketCore`/`ListenerCore` poll key, also
+/// the netpoller registry key + the `close`-side `deregister` handle), the raw `fd`, and the
+/// direction of interest. Carried from the op's `WouldBlock` site up to the worker loop, which hands
+/// it to [`MnSched::poll_park_offload`].
+struct PollPark {
+    key: usize,
+    fd: std::os::fd::RawFd,
+    interest: poller::Interest,
 }
 
 /// D5 — a blocking native call extracted at its dispatch site, ready to run off the core worker on
@@ -1312,6 +1350,7 @@ impl Vm {
             executors: Vec::new(),
             suspend: None,
             offload: None,
+            poll_park: None,
             native_reentry: 0,
             reds: 0,           // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
             yield_now: false,  // D3
@@ -1373,7 +1412,7 @@ impl Vm {
     /// `mn.is_some()` — so the cooperative engine, where it is always false, is unchanged by
     /// construction.)
     fn paused(&self) -> bool {
-        self.suspend.is_some() || self.yield_now || self.offload.is_some()
+        self.suspend.is_some() || self.yield_now || self.offload.is_some() || self.poll_park.is_some()
     }
 
     /// Run `f` with the native-reentry guard raised (B1). A blocking `recv` reached while the guard
@@ -4067,6 +4106,9 @@ impl Vm {
                 // D5 — the fiber hit a blocking native; hand it + the call to the dirty pool (frees
                 // this worker). The pool re-enqueues it on completion via `complete_offload`.
                 Disp::Offload(req) => sched.offload(fiber, req),
+                // D6 — the fiber's socket op `WouldBlock`ed; hand it + the fd to the netpoller (frees
+                // this worker). The poller re-enqueues it via `complete_offload` on OS readiness.
+                Disp::PollPark(pp) => sched.poll_park_offload(fiber, pp),
                 Disp::Finish(outcome) => {
                     let aborts = matches!(outcome, TaskOutcome::Fault(_) | TaskOutcome::Exit { .. });
                     sched.finish(task_index, outcome);
@@ -4088,6 +4130,7 @@ impl Vm {
         self.swap_ctx(&mut fiber.ctx);
         self.suspend = None;
         self.offload = None;
+        self.poll_park = None;
         self.cancelled = false;
         self.pending_exit = None;
         self.reds = CONTEXT_REDS; // D3 — fresh reduction budget on every schedule-in (BEAM semantics)
@@ -4124,6 +4167,11 @@ impl Vm {
                 // with `suspend`/`yield_now` (offload returns up via the `paused()` gate before any
                 // `recv` runs or the budget is re-checked).
                 Disp::Offload(self.offload.take().unwrap())
+            } else if res.is_ok() && self.poll_park.is_some() {
+                // D6 — the fiber's socket op `WouldBlock`ed; hand it to the netpoller (frees this
+                // worker). Mutually exclusive with `offload`/`suspend`/`yield_now` — the socket op
+                // returns up via the `paused()` gate before any other safepoint runs.
+                Disp::PollPark(self.poll_park.take().unwrap())
             } else if res.is_ok() && self.suspend.is_some() {
                 let h = self.suspend.take().unwrap();
                 // Capture the park key + the channel `Arc` WHILE the fiber heap is live (`h` is a
@@ -7119,6 +7167,40 @@ mod tests {
         assert!(sched.is_deadlocked(&c), "all-parked + nothing in flight = deadlock");
         sched.inflight.fetch_add(1, Ordering::Relaxed);
         assert!(!sched.is_deadlocked(&c), "an in-flight blocking offload vetoes the deadlock fire");
+    }
+
+    /// D6: `poll_park_offload` hands a fiber whose socket op `WouldBlock`ed to the netpoller —
+    /// running→inflight — so a socket-parked fiber is accounted as in-flight (it WILL be woken by the
+    /// OS) and vetoes a false deadlock, exactly like a blocking-pool offload. Uses a real loopback fd
+    /// (never written) so the fiber genuinely stays parked; `deregister` cleans up (delete-before-drop).
+    #[test]
+    fn poll_park_offload_moves_running_to_inflight() {
+        use std::os::fd::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = std::net::TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let key = usize::MAX - 10;
+
+        let sched = Arc::new(mk_sched(2));
+        sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+        let f0 = take_run(&sched); // running == 1, runnable == 1
+        assert_eq!(sched.lock().running, 1);
+
+        sched.poll_park_offload(f0, PollPark { key, fd: server.as_raw_fd(), interest: poller::Interest::Read });
+        assert_eq!(sched.lock().running, 0, "poll-park freed the worker (running decremented)");
+        assert_eq!(sched.inflight.load(Ordering::Relaxed), 1, "running → inflight on poll-park");
+
+        // The in-flight socket op vetoes a deadlock even with the sibling still queued drained off.
+        let mut c = sched.lock();
+        c.parked_n = 1;
+        assert!(!sched.is_deadlocked(&c), "a socket op in flight on the poller vetoes a false deadlock");
+        drop(c);
+
+        // Clean up: deregister disarms the fd + re-injects (inflight→runnable), before `server` drops.
+        assert!(poller::deregister(key), "the parked socket op was registered");
+        assert_eq!(sched.inflight.load(Ordering::Relaxed), 0, "deregister re-injected the fiber");
     }
 
     /// D5: `offload` hands a fiber to the blocking pool (running→inflight); when the pool finishes the
