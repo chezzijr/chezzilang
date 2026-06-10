@@ -304,6 +304,11 @@ struct Vm {
 /// CPU-bound fiber relinquishes its worker promptly.
 const CONTEXT_REDS: u32 = 4000;
 
+/// D6 — per-call `Socket::read(n)` buffer cap (16 MiB). A huge caller-supplied `n` is clamped to this
+/// so it can't eagerly allocate gigabytes before any data arrives; the caller loops for larger
+/// payloads (`read` returns the actual byte count). Mirrors `io::read_file`'s read limit.
+const MAX_SOCKET_READ: usize = 16 * 1024 * 1024;
+
 /// A fiber's saved execution context (B1): every `Vm` field that `run_until` reads or writes keyed by
 /// per-execution indices. Swapped with the live `Vm` fields ([`Vm::swap_ctx`]) when a fiber is
 /// scheduled in or out. `pending_exit` is deliberately NOT here — `std.os.exit` halts the whole
@@ -1093,7 +1098,7 @@ impl MnSched {
             c.running -= 1;
             self.inflight.fetch_add(1, Ordering::Relaxed); // running → inflight
         }
-        poller::register(pp.key, pp.fd, pp.interest, fiber, Arc::clone(self));
+        poller::register(pp.key, pp.fd, pp.interest, fiber, Arc::clone(self), pp.in_flight);
     }
 
     /// D5 — the blocking pool finished an offloaded native: re-enqueue the fiber (with its result
@@ -1312,6 +1317,9 @@ struct PollPark {
     key: usize,
     fd: std::os::fd::RawFd,
     interest: poller::Interest,
+    /// D6 — the owning socket's `in_flight` flag, handed to the poller so it can clear it on inject
+    /// (see [`core::SocketCore::in_flight`]).
+    in_flight: Arc<AtomicBool>,
 }
 
 /// D5 — a blocking native call extracted at its dispatch site, ready to run off the core worker on
@@ -5200,7 +5208,7 @@ impl Vm {
         match name {
             "connect" => match crate::native::net::connect_nonblocking(&addr) {
                 Ok(stream) => {
-                    let core = Arc::new(SocketCore { stream: Mutex::new(Some(stream)), key: core::next_poll_key() });
+                    let core = Arc::new(SocketCore { stream: Mutex::new(Some(stream)), key: core::next_poll_key(), in_flight: core::new_in_flight() });
                     let v = Value::Obj(self.heap.alloc(Obj::Socket(core)));
                     Ok(self.sock_ok(v))
                 }
@@ -5208,7 +5216,7 @@ impl Vm {
             },
             "listen" => match crate::native::net::listen_nonblocking(&addr) {
                 Ok(listener) => {
-                    let core = Arc::new(ListenerCore { listener: Mutex::new(Some(listener)), key: core::next_poll_key() });
+                    let core = Arc::new(ListenerCore { listener: Mutex::new(Some(listener)), key: core::next_poll_key(), in_flight: core::new_in_flight() });
                     let v = Value::Obj(self.heap.alloc(Obj::Listener(core)));
                     Ok(self.sock_ok(v))
                 }
@@ -5228,8 +5236,11 @@ impl Vm {
         match method {
             "read" => {
                 self.arity_err("read", args, 1, span)?;
+                // Cap the per-call buffer: a huge `read(n)` (caller-controlled) must not eagerly
+                // allocate gigabytes before a byte arrives (review). The caller already loops for large
+                // payloads — `read` returns the actual count.
                 let n = match args.first() {
-                    Some(Value::Int(n)) => (*n).max(0) as usize,
+                    Some(Value::Int(n)) => ((*n).max(0) as usize).min(MAX_SOCKET_READ),
                     _ => return Err(self.err("read expects an int byte count".into(), span)),
                 };
                 let core = self.socket_core(h);
@@ -5252,19 +5263,14 @@ impl Vm {
                         Ok(self.sock_ok(sv))
                     }
                     Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        if self.park_on_fd(h, args, core.key, fd, poller::Interest::Read) {
+                        let target = PollPark { key: core.key, fd, interest: poller::Interest::Read, in_flight: Arc::clone(&core.in_flight) };
+                        if self.park_on_fd(h, args, target, span)? {
                             return Ok(Value::Nil); // parked (sentinel; `poll_park` gates the push)
                         }
-                        // No fiber to park: block on this one read, then restore non-blocking.
-                        match self.block_socket_read(&core, &mut buf) {
-                            Ok(got) => {
-                                buf.truncate(got);
-                                let s = String::from_utf8_lossy(&buf).into_owned();
-                                let sv = self.alloc_str(s);
-                                Ok(self.sock_ok(sv))
-                            }
-                            Err(e) => Ok(self.sock_err(e)),
-                        }
+                        // No fiber to park (top-level / cooperative): fail loud rather than block the
+                        // only thread (a silent hang that also defeats the cooperative deadlock
+                        // detector). net targets the `--parallel` engine.
+                        Ok(self.sock_err("read would block: std.net sockets require the --parallel engine"))
                     }
                     Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
                 }
@@ -5292,13 +5298,11 @@ impl Vm {
                 match attempt {
                     Ok(got) => Ok(self.sock_ok(Value::Int(got as i64))),
                     Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        if self.park_on_fd(h, args, core.key, fd, poller::Interest::Write) {
+                        let target = PollPark { key: core.key, fd, interest: poller::Interest::Write, in_flight: Arc::clone(&core.in_flight) };
+                        if self.park_on_fd(h, args, target, span)? {
                             return Ok(Value::Nil);
                         }
-                        match self.block_socket_write(&core, &data) {
-                            Ok(got) => Ok(self.sock_ok(Value::Int(got as i64))),
-                            Err(e) => Ok(self.sock_err(e)),
-                        }
+                        Ok(self.sock_err("write would block: std.net sockets require the --parallel engine"))
                     }
                     Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
                 }
@@ -5336,13 +5340,11 @@ impl Vm {
                 match attempt {
                     Ok(stream) => Ok(self.accept_socket_value(stream)),
                     Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        if self.park_on_fd(h, args, core.key, fd, poller::Interest::Read) {
+                        let target = PollPark { key: core.key, fd, interest: poller::Interest::Read, in_flight: Arc::clone(&core.in_flight) };
+                        if self.park_on_fd(h, args, target, span)? {
                             return Ok(Value::Nil);
                         }
-                        match self.block_listener_accept(&core) {
-                            Ok(stream) => Ok(self.accept_socket_value(stream)),
-                            Err(e) => Ok(self.sock_err(e)),
-                        }
+                        Ok(self.sock_err("accept would block: std.net sockets require the --parallel engine"))
                     }
                     Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
                 }
@@ -5380,58 +5382,41 @@ impl Vm {
     /// `Result::Ok`.
     fn accept_socket_value(&mut self, stream: std::net::TcpStream) -> Value {
         stream.set_nonblocking(true).ok();
-        let core = Arc::new(SocketCore { stream: Mutex::new(Some(stream)), key: core::next_poll_key() });
+        let core = Arc::new(SocketCore { stream: Mutex::new(Some(stream)), key: core::next_poll_key(), in_flight: core::new_in_flight() });
         let v = Value::Obj(self.heap.alloc(Obj::Socket(core)));
         self.sock_ok(v)
     }
 
-    /// D6 — the M:N park half shared by every would-block socket op: under the M:N engine (and not in
-    /// a native callback, whose Rust-stack state can't be parked), restore the pre-call operand stack
-    /// (the receiver THEN its args, the exact layout `CallMethod` re-pops — unlike a 0-arg `recv` park,
-    /// a `read(n)`/`write(s)` must re-push its args too), rewind `ip` so the op re-executes on resume,
-    /// and set the `poll_park` sentinel for the worker loop to hand to the netpoller — returns `true`.
-    /// `false` off the M:N engine (the caller blocks instead).
-    fn park_on_fd(&mut self, h: GcRef, args: &[Value], key: usize, fd: std::os::fd::RawFd, interest: poller::Interest) -> bool {
+    /// D6 — the M:N park half shared by every would-block socket op. Returns `Ok(true)` if the fiber
+    /// was parked on the netpoller; `Ok(false)` off the M:N engine (or inside a native callback, whose
+    /// Rust-stack state can't be parked) — the caller then surfaces a `Result::Err` (net requires the
+    /// `--parallel` engine; blocking the only thread would wedge the cooperative deadlock detector).
+    /// `Err` only for a **concurrent op on a shared socket**: oneshot epoll allows ONE registration per
+    /// fd, so a second fiber reaching a would-block op while the first is parked (`in_flight` already
+    /// set) faults cleanly rather than corrupting the poller registry (review: Critical). On the park
+    /// path it restores the pre-call operand stack (receiver THEN args — the exact layout `CallMethod`
+    /// re-pops; unlike a 0-arg `recv` park, `read(n)`/`write(s)` must re-push their args), rewinds `ip`
+    /// so the op re-executes on resume, and sets the `poll_park` sentinel for the worker loop.
+    fn park_on_fd(&mut self, h: GcRef, args: &[Value], target: PollPark, span: Span) -> Result<bool, RuntimeError> {
         if self.mn.is_some() && self.native_reentry == 0 {
+            // The `in_flight` guard: at most one op may be parked on a socket at a time. A second
+            // concurrent op on a shared socket (`Arc`) faults rather than overwrite the registry entry
+            // (which would drop the first fiber + leak `inflight`) or double-`add` the fd (EEXIST panic).
+            if target.in_flight.swap(true, Ordering::AcqRel) {
+                return Err(self.err("concurrent operation on a shared socket is not supported".into(), span));
+            }
             self.push(Value::Obj(h)); // receiver (deeper on the stack)
             for &a in args {
                 self.push(a); // its args, in order, back on top
             }
             self.frames.last_mut().unwrap().ip -= 1;
-            self.poll_park = Some(PollPark { key, fd, interest });
-            true
+            self.poll_park = Some(target);
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
-    /// D6 — the non-M:N blocking fallback: flip the fd to blocking, run the op once (so it waits on the
-    /// OS), restore non-blocking. Single thread of control off the M:N engine, so toggling the shared
-    /// fd is race-free. Returns the op's `io::Result` mapped to a `String` error.
-    fn block_socket_read(&self, core: &Arc<SocketCore>, buf: &mut [u8]) -> Result<usize, String> {
-        let mut guard = core.stream.lock().unwrap();
-        let Some(stream) = guard.as_mut() else { return Err("read on a closed socket".into()) };
-        stream.set_nonblocking(false).ok();
-        let r = std::io::Read::read(stream, buf);
-        stream.set_nonblocking(true).ok();
-        r.map_err(|e| e.to_string())
-    }
-    fn block_socket_write(&self, core: &Arc<SocketCore>, data: &[u8]) -> Result<usize, String> {
-        let mut guard = core.stream.lock().unwrap();
-        let Some(stream) = guard.as_mut() else { return Err("write on a closed socket".into()) };
-        stream.set_nonblocking(false).ok();
-        let r = std::io::Write::write(stream, data);
-        stream.set_nonblocking(true).ok();
-        r.map_err(|e| e.to_string())
-    }
-    fn block_listener_accept(&self, core: &Arc<ListenerCore>) -> Result<std::net::TcpStream, String> {
-        let guard = core.listener.lock().unwrap();
-        let Some(listener) = guard.as_ref() else { return Err("accept on a closed listener".into()) };
-        listener.set_nonblocking(false).ok();
-        let r = listener.accept().map(|(s, _)| s);
-        listener.set_nonblocking(true).ok();
-        r.map_err(|e| e.to_string())
-    }
 
     /// `Channel[T]` methods (C2/C4): `send` (move-on-send, deep-copied in), `recv` (FIFO; empty =
     /// deadlock fault under the sequential executor), `len`. Mirrors `interp::eval_channel_method` —
@@ -7472,7 +7457,7 @@ mod tests {
         let f0 = take_run(&sched); // running == 1, runnable == 1
         assert_eq!(sched.lock().running, 1);
 
-        sched.poll_park_offload(f0, PollPark { key, fd: server.as_raw_fd(), interest: poller::Interest::Read });
+        sched.poll_park_offload(f0, PollPark { key, fd: server.as_raw_fd(), interest: poller::Interest::Read, in_flight: core::new_in_flight() });
         assert_eq!(sched.lock().running, 0, "poll-park freed the worker (running decremented)");
         assert_eq!(sched.inflight.load(Ordering::Relaxed), 1, "running → inflight on poll-park");
 

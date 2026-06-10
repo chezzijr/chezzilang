@@ -16,7 +16,7 @@ use super::value::GcRef;
 use super::wire::WireValue;
 use std::collections::VecDeque;
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// `Channel[T]` core (B3.1): the shared mailbox, an unbounded FIFO of wire-form messages. `send`
@@ -72,6 +72,14 @@ pub fn next_poll_key() -> usize {
 pub struct SocketCore {
     pub stream: Mutex<Option<TcpStream>>,
     pub key: usize,
+    /// D6 — `true` exactly while a would-block op on this socket sits parked in the netpoller. Set by
+    /// `park_on_fd` before parking, cleared by the poller when it injects the fiber back (or on
+    /// `deregister`). Because oneshot epoll/kqueue allows ONE registration per fd, a SECOND fiber that
+    /// shares this socket (`Arc`) and reaches a would-block op while the first is parked is rejected
+    /// with a clean fault — without it the duplicate `Poller::add` would `EEXIST`-panic the poll thread
+    /// and the duplicate registry insert would drop the first fiber (an `inflight` leak + hang). Shared
+    /// (`Arc`) so the poller can clear it without holding the type-erased core.
+    pub in_flight: Arc<AtomicBool>,
 }
 
 /// D6 — `Listener` core: a non-blocking accepting socket. Same handle/core split + fd-lifecycle as
@@ -80,6 +88,13 @@ pub struct SocketCore {
 pub struct ListenerCore {
     pub listener: Mutex<Option<TcpListener>>,
     pub key: usize,
+    /// D6 — see [`SocketCore::in_flight`].
+    pub in_flight: Arc<AtomicBool>,
+}
+
+/// D6 — a fresh, not-yet-parked in-flight flag for a new socket/listener core.
+pub fn new_in_flight() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
 }
 
 /// The mutable inside of an [`ExecutorCore`]: the pending-task FIFO + the shut flag, behind one lock
@@ -172,8 +187,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let stream = TcpStream::connect(addr).unwrap();
-        let s1 = SocketCore { stream: Mutex::new(Some(stream)), key: next_poll_key() };
-        let s2 = ListenerCore { listener: Mutex::new(Some(listener)), key: next_poll_key() };
+        let s1 = SocketCore { stream: Mutex::new(Some(stream)), key: next_poll_key(), in_flight: new_in_flight() };
+        let s2 = ListenerCore { listener: Mutex::new(Some(listener)), key: next_poll_key(), in_flight: new_in_flight() };
         assert_ne!(s1.key, s2.key, "each core gets a distinct poll key");
         assert!(s1.stream.lock().unwrap().is_some(), "a fresh socket core is open");
         assert!(s2.listener.lock().unwrap().is_some(), "a fresh listener core is open");

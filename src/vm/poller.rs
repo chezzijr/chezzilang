@@ -23,14 +23,21 @@
 //! and faults cleanly — never lost, never an `inflight` leak.
 //!
 //! **v1 limit (deferred to D6b).** A poller-parked fiber lives in this service's registry, *not* in
-//! the scheduler's `parked` buckets, so B3.4 cancellation / deadlock draining does not reach it: a
-//! faulting sibling cannot abort a fiber blocked in `read`/`accept`. Documented; same spirit as the
-//! existing "`recv` inside a native callback" limit.
+//! the scheduler's `parked` buckets, so B3.4 cancellation / deadlock draining does not reach it. The
+//! observable consequence is **a nursery join HANG, not just a lingering fiber**: if one sibling
+//! faults while another is parked on `accept`/`read`, the parked fiber's task never reaches `done`,
+//! `is_deadlocked` stays vetoed (`inflight > 0`), and the fault never propagates — the whole
+//! `parallel:` wedges instead of unwinding. This breaks the structured-concurrency error-propagation
+//! guarantee for net-using nurseries and is a HARD GATE on any "net is production-ready" claim. D6b
+//! must give the fault path a "drain this sched's poller registrations" hook (and a socket-timeout
+//! escape hatch). Same spirit as the existing "`recv` inside a native callback" limit, but with a
+//! larger blast radius. Until then, a net server should not share a nursery with a fallible sibling.
 
 use super::{Fiber, MnSched};
 use polling::{Event, Events, Poller};
 use std::collections::HashMap;
 use std::os::fd::{BorrowedFd, RawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The direction of readiness a socket op is waiting on.
@@ -46,6 +53,9 @@ struct Parked {
     fiber: Fiber,
     sched: Arc<MnSched>,
     fd: RawFd,
+    /// The owning socket's `in_flight` flag (see [`super::core::SocketCore::in_flight`]) — cleared
+    /// here when the fiber is injected back or de-registered, so the resumed op can re-park.
+    in_flight: Arc<AtomicBool>,
 }
 
 /// The poller + its registry, shared (by `Arc`) between the registering worker threads and the single
@@ -66,8 +76,8 @@ static SERVICE: OnceLock<NetPoller> = OnceLock::new();
 /// Register read/write interest on `fd` under `key`, parking `fiber` (to be injected back into
 /// `sched`) until the OS reports readiness. Called by [`super::MnSched::poll_park_offload`] *after* it
 /// has done running→inflight, so the fiber is accounted as in-flight before the OS can wake it.
-pub fn register(key: usize, fd: RawFd, interest: Interest, fiber: Fiber, sched: Arc<MnSched>) {
-    SERVICE.get_or_init(NetPoller::new).register(key, fd, interest, fiber, sched);
+pub fn register(key: usize, fd: RawFd, interest: Interest, fiber: Fiber, sched: Arc<MnSched>, in_flight: Arc<AtomicBool>) {
+    SERVICE.get_or_init(NetPoller::new).register(key, fd, interest, fiber, sched, in_flight);
 }
 
 /// De-register a pending park on `key` (a socket `close` racing the park). If a fiber was still
@@ -94,10 +104,13 @@ impl NetPoller {
         NetPoller { inner }
     }
 
-    fn register(&self, key: usize, fd: RawFd, interest: Interest, fiber: Fiber, sched: Arc<MnSched>) {
+    fn register(&self, key: usize, fd: RawFd, interest: Interest, fiber: Fiber, sched: Arc<MnSched>, in_flight: Arc<AtomicBool>) {
         // File the parked op BEFORE arming the fd: the poll thread removes from the registry under its
-        // lock, so a readiness event can never observe an armed fd with no registry entry.
-        self.lock_registry().insert(key, Parked { fiber, sched, fd });
+        // lock, so a readiness event can never observe an armed fd with no registry entry. The key is
+        // never a duplicate: a second op on the same socket is rejected by the `in_flight` guard in
+        // `park_on_fd` before it reaches here, so neither the `insert` nor the `add` below can collide.
+        let prev = self.lock_registry().insert(key, Parked { fiber, sched, fd, in_flight });
+        debug_assert!(prev.is_none(), "netpoller registry key reused — the in_flight guard was bypassed");
         let ev = match interest {
             Interest::Read => Event::readable(key),
             Interest::Write => Event::writable(key),
@@ -110,9 +123,10 @@ impl NetPoller {
 
     fn deregister(&self, key: usize) -> bool {
         let parked = self.lock_registry().remove(&key);
-        if let Some(Parked { fiber, sched, fd }) = parked {
+        if let Some(Parked { fiber, sched, fd, in_flight }) = parked {
             // SAFETY: still in the registry ⇒ never injected ⇒ fd still open (rooted on `fiber`).
             let _ = self.inner.poller.delete(unsafe { BorrowedFd::borrow_raw(fd) });
+            in_flight.store(false, Ordering::Release); // the op is no longer parked
             sched.complete_offload(fiber); // inflight→runnable; the re-run faults on the closed socket
             true
         } else {
@@ -140,11 +154,12 @@ fn poll_loop(inner: &Inner) {
         }
         for ev in events.iter() {
             let parked = inner.registry.lock().unwrap_or_else(|e| e.into_inner()).remove(&ev.key);
-            if let Some(Parked { fiber, sched, fd }) = parked {
+            if let Some(Parked { fiber, sched, fd, in_flight }) = parked {
                 // Oneshot fired: remove the fd before injecting (delete-before-drop; the fd is still
                 // open — the fiber resumes only after this, and only it can close the socket).
                 // SAFETY: fd open until the injected fiber resumes (see `register`).
                 let _ = inner.poller.delete(unsafe { BorrowedFd::borrow_raw(fd) });
+                in_flight.store(false, Ordering::Release); // op no longer parked → the resumed op may re-park
                 // Inject EXACTLY like a blocking-pool / timer completion: inflight→runnable + wakep.
                 // No `resume_native` stash — the socket op re-runs (its `ip` was rewound on park).
                 sched.complete_offload(fiber);
@@ -157,6 +172,7 @@ fn poll_loop(inner: &Inner) {
 mod tests {
     use super::*;
     use crate::ast::Span;
+    use crate::vm::core::new_in_flight;
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
     use std::os::fd::AsRawFd;
@@ -206,7 +222,7 @@ mod tests {
         let (mut client, server) = loopback_pair();
         let sched = mk_sched();
         sched.inflight.fetch_add(1, Ordering::Relaxed); // simulate poll_park_offload's running→inflight
-        register(usize::MAX - 1, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched));
+        register(usize::MAX - 1, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight());
 
         // Nothing written yet → fd not readable → fiber stays parked.
         assert_eq!(sched.inflight.load(Ordering::Relaxed), 1, "fiber parked before any data");
@@ -221,6 +237,26 @@ mod tests {
         drop(server);
     }
 
+    /// The `in_flight` guard's correctness hinges on the poller CLEARING it on inject: only then can
+    /// the resumed op re-park (a still-set flag would make the owner fault itself), while a *concurrent*
+    /// fiber sharing the socket sees it set and faults. Set the flag (as `park_on_fd` would), park,
+    /// fire, and assert the flag is cleared exactly when the fiber is injected.
+    #[test]
+    fn inject_clears_in_flight() {
+        let (mut client, server) = loopback_pair();
+        let sched = mk_sched();
+        let in_flight = new_in_flight();
+        in_flight.store(true, Ordering::Release); // simulate park_on_fd's swap(true)
+        sched.inflight.fetch_add(1, Ordering::Relaxed);
+        register(usize::MAX - 4, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), Arc::clone(&in_flight));
+        assert!(in_flight.load(Ordering::Acquire), "flag stays set while the op is parked");
+
+        client.write_all(b"x").unwrap();
+        wait_until(|| sched.lock().global.len() == 1, "inject");
+        assert!(!in_flight.load(Ordering::Acquire), "inject clears in_flight so the resumed op may re-park");
+        drop(server);
+    }
+
     /// No readiness event → no inject: a registered-but-not-ready fd leaves the fiber parked.
     #[test]
     fn no_event_does_not_inject() {
@@ -228,9 +264,11 @@ mod tests {
         let key = usize::MAX - 2;
         let sched = mk_sched();
         sched.inflight.fetch_add(1, Ordering::Relaxed);
-        register(key, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched));
+        register(key, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight());
 
-        // No write → give the poller a chance to (wrongly) fire, then assert it did not.
+        // No write → give the poller a chance to (wrongly) fire, then assert it did not. NOTE: this
+        // fixed sleep can only mask a real bug (a false inject under load), never flake — do not
+        // "tighten" it into a race.
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(sched.inflight.load(Ordering::Relaxed), 1, "no data ⇒ fiber stays parked");
         assert_eq!(sched.runnable.load(Ordering::Relaxed), 0, "no spurious inject");
@@ -247,10 +285,13 @@ mod tests {
         let (mut client, server) = loopback_pair();
         let key = usize::MAX - 3;
         let sched = mk_sched();
+        let in_flight = new_in_flight();
+        in_flight.store(true, Ordering::Release);
         sched.inflight.fetch_add(1, Ordering::Relaxed);
-        register(key, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched));
+        register(key, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), Arc::clone(&in_flight));
 
         assert!(deregister(key), "deregister found the pending park");
+        assert!(!in_flight.load(Ordering::Acquire), "deregister also clears in_flight");
         assert_eq!(sched.inflight.load(Ordering::Relaxed), 0, "re-injected (inflight→runnable)");
         assert_eq!(sched.lock().global.len(), 1, "fiber back on the run queue exactly once");
 
