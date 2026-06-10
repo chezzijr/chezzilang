@@ -1,0 +1,26 @@
+# B3.5 — nursery-local deadlock detection under `--parallel`.
+#
+# Both tasks block on a `recv` from a channel that nobody ever sends to, so the whole nursery is
+# stuck: every live sibling is parked and none can produce. The cooperative engine already faults
+# this; under `--parallel` (real OS threads + condvar `recv`) B3.5's per-nursery barrier-confirm
+# detector faults `deadlock` instead of hanging on the condvars.
+#
+#   chezzi run --parallel examples/parallel_deadlock.chz   # → runtime error: deadlock ...
+#
+# (A genuinely non-deadlocked nursery — see parallel_channel.chz — is untouched: a real `send`
+# aborts any in-progress all-blocked confirmation, so it never false-positives.)
+
+fn waiter(c: Channel[int]):
+    print("waiting")
+    c.recv()
+    print("got it")          # never reached — no producer
+
+fn main():
+    a := Channel[int]()
+    b := Channel[int]()
+    parallel:
+        spawn waiter(a)
+        spawn waiter(b)
+    print("done")            # never reached — the nursery deadlocks
+
+main()

@@ -258,8 +258,8 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 - [x] B3.3d — method tasks (`spawn obj.m()`) dispatch in the worker via the rebuilt graph ✅ **landed**
 - [x] B3.3-threads — real OS threads behind `--parallel` ✅ **landed** (`--parallel` flag + bounded pool + condvar `recv` + flush-on-join; `Shared.update` made cross-thread-atomic)
 - [x] B3.4 — cancellation + cross-thread `os.exit` ✅ **landed** (per-nursery `Arc<AtomicBool>` cancel flag tripped by the first sibling fault/`os.exit`; observed at the dispatch back-edge + a `wait_timeout` re-checking `recv`; first-fault aborts running siblings; child `os.exit` propagates its code up the join to halt the parent; `recover:`/`defer` compose)
-- [ ] B3.5 — nursery-local deadlock detection under threads ← **next session starts here**
-- [ ] B3.6 — `Executor`/B5 on the pool + A3b
+- [x] B3.5 — nursery-local deadlock detection under threads ✅ **landed** (per-nursery `DeadlockWatch` cloned into each worker; barrier-confirm detector in the blocking `recv` — a parked worker confirms its channel empty at most once per `epoch`, and `confirms == live` ⇒ fault `deadlock` with the cooperative engine's byte-identical message; `send`/`task_finished` report progress to bump `epoch`; watch and channel `q` locks never held together. Residual hangs documented: cross-nursery / `Executor`-spanning, orphaned message, G3 saturated-pool queued task)
+- [ ] B3.6 — `Executor`/B5 on the pool + A3b ← **next session starts here**
 
 > **B3.0 landed note (for the B3.1+ maintainer):** `WireValue` lives in `src/vm/wire.rs`;
 > `Vm::to_wire` / `Vm::from_wire` + the rewritten `deep_clone` (the round-trip) are in

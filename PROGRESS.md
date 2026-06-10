@@ -95,8 +95,7 @@ goldens: `examples/parallel_shared.chz` (N threads bump one `Shared` → exact c
 golden + the 3-way VM==interp parity stays on the default engine, **byte-identical green**. Latest
 suite: **1319 tests** green (unit + parity + `cargo test conformance`), `cargo clippy` clean.
 **Still owed (later phases):** `Executor` doesn't yet ride the pool + the A3b `submit`-capture gate
-(B3.6); no nursery-local deadlock detector under threads, so a genuinely all-blocked `--parallel`
-nursery still *hangs* (B3.5).
+(B3.6).
 
 **B3.4 — cancellation + cross-thread `os.exit` — has now landed** (VM, `--parallel`). Each worker
 `Vm` carries a per-nursery `cancel: Arc<AtomicBool>` (cloned in by `run_parallel_nursery`) plus a
@@ -123,6 +122,33 @@ worker-internal `recover:` and skipped `defer`s on the CPU path; (2) `os.exit`-v
 conformance`), `cargo clippy` clean. Single-level cancel only — nested-nursery cancel propagation is
 a documented, deferred limitation (`docs/concurrency-b3.md`).
 
+**B3.5 — nursery-local deadlock detection under threads — has now landed** (VM, `--parallel`). Under
+B3.4 a genuinely all-blocked nursery *hung* (the `recv` re-check only aborted on *cancel*); now each
+worker `Vm` also shares a per-nursery `DeadlockWatch` (`Mutex<{blocked, live, epoch, confirms,
+dead}>`, cloned in by `run_parallel_nursery` like the cancel flag). A blocking `recv` runs a
+**barrier-confirm** detector (decision D): a parked worker "confirms empty" only when every still-live
+sibling is parked (`blocked == live`) and does so at most once per `epoch`; any progress — a `send`,
+a successful pop, a park-count change, or a task finishing (`task_finished` decrements `live`) — bumps
+`epoch` and resets `confirms`. When `confirms == live`, every live worker independently re-checked its
+own channel empty in the *same* epoch with no intervening progress ⇒ no message exists and no sibling
+can send ⇒ fault `deadlock` (the **byte-identical** message the cooperative scheduler uses, now a
+shared `DEADLOCK_MSG` const). This is immune to the "message delivered, consumer hasn't popped yet"
+false-positive a plain blocked-count detector hits: a worker holding a deliverable message pops it
+instead of confirming. **Lock discipline:** the watch mutex and a channel `q` mutex are never held
+simultaneously (each recv phase takes one lock at a time; `send` bumps the epoch then releases before
+pushing) — no lock-order cycle. Soundness rests on a `--parallel` nursery being the only thing running
+(the parent thread is inside `run_parallel_nursery`), so its own live tasks are the only possible
+senders. Five new tests (the cooperative all-blocked golden ported to `--parallel`, a near-miss + a
+3-task chained relay that must NOT false-positive, a finished-task-strands-sibling case, all behind a
+5s watchdog so a regression fails loudly instead of hanging) + `examples/parallel_deadlock.chz`.
+Reviewed by a 2-agent concurrency panel (Solidity + SRE): detector logic confirmed sound (lock
+ordering, no false-positive across stress runs, no missed-wakeup, counter integrity, poison-tolerant);
+documented the residual hangs (Go-like, decision D) — deadlocks spanning nurseries / involving
+`Executor`, an orphaned message no live sibling reads, and the **G3 saturated-pool** case (a sibling
+still *queued* counts toward `live` but never parks, so the nursery waits for a slot rather than
+faulting — counting a queued task as live is the deliberate no-false-positive choice). Latest suite:
+**1332 tests** green (unit + parity + `cargo test conformance`), `cargo clippy` clean.
+
 **B3 is decomposed into a persistent, multi-session plan.** Tier-C OS-thread multicore (B3) — with
 B4 (real `Shared`) and B5 (real `Executor` pool) folded in, since under shared-nothing threads they're
 the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
@@ -130,14 +156,12 @@ the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
 decisions A–G, risk register, per-phase TDD focus). The surface of `spawn` / `parallel:` / `Channel` /
 `Shared` / `Executor` stays **unchanged**.
 
-**Next candidate:** **B3.5 — nursery-local deadlock detection under threads.** Under `--parallel` a
-genuinely all-blocked nursery hangs (B3.4's `recv` re-check only aborts on *cancel*, not on a real
-deadlock). Add a per-nursery counter of siblings-currently-blocked-in-`recv` vs live-sibling-count
-(decision D); when all live siblings are blocked with nothing queued, fault `deadlock` instead of
-hanging. Port the cooperative all-blocked deadlock golden to `--parallel`; a near-miss (one sibling
-that *does* send) must NOT false-positive. Then **B3.6** (`Executor` on the pool + the A3b
-`submit`-capture gate; a `Closure` wire arm becomes load-bearing here — the `Executor.submit` capture
-crossing — so it lands then, not as untested dead code now). Items *not* in B3–B5 (cross-nursery wakeups,
+**Next candidate:** **B3.6 — `Executor` on the pool + the A3b `submit`-capture sendability gate.**
+Submitted tasks run on pool threads (today `Executor` work drains on the parent thread only); the
+checker gates `submit`'s closure captures the way `spawn` already does — a `Closure` wire arm becomes
+load-bearing here (the `Executor.submit` capture crossing), so it lands then, not as untested dead code
+now. Acceptance: `submit` of a non-sendable capture is a checker error; executor tasks run on pool
+threads and the autodrain/`shutdown` semantics survive. Items *not* in B3–B5 (cross-nursery wakeups,
 recv-in-native-callback, `Channel.close()`, A3b) are now documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 

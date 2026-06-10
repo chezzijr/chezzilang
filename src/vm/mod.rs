@@ -241,6 +241,13 @@ struct Vm {
     /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
     /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
     cancelled: bool,
+    /// B3.5: the deadlock watch of the `parallel:` nursery this worker runs under (`--parallel`
+    /// only; cloned in by [`Vm::run_parallel_nursery`], one fresh watch per nursery). A blocking
+    /// `recv` registers as parked here and runs the barrier-confirm detector; `send`/`task_finished`
+    /// report progress. `None` on the cooperative engine (it has its own scheduler-level detector)
+    /// and on the top-level VM (a top-level empty `recv` under `--parallel` has no sibling that
+    /// could ever send, so it faults immediately rather than blocking — see `channel_method`).
+    deadlock: Option<Arc<DeadlockWatch>>,
 }
 
 /// A fiber's saved execution context (B1): every `Vm` field that `run_until` reads or writes keyed by
@@ -374,6 +381,68 @@ impl Drop for DoneSignal {
     }
 }
 
+/// The `deadlock` fault message, shared by the cooperative scheduler ([`Vm::run_scheduler`]) and
+/// the `--parallel` nursery-local detector (B3.5) so the error is byte-identical across engines.
+const DEADLOCK_MSG: &str = "deadlock: every task in this parallel: block is blocked on an empty \
+     channel recv() and no sibling can send — the nursery cannot progress";
+
+/// B3.5 — per-`--parallel`-nursery deadlock watch, cloned into every worker `Vm` like the B3.4
+/// `cancel` flag. Detects the nursery-local all-blocked deadlock that B3.4's condvar `recv` would
+/// otherwise hang on (decision D, `docs/concurrency-b3.md`). Holds no `GcRef`, so it is not a GC
+/// root.
+///
+/// **Barrier-confirm scheme.** A worker about to wait on an empty channel "confirms empty" only
+/// when it observes `blocked == live` (every still-live sibling parked) and does so at most once
+/// per `epoch`. Any progress — a `send`, a successful `recv` pop, a park-count change, or a task
+/// finishing — bumps `epoch` and resets `confirms`, tearing down a half-built confirmation. When
+/// `confirms == live`, every live worker independently re-checked *its own* channel empty within
+/// the *same* epoch with no intervening progress, so no message exists anywhere and no sibling can
+/// ever send → `dead` is set and every parked sibling faults `deadlock` on its next re-poll.
+///
+/// This is immune to the "message just delivered, consumer hasn't popped yet" race that a plain
+/// blocked-count detector hits: a worker holding a deliverable message pops it (recv phase A)
+/// instead of confirming empty, so it never contributes to a false barrier. Soundness rests on the
+/// fact that while a `--parallel` nursery runs, no code outside it executes (the parent thread is
+/// inside [`Vm::run_parallel_nursery`]), so the nursery's own live tasks are the only possible
+/// senders. Deadlocks spanning nurseries or involving `Executor` work are out of scope and still
+/// hang (Go-like), as documented.
+struct DeadlockWatch {
+    inner: Mutex<WatchState>,
+}
+
+struct WatchState {
+    /// Live siblings currently parked in a blocking `recv`.
+    blocked: usize,
+    /// Tasks not yet finished (starts at the nursery's task count `n`; `task_finished` decrements).
+    live: usize,
+    /// Bumped on every state change; invalidates an in-progress all-blocked confirmation.
+    epoch: u64,
+    /// Distinct live workers that have confirmed "my channel is empty" in the current `epoch`.
+    confirms: usize,
+    /// Sticky once the detector fires; every parked sibling reads it and faults `deadlock`.
+    dead: bool,
+}
+
+impl DeadlockWatch {
+    fn new(live: usize) -> Self {
+        DeadlockWatch { inner: Mutex::new(WatchState { blocked: 0, live, epoch: 0, confirms: 0, dead: false }) }
+    }
+
+    /// Lock the state, tolerating poison (a panicking worker thread holding the lock must not wedge
+    /// the rest of the nursery — same discipline as [`DoneSignal`]).
+    fn lock(&self) -> std::sync::MutexGuard<'_, WatchState> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Record progress (a `send`, or a task finishing): bump the epoch and reset the confirm
+    /// barrier so any all-blocked confirmation built so far is discarded.
+    fn progress(&self) {
+        let mut s = self.lock();
+        s.epoch += 1;
+        s.confirms = 0;
+    }
+}
+
 /// B3.3-threads — turn a caught panic payload (from `catch_unwind` around a worker task) into a
 /// `RuntimeError` so a Rust panic inside a `--parallel` task surfaces as an ordinary task fault
 /// (joined + reported) instead of hanging the join or aborting the process opaquely.
@@ -456,35 +525,53 @@ impl ReadyWorker {
     fn run_outcome(mut self) -> TaskOutcome {
         let span = self.span;
         let res = Self::invoke(&mut self.worker, self.call, span);
-        // A child `std.os.exit(code)` is a fault-that-cancels: it surfaces as an `Err` sentinel with
-        // `pending_exit` set. Trip cancel, flush its output, and hand the code up for a hard halt.
-        if let Some(code) = self.worker.pending_exit {
+        // Classify the outcome. The early paths take the worker's output buffers via `mem::take`
+        // (rather than moving them out of `self`) so `self` stays whole for the `task_finished`
+        // bookkeeping below — every exit path must report the finish to the deadlock watch (B3.5).
+        let outcome = if let Some(code) = self.worker.pending_exit {
+            // A child `std.os.exit(code)` is a fault-that-cancels: it surfaces as an `Err` sentinel
+            // with `pending_exit` set. Trip cancel, flush its output, hand the code up for a halt.
             self.worker.trip_cancel();
-            return TaskOutcome::Exit { code, out: self.worker.out, stderr: self.worker.stderr };
-        }
-        // This worker observed a sibling's cancel and unwound — swallow it (partial output dropped).
-        if self.worker.cancelled {
-            return TaskOutcome::Cancelled;
-        }
-        match res {
-            Err(e) => {
-                self.worker.trip_cancel();
-                TaskOutcome::Fault(e)
+            TaskOutcome::Exit {
+                code,
+                out: std::mem::take(&mut self.worker.out),
+                stderr: std::mem::take(&mut self.worker.stderr),
             }
-            Ok(ret) => {
-                let crossed = self
-                    .worker
-                    .to_wire(ret)
-                    .and_then(|value| self.worker.ensure_crossable(&value, span).map(|()| value));
-                match crossed {
-                    Ok(value) => TaskOutcome::Done(WorkerResult { value, out: self.worker.out, stderr: self.worker.stderr }),
-                    Err(e) => {
-                        self.worker.trip_cancel();
-                        TaskOutcome::Fault(e)
+        } else if self.worker.cancelled {
+            // This worker observed a sibling's cancel and unwound — swallow it (output dropped).
+            TaskOutcome::Cancelled
+        } else {
+            match res {
+                Err(e) => {
+                    self.worker.trip_cancel();
+                    TaskOutcome::Fault(e)
+                }
+                Ok(ret) => {
+                    let crossed = self
+                        .worker
+                        .to_wire(ret)
+                        .and_then(|value| self.worker.ensure_crossable(&value, span).map(|()| value));
+                    match crossed {
+                        Ok(value) => TaskOutcome::Done(WorkerResult {
+                            value,
+                            out: std::mem::take(&mut self.worker.out),
+                            stderr: std::mem::take(&mut self.worker.stderr),
+                        }),
+                        Err(e) => {
+                            self.worker.trip_cancel();
+                            TaskOutcome::Fault(e)
+                        }
                     }
                 }
             }
-        }
+        };
+        // B3.5: this task has finished running — it can never `send` again. Drop it from the
+        // nursery's live count so any sibling still parked in `recv` re-evaluates against the
+        // smaller live set (a normal finish that strands a recv-blocked sibling is a deadlock the
+        // survivors must now detect). On the cancel/exit/fault paths the cancel flag already aborts
+        // the siblings; the `live--` is harmless there (cancel is checked before the detector).
+        self.worker.task_finished();
+        outcome
     }
 }
 
@@ -514,11 +601,25 @@ impl Vm {
             scheduler_stack: Vec::new(),
             cancel: None,
             cancelled: false,
+            deadlock: None,
         }
     }
 
     fn err(&self, message: String, span: Span) -> RuntimeError {
         RuntimeError { message, span }
+    }
+
+    /// B3.5 — report to this VM's nursery deadlock watch (if it runs under one) that the task
+    /// finished running: decrement the live count and mark progress so any still-parked sibling
+    /// re-runs the all-blocked check against the smaller live set. No-op off the `--parallel`
+    /// engine (`deadlock` is `None`).
+    fn task_finished(&self) {
+        if let Some(watch) = &self.deadlock {
+            let mut s = watch.lock();
+            s.live -= 1;
+            s.epoch += 1;
+            s.confirms = 0;
+        }
     }
 
     /// B3.4 — set this VM's nursery cancel flag (if it runs under one), so sibling workers abort.
@@ -3066,16 +3167,26 @@ impl Vm {
     /// `pending_exit` (hard halt with `code`). `recover:`/`defer` compose: the cancel unwind is an
     /// ordinary `Err`, so deferred calls run and an outer `recover:` can still catch a real fault.
     ///
-    /// A genuinely deadlocked nursery **hangs** (no nursery-local detector under threads until B3.5);
-    /// all `--parallel` goldens this phase are deterministic-by-construction and cannot deadlock.
+    /// B3.5 — **deadlock detection**: every worker also shares a per-nursery [`DeadlockWatch`]; a
+    /// genuinely all-blocked nursery faults `deadlock` (matching the cooperative engine) instead of
+    /// hanging on the condvars. Residual hangs (Go-like, decision D): deadlocks spanning nurseries
+    /// or involving `Executor` work, a message orphaned in a channel no live sibling reads, and the
+    /// G3 case — a sibling still **queued** behind a saturated pool counts toward `live` but never
+    /// parks, so `blocked == live` is unreachable and the nursery waits for the slot rather than
+    /// faulting (counting a queued task as live is the deliberate safe choice: it may yet run and
+    /// `send`, so excluding it would risk a false-positive fault).
     fn run_parallel_nursery(&mut self, tasks: Vec<PendingCall>) -> Result<(), RuntimeError> {
         // 1. Prepare every task against the parent heap (must happen on this thread). Each worker
-        //    gets a clone of this nursery's cancel flag so a sibling fault/exit can abort the rest.
+        //    gets a clone of this nursery's cancel flag so a sibling fault/exit can abort the rest,
+        //    plus a clone of the nursery's deadlock watch (B3.5) so a genuinely all-blocked nursery
+        //    faults `deadlock` instead of hanging on the condvars. `live` starts at the task count.
         let cancel = Arc::new(AtomicBool::new(false));
+        let watch = Arc::new(DeadlockWatch::new(tasks.len()));
         let mut ready: Vec<ReadyWorker> = Vec::with_capacity(tasks.len());
         for t in tasks {
             let mut rw = self.prepare_worker(t)?;
             rw.worker.cancel = Some(Arc::clone(&cancel));
+            rw.worker.deadlock = Some(Arc::clone(&watch));
             ready.push(rw);
         }
         let n = ready.len();
@@ -3188,12 +3299,7 @@ impl Vm {
                     if self.all_children_done() {
                         return Ok(());
                     }
-                    return Err(self.err(
-                        "deadlock: every task in this parallel: block is blocked on an empty \
-                         channel recv() and no sibling can send — the nursery cannot progress"
-                            .to_string(),
-                        Span { line: 1, col: 1 },
-                    ));
+                    return Err(self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 }));
                 }
             }
         }
@@ -3790,6 +3896,13 @@ impl Vm {
                 self.arity_err("send", args, 1, span)?;
                 // B3.1: serialize once into the core (the wire form IS the airlock copy).
                 let w = self.to_wire(args[0])?;
+                // B3.5: a send is progress — bump the nursery deadlock-watch epoch (invalidating any
+                // half-built all-blocked confirmation) BEFORE the message is even queued, so a
+                // sibling cannot confirm-empty against a state this send is about to change. The
+                // watch lock is released here, before the `q` lock below (one-at-a-time ordering).
+                if let Some(watch) = &self.deadlock {
+                    watch.progress();
+                }
                 let core = self.channel_core(h);
                 core.q.lock().unwrap().push_back(w);
                 // B3.3-threads: wake any OS thread blocked in `recv` on this core. No-op on the
@@ -3801,39 +3914,93 @@ impl Vm {
                 self.arity_err("recv", args, 0, span)?;
                 // B3.3-threads: on the `--parallel` engine, an empty channel BLOCKS the OS thread on
                 // the core's condvar until a sibling `send`s (real blocking — there is no fiber to
-                // park; the worker owns its thread). The wait is a re-checking loop so a spurious
-                // wakeup just re-polls. The `native_reentry == 0` guard mirrors the cooperative
-                // path: inside a native callback we keep the existing fault rather than blocking the
-                // host stack. Genuine all-blocked deadlocks hang until detection lands (B3.5).
-                if self.parallel && self.native_reentry == 0 {
-                    let core = self.channel_core(h);
-                    let mut q = core.q.lock().unwrap();
-                    let w = loop {
-                        if let Some(w) = q.pop_front() {
-                            break w;
-                        }
-                        // B3.4: re-check the nursery cancel flag on each wake. A sibling fault /
-                        // `os.exit` set it; abort the blocked `recv` as the `cancelled` sentinel
-                        // rather than waiting for a `send` that will never arrive — otherwise the
-                        // join hangs forever (risk #2).
-                        if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
-                            drop(q);
-                            self.cancelled = true;
-                            return Err(self.err("cancelled".to_string(), span));
-                        }
-                        // Bounded re-checking wait (not an infinite `cv.wait`): wakes on a sibling's
-                        // `send` (`notify_all`) OR every 50ms to re-poll the cancel flag. The timeout
-                        // eliminates the lost-wakeup hazard a separate cancel condvar would carry (the
-                        // faulting worker can't know which channel cores siblings park on); the cost is
-                        // a ≤50ms abort latency on a recv-blocked sibling. See docs/concurrency-b3.md.
-                        let (g, _timeout) = core
-                            .cv
-                            .wait_timeout(q, Duration::from_millis(50))
-                            .unwrap_or_else(|e| e.into_inner());
-                        q = g;
-                    };
-                    drop(q);
-                    return Ok(self.from_wire(w));
+                // park; the worker owns its thread). B3.5: while parked, the worker also drives the
+                // nursery's barrier-confirm deadlock detector ([`DeadlockWatch`]) so a genuinely
+                // all-blocked nursery faults `deadlock` instead of hanging forever. The
+                // `native_reentry == 0` guard mirrors the cooperative path: inside a native callback
+                // we keep the existing fault rather than blocking the host stack. The `deadlock`
+                // watch is `Some` exactly for a worker running under a nursery; a top-level `recv`
+                // under `--parallel` (no nursery, watch `None`) falls through to the immediate
+                // deadlock fault below, since nothing could ever send it.
+                if self.parallel && self.native_reentry == 0 && let Some(watch) = self.deadlock.clone() {
+                    {
+                        let core = self.channel_core(h);
+                        // Per-worker confirm bookkeeping: `counted` = we have incremented `blocked`;
+                        // `my_epoch` = the epoch at which we last confirmed our channel empty (so we
+                        // confirm at most once per epoch — `confirms` counts *distinct* workers).
+                        let mut counted = false;
+                        let mut my_epoch = u64::MAX;
+                        // Locks are taken ONE AT A TIME (phase A: `q`; phase C/D: `watch`; phase E:
+                        // `q`); the watch lock and a channel `q` lock are never held simultaneously,
+                        // and `send` takes them in the same one-at-a-time order, so there is no
+                        // lock-ordering cycle between the detector and message passing.
+                        let received = loop {
+                            // Phase A — try to receive. A delivered message wins over any pending
+                            // deadlock signal: we pop it (progress) rather than confirm empty.
+                            if let Some(w) = core.q.lock().unwrap().pop_front() {
+                                if counted {
+                                    let mut s = watch.lock();
+                                    s.blocked -= 1;
+                                    s.epoch += 1;
+                                    s.confirms = 0;
+                                }
+                                break Ok(w);
+                            }
+                            // Phase B — B3.4 cancel: a sibling faulted/exited; abort as `cancelled`.
+                            if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                                if counted {
+                                    let mut s = watch.lock();
+                                    s.blocked -= 1;
+                                    s.epoch += 1;
+                                    s.confirms = 0;
+                                }
+                                self.cancelled = true;
+                                break Err(self.err("cancelled".to_string(), span));
+                            }
+                            // Phase C/D — register as parked and run the barrier-confirm check.
+                            {
+                                let mut s = watch.lock();
+                                if s.dead {
+                                    // Another sibling already detected the deadlock — join it.
+                                    if counted {
+                                        s.blocked -= 1;
+                                    }
+                                    break Err(self.err(DEADLOCK_MSG.to_string(), span));
+                                }
+                                if !counted {
+                                    counted = true;
+                                    s.blocked += 1;
+                                    s.epoch += 1; // park-count changed → invalidate prior confirms
+                                    s.confirms = 0;
+                                }
+                                // Confirm "my channel is empty" iff every live sibling is parked and
+                                // we have not already confirmed this epoch.
+                                if s.live > 0 && s.blocked == s.live && my_epoch != s.epoch {
+                                    my_epoch = s.epoch;
+                                    s.confirms += 1;
+                                    if s.confirms == s.live {
+                                        // Every live worker confirmed empty in this epoch with no
+                                        // intervening progress ⇒ no message exists and no sibling can
+                                        // send ⇒ real deadlock.
+                                        s.dead = true;
+                                        s.blocked -= 1;
+                                        break Err(self.err(DEADLOCK_MSG.to_string(), span));
+                                    }
+                                }
+                            }
+                            // Phase E — wait up to 50ms (re-checking the queue under the lock closes
+                            // the lost-wakeup gap with a `send` that happened since phase A). The
+                            // bounded timeout also re-polls the cancel flag and re-runs the detector.
+                            let q = core.q.lock().unwrap();
+                            if q.is_empty() {
+                                let _ = core.cv.wait_timeout(q, Duration::from_millis(50));
+                            }
+                        };
+                        return match received {
+                            Ok(w) => Ok(self.from_wire(w)),
+                            Err(e) => Err(e),
+                        };
+                    }
                 }
                 let popped = self.channel_core(h).q.lock().unwrap().pop_front();
                 match popped {
@@ -8505,6 +8672,72 @@ main()";
         let (out, _err, _res, code) = run_file_parallel(&entry, crate::native::HostConfig::default());
         assert_eq!(code, Some(5), "os.exit code propagates; the recv-blocked consumer aborts, no hang");
         assert!(!out.contains("consumed"), "the aborted consumer never ran past its blocked recv: got {out:?}");
+    }
+
+    /// B3.5 — run an entry on the `--parallel` engine under a watchdog: a missing/broken deadlock
+    /// detector would hang the nursery forever, so we run it on a side thread and fail loudly if it
+    /// doesn't finish, instead of wedging the whole test binary. (On a clean detector none of these
+    /// ever time out — the leak only happens on the failure path we're guarding against.)
+    fn run_parallel_watchdog(src: &str) -> RunOutput {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&entry, crate::native::HostConfig::default()));
+        });
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(r) => r,
+            Err(_) => panic!("hung: --parallel nursery did not terminate (deadlock detection missing/broken)"),
+        }
+    }
+
+    /// B3.5 — the cooperative `fibers_all_blocked_is_deadlock` golden, ported to `--parallel`: two
+    /// tasks each block on a distinct empty channel with no producer. The cooperative scheduler
+    /// already faults this; under threads B3.5's nursery-local detector must fault it too rather
+    /// than hang on the condvars.
+    #[test]
+    fn parallel_all_blocked_deadlock_faults() {
+        let src = "fn waiter(c: Channel[int]):\n    c.recv()\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn waiter(a)\n        spawn waiter(b)\nmain()\n";
+        let (_o, _e, res, _c) = run_parallel_watchdog(src);
+        let err = res.expect_err("an all-blocked --parallel nursery must fault, not hang");
+        assert!(err.message.contains("deadlock"), "got: {}", err.message);
+    }
+
+    /// B3.5 — the named anti-false-positive case: one sibling `send`s the very channel the other
+    /// `recv`s, so the nursery genuinely progresses. The barrier-confirm detector must NOT report a
+    /// deadlock (a real send aborts any half-built all-blocked confirmation).
+    #[test]
+    fn parallel_near_miss_does_not_false_positive() {
+        let src = "fn consumer(c: Channel[int]):\n    print(c.recv())\nfn producer(c: Channel[int]):\n    c.send(7)\nfn main():\n    c := Channel[int]()\n    parallel:\n        spawn consumer(c)\n        spawn producer(c)\n    print(\"done\")\nmain()\n";
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        assert!(res.is_ok(), "near-miss must not fault: {res:?}");
+        assert!(out.contains('7'), "consumer received the sent value: {out:?}");
+        assert!(out.contains("done"), "the nursery joined and main continued: {out:?}");
+    }
+
+    /// B3.5 — a three-task relay (consumer ← relay ← producer) where `blocked == live` is reached
+    /// only momentarily while a message is in flight. A naive blocked-count detector false-positives
+    /// here; the per-epoch barrier (a worker holding a deliverable message pops it instead of
+    /// confirming empty) must not.
+    #[test]
+    fn parallel_chained_near_miss_no_false_positive() {
+        let src = "fn relay(x: Channel[int], z: Channel[int]):\n    v := x.recv()\n    z.send(v)\nfn producer(x: Channel[int]):\n    x.send(1)\nfn consumer(z: Channel[int]):\n    print(z.recv())\nfn main():\n    x := Channel[int]()\n    z := Channel[int]()\n    parallel:\n        spawn consumer(z)\n        spawn relay(x, z)\n        spawn producer(x)\n    print(\"ok\")\nmain()\n";
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        assert!(res.is_ok(), "chained relay must not false-positive: {res:?}");
+        assert!(out.contains('1'), "the relayed value reached the consumer: {out:?}");
+        assert!(out.contains("ok"), "the nursery joined: {out:?}");
+    }
+
+    /// B3.5 — a task that finishes normally but strands a `recv`-blocked sibling (it never sent the
+    /// channel the sibling waits on) is a deadlock. Exercises the `task_finished` `live--` path:
+    /// dropping the finished task from the live count makes `blocked == live`, so the survivor faults.
+    #[test]
+    fn parallel_finished_task_leaves_sibling_deadlocked() {
+        let src = "fn waiter(c: Channel[int]):\n    c.recv()\nfn quick():\n    print(\"quick\")\nfn main():\n    c := Channel[int]()\n    parallel:\n        spawn waiter(c)\n        spawn quick()\nmain()\n";
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        let err = res.expect_err("a finished sibling that strands a recv-blocked task is a deadlock");
+        assert!(err.message.contains("deadlock"), "got: {}", err.message);
+        assert!(out.contains("quick"), "the finished task's output is still flushed: {out:?}");
     }
 
     /// Run an entry through both engines with a freshly-built [`crate::native::HostConfig`] each
