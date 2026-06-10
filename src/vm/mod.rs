@@ -6777,6 +6777,51 @@ mod tests {
         assert!(matches!(back.state, FiberState::Ready));
     }
 
+    /// D4/stress: a combined-churn workload that exercises EVERY new D4 path together under a
+    /// watchdog — 500 consumers that block on `recv` (park + `send_wake`), 500 producers that do CPU
+    /// work (reduction `yield` → global, batch-grab, work-stealing between idle workers) then `send`
+    /// (waking a parked consumer), all `#fibers ≫ #workers`. The consumers accumulate into one
+    /// `Shared`; the join must complete with the exact arithmetic sum, with no lost/duplicated fiber,
+    /// no false deadlock, and no hang (the watchdog turns a regression — a lost wakeup, a steal/grab
+    /// accounting bug, a deadlock-predicate false positive — into a loud failure rather than a wedge).
+    #[test]
+    fn d4_worksteal_cpu_and_channel_stress() {
+        let src = "\
+fn producer(ch: Channel[int], lo: int, hi: int):
+    acc := 0
+    i := lo
+    while i < hi:
+        acc += i
+        i += 1
+    ch.send(acc)
+
+fn consumer(ch: Channel[int], sink: Shared[int]):
+    v := ch.recv()
+    sink.update(fn(x): x + v)
+
+fn main():
+    ch := Channel[int]()
+    sink := Shared(0)
+    parallel:
+        for _ in 0..500:
+            spawn consumer(ch, sink)
+        for k in 0..500:
+            spawn producer(ch, k * 10, k * 10 + 10)
+    print(sink.get())
+
+main()
+";
+        // sum_{k=0}^{499} sum_{i=10k}^{10k+9} i = sum_{k=0}^{499} (100k + 45) = 12_475_000 + 22_500.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(src));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => assert_eq!(r.expect("mixed work-steal nursery completed"), "12497500\n"),
+            Err(_) => panic!("hung — D4 work-stealing/grab/wait_timeout regressed (lost wakeup or accounting bug)"),
+        }
+    }
+
     /// D3/the discriminating fairness test. 64 CPU "hog" fibers (≫ the core-sized worker pool) each
     /// busy-wait on a `Shared[int]` until it reaches 50, spawned FIRST; then 50 "short" fibers that
     /// each `update(+1)` and exit. WITHOUT preemption every worker grabs a hog (FIFO seed order), all
