@@ -8,6 +8,7 @@ pub mod heap;
 pub mod op;
 mod blocking_pool;
 mod pool;
+mod timer;
 pub mod value;
 pub mod wire;
 
@@ -1025,7 +1026,33 @@ impl MnSched {
             self.inflight.fetch_add(1, Ordering::Relaxed); // running → inflight
         }
         let sched = Arc::clone(self);
-        let OffloadReq { func, args, span } = req;
+        // On the timer path `func`/`args` are intentionally unused (a sleep computes nothing — the
+        // fiber resumes with `Nil`); they are consumed only by the pool branch below.
+        let OffloadReq { func, args, span, timer_ms } = req;
+        if let Some(ms) = timer_ms {
+            // D5 owe #2 — a `sleep_ms`: park the fiber on the timer thread (no pool thread, no work),
+            // waking it at the deadline. `sleep_ms` returns nothing, so the fiber resumes with
+            // `Ok(Nil)` and the native is never run (there is nothing to compute). Same
+            // inflight→runnable + `notify` accounting as the pool path (`complete_offload`), so the
+            // deadlock predicate stays sound: the sleeping fiber is `inflight` and WILL come back.
+            // `checked_add` saturates a pathological `ms` (e.g. centuries) to a far-future deadline
+            // instead of panicking the worker on `Instant` overflow — a panic here escapes *before*
+            // `complete_offload` and would pin `inflight` forever (hang). Matches the old
+            // `thread::sleep` path's "effectively infinite sleep" rather than a crash.
+            let dur = std::time::Duration::from_millis(ms);
+            let deadline = std::time::Instant::now()
+                .checked_add(dur)
+                .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365));
+            timer::submit_at(
+                deadline,
+                Box::new(move || {
+                    let mut fiber = fiber;
+                    fiber.resume_native = Some(Ok(crate::native::NativeRet::Nil));
+                    sched.complete_offload(fiber);
+                }),
+            );
+            return;
+        }
         blocking_pool::submit(Box::new(move || {
             // `complete_offload` MUST run on every path — if it didn't (e.g. the native panicked and
             // unwound), `inflight` would stay pinned forever, vetoing the deadlock predicate and
@@ -1255,6 +1282,10 @@ struct OffloadReq {
     func: crate::native::NativeFn,
     args: Vec<crate::native::NativeArg>,
     span: Span,
+    /// D5 owe #2 — `Some(ms)` for a `sleep_ms`: park the fiber on the timer thread for `ms` rather
+    /// than run `func` on a dirty-pool thread (a sleep does no work, just waits a deadline). `None`
+    /// for every other blocking native (`io`/`fs`/`request`/`process`), which runs on the pool.
+    timer_ms: Option<u64>,
 }
 
 impl Vm {
@@ -2641,8 +2672,26 @@ impl Vm {
             && crate::native::is_blocking(name)
             && let Some(nargs) = self.extract_native_args(&args)
         {
-            self.offload = Some(OffloadReq { func, args: nargs, span });
-            return Ok(Value::Nil); // sentinel; never pushed (the `paused()` gate at the call site)
+            // D5 owe #2 — `sleep_ms` rides the timer thread (park + deadline-wake), not a pool thread
+            // (`timer_ms = Some(ms)`). A non-positive (or non-int) `sleep_ms` has nothing to wait for,
+            // so it is NOT offloaded — `offload` stays `None` and execution falls through to the
+            // inline path below (which returns `Nil` instantly). Every other blocking native (the
+            // `io`/`fs`/`request`/`process` set) keeps `timer_ms = None` → the dirty pool.
+            let offload = match name {
+                "sleep_ms" => {
+                    // Copy the duration out first (ends the `nargs` borrow before the move below).
+                    let ms = match nargs.first() {
+                        Some(crate::native::NativeArg::Int(ms)) if *ms > 0 => Some(*ms as u64),
+                        _ => None, // sleep_ms(<=0) / non-int: inline no-op
+                    };
+                    ms.map(|ms| OffloadReq { func, args: nargs, span, timer_ms: Some(ms) })
+                }
+                _ => Some(OffloadReq { func, args: nargs, span, timer_ms: None }),
+            };
+            if let Some(req) = offload {
+                self.offload = Some(req);
+                return Ok(Value::Nil); // sentinel; never pushed (the `paused()` gate at the call site)
+            }
         }
         let mut host = VmHost { vm: self, args };
         let ret = func(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
@@ -6989,7 +7038,7 @@ mod tests {
         let sched = Arc::new(mk_sched(1));
         sched.seed(vec![mk_fiber(0)]);
         let f0 = take_run(&sched); // running == 1
-        let req = OffloadReq { func: panic_native, args: vec![], span: Span { line: 1, col: 1 } };
+        let req = OffloadReq { func: panic_native, args: vec![], span: Span { line: 1, col: 1 }, timer_ms: None };
         sched.offload(f0, req);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -7036,6 +7085,7 @@ mod tests {
             func: double_native,
             args: vec![crate::native::NativeArg::Int(21)],
             span: Span { line: 1, col: 1 },
+            timer_ms: None,
         };
         sched.offload(f0, req);
 
@@ -7058,6 +7108,56 @@ mod tests {
         }
         let f0 = found.expect("offloaded fiber requeued");
         assert_eq!(f0.resume_native, Some(Ok(crate::native::NativeRet::Int(42))));
+    }
+
+    /// D5 owe #2: a `timer_ms` offload parks the fiber on the *timer* thread (not the blocking pool):
+    /// running→inflight at submit (so it vetoes the deadlock predicate while sleeping), then the timer
+    /// fires at the deadline and `complete_offload`s the fiber back (inflight→runnable) carrying
+    /// `Ok(Nil)` — the native is never run on this path (a sleep computes nothing). Guards the timer
+    /// branch + that the sleeping fiber can't fault a false deadlock.
+    #[test]
+    fn timer_offload_parks_then_requeues_fiber_with_nil() {
+        let sched = Arc::new(mk_sched(2));
+        sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+        let f0 = take_run(&sched); // running == 1, runnable == 1
+        assert_eq!(sched.lock().running, 1);
+
+        // `func`/`args` are intentionally ignored on the timer path (the fiber resumes with `Nil`);
+        // `double_native` is just a stand-in to satisfy the struct.
+        let req = OffloadReq {
+            func: double_native,
+            args: vec![],
+            span: Span { line: 1, col: 1 },
+            timer_ms: Some(40),
+        };
+        sched.offload(f0, req);
+
+        // While the timer holds it the fiber is `inflight` — neither running, runnable, nor parked —
+        // and must veto a deadlock fire (it WILL come back).
+        assert_eq!(sched.inflight.load(Ordering::Relaxed), 1, "timer offload moved the fiber to inflight");
+        {
+            let c = sched.lock();
+            assert!(!sched.is_deadlocked(&c), "a timer-parked (inflight) fiber must not fault a false deadlock");
+        }
+
+        // The timer fires at the deadline and requeues the fiber.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while sched.inflight.load(Ordering::Relaxed) != 0 {
+            assert!(std::time::Instant::now() < deadline, "timer never fired the parked fiber back (lost wakeup?)");
+            std::thread::yield_now();
+        }
+        assert_eq!(sched.lock().running, 0, "timer offload freed the worker");
+        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "f1 still queued + f0 requeued by the timer");
+
+        let mut found = None;
+        while let Take::Run(f) = sched.take_runnable(0, 1) {
+            if f.task_index == 0 {
+                found = Some(f);
+                break;
+            }
+        }
+        let f0 = found.expect("timer-parked fiber requeued");
+        assert_eq!(f0.resume_native, Some(Ok(crate::native::NativeRet::Nil)), "sleep resumes with Nil, native not run");
     }
 
     /// D4c: `try_steal` grabs ceil-half of the first non-empty victim's ring (from the back), leaving
@@ -7457,6 +7557,51 @@ main()
                 assert_eq!(out, "12\n");
             }
             Err(_) => panic!("hung — D5 native_reentry gate regressed (offloaded an in-callback blocking native)"),
+        }
+    }
+
+    /// D5 owe #1 — a blocking *subprocess* native (`process.cmd`, returns `Result[str]`) is offloaded,
+    /// runs off the core worker, and its `Ok`/`Err` result is lowered + pushed on resume so the `match`
+    /// continues correctly past the call. `N` fibers (≫ the core pool) each run a trivial command and
+    /// bump a `Shared` on `Ok` — the join sum must be exactly `N` (every offloaded `cmd` returned `Ok`
+    /// and resumed into the arm). Guards the request/process classification + the Result-lowering
+    /// resume path for a non-`io`/`fs` blocking native. Watchdog 30 s.
+    #[test]
+    fn d5_owe1_blocking_process_cmd_offloads_and_resumes_correctly() {
+        let n = 64usize;
+        let src = format!(
+            "\
+import std.process
+
+fn checker(sink: Shared[int]):
+    match process.cmd(\"true\"):
+        Ok(out): sink.update(fn(x): x + 1)
+        Err(e): print(e.message())
+
+fn main():
+    sink := Shared(0)
+    parallel:
+        for _ in 0..{n}:
+            spawn checker(sink)
+    print(sink.get())
+
+main()
+"
+        );
+        let entry = write_temp_chz("d5_owe1_cmd", &src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok((out, _err, res, _code)) => {
+                assert!(res.is_ok(), "process.cmd nursery faulted: {res:?}");
+                assert_eq!(out, format!("{n}\n"));
+            }
+            Err(_) => panic!("hung — D5 owe #1 process.cmd offload/resume regressed"),
         }
     }
 

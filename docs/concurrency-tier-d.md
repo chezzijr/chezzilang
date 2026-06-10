@@ -415,10 +415,17 @@ Goldens byte-identical.
 > faulted (never a pinned `inflight` hang). The G3 starvation is fixed (`sleep_ms` ×N ≈ max not sum);
 > a blocking native inside a native callback (`native_reentry > 0`) still runs inline; cooperative/
 > `--interp` byte-identical. **+12 tests, 2-agent S++ panel (1 Critical + 1 Important applied).**
-> **Deferred (the D5 owe):** `std.request`/`std.process` classification (verify off-heap safety
-> first); a dedicated **timer-park** for `sleep_ms` (interim: one pool thread per sleep — correct,
-> not yet scalable to 10⁴ sleepers — fold into the D6 pollset deadline); the `recv`-inside-native-
-> callback unblock (the secondary aim below — a larger change, untouched).
+> **D5 owes #1 + #2 HAVE LANDED.** Owe #1 — `std.request` (`get`/`post`) + `std.process` (`cmd`) are
+> classified blocking-offloadable (verified off-heap-safe: primitive args/returns, no heap/stdio touch
+> → they run on the `OffloadHost`), added to `native::is_blocking`, guarded by a member-name-uniqueness
+> test (bare-name classification stays sound). Owe #2 — a process-wide **timer thread**
+> (`src/vm/timer.rs`: deadline min-heap + one thread) replaces the one-pool-thread-per-sleep model:
+> `sleep_ms` parks the fiber on the timer (`OffloadReq.timer_ms` branches `MnSched::offload`), waking
+> it at the deadline through the same `inflight`/`complete_offload` path (deadlock predicate stays
+> sound). 10⁴ sleepers ≈ 1 thread; `checked_add` saturates a pathological `ms`. D6 will fold this
+> timer deadline into the pollset `poll()` timeout (one blocking wait covers I/O + timers).
+> **Still deferred:** the `recv`-inside-native-callback unblock (a larger change — stackful fibers /
+> CPS; an accepted v1 limit, untouched).
 
 **Goal.** A blocking native call (`std.io.read_file` / `write_file`, `std.fs.*`, `std.time.sleep_ms`)
 must not pin a core-pool worker (G3, live today). Route it to a **growable blocking pool** so the

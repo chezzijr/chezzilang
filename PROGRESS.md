@@ -272,10 +272,26 @@ a task fault (never a lost fiber / pinned `inflight`). `sleep_ms` rides the same
 `d5_*` program ×3), `cargo clippy -- -D warnings` clean, `primes_parallel=148933`, sleep+fs program
 byte-identical across `--interp`/`--parallel`/default. 2-agent S++ panel (SRE + VM/invariant): one
 Critical applied (panic-in-offload → pinned `inflight` hang; now caught + faulted), one Important
-applied (`submit` `notify_all` not `notify_one`, closing a reap-vs-wake race). **Remaining owe:** D5
-follow-ups — `std.request`/`std.process` classification (verify off-heap safety), a dedicated
-timer-park for `sleep_ms` (vs a pool thread per sleep), and the `recv`-inside-native-callback
-unblock; then **D6 (epoll/kqueue pollset + `std.net`) is next on the ladder.** Items *not* in B3–B5
+applied (`submit` `notify_all` not `notify_one`, closing a reap-vs-wake race).
+**D5 owes #1 + #2 have landed** (this session). **Owe #1** — `std.request` (`get`/`post`, HTTP via
+`ureq`) and `std.process` (`cmd`, subprocess) are now classified blocking-offloadable (added to
+`native::is_blocking`): both verified off-heap-safe (primitive `str` args, primitive `Struct`/`Ok`/
+`Err` returns, no heap/stdio touch during the call — they run on the `OffloadHost`), so network /
+subprocess I/O no longer pins a core worker. **Owe #2** — a process-wide **timer thread**
+(`src/vm/timer.rs`: a deadline min-heap + one thread, lazy `OnceLock`) replaces the one-blocking-pool-
+thread-per-sleep model: `sleep_ms(N)` now parks the fiber on the timer (`OffloadReq.timer_ms`
+branches `MnSched::offload` to `timer::submit_at` instead of the dirty pool), waking it at the
+deadline via the same `inflight`→`complete_offload`→`notify_all` path (so the deadlock predicate
+stays sound — a sleeping fiber is `inflight` and vetoes a false deadlock). 10⁴ sleepers ≈ 1 thread,
+not 10⁴; `sleep_ms(<=0)` runs inline (no park); a pathological `ms` saturates via `checked_add` (no
+`Instant`-overflow worker panic). **+7 tests** (`is_blocking` request/process ×1, member-name-unique
+guard ×1, `timer` unit ×3, `timer_offload` park ×1, `d5_owe1` process.cmd program ×1 — **1393 green**),
+`cargo clippy --all-targets -- -D warnings` clean, `primes_parallel=148933` (VM + `--parallel`),
+VM==interp parity suite green, `sleep_ms` fan-out runs ~max not sum (timer path). 2-agent S++ panel
+(SRE + Backend Architect): zero Critical; both Importants applied (timer-deadline `checked_add`
+saturation; bare-name-collision guard test). **Remaining owe:** the `recv`-inside-native-callback
+unblock (a documented acceptable v1 limit — needs stackful fibers / CPS, deferred); then **D6
+(epoll/kqueue pollset + `std.net`) is next on the ladder.** Items *not* in B3–B5
 (cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are
 documented in **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 

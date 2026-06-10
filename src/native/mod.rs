@@ -190,8 +190,10 @@ impl HostError {
 /// stdout/stderr buffers, stdin, or os state during the blocking part (so [`Host`]'s I/O methods are
 /// `unreachable!` on the off-heap host). The scoped set: `std.io.read_file`/`write_file`, all of
 /// `std.fs`, and `std.time.sleep_ms`. Classified by bare name (the engine has the member name at the
-/// dispatch site); the set is distinctive across the native modules. `std.request`/`std.process`
-/// (also blocking) are deferred until their off-heap safety is verified.
+/// dispatch site); the set is distinctive across the native modules. D5 owe #1 added `std.request`
+/// (`get`/`post`, HTTP via `ureq`) and `std.process` (`cmd`, subprocess): both verified off-heap-safe
+/// (primitive `str` args, primitive `Struct`/`Ok`/`Err` returns, no heap/stdio touch during the call),
+/// so they offload like the rest instead of pinning a core worker on network / subprocess I/O.
 pub fn is_blocking(name: &str) -> bool {
     matches!(
         name,
@@ -201,6 +203,8 @@ pub fn is_blocking(name: &str) -> bool {
         | "list_dir" | "exists" | "is_file" | "is_dir" | "size" | "glob"
         // std.time
         | "sleep_ms"
+        // std.request (network I/O) + std.process (subprocess) — D5 owe #1
+        | "get" | "post" | "cmd"
     )
 }
 
@@ -361,6 +365,39 @@ mod tests {
     fn is_blocking_flags_the_offloadable_set() {
         for name in ["read_file", "write_file", "list_dir", "exists", "is_file", "is_dir", "size", "glob", "sleep_ms"] {
             assert!(is_blocking(name), "{name} should be blocking");
+        }
+    }
+
+    /// D5 owe #1 — `std.request` (HTTP via `ureq`) and `std.process` (subprocess) are blocking and
+    /// off-heap-safe: primitive `str` args, primitive returns (`Struct`/`Ok(Str)`/`Err`), no heap /
+    /// stdio touch during the blocking call. They satisfy the offload contract, so the M:N engine must
+    /// route them through the dirty pool instead of pinning a core worker.
+    #[test]
+    fn is_blocking_flags_request_and_process() {
+        for name in ["get", "post", "cmd"] {
+            assert!(is_blocking(name), "{name} should be blocking");
+        }
+    }
+
+    /// [`is_blocking`] classifies by *bare member name* (the engine has only the member name at the
+    /// dispatch site), which is sound ONLY while member names are unique across the native modules —
+    /// otherwise a non-blocking member sharing a name with a blocking one (e.g. a future `regex.get`)
+    /// would be wrongly offloaded to the off-heap pool, where its host-I/O methods `unreachable!`.
+    /// This guard turns any future name collision into a RED test instead of a production panic.
+    #[test]
+    fn native_member_names_are_unique_across_modules() {
+        use std::collections::HashMap;
+        let modules = ["std.math", "std.io", "std.os", "std.process", "std.fs", "std.time", "std.regex", "std.request"];
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        for module in modules {
+            for (name, _) in native_members(module) {
+                if let Some(prev) = seen.insert(name, module) {
+                    panic!(
+                        "native member name `{name}` is defined in both `{prev}` and `{module}` — \
+                         bare-name `is_blocking` classification is no longer sound (see is_blocking docs)"
+                    );
+                }
+            }
         }
     }
 
