@@ -3304,7 +3304,18 @@ impl Checker {
             Ty::Executor => {
                 // `submit(fn() -> _)->nil`, `shutdown()->nil`, `shutdown_now()->nil` (C5 escape hatch).
                 if let Some(sig) = executor_method_sig(method) {
-                    self.check_args(method, &sig.params, args, span);
+                    // A3b (B3.6): `submit`'s closure runs on a pool thread under `--parallel`, so its
+                    // captures cross the airlock exactly like a `spawn` task's. Push a capture floor at
+                    // the current scope depth around the argument check; the submitted closure opens
+                    // its own scope at that depth, so its params/locals are task-local while any outer
+                    // binding it reads is flagged by the `infer_ident` read gate (mirrors `spawn:`).
+                    if method == "submit" {
+                        self.capture_floors.push(self.scopes.len());
+                        self.check_args(method, &sig.params, args, span);
+                        self.capture_floors.pop();
+                    } else {
+                        self.check_args(method, &sig.params, args, span);
+                    }
                     return sig.ret;
                 }
                 self.infer_all(args);

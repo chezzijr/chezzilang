@@ -3189,6 +3189,18 @@ impl Vm {
             rw.worker.deadlock = Some(Arc::clone(&watch));
             ready.push(rw);
         }
+        self.run_workers_on_pool(ready)
+    }
+
+    /// B3.3-threads / B3.6 — the engine-agnostic farm/join/flush core: run a vector of already-prepared
+    /// [`ReadyWorker`]s on the bounded pool and reduce their outcomes. The caller wires each worker's
+    /// `cancel` / `deadlock` token first ([`run_parallel_nursery`] sets both; the `Executor` pool drain
+    /// sets `cancel` only — an `Executor`-spanning deadlock is an accepted hang, decision D). Farms
+    /// `ready[1..]` to the pool, runs `ready[0]` inline (parent participates — decision B), joins on the
+    /// `DoneSignal` counter, flushes `Done`/`Exit` output in **task order** (decision F), and applies the
+    /// `Exit`-over-`Fault` precedence (an `os.exit` hard-halts the parent; a fault unwinds for an outer
+    /// `recover:`). A `Cancelled` outcome is swallowed.
+    fn run_workers_on_pool(&mut self, ready: Vec<ReadyWorker>) -> Result<(), RuntimeError> {
         let n = ready.len();
         // Per-task outcome slots (task order) + a finished-count condvar the pool bumps.
         let results: TaskSlots = Arc::new(Mutex::new((0..n).map(|_| None).collect()));
@@ -3545,6 +3557,16 @@ impl Vm {
                 let cloned: Vec<Value> = payload.into_iter().map(|x| self.from_wire(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::Enum { ty, variant, payload: cloned }))
             }
+            // B3.6: rebuild a submitted closure by value over the worker's reconstructed home module
+            // (the `proto` is shared via `Arc<Program>`; captures reconstruct bottom-up into this heap).
+            // `worker_home` resolves the home index against this VM's `module_objs` (the rebuilt graph
+            // in a pool worker, or the live graph in a cooperative same-heap drain).
+            WireValue::Closure { proto, captured, home } => {
+                let cap: std::collections::HashMap<String, Value> =
+                    captured.into_iter().map(|(k, w)| (String::from(k), self.from_wire(w))).collect();
+                let home = self.worker_home(home);
+                Value::Obj(self.heap.alloc(Obj::Closure { proto, captured: cap, home }))
+            }
         }
     }
 
@@ -3679,6 +3701,37 @@ impl Vm {
         Ok(ReadyWorker { worker, call, span })
     }
 
+    /// B3.6 — the `Executor`-drain analogue of [`prepare_worker`]: build a worker, reconstruct the
+    /// parent's module graph into its heap ([`build_worker_modules`]), and rebuild a submitted closure
+    /// (a [`WireValue::Closure`] drained from the executor queue) into that heap as a zero-arg call.
+    /// Infallible — the closure already crossed `to_wire`/`ensure_crossable` at `submit`. `--parallel`
+    /// only.
+    fn prepare_worker_from_wire(&mut self, task: WireValue, span: Span) -> ReadyWorker {
+        let mut worker = self.spawn_worker();
+        self.build_worker_modules(&mut worker);
+        let callee = worker.from_wire(task);
+        ReadyWorker { worker, call: ReadyCall::Invoke { callee, args: Vec::new() }, span }
+    }
+
+    /// B3.6 — drain a shut `Executor`'s pending tasks onto the bounded pool under `--parallel`. Each
+    /// queued closure becomes a [`ReadyWorker`] sharing a fresh per-drain cancel flag (first fault
+    /// aborts siblings, matching the cooperative inline `r?`); **no** deadlock watch (decision D — an
+    /// `Executor`-spanning deadlock hangs, as documented). Output is flushed in submission (queue) order
+    /// by [`run_workers_on_pool`] (decision F).
+    fn drain_executor_on_pool(&mut self, tasks: Vec<WireValue>, span: Span) -> Result<(), RuntimeError> {
+        if tasks.is_empty() {
+            return Ok(());
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut ready = Vec::with_capacity(tasks.len());
+        for t in tasks {
+            let mut rw = self.prepare_worker_from_wire(t, span);
+            rw.worker.cancel = Some(Arc::clone(&cancel));
+            ready.push(rw);
+        }
+        self.run_workers_on_pool(ready)
+    }
+
     /// Reject a wired value that still carries a by-reference [`Handle`](WireValue::has_handle) — a
     /// heap-local `GcRef` that cannot cross into another heap as-is (B3.2). `str`/closure crossing by
     /// value lands in B3.3; until then this converts a would-be dangling handle into a clean fault.
@@ -3704,6 +3757,35 @@ impl Vm {
                 Ok(w)
             })
             .collect()
+    }
+
+    /// B3.6 — serialize a callable (`Executor.submit`'s argument) across the airlock **by value** as a
+    /// [`WireValue::Closure`], so a submitted task can be reconstructed and run on a pool thread. Unlike
+    /// the generic `to_wire` (which crosses a closure as a by-reference `Handle`), this lowers the
+    /// callee to its `proto` (shared via `Arc<Program>`) + wire'd captures + a `home` *index* — no
+    /// heap-local `GcRef` survives. A captured value is itself `to_wire`d (so a `Channel`/`Shared`
+    /// capture crosses as its shared `Arc`); the A3b checker gate already rejected a non-sendable
+    /// capture, so [`ensure_crossable`] here is the defensive backstop. A bare `Func` (no captures) is a
+    /// degenerate closure with an empty capture set.
+    fn wire_callable(&self, v: Value, span: Span) -> Result<WireValue, RuntimeError> {
+        if let Value::Obj(h) = v {
+            match self.heap.get(h) {
+                Obj::Closure { proto, captured, home } => {
+                    let mut wcap = Vec::with_capacity(captured.len());
+                    for (k, cv) in captured {
+                        let w = self.to_wire(*cv)?;
+                        self.ensure_crossable(&w, span)?;
+                        wcap.push((k.clone().into_boxed_str(), w));
+                    }
+                    return Ok(WireValue::Closure { proto: *proto, captured: wcap, home: self.home_index(*home) });
+                }
+                Obj::Func { proto, home } => {
+                    return Ok(WireValue::Closure { proto: *proto, captured: Vec::new(), home: self.home_index(*home) });
+                }
+                _ => {}
+            }
+        }
+        Err(self.err("submit requires a function or closure".to_string(), span))
     }
 
     /// A fresh empty module to serve as a worker closure's `home`. The parent's `home` `GcRef` can't
@@ -4115,9 +4197,20 @@ impl Vm {
                             span,
                         ));
                     }
-                    // The task closure crosses by handle at B3.1 (`Handle(closure)`), kept rooted via
-                    // the executor handle's `children()`.
-                    let w = self.to_wire(args[0])?;
+                    // B3.6: under `--parallel` the task closure crosses **by value** (`WireValue::Closure`
+                    // — proto + wire'd captures + home index) so a pool-thread drain can rebuild and run
+                    // it; queued captures stay rooted via the executor handle's `children()` (the
+                    // `Closure` arm of `collect_core_gcrefs`). On the cooperative default engine it crosses
+                    // **by handle** (`to_wire` → `Handle`) exactly as before B3.6 — the drain runs on this
+                    // same heap, so captures must stay *shared by reference* (a mutation between `submit`
+                    // and drain is observable, matching the interp oracle); a by-value snapshot here would
+                    // break `VM == interp` for the sequential subset (decision A). The engine flag is fixed
+                    // for a VM's lifetime, so submit-time and drain-time agree on which form was queued.
+                    let w = if self.parallel {
+                        self.wire_callable(args[0], span)?
+                    } else {
+                        self.to_wire(args[0])?
+                    };
                     g.queue.push_back(w);
                 }
                 Ok(Value::Nil)
@@ -4127,20 +4220,29 @@ impl Vm {
                 let core = self.executor_core(h);
                 // Mark shut first so a task that re-enters this executor (submit/shutdown) sees it.
                 core.inner.lock().unwrap().shut = true;
-                // Root the executor handle across the drain (its remaining queue is traced via it).
-                self.push(Value::Obj(h));
-                loop {
-                    // Pop under the lock, then DROP the guard before the re-entrant call.
-                    let task = core.inner.lock().unwrap().queue.pop_front();
-                    let Some(task) = task else { break };
-                    let task = self.from_wire(task);
-                    // The popped task is no longer in the queue → root it on the stack across its call.
-                    self.push(task);
-                    let r = self.guarded(|vm| vm.invoke_value(task, vec![], span));
-                    self.pop();
-                    r?;
+                if self.parallel {
+                    // B3.6: drain the whole queue under the lock (drop the guard before running any
+                    // task — never hold the core lock across an invoke), then run the tasks on the
+                    // bounded pool. Output flushes in submission order; the first fault propagates.
+                    let tasks: Vec<WireValue> = core.inner.lock().unwrap().queue.drain(..).collect();
+                    self.drain_executor_on_pool(tasks, span)?;
+                } else {
+                    // Cooperative engine: inline FIFO drain (unchanged). Root the executor handle across
+                    // the drain (its remaining queue is traced via it); each popped task is rooted on
+                    // the stack across its re-entrant call.
+                    self.push(Value::Obj(h));
+                    loop {
+                        // Pop under the lock, then DROP the guard before the re-entrant call.
+                        let task = core.inner.lock().unwrap().queue.pop_front();
+                        let Some(task) = task else { break };
+                        let task = self.from_wire(task);
+                        self.push(task);
+                        let r = self.guarded(|vm| vm.invoke_value(task, vec![], span));
+                        self.pop();
+                        r?;
+                    }
+                    self.pop(); // the executor root
                 }
-                self.pop(); // the executor root
                 Ok(Value::Nil)
             }
             "shutdown_now" => {
@@ -4983,6 +5085,8 @@ impl Vm {
             WireValue::Channel(core) => format!("Channel(len={})", core.q.lock().unwrap().len()),
             WireValue::Shared(core) => format!("Shared({})", self.display_wire(&core.v.lock().unwrap())),
             WireValue::Executor(core) => format!("Executor(pending={})", core.inner.lock().unwrap().queue.len()),
+            // B3.6: a wired closure renders like its heap counterpart (`Obj::Closure` → "<closure>").
+            WireValue::Closure { .. } => "<closure>".to_string(),
         }
     }
 
@@ -6509,6 +6613,43 @@ main()";
         let src = include_str!("../../examples/parallel_channel.chz");
         let expected = include_str!("../../examples/parallel_channel.expected");
         assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    }
+
+    /// B3.6 golden: `Executor` tasks run on the bounded pool. Three submitted closures capture the
+    /// result `Channel` (sendable → crosses as a shared `Arc`) and `send` from pool threads; `shutdown`
+    /// drains them onto the pool and joins, then main sorts what it gathered → fixed printed order
+    /// however threads interleave. The cooperative default engine runs it too (decision A oracle: same
+    /// output, inline drain), proving the `submit`-by-value / pool-drain change is observationally inert.
+    #[test]
+    fn golden_executor_pool_chz_matches_expected() {
+        let src = include_str!("../../examples/executor_pool.chz");
+        let expected = include_str!("../../examples/executor_pool.expected");
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+        assert_eq!(run_capture(src).expect("vm run"), expected);
+    }
+
+    /// B3.6: a submitted closure capturing a plain value (`int`) observes it **by value** across the
+    /// airlock — exercises the `WireValue::Closure` capture round-trip (not just the shared-`Arc` handle
+    /// path the golden's `Channel` capture takes). Auto-drained at program exit on both engines; the
+    /// `--parallel` drain reconstructs and runs the closure on the pool.
+    #[test]
+    fn executor_submitted_closure_captures_by_value() {
+        let src = "fn main():\n    n := 7\n    ex := Executor()\n    ex.submit(fn(): print(n))\nmain()\n";
+        assert_eq!(run_capture(src).expect("vm run"), "7\n");
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), "7\n");
+    }
+
+    /// B3.6 regression (review C-01): on the **cooperative default engine** a submitted closure must
+    /// cross **by handle** (captures shared by reference, same heap), NOT by a value snapshot — a
+    /// mutation of a captured collection *between* `submit` and the program-exit drain is observable,
+    /// matching the interp oracle (decision A: `VM == interp` for the sequential subset). An unconditional
+    /// `wire_callable` (by value) printed `[1]` here; sharing by reference prints `[1, 2]`.
+    #[test]
+    fn executor_cooperative_submit_shares_captures_by_reference() {
+        let src = "fn main():\n    xs := [1]\n    ex := Executor()\n    ex.submit(fn(): print(xs))\n    xs.push(2)\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "[1, 2]\n", "cooperative submit shares the captured list by reference");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"), "VM == interp oracle");
     }
 
     /// B3.3-threads: a nested `parallel:` runs on the same bounded pool without exploding the thread

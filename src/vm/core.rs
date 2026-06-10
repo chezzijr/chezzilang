@@ -99,6 +99,12 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         WireValue::Executor(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
             core.inner.lock().unwrap().queue.iter().for_each(|w| collect_core_gcrefs(w, out, s))
         }),
+        // B3.6: a submitted closure queued in an `Executor` crosses by value, but its captures may
+        // still embed `Handle`s into the live heap (a captured `Channel[str]`'s bytes root nothing,
+        // but a captured callable would) — root them while the task sits in the queue.
+        WireValue::Closure { captured, .. } => {
+            captured.iter().for_each(|(_, v)| collect_core_gcrefs(v, out, seen))
+        }
         // B3.3a: `Str` crosses by value (owned bytes in the core) — it roots no heap object.
         WireValue::Str(_)
         | WireValue::Int(_)

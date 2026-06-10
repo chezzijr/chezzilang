@@ -156,13 +156,39 @@ the same machinery — is broken into seven TDD phases **B3.0…B3.6** in
 decisions A–G, risk register, per-phase TDD focus). The surface of `spawn` / `parallel:` / `Channel` /
 `Shared` / `Executor` stays **unchanged**.
 
-**Next candidate:** **B3.6 — `Executor` on the pool + the A3b `submit`-capture sendability gate.**
-Submitted tasks run on pool threads (today `Executor` work drains on the parent thread only); the
-checker gates `submit`'s closure captures the way `spawn` already does — a `Closure` wire arm becomes
-load-bearing here (the `Executor.submit` capture crossing), so it lands then, not as untested dead code
-now. Acceptance: `submit` of a non-sendable capture is a checker error; executor tasks run on pool
-threads and the autodrain/`shutdown` semantics survive. Items *not* in B3–B5 (cross-nursery wakeups,
-recv-in-native-callback, `Channel.close()`, A3b) are now documented in
+**B3.6 — `Executor` on the pool + the A3b `submit`-capture sendability gate — has now landed** (VM +
+checker, `--parallel`). **A3b (checker):** `Executor.submit`'s closure runs on a pool thread, so its
+captures cross the airlock exactly like a `spawn` task's — the `Ty::Executor` `submit` arm now pushes a
+`capture_floor` (at the current scope depth) around the argument check, so the pre-existing
+`infer_ident` read gate flags a non-sendable captured binding (a `Ref`, a function-local closure) while
+the closure's own params/locals stay task-local. **VM:** a new `WireValue::Closure { proto, captured,
+home }` arm crosses a submitted closure **by value** (proto via the shared `Arc<Program>`, captures
+wired recursively, `home` as a `module_objs` index — no heap-local `GcRef`); `Vm::wire_callable`
+produces it at `submit` **only under `--parallel`** — the cooperative default engine keeps crossing the
+closure **by handle** (`to_wire` → `Handle`) so its drain on the same heap shares captures by reference
+(a mutation between `submit` and drain stays observable, matching the interp oracle — a by-value snapshot
+would break `VM == interp` for the sequential subset, decision A; caught in review). `from_wire` rebuilds
+the `Closure` over the worker's reconstructed home, and `collect_core_gcrefs`/`has_handle`/`display_wire`
+gained matching arms. Under
+`--parallel`, `shutdown` (and the program-exit autodrain, which calls it) drains the whole queue under
+the core lock then farms the tasks to the bounded pool via a new engine-agnostic
+`run_workers_on_pool` (extracted from `run_parallel_nursery` — the nursery and executor drains now
+share one farm/join/flush core); each executor task gets a fresh per-drain cancel flag (first fault
+aborts siblings, matching the cooperative inline `r?`) but **no** `DeadlockWatch` (decision D — an
+`Executor`-spanning deadlock is an accepted hang). Cooperative drain stays inline and byte-identical
+(decision A oracle). New: `examples/executor_pool.chz` (submit→pool-drain→sort, same output on both
+engines); tests `golden_executor_pool_chz_matches_expected`, `executor_submitted_closure_captures_by_value`,
+`executor_cooperative_submit_shares_captures_by_reference` (the decision-A regression pin), and six
+checker A3b tests (`submit_{non_sendable_capture,captured_closure,captured_closure_through_nested_closure}_rejected`,
+`submit_captured_{channel,int}_ok`, `top_level_closure_submitted_ok`). Latest suite: **1341 tests** green
+(unit + parity + `cargo test conformance`), `cargo clippy` clean. Reviewed by a 2-agent panel
+(concurrency/VM + checker); the C-01 cooperative-snapshot regression it caught is fixed + pinned.
+
+**With B3.6 landed, the B3 epic (B3.0…B3.6) is complete** — `spawn` / `parallel:` / `Channel` /
+`Shared` / `Executor` all run on real OS threads behind `--parallel`, surface unchanged. **Next
+frontier:** **Tier-D** (M:N scheduler + async-I/O pollset for I/O-bound concurrency at scale), designed
+in **[`docs/concurrency.md` §10](docs/concurrency.md)** — not scheduled. Items *not* in B3–B5
+(cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
 > **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,

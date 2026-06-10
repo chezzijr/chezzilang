@@ -259,7 +259,11 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 - [x] B3.3-threads — real OS threads behind `--parallel` ✅ **landed** (`--parallel` flag + bounded pool + condvar `recv` + flush-on-join; `Shared.update` made cross-thread-atomic)
 - [x] B3.4 — cancellation + cross-thread `os.exit` ✅ **landed** (per-nursery `Arc<AtomicBool>` cancel flag tripped by the first sibling fault/`os.exit`; observed at the dispatch back-edge + a `wait_timeout` re-checking `recv`; first-fault aborts running siblings; child `os.exit` propagates its code up the join to halt the parent; `recover:`/`defer` compose)
 - [x] B3.5 — nursery-local deadlock detection under threads ✅ **landed** (per-nursery `DeadlockWatch` cloned into each worker; barrier-confirm detector in the blocking `recv` — a parked worker confirms its channel empty at most once per `epoch`, and `confirms == live` ⇒ fault `deadlock` with the cooperative engine's byte-identical message; `send`/`task_finished` report progress to bump `epoch`; watch and channel `q` locks never held together. Residual hangs documented: cross-nursery / `Executor`-spanning, orphaned message, G3 saturated-pool queued task)
-- [ ] B3.6 — `Executor`/B5 on the pool + A3b ← **next session starts here**
+- [x] B3.6 — `Executor`/B5 on the pool + A3b ✅ **landed** (`WireValue::Closure` crosses a submitted
+  closure by value; `Vm::wire_callable` produces it at `submit`; `--parallel` `shutdown`/autodrain farm
+  the queue to the bounded pool via a shared `run_workers_on_pool` extracted from `run_parallel_nursery`;
+  the checker's `submit` arm pushes a `capture_floor` so a non-sendable capture is a checker error like
+  `spawn`. Cooperative drain stays inline + byte-identical. **B3 epic complete.**)
 
 > **B3.0 landed note (for the B3.1+ maintainer):** `WireValue` lives in `src/vm/wire.rs`;
 > `Vm::to_wire` / `Vm::from_wire` + the rewritten `deep_clone` (the round-trip) are in
@@ -417,6 +421,49 @@ clippy` green; update this file + `PROGRESS.md`; commit). **B3.0–B3.2 ship beh
 > `parity_tests`, via `run_file_parallel`). The partial-work tests use a `Channel` handshake so the
 > victim provably starts before the trigger faults (no timing flake); the trigger faults/exits inline
 > so cancel is tripped without depending on pool scheduling.
+
+> **B3.6 landed note (for the Tier-D maintainer) — B3 epic complete.** `Executor` rides the pool +
+> the A3b submit-capture gate shipped. **Checker (A3b):** the `Ty::Executor` `submit` arm in
+> `infer_method` (`src/checker/mod.rs`) pushes a `capture_floor` at the current scope depth around the
+> argument check, so the pre-existing `infer_ident` read gate flags a non-sendable captured binding —
+> a submitted closure's captures are now gated exactly like a `spawn:` block's (`infer_closure` opens
+> its scope *at* the floor, so the closure's own params/locals stay task-local). Tests:
+> `submit_{non_sendable_capture,captured_closure}_rejected`, `submit_captured_{channel,int}_ok`.
+>
+> **VM — `WireValue::Closure` (the load-bearing arm B3.3 deferred).** A submitted closure crosses **by
+> value**: `WireValue::Closure { proto: ProtoId, captured: Vec<(Box<str>, WireValue)>, home:
+> Option<usize> }` (`src/vm/wire.rs`) — `proto` lives in the shared `Arc<Program>`, captures wire
+> recursively, `home` is a `module_objs` *index* (via `home_index`), so the arm carries **no**
+> heap-local `GcRef`. `Vm::wire_callable` (`src/vm/mod.rs`) produces it for `Obj::Closure` and
+> `Obj::Func` (a bare fn = empty captures), but `submit` calls it **only under `--parallel`**; on the
+> **cooperative default engine `submit` crosses the closure by handle** (`to_wire` → `Handle`, the
+> pre-B3.6 behavior) so its same-heap drain shares captures **by reference** — a mutation between
+> `submit` and drain stays observable, matching the interp oracle. **(Review C-01: an *unconditional*
+> `wire_callable` snapshotted mutable collection captures by value and broke `VM == interp` for the
+> sequential subset — decision A. Fixed by the engine gate; pinned by
+> `executor_cooperative_submit_shares_captures_by_reference`.)** The generic `to_wire` still crosses
+> other closures as a by-reference `Handle`, so the `Shared`-holds-a-closure path and every existing
+> golden stay byte-identical. `from_wire` rebuilds the closure over the worker's reconstructed home
+> (`worker_home`); `collect_core_gcrefs` (`src/vm/core.rs`), `has_handle`, and `display_wire` gained
+> matching `Closure` arms (queued captures stay GC-rooted via the executor handle's `children()` under
+> `gc_stress`).
+>
+> **VM — drain on the pool.** Under `--parallel`, `executor_method("shutdown")` marks `shut`, drains
+> the whole queue under the core lock (guard dropped before any invoke — never hold the core lock across
+> a task), then farms the tasks to the bounded pool via **`run_workers_on_pool`** — the farm/inline-
+> task[0]/join/flush-in-order/`Exit`-over-`Fault` core **extracted verbatim** from `run_parallel_nursery`
+> (a pure refactor: the nursery path is byte-identical, it just now delegates). Each executor task gets a
+> fresh per-drain `cancel` flag (first fault aborts siblings, matching the cooperative inline `r?`) but
+> **no `DeadlockWatch`** — an `Executor`-spanning deadlock is an accepted hang (decision D). The
+> program-exit autodrain reaches this automatically (`drain_live_executors` calls `shutdown`). The
+> **cooperative default engine keeps the inline FIFO drain, byte-identical** (decision A oracle). New:
+> `examples/executor_pool.chz` (`submit` ×3 → pool drain → sort; same output on both engines). Tests:
+> `golden_executor_pool_chz_matches_expected`, `executor_submitted_closure_captures_by_value`.
+>
+> **Known load-sensitive test:** `parallel_defer_runs_on_cancelled_sibling` (a B3.4 cancel test) is a
+> low-rate timing flake **only under heavy full-suite parallel load** (shared process-wide pool
+> saturation delays the trigger fault); it passes in isolation and on clean HEAD with the same
+> variance — not a B3.6 regression. Re-run if it trips.
 
 ---
 

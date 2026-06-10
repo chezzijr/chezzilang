@@ -10,6 +10,7 @@
 //! shared `Arc` core).
 
 use super::core::{ChannelCore, ExecutorCore, SharedCore};
+use super::op::ProtoId;
 use super::value::GcRef;
 use std::sync::Arc;
 
@@ -62,6 +63,18 @@ pub enum WireValue {
     Shared(Arc<SharedCore>),
     /// An `Executor` handle crossing the airlock as its shared [`ExecutorCore`] (B3.1). See [`Channel`].
     Executor(Arc<ExecutorCore>),
+    /// B3.6 — a closure carried across the airlock **by value**: its `proto` (which lives in the shared
+    /// `Arc<Program>`, so it is meaningful in any worker), its captures wired recursively, and its
+    /// `home` as an index into the parent's `module_objs` (resolved via `Vm::home_index` at wire time,
+    /// `None` for a home not in the table) — never a heap-local `GcRef`. Produced **only** by
+    /// `Executor.submit` (`Vm::wire_callable`); the generic `to_wire` still crosses a closure as a
+    /// by-reference [`Handle`]. This is the arm that lets a submitted task run on a pool thread (B3.6) —
+    /// `from_wire` rebuilds the closure over the worker's reconstructed home module.
+    Closure {
+        proto: ProtoId,
+        captured: Vec<(Box<str>, WireValue)>,
+        home: Option<usize>,
+    },
 }
 
 impl WireValue {
@@ -81,6 +94,10 @@ impl WireValue {
             WireValue::Map(es) => es.iter().any(|(_, k, v)| k.has_handle() || v.has_handle()),
             WireValue::Set(es) => es.iter().any(|(_, e)| e.has_handle()),
             WireValue::Struct { fields, .. } => fields.iter().any(|(_, v)| v.has_handle()),
+            // B3.6: a closure crosses by value, but a *captured* value could itself embed a `Handle`
+            // (e.g. a captured closure crossing as a nested `Closure` whose own captures aren't
+            // cross-safe) — recurse so the invariant stays honest.
+            WireValue::Closure { captured, .. } => captured.iter().any(|(_, v)| v.has_handle()),
             _ => false,
         }
     }

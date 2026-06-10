@@ -3950,6 +3950,60 @@ fn read_captured_closure_through_nested_closure_in_spawn_block_rejected() {
     );
 }
 
+// ----- A3b (B3.6): Executor.submit gates its closure captures like `spawn` -----
+
+#[test]
+fn submit_non_sendable_capture_rejected() {
+    // A submitted closure reading a non-sendable captured binding (a Ref) crosses the airlock to a
+    // pool thread under `--parallel` — rejected exactly like a `spawn` capture.
+    entry_rejects(
+        "import std.ref\nfn main():\n    r := Ref(0)\n    ex := Executor()\n    ex.submit(fn(): r.set(1))\n    ex.shutdown()\nmain()\n",
+        "non-sendable captured binding 'r'",
+    );
+}
+
+#[test]
+fn submit_captured_closure_rejected() {
+    // Capturing a function-local closure (non-sendable) and calling it inside the submitted task.
+    rejects(
+        "fn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
+        "non-sendable captured binding 'g'",
+    );
+}
+
+#[test]
+fn submit_captured_channel_ok() {
+    // A Channel handle is sendable — capturing it in a submitted task is fine.
+    ok("fn main():\n    ch := Channel[int]()\n    ex := Executor()\n    ex.submit(fn(): ch.send(1))\n    ex.shutdown()\nmain()\n");
+}
+
+#[test]
+fn submit_captured_int_ok() {
+    // A sendable capture (int) gets its own copy — reading it in the task is the whole point.
+    ok("fn main():\n    n := 42\n    ex := Executor()\n    ex.submit(fn(): print(n))\n    ex.shutdown()\nmain()\n");
+}
+
+#[test]
+fn submit_captured_closure_through_nested_closure_rejected() {
+    // Regression pin (mirrors `read_captured_closure_through_nested_closure_in_spawn_block_rejected`):
+    // a non-sendable function-local closure smuggled into a submitted task through a *nested* closure
+    // must still be rejected. Emergent from `capture_floors` not being reset by `infer_closure` — pin
+    // it so a future refactor of the capture machinery can't silently reopen the hole.
+    rejects(
+        "fn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print((fn() -> int: g())()))\n    ex.shutdown()\nmain()\n",
+        "non-sendable captured binding 'g'",
+    );
+}
+
+#[test]
+fn top_level_closure_submitted_ok() {
+    // Regression pin (mirrors `top_level_closure_used_in_spawn_block_ok`): a module-scope binding is a
+    // global, not a per-task capture — submitting a closure that reads it is fine even when it's
+    // non-sendable (the `is_local_capture` scope-0 exclusion). Locks the intentional gap so a future
+    // tightening of the gate can't silently flip it without a test failing.
+    ok("g := fn() -> int: 7\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n");
+}
+
 // ----- G1 (B3.3b): module globals are read-only across tasks (`--parallel`) -----
 
 #[test]
