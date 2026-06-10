@@ -5,9 +5,10 @@ Companion to [`concurrency.md` §10](concurrency.md) (the design) the way
 Tier-D is and *why*; this file is the *how* — the phase ladder **D0…D6**, each independently
 TDD-able, plus the **Go-vs-BEAM borrow ledger** so the split is not relitigated.
 
-**Status:** D0, D1, D2 (D2a + D2b) landed — the `--parallel` engine is now a true M:N scheduler
-(lightweight fibers parking on `recv`, not thread-per-task). **D3 (reduction-counting preemption) is
-next.**
+**Status:** D0, D1, D2 (D2a + D2b), D3 landed — the `--parallel` engine is now a true M:N scheduler
+(lightweight fibers parking on `recv`, not thread-per-task) **with BEAM-style reduction-counting
+preemption** (a CPU-bound fiber yields its worker at budget exhaustion, so siblings make progress).
+**D4 (work-stealing + `wakep` StoreLoad barrier) is next.**
 
 ## TL;DR
 
@@ -244,7 +245,28 @@ over-notifies safely). The `native_reentry` guard still forbids parking inside a
 that fault path is **unchanged** here (fixed in D5). **Reuse:** `FiberCtx` / `Fiber` / `FiberState`,
 `swap_ctx`, `run_until(0)`, `DeadlockWatch`, `cancel: Arc<AtomicBool>`, decision-F flush logic.
 
-### D3 — Reduction-counting preemption *(BEAM)*
+### D3 — Reduction-counting preemption *(BEAM)* — ✅ LANDED
+
+> **Status: LANDED.** A fiber now carries a reduction budget `reds: u32` (reset to `CONTEXT_REDS =
+> 4000` on every schedule-in in `run_one_fiber`); the `run_until` loop-top safepoint decrements it
+> **per dispatched op** under the M:N engine (`self.mn.is_some()`) and, at exhaustion (with
+> `native_reentry == 0`), sets `yield_now` and returns `Ok(())` to stop dispatch. `run_one_fiber`
+> maps that to a new `Disp::Yield`; `mn_worker_loop` calls `MnSched::yield_fiber`, which requeues the
+> fiber at the **tail** of the shared `runq` (round-robin) under the sched lock (`running--` +
+> `push_back` + `notify_all`) — no `parked` bucket touched, so no park-gap re-check is needed and a
+> false deadlock is impossible (`take_runnable` pops `runq` before testing `running==0 &&
+> parked_n>0`). **One deviation from the plan below, verified:** a yield reuses the recv-park
+> suspend/rewind contract, so it must unwind **every nested `run_until` level** without popping a
+> result — the gate that did this only checked `suspend`, so a yield deep in a call chain
+> (`main→worker→count_primes→is_prime`, the `primes_parallel` shape) let `run_proto` pop a live
+> operand-stack temp as a bogus return → `expected bool, found int`. Fixed by a `paused()` helper
+> (`suspend.is_some() || yield_now`) applied at every propagate-up gate (`run_proto`, `do_call`,
+> `do_method_call`, `run_until` bottom, `start_task`). The cooperative engine is byte-identical by
+> construction (`yield_now` is gated on `mn.is_some()`, always `None` there). **1365 tests** green
+> (+4: the fairness hang-watchdog, the 10 k-fiber soundness churn, the nested-call unwind regression,
+> the `yield_fiber` unit test), `cargo clippy` clean, `primes_parallel=148933` both engines, all
+> `--parallel` goldens byte-identical; 4-agent S++ backend review panel (Godot Gameplay / Solidity /
+> Incident Response / SRE) — zero real findings. **D4 is next.**
 
 **Goal.** Fairness: a CPU-bound fiber must not hog a worker forever. Decrement a per-fiber
 **reduction budget** at the existing safepoint; yield at exhaustion.

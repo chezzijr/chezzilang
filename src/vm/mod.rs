@@ -268,7 +268,24 @@ struct Vm {
     /// legacy condvar-block; `None` on the cooperative engine, the top-level VM, and a prepared task
     /// fiber's heap-only worker. Cloned onto each shell at enlistment ([`Vm::run_mn_nursery`]).
     mn: Option<Arc<MnSched>>,
+    /// D3 — reduction budget of the fiber currently swapped in: the number of ops it may still
+    /// dispatch before it must yield its worker (BEAM-style preemption). Reset to [`CONTEXT_REDS`]
+    /// on every schedule-in ([`Vm::run_one_fiber`]) and decremented at the `run_until` loop-top
+    /// safepoint. Live per-VM scratch (like `pending_exit`/`cancelled`), NOT part of [`FiberCtx`]:
+    /// it is reset per schedule, never preserved across a park. Only consulted under the M:N engine
+    /// (`mn.is_some()`); the cooperative engine never preempts (it is the frozen parity oracle).
+    reds: u32,
+    /// D3 — transient signal: the safepoint set this when `reds` hit 0, asking the worker loop to
+    /// requeue this fiber (round-robin) instead of treating its `run_until` return as a finish.
+    /// Set at the safepoint, consumed in [`Vm::run_one_fiber`]; mutually exclusive with `suspend`.
+    yield_now: bool,
 }
+
+/// D3 — a fiber's reduction budget per schedule-in: how many ops it dispatches before yielding its
+/// worker so a queued sibling runs (BEAM's default is 4000; tunable — see `docs/concurrency-tier-d.md`
+/// §"Open / deferred"). Large enough that the per-op decrement is negligible, small enough that a
+/// CPU-bound fiber relinquishes its worker promptly.
+const CONTEXT_REDS: u32 = 4000;
 
 /// A fiber's saved execution context (B1): every `Vm` field that `run_until` reads or writes keyed by
 /// per-execution indices. Swapped with the live `Vm` fields ([`Vm::swap_ctx`]) when a fiber is
@@ -651,6 +668,21 @@ impl MnSched {
         }
     }
 
+    /// D3 — the running fiber exhausted its reduction budget; requeue it at the TAIL of `runq`
+    /// (round-robin) and free the worker. Decrements `running` like `park`/`finish`. Unlike `park`
+    /// it touches no `parked` bucket (a yield carries no channel handle) and always requeues, so
+    /// there is no park-gap/cancel re-check: a cancelled fiber requeued here re-runs and observes the
+    /// flag at the next loop-top back-edge (same as a sibling running at cancel time). `notify_all`
+    /// wakes any worker parked in `take_runnable` on the now-non-empty queue. No false deadlock:
+    /// `take_runnable` pops `runq` before testing `running == 0 && parked_n > 0`.
+    fn yield_fiber(&self, mut fiber: Fiber) {
+        let mut c = self.lock();
+        c.running -= 1;
+        fiber.state = FiberState::Ready;
+        c.runq.push_back(fiber);
+        self.cv.notify_all();
+    }
+
     /// A `send` into channel `key`: enqueue the message AND move every fiber parked on it back onto
     /// `runq` (as `Ready`), atomically under the core lock — so it serializes with [`MnSched::park`]'s
     /// gap re-check and a fiber parking concurrently is never lost. `notify_all` may over-notify (a
@@ -871,6 +903,8 @@ impl ReadyWorker {
 /// queue under the sched lock) or finish it with a terminal outcome.
 enum Disp {
     Park(usize, Arc<ChannelCore>),
+    /// D3 — the fiber exhausted its reduction budget; the worker requeues it at the tail of `runq`.
+    Yield,
     Finish(TaskOutcome),
 }
 
@@ -897,6 +931,8 @@ impl Vm {
             executors: Vec::new(),
             suspend: None,
             native_reentry: 0,
+            reds: 0,           // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
+            yield_now: false,  // D3
             scheduler_stack: Vec::new(),
             cancel: None,
             cancelled: false,
@@ -945,6 +981,17 @@ impl Vm {
             std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
             std::mem::swap(&mut self.executors, &mut ctx.executors);
         }
+    }
+
+    /// B1 / D3 — the running fiber paused mid-flight and its frames stay live to replay on resume:
+    /// either a blocking `recv` parked it (`suspend`) or it exhausted its D3 reduction budget
+    /// (`yield_now`). Both unwind every nested `run_until` / call site the SAME way — propagate up
+    /// WITHOUT popping a result or pushing a sentinel — so every "callee paused" gate tests this, not
+    /// `suspend` alone. (`yield_now` is only ever set under the M:N engine — the safepoint gates it on
+    /// `mn.is_some()` — so the cooperative engine, where it is always false, is unchanged by
+    /// construction.)
+    fn paused(&self) -> bool {
+        self.suspend.is_some() || self.yield_now
     }
 
     /// Run `f` with the native-reentry guard raised (B1). A blocking `recv` reached while the guard
@@ -1064,10 +1111,11 @@ impl Vm {
         let base_level = self.frames.len();
         self.push_frame(proto, home, closure, args, counted, is_toplevel, span)?;
         self.run_until(base_level)?;
-        // B1: a blocking `recv` parked this call's fiber mid-flight. The frames stay live (they
-        // replay on resume); propagate the signal up without popping a result — the caller gates on
-        // `suspend` before using the (sentinel) return value.
-        if self.suspend.is_some() {
+        // B1/D3: the call paused mid-flight — a blocking `recv` parked it, or it exhausted its D3
+        // reduction budget and is yielding its worker. The frames stay live (they replay on resume);
+        // propagate the signal up without popping a result — the caller gates on `paused()` before
+        // using the (sentinel) return value.
+        if self.paused() {
             return Ok(Value::Nil);
         }
         Ok(self.stack.pop().unwrap_or(Value::Nil))
@@ -1160,6 +1208,24 @@ impl Vm {
                 let rte = self.unwind_deferred(base_level).unwrap_or(rte);
                 return Err(rte);
             }
+            // D3: reduction-counting preemption (M:N engine only — the cooperative engine is the
+            // frozen parity oracle and never preempts). Decrement the budget per dispatched op; at
+            // exhaustion yield this worker so a queued sibling runs (round-robin fairness). Placed
+            // AFTER the cancel check so cancel wins (a cancelled fiber unwinds, never yields). The
+            // `native_reentry == 0` guard mirrors `recv`-park: a yield inside a native callback can't
+            // save the caller's Rust-stack state, so we defer it (leave `reds` at 0 and re-check next
+            // op, once the reentry unwinds). Reuses the suspend/rewind contract — frames stay intact,
+            // resume re-enters `run_until(0)` — but carries no channel handle (a voluntary park).
+            if self.mn.is_some() {
+                if self.reds == 0 {
+                    if self.native_reentry == 0 {
+                        self.yield_now = true;
+                        return Ok(());
+                    }
+                } else {
+                    self.reds -= 1;
+                }
+            }
             let fi = self.frames.len() - 1;
             let pid = self.frames[fi].proto;
             let ip = self.frames[fi].ip;
@@ -1243,10 +1309,12 @@ impl Vm {
                     _ => return Err(rte),
                 }
             }
-            // B1: a blocking `recv` parked the running fiber. Stop the dispatch loop WITHOUT
-            // unwinding (frames + defers stay intact to replay on resume) and hand control back to
-            // the nursery scheduler, which parks this fiber and runs a sibling.
-            if self.suspend.is_some() {
+            // B1/D3: the running fiber paused — a blocking `recv` parked it, or (D3) it exhausted its
+            // reduction budget at the safepoint above and is yielding. Stop the dispatch loop WITHOUT
+            // unwinding (frames + defers stay intact to replay on resume) and hand control back up.
+            // For a yield detected in a NESTED `run_until`, this is how each outer level bails after
+            // its in-flight call op returns — propagating the yield all the way to the worker loop.
+            if self.paused() {
                 return Ok(());
             }
         }
@@ -2168,8 +2236,8 @@ impl Vm {
         let args: Vec<Value> = self.stack.split_off(at);
         let callee = self.pop();
         let v = self.invoke_value(callee, args, span)?;
-        if self.suspend.is_some() {
-            return Ok(()); // B1: callee parked on a blocking `recv`; don't push a sentinel result.
+        if self.paused() {
+            return Ok(()); // B1/D3: callee parked on `recv` or yielded; don't push a sentinel result.
         }
         self.push(v);
         Ok(())
@@ -2560,8 +2628,8 @@ impl Vm {
                     call_args.push(recv);
                     call_args.extend(args);
                     let v = self.run_proto(proto, home, None, call_args, true, false, span)?;
-                    if self.suspend.is_some() {
-                        return Ok(()); // B1: the method parked on a blocking `recv`.
+                    if self.paused() {
+                        return Ok(()); // B1/D3: the method parked on a blocking `recv` or yielded.
                     }
                     self.push(v);
                     return Ok(());
@@ -2571,8 +2639,8 @@ impl Vm {
                 // Invoked as a value (no `self` bound — it's not a method).
                 if let Some((_, fval)) = fields.iter().find(|(k, _)| k.as_ref() == method) {
                     let v = self.invoke_value(*fval, args, span)?;
-                    if self.suspend.is_some() {
-                        return Ok(()); // B1: the function-field call parked on a blocking `recv`.
+                    if self.paused() {
+                        return Ok(()); // B1/D3: the function-field call parked on `recv` or yielded.
                     }
                     self.push(v);
                     return Ok(());
@@ -3555,6 +3623,7 @@ impl Vm {
             let span = fiber.span;
             match self.run_one_fiber(&mut fiber, span) {
                 Disp::Park(key, core) => sched.park(key, &core, fiber),
+                Disp::Yield => sched.yield_fiber(fiber),
                 Disp::Finish(outcome) => {
                     let aborts = matches!(outcome, TaskOutcome::Fault(_) | TaskOutcome::Exit { .. });
                     sched.finish(task_index, outcome);
@@ -3577,6 +3646,8 @@ impl Vm {
         self.suspend = None;
         self.cancelled = false;
         self.pending_exit = None;
+        self.reds = CONTEXT_REDS; // D3 — fresh reduction budget on every schedule-in (BEAM semantics)
+        self.yield_now = false;
         let state = std::mem::replace(&mut fiber.state, FiberState::Ready);
         let disp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let res = match state {
@@ -3589,6 +3660,11 @@ impl Vm {
                 // Capture the park key + the channel `Arc` WHILE the fiber heap is live (`h` is a
                 // GcRef into it); `park` re-checks the queue through this `Arc` under the sched lock.
                 Disp::Park(self.channel_core_ptr(h), self.channel_core(h))
+            } else if res.is_ok() && self.yield_now {
+                // D3 — budget exhausted (mutually exclusive with `suspend`: the safepoint returns
+                // before dispatching, so no `recv` ran this slice). Frames stay intact; resume
+                // re-enters `run_until(0)`.
+                Disp::Yield
             } else {
                 Disp::Finish(self.classify_mn_outcome(res))
             }
@@ -3873,8 +3949,8 @@ impl Vm {
                     self.push(a);
                 }
                 self.do_method_call(&name, argc, span)?;
-                if self.suspend.is_none() {
-                    self.pop(); // discard the completed task's result (none pending if suspended)
+                if !self.paused() {
+                    self.pop(); // discard the completed task's result (none pending if paused/yielded)
                 }
                 Ok(())
             }
@@ -6381,6 +6457,140 @@ mod tests {
         let g = take_run(&sched);
         assert_eq!(g.task_index, 0);
         assert!(matches!(g.state, FiberState::Ready));
+    }
+
+    /// D3/U: a fiber that exhausts its reduction budget `yield_fiber`s — the scheduler frees the
+    /// worker (`running--`) and requeues it at the **tail** of `runq` (round-robin), still `Ready`.
+    /// No park bucket is touched (a yield carries no channel handle). Mirrors the park/wake test.
+    #[test]
+    fn mnsched_yield_fiber_requeues_at_tail() {
+        let sched = mk_sched(2);
+        sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+        let f0 = take_run(&sched); // pops task 0, running == 1
+        assert_eq!(f0.task_index, 0);
+        sched.yield_fiber(f0); // requeue task 0 behind task 1
+        {
+            let c = sched.lock();
+            assert_eq!(c.running, 0);
+            assert_eq!(c.parked_n, 0); // a yield never parks
+            assert_eq!(c.runq.len(), 2);
+        }
+        // Round-robin: task 1 (which was behind task 0) now runs before the requeued task 0.
+        assert_eq!(take_run(&sched).task_index, 1);
+        let back = take_run(&sched);
+        assert_eq!(back.task_index, 0);
+        assert!(matches!(back.state, FiberState::Ready));
+    }
+
+    /// D3/the discriminating fairness test. 64 CPU "hog" fibers (≫ the core-sized worker pool) each
+    /// busy-wait on a `Shared[int]` until it reaches 50, spawned FIRST; then 50 "short" fibers that
+    /// each `update(+1)` and exit. WITHOUT preemption every worker grabs a hog (FIFO seed order), all
+    /// spin forever on a counter the never-scheduled shorts can't advance → permanent hang. WITH
+    /// reduction-counting preemption the hogs yield, the shorts run, the counter reaches 50, the hogs
+    /// observe it and exit. A watchdog turns the no-preemption hang into a test FAILURE (not an
+    /// infinite hang) and stands as the regression guard if preemption ever regresses.
+    #[test]
+    fn d3_preemption_prevents_cpu_hog_starvation() {
+        let src = "\
+fn hog(s: Shared[int], k: int):
+    while s.get() < k:
+        continue
+
+fn short(s: Shared[int]):
+    s.update(fn(x): x + 1)
+
+fn main():
+    s := Shared(0)
+    parallel:
+        for _ in 0..64:
+            spawn hog(s, 50)
+        for _ in 0..50:
+            spawn short(s)
+    print(s.get())
+
+main()
+";
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(src));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => assert_eq!(r.expect("hog/short nursery completed"), "50\n"),
+            Err(_) => panic!("starved — D3 preemption regressed (CPU hogs never yielded their workers)"),
+        }
+    }
+
+    /// D3/soundness: thousands of CPU-bound fibers (each a bounded loop + a `Shared` increment), far
+    /// more than the worker pool, all complete under heavy yield churn — no corruption, no lost fiber,
+    /// no false deadlock. Bounded loops terminate regardless of preemption, so this is a soundness
+    /// guard for the yield/requeue machinery rather than the discriminating fairness test above.
+    #[test]
+    fn d3_thousands_of_cpu_fibers_all_complete() {
+        let src = "\
+fn work(s: Shared[int]):
+    i := 0
+    while i < 100:
+        i += 1
+    s.update(fn(x): x + 1)
+
+fn main():
+    s := Shared(0)
+    parallel:
+        for _ in 0..10000:
+            spawn work(s)
+    print(s.get())
+
+main()
+";
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(src));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(r) => assert_eq!(r.expect("10k-fiber nursery completed"), "10000\n"),
+            Err(_) => panic!("10k CPU-bound fibers did not all complete in time (yield machinery hang?)"),
+        }
+    }
+
+    /// D3/regression: a reduction yield must unwind cleanly through **nested function calls**. A yield
+    /// is detected at the safepoint of the innermost `run_until`; every enclosing `run_proto`/call site
+    /// must propagate it up WITHOUT popping a result (the frames replay on resume) — the same contract
+    /// as a `recv`-park. The first cut only guarded `suspend`, so a yield deep in a call chain
+    /// (main → work → middle → inner, the shape of `primes_parallel`) let `run_proto` pop a live stack
+    /// temp as a bogus return value → "expected bool, found int". This computes a known sum across two
+    /// workers, each looping 50 k times through a 3-deep call chain (millions of ops ≫ CONTEXT_REDS, so
+    /// many yields fire mid-chain), and also crosses a channel `recv` — exercising yield + park together.
+    #[test]
+    fn d3_yield_unwinds_through_nested_calls() {
+        let src = "\
+fn inner(n: int) -> int:
+    return n * 2
+
+fn middle(n: int) -> int:
+    return inner(n) + 1
+
+fn work(lo: int, hi: int, out: Channel[int]):
+    acc := 0
+    i := lo
+    while i < hi:
+        acc += middle(i)
+        i += 1
+    out.send(acc)
+
+fn main():
+    out := Channel[int]()
+    parallel:
+        spawn work(0, 50000, out)
+        spawn work(50000, 100000, out)
+    total := 0
+    for _ in 0..2:
+        total += out.recv()
+    print(total)
+
+main()
+";
+        // sum_{i=0}^{99999} (2*i + 1) = 100000 * 100000.
+        assert_eq!(run_capture_parallel(src).unwrap(), "10000000000\n");
     }
 
     /// D2b park-gap guard (the lost-wakeup fix): if a message is already queued when `park` runs (a

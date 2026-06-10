@@ -206,12 +206,24 @@ and re-queues parked waiters atomically (lost-wakeup-safe); deadlock is the exac
 `running==0 && runq empty && parked>0 && done<total`; the joining thread runs an inline shell that
 alone guarantees completion (decision B), so the join never waits on a bounded pool resource (no
 nested/concurrent pool-exhaustion deadlock). The legacy condvar `recv` + `DeadlockWatch`
-barrier-confirm detector were retired. **1361 tests** green (5× full-suite + 60× the cancel/defer
-race + 10× the headline, all clean), `cargo clippy` clean, `primes_parallel=148933` both engines;
-reviewed by a 4-agent S++ panel + cold pass — two Criticals found (a defer-on-cancel test race and a
-nested pool-exhaustion join hang) and both fixed. See the changelog bullet below.
-**D3 is next** — reduction-counting preemption (BEAM-style `reds` budget at the `run_until`
-safepoint, yield-to-tail) for fairness. Items *not* in B3–B5
+barrier-confirm detector were retired. Reviewed by a 4-agent S++ panel + cold pass — two Criticals
+found (a defer-on-cancel test race and a nested pool-exhaustion join hang) and both fixed. **D3 has
+landed** — **BEAM-style reduction-counting preemption**: a fiber carries a reduction budget
+`reds: u32` (reset to `CONTEXT_REDS = 4000` per schedule-in); the `run_until` loop-top safepoint
+decrements it per op under the M:N engine and, at exhaustion (`native_reentry == 0`), **yields** —
+stops dispatch and requeues the fiber at the **tail** of the shared run queue (`Disp::Yield` →
+`MnSched::yield_fiber`, round-robin), so a CPU-bound fiber can no longer hog its worker while
+siblings starve (64 spinning hogs ≫ pool that would hang without preemption now complete). The yield
+reuses the recv-park suspend/rewind contract, so it unwinds every nested `run_until` level via a
+`paused()` helper (`suspend.is_some() || yield_now`) at each propagate-up gate — the fix for a found
+bug where a yield deep in a call chain let `run_proto` pop a live operand-stack temp
+(`expected bool, found int` on `primes_parallel`). Cooperative engine byte-identical by construction
+(`yield_now` gated on `mn.is_some()`). **1365 tests** green (+4: fairness hang-watchdog, 10 k-fiber
+soundness churn, nested-call unwind regression, `yield_fiber` unit), `cargo clippy` clean,
+`primes_parallel=148933` both engines, all `--parallel` goldens byte-identical; 4-agent S++ backend
+panel (Godot Gameplay / Solidity / Incident Response / SRE) — zero real findings.
+**D4 is next** — Go-style work-stealing per-worker run queues + the `wakep` / spinning-worker
+StoreLoad-barrier protocol (the lost-wakeup correctness lynchpin). Items *not* in B3–B5
 (cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
@@ -255,6 +267,33 @@ overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no
 ## Done (newest → oldest)
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
+
+- ✅ **Concurrency D3 — reduction-counting preemption (BEAM-style fairness)** (`--parallel` engine).
+  Before: an M:N fiber held its worker until it parked on `recv` or finished, so a CPU-bound fiber
+  with `#runnable ≫ #workers` starved every sibling queued behind it. Now: a fiber carries a
+  reduction budget `reds: u32` (reset to `CONTEXT_REDS = 4000` on every schedule-in in
+  `run_one_fiber`); the existing `run_until` loop-top safepoint — beside the GC + cancel checks —
+  decrements it **per dispatched op** under the M:N engine (`self.mn.is_some()`) and, at exhaustion
+  with `native_reentry == 0`, sets `yield_now` and returns `Ok(())` to stop dispatch (the same
+  `native_reentry` guard as `recv`-park; a yield inside a native callback is deferred until the
+  reentry unwinds). `run_one_fiber` maps that to a new `Disp::Yield`; `mn_worker_loop` calls
+  `MnSched::yield_fiber`, which under the sched core lock does `running--` + `runq.push_back` +
+  `notify_all` — requeue at the **tail** for round-robin, no `parked` bucket touched (so no park-gap
+  re-check, and `take_runnable` pops `runq` before the deadlock predicate → no false deadlock). The
+  yield reuses the recv-park suspend/rewind contract (frames stay live, resume re-enters
+  `run_until(0)` from the saved `ip`), so it must unwind **every nested `run_until` level** without
+  popping a result: a `paused()` helper (`suspend.is_some() || yield_now`) replaced `suspend.is_some()`
+  at each propagate-up gate (`run_proto`, `do_call`, `do_method_call`, `run_until` bottom,
+  `start_task`). That fix closed a found bug — a yield deep in a call chain
+  (`main→worker→count_primes→is_prime`) let `run_proto` pop a live operand-stack temp as a bogus
+  return value → `expected bool, found int` on `primes_parallel`. Cooperative engine byte-identical
+  by construction (`yield_now` gated on `mn.is_some()`, always `None` there). TDD: a fairness
+  hang-watchdog (64 spinning CPU hogs ≫ pool + 50 short fibers — hangs without preemption, the
+  watchdog turns the hang into a test failure + standing regression guard), a 10 k-fiber soundness
+  churn, the nested-call unwind regression, and a `MnSched::yield_fiber` unit test. **1365 tests**
+  green, `cargo clippy` clean, `primes_parallel=148933` both engines, all `--parallel` goldens
+  byte-identical; 4-agent S++ backend review panel (Godot Gameplay / Solidity / Incident Response /
+  SRE), zero real findings.
 
 - ✅ **Concurrency D2b — M:N scheduler: park-on-`recv`, not thread-per-task** (`--parallel` engine).
   Old: one full worker `Vm` per task on a bounded FIFO pool; an empty `recv` **blocked the whole OS
