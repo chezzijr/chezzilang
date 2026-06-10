@@ -15,6 +15,8 @@
 use super::value::GcRef;
 use super::wire::WireValue;
 use std::collections::VecDeque;
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// `Channel[T]` core (B3.1): the shared mailbox, an unbounded FIFO of wire-form messages. `send`
@@ -47,6 +49,37 @@ pub struct ChannelCore {
 pub struct SharedCore {
     pub v: Mutex<WireValue>,
     pub update_lock: Mutex<()>,
+}
+
+/// D6 — a monotonic, process-wide poll key. The netpoller (`super::poller`) keys an fd registration
+/// by an arbitrary `usize` we choose, NOT the raw fd: a closed-then-reopened fd reuses its integer,
+/// which would alias a stale registration (an ABA hazard); a fresh key per socket avoids that. It is
+/// also the registry key the poller files a parked fiber under. `0` is reserved (never a real key).
+static NEXT_POLL_KEY: AtomicUsize = AtomicUsize::new(1);
+
+/// Allocate the next unique poll key (see [`NEXT_POLL_KEY`]).
+pub fn next_poll_key() -> usize {
+    NEXT_POLL_KEY.fetch_add(1, Ordering::Relaxed)
+}
+
+/// D6 — `Socket` core: a non-blocking connected TCP stream, the shared half of an `Obj::Socket`
+/// handle (structurally like [`ChannelCore`] — an `Arc`'d core outside every heap, so two fibers can
+/// alias one fd). `Option` so `close()` can take + drop the stream (closing the fd) while aliasing
+/// handles observe `None` — a use-after-close is then a clean fault, never a dangling-fd panic. The
+/// `std::net::TcpStream` is the RAII fd owner: the last `Arc<SocketCore>` drop closes the fd
+/// automatically (no manual `Drop` needed). `key` is the stable poll-registration identity.
+#[derive(Debug)]
+pub struct SocketCore {
+    pub stream: Mutex<Option<TcpStream>>,
+    pub key: usize,
+}
+
+/// D6 — `Listener` core: a non-blocking accepting socket. Same handle/core split + fd-lifecycle as
+/// [`SocketCore`]; `accept` on it (when ready) yields a fresh `SocketCore`.
+#[derive(Debug)]
+pub struct ListenerCore {
+    pub listener: Mutex<Option<TcpListener>>,
+    pub key: usize,
 }
 
 /// The mutable inside of an [`ExecutorCore`]: the pending-task FIFO + the shut flag, behind one lock
@@ -106,10 +139,13 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
             captured.iter().for_each(|(_, v)| collect_core_gcrefs(v, out, seen))
         }
         // B3.3a: `Str` crosses by value (owned bytes in the core) — it roots no heap object.
+        // D6: a `Socket`/`Listener` core holds an OS fd + a poll key — no `WireValue`s, no `GcRef`s.
         WireValue::Str(_)
         | WireValue::Int(_)
         | WireValue::Float(_)
         | WireValue::Bool(_)
+        | WireValue::Socket(_)
+        | WireValue::Listener(_)
         | WireValue::Nil => {}
     }
 }
@@ -122,4 +158,24 @@ fn visit_core(ptr: usize, seen: &mut Vec<usize>, f: impl FnOnce(&mut Vec<usize>)
     }
     seen.push(ptr);
     f(seen);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{TcpListener, TcpStream};
+
+    /// D6 — every `SocketCore`/`ListenerCore` gets a fresh, distinct poll key (the ABA-avoiding
+    /// identity), and a freshly-built core holds its stream `Some` (open).
+    #[test]
+    fn socket_cores_have_unique_keys_and_an_open_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let s1 = SocketCore { stream: Mutex::new(Some(stream)), key: next_poll_key() };
+        let s2 = ListenerCore { listener: Mutex::new(Some(listener)), key: next_poll_key() };
+        assert_ne!(s1.key, s2.key, "each core gets a distinct poll key");
+        assert!(s1.stream.lock().unwrap().is_some(), "a fresh socket core is open");
+        assert!(s2.listener.lock().unwrap().is_some(), "a fresh listener core is open");
+    }
 }

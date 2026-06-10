@@ -12,7 +12,7 @@ mod timer;
 pub mod value;
 pub mod wire;
 
-use core::{ChannelCore, ExecutorCore, SharedCore};
+use core::{ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, Op, Program, ProtoId};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -4478,6 +4478,10 @@ impl Vm {
                 Obj::Channel(core) => WireValue::Channel(Arc::clone(core)),
                 Obj::Shared(core) => WireValue::Shared(Arc::clone(core)),
                 Obj::Executor(core) => WireValue::Executor(Arc::clone(core)),
+                // D6: a socket/listener handle crosses as its shared `Arc` core (a spawned fiber
+                // reaches the same fd) — same shape as `Channel`/`Shared`/`Executor`.
+                Obj::Socket(core) => WireValue::Socket(Arc::clone(core)),
+                Obj::Listener(core) => WireValue::Listener(Arc::clone(core)),
                 Obj::List(items) => {
                     let mut out = Vec::with_capacity(items.len());
                     for x in items {
@@ -4548,6 +4552,10 @@ impl Vm {
             WireValue::Channel(core) => Value::Obj(self.heap.alloc(Obj::Channel(core))),
             WireValue::Shared(core) => Value::Obj(self.heap.alloc(Obj::Shared(core))),
             WireValue::Executor(core) => Value::Obj(self.heap.alloc(Obj::Executor(core))),
+            // D6: rebuild a fresh heap handle onto the SAME shared socket/listener core (`Arc` cloned
+            // in `to_wire`) — two fibers reach one fd.
+            WireValue::Socket(core) => Value::Obj(self.heap.alloc(Obj::Socket(core))),
+            WireValue::Listener(core) => Value::Obj(self.heap.alloc(Obj::Listener(core))),
             WireValue::List(items) => {
                 let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::List(cloned)))
@@ -4934,8 +4942,13 @@ impl Vm {
             Obj::Set(s) => SnapValue::Set(s.entries.iter().map(|(hash, e)| (*hash, self.to_snap(*e))).collect()),
             // Leaf data / cores are handled by the fast path; if `to_wire` ever errored above we land
             // here for a `str`/core (always sendable) — encode its wire form.
-            Obj::Str(_) | Obj::Channel(_) | Obj::Shared(_) | Obj::Executor(_) => {
-                SnapValue::Wire(self.to_wire(v).expect("str / channel / shared / executor is always sendable"))
+            Obj::Str(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_) => {
+                SnapValue::Wire(self.to_wire(v).expect("str / channel / shared / executor / socket is always sendable"))
             }
         }
     }
@@ -5067,6 +5080,23 @@ impl Vm {
         match self.heap.get(h) {
             Obj::Executor(core) => Arc::clone(core),
             _ => unreachable!("executor_core on non-executor"),
+        }
+    }
+
+    /// D6 — clone out the shared `Arc<SocketCore>`/`Arc<ListenerCore>` behind a handle (refcount bump),
+    /// mirroring [`channel_core`](Vm::channel_core). The `Arc` is held only for the calling method, so
+    /// locking the fd does not borrow the heap.
+    fn socket_core(&self, h: GcRef) -> Arc<SocketCore> {
+        match self.heap.get(h) {
+            Obj::Socket(core) => Arc::clone(core),
+            _ => unreachable!("socket_core on non-socket"),
+        }
+    }
+
+    fn listener_core(&self, h: GcRef) -> Arc<ListenerCore> {
+        match self.heap.get(h) {
+            Obj::Listener(core) => Arc::clone(core),
+            _ => unreachable!("listener_core on non-listener"),
         }
     }
 
@@ -6022,6 +6052,8 @@ impl Vm {
                 Obj::Channel(_) => "Channel",
                 Obj::Shared(_) => "Shared",
                 Obj::Executor(_) => "Executor",
+                Obj::Socket(_) => "Socket",
+                Obj::Listener(_) => "Listener",
             },
         }
     }
@@ -6081,6 +6113,14 @@ impl Vm {
                 // cannot `from_wire`, which allocates — `display_wire` is the read-only equivalent).
                 Obj::Shared(core) => format!("Shared({})", self.display_wire(&core.v.lock().unwrap())),
                 Obj::Executor(core) => format!("Executor(pending={})", core.inner.lock().unwrap().queue.len()),
+                // D6: render open/closed without exposing the fd; matches no interp counterpart (net
+                // is VM-only) but mirrors the core handles' structural `Display`.
+                Obj::Socket(core) => {
+                    format!("Socket({})", if core.stream.lock().unwrap().is_some() { "open" } else { "closed" })
+                }
+                Obj::Listener(core) => {
+                    format!("Listener({})", if core.listener.lock().unwrap().is_some() { "open" } else { "closed" })
+                }
             },
         }
     }
@@ -6136,6 +6176,13 @@ impl Vm {
             WireValue::Channel(core) => format!("Channel(len={})", core.q.lock().unwrap().len()),
             WireValue::Shared(core) => format!("Shared({})", self.display_wire(&core.v.lock().unwrap())),
             WireValue::Executor(core) => format!("Executor(pending={})", core.inner.lock().unwrap().queue.len()),
+            // D6: render open/closed without exposing the fd (mirrors the heap `Display`).
+            WireValue::Socket(core) => {
+                format!("Socket({})", if core.stream.lock().unwrap().is_some() { "open" } else { "closed" })
+            }
+            WireValue::Listener(core) => {
+                format!("Listener({})", if core.listener.lock().unwrap().is_some() { "open" } else { "closed" })
+            }
             // B3.6: a wired closure renders like its heap counterpart (`Obj::Closure` → "<closure>").
             WireValue::Closure { .. } => "<closure>".to_string(),
         }
@@ -6213,7 +6260,9 @@ impl Vm {
             Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
             // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
             // (matches the interpreter's `stringify` catch-all falling back to `Display`).
-            Obj::Channel(_) | Obj::Shared(_) | Obj::Executor(_) => Ok(self.display(Value::Obj(h))),
+            Obj::Channel(_) | Obj::Shared(_) | Obj::Executor(_) | Obj::Socket(_) | Obj::Listener(_) => {
+                Ok(self.display(Value::Obj(h)))
+            }
         }
     }
 

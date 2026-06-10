@@ -9,7 +9,7 @@
 //! data arms — the only `GcRef` is the by-reference `Handle` arm, which B3.1 replaces with the
 //! shared `Arc` core).
 
-use super::core::{ChannelCore, ExecutorCore, SharedCore};
+use super::core::{ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use super::op::ProtoId;
 use super::value::GcRef;
 use std::sync::Arc;
@@ -63,6 +63,12 @@ pub enum WireValue {
     Shared(Arc<SharedCore>),
     /// An `Executor` handle crossing the airlock as its shared [`ExecutorCore`] (B3.1). See [`Channel`].
     Executor(Arc<ExecutorCore>),
+    /// A `Socket` handle crossing the airlock as its shared [`SocketCore`] (D6) — an `Arc`'d fd, so a
+    /// spawned fiber reaches the same connection. Cross-safe (an `Arc`, not a `GcRef`), like [`Channel`]
+    /// — `has_handle` leaves it `false` via the `_` arm.
+    Socket(Arc<SocketCore>),
+    /// A `Listener` handle crossing the airlock as its shared [`ListenerCore`] (D6). See [`Socket`].
+    Listener(Arc<ListenerCore>),
     /// B3.6 — a closure carried across the airlock **by value**: its `proto` (which lives in the shared
     /// `Arc<Program>`, so it is meaningful in any worker), its captures wired recursively, and its
     /// `home` as an index into the parent's `module_objs` (resolved via `Vm::home_index` at wire time,

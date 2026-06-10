@@ -4,7 +4,7 @@
 //! lands in M5b). Objects are addressed by [`GcRef`] (a slot index), so handle copies alias one
 //! object. The VM owns the heap and mutates objects through `&mut heap[h]` — no `RefCell` needed.
 
-use super::core::{ChannelCore, ExecutorCore, SharedCore};
+use super::core::{ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use super::op::ProtoId;
 use super::value::{GcRef, Value};
 use std::collections::HashMap;
@@ -138,6 +138,13 @@ pub enum Obj {
     /// lives in the shared core so aliasing handles agree on shutdown state. See
     /// [`Channel`](Obj::Channel).
     Executor(Arc<ExecutorCore>),
+    /// `Socket` (D6) — a *handle* to a non-blocking connected TCP stream [`SocketCore`]. Same
+    /// handle/core split as [`Channel`](Obj::Channel); the core holds an OS fd (no `WireValue`s, no
+    /// `GcRef`s), so it traces no GC children.
+    Socket(Arc<SocketCore>),
+    /// `Listener` (D6) — a *handle* to a non-blocking accepting socket [`ListenerCore`]. See
+    /// [`Socket`](Obj::Socket).
+    Listener(Arc<ListenerCore>),
 }
 
 /// One heap slot: the object (or a hole, for swept/free slots) + its GC mark bit.
@@ -292,6 +299,8 @@ impl Heap {
                     crate::vm::core::collect_core_gcrefs(w, &mut out, &mut seen);
                 }
             }
+            // D6: a socket/listener core holds only an OS fd + a poll key — no heap refs to trace.
+            Obj::Socket(_) | Obj::Listener(_) => {}
         }
         out
     }
