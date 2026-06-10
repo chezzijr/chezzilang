@@ -186,8 +186,12 @@ checker A3b tests (`submit_{non_sendable_capture,captured_closure,captured_closu
 
 **With B3.6 landed, the B3 epic (B3.0…B3.6) is complete** — `spawn` / `parallel:` / `Channel` /
 `Shared` / `Executor` all run on real OS threads behind `--parallel`, surface unchanged. **Next
-frontier:** **Tier-D** (M:N scheduler + async-I/O pollset for I/O-bound concurrency at scale), designed
-in **[`docs/concurrency.md` §10](docs/concurrency.md)** — not scheduled. Items *not* in B3–B5
+frontier:** **Tier-D** (M:N scheduler + async-I/O pollset), designed in
+**[`docs/concurrency.md` §10](docs/concurrency.md)** and now **broken down into seven TDD phases
+D0…D6** in **[`docs/concurrency-tier-d.md`](docs/concurrency-tier-d.md)** — Go-style GMP work-stealing
+skeleton + BEAM-style reduction-counting preemption & dirty pool for opaque blocking native calls
+(full Go-vs-BEAM borrow ledger in that file). **D0 is next** — the O(N²)→O(N) cooperative ready-queue
+(§11). Items *not* in B3–B5
 (cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 

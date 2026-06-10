@@ -631,6 +631,29 @@ parity oracle + reproducible-debug engine. Not a date; a checklist.
   markers); `Option` constructors (`some`/`none`, `alloc_enum`) for `recv`; `Ref[T]` (`std/ref.chz`)
   as the `Shared[T]` template.
 
+**Go vs BEAM — the borrow decision (settled).** Chezzi *already has BEAM's memory model* (private
+heap per task, message-copy across the boundary); what it lacks is the *scheduler*. Memory model and
+scheduler are orthogonal axes — so take Go's scheduler *mechanics* but BEAM's *preemption + native-call
+handling*, which are downstream of share-nothing and strictly simpler for a bytecode VM:
+
+- **From Go:** the G/M/P split + per-P work-stealing run queues (`runnext` + bounded ring + global
+  overflow), the `wakep`/spinning-worker wakeup with its StoreLoad barrier, and the netpoller
+  (epoll/kqueue) for sockets.
+- **From BEAM:** **reduction-counting preemption** instead of Go's signal-based SIGURG — Go needs
+  signals only because it runs native code with a *shared GC heap* (stop at any PC, find live
+  pointers); a bytecode VM has a natural safepoint every dispatch and share-nothing GC, so neither
+  applies. And a **dirty/blocking pool** for opaque blocking native calls (`fs`/`io`/`sleep`) instead
+  of Go's syscall handoff — Go's handoff only covers syscalls the runtime itself wraps, not opaque
+  user native code.
+- **Rejected from Go:** SIGURG async preemption and P-handoff-as-native-call-story (both solve
+  native-code + shared-GC problems Chezzi doesn't have). **Deferred from BEAM:** priority classes.
+
+One line: *Go skeleton, BEAM brain — because Chezzi is a share-nothing bytecode VM, which is BEAM's
+world.* The full per-mechanism ledger + the phased breakdown **D0…D6** (each independently TDD-able,
+D0 = the O(N²) ready-queue fix from §11) live in
+**[`concurrency-tier-d.md`](concurrency-tier-d.md)** — the companion to this section the way
+[`concurrency-b3.md`](concurrency-b3.md) is to §9. **Status: broken down, D0 next.**
+
 ---
 
 ## 11. Deferred / backlog (not B3–B5)
