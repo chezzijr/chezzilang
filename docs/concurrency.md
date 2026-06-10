@@ -666,8 +666,21 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   semantics (what `recv` on a closed channel returns; whether `send` after `close` faults) before
   implementation.
 
-- **A3b — `Executor.submit` capture sendability gate** *(correctly deferred; lands in B3.6/B5)*.
-  `submit` runs the closure in-heap at the drain (no airlock, unlike `spawn`'s deep-clone), so a
-  non-sendable capture is *benign under today's only engine* — gating it now would reject valid
-  programs. It becomes load-bearing once captures truly cross threads (B3.6). See §9 Group B and
+- **A3b — `Executor.submit` capture sendability gate** *(✅ shipped in B3.6)*.
+  `submit` ran the closure in-heap at the drain (no airlock, unlike `spawn`'s deep-clone), so a
+  non-sendable capture was *benign under the cooperative engine* — gating it then would have rejected
+  valid programs. It became load-bearing once captures truly cross threads, and the gate landed with
+  **B3.6** (the `submit` arm pushes a `capture_floor` like `spawn`). See §9 Group B and
   [`concurrency-b3.md` §4 B3.6](concurrency-b3.md#4-phased-breakdown).
+
+- **Cooperative scheduler is O(N²) in the per-nursery task count** *(cooperative-engine perf limit)*.
+  `run_scheduler` calls `pick_runnable` (`src/vm/mod.rs`) each turn, which **linear-scans all live
+  children** for the lowest-index runnable one; with N children finishing ~one per turn that is O(N²).
+  Measured (N trivial fibers in one `parallel:`): 1k→1.4 ms, 10k→51 ms, 20k→246 ms, 50k→2.34 s —
+  doubling N roughly quadruples the time, so the practical cooperative fan-out ceiling is **~10k–20k
+  tasks** before the scheduler dominates. **Fix:** maintain an explicit FIFO **ready-queue** of
+  runnable child indices (push on unblock/spawn, pop to run) so a turn is O(1) amortized → whole nursery
+  O(N). Bounded, both correctness-preserving (FIFO order is already the contract), and TDD-able.
+  **Not mooted by B3** — this is purely the *cooperative default* engine; `--parallel` farms tasks to
+  the pool and never runs `run_scheduler`. (It does *not* make cooperative tasks "green-thread cheap" on
+  its own — that is the Tier-D per-task-cost work in §10 — but it removes the quadratic wall.)
