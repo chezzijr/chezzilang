@@ -8,11 +8,16 @@ TDD-able, plus the **Go-vs-BEAM borrow ledger** so the split is not relitigated.
 **Status:** D0, D1, D2 (D2a + D2b), D3 landed — the `--parallel` engine is now a true M:N scheduler
 (lightweight fibers parking on `recv`, not thread-per-task) **with BEAM-style reduction-counting
 preemption** (a CPU-bound fiber yields its worker at budget exhaustion, so siblings make progress).
-**D4's work-stealing half (D4a–D4d) has landed** — per-worker local run queues + a global overflow,
-a capped global batch-grab (`globrunqget`), random-victim steal-half, and a periodic global check —
-with **bounded-poll wake** (`cv.wait_timeout`) as the lost-wakeup backstop instead of the full Go
-`wakep` StoreLoad barrier. **D4e (the SeqCst `wakep` barrier that removes the poll) is the remaining
-D4 owe**; D5 is next on the ladder.
+**D4 (D4a–D4e) has landed** — per-worker local run queues + a global overflow, a capped global
+batch-grab (`globrunqget`), random-victim steal-half, a periodic global check, and **D4e — a
+runnable-gated park** that removed the `cv.wait_timeout` poll: an idle worker now does a true
+`cv.wait` (no timeout) when `runnable == 0` and re-steals after a brief bounded `wait_timeout` backoff
+when `runnable > 0`. **D4e
+deliberately did NOT adopt Go's `nmspinning` + SeqCst StoreLoad fence** — chezzi already maintains a
+precise core-lock-serialized `runnable` atomic (the reachability oracle Go lacks, which is the whole
+reason Go needs the lockless fence), so the core mutex *is* the StoreLoad barrier and a simpler,
+easier-to-prove gate suffices (see the D4e section below). **D5 (dirty/blocking pool) has landed; D6
+(epoll/kqueue pollset + `std.net`) is next on the ladder.**
 
 ## TL;DR
 
@@ -333,12 +338,43 @@ yield while `native_reentry > 0` — gate the yield on `native_reentry == 0`, sa
 > cliff; `try_steal` now drains `runnext` so the predicate stays sound if a future commit ever
 > populates it). **D4e (below) is the remaining owe.**
 >
-> **D4e — full `wakep` StoreLoad barrier (DEFERRED).** Replace `cv.wait_timeout` polling with Go's
-> SeqCst `store(work); fence; load(nmspinning/idle)` ⇄ `store(idle); fence; load(work)` publish/observe
-> barrier + a spinning-worker (`nmspinning`) so a new task is grabbed without a park/unpark round-trip
-> and idle workers truly sleep (no 2ms poll). Land as its own reviewed change with a focused
-> `cfg(loom)` 2-thread model of the publish/observe core. **Correctness does not depend on it** —
-> D4a–D4d are complete and correct; D4e is a throughput/efficiency refinement.
+> **D4e — runnable-gated park (LANDED; deviates from the originally-planned Go barrier).** The poll is
+> gone. **Decision:** rather than port Go's SeqCst `store(work); fence; load(nmspinning/idle)` ⇄
+> `store(idle); fence; load(work)` publish/observe barrier + a `nmspinning` spinning-worker, the park
+> branch of `take_runnable` now gates on the **`runnable` atomic chezzi already maintains**:
+> `runnable > 0` ⇒ work exists somewhere (a local — stealable — or the sub-µs in-hand `Vec` window of a
+> concurrent grab/steal) ⇒ do NOT truly sleep; take a brief bounded `cv.wait_timeout(SPIN_BACKOFF=500µs)`
+> backoff that any wake `notify_all` cuts short, then re-loop (re-steal/re-grab);
+> `runnable == 0` ⇒ no fiber queued anywhere ⇒ a TRUE `cv.wait` (no timeout), woken only by a sibling's
+> `notify`. **Why not Go's fence.** Go needs the lockless StoreLoad fence precisely *because it has no
+> global runnable counter* — `nmspinning` reconstructs "is there work + is anyone hunting it" losslessly
+> without a lock. Chezzi already paid for a precise `runnable: AtomicUsize` (for the deadlock predicate),
+> mutated under the core lock at every enqueue and read under that same lock immediately before
+> `cv.wait`. The mutex serializes publish-against-observe — *it is* the StoreLoad barrier — so the gate
+> is lost-wakeup-free by the standard locked-condvar argument (a `runnable++`/`notify` either
+> happens-before the read, so the worker sees `runnable > 0` and skips the park, or after the wait is
+> registered, so the `notify` reaches it). The only counted-but-momentarily-unreachable state is the
+> in-hand `Vec` window — a bounded handful of `VecDeque` pushes by a non-blocked worker — so the
+> backoff re-loop is bounded, not a livelock. (The first cut busy-spun with `drop; yield_now; continue`;
+> the S++ SRE review flagged that as a thundering-herd lock-hammer on `runnable > 0` and an
+> oversubscription hazard where spinners starve the surplus-holder — hence the bounded `wait_timeout`
+> backoff, which sleeps instead of spinning while the `notify_all` still wakes it the instant the work
+> lands.) This is **simpler and easier to prove than the Go barrier
+> for this codebase**, with no new atomics, no fence, no per-worker park primitives. **What was NOT
+> done (deferred, optional, throughput-only):** the conditioned single-wake (`notify_one` when exactly
+> one fiber became runnable + an idle-worker count) that avoids the `notify_all` thundering herd — a
+> pure efficiency tweak the original plan folded in via `nmspinning`; it is correctness-irrelevant and
+> separable, to be added only if a benchmark justifies it (that is where a `cfg(loom)` model would earn
+> its keep — the runnable-gate's only race is the locked add-vs-locked-read, which stress tests +
+> a `debug_assert!(runnable == 0)` before `cv.wait` cover without loom's dev-dep + atomic-abstraction
+> cost). **TDD landed:** `d4e_pingpong_no_lost_wakeup_stress` (park-heavy consumer-first workload ×25
+> rounds under per-round watchdog — the lost-wakeup guard) + `d4e_wake_parked_workers_from_true_sleep`
+> (isolates wake-from-`runnable==0`-sleep: one CPU-burning producer drives every other worker to a real
+> `cv.wait`, then a `send` burst must wake them). 1386 tests green, clippy clean, `primes_parallel=148933`
+> both engines, all `--parallel` goldens byte-identical, release stress ×4 stable. **4-agent S++
+> concurrency panel** (Godot Gameplay / Solidity / Incident Response / SRE): zero Critical, zero
+> lost-wakeup/hang confirmed; applied SRE's two Importants (busy-spin → bounded `wait_timeout` backoff;
+> corrected a stale `runnable` doc-comment the gate's soundness depends on).
 
 **Goal.** Load-balance across P's and wake parked workers correctly (no lost wakeups, no busy-wait).
 
@@ -347,11 +383,12 @@ yield while `native_reentry > 0` — gate the yield on `native_reentry == 0`, sa
   **steal half** its local queue (Go `runqsteal` / `runqgrab`). 4 randomized steal passes, then park.
 - **Periodic global check**: every Nth schedule (Go uses `schedtick % 61`), pull from the global
   queue first to prevent starvation.
-- **`wakep` protocol**: on enqueue (from `send` / yield / spawn), a **StoreLoad full barrier**
-  between "publish work" and "read `nmspinning` / idle-P", waking a worker **only if** an idle P
-  exists *and* `nmspinning == 0`. Keep ~one spinning worker alive so new work is grabbed without a
-  full park/unpark round-trip. **The barrier is mandatory** — getting it wrong silently loses
-  wakeups.
+- **`wakep` protocol** *(SUPERSEDED — see the D4e blockquote above for what actually landed)*: the
+  original plan was Go's enqueue-time **StoreLoad full barrier** between "publish work" and "read
+  `nmspinning` / idle-P", waking a worker **only if** an idle P exists *and* `nmspinning == 0`, with
+  ~one spinning worker kept alive. **Not adopted** — chezzi's precise core-lock-serialized `runnable`
+  atomic makes the lockless fence unnecessary; D4e gates the park on `runnable` under the core lock
+  instead (the mutex *is* the StoreLoad barrier). Kept here for the GMP-reference contrast.
 - **Park/unpark**: an idle worker releases its P, parks on a semaphore/condvar, woken by `wakep`.
 
 **TDD.** (1) Load-balance: skewed initial distribution (all fibers spawned from one fiber) still

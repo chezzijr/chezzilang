@@ -226,13 +226,33 @@ panel (Godot Gameplay / Solidity / Incident Response / SRE) — zero real findin
 `runnext` + ring, lock class B) + a shared `global` overflow queue, a capped global batch-grab
 (`globrunqget`), random-victim steal-half (`try_steal`), and a periodic global check (`tick%61`),
 replacing the D2b single shared run queue. The deadlock predicate now reads a `runnable: AtomicUsize`
-(count of fibers queued anywhere) instead of `runq.is_empty()`. Wake is **bounded-poll**
-(`cv.wait_timeout(2ms)` + `notify_all` after a batch-grab surplus), not the full Go `wakep`
-StoreLoad barrier — a correct, simpler intermediate (a lost wakeup costs ≤2ms latency, never a hang;
-mirrors B3.4's recv-cancel re-check). `yield`→global (fairness, so a CPU hog can't re-pop its own
-local forever); only the batch-grab populates locals; stealing rebalances. Lock order strictly
-B-then-A / A-then-C → no ABBA. **D4e — the SeqCst `wakep` barrier that removes the poll — is the
-remaining D4 owe.**
+(count of fibers queued anywhere) instead of `runq.is_empty()`. `yield`→global (fairness, so a CPU
+hog can't re-pop its own local forever); only the batch-grab populates locals; stealing rebalances.
+Lock order strictly B-then-A / A-then-C → no ABBA.
+**D4e (the wake protocol) has landed — as a runnable-gated park, NOT Go's `nmspinning` + SeqCst
+StoreLoad fence.** The `cv.wait_timeout(2ms)` poll is gone: `take_runnable`'s park branch now does a
+**true `cv.wait`** (no timeout, woken only by a sibling's `notify`) when `runnable == 0`, and
+**re-steals after a brief bounded `cv.wait_timeout(SPIN_BACKOFF=500µs)` backoff** when `runnable > 0`
+(work sits in a local — stealable — or in the sub-µs in-hand `Vec` window of a concurrent grab/steal;
+the backoff is cut short by any wake `notify_all`, so it adds no hot-path latency — it only stops the
+idle workers from busy-spinning on the core lock across that window). **Why not the
+Go fence:** Go needs the lockless StoreLoad barrier only because it lacks a global runnable counter;
+chezzi's `runnable` atomic is mutated under the core lock at every enqueue and read under that same
+lock right before `cv.wait`, so the **mutex *is* the StoreLoad barrier** — lost-wakeup-free by the
+standard locked-condvar argument, simpler and easier to prove, no new atomics/fence/park primitives.
+The in-hand `Vec` window (counted-but-momentarily-unreachable) is a bounded handful of `VecDeque`
+pushes by a non-blocked worker, so the spin is bounded, not a livelock; a `debug_assert!(runnable==0)`
+before `cv.wait` pins the invariant. **Deferred (optional, throughput-only):** the conditioned
+single-wake (`notify_one` + idle-count) that would avoid the `notify_all` thundering herd — pure
+efficiency, correctness-irrelevant, to add only if a benchmark justifies it (and where a `cfg(loom)`
+model would then earn its keep). +2 tests: `d4e_pingpong_no_lost_wakeup_stress` (×25-round watchdog
+lost-wakeup guard), `d4e_wake_parked_workers_from_true_sleep` (wake-from-`runnable==0`-sleep). 1386
+tests green, clippy clean, `primes_parallel=148933` both engines, goldens byte-identical, release
+stress ×4 stable. 4-agent S++ concurrency panel (Godot Gameplay / Solidity / Incident Response /
+SRE): zero Critical, zero lost-wakeup/hang; applied SRE's two Importants (the `runnable>0` busy-spin
+→ bounded `wait_timeout` backoff, killing a thundering-herd / oversubscription-starvation regression;
++ corrected a stale `runnable` doc-comment that claimed an out-of-lock mutator, on which the gate's
+soundness depends). **D4 epic complete.**
 **D5 (dirty/blocking pool) has landed** — a blocking native call (`std.io.read_file`/`write_file`,
 `std.fs.*`, `std.time.sleep_ms`) no longer pins a core worker (the **live G3 starvation is fixed**).
 At its dispatch site (`invoke_native`, gated on `mn.is_some() && native_reentry == 0`) a blocking,
@@ -252,10 +272,11 @@ a task fault (never a lost fiber / pinned `inflight`). `sleep_ms` rides the same
 `d5_*` program ×3), `cargo clippy -- -D warnings` clean, `primes_parallel=148933`, sleep+fs program
 byte-identical across `--interp`/`--parallel`/default. 2-agent S++ panel (SRE + VM/invariant): one
 Critical applied (panic-in-offload → pinned `inflight` hang; now caught + faulted), one Important
-applied (`submit` `notify_all` not `notify_one`, closing a reap-vs-wake race). **Remaining owe:** D4e
-(`wakep` barrier); D5 follow-ups — `std.request`/`std.process` classification (verify off-heap safety),
-a dedicated timer-park for `sleep_ms` (vs a pool thread per sleep), and the `recv`-inside-native-callback
-unblock. Items *not* in B3–B5 (cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are
+applied (`submit` `notify_all` not `notify_one`, closing a reap-vs-wake race). **Remaining owe:** D5
+follow-ups — `std.request`/`std.process` classification (verify off-heap safety), a dedicated
+timer-park for `sleep_ms` (vs a pool thread per sleep), and the `recv`-inside-native-callback
+unblock; then **D6 (epoll/kqueue pollset + `std.net`) is next on the ladder.** Items *not* in B3–B5
+(cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are
 documented in **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
 > **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,

@@ -554,8 +554,9 @@ const DEADLOCK_MSG: &str = "deadlock: every task in this parallel: block is bloc
 /// outcome slots, and the scheduling counts together; per-worker locals have their own locks (class
 /// **B**, taken alone). The core lock is NEVER held across a `swap_ctx` / `run_until`: the worker
 /// loop takes a fiber out, releases the lock, runs the fiber, then re-locks to settle. `cv` is the
-/// wait point — a worker with no runnable fiber parks here (bounded `wait_timeout`) until a
-/// `send`/finish/terminate or it re-steals.
+/// wait point — a worker with `runnable == 0` parks here (a true `cv.wait`, D4e) until a
+/// `send`/finish/terminate `notify`; with `runnable > 0` (work in a local) it spins-and-resteals
+/// instead of sleeping.
 ///
 /// **Deadlock** (the M:N redefinition of B3.5): `running == 0 && runnable == 0 && parked > 0 &&
 /// done < total` — every not-done fiber is parked on some channel and none is running or queued
@@ -583,10 +584,15 @@ struct LocalQ {
 /// next grab, so it is not also enforced as a hard push bound).
 const LOCAL_RING_CAP: usize = 256;
 
-/// D4c — how long an idle worker parks before waking to re-steal. Bounds the cost of a lost wakeup
-/// (work pushed to a local outside the core lock) to this latency; `notify_all` still wakes promptly
-/// on the common path, so this only fires on the rare missed-notify race.
-const STEAL_POLL: std::time::Duration = std::time::Duration::from_millis(2);
+/// D4e — the brief bounded wait a worker does when `runnable > 0` but it found no fiber to run (the
+/// work is in a sibling local it lost the steal race for, or in the sub-µs in-hand `Vec` window of a
+/// concurrent batch-grab). NOT the idle park (that is a true timeout-less `cv.wait` at `runnable ==
+/// 0`): this is a backoff that the surplus-push / wake `notify_all` cuts short, so it adds no
+/// latency on the common path. It exists only to stop (W−1) idle workers from busy-spinning on the
+/// core lock across the in-hand window (the D4e SRE review's thundering-herd / oversubscription
+/// finding) — a sleeping waiter neither hammers lock A nor starves the worker holding the surplus of
+/// CPU. Small (the window is microseconds), and a missed notify costs ≤ this, never liveness.
+const SPIN_BACKOFF: std::time::Duration = std::time::Duration::from_micros(500);
 
 /// D4d — every Nth schedule a worker checks the global queue before its own local, bounding the
 /// latency of global work while a worker is continuously fed by stealing. Go uses 61 (prime, to
@@ -618,8 +624,14 @@ struct MnSched {
     /// it lives here as an atomic so D4b can split `runq` into per-worker local rings + a global
     /// overflow (no single queue to `.len()`) while the deadlock predicate stays a cheap O(1) read.
     /// Maintained under the core lock alongside every queue mutation; read by `take_runnable` to test
-    /// "no work anywhere". A `send`/`yield`/`steal` from a *running* worker is the only out-of-core-
-    /// lock mutator that could race the predicate, and `running == 0` already excludes that case.
+    /// "no work anywhere" — for BOTH the deadlock predicate AND (D4e) the park gate. **Every
+    /// `fetch_add`/`fetch_sub` site holds the core lock** (`seed` is the sole exception — it runs
+    /// before any worker is spawned); the only out-of-lock queue movements (`try_steal`, the
+    /// batch-grab surplus push) are net-zero on this count, so they touch no atomic at all. D4e's
+    /// runnable-gated park RELIES on this discipline: a worker reads `runnable` under the core lock
+    /// immediately before `cv.wait`, so the mutex serializes every publish against that observe (it
+    /// IS the StoreLoad barrier). **Do not move a `runnable` mutation out of the core lock** — doing
+    /// so would reintroduce the lost-wakeup race Go's `nmspinning` fence exists to close.
     runnable: AtomicUsize,
     /// D4b — one run queue per worker slot (lock class **B**, taken alone — never while holding the
     /// core lock — so there is no ABBA with the core/channel locks). A worker drains its own
@@ -632,8 +644,8 @@ struct MnSched {
     /// running / runnable / parked / done). A blocking native offload transitions running→inflight;
     /// the pool's completion transitions inflight→runnable. Read by the deadlock predicate
     /// ([`MnSched::is_deadlocked`]) so an in-flight blocking call vetoes a false deadlock fire — the
-    /// fiber *will* come back runnable. Only ever mutated under the core lock (unlike `runnable`,
-    /// which a running worker may bump out-of-lock), so the predicate's read is sound.
+    /// fiber *will* come back runnable. Like `runnable`, only ever mutated under the core lock, so the
+    /// predicate's read is sound.
     inflight: AtomicUsize,
 }
 
@@ -773,9 +785,12 @@ impl MnSched {
                         }
                     }
                     // D4c — the surplus is now stealable by idle siblings, but it landed in a local
-                    // with no accompanying `notify_all` (unlike the global-queue requeue paths), so
-                    // without this wake an idle sibling would wait out the full `STEAL_POLL` before
-                    // stealing it (a throughput cliff for a quiet-after-fan-out workload). Notify
+                    // with no accompanying `notify_all` (unlike the global-queue requeue paths). The
+                    // surplus IS counted in `runnable` (the global→local move is net-zero), so under
+                    // D4e an idle sibling that races a park here observes `runnable > 0` and spins to
+                    // steal it rather than truly sleeping — this `notify_all` additionally wakes any
+                    // sibling that was already in a real `cv.wait` (parked when `runnable` was 0, e.g.
+                    // before this batch was produced) so it re-checks and steals promptly. Notify
                     // after releasing the local lock (B) — `cv` is the core's, not held here.
                     self.cv.notify_all();
                 }
@@ -796,15 +811,44 @@ impl MnSched {
                 self.cv.notify_all();
                 return Take::Stop;
             }
-            // D4c — bounded `wait_timeout`, NOT a plain `wait`: a scheduling worker grabs a batch from
-            // the global queue (or steals) and pushes the surplus into its OWN local OUTSIDE this core
-            // lock, so for the brief in-hand window those fibers are runnable-but-unstealable; a worker
-            // that parked just before could miss them. The timeout caps that to ≤STEAL_POLL latency,
-            // never liveness — on wake/timeout we re-loop and re-check the local + re-steal + re-grab.
-            // (The full Go `wakep` StoreLoad barrier that removes the poll is the deferred D4e
-            // follow-up.) The woken guard is dropped; the loop re-acquires (must release core to check
-            // the local first — lock order B-then-A).
-            let (guard, _) = self.cv.wait_timeout(c, STEAL_POLL).unwrap_or_else(|e| e.into_inner());
+            // D4e — runnable-gated park (replaces the D4c bounded `wait_timeout` poll). `runnable`
+            // counts every fiber queued in the global queue OR any worker local (batch-grab and steal
+            // move fibers between queues net-zero, so a fiber sitting in a local stays counted), PLUS
+            // the sub-microsecond in-hand `Vec` window of a concurrent grab/steal (popped from one
+            // queue, not yet pushed to the next). So `runnable > 0` means work exists somewhere
+            // reachable-now (in a local, stealable) or reachable-imminently (the in-hand window): do
+            // NOT truly sleep — we must re-loop and re-steal/re-grab. But do NOT busy-spin either: a
+            // brief `wait_timeout` backoff (`SPIN_BACKOFF`) that any wake `notify_all` cuts short, then
+            // `continue`. Busy-spinning (`drop; yield_now; continue`) was the first cut, but the D4e
+            // SRE review flagged that (W−1) idle workers in a fan-out-then-quiesce burst would then
+            // hammer core lock A across the in-hand window, and on an oversubscribed host the spinners
+            // would starve the very worker holding the surplus of CPU — *widening* the window. A
+            // sleeping waiter does neither, and the surplus-push `notify_all` (above) wakes it the
+            // instant the work lands, so there is no added latency on the common path; the timeout is
+            // only a backstop for a wake that fired just before we waited. `runnable == 0` means no
+            // fiber is queued anywhere: park for real on `cv` with NO timeout — a true sleep, woken
+            // only by a sibling's `send`/`yield`/`finish`/offload-complete `notify`.
+            //
+            // Lost-wakeup-free: every site that makes a fiber runnable does `runnable.fetch_add` while
+            // holding THIS core lock and then `notify`s; this worker reads `runnable` under the same
+            // lock immediately before it waits, and `cv.wait`/`wait_timeout` atomically
+            // releases-and-enqueues before any notifier can re-acquire the lock. So a
+            // `runnable++`/`notify` either happens-before this read (we observe `runnable > 0`, take
+            // the backoff branch, and re-steal) or after the wait is registered (the `notify` reaches
+            // us). The mutex serializes the publish against the observe — it IS the StoreLoad barrier,
+            // so Go's lockless `nmspinning` fence is unnecessary here (chezzi's precise `runnable`
+            // atomic is the reachability oracle Go lacks). Terminate/deadlock/cancel still broadcast
+            // via `notify_all`, which wakes these true sleepers to exit/unwind.
+            if self.runnable.load(Ordering::Relaxed) > 0 {
+                let (guard, _) = self.cv.wait_timeout(c, SPIN_BACKOFF).unwrap_or_else(|e| e.into_inner());
+                drop(guard);
+                continue;
+            }
+            debug_assert!(
+                c.global.is_empty(),
+                "D4e park invariant: runnable==0 but the global queue is non-empty"
+            );
+            let guard = self.cv.wait(c).unwrap_or_else(|e| e.into_inner());
             drop(guard);
         }
     }
@@ -1004,7 +1048,9 @@ impl MnSched {
     /// D5 — the blocking pool finished an offloaded native: re-enqueue the fiber (with its result
     /// stashed in `resume_native`) as `Ready` on the global queue and wake a worker. Transitions
     /// inflight→runnable under the core lock; the `notify_all` is the wakep (reusing the D4 wake
-    /// path — a lost wakeup costs ≤ the `STEAL_POLL` bound, never liveness).
+    /// path). The `runnable.fetch_add` here happens under the core lock and is followed by `notify`,
+    /// so D4e's runnable-gated park is lost-wakeup-free: a worker parking concurrently either sees
+    /// `runnable > 0` and does not sleep, or is already in `cv.wait` and is reached by this `notify`.
     fn complete_offload(&self, mut fiber: Fiber) {
         let mut c = self.lock();
         self.inflight.fetch_sub(1, Ordering::Relaxed); // inflight → runnable
@@ -7165,6 +7211,112 @@ main()
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => assert_eq!(r.expect("mixed work-steal nursery completed"), "12497500\n"),
             Err(_) => panic!("hung — D4 work-stealing/grab/wait_timeout regressed (lost wakeup or accounting bug)"),
+        }
+    }
+
+    /// D4e/stress: the lost-wakeup regression guard for the runnable-gated park. D4e removed the 2 ms
+    /// `wait_timeout` backstop — an idle worker now sleeps on `cv` INDEFINITELY when `runnable == 0`,
+    /// woken ONLY by a real `notify` from a sibling's `send`/`yield`/`finish`/offload-complete. A
+    /// single missed wakeup is no longer a 2 ms stall but a PERMANENT hang. The race is probabilistic
+    /// (the batch-grab in-hand window, the park-vs-send gap), so we REPEAT a park-heavy
+    /// consumer-first workload many rounds, each under a watchdog: any lost wakeup in any round =>
+    /// the round never completes => `recv_timeout` fires => loud failure. 300 consumers are spawned
+    /// FIRST (they all `recv`-park, driving every worker to a true `cv.wait` sleep with `runnable`
+    /// near zero), then 300 producers wake them — the exact sleep→`send_wake`→wake path D4e changed.
+    #[test]
+    fn d4e_pingpong_no_lost_wakeup_stress() {
+        let src = "\
+fn producer(ch: Channel[int], lo: int, hi: int):
+    acc := 0
+    i := lo
+    while i < hi:
+        acc += i
+        i += 1
+    ch.send(acc)
+
+fn consumer(ch: Channel[int], sink: Shared[int]):
+    v := ch.recv()
+    sink.update(fn(x): x + v)
+
+fn main():
+    ch := Channel[int]()
+    sink := Shared(0)
+    parallel:
+        for _ in 0..300:
+            spawn consumer(ch, sink)
+        for k in 0..300:
+            spawn producer(ch, k * 10, k * 10 + 10)
+    print(sink.get())
+
+main()
+";
+        // sum_{k=0}^{299} sum_{i=10k}^{10k+9} i = sum_{k=0}^{299} (100k + 45) = 100*44850 + 300*45.
+        let expected = format!("{}\n", 100 * (299 * 300 / 2) + 300 * 45);
+        for round in 0..25 {
+            let want = expected.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(run_capture_parallel(src));
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+                Ok(r) => assert_eq!(r.expect("park-heavy nursery completed"), want, "round {round}"),
+                Err(_) => panic!(
+                    "hung on round {round} — D4e runnable-gated park lost a wakeup \
+                     (an idle worker slept on cv with a runnable fiber pending)"
+                ),
+            }
+        }
+    }
+
+    /// D4e/stress: wake-from-TRUE-sleep. Distinct from the churn test above, this isolates the exact
+    /// state D4e introduced — workers asleep on `cv` with `runnable == 0` — and proves a later `send`
+    /// wakes them with the poll gone. One `slow_producer` burns CPU on a single worker while `N`
+    /// consumers `recv`-park; with nothing queued (`runnable == 0`) every OTHER worker reaches the
+    /// runnable-gated branch and does a real `cv.wait` (no 2 ms timeout to fall back on). Only when
+    /// the producer finishes its spin and fires its burst of `send`s are the sleepers woken. The join
+    /// completing with `sink == N` proves no sleeper was stranded. Watchdog 30 s.
+    #[test]
+    fn d4e_wake_parked_workers_from_true_sleep() {
+        let n = 200usize;
+        let src = format!(
+            "\
+fn slow_producer(ch: Channel[int], n: int):
+    acc := 0
+    i := 0
+    while i < 8000000:
+        acc += i
+        i += 1
+    j := 0
+    while j < n:
+        ch.send(acc + j)
+        j += 1
+
+fn consumer(ch: Channel[int], sink: Shared[int]):
+    ch.recv()
+    sink.update(fn(x): x + 1)
+
+fn main():
+    ch := Channel[int]()
+    sink := Shared(0)
+    parallel:
+        for _ in 0..{n}:
+            spawn consumer(ch, sink)
+        spawn slow_producer(ch, {n})
+    print(sink.get())
+
+main()
+"
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(&src));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => assert_eq!(r.expect("wake-from-sleep nursery completed"), format!("{n}\n")),
+            Err(_) => panic!(
+                "hung — D4e: a `send` failed to wake workers parked in the runnable-gated `cv.wait` \
+                 (lost wakeup from true sleep)"
+            ),
         }
     }
 
