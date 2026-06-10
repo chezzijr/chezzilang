@@ -908,6 +908,9 @@ impl Checker {
                 "nil" => Ty::Nil,
                 // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation).
                 "Executor" => Ty::Executor,
+                // D6 — the std.net TCP handles, non-generic (bare `Socket` / `Listener` annotations).
+                "Socket" => Ty::Socket,
+                "Listener" => Ty::Listener,
                 // A generic type parameter (`T`) or `Self`, in scope while checking a generic
                 // fn signature/body or a protocol method — checked BEFORE type names so an
                 // in-scope type parameter shadows a same-named struct/enum.
@@ -3864,6 +3867,8 @@ impl Checker {
                 "str" => Ty::Str,
                 "nil" => Ty::Nil,
                 "Executor" => Ty::Executor,
+                "Socket" => Ty::Socket,
+                "Listener" => Ty::Listener,
                 _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
                 _ if self.struct_names.contains(n) => Ty::strukt(n.clone()),
                 _ if self.enum_names.contains(n) => Ty::Enum(n.clone(), Vec::new()),
@@ -5276,6 +5281,9 @@ fn socket_method_sig(method: &str) -> Option<FnSig> {
 fn listener_method_sig(method: &str) -> Option<FnSig> {
     let (params, ret) = match method {
         "accept" => (vec![], Ty::result(Ty::Socket)),
+        // `addr()` reports the bound local address as `"host:port"` — lets a `listen(":0")` caller
+        // discover the OS-assigned port.
+        "addr" => (vec![], Ty::result(Ty::Str)),
         "close" => (vec![], Ty::Nil),
         _ => return None,
     };

@@ -16,6 +16,7 @@ pub mod wire;
 use core::{ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, Op, Program, ProtoId};
+use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use value::{GcRef, Value};
@@ -2700,6 +2701,12 @@ impl Vm {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        // D6 — `std.net.connect` / `listen` are intercepted: they allocate a `Socket`/`Listener`
+        // handle (a heap object over an `Arc`'d core), which a pure off-heap native cannot do. Run
+        // inline in the VM (the `func` placeholder in `net.rs` never executes).
+        if name == "connect" || name == "listen" {
+            return self.net_connect_or_listen(name, args, span);
+        }
         // D5 — under the M:N engine, a blocking native call (`read_file` / `sleep_ms` / `fs.*`) is
         // OFFLOADED to the dirty pool rather than run inline, so it can't pin a core worker (the G3
         // starvation). Gated on `native_reentry == 0`: a blocking native reached inside a native
@@ -3071,6 +3078,26 @@ impl Vm {
         }
         if matches!(self.heap.get(h), Obj::Executor(_)) {
             let result = self.executor_method(h, method, &args, span)?;
+            self.push(result);
+            return Ok(());
+        }
+        // D6: `Socket` / `Listener` methods operate on the fd in the `Arc`'d core and may park the
+        // fiber on the netpoller (a would-block `read`/`write`/`accept`). Dispatch off the handle, like
+        // the other core handles; gate the result-push on `poll_park` (mirrors the channel `recv` park
+        // gate just above, but routed to the poller — strictly separate from `suspend`).
+        if matches!(self.heap.get(h), Obj::Socket(_)) {
+            let result = self.socket_method(h, method, &args, span)?;
+            if self.poll_park.is_some() {
+                return Ok(()); // D6: the op `WouldBlock`ed and re-rooted the receiver itself.
+            }
+            self.push(result);
+            return Ok(());
+        }
+        if matches!(self.heap.get(h), Obj::Listener(_)) {
+            let result = self.listener_method(h, method, &args, span)?;
+            if self.poll_park.is_some() {
+                return Ok(());
+            }
             self.push(result);
             return Ok(());
         }
@@ -5147,6 +5174,263 @@ impl Vm {
             Obj::Listener(core) => Arc::clone(core),
             _ => unreachable!("listener_core on non-listener"),
         }
+    }
+
+    /// D6 — build a `Result::Ok(v)` / `Result::Err(msg)` for a socket op (mirrors `lower_native`'s
+    /// `Ok`/`Err` arms — the surface contract is `read/write/accept -> Result`).
+    fn sock_ok(&mut self, v: Value) -> Value {
+        self.alloc_enum("Result", "Ok", vec![v])
+    }
+    fn sock_err(&mut self, msg: impl Into<String>) -> Value {
+        let ev = self.alloc_str(msg.into());
+        self.alloc_enum("Result", "Err", vec![ev])
+    }
+
+    /// D6 — `std.net.connect(addr)` / `listen(addr)`: allocate a non-blocking `Socket`/`Listener`
+    /// handle (or a `Result::Err` on a bad address / bind failure). Intercepted in `invoke_native`
+    /// because it allocates a heap handle over an `Arc`'d core — a pure off-heap native can't.
+    fn net_connect_or_listen(&mut self, name: &str, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+        let addr = match args.first() {
+            Some(Value::Obj(h)) => match self.heap.get(*h) {
+                Obj::Str(s) => s.to_string(),
+                _ => return Err(self.err(format!("std.net.{name} expects an address string"), span)),
+            },
+            _ => return Err(self.err(format!("std.net.{name} expects an address string"), span)),
+        };
+        match name {
+            "connect" => match crate::native::net::connect_nonblocking(&addr) {
+                Ok(stream) => {
+                    let core = Arc::new(SocketCore { stream: Mutex::new(Some(stream)), key: core::next_poll_key() });
+                    let v = Value::Obj(self.heap.alloc(Obj::Socket(core)));
+                    Ok(self.sock_ok(v))
+                }
+                Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
+            },
+            "listen" => match crate::native::net::listen_nonblocking(&addr) {
+                Ok(listener) => {
+                    let core = Arc::new(ListenerCore { listener: Mutex::new(Some(listener)), key: core::next_poll_key() });
+                    let v = Value::Obj(self.heap.alloc(Obj::Listener(core)));
+                    Ok(self.sock_ok(v))
+                }
+                Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
+            },
+            _ => unreachable!("net_connect_or_listen on '{name}'"),
+        }
+    }
+
+    /// D6 — `Socket` methods: `read(n) -> Result[str]`, `write(s) -> Result[int]`, `close() -> nil`.
+    /// On a would-block, under the M:N engine the fiber PARKS on the netpoller (re-root the receiver,
+    /// rewind `ip` so the op re-executes on resume, set the `poll_park` sentinel — mirrors the channel
+    /// `recv` park, but routed to the poller). Off the M:N engine (top level / cooperative) there is no
+    /// fiber to park, so the op blocks the thread once (a documented v1 fallback — net targets
+    /// `--parallel`).
+    fn socket_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        match method {
+            "read" => {
+                self.arity_err("read", args, 1, span)?;
+                let n = match args.first() {
+                    Some(Value::Int(n)) => (*n).max(0) as usize,
+                    _ => return Err(self.err("read expects an int byte count".into(), span)),
+                };
+                let core = self.socket_core(h);
+                let mut buf = vec![0u8; n];
+                let attempt = {
+                    let mut guard = core.stream.lock().unwrap();
+                    let Some(stream) = guard.as_mut() else {
+                        return Ok(self.sock_err("read on a closed socket"));
+                    };
+                    match std::io::Read::read(stream, &mut buf) {
+                        Ok(got) => Ok(got),
+                        Err(e) => Err((e, stream.as_raw_fd())),
+                    }
+                };
+                match attempt {
+                    Ok(got) => {
+                        buf.truncate(got);
+                        let s = String::from_utf8_lossy(&buf).into_owned();
+                        let sv = self.alloc_str(s);
+                        Ok(self.sock_ok(sv))
+                    }
+                    Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if self.park_on_fd(h, args, core.key, fd, poller::Interest::Read) {
+                            return Ok(Value::Nil); // parked (sentinel; `poll_park` gates the push)
+                        }
+                        // No fiber to park: block on this one read, then restore non-blocking.
+                        match self.block_socket_read(&core, &mut buf) {
+                            Ok(got) => {
+                                buf.truncate(got);
+                                let s = String::from_utf8_lossy(&buf).into_owned();
+                                let sv = self.alloc_str(s);
+                                Ok(self.sock_ok(sv))
+                            }
+                            Err(e) => Ok(self.sock_err(e)),
+                        }
+                    }
+                    Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
+                }
+            }
+            "write" => {
+                self.arity_err("write", args, 1, span)?;
+                let data = match args.first() {
+                    Some(Value::Obj(sh)) => match self.heap.get(*sh) {
+                        Obj::Str(s) => s.as_bytes().to_vec(),
+                        _ => return Err(self.err("write expects a str".into(), span)),
+                    },
+                    _ => return Err(self.err("write expects a str".into(), span)),
+                };
+                let core = self.socket_core(h);
+                let attempt = {
+                    let mut guard = core.stream.lock().unwrap();
+                    let Some(stream) = guard.as_mut() else {
+                        return Ok(self.sock_err("write on a closed socket"));
+                    };
+                    match std::io::Write::write(stream, &data) {
+                        Ok(got) => Ok(got),
+                        Err(e) => Err((e, stream.as_raw_fd())),
+                    }
+                };
+                match attempt {
+                    Ok(got) => Ok(self.sock_ok(Value::Int(got as i64))),
+                    Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if self.park_on_fd(h, args, core.key, fd, poller::Interest::Write) {
+                            return Ok(Value::Nil);
+                        }
+                        match self.block_socket_write(&core, &data) {
+                            Ok(got) => Ok(self.sock_ok(Value::Int(got as i64))),
+                            Err(e) => Ok(self.sock_err(e)),
+                        }
+                    }
+                    Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
+                }
+            }
+            "close" => {
+                self.arity_err("close", args, 0, span)?;
+                let core = self.socket_core(h);
+                // Disarm any pending poller registration (a `close` racing a park) before the fd drops;
+                // a no-op in the common case (the owning fiber is running, not parked).
+                poller::deregister(core.key);
+                *core.stream.lock().unwrap() = None;
+                Ok(Value::Nil)
+            }
+            _ => Err(self.err(format!("type Socket has no method '{method}'"), span)),
+        }
+    }
+
+    /// D6 — `Listener` methods: `accept() -> Result[Socket]`, `close() -> nil`. `accept` parks on the
+    /// listening fd's readability (a pending connection) under the M:N engine, like `Socket::read`.
+    fn listener_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        match method {
+            "accept" => {
+                self.arity_err("accept", args, 0, span)?;
+                let core = self.listener_core(h);
+                let attempt = {
+                    let guard = core.listener.lock().unwrap();
+                    let Some(listener) = guard.as_ref() else {
+                        return Ok(self.sock_err("accept on a closed listener"));
+                    };
+                    match listener.accept() {
+                        Ok((stream, _peer)) => Ok(stream),
+                        Err(e) => Err((e, listener.as_raw_fd())),
+                    }
+                };
+                match attempt {
+                    Ok(stream) => Ok(self.accept_socket_value(stream)),
+                    Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if self.park_on_fd(h, args, core.key, fd, poller::Interest::Read) {
+                            return Ok(Value::Nil);
+                        }
+                        match self.block_listener_accept(&core) {
+                            Ok(stream) => Ok(self.accept_socket_value(stream)),
+                            Err(e) => Ok(self.sock_err(e)),
+                        }
+                    }
+                    Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
+                }
+            }
+            "addr" => {
+                self.arity_err("addr", args, 0, span)?;
+                let core = self.listener_core(h);
+                let addr = {
+                    let guard = core.listener.lock().unwrap();
+                    match guard.as_ref() {
+                        Some(l) => l.local_addr().map(|a| a.to_string()).map_err(|e| e.to_string()),
+                        None => Err("addr on a closed listener".to_string()),
+                    }
+                };
+                match addr {
+                    Ok(a) => {
+                        let v = self.alloc_str(a);
+                        Ok(self.sock_ok(v))
+                    }
+                    Err(e) => Ok(self.sock_err(e)),
+                }
+            }
+            "close" => {
+                self.arity_err("close", args, 0, span)?;
+                let core = self.listener_core(h);
+                poller::deregister(core.key);
+                *core.listener.lock().unwrap() = None;
+                Ok(Value::Nil)
+            }
+            _ => Err(self.err(format!("type Listener has no method '{method}'"), span)),
+        }
+    }
+
+    /// D6 — wrap an accepted `TcpStream` (set non-blocking) into a fresh `Socket` handle, as a
+    /// `Result::Ok`.
+    fn accept_socket_value(&mut self, stream: std::net::TcpStream) -> Value {
+        stream.set_nonblocking(true).ok();
+        let core = Arc::new(SocketCore { stream: Mutex::new(Some(stream)), key: core::next_poll_key() });
+        let v = Value::Obj(self.heap.alloc(Obj::Socket(core)));
+        self.sock_ok(v)
+    }
+
+    /// D6 — the M:N park half shared by every would-block socket op: under the M:N engine (and not in
+    /// a native callback, whose Rust-stack state can't be parked), restore the pre-call operand stack
+    /// (the receiver THEN its args, the exact layout `CallMethod` re-pops — unlike a 0-arg `recv` park,
+    /// a `read(n)`/`write(s)` must re-push its args too), rewind `ip` so the op re-executes on resume,
+    /// and set the `poll_park` sentinel for the worker loop to hand to the netpoller — returns `true`.
+    /// `false` off the M:N engine (the caller blocks instead).
+    fn park_on_fd(&mut self, h: GcRef, args: &[Value], key: usize, fd: std::os::fd::RawFd, interest: poller::Interest) -> bool {
+        if self.mn.is_some() && self.native_reentry == 0 {
+            self.push(Value::Obj(h)); // receiver (deeper on the stack)
+            for &a in args {
+                self.push(a); // its args, in order, back on top
+            }
+            self.frames.last_mut().unwrap().ip -= 1;
+            self.poll_park = Some(PollPark { key, fd, interest });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// D6 — the non-M:N blocking fallback: flip the fd to blocking, run the op once (so it waits on the
+    /// OS), restore non-blocking. Single thread of control off the M:N engine, so toggling the shared
+    /// fd is race-free. Returns the op's `io::Result` mapped to a `String` error.
+    fn block_socket_read(&self, core: &Arc<SocketCore>, buf: &mut [u8]) -> Result<usize, String> {
+        let mut guard = core.stream.lock().unwrap();
+        let Some(stream) = guard.as_mut() else { return Err("read on a closed socket".into()) };
+        stream.set_nonblocking(false).ok();
+        let r = std::io::Read::read(stream, buf);
+        stream.set_nonblocking(true).ok();
+        r.map_err(|e| e.to_string())
+    }
+    fn block_socket_write(&self, core: &Arc<SocketCore>, data: &[u8]) -> Result<usize, String> {
+        let mut guard = core.stream.lock().unwrap();
+        let Some(stream) = guard.as_mut() else { return Err("write on a closed socket".into()) };
+        stream.set_nonblocking(false).ok();
+        let r = std::io::Write::write(stream, data);
+        stream.set_nonblocking(true).ok();
+        r.map_err(|e| e.to_string())
+    }
+    fn block_listener_accept(&self, core: &Arc<ListenerCore>) -> Result<std::net::TcpStream, String> {
+        let guard = core.listener.lock().unwrap();
+        let Some(listener) = guard.as_ref() else { return Err("accept on a closed listener".into()) };
+        listener.set_nonblocking(false).ok();
+        let r = listener.accept().map(|(s, _)| s);
+        listener.set_nonblocking(true).ok();
+        r.map_err(|e| e.to_string())
     }
 
     /// `Channel[T]` methods (C2/C4): `send` (move-on-send, deep-copied in), `recv` (FIFO; empty =
@@ -11336,6 +11620,53 @@ main()";
         assert!(res.is_ok(), "chained relay must not false-positive: {res:?}");
         assert!(out.contains('1'), "the relayed value reached the consumer: {out:?}");
         assert!(out.contains("ok"), "the nursery joined: {out:?}");
+    }
+
+    /// D6 — single-connection loopback over `std.net` on the M:N engine: a `parallel:` runs a server
+    /// fiber (`listen`/`accept`/`read`/`write`) and a client fiber (`connect`/`write`/`read`) in one
+    /// program. A would-block `accept`/`read` parks on the netpoller and resumes on readiness, so the
+    /// round-trip completes without a thread per op. `Listener.addr()` surfaces the OS-assigned port so
+    /// the client can reach the `:0` bind. Watchdog-guarded.
+    #[test]
+    fn net_loopback_round_trip_over_parallel() {
+        let src = r#"import std.net
+
+fn serve(server: Listener) -> int!:
+    conn := server.accept()?
+    msg := conn.read(64)?
+    conn.write("echo:" + msg)?
+    conn.close()
+    server.close()
+    return Ok(0)
+
+fn client(addr: str) -> int!:
+    sock := net.connect(addr)?
+    sock.write("hello")?
+    reply := sock.read(64)?
+    print(reply)
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    server := net.listen("127.0.0.1:0")?
+    addr := server.addr()?
+    parallel:
+        spawn serve(server)
+        spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print("done")
+        Err(e): print("net error: " + e.message())
+
+main()
+"#;
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        assert!(res.is_ok(), "net round-trip must not fault: {res:?}");
+        assert!(out.contains("echo:hello"), "the client received the server's echo: {out:?}");
+        assert!(out.contains("done"), "the nursery joined and main continued: {out:?}");
+        assert!(!out.contains("net error"), "no I/O error on the happy path: {out:?}");
     }
 
     /// B3.5 — a task that finishes normally but strands a `recv`-blocked sibling (it never sent the
