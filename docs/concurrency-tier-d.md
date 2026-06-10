@@ -365,6 +365,24 @@ Goldens byte-identical.
 
 ### D5 — Dirty / blocking pool for opaque blocking native calls *(BEAM; real surface today)*
 
+> **D5 HAS LANDED (core).** `src/vm/blocking_pool.rs` (growable: spawn-on-stall, reap idle >10 s, cap
+> 512) + the offload path in `src/vm/mod.rs`: `invoke_native` intercepts an off-heap-safe blocking
+> native (`native::is_blocking` — `io.read_file`/`write_file`, all `fs.*`, `time.sleep_ms`) under the
+> M:N engine (gated `native_reentry == 0`), materializes its args into `Send` `NativeArg`s, suspends
+> the fiber (`Vm::offload` + the `paused()` push-skip), and the worker hands it (`Disp::Offload`) to
+> the pool. The pool runs it with no `Vm`/heap (`OffloadHost`), stashes the raw `NativeRet` on
+> `Fiber.resume_native`, and `complete_offload`s the fiber back (inflight→runnable + `notify_all`);
+> the resuming worker lowers + pushes the result and continues past the `Call`. `MnSched.inflight`
+> (a 4th fiber state) is folded into the deadlock predicate (`is_deadlocked`) so an in-flight blocking
+> call can't fire a false deadlock. A panic in an offloaded native is caught in the pool job and
+> faulted (never a pinned `inflight` hang). The G3 starvation is fixed (`sleep_ms` ×N ≈ max not sum);
+> a blocking native inside a native callback (`native_reentry > 0`) still runs inline; cooperative/
+> `--interp` byte-identical. **+12 tests, 2-agent S++ panel (1 Critical + 1 Important applied).**
+> **Deferred (the D5 owe):** `std.request`/`std.process` classification (verify off-heap safety
+> first); a dedicated **timer-park** for `sleep_ms` (interim: one pool thread per sleep — correct,
+> not yet scalable to 10⁴ sleepers — fold into the D6 pollset deadline); the `recv`-inside-native-
+> callback unblock (the secondary aim below — a larger change, untouched).
+
 **Goal.** A blocking native call (`std.io.read_file` / `write_file`, `std.fs.*`, `std.time.sleep_ms`)
 must not pin a core-pool worker (G3, live today). Route it to a **growable blocking pool** so the
 core pool keeps scheduling. This is also the answer to the `native_reentry` "recv inside a native

@@ -117,6 +117,18 @@ pub enum NativeRet {
     Nil,
 }
 
+/// D5 — an offloaded blocking native's already-extracted argument, in `Send` primitive form (no heap
+/// `GcRef`). The engine materializes these on the worker (heap live) before handing a blocking call
+/// to the dirty pool; the off-heap host serves them back to the native fn off-thread. The scoped
+/// blocking fns take only int / str args; float / bool are carried for completeness.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NativeArg {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+}
+
 /// The engine-agnostic context a native function operates through. Object-safe (`&mut dyn Host`):
 /// arguments are read by index (already evaluated and bounds-checked by the engine before the
 /// call), and side-effects (stdout/stderr, stdin, process/env) route through the host so they hit
@@ -168,6 +180,28 @@ impl HostError {
     pub fn arg_type(i: usize, want: &str, got: &str) -> Self {
         HostError { message: format!("argument {i} must be {want}, got {got}") }
     }
+}
+
+/// D5 — whether a native fn (by its bare member name) is a *blocking, off-heap-safe* call the M:N
+/// engine offloads to the dirty/blocking pool instead of running inline on a core worker (so a
+/// `sleep_ms`/`read_file` can't pin a worker → the live G3 starvation). "Off-heap-safe" is the
+/// contract that lets it run on a pool thread with no `Vm`: it reads only primitive args
+/// (`arg_int`/`arg_str`) and returns a primitive [`NativeRet`] — it never touches the heap, the
+/// stdout/stderr buffers, stdin, or os state during the blocking part (so [`Host`]'s I/O methods are
+/// `unreachable!` on the off-heap host). The scoped set: `std.io.read_file`/`write_file`, all of
+/// `std.fs`, and `std.time.sleep_ms`. Classified by bare name (the engine has the member name at the
+/// dispatch site); the set is distinctive across the native modules. `std.request`/`std.process`
+/// (also blocking) are deferred until their off-heap safety is verified.
+pub fn is_blocking(name: &str) -> bool {
+    matches!(
+        name,
+        // std.io (file I/O only — print/eprint/read_line touch host stdio, run inline)
+        "read_file" | "write_file"
+        // std.fs (all members are filesystem syscalls)
+        | "list_dir" | "exists" | "is_file" | "is_dir" | "size" | "glob"
+        // std.time
+        | "sleep_ms"
+    )
 }
 
 /// Helper for native functions: assert an exact argument count, else a uniform error.
@@ -319,5 +353,24 @@ mod tests {
         // user modules are never native.
         assert_eq!(native_name(&["foo".into(), "math".into()]), None);
         assert_eq!(native_name(&["std".into()]), None);
+    }
+
+    /// D5 — the blocking-fn classifier flags exactly the off-heap-safe blocking natives (the work the
+    /// dirty pool offloads): `std.io.read_file`/`write_file`, all of `std.fs`, and `std.time.sleep_ms`.
+    #[test]
+    fn is_blocking_flags_the_offloadable_set() {
+        for name in ["read_file", "write_file", "list_dir", "exists", "is_file", "is_dir", "size", "glob", "sleep_ms"] {
+            assert!(is_blocking(name), "{name} should be blocking");
+        }
+    }
+
+    /// Fast / pure / host-I/O natives must NOT be offloaded: `print`/`eprint`/`read_line` touch the
+    /// host stdio buffers (off-heap host would `unreachable!`), and `now`/`monotonic`/`format`/math are
+    /// cheap. Mislabeling a CPU/pure fn as blocking would needlessly bounce it through the pool.
+    #[test]
+    fn is_blocking_excludes_fast_and_host_io_natives() {
+        for name in ["print", "eprint", "read_line", "now", "monotonic", "format", "abs", "sqrt"] {
+            assert!(!is_blocking(name), "{name} should not be blocking");
+        }
     }
 }

@@ -6,6 +6,7 @@
 pub mod core;
 pub mod heap;
 pub mod op;
+mod blocking_pool;
 mod pool;
 pub mod value;
 pub mod wire;
@@ -226,6 +227,12 @@ struct Vm {
     /// VM-global (not part of [`FiberCtx`]): only one fiber runs at a time, so at most one suspend is
     /// pending. See [`Vm::run_scheduler`].
     suspend: Option<GcRef>,
+    /// D5 — set when a blocking native call (`is_blocking`) is reached under the M:N engine: instead
+    /// of running inline (pinning the worker), `invoke_native` records the call here and returns a
+    /// sentinel; the worker loop hands it to the dirty/blocking pool ([`Disp::Offload`]) and is freed.
+    /// Like `suspend` it is a VM-global (one fiber runs at a time) and gates the result-push at the
+    /// call site (via [`Vm::paused`]). Reset per schedule-in; never preserved across a park/offload.
+    offload: Option<OffloadReq>,
     /// Depth of native (Rust) callbacks currently on the host stack that re-enter Chezzi (operator
     /// overloads, `compare`/`hash`/`str` hooks, list HOFs, sorts, `Shared.update`, the executor
     /// drain, deferred calls). Their loop / recursion state lives on the Rust stack and cannot be
@@ -348,6 +355,11 @@ struct Fiber {
     task_index: usize,
     /// D2b — the spawning task's span, for fault/panic attribution when this fiber faults under M:N.
     span: Span,
+    /// D5 — a blocking native call offloaded to the dirty pool stashes its result here; the worker
+    /// that resumes this fiber lowers the `NativeRet` into the heap + pushes it (or re-raises the
+    /// `RuntimeError`) before continuing past the `Call`. `None` except in the brief window between a
+    /// blocking-pool completion and the fiber's next schedule-in.
+    resume_native: Option<Result<crate::native::NativeRet, RuntimeError>>,
 }
 
 // D2a — a `Fiber` now carries its own `Heap` (via `FiberCtx::heap`), and D2b parks fibers across
@@ -616,6 +628,13 @@ struct MnSched {
     /// D4c — a rotating counter mixed into the work-stealing victim choice so idle workers don't all
     /// probe the same sibling first (convoy avoidance) without per-worker RNG state.
     steal_ctr: AtomicUsize,
+    /// D5 — count of fibers currently off in the dirty/blocking pool (a 4th fiber state beyond
+    /// running / runnable / parked / done). A blocking native offload transitions running→inflight;
+    /// the pool's completion transitions inflight→runnable. Read by the deadlock predicate
+    /// ([`MnSched::is_deadlocked`]) so an in-flight blocking call vetoes a false deadlock fire — the
+    /// fiber *will* come back runnable. Only ever mutated under the core lock (unlike `runnable`,
+    /// which a running worker may bump out-of-lock), so the predicate's read is sound.
+    inflight: AtomicUsize,
 }
 
 struct SchedCore {
@@ -663,6 +682,7 @@ impl MnSched {
             runnable: AtomicUsize::new(0),
             locals: (0..nworkers.max(1)).map(|_| Mutex::new(LocalQ::new())).collect(),
             steal_ctr: AtomicUsize::new(0),
+            inflight: AtomicUsize::new(0),
         }
     }
 
@@ -771,7 +791,7 @@ impl MnSched {
             // `runnable == 0` means no fiber is queued in any local or the global. Sound because we
             // hold the core lock and `running == 0` excludes the only out-of-lock mutator (a running
             // worker's local push/steal), so no fiber can be in flight to become runnable.
-            if c.running == 0 && self.runnable.load(Ordering::Relaxed) == 0 && c.parked_n > 0 {
+            if self.is_deadlocked(&c) {
                 c.flag_deadlock(&self.deadlock_err);
                 self.cv.notify_all();
                 return Take::Stop;
@@ -934,6 +954,78 @@ impl MnSched {
     fn take_slots(&self) -> Vec<Option<TaskOutcome>> {
         std::mem::take(&mut self.lock().slots)
     }
+
+    /// The B3.5 deadlock predicate (D4a + D5): every not-done fiber is parked, with none running,
+    /// none queued anywhere (`runnable`), and **none in flight in the blocking pool** (`inflight`) —
+    /// so no `send` and no blocking-pool completion can ever arrive to wake a parked fiber. Called
+    /// under the core lock (the caller holds `c`); `running == 0` excludes the only out-of-lock
+    /// `runnable` mutator, and `inflight` is mutated only under the core lock, so both reads are
+    /// sound. The `done < total` half is guaranteed by the call site (the `done == total` terminate
+    /// check precedes this).
+    fn is_deadlocked(&self, c: &SchedCore) -> bool {
+        c.running == 0
+            && self.runnable.load(Ordering::Relaxed) == 0
+            && self.inflight.load(Ordering::Relaxed) == 0
+            && c.parked_n > 0
+    }
+
+    /// D5 — hand a fiber that hit a blocking native call to the dirty/blocking pool, freeing this
+    /// core worker. Transitions running→inflight under the core lock (so the deadlock predicate is
+    /// immediately sound: the fiber is accounted as in-flight, not vanished), then submits the call.
+    /// The pool thread runs the native off-heap ([`run_offload`]) and `complete_offload`s the fiber
+    /// back onto the run queue. Takes `&Arc<Self>` so the completion closure can hold the scheduler.
+    fn offload(self: &Arc<Self>, fiber: Fiber, req: OffloadReq) {
+        {
+            let mut c = self.lock();
+            c.running -= 1;
+            self.inflight.fetch_add(1, Ordering::Relaxed); // running → inflight
+        }
+        let sched = Arc::clone(self);
+        let OffloadReq { func, args, span } = req;
+        blocking_pool::submit(Box::new(move || {
+            // `complete_offload` MUST run on every path — if it didn't (e.g. the native panicked and
+            // unwound), `inflight` would stay pinned forever, vetoing the deadlock predicate and
+            // hanging the nursery with the fiber lost. So catch a panic here and surface it as a
+            // fault on the fiber (matching an inline native panic, which `run_one_fiber`'s
+            // `catch_unwind` also turns into a task fault) rather than letting it escape into the
+            // pool's belt-and-suspenders `catch_unwind`.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_offload(func, args)));
+            let result = match outcome {
+                Ok(Ok(nr)) => Ok(nr),
+                Ok(Err(e)) => Err(RuntimeError { message: e.message, span }),
+                Err(p) => Err(panic_to_fault(p, span)),
+            };
+            let mut fiber = fiber;
+            fiber.resume_native = Some(result);
+            sched.complete_offload(fiber);
+        }));
+    }
+
+    /// D5 — the blocking pool finished an offloaded native: re-enqueue the fiber (with its result
+    /// stashed in `resume_native`) as `Ready` on the global queue and wake a worker. Transitions
+    /// inflight→runnable under the core lock; the `notify_all` is the wakep (reusing the D4 wake
+    /// path — a lost wakeup costs ≤ the `STEAL_POLL` bound, never liveness).
+    fn complete_offload(&self, mut fiber: Fiber) {
+        let mut c = self.lock();
+        self.inflight.fetch_sub(1, Ordering::Relaxed); // inflight → runnable
+        fiber.state = FiberState::Ready;
+        c.global.push_back(fiber);
+        self.runnable.fetch_add(1, Ordering::Relaxed);
+        drop(c);
+        self.cv.notify_all();
+    }
+}
+
+/// D5 — run an offloaded blocking native off the core worker (on a blocking-pool thread, no `Vm`):
+/// serve its already-extracted primitive args through an [`OffloadHost`] and invoke it. The scoped
+/// blocking fns read only primitive args + return a primitive [`NativeRet`], so they never touch the
+/// heap / host I/O here (the off-heap host `unreachable!`s if one ever does — a misclassification).
+fn run_offload(
+    func: crate::native::NativeFn,
+    args: Vec<crate::native::NativeArg>,
+) -> Result<crate::native::NativeRet, crate::native::HostError> {
+    let mut host = OffloadHost { args };
+    func(&mut host)
 }
 
 impl SchedCore {
@@ -1091,7 +1183,7 @@ impl ReadyWorker {
             executors: worker.executors,
             ..FiberCtx::default()
         };
-        Fiber { ctx, state: FiberState::Pending(task), task_index, span }
+        Fiber { ctx, state: FiberState::Pending(task), task_index, span, resume_native: None }
     }
 }
 
@@ -1102,7 +1194,21 @@ enum Disp {
     Park(usize, Arc<ChannelCore>),
     /// D3 — the fiber exhausted its reduction budget; the worker requeues it at the tail of the global queue.
     Yield,
+    /// D5 — the fiber hit a blocking native call; the worker hands the call (and the fiber) to the
+    /// dirty/blocking pool and is freed to schedule other work. The pool re-enqueues the fiber on
+    /// completion (`MnSched::complete_offload`).
+    Offload(OffloadReq),
     Finish(TaskOutcome),
+}
+
+/// D5 — a blocking native call extracted at its dispatch site, ready to run off the core worker on
+/// the blocking pool. The args are already materialized out of the heap into `Send` primitives
+/// ([`crate::native::NativeArg`]), so the pool thread runs the native ([`OffloadHost`]) without a
+/// `Vm` / heap. `span` attributes any error the native raises.
+struct OffloadReq {
+    func: crate::native::NativeFn,
+    args: Vec<crate::native::NativeArg>,
+    span: Span,
 }
 
 impl Vm {
@@ -1127,6 +1233,7 @@ impl Vm {
             nurseries: Vec::new(),
             executors: Vec::new(),
             suspend: None,
+            offload: None,
             native_reentry: 0,
             reds: 0,           // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
             yield_now: false,  // D3
@@ -1188,7 +1295,7 @@ impl Vm {
     /// `mn.is_some()` — so the cooperative engine, where it is always false, is unchanged by
     /// construction.)
     fn paused(&self) -> bool {
-        self.suspend.is_some() || self.yield_now
+        self.suspend.is_some() || self.yield_now || self.offload.is_some()
     }
 
     /// Run `f` with the native-reentry guard raised (B1). A blocking `recv` reached while the guard
@@ -2458,7 +2565,7 @@ impl Vm {
                     }
                     self.run_proto(proto, home, Some(h), args, true, false, span)
                 }
-                Obj::Native { func, .. } => self.invoke_native(func, args, span),
+                Obj::Native { func, name } => self.invoke_native(func, &name, args, span),
                 _ => Err(self.err(format!("'{}' is not callable", self.type_name(callee)), span)),
             },
             other => Err(self.err(format!("'{}' is not callable", self.type_name(other)), span)),
@@ -2472,12 +2579,48 @@ impl Vm {
     fn invoke_native(
         &mut self,
         func: crate::native::NativeFn,
+        name: &str,
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        // D5 — under the M:N engine, a blocking native call (`read_file` / `sleep_ms` / `fs.*`) is
+        // OFFLOADED to the dirty pool rather than run inline, so it can't pin a core worker (the G3
+        // starvation). Gated on `native_reentry == 0`: a blocking native reached inside a native
+        // callback can't park the fiber (its caller's loop state is on the Rust host stack), so it
+        // falls through to inline. Record the call + extracted primitive args; the worker loop hands
+        // it to the pool ([`Disp::Offload`]) and `paused()` skips the (missing) result-push here. The
+        // result is lowered + pushed by the worker that resumes the fiber after completion.
+        if self.mn.is_some()
+            && self.native_reentry == 0
+            && crate::native::is_blocking(name)
+            && let Some(nargs) = self.extract_native_args(&args)
+        {
+            self.offload = Some(OffloadReq { func, args: nargs, span });
+            return Ok(Value::Nil); // sentinel; never pushed (the `paused()` gate at the call site)
+        }
         let mut host = VmHost { vm: self, args };
         let ret = func(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
         Ok(self.lower_native(ret))
+    }
+
+    /// D5 — materialize a blocking native's already-evaluated `Value` args into `Send` primitives so
+    /// the dirty-pool thread can run the call without the heap. Returns `None` if any arg is not a
+    /// primitive (int / float / bool / str) — the scoped blocking fns only ever take primitives, so a
+    /// non-primitive means "don't offload, run inline" (a safe fallback, never a fault).
+    fn extract_native_args(&self, args: &[Value]) -> Option<Vec<crate::native::NativeArg>> {
+        use crate::native::NativeArg as A;
+        args.iter()
+            .map(|v| match v {
+                Value::Int(n) => Some(A::Int(*n)),
+                Value::Float(f) => Some(A::Float(*f)),
+                Value::Bool(b) => Some(A::Bool(*b)),
+                Value::Obj(h) => match self.heap.get(*h) {
+                    Obj::Str(s) => Some(A::Str(s.to_string())),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
     }
 
     /// Lower a native fn's engine-neutral [`crate::native::NativeRet`] into a VM `Value`, allocating
@@ -3707,7 +3850,7 @@ impl Vm {
         let children: Vec<Fiber> = tasks
             .into_iter()
             .enumerate()
-            .map(|(i, t)| Fiber { span: t.span(), ctx: FiberCtx::default(), state: FiberState::Pending(t), task_index: i })
+            .map(|(i, t)| Fiber { span: t.span(), ctx: FiberCtx::default(), state: FiberState::Pending(t), task_index: i, resume_native: None })
             .collect();
         // D0: every child starts `Pending` ⇒ runnable, so seed `ready` with all indices in order.
         let ready = (0..children.len()).collect();
@@ -3825,6 +3968,9 @@ impl Vm {
             match self.run_one_fiber(&mut fiber, span) {
                 Disp::Park(key, core) => sched.park(key, &core, fiber),
                 Disp::Yield => sched.yield_fiber(fiber),
+                // D5 — the fiber hit a blocking native; hand it + the call to the dirty pool (frees
+                // this worker). The pool re-enqueues it on completion via `complete_offload`.
+                Disp::Offload(req) => sched.offload(fiber, req),
                 Disp::Finish(outcome) => {
                     let aborts = matches!(outcome, TaskOutcome::Fault(_) | TaskOutcome::Exit { .. });
                     sched.finish(task_index, outcome);
@@ -3845,18 +3991,44 @@ impl Vm {
     fn run_one_fiber(&mut self, fiber: &mut Fiber, span: Span) -> Disp {
         self.swap_ctx(&mut fiber.ctx);
         self.suspend = None;
+        self.offload = None;
         self.cancelled = false;
         self.pending_exit = None;
         self.reds = CONTEXT_REDS; // D3 — fresh reduction budget on every schedule-in (BEAM semantics)
         self.yield_now = false;
         let state = std::mem::replace(&mut fiber.state, FiberState::Ready);
+        // D5 — a fiber resumed after a blocking-native offload carries the pool's result. Take it now
+        // (heap is swapped in) and push it below so the suspended `Call` completes and dispatch
+        // continues past it.
+        let resume_native = fiber.resume_native.take();
         let disp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // D5 — lower + push the offloaded native's result before resuming, so the operand stack
+            // holds what the `Call` would have pushed and `run_until` continues correctly. The `Err`
+            // arm carries a fault from the pool job: either the native PANICKED (caught in the job,
+            // surfaced here — faulting the task without running its defers, exactly as an inline
+            // native panic does via `run_one_fiber`'s outer `catch_unwind`), or it returned a
+            // `HostError` (unreachable for the scoped fns — fs/io surface I/O failures as `Result`
+            // *values* and arg types are checker-guaranteed). Either way the task faults.
+            if let Some(result) = resume_native {
+                match result {
+                    Ok(nr) => {
+                        let v = self.lower_native(nr);
+                        self.push(v);
+                    }
+                    Err(rte) => return Disp::Finish(self.classify_mn_outcome(Err(rte))),
+                }
+            }
             let res = match state {
                 FiberState::Pending(task) => self.start_task(task),
                 FiberState::Ready | FiberState::Blocked => self.run_until(0),
                 FiberState::Done => unreachable!("mn_worker_loop scheduled a Done fiber"),
             };
-            if res.is_ok() && self.suspend.is_some() {
+            if res.is_ok() && self.offload.is_some() {
+                // D5 — the fiber hit a blocking native; hand it to the dirty pool. Mutually exclusive
+                // with `suspend`/`yield_now` (offload returns up via the `paused()` gate before any
+                // `recv` runs or the budget is re-checked).
+                Disp::Offload(self.offload.take().unwrap())
+            } else if res.is_ok() && self.suspend.is_some() {
                 let h = self.suspend.take().unwrap();
                 // Capture the park key + the channel `Arc` WHILE the fiber heap is live (`h` is a
                 // GcRef into it); `park` re-checks the queue through this `Arc` under the sched lock.
@@ -4060,7 +4232,7 @@ impl Vm {
     fn run_child(&mut self, i: usize) -> Result<(), RuntimeError> {
         let mut child = {
             let level = self.scheduler_stack.last_mut().expect("scheduler level present");
-            std::mem::replace(&mut level.children[i], Fiber { ctx: FiberCtx::default(), state: FiberState::Done, task_index: i, span: Span { line: 1, col: 1 } })
+            std::mem::replace(&mut level.children[i], Fiber { ctx: FiberCtx::default(), state: FiberState::Done, task_index: i, span: Span { line: 1, col: 1 }, resume_native: None })
         };
         self.swap_ctx(&mut child.ctx); // self.* = child's execution context
         self.suspend = None; // clear any prior wait before (re)running
@@ -5959,6 +6131,64 @@ impl Vm {
     }
 }
 
+/// D5 — the off-heap [`crate::native::Host`] for a blocking native run on the dirty pool (no `Vm`,
+/// no heap). It serves the pre-extracted primitive args ([`crate::native::NativeArg`]) and *panics*
+/// on any host-I/O method: the offload classifier ([`crate::native::is_blocking`]) only flags fns
+/// that read primitive args + return a primitive `NativeRet`, so reaching stdout/stderr/stdin/os here
+/// means a fn was misclassified as off-heap-safe — a bug to surface loudly, not paper over.
+struct OffloadHost {
+    args: Vec<crate::native::NativeArg>,
+}
+
+impl crate::native::Host for OffloadHost {
+    fn arg_count(&self) -> usize {
+        self.args.len()
+    }
+    fn arg_int(&mut self, i: usize) -> Result<i64, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(crate::native::NativeArg::Int(n)) => Ok(*n),
+            Some(_) => Err(crate::native::HostError::arg_type(i, "int", "other")),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_is_int(&self, i: usize) -> bool {
+        matches!(self.args.get(i), Some(crate::native::NativeArg::Int(_)))
+    }
+    fn arg_float(&mut self, i: usize) -> Result<f64, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(crate::native::NativeArg::Float(f)) => Ok(*f),
+            Some(crate::native::NativeArg::Int(n)) => Ok(*n as f64),
+            Some(_) => Err(crate::native::HostError::arg_type(i, "float", "other")),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_str(&mut self, i: usize) -> Result<String, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(crate::native::NativeArg::Str(s)) => Ok(s.clone()),
+            Some(_) => Err(crate::native::HostError::arg_type(i, "str", "other")),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn write_stdout(&mut self, _s: &str) {
+        unreachable!("offloaded blocking native must not write stdout (off-heap host)")
+    }
+    fn write_stderr(&mut self, _s: &str) {
+        unreachable!("offloaded blocking native must not write stderr (off-heap host)")
+    }
+    fn read_line(&mut self) -> Result<Option<String>, crate::native::HostError> {
+        unreachable!("offloaded blocking native must not read stdin (off-heap host)")
+    }
+    fn os_args(&self) -> Vec<String> {
+        unreachable!("offloaded blocking native must not read os args (off-heap host)")
+    }
+    fn os_env(&self, _key: &str) -> Option<String> {
+        unreachable!("offloaded blocking native must not read env (off-heap host)")
+    }
+    fn os_getcwd(&self) -> Result<String, crate::native::HostError> {
+        unreachable!("offloaded blocking native must not read cwd (off-heap host)")
+    }
+}
+
 /// The VM's [`crate::native::Host`] adapter: lets a native fn read the evaluated `Value` arguments
 /// (reaching into the heap for `str` args) and write to the captured output buffers. Holds `&mut
 /// Vm` plus the arg vector; it allocates nothing itself — the returned [`crate::native::NativeRet`]
@@ -6608,7 +6838,7 @@ mod tests {
         MnSched::new(total, 4, Arc::new(AtomicBool::new(false)), dl_err())
     }
     fn mk_fiber(task_index: usize) -> Fiber {
-        Fiber { ctx: FiberCtx::default(), state: FiberState::Ready, task_index, span: Span { line: 1, col: 1 } }
+        Fiber { ctx: FiberCtx::default(), state: FiberState::Ready, task_index, span: Span { line: 1, col: 1 }, resume_native: None }
     }
     fn empty_core() -> Arc<ChannelCore> {
         Arc::new(ChannelCore::default())
@@ -6689,6 +6919,99 @@ mod tests {
         assert_eq!(take_run(&sched).task_index, 1, "then the global queue");
         assert_eq!(sched.runnable.load(Ordering::Relaxed), 0);
         assert_eq!(sched.lock().running, 2);
+    }
+
+    /// A trivial blocking-shaped native for the offload tests: double the first int arg. Off-heap-safe
+    /// (reads only a primitive arg, returns a primitive), so it can run on an [`OffloadHost`].
+    fn double_native(h: &mut dyn crate::native::Host) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        Ok(crate::native::NativeRet::Int(h.arg_int(0)? * 2))
+    }
+
+    /// A native that panics — stands in for a misclassified blocking fn that hits an `OffloadHost`
+    /// `unreachable!`, or any panic inside an offloaded call.
+    fn panic_native(_h: &mut dyn crate::native::Host) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        panic!("boom inside offloaded native")
+    }
+
+    /// D5 — a panic inside an offloaded native must NOT lose the fiber. If the pool job lets the panic
+    /// escape, `complete_offload` never runs: `inflight` stays pinned, the fiber's slot stays empty,
+    /// and the nursery hangs forever (the deadlock predicate is vetoed by `inflight > 0`). The job
+    /// must catch the panic, surface it as a fault on the fiber, and always re-enqueue → `inflight`
+    /// returns to 0 and the resumed fiber faults like an inline native panic.
+    #[test]
+    fn offload_native_panic_still_completes_and_faults() {
+        let sched = Arc::new(mk_sched(1));
+        sched.seed(vec![mk_fiber(0)]);
+        let f0 = take_run(&sched); // running == 1
+        let req = OffloadReq { func: panic_native, args: vec![], span: Span { line: 1, col: 1 } };
+        sched.offload(f0, req);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while sched.inflight.load(Ordering::Relaxed) != 0 {
+            assert!(std::time::Instant::now() < deadline, "panic in offloaded native lost the fiber (inflight pinned → hang)");
+            std::thread::yield_now();
+        }
+        // The fiber came back runnable carrying a fault to raise on resume.
+        let f0 = match sched.take_runnable(0, 1) {
+            Take::Run(f) => f,
+            Take::Stop => panic!("fiber not requeued after panicking offload"),
+        };
+        assert!(matches!(f0.resume_native, Some(Err(_))), "panic surfaced as a fault on the fiber");
+    }
+
+    /// D5: an in-flight blocking offload must SUPPRESS the deadlock fire. The predicate is
+    /// `running==0 && runnable==0 && parked_n>0 && done<total` — but a fiber off in the blocking pool
+    /// (counted by `inflight`) is neither running, runnable, nor parked, and *will* come back runnable,
+    /// so `inflight>0` must veto the deadlock declaration (else a program that parks everyone while one
+    /// fiber blocks in `read_file` would falsely fault `deadlock`).
+    #[test]
+    fn deadlock_predicate_suppressed_by_inflight_offload() {
+        let sched = mk_sched(2);
+        let c = sched.lock();
+        // running==0, runnable==0, one parked, none done: a real deadlock with no in-flight work.
+        let mut c = c;
+        c.parked_n = 1;
+        assert!(sched.is_deadlocked(&c), "all-parked + nothing in flight = deadlock");
+        sched.inflight.fetch_add(1, Ordering::Relaxed);
+        assert!(!sched.is_deadlocked(&c), "an in-flight blocking offload vetoes the deadlock fire");
+    }
+
+    /// D5: `offload` hands a fiber to the blocking pool (running→inflight); when the pool finishes the
+    /// native it `complete_offload`s the fiber back onto the run queue (inflight→runnable) with the
+    /// raw [`NativeRet`] stashed for the worker to lower + push on resume.
+    #[test]
+    fn offload_runs_native_and_requeues_fiber_with_result() {
+        let sched = Arc::new(mk_sched(2));
+        sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+        let f0 = take_run(&sched); // running==1, runnable==1
+        assert_eq!(sched.lock().running, 1);
+
+        let req = OffloadReq {
+            func: double_native,
+            args: vec![crate::native::NativeArg::Int(21)],
+            span: Span { line: 1, col: 1 },
+        };
+        sched.offload(f0, req);
+
+        // The job runs asynchronously on the blocking pool; wait (bounded) for it to complete.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while sched.inflight.load(Ordering::Relaxed) != 0 {
+            assert!(std::time::Instant::now() < deadline, "offloaded native never completed");
+            std::thread::yield_now();
+        }
+        assert_eq!(sched.lock().running, 0, "offload freed the worker (running decremented)");
+        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "f1 still queued + f0 requeued on completion");
+
+        // The requeued fiber carries the lowered-pending native result (Int(21)*2 == Int(42)).
+        let mut found = None;
+        while let Take::Run(f) = sched.take_runnable(0, 1) {
+            if f.task_index == 0 {
+                found = Some(f);
+                break;
+            }
+        }
+        let f0 = found.expect("offloaded fiber requeued");
+        assert_eq!(f0.resume_native, Some(Ok(crate::native::NativeRet::Int(42))));
     }
 
     /// D4c: `try_steal` grabs ceil-half of the first non-empty victim's ring (from the back), leaving
@@ -6843,6 +7166,157 @@ main()
             Ok(r) => assert_eq!(r.expect("mixed work-steal nursery completed"), "12497500\n"),
             Err(_) => panic!("hung — D4 work-stealing/grab/wait_timeout regressed (lost wakeup or accounting bug)"),
         }
+    }
+
+    /// D5 — the discriminating offload proof. `N = workers * 4` fibers each `sleep_ms(150)`. Run
+    /// INLINE on the core pool, each of the `workers` threads must run 4 sleeps back-to-back → wall
+    /// clock ≥ `4 * 150 = 600 ms` regardless of core count. OFFLOADED to the dirty pool, all `N`
+    /// sleeps run concurrently → wall clock ≈ `150 ms`. Asserting `< 450 ms` (`3 * sleep`) fails on
+    /// the inline path and passes once offload is wired — and the `N ∝ workers` construction keeps
+    /// that gap on any machine (the inline path is always 4 batches). Watchdog 30 s.
+    #[test]
+    fn d5_blocking_sleeps_run_concurrently_not_serialized() {
+        let workers = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1).max(1);
+        let n = workers * 4;
+        let src = format!(
+            "\
+import std.time
+
+fn sleeper():
+    time.sleep_ms(150)
+
+fn main():
+    parallel:
+        for _ in 0..{n}:
+            spawn sleeper()
+    print(\"done\")
+
+main()
+"
+        );
+        let entry = write_temp_chz("d5_sleeps", &src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let out = run_file_parallel(&run_entry, crate::native::HostConfig::default());
+            let _ = tx.send((out, start.elapsed()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok(((out, _err, res, _code), elapsed)) => {
+                assert!(res.is_ok(), "sleeper nursery faulted: {res:?}");
+                assert_eq!(out, "done\n");
+                assert!(
+                    elapsed < std::time::Duration::from_millis(450),
+                    "{n} sleep_ms(150) fibers took {elapsed:?} — blocking calls serialized on the core pool \
+                     instead of offloading to the dirty pool (G3 starvation)"
+                );
+            }
+            Err(_) => panic!("hung — D5 offload/complete regressed (lost wakeup or inflight accounting bug)"),
+        }
+    }
+
+    /// D5 — a blocking *filesystem* native (`fs.exists`, returns a `bool`) is offloaded, runs off the
+    /// core worker, and its result is lowered + pushed on resume so execution continues correctly
+    /// past the call. `N` fibers each check a real temp file and bump a `Shared` — the join sum must
+    /// be exactly `N` (every offloaded call returned `true` and resumed into the `if`). Guards the
+    /// resume-continues-past-the-call + bool-lowering path. Watchdog 30 s.
+    #[test]
+    fn d5_blocking_fs_calls_offload_and_resume_correctly() {
+        let path = std::env::temp_dir().join(format!("chezzi_d5_exists_{}.txt", std::process::id()));
+        std::fs::write(&path, b"x").expect("write temp file");
+        let path_str = path.to_str().expect("utf8 temp path").to_string();
+        let n = 64usize;
+        let src = format!(
+            "\
+import std.fs
+
+fn checker(sink: Shared[int], path: str):
+    if fs.exists(path):
+        sink.update(fn(x): x + 1)
+
+fn main():
+    sink := Shared(0)
+    parallel:
+        for _ in 0..{n}:
+            spawn checker(sink, \"{path_str}\")
+    print(sink.get())
+
+main()
+"
+        );
+        let entry = write_temp_chz("d5_fs", &src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok((out, _err, res, _code)) => {
+                assert!(res.is_ok(), "fs.exists nursery faulted: {res:?}");
+                assert_eq!(out, format!("{n}\n"));
+            }
+            Err(_) => panic!("hung — D5 fs offload/resume regressed"),
+        }
+    }
+
+    /// D5 — a blocking native reached *inside a native callback* (here `time.sleep_ms` inside the
+    /// per-element fn of `list.map`, which runs under the `native_reentry` guard) must NOT be
+    /// offloaded: the callback's loop state lives on the Rust host stack and cannot be parked into a
+    /// fiber. The offload is gated on `native_reentry == 0`, so it falls back to inline execution and
+    /// the map completes correctly (no fault, no corruption). Guards the gate. Watchdog 30 s.
+    #[test]
+    fn d5_blocking_native_in_callback_runs_inline() {
+        let src = "\
+import std.time
+
+fn dbl(x: int) -> int:
+    time.sleep_ms(1)
+    return x * 2
+
+fn work(sink: Shared[int]):
+    ys := [1, 2, 3].map(dbl)
+    sink.update(fn(x): x + ys[0] + ys[1] + ys[2])
+
+fn main():
+    sink := Shared(0)
+    parallel:
+        spawn work(sink)
+    print(sink.get())
+
+main()
+";
+        let entry = write_temp_chz("d5_callback", src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok((out, _err, res, _code)) => {
+                assert!(res.is_ok(), "in-callback nursery faulted: {res:?}");
+                assert_eq!(out, "12\n");
+            }
+            Err(_) => panic!("hung — D5 native_reentry gate regressed (offloaded an in-callback blocking native)"),
+        }
+    }
+
+    /// D5 test helper: write a Chezzi source to a uniquely-named temp `.chz` file and return its path
+    /// (so `run_file_parallel` resolves `import std.*` through the real module graph, unlike
+    /// `compile_module_standalone`). The caller removes it after the run.
+    fn write_temp_chz(tag: &str, src: &str) -> std::path::PathBuf {
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("chezzi_{tag}_{}_{seq}.chz", std::process::id()));
+        std::fs::write(&path, src).expect("write temp .chz");
+        path
     }
 
     /// D3/the discriminating fairness test. 64 CPU "hog" fibers (≫ the core-sized worker pool) each

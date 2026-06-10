@@ -232,10 +232,31 @@ StoreLoad barrier — a correct, simpler intermediate (a lost wakeup costs ≤2m
 mirrors B3.4's recv-cancel re-check). `yield`→global (fairness, so a CPU hog can't re-pop its own
 local forever); only the batch-grab populates locals; stealing rebalances. Lock order strictly
 B-then-A / A-then-C → no ABBA. **D4e — the SeqCst `wakep` barrier that removes the poll — is the
-remaining D4 owe; D5 (dirty/blocking pool for blocking native calls, fixes the live G3 starvation)
-is next on the ladder.** Items *not* in B3–B5 (cross-nursery wakeups, recv-in-native-callback,
-`Channel.close()`) are documented in **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B
-breakdown: §9.
+remaining D4 owe.**
+**D5 (dirty/blocking pool) has landed** — a blocking native call (`std.io.read_file`/`write_file`,
+`std.fs.*`, `std.time.sleep_ms`) no longer pins a core worker (the **live G3 starvation is fixed**).
+At its dispatch site (`invoke_native`, gated on `mn.is_some() && native_reentry == 0`) a blocking,
+*off-heap-safe* native (`native::is_blocking`) is intercepted: its args are materialized into `Send`
+primitives (`NativeArg`), the fiber suspends like a `recv`-park (`Vm::offload` + the `paused()`
+push-skip gate), and the worker hands it (`Disp::Offload`) to a **growable blocking pool**
+(`src/vm/blocking_pool.rs`: spawn-on-stall, reap idle past 10 s, cap 512) that runs the native with no
+`Vm`/heap (`OffloadHost`, host-I/O methods `unreachable!`). On completion the pool stashes the raw
+`NativeRet` on the fiber and `complete_offload`s it back onto the global queue + `notify_all`; the
+resuming worker lowers + pushes the result and continues past the `Call`. A 4th fiber state,
+`MnSched.inflight`, is added to the deadlock predicate (`is_deadlocked`) so an in-flight blocking call
+vetoes a false deadlock fire. A panic in an offloaded native is caught in the pool job and surfaced as
+a task fault (never a lost fiber / pinned `inflight`). `sleep_ms` rides the same pool (so `sleep_ms`
+×N runs concurrently, ≈ max not sum); a blocking native reached *inside a native callback*
+(`native_reentry > 0`) still runs inline. Cooperative/`--interp` byte-identical (offload is M:N-only).
+**1384 tests** green (+12: `is_blocking` ×2, `blocking_pool` ×4, `offload`/`is_deadlocked`/panic ×3,
+`d5_*` program ×3), `cargo clippy -- -D warnings` clean, `primes_parallel=148933`, sleep+fs program
+byte-identical across `--interp`/`--parallel`/default. 2-agent S++ panel (SRE + VM/invariant): one
+Critical applied (panic-in-offload → pinned `inflight` hang; now caught + faulted), one Important
+applied (`submit` `notify_all` not `notify_one`, closing a reap-vs-wake race). **Remaining owe:** D4e
+(`wakep` barrier); D5 follow-ups — `std.request`/`std.process` classification (verify off-heap safety),
+a dedicated timer-park for `sleep_ms` (vs a pool thread per sleep), and the `recv`-inside-native-callback
+unblock. Items *not* in B3–B5 (cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are
+documented in **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
 > **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,
 > not a TODO.** The interpreter stays frozen at the **sequential concurrency subset** and serves as
