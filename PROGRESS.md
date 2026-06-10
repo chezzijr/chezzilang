@@ -295,9 +295,42 @@ moves the suspendable HOFs into chezzi source (`std/iter.chz`, like BEAM's `Enum
 park: a chezzi-defined HOF with a `recv` in its closure suspends fine under `--parallel`; only native
 Rust frames break the snapshot chain), Path C Go-`handoffp`-demotes the fiber to a thread for the
 intrinsically-native islands (`Shared.update`'s lock, hash/compare/str hooks, fast `sort`), Path B
-stackful fibers rejected. Not a D6 prerequisite. Then **D6 (epoll/kqueue pollset + `std.net`) is next
-on the ladder.** Items *not* in B3–B5
-(cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are
+stackful fibers rejected. Not a D6 prerequisite.
+**D6a (netpoller + non-blocking `std.net` TCP surface) has landed** — the epoll/kqueue netpoller
+(`src/vm/poller.rs`, via the `polling` crate: one process-wide poll thread + an fd→parked-fiber
+registry) turns a would-block socket op into a cheap fiber-park instead of a pinned worker. `std.net`
+adds `connect`/`listen`/`accept`/`read`/`write`/`close`/`addr` over a new heap object kind
+`Obj::Socket(Arc<SocketCore>)` / `Obj::Listener(Arc<ListenerCore>)` — structurally a `Channel` (an
+`Arc`'d core outside every heap, a `WireValue` arm so a handle crosses to a spawned fiber, GC tracing
+that roots nothing). Sockets are **non-blocking**; on `WouldBlock` the op rewinds `ip` + re-roots its
+receiver/args (mirroring the `recv`-park, but re-pushing args too) and sets a new `Disp::PollPark`,
+which `MnSched::poll_park_offload` accounts as **`inflight`** (running→inflight) before registering fd
+interest. The poll thread injects the fiber back on OS readiness via the **existing**
+`complete_offload` (inflight→runnable + `notify_all`) — so the op re-runs and the deadlock predicate is
+unchanged (an in-flight socket op vetoes a false deadlock; a lone `accept`-parked server with no client
+correctly never self-terminates, Go-identical). `connect`/`listen` are intercepted in `invoke_native`
+(they allocate a heap handle, not an off-heap native); `read`/`write`/`accept`/`close`/`addr` dispatch
+inline like `channel_method`. The checker gains `Ty::Socket`/`Ty::Listener` (sendable, non-generic,
+the runtime↔checker↔native lockstep maintained). **Headline:** an echo server services **100
+connections ≫ core workers** in one `parallel:` (`net_echo_server_services_more_conns_than_workers`)
+and `examples/echo_server.chz` runs; without the poller the bounded pool would starve. fd lifecycle is
+delete-before-drop on every path (`close` de-registers before dropping the stream; `Option<TcpStream>`
+makes use-after-close a clean fault). **2-agent S++ review panel (Security Engineer + Code Reviewer):
+one Critical applied** — two fibers sharing one socket `Arc` and both reaching a would-block op would
+overwrite the per-fd poller registration (drop the first fiber + leak `inflight`) and double-`add` the
+fd (`EEXIST`-panic the poll thread); now a per-`SocketCore` `in_flight` guard (set on park, cleared by
+the poller on inject so the owner can re-park) makes a concurrent shared-socket op fault cleanly. **Two
+Importants applied** — the non-`--parallel` would-block path now fails loud (`Result::Err`, net needs
+`--parallel`) instead of blocking the only thread (a silent hang that also defeated the cooperative
+deadlock detector), and `read(n)` caps its buffer at 16 MiB (`MAX_SOCKET_READ`) against a
+caller-controlled OOM. **1404 tests green** (+11: socket core ×1, poller unit ×4, `poll_park_offload`
+×1, `net.rs` helpers ×3, loopback round-trip ×1, echo-server ×1), `cargo clippy` clean,
+`primes_parallel=148933` (VM + `--parallel`), all `--parallel` goldens byte-identical.
+**D6b (small follow-up) is next:** fold the `sleep_ms` timer deadline into the poll timeout; wire the
+B3.4 cancel/fault path to drain the poller registry so a faulting sibling aborts an `accept`/`read`-
+parked fiber (today that **hangs the nursery join** — a documented hard gate on "net production-ready",
+`src/vm/poller.rs` module docs); and a true non-blocking `connect` parked on writability. Items *not*
+in B3–B5 (cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are
 documented in **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
 > **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,

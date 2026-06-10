@@ -16,8 +16,13 @@ when `runnable > 0`. **D4e
 deliberately did NOT adopt Go's `nmspinning` + SeqCst StoreLoad fence** — chezzi already maintains a
 precise core-lock-serialized `runnable` atomic (the reachability oracle Go lacks, which is the whole
 reason Go needs the lockless fence), so the core mutex *is* the StoreLoad barrier and a simpler,
-easier-to-prove gate suffices (see the D4e section below). **D5 (dirty/blocking pool) has landed; D6
-(epoll/kqueue pollset + `std.net`) is next on the ladder.**
+easier-to-prove gate suffices (see the D4e section below). **D5 (dirty/blocking pool) has landed.
+D6a (the netpoller + non-blocking `std.net` TCP surface) has landed** — an epoll/kqueue poll thread
+(`src/vm/poller.rs`, `polling` crate) parks a would-block socket op as `inflight` and injects it back
+via `complete_offload`; `Socket`/`Listener` are `Channel`-shaped `Arc`-core heap handles. **D6b (the
+small follow-up) is what remains: timer-into-poll fold, cancel/fault draining the poller registry (the
+one real gap — today a faulting sibling hangs a nursery with a poller-parked fiber), and non-blocking
+`connect`.**
 
 ## TL;DR
 
@@ -531,7 +536,27 @@ pursued unless chezzi adopts Go/BEAM-grade uniformity as a core goal.
 `--parallel` test that `recv`s inside the closure. (2) Decide the builtin-method fate (keep fast vs
 dispatch-to-stdlib). (3) Path C only if real programs hit `update`/hooks/fast-`sort`. **B never.**
 
-### D6 — epoll / kqueue pollset + minimal `std.net` (TCP) *(Go netpoller)*
+### D6 — epoll / kqueue pollset + minimal `std.net` (TCP) *(Go netpoller)* — D6a ✅ LANDED
+
+> **Status: D6a LANDED.** The pollset (`src/vm/poller.rs`, `polling` crate: one poll thread + an
+> fd→parked-fiber registry) and the full non-blocking `std.net` surface
+> (`connect`/`listen`/`accept`/`read`/`write`/`close`/`addr`) ship. Sockets are `Channel`-shaped heap
+> handles — `Obj::Socket(Arc<SocketCore>)` / `Obj::Listener(Arc<ListenerCore>)`, a `WireValue` arm so a
+> handle crosses to a spawned fiber, GC-trace-nothing. A would-block op rewinds `ip` + re-roots
+> receiver/args, sets `Disp::PollPark`; `MnSched::poll_park_offload` accounts it as **`inflight`**
+> (reusing D5's counter → the deadlock predicate is unchanged) and registers fd interest; the poll
+> thread injects it back via the existing `complete_offload` on readiness, so the op re-runs. A
+> per-`SocketCore` `in_flight` guard rejects a second concurrent op on a shared socket (oneshot epoll =
+> one registration per fd) with a clean fault instead of a registry-corrupting double-`add`/overwrite
+> (review Critical). Off `--parallel`, a would-block op fails loud (`Result::Err`) rather than blocking
+> the only thread. **Headline:** `examples/echo_server.chz` + `net_echo_server_services_more_conns_than_workers`
+> service **100 conns ≫ core workers** in one `parallel:`. 1404 tests green, clippy clean,
+> `primes_parallel=148933` both engines, goldens byte-identical. 2-agent S++ panel; Critical + both
+> Importants applied. **D6b remains:** fold the `sleep_ms` timer into the poll timeout; drain the poller
+> registry on cancel/fault (today a faulting sibling **hangs a nursery** with a poller-parked fiber —
+> the one real gap, `src/vm/poller.rs` module docs); true non-blocking `connect` parked on writability;
+> per-connection `spawn` handler (needs M:N spawn-after-join, currently the handler runs inline in the
+> acceptor). The plan below is the original full-D6 spec; D6a is its socket-surface + park/inject core.
 
 **Goal.** Cheap *massive* socket concurrency (10 k connections) without a thread per connection.
 Build the pollset **and** the socket surface that justifies it (regular files stay on D5's blocking
