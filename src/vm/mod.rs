@@ -11669,6 +11669,58 @@ main()
         assert!(!out.contains("net error"), "no I/O error on the happy path: {out:?}");
     }
 
+    /// D6 — the headline netpoller test: an echo server services **far more connections than there are
+    /// workers**, without a thread per connection. One acceptor fiber + N=100 client fibers run in a
+    /// single `parallel:` over a core-sized pool (100 ≫ cores). Every client parks on its `read` and
+    /// the acceptor parks on each `accept`/`read` — on the netpoller, not a pinned worker — so all 100
+    /// round-trips complete. Without the poller (thread-per-park) the bounded pool would starve and the
+    /// watchdog would fire. (N stays under the TCP backlog so the v1 *blocking* connect never pins a
+    /// worker waiting for backlog room — non-blocking connect is deferred to D6b; the per-connection
+    /// handler runs inline in the acceptor because M:N's fixed task `total` has no spawn-after-join.)
+    #[test]
+    fn net_echo_server_services_more_conns_than_workers() {
+        let src = r#"import std.net
+
+fn acceptor(server: Listener, n: int) -> int!:
+    for _ in 0..n:
+        conn := server.accept()?
+        msg := conn.read(64)?
+        conn.write("echo:" + msg)?
+        conn.close()
+    server.close()
+    return Ok(0)
+
+fn client(addr: str) -> int!:
+    sock := net.connect(addr)?
+    sock.write("ping")?
+    reply := sock.read(64)?
+    sock.close()
+    if reply == "echo:ping":
+        return Ok(1)
+    return Err("bad reply: " + reply)
+
+fn run(n: int) -> int!:
+    server := net.listen("127.0.0.1:0")?
+    addr := server.addr()?
+    parallel:
+        spawn acceptor(server, n)
+        for _ in 0..n:
+            spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run(100):
+        Ok(_): print("all served")
+        Err(e): print("error: " + e.message())
+
+main()
+"#;
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        assert!(res.is_ok(), "100-conn echo server must not fault: {res:?}");
+        assert!(out.contains("all served"), "every connection was serviced + the nursery joined: {out:?}");
+        assert!(!out.contains("error"), "no client saw a bad echo: {out:?}");
+    }
+
     /// B3.5 — a task that finishes normally but strands a `recv`-blocked sibling (it never sent the
     /// channel the sibling waits on) is a deadlock. Exercises the `task_finished` `live--` path:
     /// dropping the finished task from the live count makes `blocked == live`, so the survivor faults.

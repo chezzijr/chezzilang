@@ -1,0 +1,45 @@
+# examples/echo_server.chz — a tiny TCP echo server on the --parallel netpoller (D6).
+#
+# One `parallel:` runs an acceptor fiber that serves N connections (reading a line and echoing it
+# back with an "echo:" prefix) plus N client fibers that each connect, ping, and read the reply.
+# All N+1 fibers multiplex over a core-sized worker pool: a would-block accept/read parks the fiber
+# on the epoll/kqueue netpoller instead of pinning a thread, so #connections >> #workers.
+#
+# net sockets are non-blocking and park on the M:N scheduler, so this MUST run on the --parallel
+# engine (the cooperative oracle has no fibers to park):
+#
+#   chezzi run --parallel examples/echo_server.chz
+
+import std.net
+
+fn acceptor(server: Listener, n: int) -> int!:
+    for _ in 0..n:
+        conn := server.accept()?
+        line := conn.read(64)?
+        conn.write("echo:" + line)?
+        conn.close()
+    server.close()
+    return Ok(0)
+
+fn client(addr: str) -> int!:
+    sock := net.connect(addr)?
+    sock.write("ping")?
+    reply := sock.read(64)?
+    sock.close()
+    return Ok(0)
+
+fn run(n: int) -> int!:
+    server := net.listen("127.0.0.1:0")?
+    addr := server.addr()?
+    parallel:
+        spawn acceptor(server, n)
+        for _ in 0..n:
+            spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run(50):
+        Ok(_): print("echo server handled 50 connections")
+        Err(e): print("error: " + e.message())
+
+main()
