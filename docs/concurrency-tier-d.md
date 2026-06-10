@@ -5,7 +5,9 @@ Companion to [`concurrency.md` §10](concurrency.md) (the design) the way
 Tier-D is and *why*; this file is the *how* — the phase ladder **D0…D6**, each independently
 TDD-able, plus the **Go-vs-BEAM borrow ledger** so the split is not relitigated.
 
-**Status:** broken down, not yet started. **D0 is next.**
+**Status:** D0, D1, D2 (D2a + D2b) landed — the `--parallel` engine is now a true M:N scheduler
+(lightweight fibers parking on `recv`, not thread-per-task). **D3 (reduction-counting preemption) is
+next.**
 
 ## TL;DR
 
@@ -166,8 +168,38 @@ FIFO pool still farming one fiber per worker** (no new scheduler yet) so D1 is o
 except faster; the new loop is D2. **Reuse:** `swap_ctx`, `to_wire` / `from_wire` (`src/vm/wire.rs`),
 `Arc<Program>`, `module_objs`, `map_global_value`.
 
-### D2 — GMP run queues + unified M:N scheduler loop *(no stealing yet)*
+### D2 — GMP run queues + unified M:N scheduler loop *(no stealing yet)* — ✅ LANDED (D2a + D2b)
 
+> **Status: D2b LANDED.** The `--parallel` engine is now an M:N scheduler. `run_mn_nursery` replaces
+> `run_parallel_nursery`: each task is prepared (`prepare_worker` → `ReadyWorker::into_fiber`) into a
+> lightweight **`Fiber`** (own heap + per-task `out`/`stderr`/`module_objs`/`module_faulted`/`executors`
+> in `FiberCtx`, the D2a foundation) and seeded onto a **single shared per-nursery run queue**
+> (`MnSched`, one `Mutex<SchedCore>` + `Condvar`). Workers are thin host **shells** (`spawn_shell`);
+> `mn_worker_loop` (the cross-thread generalization of cooperative `run_child`) swaps a fiber's ctx in,
+> runs `start_task`/`run_until(0)`, and on an empty `recv` **parks** it (reusing the cooperative
+> suspend/rewind-`ip` mechanism, filed into the channel's wait set keyed by `ChannelCore` ptr) then
+> grabs the next fiber — no OS-thread blocking. `send` (`MnSched::send_wake`) enqueues the message AND
+> re-queues parked waiters **atomically under the sched lock**; `park` re-checks the queue + cancel
+> flag under that same lock to close the check-then-park **lost-wakeup gap** (lock order is
+> core-OUTER / channel-`q`-INNER everywhere → no ABBA). **Deviations from the plan below, each
+> verified:** (1) **one shared run queue**, not per-worker local rings + `runnext` + global overflow —
+> rings without work-stealing are pointless and harmful, so both are deferred together to D4. (2) The
+> deadlock detector is **not** B3.5's barrier-confirm `DeadlockWatch` (retired) but the exact predicate
+> `running==0 && runq empty && parked>0 && done<total`, race-free under the single coordinator. (3) The
+> joining thread runs an **inline shell that alone drains the whole run queue** (decision B), so
+> farmed helper shells are **fire-and-forget — never joined**; the join's liveness never depends on a
+> bounded pool resource, which is what prevents the nested/concurrent **pool-exhaustion join hang** (a
+> review-panel Critical). Decision-F flush + `Exit`-over-`Fault` precedence are factored into
+> `reduce_task_slots` (shared with the legacy `Executor`-drain `run_workers_on_pool`, which keeps the
+> per-task-`Vm` model — its `recv`-on-empty faults immediately, as it always did). Headline: 1000
+> consumers + 1000 producers finish in ~0.02 s (would starve on the old engine). **1361 tests** green
+> (5× full-suite + 60× the defer/cancel race + 10× headline), `cargo clippy` clean,
+> `primes_parallel=148933` both engines, all `--parallel` goldens byte-identical; 4-agent S++ review
+> panel + cold pass, two Criticals fixed (the pool-exhaustion hang above + a `defer`-on-cancel test
+> race: a sibling fault could trip cancel before a sibling registered its `defer`, so the test was
+> synchronized with a start-token — matching the Go semantic that an unregistered defer doesn't run).
+> **D3 is next.**
+>
 > **Status: D1's deferred heap-into-`FiberCtx` half LANDED (D2a).** `FiberCtx` now carries
 > `heap: Option<Heap>`; `swap_ctx` swaps it **only for M:N fibers** (`Some`), while cooperative
 > fibers carry `None` and keep aliasing the single `Vm::heap` (decision A — share-by-ref), so the

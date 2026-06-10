@@ -14,8 +14,7 @@ use core::{ChannelCore, ExecutorCore, SharedCore};
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, Op, Program, ProtoId};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
 use value::{GcRef, Value};
 use wire::WireValue;
 
@@ -163,6 +162,13 @@ impl PendingCall {
             .chain(args.iter())
             .filter_map(|v| if let Value::Obj(h) = v { Some(*h) } else { None })
     }
+
+    /// The spawning span of this task (D2b — carried onto the fiber for fault attribution).
+    fn span(&self) -> Span {
+        match self {
+            PendingCall::Call { span, .. } | PendingCall::Method { span, .. } => *span,
+        }
+    }
 }
 
 struct Vm {
@@ -241,13 +247,6 @@ struct Vm {
     /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
     /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
     cancelled: bool,
-    /// B3.5: the deadlock watch of the `parallel:` nursery this worker runs under (`--parallel`
-    /// only; cloned in by [`Vm::run_parallel_nursery`], one fresh watch per nursery). A blocking
-    /// `recv` registers as parked here and runs the barrier-confirm detector; `send`/`task_finished`
-    /// report progress. `None` on the cooperative engine (it has its own scheduler-level detector)
-    /// and on the top-level VM (a top-level empty `recv` under `--parallel` has no sibling that
-    /// could ever send, so it faults immediately rather than blocking — see `channel_method`).
-    deadlock: Option<Arc<DeadlockWatch>>,
     /// D1 — on a `--parallel` **worker** VM, the read-only [`ModuleSnapshot`] of the parent's module
     /// graph that this worker faults into its own heap lazily, one module at a time, on first global
     /// access ([`Vm::fault_module`]). `None` on the top-level VM and the cooperative engine (which
@@ -264,6 +263,11 @@ struct Vm {
     /// (module globals are frozen under `--parallel`, decision G1), so one build serves the whole
     /// run. A worker reuses its `module_snapshot` instead of this (see [`Vm::ensure_snapshot`]).
     snapshot_memo: Option<Arc<ModuleSnapshot>>,
+    /// D2b — set on an M:N **worker shell** to the scheduler of the `parallel:` nursery it is draining.
+    /// `Some` flips the `recv`/`send` arms onto the park/wake protocol ([`MnSched`]) instead of the
+    /// legacy condvar-block; `None` on the cooperative engine, the top-level VM, and a prepared task
+    /// fiber's heap-only worker. Cloned onto each shell at enlistment ([`Vm::run_mn_nursery`]).
+    mn: Option<Arc<MnSched>>,
 }
 
 /// A fiber's saved execution context (B1): every `Vm` field that `run_until` reads or writes keyed by
@@ -283,10 +287,24 @@ struct FiberCtx {
     /// D2a — an M:N fiber carries its OWN heap (share-nothing): `swap_ctx` swaps it with the host
     /// `Vm::heap` when this fiber schedules in, and back out when it parks. `None` for cooperative
     /// fibers, which all alias the single `Vm::heap` (decision A — share-by-ref), so their swap
-    /// leaves the heap untouched and the cooperative engine stays byte-identical. No M:N call site
-    /// sets `Some` yet — the FIFO pool runs one fiber per worker (D1); a parked fiber that must carry
-    /// its heap off the worker arrives with the run-queue + park-on-`recv` engine in D2b.
+    /// leaves the heap untouched and the cooperative engine stays byte-identical. The `Some`/`None`
+    /// discriminant also gates every D2b side-state swap below.
     heap: Option<Heap>,
+    /// D2b — per-task output buffers (Decision F: each task's stdout/stderr flushes in task order at
+    /// join, never interleaved live). An M:N worker shell runs many fibers in turn, so these MUST
+    /// travel with the fiber rather than living on the shell `Vm`. Swapped only for M:N fibers
+    /// (`heap.is_some()`); a cooperative fiber keeps `String::new()` and aliases the shell's buffers.
+    out: String,
+    stderr: String,
+    /// D2b — the fiber's module-namespace objects + lazy-fault flags (D1). Each is a `GcRef` into the
+    /// fiber's OWN heap, which travels via `heap` above; a `GcRef` is only valid against the heap it
+    /// was allocated in, so these roots MUST swap atomically with that heap. Empty for cooperative
+    /// fibers (they alias the shell's `module_objs`/`module_faulted`).
+    module_objs: Vec<GcRef>,
+    module_faulted: Vec<bool>,
+    /// D2b — the fiber's `Executor` handles (GC roots into its own heap; same heap-keyed argument as
+    /// `module_objs`). Empty for cooperative fibers.
+    executors: Vec<GcRef>,
 }
 
 /// Scheduling state of a child fiber within a [`Nursery`].
@@ -308,6 +326,11 @@ enum FiberState {
 struct Fiber {
     ctx: FiberCtx,
     state: FiberState,
+    /// D2b — the fiber's stable Decision-F outcome slot (its index in the nursery's task order),
+    /// assigned at nursery build. Unused by the cooperative engine (it carries the child index).
+    task_index: usize,
+    /// D2b — the spawning task's span, for fault/panic attribution when this fiber faults under M:N.
+    span: Span,
 }
 
 // D2a — a `Fiber` now carries its own `Heap` (via `FiberCtx::heap`), and D2b parks fibers across
@@ -484,64 +507,218 @@ impl Drop for DoneSignal {
 }
 
 /// The `deadlock` fault message, shared by the cooperative scheduler ([`Vm::run_scheduler`]) and
-/// the `--parallel` nursery-local detector (B3.5) so the error is byte-identical across engines.
+/// the `--parallel` M:N detector ([`MnSched::take_runnable`]) so the error is byte-identical across
+/// engines.
 const DEADLOCK_MSG: &str = "deadlock: every task in this parallel: block is blocked on an empty \
      channel recv() and no sibling can send — the nursery cannot progress";
 
-/// B3.5 — per-`--parallel`-nursery deadlock watch, cloned into every worker `Vm` like the B3.4
-/// `cancel` flag. Detects the nursery-local all-blocked deadlock that B3.4's condvar `recv` would
-/// otherwise hang on (decision D, `docs/concurrency-b3.md`). Holds no `GcRef`, so it is not a GC
-/// root.
+/// D2b — the M:N scheduler shared by every worker enlisted on one `parallel:` nursery (the joining
+/// thread + the pool shells it farms). It replaces the legacy `--parallel` "one OS thread per task,
+/// block the thread on `recv`" model with **lightweight fibers parked on `recv`** multiplexed over a
+/// core-sized pool: an empty `recv` files the running fiber into `parked` (keyed by `ChannelCore`
+/// pointer) and the worker grabs the next runnable fiber instead of blocking the thread; a `send`
+/// drains the matching bucket back onto `runq` and wakes a worker.
 ///
-/// **Barrier-confirm scheme.** A worker about to wait on an empty channel "confirms empty" only
-/// when it observes `blocked == live` (every still-live sibling parked) and does so at most once
-/// per `epoch`. Any progress — a `send`, a successful `recv` pop, a park-count change, or a task
-/// finishing — bumps `epoch` and resets `confirms`, tearing down a half-built confirmation. When
-/// `confirms == live`, every live worker independently re-checked *its own* channel empty within
-/// the *same* epoch with no intervening progress, so no message exists anywhere and no sibling can
-/// ever send → `dead` is set and every parked sibling faults `deadlock` on its next re-poll.
+/// A single `Mutex<SchedCore>` guards the run queue, the park set, the per-task outcome slots, and
+/// the scheduling counts together, so every transition is atomic and the deadlock predicate is
+/// evaluated without races. The lock is NEVER held across a `swap_ctx` / `run_until`: the worker
+/// loop takes a fiber out under the lock, releases it, runs the fiber, then re-locks to settle. `cv`
+/// is the single wait point — a worker with no runnable fiber parks here until a `send`/finish/
+/// terminate.
 ///
-/// This is immune to the "message just delivered, consumer hasn't popped yet" race that a plain
-/// blocked-count detector hits: a worker holding a deliverable message pops it (recv phase A)
-/// instead of confirming empty, so it never contributes to a false barrier. Soundness rests on the
-/// fact that while a `--parallel` nursery runs, no code outside it executes (the parent thread is
-/// inside [`Vm::run_parallel_nursery`]), so the nursery's own live tasks are the only possible
-/// senders. Deadlocks spanning nurseries or involving `Executor` work are out of scope and still
-/// hang (Go-like), as documented.
-struct DeadlockWatch {
-    inner: Mutex<WatchState>,
+/// **Deadlock** (the M:N redefinition of B3.5): `running == 0 && runq empty && parked > 0 && done <
+/// total` — every not-done fiber is parked on some channel and none is running or runnable, so no
+/// `send` can ever come. It is an exact local predicate under the single coordinator, so the legacy
+/// barrier-confirm epoch dance ([`DeadlockWatch`]) is unnecessary here. For D2b the run queue is one
+/// shared `VecDeque` (per-worker rings + work-stealing + a targeted-wake StoreLoad barrier are D4).
+struct MnSched {
+    core: Mutex<SchedCore>,
+    cv: Condvar,
+    /// B3.4 — the shared cancel flag (same token cloned onto every enlisted shell). Read under the
+    /// core lock by [`MnSched::park`] to close the park-vs-cancel gap: a fiber must not park if cancel
+    /// was tripped after its `recv` empty-check but before it actually parks.
+    cancel: Arc<AtomicBool>,
+    /// The prebuilt `deadlock` fault, cloned into every still-parked fiber's slot when the predicate
+    /// fires, so the join's lowest-index-fault reduce propagates it byte-identically (`DEADLOCK_MSG`).
+    deadlock_err: RuntimeError,
 }
 
-struct WatchState {
-    /// Live siblings currently parked in a blocking `recv`.
-    blocked: usize,
-    /// Tasks not yet finished (starts at the nursery's task count `n`; `task_finished` decrements).
-    live: usize,
-    /// Bumped on every state change; invalidates an in-progress all-blocked confirmation.
-    epoch: u64,
-    /// Distinct live workers that have confirmed "my channel is empty" in the current `epoch`.
-    confirms: usize,
-    /// Sticky once the detector fires; every parked sibling reads it and faults `deadlock`.
-    dead: bool,
+struct SchedCore {
+    /// Runnable fibers (single shared queue for D2b; per-worker rings + stealing are D4).
+    runq: std::collections::VecDeque<Fiber>,
+    /// Fibers parked on an empty `recv`, keyed by `ChannelCore` pointer ([`Vm::channel_core_ptr`]).
+    parked: std::collections::HashMap<usize, Vec<Fiber>>,
+    /// Decision-F per-task outcome slots, indexed by `Fiber::task_index`. `None` until that task ends.
+    slots: Vec<Option<TaskOutcome>>,
+    running: usize,  // fibers currently swapped into a worker (executing)
+    parked_n: usize, // total fibers across every `parked` bucket
+    done: usize,     // fibers that have produced a `TaskOutcome`
+    total: usize,    // nursery task count (fixed for D2b — no spawn-after-join)
+    terminate: bool, // every worker loop exits once set (done==total, deadlock, or os.exit/fault)
 }
 
-impl DeadlockWatch {
-    fn new(live: usize) -> Self {
-        DeadlockWatch { inner: Mutex::new(WatchState { blocked: 0, live, epoch: 0, confirms: 0, dead: false }) }
+/// What [`MnSched::take_runnable`] hands a worker: the next fiber to run, or `Stop` (this worker
+/// should leave the loop — the nursery is done, deadlocked, or otherwise terminated). The size
+/// asymmetry is inherent (a `Fiber` is the unit of work and must move out of the queue regardless);
+/// boxing the `Run` payload would add an allocation on the schedule hot path for no benefit.
+#[allow(clippy::large_enum_variant)]
+enum Take {
+    Run(Fiber),
+    Stop,
+}
+
+impl MnSched {
+    fn new(total: usize, cancel: Arc<AtomicBool>, deadlock_err: RuntimeError) -> Self {
+        MnSched {
+            core: Mutex::new(SchedCore {
+                runq: std::collections::VecDeque::new(),
+                parked: std::collections::HashMap::new(),
+                slots: (0..total).map(|_| None).collect(),
+                running: 0,
+                parked_n: 0,
+                done: 0,
+                total,
+                terminate: false,
+            }),
+            cv: Condvar::new(),
+            cancel,
+            deadlock_err,
+        }
     }
 
-    /// Lock the state, tolerating poison (a panicking worker thread holding the lock must not wedge
-    /// the rest of the nursery — same discipline as [`DoneSignal`]).
-    fn lock(&self) -> std::sync::MutexGuard<'_, WatchState> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    /// Lock the core, tolerating poison (a panicking worker must not wedge the rest of the nursery —
+    /// same discipline as [`DoneSignal`]).
+    fn lock(&self) -> std::sync::MutexGuard<'_, SchedCore> {
+        self.core.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Record progress (a `send`, or a task finishing): bump the epoch and reset the confirm
-    /// barrier so any all-blocked confirmation built so far is discarded.
-    fn progress(&self) {
-        let mut s = self.lock();
-        s.epoch += 1;
-        s.confirms = 0;
+    /// Seed the run queue with the nursery's fibers (task order).
+    fn seed(&self, fibers: Vec<Fiber>) {
+        self.lock().runq.extend(fibers);
+    }
+
+    /// Pop a runnable fiber, marking it `running`. With none runnable, park this worker on `cv` until
+    /// a `send`/finish makes progress — or return `Stop` when the nursery is done, deadlocked, or
+    /// terminated. The deadlock predicate is evaluated here (the only place a worker observes "runq
+    /// empty"); `running == 0` is the key — while any fiber runs it might `send` and unpark a sibling,
+    /// so an idle worker waits rather than declaring deadlock.
+    fn take_runnable(&self) -> Take {
+        let mut c = self.lock();
+        loop {
+            if c.terminate {
+                return Take::Stop;
+            }
+            if let Some(f) = c.runq.pop_front() {
+                c.running += 1;
+                return Take::Run(f);
+            }
+            if c.done == c.total {
+                c.terminate = true;
+                self.cv.notify_all();
+                return Take::Stop;
+            }
+            if c.running == 0 && c.parked_n > 0 {
+                c.flag_deadlock(&self.deadlock_err);
+                self.cv.notify_all();
+                return Take::Stop;
+            }
+            c = self.cv.wait(c).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// Park the running fiber on channel `key` (it blocked on an empty `recv`), freeing the worker —
+    /// BUT close the park gap first. Between `recv`'s empty-check and this call (a swap-out apart) a
+    /// sibling `send` may have enqueued a message (+ run [`MnSched::send_wake`], which found no parked
+    /// fiber) or a sibling may have tripped cancel; either would strand this fiber forever. So, holding
+    /// the core lock (the SAME lock `send_wake`/`cancel_drain` take), re-check the channel queue and
+    /// the cancel flag: if a message arrived or cancel is set, requeue the fiber as `Ready` (it will
+    /// re-run `recv` and pop, or unwind on the cancel back-edge) instead of parking. Lock order is
+    /// core-OUTER, channel-`q`-INNER everywhere (`send_wake` matches), so there is no ABBA cycle.
+    /// No `cv` notify on the park path: parking creates no runnable work; an all-parked deadlock is
+    /// detected by this worker's next `take_runnable` (`running == 0`).
+    fn park(&self, key: usize, core: &Arc<ChannelCore>, mut fiber: Fiber) {
+        let mut c = self.lock();
+        c.running -= 1;
+        let message_waiting = !core.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
+        if message_waiting || self.cancel.load(Ordering::Relaxed) {
+            fiber.state = FiberState::Ready;
+            c.runq.push_back(fiber);
+            self.cv.notify_all();
+        } else {
+            fiber.state = FiberState::Blocked;
+            c.parked.entry(key).or_default().push(fiber);
+            c.parked_n += 1;
+        }
+    }
+
+    /// A `send` into channel `key`: enqueue the message AND move every fiber parked on it back onto
+    /// `runq` (as `Ready`), atomically under the core lock — so it serializes with [`MnSched::park`]'s
+    /// gap re-check and a fiber parking concurrently is never lost. `notify_all` may over-notify (a
+    /// spuriously woken worker finds the queue empty and re-parks) — targeted wake + the StoreLoad
+    /// barrier are D4. Lock order: core-OUTER, channel-`q`-INNER (matches `park`).
+    fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) {
+        let mut c = self.lock();
+        core.q.lock().unwrap_or_else(|e| e.into_inner()).push_back(w);
+        if let Some(woken) = c.parked.remove(&key) {
+            c.parked_n -= woken.len();
+            for mut f in woken {
+                f.state = FiberState::Ready;
+                c.runq.push_back(f);
+            }
+        }
+        drop(c);
+        self.cv.notify_all();
+    }
+
+    /// Record a finished fiber's outcome in its task slot and drop it from `running`. Terminates the
+    /// nursery once every task is done.
+    fn finish(&self, task_index: usize, outcome: TaskOutcome) {
+        let mut c = self.lock();
+        c.running -= 1;
+        c.slots[task_index] = Some(outcome);
+        c.done += 1;
+        if c.done == c.total {
+            c.terminate = true;
+        }
+        self.cv.notify_all();
+    }
+
+    /// B3.4 — after cancel is tripped, move every parked fiber back onto `runq` so a worker resumes it
+    /// and it observes the cancel flag (at the recv re-check / a dispatch back-edge) and unwinds.
+    fn cancel_drain(&self) {
+        let mut c = self.lock();
+        if c.parked_n == 0 {
+            return;
+        }
+        let buckets: Vec<Vec<Fiber>> = c.parked.drain().map(|(_, v)| v).collect();
+        c.parked_n = 0;
+        for v in buckets {
+            for mut f in v {
+                f.state = FiberState::Ready;
+                c.runq.push_back(f);
+            }
+        }
+        self.cv.notify_all();
+    }
+
+    /// Drain the per-task outcome slots after the nursery terminates (joining thread, post-loop).
+    fn take_slots(&self) -> Vec<Option<TaskOutcome>> {
+        std::mem::take(&mut self.lock().slots)
+    }
+}
+
+impl SchedCore {
+    /// Fault every still-parked fiber with the deadlock error and terminate (called under the lock).
+    fn flag_deadlock(&mut self, err: &RuntimeError) {
+        let buckets: Vec<Vec<Fiber>> = self.parked.drain().map(|(_, v)| v).collect();
+        for v in buckets {
+            for f in v {
+                self.slots[f.task_index] = Some(TaskOutcome::Fault(err.clone()));
+                self.done += 1;
+            }
+        }
+        self.parked_n = 0;
+        self.terminate = true;
     }
 }
 
@@ -627,10 +804,8 @@ impl ReadyWorker {
     fn run_outcome(mut self) -> TaskOutcome {
         let span = self.span;
         let res = Self::invoke(&mut self.worker, self.call, span);
-        // Classify the outcome. The early paths take the worker's output buffers via `mem::take`
-        // (rather than moving them out of `self`) so `self` stays whole for the `task_finished`
-        // bookkeeping below — every exit path must report the finish to the deadlock watch (B3.5).
-        let outcome = if let Some(code) = self.worker.pending_exit {
+        // Classify the outcome (legacy `Executor`-drain pool path; the nursery engine is M:N now).
+        if let Some(code) = self.worker.pending_exit {
             // A child `std.os.exit(code)` is a fault-that-cancels: it surfaces as an `Err` sentinel
             // with `pending_exit` set. Trip cancel, flush its output, hand the code up for a halt.
             self.worker.trip_cancel();
@@ -666,15 +841,37 @@ impl ReadyWorker {
                     }
                 }
             }
-        };
-        // B3.5: this task has finished running — it can never `send` again. Drop it from the
-        // nursery's live count so any sibling still parked in `recv` re-evaluates against the
-        // smaller live set (a normal finish that strands a recv-blocked sibling is a deadlock the
-        // survivors must now detect). On the cancel/exit/fault paths the cancel flag already aborts
-        // the siblings; the `live--` is harmless there (cancel is checked before the detector).
-        self.worker.task_finished();
-        outcome
+        }
     }
+
+    /// D2b — deconstruct a prepared worker into a lightweight [`Fiber`] for the M:N engine: its
+    /// reconstructed heap + lazy-module roots + executors become the fiber's `FiberCtx` (heap-keyed
+    /// state that travels together — see [`FiberCtx`]), and its `ReadyCall` becomes a `Pending` task
+    /// `start_task` launches on first schedule. The worker `Vm` shell is discarded: under M:N a fiber
+    /// runs on a shared host shell (its module snapshot is re-installed there), not its own `Vm`.
+    fn into_fiber(self, task_index: usize) -> Fiber {
+        let ReadyWorker { worker, call, span } = self;
+        let task = match call {
+            ReadyCall::Invoke { callee, args } => PendingCall::Call { callee, args, span },
+            ReadyCall::Method { recv, name, args } => PendingCall::Method { recv, name, args, span },
+        };
+        let ctx = FiberCtx {
+            heap: Some(worker.heap),
+            module_objs: worker.module_objs,
+            module_faulted: worker.module_faulted,
+            executors: worker.executors,
+            ..FiberCtx::default()
+        };
+        Fiber { ctx, state: FiberState::Pending(task), task_index, span }
+    }
+}
+
+/// D2b — the disposition of one fiber run on a worker shell: park it on a channel (it blocked on an
+/// empty `recv`; carries the channel core ptr key + the `Arc<ChannelCore>` so `park` can re-check the
+/// queue under the sched lock) or finish it with a terminal outcome.
+enum Disp {
+    Park(usize, Arc<ChannelCore>),
+    Finish(TaskOutcome),
 }
 
 impl Vm {
@@ -703,28 +900,15 @@ impl Vm {
             scheduler_stack: Vec::new(),
             cancel: None,
             cancelled: false,
-            deadlock: None,
             module_snapshot: None,
             module_faulted: Vec::new(),
             snapshot_memo: None,
+            mn: None,
         }
     }
 
     fn err(&self, message: String, span: Span) -> RuntimeError {
         RuntimeError { message, span }
-    }
-
-    /// B3.5 — report to this VM's nursery deadlock watch (if it runs under one) that the task
-    /// finished running: decrement the live count and mark progress so any still-parked sibling
-    /// re-runs the all-blocked check against the smaller live set. No-op off the `--parallel`
-    /// engine (`deadlock` is `None`).
-    fn task_finished(&self) {
-        if let Some(watch) = &self.deadlock {
-            let mut s = watch.lock();
-            s.live -= 1;
-            s.epoch += 1;
-            s.confirms = 0;
-        }
     }
 
     /// B3.4 — set this VM's nursery cancel flag (if it runs under one), so sibling workers abort.
@@ -749,10 +933,17 @@ impl Vm {
         std::mem::swap(&mut self.fault_trace_depth, &mut ctx.fault_trace_depth);
         // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
         // (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched and the
-        // cooperative engine stays byte-identical by construction.
+        // cooperative engine stays byte-identical by construction. D2b — the same `Some` gate carries
+        // the fiber's heap-keyed side state (out/stderr/module roots/executors), so they move
+        // atomically WITH the heap their `GcRef`s index. A cooperative fiber swaps none of it.
         if let Some(ctx_heap) = ctx.heap.as_mut() {
             debug_assert!(self.parallel, "cooperative fiber must never carry its own heap (decision A)");
             std::mem::swap(&mut self.heap, ctx_heap);
+            std::mem::swap(&mut self.out, &mut ctx.out);
+            std::mem::swap(&mut self.stderr, &mut ctx.stderr);
+            std::mem::swap(&mut self.module_objs, &mut ctx.module_objs);
+            std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
+            std::mem::swap(&mut self.executors, &mut ctx.executors);
         }
     }
 
@@ -3242,14 +3433,16 @@ impl Vm {
         if tasks.is_empty() {
             return Ok(());
         }
-        // B3.3-threads: under `--parallel`, run the tasks on the real OS-thread pool instead of
-        // cooperative fibers (decision A keeps the cooperative path the default below).
+        // D2b: under `--parallel`, run the tasks as lightweight M:N fibers on the OS-thread pool
+        // (park-on-`recv`), instead of cooperative fibers (decision A keeps the cooperative path the
+        // default below).
         if self.parallel {
-            return self.run_parallel_nursery(tasks);
+            return self.run_mn_nursery(tasks);
         }
         let children: Vec<Fiber> = tasks
             .into_iter()
-            .map(|t| Fiber { ctx: FiberCtx::default(), state: FiberState::Pending(t) })
+            .enumerate()
+            .map(|(i, t)| Fiber { span: t.span(), ctx: FiberCtx::default(), state: FiberState::Pending(t), task_index: i })
             .collect();
         // D0: every child starts `Pending` ⇒ runnable, so seed `ready` with all indices in order.
         let ready = (0..children.len()).collect();
@@ -3266,54 +3459,169 @@ impl Vm {
         result
     }
 
-    /// B3.3-threads — the `--parallel` counterpart of [`Vm::join_nursery`]'s cooperative scheduler:
-    /// run a nursery's tasks on real OS threads (decision B's bounded pool + decision F's
-    /// flush-on-join).
+    /// D2b — the `--parallel` M:N engine: run a nursery's tasks as **lightweight fibers parked on
+    /// `recv`** multiplexed over the bounded pool, the replacement for the legacy "one OS thread per
+    /// task, block the thread on `recv`" model. The core M:N win: an empty `recv` parks the fiber and
+    /// frees its worker instead of pinning the thread, so `#fibers ≫ #threads` producer/consumer
+    /// workloads complete instead of starving.
     ///
-    /// 1. **Prepare every task in the parent heap** ([`Vm::prepare_worker`], serial, read-only): each
-    ///    becomes a [`ReadyWorker`] owning its own worker `Vm` with the task reconstructed inside.
-    /// 2. **Farm tasks `[1..]` to the pool**, each storing its outcome into a shared result slot and
-    ///    bumping a completion counter.
-    /// 3. **The joining thread runs task `[0]` inline** (decision B — the parent participates), so a
-    ///    nested `parallel:` can't explode the thread count: each nesting level adds only its own
-    ///    joining thread, never a thread per task. Real concurrency holds because task `[0]`'s
-    ///    blocking `recv` waits on the channel condvar while pool tasks `send`.
-    /// 4. **Wait for all pool tasks**, then **flush each worker's `out`/`stderr` in task order**
-    ///    (decision F — deterministic even though execution was concurrent) and propagate the
-    ///    lowest-index terminal outcome.
+    /// 1. **Prepare every task into a lightweight [`Fiber`]** ([`Vm::prepare_worker`] →
+    ///    [`ReadyWorker::into_fiber`], serial, against the parent heap): each carries its own heap +
+    ///    lazy-module roots + a `Pending` task.
+    /// 2. **Seed the shared [`MnSched`]** (run queue + park set + per-task slots) and enlist workers:
+    ///    the joining thread runs one shell loop inline (decision B — parent participates) and up to
+    ///    `available_parallelism()-1` more shells are farmed to the pool. A shell is a thin host `Vm`
+    ///    (shared module snapshot installed, sched/cancel wired); fibers swap their own heaps in/out.
+    ///    Bounded by core count, so a nested `parallel:` never becomes thread-per-task.
+    /// 3. **Park/wake**: an empty `recv` parks the fiber in the channel's wait set ([`MnSched::park`])
+    ///    and the worker grabs the next fiber; a `send` drains that set back onto the run queue and
+    ///    wakes a worker ([`MnSched::send_wake`]). Over-notify is correct (a spuriously-woken fiber replays
+    ///    its rewound-ip `recv` and re-parks); targeted wake + the StoreLoad barrier are D4.
+    /// 4. **Reduce** the per-task slots in task order ([`Vm::reduce_task_slots`]) — decision F output
+    ///    flush + `Exit`-over-`Fault` precedence.
     ///
-    /// B3.4 — **cancellation**: every worker shares a per-nursery `cancel: Arc<AtomicBool>`. The
-    /// first sibling to fault or `os.exit` trips it ([`Vm::trip_cancel`]); the others observe it at
-    /// a dispatch back-edge or inside a blocking `recv` and unwind as the `cancelled` sentinel, so a
-    /// faulted nursery aborts its running siblings instead of joining them all first. The completion
-    /// barrier is unchanged — a cancelled worker still finishes (returns `Err`) and bumps the
-    /// counter, so no slot is ever missing. A child `os.exit(code)` propagates up as a parent
-    /// `pending_exit` (hard halt with `code`). `recover:`/`defer` compose: the cancel unwind is an
-    /// ordinary `Err`, so deferred calls run and an outer `recover:` can still catch a real fault.
-    ///
-    /// B3.5 — **deadlock detection**: every worker also shares a per-nursery [`DeadlockWatch`]; a
-    /// genuinely all-blocked nursery faults `deadlock` (matching the cooperative engine) instead of
-    /// hanging on the condvars. Residual hangs (Go-like, decision D): deadlocks spanning nurseries
-    /// or involving `Executor` work, a message orphaned in a channel no live sibling reads, and the
-    /// G3 case — a sibling still **queued** behind a saturated pool counts toward `live` but never
-    /// parks, so `blocked == live` is unreachable and the nursery waits for the slot rather than
-    /// faulting (counting a queued task as live is the deliberate safe choice: it may yet run and
-    /// `send`, so excluding it would risk a false-positive fault).
-    fn run_parallel_nursery(&mut self, tasks: Vec<PendingCall>) -> Result<(), RuntimeError> {
-        // 1. Prepare every task against the parent heap (must happen on this thread). Each worker
-        //    gets a clone of this nursery's cancel flag so a sibling fault/exit can abort the rest,
-        //    plus a clone of the nursery's deadlock watch (B3.5) so a genuinely all-blocked nursery
-        //    faults `deadlock` instead of hanging on the condvars. `live` starts at the task count.
+    /// B3.4 — **cancellation**: the shared `cancel: Arc<AtomicBool>` (cloned onto every shell) aborts
+    /// running fibers at a dispatch back-edge and parked fibers via [`MnSched::cancel_drain`] (they are
+    /// requeued and observe the flag on resume). B3.5 — **deadlock** is redefined as the exact
+    /// predicate `running == 0 && runq empty && parked > 0 && done < total`, evaluated atomically by
+    /// [`MnSched::take_runnable`] (no barrier-confirm needed under a single coordinator). Residual
+    /// hangs (decision D): deadlocks spanning nurseries or involving `Executor` work — `MnSched.parked`
+    /// is per-nursery, so a cross-nursery `send` delivers the message but does not wake across scheds.
+    fn run_mn_nursery(&mut self, tasks: Vec<PendingCall>) -> Result<(), RuntimeError> {
+        let total = tasks.len();
+        // 1. Prepare every task into a Fiber against the parent heap (must happen on this thread).
         let cancel = Arc::new(AtomicBool::new(false));
-        let watch = Arc::new(DeadlockWatch::new(tasks.len()));
-        let mut ready: Vec<ReadyWorker> = Vec::with_capacity(tasks.len());
-        for t in tasks {
-            let mut rw = self.prepare_worker(t)?;
-            rw.worker.cancel = Some(Arc::clone(&cancel));
-            rw.worker.deadlock = Some(Arc::clone(&watch));
-            ready.push(rw);
+        let snap = self.ensure_snapshot();
+        let mut fibers = Vec::with_capacity(total);
+        for (i, t) in tasks.into_iter().enumerate() {
+            fibers.push(self.prepare_worker(t)?.into_fiber(i));
         }
-        self.run_workers_on_pool(ready)
+        // 2. Build + seed the shared scheduler.
+        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 });
+        let sched = Arc::new(MnSched::new(total, Arc::clone(&cancel), deadlock_err));
+        sched.seed(fibers);
+        // 3. Farm helper shells to the pool — **fire-and-forget**. They accelerate the nursery via
+        //    real parallelism, but the join MUST NOT wait on them: a farmed shell can be starved
+        //    indefinitely by a saturated process-wide pool (nested or concurrent nurseries hold every
+        //    pool thread in their own loops), and waiting on its `DoneSignal` would then deadlock the
+        //    join. A panicking shell is contained by the pool's own `catch_unwind` (see `pool.rs`).
+        let nworkers = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1).max(1).min(total.max(1));
+        for _ in 1..nworkers {
+            let mut shell = self.spawn_shell(&snap, &sched, &cancel);
+            let sched = Arc::clone(&sched);
+            pool::submit(Box::new(move || {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shell.mn_worker_loop(&sched)));
+            }));
+        }
+        // 4. The joining thread runs the inline shell to completion (decision B — parent participates),
+        //    on its OWN shell so `self` keeps the parent fiber's context untouched (a nested
+        //    `parallel:` recurses here without disturbing it). The inline shell is a COMPLETE scheduler
+        //    over the shared run queue: even if every farmed shell is starved, it alone drains all
+        //    fibers (park/wake via the sched) until `terminate` (done == total, or deadlock). So
+        //    liveness depends ONLY on this always-running thread, never on a bounded pool resource —
+        //    `mn_worker_loop` returns iff `terminate` is set iff every task slot is filled, so the
+        //    starved farmed shells (which observe `terminate` and `Stop` whenever they finally run)
+        //    need not be joined.
+        let mut shell = self.spawn_shell(&snap, &sched, &cancel);
+        shell.mn_worker_loop(&sched);
+        // 5. Reduce the per-task outcome slots (task order, decision F + Exit-over-Fault precedence).
+        let slots = sched.take_slots();
+        self.reduce_task_slots(slots)
+    }
+
+    /// D2b — build a thin host **shell** `Vm` for the M:N engine: a worker `Vm` with the shared
+    /// read-only module snapshot, the nursery scheduler, and the cancel token wired in. It runs no
+    /// code itself — fibers swap their own heap + module roots into it ([`Vm::swap_ctx`]); the shell
+    /// only provides the dispatch engine, the shared `module_snapshot` (for lazy module fault-in), and
+    /// the `mn`/`cancel` flags the `recv`/`send`/back-edge paths read.
+    fn spawn_shell(&self, snap: &Arc<ModuleSnapshot>, sched: &Arc<MnSched>, cancel: &Arc<AtomicBool>) -> Vm {
+        let mut shell = self.spawn_worker();
+        shell.module_snapshot = Some(Arc::clone(snap));
+        shell.mn = Some(Arc::clone(sched));
+        shell.cancel = Some(Arc::clone(cancel));
+        shell
+    }
+
+    /// D2b — a worker shell's lifetime: pull a runnable fiber, run it to its next park/finish, settle,
+    /// repeat until the scheduler terminates. Generalizes the cooperative [`Vm::run_child`] to a
+    /// shared run queue + park set across threads.
+    fn mn_worker_loop(&mut self, sched: &Arc<MnSched>) {
+        loop {
+            let mut fiber = match sched.take_runnable() {
+                Take::Run(f) => f,
+                Take::Stop => return,
+            };
+            let task_index = fiber.task_index;
+            let span = fiber.span;
+            match self.run_one_fiber(&mut fiber, span) {
+                Disp::Park(key, core) => sched.park(key, &core, fiber),
+                Disp::Finish(outcome) => {
+                    let aborts = matches!(outcome, TaskOutcome::Fault(_) | TaskOutcome::Exit { .. });
+                    sched.finish(task_index, outcome);
+                    // A fault/exit tripped the cancel flag (in `classify_mn_outcome`); requeue parked
+                    // siblings so they observe it and unwind (running ones see it at a back-edge).
+                    if aborts {
+                        sched.cancel_drain();
+                    }
+                }
+            }
+        }
+    }
+
+    /// D2b — run a single fiber on this shell: swap its context in, start/resume it until it parks or
+    /// finishes, decide its disposition WHILE its heap is live (the park key and outcome are heap-keyed
+    /// reads), then swap the context back out. The run is panic-guarded so a worker-VM panic becomes a
+    /// task `Fault` (keeps the loop alive + the slot filled — the join can't hang).
+    fn run_one_fiber(&mut self, fiber: &mut Fiber, span: Span) -> Disp {
+        self.swap_ctx(&mut fiber.ctx);
+        self.suspend = None;
+        self.cancelled = false;
+        self.pending_exit = None;
+        let state = std::mem::replace(&mut fiber.state, FiberState::Ready);
+        let disp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let res = match state {
+                FiberState::Pending(task) => self.start_task(task),
+                FiberState::Ready | FiberState::Blocked => self.run_until(0),
+                FiberState::Done => unreachable!("mn_worker_loop scheduled a Done fiber"),
+            };
+            if res.is_ok() && self.suspend.is_some() {
+                let h = self.suspend.take().unwrap();
+                // Capture the park key + the channel `Arc` WHILE the fiber heap is live (`h` is a
+                // GcRef into it); `park` re-checks the queue through this `Arc` under the sched lock.
+                Disp::Park(self.channel_core_ptr(h), self.channel_core(h))
+            } else {
+                Disp::Finish(self.classify_mn_outcome(res))
+            }
+        }))
+        .unwrap_or_else(|p| Disp::Finish(TaskOutcome::Fault(panic_to_fault(p, span))));
+        self.swap_ctx(&mut fiber.ctx);
+        disp
+    }
+
+    /// D2b — classify a finished fiber's run into a [`TaskOutcome`] (the M:N analogue of
+    /// [`ReadyWorker::run_outcome`]). Unlike the legacy path it uses `start_task`/`run_until` and
+    /// **discards the task's return value**, matching the cooperative parity oracle (which never
+    /// inspects a task's return). Trips the shared cancel flag on a fault/exit so siblings abort. The
+    /// fiber's `out`/`stderr` are taken from the live (swapped-in) shell buffers.
+    fn classify_mn_outcome(&mut self, res: Result<(), RuntimeError>) -> TaskOutcome {
+        if let Some(code) = self.pending_exit {
+            self.trip_cancel();
+            TaskOutcome::Exit { code, out: std::mem::take(&mut self.out), stderr: std::mem::take(&mut self.stderr) }
+        } else if self.cancelled {
+            TaskOutcome::Cancelled
+        } else {
+            match res {
+                Err(e) => {
+                    self.trip_cancel();
+                    TaskOutcome::Fault(e)
+                }
+                Ok(()) => TaskOutcome::Done(WorkerResult {
+                    value: WireValue::Nil,
+                    out: std::mem::take(&mut self.out),
+                    stderr: std::mem::take(&mut self.stderr),
+                }),
+            }
+        }
     }
 
     /// B3.3-threads / B3.6 — the engine-agnostic farm/join/flush core: run a vector of already-prepared
@@ -3385,6 +3693,20 @@ impl Vm {
         // which still owns a `results` `Arc` clone — is dropped, so the joiner can wake with
         // `strong_count > 1` and `try_unwrap` would spuriously fail. `mem::take` needs only the lock.
         let slots = std::mem::take(&mut *results.lock().unwrap_or_else(|e| e.into_inner()));
+        self.reduce_task_slots(slots)
+    }
+
+    /// B3.3-threads / D2b — reduce a nursery's per-task outcome slots (task order) into the join's
+    /// result, flushing output and applying `Exit`-over-`Fault` precedence. Shared by the legacy pool
+    /// engine ([`run_workers_on_pool`]) and the M:N engine ([`run_mn_nursery`]).
+    ///
+    /// `Done`/`Exit` output is flushed in task order (decision F); `Fault`/`Cancelled` output is
+    /// dropped (a faulting worker's partial output had no deterministic position; a cancelled worker's
+    /// work is incomplete). The fault-free goldens only ever hit `Done`, so they stay byte-identical.
+    /// Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the lowest-index `Exit` wins over any
+    /// `Fault` regardless of index — otherwise a lower-index recoverable fault could demote a child's
+    /// `os.exit` to a catchable error. Within a kind, the lowest index wins (scan order + `is_none()`).
+    fn reduce_task_slots(&mut self, slots: Vec<Option<TaskOutcome>>) -> Result<(), RuntimeError> {
         let mut first_exit: Option<i32> = None;
         let mut first_fault: Option<RuntimeError> = None;
         for slot in slots {
@@ -3461,7 +3783,7 @@ impl Vm {
     fn run_child(&mut self, i: usize) -> Result<(), RuntimeError> {
         let mut child = {
             let level = self.scheduler_stack.last_mut().expect("scheduler level present");
-            std::mem::replace(&mut level.children[i], Fiber { ctx: FiberCtx::default(), state: FiberState::Done })
+            std::mem::replace(&mut level.children[i], Fiber { ctx: FiberCtx::default(), state: FiberState::Done, task_index: i, span: Span { line: 1, col: 1 } })
         };
         self.swap_ctx(&mut child.ctx); // self.* = child's execution context
         self.suspend = None; // clear any prior wait before (re)running
@@ -4213,114 +4535,56 @@ impl Vm {
                 self.arity_err("send", args, 1, span)?;
                 // B3.1: serialize once into the core (the wire form IS the airlock copy).
                 let w = self.to_wire(args[0])?;
-                // B3.5: a send is progress — bump the nursery deadlock-watch epoch (invalidating any
-                // half-built all-blocked confirmation) BEFORE the message is even queued, so a
-                // sibling cannot confirm-empty against a state this send is about to change. The
-                // watch lock is released here, before the `q` lock below (one-at-a-time ordering).
-                if let Some(watch) = &self.deadlock {
-                    watch.progress();
-                }
                 let core = self.channel_core(h);
-                core.q.lock().unwrap().push_back(w);
-                // B3.3-threads: wake any OS thread blocked in `recv` on this core. No-op on the
-                // cooperative engine (nothing ever waits on `cv` there — fibers park instead).
-                core.cv.notify_all();
-                // D0: on the cooperative engine, re-add any sibling fiber parked on this channel's
-                // `recv` to its scheduler level's `ready` set. No-op under `--parallel`.
-                self.wake_on_send(h);
+                // D2b: on the M:N engine, enqueue the message AND move every fiber parked on this
+                // channel's `recv` back onto the run queue ATOMICALLY under the sched lock
+                // ([`MnSched::send_wake`]) — so a sibling parking concurrently can't be lost (its
+                // `park` re-checks the queue under the same lock). The key is the `ChannelCore`
+                // pointer, computed here while this fiber's heap is live (`h` is a GcRef into it). A
+                // `send` from a thread not enlisted on the parked fiber's sched (cross-nursery /
+                // top-level) has `mn == None`, so it only enqueues — the cross-sched wake is an
+                // accepted hang (decision D); the message is delivered into the shared `Arc<ChannelCore>`.
+                if let Some(sched) = self.mn.clone() {
+                    let key = self.channel_core_ptr(h);
+                    sched.send_wake(key, &core, w);
+                } else {
+                    core.q.lock().unwrap().push_back(w);
+                    // B3.3-threads: wake any OS thread blocked in `recv` on this core (legacy
+                    // executor-drain pool path). No-op on the cooperative engine (fibers park).
+                    core.cv.notify_all();
+                    // D0: on the cooperative engine, re-add any sibling fiber parked on this channel's
+                    // `recv` to its scheduler level's `ready` set.
+                    self.wake_on_send(h);
+                }
                 Ok(Value::Nil)
             }
             "recv" => {
                 self.arity_err("recv", args, 0, span)?;
-                // B3.3-threads: on the `--parallel` engine, an empty channel BLOCKS the OS thread on
-                // the core's condvar until a sibling `send`s (real blocking — there is no fiber to
-                // park; the worker owns its thread). B3.5: while parked, the worker also drives the
-                // nursery's barrier-confirm deadlock detector ([`DeadlockWatch`]) so a genuinely
-                // all-blocked nursery faults `deadlock` instead of hanging forever. The
-                // `native_reentry == 0` guard mirrors the cooperative path: inside a native callback
-                // we keep the existing fault rather than blocking the host stack. The `deadlock`
-                // watch is `Some` exactly for a worker running under a nursery; a top-level `recv`
-                // under `--parallel` (no nursery, watch `None`) falls through to the immediate
-                // deadlock fault below, since nothing could ever send it.
-                if self.parallel && self.native_reentry == 0 && let Some(watch) = self.deadlock.clone() {
-                    {
-                        let core = self.channel_core(h);
-                        // Per-worker confirm bookkeeping: `counted` = we have incremented `blocked`;
-                        // `my_epoch` = the epoch at which we last confirmed our channel empty (so we
-                        // confirm at most once per epoch — `confirms` counts *distinct* workers).
-                        let mut counted = false;
-                        let mut my_epoch = u64::MAX;
-                        // Locks are taken ONE AT A TIME (phase A: `q`; phase C/D: `watch`; phase E:
-                        // `q`); the watch lock and a channel `q` lock are never held simultaneously,
-                        // and `send` takes them in the same one-at-a-time order, so there is no
-                        // lock-ordering cycle between the detector and message passing.
-                        let received = loop {
-                            // Phase A — try to receive. A delivered message wins over any pending
-                            // deadlock signal: we pop it (progress) rather than confirm empty.
-                            if let Some(w) = core.q.lock().unwrap().pop_front() {
-                                if counted {
-                                    let mut s = watch.lock();
-                                    s.blocked -= 1;
-                                    s.epoch += 1;
-                                    s.confirms = 0;
-                                }
-                                break Ok(w);
-                            }
-                            // Phase B — B3.4 cancel: a sibling faulted/exited; abort as `cancelled`.
-                            if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
-                                if counted {
-                                    let mut s = watch.lock();
-                                    s.blocked -= 1;
-                                    s.epoch += 1;
-                                    s.confirms = 0;
-                                }
-                                self.cancelled = true;
-                                break Err(self.err("cancelled".to_string(), span));
-                            }
-                            // Phase C/D — register as parked and run the barrier-confirm check.
-                            {
-                                let mut s = watch.lock();
-                                if s.dead {
-                                    // Another sibling already detected the deadlock — join it.
-                                    if counted {
-                                        s.blocked -= 1;
-                                    }
-                                    break Err(self.err(DEADLOCK_MSG.to_string(), span));
-                                }
-                                if !counted {
-                                    counted = true;
-                                    s.blocked += 1;
-                                    s.epoch += 1; // park-count changed → invalidate prior confirms
-                                    s.confirms = 0;
-                                }
-                                // Confirm "my channel is empty" iff every live sibling is parked and
-                                // we have not already confirmed this epoch.
-                                if s.live > 0 && s.blocked == s.live && my_epoch != s.epoch {
-                                    my_epoch = s.epoch;
-                                    s.confirms += 1;
-                                    if s.confirms == s.live {
-                                        // Every live worker confirmed empty in this epoch with no
-                                        // intervening progress ⇒ no message exists and no sibling can
-                                        // send ⇒ real deadlock.
-                                        s.dead = true;
-                                        s.blocked -= 1;
-                                        break Err(self.err(DEADLOCK_MSG.to_string(), span));
-                                    }
-                                }
-                            }
-                            // Phase E — wait up to 50ms (re-checking the queue under the lock closes
-                            // the lost-wakeup gap with a `send` that happened since phase A). The
-                            // bounded timeout also re-polls the cancel flag and re-runs the detector.
-                            let q = core.q.lock().unwrap();
-                            if q.is_empty() {
-                                let _ = core.cv.wait_timeout(q, Duration::from_millis(50));
-                            }
-                        };
-                        return match received {
-                            Ok(w) => Ok(self.from_wire(w)),
-                            Err(e) => Err(e),
-                        };
+                // D2b: on the M:N engine, an empty `recv` PARKS the fiber (it does not block the OS
+                // thread). Reuse the cooperative suspend mechanism — re-root the receiver, rewind `ip`
+                // so this `CallMethod(recv)` re-executes on resume, set the `suspend` sentinel — and
+                // the worker loop ([`Vm::mn_worker_loop`]) files the captured fiber into the channel's
+                // wait set and runs the next fiber. A `send` drains that wait set + wakes a worker.
+                // The cancel flag is checked FIRST (mirror the legacy phase-B): a fiber woken only to
+                // be cancelled (its parked sibling faulted) must NOT re-park, or it would loop forever.
+                // The `native_reentry == 0` guard matches the cooperative path: a `recv` inside a
+                // native callback can't park (its caller's state lives on the Rust stack), so it falls
+                // through to the deadlock fault below.
+                if self.mn.is_some() && self.native_reentry == 0 {
+                    if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                        self.cancelled = true;
+                        return Err(self.err("cancelled".to_string(), span));
                     }
+                    let popped = self.channel_core(h).q.lock().unwrap().pop_front();
+                    return match popped {
+                        Some(w) => Ok(self.from_wire(w)),
+                        None => {
+                            self.push(Value::Obj(h));
+                            self.frames.last_mut().unwrap().ip -= 1;
+                            self.suspend = Some(h);
+                            Ok(Value::Nil) // sentinel; never observed (callers gate on `suspend`)
+                        }
+                    };
                 }
                 let popped = self.channel_core(h).q.lock().unwrap().pop_front();
                 match popped {
@@ -5988,6 +6252,286 @@ mod tests {
         assert!(matches!(ctx.heap.as_ref().unwrap().get(hf), Obj::Str(s) if &s[..] == "fiber-obj"));
     }
 
+    /// D2b: an M:N fiber carries its own per-task SIDE state too — `out`/`stderr` (Decision-F output
+    /// buffers) and the heap-keyed roots `module_objs`/`module_faulted`/`executors` (each a `GcRef`
+    /// into the fiber's own heap, so they MUST travel atomically with that heap). `swap_ctx` round-
+    /// trips all of them alongside the heap, gated on `heap.is_some()` so a cooperative fiber
+    /// (`heap: None`) leaves the shell's side state untouched (byte-identical, asserted separately).
+    #[test]
+    fn mn_swap_ctx_round_trips_fiber_side_state() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        vm.parallel = true;
+        vm.out.push_str("host-out");
+        vm.stderr.push_str("host-err");
+        let host_mod = vm.heap.alloc(Obj::Str("host-mod".into()));
+        let host_exec = vm.heap.alloc(Obj::Str("host-exec".into()));
+        vm.module_objs = vec![host_mod];
+        vm.module_faulted = vec![true];
+        vm.executors = vec![host_exec];
+
+        let mut fiber_heap = Heap::new();
+        let fib_mod = fiber_heap.alloc(Obj::Str("fiber-mod".into()));
+        let fib_exec = fiber_heap.alloc(Obj::Str("fiber-exec".into()));
+        let mut ctx = FiberCtx {
+            heap: Some(fiber_heap),
+            out: "fiber-out".to_string(),
+            stderr: "fiber-err".to_string(),
+            module_objs: vec![fib_mod],
+            module_faulted: vec![false],
+            executors: vec![fib_exec],
+            ..FiberCtx::default()
+        };
+
+        // Schedule in: the fiber's side state becomes live; the shell's parks into the ctx.
+        vm.swap_ctx(&mut ctx);
+        assert_eq!(vm.out, "fiber-out");
+        assert_eq!(vm.stderr, "fiber-err");
+        assert_eq!(vm.module_objs, vec![fib_mod]);
+        assert_eq!(vm.module_faulted, vec![false]);
+        assert_eq!(vm.executors, vec![fib_exec]);
+        assert_eq!(ctx.out, "host-out");
+        assert_eq!(ctx.module_objs, vec![host_mod]);
+
+        // Park out: the shell's side state is restored; the fiber keeps its own.
+        vm.swap_ctx(&mut ctx);
+        assert_eq!(vm.out, "host-out");
+        assert_eq!(vm.stderr, "host-err");
+        assert_eq!(vm.module_objs, vec![host_mod]);
+        assert_eq!(vm.module_faulted, vec![true]);
+        assert_eq!(vm.executors, vec![host_exec]);
+        assert_eq!(ctx.out, "fiber-out");
+        assert_eq!(ctx.module_objs, vec![fib_mod]);
+    }
+
+    /// D2b companion to [`swap_ctx_leaves_heap_untouched_for_cooperative_fiber`]: a cooperative fiber
+    /// (`heap: None`) must leave the shell's `out`/`module_objs`/`executors` untouched too, so the
+    /// cooperative engine stays byte-identical.
+    #[test]
+    fn mn_swap_ctx_leaves_side_state_untouched_for_cooperative_fiber() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        vm.out.push_str("host-out");
+        let host_mod = vm.heap.alloc(Obj::Str("host-mod".into()));
+        vm.module_objs = vec![host_mod];
+        let mut ctx = FiberCtx::default();
+        vm.swap_ctx(&mut ctx);
+        assert_eq!(vm.out, "host-out");
+        assert_eq!(vm.module_objs, vec![host_mod]);
+        assert!(ctx.out.is_empty(), "swap must not give a cooperative fiber side state");
+        assert!(ctx.module_objs.is_empty());
+    }
+
+    // ---- D2b MnSched scheduler mechanics (Step 2 — hand-built fibers, no bytecode) ----
+
+    fn dl_err() -> RuntimeError {
+        RuntimeError { message: DEADLOCK_MSG.to_string(), span: Span { line: 1, col: 1 } }
+    }
+    fn mk_sched(total: usize) -> MnSched {
+        MnSched::new(total, Arc::new(AtomicBool::new(false)), dl_err())
+    }
+    fn mk_fiber(task_index: usize) -> Fiber {
+        Fiber { ctx: FiberCtx::default(), state: FiberState::Ready, task_index, span: Span { line: 1, col: 1 } }
+    }
+    fn empty_core() -> Arc<ChannelCore> {
+        Arc::new(ChannelCore::default())
+    }
+    fn core_key(core: &Arc<ChannelCore>) -> usize {
+        Arc::as_ptr(core) as usize
+    }
+    fn take_run(s: &MnSched) -> Fiber {
+        match s.take_runnable() {
+            Take::Run(f) => f,
+            Take::Stop => panic!("expected a runnable fiber, got Stop"),
+        }
+    }
+
+    /// D2b/U1: `take_runnable` pops the shared run queue in FIFO order and marks each popped fiber
+    /// `running`.
+    #[test]
+    fn mnsched_take_runnable_pops_in_order_and_counts_running() {
+        let sched = mk_sched(2);
+        sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+        assert_eq!(take_run(&sched).task_index, 0);
+        assert_eq!(take_run(&sched).task_index, 1);
+        assert_eq!(sched.lock().running, 2);
+    }
+
+    /// D2b/U2: parking the running fiber on an EMPTY channel frees the worker (`running--`,
+    /// `parked++`); a `send_wake` on that channel enqueues the message and moves the fiber back onto
+    /// the run queue as `Ready`.
+    #[test]
+    fn mnsched_park_then_wake_requeues_fiber() {
+        let sched = mk_sched(1);
+        let core = empty_core();
+        let key = core_key(&core);
+        sched.seed(vec![mk_fiber(0)]);
+        let f = take_run(&sched);
+        sched.park(key, &core, f);
+        {
+            let c = sched.lock();
+            assert_eq!(c.running, 0);
+            assert_eq!(c.parked_n, 1);
+            assert!(c.runq.is_empty());
+        }
+        sched.send_wake(key, &core, WireValue::Int(7));
+        {
+            let c = sched.lock();
+            assert_eq!(c.parked_n, 0);
+            assert_eq!(c.runq.len(), 1);
+        }
+        let g = take_run(&sched);
+        assert_eq!(g.task_index, 0);
+        assert!(matches!(g.state, FiberState::Ready));
+    }
+
+    /// D2b park-gap guard (the lost-wakeup fix): if a message is already queued when `park` runs (a
+    /// `send` landed in the gap between `recv`'s empty-check and the park), the fiber must NOT park —
+    /// it is requeued `Ready` so it re-runs `recv` and pops the message. Without this the fiber would
+    /// park forever behind a delivered-but-unconsumed message → a false deadlock.
+    #[test]
+    fn mnsched_park_requeues_when_message_already_waiting() {
+        let sched = mk_sched(1);
+        let core = empty_core();
+        let key = core_key(&core);
+        sched.seed(vec![mk_fiber(0)]);
+        let f = take_run(&sched);
+        // Simulate a send that landed in the gap (message queued, but this fiber wasn't parked yet).
+        core.q.lock().unwrap().push_back(WireValue::Int(7));
+        sched.park(key, &core, f);
+        let c = sched.lock();
+        assert_eq!(c.parked_n, 0, "must not park behind a waiting message");
+        assert_eq!(c.runq.len(), 1, "fiber requeued to re-run recv");
+    }
+
+    /// D2b park-gap guard (cancel half): if cancel was tripped in the gap before the park, the fiber
+    /// must be requeued (to unwind on the back-edge) rather than parked (where it would be stranded).
+    #[test]
+    fn mnsched_park_requeues_when_cancel_tripped() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let sched = MnSched::new(1, Arc::clone(&cancel), dl_err());
+        let core = empty_core();
+        sched.seed(vec![mk_fiber(0)]);
+        let f = take_run(&sched);
+        cancel.store(true, Ordering::Relaxed);
+        sched.park(core_key(&core), &core, f);
+        let c = sched.lock();
+        assert_eq!(c.parked_n, 0, "must not park a cancelled fiber");
+        assert_eq!(c.runq.len(), 1);
+    }
+
+    /// D2b/U4: every not-done fiber parked, none running, run queue empty ⇒ deadlock. `take_runnable`
+    /// detects it, faults every parked fiber with `DEADLOCK_MSG`, and terminates.
+    #[test]
+    fn mnsched_deadlock_when_all_parked_runq_empty() {
+        let sched = mk_sched(2);
+        let c1 = empty_core();
+        let c2 = empty_core();
+        sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+        let a = take_run(&sched);
+        let b = take_run(&sched);
+        sched.park(core_key(&c1), &c1, a);
+        sched.park(core_key(&c2), &c2, b);
+        assert!(matches!(sched.take_runnable(), Take::Stop));
+        let slots = sched.take_slots();
+        assert_eq!(slots.len(), 2);
+        for s in slots {
+            assert!(matches!(s, Some(TaskOutcome::Fault(e)) if e.message == DEADLOCK_MSG));
+        }
+    }
+
+    /// D2b: `finish` records a task's outcome in its slot, drops it from `running`, and flips
+    /// `terminate` once every task is done.
+    #[test]
+    fn mnsched_finish_writes_slot_and_terminates_at_total() {
+        let sched = mk_sched(2);
+        sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+        let a = take_run(&sched);
+        let b = take_run(&sched);
+        sched.finish(a.task_index, TaskOutcome::Cancelled);
+        {
+            let c = sched.lock();
+            assert_eq!(c.done, 1);
+            assert!(!c.terminate);
+        }
+        sched.finish(b.task_index, TaskOutcome::Cancelled);
+        {
+            let c = sched.lock();
+            assert_eq!(c.done, 2);
+            assert!(c.terminate);
+        }
+        assert!(matches!(sched.take_runnable(), Take::Stop));
+    }
+
+    /// D2b/U5 (mechanics half): `cancel_drain` moves every parked fiber back onto the run queue so a
+    /// worker resumes it and it observes the cancel flag on its next dispatch back-edge.
+    #[test]
+    fn mnsched_cancel_drain_requeues_parked() {
+        let sched = mk_sched(2);
+        let c1 = empty_core();
+        let c2 = empty_core();
+        sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+        let a = take_run(&sched);
+        let b = take_run(&sched);
+        sched.park(core_key(&c1), &c1, a);
+        sched.park(core_key(&c2), &c2, b);
+        sched.cancel_drain();
+        let c = sched.lock();
+        assert_eq!(c.parked_n, 0);
+        assert_eq!(c.runq.len(), 2);
+    }
+
+    /// D2b/G1 (headline): #fibers ≫ #threads. 64 consumer fibers each block on an empty channel while
+    /// 64 producer fibers send. On the legacy "one OS thread per task, block the thread on `recv`"
+    /// engine the blocked consumers pin every pool thread and the queued producers never run
+    /// (starvation/hang). Under the M:N engine the consumers PARK (freeing their workers), the
+    /// producers run and wake them, and the sum completes.
+    #[test]
+    fn mn_many_blocked_consumers_complete_without_starving() {
+        let src = "\
+fn producer(ch: Channel[int], i: int):
+    ch.send(i)
+fn consumer(ch: Channel[int], acc: Shared[int]):
+    v := ch.recv()
+    acc.update(fn(x): x + v)
+fn main():
+    ch := Channel[int]()
+    acc := Shared(0)
+    parallel:
+        for i in 0..64:
+            spawn consumer(ch, acc)
+        for i in 0..64:
+            spawn producer(ch, i)
+    print(acc.get())
+main()
+";
+        assert_eq!(run_capture_parallel(src).unwrap(), "2016\n"); // sum 0..64
+    }
+
+    /// D2b: 1000 producer fibers + 1 consumer recv-looping 1000 times, multiplexed over the
+    /// core-sized pool — 1001 fibers on ~N threads, no thread-per-fiber. The consumer parks between
+    /// sends and resumes via the rewound-ip `recv` replay.
+    #[test]
+    fn mn_thousand_fiber_pipeline_completes() {
+        let src = "\
+fn producer(ch: Channel[int], i: int):
+    ch.send(i)
+fn consumer(ch: Channel[int], acc: Shared[int]):
+    total := 0
+    for _ in 0..1000:
+        total = total + ch.recv()
+    acc.update(fn(x): x + total)
+fn main():
+    ch := Channel[int]()
+    acc := Shared(0)
+    parallel:
+        spawn consumer(ch, acc)
+        for i in 0..1000:
+            spawn producer(ch, i)
+    print(acc.get())
+main()
+";
+        assert_eq!(run_capture_parallel(src).unwrap(), "499500\n"); // sum 0..1000
+    }
+
     /// D2a: a cooperative fiber carries NO heap (`heap: None`) — every cooperative fiber aliases the
     /// single `Vm::heap` (decision A, share-by-ref). `swap_ctx` must leave `self.heap` untouched, so
     /// the cooperative engine stays byte-identical.
@@ -7125,12 +7669,19 @@ main()
     /// B3.4: `defer` still composes with cancellation. The blocked consumer is aborted when the
     /// producer faults; its `defer cleanup(s)` must still run on the cancel unwind (writing the
     /// shared sentinel), proving deferred calls fire even on a cancelled task.
+    ///
+    /// Synchronized like [`parallel_cpu_sibling_aborts_on_sibling_fault`]: `boom` waits for a token
+    /// `consumer` sends only AFTER it has registered its `defer` and is about to block, so the fault
+    /// happens-after the defer is registered — no timing race. (Under the M:N engine task start order
+    /// is not deterministic, so a fault that races a not-yet-started sibling would legitimately skip
+    /// its not-yet-registered defer, per Go semantics; this token makes the intended "blocked
+    /// consumer is aborted" scenario the one actually exercised.)
     #[test]
     fn parallel_defer_runs_on_cancelled_sibling() {
         let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
-                   fn consumer(ch: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    ch.recv()\n\
-                   fn boom(ch: Channel[int]):\n    xs := [1]\n    print(xs[9])\n\
-                   fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        parallel:\n            spawn consumer(ch, s)\n            spawn boom(ch)\n        0\n    print(s.get())\nmain()\n";
+                   fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
+                   fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+                   fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(s.get())\nmain()\n";
         let out = run_capture_parallel(src).expect("the producer fault is recovered, so the program completes");
         assert_eq!(out, "42\n", "the cancelled consumer's defer ran on the unwind");
     }
@@ -7277,7 +7828,7 @@ main()
         let elapsed = start.elapsed();
         assert_eq!(out, format!("{n}\n"), "every fiber must run exactly once");
         assert!(
-            elapsed < Duration::from_secs(5),
+            elapsed < std::time::Duration::from_secs(5),
             "scheduler is quadratic: {n} fibers took {elapsed:?} (ceiling 5s)"
         );
     }
@@ -9268,7 +9819,7 @@ main()";
         std::thread::spawn(move || {
             let _ = tx.send(run_file_parallel(&entry, crate::native::HostConfig::default()));
         });
-        match rx.recv_timeout(Duration::from_secs(5)) {
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(r) => r,
             Err(_) => panic!("hung: --parallel nursery did not terminate (deadlock detection missing/broken)"),
         }

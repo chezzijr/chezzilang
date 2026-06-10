@@ -196,18 +196,22 @@ O(N²) per-turn linear scan (`pick_runnable`) is replaced by an explicit per-nur
 lazy-module-snapshot half has landed** (see below). **D2a has landed** — D1's deferred other half:
 `Heap` is now part of the swappable `FiberCtx` as `heap: Option<Heap>`, swapped only for M:N fibers
 (`Some`); cooperative fibers carry `None` and keep aliasing the single `Vm::heap` (decision A —
-share-by-ref), so the engine stays byte-identical by construction. No runtime site sets `Some` yet
-(the FIFO pool still runs one fiber per worker); D2a is the parity-preserving prerequisite that makes
-a `Fiber` self-contained + `Send` so D2b can park it across worker threads. Tests:
-`swap_ctx_round_trips_an_mn_fiber_heap`, `swap_ctx_leaves_heap_untouched_for_cooperative_fiber`, and
-two GC canaries (`collect_under_swapped_in_fiber_heap_{preserves_parked_host_object,leaves_parked_host_heap_quiescent}`)
-that lock the share-nothing rooting goldens can't reach; `Fiber: Send` compile-time guard +
-`debug_assert!`s pin the decision-A invariant. **1350 tests** green, `cargo clippy` clean,
-`primes_parallel=148933` both engines; reviewed by a 2-agent panel (zero Critical/Important).
-**D2b is next** — GMP run queues (per-P local ring + `runnext` + global overflow) + park-on-`recv`
-(empty `recv` parks the fiber, worker picks the next; `send` requeues + `wakep`) + redefined deadlock
-detection. Headline test: 1000 fibers / 4 threads producer-consumer completes instead of starving.
-Items *not* in B3–B5
+share-by-ref), so the engine stays byte-identical by construction. D2a was the parity-preserving prerequisite that made
+a `Fiber` self-contained + `Send` so D2b could park it across worker threads. **D2b has landed** —
+the `--parallel` engine is now a true M:N scheduler: lightweight fibers (own heap, share-nothing)
+multiplexed over the bounded pool, **parking on `recv` instead of pinning OS threads**, so a
+`#fibers ≫ #threads` producer/consumer workload completes instead of starving (1000 consumers +
+1000 producers in ~0.02 s). One shared per-nursery run queue + park set (`MnSched`); `send` enqueues
+and re-queues parked waiters atomically (lost-wakeup-safe); deadlock is the exact predicate
+`running==0 && runq empty && parked>0 && done<total`; the joining thread runs an inline shell that
+alone guarantees completion (decision B), so the join never waits on a bounded pool resource (no
+nested/concurrent pool-exhaustion deadlock). The legacy condvar `recv` + `DeadlockWatch`
+barrier-confirm detector were retired. **1361 tests** green (5× full-suite + 60× the cancel/defer
+race + 10× the headline, all clean), `cargo clippy` clean, `primes_parallel=148933` both engines;
+reviewed by a 4-agent S++ panel + cold pass — two Criticals found (a defer-on-cancel test race and a
+nested pool-exhaustion join hang) and both fixed. See the changelog bullet below.
+**D3 is next** — reduction-counting preemption (BEAM-style `reds` budget at the `run_until`
+safepoint, yield-to-tail) for fairness. Items *not* in B3–B5
 (cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
 
@@ -251,6 +255,37 @@ overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no
 ## Done (newest → oldest)
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
+
+- ✅ **Concurrency D2b — M:N scheduler: park-on-`recv`, not thread-per-task** (`--parallel` engine).
+  Old: one full worker `Vm` per task on a bounded FIFO pool; an empty `recv` **blocked the whole OS
+  thread** on a condvar, so `#blocked-tasks > #pool-threads` starved/hung. Now: tasks are lightweight
+  **fibers** (each owns its `Heap` + per-task `out`/`stderr`/`module_objs`/`module_faulted`/`executors`,
+  all carried in `FiberCtx` and swapped via `swap_ctx` — the D2a foundation) multiplexed over the pool.
+  A new `MnSched` (one `Mutex<SchedCore>` + `Condvar`) holds a shared run queue + a per-`ChannelCore`
+  park set + task-order outcome slots. `mn_worker_loop` (the cross-thread generalization of the
+  cooperative `run_child`): pop a fiber → `swap_ctx` in → `start_task`/`run_until(0)` → on empty
+  `recv` PARK it (reuse the cooperative suspend/rewind-`ip` mechanism, file into the channel's wait
+  set) and grab the next; `send` (`MnSched::send_wake`) enqueues the message **and** re-queues parked
+  waiters **atomically under the sched lock** (core-OUTER / channel-`q`-INNER everywhere → no ABBA);
+  `park` re-checks the queue **and** cancel flag under that same lock to close the check-then-park
+  lost-wakeup gap. Deadlock is the exact predicate `running==0 && runq empty && parked>0 && done<total`
+  (no barrier-confirm epoch dance — a single coordinator has global knowledge), reusing `DEADLOCK_MSG`.
+  Decision F flush + `Exit`-over-`Fault` precedence factored into `reduce_task_slots` (shared with the
+  legacy executor-drain path). The joining thread runs an **inline shell that alone drains the whole
+  run queue** (decision B), so liveness never depends on a bounded pool resource — farmed helper shells
+  are fire-and-forget, never joined, which kills the nested/concurrent pool-exhaustion join hang. The
+  legacy condvar-`recv` branch + `DeadlockWatch`/`WatchState`/`task_finished` were retired. Headline:
+  1000 consumers + 1000 producers on the core-sized pool finish in ~0.02 s (would starve on the old
+  engine). **1361 tests** (incl. `mnsched_*` mechanics + park-gap regressions, `mn_many_blocked_consumers_complete_without_starving`,
+  `mn_thousand_fiber_pipeline_completes`); 5× full-suite + 60× the defer/cancel race + 10× headline,
+  all green; `cargo clippy` clean; `primes_parallel=148933` both engines; all `--parallel` goldens
+  byte-identical. 4-agent S++ review panel + cold pass: **two Criticals found and fixed** — (1) a
+  `parallel_defer_runs_on_cancelled_sibling` race (a sibling fault could trip cancel before the
+  consumer registered its `defer`; fixed by synchronizing the test with a start-token, matching the
+  Go semantic that an unregistered defer doesn't run), (2) the nested/concurrent pool-exhaustion join
+  hang (fixed by the fire-and-forget farm + inline-shell liveness above). Per-worker local rings,
+  work-stealing, the targeted-wake StoreLoad barrier, and cross-nursery wakeups remain D4+ (decision D
+  cross-nursery/`Executor` hangs documented). Subsumes D1's deferred heap-into-`FiberCtx` half (D2a).
 
 - ✅ **Concurrency D1 (lazy module snapshot) — kill the per-task module-graph rebuild** (`--parallel`
   engine). Old: `prepare_worker` / `prepare_worker_from_wire` called `build_worker_modules`, which
