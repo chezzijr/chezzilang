@@ -8,7 +8,11 @@ TDD-able, plus the **Go-vs-BEAM borrow ledger** so the split is not relitigated.
 **Status:** D0, D1, D2 (D2a + D2b), D3 landed — the `--parallel` engine is now a true M:N scheduler
 (lightweight fibers parking on `recv`, not thread-per-task) **with BEAM-style reduction-counting
 preemption** (a CPU-bound fiber yields its worker at budget exhaustion, so siblings make progress).
-**D4 (work-stealing + `wakep` StoreLoad barrier) is next.**
+**D4's work-stealing half (D4a–D4d) has landed** — per-worker local run queues + a global overflow,
+a capped global batch-grab (`globrunqget`), random-victim steal-half, and a periodic global check —
+with **bounded-poll wake** (`cv.wait_timeout`) as the lost-wakeup backstop instead of the full Go
+`wakep` StoreLoad barrier. **D4e (the SeqCst `wakep` barrier that removes the poll) is the remaining
+D4 owe**; D5 is next on the ladder.
 
 ## TL;DR
 
@@ -266,7 +270,7 @@ that fault path is **unchanged** here (fixed in D5). **Reuse:** `FiberCtx` / `Fi
 > (+4: the fairness hang-watchdog, the 10 k-fiber soundness churn, the nested-call unwind regression,
 > the `yield_fiber` unit test), `cargo clippy` clean, `primes_parallel=148933` both engines, all
 > `--parallel` goldens byte-identical; 4-agent S++ backend review panel (Godot Gameplay / Solidity /
-> Incident Response / SRE) — zero real findings. **D4 is next.**
+> Incident Response / SRE) — zero real findings. **D4a–D4d landed (see the D4 status box below).**
 
 **Goal.** Fairness: a CPU-bound fiber must not hog a worker forever. Decrement a per-fiber
 **reduction budget** at the existing safepoint; yield at exhaustion.
@@ -291,6 +295,50 @@ yield while `native_reentry > 0` — gate the yield on `native_reentry == 0`, sa
 **Reuse:** the loop-top safepoint, suspend/resume, the D2 run queue.
 
 ### D4 — Work-stealing + `wakep` / spinning-worker protocol *(Go)*
+
+> **Status: D4a–D4d LANDED** (`--parallel` engine; cooperative untouched). The D2b single shared run
+> queue is now a **per-worker `LocalQ`** (a `runnext` slot + a ring, lock class **B**) + a shared
+> `global` overflow queue (in `SchedCore`, lock class **A**). `take_runnable(wid, tick)` searches:
+> a periodic global pull every `GLOBAL_CHECK_INTERVAL` (61) schedules → own local → **work-steal**
+> (`try_steal`: rotating-victim, ceil-half from the ring back, falling back to the victim's
+> `runnext`) → a **capped global batch-grab** (Go `globrunqget`: `min(g/nworkers+1, g, CAP/2)` into
+> the own local, run the first, leave the rest for siblings — one core-lock acquisition amortized over
+> the batch is the contention win) → park. **Deviations from the plan below, each verified:**
+> (1) **Only `take_runnable`'s batch-grab populates locals**, not `yield`/`send_wake`: a time-slice
+> `yield` goes to the **global** queue (Go-faithful — preserves cross-worker fairness; routing it to
+> the worker's own local would let a CPU hog re-pop itself forever, re-introducing the D3 starvation),
+> and `send_wake`/`park`-requeue/`cancel_drain` also stay on `global` (immediately balanced, no spill).
+> So locals are fed from `global` and rebalanced by stealing. (2) **Bounded-poll wake, NOT the full
+> `wakep` StoreLoad barrier** (→ D4e): a worker that finds no work parks on `cv.wait_timeout(2ms)` and
+> re-steals on wake/timeout, plus a `notify_all` after the batch-grab surplus push. Once a fiber can
+> land in a local *outside* the core lock, a plain `notify_all` is lost-wakeup-prone (a local push
+> between a parker's "no work?" check and its `wait`); the bounded timeout caps that to ≤2ms latency,
+> **never a hang** (mirrors B3.4's accepted 50ms recv-cancel re-check). Liveness still rests on the
+> always-running inline shell (decision B): `try_steal` reaches any local it needs, so no fiber is
+> stranded. (3) **Deadlock predicate reads a `runnable: AtomicUsize`** (D4a) — the count of fibers
+> queued anywhere (all locals + `global`) — instead of `runq.is_empty()`, since there is no single
+> queue to test under the split; maintained under the core lock at every transition (seed/pop/park/
+> yield/wake/drain/grab; steal is net-zero), byte-identical `DEADLOCK_MSG`. (4) **Per-queue `Mutex`,
+> not lock-free CAS** — a `Fiber` is a large move-only struct, not a word-sized CAS payload; per-worker
+> mutexes are uncontended in the common case and keep the correctness/test story tractable (the doc
+> allows this). **Lock order is strictly B-then-A (a local is taken alone and released before the core
+> lock) and A-then-C** (`send`/`park` take core then `ChannelCore.q`) → no ABBA. **1372 tests** green
+> (+8: `mnsched_runnable_tracks_single_queue`, `localq_runnext_then_ring_order`,
+> `take_runnable_prefers_local_over_global`, `schedule_steals_half_from_victim`,
+> `steal_skips_self_and_empty_victims`, `schedule_pulls_global_every_61st_tick`, the
+> `d4_worksteal_cpu_and_channel_stress` watchdog), `cargo clippy -- -D warnings` clean,
+> `primes_parallel=148933` both engines, all `--parallel` goldens byte-identical, full suite ×5 +
+> stress ×15 + defer/cancel race ×40 stable. 2-agent S++ concurrency panel (SRE + invariant/VM):
+> zero Critical; applied both Importants (the batch-grab `notify_all` to kill a 2ms steal-latency
+> cliff; `try_steal` now drains `runnext` so the predicate stays sound if a future commit ever
+> populates it). **D4e (below) is the remaining owe.**
+>
+> **D4e — full `wakep` StoreLoad barrier (DEFERRED).** Replace `cv.wait_timeout` polling with Go's
+> SeqCst `store(work); fence; load(nmspinning/idle)` ⇄ `store(idle); fence; load(work)` publish/observe
+> barrier + a spinning-worker (`nmspinning`) so a new task is grabbed without a park/unpark round-trip
+> and idle workers truly sleep (no 2ms poll). Land as its own reviewed change with a focused
+> `cfg(loom)` 2-thread model of the publish/observe core. **Correctness does not depend on it** —
+> D4a–D4d are complete and correct; D4e is a throughput/efficiency refinement.
 
 **Goal.** Load-balance across P's and wake parked workers correctly (no lost wakeups, no busy-wait).
 

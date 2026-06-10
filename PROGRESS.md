@@ -222,10 +222,20 @@ bug where a yield deep in a call chain let `run_proto` pop a live operand-stack 
 soundness churn, nested-call unwind regression, `yield_fiber` unit), `cargo clippy` clean,
 `primes_parallel=148933` both engines, all `--parallel` goldens byte-identical; 4-agent S++ backend
 panel (Godot Gameplay / Solidity / Incident Response / SRE) — zero real findings.
-**D4 is next** — Go-style work-stealing per-worker run queues + the `wakep` / spinning-worker
-StoreLoad-barrier protocol (the lost-wakeup correctness lynchpin). Items *not* in B3–B5
-(cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are documented in
-**[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
+**D4's work-stealing half (D4a–D4d) has landed** — per-worker local run queues (`LocalQ` =
+`runnext` + ring, lock class B) + a shared `global` overflow queue, a capped global batch-grab
+(`globrunqget`), random-victim steal-half (`try_steal`), and a periodic global check (`tick%61`),
+replacing the D2b single shared run queue. The deadlock predicate now reads a `runnable: AtomicUsize`
+(count of fibers queued anywhere) instead of `runq.is_empty()`. Wake is **bounded-poll**
+(`cv.wait_timeout(2ms)` + `notify_all` after a batch-grab surplus), not the full Go `wakep`
+StoreLoad barrier — a correct, simpler intermediate (a lost wakeup costs ≤2ms latency, never a hang;
+mirrors B3.4's recv-cancel re-check). `yield`→global (fairness, so a CPU hog can't re-pop its own
+local forever); only the batch-grab populates locals; stealing rebalances. Lock order strictly
+B-then-A / A-then-C → no ABBA. **D4e — the SeqCst `wakep` barrier that removes the poll — is the
+remaining D4 owe; D5 (dirty/blocking pool for blocking native calls, fixes the live G3 starvation)
+is next on the ladder.** Items *not* in B3–B5 (cross-nursery wakeups, recv-in-native-callback,
+`Channel.close()`) are documented in **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B
+breakdown: §9.
 
 > **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,
 > not a TODO.** The interpreter stays frozen at the **sequential concurrency subset** and serves as
@@ -267,6 +277,40 @@ overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no
 ## Done (newest → oldest)
 
 Each landed TDD, both engines in lockstep, with a golden + parity `examples/*.chz`. Git has the detail.
+
+- ✅ **Concurrency D4a–D4d — Go-style work-stealing per-worker run queues** (`--parallel` engine;
+  cooperative untouched, byte-identical). Replaced D2b's single shared run queue with a **per-worker
+  `LocalQ`** (`runnext` + ring, lock class **B**) + a shared `global` overflow queue (`SchedCore`,
+  lock class **A**). `take_runnable(wid, tick)` order: periodic global pull every `GLOBAL_CHECK_INTERVAL`
+  (61) schedules → own local → **work-steal** (`try_steal`: rotating victim, ceil-half from the ring
+  back, falling back to the victim's `runnext`) → **capped global batch-grab** (`globrunqget`:
+  `min(g/nworkers+1, g, LOCAL_RING_CAP/2)` into the own local — one core-lock acquisition amortized
+  over the batch is the contention win) → park. **D4a** introduced `runnable: AtomicUsize` (count of
+  fibers queued in any local + `global`) and rewired the deadlock predicate to
+  `running==0 && runnable==0 && parked>0 && done<total` (no single queue to `.len()` under the split;
+  byte-identical `DEADLOCK_MSG`). **D4b** split the queue + threaded `wid` (scaffold, locals unused →
+  behavior identical). **D4c** added stealing + the batch-grab + `cv.wait_timeout(2ms)` **bounded-poll
+  wake** in place of the full Go `wakep` StoreLoad barrier — a correct, simpler intermediate: once a
+  fiber can land in a local outside the core lock a plain `notify_all` is lost-wakeup-prone, so the
+  timeout caps that to ≤2ms latency, **never a hang** (mirrors B3.4's 50ms recv-cancel re-check);
+  liveness still rests on the always-running inline shell (decision B), which `try_steal` lets reach
+  any local. **D4d** added the periodic global check. **Key design call:** a time-slice `yield` goes
+  to **global** (Go-faithful fairness — routing it to the worker's own local would let a CPU hog
+  re-pop itself forever, re-introducing the D3 starvation), and `send_wake`/`park`-requeue/
+  `cancel_drain` stay on global too; **only the batch-grab populates locals**, fed from global and
+  rebalanced by stealing. **Per-queue `Mutex`, not lock-free CAS** (a `Fiber` is a large move-only
+  struct). Lock order strictly **B-then-A / A-then-C** → no ABBA. TDD: 8 new tests
+  (`runnable`-tracking, `LocalQ` ordering, local-before-global, steal-half, steal-skips-self,
+  periodic-61, + the `d4_worksteal_cpu_and_channel_stress` watchdog — 500 consumers + 500 CPU
+  producers exercising grab/steal/yield/park/wake/`wait_timeout` together). **1372 tests** green,
+  `cargo clippy -- -D warnings` clean, `cargo test conformance` clean, `primes_parallel=148933` both
+  engines, all `--parallel` goldens byte-identical; full suite ×5 + stress ×15 + defer/cancel race
+  ×40 stable. 2-agent S++ concurrency panel (SRE + invariant/VM): zero Critical; both Importants
+  applied — a `notify_all` after the batch-grab surplus push (kills a 2ms steal-latency cliff on
+  quiet-after-fan-out workloads) and `try_steal` now drains `runnext` (forward-safe: keeps the
+  deadlock predicate sound if a future commit ever routes work through `runnext`). **D4e — the full
+  SeqCst `wakep` StoreLoad barrier + spinning-worker that removes the poll — is the remaining D4 owe**
+  (correctness does not depend on it; it is a throughput refinement).
 
 - ✅ **Concurrency D3 — reduction-counting preemption (BEAM-style fairness)** (`--parallel` engine).
   Before: an M:N fiber held its worker until it parked on `recv` or finished, so a CPU-bound fiber
