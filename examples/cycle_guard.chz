@@ -1,0 +1,54 @@
+# examples/cycle_guard.chz — a cyclic data structure (built with ordinary type-safe code) used to
+# crash the host with an UNCATCHABLE stack overflow on `print` / `==`. Now the display and equality
+# walks are depth-guarded, so the fault is a recoverable RuntimeError that `recover:` catches — on
+# both engines, byte-identically.
+
+struct Node:
+    val: int
+    next: list[Node]
+
+a := Node(1, [])
+b := Node(2, [])
+a.next.push(b)
+b.next.push(a)            # a -> b -> a  (cycle)
+
+# print of a cyclic value is now catchable.
+pr := recover:
+    print(a)
+    "printed"
+match pr:
+    Ok(v):  print("print ok: {v}")
+    Err(e): print("print caught: {e.message()}")
+
+# == of two distinct-but-equal cycles is now catchable.
+c := Node(1, [])
+d := Node(2, [])
+c.next.push(d)
+d.next.push(c)
+eq := recover:
+    a == c
+match eq:
+    Ok(v):  print("eq ok")
+    Err(e): print("eq caught: {e.message()}")
+
+# A cyclic value compared to ITSELF short-circuits via identity (no deep walk) → true, no fault.
+print(a == a)                # true on both engines (identity fast-path)
+
+# `.contains` over a cyclic list is depth-guarded too — degrades gracefully, never crashes.
+ct := recover:
+    a.next.contains(a)       # a.next = [b]; b != a structurally → walks the cycle → guarded
+match ct:
+    Ok(v):  print("contains ok: {v}")
+    Err(e): print("contains caught: {e.message()}")
+
+# A deep-but-ACYCLIC structure still prints fine (the guard doesn't false-trip on legit data):
+# a chain of 50 Nodes, each pointing forward to the next (no back-edge → no cycle).
+chain := Node(0, [])
+for i in 1..50:
+    chain = Node(i, [chain])
+ok := recover:
+    print(chain.val)         # walks/holds a 50-deep acyclic graph; no fault
+    "walked"
+match ok:
+    Ok(v):  print("deep ok: {v}")
+    Err(e): print("deep caught: {e.message()}")

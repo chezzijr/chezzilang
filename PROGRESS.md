@@ -11,6 +11,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**Robustness pass — cyclic-data depth guard + order-independent map `==` — has now landed** (both
+engines). Two fuzzing-found bugs: (1) a cyclic data structure (a struct with a `list[Self]` field
+forming a cycle) made `print`/`==` recurse unbounded on the **host** stack inside the value-display
+and value-equality routines → uncatchable SIGABRT, even inside `recover:`; (2) map `==` was
+order-*dependent* (positional zip) while set `==` was order-independent — inconsistent. Fix:
+a contained recursion guard `MAX_STRUCTURAL_DEPTH = 10_000` threaded through display
+(`stringify`/`display_guarded`) and a new `values_equal_guarded(..) -> Result<bool, RuntimeError>`
+(the public `values_equal -> bool` stays a thin wrapper over it, so the ~66 hash-probe/`contains`
+call sites are untouched and depth-exceeded degrades to "not equal"); the recoverable
+`maximum structural depth (10000) exceeded (cyclic data structure?)` error is surfaced only at the
+`==`/`!=` op sites. Map `==` is now order-independent value equality (same key→value pairs), mirroring
+the Set arm. A 2-agent review caught + fixed two parity gaps before commit: interp `list.contains`/
+`index_of` used derived `==` (unguarded → SIGABRT on cyclic data; now route through `values_equal`),
+and the interp equality lacked the VM's identity fast-path (`a == a` on a self-cycle diverged; added
+`Rc::ptr_eq` short-circuits). New goldens `examples/map_eq.chz` + `examples/cycle_guard.chz` (VM ==
+interp == `.expected`). Decision: the interp's *call*-depth overflow in **debug** builds is left
+as-is (the tree-walk engine is slated for removal; release is fine, VM is fine). Latest suite:
+**1497 tests** green (unit + parity + `cargo test conformance`), `cargo clippy -- -D warnings` clean.
+
 Core language is feature-complete through **M18** plus several gap-closing passes. Concurrency
 **C1 + C2 + C3 + C4** have landed (both engines), plus the **`Executor` escape hatch** (C5's
 sequential subset) with **program-exit auto-drain** (C5 / A2) and the C5 checker refinements. So

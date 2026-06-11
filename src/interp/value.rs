@@ -83,8 +83,9 @@ pub struct Closure {
 
 /// An insertion-ordered hash map (interp side, mirroring `vm::heap::MapData`). `entries` is the
 /// insertion-ordered store with a cached key hash per entry; `index` maps a hash to its candidate
-/// positions for O(1)-average lookup. Equality ignores the cached hashes and the index — it compares
-/// key/value pairs in order (preserving the pre-hash-table assoc-list `==` semantics).
+/// positions for O(1)-average lookup. Equality ignores the cached hashes and the index and is
+/// order-INDEPENDENT — two maps are equal iff they have the same size and every `(key, value)` pair
+/// of one has a matching pair in the other (a map literal's insertion order must not affect `==`).
 #[derive(Debug, Clone, Default)]
 pub struct MapData {
     pub entries: Vec<(u64, Value, Value)>,
@@ -114,13 +115,20 @@ impl MapData {
 }
 
 impl PartialEq for MapData {
+    /// Order-*independent* key/value comparison (ignoring cached hashes / index): equal iff the same
+    /// size and every `(key, value)` of `self` has a matching pair in `o`. Mirrors `SetData::eq` and
+    /// the VM's `values_equal` Map arm so a map nested inside a struct/list — which reaches here via
+    /// `Value`'s derived `PartialEq` — compares the same on both engines. (Top-level map `==` goes
+    /// through `interp::values_equal_guarded`'s dedicated `Map` arm, which is semantically identical
+    /// — the guarded arm additionally bounds recursion depth. Keys and values are compared with
+    /// `values_equal` (the depth-guarded wrapper) for the same numeric/cross-engine semantics.
     fn eq(&self, o: &Self) -> bool {
         self.entries.len() == o.entries.len()
-            && self
-                .entries
-                .iter()
-                .zip(&o.entries)
-                .all(|((_, ka, va), (_, kb, vb))| ka == kb && va == vb)
+            && self.entries.iter().all(|(_, ka, va)| {
+                o.entries.iter().any(|(_, kb, vb)| {
+                    super::values_equal(ka, kb) && super::values_equal(va, vb)
+                })
+            })
     }
 }
 

@@ -248,6 +248,13 @@ enum Deferred {
 /// of overflowing the host stack — while still allowing deep, legitimate recursion.
 const MAX_CALL_DEPTH: usize = 10_000;
 
+/// Maximum structural recursion depth for display (`stringify`) and equality (`values_equal_guarded`).
+/// A cyclic data structure (e.g. a struct with a `list[Self]` field that points back at itself) would
+/// otherwise recurse unbounded on the *host* stack inside these routines and SIGABRT — uncatchable by
+/// `recover:`. Tripping this contained guard surfaces a recoverable `RuntimeError` instead. The limit
+/// matches the VM engine's (parity tested).
+const MAX_STRUCTURAL_DEPTH: usize = 10_000;
+
 impl Interp {
     fn new() -> Self {
         let mut interp = Interp {
@@ -734,7 +741,7 @@ impl Interp {
                     }
                     let expr = parse_expr_str(&inner)?;
                     let value = self.eval(&expr)?;
-                    out.push_str(&self.stringify(&value, span)?);
+                    out.push_str(&self.stringify(&value, span, 0)?);
                 }
                 '}' => {
                     return Err(RuntimeError {
@@ -770,7 +777,7 @@ impl Interp {
             if name == "print" {
                 let mut parts = Vec::with_capacity(arg_vals.len());
                 for v in &arg_vals {
-                    parts.push(self.stringify(v, span)?);
+                    parts.push(self.stringify(v, span, 0)?);
                 }
                 self.out.push_str(&parts.join(" "));
                 self.out.push('\n');
@@ -779,7 +786,7 @@ impl Interp {
             // `str(x)` dispatches to a `Stringable` struct's `str` method (else default repr).
             // Arity ≠ 1 falls through to the builtin so its arity error is preserved.
             if name == "str" && arg_vals.len() == 1 {
-                let s = self.stringify(&arg_vals[0], span)?;
+                let s = self.stringify(&arg_vals[0], span, 0)?;
                 return Ok(Value::Str(s.into()));
             }
             // `set(list)` can take a list of structs whose `hash()` re-enters the engine, so it can't
@@ -1426,7 +1433,17 @@ impl Interp {
     /// uses the default structural repr, recursing through `stringify` so a struct nested in a list
     /// / tuple / map / set / enum payload still honours the protocol. Mirrors `Value`'s `Display`
     /// for the non-dispatch cases (kept in lock-step with the VM's `stringify`, parity-tested).
-    fn stringify(&mut self, v: &Value, span: Span) -> Result<String, RuntimeError> {
+    fn stringify(&mut self, v: &Value, span: Span, depth: usize) -> Result<String, RuntimeError> {
+        // Contained structural-depth guard (Bug A): a cyclic data structure would otherwise recurse
+        // unbounded on the host stack here and SIGABRT (uncatchable). Tripping this returns a
+        // recoverable `RuntimeError`. The Stringable `str()` re-stringify below passes `depth`
+        // unchanged (its own `enter_call` guard bounds that path); container recursions pass depth+1.
+        if depth > MAX_STRUCTURAL_DEPTH {
+            return Err(RuntimeError {
+                message: "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
+                span,
+            });
+        }
         match v {
             Value::Struct { name, fields } => {
                 // `str(self) -> str` overrides the default repr. Only a self-only method is the hook
@@ -1441,28 +1458,32 @@ impl Interp {
                     self.enter_call(span)?;
                     let res = self.call(&decl, &def.home, vec![v.clone()], span);
                     self.call_depth -= 1;
-                    return self.stringify(&res?, span);
+                    return self.stringify(&res?, span, depth);
                 }
                 let parts = fields.borrow().clone();
                 let mut rendered = Vec::with_capacity(parts.len());
                 for (k, fv) in &parts {
-                    rendered.push(format!("{k}={}", self.stringify(fv, span)?));
+                    rendered.push(format!("{k}={}", self.stringify(fv, span, depth + 1)?));
                 }
                 Ok(format!("{name}({})", rendered.join(", ")))
             }
             Value::List(items) => {
                 let elems = items.borrow().clone();
-                Ok(format!("[{}]", self.stringify_seq(&elems, span)?))
+                Ok(format!("[{}]", self.stringify_seq(&elems, span, depth + 1)?))
             }
             Value::Tuple(items) => {
                 let elems = (**items).clone();
-                Ok(format!("({})", self.stringify_seq(&elems, span)?))
+                Ok(format!("({})", self.stringify_seq(&elems, span, depth + 1)?))
             }
             Value::Map(m) => {
                 let entries = m.borrow().entries.clone();
                 let mut rendered = Vec::with_capacity(entries.len());
                 for (_, k, mv) in &entries {
-                    rendered.push(format!("{}: {}", self.stringify(k, span)?, self.stringify(mv, span)?));
+                    rendered.push(format!(
+                        "{}: {}",
+                        self.stringify(k, span, depth + 1)?,
+                        self.stringify(mv, span, depth + 1)?
+                    ));
                 }
                 Ok(format!("{{{}}}", rendered.join(", ")))
             }
@@ -1472,14 +1493,14 @@ impl Interp {
                     Ok("set()".to_string())
                 } else {
                     let elems: Vec<Value> = entries.into_iter().map(|(_, e)| e).collect();
-                    Ok(format!("{{{}}}", self.stringify_seq(&elems, span)?))
+                    Ok(format!("{{{}}}", self.stringify_seq(&elems, span, depth + 1)?))
                 }
             }
             Value::Enum { variant, payload, .. } => {
                 if payload.is_empty() {
                     Ok(variant.to_string())
                 } else {
-                    Ok(format!("{variant}({})", self.stringify_seq(payload, span)?))
+                    Ok(format!("{variant}({})", self.stringify_seq(payload, span, depth + 1)?))
                 }
             }
             // Scalars, functions, modules — no protocol dispatch; reuse `Display`.
@@ -1488,10 +1509,10 @@ impl Interp {
     }
 
     /// `stringify` each element and join with `, ` (shared by list/tuple/set/enum-payload).
-    fn stringify_seq(&mut self, elems: &[Value], span: Span) -> Result<String, RuntimeError> {
+    fn stringify_seq(&mut self, elems: &[Value], span: Span, depth: usize) -> Result<String, RuntimeError> {
         let mut rendered = Vec::with_capacity(elems.len());
         for e in elems {
-            rendered.push(self.stringify(e, span)?);
+            rendered.push(self.stringify(e, span, depth)?);
         }
         Ok(rendered.join(", "))
     }
@@ -3641,8 +3662,8 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, Ru
             }
             _ => Err(type_err(op, &l, &r)),
         },
-        Eq => Ok(Value::Bool(values_equal(&l, &r))),
-        NotEq => Ok(Value::Bool(!values_equal(&l, &r))),
+        Eq => Ok(Value::Bool(values_equal_guarded(&l, &r, 0, span)?)),
+        NotEq => Ok(Value::Bool(!values_equal_guarded(&l, &r, 0, span)?)),
         And | Or => Err(RuntimeError {
             message: "logical operators are handled before evaluation".to_string(),
             span,
@@ -3756,17 +3777,148 @@ fn map_upsert(map: &mut MapData, h: u64, k: Value, v: Value) {
 }
 
 pub(super) fn values_equal(l: &Value, r: &Value) -> bool {
+    values_equal_guarded(l, r, 0, Span { line: 1, col: 1 }).unwrap_or(false)
+}
+
+/// Structural equality with a contained recursion-depth guard (Bug A). Recursive container kinds are
+/// handled EXPLICITLY and recurse via `values_equal_guarded(.., depth + 1, span)?`; a cyclic structure
+/// trips `MAX_STRUCTURAL_DEPTH` and returns a recoverable `RuntimeError` instead of overflowing the
+/// host stack. Only the language `==`/`!=` op site surfaces the error (`?`); every other caller goes
+/// through the boolean `values_equal` wrapper (which maps the error to `false`), so the invariant
+/// `values_equal(a, b) ⇒ hash(a) == hash(b)` is preserved for non-pathological data. Map and Set arms
+/// are order-INDEPENDENT (Bug B).
+pub(super) fn values_equal_guarded(
+    l: &Value,
+    r: &Value,
+    depth: usize,
+    span: Span,
+) -> Result<bool, RuntimeError> {
+    if depth > MAX_STRUCTURAL_DEPTH {
+        return Err(RuntimeError {
+            message: "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
+            span,
+        });
+    }
     match (l, r) {
         (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
-            as_f64(l) == as_f64(r)
+            Ok(as_f64(l) == as_f64(r))
+        }
+        (Value::List(a), Value::List(b)) => {
+            if std::rc::Rc::ptr_eq(a, b) {
+                return Ok(true); // identity fast-path (mirrors the VM's `ha == hb`)
+            }
+            let (a, b) = (a.borrow(), b.borrow());
+            if a.len() != b.len() {
+                return Ok(false);
+            }
+            for (x, y) in a.iter().zip(b.iter()) {
+                if !values_equal_guarded(x, y, depth + 1, span)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (Value::Tuple(a), Value::Tuple(b)) => {
+            if std::rc::Rc::ptr_eq(a, b) {
+                return Ok(true); // identity fast-path (mirrors the VM's `ha == hb`)
+            }
+            if a.len() != b.len() {
+                return Ok(false);
+            }
+            for (x, y) in a.iter().zip(b.iter()) {
+                if !values_equal_guarded(x, y, depth + 1, span)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        // Maps are unordered: equal iff same size and every (key, value) of one has a matching
+        // (key, value) in the other (order-INDEPENDENT — Bug B).
+        (Value::Map(a), Value::Map(b)) => {
+            if std::rc::Rc::ptr_eq(a, b) {
+                return Ok(true); // identity fast-path (mirrors the VM's `ha == hb`)
+            }
+            let (a, b) = (a.borrow(), b.borrow());
+            if a.entries.len() != b.entries.len() {
+                return Ok(false);
+            }
+            for (_, ka, va) in a.entries.iter() {
+                let mut found = false;
+                for (_, kb, vb) in b.entries.iter() {
+                    if values_equal_guarded(ka, kb, depth + 1, span)?
+                        && values_equal_guarded(va, vb, depth + 1, span)?
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
         }
         // Sets are unordered: equal iff same size and every element of one is in the other.
         (Value::Set(a), Value::Set(b)) => {
+            if std::rc::Rc::ptr_eq(a, b) {
+                return Ok(true); // identity fast-path (mirrors the VM's `ha == hb`)
+            }
             let (a, b) = (a.borrow(), b.borrow());
-            a.entries.len() == b.entries.len()
-                && a.entries.iter().all(|(_, x)| b.entries.iter().any(|(_, y)| values_equal(x, y)))
+            if a.entries.len() != b.entries.len() {
+                return Ok(false);
+            }
+            for (_, x) in a.entries.iter() {
+                let mut found = false;
+                for (_, y) in b.entries.iter() {
+                    if values_equal_guarded(x, y, depth + 1, span)? {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
         }
-        _ => l == r,
+        (
+            Value::Struct { name: na, fields: fa },
+            Value::Struct { name: nb, fields: fb },
+        ) => {
+            if na == nb && std::rc::Rc::ptr_eq(fa, fb) {
+                return Ok(true); // identity fast-path (mirrors the VM's `ha == hb`)
+            }
+            if na != nb {
+                return Ok(false);
+            }
+            let (fa, fb) = (fa.borrow(), fb.borrow());
+            if fa.len() != fb.len() {
+                return Ok(false);
+            }
+            for ((ka, va), (kb, vb)) in fa.iter().zip(fb.iter()) {
+                if ka != kb || !values_equal_guarded(va, vb, depth + 1, span)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (
+            Value::Enum { ty: ta, variant: va, payload: pa },
+            Value::Enum { ty: tb, variant: vb, payload: pb },
+        ) => {
+            if ta != tb || va != vb || pa.len() != pb.len() {
+                return Ok(false);
+            }
+            for (x, y) in pa.iter().zip(pb.iter()) {
+                if !values_equal_guarded(x, y, depth + 1, span)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        // Non-recursive kinds (Bool, Str, Nil, Func, Closure, Module, Native, Channel/Shared/Executor
+        // handles) — derived `PartialEq` does not recurse through user data here.
+        _ => Ok(l == r),
     }
 }
 
@@ -4438,6 +4590,61 @@ fn safe_div(a: int, b: int) -> Result[int]:
     fn self_referential_stringable_errors_instead_of_aborting() {
         let src = "struct Loop:\n    n: int\n    fn str(self) -> str:\n        return str(self)\nprint(Loop(1))\n";
         assert!(run_capture(src).is_err());
+    }
+
+    /// A cyclic data structure (`list[Self]` field forming a cycle) must error gracefully on
+    /// `print` rather than overflowing the host stack (SIGABRT), via the structural-depth guard.
+    #[test]
+    fn cyclic_print_errors_not_crashes() {
+        let src = "struct Node:\n    next: list[Node]\na := Node([])\nb := Node([])\na.next.push(b)\nb.next.push(a)\nprint(a)\n";
+        let err = run_capture(src).unwrap_err();
+        assert!(err.message.contains("maximum structural depth"), "{}", err.message);
+    }
+
+    /// `==` between two separate equal cycles must error via the structural-depth guard rather than
+    /// recursing forever on the host stack.
+    #[test]
+    fn cyclic_equality_errors_not_crashes() {
+        let src = "struct Node:\n    next: list[Node]\na := Node([])\nb := Node([])\na.next.push(b)\nb.next.push(a)\nc := Node([])\nd := Node([])\nc.next.push(d)\nd.next.push(c)\nprint(a == c)\n";
+        let err = run_capture(src).unwrap_err();
+        assert!(err.message.contains("maximum structural depth"), "{}", err.message);
+    }
+
+    /// The structural-depth fault is recoverable (a `RuntimeError`, not a SIGABRT): wrapping the
+    /// offending `print` in `recover:` catches it.
+    #[test]
+    fn cyclic_print_is_recoverable() {
+        let src = "struct Node:\n    next: list[Node]\na := Node([])\nb := Node([])\na.next.push(b)\nb.next.push(a)\nr := recover:\n    print(a)\nmatch r:\n    Ok(v): print(\"ok\")\n    Err(e): print(\"caught: {e.message()}\")\n";
+        let out = run(src);
+        assert!(out.contains("caught: maximum structural depth"), "{out}");
+    }
+
+    /// Map `==` is order-INDEPENDENT: the same entries in a different insertion order compare equal.
+    #[test]
+    fn map_equality_is_order_independent() {
+        assert_eq!(run("print({1: 10, 2: 20} == {2: 20, 1: 10})\n"), "true\n");
+    }
+
+    /// Map `==` still distinguishes differing values / differing sizes.
+    #[test]
+    fn map_equality_distinguishes_values() {
+        assert_eq!(run("print({1: 10} == {1: 99})\n"), "false\n");
+        assert_eq!(run("print({1: 10} == {1: 10, 2: 20})\n"), "false\n");
+    }
+
+    /// A deep but ACYCLIC structure (well under the guard limit) prints and compares without error.
+    #[test]
+    fn deep_acyclic_structure_ok() {
+        let mut src = String::from("x := 0\n");
+        for _ in 0..100 {
+            src.push_str("x = [x]\n");
+        }
+        src.push_str("y := 0\n");
+        for _ in 0..100 {
+            src.push_str("y = [y]\n");
+        }
+        src.push_str("print(x == y)\n");
+        assert_eq!(run(&src), "true\n");
     }
 
     #[test]

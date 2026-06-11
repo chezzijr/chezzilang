@@ -1,0 +1,6 @@
+print caught: maximum structural depth (10000) exceeded (cyclic data structure?)
+eq caught: maximum structural depth (10000) exceeded (cyclic data structure?)
+true
+contains ok: false
+49
+deep ok: walked

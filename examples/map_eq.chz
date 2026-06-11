@@ -1,0 +1,24 @@
+# examples/map_eq.chz — map equality is order-independent (the `Eq` notion: same key→value pairs,
+# regardless of insertion order), matching how set `==` already behaves. Previously map `==` zipped
+# entries pairwise, so a differently-ordered map compared unequal — inconsistent with sets and with
+# how a dictionary is conceptually unordered. Pins top-level AND nested (struct/list) parity.
+
+struct Cfg:
+    name: str
+    opts: map[str, int]
+
+# Top-level: reordered keys are still ==.
+print({"a": 1, "b": 2} == {"b": 2, "a": 1})        # true
+print({1: 10, 2: 20} == {2: 20, 1: 10})            # true
+print({1: 10} == {1: 99})                          # false (same key, different value)
+print({1: 10} == {1: 10, 2: 20})                   # false (different size)
+
+# Nested in a struct: the field map compares unordered.
+a := Cfg("a", {"x": 1, "y": 2})
+b := Cfg("a", {"y": 2, "x": 1})
+c := Cfg("a", {"x": 1, "y": 9})
+print(a == b)                                      # true
+print(a == c)                                      # false (different value for y)
+
+# Nested in a list, with list-valued entries reordered at the map level.
+print([{"x": [1, 2], "y": [3]}] == [{"y": [3], "x": [1, 2]}])   # true
