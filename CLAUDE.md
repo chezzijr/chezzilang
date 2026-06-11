@@ -69,6 +69,23 @@ OS-thread engine via `--parallel`, netpoller + `std.net`). ~1500 tests green.
 ## Current focus
 
 See **[`PROGRESS.md`](PROGRESS.md)** — single source of truth for "what's next."
-Right now: **M19 — Perf track** (scheduled, not started). Reproducible Chezzi-vs-CPython
-baseline in **[`docs/benchmarks.md`](docs/benchmarks.md)** (currently 2.1×–5.9× slower than
-CPython, startup ~11× faster); ranked optimization backlog in **[`docs/future.md`](docs/future.md)** §4.
+
+Right now: **M19 — Perf track (in progress).** The language is frozen feature-wise; this milestone
+is pure optimization, so the bar is **behavior-preserving + two-engine parity** on every change —
+a VM speedup that diverges from the interpreter (or changes observable output) is a bug, not a win.
+Landed so far: Phase 1 (peephole/const-fold, superinstructions, `invoke_value` clone-kill),
+Phase 2 (in-place call args, stringify-into-buffer), Phase 2b (global-slotting), Phase 3 (`ConstStr`
+interning, per-char single-alloc). Current gap to CPython: **1.3×–3.9×** slower (worst on call/alloc-
+bound `fib`/`list`), startup ~11× **faster**.
+
+**How to work a perf task here:** measure first (`cargo run --release -- run benches/run.chz`), land
+behind a failing-then-green correctness test, keep parity green, re-measure, record the delta in
+`docs/benchmarks.md` + `PROGRESS.md`. Don't trust a lever's a-priori payoff guess — several in the
+backlog moved a *different* bench than predicted (logged in `docs/benchmarks.md`).
+
+**Remaining levers** (ranked in **[`docs/future.md`](docs/future.md)** §4): Medium — NaN-boxing
+`Value` (16B→8B, the biggest remaining lever; its own milestone), struct-field inline caching, string
+concat/`split` builder. Big/separate — register VM, generational/incremental GC, and **Cranelift
+AOT/JIT as the stretch end-game** (a whole backend — only once the language has truly stopped moving;
+not next). Frame pooling and general arith-specialization are deprioritized (superinstructions already
+cover the hot int paths; `CallFrame`'s per-call `Vec`s are alloc-free).
