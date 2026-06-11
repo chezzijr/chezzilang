@@ -502,6 +502,90 @@ Was never a D6 prerequisite.
 > cleanly; demotion is scoped to `recv` (`sleep_ms`/socket in a callback keep their current path); the
 > `Shared.update` same-box hazard survives (don't block on a value needing the same box).
 
+#### Path C residuals — next-session worklist *(ranked #1 > #3 > #2)*
+
+> Three known limitations remain after the Path C attempt. Priority is **correctness > performance >
+> rare-hang-with-a-known-rule**. All chezzi examples below are **single-expression closures** (`fn(x):
+> <expr>`, the only closure form — `src/parser/mod.rs::parse_closure`); a multi-statement callback must
+> be a **named function** (block body), as in `slow_double` below.
+
+**#1 — deadlock false-positive *(priority 1; a correctness bug — wrong result, not a hang).*** When
+**2+ fibers are demoted** and one of them has a value already queued that the deadlock-checker can't
+see, `is_deadlocked` can fire and fault an innocent **parked sibling** with a fake `deadlock`. The
+demoted fiber with the pending value still resumes correctly (the demote loop pops its queue first) —
+only the parked sibling is wrongly killed.
+```
+import std.iter
+fn main():
+    a := Channel[int]()
+    c := Channel[int]()
+    xs := [1]
+    parallel:
+        spawn:                              # F1 demotes on `a`; later wakes F2
+            xs.map(fn(x): x + a.recv())
+            c.send(7)
+        spawn: print(c.recv())              # F2 snapshot-parks on `c`, woken by F1
+        spawn: a.send(10)                   # F3 feeds F1, then finishes
+```
+Bad interleaving (microseconds, usually does NOT happen): F3 queues `10` for F1 then finishes →
+`running==0`; before F1 pops `10`, the checker sees `running==0, parked=1 (F2), blocked_native=1 (F1)`
+→ fires → kills F2; then F1 pops `10` and would have woken F2 via `c.send(7)`.
+*Fix sketch:* register each demoted fiber's `Arc<ChannelCore>` in `SchedCore` (under core lock A); in
+`is_deadlocked`, before returning `true`, lock each demoted channel's `q` (A-then-q, the existing safe
+order) and return `false` if **any** is non-empty (that fiber will pop + progress); make the demoted
+fiber's `pop + blocked_native--` **atomic under core lock A** so there is no "popped-but-not-yet-
+un-accounted" window for the checker to misread. *Files:* `src/vm/mod.rs` — `is_deadlocked`,
+`demote_recv_block`, `SchedCore` (a demoted-channels map) + register/unregister.
+
+**#3 — `sleep_ms` / socket op inside a native callback is NOT demoted *(priority 2; perf/liveness,
+not wrong).*** A `sleep_ms` inside a native `.map` runs **inline** (pins the worker for the duration
+instead of freeing it); a socket `read`/`accept` inside a callback isn't handed to the netpoller. Same
+root cause as `recv`: the `Disp::Offload` / `Disp::PollPark` paths are snapshot mechanisms, gated on
+`native_reentry == 0` (`src/vm/mod.rs` ~2771 for the offload gate, ~5291/~5549 for the socket gates).
+```
+import std.time
+fn slow_double(x: int) -> int:              # named fn = block body (closures are single-expr)
+    time.sleep_ms(100)                      # runs INLINE inside .map — pins the worker, no demote
+    return x * 2
+fn main():
+    parallel:
+        spawn: print([1, 2, 3].map(slow_double))   # 300ms of pinned thread, not freed
+        spawn: print("a worker is pinned during those sleeps")
+```
+*Fix sketch:* reuse the Path C demote mechanism. `sleep_ms` with `native_reentry > 0` under the M:N
+engine → `spawn_replacement_worker` + a real `thread::sleep(ms)` in place + resume (clean, common —
+do this first). Socket `WouldBlock` with `native_reentry > 0` → demote + a blocking fd wait in place
+(set the fd blocking, or synchronously poll it) + resume — more complex (error paths), rarer trigger
+(net I/O inside a `map` callback is unusual). *Files:* `src/vm/mod.rs` — the `sleep_ms` offload gate
+and the socket gates, a `demote_block_sleep` / `demote_block_socket` analogous to `demote_recv_block`.
+
+**#2 — `Shared.update` same-box hold-and-wait *(priority 3; WON'T FIX by design — a dev-authored,
+universal deadlock).*** `Shared.update(f)` holds the box's `update_lock` across `f`; if `f` blocks on a
+`recv`, the lock stays held while parked, so any sender needing the **same** box deadlocks (silently —
+the pinned sender is `running`, vetoing detection).
+```
+fn main():
+    s := Shared(0)
+    ch := Channel[int]()
+    parallel:
+        spawn: s.update(fn(x): x + ch.recv())   # A: blocks on recv while holding s's lock
+        spawn:                                    # B: needs s's lock first → never reaches the send
+            s.update(fn(x): x + 1)
+            ch.send(41)
+```
+This is the classic **hold-and-wait-while-blocking** deadlock — *every* language with locks + blocking
+hits it. **Go** detects only the *global* all-goroutines-asleep case; a **partial** deadlock like this
+goes undetected ([golang/go#13759](https://github.com/golang/go/issues/13759); people use
+[go-deadlock](https://github.com/sasha-s/go-deadlock)). **Rust** flags it statically with
+[`clippy::await_holding_lock`](https://github.com/rust-lang/rust-clippy/pull/5439) ("holding a
+`MutexGuard` across an `await` is a logic bug that could lead to deadlock"). **BEAM** avoids it
+structurally (no shared locks — message passing; the analog rule is "don't block in a `gen_server`
+callback"). chezzi's rule is identical: **don't block on a value that needs the same `Shared` box** —
+`update` is a fast read-modify-write, never park inside it. *Decision:* do **not** solve. *Future:* when
+the tooling track lands, add a **lint/warning** (or a runtime "cannot block inside `update`" fault) to
+turn the silent hang into a loud error — strictly between Go (nothing for partial) and Rust (static
+lint).
+
 **The bug.** A blocking `recv` reached inside a native Rust callback (`list.map`/`filter`, `sort`,
 `compare`/`hash`/`str` hooks, `Shared.update`, the executor drain, a `defer`red call) faults
 `deadlock`. It is gated by the `native_reentry` guard (`guarded()`, `src/vm/mod.rs` — the *only* site

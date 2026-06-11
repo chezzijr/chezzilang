@@ -185,16 +185,24 @@ thread-demotion landed (attempt)** for the native islands — see the residuals 
   attempt (2026-06-11, branch `d5-owe3-path-c`).** A blocking `recv` inside a native callback
   (`xs.map`/sort comparator/`Shared.update`) now **demotes the worker thread** (blocks in place +
   spins a replacement) and resumes on a sibling `send`, instead of faulting `deadlock` (M:N engine
-  only; the cooperative engine still faults). Known residuals, accepted under the *pragmatic* scope:
-  (1) **narrow deadlock false-positive** — when two+ fibers are demoted and one has a value queued that
-  the other can't observe, the predicate can spuriously fault a *parked sibling* (the demoted fiber
-  with the pending value still resumes correctly — the queue is checked before the predicate); (2) the
-  **`Shared.update` same-box hazard** — a `recv` blocking inside `update(f)` holds `update_lock` while
-  parked, so a sender needing the *same* box deadlocks invisibly (rule: *don't block on a value that
-  needs the same `Shared` box*); (3) **scope** — demotion covers `recv` only (a `sleep_ms`/socket op
-  inside a callback keeps its current path); (4) **cost** — one raw OS thread per fiber *actually*
-  blocked in a callback (Go's `handoffp` cost), faulted cleanly if the OS refuses the thread. See
-  `docs/concurrency-tier-d.md` (D5 owe #3) + `src/vm/mod.rs::demote_recv_block`.
+  only; the cooperative engine still faults). Three known residuals — **full worklist (corrected
+  examples + fix sketches + cross-language refs) in `docs/concurrency-tier-d.md` → "Path C residuals —
+  next-session worklist".** Ranked #1 > #3 > #2 (correctness > perf > rare-hang-with-a-rule):
+  - **(#1, fix next) narrow deadlock false-positive** — 2+ fibers demoted, one has a value queued the
+    checker can't see → can spuriously fault a *parked sibling* with a fake `deadlock` (the demoted
+    fiber with the pending value still resumes — queue is checked first). *Correctness bug; do first.*
+    Fix: register demoted channels, have `is_deadlocked` peek their queues, make `pop + blocked_native--`
+    atomic under the core lock.
+  - **(#3, fix next) `sleep_ms`/socket inside a callback not demoted** — `sleep_ms` runs inline (pins
+    the worker); a socket op isn't handed to the netpoller. *Perf/liveness, not wrong.* Fix: reuse the
+    demote mechanism (replacement + block in place).
+  - **(#2, WON'T FIX by design) `Shared.update` same-box hold-and-wait** — a `recv` blocking inside
+    `update(f)` holds `update_lock` while parked → a sender needing the *same* box deadlocks silently.
+    A **universal** hold-and-wait deadlock (Go detects only the global case, not partial; Rust lints it
+    via `await_holding_lock`; BEAM has no shared locks). Dev-authored. Rule: *don't block on a value that
+    needs the same `Shared` box.* Future: a lint/warning when the tooling track lands.
+  - **(cost, by design)** one raw OS thread per fiber *actually* blocked in a callback (Go's `handoffp`
+    cost), faulted cleanly if the OS refuses the thread.
 
 ### 🟡 Stdlib breadth (low priority — language is feature-complete; this is library fill)
 
