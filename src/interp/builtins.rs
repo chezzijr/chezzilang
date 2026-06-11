@@ -190,13 +190,16 @@ fn list_method(
         "contains" => {
             arity("contains", &args, 1, span)?;
             let target = &args[0];
-            let found = items.borrow().iter().any(|v| v == target);
+            // `values_equal` (not derived `==`) for numeric/cyclic parity with the VM: it unifies
+            // int/float and is depth-guarded, so a cyclic element degrades to "not equal" instead of
+            // overflowing the host stack.
+            let found = items.borrow().iter().any(|v| super::values_equal(v, target));
             Ok(Value::Bool(found))
         }
         "index_of" => {
             arity("index_of", &args, 1, span)?;
             let target = &args[0];
-            let idx = items.borrow().iter().position(|v| v == target);
+            let idx = items.borrow().iter().position(|v| super::values_equal(v, target));
             Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
         }
         "concat" => {

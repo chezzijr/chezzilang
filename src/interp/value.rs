@@ -119,8 +119,9 @@ impl PartialEq for MapData {
     /// size and every `(key, value)` of `self` has a matching pair in `o`. Mirrors `SetData::eq` and
     /// the VM's `values_equal` Map arm so a map nested inside a struct/list — which reaches here via
     /// `Value`'s derived `PartialEq` — compares the same on both engines. (Top-level map `==` goes
-    /// through `interp::values_equal_guarded`'s dedicated `Map` arm, which is identical.) Keys and
-    /// values are compared with `values_equal` for the same numeric/cross-engine semantics.
+    /// through `interp::values_equal_guarded`'s dedicated `Map` arm, which is semantically identical
+    /// — the guarded arm additionally bounds recursion depth. Keys and values are compared with
+    /// `values_equal` (the depth-guarded wrapper) for the same numeric/cross-engine semantics.
     fn eq(&self, o: &Self) -> bool {
         self.entries.len() == o.entries.len()
             && self.entries.iter().all(|(_, ka, va)| {

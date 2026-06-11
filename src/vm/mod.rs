@@ -12620,6 +12620,31 @@ main()
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// Golden: `examples/map_eq.chz` — map equality is order-independent (same key→value pairs
+    /// regardless of insertion order), incl. nested in a struct/list, byte-identical on the VM, the
+    /// interpreter, and its `.expected`. Pins the fix that made map `==` consistent with set `==`.
+    #[test]
+    fn golden_map_eq_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/map_eq.chz");
+        let expected = include_str!("../../examples/map_eq.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Golden: `examples/cycle_guard.chz` — a cyclic data structure makes `print`/`==` a recoverable
+    /// `RuntimeError` (depth-guarded) instead of an uncatchable host stack overflow, and a
+    /// deep-but-acyclic structure still renders fine. Byte-identical on the VM, the interpreter, and
+    /// its `.expected`.
+    #[test]
+    fn golden_cycle_guard_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/cycle_guard.chz");
+        let expected = include_str!("../../examples/cycle_guard.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     /// Tech-debt parity: a `set` nested inside a struct / list must compare unordered on BOTH
     /// engines (top-level set `==` already did). Previously the interp's derived `SetData::eq` was
     /// order-sensitive, so `W(set([1,2,3])) == W(set([3,2,1]))` was `true` on the VM but `false` on

@@ -3804,6 +3804,9 @@ pub(super) fn values_equal_guarded(
             Ok(as_f64(l) == as_f64(r))
         }
         (Value::List(a), Value::List(b)) => {
+            if std::rc::Rc::ptr_eq(a, b) {
+                return Ok(true); // identity fast-path (mirrors the VM's `ha == hb`)
+            }
             let (a, b) = (a.borrow(), b.borrow());
             if a.len() != b.len() {
                 return Ok(false);
@@ -3816,6 +3819,9 @@ pub(super) fn values_equal_guarded(
             Ok(true)
         }
         (Value::Tuple(a), Value::Tuple(b)) => {
+            if std::rc::Rc::ptr_eq(a, b) {
+                return Ok(true); // identity fast-path (mirrors the VM's `ha == hb`)
+            }
             if a.len() != b.len() {
                 return Ok(false);
             }
@@ -3829,6 +3835,9 @@ pub(super) fn values_equal_guarded(
         // Maps are unordered: equal iff same size and every (key, value) of one has a matching
         // (key, value) in the other (order-INDEPENDENT — Bug B).
         (Value::Map(a), Value::Map(b)) => {
+            if std::rc::Rc::ptr_eq(a, b) {
+                return Ok(true); // identity fast-path (mirrors the VM's `ha == hb`)
+            }
             let (a, b) = (a.borrow(), b.borrow());
             if a.entries.len() != b.entries.len() {
                 return Ok(false);
@@ -3851,6 +3860,9 @@ pub(super) fn values_equal_guarded(
         }
         // Sets are unordered: equal iff same size and every element of one is in the other.
         (Value::Set(a), Value::Set(b)) => {
+            if std::rc::Rc::ptr_eq(a, b) {
+                return Ok(true); // identity fast-path (mirrors the VM's `ha == hb`)
+            }
             let (a, b) = (a.borrow(), b.borrow());
             if a.entries.len() != b.entries.len() {
                 return Ok(false);
@@ -3873,6 +3885,9 @@ pub(super) fn values_equal_guarded(
             Value::Struct { name: na, fields: fa },
             Value::Struct { name: nb, fields: fb },
         ) => {
+            if na == nb && std::rc::Rc::ptr_eq(fa, fb) {
+                return Ok(true); // identity fast-path (mirrors the VM's `ha == hb`)
+            }
             if na != nb {
                 return Ok(false);
             }
