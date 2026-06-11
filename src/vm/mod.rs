@@ -87,6 +87,11 @@ pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
 /// runtime error rather than a host stack overflow.
 const MAX_CALL_DEPTH: usize = 10_000;
 
+/// Maximum structural-recursion depth for value display / equality — a cyclic data structure (e.g.
+/// a struct with a `list[Self]` field forming a cycle) would otherwise recurse unbounded on the
+/// HOST stack and SIGABRT (uncatchable). This bound turns that into a recoverable `RuntimeError`.
+const MAX_STRUCTURAL_DEPTH: usize = 10_000;
+
 /// Stack size for the VM thread (same as the interpreter's): the VM recurses on the host stack
 /// when a builtin/method re-enters the dispatch loop, so a large dedicated stack decouples the
 /// call-depth limit from the caller's thread.
@@ -2300,12 +2305,14 @@ impl Vm {
             Op::Eq => {
                 let r = self.pop();
                 let l = self.pop();
-                self.push(Value::Bool(self.values_equal(l, r)));
+                let eq = self.values_equal_guarded(l, r, 0, span)?;
+                self.push(Value::Bool(eq));
             }
             Op::NotEq => {
                 let r = self.pop();
                 let l = self.pop();
-                self.push(Value::Bool(!self.values_equal(l, r)));
+                let eq = self.values_equal_guarded(l, r, 0, span)?;
+                self.push(Value::Bool(!eq));
             }
             Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => self.bitwise(op, span)?,
             Op::AsBool => {
@@ -2480,7 +2487,7 @@ impl Vm {
             }
             Op::ToStr => {
                 let v = self.stack[self.stack.len() - 1]; // leave rooted; stringify may run user code
-                let s = self.stringify(v, span)?;
+                let s = self.stringify(v, span, 0)?;
                 self.pop();
                 let h = self.heap.alloc(Obj::Str(s.into_boxed_str()));
                 self.push(Value::Obj(h));
@@ -2491,7 +2498,7 @@ impl Vm {
                 let mut s = String::new();
                 for i in 0..*n {
                     let p = self.stack[at + i];
-                    s.push_str(&self.stringify(p, span)?);
+                    s.push_str(&self.stringify(p, span, 0)?);
                 }
                 self.stack.truncate(at);
                 let h = self.heap.alloc(Obj::Str(s.into_boxed_str()));
@@ -3024,45 +3031,131 @@ impl Vm {
         }
     }
 
-    /// Structural equality mirroring `interp::values_equal`.
+    /// Structural equality mirroring `interp::values_equal`. Thin `bool` wrapper over the
+    /// depth-guarded worker (kept so the ~39 existing call sites — many in hot hash-probe paths
+    /// bound by `values_equal(a,b) ⇒ hash(a)==hash(b)` — are untouched). A depth-exceeded fault
+    /// (cyclic data) degrades to "not equal" here; the language `==`/`!=` ops surface it instead.
     fn values_equal(&self, l: Value, r: Value) -> bool {
+        self.values_equal_guarded(l, r, 0, Span { line: 1, col: 1 }).unwrap_or(false)
+    }
+
+    /// Depth-guarded structural equality. Returns `Err` (recoverable) once recursion exceeds
+    /// [`MAX_STRUCTURAL_DEPTH`] — guarding against cyclic data structures overflowing the host stack.
+    fn values_equal_guarded(&self, l: Value, r: Value, depth: usize, span: Span) -> Result<bool, RuntimeError> {
+        if depth > MAX_STRUCTURAL_DEPTH {
+            return Err(self.err("maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(), span));
+        }
         match (l, r) {
-            (a, b) if is_numeric(a) && is_numeric(b) => as_f64(a) == as_f64(b),
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Nil, Value::Nil) => true,
+            (a, b) if is_numeric(a) && is_numeric(b) => Ok(as_f64(a) == as_f64(b)),
+            (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
+            (Value::Nil, Value::Nil) => Ok(true),
             (Value::Obj(ha), Value::Obj(hb)) => {
                 if ha == hb {
-                    return true;
+                    return Ok(true);
                 }
+                // Snapshot the element/entry handles out of the heap so the borrow is released before
+                // recursing through `&self` methods (mirrors the borrow discipline of the seq paths).
                 match (self.heap.get(ha), self.heap.get(hb)) {
-                    (Obj::Str(a), Obj::Str(b)) => a == b,
-                    (Obj::List(a), Obj::List(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.values_equal(*x, *y)),
-                    (Obj::Tuple(a), Obj::Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.values_equal(*x, *y)),
-                    // Maps compare key+value pairwise in insertion order (matches the old assoc-list
-                    // semantics — the cached hash is ignored).
+                    (Obj::Str(a), Obj::Str(b)) => Ok(a == b),
+                    (Obj::List(a), Obj::List(b)) => {
+                        if a.len() != b.len() {
+                            return Ok(false);
+                        }
+                        let (a, b): (Vec<Value>, Vec<Value>) = (a.clone(), b.clone());
+                        for (x, y) in a.iter().zip(&b) {
+                            if !self.values_equal_guarded(*x, *y, depth + 1, span)? {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
+                    }
+                    (Obj::Tuple(a), Obj::Tuple(b)) => {
+                        if a.len() != b.len() {
+                            return Ok(false);
+                        }
+                        let (a, b): (Vec<Value>, Vec<Value>) = (a.clone(), b.clone());
+                        for (x, y) in a.iter().zip(&b) {
+                            if !self.values_equal_guarded(*x, *y, depth + 1, span)? {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
+                    }
+                    // Maps are unordered: equal iff same size and every (key, value) entry of `a` has
+                    // a structurally-equal match in `b` (mirrors the Set arm; the cached hash is unused).
                     (Obj::Map(a), Obj::Map(b)) => {
-                        a.entries.len() == b.entries.len()
-                            && a.entries.iter().zip(&b.entries).all(|((_, ka, va), (_, kb, vb))| {
-                                self.values_equal(*ka, *kb) && self.values_equal(*va, *vb)
-                            })
+                        if a.entries.len() != b.entries.len() {
+                            return Ok(false);
+                        }
+                        let ae: Vec<(Value, Value)> = a.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
+                        let be: Vec<(Value, Value)> = b.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
+                        for (ka, va) in &ae {
+                            let mut found = false;
+                            for (kb, vb) in &be {
+                                if self.values_equal_guarded(*ka, *kb, depth + 1, span)?
+                                    && self.values_equal_guarded(*va, *vb, depth + 1, span)?
+                                {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
                     }
                     // Sets are unordered: equal iff same size and every element of `a` is in `b`.
                     (Obj::Set(a), Obj::Set(b)) => {
-                        a.entries.len() == b.entries.len()
-                            && a.entries.iter().all(|(_, x)| b.entries.iter().any(|(_, y)| self.values_equal(*x, *y)))
+                        if a.entries.len() != b.entries.len() {
+                            return Ok(false);
+                        }
+                        let ae: Vec<Value> = a.entries.iter().map(|(_, x)| *x).collect();
+                        let be: Vec<Value> = b.entries.iter().map(|(_, x)| *x).collect();
+                        for x in &ae {
+                            let mut found = false;
+                            for y in &be {
+                                if self.values_equal_guarded(*x, *y, depth + 1, span)? {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
                     }
                     (Obj::Struct { name: na, fields: fa }, Obj::Struct { name: nb, fields: fb }) => {
-                        na == nb
-                            && fa.len() == fb.len()
-                            && fa.iter().zip(fb).all(|((ka, va), (kb, vb))| ka == kb && self.values_equal(*va, *vb))
+                        if na != nb || fa.len() != fb.len() {
+                            return Ok(false);
+                        }
+                        let fa: Vec<(Box<str>, Value)> = fa.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                        let fb: Vec<(Box<str>, Value)> = fb.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                        for ((ka, va), (kb, vb)) in fa.iter().zip(&fb) {
+                            if ka != kb || !self.values_equal_guarded(*va, *vb, depth + 1, span)? {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
                     }
                     (Obj::Enum { ty: ta, variant: va, payload: pa }, Obj::Enum { ty: tb, variant: vb, payload: pb }) => {
-                        ta == tb && va == vb && pa.len() == pb.len() && pa.iter().zip(pb).all(|(x, y)| self.values_equal(*x, *y))
+                        if ta != tb || va != vb || pa.len() != pb.len() {
+                            return Ok(false);
+                        }
+                        let pa: Vec<Value> = pa.clone();
+                        let pb: Vec<Value> = pb.clone();
+                        for (x, y) in pa.iter().zip(&pb) {
+                            if !self.values_equal_guarded(*x, *y, depth + 1, span)? {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
                     }
-                    _ => false,
+                    _ => Ok(false),
                 }
             }
-            _ => false,
+            _ => Ok(false),
         }
     }
 
@@ -7356,7 +7449,7 @@ impl Vm {
         let mut parts = Vec::with_capacity(argc);
         for i in 0..argc {
             let v = self.stack[at + i];
-            parts.push(self.stringify(v, span)?);
+            parts.push(self.stringify(v, span, 0)?);
         }
         self.stack.truncate(at);
         self.out.push_str(&parts.join(" "));
@@ -7519,7 +7612,7 @@ impl Vm {
 
     fn builtin_str(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         self.arity_err("str", args, 1, span)?;
-        let s = self.stringify(args[0], span)?;
+        let s = self.stringify(args[0], span, 0)?;
         Ok(Value::Obj(self.heap.alloc(Obj::Str(s.into_boxed_str()))))
     }
 
@@ -7616,68 +7709,95 @@ impl Vm {
         }
     }
 
-    /// `Display` form, matching `interp::value::Value`'s `Display` exactly.
+    /// `Display` form, matching `interp::value::Value`'s `Display` exactly. Thin wrapper over the
+    /// depth-guarded worker — kept infallible so every error-message / `display_wire` caller is
+    /// unchanged; a cyclic structure renders as `<...>` here (the print path surfaces the error).
     fn display(&self, v: Value) -> String {
+        self.display_guarded(v, 0).unwrap_or_else(|_| "<...>".to_string())
+    }
+
+    /// Depth-guarded structural display. Returns `Err` (recoverable) once recursion exceeds
+    /// [`MAX_STRUCTURAL_DEPTH`] — guarding cyclic data from overflowing the host stack.
+    fn display_guarded(&self, v: Value, depth: usize) -> Result<String, RuntimeError> {
+        if depth > MAX_STRUCTURAL_DEPTH {
+            return Err(self.err(
+                "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
+                Span { line: 1, col: 1 },
+            ));
+        }
         match v {
-            Value::Int(n) => n.to_string(),
-            Value::Float(x) => format_float(x),
-            Value::Bool(b) => b.to_string(),
-            Value::Nil => "nil".to_string(),
+            Value::Int(n) => Ok(n.to_string()),
+            Value::Float(x) => Ok(format_float(x)),
+            Value::Bool(b) => Ok(b.to_string()),
+            Value::Nil => Ok("nil".to_string()),
             Value::Obj(h) => match self.heap.get(h) {
-                Obj::Str(s) => s.to_string(),
+                Obj::Str(s) => Ok(s.to_string()),
                 Obj::List(items) => {
-                    let inner = items.iter().map(|v| self.display(*v)).collect::<Vec<_>>().join(", ");
-                    format!("[{inner}]")
+                    let mut parts = Vec::with_capacity(items.len());
+                    for v in items {
+                        parts.push(self.display_guarded(*v, depth + 1)?);
+                    }
+                    Ok(format!("[{}]", parts.join(", ")))
                 }
                 Obj::Tuple(items) => {
-                    let inner = items.iter().map(|v| self.display(*v)).collect::<Vec<_>>().join(", ");
-                    format!("({inner})")
+                    let mut parts = Vec::with_capacity(items.len());
+                    for v in items {
+                        parts.push(self.display_guarded(*v, depth + 1)?);
+                    }
+                    Ok(format!("({})", parts.join(", ")))
                 }
                 Obj::Map(m) => {
-                    let inner = m
-                        .entries
-                        .iter()
-                        .map(|(_, k, v)| format!("{}: {}", self.display(*k), self.display(*v)))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("{{{inner}}}")
+                    let mut parts = Vec::with_capacity(m.entries.len());
+                    for (_, k, v) in &m.entries {
+                        parts.push(format!("{}: {}", self.display_guarded(*k, depth + 1)?, self.display_guarded(*v, depth + 1)?));
+                    }
+                    Ok(format!("{{{}}}", parts.join(", ")))
                 }
                 Obj::Set(s) => {
                     if s.entries.is_empty() {
-                        "set()".to_string()
+                        Ok("set()".to_string())
                     } else {
-                        let inner = s.entries.iter().map(|(_, v)| self.display(*v)).collect::<Vec<_>>().join(", ");
-                        format!("{{{inner}}}")
+                        let mut parts = Vec::with_capacity(s.entries.len());
+                        for (_, v) in &s.entries {
+                            parts.push(self.display_guarded(*v, depth + 1)?);
+                        }
+                        Ok(format!("{{{}}}", parts.join(", ")))
                     }
                 }
                 Obj::Struct { name, fields } => {
-                    let inner = fields.iter().map(|(k, v)| format!("{k}={}", self.display(*v))).collect::<Vec<_>>().join(", ");
-                    format!("{name}({inner})")
+                    let mut parts = Vec::with_capacity(fields.len());
+                    for (k, v) in fields {
+                        parts.push(format!("{k}={}", self.display_guarded(*v, depth + 1)?));
+                    }
+                    Ok(format!("{name}({})", parts.join(", ")))
                 }
                 Obj::Enum { variant, payload, .. } => {
                     if payload.is_empty() {
-                        variant.to_string()
+                        Ok(variant.to_string())
                     } else {
-                        let inner = payload.iter().map(|v| self.display(*v)).collect::<Vec<_>>().join(", ");
-                        format!("{variant}({inner})")
+                        let mut parts = Vec::with_capacity(payload.len());
+                        for v in payload {
+                            parts.push(self.display_guarded(*v, depth + 1)?);
+                        }
+                        Ok(format!("{variant}({})", parts.join(", ")))
                     }
                 }
-                Obj::Func { proto, .. } => format!("<fn {}>", self.program.protos[*proto].name),
-                Obj::Closure { .. } => "<closure>".to_string(),
-                Obj::Module { name, .. } => format!("<module {name}>"),
-                Obj::Native { name, .. } => format!("<native fn {name}>"),
-                Obj::Channel(core) => format!("Channel(len={})", core.q.lock().unwrap().queue.len()),
+                Obj::Func { proto, .. } => Ok(format!("<fn {}>", self.program.protos[*proto].name)),
+                Obj::Closure { .. } => Ok("<closure>".to_string()),
+                Obj::Module { name, .. } => Ok(format!("<module {name}>")),
+                Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
+                Obj::Channel(core) => Ok(format!("Channel(len={})", core.q.lock().unwrap().queue.len())),
                 // B3.1: the box holds the wire form; render it directly (`display` is `&self` and
                 // cannot `from_wire`, which allocates — `display_wire` is the read-only equivalent).
-                Obj::Shared(core) => format!("Shared({})", self.display_wire(&core.v.lock().unwrap())),
-                Obj::Executor(core) => format!("Executor(pending={})", core.inner.lock().unwrap().queue.len()),
+                Obj::Shared(core) => Ok(format!("Shared({})", self.display_wire(&core.v.lock().unwrap()))),
+                Obj::Executor(core) => Ok(format!("Executor(pending={})", core.inner.lock().unwrap().queue.len())),
                 // D6: render open/closed without exposing the fd; matches no interp counterpart (net
                 // is VM-only) but mirrors the core handles' structural `Display`.
                 Obj::Socket(core) => {
-                    format!("Socket({})", if core.stream.lock().unwrap().is_some() { "open" } else { "closed" })
+                    Ok(format!("Socket({})", if core.stream.lock().unwrap().is_some() { "open" } else { "closed" }))
                 }
                 Obj::Listener(core) => {
-                    format!("Listener({})", if core.listener.lock().unwrap().is_some() { "open" } else { "closed" })
+                    Ok(format!("Listener({})", if core.listener.lock().unwrap().is_some() { "open" } else { "closed" }))
                 }
             },
         }
@@ -7751,7 +7871,13 @@ impl Vm {
     /// the default structural repr, recursing through `stringify` so nested structs honour the
     /// protocol too. Mirrors `interp::Interp::stringify` exactly (parity-tested). Distinct from the
     /// `&self` `display` above, which stays the pure structural form for error/debug text.
-    fn stringify(&mut self, v: Value, span: Span) -> Result<String, RuntimeError> {
+    fn stringify(&mut self, v: Value, span: Span, depth: usize) -> Result<String, RuntimeError> {
+        // Guard against cyclic data overflowing the host stack — turns SIGABRT into a recoverable
+        // `RuntimeError` (a `str` method re-stringifies at the *same* depth, so a non-recursive
+        // protocol hook doesn't burn the budget).
+        if depth > MAX_STRUCTURAL_DEPTH {
+            return Err(self.err("maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(), span));
+        }
         match v {
             Value::Int(n) => Ok(n.to_string()),
             Value::Float(x) => Ok(format_float(x)),
@@ -7761,23 +7887,23 @@ impl Vm {
             // instruction boundaries, and the container keeps its transitive contents reachable.
             Value::Obj(h) => {
                 self.push(v);
-                let r = self.stringify_obj(h, span);
+                let r = self.stringify_obj(h, span, depth);
                 self.pop();
                 r
             }
         }
     }
 
-    fn stringify_obj(&mut self, h: GcRef, span: Span) -> Result<String, RuntimeError> {
+    fn stringify_obj(&mut self, h: GcRef, span: Span, depth: usize) -> Result<String, RuntimeError> {
         // Clone the object's shape out so no heap borrow is held across the nested `&mut self` calls.
         match self.heap.get(h).clone() {
             Obj::Str(s) => Ok(s.to_string()),
-            Obj::List(items) => Ok(format!("[{}]", self.stringify_seq(&items, span)?)),
-            Obj::Tuple(items) => Ok(format!("({})", self.stringify_seq(&items, span)?)),
+            Obj::List(items) => Ok(format!("[{}]", self.stringify_seq(&items, span, depth + 1)?)),
+            Obj::Tuple(items) => Ok(format!("({})", self.stringify_seq(&items, span, depth + 1)?)),
             Obj::Map(m) => {
                 let mut rendered = Vec::with_capacity(m.entries.len());
                 for (_, k, mv) in &m.entries {
-                    rendered.push(format!("{}: {}", self.stringify(*k, span)?, self.stringify(*mv, span)?));
+                    rendered.push(format!("{}: {}", self.stringify(*k, span, depth + 1)?, self.stringify(*mv, span, depth + 1)?));
                 }
                 Ok(format!("{{{}}}", rendered.join(", ")))
             }
@@ -7786,7 +7912,7 @@ impl Vm {
                     Ok("set()".to_string())
                 } else {
                     let elems: Vec<Value> = s.entries.iter().map(|(_, e)| *e).collect();
-                    Ok(format!("{{{}}}", self.stringify_seq(&elems, span)?))
+                    Ok(format!("{{{}}}", self.stringify_seq(&elems, span, depth + 1)?))
                 }
             }
             Obj::Struct { name, fields } => {
@@ -7797,11 +7923,11 @@ impl Vm {
                 {
                     let home = self.module_objs[def.module_idx];
                     let res = self.guarded(|vm| vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span))?;
-                    return self.stringify(res, span);
+                    return self.stringify(res, span, depth);
                 }
                 let mut rendered = Vec::with_capacity(fields.len());
                 for (k, fv) in &fields {
-                    rendered.push(format!("{k}={}", self.stringify(*fv, span)?));
+                    rendered.push(format!("{k}={}", self.stringify(*fv, span, depth + 1)?));
                 }
                 Ok(format!("{name}({})", rendered.join(", ")))
             }
@@ -7809,7 +7935,7 @@ impl Vm {
                 if payload.is_empty() {
                     Ok(variant.to_string())
                 } else {
-                    Ok(format!("{variant}({})", self.stringify_seq(&payload, span)?))
+                    Ok(format!("{variant}({})", self.stringify_seq(&payload, span, depth + 1)?))
                 }
             }
             Obj::Func { proto, .. } => Ok(format!("<fn {}>", self.program.protos[proto].name)),
@@ -7819,15 +7945,15 @@ impl Vm {
             // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
             // (matches the interpreter's `stringify` catch-all falling back to `Display`).
             Obj::Channel(_) | Obj::Shared(_) | Obj::Executor(_) | Obj::Socket(_) | Obj::Listener(_) => {
-                Ok(self.display(Value::Obj(h)))
+                self.display_guarded(Value::Obj(h), depth)
             }
         }
     }
 
-    fn stringify_seq(&mut self, elems: &[Value], span: Span) -> Result<String, RuntimeError> {
+    fn stringify_seq(&mut self, elems: &[Value], span: Span, depth: usize) -> Result<String, RuntimeError> {
         let mut rendered = Vec::with_capacity(elems.len());
         for e in elems {
-            rendered.push(self.stringify(*e, span)?);
+            rendered.push(self.stringify(*e, span, depth)?);
         }
         Ok(rendered.join(", "))
     }
@@ -12682,6 +12808,88 @@ print(P(5) >= P(5))
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    // ----- cyclic-data structural-depth guard + order-independent map == -----
+
+    #[test]
+    fn cyclic_print_errors_not_crashes() {
+        let src = "\
+struct Node:
+    next: list[Node]
+a := Node([])
+b := Node([])
+a.next.push(b)
+b.next.push(a)
+print(a)
+";
+        assert!(run_err(src).contains("maximum structural depth"), "expected structural-depth error");
+    }
+
+    #[test]
+    fn cyclic_equality_errors_not_crashes() {
+        let src = "\
+struct Node:
+    next: list[Node]
+a := Node([])
+b := Node([])
+a.next.push(b)
+b.next.push(a)
+c := Node([])
+d := Node([])
+c.next.push(d)
+d.next.push(c)
+print(a == c)
+";
+        assert!(run_err(src).contains("maximum structural depth"), "expected structural-depth error");
+    }
+
+    #[test]
+    fn cyclic_print_is_recoverable() {
+        let src = "\
+struct Node:
+    next: list[Node]
+a := Node([])
+b := Node([])
+a.next.push(b)
+b.next.push(a)
+r := recover:
+    print(a)
+match r:
+    Ok(v): print(\"ok\")
+    Err(e): print(\"caught: {e.message()}\")
+";
+        let out = run(src);
+        assert!(out.contains("caught: maximum structural depth"), "expected recovered error, got {out:?}");
+    }
+
+    #[test]
+    fn map_equality_is_order_independent() {
+        assert_eq!(run("print({1: 10, 2: 20} == {2: 20, 1: 10})\n"), "true\n");
+    }
+
+    #[test]
+    fn map_equality_distinguishes_values() {
+        assert_eq!(run("print({1: 10} == {1: 99})\n"), "false\n");
+        assert_eq!(run("print({1: 10} == {1: 10, 2: 20})\n"), "false\n");
+    }
+
+    #[test]
+    fn deep_acyclic_structure_ok() {
+        let src = "\
+x := [0]
+i := 0
+while i < 100:
+    x = [x]
+    i = i + 1
+y := [0]
+j := 0
+while j < 100:
+    y = [y]
+    j = j + 1
+print(x == y)
+";
+        assert_eq!(run(src), "true\n");
     }
 }
 
