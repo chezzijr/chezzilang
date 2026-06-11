@@ -14,7 +14,9 @@
 //! `Result::Err` variant with message `"timeout"` (the return type is unchanged). `0` polls once
 //! (never parks); a negative saturates to `0`. This is a `--parallel`-engine feature (the fiber parks
 //! on the netpoller with a deadline); on the cooperative / top-level fallback — which has no fiber to
-//! park and already fails loud on would-block — a `timeout_ms` argument is simply ignored.
+//! park and already fails loud on would-block — a non-zero `timeout_ms` is moot (the op never parks
+//! there, so it can't time out), though a `timeout_ms == 0` would-block still surfaces `Err("timeout")`
+//! since the poll-once check precedes the engine gate. Either way the cooperative result is an `Err`.
 
 use super::{Host, HostError, NativeFn, NativeRet};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};

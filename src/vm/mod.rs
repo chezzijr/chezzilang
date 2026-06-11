@@ -224,6 +224,13 @@ struct Vm {
     /// its install-time length on catch (see [`Handler::nursery_len`]), so a fault in the nursery
     /// body or a task can't leave a stale entry.
     nurseries: Vec<Vec<PendingCall>>,
+    /// TASK B — parallel to [`Vm::nurseries`] (same length, pushed/popped in lockstep): the value of
+    /// the current frame's `deferred.len()` captured when each nursery was entered (`EnterNursery`),
+    /// i.e. the defer floor of that `parallel:` body. A recover-scoped `?` escaping a `parallel:`
+    /// must run the body's defers (those at `deferred[floor..]`) BEFORE writing the cancel-report and
+    /// only THEN run the recover block's own defers — matching the interp, whose `exec_parallel`
+    /// reports after the body's `exec_scoped_block` has already drained its defers.
+    nursery_defer_floors: Vec<usize>,
     /// Every `Executor` created during the run (`Op::NewExecutor`), in creation order. These handles
     /// are GC roots (see [`Vm::collect`]) so an un-shut executor's queued work survives until the
     /// program-exit auto-drain (C5 / A2) reaps any executor never explicitly shut down — the VM
@@ -390,6 +397,9 @@ struct FiberCtx {
     cur_base: usize,
     handlers: Vec<Handler>,
     nurseries: Vec<Vec<PendingCall>>,
+    /// TASK B — see [`Vm::nursery_defer_floors`]; carried per-fiber so a parked fiber's per-nursery
+    /// defer floors travel with its `nurseries` across `swap_ctx`.
+    nursery_defer_floors: Vec<usize>,
     fault_trace: Option<Vec<TraceFrame>>,
     fault_trace_depth: usize,
     /// D2a — an M:N fiber carries its OWN heap (share-nothing): `swap_ctx` swaps it with the host
@@ -1596,6 +1606,7 @@ impl Vm {
             gc_stress: false,
             parallel: false,
             nurseries: Vec::new(),
+            nursery_defer_floors: Vec::new(),
             executors: Vec::new(),
             suspend: None,
             offload: None,
@@ -1639,6 +1650,7 @@ impl Vm {
         std::mem::swap(&mut self.cur_base, &mut ctx.cur_base);
         std::mem::swap(&mut self.handlers, &mut ctx.handlers);
         std::mem::swap(&mut self.nurseries, &mut ctx.nurseries);
+        std::mem::swap(&mut self.nursery_defer_floors, &mut ctx.nursery_defer_floors);
         std::mem::swap(&mut self.fault_trace, &mut ctx.fault_trace);
         std::mem::swap(&mut self.fault_trace_depth, &mut ctx.fault_trace_depth);
         // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
@@ -2492,7 +2504,13 @@ impl Vm {
                 };
                 return Err(self.err(format!("no match arm for variant '{variant}'"), span));
             }
-            Op::EnterNursery => self.nurseries.push(Vec::new()),
+            Op::EnterNursery => {
+                self.nurseries.push(Vec::new());
+                // TASK B — capture this parallel body's defer floor so a recover-scoped `?` can run
+                // the body's defers before the cancel-report (see `nursery_defer_floors`).
+                let floor = self.frames.last().map(|f| f.deferred.len()).unwrap_or(0);
+                self.nursery_defer_floors.push(floor);
+            }
             Op::JoinNursery => self.join_nursery()?,
             // TASK B — `break`/`continue` leaving a `parallel:` scope: cancel-and-report its unstarted
             // tasks and pop exactly that one level (the compiler emits one per escaped scope).
@@ -4329,6 +4347,7 @@ impl Vm {
         let mut cancelled = 0usize;
         while self.nurseries.len() > from_len {
             // Each `PendingCall` is one unstarted task; drop the whole level.
+            self.nursery_defer_floors.pop(); // lockstep with `nurseries`
             cancelled += self.nurseries.pop().map(|n| n.len()).unwrap_or(0);
         }
         if cancelled >= 1 {
@@ -4339,6 +4358,7 @@ impl Vm {
     fn join_nursery(&mut self) -> Result<(), RuntimeError> {
         // Consume this nursery's tasks (FIFO). Popping the entry now (as the old drain did at the
         // end) keeps the parent's `Handler::nursery_len` accounting correct on a later fault.
+        self.nursery_defer_floors.pop(); // keep the parallel floor stack in lockstep with `nurseries`
         let tasks = self.nurseries.pop().unwrap_or_default();
         if tasks.is_empty() {
             return Ok(());
@@ -6733,9 +6753,28 @@ impl Vm {
                     // whose `exec_parallel` reports during the `?` unwind, before the recover's value is
                     // produced. Without this the nursery lingered until the whole frame returned (the
                     // report then trailed `print("recovered")`, an interp/VM divergence).
+                    //
+                    // ORDERING (matches the interp oracle): the escaped `parallel:` BODY's own defers
+                    // must run BEFORE the cancel-report, and the recover block's defers AFTER it —
+                    // because in the interp the body is its own `exec_scoped_block` whose defers drain
+                    // as the `?` unwinds out of the body, and only then does `exec_parallel` report;
+                    // the recover block's defers run later, at the recover boundary. So: drain the
+                    // body defers down to the outermost escaped nursery's floor, report, then drain the
+                    // remaining (recover-block) defers down to the handler's install-time floor. A body
+                    // defer fault is held and superseded by any later recover-block defer fault.
+                    let mut body_defer_err = if self.nurseries.len() > h.nursery_len {
+                        let floor = self.nursery_defer_floors[h.nursery_len];
+                        self.drain_frame_to(floor)
+                    } else {
+                        None
+                    };
+                    if self.pending_exit.is_some() && let Some(e) = body_defer_err.take() {
+                        return Err(e);
+                    }
                     self.drain_escaped_nursery(h.nursery_len);
                     // Drain the recover block's own defers before binding the result. A fault in one
-                    // supersedes the propagated value (becomes the recover's `Err`).
+                    // supersedes the propagated value (becomes the recover's `Err`); a recover-block
+                    // defer fault in turn supersedes a body defer fault (it unwinds later).
                     match self.drain_frame_to(h.defer_len) {
                         Some(e) if self.pending_exit.is_some() => return Err(e),
                         Some(e) => {
@@ -6743,7 +6782,16 @@ impl Vm {
                             let err = self.alloc_enum("Result", "Err", vec![msg]);
                             self.push(err);
                         }
-                        None => self.push(v), // the propagated Result/Option value IS the result
+                        None => match body_defer_err {
+                            // No recover-block defer fault, but a parallel-body defer faulted: that
+                            // becomes the recover's `Err` (Go semantics — a defer fault supersedes).
+                            Some(e) => {
+                                let msg = self.alloc_str(e.message);
+                                let err = self.alloc_enum("Result", "Err", vec![msg]);
+                                self.push(err);
+                            }
+                            None => self.push(v), // the propagated Result/Option value IS the result
+                        },
                     }
                     self.jump(h.ip);
                     return Ok(());
@@ -11195,6 +11243,29 @@ main()
         assert_eq!(vm_out, format!("{report}recovered\n"), "recover swallows the fault; cancel+report precedes it");
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"), "VM/interp parity");
         assert_eq!(nursery_depth, 0, "the recover-caught nursery is reclaimed via the handler path");
+    }
+
+    /// gap #2, ordering boundary: a recover-scoped `?` escaping a `parallel:` whose BODY has a
+    /// `defer` must order the cancel-report AFTER the parallel-body defer and BEFORE the recover
+    /// continues — matching the interp oracle, whose `exec_parallel` reports only after the body's
+    /// `exec_scoped_block` has drained its defers. Regression for the do_try report-before-body-defer
+    /// divergence (the report previously trailed the parallel-body defer on the VM). Body-defer →
+    /// report → recovered, byte-identical across interp / VM-cooperative / VM-`--parallel`.
+    #[test]
+    fn parallel_recover_scoped_try_orders_report_after_body_defer() {
+        let src = "fn noop():\n    0\n\
+                   fn pdefer():\n    print(\"PDEFER\")\n\
+                   fn boom() -> int!:\n    return Err(\"x\")\n\
+                   fn main():\n    r := recover:\n        parallel:\n            defer pdefer()\n            spawn noop()\n            y := boom()?\n            print(y)\n        0\n    print(\"recovered\")\nmain()\n";
+        let report = crate::runtime::pending_cancel_report(1);
+        let expected = format!("PDEFER\n{report}recovered\n");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(interp_out, expected, "interp oracle: body-defer precedes report precedes recover");
+        let (vm_out, nursery_depth) = run_capture_nursery_len(src);
+        let vm_out = vm_out.expect("the ? is caught by recover, so the program completes");
+        assert_eq!(vm_out, expected, "VM cooperative: report ordered after the parallel-body defer");
+        assert_eq!(nursery_depth, 0, "the recover-caught nursery is reclaimed, not leaked");
+        assert_eq!(run_capture_parallel(src).expect("--parallel run"), expected, "VM --parallel parity");
     }
 
     // ----- TASK B: pending-spawn-drop on early `parallel:` escape → cancel-and-report -----
