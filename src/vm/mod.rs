@@ -8093,6 +8093,98 @@ main()
         }
     }
 
+    /// D5 owe #3 (Path A) — a blocking `recv` reached **through a chezzi-source HOF** (`iter.map`,
+    /// `std/iter.chz`) parks instead of faulting `deadlock`, unlike the native `.map` (whose Rust loop
+    /// frame breaks the snapshot chain). Every frame from the fiber's entry to the `recv` is a VM frame
+    /// (`map`'s `for`-loop + the closure), so the park is sound. The exact A/B of the contrast test
+    /// `fibers_recv_inside_map_callback_faults` (native `xs.map` → `deadlock`); here `iter.map` succeeds.
+    ///
+    /// The **cooperative** leg is the deterministic guard: tasks run in spawn order on one thread, so
+    /// `consume` (spawned first) reaches `recv` on the still-empty channel and **must park** before the
+    /// `produce` sibling can run — a regressed park/wake faults `deadlock` or hangs, never flake-passes.
+    /// (Under `--parallel` the producer races the consumer on another thread and may fill the unbounded
+    /// FIFO before the first `recv`, so that leg can't *force* a park — it's the real-engine + hang
+    /// guard, run under a 30 s watchdog.) Sum `66` proves all three recvs threaded through the closure.
+    #[test]
+    fn d5_owe3_recv_in_iter_map_callback_parks() {
+        let src = "\
+import std.iter
+
+fn produce(ch: Channel[int]):
+    ch.send(10)
+    ch.send(20)
+    ch.send(30)
+
+fn consume(ch: Channel[int], out: Shared[int]):
+    ys := iter.map([1, 2, 3], fn(x: int) -> int: x + ch.recv())
+    out.update(fn(a): a + ys[0] + ys[1] + ys[2])
+
+fn main():
+    ch := Channel[int]()
+    out := Shared(0)
+    parallel:
+        spawn consume(ch, out)
+        spawn produce(ch)
+    print(out.get())
+
+main()
+";
+        let entry = write_temp_chz("d5_owe3_iter_map", src);
+        // Cooperative leg — deterministic: `consume` parks on the empty channel before `produce` runs.
+        let (co, _ce, cr, _cc) = run_file_with(&entry, crate::native::HostConfig::default());
+        assert!(cr.is_ok(), "cooperative iter.map recv-in-callback faulted (park regressed): {cr:?}");
+        assert_eq!(co, "66\n", "cooperative iter.map recv-in-callback wrong sum");
+        // Parallel leg — the real M:N engine, under a watchdog so a park/wake hang fails loud.
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok((out, _err, res, _code)) => {
+                assert!(res.is_ok(), "parallel iter.map recv-in-callback nursery faulted: {res:?}");
+                assert_eq!(out, "66\n");
+            }
+            Err(_) => panic!("hung — D5 owe #3 Path A regressed (recv inside iter.map did not park)"),
+        }
+    }
+
+    /// D5 owe #3 (Path A) — the new `std/iter.chz` HOFs (`map`/`filter`/`fold`/`reduce`) are correct
+    /// and byte-identical across both engines. `map` to a different return type (`int -> str`)
+    /// exercises generic-return inference (`U` is bound solely from the closure, not from `xs`), the
+    /// primary risk flagged in the plan — it works without explicit type args. Cooperative (no
+    /// `--parallel`): this guards the functional surface; the park behaviour is guarded separately by
+    /// `d5_owe3_recv_in_iter_map_callback_parks`.
+    #[test]
+    fn d5_owe3_iter_hofs_correct_on_both_engines() {
+        let src = "\
+import std.iter
+
+fn main():
+    xs := [1, 2, 3, 4, 5]
+    print(iter.map(xs, fn(x: int) -> int: x * x))
+    print(iter.filter(xs, fn(x: int) -> bool: x % 2 == 0))
+    print(iter.fold(xs, 0, fn(a: int, x: int) -> int: a + x))
+    print(iter.reduce(xs, fn(a: int, b: int) -> int: a * b))
+    print(iter.map([1, 2], fn(x: int) -> str: \"n{x}\"))
+    # subtraction is non-commutative — locks the left-to-right fold order (0-1-2-3-4-5 = -15)
+    print(iter.fold(xs, 0, fn(a: int, x: int) -> int: a - x))
+
+main()
+";
+        let entry = write_temp_chz("d5_owe3_hofs", src);
+        let cfg = crate::native::HostConfig::default;
+        let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
+        let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(vr.is_ok(), "vm run faulted: {vr:?}");
+        assert!(ir.is_ok(), "interp run faulted: {ir:?}");
+        assert_eq!(vo, io, "vm/interp stdout divergence");
+        assert_eq!(vo, "[1, 4, 9, 16, 25]\n[2, 4]\n15\n120\n[n1, n2]\n-15\n");
+    }
+
     /// D5 owe #1 — a blocking *subprocess* native (`process.cmd`, returns `Result[str]`) is offloaded,
     /// runs off the core worker, and its `Ok`/`Err` result is lowered + pushed on resume so the `match`
     /// continues correctly past the call. `N` fibers (≫ the core pool) each run a trivial command and

@@ -24,3 +24,45 @@ fn zip[A, B](xs: list[A], ys: list[B]) -> list[(A, B)]:
     for i in 0..n:
         out.push((xs[i], ys[i]))
     return out
+
+# The HOFs below are deliberately written in Chezzi (not native Rust) so the per-element callback
+# runs through pure VM frames. Under `--parallel` a fiber parks by snapshotting its VM frames; a
+# native Rust loop frame (the builtin `xs.map`) can't be snapshotted, so a blocking `recv` / `sleep`
+# / socket op inside the callback faults `deadlock`. Reached through these functions the same
+# callback parks fine — this is the language-level fix for D5 owe #3 (BEAM's `Enum.map` over a NIF).
+# Use `iter.map` (not `xs.map`) when the callback may block under `--parallel`; the native methods
+# stay the faster non-blocking path.
+
+# Apply `f` to each element, collecting the results into a new list (BEAM `Enum.map`).
+fn map[T, U](xs: list[T], f: fn(T) -> U) -> list[U]:
+    out := []
+    for x in xs:
+        out.push(f(x))
+    return out
+
+# Keep the elements for which `pred` returns true, preserving order.
+fn filter[T](xs: list[T], pred: fn(T) -> bool) -> list[T]:
+    out := []
+    for x in xs:
+        if pred(x):
+            out.push(x)
+    return out
+
+# Left-fold: thread `acc` through `f(acc, x)` for each element, starting from `init`.
+fn fold[T, A](xs: list[T], init: A, f: fn(A, T) -> A) -> A:
+    acc := init
+    for x in xs:
+        acc = f(acc, x)
+    return acc
+
+# (`each` deferred: a void fn-type param `fn(T)` does not yet parse — the grammar requires a `->`
+# return on a function type. For side-effecting iteration use a bare `for x in xs:` or `iter.fold`
+# threading a dummy accumulator; revisit when void function types land.)
+
+# Left-fold with no seed: the accumulator starts at the first element, `f` combines the rest.
+# `xs` must be non-empty (an empty list faults on the `xs[0]` index, matching no-seed reduce).
+fn reduce[T](xs: list[T], f: fn(T, T) -> T) -> T:
+    acc := xs[0]
+    for i in 1..xs.len():
+        acc = f(acc, xs[i])
+    return acc

@@ -434,10 +434,11 @@ Goldens byte-identical.
 > sound). 10⁴ sleepers ≈ 1 thread; `checked_add` saturates a pathological `ms`. **D6b folded this timer
 > deadline into the netpoller `poll()` timeout (one blocking wait covers I/O + timers); the dedicated
 > timer thread is gone and `src/vm/timer.rs` is now a shim over `poller::submit_timer`.**
-> **Still deferred — owe #3:** the `recv`-inside-native-callback unblock. Its **resolution strategy is
-> now documented** (the "D5 owe #3" section below — Path A: move HOFs into `std/iter.chz` chezzi source,
-> proven to park; Path C: Go-`handoffp` thread-demote for the native-lock/hook islands; Path B stackful
-> rejected). Not yet implemented; not a D6 prerequisite.
+> **Owe #3 — Path A LANDED.** The `recv`-inside-callback unblock for the iteration HOFs: `map` /
+> `filter` / `fold` / `reduce` now live in `std/iter.chz` (chezzi source → VM frames → a blocking
+> `recv` in the callback parks under `--parallel`, proven by `d5_owe3_*`). Native `xs.map` kept as the
+> fast non-blocking path. Path C (thread-demote for the native-lock/hook islands) residual — only when
+> real programs hit the wall; Path B (stackful) rejected. See the "D5 owe #3" section below.
 
 **Goal.** A blocking native call (`std.io.read_file` / `write_file`, `std.fs.*`, `std.time.sleep_ms`)
 must not pin a core-pool worker (G3, live today). Route it to a **growable blocking pool** so the
@@ -463,10 +464,25 @@ concurrently (wall-clock ≈ max, not sum). (2) `sleep_ms(100)` ×100 fibers on 
 **Risk.** Medium. Classification correctness (mislabel CPU as I/O → starve). `io` stdout writes must
 respect decision-F flush. **Reuse:** `NativeFn` table, `guarded` / `native_reentry`, the D4 wake path.
 
-### D5 owe #3 — `recv` inside a native callback: resolution strategy *(A + C; B rejected)*
+### D5 owe #3 — `recv` inside a native callback: resolution strategy *(A LANDED; C residual; B rejected)*
 
-**Status:** documented strategy, **not yet implemented**. Not a D6 prerequisite — do it only when real
-programs hit the wall.
+> **Path A HAS LANDED.** The suspendable iteration HOFs `map` / `filter` / `fold` / `reduce` are now
+> chezzi source in `std/iter.chz` (alongside the pre-existing `enumerate` / `zip`). Reached through
+> `iter.map(xs, f)` the per-element callback runs through **pure VM frames**, so a blocking `recv` (or
+> `sleep` / socket op) inside `f` **parks** under `--parallel` instead of faulting `deadlock` — proven
+> live by `d5_owe3_recv_in_iter_map_callback_parks` (a `recv`-in-closure across a nursery sums `66`, no
+> hang). Generic-return inference binds `U` (and `fold`'s `A`) **from the closure alone** — no explicit
+> type args needed (`d5_owe3_iter_hofs_correct_on_both_engines`, byte-identical VM/interp). Zero Rust
+> runtime change. The native builtin `xs.map(f)` is **kept** as the faster non-blocking path (the
+> recommended split — fast native loop vs suspendable bytecode HOF, exactly BEAM's NIF-vs-`Enum`). Guidance:
+> *use `iter.map` when the callback may block under `--parallel`.* **Deferred:** `each` (a void fn-type
+> param `fn(T)` does not yet parse — the grammar requires a `->` return; use a bare `for` loop). **Path C
+> (thread-demote) remains unimplemented** — only if real programs hit the intrinsically-native islands
+> (`Shared.update`'s lock, hash/compare/str hooks, fast native `sort`).
+
+**Status:** **Path A landed** (the iteration HOFs); **Path C residual** (the native islands `iter.*`
+can't move), do it only when real programs hit the wall; **Path B rejected**. Was never a D6
+prerequisite.
 
 **The bug.** A blocking `recv` reached inside a native Rust callback (`list.map`/`filter`, `sort`,
 `compare`/`hash`/`str` hooks, `Shared.update`, the executor drain, a `defer`red call) faults
@@ -537,9 +553,11 @@ large/risky cost already declared a **non-goal** for interp B1/B2. The **A + C**
 same *observable* behaviour ("`recv` works in callbacks") at a fraction of the risk, so B is not
 pursued unless chezzi adopts Go/BEAM-grade uniformity as a core goal.
 
-**Plan of record.** (1) Add `map`/`filter`/`fold`/`each` to `std/iter.chz` (chezzi source) + a
-`--parallel` test that `recv`s inside the closure. (2) Decide the builtin-method fate (keep fast vs
-dispatch-to-stdlib). (3) Path C only if real programs hit `update`/hooks/fast-`sort`. **B never.**
+**Plan of record.** (1) ✅ **DONE** — `map`/`filter`/`fold`/`reduce` added to `std/iter.chz` (chezzi
+source) + a `--parallel` test that `recv`s inside the closure parks (`66`, no hang); `each` deferred
+(void fn-type doesn't parse yet). (2) ✅ **DECIDED** — builtin `xs.map` **kept fast** (native loop);
+`iter.map` is the suspendable path, documented. No dispatch-to-stdlib indirection. (3) Path C only if
+real programs hit `update`/hooks/fast-`sort` — still unimplemented. **B never.**
 
 ### D6 — epoll / kqueue pollset + minimal `std.net` (TCP) *(Go netpoller)* — D6a + D6b ✅ LANDED
 

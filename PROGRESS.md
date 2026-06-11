@@ -289,13 +289,31 @@ guard ×1, `timer` unit ×3, `timer_offload` park ×1, `d5_owe1` process.cmd pro
 `cargo clippy --all-targets -- -D warnings` clean, `primes_parallel=148933` (VM + `--parallel`),
 VM==interp parity suite green, `sleep_ms` fan-out runs ~max not sum (timer path). 2-agent S++ panel
 (SRE + Backend Architect): zero Critical; both Importants applied (timer-deadline `checked_add`
-saturation; bare-name-collision guard test). **Remaining owe #3:** the `recv`-inside-native-callback
-unblock — **resolution strategy now documented** (`docs/concurrency-tier-d.md` § "D5 owe #3"): Path A
-moves the suspendable HOFs into chezzi source (`std/iter.chz`, like BEAM's `Enum.map` — *proven* to
-park: a chezzi-defined HOF with a `recv` in its closure suspends fine under `--parallel`; only native
-Rust frames break the snapshot chain), Path C Go-`handoffp`-demotes the fiber to a thread for the
-intrinsically-native islands (`Shared.update`'s lock, hash/compare/str hooks, fast `sort`), Path B
-stackful fibers rejected. Not a D6 prerequisite.
+saturation; bare-name-collision guard test).
+**D5 owe #3 — Path A has landed** (this session). The `recv`-inside-callback unblock for the
+iteration HOFs: `map` / `filter` / `fold` / `reduce` are now **chezzi source** in `std/iter.chz`
+(beside the pre-existing `enumerate` / `zip`). Reached through `iter.map(xs, f)` the per-element
+callback runs entirely through **VM frames** (no native Rust loop frame in the chain), so a blocking
+`recv` (or `sleep` / socket op) inside the closure **parks** under `--parallel` instead of faulting
+`deadlock` — the BEAM `Enum.map`-over-a-NIF split, zero Rust runtime change. **Generic-return
+inference** binds `U` (and `fold`'s `A`) **from the closure alone** (not from `xs`) — the flagged
+risk — and works with **no explicit type args**. The native builtin `xs.map(f)` is **kept** as the
+faster non-blocking path (documented: *use `iter.map` if the callback may block under `--parallel`*).
+`each` deferred — a void fn-type param `fn(T)` doesn't parse yet (grammar requires a `->` return; use
+a bare `for x in xs:`). **+2 tests** (`d5_owe3_recv_in_iter_map_callback_parks` — recv-in-closure
+across a nursery sums `66`, 30 s watchdog vs hang; `d5_owe3_iter_hofs_correct_on_both_engines` —
+map/filter/fold/reduce byte-identical VM/interp incl. `int -> str` map). **1412 green**, `cargo
+clippy --all-targets -- -D warnings` clean, conformance green, `enumerate`/`zip` users
+(`examples/for_tuple.chz`) unchanged. **Remaining owe #3 — Path C residual** (Go-`handoffp`
+thread-demote for the intrinsically-native islands: `Shared.update`'s lock, hash/compare/str hooks,
+fast native `sort`) — only when real programs hit the wall; Path B (stackful) rejected. **2-agent S++
+panel** (SRE + Backend Architect): zero Critical; applied SRE's Important (the park test's parallel
+leg can't *force* a park over an unbounded FIFO — added a **deterministic cooperative leg** that parks
+before the producer can run, so a park/wake regression faults/hangs instead of flake-passing) + SRE's
+Minor (non-commutative `fold` subtraction locks left-to-right). **Known follow-up (both reviewers, not
+this PR):** a user who reaches for the native `xs.map` with a blocking callback hits the generic
+`deadlock` fault, which names channel topology, not the `xs.map`→`iter.map` fix — a native-callback-
+specific fault message (`src/vm/mod.rs` guard sites) would make the footgun self-correcting.
 **D6a (netpoller + non-blocking `std.net` TCP surface) has landed** — the epoll/kqueue netpoller
 (`src/vm/poller.rs`, via the `polling` crate: one process-wide poll thread + an fd→parked-fiber
 registry) turns a would-block socket op into a cheap fiber-park instead of a pinned worker. `std.net`
