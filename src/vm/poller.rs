@@ -35,10 +35,12 @@
 
 use super::{Fiber, MnSched};
 use polling::{Event, Events, Poller};
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::os::fd::{BorrowedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// The direction of readiness a socket op is waiting on.
 #[derive(Clone, Copy, Debug)]
@@ -58,12 +60,53 @@ struct Parked {
     in_flight: Arc<AtomicBool>,
 }
 
-/// The poller + its registry, shared (by `Arc`) between the registering worker threads and the single
-/// poll thread. `poller` is `Sync` — the crate explicitly allows `add`/`delete` from other threads
-/// while one thread is blocked in `wait` — so it sits beside the `Mutex`'d registry, not inside it.
+/// A scheduled timer job (D6b — folded in from the former dedicated timer thread). Owns the parked
+/// fiber + scheduler `Arc` by move, exactly like a [`Parked`]; the poll thread runs it when due.
+pub type TimerJob = Box<dyn FnOnce() + Send + 'static>;
+
+/// One scheduled `sleep_ms` timer. Ordered by `(deadline, seq)` only — the `seq` tie-breaker keeps the
+/// order total without requiring `TimerJob: Ord` (the job is never compared).
+struct TimerEntry {
+    deadline: Instant,
+    seq: u64,
+    job: TimerJob,
+}
+impl PartialEq for TimerEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.deadline == other.deadline && self.seq == other.seq
+    }
+}
+impl Eq for TimerEntry {}
+impl PartialOrd for TimerEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for TimerEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.deadline.cmp(&other.deadline).then(self.seq.cmp(&other.seq))
+    }
+}
+
+/// The pending-timer min-heap (stored as `Reverse<TimerEntry>` so the max-heap yields the *earliest*
+/// deadline on `peek`/`pop`) plus a monotonic tie-breaker counter.
+struct Timers {
+    heap: BinaryHeap<Reverse<TimerEntry>>,
+    next_seq: u64,
+}
+
+/// The poller + its registry + the timer heap, shared (by `Arc`) between the registering worker threads
+/// and the single poll thread. `poller` is `Sync` — the crate explicitly allows `add`/`delete`/`notify`
+/// from other threads while one thread is blocked in `wait` — so it sits beside the `Mutex`'d registry
+/// and timer heap, not inside them.
 struct Inner {
     poller: Poller,
     registry: Mutex<HashMap<usize, Parked>>,
+    /// D6b — the `sleep_ms` deadlines, folded onto this one thread: the poll loop waits with a
+    /// deadline-bounded timeout and fires due jobs on wake, so sleeps + socket readiness share a
+    /// single OS thread (no separate timer thread). A `submit_timer` `notify()`s the poll thread to
+    /// re-evaluate its timeout in case the new deadline is sooner than the one it is sleeping until.
+    timers: Mutex<Timers>,
 }
 
 /// The process-wide netpoller handle (the `Arc<Inner>` is also held by the poll thread).
@@ -99,11 +142,21 @@ pub fn drain_sched(sched: &Arc<MnSched>) {
     SERVICE.get_or_init(NetPoller::new).drain_sched(sched);
 }
 
+/// D6b — schedule `job` to run on (or just after) `deadline`, on the netpoller's single poll thread
+/// (lazily created on first use). Folds the former dedicated timer thread onto the poll thread: a
+/// `std.time.sleep_ms` re-enqueues its parked fiber here exactly as a socket readiness event does.
+/// Callable from any thread (the worker draining `MnSched::offload`); a socket-free `--parallel`
+/// program that only sleeps still spins this one thread.
+pub fn submit_timer(deadline: Instant, job: TimerJob) {
+    SERVICE.get_or_init(NetPoller::new).submit_timer(deadline, job);
+}
+
 impl NetPoller {
     fn new() -> Self {
         let inner = Arc::new(Inner {
             poller: Poller::new().expect("failed to create the netpoller"),
             registry: Mutex::new(HashMap::new()),
+            timers: Mutex::new(Timers { heap: BinaryHeap::new(), next_seq: 0 }),
         });
         let t = Arc::clone(&inner);
         // The poll thread only locks the registry + calls `complete_offload` (which re-enqueues a
@@ -166,24 +219,47 @@ impl NetPoller {
         }
     }
 
+    fn submit_timer(&self, deadline: Instant, job: TimerJob) {
+        {
+            let mut t = self.lock_timers();
+            let seq = t.next_seq;
+            t.next_seq += 1;
+            t.heap.push(Reverse(TimerEntry { deadline, seq, job }));
+        }
+        // Wake the poll thread so it re-evaluates the nearest deadline: this new entry may be sooner
+        // than the timeout it is currently sleeping until (and `notify` wakes the *current or
+        // following* `wait`, so there is no lost-wakeup window between timeout-compute and `wait`).
+        let _ = self.inner.poller.notify();
+    }
+
     fn lock_registry(&self) -> std::sync::MutexGuard<'_, HashMap<usize, Parked>> {
         self.inner.registry.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    fn lock_timers(&self) -> std::sync::MutexGuard<'_, Timers> {
+        self.inner.timers.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
-/// The poll thread's lifetime: block until at least one fd is ready, then for each event remove its
-/// parked op, delete the fd from the pollset (oneshot fired; the fd is still open), and inject the
-/// fiber back onto its scheduler. A process daemon — it ends only when the process exits (like the
-/// timer / blocking-pool threads); no explicit shutdown.
+/// The poll thread's lifetime: wait until a fd is ready OR the nearest timer deadline elapses (or a
+/// `notify` from a new socket/timer registration), then fire every due timer and inject each ready
+/// fd's parked fiber back onto its scheduler. A process daemon — it ends only when the process exits
+/// (like the blocking-pool thread); no explicit shutdown. D6b folds the former dedicated timer thread
+/// in here: one thread serves both socket readiness and `sleep_ms` deadlines.
 fn poll_loop(inner: &Inner) {
     let mut events = Events::new();
     loop {
         events.clear();
-        // `None` timeout: block until a fd is ready (or a spurious wake). A failed `wait` (already
-        // retried past EINTR internally) just loops.
-        if inner.poller.wait(&mut events, None).is_err() {
+        // Bound the wait by the nearest timer deadline (`None` ⇒ no timers ⇒ block until a fd is ready
+        // or a `notify`). A past-due deadline yields `Duration::ZERO` so `wait` returns at once to fire
+        // it. A failed `wait` (already retried past EINTR internally) just loops.
+        let timeout = next_timeout(inner);
+        if inner.poller.wait(&mut events, timeout).is_err() {
             continue;
         }
+        // Fire due timers first (a timeout-only wake has empty `events`); each re-enqueues its fiber
+        // via `complete_offload`, exactly like a fd inject below.
+        fire_due_timers(inner);
         for ev in events.iter() {
             let parked = inner.registry.lock().unwrap_or_else(|e| e.into_inner()).remove(&ev.key);
             if let Some(Parked { fiber, sched, fd, in_flight }) = parked {
@@ -196,6 +272,38 @@ fn poll_loop(inner: &Inner) {
                 // No `resume_native` stash — the socket op re-runs (its `ip` was rewound on park).
                 sched.complete_offload(fiber);
             }
+        }
+    }
+}
+
+/// The `wait` timeout: how long until the nearest timer deadline (`None` if no timers are pending).
+/// `saturating_duration_since` yields `Duration::ZERO` for an already-past deadline, so `wait` returns
+/// immediately and `fire_due_timers` runs it.
+fn next_timeout(inner: &Inner) -> Option<Duration> {
+    let t = inner.timers.lock().unwrap_or_else(|e| e.into_inner());
+    t.heap.peek().map(|Reverse(e)| e.deadline.saturating_duration_since(Instant::now()))
+}
+
+/// Run every timer whose deadline has passed. Each job is popped UNDER the timers lock, then run with
+/// the lock RELEASED — a job re-enters the scheduler (`complete_offload` takes the sched lock) and a
+/// concurrent `submit_timer` must not block behind it. A panicking job is caught + swallowed (mirrors
+/// the blocking pool's job boundary) so it neither poisons the timers lock nor kills the poll thread
+/// (which would strand every other sleeper *and* socket).
+fn fire_due_timers(inner: &Inner) {
+    let now = Instant::now();
+    loop {
+        let job = {
+            let mut t = inner.timers.lock().unwrap_or_else(|e| e.into_inner());
+            match t.heap.peek() {
+                Some(Reverse(e)) if e.deadline <= now => t.heap.pop().map(|Reverse(e)| e.job),
+                _ => None,
+            }
+        };
+        match job {
+            Some(job) => {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+            }
+            None => break,
         }
     }
 }
@@ -373,6 +481,90 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(sched.lock().global.len(), 1, "disarmed fd did not double-inject");
         assert!(!deregister(key), "second deregister finds nothing");
+        drop(server);
+    }
+
+    // ----- D6b timer fold: the former `timer.rs` thread's behavioral tests, now exercising the
+    // merged poll loop (`submit_timer` + `fire_due_timers` on the single netpoller thread). -----
+
+    /// A submitted timer fires on (or just after) its deadline — not early, not never.
+    #[test]
+    fn timer_fires_after_its_deadline() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let start = Instant::now();
+        submit_timer(start + Duration::from_millis(80), Box::new(move || {
+            let _ = tx.send(start.elapsed());
+        }));
+        let elapsed = rx.recv_timeout(Duration::from_secs(5)).expect("timer fired within 5s");
+        assert!(elapsed >= Duration::from_millis(60), "timer fired too early: {elapsed:?}");
+    }
+
+    /// A far-future timer must not delay a nearer one: the heap orders by deadline, so the sooner
+    /// deadline fires first even when submitted second (and its `notify` re-bounds the poll wait).
+    #[test]
+    fn timer_nearer_deadline_fires_first() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let start = Instant::now();
+        let tx_far = tx.clone();
+        submit_timer(start + Duration::from_millis(400), Box::new(move || {
+            let _ = tx_far.send("far");
+        }));
+        submit_timer(start + Duration::from_millis(40), Box::new(move || {
+            let _ = tx.send("near");
+        }));
+        let first = rx.recv_timeout(Duration::from_secs(5)).expect("a timer fired");
+        assert_eq!(first, "near", "the sooner deadline must fire first");
+    }
+
+    /// Many concurrent timers all fire on the one poll thread (the point: N sleepers ≈ 1 thread).
+    #[test]
+    fn timer_many_all_fire_on_one_thread() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let n = 200;
+        let start = Instant::now();
+        for _ in 0..n {
+            let tx = tx.clone();
+            submit_timer(start + Duration::from_millis(50), Box::new(move || {
+                let _ = tx.send(());
+            }));
+        }
+        drop(tx);
+        let mut got = 0;
+        while rx.recv_timeout(Duration::from_secs(5)).is_ok() {
+            got += 1;
+        }
+        assert_eq!(got, n, "every concurrent timer fired");
+        assert!(start.elapsed() < Duration::from_secs(2), "200 timers serialized instead of sharing one thread");
+    }
+
+    /// D6b — a parked socket fiber and a batch of timers both complete on the single poll thread: the
+    /// timer fold did not break fd injection, and fd readiness did not starve the timers (one thread
+    /// genuinely serves both). The socket fires on data; the timers fire on their deadline.
+    #[test]
+    fn timer_and_fd_share_one_thread() {
+        let (mut client, server) = loopback_pair();
+        let sched = mk_sched();
+        sched.inflight.fetch_add(1, Ordering::Relaxed);
+        register(usize::MAX - 20, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let start = Instant::now();
+        for _ in 0..5 {
+            let tx = tx.clone();
+            submit_timer(start + Duration::from_millis(30), Box::new(move || {
+                let _ = tx.send(());
+            }));
+        }
+        drop(tx);
+
+        client.write_all(b"x").unwrap(); // wake the socket fiber
+        wait_until(|| sched.lock().global.len() == 1, "socket inject under timer load");
+
+        let mut got = 0;
+        while rx.recv_timeout(Duration::from_secs(5)).is_ok() {
+            got += 1;
+        }
+        assert_eq!(got, 5, "every timer fired on the same thread that served the socket");
         drop(server);
     }
 }
