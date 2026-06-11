@@ -22,11 +22,14 @@ use std::sync::{Arc, Condvar, Mutex};
 /// `Channel[T]` core (B3.1): the shared mailbox, an unbounded FIFO of wire-form messages. `send`
 /// locks + `push_back`; `recv`/`try_recv` lock + `pop_front`; `len` locks + len.
 ///
-/// B3.3-threads: `cv` is the real-OS-thread blocking primitive. Under `--parallel` a `recv` on an
-/// empty queue waits on `cv` (paired with `q`'s `Mutex`); a `send` `notify_all`s it after pushing.
-/// `cv` is **dead on the cooperative default engine** — there a `recv` parks the *fiber* (it never
-/// touches `cv`), so single-thread runs never wait on it. The wait loop re-checks the queue on every
-/// wake (spurious-wakeup-safe), which is also the hook B3.4 will extend for cancel wake-ups.
+/// B3.3-threads: `cv` is the real-OS-thread blocking primitive. A `recv` on an empty queue waits on
+/// `cv` (paired with `q`'s `Mutex`); a `send` `notify_all`s it after pushing. `cv` is **dead on the
+/// cooperative default engine** — there a `recv` parks the *fiber* (it never touches `cv`), so
+/// single-thread runs never wait on it. On the M:N engine a normal empty `recv` snapshot-parks the
+/// fiber (still no `cv`), BUT **D5 owe #3 Path C revives `cv`**: a `recv` reached inside a native
+/// callback can't snapshot-park, so the worker thread DEMOTES — it blocks in place on `cv` and resumes
+/// when a sibling `send` `notify_all`s it (`MnSched::send_wake` + the non-mn `send`). The wait loop
+/// re-checks the queue / cancel / terminate on every wake (spurious-wakeup-safe; bounded poll).
 #[derive(Debug, Default)]
 pub struct ChannelCore {
     pub q: Mutex<VecDeque<WireValue>>,

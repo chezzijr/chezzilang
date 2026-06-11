@@ -308,6 +308,19 @@ struct Vm {
     /// requeue this fiber (round-robin) instead of treating its `run_until` return as a finish.
     /// Set at the safepoint, consumed in [`Vm::run_one_fiber`]; mutually exclusive with `suspend`.
     yield_now: bool,
+    /// D5 owe #3 (Path C) — this M:N worker shell's worker id (its `locals[wid]` slot), set at the top
+    /// of [`Vm::mn_worker_loop`]. Read by [`Vm::demote_recv_block`] so a demoted worker's raw
+    /// replacement thread reuses the same `wid` (safe: a demoted worker never touches `locals[wid]`
+    /// again — it exits after settling its current fiber). `0` on the cooperative engine / top-level VM.
+    wid: usize,
+    /// D5 owe #3 (Path C) — set true the first time THIS worker thread blocks in place on a `recv`
+    /// reached inside a native callback (a "thread demotion", Go's `handoffp`). Once demoted, a fresh
+    /// replacement worker covers this thread's `wid`, so after its current fiber settles
+    /// [`Vm::mn_worker_loop`] returns (the demoted thread exits) — keeping the net live-worker count at
+    /// N. A per-WORKER-thread flag, NOT per-fiber: it is deliberately NOT reset in
+    /// [`Vm::run_one_fiber`] and NOT part of [`FiberCtx`] (a demoted thread runs exactly one fiber to
+    /// settle, then exits, so it never carries the flag into another fiber).
+    demoted: bool,
 }
 
 /// D3 — a fiber's reduction budget per schedule-in: how many ops it dispatches before yielding its
@@ -325,6 +338,12 @@ const MAX_SOCKET_READ: usize = 16 * 1024 * 1024;
 /// black-hole address returns a clean timeout instead of spinning for the kernel's ~2-minute connect
 /// timeout. Generous (the M:N engine, which parks instead of blocking, is the real target).
 const CONNECT_BLOCK_TIMEOUT_SECS: u64 = 10;
+
+/// D5 owe #3 (Path C) — how long a demoted worker thread waits on the channel condvar between
+/// re-checks (queue / cancel / terminate). A `send` notifies the condvar so the common case wakes
+/// immediately; this bounded poll only backstops a lost wakeup (≤ this much added latency, never a
+/// hang) and bounds how fast a demoted thread observes `terminate`/`cancel` (a sibling fault/deadlock).
+const DEMOTE_POLL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// A fiber's saved execution context (B1): every `Vm` field that `run_until` reads or writes keyed by
 /// per-execution indices. Swapped with the live `Vm` fields ([`Vm::swap_ctx`]) when a fiber is
@@ -684,6 +703,17 @@ struct MnSched {
     /// fiber *will* come back runnable. Like `runnable`, only ever mutated under the core lock, so the
     /// predicate's read is sound.
     inflight: AtomicUsize,
+    /// D5 owe #3 (Path C) — count of fibers currently **demoted**: blocked in place on a channel
+    /// condvar after a `recv` reached inside a native callback (a 5th fiber state, distinct from
+    /// `inflight`). Mutated only under the core lock by [`Vm::demote_recv_block`] (running→demoted on
+    /// block, demoted→running on resume). Distinct from `inflight` because the two un-account by
+    /// different paths AND feed the deadlock predicate differently: an `inflight` fiber WILL come back
+    /// from the pool/poller (external progress guaranteed) so it vetoes a deadlock, but a `blocked_native`
+    /// fiber comes back ONLY if a sibling sends — so when every remaining fiber is parked or
+    /// blocked_native with nothing running/runnable/inflight, that IS a deadlock and the predicate must
+    /// fire (see [`MnSched::is_deadlocked`]). The block loop checks the channel queue before `terminate`,
+    /// so a value that was genuinely sent always wins over a spuriously-fired terminate.
+    blocked_native: AtomicUsize,
 }
 
 struct SchedCore {
@@ -732,6 +762,7 @@ impl MnSched {
             locals: (0..nworkers.max(1)).map(|_| Mutex::new(LocalQ::new())).collect(),
             steal_ctr: AtomicUsize::new(0),
             inflight: AtomicUsize::new(0),
+            blocked_native: AtomicUsize::new(0),
         }
     }
 
@@ -996,6 +1027,12 @@ impl MnSched {
         }
         drop(c);
         self.cv.notify_all();
+        // D5 owe #3 (Path C) — also wake any worker thread DEMOTED on this channel (blocked in place
+        // on `core.cv` after a `recv` inside a native callback). Snapshot-parked fibers are requeued
+        // above + woken via `self.cv`; a demoted thread instead waits on the channel's OWN condvar, so
+        // it must be notified here. Without this it would only re-check on its bounded poll timeout
+        // (added latency, not a hang). No-op when no thread is demoted on this channel.
+        core.cv.notify_all();
     }
 
     /// Record a finished fiber's outcome in its task slot and drop it from `running`. Terminates the
@@ -1036,6 +1073,23 @@ impl MnSched {
         std::mem::take(&mut self.lock().slots)
     }
 
+    /// D5 owe #3 (Path C) — block until every task slot is filled (`done == total`), then return. The
+    /// joining thread calls this AFTER its `mn_worker_loop` returns and BEFORE `take_slots`, because
+    /// under Path C the loop can return in two ways that race slot-completion: (a) the joining thread
+    /// itself demoted and early-exited (its replacement is still draining the nursery), or (b) a
+    /// `terminate` (deadlock) was set before the `blocked_native` threads finished faulting in place.
+    /// In the common case `mn_worker_loop` already returned because `done == total`, so this is a
+    /// non-blocking re-check. Poison-tolerant (a panicked worker must not wedge the join). Liveness
+    /// rests on the invariant that EVERY demote-loop exit settles its fiber (value → resume → finish;
+    /// cancel/terminate/self-detected-deadlock → fault → finish; spawn-failure → fault → finish), so
+    /// `done` strictly advances to `total`.
+    fn wait_for_completion(&self) {
+        let mut c = self.lock();
+        while c.done < c.total {
+            c = self.cv.wait(c).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
     /// The B3.5 deadlock predicate (D4a + D5): every not-done fiber is parked, with none running,
     /// none queued anywhere (`runnable`), and **none in flight in the blocking pool** (`inflight`) —
     /// so no `send` and no blocking-pool completion can ever arrive to wake a parked fiber. Called
@@ -1047,7 +1101,12 @@ impl MnSched {
         c.running == 0
             && self.runnable.load(Ordering::Relaxed) == 0
             && self.inflight.load(Ordering::Relaxed) == 0
-            && c.parked_n > 0
+            // D5 owe #3 (Path C) — a `blocked_native` fiber (demoted, waiting in place on a channel
+            // condvar) comes back only via a sibling `send`; if nothing is running/runnable/inflight,
+            // no send can ever arrive, so an all-parked-or-blocked_native quiesce IS a deadlock. The
+            // demoted thread observes the resulting `terminate` (via its bounded condvar poll) and
+            // faults in place. (`blocked_native++` notifies `cv` so an idle puller re-evaluates this.)
+            && (c.parked_n > 0 || self.blocked_native.load(Ordering::Relaxed) > 0)
     }
 
     /// D5 — hand a fiber that hit a blocking native call to the dirty/blocking pool, freeing this
@@ -1403,6 +1462,8 @@ impl Vm {
             native_reentry: 0,
             reds: 0,           // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
             yield_now: false,  // D3
+            wid: 0,            // D5 owe #3 (Path C) — set in mn_worker_loop
+            demoted: false,    // D5 owe #3 (Path C)
             scheduler_stack: Vec::new(),
             cancel: None,
             cancelled: false,
@@ -4158,7 +4219,13 @@ impl Vm {
         //    need not be joined.
         let mut shell = self.spawn_shell(&snap, &sched, &cancel);
         shell.mn_worker_loop(&sched, 0);
-        // 5. Reduce the per-task outcome slots (task order, decision F + Exit-over-Fault precedence).
+        // 5. D5 owe #3 (Path C) — wait for every slot to be filled before reducing. `mn_worker_loop`
+        //    can now return before `done == total`: if the joining thread itself demoted it early-exits
+        //    (a replacement is still draining), and a deadlock `terminate` can precede the blocked_native
+        //    threads faulting in place. A non-blocking re-check in the common case (loop returned because
+        //    `done == total`); on Path C it parks until the replacements/demoted threads fill the slots.
+        sched.wait_for_completion();
+        // 6. Reduce the per-task outcome slots (task order, decision F + Exit-over-Fault precedence).
         let slots = sched.take_slots();
         self.reduce_task_slots(slots)
     }
@@ -4176,10 +4243,138 @@ impl Vm {
         shell
     }
 
+    /// D5 owe #3 (Path C) — a blocking `recv` reached inside a native callback (the host-stack loop
+    /// frame of `xs.map(f)` / a sort comparator / `Shared.update(f)`, so `native_reentry > 0`) cannot
+    /// snapshot-park. Instead of faulting `deadlock`, this worker thread **demotes**: it blocks in place
+    /// on the channel's own condvar and resumes in place once a sibling `send`s — Go's `handoffp`. A
+    /// fresh replacement worker is spun up ONCE (covering this thread's `wid`) so the live runnable-worker
+    /// count stays at N; after this fiber settles, [`Vm::mn_worker_loop`] sees `self.demoted` and exits,
+    /// so steady-state live workers = N + (fibers currently blocked in a callback) — Go's exact cost.
+    ///
+    /// Returns the received value (the native callback continues on this thread) or a `cancelled` /
+    /// `deadlock` fault (which unwinds the callback → the fiber faults). Only ever called on the M:N
+    /// engine inside a native callback (the recv site gates on `mn.is_some() && native_reentry > 0`).
+    fn demote_recv_block(&mut self, h: GcRef, span: Span) -> Result<Value, RuntimeError> {
+        let sched = Arc::clone(self.mn.as_ref().expect("demote_recv_block on the cooperative engine"));
+        let core = self.channel_core(h);
+        // 1. Account running → blocked_native under the core lock, then notify so an idle puller sitting
+        //    in an untimed `take_runnable` `cv.wait` re-evaluates the deadlock predicate now that this
+        //    fiber left `running` (without this notify a genuine all-blocked quiesce would never be
+        //    detected — a hang).
+        {
+            let mut c = sched.lock();
+            c.running -= 1;
+            sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+            drop(c);
+            sched.cv.notify_all();
+        }
+        // 2. Spin up a replacement worker ONCE per demoted thread (covers this `wid` while we block).
+        //    Subsequent re-entries of this loop on the SAME thread (a callback that recvs repeatedly)
+        //    reuse the already-spawned coverage — one spawn + one eventual exit per demoted thread.
+        //    If the OS refuses the thread (a real mode for this raw-thread-per-demotion design under
+        //    `RLIMIT_NPROC`/ENOMEM with many fibers blocked-in-callback), DON'T panic mid-accounting:
+        //    un-roll step 1 and fault this fiber cleanly so the join still completes.
+        if !self.demoted {
+            if !self.spawn_replacement_worker(&sched, self.wid) {
+                let mut c = sched.lock();
+                c.running += 1;
+                sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+                drop(c);
+                return Err(self.err(
+                    "recv inside a native callback could not demote the worker (OS thread limit \
+                     reached) — reduce concurrent in-callback blocking or raise the thread limit"
+                        .to_string(),
+                    span,
+                ));
+            }
+            self.demoted = true;
+        }
+        // 3. Block in place on the channel's OWN condvar/queue. NEVER hold the core lock (A) and `core.q`
+        //    simultaneously (respects the A-outer / q-inner order `send_wake` uses → no ABBA). Check the
+        //    QUEUE FIRST each iteration so a genuinely-sent value always wins over a spuriously-set
+        //    `terminate` (the narrow deadlock-predicate false-positive); lost condvar wakeups are bounded
+        //    by `DEMOTE_POLL_BACKOFF` (≤ latency, never a hang).
+        let result = loop {
+            let popped = core.q.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+            if let Some(w) = popped {
+                break Ok(self.from_wire(w));
+            }
+            // Cancel (a sibling faulted): set `cancelled` BEFORE returning the Err so the outcome is
+            // SWALLOWED (a cancelled task is dropped, not reported) instead of surfacing as a Fault —
+            // mirrors the snapshot-park recv's cancel branch.
+            if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                self.cancelled = true;
+                break Err(self.err("cancelled".to_string(), span));
+            }
+            // Terminate without a delivered value (genuine deadlock / nursery torn down): fault in place.
+            // Path C self-sufficient deadlock detection: also evaluate the predicate HERE rather than
+            // depending on a separate idle puller being alive to fire it (the replacement could be the
+            // last worker and itself demoted → otherwise a hang). The queue-first pop above means we only
+            // reach here with OUR OWN channel empty, so firing the predicate can never strand a value
+            // destined for THIS fiber — it narrows the residual false-positive to OTHER demoted fibers
+            // whose pending values this one can't observe.
+            {
+                let mut c = sched.lock();
+                if c.terminate {
+                    break Err(sched.deadlock_err.clone());
+                }
+                if sched.is_deadlocked(&c) {
+                    c.flag_deadlock(&sched.deadlock_err);
+                    drop(c);
+                    sched.cv.notify_all();
+                    break Err(sched.deadlock_err.clone());
+                }
+            }
+            let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+            if q.is_empty() {
+                let _ = core.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
+            }
+        };
+        // 4. Un-account blocked_native → running. The `+1` is essential: the fiber's next dispatch
+        //    (`finish` / `park` / `yield`) each do `running -= 1`, which would underflow a `usize`
+        //    without this restore (panic in debug / wrap → permanent false-deadlock veto in release).
+        {
+            let mut c = sched.lock();
+            c.running += 1;
+            sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    /// D5 owe #3 (Path C) — spawn a fresh OS thread running a replacement M:N worker shell over the
+    /// same scheduler, reusing the demoting worker's `wid`. A RAW thread ([`VM_STACK_BYTES`] stack,
+    /// like the pool), NOT a `pool::submit` job: the bounded pool is fixed-size, so a blocked-in-callback
+    /// pool thread would shrink it — the demoted thread is "off the pool" (Go grows `m` under
+    /// cgo/syscalls). The replacement drains the shared run queue until `terminate` (`Take::Stop`), then
+    /// exits — detached + reaped at nursery/process end (it holds only `Arc`s, so the joining thread can
+    /// return without any use-after-free). Panic-guarded like the farmed shells. Returns `false` iff the
+    /// OS refused the thread (caller faults the fiber rather than blocking with no coverage); the
+    /// snapshot/cancel `.expect`s are true invariants (only reachable on the M:N engine in a nursery).
+    fn spawn_replacement_worker(&self, sched: &Arc<MnSched>, wid: usize) -> bool {
+        let snap = self
+            .module_snapshot
+            .as_ref()
+            .expect("Path C replacement worker without a module snapshot");
+        let cancel = self
+            .cancel
+            .as_ref()
+            .expect("Path C replacement worker without a cancel token");
+        let mut shell = self.spawn_shell(snap, sched, cancel);
+        let sched = Arc::clone(sched);
+        std::thread::Builder::new()
+            .stack_size(VM_STACK_BYTES)
+            .name("chezzi-mn-repl".into())
+            .spawn(move || {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shell.mn_worker_loop(&sched, wid)));
+            })
+            .is_ok()
+    }
+
     /// D2b — a worker shell's lifetime: pull a runnable fiber, run it to its next park/finish, settle,
     /// repeat until the scheduler terminates. Generalizes the cooperative [`Vm::run_child`] to a
     /// shared run queue + park set across threads.
     fn mn_worker_loop(&mut self, sched: &Arc<MnSched>, wid: usize) {
+        self.wid = wid; // D5 owe #3 (Path C) — `demote_recv_block` reuses this for the replacement worker
         let mut tick: u64 = 0;
         loop {
             tick = tick.wrapping_add(1);
@@ -4212,6 +4407,14 @@ impl Vm {
                         poller::drain_sched(sched);
                     }
                 }
+            }
+            // D5 owe #3 (Path C) — this worker DEMOTED mid-fiber (blocked in place on a callback `recv`)
+            // and a replacement now covers its `wid`. The fiber it was running has just settled
+            // (finished, or re-parked for another worker to resume), so this thread exits to keep the
+            // net live-worker count at N. The joining thread's `wait_for_completion` holds the reduce
+            // until the replacements fill every slot.
+            if self.demoted {
+                return;
             }
         }
     }
@@ -5641,8 +5844,16 @@ impl Vm {
                         self.suspend = Some(h);
                         Ok(Value::Nil) // sentinel; never observed (callers gate on `suspend`)
                     }
-                    // No scheduler (top level / single fiber) or inside a native callback: there is
-                    // no sibling that could ever fill the channel here — a real deadlock. Unchanged.
+                    // D5 owe #3 (Path C) — empty `recv` reached INSIDE a native callback on the M:N
+                    // engine (reachable here only with `native_reentry > 0`: the `mn && reentry==0`
+                    // snapshot-park branch above already returned, and the `reentry==0` cooperative-park
+                    // guard just failed). The host-stack loop frame can't be snapshot-parked, so instead
+                    // of faulting we DEMOTE the worker thread: block in place on the channel condvar +
+                    // spin up a replacement worker, resuming in place on a sibling `send` (Go's
+                    // `handoffp`). The cooperative engine (`mn.is_none()`) keeps the deadlock fault.
+                    None if self.mn.is_some() => self.demote_recv_block(h, span),
+                    // No scheduler (top level / single fiber) or a native callback on the cooperative
+                    // engine: no sibling could ever fill the channel here — a real deadlock. Unchanged.
                     None => Err(self.err(
                         "recv on an empty channel: deadlock — nothing is queued and the \
                          sequential executor cannot block waiting for a producer (a \
@@ -8233,6 +8444,106 @@ main()
         assert!(ir.is_ok(), "interp run faulted: {ir:?}");
         assert_eq!(vo, io, "vm/interp stdout divergence");
         assert_eq!(vo, "[1, 4, 9, 16, 25]\n[2, 4]\n15\n120\n[n1, n2]\n-15\n");
+    }
+
+    /// D5 owe #3 (Path C) — a blocking `recv` reached inside a **native** callback (`xs.map`, whose
+    /// per-element loop frame lives on the Rust host stack and CANNOT be snapshot-parked) no longer
+    /// faults `deadlock` under `--parallel`: the worker thread is **demoted** (blocks in place on the
+    /// channel condvar, a fresh replacement worker covers its `wid`), and **resumes in place** when a
+    /// sibling `send`s — Go's `handoffp`. The contrast to Path A (`d5_owe3_recv_in_iter_map_callback_parks`,
+    /// where `iter.map` is chezzi source → pure VM frames → snapshot-parks) and to the cooperative-engine
+    /// pin (`fibers_recv_inside_map_callback_faults`, which still faults — demotion is M:N-only). The
+    /// result is written with `Shared.set` (NOT `update`) so the recv site is the `xs.map` callback only,
+    /// avoiding the `update_lock`-held-while-blocked hazard. Sum `66` = (1+10)+(2+20)+(3+30): all three
+    /// recvs threaded through the native map callback. Parallel-only, under a 30 s watchdog so a
+    /// demote/resume hang fails loud instead of hanging the suite. The producer `sleep_ms`s before its
+    /// first `send` so the consumer's first map-callback `recv` is **guaranteed empty** — forcing the
+    /// demote path deterministically (without the delay the producer races ahead and pre-fills the FIFO,
+    /// so the `recv` never blocks and the test would flake-pass even with Path C broken).
+    #[test]
+    fn d5_owe3_path_c_recv_in_native_map_callback_demotes() {
+        let src = "\
+import std.time
+
+fn use_map(ch: Channel[int], out: Shared[int]):
+    xs := [1, 2, 3]
+    ys := xs.map(fn(x): x + ch.recv())
+    out.set(ys[0] + ys[1] + ys[2])
+
+fn fill(ch: Channel[int]):
+    time.sleep_ms(50)
+    ch.send(10)
+    ch.send(20)
+    ch.send(30)
+
+fn main():
+    ch := Channel[int]()
+    out := Shared(0)
+    parallel:
+        spawn use_map(ch, out)
+        spawn fill(ch)
+    print(out.get())
+
+main()
+";
+        let entry = write_temp_chz("d5_owe3_path_c", src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok((out, _err, res, _code)) => {
+                assert!(res.is_ok(), "Path C: recv inside native xs.map faulted under --parallel: {res:?}");
+                assert_eq!(out, "66\n");
+            }
+            Err(_) => panic!("hung — D5 owe #3 Path C regressed (recv inside native xs.map did not demote-and-resume)"),
+        }
+    }
+
+    /// D5 owe #3 (Path C) — a `recv` inside a native callback with **no possible sender** must still
+    /// **fault `deadlock`**, not hang. This is the load-bearing half of the pragmatic deadlock scope:
+    /// the demoted thread is accounted as `blocked_native` (a 5th fiber state), which feeds
+    /// [`MnSched::is_deadlocked`] (`parked_n>0 || blocked_native>0`). The demote's `blocked_native++`
+    /// notifies `cv` so the idle replacement worker re-evaluates the predicate; on fire, `flag_deadlock`
+    /// sets `terminate`, the demoted thread observes it within `DEMOTE_POLL_BACKOFF` and faults in place,
+    /// and `wait_for_completion` lets the join reduce the deadlock outcome. Watchdog 30 s: a regressed
+    /// predicate (or a missing notify) would HANG here instead of faulting.
+    #[test]
+    fn d5_owe3_path_c_recv_in_callback_no_sender_still_deadlocks() {
+        let src = "\
+fn use_map(ch: Channel[int]):
+    xs := [1]
+    ys := xs.map(fn(x): x + ch.recv())
+    print(ys)
+
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn use_map(ch)
+
+main()
+";
+        let entry = write_temp_chz("d5_owe3_path_c_dl", src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok((_out, _err, res, _code)) => match res {
+                Err(e) => {
+                    let s = format!("{e:?}");
+                    assert!(s.contains("deadlock"), "Path C: no-sender recv-in-callback should fault deadlock, got: {s}");
+                }
+                Ok(()) => panic!("Path C: no-sender recv-in-callback unexpectedly succeeded"),
+            },
+            Err(_) => panic!("hung — D5 owe #3 Path C deadlock detection regressed (blocked_native predicate / notify)"),
+        }
     }
 
     /// D5 owe #1 — a blocking *subprocess* native (`process.cmd`, returns `Result[str]`) is offloaded,

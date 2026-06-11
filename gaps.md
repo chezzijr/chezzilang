@@ -155,8 +155,9 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 
 The `--parallel` engine is a true M:N scheduler through **D6** (fibers, work-stealing, dirty pool,
 netpoller + `std.net`). The items here are *correctness/semantics* gaps found by probing, not missing
-breadth. The big deferred *features* (D5 owe #3 `recv`-in-native-callback, per-connection `spawn`,
-`Channel.close()`, per-socket timeout) live in the tier-d doc.
+breadth. The big deferred *features* (per-connection `spawn`, `Channel.close()`, per-socket timeout)
+live in the tier-d doc. (D5 owe #3 `recv`-in-native-callback: Path A landed for `iter.*`; **Path C
+thread-demotion landed (attempt)** for the native islands — see the residuals entry below.)
 
 - **🟡 Pending `spawn` tasks are silently dropped on an early escape from `parallel:`** — **verified
   both engines, 2026-06-11.** If the parent's inline code in a `parallel:` body escapes *before the
@@ -179,6 +180,21 @@ breadth. The big deferred *features* (D5 owe #3 `recv`-in-native-callback, per-c
 - ~~**🟡 VM leaks the nursery on a `?`/return escape from `parallel:` not caught by `recover:`**~~ —
   **resolved (see resolved log).** `do_return` now `truncate`s `self.nurseries` to the frame's
   entry depth, mirroring `Handler::nursery_len` + the interp's unconditional `exec_parallel` pop.
+
+- **🟡 Path C (recv-in-native-callback thread-demotion) residuals** — **D5 owe #3 Path C landed as an
+  attempt (2026-06-11, branch `d5-owe3-path-c`).** A blocking `recv` inside a native callback
+  (`xs.map`/sort comparator/`Shared.update`) now **demotes the worker thread** (blocks in place +
+  spins a replacement) and resumes on a sibling `send`, instead of faulting `deadlock` (M:N engine
+  only; the cooperative engine still faults). Known residuals, accepted under the *pragmatic* scope:
+  (1) **narrow deadlock false-positive** — when two+ fibers are demoted and one has a value queued that
+  the other can't observe, the predicate can spuriously fault a *parked sibling* (the demoted fiber
+  with the pending value still resumes correctly — the queue is checked before the predicate); (2) the
+  **`Shared.update` same-box hazard** — a `recv` blocking inside `update(f)` holds `update_lock` while
+  parked, so a sender needing the *same* box deadlocks invisibly (rule: *don't block on a value that
+  needs the same `Shared` box*); (3) **scope** — demotion covers `recv` only (a `sleep_ms`/socket op
+  inside a callback keeps its current path); (4) **cost** — one raw OS thread per fiber *actually*
+  blocked in a callback (Go's `handoffp` cost), faulted cleanly if the OS refuses the thread. See
+  `docs/concurrency-tier-d.md` (D5 owe #3) + `src/vm/mod.rs::demote_recv_block`.
 
 ### 🟡 Stdlib breadth (low priority — language is feature-complete; this is library fill)
 

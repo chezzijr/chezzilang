@@ -314,6 +314,35 @@ Minor (non-commutative `fold` subtraction locks left-to-right). **Known follow-u
 this PR):** a user who reaches for the native `xs.map` with a blocking callback hits the generic
 `deadlock` fault, which names channel topology, not the `xs.map`→`iter.map` fix — a native-callback-
 specific fault message (`src/vm/mod.rs` guard sites) would make the footgun self-correcting.
+**D5 owe #3 — Path C has landed** (this session, an *attempt*; branch `d5-owe3-path-c`). The
+intrinsically-native islands `iter.*` can't move to (the native `xs.map`/sort comparator/`Shared.update`
+callback) now **demote the worker thread** instead of faulting `deadlock`: a blocking `recv` reached with
+`native_reentry > 0` under `--parallel` (host-stack loop frame, unsnapshotable) calls a new
+`Vm::demote_recv_block` — it accounts the fiber as a 5th state `blocked_native` (running→blocked_native
+under the core lock + `cv.notify_all`), spins up **one raw replacement OS thread** (`spawn_replacement_worker`,
+reusing the worker's `wid`; a fresh thread, NOT a pool job — the pool is fixed-size), and **blocks in place**
+on the channel's own condvar (`ChannelCore.cv`, revived from B3.3), resuming in place when a sibling
+`send`s (`send_wake` now also `core.cv.notify_all`s). After the fiber settles, `mn_worker_loop` returns
+(`if self.demoted`) so the demoted thread exits — net-zero worker count, Go's `handoffp` cost (+1 OS
+thread per fiber *actually* blocked in a callback). `is_deadlocked` gains `|| blocked_native > 0` so a
+genuine in-callback deadlock still **faults** (the demote loop self-evaluates the predicate + `flag_deadlock`,
+so detection doesn't depend on a separate puller being alive); the block loop checks the queue **before**
+`terminate` so a real send always wins. The joining thread `wait_for_completion`s (`done == total`) before
+the slot reduce (the demoted/early-exited loop can return before all slots fill). **Pragmatic scope** (user
+decision): the one narrow false-positive — parked siblings spuriously faulted when a value is queued for
+*another* demoted fiber while `running == 0` — is documented, not closed. **+2 tests**
+(`d5_owe3_path_c_recv_in_native_map_callback_demotes` — recv inside native `xs.map`, producer `sleep_ms`s
+to force the empty recv, sums `66` under a 30 s watchdog; `d5_owe3_path_c_recv_in_callback_no_sender_still_deadlocks`
+— no-sender recv-in-callback faults `deadlock`, not hang). **1417 green**, `cargo clippy` clean, conformance
+green; the cooperative fault pins (`fibers_recv_inside_map_callback_faults`/`_index_overload_`/`_defer_`)
+unchanged (Path C is M:N-only) and `d5_blocking_native_in_callback_runs_inline` (sleep-in-callback stays
+inline — demotion is scoped to `recv`) stays green. **2-agent S++ panel** (concurrency + quality): zero
+Critical; both Importants applied — spawn-failure (OS thread limit) now faults the fiber cleanly instead of
+panicking mid-accounting; the demote loop self-detects deadlock so it can't hang as the last live worker.
+**Residuals (documented):** the narrow parked-sibling false-positive; the `Shared.update` same-box hazard
+(a `recv` blocking inside `update(f)` holds `update_lock` — *don't block on a value needing the same box*);
+demotion scoped to `recv` (a `sleep_ms`/socket op inside a callback keeps its current path); Path B
+(stackful) still rejected.
 **D6a (netpoller + non-blocking `std.net` TCP surface) has landed** — the epoll/kqueue netpoller
 (`src/vm/poller.rs`, via the `polling` crate: one process-wide poll thread + an fd→parked-fiber
 registry) turns a would-block socket op into a cheap fiber-park instead of a pinned worker. `std.net`

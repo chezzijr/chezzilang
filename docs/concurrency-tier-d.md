@@ -464,7 +464,7 @@ concurrently (wall-clock ≈ max, not sum). (2) `sleep_ms(100)` ×100 fibers on 
 **Risk.** Medium. Classification correctness (mislabel CPU as I/O → starve). `io` stdout writes must
 respect decision-F flush. **Reuse:** `NativeFn` table, `guarded` / `native_reentry`, the D4 wake path.
 
-### D5 owe #3 — `recv` inside a native callback: resolution strategy *(A LANDED; C residual; B rejected)*
+### D5 owe #3 — `recv` inside a native callback: resolution strategy *(A LANDED; C ATTEMPTED/LANDED; B rejected)*
 
 > **Path A HAS LANDED.** The suspendable iteration HOFs `map` / `filter` / `fold` / `reduce` are now
 > chezzi source in `std/iter.chz` (alongside the pre-existing `enumerate` / `zip`). Reached through
@@ -480,9 +480,27 @@ respect decision-F flush. **Reuse:** `NativeFn` table, `guarded` / `native_reent
 > (thread-demote) remains unimplemented** — only if real programs hit the intrinsically-native islands
 > (`Shared.update`'s lock, hash/compare/str hooks, fast native `sort`).
 
-**Status:** **Path A landed** (the iteration HOFs); **Path C residual** (the native islands `iter.*`
-can't move), do it only when real programs hit the wall; **Path B rejected**. Was never a D6
-prerequisite.
+**Status:** **Path A landed** (the iteration HOFs); **Path C attempted/landed** (this session, branch
+`d5-owe3-path-c` — thread-demotion for the `recv` site, pragmatic deadlock detection); **Path B rejected**.
+Was never a D6 prerequisite.
+
+> **Path C HAS LANDED (attempt).** A blocking `recv` reached inside a native callback (`native_reentry > 0`)
+> under `--parallel` no longer faults `deadlock` — the worker thread **demotes**: `Vm::demote_recv_block`
+> accounts it as a 5th fiber state `blocked_native` (running→blocked_native under the core lock +
+> `cv.notify_all`), spins up **one raw replacement OS thread** (`spawn_replacement_worker`, reusing the
+> `wid`; a fresh thread, NOT a pool job), and **blocks in place** on `ChannelCore.cv` (revived from B3.3),
+> resuming in place when a sibling `send`s (`send_wake` now also `core.cv.notify_all`s). After the fiber
+> settles, `mn_worker_loop` returns (`if self.demoted`) so the demoted thread exits — net-zero worker count
+> (Go's `handoffp`: +1 OS thread per fiber actually blocked in a callback). `is_deadlocked` gains
+> `|| blocked_native > 0` and the demote loop self-evaluates it + `flag_deadlock` (detection doesn't depend
+> on a live puller); the loop checks the queue **before** `terminate` so a real send always wins. The
+> joining thread `wait_for_completion`s before the slot reduce. Proven by `d5_owe3_path_c_recv_in_native_map_callback_demotes`
+> (recv inside native `xs.map`, producer `sleep_ms`s to force the empty recv, sums `66`) and
+> `d5_owe3_path_c_recv_in_callback_no_sender_still_deadlocks` (no-sender → faults, not hang). **Pragmatic
+> scope:** the narrow false-positive (parked siblings faulted when a value is queued for *another* demoted
+> fiber while `running==0`) is documented, not closed; spawn-failure (OS thread limit) faults the fiber
+> cleanly; demotion is scoped to `recv` (`sleep_ms`/socket in a callback keep their current path); the
+> `Shared.update` same-box hazard survives (don't block on a value needing the same box).
 
 **The bug.** A blocking `recv` reached inside a native Rust callback (`list.map`/`filter`, `sort`,
 `compare`/`hash`/`str` hooks, `Shared.update`, the executor drain, a `defer`red call) faults
@@ -556,8 +574,11 @@ pursued unless chezzi adopts Go/BEAM-grade uniformity as a core goal.
 **Plan of record.** (1) ✅ **DONE** — `map`/`filter`/`fold`/`reduce` added to `std/iter.chz` (chezzi
 source) + a `--parallel` test that `recv`s inside the closure parks (`66`, no hang); `each` deferred
 (void fn-type doesn't parse yet). (2) ✅ **DECIDED** — builtin `xs.map` **kept fast** (native loop);
-`iter.map` is the suspendable path, documented. No dispatch-to-stdlib indirection. (3) Path C only if
-real programs hit `update`/hooks/fast-`sort` — still unimplemented. **B never.**
+`iter.map` is the suspendable path, documented. No dispatch-to-stdlib indirection. (3) ✅ **DONE
+(attempt)** — Path C thread-demotion landed for the `recv` site (`Vm::demote_recv_block` +
+`spawn_replacement_worker` + `blocked_native` accounting + `wait_for_completion`), pragmatic deadlock
+detection, +2 tests. Residuals documented (narrow false-positive; `Shared.update` same-box hazard;
+recv-only scope). **B never.**
 
 ### D6 — epoll / kqueue pollset + minimal `std.net` (TCP) *(Go netpoller)* — D6a + D6b ✅ LANDED
 
