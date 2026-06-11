@@ -70,12 +70,14 @@ pub enum Op {
     // ----- variables -----
     GetLocal(usize),
     SetLocal(usize),
-    /// Resolve a name against the current frame's home-module globals.
-    GetGlobal(String),
-    /// Declare (`:=` at top level / `fn` hoist) into the current module's globals.
-    DefineGlobal(String),
-    /// Assign (`=`/`+=`/`-=`) an existing global; runtime error if undefined.
-    SetGlobal(String),
+    /// Read the current frame's home-module global at compile-time `slot` (M19 Phase 2b: a
+    /// bounds-checked `Vec` index, no name hash). Slots are assigned per module by the compiler and
+    /// recorded in [`ModuleProto::global_slots`].
+    GetGlobalSlot(u32),
+    /// Declare (`:=` at top level / `fn` hoist) into the current module's global `slot`.
+    DefineGlobalSlot(u32),
+    /// Assign (`=`/`+=`/`-=`) the current module's global `slot` (checker guarantees it is defined).
+    SetGlobalSlot(u32),
     /// Resolve a name against the current closure's captured env, falling back to globals.
     GetCaptured(String),
 
@@ -319,6 +321,10 @@ pub struct ModuleProto {
     /// `Some(name)` for a native std module (`std.math` etc., M6c): its globals are Rust
     /// `NativeFn`s injected at run time, and its (empty) `toplevel` is never executed.
     pub native: Option<&'static str>,
+    /// M19 Phase 2b — global names in compile-time slot order (slot `i` ⇒ `global_slots[i]`). The
+    /// run driver pre-sizes the module's `slots` vector to this length and builds its name→slot
+    /// index from it. Empty for native modules (their members are populated by name at run time).
+    pub global_slots: Vec<String>,
 }
 
 /// The whole compiled program.

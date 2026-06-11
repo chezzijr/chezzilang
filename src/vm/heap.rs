@@ -113,10 +113,13 @@ pub enum Obj {
         captured: HashMap<String, Value>,
         home: GcRef,
     },
-    /// A module namespace: its name + top-level bindings (this *is* the module's globals table).
+    /// A module namespace: its name + top-level bindings. M19 Phase 2b — globals are stored
+    /// slot-indexed (`slots[i]` for compile-time slot `i`) for hash-free `GetGlobalSlot` reads; the
+    /// `index` (name → slot) backs `module.member` field reads, imports, native population, and errors.
     Module {
         name: Box<str>,
-        globals: HashMap<String, Value>,
+        slots: Vec<Value>,
+        index: HashMap<Box<str>, u32>,
     },
     /// A native (Rust) function — a member of a native std module (`std.math` etc., M6c). Holds no
     /// heap references, so it has no GC children.
@@ -274,7 +277,7 @@ impl Heap {
                 captured.values().for_each(&mut push);
                 out.push(*home);
             }
-            Obj::Module { globals, .. } => globals.values().for_each(&mut push),
+            Obj::Module { slots, .. } => slots.iter().for_each(&mut push),
             Obj::Native { .. } => {}
             // B3.1: the core lives in an `Arc` outside this heap and holds `WireValue`s, but those
             // can still carry `Handle(GcRef)`s into *this* heap (an `Executor`'s queued closures and

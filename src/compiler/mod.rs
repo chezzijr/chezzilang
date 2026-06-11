@@ -1,8 +1,8 @@
 //! Bytecode compiler (M5): lowers a resolved module graph (or a single `Module`) to a [`Program`]
 //! of function prototypes for the stack VM. The compiler is the *only* place that knows about slots
-//! — locals resolve to operand-stack slots here; everything else (globals, struct/variant names,
-//! builtins) is resolved by name, matching the tree-walk interpreter's resolution order so the VM
-//! reproduces its semantics exactly.
+//! — locals resolve to operand-stack slots, and (M19 Phase 2b) module globals resolve to stable
+//! per-module global slots here; the rest (struct/variant names, builtins) is resolved by name,
+//! matching the tree-walk interpreter's resolution order so the VM reproduces its semantics exactly.
 //!
 //! Two passes:
 //!   1. **Hoist** — register every module's struct / enum declarations into the program-global
@@ -15,7 +15,7 @@ use crate::ast::{
     AssignOp, BinaryOp, Block, CompKind, Expr, ExprKind, FnDecl, LitPattern, MatchArm, MatchExprArm,
     Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp,
 };
-use crate::resolver::ModuleGraph;
+use crate::resolver::{ModuleGraph, ResolvedImport};
 use crate::vm::op::{
     CapEntry, CapSrc, ModuleProto, Op, Program, Proto, ProtoId, StructDef, VariantDef,
 };
@@ -47,13 +47,15 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     }
     // Pass 2: compile each module's toplevel + functions.
     for (idx, lm) in graph.modules.iter().enumerate() {
-        let toplevel = c.compile_module(idx, &lm.ast)?;
+        let toplevel = c.compile_module(idx, &lm.ast, &lm.imports)?;
+        let global_slots = std::mem::take(&mut c.global_slots);
         c.program.modules.push(ModuleProto {
             id: lm.id.clone(),
             label: lm.label(),
             toplevel,
             imports: lm.imports.clone(),
             native: lm.native,
+            global_slots,
         });
     }
     Ok(c.program)
@@ -69,7 +71,8 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     let module = &module;
     let mut c = Compiler::new();
     c.hoist_types(&module.stmts)?;
-    let toplevel = c.compile_module(0, module)?;
+    let toplevel = c.compile_module(0, module, &[])?;
+    let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
     c.program.modules.push(ModuleProto {
@@ -78,6 +81,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         toplevel,
         imports: Vec::new(),
         native: None,
+        global_slots,
     });
     Ok(c.program)
 }
@@ -86,6 +90,13 @@ struct Compiler {
     program: Program,
     /// Struct name → declared fields (with types), kept for building `json.decode` descriptors.
     struct_fields: HashMap<String, Vec<crate::ast::Field>>,
+    /// M19 Phase 2b — the current module's global name → slot map, rebuilt at the start of each
+    /// `compile_module`. Shared across the toplevel proto and every fn/method/closure compiled for
+    /// the module, so a global reference anywhere in the module resolves to the same slot.
+    globals: HashMap<String, u32>,
+    /// The current module's globals in slot order (slot `i` ⇒ `global_slots[i]`), recorded into the
+    /// module's [`ModuleProto`] so the run driver can pre-size storage + build its name→slot index.
+    global_slots: Vec<String>,
 }
 
 impl Compiler {
@@ -103,7 +114,58 @@ impl Compiler {
                 VariantDef { enum_name: e.to_string(), arity },
             );
         }
-        Compiler { program, struct_fields: HashMap::new() }
+        Compiler { program, struct_fields: HashMap::new(), globals: HashMap::new(), global_slots: Vec::new() }
+    }
+
+    /// M19 Phase 2b — resolve a module-global name to its compile-time slot. The checker rejects
+    /// undefined names before compilation, so every name reaching a global load/store/define site is
+    /// guaranteed to have been collected by [`Compiler::collect_globals`].
+    fn global_slot(&self, name: &str) -> u32 {
+        *self
+            .globals
+            .get(name)
+            .unwrap_or_else(|| panic!("compiler: global '{name}' has no slot (checker should reject undefined names)"))
+    }
+
+    /// M19 Phase 2b — pre-scan a module's globals into `self.globals`/`self.global_slots` before any
+    /// code is emitted, so forward references (a fn body reading a global declared later, an import
+    /// used before its line) resolve to a stable slot. Order: imports, then top-level `fn`s, then
+    /// top-level `let`s — only internal consistency matters (the run driver reads the same list).
+    fn collect_globals(&mut self, imports: &[ResolvedImport], stmts: &[Stmt]) {
+        use crate::ast::Import;
+        self.globals.clear();
+        self.global_slots.clear();
+        let add = |name: String, globals: &mut HashMap<String, u32>, slots: &mut Vec<String>| {
+            if !globals.contains_key(&name) {
+                globals.insert(name.clone(), slots.len() as u32);
+                slots.push(name);
+            }
+        };
+        for imp in imports {
+            match &imp.import {
+                Import::Module { path, alias } => {
+                    let name = alias.clone().unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                    add(name, &mut self.globals, &mut self.global_slots);
+                }
+                Import::From { names, .. } => {
+                    for (member, alias) in names {
+                        add(alias.clone().unwrap_or_else(|| member.clone()), &mut self.globals, &mut self.global_slots);
+                    }
+                }
+            }
+        }
+        for stmt in stmts {
+            if let StmtKind::Fn(decl) = &stmt.kind {
+                add(decl.name.clone(), &mut self.globals, &mut self.global_slots);
+            }
+        }
+        for stmt in stmts {
+            if let StmtKind::Let { names, .. } = &stmt.kind {
+                for name in names {
+                    add(name.clone(), &mut self.globals, &mut self.global_slots);
+                }
+            }
+        }
     }
 
     /// Pass 1: register struct / enum declarations into the program-global tables.
@@ -144,7 +206,10 @@ impl Compiler {
     }
 
     /// Pass 2: compile one module to a toplevel proto; record method protos into the type table.
-    fn compile_module(&mut self, module_idx: usize, module: &Module) -> Result<ProtoId, CompileError> {
+    fn compile_module(&mut self, module_idx: usize, module: &Module, imports: &[ResolvedImport]) -> Result<ProtoId, CompileError> {
+        // M19 Phase 2b: assign a stable slot to every module global before emitting any code, so
+        // forward references (method/fn bodies, imports used before their line) resolve to a slot.
+        self.collect_globals(imports, &module.stmts);
         // Compile struct methods first, recording their proto ids + this module as their home.
         for stmt in &module.stmts {
             if let StmtKind::Struct { name, methods, .. } = &stmt.kind {
@@ -162,7 +227,7 @@ impl Compiler {
             if let StmtKind::Fn(decl) = &stmt.kind {
                 let pid = self.compile_fn(decl, false)?;
                 fc.emit(Op::MakeFunc(pid), stmt.span);
-                fc.emit(Op::DefineGlobal(decl.name.clone()), stmt.span);
+                fc.emit(Op::DefineGlobalSlot(self.global_slot(&decl.name)), stmt.span);
             }
         }
         self.compile_block_flat(&mut fc, &module.stmts)?;
@@ -280,14 +345,14 @@ impl Compiler {
                         fc.emit(Op::GetLocal(tuple_slot), stmt.span);
                         fc.emit(Op::GetField(i.to_string()), stmt.span);
                         if fc.is_global_scope() {
-                            fc.emit(Op::DefineGlobal(name.clone()), stmt.span);
+                            fc.emit(Op::DefineGlobalSlot(self.global_slot(name)), stmt.span);
                         } else {
                             let slot = fc.add_local(name.clone());
                             fc.emit(Op::SetLocal(slot), stmt.span);
                         }
                     }
                 } else if fc.is_global_scope() {
-                    fc.emit(Op::DefineGlobal(names[0].clone()), stmt.span);
+                    fc.emit(Op::DefineGlobalSlot(self.global_slot(&names[0])), stmt.span);
                 } else {
                     let slot = fc.add_local(names[0].clone());
                     fc.emit(Op::SetLocal(slot), stmt.span);
@@ -499,7 +564,7 @@ impl Compiler {
     fn emit_store(&mut self, fc: &mut FnComp, name: &str, span: Span) {
         match fc.resolve_local(name) {
             Some(slot) => fc.emit(Op::SetLocal(slot), span),
-            None => fc.emit(Op::SetGlobal(name.to_string()), span),
+            None => fc.emit(Op::SetGlobalSlot(self.global_slot(name)), span),
         }
     }
 
@@ -508,7 +573,7 @@ impl Compiler {
         match fc.resolve_local(name) {
             Some(slot) => fc.emit(Op::GetLocal(slot), span),
             None if fc.captures(name) => fc.emit(Op::GetCaptured(name.to_string()), span),
-            None => fc.emit(Op::GetGlobal(name.to_string()), span),
+            None => fc.emit(Op::GetGlobalSlot(self.global_slot(name)), span),
         }
     }
 

@@ -588,6 +588,22 @@ struct ModuleSnap {
     globals: Vec<(String, SnapValue)>,
 }
 
+/// M19 Phase 2b — a module's globals as `(name, value)` pairs in **slot order** (slot `i` at index
+/// `i`). Used to snapshot a module deterministically: replaying the pairs in order via
+/// `module_define` rebuilds slots in the same order the compiler assigned them.
+fn module_slot_pairs(slots: &[Value], index: &std::collections::HashMap<Box<str>, u32>) -> Vec<(String, Value)> {
+    // Invariant: `index` names every slot `0..slots.len()` (the three growth paths — `run_module`
+    // pre-size, `module_define` append, `set_global_slot` overwrite — keep `slots`/`index` in
+    // lockstep). If that ever breaks, an unnamed hole would replay as a duplicate empty name and
+    // collapse later slots in a worker, silently corrupting its globals — so fail loudly here.
+    debug_assert_eq!(slots.len(), index.len(), "module slots/index out of lockstep — slot order would corrupt on worker fault");
+    let mut pairs: Vec<(String, Value)> = vec![(String::new(), Value::Nil); slots.len()];
+    for (name, &i) in index {
+        pairs[i as usize] = (name.to_string(), slots[i as usize]);
+    }
+    pairs
+}
+
 /// D1 — one global value in heap-independent form, the snapshot analogue of what
 /// [`Vm::map_global_value`] rebuilt eagerly. `WireValue` already encodes pure data, `str`-by-value,
 /// and `Channel`/`Shared`/`Executor` cores (Arc-shared, meaningful in any heap), so the common case
@@ -1830,10 +1846,15 @@ impl Vm {
 
     fn run_module(&mut self, idx: usize) -> Result<(), RuntimeError> {
         let m = self.program.modules[idx].clone();
-        // Fresh, empty namespace for this module.
+        // M19 Phase 2b: pre-size the namespace to the compiler's slot count and build its name→slot
+        // index from `global_slots`, so `DefineGlobalSlot(i)` / bind-import writes land in the slot
+        // the compiler chose. Native modules carry no slots (members injected by name below).
+        let index: std::collections::HashMap<Box<str>, u32> =
+            m.global_slots.iter().enumerate().map(|(i, n)| (n.as_str().into(), i as u32)).collect();
         let mod_obj = self.heap.alloc(Obj::Module {
             name: m.label.clone().into_boxed_str(),
-            globals: std::collections::HashMap::new(),
+            slots: vec![Value::Nil; m.global_slots.len()],
+            index,
         });
         debug_assert_eq!(self.module_objs.len(), idx);
         self.module_objs.push(mod_obj);
@@ -2315,23 +2336,21 @@ impl Vm {
                 let at = self.base() + slot;
                 self.stack[at] = v;
             }
-            Op::GetGlobal(name) => {
+            Op::GetGlobalSlot(slot) => {
                 let home = self.frames.last().unwrap().home;
                 self.ensure_module_faulted(home); // D1: lazily reconstruct the worker's home module
-                let v = self.module_global(home, name).ok_or_else(|| self.err(format!("undefined name '{name}'"), span))?;
+                let v = self.global_slot(home, *slot);
                 self.push(v);
             }
-            Op::DefineGlobal(name) => {
+            Op::DefineGlobalSlot(slot) => {
                 let v = self.pop();
                 let home = self.frames.last().unwrap().home;
-                self.module_define(home, name, v);
+                self.set_global_slot(home, *slot, v);
             }
-            Op::SetGlobal(name) => {
+            Op::SetGlobalSlot(slot) => {
                 let v = self.pop();
                 let home = self.frames.last().unwrap().home;
-                if !self.module_assign(home, name, v) {
-                    return Err(self.err(format!("cannot assign to undefined name '{name}'"), span));
-                }
+                self.set_global_slot(home, *slot, v);
             }
             Op::GetCaptured(name) => {
                 let clo = self.frames.last().unwrap().closure;
@@ -3870,8 +3889,8 @@ impl Vm {
         self.ensure_module_faulted(h); // D1: `module.fn(...)` on a not-yet-faulted worker module
         match self.heap.get(h).clone() {
             // `module.fn(args)` — plain call on the looked-up member, no `self`.
-            Obj::Module { name, globals } => {
-                let member = globals.get(method).copied().ok_or_else(|| self.err(format!("module '{name}' has no member '{method}'"), span))?;
+            Obj::Module { name, slots, index } => {
+                let member = index.get(method).map(|&i| slots[i as usize]).ok_or_else(|| self.err(format!("module '{name}' has no member '{method}'"), span))?;
                 self.stack.push(member);
                 self.stack.extend(args);
                 self.do_call(argc, span)
@@ -6148,7 +6167,7 @@ impl Vm {
     /// cross heaps; used as the fallback when the task's home is not a real `module_objs` entry (the
     /// hand-built unit-test fixtures) — real spawns resolve a reconstructed module (see `worker_home`).
     fn fresh_worker_home(&mut self) -> GcRef {
-        self.heap.alloc(Obj::Module { name: "<worker>".into(), globals: Default::default() })
+        self.heap.alloc(Obj::Module { name: "<worker>".into(), slots: Vec::new(), index: Default::default() })
     }
 
     /// B3.3c — the index of a `home` module `GcRef` in this VM's `module_objs`, so the worker can
@@ -6193,10 +6212,11 @@ impl Vm {
             .module_objs
             .iter()
             .map(|&pm| {
+                // M19 Phase 2b — collect globals in *slot order* (not HashMap iteration order) so a
+                // worker replays them into matching slots; the shared `Arc<Program>` slot map makes
+                // parent and worker agree on slot↔name regardless of any hash ordering.
                 let (name, globals): (Box<str>, Vec<(String, Value)>) = match self.heap.get(pm) {
-                    Obj::Module { name, globals } => {
-                        (name.clone(), globals.iter().map(|(k, v)| (k.clone(), *v)).collect())
-                    }
+                    Obj::Module { name, slots, index } => (name.clone(), module_slot_pairs(slots, index)),
                     _ => ("<worker>".into(), Vec::new()),
                 };
                 let globals = globals.into_iter().map(|(k, v)| (k, self.to_snap(v))).collect();
@@ -6234,11 +6254,15 @@ impl Vm {
                 SnapValue::Closure { proto, captured, home: self.home_index(home) }
             }
             // An import alias bound to another module obj.
-            Obj::Module { name, globals } => match self.home_index(h) {
+            Obj::Module { name, slots, index } => match self.home_index(h) {
                 Some(idx) => SnapValue::ModuleAlias(idx),
-                // A module not in `module_objs` (shouldn't occur for a bound import) — encode inline.
+                // A module not in `module_objs` (shouldn't occur for a bound import) — encode inline,
+                // in slot order so replay rebuilds matching slots.
                 None => {
-                    let globals = globals.iter().map(|(k, mv)| (k.clone(), self.to_snap(*mv))).collect();
+                    let globals = module_slot_pairs(&slots, &index)
+                        .into_iter()
+                        .map(|(k, mv)| (k, self.to_snap(mv)))
+                        .collect();
                     SnapValue::ModuleInline { name, globals }
                 }
             },
@@ -6279,7 +6303,7 @@ impl Vm {
     fn install_snapshot(&mut self, snap: Arc<ModuleSnapshot>) {
         debug_assert!(self.module_objs.is_empty(), "install_snapshot expects a fresh worker");
         for m in &snap.modules {
-            let wm = self.heap.alloc(Obj::Module { name: m.name.clone(), globals: std::collections::HashMap::new() });
+            let wm = self.heap.alloc(Obj::Module { name: m.name.clone(), slots: Vec::new(), index: std::collections::HashMap::new() });
             self.module_objs.push(wm);
         }
         self.module_faulted = vec![false; snap.modules.len()];
@@ -6335,7 +6359,7 @@ impl Vm {
             }
             SnapValue::ModuleAlias(idx) => Value::Obj(self.module_objs[*idx]),
             SnapValue::ModuleInline { name, globals } => {
-                let wm = self.heap.alloc(Obj::Module { name: name.clone(), globals: std::collections::HashMap::new() });
+                let wm = self.heap.alloc(Obj::Module { name: name.clone(), slots: Vec::new(), index: std::collections::HashMap::new() });
                 for (k, gv) in globals {
                     let val = self.replay_snap(gv);
                     self.module_define(wm, k, val);
@@ -7414,7 +7438,7 @@ impl Vm {
                     }
                 }
             }
-            Obj::Module { name: mname, globals } => match globals.get(name).copied() {
+            Obj::Module { name: mname, slots, index } => match index.get(name).map(|&i| slots[i as usize]) {
                 Some(v) => {
                     self.push(v);
                     Ok(())
@@ -7876,25 +7900,43 @@ impl Vm {
     /// otherwise it may observe an empty, not-yet-faulted module and spuriously fail to resolve.
     fn module_global(&self, module: GcRef, name: &str) -> Option<Value> {
         match self.heap.get(module) {
-            Obj::Module { globals, .. } => globals.get(name).copied(),
+            Obj::Module { slots, index, .. } => index.get(name).map(|&i| slots[i as usize]),
             _ => None,
         }
     }
 
-    fn module_define(&mut self, module: GcRef, name: &str, value: Value) {
-        if let Obj::Module { globals, .. } = self.heap.get_mut(module) {
-            globals.insert(name.to_string(), value);
+    /// M19 Phase 2b — read a module global by compile-time slot. The home module is always pre-sized
+    /// before any `GetGlobalSlot`: the top-level engine sizes it from `global_slots` in `run_module`,
+    /// and a worker faults it fully in (`fault_module`) before reading. So the index is always valid.
+    fn global_slot(&self, module: GcRef, slot: u32) -> Value {
+        match self.heap.get(module) {
+            Obj::Module { slots, .. } => slots[slot as usize],
+            _ => Value::Nil,
         }
     }
 
-    fn module_assign(&mut self, module: GcRef, name: &str, value: Value) -> bool {
-        if let Obj::Module { globals, .. } = self.heap.get_mut(module)
-            && globals.contains_key(name)
-        {
-            globals.insert(name.to_string(), value);
-            return true;
+    /// M19 Phase 2b — write a module global by compile-time slot (`DefineGlobalSlot`/`SetGlobalSlot`).
+    fn set_global_slot(&mut self, module: GcRef, slot: u32, value: Value) {
+        if let Obj::Module { slots, .. } = self.heap.get_mut(module) {
+            slots[slot as usize] = value;
         }
-        false
+    }
+
+    /// Define (or overwrite) a global by name. M19 Phase 2b — if `name` already has a slot (the
+    /// common case: the run driver pre-sized + indexed the module from `global_slots`, so imports
+    /// and `DefineGlobalSlot` targets are already present) the value lands in that slot; otherwise a
+    /// fresh slot is appended (native-module population + worker fault replay both build up modules
+    /// this way, growing slots in the same order the parent assigned them).
+    fn module_define(&mut self, module: GcRef, name: &str, value: Value) {
+        if let Obj::Module { slots, index, .. } = self.heap.get_mut(module) {
+            match index.get(name) {
+                Some(&i) => slots[i as usize] = value,
+                None => {
+                    index.insert(name.into(), slots.len() as u32);
+                    slots.push(value);
+                }
+            }
+        }
     }
 
     fn module_name(&self, module: GcRef) -> String {
@@ -8824,7 +8866,7 @@ mod tests {
     #[test]
     fn wire_passes_by_reference_objects_as_same_handle() {
         let mut vm = Vm::new(Arc::new(empty_program()));
-        let m = vm.heap.alloc(Obj::Module { name: "m".into(), globals: Default::default() });
+        let m = vm.heap.alloc(Obj::Module { name: "m".into(), slots: Vec::new(), index: Default::default() });
         let v = Value::Obj(m);
         let w = vm.to_wire(v).expect("by-ref object should serialize");
         assert_eq!(vm.from_wire(w), v, "by-reference object must round-trip to the same handle");
@@ -10783,7 +10825,7 @@ main()
         let proto = op::Proto { name: "task".into(), arity: 0, n_slots: 0, lines: vec![sp; code.len()], code };
         let program = Program { protos: vec![proto], ..empty_program() };
         let mut vm = Vm::new(Arc::new(program));
-        let home = vm.heap.alloc(Obj::Module { name: "<test>".into(), globals: Default::default() });
+        let home = vm.heap.alloc(Obj::Module { name: "<test>".into(), slots: Vec::new(), index: Default::default() });
         let clo = vm.heap.alloc(Obj::Closure { proto: 0, captured: Default::default(), home });
         (vm, PendingCall::Call { callee: Value::Obj(clo), args: Vec::new(), span: sp })
     }
@@ -10906,6 +10948,43 @@ main()
         let task = PendingCall::Call { callee: entry_global(&vm, "get_answer"), args: Vec::new(), span: sp() };
         let res = vm.run_task_isolated(task).expect("task reads a module global in its worker");
         assert_eq!(vm.from_wire(res.value), Value::Int(42));
+    }
+
+    #[test]
+    fn worker_reads_last_of_many_globals() {
+        // M19 Phase 2b: three globals defined before the fn, and the task reads the LAST one. A
+        // slot scramble between the parent's compiled slots and the worker's faulted-in slots would
+        // surface here as the wrong global's value (e.g. reading `a` or `b` instead of `c`).
+        let mut vm = ran_standalone("a := 1\nb := 2\nc := 99\nfn get_c() -> int:\n    return c\n");
+        let task = PendingCall::Call { callee: entry_global(&vm, "get_c"), args: Vec::new(), span: sp() };
+        let res = vm.run_task_isolated(task).expect("task reads the last module global in its worker");
+        assert_eq!(vm.from_wire(res.value), Value::Int(99));
+    }
+
+    #[test]
+    fn globals_compile_to_stable_slots() {
+        // M19 Phase 2b: top-level bindings get compile-time slots. Collection order is fns first,
+        // then lets — so `read_b`=0, `a`=1, `b`=2 — and a fn body reads a global by its slot
+        // (`GetGlobalSlot`), never by name.
+        let tokens = lexer::tokenize("a := 1\nb := 2\nfn read_b() -> int:\n    return b\n").expect("tok");
+        let module = parser::parse(tokens).expect("parse");
+        let program = crate::compiler::compile_module_standalone(&module).expect("compile");
+        assert_eq!(program.modules[0].global_slots, vec!["read_b".to_string(), "a".to_string(), "b".to_string()]);
+        let read_b = program.protos.iter().find(|p| p.name == "read_b").expect("fn proto");
+        assert!(
+            read_b.code.iter().any(|op| matches!(op, Op::GetGlobalSlot(2))),
+            "read_b should load global slot 2 (`b`): {:?}",
+            read_b.code
+        );
+        let top = &program.protos[program.modules[0].toplevel];
+        let defines: Vec<u32> =
+            top.code.iter().filter_map(|op| if let Op::DefineGlobalSlot(s) = op { Some(*s) } else { None }).collect();
+        // toplevel defines the fn (slot 0 via hoist) and both lets (slots 1, 2).
+        assert!(
+            defines.contains(&0) && defines.contains(&1) && defines.contains(&2),
+            "toplevel defines slots 0, 1, 2: {:?}",
+            top.code
+        );
     }
 
     /// A spawned task calls another top-level fn in its module — sibling resolution via the

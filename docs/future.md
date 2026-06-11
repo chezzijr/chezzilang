@@ -109,14 +109,16 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   fuse the hot `GetLocal+GetLocal+BinOp`, `GetLocal+Const+BinOp`, and `i += k` windows (Int fast
   path inlined; non-Int falls back to the exact unfused op). Cut `loop` −36%, `primes` −25%.
   Remaining candidates: `GetLocal+GetField`, fuse compare+`AsBool`, the load-store accumulator.
-- **Inline caching for name lookup (→ Phase 2b)** — globals / builtins / struct fields resolve *by
-  name at runtime* today (a `HashMap<String,Value>` probe per `GetGlobal`). Cache the resolved
-  slot on first hit. **Not a local change** — see the design note at the bottom of this section:
-  the bytecode lives in `Arc<Program>` (read-only, shared across worker threads, so the opcode can't
-  carry a mutable cache) and globals are name-keyed (no slots). The principled fix is global-slotting
-  (`Module.globals` → `Vec<Value>` + compile-time slot ids), which must preserve slot order across
-  the lazy module-fault path (`ensure_module_faulted` / `fault_module`). Moves `primes`. ⚠ its own
-  parity surface — scheduled as **M19 Phase 2b**, not bundled with the Phase 2 allocation kills.
+- ✅ **Global-slotting (inline-cache equivalent for name lookup)** — *landed M19 Phase 2b*: the
+  compiler assigns each module global a stable `u32` slot (`ModuleProto.global_slots`) and emits
+  `GetGlobalSlot`/`SetGlobalSlot`/`DefineGlobalSlot`; `Obj::Module.globals` (a `HashMap<String,Value>`
+  probed by name per read) became `{ slots: Vec<Value>, index }`, so a global read is a `Vec` index,
+  no hash. The slot map lives in the shared `Arc<Program>`, so parent and faulted-worker agree on
+  slot↔name by construction — removing the slot-order fragility rather than just guarding it.
+  **Reality vs prediction:** it moved `fib` −9% (the call-heavy bench resolves its callee per call),
+  but *not* `primes`/`loop` — their hot loops read locals, not globals, so the "moves `primes`" guess
+  was wrong about where global-read density actually is. Still cheaper on every global read; struct-
+  field caching (the other half of name-lookup ICs) remains future work.
 - ✅ **Kill per-call clones in `invoke_value`** — *landed M19 Phase 1*: matches on `&Obj` (no whole-
   `Obj` / closure-`HashMap` clone) and drops the arity-check `name.clone()`. Cut `fib` −17%, `list`
   −22%.
@@ -164,7 +166,13 @@ kill — all behavior-preserving (1516 tests + full two-engine parity green). Re
 two-engine parity green, 4-agent S++ panel clean). Results in `docs/benchmarks.md`. Remaining `str`
 lever is `ConstStr` interning; the next dispatch win is inline caching (Phase 2b, below).
 
-### M19 Phase 2b — inline caching via global-slotting (design note)
+### M19 Phase 2b — inline caching via global-slotting (✅ landed 2026-06-11)
+
+Landed as designed below. Net: `fib` −9%; other microbenches flat (their hot loops are local-bound).
+Implementation notes vs the plan: `Module` became `{ slots: Vec<Value>, index: HashMap<Box<str>,u32> }`
+(the `index` is kept alongside the `Vec`, not discarded — it backs `module.member`/imports/native
+population, and reverse-iterating it in slot order via `module_slot_pairs` is how the snapshot stays
+deterministic); the old name-keyed ops were *replaced*, not kept. The historical design note follows.
 
 The next dispatch win, deliberately split out from Phase 2 because it is **not** a local opcode
 tweak. Today `Op::GetGlobal(String)` does a `HashMap<String,Value>` probe by name every read

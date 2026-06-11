@@ -72,6 +72,36 @@ the residual cost is `ConstStr` boxing the literal part on every push — the ne
 cost is `.push` (a method call, not `do_call`) + GC, untouched here; the 447→458 wobble and the
 2.9→3.05 ratio are run-to-run noise (CPython also measured 150 vs 154 ms this run, σ≈10 ms on both).
 
+## After M19 Phase 2b — 2026-06-11 (same machine)
+
+Phase 2b is **global-slotting**: the compiler assigns each module global a stable `u32` slot and
+emits `GetGlobalSlot`/`SetGlobalSlot`/`DefineGlobalSlot`; the runtime read is now a bounds-checked
+`Vec` index (`Obj::Module { slots: Vec<Value>, index }`) instead of a `HashMap<String,Value>` probe
+by name. Because the slot map lives in the shared `Arc<Program>`, this also removes the latent
+parent↔worker slot-order fragility the snapshot path carried (slot↔name is identical by
+construction, not by HashMap iteration luck). Behavior-preserving — all 1520 tests green, both
+engines. `fib`/`str`/`primes` re-measured isolated (`--warmup 3 -N -r 20`); `loop`/`list`/`empty`
+from the sweep:
+
+| bench    | chezzi (P2 → P2b)       | python  | slower (P2 → P2b)       |
+|----------|-------------------------|---------|-------------------------|
+| fib(30)  | 333 ms → **302 ms**     | 80 ms   | 4.2× → **3.78×**        |
+| str      | 264 ms → **273 ms**     | 84 ms   | 3.15× → **3.24×** (flat)|
+| primes   | 714 ms → **740 ms**     | 285 ms  | 2.54× → **2.60×** (flat)|
+| loop     | 1106 ms → **1105 ms**   | 854 ms  | 1.30× → **1.29×** (flat)|
+| list     | 458 ms → **486 ms**     | 153 ms  | 3.05× → **3.18×** (flat)|
+| startup  | 0.80 ms → **0.84 ms**   | 9.0 ms  | 0.09× (win, unchanged)  |
+
+**`fib` −9%** is the whole story — and it's the right story. The lever lands on *global-read
+density*: `fib(n-1) + fib(n-2)` resolves the `fib` callee twice per call, so every call paid a
+name-keyed map probe before and a `Vec` index now. The rest are **flat within noise** because their
+hot loops read *locals*, not globals: `primes`/`loop` are inner-loop integer arithmetic (one global
+call per *outer* iteration is too small a fraction to register — the a-priori "moves `primes`" guess
+in `future.md` was wrong about where the read density is), `list` is `.push`+GC, `str` is string
+allocation. CPython measured identically on `primes` (281→285 ms) this run, confirming the box was
+stable — the small +ms drifts on the local-bound benches are thermal/run-to-run, not regressions
+(nothing got a *slower* code path; the slot read is strictly cheaper than the map probe it replaced).
+
 ## Reading it
 
 The shape matches what `future.md §4` predicted from first principles: **the gap is

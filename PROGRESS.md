@@ -47,10 +47,30 @@ loop 1.4×→1.30×** (list flat, not call-bound; startup still ~11× win). **15
 test conformance` (7/7) + `cargo clippy -- -D warnings` clean. Numbers in
 [`docs/benchmarks.md`](docs/benchmarks.md).
 
-**Next (M19 Phase 2b):** inline caching for name lookup — the next dispatch win, but its own milestone
-(needs global-slotting: `Module.globals` → `Vec<Value>` + compile-time slot ids + slot-order
-preservation across the lazy module-fault path). Design note in [`docs/future.md §4`](docs/future.md).
-Then: `ConstStr` interning (remaining `str` lever), arithmetic specialization, frame pooling.
+**🟦 M19 Perf track — Phase 2b LANDED (2026-06-11).** **Global-slotting** — the inline-cache
+equivalent for name lookup, TDD'd and guarded by the full two-engine parity suite (incl. the
+`--parallel` module-fault tests). The compiler now assigns every module global a stable `u32` slot
+(`ModuleProto.global_slots`, collected before any code is emitted so forward refs resolve) and emits
+`GetGlobalSlot`/`SetGlobalSlot`/`DefineGlobalSlot`; the old name-keyed ops are gone. `Obj::Module`
+became `{ slots: Vec<Value>, index: HashMap<Box<str>,u32> }` — slot ops hit `slots[i]` with no hash;
+the `index` still backs `module.member` reads, imports, native-module population, and errors. The
+run driver pre-sizes a module's slots from `global_slots`; native modules + worker fault-replay grow
+slots by name via `module_define`. Because the slot map lives in the shared `Arc<Program>`,
+parent and faulted-worker agree on slot↔name **by construction** — this *removes* the latent
+HashMap-iteration-order fragility the snapshot path would otherwise have inherited (snapshot now
+emits globals in slot order via `module_slot_pairs`).
+
+Result: **`fib` 4.2×→3.78× (−9%)** — the call-heavy bench, where `fib`'s per-call callee resolution
+went from a name-keyed map probe to a `Vec` index. The other microbenches are flat within noise:
+their hot loops read *locals*, not globals, so global-slotting has nothing to bite on there (the
+a-priori "moves `primes`" guess was wrong — `primes`' hot path is inner-loop integer arithmetic, one
+global call per *outer* iteration). No regressions (the slot read is strictly cheaper than the probe
+it replaced). **1520 tests** green + `cargo test conformance` (7/7) + `cargo clippy -- -D warnings`
+clean. Numbers in [`docs/benchmarks.md`](docs/benchmarks.md).
+
+**Next (M19):** `ConstStr` interning (the remaining `str` lever), arithmetic specialization
+(monomorphic int-path guard in hot loops — the lever for `loop`/`primes`), frame pooling (helps
+recursion like `fib`). Ranked backlog in [`docs/future.md §4`](docs/future.md).
 
 **Robustness pass — cyclic-data depth guard + order-independent map `==` — has now landed** (both
 engines). Two fuzzing-found bugs: (1) a cyclic data structure (a struct with a `list[Self]` field
