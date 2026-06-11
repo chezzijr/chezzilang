@@ -345,6 +345,33 @@ const CONNECT_BLOCK_TIMEOUT_SECS: u64 = 10;
 /// hang) and bounds how fast a demoted thread observes `terminate`/`cancel` (a sibling fault/deadlock).
 const DEMOTE_POLL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(5);
 
+/// D5 owe #3 Path C (#3 socket half) — block the (replacement-covered) worker on `fd` until it is
+/// readable/writable per `interest` OR `timeout` elapses, then return. Used by [`Vm::demote_block_socket`]
+/// so an in-callback socket op that can't snapshot-park onto the netpoller still waits in the KERNEL
+/// (woken immediately on readiness, no busy-poll) instead of pinning a CPU. The `timeout` bounds how
+/// fast the caller re-observes `cancel`/`terminate`. Spurious/early returns are harmless — the caller
+/// simply re-attempts the non-blocking op and re-blocks here on `WouldBlock`. On non-Unix (no `poll(2)`)
+/// it degrades to a plain sleep (the same bounded backoff the netpoller already targets Unix-only).
+#[cfg(unix)]
+fn wait_fd_ready(fd: std::os::fd::RawFd, interest: poller::Interest, timeout: std::time::Duration) {
+    let events = match interest {
+        poller::Interest::Read => libc::POLLIN,
+        poller::Interest::Write => libc::POLLOUT,
+    };
+    let mut pfd = libc::pollfd { fd, events, revents: 0 };
+    let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    // Ignore the result: a ready fd, a timeout, or an EINTR all lead to the same next step (re-attempt
+    // the non-blocking op under the caller's lock). Never blocks longer than `ms`.
+    unsafe {
+        libc::poll(&mut pfd as *mut libc::pollfd, 1, ms);
+    }
+}
+
+#[cfg(not(unix))]
+fn wait_fd_ready(_fd: std::os::fd::RawFd, _interest: poller::Interest, timeout: std::time::Duration) {
+    std::thread::sleep(timeout);
+}
+
 /// A fiber's saved execution context (B1): every `Vm` field that `run_until` reads or writes keyed by
 /// per-execution indices. Swapped with the live `Vm` fields ([`Vm::swap_ctx`]) when a fiber is
 /// scheduled in or out. `pending_exit` is deliberately NOT here — `std.os.exit` halts the whole
@@ -1449,6 +1476,15 @@ struct PollPark {
     /// D6 — the owning socket's `in_flight` flag, handed to the poller so it can clear it on inject
     /// (see [`core::SocketCore::in_flight`]).
     in_flight: Arc<AtomicBool>,
+}
+
+/// D5 owe #3 Path C (#3 socket half) — the outcome of one non-blocking socket-op attempt under the
+/// in-callback demote loop ([`Vm::demote_block_socket`]). `Ready` carries the op's final
+/// `Result[..]`-shaped `Value` (`sock_ok`/`sock_err`); `WouldBlock` means "fd not ready, re-poll after
+/// a backoff". Used only on the demote path (a callback can't snapshot-park onto the netpoller).
+enum SockPoll {
+    Ready(Result<Value, RuntimeError>),
+    WouldBlock,
 }
 
 /// D6b — a non-blocking `connect` whose TCP handshake is still in flight (`EINPROGRESS`): the
@@ -4470,6 +4506,102 @@ impl Vm {
         Ok(Value::Nil)
     }
 
+    /// D5 owe #3 Path C (#3 socket half) — a socket `read`/`write`/`accept` that `WouldBlock`s INSIDE a
+    /// native callback (`native_reentry > 0`) on the M:N engine. [`Vm::park_on_fd`] only parks on the
+    /// netpoller when `native_reentry == 0` (the callback's `for`-loop state lives on the un-snapshottable
+    /// Rust host stack), so without this the op surfaces a misleading `--parallel`-engine error even
+    /// though we *are* on `--parallel`. Instead DEMOTE like [`Vm::demote_block_sleep`]: spin a replacement
+    /// worker once + backoff-poll the **non-blocking** op in place until it's ready, then resume.
+    ///
+    /// Accounted as `inflight` (NOT `blocked_native`): a socket op is woken by external OS readiness, so
+    /// it must VETO the deadlock predicate — exactly the netpoller-park accounting (a lone in-callback
+    /// `accept` with no client correctly never self-terminates, Go-identical), hence **no** `is_deadlocked`
+    /// self-fire here. The flip side: this op exits the wait ONLY via fd readiness, `cancel`, or another
+    /// worker setting `terminate` — so a nursery where *every* remaining fiber is an in-callback socket
+    /// demote on an fd that never becomes ready, with no faulting sibling, hangs silently (no `deadlock`
+    /// fault). That is the same Go-identical "all goroutines waiting on a never-ready socket" case the
+    /// netpoller park already has; the rule is unchanged (don't await an fd that nothing will signal).
+    ///
+    /// Between attempts the worker kernel-BLOCKS on the fd via [`wait_fd_ready`] (woken immediately on
+    /// readiness, no busy-poll, no wasted syscalls — close to the epoll path it can't use here) with a
+    /// `DEMOTE_POLL_BACKOFF` timeout so a sibling-fault `cancel` is still observed within that window.
+    /// `cancel`/`terminate` are re-checked at the TOP of every iteration (before re-attempting), so a
+    /// cancelled task stops issuing socket work promptly and its outcome is SWALLOWED (mirrors the
+    /// recv/sleep demote). `attempt` re-runs one non-blocking op (it owns a cloned `Arc<…Core>`) and
+    /// returns `SockPoll::Ready` with the op's `Result`-shaped `Value`, or `SockPoll::WouldBlock`.
+    fn demote_block_socket(
+        &mut self,
+        fd: std::os::fd::RawFd,
+        interest: poller::Interest,
+        span: Span,
+        mut attempt: impl FnMut(&mut Vm) -> SockPoll,
+    ) -> Result<Value, RuntimeError> {
+        let sched = Arc::clone(self.mn.as_ref().expect("demote_block_socket on the cooperative engine"));
+        self.demote_socket_enter(span)?;
+        let out = loop {
+            // Observe teardown/cancel BEFORE doing more work each iteration. Cancel (a sibling faulted):
+            // set `cancelled` so the outcome is SWALLOWED (a cancelled task is dropped, not reported).
+            if self.cancel.as_ref().is_some_and(|x| x.load(Ordering::Relaxed)) {
+                self.cancelled = true;
+                break Err(self.err("cancelled".to_string(), span));
+            }
+            // Nursery torn down (deadlock elsewhere / `os.exit`): fault in place. An `inflight` socket op
+            // never *self*-fires the predicate (it vetoes it), so a genuine quiesce is surfaced by another
+            // worker setting `terminate`, observed here within the backoff.
+            if sched.lock().terminate {
+                break Err(sched.deadlock_err.clone());
+            }
+            match attempt(self) {
+                SockPoll::Ready(r) => break r,
+                SockPoll::WouldBlock => wait_fd_ready(fd, interest, DEMOTE_POLL_BACKOFF),
+            }
+        };
+        self.demote_socket_exit();
+        out
+    }
+
+    /// D5 owe #3 Path C (#3 socket half) — enter the in-callback socket demote: account `running → inflight`
+    /// under core lock A + notify idle pullers (a worker in an untimed `cv.wait` re-evaluates now that this
+    /// fiber left `running`), then spin a replacement worker ONCE (reuse the `self.demoted` coverage the
+    /// recv/sleep demote also uses — one spawn + one eventual exit per demoted thread). On OS-refuse, un-roll
+    /// the accounting and fault cleanly so the join still completes. Mirrors [`Vm::demote_block_sleep`] 1–2.
+    fn demote_socket_enter(&mut self, span: Span) -> Result<(), RuntimeError> {
+        let sched = Arc::clone(self.mn.as_ref().expect("demote_socket_enter on the cooperative engine"));
+        {
+            let mut c = sched.lock();
+            c.running -= 1;
+            sched.inflight.fetch_add(1, Ordering::Relaxed);
+            drop(c);
+            sched.cv.notify_all();
+        }
+        if !self.demoted {
+            if !self.spawn_replacement_worker(&sched, self.wid) {
+                let mut c = sched.lock();
+                c.running += 1;
+                sched.inflight.fetch_sub(1, Ordering::Relaxed);
+                drop(c);
+                return Err(self.err(
+                    "a socket op inside a native callback could not demote the worker (OS thread limit \
+                     reached) — reduce concurrent in-callback blocking or raise the thread limit"
+                        .to_string(),
+                    span,
+                ));
+            }
+            self.demoted = true;
+        }
+        Ok(())
+    }
+
+    /// D5 owe #3 Path C (#3 socket half) — exit the in-callback socket demote: un-account `inflight →
+    /// running` (the `+1` is essential — the fiber's next dispatch does `running -= 1`, which would
+    /// underflow without this restore). Mirrors [`Vm::demote_block_sleep`] step 4.
+    fn demote_socket_exit(&mut self) {
+        let sched = Arc::clone(self.mn.as_ref().expect("demote_socket_exit on the cooperative engine"));
+        let mut c = sched.lock();
+        c.running += 1;
+        sched.inflight.fetch_sub(1, Ordering::Relaxed);
+    }
+
     /// D5 owe #3 (Path C) — spawn a fresh OS thread running a replacement M:N worker shell over the
     /// same scheduler, reusing the demoting worker's `wid`. A RAW thread ([`VM_STACK_BYTES`] stack,
     /// like the pool), NOT a `pool::submit` job: the bounded pool is fixed-size, so a blocked-in-callback
@@ -5747,9 +5879,34 @@ impl Vm {
                         if self.park_on_fd(h, args, target, span)? {
                             return Ok(Value::Nil); // parked (sentinel; `poll_park` gates the push)
                         }
-                        // No fiber to park (top-level / cooperative): fail loud rather than block the
-                        // only thread (a silent hang that also defeats the cooperative deadlock
-                        // detector). net targets the `--parallel` engine.
+                        // No netpoller-park: inside a native callback on M:N (`native_reentry > 0`, the
+                        // Rust-stack `map`/sort loop can't snapshot-park) → DEMOTE + backoff-poll the
+                        // non-blocking read in place (#3 socket half). Off the M:N engine (top-level /
+                        // cooperative) there is no fiber to demote → fail loud (a silent hang would also
+                        // defeat the cooperative deadlock detector). net targets the `--parallel` engine.
+                        if self.mn.is_some() && self.native_reentry > 0 {
+                            let core = Arc::clone(&core);
+                            return self.demote_block_socket(fd, poller::Interest::Read, span, move |vm| {
+                                let mut b = vec![0u8; n];
+                                let r = {
+                                    let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                                    let Some(stream) = guard.as_mut() else {
+                                        return SockPoll::Ready(Ok(vm.sock_err("read on a closed socket")));
+                                    };
+                                    std::io::Read::read(stream, &mut b)
+                                };
+                                match r {
+                                    Ok(got) => {
+                                        b.truncate(got);
+                                        let s = String::from_utf8_lossy(&b).into_owned();
+                                        let sv = vm.alloc_str(s);
+                                        SockPoll::Ready(Ok(vm.sock_ok(sv)))
+                                    }
+                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => SockPoll::WouldBlock,
+                                    Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                                }
+                            });
+                        }
                         Ok(self.sock_err("read would block: std.net sockets require the --parallel engine"))
                     }
                     Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
@@ -5781,6 +5938,24 @@ impl Vm {
                         let target = PollPark { key: core.key, fd, interest: poller::Interest::Write, in_flight: Arc::clone(&core.in_flight) };
                         if self.park_on_fd(h, args, target, span)? {
                             return Ok(Value::Nil);
+                        }
+                        // In-callback on M:N → demote + backoff-poll the non-blocking write (#3 socket half).
+                        if self.mn.is_some() && self.native_reentry > 0 {
+                            let core = Arc::clone(&core);
+                            return self.demote_block_socket(fd, poller::Interest::Write, span, move |vm| {
+                                let r = {
+                                    let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                                    let Some(stream) = guard.as_mut() else {
+                                        return SockPoll::Ready(Ok(vm.sock_err("write on a closed socket")));
+                                    };
+                                    std::io::Write::write(stream, &data)
+                                };
+                                match r {
+                                    Ok(got) => SockPoll::Ready(Ok(vm.sock_ok(Value::Int(got as i64)))),
+                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => SockPoll::WouldBlock,
+                                    Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                                }
+                            });
                         }
                         Ok(self.sock_err("write would block: std.net sockets require the --parallel engine"))
                     }
@@ -5823,6 +5998,24 @@ impl Vm {
                         let target = PollPark { key: core.key, fd, interest: poller::Interest::Read, in_flight: Arc::clone(&core.in_flight) };
                         if self.park_on_fd(h, args, target, span)? {
                             return Ok(Value::Nil);
+                        }
+                        // In-callback on M:N → demote + backoff-poll the non-blocking accept (#3 socket half).
+                        if self.mn.is_some() && self.native_reentry > 0 {
+                            let core = Arc::clone(&core);
+                            return self.demote_block_socket(fd, poller::Interest::Read, span, move |vm| {
+                                let r = {
+                                    let guard = core.listener.lock().unwrap_or_else(|e| e.into_inner());
+                                    let Some(listener) = guard.as_ref() else {
+                                        return SockPoll::Ready(Ok(vm.sock_err("accept on a closed listener")));
+                                    };
+                                    listener.accept()
+                                };
+                                match r {
+                                    Ok((stream, _peer)) => SockPoll::Ready(Ok(vm.accept_socket_value(stream))),
+                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => SockPoll::WouldBlock,
+                                    Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                                }
+                            });
                         }
                         Ok(self.sock_err("accept would block: std.net sockets require the --parallel engine"))
                     }
@@ -8569,6 +8762,147 @@ main()
                 assert_eq!(out, "24\n");
             }
             Err(_) => panic!("hung — D5 owe #3 Path C sleep-in-callback demote regressed (correctness)"),
+        }
+    }
+
+    /// D5 owe #3 Path C (#3 socket half) — correctness of the in-callback socket DEMOTE: a `Socket::read`
+    /// reached INSIDE a native `xs.map` callback (`native_reentry > 0`) that `WouldBlock`s must demote
+    /// the worker (spin a replacement, backoff-poll the non-blocking read in place) and resume with the
+    /// real bytes — NOT surface the `--parallel`-engine error. `park_on_fd` only parks on the netpoller
+    /// when `native_reentry == 0`; inside a callback the Rust-stack `map` loop can't snapshot-park, so
+    /// without the demote the read returns `Result::Err("read would block: ... require the --parallel
+    /// engine")`, which `?` propagates → the client prints `ERR:…` instead of the echoed line. The
+    /// server `sleep_ms(50)`s after `accept` before writing, so the client's in-callback read is
+    /// *guaranteed* empty (forces the demote path deterministically). Parallel-only, 30 s watchdog.
+    #[test]
+    fn d5_owe3_path_c_socket_read_in_callback_demotes() {
+        let src = "\
+import std.net
+import std.time
+
+fn read_reply(s: Socket) -> str!:
+    line := s.read(64)?
+    return Ok(line)
+
+fn do_client(addr: str) -> str!:
+    sock := net.connect(addr)?
+    socks := [sock]
+    replies := socks.map(read_reply)
+    line := replies[0]?
+    sock.close()
+    return Ok(line)
+
+fn client(addr: str):
+    match do_client(addr):
+        Ok(line): print(line)
+        Err(e): print(\"ERR:\" + e.message())
+
+fn server(listener: Listener) -> int!:
+    conn := listener.accept()?
+    time.sleep_ms(50)
+    conn.write(\"hello\")?
+    conn.close()
+    listener.close()
+    return Ok(0)
+
+fn run() -> int!:
+    listener := net.listen(\"127.0.0.1:0\")?
+    addr := listener.addr()?
+    parallel:
+        spawn server(listener)
+        spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"\")
+        Err(e): print(\"RUN-ERR:\" + e.message())
+
+main()
+";
+        let entry = write_temp_chz("d5_owe3_sock_read_cb", src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok((out, _err, res, _code)) => {
+                assert!(res.is_ok(), "in-callback socket read demote faulted: {res:?}");
+                // client prints the echoed line; main prints a trailing blank line.
+                assert_eq!(out, "hello\n\n", "in-callback read did not demote (got: {out:?})");
+            }
+            Err(_) => panic!("hung — D5 owe #3 Path C socket-read-in-callback demote regressed"),
+        }
+    }
+
+    /// D5 owe #3 Path C (#3 socket half) — the listener path: an `accept` reached INSIDE a native `map`
+    /// callback that `WouldBlock`s (no client yet) demotes + resumes once a sibling client connects,
+    /// instead of erroring. Proves the `Listener::accept` gate, not just `Socket::read`. The client
+    /// `sleep_ms(50)`s before connecting so the in-callback `accept` is guaranteed to block first.
+    /// Parallel-only, 30 s watchdog.
+    #[test]
+    fn d5_owe3_path_c_accept_in_callback_demotes() {
+        let src = "\
+import std.net
+import std.time
+
+fn accept_one(l: Listener) -> int!:
+    conn := l.accept()?
+    conn.read(64)?
+    conn.close()
+    return Ok(1)
+
+fn do_server(listener: Listener) -> int!:
+    ls := [listener]
+    got := ls.map(accept_one)
+    n := got[0]?
+    listener.close()
+    return Ok(n)
+
+fn server(listener: Listener):
+    match do_server(listener):
+        Ok(n): print(n)
+        Err(e): print(\"ERR:\" + e.message())
+
+fn client(addr: str) -> int!:
+    time.sleep_ms(50)
+    sock := net.connect(addr)?
+    sock.write(\"ping\")?
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    listener := net.listen(\"127.0.0.1:0\")?
+    addr := listener.addr()?
+    parallel:
+        spawn server(listener)
+        spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"\")
+        Err(e): print(\"RUN-ERR:\" + e.message())
+
+main()
+";
+        let entry = write_temp_chz("d5_owe3_sock_accept_cb", src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok((out, _err, res, _code)) => {
+                assert!(res.is_ok(), "in-callback accept demote faulted: {res:?}");
+                assert_eq!(out, "1\n\n", "in-callback accept did not demote (got: {out:?})");
+            }
+            Err(_) => panic!("hung — D5 owe #3 Path C accept-in-callback demote regressed"),
         }
     }
 

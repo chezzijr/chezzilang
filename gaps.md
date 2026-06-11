@@ -185,9 +185,9 @@ thread-demotion landed (attempt)** for the native islands — see the residuals 
   attempt (2026-06-11, branch `d5-owe3-path-c`).** A blocking `recv` inside a native callback
   (`xs.map`/sort comparator/`Shared.update`) now **demotes the worker thread** (blocks in place +
   spins a replacement) and resumes on a sibling `send`, instead of faulting `deadlock` (M:N engine
-  only; the cooperative engine still faults). Two residuals **resolved** this session (#1, #3-sleep);
-  one half of #3 + #2 remain — **full worklist (corrected examples + fix sketches + cross-language
-  refs) in `docs/concurrency-tier-d.md` → "Path C residuals — next-session worklist".**
+  only; the cooperative engine still faults). #1, #3-sleep resolved 2026-06-11; **#3-socket resolved
+  2026-06-12**; only #2 (WON'T FIX by design) remains — **full worklist (corrected examples + fix
+  sketches + cross-language refs) in `docs/concurrency-tier-d.md` → "Path C residuals — worklist".**
   - ~~**(#1) narrow deadlock false-positive**~~ — **resolved (2026-06-11).** `SchedCore` now registers
     each demoted fiber's `ChannelCore` (refcounted); `is_deadlocked` peeks the registered queues and
     vetoes the fire if any holds a value (that fiber will pop + progress), and the demote loop's
@@ -195,13 +195,15 @@ thread-demotion landed (attempt)** for the native islands — see the residuals 
     sees an emptied-but-still-counted demoted fiber. No more spuriously-killed parked sibling. White-box
     (`deadlock_predicate_vetoed_by_queued_value_on_demoted_channel`, `..._refcounted_for_two_fibers_...`)
     + 200× black-box stress regression tests.
-  - **(#3) `sleep_ms` inside a callback** — ~~`sleep_ms` half~~ **resolved (2026-06-11):** a
-    `sleep_ms(ms>0)` reached inside a native callback now **demotes** (spawns a replacement + sleeps in
-    place + resumes, accounted `inflight` so it vetoes deadlock), instead of running inline + pinning
-    the worker; cancel during the sleep swallows the task outcome (mirrors the recv demote). **Socket
-    half still open:** a socket `read`/`accept`/`connect` inside a callback isn't handed to the
-    netpoller (more complex error/restore handling, rarer trigger — net I/O inside a `map` callback is
-    unusual). *Perf/liveness, not wrong.* Fix sketch: demote + a blocking fd wait in place.
+  - ~~**(#3) socket/sleep op inside a callback**~~ — **fully resolved.** ~~`sleep_ms` half~~ (2026-06-11):
+    a `sleep_ms(ms>0)` reached inside a native callback **demotes** (spawns a replacement + sleeps in
+    place + resumes, accounted `inflight` so it vetoes deadlock) instead of running inline + pinning the
+    worker. ~~Socket half~~ (2026-06-12): a `read`/`write`/`accept` that `WouldBlock`s inside a callback
+    now **demotes** too — `demote_block_socket` spins a replacement and **kernel-blocks on the fd**
+    (`libc::poll`, `DEMOTE_POLL_BACKOFF` timeout) re-running the non-blocking op on readiness, accounted
+    `inflight` (netpoller-park parity: vetoes deadlock, a lone in-callback `accept` with no client never
+    self-terminates). Was surfacing a misleading `"…require the --parallel engine"` error. *Perf/liveness,
+    not wrong.* (`connect`-in-callback unchanged — handshake state in `pending_connect`, even rarer.)
   - **(#2, WON'T FIX by design) `Shared.update` same-box hold-and-wait** — a `recv` blocking inside
     `update(f)` holds `update_lock` while parked → a sender needing the *same* box deadlocks silently.
     A **universal** hold-and-wait deadlock (Go detects only the global case, not partial; Rust lints it

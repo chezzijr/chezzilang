@@ -502,11 +502,11 @@ Was never a D6 prerequisite.
 > cleanly; demotion is scoped to `recv` (`sleep_ms`/socket in a callback keep their current path); the
 > `Shared.update` same-box hazard survives (don't block on a value needing the same box).
 
-#### Path C residuals — worklist *(ranked #1 > #3 > #2; #1 + #3-sleep RESOLVED 2026-06-11)*
+#### Path C residuals — worklist *(ranked #1 > #3 > #2; #1 RESOLVED 2026-06-11, #3 RESOLVED 2026-06-11/06-12)*
 
-> Of three known limitations after the Path C attempt, **#1 and the `sleep_ms` half of #3 are now
-> resolved** (branch `d5-owe3-path-c`); the **socket half of #3** and **#2** remain. Priority was
-> **correctness > performance > rare-hang-with-a-known-rule**. All chezzi examples below are
+> Of three known limitations after the Path C attempt, **#1 and all of #3 (sleep half 2026-06-11, socket
+> half 2026-06-12) are now resolved** (branch `d5-owe3-path-c`); only **#2** remains (WON'T FIX by
+> design). Priority was **correctness > performance > rare-hang-with-a-known-rule**. All chezzi examples below are
 > **single-expression closures** (`fn(x): <expr>`, the only closure form —
 > `src/parser/mod.rs::parse_closure`); a multi-statement callback must be a **named function** (block
 > body), as in `slow_double` below.
@@ -561,11 +561,24 @@ resume, accounted `running→inflight` (so it **vetoes** deadlock — a sleeper 
 unlike a `blocked_native` recv); a cancel observed during/after the sleep swallows the task outcome
 (mirrors the recv demote). *Tests:* `d5_owe3_path_c_sleep_in_callback_demotes_frees_worker`
 (N=workers·4 in-callback sleeps finish <450ms, i.e. concurrent not 4-batch-serial),
-`d5_owe3_path_c_sleep_in_callback_correct`. **Socket half still OPEN:** a socket `WouldBlock` with
-`native_reentry > 0` → demote + a blocking fd wait in place (set the fd blocking, or synchronously poll
-it) + resume — more complex (error/restore paths), rarer trigger (net I/O inside a `map` callback is
-unusual). *Fix sketch / files:* `src/vm/mod.rs` — the socket gates, a `demote_block_socket` analogous
-to `demote_block_sleep` / `demote_recv_block`.
+`d5_owe3_path_c_sleep_in_callback_correct`. **Socket half landed (2026-06-12):** a socket
+`read`/`write`/`accept` that `WouldBlock`s with `native_reentry > 0` now demotes via `demote_block_socket`
+(analogous to `demote_block_sleep`): `demote_socket_enter` accounts `running → inflight` + spins a
+replacement worker once, then the worker **kernel-blocks on the fd** with `wait_fd_ready` (`libc::poll`
+in the readability/writability direction, `DEMOTE_POLL_BACKOFF` timeout — woken immediately on readiness,
+no busy-poll, near-epoll latency) and re-runs the **non-blocking** op on wake; `demote_socket_exit`
+restores `inflight → running`. Accounted `inflight` for netpoller-park parity (it vetoes the deadlock
+predicate — a lone in-callback `accept` with no client never self-terminates, Go-identical). `cancel`/
+`terminate` are re-checked at the top of every wait iteration (cancelled task stops issuing socket work
+promptly, outcome swallowed); the closures lock the socket/listener core poison-tolerantly
+(`unwrap_or_else(|e| e.into_inner())`) so a concurrent-`close` poison can't skip the `inflight` restore
+and wedge the nursery's deadlock detector. Before the fix the in-callback op surfaced a misleading
+`"… require the --parallel engine"` error (we *are* on `--parallel`; the callback's Rust-stack loop just
+can't snapshot-park). *Tests:* `d5_owe3_path_c_socket_read_in_callback_demotes`,
+`d5_owe3_path_c_accept_in_callback_demotes`. *Files:* `src/vm/mod.rs` — `demote_block_socket`,
+`demote_socket_enter`/`exit`, `wait_fd_ready`, `enum SockPoll`, the three socket-op `WouldBlock` arms.
+(`connect`-in-callback is left unchanged: its half-finished handshake lives in `pending_connect`, an
+even rarer trigger.)
 
 **#2 — `Shared.update` same-box hold-and-wait *(priority 3; WON'T FIX by design — a dev-authored,
 universal deadlock).*** `Shared.update(f)` holds the box's `update_lock` across `f`; if `f` blocks on a

@@ -402,9 +402,9 @@ conns. Items *not* in B3–B5 (cross-nursery wakeups, recv-in-native-callback / 
 **[`docs/concurrency.md` §11](docs/concurrency.md)** and **[`docs/concurrency-tier-d.md`](docs/concurrency-tier-d.md)**.
 Full A/B breakdown: §9.
 
-**D5 owe #3 — Path C residuals #1 + #3-sleep have landed** (this session, branch `d5-owe3-path-c`),
-closing the two actionable residuals from the Path C attempt (ranked correctness > perf; #3-socket +
-#2 remain — see `docs/concurrency-tier-d.md`). **#1 (deadlock false-positive, a correctness bug):**
+**D5 owe #3 — Path C residuals #1 + ALL of #3 have landed** (branch `d5-owe3-path-c`), leaving only #2
+(WON'T FIX by design). #1 + #3-sleep landed 2026-06-11; **#3-socket landed 2026-06-12** (see below + 
+`docs/concurrency-tier-d.md`). **#1 (deadlock false-positive, a correctness bug):**
 when 2+ fibers were demoted and one had a value already queued, `is_deadlocked` could fault an innocent
 **parked sibling** with a fake `deadlock` (the demoted fiber polls its OWN channel queue — a `send`
 `push_back`s + notifies `core.cv`, it does NOT bump `runnable` — so a queued value was invisible to the
@@ -418,18 +418,28 @@ demoted fiber. **#3-sleep (perf/liveness):** a `sleep_ms(ms>0)` reached inside a
 `Vm::demote_block_sleep` — `spawn_replacement_worker` + `thread::sleep(ms)` in place + resume, accounted
 `running→inflight` (so a sleeper **vetoes** deadlock — it returns unconditionally, unlike a
 `blocked_native` recv); a cancel observed during/after the sleep swallows the task outcome (mirrors the
-recv demote, so a cancelled task stops sleeping through the rest of the callback). The offload gate is
-untouched (it requires `native_reentry == 0`); the **socket half of #3** (a socket op inside a callback
-handed to the netpoller) stays deferred — more complex, rare. **+4 tests** (`deadlock_predicate_vetoed_
-by_queued_value_on_demoted_channel` + `..._refcounted_for_two_fibers_on_one_channel` white-box;
-`d5_owe3_path_c_no_false_deadlock_when_demoted_fiber_has_queued_value` 200× race stress;
-`d5_owe3_path_c_sleep_in_callback_demotes_frees_worker` timing N=workers·4 <450ms +
-`..._sleep_in_callback_correct`); `d5_blocking_native_in_callback_runs_inline` repurposed to `fs.exists`
-(still inline — only `sleep_ms`/`recv` demote). **1422 green**, `cargo clippy` clean, conformance green.
-**2-agent S++ panel (Code Reviewer ×2): zero Critical;** Important applied — the sleep demote now checks
-cancel (was: a cancelled task slept through every remaining callback element + faulted normally instead
-of being swallowed); refcount>1 white-box coverage added; the existing no-sender deadlock test already
-guards the genuine-deadlock-still-faults path.
+recv demote, so a cancelled task stops sleeping through the rest of the callback). **#3-socket
+(2026-06-12, perf/liveness):** a socket `read`/`write`/`accept` that `WouldBlock`s inside a native
+callback (`native_reentry > 0`) used to surface a misleading `"… require the --parallel engine"` error
+(`park_on_fd` only snapshot-parks at `native_reentry == 0`; the callback's Rust-stack loop can't park).
+It now demotes via new `Vm::demote_block_socket`: `demote_socket_enter` (`running→inflight` + spin a
+replacement once, reusing `self.demoted`) → the worker **kernel-blocks on the fd** with `wait_fd_ready`
+(`libc::poll` in the read/write direction, `DEMOTE_POLL_BACKOFF` timeout — woken on readiness, no
+busy-poll) and re-runs the non-blocking op via a `SockPoll`-returning closure → `demote_socket_exit`
+(`inflight→running`). Accounted `inflight` for netpoller-park parity (vetoes deadlock; a lone in-callback
+`accept` with no client never self-terminates, Go-identical). `connect`-in-callback left unchanged
+(handshake state in `pending_connect`, rarer). **+6 tests total this branch** — #1: `deadlock_predicate_
+vetoed_by_queued_value_on_demoted_channel`, `..._refcounted_for_two_fibers_on_one_channel`,
+`d5_owe3_path_c_no_false_deadlock_when_demoted_fiber_has_queued_value` (200× race stress); #3-sleep:
+`d5_owe3_path_c_sleep_in_callback_demotes_frees_worker` (N=workers·4 <450ms), `..._sleep_in_callback_correct`;
+#3-socket: `d5_owe3_path_c_socket_read_in_callback_demotes`, `d5_owe3_path_c_accept_in_callback_demotes`.
+**1424 green**, `cargo clippy` clean, conformance green, `echo_server.chz --parallel` e2e green.
+**4-agent S++ panel (Godot Gameplay, Solidity, Incident Response, SRE) on the socket change:** Critical
+applied — poison-tolerant socket-core locks in the demote closures (a concurrent-`close` poison could
+have skipped the `inflight` restore → permanent `inflight` leak → nursery deadlock detector wedged);
+Important applied — cancel/terminate re-checked at the top of each wait iteration (cancelled task stops
+issuing socket work promptly), and the bare `thread::sleep` busy-poll upgraded to a kernel `libc::poll`
+fd-wait (early wake on readiness, no wasted syscalls, near-epoll latency).
 
 > **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,
 > not a TODO.** The interpreter stays frozen at the **sequential concurrency subset** and serves as
