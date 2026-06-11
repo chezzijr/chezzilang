@@ -3711,6 +3711,60 @@ fn channel_non_sendable_element_rejected() {
 }
 
 #[test]
+fn channel_close_ok() {
+    ok("fn main():\n    ch := Channel[int]()\n    ch.close()\nmain()\n");
+}
+
+#[test]
+fn channel_close_rejects_args() {
+    rejects(
+        "fn main():\n    ch := Channel[int]()\n    ch.close(1)\nmain()\n",
+        "close",
+    );
+}
+
+#[test]
+fn channel_try_send_returns_bool() {
+    ok("fn main():\n    ch := Channel[int]()\n    sent: bool = ch.try_send(1)\n    print(sent)\nmain()\n");
+}
+
+#[test]
+fn channel_try_send_wrong_type_rejected() {
+    rejects(
+        "fn main():\n    ch := Channel[int]()\n    ch.try_send(\"x\")\nmain()\n",
+        "expected int",
+    );
+}
+
+#[test]
+fn for_over_channel_binds_element() {
+    ok("fn main():\n    ch := Channel[int]()\n    ch.close()\n    for v in ch:\n        print(v + 1)\nmain()\n");
+}
+
+#[test]
+fn for_over_channel_two_vars_rejected() {
+    rejects(
+        "fn main():\n    ch := Channel[int]()\n    for k, v in ch:\n        print(k)\nmain()\n",
+        "single loop variable",
+    );
+}
+
+#[test]
+fn close_on_non_channel_rejected() {
+    rejects("fn main():\n    x := 1\n    x.close()\nmain()\n", "close");
+}
+
+#[test]
+fn comprehension_over_channel_rejected() {
+    // A comprehension over a channel would diverge between engines (VM drains, interp oracle can't);
+    // reject it on both — `for v in ch:` is the channel-draining form.
+    rejects(
+        "fn main():\n    ch := Channel[int]()\n    xs := [v for v in ch]\n    print(xs)\nmain()\n",
+        "channel cannot be drained in a comprehension",
+    );
+}
+
+#[test]
 fn spawn_non_sendable_arg_rejected() {
     rejects(
         "fn run(f: fn() -> int):\n    print(f())\nfn main():\n    g := fn(): 1\n    parallel:\n        spawn run(g)\nmain()\n",

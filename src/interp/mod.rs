@@ -796,7 +796,7 @@ impl Interp {
                     });
                 }
                 return Ok(Value::Channel(std::rc::Rc::new(std::cell::RefCell::new(
-                    std::collections::VecDeque::new(),
+                    value::ChanState::new(),
                 ))));
             }
             // `Shared(v)` (C3) — a fresh cross-task box owning a copy of `v` (move-in across the
@@ -1919,7 +1919,7 @@ impl Interp {
     /// mutable state with the sender.
     fn eval_channel_method(
         &mut self,
-        q: &std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Value>>>,
+        q: &std::rc::Rc<std::cell::RefCell<value::ChanState>>,
         method: &str,
         args: Vec<Value>,
         span: Span,
@@ -1927,13 +1927,34 @@ impl Interp {
         match method {
             "send" => {
                 builtins::arity("send", &args, 1, span)?;
-                q.borrow_mut().push_back(deep_clone(&args[0]));
+                let mut s = q.borrow_mut();
+                if s.closed {
+                    return Err(RuntimeError { message: "send on a closed channel".to_string(), span });
+                }
+                s.queue.push_back(deep_clone(&args[0]));
                 Ok(Value::Nil)
+            }
+            // `try_send` is the safe partner of `send`: channels are unbounded, so its only failure is
+            // a closed channel — returns `false` then (never faults), `true` once the value is queued.
+            "try_send" => {
+                builtins::arity("try_send", &args, 1, span)?;
+                let mut s = q.borrow_mut();
+                if s.closed {
+                    return Ok(Value::Bool(false));
+                }
+                s.queue.push_back(deep_clone(&args[0]));
+                Ok(Value::Bool(true))
             }
             "recv" => {
                 builtins::arity("recv", &args, 0, span)?;
-                match q.borrow_mut().pop_front() {
+                let mut s = q.borrow_mut();
+                match s.queue.pop_front() {
                     Some(v) => Ok(v),
+                    // Drain-before-done: only consult `closed` on an empty queue. A closed-and-empty
+                    // channel faults distinctly (not the deadlock fault) — there is no producer left.
+                    None if s.closed => {
+                        Err(RuntimeError { message: "receive on a closed channel".to_string(), span })
+                    }
                     None => Err(RuntimeError {
                         message: "recv on an empty channel: deadlock — nothing is queued and the \
                                   sequential executor cannot block waiting for a producer (a \
@@ -1945,16 +1966,24 @@ impl Interp {
             }
             "try_recv" => {
                 // A1: non-blocking poll. `Some(v)` if queued, `None` if empty — never the deadlock
-                // fault `recv` raises (and never suspends; the VM twin mirrors this exactly).
+                // fault `recv` raises (and never suspends; the VM twin mirrors this exactly). A closed
+                // channel is indistinguishable here from an empty one (`None`) — by design.
                 builtins::arity("try_recv", &args, 0, span)?;
-                Ok(match q.borrow_mut().pop_front() {
+                Ok(match q.borrow_mut().queue.pop_front() {
                     Some(v) => Value::Enum { ty: "Option".into(), variant: "Some".into(), payload: vec![v] },
                     None => Value::Enum { ty: "Option".into(), variant: "None".into(), payload: vec![] },
                 })
             }
+            // `close()` marks the channel closed (idempotent). In the sequential oracle there are no
+            // parked receivers to wake — a later `recv`/`for` observes `closed` directly.
+            "close" => {
+                builtins::arity("close", &args, 0, span)?;
+                q.borrow_mut().closed = true;
+                Ok(Value::Nil)
+            }
             "len" => {
                 builtins::arity("len", &args, 0, span)?;
-                Ok(Value::Int(q.borrow().len() as i64))
+                Ok(Value::Int(q.borrow().queue.len() as i64))
             }
             _ => Err(RuntimeError {
                 message: format!("type Channel has no method '{method}'"),
@@ -2790,6 +2819,39 @@ impl Interp {
                             span: iter.span,
                         });
                     }
+                }
+            }
+            return Ok(Flow::Normal);
+        }
+        // `for v in ch:` over a Channel — drain buffered + future values, end cleanly when closed.
+        // The sequential oracle cannot block, so an open-and-empty channel faults like bare `recv`
+        // (a valid program runs the producer to completion + closes before the consumer iterates).
+        if let Value::Channel(state) = &iter_val {
+            let state = state.clone();
+            loop {
+                let next = {
+                    let mut s = state.borrow_mut();
+                    match s.queue.pop_front() {
+                        Some(v) => Some(v),
+                        None if s.closed => None, // closed + drained ⇒ clean exit
+                        None => {
+                            return Err(RuntimeError {
+                                message: "recv on an empty channel: deadlock — nothing is queued and \
+                                          the sequential executor cannot block waiting for a producer \
+                                          (a consumer that waits mid-flight on a live producer needs C5)"
+                                    .to_string(),
+                                span: iter.span,
+                            });
+                        }
+                    }
+                };
+                match next {
+                    Some(v) => match self.run_for_body(vars, vec![v], body)? {
+                        Flow::Return(v) => return Ok(Flow::Return(v)),
+                        Flow::Break => break,
+                        Flow::Continue | Flow::Normal => {}
+                    },
+                    None => break,
                 }
             }
             return Ok(Flow::Normal);
@@ -4614,6 +4676,71 @@ b := Buf([10, 20, 30])
         let source = include_str!("../../examples/try_recv.chz");
         let expected = include_str!("../../examples/try_recv.expected");
         assert_eq!(run_capture(source).expect("try_recv.chz should run"), expected);
+    }
+
+    #[test]
+    fn channel_send_after_close_faults() {
+        let err = run_capture("fn main():\n    ch := Channel[int]()\n    ch.close()\n    ch.send(1)\nmain()\n")
+            .expect_err("send on a closed channel should fault");
+        assert!(err.message.contains("send on a closed channel"), "{}", err.message);
+    }
+
+    #[test]
+    fn channel_recv_on_closed_empty_faults() {
+        let err = run_capture("fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.recv())\nmain()\n")
+            .expect_err("recv on a closed empty channel should fault");
+        assert!(err.message.contains("receive on a closed channel"), "{}", err.message);
+    }
+
+    #[test]
+    fn channel_drains_buffered_after_close() {
+        // close() must not drop buffered values — recv drains them first, then faults distinctly.
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    ch.send(2)\n    ch.close()\n    print(ch.recv())\n    print(ch.recv())\nmain()\n";
+        assert_eq!(run(src), "1\n2\n");
+    }
+
+    #[test]
+    fn channel_try_send_false_when_closed() {
+        let src = "fn main():\n    ch := Channel[int]()\n    print(ch.try_send(1))\n    ch.close()\n    print(ch.try_send(2))\nmain()\n";
+        assert_eq!(run(src), "true\nfalse\n");
+    }
+
+    #[test]
+    fn channel_double_close_ok() {
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    ch.close()\n    print(1)\nmain()\n";
+        assert_eq!(run(src), "1\n");
+    }
+
+    #[test]
+    fn channel_close_then_len_zero() {
+        // close() must not fault len(); a closed-and-empty channel still reports 0.
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.len())\nmain()\n";
+        assert_eq!(run(src), "0\n");
+    }
+
+    #[test]
+    fn channel_try_recv_closed_empty_is_none() {
+        // try_recv stays non-blocking + non-faulting on a closed channel — None, indistinguishable
+        // from empty (by design; only blocking recv / `for v in ch:` detect close).
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    match ch.try_recv():\n        Some(v): print(v)\n        None: print(\"none\")\nmain()\n";
+        assert_eq!(run(src), "none\n");
+    }
+
+    #[test]
+    fn for_over_channel_drains_then_exits() {
+        // Producer-first (sequential oracle): send 1,2,3, close, then the consumer `for` drains and
+        // exits cleanly — no deadlock fault.
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    ch.send(2)\n    ch.send(3)\n    ch.close()\n    total := 0\n    for v in ch:\n        total = total + v\n    print(total)\nmain()\n";
+        assert_eq!(run(src), "6\n");
+    }
+
+    #[test]
+    fn for_over_open_empty_channel_deadlocks() {
+        // The sequential oracle cannot block: a `for` over an open-and-empty channel faults (it can
+        // never receive a value), mirroring bare `recv`.
+        let err = run_capture("fn main():\n    ch := Channel[int]()\n    for v in ch:\n        print(v)\nmain()\n")
+            .expect_err("for over an open empty channel should deadlock-fault");
+        assert!(err.message.contains("deadlock"), "{}", err.message);
     }
 
     /// C3 concurrency golden: the canonical `Shared[T]` cross-task counter — three spawned tasks

@@ -556,32 +556,43 @@ impl Compiler {
             fc.patch_jump(exit);
             self.patch_loop(fc, inc_target);
         } else if vars.len() == 1 {
-            // Single loop variable. The iterand may be a sequence (list/map-keys/set/str) OR a user
-            // struct implementing the iterator protocol (`next(self) -> Option[T]`). The compiler is
-            // type-erased, so we branch at RUNTIME on `IsStruct`: a struct is driven LAZILY by
-            // `next()` (so an infinite iterator with a `break` terminates); anything else is indexed
-            // as a snapshotted list (existing behaviour).
+            // Single loop variable. The iterand may be a sequence (list/map-keys/set/str), a user
+            // struct implementing the iterator protocol (`next(self) -> Option[T]`), OR a `Channel[T]`
+            // (`for v in ch:` — block per value, end on close). The compiler is type-erased, so we
+            // branch at RUNTIME on `IsChannel`/`IsStruct`: the channel and struct paths are both driven
+            // LAZILY by an `Option`-producing step (so an infinite iterator with a `break` terminates,
+            // and a channel blocks then ends on close); anything else is indexed as a snapshotted list.
+            // The channel and struct steps converge on ONE shared `Option` (None ⇒ exit, Some ⇒ bind)
+            // decoder — they differ only in how they produce the `Option`.
             self.compile_expr(fc, iter)?;
             let iter_slot = fc.add_hidden();
             fc.emit(Op::SetLocal(iter_slot), span);
             fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit(Op::IsChannel, span);
+            let chan_mode_slot = fc.add_hidden(); // true ⇒ channel path (ChanRecvOrClosed)
+            fc.emit(Op::SetLocal(chan_mode_slot), span);
+            fc.emit(Op::GetLocal(iter_slot), span);
             fc.emit(Op::IsStruct, span);
-            let mode_slot = fc.add_hidden(); // true ⇒ struct-iterator path
-            fc.emit(Op::SetLocal(mode_slot), span);
+            let struct_mode_slot = fc.add_hidden(); // true ⇒ struct-iterator path (next())
+            fc.emit(Op::SetLocal(struct_mode_slot), span);
             // The loop variable, plus the seq-path bookkeeping slots (allocated unconditionally; the
-            // struct path simply never touches them) and the struct-path's `next()` result slot.
+            // lazy paths simply never touch them) and the lazy paths' `Option` result slot.
             let item_slot = fc.add_local(vars[0].clone());
             let lst_slot = fc.add_hidden();
             let len_slot = fc.add_hidden();
             let idx_slot = fc.add_hidden();
             let opt_slot = fc.add_hidden();
 
-            // Seq init (skipped on the struct path): snapshot the iterand to a list, take its length,
-            // start the index at 0.
-            fc.emit(Op::GetLocal(mode_slot), span);
-            let skip_seq_init = fc.emit_jump(Op::JumpIfFalse(0), span); // false ⇒ run seq init
-            let jump_to_head = fc.emit_jump(Op::Jump(0), span); // struct: no init, go to head
-            fc.patch_jump(skip_seq_init);
+            // Seq init (skipped on BOTH lazy paths): snapshot the iterand to a list, take its length,
+            // start the index at 0. Skip when channel OR struct.
+            fc.emit(Op::GetLocal(chan_mode_slot), span);
+            let chan_to_check_struct = fc.emit_jump(Op::JumpIfFalse(0), span); // not chan ⇒ check struct
+            let chan_skip_init = fc.emit_jump(Op::Jump(0), span); // chan ⇒ skip seq init
+            fc.patch_jump(chan_to_check_struct);
+            fc.emit(Op::GetLocal(struct_mode_slot), span);
+            let to_seq_init = fc.emit_jump(Op::JumpIfFalse(0), span); // not struct ⇒ run seq init
+            let struct_skip_init = fc.emit_jump(Op::Jump(0), span); // struct ⇒ skip seq init
+            fc.patch_jump(to_seq_init);
             fc.emit(Op::GetLocal(iter_slot), span);
             fc.emit(Op::ListClone, iter.span);
             fc.emit(Op::SetLocal(lst_slot), span);
@@ -590,22 +601,34 @@ impl Compiler {
             fc.emit(Op::SetLocal(len_slot), span);
             fc.emit(Op::ConstInt(0), span);
             fc.emit(Op::SetLocal(idx_slot), span);
-            fc.patch_jump(jump_to_head);
+            fc.patch_jump(chan_skip_init);
+            fc.patch_jump(struct_skip_init);
 
             let loop_head = fc.here();
-            fc.emit(Op::GetLocal(mode_slot), span);
+            // Channel step: `ChanRecvOrClosed` → opt_slot (blocks on empty-open, None on closed+drained).
+            fc.emit(Op::GetLocal(chan_mode_slot), span);
+            let chan_to_struct = fc.emit_jump(Op::JumpIfFalse(0), span); // not chan ⇒ struct/seq
+            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit(Op::ChanRecvOrClosed, iter.span);
+            fc.emit(Op::SetLocal(opt_slot), span);
+            let chan_to_opt = fc.emit_jump(Op::Jump(0), span); // ⇒ shared Option decoder
+            fc.patch_jump(chan_to_struct);
+            // Struct vs seq split.
+            fc.emit(Op::GetLocal(struct_mode_slot), span);
             let to_seq_step = fc.emit_jump(Op::JumpIfFalse(0), span); // false ⇒ seq step
-            // ----- struct step: call next(); None ⇒ exit, Some(v) ⇒ bind v -----
+            // ----- struct step: call next() → opt_slot -----
             fc.emit(Op::GetLocal(iter_slot), span);
             fc.emit(Op::CallMethod("next".to_string(), 0), span);
             fc.emit(Op::SetLocal(opt_slot), span);
+            // ----- shared Option decoder (channel + struct): None ⇒ exit, Some(v) ⇒ bind v -----
+            fc.patch_jump(chan_to_opt);
             fc.emit(Op::EnsureEnum(opt_slot), iter.span);
             // Test `None` first: a match falls through to the exit jump; a mismatch goes to `to_some`.
             let none_arm = fc.emit_jump(
                 Op::MatchArm { scrut: opt_slot, variant: "None".to_string(), nbind: 0, bind_start: 0, next: 0 },
                 iter.span,
             );
-            let struct_exit = fc.emit_jump(Op::Jump(0), span); // None matched ⇒ leave the loop
+            let lazy_exit = fc.emit_jump(Op::Jump(0), span); // None matched ⇒ leave the loop
             fc.patch_jump(none_arm); // not None ⇒ try Some here
             // `Some(v)`: a match binds the payload into the loop variable's slot and falls through to
             // the body jump; a non-Some jumps to the trap below.
@@ -629,10 +652,14 @@ impl Compiler {
 
             fc.patch_jump(to_body);
             self.compile_defer_scoped_block(fc, body)?;
-            // `continue` lands HERE — the advance step. For a struct, "advance" is just re-looping
-            // (the next `next()` call); for a sequence, it's the index increment.
+            // `continue` lands HERE — the advance step. For a channel/struct, "advance" is just
+            // re-looping (the next lazy step); for a sequence, it's the index increment.
             let inc_target = fc.here();
-            fc.emit(Op::GetLocal(mode_slot), span);
+            fc.emit(Op::GetLocal(chan_mode_slot), span);
+            let inc_check_struct = fc.emit_jump(Op::JumpIfFalse(0), span);
+            fc.emit(Op::Jump(loop_head), span); // channel: re-loop, ChanRecvOrClosed advances
+            fc.patch_jump(inc_check_struct);
+            fc.emit(Op::GetLocal(struct_mode_slot), span);
             let to_seq_inc = fc.emit_jump(Op::JumpIfFalse(0), span);
             fc.emit(Op::Jump(loop_head), span); // struct: re-loop, next() advances
             fc.patch_jump(to_seq_inc);
@@ -641,8 +668,8 @@ impl Compiler {
             fc.emit(Op::Add, span);
             fc.emit(Op::SetLocal(idx_slot), span);
             fc.emit(Op::Jump(loop_head), span);
-            // Both exit paths land here (past the back-edge).
-            fc.patch_jump(struct_exit);
+            // All exit paths land here (past the back-edge).
+            fc.patch_jump(lazy_exit);
             fc.patch_jump(seq_exit);
             self.patch_loop(fc, inc_target);
         } else {

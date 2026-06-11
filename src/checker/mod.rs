@@ -1713,13 +1713,20 @@ impl Checker {
                     unknowns(vars)
                 }
             },
-            Ty::Str | Ty::Set(_) if vars.len() != 1 => {
-                self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
+            Ty::Str | Ty::Set(_) | Ty::Channel(_) if vars.len() != 1 => {
+                if matches!(it, Ty::Channel(_)) {
+                    self.error(iter.span, "a channel iterator binds a single loop variable");
+                } else {
+                    self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
+                }
                 unknowns(vars)
             }
             Ty::List(inner) => vec![(vars[0].clone(), (**inner).clone())],
             Ty::Set(elem) => vec![(vars[0].clone(), (**elem).clone())],
             Ty::Str => vec![(vars[0].clone(), Ty::Str)],
+            // `for v in ch:` over a `Channel[T]` blocks for each value and ends when the channel is
+            // closed-and-drained (Go's `for v := range ch`). Binds a single element of type `T`.
+            Ty::Channel(elem) => vec![(vars[0].clone(), (**elem).clone())],
             Ty::Unknown => unknowns(vars),
             Ty::Param(name) => {
                 // A type parameter bounded `S: Iterator[T]` is iterable; bind the loop var to its
@@ -2389,6 +2396,17 @@ impl Checker {
         guard: Option<&Expr>,
     ) -> Ty {
         let bindings = self.for_bindings(vars, iter);
+        // A comprehension materializes eagerly, but a `Channel` is a blocking iteration form whose
+        // termination depends on `close()`. Draining it into a list/set/map is out of scope and would
+        // DIVERGE between engines (the VM's `compile_comprehension` reuses the channel-aware
+        // `compile_for`, but the interp oracle's comprehension path can't iterate a channel). Reject on
+        // both engines instead — the `for v in ch:` statement form is the way to drain a channel.
+        if matches!(self.infer(iter), Ty::Channel(_)) {
+            self.error(
+                iter.span,
+                "a channel cannot be drained in a comprehension; use the `for v in ch:` statement form",
+            );
+        }
         self.push_scope();
         for (name, ty) in bindings {
             // Intentionally NOT `mark_loop_var`: a comprehension body is an expression, so its
@@ -5240,8 +5258,14 @@ fn map_method_sig(method: &str, k: &Ty, v: &Ty) -> Option<FnSig> {
 fn channel_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
     let (params, ret) = match method {
         "send" => (vec![elem.clone()], Ty::Nil),
+        // `try_send` is the safe partner of `send` (mirrors `try_recv` vs `recv`): channels are
+        // unbounded, so its only failure is a closed channel — returns `false` then, `true` on send.
+        "try_send" => (vec![elem.clone()], Ty::Bool),
         "recv" => (vec![], elem.clone()),
         "try_recv" => (vec![], Ty::option(elem.clone())),
+        // `close()` marks the channel closed (idempotent); a later `send` faults, `recv` drains then
+        // faults, and `for v in ch:` ends cleanly once drained.
+        "close" => (vec![], Ty::Nil),
         "len" => (vec![], Ty::Int),
         _ => return None,
     };

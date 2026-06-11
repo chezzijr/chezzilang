@@ -784,8 +784,12 @@ Critical + Important findings before the completion claim.
 
 ## Open / deferred
 
-- **`Channel.close()`** ([§11](concurrency.md)) — clean producer→consumer termination; needs a
-  surface decision; pairs naturally with D2's park model.
+- ~~**`Channel.close()`**~~ — **LANDED** (branch `feat/channel-close`). Clean producer→consumer
+  termination: `close()` (idempotent, wakes all receivers via `MnSched::close_wake`), `send`/`recv`
+  after close fault, **`for v in ch:`** blocking iteration (drains then ends on close, Go's
+  `for v := range ch`), and **`try_send(v) -> bool`** (the safe partner of `send`; channels are
+  unbounded so `false` = closed is its only failure). `closed` folded into the queue mutex
+  (`ChanState`) so the park-gap re-check is TOCTOU-free. See PROGRESS.md.
 - **Cross-nursery wakeups** ([§11](concurrency.md)) — mooted by real-thread blocking; M:N's flat run
   queues may lift it for free — revisit after D2.
 - **Priority classes** (BEAM) — deferred; revisit if priority becomes a requirement.

@@ -1,0 +1,36 @@
+# Channel.close() + `for v in ch:` golden: the canonical producer→consumer pipeline with clean
+# termination. The producer sends a fixed run of values then `close()`s the channel; the consumer
+# loops `for v in ch:`, which drains every value and ENDS cleanly once the channel is closed-and-empty
+# (instead of deadlock-faulting on the next `recv`, the old behaviour). `try_send` is the safe partner
+# of `send`: it returns `false` after close rather than faulting.
+#
+# Producer spawned FIRST so the sequential cooperative oracle (interp) runs it to completion — channel
+# closed + full — before the consumer iterates; under `--parallel` the consumer instead parks on the
+# empty channel and is woken by the producer's `send`/`close`. Both engines print the same total.
+# Run with: chezzi run examples/parallel_channel_close.chz  (or --parallel)
+
+fn produce(ch: Channel[int]):
+    for i in 1..6:
+        ch.send(i)                      # 1, 2, 3, 4, 5
+    ch.close()                          # no more values — wakes the consumer
+
+fn consume(ch: Channel[int], out: Channel[int]):
+    total := 0
+    for v in ch:                        # drains 1..5, then ends cleanly on close
+        total = total + v
+    out.send(total)
+
+fn main():
+    ch := Channel[int]()
+    out := Channel[int]()
+    parallel:
+        spawn produce(ch)               # task[0] — runs inline, sends then closes
+        spawn consume(ch, out)          # task[1] — drains via `for v in ch:`, reports the sum
+    print(out.recv())                   # 15, however the threads interleave
+
+    # `try_send` after close returns false (never faults) — the safe, verbose partner of `send`.
+    done := Channel[int]()
+    done.close()
+    print(done.try_send(99))
+
+main()

@@ -700,15 +700,18 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   to a thread for the intrinsically-native islands (`Shared.update`'s lock, hash/compare hooks). An
   accepted v1 limit until then.
 
-- **`Channel.close()` + closed-channel semantics** *(surface addition — needs an explicit decision)*.
-  Not part of the currently-fixed surface (§5). The natural complement to B1/B2's blocking `recv`: a
-  consumer looping `while true: ch.recv()` currently deadlock-faults when the producer is done.
-  Go's `close(ch)` + consumer-side end-detection (a closed-and-empty `recv` returns a sentinel /
-  `try_recv` distinguishes empty-vs-closed, or a `for v in ch:` form) gives clean producer→consumer
-  termination. Bounded, both engines, very TDD-able. **Blocked on a surface decision** — it extends the
-  `Channel` method set and possibly adds a `for`-over-channel form, so it needs sign-off on syntax +
-  semantics (what `recv` on a closed channel returns; whether `send` after `close` faults) before
-  implementation.
+- **`Channel.close()` + closed-channel semantics** — **LANDED** (both engines, branch
+  `feat/channel-close`). The natural complement to B1/B2's blocking `recv`: a consumer looping past the
+  producer's last value used to deadlock-fault. Resolved surface (decided with the user):
+  - **`for v in ch:`** — blocking iteration; drains buffered + future values, ends cleanly when
+    closed-and-drained (Go's `for v := range ch`). The headline consumer form.
+  - **`close()`** — idempotent, wakes every parked/demoted receiver.
+  - **`send` after close → faults** `"send on a closed channel"`; **`recv` on closed-and-empty →
+    faults** `"receive on a closed channel"` (drains buffered first).
+  - **`try_send(v) -> bool`** — the safe partner of `send` (mirrors `try_recv` vs `recv`); `false` =
+    closed. Channels are unbounded, so closed is `send`'s only failure → `bool`, not `Option`.
+  - `try_recv` unchanged (closed reads as `None`); comprehension-over-channel rejected (use the `for`
+    form). Implementation notes in PROGRESS.md + [`concurrency-tier-d.md`](concurrency-tier-d.md).
 
 - **A3b — `Executor.submit` capture sendability gate** *(✅ shipped in B3.6)*.
   `submit` ran the closure in-heap at the drain (no airlock, unlike `spawn`'s deep-clone), so a

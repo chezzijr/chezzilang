@@ -213,7 +213,7 @@ pub enum Value {
     /// `Channel[T]` (C2) — a shared mailbox (buffered, unbounded FIFO) for cross-task messages.
     /// Shared by reference (the handle is what `spawn` copies across the airlock); values move in
     /// on `send` (deep-copied) and out on `recv`.
-    Channel(Rc<RefCell<std::collections::VecDeque<Value>>>),
+    Channel(Rc<RefCell<ChanState>>),
     /// `Shared[T]` (C3) — the cross-task mutable box. Shared by reference (the handle is what
     /// `spawn` copies across the airlock); the value lives in the one box and is copied in on
     /// `set`/construction and out on `get`. Under the sequential executor a single thread already
@@ -227,6 +227,21 @@ pub enum Value {
     /// The result of a statement-like expression (e.g. `print(...)`) or a function with no
     /// `return`. Not directly constructible in source.
     Nil,
+}
+
+/// The mutable interior of a [`Value::Channel`]: the unbounded FIFO of messages and a `closed` flag.
+/// Once `close()` sets `closed`, a `send`/`try_send` is rejected (`send` faults, `try_send` returns
+/// `false`), a `recv` drains the queue then faults, and a `for v in ch:` ends once drained.
+#[derive(Debug, PartialEq, Default)]
+pub struct ChanState {
+    pub queue: std::collections::VecDeque<Value>,
+    pub closed: bool,
+}
+
+impl ChanState {
+    pub fn new() -> Self {
+        ChanState::default()
+    }
 }
 
 /// The mutable interior of an [`Value::Executor`]: a FIFO queue of submitted task closures and a
@@ -339,7 +354,7 @@ impl std::fmt::Display for Value {
                     write!(f, "{variant}({inner})")
                 }
             }
-            Value::Channel(q) => write!(f, "Channel(len={})", q.borrow().len()),
+            Value::Channel(q) => write!(f, "Channel(len={})", q.borrow().queue.len()),
             Value::Shared(cell) => write!(f, "Shared({})", cell.borrow()),
             Value::Executor(ex) => write!(f, "Executor(pending={})", ex.borrow().queue.len()),
             Value::Nil => write!(f, "nil"),

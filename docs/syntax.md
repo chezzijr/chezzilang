@@ -816,8 +816,12 @@ main()
   a nursery **in its own function** — a task can't outlive the function that spawned it. A
   "background" task = one spawned into a longer-lived *outer* `parallel:`.
 - **`Channel[T]`** — a mailbox (buffered FIFO): `ch.send(v)`, `ch.recv() -> T`,
-  `ch.try_recv() -> T?` (non-blocking poll — `Some(v)`/`None`, never blocks or faults), `ch.len()`.
-  Values **move/copy** across the boundary; the sender can't reuse a sent value.
+  `ch.try_recv() -> T?` (non-blocking poll — `Some(v)`/`None`, never blocks or faults), `ch.len()`,
+  `ch.close()`, `ch.try_send(v) -> bool` (safe `send` — `false` if closed, never faults). After
+  `close()`: `send` faults, `recv` drains then faults, `try_send` returns `false`. Drain a channel to
+  completion with **`for v in ch:`** — it blocks per value and ends cleanly once closed-and-drained
+  (Go's `for v := range ch`). Values **move/copy** across the boundary; the sender can't reuse a sent
+  value.
 - **`Shared[T]`** — the cross-task mutable box: `s.get()`, `s.set(v)`, `s.update(fn(x): ...)`. The
   ladder is `value` (copied) → `Ref[T]` (in-task) → `Shared[T]` (cross-task). `Ref` is **not**
   sendable; `Shared` is.

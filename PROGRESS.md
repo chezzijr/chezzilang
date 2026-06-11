@@ -398,7 +398,7 @@ address), and `connect` inside a native callback fails loud rather than pinning 
 green** (+drain unit, +timer fold ×4, +3 net VM tests, +1 net unit), `cargo clippy` clean, full
 `--parallel` net suite + the hang-regression watchdog tests pass, `examples/echo_server.chz` serves 50
 conns. Items *not* in B3–B5 (cross-nursery wakeups, recv-in-native-callback / D5 owe #3,
-`Channel.close()`, per-connection `spawn`, per-socket read/accept timeout) are documented in
+~~`Channel.close()`~~ [landed — see below], per-connection `spawn`, per-socket read/accept timeout) are documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)** and **[`docs/concurrency-tier-d.md`](docs/concurrency-tier-d.md)**.
 Full A/B breakdown: §9.
 
@@ -440,6 +440,42 @@ have skipped the `inflight` restore → permanent `inflight` leak → nursery de
 Important applied — cancel/terminate re-checked at the top of each wait iteration (cancelled task stops
 issuing socket work promptly), and the bare `thread::sleep` busy-poll upgraded to a kernel `libc::poll`
 fd-wait (early wake on readiness, no wasted syscalls, near-epoll latency).
+
+**`Channel.close()` + closed-channel semantics + `try_send` + `for v in ch:` have landed** (both
+engines, branch `feat/channel-close`) — the headline deferred concurrency *feature* (the engine was
+already complete through D6b; this is surface breadth). Closes the gap where a consumer looping `recv`
+after the producer was done could only **deadlock-fault**; now there is clean producer→consumer
+termination. Surface (user-locked):
+> - **`for v in ch:`** — blocking iteration over a channel: drains buffered + future values, ends
+>   cleanly once **closed-and-drained** (Go's `for v := range ch`). The headline consumer form.
+> - **`ch.close()`** — idempotent, no args, returns Nil; wakes **every** parked/demoted receiver.
+> - **`ch.send(v)` after close → faults** `"send on a closed channel"`; **`ch.recv()` on a
+>   closed-and-empty channel → faults** `"receive on a closed channel"` (drains buffered first).
+> - **`ch.try_send(v) -> bool`** — the safe partner of `send` (mirrors `try_recv` vs `recv`):
+>   `true` = sent, `false` = closed. Channels are **unbounded**, so closed is `send`'s only failure
+>   mode — hence `bool`, not `Option`/`Result`. `try_recv` unchanged (closed is `None`, by design).
+
+Implementation: `ChannelCore` folds a `closed` flag **into the queue mutex** (`Mutex<ChanState{queue,
+closed}>`, `src/vm/core.rs`) so "value waiting OR closed" is one atomic observation — killing the
+lost-wakeup TOCTOU at `park`/`send_wake`/`recv`/demote. Two new ops (`IsChannel`, `ChanRecvOrClosed`);
+`compile_for`'s single-var path became a 3-way runtime branch (channel/struct/seq) where the channel +
+struct steps share the existing `Option` `None→exit`/`Some→bind` decoder — the channel step just
+produces the `Option` via `ChanRecvOrClosed` (parks on empty-open like `recv`, `None` on
+closed-drained) instead of `next()`. `recv` + the op share `chan_recv_step`/`park_recv`;
+`demote_recv_block` (in-callback recv) is closed-aware too; `MnSched::close_wake` wakes *all* parked
+fibers (vs `send_wake`'s one-per-value) + notifies demoted condvars; `park` re-checks `closed` in its
+gap. Interp mirrors it (sequential oracle: `exec_for` channel branch + `eval_channel_method` faults).
+Comprehension-over-channel (`[v for v in ch]`) is **rejected by the checker** on both engines (it would
+diverge — VM drains, interp oracle can't), steering users to `for v in ch:`. Golden
+`examples/parallel_channel_close.chz` (producer-first → parity-safe) is VM-cooperative == interp ==
+expected and runs on `--parallel` too. **1455 tests green** (+24: checker close/try_send/for-bind/
+comprehension-reject; interp + VM close/send-fault/recv-fault/try_send/drain/double-close/len/try_recv;
+`--parallel` close-wakes-one / close-wakes-many / dead-consumer-terminates / send-after-close-faults;
+golden ×2), `cargo clippy` clean, conformance green, racy `--parallel` close tests stress-clean (6×
+each). **2-agent S++ panel** (concurrency-correctness + API-design): concurrency reviewer found zero
+Critical/Important (traced every close/park interleaving safe under 90× stress); API reviewer found one
+Important — comprehension-over-channel parity divergence — **applied** (checker rejection + test), plus
+the two minor close-then-`len`/`try_recv` contract tests and a softened `send`-atomicity comment.
 
 > **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,
 > not a TODO.** The interpreter stays frozen at the **sequential concurrency subset** and serves as

@@ -8,9 +8,9 @@
 //! same core. This is the structural move that lets B3.3 share a core across real OS threads; at B3.1
 //! everything is still single-thread and cooperative, so the `Mutex` never actually contends.
 //!
-//! A `Condvar` (for real blocking `recv`) and close/cancel bits are deliberately **not** here yet —
-//! cooperative `recv` parks the *fiber* (it does not block on a primitive), so a condvar would be dead
-//! code until B3.3.
+//! A `Condvar` (for real blocking `recv`) was added at B3.3; a `closed` flag (for `Channel.close()`)
+//! lives alongside the queue under [`ChannelCore::q`]'s lock (see [`ChanState`]). Cooperative `recv`
+//! parks the *fiber* (it does not block on a primitive), so the condvar is dead on that engine.
 
 use super::value::GcRef;
 use super::wire::WireValue;
@@ -32,8 +32,21 @@ use std::sync::{Arc, Condvar, Mutex};
 /// re-checks the queue / cancel / terminate on every wake (spurious-wakeup-safe; bounded poll).
 #[derive(Debug, Default)]
 pub struct ChannelCore {
-    pub q: Mutex<VecDeque<WireValue>>,
+    pub q: Mutex<ChanState>,
     pub cv: Condvar,
+}
+
+/// The locked interior of a [`ChannelCore`]: the message FIFO plus a `closed` flag. Folding `closed`
+/// into the *same* mutex as the queue is deliberate — every park decision ([`super::Vm::park`],
+/// `send_wake`, the recv arm, the demote loop) re-checks the queue under this lock, so "a value is
+/// waiting OR the channel is closed" is one atomic observation. A separate `AtomicBool` would leave a
+/// TOCTOU gap (check empty, then close happens, then park) that could strand a parked fiber. Once
+/// `closed`: `send`/`try_send` are rejected, `recv` drains then faults, and `for v in ch:` ends once
+/// drained. `close()` wakes every parked/demoted receiver via `cv` + the scheduler.
+#[derive(Debug, Default)]
+pub struct ChanState {
+    pub queue: VecDeque<WireValue>,
+    pub closed: bool,
 }
 
 /// `Shared[T]` core (B3.1): the one box every task reaches. `get` locks + clones out; `set` locks +
@@ -142,7 +155,7 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         }
         WireValue::Enum { payload, .. } => payload.iter().for_each(|x| collect_core_gcrefs(x, out, seen)),
         WireValue::Channel(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
-            core.q.lock().unwrap().iter().for_each(|w| collect_core_gcrefs(w, out, s))
+            core.q.lock().unwrap().queue.iter().for_each(|w| collect_core_gcrefs(w, out, s))
         }),
         WireValue::Shared(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
             collect_core_gcrefs(&core.v.lock().unwrap(), out, s)

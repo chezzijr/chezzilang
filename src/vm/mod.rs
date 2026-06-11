@@ -987,8 +987,14 @@ impl MnSched {
     fn park(&self, key: usize, core: &Arc<ChannelCore>, mut fiber: Fiber) {
         let mut c = self.lock();
         c.running -= 1;
-        let message_waiting = !core.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
-        if message_waiting || self.cancel.load(Ordering::Relaxed) {
+        // Close the park gap: re-check (under the core lock) whether a message is waiting, the channel
+        // was CLOSED (a concurrent `close()` between `recv`'s empty-check and here — the fiber must
+        // re-run to observe `closed` and end its `for`/fault, not park forever), or cancel was tripped.
+        let (message_waiting, closed) = {
+            let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+            (!g.queue.is_empty(), g.closed)
+        };
+        if message_waiting || closed || self.cancel.load(Ordering::Relaxed) {
             fiber.state = FiberState::Ready;
             c.global.push_back(fiber);
             self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued)
@@ -1069,7 +1075,7 @@ impl MnSched {
     /// barrier are D4. Lock order: core-OUTER, channel-`q`-INNER (matches `park`).
     fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) {
         let mut c = self.lock();
-        core.q.lock().unwrap_or_else(|e| e.into_inner()).push_back(w);
+        core.q.lock().unwrap_or_else(|e| e.into_inner()).queue.push_back(w);
         if let Some(woken) = c.parked.remove(&key) {
             c.parked_n -= woken.len();
             self.runnable.fetch_add(woken.len(), Ordering::Relaxed); // parked → ready
@@ -1085,6 +1091,27 @@ impl MnSched {
         // above + woken via `self.cv`; a demoted thread instead waits on the channel's OWN condvar, so
         // it must be notified here. Without this it would only re-check on its bounded poll timeout
         // (added latency, not a hang). No-op when no thread is demoted on this channel.
+        core.cv.notify_all();
+    }
+
+    /// A `close()` on channel `key`: wake EVERY fiber parked on it (not just one, as a `send` would —
+    /// a close has no value to deliver, it just unblocks all receivers) so each re-runs its `recv` /
+    /// `ChanRecvOrClosed` and observes the now-closed channel (a `for v in ch:` ends, a bare `recv`
+    /// faults). Atomic under the core lock so it serializes with [`MnSched::park`]'s gap re-check (the
+    /// `closed` flag is already set by the caller before this call). Same lock discipline as
+    /// `send_wake`; `core.cv.notify_all` also wakes any thread DEMOTED on this channel.
+    fn close_wake(&self, key: usize, core: &Arc<ChannelCore>) {
+        let mut c = self.lock();
+        if let Some(woken) = c.parked.remove(&key) {
+            c.parked_n -= woken.len();
+            self.runnable.fetch_add(woken.len(), Ordering::Relaxed); // parked → ready
+            for mut f in woken {
+                f.state = FiberState::Ready;
+                c.global.push_back(f);
+            }
+        }
+        drop(c);
+        self.cv.notify_all();
         core.cv.notify_all();
     }
 
@@ -1171,7 +1198,7 @@ impl MnSched {
         // `send` racing the quiesce could spuriously fault an innocent PARKED sibling.
         if c.demoted_chans
             .values()
-            .any(|(core, _)| !core.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty())
+            .any(|(core, _)| !core.q.lock().unwrap_or_else(|e| e.into_inner()).queue.is_empty())
         {
             return false;
         }
@@ -1485,6 +1512,16 @@ struct PollPark {
 enum SockPoll {
     Ready(Result<Value, RuntimeError>),
     WouldBlock,
+}
+
+/// The outcome of one blocking-`recv` step ([`Vm::chan_recv_step`] / [`Vm::demote_recv_block`]):
+/// a value was dequeued, the channel is closed-and-drained, or the fiber parked (re-runs on wake).
+/// Shared by bare `recv` (`Got` → value, `ClosedEmpty` → "receive on a closed channel" fault) and
+/// the `ChanRecvOrClosed` op driving `for v in ch:` (`Got` → `Some(v)`, `ClosedEmpty` → `None`).
+enum RecvStep {
+    Got(WireValue),
+    ClosedEmpty,
+    Parked,
 }
 
 /// D6b — a non-blocking `connect` whose TCP handshake is still in flight (`EINPROGRESS`): the
@@ -2374,6 +2411,36 @@ impl Vm {
                 let v = self.pop();
                 let is_map = matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Map(_)));
                 self.push(Value::Bool(is_map));
+            }
+            Op::IsChannel => {
+                let v = self.pop();
+                let is_chan =
+                    matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Channel(_)));
+                self.push(Value::Bool(is_chan));
+            }
+            Op::ChanRecvOrClosed => {
+                // `for v in ch:` step: pop a value (parking on empty-open exactly like `recv`) and push
+                // `Some(v)`, or push `None` once the channel is closed-and-drained (the loop's clean
+                // exit). Runs at the loop top, never inside a native callback (`native_reentry == 0`),
+                // so it takes the snapshot-park / cooperative-park / fault paths — never the demote path.
+                let v = self.pop();
+                let Value::Obj(h) = v else {
+                    return Err(self.err("`for` over a non-channel value".to_string(), span));
+                };
+                match self.chan_recv_step(h, span)? {
+                    RecvStep::Got(w) => {
+                        let val = self.from_wire(w);
+                        let opt = self.alloc_enum("Option", "Some", vec![val]);
+                        self.push(opt);
+                    }
+                    RecvStep::ClosedEmpty => {
+                        let opt = self.alloc_enum("Option", "None", vec![]);
+                        self.push(opt);
+                    }
+                    // `chan_recv_step` re-rooted the handle + set `suspend`; `run_until`'s `paused()`
+                    // gate returns to the scheduler, and the op re-runs (rewound `ip`) on resume.
+                    RecvStep::Parked => {}
+                }
             }
             Op::EnsureEnum(slot) => {
                 let v = self.stack[self.base() + *slot];
@@ -4341,10 +4408,13 @@ impl Vm {
     /// count stays at N; after this fiber settles, [`Vm::mn_worker_loop`] sees `self.demoted` and exits,
     /// so steady-state live workers = N + (fibers currently blocked in a callback) — Go's exact cost.
     ///
-    /// Returns the received value (the native callback continues on this thread) or a `cancelled` /
-    /// `deadlock` fault (which unwinds the callback → the fiber faults). Only ever called on the M:N
-    /// engine inside a native callback (the recv site gates on `mn.is_some() && native_reentry > 0`).
-    fn demote_recv_block(&mut self, h: GcRef, span: Span) -> Result<Value, RuntimeError> {
+    /// Returns [`RecvStep::Got`] (the native callback continues on this thread with the value),
+    /// [`RecvStep::ClosedEmpty`] (the channel was `close()`d while demoted — the caller faults
+    /// "receive on a closed channel"), or a `cancelled` / `deadlock` fault (which unwinds the callback
+    /// → the fiber faults). Never [`RecvStep::Parked`] — a demoted recv blocks in place, it never
+    /// snapshot-parks. Only ever called on the M:N engine inside a native callback (the recv site gates
+    /// on `mn.is_some() && native_reentry > 0`).
+    fn demote_recv_block(&mut self, h: GcRef, span: Span) -> Result<RecvStep, RuntimeError> {
         let sched = Arc::clone(self.mn.as_ref().expect("demote_recv_block on the cooperative engine"));
         let core = self.channel_core(h);
         let ptr = self.channel_core_ptr(h);
@@ -4394,14 +4464,22 @@ impl Vm {
             // --- settle under core lock A: pop wins over cancel / terminate / deadlock ---
             {
                 let mut c = sched.lock();
-                let popped = core.q.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                let mut qg = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                let popped = qg.queue.pop_front();
                 if let Some(w) = popped {
                     c.running += 1;
                     sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
                     c.unregister_demoted(ptr);
+                    drop(qg);
                     drop(c);
-                    return Ok(self.from_wire(w));
+                    return Ok(RecvStep::Got(w));
                 }
+                // Closed-and-drained: the queue is empty here (pop-first) and the channel is closed, so
+                // no value will ever arrive — signal `ClosedEmpty` (the caller faults "receive on a
+                // closed channel"). Read while still holding the queue lock so it is atomic with the
+                // pop above. Ranks below a delivered value, above terminate/deadlock.
+                let closed = qg.closed;
+                drop(qg);
                 // Cancel (a sibling faulted): set `cancelled` BEFORE returning the Err so the outcome is
                 // SWALLOWED (a cancelled task is dropped, not reported) instead of surfacing as a Fault —
                 // mirrors the snapshot-park recv's cancel branch.
@@ -4412,6 +4490,13 @@ impl Vm {
                     c.unregister_demoted(ptr);
                     drop(c);
                     return Err(self.err("cancelled".to_string(), span));
+                }
+                if closed {
+                    c.running += 1;
+                    sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+                    c.unregister_demoted(ptr);
+                    drop(c);
+                    return Ok(RecvStep::ClosedEmpty);
                 }
                 // Terminate without a delivered value (genuine deadlock / nursery torn down): fault in
                 // place. Path C self-sufficient deadlock detection: evaluate the predicate HERE rather
@@ -4438,7 +4523,7 @@ impl Vm {
             }
             // --- wait on the channel's OWN condvar (q-only; core lock A released) ---
             let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-            if q.is_empty() {
+            if q.queue.is_empty() {
                 let _ = core.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
             }
         }
@@ -6100,89 +6185,54 @@ impl Vm {
                 self.arity_err("send", args, 1, span)?;
                 // B3.1: serialize once into the core (the wire form IS the airlock copy).
                 let w = self.to_wire(args[0])?;
-                let core = self.channel_core(h);
-                // D2b: on the M:N engine, enqueue the message AND move every fiber parked on this
-                // channel's `recv` back onto the run queue ATOMICALLY under the sched lock
-                // ([`MnSched::send_wake`]) — so a sibling parking concurrently can't be lost (its
-                // `park` re-checks the queue under the same lock). The key is the `ChannelCore`
-                // pointer, computed here while this fiber's heap is live (`h` is a GcRef into it). A
-                // `send` from a thread not enlisted on the parked fiber's sched (cross-nursery /
-                // top-level) has `mn == None`, so it only enqueues — the cross-sched wake is an
-                // accepted hang (decision D); the message is delivered into the shared `Arc<ChannelCore>`.
-                if let Some(sched) = self.mn.clone() {
-                    let key = self.channel_core_ptr(h);
-                    sched.send_wake(key, &core, w);
-                } else {
-                    core.q.lock().unwrap().push_back(w);
-                    // B3.3-threads: wake any OS thread blocked in `recv` on this core (legacy
-                    // executor-drain pool path). No-op on the cooperative engine (fibers park).
-                    core.cv.notify_all();
-                    // D0: on the cooperative engine, re-add any sibling fiber parked on this channel's
-                    // `recv` to its scheduler level's `ready` set.
-                    self.wake_on_send(h);
+                // Closed-channel guard: a `send` after `close()` faults (Go-panic analog). A `close`
+                // racing in the window between this check and the enqueue is benign — the value is
+                // still buffered and drained before the close is observed (drain-before-close), exactly
+                // like Go's racy `select`/close. Strict mutual exclusion isn't required.
+                if self.channel_core(h).q.lock().unwrap().closed {
+                    return Err(self.err("send on a closed channel".to_string(), span));
                 }
+                self.channel_send_wire(h, w);
                 Ok(Value::Nil)
+            }
+            // `try_send` is the safe partner of `send`: channels are unbounded, so its only failure is
+            // a closed channel — returns `false` then (never faults), `true` once the value is queued.
+            "try_send" => {
+                self.arity_err("try_send", args, 1, span)?;
+                let w = self.to_wire(args[0])?;
+                if self.channel_core(h).q.lock().unwrap().closed {
+                    return Ok(Value::Bool(false));
+                }
+                self.channel_send_wire(h, w);
+                Ok(Value::Bool(true))
             }
             "recv" => {
                 self.arity_err("recv", args, 0, span)?;
-                // D2b: on the M:N engine, an empty `recv` PARKS the fiber (it does not block the OS
-                // thread). Reuse the cooperative suspend mechanism — re-root the receiver, rewind `ip`
-                // so this `CallMethod(recv)` re-executes on resume, set the `suspend` sentinel — and
-                // the worker loop ([`Vm::mn_worker_loop`]) files the captured fiber into the channel's
-                // wait set and runs the next fiber. A `send` drains that wait set + wakes a worker.
-                // The cancel flag is checked FIRST (mirror the legacy phase-B): a fiber woken only to
-                // be cancelled (its parked sibling faulted) must NOT re-park, or it would loop forever.
-                // The `native_reentry == 0` guard matches the cooperative path: a `recv` inside a
-                // native callback can't park (its caller's state lives on the Rust stack), so it falls
-                // through to the deadlock fault below.
-                if self.mn.is_some() && self.native_reentry == 0 {
-                    if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
-                        self.cancelled = true;
-                        return Err(self.err("cancelled".to_string(), span));
-                    }
-                    let popped = self.channel_core(h).q.lock().unwrap().pop_front();
-                    return match popped {
-                        Some(w) => Ok(self.from_wire(w)),
-                        None => {
-                            self.push(Value::Obj(h));
-                            self.frames.last_mut().unwrap().ip -= 1;
-                            self.suspend = Some(h);
-                            Ok(Value::Nil) // sentinel; never observed (callers gate on `suspend`)
+                // D5 owe #3 (Path C) — a `recv` reached INSIDE a native callback on the M:N engine
+                // (`native_reentry > 0`) can't snapshot-park (its host-stack loop frame is not
+                // capturable), so it DEMOTES the worker thread: block in place on the channel condvar +
+                // spin a replacement, resuming on a sibling `send` (Go's `handoffp`). Handled before
+                // `chan_recv_step` (which only covers the snapshot-park / cooperative-park / fault
+                // paths). `demote_recv_block` is itself closed-aware (a `close` faults the demoted recv).
+                if self.mn.is_some() && self.native_reentry > 0 {
+                    return match self.demote_recv_block(h, span)? {
+                        RecvStep::Got(w) => Ok(self.from_wire(w)),
+                        RecvStep::ClosedEmpty => {
+                            Err(self.err("receive on a closed channel".to_string(), span))
                         }
+                        // demote never parks (it blocks in place); a Parked here is impossible.
+                        RecvStep::Parked => unreachable!("demote_recv_block never parks"),
                     };
                 }
-                let popped = self.channel_core(h).q.lock().unwrap().pop_front();
-                match popped {
-                    Some(w) => Ok(self.from_wire(w)),
-                    // Empty channel. Under an active nursery scheduler (and not inside a native
-                    // callback, whose Rust-stack state can't be parked), B1/B2 SUSPENDS the running
-                    // fiber instead of faulting: re-root the receiver, rewind `ip` so this very
-                    // `CallMethod(recv)` re-executes on resume, and signal the scheduler to run a
-                    // sibling. `do_method_call` skips its result-push while `suspend` is set; the
-                    // scheduler resumes this fiber once `h` has data (a sibling `send`).
-                    None if !self.scheduler_stack.is_empty() && self.native_reentry == 0 => {
-                        self.push(Value::Obj(h));
-                        self.frames.last_mut().unwrap().ip -= 1;
-                        self.suspend = Some(h);
-                        Ok(Value::Nil) // sentinel; never observed (callers gate on `suspend`)
+                match self.chan_recv_step(h, span)? {
+                    RecvStep::Got(w) => Ok(self.from_wire(w)),
+                    // `chan_recv_step` already re-rooted the receiver + set `suspend`; the sentinel is
+                    // never observed (`do_method_call` gates the result-push on `suspend`).
+                    RecvStep::Parked => Ok(Value::Nil),
+                    // Closed-and-drained: a distinct fault (not the deadlock fault) — no producer left.
+                    RecvStep::ClosedEmpty => {
+                        Err(self.err("receive on a closed channel".to_string(), span))
                     }
-                    // D5 owe #3 (Path C) — empty `recv` reached INSIDE a native callback on the M:N
-                    // engine (reachable here only with `native_reentry > 0`: the `mn && reentry==0`
-                    // snapshot-park branch above already returned, and the `reentry==0` cooperative-park
-                    // guard just failed). The host-stack loop frame can't be snapshot-parked, so instead
-                    // of faulting we DEMOTE the worker thread: block in place on the channel condvar +
-                    // spin up a replacement worker, resuming in place on a sibling `send` (Go's
-                    // `handoffp`). The cooperative engine (`mn.is_none()`) keeps the deadlock fault.
-                    None if self.mn.is_some() => self.demote_recv_block(h, span),
-                    // No scheduler (top level / single fiber) or a native callback on the cooperative
-                    // engine: no sibling could ever fill the channel here — a real deadlock. Unchanged.
-                    None => Err(self.err(
-                        "recv on an empty channel: deadlock — nothing is queued and the \
-                         sequential executor cannot block waiting for a producer (a \
-                         consumer that waits mid-flight on a live producer needs C5)"
-                            .to_string(),
-                        span,
-                    )),
                 }
             }
             "try_recv" => {
@@ -6190,7 +6240,7 @@ impl Vm {
                 // `native_reentry` / `suspend` / `ip` — it always returns immediately with an
                 // `Option`: `Some(v)` if queued, `None` if empty. Mirrors `interp::eval_channel_method`.
                 self.arity_err("try_recv", args, 0, span)?;
-                let popped = self.channel_core(h).q.lock().unwrap().pop_front();
+                let popped = self.channel_core(h).q.lock().unwrap().queue.pop_front();
                 Ok(match popped {
                     Some(w) => {
                         let v = self.from_wire(w);
@@ -6199,13 +6249,112 @@ impl Vm {
                     None => self.alloc_enum("Option", "None", vec![]),
                 })
             }
+            // `close()` marks the channel closed (idempotent) and wakes every parked / demoted
+            // receiver so each re-runs and observes the close: a `for v in ch:` ends, a bare `recv`
+            // faults. Mirrors `send`'s wake fan-out but delivers no value.
+            "close" => {
+                self.arity_err("close", args, 0, span)?;
+                let core = self.channel_core(h);
+                core.q.lock().unwrap().closed = true;
+                if let Some(sched) = self.mn.clone() {
+                    let key = self.channel_core_ptr(h);
+                    sched.close_wake(key, &core);
+                } else {
+                    // Wake any demoted OS thread blocked on this core's condvar (in-callback recv).
+                    core.cv.notify_all();
+                    // Cooperative engine: re-add every sibling fiber parked on this channel's `recv`.
+                    self.wake_on_send(h);
+                }
+                Ok(Value::Nil)
+            }
             "len" => {
                 self.arity_err("len", args, 0, span)?;
-                let n = self.channel_core(h).q.lock().unwrap().len();
+                let n = self.channel_core(h).q.lock().unwrap().queue.len();
                 Ok(Value::Int(n as i64))
             }
             _ => Err(self.err(format!("type Channel has no method '{method}'"), span)),
         }
+    }
+
+    /// Enqueue an already-wire-serialized message into a channel and wake any receivers — the shared
+    /// tail of `send`/`try_send` (after their respective closed-channel guards). On the M:N engine the
+    /// enqueue + wake of every fiber parked on this channel is atomic under the sched lock
+    /// ([`MnSched::send_wake`]) so a sibling parking concurrently can't be lost. With no scheduler
+    /// (cooperative / cross-nursery / top-level) it enqueues + notifies the core condvar (a demoted
+    /// in-callback recv) + re-adds any cooperative fiber parked on this channel.
+    fn channel_send_wire(&mut self, h: GcRef, w: WireValue) {
+        let core = self.channel_core(h);
+        if let Some(sched) = self.mn.clone() {
+            let key = self.channel_core_ptr(h);
+            sched.send_wake(key, &core, w);
+        } else {
+            core.q.lock().unwrap().queue.push_back(w);
+            core.cv.notify_all();
+            self.wake_on_send(h);
+        }
+    }
+
+    /// One blocking-`recv` step on the snapshot-park / cooperative-park / fault paths (NOT the
+    /// in-callback demote path, which `recv` handles directly). Pops a value if one is waiting,
+    /// signals `ClosedEmpty` on a closed-and-drained channel, or parks the running fiber (re-rooting
+    /// the receiver + rewinding `ip` so the calling op re-runs on resume, setting `suspend`). Shared
+    /// by `recv` (`CallMethod`) and the `ChanRecvOrClosed` op (`for v in ch:`).
+    fn chan_recv_step(&mut self, h: GcRef, span: Span) -> Result<RecvStep, RuntimeError> {
+        // M:N snapshot-park path (empty-open parks the fiber; the worker loop files it into the wait
+        // set). Cancel is checked FIRST: a fiber woken only to be cancelled must not re-park.
+        if self.mn.is_some() && self.native_reentry == 0 {
+            if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                self.cancelled = true;
+                return Err(self.err("cancelled".to_string(), span));
+            }
+            let core = self.channel_core(h);
+            let mut g = core.q.lock().unwrap();
+            if let Some(w) = g.queue.pop_front() {
+                return Ok(RecvStep::Got(w));
+            }
+            if g.closed {
+                return Ok(RecvStep::ClosedEmpty);
+            }
+            drop(g);
+            self.park_recv(h);
+            return Ok(RecvStep::Parked);
+        }
+        // Cooperative / no-scheduler path. Pop + closed read are atomic under one lock.
+        let core = self.channel_core(h);
+        let mut g = core.q.lock().unwrap();
+        if let Some(w) = g.queue.pop_front() {
+            return Ok(RecvStep::Got(w));
+        }
+        let closed = g.closed;
+        drop(g);
+        if closed {
+            return Ok(RecvStep::ClosedEmpty);
+        }
+        // Empty + open: under an active nursery scheduler (and not in a native callback) the fiber
+        // suspends; the scheduler resumes it once a sibling `send`s.
+        if !self.scheduler_stack.is_empty() && self.native_reentry == 0 {
+            self.park_recv(h);
+            return Ok(RecvStep::Parked);
+        }
+        // No scheduler (top level / single fiber) or a native callback on the cooperative engine: no
+        // sibling could ever fill the channel — a real deadlock.
+        Err(self.err(
+            "recv on an empty channel: deadlock — nothing is queued and the \
+             sequential executor cannot block waiting for a producer (a \
+             consumer that waits mid-flight on a live producer needs C5)"
+                .to_string(),
+            span,
+        ))
+    }
+
+    /// Park the running fiber on an empty `recv`: re-root the receiver on the operand stack, rewind
+    /// `ip` so the current op (`CallMethod(recv)` or `ChanRecvOrClosed`) re-executes on resume, and
+    /// set the `suspend` sentinel. The scheduler / worker loop files the fiber into the channel's
+    /// wait set; a sibling `send`/`close` wakes it.
+    fn park_recv(&mut self, h: GcRef) {
+        self.push(Value::Obj(h));
+        self.frames.last_mut().unwrap().ip -= 1;
+        self.suspend = Some(h);
     }
 
     /// `Shared[T]` methods (C3/C4): `get` (copies out), `set` (copies in), `update` (read-modify-write
@@ -7107,7 +7256,7 @@ impl Vm {
                 Obj::Closure { .. } => "<closure>".to_string(),
                 Obj::Module { name, .. } => format!("<module {name}>"),
                 Obj::Native { name, .. } => format!("<native fn {name}>"),
-                Obj::Channel(core) => format!("Channel(len={})", core.q.lock().unwrap().len()),
+                Obj::Channel(core) => format!("Channel(len={})", core.q.lock().unwrap().queue.len()),
                 // B3.1: the box holds the wire form; render it directly (`display` is `&self` and
                 // cannot `from_wire`, which allocates — `display_wire` is the read-only equivalent).
                 Obj::Shared(core) => format!("Shared({})", self.display_wire(&core.v.lock().unwrap())),
@@ -7172,7 +7321,7 @@ impl Vm {
                     format!("{variant}({inner})")
                 }
             }
-            WireValue::Channel(core) => format!("Channel(len={})", core.q.lock().unwrap().len()),
+            WireValue::Channel(core) => format!("Channel(len={})", core.q.lock().unwrap().queue.len()),
             WireValue::Shared(core) => format!("Shared({})", self.display_wire(&core.v.lock().unwrap())),
             WireValue::Executor(core) => format!("Executor(pending={})", core.inner.lock().unwrap().queue.len()),
             // D6: render open/closed without exposing the fd (mirrors the heap `Display`).
@@ -8171,13 +8320,13 @@ mod tests {
         sched.blocked_native.fetch_add(1, Ordering::Relaxed);
         c.register_demoted(ptr, &core);
         // A sibling already queued a value on the demoted fiber's channel: it will pop + progress.
-        core.q.lock().unwrap().push_back(WireValue::Int(7));
+        core.q.lock().unwrap().queue.push_back(WireValue::Int(7));
         assert!(
             !sched.is_deadlocked(&c),
             "a queued value on a demoted channel must veto the deadlock fire (#1 false-positive)"
         );
         // Drain it: now the demoted fiber truly has nothing queued → a real all-blocked deadlock.
-        core.q.lock().unwrap().pop_front();
+        core.q.lock().unwrap().queue.pop_front();
         assert!(
             sched.is_deadlocked(&c),
             "an empty demoted channel with all fibers blocked IS a genuine deadlock"
@@ -8209,12 +8358,12 @@ mod tests {
         c.register_demoted(ptr, &core);
         c.register_demoted(ptr, &core); // refcount now 2
         // A value queued on the shared channel → at least one demoted fiber pops + progresses.
-        core.q.lock().unwrap().push_back(WireValue::Int(7));
+        core.q.lock().unwrap().queue.push_back(WireValue::Int(7));
         assert!(!sched.is_deadlocked(&c), "queued value on the shared demoted channel vetoes deadlock");
         // One fiber pops + un-registers (refcount 2→1); the OTHER is still demoted on this channel, so
         // the entry must remain. Queue now empty → but the entry's presence alone does NOT veto; the
         // peek is queue-driven, so an empty registered channel is a genuine all-blocked deadlock.
-        core.q.lock().unwrap().pop_front();
+        core.q.lock().unwrap().queue.pop_front();
         c.unregister_demoted(ptr); // refcount 2→1, entry retained
         assert!(
             sched.is_deadlocked(&c),
@@ -8222,12 +8371,12 @@ mod tests {
         );
         // A fresh value for the surviving fiber re-vetoes via the retained entry (proves it wasn't
         // dropped at the first unregister).
-        core.q.lock().unwrap().push_back(WireValue::Int(9));
+        core.q.lock().unwrap().queue.push_back(WireValue::Int(9));
         assert!(
             !sched.is_deadlocked(&c),
             "the retained refcount-1 entry still peeks the queue (entry not dropped at refcount 1)"
         );
-        core.q.lock().unwrap().pop_front();
+        core.q.lock().unwrap().queue.pop_front();
         c.unregister_demoted(ptr); // refcount 1→0, entry removed
         assert!(c.demoted_chans.is_empty(), "the entry is removed only at refcount 0");
         assert!(sched.is_deadlocked(&c), "all demoted fibers gone, still all-blocked = deadlock");
@@ -9431,7 +9580,7 @@ main()
         sched.seed(vec![mk_fiber(0)]);
         let f = take_run(&sched);
         // Simulate a send that landed in the gap (message queued, but this fiber wasn't parked yet).
-        core.q.lock().unwrap().push_back(WireValue::Int(7));
+        core.q.lock().unwrap().queue.push_back(WireValue::Int(7));
         sched.park(key, &core, f);
         let c = sched.lock();
         assert_eq!(c.parked_n, 0, "must not park behind a waiting message");
@@ -10537,6 +10686,175 @@ main()";
         let src = include_str!("../../examples/parallel_channel.chz");
         let expected = include_str!("../../examples/parallel_channel.expected");
         assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    }
+
+    // ---- Channel.close() + closed semantics (both engines) ----
+
+    #[test]
+    fn vm_channel_send_after_close_faults() {
+        let err = run_err("fn main():\n    ch := Channel[int]()\n    ch.close()\n    ch.send(1)\nmain()\n");
+        assert!(err.contains("send on a closed channel"), "{err}");
+    }
+
+    #[test]
+    fn vm_channel_recv_on_closed_empty_faults() {
+        let err = run_err("fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.recv())\nmain()\n");
+        assert!(err.contains("receive on a closed channel"), "{err}");
+    }
+
+    #[test]
+    fn vm_channel_drains_buffered_after_close() {
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    ch.send(2)\n    ch.close()\n    print(ch.recv())\n    print(ch.recv())\nmain()\n";
+        assert_eq!(run(src), "1\n2\n");
+        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp"));
+    }
+
+    #[test]
+    fn vm_channel_try_send_false_when_closed() {
+        let src = "fn main():\n    ch := Channel[int]()\n    print(ch.try_send(1))\n    ch.close()\n    print(ch.try_send(2))\nmain()\n";
+        assert_eq!(run(src), "true\nfalse\n");
+        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp"));
+    }
+
+    #[test]
+    fn vm_channel_double_close_ok() {
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    ch.close()\n    print(1)\nmain()\n";
+        assert_eq!(run(src), "1\n");
+    }
+
+    #[test]
+    fn vm_channel_close_then_len_zero() {
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.len())\nmain()\n";
+        assert_eq!(run(src), "0\n");
+        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp"));
+    }
+
+    #[test]
+    fn vm_channel_try_recv_closed_empty_is_none() {
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    match ch.try_recv():\n        Some(v): print(v)\n        None: print(\"none\")\nmain()\n";
+        assert_eq!(run(src), "none\n");
+        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp"));
+    }
+
+    #[test]
+    fn vm_for_over_channel_drains_then_exits() {
+        // Producer-first (no concurrency needed): the channel is closed+full before the `for` runs.
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    ch.send(2)\n    ch.send(3)\n    ch.close()\n    total := 0\n    for v in ch:\n        total = total + v\n    print(total)\nmain()\n";
+        assert_eq!(run(src), "6\n");
+        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// `--parallel`: a `for v in ch:` consumer that runs ahead of the producer PARKS on the empty
+    /// channel; a sibling `close()` (no value sent) wakes it and the loop ends cleanly (0 iterations).
+    #[test]
+    fn parallel_close_wakes_parked_receiver() {
+        let src = "\
+fn produce(ch: Channel[int]):
+    ch.close()
+fn consume(ch: Channel[int], out: Channel[int]):
+    n := 0
+    for v in ch:
+        n = n + 1
+    out.send(n)
+fn main():
+    ch := Channel[int]()
+    out := Channel[int]()
+    parallel:
+        spawn consume(ch, out)
+        spawn produce(ch)
+    print(out.recv())
+main()
+";
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), "0\n");
+    }
+
+    /// `--parallel`: a single `close()` must wake EVERY receiver parked on the channel (not just one,
+    /// as a `send` would). Three consumers each loop-then-report; all three exit and report.
+    #[test]
+    fn parallel_close_wakes_multiple_receivers() {
+        let src = "\
+fn consume(ch: Channel[int], done: Channel[int]):
+    for v in ch:
+        n := v
+    done.send(1)
+fn main():
+    ch := Channel[int]()
+    done := Channel[int]()
+    parallel:
+        spawn consume(ch, done)
+        spawn consume(ch, done)
+        spawn consume(ch, done)
+        spawn:
+            ch.close()
+    total := 0
+    for i in 0..3:
+        total = total + done.recv()
+    print(total)
+main()
+";
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), "3\n");
+    }
+
+    /// `--parallel`: a consumer that loops `recv` past the producer's last value used to deadlock-fault;
+    /// with `for v in ch:` + a producer `close()` it drains the buffered values and exits cleanly.
+    #[test]
+    fn parallel_consumer_loop_terminates_on_close() {
+        let src = "\
+fn produce(ch: Channel[int]):
+    for i in 1..6:
+        ch.send(i)
+    ch.close()
+fn consume(ch: Channel[int], out: Channel[int]):
+    total := 0
+    for v in ch:
+        total = total + v
+    out.send(total)
+fn main():
+    ch := Channel[int]()
+    out := Channel[int]()
+    parallel:
+        spawn produce(ch)
+        spawn consume(ch, out)
+    print(out.recv())
+main()
+";
+        // 1+2+3+4+5 = 15, however the producer/consumer interleave.
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), "15\n");
+    }
+
+    /// Channel.close() golden: producer sends a run + `close()`s; consumer `for v in ch:` drains then
+    /// ends cleanly. VM cooperative == interp == expected (decision A oracle), and the `--parallel`
+    /// engine (consumer parks on the empty channel, woken by the producer's send/close) prints the
+    /// same total. Pins the headline `for`-over-channel + `try_send`-after-close surface on all engines.
+    #[test]
+    fn golden_parallel_channel_close_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/parallel_channel_close.chz");
+        let expected = include_str!("../../examples/parallel_channel_close.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    #[test]
+    fn golden_parallel_channel_close_chz_parallel_engine() {
+        let src = include_str!("../../examples/parallel_channel_close.chz");
+        let expected = include_str!("../../examples/parallel_channel_close.expected");
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    }
+
+    #[test]
+    fn parallel_send_after_close_faults() {
+        let src = "\
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn:
+            ch.close()
+            ch.send(1)
+main()
+";
+        let err = run_capture_parallel(src).expect_err("send after close should fault");
+        assert!(err.message.contains("send on a closed channel"), "{}", err.message);
     }
 
     /// B3.6 golden: `Executor` tasks run on the bounded pool. Three submitted closures capture the

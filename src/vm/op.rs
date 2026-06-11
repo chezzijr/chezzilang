@@ -192,6 +192,13 @@ pub enum Op {
     /// the map (key, value) path vs the list-of-tuples destructuring path at runtime, since the
     /// compiler is type-erased and can't decide statically.
     IsMap,
+    /// Pop a value; push `true` if it is a `Channel`, else `false`. Used by `for v in ch:` to pick
+    /// the blocking channel-iteration path vs the struct/sequence paths at runtime (type-erased).
+    IsChannel,
+    /// Pop a `Channel` handle; push `Option[T]`: `Some(v)` once a value is available (parking the
+    /// fiber on an empty-open channel exactly like `recv`), or `None` when the channel is
+    /// closed-and-drained. The lazy step driving `for v in ch:` — `None` ends the loop cleanly.
+    ChanRecvOrClosed,
 
     // ----- match -----
     /// Require the scrutinee in `slot` to be an enum, else "cannot match on …".

@@ -285,7 +285,7 @@ impl Heap {
             // cross by value until B3.3/G1, so cores still hold heap refs.)
             Obj::Channel(core) => {
                 let mut seen = vec![Arc::as_ptr(core) as usize];
-                for w in core.q.lock().unwrap().iter() {
+                for w in core.q.lock().unwrap().queue.iter() {
                     crate::vm::core::collect_core_gcrefs(w, &mut out, &mut seen);
                 }
             }
