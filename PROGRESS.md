@@ -477,6 +477,48 @@ Critical/Important (traced every close/park interleaving safe under 90× stress)
 Important — comprehension-over-channel parity divergence — **applied** (checker rejection + test), plus
 the two minor close-then-`len`/`try_recv` contract tests and a softened `send`-atomicity comment.
 
+**D6c — per-socket read/accept/write timeout (`--parallel`) — has landed** (branch
+`feat/channel-close`). The deferred user-facing socket timeout the tier-D doc flagged ("the timer fold
+is the groundwork"). Surface (return types **unchanged** — a timeout is the existing `Err` variant):
+`conn.read(n, timeout_ms)` / `sock.write(s, timeout_ms)` / `server.accept(timeout_ms)` return
+`Err("timeout")` when no data / writability / connection arrives within `timeout_ms`; `0` polls once
+(never parks), a negative saturates to `0`. `--parallel`-only by construction (the cooperative engine
+has no fiber to park and already fails loud on would-block; either way its result is an `Err`).
+Mechanism reuses D6b's deadline-bounded poll with **no new thread/heap/job**: `poller::Parked` gains
+`deadline: Option<Instant>`, `next_timeout` folds the earliest socket deadline in with the timer heap,
+and a new `fire_due_socket_timeouts` pass (after the ready-fd inject loop, same registry lock →
+readiness wins ties) sets a per-fiber `poll_timed_out` marker (carried across `swap_ctx` like
+`pending_connect`); the rewound socket op's re-run sees the marker at method entry and returns
+`Err("timeout")` instead of retrying the syscall. Checker gained optional trailing-arg arity
+(`FnSig::min_params` + `check_args_range`). New `examples/socket_timeout.chz`; poller units
+(`register_with_deadline_times_out_when_fd_never_ready`, `readiness_before_deadline_wins`,
+`deadline_past_fires_immediately`, `socket_timeout_and_timer_share_one_thread`) + e2e
+(`read_timeout_returns_err`, `accept_timeout_returns_err`, `read_without_timeout_still_parks_forever`)
++ 7 checker arity tests. In-callback `demote_block_socket` timeout is out of scope v1 (documented).
+
+**Pending-`spawn`-drop on early `parallel:` escape → cancel-and-report — has landed** (both engines,
+branch `feat/channel-close`). Closes the structured-concurrency gap (gaps.md): a `parallel:` body that
+escaped via `?`/`return`/`break`/`continue` **before the join** mishandled already-`spawn`ed-but-
+unstarted tasks — and the engines **diverged** (interp ran them on `return`/`break`, dropped on `?`; VM
+dropped on all three). Policy (decided): unstarted tasks are **cancelled, not run** — the same end-
+state a started sibling reaches under B3.4 — and one stdout report line (`runtime::pending_cancel_report`,
+byte-identical across interp / VM-cooperative / VM-`--parallel`) is emitted when ≥1 task is cancelled;
+the escape propagates unchanged, nursery depth returns to 0 (no leak). VM routes a new
+`drain_escaped_nursery` through **four** reclaim sites: `do_return`, the recover-catch fault path, a
+**net-new `Op::ReclaimNursery`** for break/continue (compiler emits one per escaped nursery scope via
+`emit_loop_nursery_drain`, mirroring the defer-scope drain), and the `do_try` recover-scoped-`?`
+short-circuit. **2-agent S++ panel** caught one **Critical** on the `do_try` path — a recover-scoped
+`?` escaping a `parallel:` whose **body has a `defer`** ordered the cancel-report *before* the body
+defer, diverging from the interp (which runs body defers as the `?` unwinds, then reports). **Fixed**:
+a per-nursery `nursery_defer_floors` stack (captured at `EnterNursery`, swapped with `nurseries` across
+`swap_ctx`) lets the `do_try` path drain the escaped body's defers down to its floor *before* the
+report, then the recover-block defers after — interp order restored
+(`parallel_recover_scoped_try_orders_report_after_body_defer`, all three engines). Task-A Minor (net.rs
+doc on `timeout_ms==0` cooperative behavior) also applied.
+
+**Latest suite: 1475 tests green** (unit + parity + `cargo test conformance` 7/7), `cargo clippy
+--all-targets` clean; `primes_parallel=148933` and `examples/parallel*.chz` byte-identical both engines.
+
 > **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,
 > not a TODO.** The interpreter stays frozen at the **sequential concurrency subset** and serves as
 > the **differential-testing parity oracle** for the non-blocking language surface (its real value:

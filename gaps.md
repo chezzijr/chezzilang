@@ -155,27 +155,26 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
 
 The `--parallel` engine is a true M:N scheduler through **D6** (fibers, work-stealing, dirty pool,
 netpoller + `std.net`). The items here are *correctness/semantics* gaps found by probing, not missing
-breadth. The big deferred *features* (per-connection `spawn`, `Channel.close()`, per-socket timeout)
-live in the tier-d doc. (D5 owe #3 `recv`-in-native-callback: Path A landed for `iter.*`; **Path C
+breadth. The big deferred *features* `Channel.close()` and the per-socket read/accept/write **timeout**
+(D6c) have landed; **per-connection `spawn`** remains deferred in the tier-d doc. (D5 owe #3
+`recv`-in-native-callback: Path A landed for `iter.*`; **Path C
 thread-demotion landed (attempt)** for the native islands — see the residuals entry below.)
 
-- **🟡 Pending `spawn` tasks are silently dropped on an early escape from `parallel:`** — **verified
-  both engines, 2026-06-11.** If the parent's inline code in a `parallel:` body escapes *before the
-  join* (a `?` error, `return`, or `break`), every task already `spawn`ed-but-not-yet-started is
-  **neither run nor cancelled nor awaited** — it just vanishes. Example:
-  ```
-  parallel:
-      spawn side()      # registered, not started
-      x := risky()?     # errors here → escapes before JoinNursery → side() never runs
-  ```
-  Faults *from a started task* correctly cancel siblings + propagate (B3.4); the asymmetry is only for
-  tasks that hadn't started. This violates structured-concurrency expectation (Trio/Kotlin run-or-cancel
-  children on scope exit). **Blocks:** relying on `parallel:` as a hard "all children accounted for"
-  barrier. **Design call needed:** run-pending-to-completion vs cancel-and-report before deciding the
-  fix. (Surface note: `spawn f()?` is a *parse* error — `?` can't sit at the spawn site; `?` inside a
-  spawned body/`spawn:` block is fine and faults the task.) **Now a pure *semantics* call** — the
-  related VM nursery *leak* is fixed (resolved log below), so both engines drop consistently; what's
-  left is only the run-vs-cancel design decision.
+- ~~**🟡 Pending `spawn` tasks are silently dropped on an early escape from `parallel:`**~~ —
+  **resolved 2026-06-11 → cancel-and-report (both engines).** A `parallel:` body escaping via
+  `?`/`return`/`break`/`continue` before the join now **cancels** its unstarted `spawn` tasks (the
+  same end-state a started sibling reaches under B3.4) and emits one stdout report line
+  (`runtime::pending_cancel_report`, byte-identical across interp / VM-cooperative / VM-`--parallel`);
+  the escape propagates unchanged, nursery depth returns to 0. This also fixed the prior engine
+  divergence (interp ran unstarted tasks on `return`/`break`, dropped on `?`; VM dropped on all three —
+  now all three cancel-and-report uniformly). VM routes `drain_escaped_nursery` through four reclaim
+  sites (`do_return`, recover-catch fault, net-new `Op::ReclaimNursery` for break/continue, `do_try`
+  recover-scoped `?`); a review-caught Critical on the `do_try` path (report ordered before a
+  parallel-**body** `defer`) was fixed with a per-nursery `nursery_defer_floors` stack so body defers
+  drain before the report, recover-block defers after — interp order. (Surface note unchanged:
+  `spawn f()?` is a *parse* error; `?` inside a spawned body/`spawn:` block faults the task.) Decided
+  against run-pending-to-completion (Policy 1): deadlock-prone — a pending `recv` awaiting a `send`
+  from the escaped parent — and would need a scheduler mid-unwind with no serial-oracle analogue.
 
 - ~~**🟡 VM leaks the nursery on a `?`/return escape from `parallel:` not caught by `recover:`**~~ —
   **resolved (see resolved log).** `do_return` now `truncate`s `self.nurseries` to the frame's
