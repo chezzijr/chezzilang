@@ -4165,3 +4165,45 @@ fn user_struct_named_ref_is_sendable() {
     // sendable struct — the non-sendability gate applies only to the builtin std.ref `Ref[T]`.
     entry_ok("struct Ref:\n    val: int\nfn use_it(r: Ref):\n    print(r.val)\nfn main():\n    r := Ref(1)\n    parallel:\n        spawn use_it(r)\nmain()\n");
 }
+
+// ----- D6c: optional `timeout_ms` on net socket read/accept/write -----
+
+#[test]
+fn socket_read_with_timeout_type_checks() {
+    // `read(n)` and `read(n, timeout_ms)` both type-check (the trailing int is optional).
+    ok("fn use_sock(s: Socket) -> str!:\n    a := s.read(64)?\n    b := s.read(64, 100)?\n    return Ok(a + b)\n");
+}
+
+#[test]
+fn socket_write_with_timeout_type_checks() {
+    ok("fn use_sock(s: Socket) -> int!:\n    a := s.write(\"x\")?\n    b := s.write(\"x\", 100)?\n    return Ok(a + b)\n");
+}
+
+#[test]
+fn listener_accept_with_timeout_type_checks() {
+    // `accept()` and `accept(timeout_ms)` both type-check.
+    ok("fn use_listener(l: Listener) -> int!:\n    l.accept()?\n    l.accept(100)?\n    return Ok(0)\n");
+}
+
+#[test]
+fn socket_read_with_non_int_timeout_rejected() {
+    // A non-int `timeout_ms` is a type error.
+    rejects("fn use_sock(s: Socket):\n    s.read(64, \"x\")\n", "expected int");
+}
+
+#[test]
+fn socket_read_with_too_few_args_rejected() {
+    // `read()` (zero args) is below the 1–2 arg range.
+    rejects("fn use_sock(s: Socket):\n    s.read()\n", "argument");
+}
+
+#[test]
+fn socket_read_with_too_many_args_rejected() {
+    // `read(n, t, extra)` exceeds the 1–2 arg range.
+    rejects("fn use_sock(s: Socket):\n    s.read(64, 100, 1)\n", "argument");
+}
+
+#[test]
+fn listener_accept_with_too_many_args_rejected() {
+    rejects("fn use_listener(l: Listener):\n    l.accept(100, 1)\n", "argument");
+}

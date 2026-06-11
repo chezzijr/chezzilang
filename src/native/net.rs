@@ -7,6 +7,14 @@
 //! **intercepts** these by name in `Vm::invoke_native` / `Vm::do_method_call`; the `MEMBERS` entries
 //! below exist only so the module member *resolves* (the placeholder fns never run). This module holds
 //! just the pure, `Vm`-free socket helpers the VM calls.
+//!
+//! **Timeouts (D6c).** `read`/`write`/`accept` take an OPTIONAL trailing `timeout_ms: int`
+//! (`conn.read(n, timeout_ms)`, `sock.write(s, timeout_ms)`, `server.accept(timeout_ms)`): if no
+//! data / writability / connection arrives within `timeout_ms`, the op returns the existing
+//! `Result::Err` variant with message `"timeout"` (the return type is unchanged). `0` polls once
+//! (never parks); a negative saturates to `0`. This is a `--parallel`-engine feature (the fiber parks
+//! on the netpoller with a deadline); on the cooperative / top-level fallback — which has no fiber to
+//! park and already fails loud on would-block — a `timeout_ms` argument is simply ignored.
 
 use super::{Host, HostError, NativeFn, NativeRet};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};

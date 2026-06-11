@@ -1,0 +1,59 @@
+# examples/socket_timeout.chz — per-socket read/accept timeouts on the --parallel netpoller (D6c).
+#
+# std.net sockets are non-blocking and park a fiber on fd-readiness. By default a read/accept parks
+# FOREVER; passing an optional trailing `timeout_ms` bounds the wait — on expiry the op returns the
+# existing Err variant with message "timeout" (the return type is unchanged):
+#
+#   conn.read(n, timeout_ms)     -> str!     # Err("timeout") if no data within timeout_ms
+#   sock.write(s, timeout_ms)    -> int!     # Err("timeout") if not writable within timeout_ms
+#   server.accept(timeout_ms)    -> Socket!  # Err("timeout") if no connection within timeout_ms
+#
+# This MUST run on the --parallel engine (the cooperative oracle has no fibers to park):
+#
+#   chezzi run --parallel examples/socket_timeout.chz
+
+import std.net
+import std.time
+
+# Demo 1: accept(timeout_ms) with NO client connecting → the accept times out.
+fn accept_demo(listener: Listener):
+    match listener.accept(100):
+        Ok(_): print("accept: unexpectedly accepted")
+        Err(e): print("accept: " + e.message())
+    listener.close()
+
+# Demo 2: the server accepts but never writes; the client's read(n, timeout_ms) times out.
+fn read_server(listener: Listener) -> int!:
+    conn := listener.accept()?
+    time.sleep_ms(400)   # outlast the client's read deadline, then hang up
+    conn.close()
+    listener.close()
+    return Ok(0)
+
+fn read_client(addr: str):
+    sock := net.connect(addr)?
+    match sock.read(64, 100):
+        Ok(s): print("read: unexpectedly got " + s)
+        Err(e): print("read: " + e.message())
+    sock.close()
+
+fn run() -> int!:
+    # Demo 1 — a lone listener, no client.
+    lonely := net.listen("127.0.0.1:0")?
+    parallel:
+        spawn accept_demo(lonely)
+
+    # Demo 2 — a server that accepts then stalls past the client's read timeout.
+    server := net.listen("127.0.0.1:0")?
+    addr := server.addr()?
+    parallel:
+        spawn read_server(server)
+        spawn read_client(addr)
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print("done")
+        Err(e): print("error: " + e.message())
+
+main()

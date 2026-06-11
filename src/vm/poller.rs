@@ -58,6 +58,13 @@ struct Parked {
     /// The owning socket's `in_flight` flag (see [`super::core::SocketCore::in_flight`]) — cleared
     /// here when the fiber is injected back or de-registered, so the resumed op can re-park.
     in_flight: Arc<AtomicBool>,
+    /// D6c — the op's optional read/accept/write timeout deadline. `Some(d)` iff the socket op was
+    /// given a `timeout_ms`: if this fd has not fired by `d`, [`fire_due_socket_timeouts`] removes
+    /// the entry, disarms the fd, and re-injects the fiber with its `poll_timed_out` marker set so the
+    /// rewound op returns `Err("timeout")`. `None` = park forever (the existing read/accept/connect
+    /// behavior). Readiness wins ties: a fired fd is removed by the events loop before the timeout
+    /// sweep, both under the same registry lock.
+    deadline: Option<Instant>,
 }
 
 /// A scheduled timer job (D6b — folded in from the former dedicated timer thread). Owns the parked
@@ -125,8 +132,8 @@ static SERVICE: OnceLock<NetPoller> = OnceLock::new();
 /// normal park. The cancel read + the insert happen under the registry lock that `drain_sched` also
 /// holds, so park and drain are serialized: the fiber is either registered-then-drained or rejected.
 #[must_use]
-pub fn register(key: usize, fd: RawFd, interest: Interest, fiber: Fiber, sched: Arc<MnSched>, in_flight: Arc<AtomicBool>) -> Option<Fiber> {
-    SERVICE.get_or_init(NetPoller::new).register(key, fd, interest, fiber, sched, in_flight)
+pub fn register(key: usize, fd: RawFd, interest: Interest, fiber: Fiber, sched: Arc<MnSched>, in_flight: Arc<AtomicBool>, deadline: Option<Instant>) -> Option<Fiber> {
+    SERVICE.get_or_init(NetPoller::new).register(key, fd, interest, fiber, sched, in_flight, deadline)
 }
 
 /// De-register a pending park on `key` (a socket `close` racing the park). If a fiber was still
@@ -174,7 +181,8 @@ impl NetPoller {
         NetPoller { inner }
     }
 
-    fn register(&self, key: usize, fd: RawFd, interest: Interest, fiber: Fiber, sched: Arc<MnSched>, in_flight: Arc<AtomicBool>) -> Option<Fiber> {
+    #[allow(clippy::too_many_arguments)] // the park identity (key/fd/interest/fiber/sched/in_flight) + D6c deadline
+    fn register(&self, key: usize, fd: RawFd, interest: Interest, fiber: Fiber, sched: Arc<MnSched>, in_flight: Arc<AtomicBool>, deadline: Option<Instant>) -> Option<Fiber> {
         // The whole op runs under the registry lock so that registration is atomic w.r.t. `drain_sched`
         // / the fire path / `deregister` (all reg-locked): the cancel check + the insert + the fd `add`
         // never interleave with a sweep that would observe a half-armed entry or delete an fd this is
@@ -190,7 +198,7 @@ impl NetPoller {
         }
         // The key is never a duplicate: a second op on the same socket is rejected by the `in_flight`
         // guard in `park_on_fd` before it reaches here, so neither the `insert` nor the `add` collide.
-        let prev = reg.insert(key, Parked { fiber, sched, fd, in_flight });
+        let prev = reg.insert(key, Parked { fiber, sched, fd, in_flight, deadline });
         debug_assert!(prev.is_none(), "netpoller registry key reused — the in_flight guard was bypassed");
         let ev = match interest {
             Interest::Read => Event::readable(key),
@@ -201,6 +209,15 @@ impl NetPoller {
         // fire path / `deregister` / `drain_sched`), all of which precede any stream drop — satisfying
         // `add`'s delete-before-drop contract.
         unsafe { self.inner.poller.add(fd, ev) }.expect("netpoller add");
+        // D6c — if this park carries a timeout deadline, wake the poll thread so its in-flight `wait()`
+        // re-bounds its timeout (this deadline may be sooner than the one it is sleeping until), exactly
+        // like `submit_timer`. `notify` reaches the current or following `wait`, so no lost-wakeup
+        // window between `next_timeout`'s read and the `wait`. No-op cost for a `None` (park-forever) op
+        // is avoided by gating the notify on `deadline.is_some()`.
+        drop(reg);
+        if deadline.is_some() {
+            let _ = self.inner.poller.notify();
+        }
         None
     }
 
@@ -308,15 +325,65 @@ fn poll_loop(inner: &Inner) {
                 sched.complete_offload(fiber);
             }
         }
+        // D6c — AFTER the ready-fd injects: any socket whose `timeout_ms` deadline elapsed without its
+        // fd firing. Readiness wins ties — a fired fd was already removed above (same registry lock), so
+        // a fiber injected on data is never double-injected here.
+        fire_due_socket_timeouts(inner);
     }
 }
 
-/// The `wait` timeout: how long until the nearest timer deadline (`None` if no timers are pending).
+/// D6c — re-inject every socket-parked fiber whose `timeout_ms` deadline has passed AND whose fd has
+/// NOT fired (still in the registry), with its `poll_timed_out` marker set so the rewound op returns
+/// `Err("timeout")` instead of retrying the syscall. Collect-and-remove UNDER the registry lock (the
+/// same lock the events loop removes a fired fd under, so readiness/timeout races resolve to whichever
+/// removed the entry first — readiness wins because the events loop runs before this), disarm each fd
+/// (delete-before-drop; the fd is still open — its fiber hasn't resumed to close it), THEN re-inject
+/// with the lock released (`complete_offload` takes the sched lock — keep the registry lock leaf-level,
+/// matching `drain_sched`). The marker is set on the detached fiber's `ctx` (swapped into the live `Vm`
+/// on its next schedule-in) — the poll thread never runs interpreter code, only mutates this flag.
+fn fire_due_socket_timeouts(inner: &Inner) {
+    let now = Instant::now();
+    let timed_out: Vec<Parked> = {
+        let mut reg = inner.registry.lock().unwrap_or_else(|e| e.into_inner());
+        let keys: Vec<usize> =
+            reg.iter().filter(|(_, p)| p.deadline.is_some_and(|d| d <= now)).map(|(k, _)| *k).collect();
+        keys.into_iter()
+            .filter_map(|k| reg.remove(&k))
+            .inspect(|p| {
+                // SAFETY: still in the registry ⇒ never injected ⇒ fd still open (rooted on `fiber`).
+                let _ = inner.poller.delete(unsafe { BorrowedFd::borrow_raw(p.fd) });
+            })
+            .collect()
+    };
+    for Parked { mut fiber, sched, in_flight, .. } in timed_out {
+        in_flight.store(false, Ordering::Release); // the op is no longer parked
+        fiber.ctx.poll_timed_out = true; // the rewound op resumes, sees this, returns Err("timeout")
+        sched.complete_offload(fiber); // inflight→runnable
+    }
+}
+
+/// The `wait` timeout: how long until the nearest deadline across BOTH the timer heap (`sleep_ms`,
+/// D6b) AND the socket-timeout registry (D6c), `None` if neither has a pending deadline.
 /// `saturating_duration_since` yields `Duration::ZERO` for an already-past deadline, so `wait` returns
-/// immediately and `fire_due_timers` runs it.
+/// immediately and `fire_due_timers` / `fire_due_socket_timeouts` run it. The socket fold is a small
+/// linear scan of the registry's `deadline`s (most are `None`); a parked fd with no timeout never
+/// bounds the wait, so a timeout-free server still blocks until readiness.
 fn next_timeout(inner: &Inner) -> Option<Duration> {
-    let t = inner.timers.lock().unwrap_or_else(|e| e.into_inner());
-    t.heap.peek().map(|Reverse(e)| e.deadline.saturating_duration_since(Instant::now()))
+    let now = Instant::now();
+    let timer_dl = {
+        let t = inner.timers.lock().unwrap_or_else(|e| e.into_inner());
+        t.heap.peek().map(|Reverse(e)| e.deadline)
+    };
+    let sock_dl = {
+        let reg = inner.registry.lock().unwrap_or_else(|e| e.into_inner());
+        reg.values().filter_map(|p| p.deadline).min()
+    };
+    // Earliest of the two pending deadlines (either may be `None`).
+    let nearest = match (timer_dl, sock_dl) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    nearest.map(|d| d.saturating_duration_since(now))
 }
 
 /// Run every timer whose deadline has passed. Each job is popped UNDER the timers lock, then run with
@@ -397,7 +464,7 @@ mod tests {
         let (mut client, server) = loopback_pair();
         let sched = mk_sched();
         sched.inflight.fetch_add(1, Ordering::Relaxed); // simulate poll_park_offload's running→inflight
-        assert!(register(usize::MAX - 1, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight()).is_none(), "a non-cancel park registers (returns None)");
+        assert!(register(usize::MAX - 1, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), None).is_none(), "a non-cancel park registers (returns None)");
 
         // Nothing written yet → fd not readable → fiber stays parked.
         assert_eq!(sched.inflight.load(Ordering::Relaxed), 1, "fiber parked before any data");
@@ -412,6 +479,90 @@ mod tests {
         drop(server);
     }
 
+    /// D6c — a deadline-bounded park whose fd NEVER becomes ready: the poll thread fires the timeout,
+    /// re-injects the fiber with `poll_timed_out == true`, and disarms the fd (a later write does NOT
+    /// double-inject). The marker is what the rewound socket op reads to return `Err("timeout")`.
+    #[test]
+    fn register_with_deadline_times_out_when_fd_never_ready() {
+        let (mut client, server) = loopback_pair();
+        let sched = mk_sched();
+        sched.inflight.fetch_add(1, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_millis(80);
+        assert!(register(usize::MAX - 30, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), Some(deadline)).is_none(), "a non-cancel park registers (returns None)");
+
+        // Never write → only the deadline can wake it.
+        wait_until(|| sched.lock().global.len() == 1, "timeout inject");
+        assert_eq!(sched.inflight.load(Ordering::Relaxed), 0, "inflight→runnable on timeout inject");
+        // The injected fiber carries the timeout marker so the rewound op returns Err("timeout").
+        let timed_out = sched.lock().global.front().map(|f| f.ctx.poll_timed_out);
+        assert_eq!(timed_out, Some(true), "the timed-out fiber carries poll_timed_out == true");
+
+        // The fd was disarmed: making it readable now must NOT inject a second time.
+        client.write_all(b"x").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(sched.lock().global.len(), 1, "timed-out fd did not double-inject");
+        drop(server);
+    }
+
+    /// D6c — readiness before the deadline WINS: a generous deadline, but the fd fires immediately, so
+    /// the fiber is injected by the events loop (NOT the timeout sweep) with `poll_timed_out == false`.
+    #[test]
+    fn readiness_before_deadline_wins() {
+        let (mut client, server) = loopback_pair();
+        let sched = mk_sched();
+        sched.inflight.fetch_add(1, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(30); // generous — readiness must win
+        assert!(register(usize::MAX - 31, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), Some(deadline)).is_none(), "a non-cancel park registers (returns None)");
+
+        client.write_all(b"x").unwrap(); // fd readable at once
+        wait_until(|| sched.lock().global.len() == 1, "readiness inject");
+        let timed_out = sched.lock().global.front().map(|f| f.ctx.poll_timed_out);
+        assert_eq!(timed_out, Some(false), "a readiness wake does NOT set poll_timed_out");
+        drop(server);
+    }
+
+    /// D6c — a deadline already in the past fires near-immediately (poll-once semantics route through
+    /// the caller, but the poller itself must still honor a past deadline rather than park forever).
+    #[test]
+    fn deadline_past_fires_immediately() {
+        let (_client, server) = loopback_pair();
+        let sched = mk_sched();
+        sched.inflight.fetch_add(1, Ordering::Relaxed);
+        let deadline = Instant::now(); // already due
+        let start = Instant::now();
+        assert!(register(usize::MAX - 32, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), Some(deadline)).is_none(), "a non-cancel park registers (returns None)");
+
+        wait_until(|| sched.lock().global.len() == 1, "past-deadline inject");
+        assert!(start.elapsed() < Duration::from_secs(1), "a past deadline fired promptly: {:?}", start.elapsed());
+        let timed_out = sched.lock().global.front().map(|f| f.ctx.poll_timed_out);
+        assert_eq!(timed_out, Some(true), "the past-deadline fiber carries poll_timed_out == true");
+        drop(server);
+    }
+
+    /// D6c — a socket TIMEOUT and a sleep TIMER both fire on the single poll thread: the socket-deadline
+    /// fold in `next_timeout` did not break timer firing, and vice-versa. The socket fd never becomes
+    /// ready (only its deadline wakes it); the timer fires on its own deadline.
+    #[test]
+    fn socket_timeout_and_timer_share_one_thread() {
+        let (_client, server) = loopback_pair();
+        let sched = mk_sched();
+        sched.inflight.fetch_add(1, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_millis(60);
+        assert!(register(usize::MAX - 33, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), Some(deadline)).is_none(), "a non-cancel park registers (returns None)");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        submit_timer(Instant::now() + Duration::from_millis(40), Box::new(move || {
+            let _ = tx.send(());
+        }));
+
+        // Both must complete: the timer sends, the socket times out and injects.
+        rx.recv_timeout(Duration::from_secs(5)).expect("the timer fired alongside the socket timeout");
+        wait_until(|| sched.lock().global.len() == 1, "socket timeout inject under timer load");
+        let timed_out = sched.lock().global.front().map(|f| f.ctx.poll_timed_out);
+        assert_eq!(timed_out, Some(true), "the socket fiber timed out (marker set)");
+        drop(server);
+    }
+
     /// The `in_flight` guard's correctness hinges on the poller CLEARING it on inject: only then can
     /// the resumed op re-park (a still-set flag would make the owner fault itself), while a *concurrent*
     /// fiber sharing the socket sees it set and faults. Set the flag (as `park_on_fd` would), park,
@@ -423,7 +574,7 @@ mod tests {
         let in_flight = new_in_flight();
         in_flight.store(true, Ordering::Release); // simulate park_on_fd's swap(true)
         sched.inflight.fetch_add(1, Ordering::Relaxed);
-        assert!(register(usize::MAX - 4, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), Arc::clone(&in_flight)).is_none(), "a non-cancel park registers (returns None)");
+        assert!(register(usize::MAX - 4, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), Arc::clone(&in_flight), None).is_none(), "a non-cancel park registers (returns None)");
         assert!(in_flight.load(Ordering::Acquire), "flag stays set while the op is parked");
 
         client.write_all(b"x").unwrap();
@@ -439,7 +590,7 @@ mod tests {
         let key = usize::MAX - 2;
         let sched = mk_sched();
         sched.inflight.fetch_add(1, Ordering::Relaxed);
-        assert!(register(key, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight()).is_none(), "a non-cancel park registers (returns None)");
+        assert!(register(key, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), None).is_none(), "a non-cancel park registers (returns None)");
 
         // No write → give the poller a chance to (wrongly) fire, then assert it did not. NOTE: this
         // fixed sleep can only mask a real bug (a false inject under load), never flake — do not
@@ -470,9 +621,9 @@ mod tests {
         }
         sched_a.inflight.fetch_add(2, Ordering::Relaxed);
         sched_b.inflight.fetch_add(1, Ordering::Relaxed);
-        assert!(register(k_a1, server_a1.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched_a), Arc::clone(&if_a1)).is_none(), "a non-cancel park registers (returns None)");
-        assert!(register(k_a2, server_a2.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched_a), Arc::clone(&if_a2)).is_none(), "a non-cancel park registers (returns None)");
-        assert!(register(k_b, server_b.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched_b), Arc::clone(&if_b)).is_none(), "a non-cancel park registers (returns None)");
+        assert!(register(k_a1, server_a1.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched_a), Arc::clone(&if_a1), None).is_none(), "a non-cancel park registers (returns None)");
+        assert!(register(k_a2, server_a2.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched_a), Arc::clone(&if_a2), None).is_none(), "a non-cancel park registers (returns None)");
+        assert!(register(k_b, server_b.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched_b), Arc::clone(&if_b), None).is_none(), "a non-cancel park registers (returns None)");
 
         drain_sched(&sched_a);
 
@@ -504,7 +655,7 @@ mod tests {
         let in_flight = new_in_flight();
         in_flight.store(true, Ordering::Release);
         sched.inflight.fetch_add(1, Ordering::Relaxed);
-        assert!(register(key, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), Arc::clone(&in_flight)).is_none(), "a non-cancel park registers (returns None)");
+        assert!(register(key, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), Arc::clone(&in_flight), None).is_none(), "a non-cancel park registers (returns None)");
 
         assert!(deregister(key), "deregister found the pending park");
         assert!(!in_flight.load(Ordering::Acquire), "deregister also clears in_flight");
@@ -580,7 +731,7 @@ mod tests {
         let (mut client, server) = loopback_pair();
         let sched = mk_sched();
         sched.inflight.fetch_add(1, Ordering::Relaxed);
-        assert!(register(usize::MAX - 20, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight()).is_none(), "a non-cancel park registers (returns None)");
+        assert!(register(usize::MAX - 20, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), None).is_none(), "a non-cancel park registers (returns None)");
 
         let (tx, rx) = std::sync::mpsc::channel();
         let start = Instant::now();
