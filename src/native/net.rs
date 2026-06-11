@@ -28,6 +28,7 @@ pub fn connect_nonblocking(addr: &str) -> std::io::Result<(TcpStream, bool)> {
         Ok(()) => false,
         // Non-blocking connect that hasn't finished: `WouldBlock` (Windows) or `EINPROGRESS` (unix).
         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => true,
+        #[cfg(unix)]
         Err(ref e) if e.raw_os_error() == Some(libc::EINPROGRESS) => true,
         Err(e) => return Err(e),
     };

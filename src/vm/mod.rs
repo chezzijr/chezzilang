@@ -315,6 +315,11 @@ const CONTEXT_REDS: u32 = 4000;
 /// payloads (`read` returns the actual byte count). Mirrors `io::read_file`'s read limit.
 const MAX_SOCKET_READ: usize = 16 * 1024 * 1024;
 
+/// D6b — wall-clock cap on the top-level (no-fiber-to-park) blocking `connect` fallback, so a
+/// black-hole address returns a clean timeout instead of spinning for the kernel's ~2-minute connect
+/// timeout. Generous (the M:N engine, which parks instead of blocking, is the real target).
+const CONNECT_BLOCK_TIMEOUT_SECS: u64 = 10;
+
 /// A fiber's saved execution context (B1): every `Vm` field that `run_until` reads or writes keyed by
 /// per-execution indices. Swapped with the live `Vm` fields ([`Vm::swap_ctx`]) when a fiber is
 /// scheduled in or out. `pending_exit` is deliberately NOT here — `std.os.exit` halts the whole
@@ -5270,7 +5275,16 @@ impl Vm {
                     if self.mn.is_some() && self.native_reentry == 0 {
                         self.park_on_connect(stream);
                         Ok(Value::Nil) // parked sentinel; `poll_park` gates the result-push at `do_call`
+                    } else if self.mn.is_some() {
+                        // `native_reentry > 0` — a `connect` reached inside a native callback (operator
+                        // overload, list HOF, `Shared.update`, ...). The caller's loop state lives on the
+                        // Rust stack, so the fiber can't park; and blocking here would pin a worker
+                        // thread on the handshake. Fail loud, exactly as `read`/`write`/`accept` do.
+                        Ok(self.sock_err("connect would block: std.net sockets require the --parallel engine"))
                     } else {
+                        // Top-level / cooperative: no fiber to park, so block (bounded) until the
+                        // handshake settles. net targets `--parallel`; this keeps a top-level
+                        // `net.connect` usable as the v1 fallback.
                         Ok(self.block_until_connected(stream))
                     }
                 }
@@ -5322,18 +5336,24 @@ impl Vm {
         self.poll_park = Some(PollPark { key, fd, interest: poller::Interest::Write, in_flight });
     }
 
-    /// D6b — the cooperative / top-level connect fallback (no fiber to park): block until the handshake
-    /// settles, then return `Ok(Socket)` / `Err`. A bounded spin on writability — net targets the M:N
+    /// D6b — the top-level connect fallback (no fiber to park): block until the handshake settles, then
+    /// return `Ok(Socket)` / `Err`. Bounded by a wall-clock deadline so a black-hole address (no RST,
+    /// no SYN-ACK — `SO_ERROR` never sets, the fd never becomes writable) returns a clean timeout
+    /// instead of spinning for the kernel's multi-minute connect timeout. net targets the M:N
     /// `--parallel` engine, so this path exists only to keep a top-level `net.connect` usable.
     fn block_until_connected(&mut self, stream: std::net::TcpStream) -> Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(CONNECT_BLOCK_TIMEOUT_SECS);
         loop {
             match crate::native::net::finish_connect(&stream) {
                 // SO_ERROR clear AND the peer is reachable ⇒ connected.
                 Ok(()) if stream.peer_addr().is_ok() => {
                     return self.alloc_socket_ok(stream, core::next_poll_key(), core::new_in_flight());
                 }
-                Ok(()) => std::thread::sleep(std::time::Duration::from_millis(1)), // not settled yet
                 Err(e) => return self.sock_err(format!("connect failed: {e}")),
+                Ok(()) if std::time::Instant::now() >= deadline => {
+                    return self.sock_err("connect failed: timed out");
+                }
+                Ok(()) => std::thread::sleep(std::time::Duration::from_millis(1)), // not settled yet
             }
         }
     }
@@ -11839,6 +11859,35 @@ main()
         let err = res.expect_err("the faulting sibling aborts the connect-parked dialer, no hang");
         assert!(err.message.contains("division by zero"), "the original fault surfaces: {}", err.message);
         assert!(!out.contains("joined ok"), "the nursery faulted rather than joining cleanly: {out:?}");
+    }
+
+    /// D6b — the top-level (no-`--parallel`) blocking connect fallback returns a clean `Err` rather
+    /// than hanging: `net.connect` to a dead loopback port (bound-then-dropped) settles to a refusal
+    /// through `block_until_connected`. Guards the bounded-spin fix — a regression to an unbounded spin
+    /// on a non-completing handshake would surface as a watchdog timeout here.
+    #[test]
+    fn net_connect_top_level_dead_port_errors_not_hangs() {
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let src = format!(
+            "import std.net\nfn main():\n    match net.connect(\"{dead}\"):\n        Ok(_): print(\"connected\")\n        Err(e): print(\"refused\")\nmain()\n"
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let t = TmpDir::new();
+            let entry = t.write("main.chz", &src);
+            let (out, _e, res, _c) = run_file(&entry); // cooperative (no --parallel) ⇒ the blocking fallback
+            let _ = tx.send((out, res));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+            Ok((out, res)) => {
+                res.expect("top-level connect program runs");
+                assert_eq!(out, "refused\n", "dead port ⇒ Err branch (bounded, no hang)");
+            }
+            Err(_) => panic!("hung: top-level connect to a dead port did not return (unbounded spin?)"),
+        }
     }
 
     /// D6 — the headline netpoller test: an echo server services **far more connections than there are
