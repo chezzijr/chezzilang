@@ -24,24 +24,51 @@ Claude implements directly. Ship working, tested code each session.
 ## Commands
 
 ```sh
-cargo build              # compile
-cargo test               # run unit + guiding tests
+cargo build --release    # compile (release; the VM is only fast optimized)
+cargo test               # run unit + parity (both engines) + guiding tests
 cargo test conformance   # execute docs/grammar.bnf, differential-test vs the parser
+cargo clippy -- -D warnings   # lint (must be clean before commit)
 cargo run -- help        # CLI usage
-cargo run -- tokens examples/hello.chz   # M1 target
-cargo run -- ast    examples/hello.chz   # M2 target
-cargo run -- run    examples/hello.chz   # M3 target
-cargo clippy             # lint
+
+cargo run -- tokens examples/hello.chz   # token stream (M1)
+cargo run -- ast    examples/hello.chz   # parsed AST (M2)
+cargo run -- check  examples/hello.chz   # type-check only (M4); --errors=json for machine output
+cargo run -- run    examples/hello.chz   # type-check + run on the bytecode VM (default, M5)
+cargo run -- run --interp   examples/hello.chz   # tree-walk interpreter (frozen reference engine)
+cargo run -- run --parallel examples/primes_parallel.chz   # VM-only OS-thread engine
+cargo run -- repl                        # interactive REPL
+
+cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see docs/benchmarks.md)
 ```
+
+> Flags go **before** the file path; anything after the file is passed to the program.
+> `--interp` and `--parallel` are mutually exclusive (the interpreter is the frozen
+> sequential engine; `--parallel` is the VM's real-thread engine).
 
 ## Conventions
 
 - Commits: single-line conventional (`feat:`, `fix:`, `chore:`, `docs:`, `test:`). No body.
-- Each compiler phase is its own module under `src/` (`lexer`, `parser`, `ast`, `checker`, ...).
+- Each compiler phase is its own module under `src/`: `lexer` → `parser` → `ast` →
+  `desugar` → `checker` → `compiler` → `vm` (default engine) / `interp` (frozen tree-walk
+  reference), plus `gc`, `native` + `runtime` (builtins / std), `resolver` (module paths).
 - Keep modules small and single-purpose.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
+- **Two engines, asserted equal.** Golden tests run each `examples/*.chz` through both the
+  VM and the interpreter and assert identical stdout. The interpreter is frozen (slated for
+  eventual removal) but parity is still the discipline — a VM change that diverges is a bug.
+
+## Where things stand
+
+Core language is **feature-complete through M18** (scalars, `list`/`map`/`set`/`tuple`,
+generic structs + enums, `Result`/`Option` + `?`, generics + structural protocols,
+exhaustive `match` + guards, closures/HOF, modules, GC, interpolation, pipe, `defer`,
+`recover:`, `Iterator[T]`, slicing/indexing protocols). **Concurrency** has landed through
+**Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, real
+OS-thread engine via `--parallel`, netpoller + `std.net`). ~1500 tests green.
 
 ## Current focus
 
 See **[`PROGRESS.md`](PROGRESS.md)** — single source of truth for "what's next."
-Right now: **M2 — parser → AST.**
+Right now: **M19 — Perf track** (scheduled, not started). Reproducible Chezzi-vs-CPython
+baseline in **[`docs/benchmarks.md`](docs/benchmarks.md)** (currently 2.1×–5.9× slower than
+CPython, startup ~11× faster); ranked optimization backlog in **[`docs/future.md`](docs/future.md)** §4.
