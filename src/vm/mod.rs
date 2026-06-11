@@ -255,6 +255,12 @@ struct Vm {
     /// field just holds it while the fiber is swapped in. The resumed `net.connect` re-run takes it to
     /// finish the connect. `None` whenever no connect is mid-flight.
     pending_connect: Option<ConnectInProgress>,
+    /// D6c — live mirror of [`FiberCtx::poll_timed_out`] while the fiber is swapped in: set by the poll
+    /// thread on the detached fiber's ctx when a socket op's `timeout_ms` deadline elapsed before the
+    /// fd became ready, swapped in here on schedule-in. `socket_method`/`listener_method` consume it at
+    /// op ENTRY (after the `run_until` loop-top cancel check, so a sibling fault still wins): if set,
+    /// clear it and return `Err("timeout")` instead of retrying the syscall. Snapshot-park path only.
+    poll_timed_out: bool,
     /// Depth of native (Rust) callbacks currently on the host stack that re-enter Chezzi (operator
     /// overloads, `compare`/`hash`/`str` hooks, list HOFs, sorts, `Shared.update`, the executor
     /// drain, deferred calls). Their loop / recursion state lives on the Rust stack and cannot be
@@ -412,6 +418,14 @@ struct FiberCtx {
     /// park, so it swaps in [`Vm::swap_ctx`] like the other per-fiber state. `None` unless this fiber
     /// is mid-connect (only ever set on the M:N engine — cooperative connect blocks instead).
     pending_connect: Option<ConnectInProgress>,
+    /// D6c — per-socket read/accept/write timeout marker. A socket op given a `timeout_ms` parks on
+    /// the netpoller with a deadline; if that deadline elapses before the fd fires, the poll thread
+    /// (which owns the detached [`Fiber`]) sets this `true` and re-injects the fiber — exactly like
+    /// `pending_connect`, this travels WITH the fiber across [`Vm::swap_ctx`] so the resumed op knows
+    /// the wake came from a timeout, not readiness. On schedule-in it swaps into [`Vm::poll_timed_out`];
+    /// the rewound socket op checks it at ENTRY (before re-running the syscall) and returns
+    /// `Err("timeout")` instead of retrying. `false` whenever no timeout wake is pending. M:N-only.
+    poll_timed_out: bool,
 }
 
 /// Scheduling state of a child fiber within a [`Nursery`].
@@ -1278,7 +1292,7 @@ impl MnSched {
         // `register` rejects (returns the fiber) iff cancel was tripped before it could park — a
         // sibling faulted in the park-vs-cancel gap. Re-inject so the fiber resumes and unwinds on the
         // cancel flag, rather than parking on a poller a past `drain_sched` already swept (→ a hang).
-        if let Some(fiber) = poller::register(pp.key, pp.fd, pp.interest, fiber, Arc::clone(self), Arc::clone(&pp.in_flight)) {
+        if let Some(fiber) = poller::register(pp.key, pp.fd, pp.interest, fiber, Arc::clone(self), Arc::clone(&pp.in_flight), pp.deadline) {
             pp.in_flight.store(false, Ordering::Release);
             self.complete_offload(fiber);
         }
@@ -1503,6 +1517,19 @@ struct PollPark {
     /// D6 — the owning socket's `in_flight` flag, handed to the poller so it can clear it on inject
     /// (see [`core::SocketCore::in_flight`]).
     in_flight: Arc<AtomicBool>,
+    /// D6c — the optional read/accept/write timeout deadline. `Some` iff the op was given a
+    /// `timeout_ms`: if the fd has not fired by then, the poll thread re-injects the fiber with its
+    /// `poll_timed_out` marker set so the rewound op returns `Err("timeout")`. `None` = park forever.
+    deadline: Option<std::time::Instant>,
+}
+
+/// D6c — a parsed `timeout_ms` argument to a net socket op. `poll_once` (true iff `ms <= 0`) means
+/// "do NOT park: if the syscall would block, return `Err("timeout")` at once"; otherwise the op parks
+/// with `deadline` and the netpoller wakes it on readiness OR at the deadline (whichever first).
+#[derive(Clone, Copy)]
+struct SockTimeout {
+    poll_once: bool,
+    deadline: std::time::Instant,
 }
 
 /// D5 owe #3 Path C (#3 socket half) — the outcome of one non-blocking socket-op attempt under the
@@ -1574,6 +1601,7 @@ impl Vm {
             offload: None,
             poll_park: None,
             pending_connect: None,
+            poll_timed_out: false,
             native_reentry: 0,
             reds: 0,           // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
             yield_now: false,  // D3
@@ -1630,6 +1658,9 @@ impl Vm {
             // connecting fd that the netpoller is watching; it must not be left on the shell where the
             // next fiber would inherit or drop it).
             std::mem::swap(&mut self.pending_connect, &mut ctx.pending_connect);
+            // D6c — a socket timeout marker set by the poll thread (on the detached fiber's ctx) swaps
+            // in here so the resumed socket op sees it at entry. M:N-only, like `pending_connect`.
+            std::mem::swap(&mut self.poll_timed_out, &mut ctx.poll_timed_out);
         }
     }
 
@@ -5927,7 +5958,9 @@ impl Vm {
         in_flight.store(true, Ordering::Release); // mark parked (matches `park_on_fd`'s swap(true))
         let fd = stream.as_raw_fd();
         self.pending_connect = Some(ConnectInProgress { stream, key, in_flight: Arc::clone(&in_flight) });
-        self.poll_park = Some(PollPark { key, fd, interest: poller::Interest::Write, in_flight });
+        // A `connect` never carries a user timeout (the `connect` surface takes only an address); it
+        // parks forever (or until `drain_sched` re-injects it on a sibling fault).
+        self.poll_park = Some(PollPark { key, fd, interest: poller::Interest::Write, in_flight, deadline: None });
     }
 
     /// D6b — the top-level connect fallback (no fiber to park): block until the handshake settles, then
@@ -5961,7 +5994,16 @@ impl Vm {
     fn socket_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         match method {
             "read" => {
-                self.arity_err("read", args, 1, span)?;
+                // `read(n)` or `read(n, timeout_ms)` — the optional trailing int bounds the FIRST
+                // readiness (D6c). On a timeout the netpoller re-injects this fiber with `poll_timed_out`
+                // set; the rewound op re-runs and lands HERE — so check it at entry (after the
+                // `run_until` loop-top cancel check, which a sibling fault wins) and return Err.
+                self.arity_range_err("read", args, 1, 2, span)?;
+                if self.poll_timed_out {
+                    self.poll_timed_out = false;
+                    return Ok(self.sock_err("timeout"));
+                }
+                let timeout = self.parse_timeout_ms(args.get(1), span)?;
                 // Cap the per-call buffer: a huge `read(n)` (caller-controlled) must not eagerly
                 // allocate gigabytes before a byte arrives (review). The caller already loops for large
                 // payloads — `read` returns the actual count.
@@ -5989,7 +6031,11 @@ impl Vm {
                         Ok(self.sock_ok(sv))
                     }
                     Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        let target = PollPark { key: core.key, fd, interest: poller::Interest::Read, in_flight: Arc::clone(&core.in_flight) };
+                        // `timeout_ms == 0` (poll-once): do NOT park — surface the timeout immediately.
+                        if timeout.is_some_and(|t| t.poll_once) {
+                            return Ok(self.sock_err("timeout"));
+                        }
+                        let target = PollPark { key: core.key, fd, interest: poller::Interest::Read, in_flight: Arc::clone(&core.in_flight), deadline: timeout.map(|t| t.deadline) };
                         if self.park_on_fd(h, args, target, span)? {
                             return Ok(Value::Nil); // parked (sentinel; `poll_park` gates the push)
                         }
@@ -6027,7 +6073,13 @@ impl Vm {
                 }
             }
             "write" => {
-                self.arity_err("write", args, 1, span)?;
+                // `write(s)` or `write(s, timeout_ms)` — the optional trailing int bounds writability.
+                self.arity_range_err("write", args, 1, 2, span)?;
+                if self.poll_timed_out {
+                    self.poll_timed_out = false;
+                    return Ok(self.sock_err("timeout"));
+                }
+                let timeout = self.parse_timeout_ms(args.get(1), span)?;
                 let data = match args.first() {
                     Some(Value::Obj(sh)) => match self.heap.get(*sh) {
                         Obj::Str(s) => s.as_bytes().to_vec(),
@@ -6049,7 +6101,10 @@ impl Vm {
                 match attempt {
                     Ok(got) => Ok(self.sock_ok(Value::Int(got as i64))),
                     Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        let target = PollPark { key: core.key, fd, interest: poller::Interest::Write, in_flight: Arc::clone(&core.in_flight) };
+                        if timeout.is_some_and(|t| t.poll_once) {
+                            return Ok(self.sock_err("timeout"));
+                        }
+                        let target = PollPark { key: core.key, fd, interest: poller::Interest::Write, in_flight: Arc::clone(&core.in_flight), deadline: timeout.map(|t| t.deadline) };
                         if self.park_on_fd(h, args, target, span)? {
                             return Ok(Value::Nil);
                         }
@@ -6094,7 +6149,14 @@ impl Vm {
     fn listener_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         match method {
             "accept" => {
-                self.arity_err("accept", args, 0, span)?;
+                // `accept()` or `accept(timeout_ms)` — the optional trailing int bounds how long to
+                // wait for an inbound connection (D6c). Mirrors `Socket::read`'s timeout handling.
+                self.arity_range_err("accept", args, 0, 1, span)?;
+                if self.poll_timed_out {
+                    self.poll_timed_out = false;
+                    return Ok(self.sock_err("timeout"));
+                }
+                let timeout = self.parse_timeout_ms(args.first(), span)?;
                 let core = self.listener_core(h);
                 let attempt = {
                     let guard = core.listener.lock().unwrap();
@@ -6109,7 +6171,10 @@ impl Vm {
                 match attempt {
                     Ok(stream) => Ok(self.accept_socket_value(stream)),
                     Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        let target = PollPark { key: core.key, fd, interest: poller::Interest::Read, in_flight: Arc::clone(&core.in_flight) };
+                        if timeout.is_some_and(|t| t.poll_once) {
+                            return Ok(self.sock_err("timeout"));
+                        }
+                        let target = PollPark { key: core.key, fd, interest: poller::Interest::Read, in_flight: Arc::clone(&core.in_flight), deadline: timeout.map(|t| t.deadline) };
                         if self.park_on_fd(h, args, target, span)? {
                             return Ok(Value::Nil);
                         }
@@ -6184,6 +6249,12 @@ impl Vm {
     /// path it restores the pre-call operand stack (receiver THEN args — the exact layout `CallMethod`
     /// re-pops; unlike a 0-arg `recv` park, `read(n)`/`write(s)` must re-push their args), rewinds `ip`
     /// so the op re-executes on resume, and sets the `poll_park` sentinel for the worker loop.
+    ///
+    /// D6c — `target.deadline` (the optional `timeout_ms`) is honored ONLY on this snapshot-park path:
+    /// the netpoller wakes the fiber on readiness OR at the deadline. The in-callback demote path
+    /// (`native_reentry > 0`, where this returns `Ok(false)`) does NOT honor it — a demoted op
+    /// backoff-polls in the kernel until readiness regardless of `timeout_ms` (a documented v1 gap;
+    /// in-callback socket timeouts are out of scope, matching the in-callback connect-blocks behavior).
     fn park_on_fd(&mut self, h: GcRef, args: &[Value], target: PollPark, span: Span) -> Result<bool, RuntimeError> {
         if self.mn.is_some() && self.native_reentry == 0 {
             // The `in_flight` guard: at most one op may be parked on a socket at a time. A second
@@ -7047,6 +7118,38 @@ impl Vm {
             Ok(())
         } else {
             Err(self.err(format!("{name}() expects {n} argument(s), got {}", args.len()), span))
+        }
+    }
+
+    /// D6c — arity check for a method that accepts an inclusive `min..=max` argument range (the net
+    /// socket ops: `read`/`write` take 1–2, `accept` 0–1 — the optional trailing `timeout_ms`).
+    fn arity_range_err(&self, name: &str, args: &[Value], min: usize, max: usize, span: Span) -> Result<(), RuntimeError> {
+        if (min..=max).contains(&args.len()) {
+            Ok(())
+        } else {
+            Err(self.err(format!("{name}() expects {min}–{max} argument(s), got {}", args.len()), span))
+        }
+    }
+
+    /// D6c — parse the optional trailing `timeout_ms` int arg of a net socket op. `Ok(None)` if no
+    /// timeout arg was passed (park forever — the existing behavior). `Ok(Some(Timeout))` otherwise:
+    /// `poll_once` is true iff `ms <= 0` (`0` polls once and never parks; a negative saturates to it),
+    /// and `deadline` is `now + ms`, saturated to a far-future deadline for a pathological `ms`
+    /// (centuries) rather than panicking the worker on `Instant` overflow (mirrors `sleep_ms`). `Err`
+    /// for a non-int timeout arg (the checker also rejects this; this is the runtime backstop).
+    fn parse_timeout_ms(&self, arg: Option<&Value>, span: Span) -> Result<Option<SockTimeout>, RuntimeError> {
+        match arg {
+            None => Ok(None),
+            Some(Value::Int(ms)) => {
+                let poll_once = *ms <= 0;
+                let ms = (*ms).max(0) as u64;
+                let dur = std::time::Duration::from_millis(ms);
+                let deadline = std::time::Instant::now()
+                    .checked_add(dur)
+                    .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365));
+                Ok(Some(SockTimeout { poll_once, deadline }))
+            }
+            Some(_) => Err(self.err("timeout_ms expects an int (milliseconds)".into(), span)),
         }
     }
 
@@ -8438,7 +8541,7 @@ mod tests {
         let f0 = take_run(&sched); // running == 1, runnable == 1
         assert_eq!(sched.lock().running, 1);
 
-        sched.poll_park_offload(f0, PollPark { key, fd: server.as_raw_fd(), interest: poller::Interest::Read, in_flight: core::new_in_flight() });
+        sched.poll_park_offload(f0, PollPark { key, fd: server.as_raw_fd(), interest: poller::Interest::Read, in_flight: core::new_in_flight(), deadline: None });
         assert_eq!(sched.lock().running, 0, "poll-park freed the worker (running decremented)");
         assert_eq!(sched.inflight.load(Ordering::Relaxed), 1, "running → inflight on poll-park");
 
@@ -13439,6 +13542,171 @@ main()
         assert!(out.contains("echo:hello"), "the client received the server's echo: {out:?}");
         assert!(out.contains("done"), "the nursery joined and main continued: {out:?}");
         assert!(!out.contains("net error"), "no I/O error on the happy path: {out:?}");
+    }
+
+    /// D6c — run a `--parallel` net program from a temp file under a 30 s watchdog (net round-trips
+    /// can legitimately take longer than `run_parallel_watchdog`'s 5 s, and a regressed timeout would
+    /// HANG rather than fault). Returns the captured stdout, or panics loudly on a hang.
+    fn run_net_timeout_watchdog(tag: &str, src: &str) -> String {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&entry, crate::native::HostConfig::default()));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok((out, _err, res, _code)) => {
+                assert!(res.is_ok(), "{tag}: program faulted: {res:?}");
+                out
+            }
+            Err(_) => panic!("{tag}: hung — D6c socket timeout regressed (the op parked forever)"),
+        }
+    }
+
+    /// D6c — `conn.read(n, timeout_ms)` returns `Err("timeout")` when the peer accepts but never
+    /// writes. The server accepts the connection and then sleeps past the client's read timeout; the
+    /// client's `read(64, 100)` parks on the netpoller with a 100 ms deadline, the deadline fires
+    /// before any data, and the rewound op returns `Err` with `e.message() == "timeout"`.
+    #[test]
+    fn read_timeout_returns_err() {
+        let src = "\
+import std.net
+import std.time
+
+fn server(listener: Listener) -> int!:
+    conn := listener.accept()?
+    time.sleep_ms(400)
+    conn.close()
+    listener.close()
+    return Ok(0)
+
+fn client(addr: str):
+    sock := net.connect(addr)?
+    match sock.read(64, 100):
+        Ok(s): print(\"GOT:\" + s)
+        Err(e): print(\"ERR:\" + e.message())
+    sock.close()
+
+fn run() -> int!:
+    listener := net.listen(\"127.0.0.1:0\")?
+    addr := listener.addr()?
+    parallel:
+        spawn server(listener)
+        spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"\")
+        Err(e): print(\"RUN-ERR:\" + e.message())
+
+main()
+";
+        let out = run_net_timeout_watchdog("read_timeout", src);
+        assert!(out.contains("ERR:timeout"), "read(64, 100) must surface Err(\"timeout\"): {out:?}");
+        assert!(!out.contains("GOT:"), "no data should have been read: {out:?}");
+    }
+
+    /// D6c — `server.accept(timeout_ms)` returns `Err("timeout")` when NO client ever connects, and the
+    /// program terminates (no hang). The lone acceptor parks on the netpoller with a deadline; the
+    /// deadline fires, the rewound `accept` returns `Err("timeout")`, and the nursery joins.
+    #[test]
+    fn accept_timeout_returns_err() {
+        let src = "\
+import std.net
+
+fn server(listener: Listener):
+    match listener.accept(100):
+        Ok(_): print(\"ACCEPTED\")
+        Err(e): print(\"ERR:\" + e.message())
+    listener.close()
+
+fn run() -> int!:
+    listener := net.listen(\"127.0.0.1:0\")?
+    parallel:
+        spawn server(listener)
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"RUN-ERR:\" + e.message())
+
+main()
+";
+        let out = run_net_timeout_watchdog("accept_timeout", src);
+        assert!(out.contains("ERR:timeout"), "accept(100) with no client must surface Err(\"timeout\"): {out:?}");
+        assert!(out.contains("done"), "the nursery joined and main continued (no hang): {out:?}");
+        assert!(!out.contains("ACCEPTED"), "nothing was accepted: {out:?}");
+    }
+
+    /// D6c regression — a `read(n)` with NO timeout still parks FOREVER (until data arrives): the
+    /// timeout machinery must not have made the untimed read return early. The server sleeps well past
+    /// any plausible deadline before writing; the client's untimed `read(64)` must wait for the bytes
+    /// (not time out) and print them.
+    #[test]
+    fn read_without_timeout_still_parks_forever() {
+        let src = "\
+import std.net
+import std.time
+
+fn server(listener: Listener) -> int!:
+    conn := listener.accept()?
+    time.sleep_ms(300)
+    conn.write(\"late\")?
+    conn.close()
+    listener.close()
+    return Ok(0)
+
+fn client(addr: str):
+    sock := net.connect(addr)?
+    match sock.read(64):
+        Ok(s): print(\"GOT:\" + s)
+        Err(e): print(\"ERR:\" + e.message())
+    sock.close()
+
+fn run() -> int!:
+    listener := net.listen(\"127.0.0.1:0\")?
+    addr := listener.addr()?
+    parallel:
+        spawn server(listener)
+        spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"\")
+        Err(e): print(\"RUN-ERR:\" + e.message())
+
+main()
+";
+        let out = run_net_timeout_watchdog("read_no_timeout", src);
+        assert!(out.contains("GOT:late"), "an untimed read must block until data, not time out: {out:?}");
+        assert!(!out.contains("ERR:"), "no timeout/error on the untimed read: {out:?}");
+    }
+
+    /// D6c — the bundled `examples/socket_timeout.chz` golden: a `--parallel` program that demonstrates
+    /// both an `accept(timeout_ms)` and a `read(n, timeout_ms)` timeout branch, run end-to-end against
+    /// its `.expected` output. Net examples need `--parallel` (no fibers to park on the cooperative
+    /// engine), so — like `echo_server.chz` — this is exercised here rather than in the cooperative
+    /// golden harness. Watchdog-guarded so a regression faults instead of hanging the test binary.
+    #[test]
+    fn example_socket_timeout_matches_expected() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let entry = manifest.join("examples/socket_timeout.chz");
+        let expected = std::fs::read_to_string(manifest.join("examples/socket_timeout.expected"))
+            .expect("read examples/socket_timeout.expected");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&entry, crate::native::HostConfig::default()));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok((out, _err, res, _code)) => {
+                assert!(res.is_ok(), "socket_timeout.chz faulted: {res:?}");
+                assert_eq!(out, expected, "socket_timeout.chz output diverged from its golden");
+            }
+            Err(_) => panic!("socket_timeout.chz hung — D6c timeout regressed"),
+        }
     }
 
     /// D6b — the production-ready gate (regression for the documented HANG): a `parallel:` runs a

@@ -84,12 +84,25 @@ struct FnSig {
     params: Vec<Ty>,
     ret: Ty,
     type_params: Vec<TypeParam>,
+    /// D6c — the minimum number of arguments this signature accepts; `params.len()` for an ordinary
+    /// fixed-arity signature (set by [`FnSig::plain`]), but smaller when trailing params are optional
+    /// (the net socket ops' optional `timeout_ms`). [`Checker::check_args`] accepts any arg count in
+    /// `min_params..=params.len()`.
+    min_params: usize,
 }
 
 impl FnSig {
-    /// A non-generic signature (the common case).
+    /// A non-generic signature (the common case): every param is required (`min_params == params.len()`).
     fn plain(params: Vec<Ty>, ret: Ty) -> FnSig {
-        FnSig { params, ret, type_params: Vec::new() }
+        let min_params = params.len();
+        FnSig { params, ret, type_params: Vec::new(), min_params }
+    }
+
+    /// D6c — a non-generic signature whose last `optional` params may be omitted (the net socket ops'
+    /// optional trailing `timeout_ms`). `check_args` accepts `params.len() - optional ..= params.len()`.
+    fn optional_tail(params: Vec<Ty>, ret: Ty, optional: usize) -> FnSig {
+        let min_params = params.len() - optional;
+        FnSig { params, ret, type_params: Vec::new(), min_params }
     }
 }
 
@@ -791,7 +804,7 @@ impl Checker {
         for tp in &decl.type_params {
             self.check_bounds(&tp.bounds, &tp.name, span);
         }
-        let params = decl
+        let params: Vec<Ty> = decl
             .params
             .iter()
             .map(|p| match &p.ty {
@@ -809,7 +822,7 @@ impl Checker {
         // rather than to a confidently-wrong `Nil`).
         let ret = decl.ret.as_ref().map(|t| self.resolve_type(t, span)).unwrap_or(Ty::Unknown);
         self.exit_type_params(saved);
-        FnSig { params, ret, type_params: decl.type_params.clone() }
+        FnSig { min_params: params.len(), params, ret, type_params: decl.type_params.clone() }
     }
 
     /// Pass-1.5: for every function/method that omitted `-> T`, infer its return type from the
@@ -3356,7 +3369,7 @@ impl Checker {
             // their `Result`.
             Ty::Socket => {
                 if let Some(sig) = socket_method_sig(method) {
-                    self.check_args(method, &sig.params, args, span);
+                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -3365,7 +3378,7 @@ impl Checker {
             }
             Ty::Listener => {
                 if let Some(sig) = listener_method_sig(method) {
-                    self.check_args(method, &sig.params, args, span);
+                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -3652,11 +3665,21 @@ impl Checker {
 
     /// Check argument count and each argument's type against a known parameter list.
     fn check_args(&mut self, name: &str, params: &[Ty], args: &[Expr], span: Span) {
-        if params.len() != args.len() {
-            self.error(
-                span,
-                format!("'{name}' expects {} argument(s), got {}", params.len(), args.len()),
-            );
+        self.check_args_range(name, params, params.len(), args, span);
+    }
+
+    /// D6c — `check_args` generalized to an optional trailing tail: the arg count must fall in
+    /// `min_params..=params.len()`, and each supplied arg must match its positional param. Used for the
+    /// net socket ops whose `timeout_ms` is optional. `min_params == params.len()` reproduces the
+    /// exact-arity behavior of [`Checker::check_args`].
+    fn check_args_range(&mut self, name: &str, params: &[Ty], min_params: usize, args: &[Expr], span: Span) {
+        if !(min_params..=params.len()).contains(&args.len()) {
+            let want = if min_params == params.len() {
+                format!("{}", params.len())
+            } else {
+                format!("{min_params}–{}", params.len())
+            };
+            self.error(span, format!("'{name}' expects {want} argument(s), got {}", args.len()));
         }
         for (i, arg) in args.iter().enumerate() {
             let at = self.infer(arg);
@@ -4020,10 +4043,13 @@ impl Checker {
                 let pmap: HashMap<String, Ty> =
                     pinfo.type_params.iter().cloned().zip(args.iter().cloned()).collect();
                 for (mname, msig) in &pinfo.methods {
+                    let subst_params: Vec<Ty> = msig.params.iter().map(|t| subst(t, &pmap)).collect();
+                    let min_params = subst_params.len();
                     let want = FnSig {
-                        params: msig.params.iter().map(|t| subst(t, &pmap)).collect(),
+                        params: subst_params,
                         ret: subst(&msig.ret, &pmap),
                         type_params: Vec::new(),
+                        min_params,
                     };
                     let msig = &want;
                     match info.methods.get(mname) {
@@ -5291,27 +5317,29 @@ fn shared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
 /// `str` (empty on a clean EOF / peer close); `write(s)` returns the byte count written; both are
 /// `Result` (I/O can fail). `close()` releases the fd.
 fn socket_method_sig(method: &str) -> Option<FnSig> {
-    let (params, ret) = match method {
-        "read" => (vec![Ty::Int], Ty::result(Ty::Str)),
-        "write" => (vec![Ty::Str], Ty::result(Ty::Int)),
-        "close" => (vec![], Ty::Nil),
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
+    match method {
+        // D6c — `read`/`write` take an OPTIONAL trailing `timeout_ms: int` (`Err("timeout")` if no
+        // data / not writable within it). The required first param (byte count / payload) stays.
+        "read" => Some(FnSig::optional_tail(vec![Ty::Int, Ty::Int], Ty::result(Ty::Str), 1)),
+        "write" => Some(FnSig::optional_tail(vec![Ty::Str, Ty::Int], Ty::result(Ty::Int), 1)),
+        "close" => Some(FnSig::plain(vec![], Ty::Nil)),
+        _ => None,
+    }
 }
 
 /// D6 — built-in method signatures on `Listener` (std.net). `accept()` yields the next inbound
 /// connection as a `Socket` (`Result` — accept can fail); `close()` releases the fd.
 fn listener_method_sig(method: &str) -> Option<FnSig> {
-    let (params, ret) = match method {
-        "accept" => (vec![], Ty::result(Ty::Socket)),
+    match method {
+        // D6c — `accept` takes an OPTIONAL `timeout_ms: int` (`Err("timeout")` if no connection
+        // arrives within it).
+        "accept" => Some(FnSig::optional_tail(vec![Ty::Int], Ty::result(Ty::Socket), 1)),
         // `addr()` reports the bound local address as `"host:port"` — lets a `listen(":0")` caller
         // discover the OS-assigned port.
-        "addr" => (vec![], Ty::result(Ty::Str)),
-        "close" => (vec![], Ty::Nil),
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
+        "addr" => Some(FnSig::plain(vec![], Ty::result(Ty::Str))),
+        "close" => Some(FnSig::plain(vec![], Ty::Nil)),
+        _ => None,
+    }
 }
 
 /// Built-in method signatures on `Executor` (C5 escape hatch). `submit` takes a detached, zero-arg
