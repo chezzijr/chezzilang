@@ -243,6 +243,12 @@ struct Vm {
     /// fiber runs at a time) — gates the result-push at the call site via [`Vm::paused`]. Reset per
     /// schedule-in; never preserved across a park.
     poll_park: Option<PollPark>,
+    /// D6b — a non-blocking `connect` whose handshake is in flight: the connecting stream + its poll
+    /// key + guard (see [`ConnectInProgress`]). Unlike `poll_park` (reset per schedule-in), this must
+    /// SURVIVE the writability park, so it lives in [`FiberCtx`] and swaps with the fiber; this `Vm`
+    /// field just holds it while the fiber is swapped in. The resumed `net.connect` re-run takes it to
+    /// finish the connect. `None` whenever no connect is mid-flight.
+    pending_connect: Option<ConnectInProgress>,
     /// Depth of native (Rust) callbacks currently on the host stack that re-enter Chezzi (operator
     /// overloads, `compare`/`hash`/`str` hooks, list HOFs, sorts, `Shared.update`, the executor
     /// drain, deferred calls). Their loop / recursion state lives on the Rust stack and cannot be
@@ -344,6 +350,11 @@ struct FiberCtx {
     /// D2b — the fiber's `Executor` handles (GC roots into its own heap; same heap-keyed argument as
     /// `module_objs`). Empty for cooperative fibers.
     executors: Vec<GcRef>,
+    /// D6b — a non-blocking `connect` parked on writability (see [`ConnectInProgress`]). Non-heap, so
+    /// it carries no `GcRef` and needs no GC rooting; but it MUST travel with the fiber across the
+    /// park, so it swaps in [`Vm::swap_ctx`] like the other per-fiber state. `None` unless this fiber
+    /// is mid-connect (only ever set on the M:N engine — cooperative connect blocks instead).
+    pending_connect: Option<ConnectInProgress>,
 }
 
 /// Scheduling state of a child fiber within a [`Nursery`].
@@ -1098,7 +1109,13 @@ impl MnSched {
             c.running -= 1;
             self.inflight.fetch_add(1, Ordering::Relaxed); // running → inflight
         }
-        poller::register(pp.key, pp.fd, pp.interest, fiber, Arc::clone(self), pp.in_flight);
+        // `register` rejects (returns the fiber) iff cancel was tripped before it could park — a
+        // sibling faulted in the park-vs-cancel gap. Re-inject so the fiber resumes and unwinds on the
+        // cancel flag, rather than parking on a poller a past `drain_sched` already swept (→ a hang).
+        if let Some(fiber) = poller::register(pp.key, pp.fd, pp.interest, fiber, Arc::clone(self), Arc::clone(&pp.in_flight)) {
+            pp.in_flight.store(false, Ordering::Release);
+            self.complete_offload(fiber);
+        }
     }
 
     /// D5 — the blocking pool finished an offloaded native: re-enqueue the fiber (with its result
@@ -1322,6 +1339,17 @@ struct PollPark {
     in_flight: Arc<AtomicBool>,
 }
 
+/// D6b — a non-blocking `connect` whose TCP handshake is still in flight (`EINPROGRESS`): the
+/// connecting (non-blocking) `TcpStream` (it owns the fd being polled, so it must outlive the park),
+/// its stable poll `key`, and a fresh `in_flight` guard. Lives in [`FiberCtx`] (per-fiber, non-heap)
+/// so it survives the writability park and travels with the fiber via [`Vm::swap_ctx`]; the resumed
+/// `net.connect` takes it back and calls [`crate::native::net::finish_connect`] to read `SO_ERROR`.
+struct ConnectInProgress {
+    stream: std::net::TcpStream,
+    key: usize,
+    in_flight: Arc<AtomicBool>,
+}
+
 /// D5 — a blocking native call extracted at its dispatch site, ready to run off the core worker on
 /// the blocking pool. The args are already materialized out of the heap into `Send` primitives
 /// ([`crate::native::NativeArg`]), so the pool thread runs the native ([`OffloadHost`]) without a
@@ -1360,6 +1388,7 @@ impl Vm {
             suspend: None,
             offload: None,
             poll_park: None,
+            pending_connect: None,
             native_reentry: 0,
             reds: 0,           // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
             yield_now: false,  // D3
@@ -1410,6 +1439,10 @@ impl Vm {
             std::mem::swap(&mut self.module_objs, &mut ctx.module_objs);
             std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
             std::mem::swap(&mut self.executors, &mut ctx.executors);
+            // D6b — a mid-flight `connect` parked on writability swaps WITH its fiber (it owns the
+            // connecting fd that the netpoller is watching; it must not be left on the shell where the
+            // next fiber would inherit or drop it).
+            std::mem::swap(&mut self.pending_connect, &mut ctx.pending_connect);
         }
     }
 
@@ -4197,6 +4230,15 @@ impl Vm {
                     Err(rte) => return Disp::Finish(self.classify_mn_outcome(Err(rte))),
                 }
             }
+            // D6b — a fiber resumed from a non-blocking `connect` park carries the connecting socket in
+            // `pending_connect` (swapped in with its ctx). Complete the handshake (read `SO_ERROR`) and
+            // push the `Result[Socket]` the `net.connect` call site is waiting for, then continue past
+            // it. `finish_pending_connect` never faults (it yields a `Result` *value*). Mutually
+            // exclusive with `resume_native` (a fiber is offload-parked OR connect-parked, never both).
+            if let Some(cip) = self.pending_connect.take() {
+                let v = self.finish_pending_connect(cip);
+                self.push(v);
+            }
             let res = match state {
                 FiberState::Pending(task) => self.start_task(task),
                 FiberState::Ready | FiberState::Blocked => self.run_until(0),
@@ -5202,6 +5244,13 @@ impl Vm {
     /// D6 — `std.net.connect(addr)` / `listen(addr)`: allocate a non-blocking `Socket`/`Listener`
     /// handle (or a `Result::Err` on a bad address / bind failure). Intercepted in `invoke_native`
     /// because it allocates a heap handle over an `Arc`'d core — a pure off-heap native can't.
+    ///
+    /// D6b — `connect` is now a **true non-blocking** connect: an in-progress handshake (`EINPROGRESS`)
+    /// parks the fiber on the socket's writability rather than pinning a worker for the round trip. The
+    /// connecting socket is stashed in `pending_connect`; the netpoller wakes the fiber on writability
+    /// and [`Vm::run_one_fiber`] completes it via [`Vm::finish_pending_connect`] (read `SO_ERROR`) and
+    /// pushes the resulting `Socket` — the bytecode call site never re-runs. The instant (loopback)
+    /// case still returns immediately.
     fn net_connect_or_listen(&mut self, name: &str, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
         let addr = match args.first() {
             Some(Value::Obj(h)) => match self.heap.get(*h) {
@@ -5212,10 +5261,18 @@ impl Vm {
         };
         match name {
             "connect" => match crate::native::net::connect_nonblocking(&addr) {
-                Ok(stream) => {
-                    let core = Arc::new(SocketCore { stream: Mutex::new(Some(stream)), key: core::next_poll_key(), in_flight: core::new_in_flight() });
-                    let v = Value::Obj(self.heap.alloc(Obj::Socket(core)));
-                    Ok(self.sock_ok(v))
+                // Connected synchronously (the common loopback case) — wrap + return at once.
+                Ok((stream, false)) => Ok(self.alloc_socket_ok(stream, core::next_poll_key(), core::new_in_flight())),
+                // Handshake in flight: park the fiber on writability under the M:N engine; off it (the
+                // cooperative / top-level v1 fallback, where there is no fiber to park), block until the
+                // handshake settles. net targets `--parallel`.
+                Ok((stream, true)) => {
+                    if self.mn.is_some() && self.native_reentry == 0 {
+                        self.park_on_connect(stream);
+                        Ok(Value::Nil) // parked sentinel; `poll_park` gates the result-push at `do_call`
+                    } else {
+                        Ok(self.block_until_connected(stream))
+                    }
                 }
                 Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
             },
@@ -5228,6 +5285,56 @@ impl Vm {
                 Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
             },
             _ => unreachable!("net_connect_or_listen on '{name}'"),
+        }
+    }
+
+    /// D6b — wrap a connected `TcpStream` in a `Socket` handle and return `Ok(Socket)`. `key`/`in_flight`
+    /// become the socket's poll identity for later `read`/`write` parks (a fresh pair for a synchronous
+    /// connect; the connect's own pair, reused, for one that parked — its `in_flight` was cleared on
+    /// inject).
+    fn alloc_socket_ok(&mut self, stream: std::net::TcpStream, key: usize, in_flight: Arc<AtomicBool>) -> Value {
+        let core = Arc::new(SocketCore { stream: Mutex::new(Some(stream)), key, in_flight });
+        let v = Value::Obj(self.heap.alloc(Obj::Socket(core)));
+        self.sock_ok(v)
+    }
+
+    /// D6b — finish a connect that parked on writability: `SO_ERROR` clear ⇒ `Ok(Socket)`, else
+    /// `Err(msg)`. Reuses the connect's poll key + guard so the resulting socket keeps a stable identity.
+    fn finish_pending_connect(&mut self, cip: ConnectInProgress) -> Value {
+        match crate::native::net::finish_connect(&cip.stream) {
+            Ok(()) => self.alloc_socket_ok(cip.stream, cip.key, cip.in_flight),
+            Err(e) => self.sock_err(format!("connect failed: {e}")),
+        }
+    }
+
+    /// D6b — park the current fiber on a connecting socket's writability. Stash the connecting stream
+    /// in `pending_connect` (it owns the fd the poller will watch, so it must outlive the park) and set
+    /// the `poll_park` sentinel; the worker loop hands both to the netpoller. Unlike a `read`/`write`
+    /// park there is NO `ip` rewind — `net.connect`'s call site already popped its args and pushed
+    /// nothing (`do_call` saw `paused()`), so on resume [`Vm::run_one_fiber`] finishes the connect and
+    /// pushes the `Socket` exactly where the call would have, and execution continues past the call.
+    fn park_on_connect(&mut self, stream: std::net::TcpStream) {
+        let key = core::next_poll_key();
+        let in_flight = core::new_in_flight();
+        in_flight.store(true, Ordering::Release); // mark parked (matches `park_on_fd`'s swap(true))
+        let fd = stream.as_raw_fd();
+        self.pending_connect = Some(ConnectInProgress { stream, key, in_flight: Arc::clone(&in_flight) });
+        self.poll_park = Some(PollPark { key, fd, interest: poller::Interest::Write, in_flight });
+    }
+
+    /// D6b — the cooperative / top-level connect fallback (no fiber to park): block until the handshake
+    /// settles, then return `Ok(Socket)` / `Err`. A bounded spin on writability — net targets the M:N
+    /// `--parallel` engine, so this path exists only to keep a top-level `net.connect` usable.
+    fn block_until_connected(&mut self, stream: std::net::TcpStream) -> Value {
+        loop {
+            match crate::native::net::finish_connect(&stream) {
+                // SO_ERROR clear AND the peer is reachable ⇒ connected.
+                Ok(()) if stream.peer_addr().is_ok() => {
+                    return self.alloc_socket_ok(stream, core::next_poll_key(), core::new_in_flight());
+                }
+                Ok(()) => std::thread::sleep(std::time::Duration::from_millis(1)), // not settled yet
+                Err(e) => return self.sock_err(format!("connect failed: {e}")),
+            }
         }
     }
 
@@ -11693,6 +11800,43 @@ main()
 "#;
         let (out, _e, res, _c) = run_parallel_watchdog(src);
         let err = res.expect_err("the faulting sibling's error must propagate, not hang the nursery");
+        assert!(err.message.contains("division by zero"), "the original fault surfaces: {}", err.message);
+        assert!(!out.contains("joined ok"), "the nursery faulted rather than joining cleanly: {out:?}");
+    }
+
+    /// D6b — non-blocking `connect` actually parks (and is drainable): a fiber connects to an
+    /// unroutable TEST-NET-1 address (RFC 5737 `192.0.2.0/24` — the SYN gets no reply, so the
+    /// non-blocking connect stays `EINPROGRESS` and the fiber parks on writability *indefinitely*),
+    /// while a sibling faults. A blocking v1 connect would have pinned a worker on the dead handshake;
+    /// the parked connect must instead be reached by `poller::drain_sched` so the fault propagates and
+    /// the nursery joins. Deterministic (the address never completes) and watchdog-guarded.
+    #[test]
+    fn net_connect_parks_and_is_drained_on_fault() {
+        let src = r#"import std.net
+
+fn faulter(z: int) -> int!:
+    return Ok(10 / z)
+
+fn dialer() -> int!:
+    sock := net.connect("192.0.2.1:9")?
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    parallel:
+        spawn dialer()
+        spawn faulter(0)
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print("joined ok")
+        Err(e): print("caught: " + e.message())
+
+main()
+"#;
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        let err = res.expect_err("the faulting sibling aborts the connect-parked dialer, no hang");
         assert!(err.message.contains("division by zero"), "the original fault surfaces: {}", err.message);
         assert!(!out.contains("joined ok"), "the nursery faulted rather than joining cleanly: {out:?}");
     }
