@@ -1,0 +1,14 @@
+# Bench: f-string + join, 500k parts. Builds 500k interpolated strings into a list,
+# then joins on ",". Stresses string interpolation (BuildStr) and concat allocation.
+# Prints the length of the joined string.
+
+fn main():
+    parts := []
+    i := 0
+    while i < 500000:
+        parts.push("item-{i}")
+        i += 1
+    s := ",".join(parts)
+    print(s.len())
+
+main()

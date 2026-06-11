@@ -1,0 +1,12 @@
+# Bench: recursive calls. fib(30) — naive double recursion, no memoization.
+# Stresses call dispatch, per-call arg/frame allocation. Prints 832040.
+
+fn fib(n: int) -> int:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn main():
+    print(fib(30))
+
+main()

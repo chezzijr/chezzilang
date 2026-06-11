@@ -11,6 +11,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**Next up — M19 Perf track (scheduled, not started).** A reproducible `benches/` harness now
+exists (`benches/run.chz` — a Chezzi-written driver shelling out to hyperfine — measuring 6 microbenches
+against CPython). Baseline 2026-06-11: **2.1×–5.9× slower than CPython**, **~11× faster cold startup**.
+The gap scales with call density (`loop` 2.1× → `fib` 5.9×). Numbers + per-bench bottleneck analysis
+(with `src/vm` `file:line` hot spots) in [`docs/benchmarks.md`](docs/benchmarks.md); ranked backlog in
+[`docs/future.md §4`](docs/future.md). First cheap wins: peephole/const-fold, superinstructions, inline
+caching, and killing the per-call clones in `invoke_value` (`mod.rs:3181/:3198/:3200`). No VM code
+changed yet — this session landed docs + harness only.
+
 **Robustness pass — cyclic-data depth guard + order-independent map `==` — has now landed** (both
 engines). Two fuzzing-found bugs: (1) a cyclic data structure (a struct with a `list[Self]` field
 forming a cycle) made `print`/`==` recurse unbounded on the **host** stack inside the value-display

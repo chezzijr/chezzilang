@@ -1,0 +1,12 @@
+# Bench: int add, 20M iterations. Pure while-loop counter + accumulator — the leanest
+# possible measure of dispatch count and integer add. Prints 199999990000000.
+
+fn main():
+    total := 0
+    i := 0
+    while i < 20000000:
+        total += i
+        i += 1
+    print(total)
+
+main()

@@ -1,0 +1,15 @@
+# Bench: push + sum, 2M elements. Grows a list to 2M via push, then sums it with a
+# for-loop. Stresses list growth/allocation and iteration. Prints 1999999000000.
+
+fn main():
+    xs := []
+    i := 0
+    while i < 2000000:
+        xs.push(i)
+        i += 1
+    total := 0
+    for x in xs:
+        total += x
+    print(total)
+
+main()

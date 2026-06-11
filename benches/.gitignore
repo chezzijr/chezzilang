@@ -1,0 +1,3 @@
+# hyperfine --export-markdown artifacts written by run.chz
+last-*.md
+last-*.json

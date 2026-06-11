@@ -92,28 +92,43 @@ built-in test runner, LSP.
 
 ## 4. Optimizations (ranked effort → payoff)
 
+> **Live numbers:** `docs/benchmarks.md` tracks Chezzi vs CPython (reproducible via
+> `benches/run.chz`). Current baseline (2026-06-11): **2.1×–5.9× slower than CPython**, and
+> a **standing startup win** (~11× faster cold). The gap scales with call density — `loop`
+> (no calls) is 2.1×, `fib` (all calls) is 5.9×. Source hot-spot `file:line`s below come
+> from that analysis; the scheduled work is roadmap **M19**.
+
 Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. The two real costs are
-**dispatch count** and **name lookup**.
+**dispatch count** and **name lookup** — with **per-call allocation** a close third on call-heavy code.
 
 **Cheap — do first:**
 - **Peephole + constant folding (compiler)** — fold `2+3`, fold constant interpolation chunks, drop
   dead code. Free wins, no runtime change.
 - **Superinstructions** — fuse hot op pairs (`GetLocal+GetField`, `PushConst+Add`,
-  `GetLocal+GetLocal+BinOp`). Cuts dispatch count directly — the bottleneck.
+  `GetLocal+GetLocal+BinOp`). Cuts dispatch count directly — the bottleneck. Moves `loop`/`primes`.
 - **Inline caching for name lookup** — globals / builtins / struct fields resolve *by name at
   runtime* today. Cache the resolved slot/index on first hit (monomorphic IC). Field access, method
-  dispatch, and global reads all benefit.
+  dispatch, and global reads all benefit. Moves `primes`.
+- **Kill per-call clones in `invoke_value`** — every call does `self.heap.get(h).clone()` on the
+  whole `Obj` enum (cloning a closure's captured `HashMap`!) at `mod.rs:3198`, plus a
+  `name.clone()` for the arity check at `:3200`, plus a fresh `Vec<Value>` for args at `:3181`.
+  Match on `&Obj` and pass args as a stack slice instead. `fib` is the worst bench and this is its
+  hot path — cheap, high payoff.
 
 **Medium:**
 - **NaN-boxing the `Value`** — pack into 8 bytes (vs the current ~16-byte enum). Better cache density
-  across the whole operand stack. Touches every `Value` site.
+  across the whole operand stack. Touches every `Value` site. Moves `loop`.
 - **Specialize arithmetic** — binary ops re-dispatch on type every iteration; type-guard a hot loop
-  to a monomorphic int path. Big on numeric loops (the current weak case).
-- **Frame pooling** — reuse call frames instead of allocating per call. Helps recursion (`fib`).
+  to a monomorphic int path. Big on numeric loops (`loop`/`primes`, the current weak cases).
+- **Frame pooling** — reuse call frames + the per-call slot pre-fill in `push_frame` instead of
+  allocating per call. Helps recursion (`fib`).
 - **String interning + cached hash** — intern keys / short strings → pointer-compare equality + free
-  map hash. Map hashes are already cached; interning extends it.
-- **Reduce string-op allocations** — concat / `split` / `+` build a fresh `Rc<str>` each time; a
-  builder / rope helps hot concatenation.
+  map hash. Map hashes are already cached; interning extends it. `ConstStr` (`mod.rs:2228`) boxes a
+  fresh string on every push — interning constants kills that.
+- **Reduce string-op allocations** — `BuildStr` (`mod.rs:2495`) stringifies each interpolation part
+  into a fresh `String`; concat / `split` / `+` build a fresh `Rc<str>` each time. A builder / rope
+  helps hot concatenation. Moves `str`. (See also: list clone per `for` iter at `mod.rs:2514`,
+  per-char `String` on string iteration at `:2530`.)
 
 **Big (separate milestones):**
 - **Register VM** instead of stack — fewer ops, less stack traffic. Effectively a VM rewrite; only

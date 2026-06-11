@@ -1,0 +1,37 @@
+# benches/run.chz — the benchmark driver, written in Chezzi (dogfood).
+#
+# Builds the release binary, then runs each chezzi/python pair under `hyperfine`,
+# shelling out via std.process.cmd. `hyperfine` owns the timing; this script just
+# orchestrates and prints. Run it with:
+#
+#   cargo run -- run benches/run.chz
+#
+# Requires `hyperfine` and `python3` on PATH. Add --export-markdown to capture a table
+# for docs/benchmarks.md (see the per-bench call below).
+
+import std.process
+
+# Run one chezzi/python pair under hyperfine. `-N` (shell=none) keeps the timing clean —
+# both commands are plain binary invocations, no shell needed.
+fn bench(name: str):
+    chz := "./target/release/chezzi run benches/chz/{name}.chz"
+    py := "python3 benches/py/{name}.py"
+    cmd := "hyperfine --warmup 2 -N --export-markdown benches/last-{name}.md '{chz}' '{py}'"
+    match process.cmd(cmd):
+        Ok(out): print(out)
+        Err(e): print("FAILED [{name}]: {e.message()}")
+
+fn main():
+    print("building release binary (cargo build --release)...")
+    match process.cmd("cargo build --release"):
+        Ok(_): print("build ok\n")
+        Err(e):
+            print("build failed: {e.message()}")
+            return
+
+    benches := ["fib", "str", "primes", "loop", "list", "empty"]
+    for name in benches:
+        print("=== {name} ===")
+        bench(name)
+
+main()

@@ -244,6 +244,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M13** | `Iterator[T]` protocol | The language's first **parameterized** protocol bound: `[S: Iterator[T], T]` accepts any iterable (built-ins intrinsically, structs via `next`) and recovers element type `T`. Lazy adapters (Take/Mapped) replace `yield` (a non-goal). Checker/parser/grammar only; both engines parity-tested |
 | ✅ **M14** | Generics depth | **Method-level type params** (a method's own `[U]`, inferred at call) + **user-defined parameterized protocols** (`protocol Container[T]`, structural conformance with concrete-arg bounds `[X: Container[int]]`) — the special-cased `Iterator[T]` generalized. Checker/parser/grammar only; both engines parity-tested |
 | ✅ **M15** | Slicing + indexing protocols | `xs[1..3]` / `s[0..2]` (half-open, bounds-clamped, reusing `..`); prebuilt **`Index[K, V]` + `IndexSet[K, V]` + `Slice[R]`** structural protocols — built-in `list`/`map`/`str` conform intrinsically, user structs via `index`/`set_index`/`slice`, so `custom[k]`/`custom[k]=v`/`custom[a..b]` work and a generic can be bounded by `Index[int, V]`. Both engines parity-tested |
+| **M19** | Perf track (cheap wins) | Peephole + constant folding, superinstructions, inline caching for name lookup, kill per-call clones in `invoke_value`. *Scheduled, not started* — backlog ranked in [`docs/future.md §4`](future.md). Proof: `benches/run.chz` shrinks the chezzi÷python ratios vs the dated baseline in [`docs/benchmarks.md`](benchmarks.md) |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional) |
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c** — see the *Standard library* note
@@ -255,4 +256,6 @@ tests/          # Rust unit + golden tests
 - **Golden tests** — `examples/*.chz` + `*.expected`; harness runs each through both tree-walker and VM, asserts identical stdout.
 - **Manual end-to-end** via the `chezzi` CLI subcommand for each phase (`tokens`/`ast`/`run`).
 - **LLM-codegen eval** — feed the grammar cheatsheet + `--errors=json` to a model, measure first-try compile rate; failures feed grammar/error-message work.
-- **Perf check** — after M5, benchmark a loop-heavy script tree-walker vs VM; target ~10x.
+- **Perf check** — tracked against CPython via the `benches/` harness (`benches/run.chz`, hyperfine);
+  baseline + per-bench bottleneck analysis in [`docs/benchmarks.md`](benchmarks.md). Current: 2.1×–5.9×
+  slower than CPython, startup ~11× faster. M19 drives the ratios down.
