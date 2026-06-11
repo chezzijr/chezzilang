@@ -329,6 +329,10 @@ impl Compiler {
                 // Drain the current iteration's loop-body defers (and any nested block defers) before
                 // jumping out, so they run at the `break`, not at function return.
                 self.emit_loop_body_drain(fc, stmt.span);
+                // TASK B — cancel-and-report any `parallel:` nursery this `break` leaves before its
+                // join (after the defers, matching the interp's unwind order: body defers, then the
+                // `exec_parallel` reclaim).
+                self.emit_loop_nursery_drain(fc, stmt.span);
                 let j = fc.emit_jump(Op::Jump(0), stmt.span);
                 match fc.current_loop() {
                     Some(ctx) => ctx.break_jumps.push(j),
@@ -341,6 +345,7 @@ impl Compiler {
             }
             StmtKind::Continue => {
                 self.emit_loop_body_drain(fc, stmt.span);
+                self.emit_loop_nursery_drain(fc, stmt.span);
                 let j = fc.emit_jump(Op::Jump(0), stmt.span);
                 match fc.current_loop() {
                     Some(ctx) => ctx.continue_jumps.push(j),
@@ -367,9 +372,28 @@ impl Compiler {
     /// interpreter's `exec_scoped_block`), so a `defer` directly inside the block runs at the dedent.
     fn compile_parallel(&mut self, fc: &mut FnComp, body: &[Stmt], span: Span) -> Result<(), CompileError> {
         fc.emit(Op::EnterNursery, span);
+        // TASK B — track the open nursery scope so a `break`/`continue` inside `body` knows to emit a
+        // `ReclaimNursery` (cancel-and-report) before its loop-exit jump. Mirrors `defer_scopes`.
+        fc.nursery_scopes += 1;
         self.compile_defer_scoped_block(fc, body)?;
+        fc.nursery_scopes -= 1;
         fc.emit(Op::JoinNursery, span);
         Ok(())
+    }
+
+    /// TASK B — emit one `ReclaimNursery` per `parallel:` scope between the current point and the
+    /// enclosing loop body (inclusive), cancelling-and-reporting each escaped nursery before a
+    /// `break`/`continue` jumps away. These run on the jump path only; the blocks' own `JoinNursery`s
+    /// are skipped by the jump. Mirrors `emit_loop_body_drain` for defer scopes. The compiler's
+    /// `nursery_scopes` count is unchanged — the scopes remain lexically open and emit their natural
+    /// `JoinNursery` on the fall-through path.
+    fn emit_loop_nursery_drain(&mut self, fc: &mut FnComp, span: Span) {
+        let Some(floor) = fc.loops.last().map(|c| c.nursery_floor) else {
+            return; // no enclosing loop — the checker rejects this `break`/`continue`
+        };
+        for _ in 0..(fc.nursery_scopes - floor) {
+            fc.emit(Op::ReclaimNursery, span);
+        }
     }
 
     /// `spawn` — register a task on the innermost nursery. Form 1 (`spawn f(args)` / `spawn
@@ -508,7 +532,7 @@ impl Compiler {
         self.compile_expr(fc, cond)?;
         fc.emit(Op::AsBool, cond.span);
         let exit = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
-        fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new(), defer_floor: fc.defer_scopes });
+        fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new(), defer_floor: fc.defer_scopes, nursery_floor: fc.nursery_scopes });
         self.compile_defer_scoped_block(fc, body)?;
         fc.emit(Op::Jump(loop_start), cond.span);
         fc.patch_jump(exit);
@@ -526,7 +550,7 @@ impl Compiler {
 
     fn compile_for(&mut self, fc: &mut FnComp, vars: &[String], iter: &Expr, body: &[Stmt], span: Span) -> Result<(), CompileError> {
         fc.begin_scope();
-        fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new(), defer_floor: fc.defer_scopes });
+        fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new(), defer_floor: fc.defer_scopes, nursery_floor: fc.nursery_scopes });
         if let ExprKind::Range { start, end } = &iter.kind {
             // Lazy counting loop — the range is never materialized. The checker guarantees a single
             // loop variable for a range.
@@ -1639,6 +1663,11 @@ struct LoopCtx {
     /// own defer scope). A `break`/`continue` drains every defer scope from the break point down to
     /// (and including) the loop-body scope — i.e. `fc.defer_scopes - defer_floor` of them.
     defer_floor: usize,
+    /// TASK B — number of open `parallel:` nursery scopes enclosing this loop (captured at loop entry).
+    /// A `break`/`continue` inside the loop body leaves every `parallel:` scope opened within it before
+    /// the matching `JoinNursery` runs; the compiler emits one `ReclaimNursery` per such escaped scope
+    /// (`fc.nursery_scopes - nursery_floor`), mirroring the `LeaveDeferScope` drain for defers.
+    nursery_floor: usize,
 }
 
 /// Whether a block directly contains a `defer` statement (so it needs defer-scope brackets). Nested
@@ -1668,6 +1697,10 @@ struct FnComp {
     /// decremented at the matching `LeaveDeferScope`). Read by `break`/`continue` to know how many
     /// scopes to drain down to the loop body.
     defer_scopes: usize,
+    /// TASK B — count of `parallel:` nursery scopes currently open during compilation (incremented at
+    /// the `EnterNursery` emit in `compile_parallel`, decremented at the matching `JoinNursery`). Read
+    /// by `break`/`continue` to know how many `ReclaimNursery`s to emit before jumping out of the loop.
+    nursery_scopes: usize,
 }
 
 impl FnComp {
@@ -1685,6 +1718,7 @@ impl FnComp {
             captured_names: Vec::new(),
             loops: Vec::new(),
             defer_scopes: 0,
+            nursery_scopes: 0,
         }
     }
 

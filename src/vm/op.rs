@@ -224,6 +224,13 @@ pub enum Op {
     /// registered task to completion (results discarded). The first task to fault aborts the
     /// remaining siblings and propagates (composing with `recover:` / `defer`).
     JoinNursery,
+    /// TASK B — emitted on the `break`/`continue` jump path for each `parallel:` scope the jump leaves
+    /// before its `JoinNursery` runs (mirrors the `LeaveDeferScope` drain `break`/`continue` emit for
+    /// defer scopes). Pops the innermost nursery and CANCELS-AND-REPORTS its unstarted tasks via
+    /// `drain_escaped_nursery` (one report line when non-empty) — the block-scoped reclaim for the
+    /// net-new in-frame escape site (`do_return` covers the whole-frame return; this covers in-frame
+    /// loop exits). Reclaims exactly one level so nested parallels each report their own count.
+    ReclaimNursery,
     /// `spawn f(args)` — stack `[callee, arg0, …]`; pops `argc + 1`, deep-copies the args across the
     /// airlock (the callee passes by handle, like `defer`), and registers the task on the innermost
     /// nursery. Mirrors `DeferCall`.

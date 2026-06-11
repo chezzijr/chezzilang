@@ -1945,9 +1945,10 @@ impl Vm {
                         // and corrupt later drains in this frame.
                         self.frames[h.frame_len - 1].defer_markers.truncate(h.markers_len);
                         // Reclaim any `parallel:` nursery the fault unwound past (its `JoinNursery`
-                        // never ran), dropping the aborted siblings — mirrors the interpreter always
-                        // reclaiming its nursery list.
-                        self.nurseries.truncate(h.nursery_len);
+                        // never ran) — mirrors the interpreter always reclaiming its nursery list.
+                        // TASK B: route through `drain_escaped_nursery` so a `?` caught by `recover:`
+                        // cancels-and-reports its unstarted tasks IDENTICALLY to an uncaught `?`.
+                        self.drain_escaped_nursery(h.nursery_len);
                         if self.pending_exit.is_some() {
                             return Err(rte);
                         }
@@ -2462,6 +2463,12 @@ impl Vm {
             }
             Op::EnterNursery => self.nurseries.push(Vec::new()),
             Op::JoinNursery => self.join_nursery()?,
+            // TASK B — `break`/`continue` leaving a `parallel:` scope: cancel-and-report its unstarted
+            // tasks and pop exactly that one level (the compiler emits one per escaped scope).
+            Op::ReclaimNursery => {
+                let from = self.nurseries.len().saturating_sub(1);
+                self.drain_escaped_nursery(from);
+            }
             Op::SpawnCall(argc) => self.do_spawn(None, *argc, span)?,
             Op::SpawnMethod(name, argc) => self.do_spawn(Some(name.clone()), *argc, span)?,
             Op::SpawnBlock(proto, entries) => self.do_spawn_block(*proto, entries, span)?,
@@ -4153,13 +4160,13 @@ impl Vm {
         self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
         // Reclaim any `parallel:` nursery this frame opened but whose `JoinNursery` was skipped by a
         // `?`/return escape (no-op on the normal fall-through path — `JoinNursery` already popped it,
-        // so `nurseries.len() == frame.nursery_len`). Mirrors the `recover:` catch path (the
-        // `truncate(h.nursery_len)` keyed on `Handler::nursery_len`) and the interp's unconditional
-        // `exec_parallel` pop; a nested frame keeps the parent's nursery (it captured the parent
-        // depth at entry). NB: within-frame `break`/`continue` out of a `parallel:` stay in-frame
-        // (no `do_return`), so their nursery is reclaimed only when the frame returns — bounded to
-        // frame lifetime, never wrong, but not block-scoped (tracked as a residual in `gaps.md`).
-        self.nurseries.truncate(frame.nursery_len);
+        // so `nurseries.len() == frame.nursery_len`). Mirrors the `recover:` catch path and the interp's
+        // unconditional `exec_parallel` pop; a nested frame keeps the parent's nursery (it captured the
+        // parent depth at entry). TASK B: route through `drain_escaped_nursery` so the unstarted tasks
+        // are cancelled-and-reported (not silently dropped). NB: within-frame `break`/`continue` out of
+        // a `parallel:` no longer rely on this — the compiler emits a `ReclaimNursery` before their
+        // loop-exit `Jump` (see `compile_parallel`/`emit_loop_body_drain`), reclaiming block-scoped.
+        self.drain_escaped_nursery(frame.nursery_len);
         // Drop any `recover:` handlers installed in the frame we just left (e.g. a `?` early-return
         // out of a recover block) — they must not survive to catch a later, unrelated fault.
         while self.handlers.last().is_some_and(|h| h.frame_len > self.frames.len()) {
@@ -4276,6 +4283,28 @@ impl Vm {
     /// the old FIFO run-to-completion drain, so non-blocking programs are byte-for-byte unchanged.
     /// The first child fault (or `std.os.exit`) aborts the remaining siblings and propagates; on that
     /// path the parent's restored `run_until` handles `recover:`/unwind in its own context.
+    /// TASK B — cancel-and-report when a `parallel:` body escapes its `JoinNursery` early (`?` /
+    /// `return` / `break` / `continue`). Pop every nursery entry ABOVE `from_len` (the level the
+    /// escaping construct should restore to), count the unstarted [`PendingCall`]s they hold, and —
+    /// when that count is `>= 1` — write ONE report line to stdout (`out`, the stream the parity
+    /// harnesses read), byte-identical to the interpreter's `exec_parallel`. The tasks are then
+    /// DROPPED: they never started, so there is no fiber to cancel and no buffered output to flush.
+    /// This preserves the old `truncate`'s no-leak behavior (depth returns to `from_len`) and adds the
+    /// observable report. Replaces the bare `self.nurseries.truncate(from_len)` at every reclaim site.
+    fn drain_escaped_nursery(&mut self, from_len: usize) {
+        if self.nurseries.len() <= from_len {
+            return; // nothing escaped past the join (e.g. normal fall-through already popped it)
+        }
+        let mut cancelled = 0usize;
+        while self.nurseries.len() > from_len {
+            // Each `PendingCall` is one unstarted task; drop the whole level.
+            cancelled += self.nurseries.pop().map(|n| n.len()).unwrap_or(0);
+        }
+        if cancelled >= 1 {
+            self.out.push_str(&crate::runtime::pending_cancel_report(cancelled));
+        }
+    }
+
     fn join_nursery(&mut self) -> Result<(), RuntimeError> {
         // Consume this nursery's tasks (FIFO). Popping the entry now (as the old drain did at the
         // end) keeps the parent's `Handler::nursery_len` accounting correct on a later fault.
@@ -6626,6 +6655,14 @@ impl Vm {
                     // Drop scope markers of defer scopes opened inside the recover block — the `?`
                     // jumps past their `LeaveDeferScope`s, so they would otherwise leak.
                     self.frames.last_mut().unwrap().defer_markers.truncate(h.markers_len);
+                    // TASK B — a recover-scoped `?` jumps past the `JoinNursery` of any `parallel:`
+                    // opened inside the recover block: cancel-and-report its unstarted tasks HERE
+                    // (before the handler binds its result and execution continues), so a recover-caught
+                    // `?` reports IDENTICALLY-AND-AS-EARLY as an uncaught one — matching the interp,
+                    // whose `exec_parallel` reports during the `?` unwind, before the recover's value is
+                    // produced. Without this the nursery lingered until the whole frame returned (the
+                    // report then trailed `print("recovered")`, an interp/VM divergence).
+                    self.drain_escaped_nursery(h.nursery_len);
                     // Drain the recover block's own defers before binding the result. A fault in one
                     // supersedes the propagated value (becomes the recover's `Err`).
                     match self.drain_frame_to(h.defer_len) {
@@ -10991,11 +11028,11 @@ main()
     }
 
     /// gap #2: a plain `return` inside a `parallel:` body jumps past `JoinNursery`, so the nursery is
-    /// never popped at the dedent. `do_return` must truncate `self.nurseries` back to the frame's
-    /// entry depth (mirroring the interp's unconditional `exec_parallel` pop + the `recover:` catch
-    /// path), or the stale nursery leaks until program exit. Output is identical pre/post fix (the
-    /// dropped task never ran either way), so this is a white-box check on the residual depth plus a
-    /// VM/interp parity assert. A subsequent `parallel:` must run on a clean stack.
+    /// never popped at the dedent. Both engines truncate `self.nurseries` back to the frame's entry
+    /// depth (VM via `do_return`/`drain_escaped_nursery`; interp via `exec_parallel`'s unconditional
+    /// pop), or the stale nursery leaks. TASK B: the escape now also CANCELS-AND-REPORTS the unstarted
+    /// `noop()` — one report line precedes the early-return value. White-box residual-depth check +
+    /// VM/interp parity. A subsequent `parallel:` runs on a clean stack (its empty join is silent).
     #[test]
     fn parallel_return_escape_leaves_clean_nursery_stack() {
         let src = "fn noop():\n    0\n\
@@ -11003,14 +11040,20 @@ main()
                    fn main():\n    print(worker())\n    parallel:\n        spawn noop()\nmain()\n";
         let (vm_out, nursery_depth) = run_capture_nursery_len(src);
         let vm_out = vm_out.expect("vm run");
-        assert_eq!(vm_out, "5\n", "the early return wins; the join is skipped");
+        // `worker`'s parallel: escapes via `return` with one pending task → cancel+report, then `5`.
+        // `main`'s trailing parallel: dedents normally to its join (NOT an escape), so it runs `noop()`
+        // silently — no report, proving a later parallel: still works on the reclaimed stack.
+        let report = crate::runtime::pending_cancel_report(1);
+        assert_eq!(vm_out, format!("{report}5\n"), "early return wins; only the escaped nursery reports");
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"), "VM/interp parity");
         assert_eq!(nursery_depth, 0, "the return-escaped nursery must be reclaimed, not leaked");
     }
 
     /// gap #2, second escape form: an uncaught `?` that propagates out of the frame (no `recover:`
     /// between the `parallel:` and the program top) must also reclaim the skipped nursery via
-    /// `do_return`. The whole program faults, but the run-so-far must leave no leaked nursery.
+    /// `do_return`. The whole program faults, but the run-so-far must leave no leaked nursery. TASK B:
+    /// the unstarted `noop()` is cancelled-and-reported — one report line is on stdout before the fault
+    /// (interp already dropped on `?`; both engines now emit the report identically).
     #[test]
     fn parallel_try_escape_leaves_clean_nursery_stack() {
         let src = "fn noop():\n    0\n\
@@ -11019,13 +11062,23 @@ main()
         let (vm_out, nursery_depth) = run_capture_nursery_len(src);
         assert!(vm_out.is_err(), "the uncaught ? faults the program");
         assert_eq!(nursery_depth, 0, "the ?-escaped nursery must be reclaimed, not leaked");
+        // Cancel-and-report: stdout-so-far is exactly the report line, identical across engines.
+        let report = crate::runtime::pending_cancel_report(1);
+        let (vm_so_far, vm_res) = run_program(src);
+        assert!(vm_res.is_err());
+        assert_eq!(vm_so_far, report, "VM: one report line before the fault");
+        let (interp_so_far, interp_res) = crate::interp::run_program(src);
+        assert!(interp_res.is_err());
+        assert_eq!(interp_so_far, vm_so_far, "interp/VM stdout-so-far parity");
     }
 
     /// gap #2, boundary: a `?` inside a `parallel:` that IS caught by a same-frame `recover:` must
     /// stay on the **existing** handler-catch reclaim (`Handler::nursery_len`), NOT the new
     /// `do_return` truncate — the two paths are mutually exclusive in `do_try` (recover-scoped `?`
-    /// jumps to the handler and never calls `do_return`). Asserts they don't fight: the recovered
-    /// program continues, a subsequent `parallel:` runs, and the nursery stack ends clean.
+    /// jumps to the handler and never calls `do_return`). TASK B: that recover-catch reclaim site now
+    /// routes through `drain_escaped_nursery`, so a recover-caught `?` cancels-and-reports the unstarted
+    /// `noop()` IDENTICALLY to an uncaught `?` — one report line precedes "recovered". Asserts the two
+    /// reclaim paths don't fight: the recovered program continues, a later `parallel:` runs, stack clean.
     #[test]
     fn parallel_try_caught_by_recover_leaves_clean_nursery_stack() {
         let src = "fn noop():\n    0\n\
@@ -11033,9 +11086,86 @@ main()
                    fn main():\n    r := recover:\n        parallel:\n            spawn noop()\n            y := boom()?\n            print(y)\n        0\n    print(\"recovered\")\n    parallel:\n        spawn noop()\nmain()\n";
         let (vm_out, nursery_depth) = run_capture_nursery_len(src);
         let vm_out = vm_out.expect("the ? is caught by recover, so the program completes");
-        assert_eq!(vm_out, "recovered\n", "the recover swallows the fault; print(y) is skipped");
+        // The recover-caught `?` cancels its one pending task and reports, THEN the recover continues.
+        // `main`'s trailing parallel: joins normally (not an escape) → silent.
+        let report = crate::runtime::pending_cancel_report(1);
+        assert_eq!(vm_out, format!("{report}recovered\n"), "recover swallows the fault; cancel+report precedes it");
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"), "VM/interp parity");
         assert_eq!(nursery_depth, 0, "the recover-caught nursery is reclaimed via the handler path");
+    }
+
+    // ----- TASK B: pending-spawn-drop on early `parallel:` escape → cancel-and-report -----
+    // Policy: an UNSTARTED spawn task on a `parallel:` that escapes early (`?`/`return`/`break`)
+    // before its join is CANCELLED (not run), and ONE report line is written to stdout (`out`,
+    // the stream every `run_capture*` harness reads), byte-identical across interp / VM-cooperative
+    // / VM-`--parallel`. The escape propagates unchanged; the nursery stack stays leak-free (depth 0).
+    //
+    // NB: the spawned task's side effect is observed via `print` (a true cross-airlock observable),
+    // NOT a `Shared[int]` counter — `spawn` DEEP-CLONES the box across the airlock, so a run task
+    // mutates a COPY and the parent's `s.get()` stays 0 whether or not the task ran. A `print` in the
+    // spawned body is the only reliable run-vs-cancelled signal.
+
+    /// `?` escape: the spawned `side()` MUST NOT run (no "SIDE RAN") and the cancellation report IS
+    /// emitted before the fault unwinds. White-box: nursery depth returns to 0 (no leak). The interp
+    /// already DROPPED on `?` (it never diverged on this kind), so here all three only gain the report.
+    #[test]
+    fn parallel_try_escape_cancels_pending_and_reports() {
+        let src = "fn side():\n    print(\"SIDE RAN\")\n\
+                   fn boom() -> int!:\n    return Err(\"x\")\n\
+                   fn main() -> int!:\n    parallel:\n        spawn side()\n        y := boom()?\n        print(y)\n    Ok(0)\nmain()\n";
+        let report = crate::runtime::pending_cancel_report(1);
+        // The `?` faults the whole program, but the report is on stdout captured so far.
+        let (vm_out, depth) = run_capture_nursery_len(src);
+        assert!(vm_out.is_err(), "the uncaught ? faults the program");
+        assert_eq!(depth, 0, "the ?-escaped nursery must be reclaimed, not leaked");
+        // Stdout captured up to the fault: exactly the cancellation report, no `side()` output.
+        let (vm_so_far, vm_res) = run_program(src);
+        assert!(vm_res.is_err());
+        assert_eq!(vm_so_far, report, "VM cooperative: report present, task NOT run");
+        // Interp parity (oracle): identical stdout-so-far + identical error class.
+        let (interp_so_far, interp_res) = crate::interp::run_program(src);
+        assert!(interp_res.is_err());
+        assert_eq!(interp_so_far, vm_so_far, "interp/VM stdout-so-far parity");
+        // --parallel parity: same fault.
+        assert!(run_capture_parallel(src).is_err(), "--parallel also faults");
+    }
+
+    /// `return` escape: the spawned `side()` is CANCELLED (not run) and the report is emitted; the
+    /// early `return` value still wins. Pre-fix the interp RAN the task here (printed "SIDE RAN") while
+    /// the VM dropped it — the live divergence this fixes. Identical text across engines, depth 0.
+    #[test]
+    fn parallel_return_escape_cancels_pending_and_reports() {
+        let src = "fn side():\n    print(\"SIDE RAN\")\n\
+                   fn worker() -> int:\n    parallel:\n        spawn side()\n        return 5\n    99\n\
+                   fn main():\n    print(worker())\nmain()\n";
+        let report = crate::runtime::pending_cancel_report(1);
+        // The early return wins (5); `side()` never runs (no "SIDE RAN"); the report is emitted at the
+        // escape (inside `worker`, before its caller prints the result).
+        let expected = format!("{report}5\n");
+        let (vm_out, depth) = run_capture_nursery_len(src);
+        assert_eq!(vm_out.as_deref().map(str::to_string), Ok(expected.clone()), "VM cooperative");
+        assert_eq!(depth, 0, "the return-escaped nursery must be reclaimed, not leaked");
+        assert_eq!(crate::interp::run_capture(src).expect("interp run"), expected, "interp parity");
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), expected, "--parallel parity");
+    }
+
+    /// `break`-in-loop escape: the NET-NEW VM site (a `break` that leaves a `parallel:` scope via the
+    /// in-frame loop-exit Jump, NOT via `do_return`). The spawned `side()` is cancelled + reported on
+    /// the iteration that breaks; the loop exits, the function continues. Pre-fix the interp RAN the
+    /// task ("SIDE RAN") while the VM dropped it. Identical across engines, depth 0.
+    #[test]
+    fn parallel_break_escape_cancels_pending_and_reports() {
+        let src = "fn side():\n    print(\"SIDE RAN\")\n\
+                   fn main():\n    for i in 0..3:\n        parallel:\n            spawn side()\n            if i == 0:\n                break\n            print(\"unreached\")\n    print(\"done\")\nmain()\n";
+        let report = crate::runtime::pending_cancel_report(1);
+        // i==0: spawn side(), then break out of the `parallel:` scope before the join → cancel+report,
+        // exit the loop. `side()` never runs (no "SIDE RAN"). "unreached" never prints.
+        let expected = format!("{report}done\n");
+        let (vm_out, depth) = run_capture_nursery_len(src);
+        assert_eq!(vm_out.as_deref().map(str::to_string), Ok(expected.clone()), "VM cooperative (net-new break site)");
+        assert_eq!(depth, 0, "the break-escaped nursery must be reclaimed, not leaked");
+        assert_eq!(crate::interp::run_capture(src).expect("interp run"), expected, "interp parity");
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), expected, "--parallel parity");
     }
 
     /// B3.4: a `recv`-blocked sibling must ABORT when a sibling faults before sending, instead of

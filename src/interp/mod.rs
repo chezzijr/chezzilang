@@ -900,6 +900,19 @@ impl Interp {
         let body_result = self.exec_scoped_block(body);
         // Always reclaim our task list, even if the body faulted, so it can't dangle.
         let tasks = self.nurseries.pop().unwrap_or_default();
+        // TASK B — cancel-and-report on early escape. The body escapes the join when it faults (`?`,
+        // an `Err`) OR when a non-`Normal` flow (`return`/`break`/`continue`) unwinds past the dedent.
+        // In every such case the unstarted `spawn` tasks are CANCELLED, not run (the same end-state a
+        // started sibling reaches under B3.4), and ONE report line is written to stdout — byte-identical
+        // to the VM's `drain_escaped_nursery`. Only the NORMAL fall-through runs the queued tasks.
+        let escaped = body_result.is_err()
+            || matches!(body_result, Ok(Flow::Return(_)) | Ok(Flow::Break) | Ok(Flow::Continue));
+        if escaped {
+            if !tasks.is_empty() {
+                self.out.push_str(&crate::runtime::pending_cancel_report(tasks.len()));
+            }
+            return body_result;
+        }
         let body_flow = body_result?;
         for task in tasks {
             self.run_task(task)?;
