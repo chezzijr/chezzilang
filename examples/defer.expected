@@ -19,6 +19,17 @@ breaking
 if cleanup
 iter 1 cleanup
 loop exited
+== block form ==
+block_form body, x now 2
+snapshot x = 1
+single B (registered last)
+block step 1
+block step 2
+single A (registered first)
+== block form on ? path ==
+block_q cleanup 1
+block_q cleanup 2
+bq err nope
 == panic + recover ==
 faults cleanup
 recovered err: index 5 out of bounds (len 2)

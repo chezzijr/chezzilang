@@ -9,8 +9,9 @@
 mod ty;
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, Bound, CompKind, Expr, ExprKind, FnDecl, Import, LitPattern,
-    MethodSig, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, TypeParam, UnaryOp,
+    AssignOp, BinaryOp, Block, Bound, CompKind, DeferTarget, Expr, ExprKind, FnDecl, Import,
+    LitPattern, MethodSig, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, TypeParam,
+    UnaryOp,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
 use std::collections::HashMap;
@@ -337,6 +338,14 @@ struct Checker {
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
     /// Empty outside any `spawn:` block.
     capture_floors: Vec<usize>,
+    /// Like [`Self::capture_floors`] but for `defer:` block bodies. A `defer:` block runs in the
+    /// **same task** (no airlock), so reads of an enclosing local are fine and non-sendable captures
+    /// are legal — it does NOT engage the read sendability gate that `capture_floors` drives.
+    /// However the block captures its free variables **by value** at the defer point, and neither
+    /// engine can write back through that snapshot (the VM has no `SetCaptured` op; the interp would
+    /// write a discarded copy), so *reassigning* an enclosing local is rejected at the reassign gate.
+    /// Empty outside any `defer:` block.
+    defer_floors: Vec<usize>,
     /// True while checking a `std.*` module — structs hoisted now are tagged `StructOrigin::Builtin`.
     current_module_is_stdlib: bool,
 }
@@ -369,6 +378,7 @@ impl Checker {
             loop_depth: 0,
             nursery_depth: 0,
             capture_floors: Vec::new(),
+            defer_floors: Vec::new(),
             current_module_is_stdlib: false,
         };
         c.seed_stdlib_structs();
@@ -628,6 +638,20 @@ impl Checker {
     /// task-local binding (declared inside the task) and a global/function are not captures.
     fn is_captured(&self, name: &str) -> bool {
         let Some(&floor) = self.capture_floors.last() else {
+            return false;
+        };
+        for i in (0..self.scopes.len()).rev() {
+            if self.scopes[i].contains_key(name) {
+                return i < floor;
+            }
+        }
+        false
+    }
+    /// Whether `name` is an enclosing local captured by the innermost `defer:` block (i.e. bound at a
+    /// scope below the block's floor). Drives ONLY the reassign gate — unlike [`Self::is_captured`]
+    /// it does not gate reads, since a same-task `defer:` block reads enclosing locals freely.
+    fn is_defer_captured(&self, name: &str) -> bool {
+        let Some(&floor) = self.defer_floors.last() else {
             return false;
         };
         for i in (0..self.scopes.len()).rev() {
@@ -1203,7 +1227,7 @@ impl Checker {
             }
             StmtKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms),
             StmtKind::Return(value) => self.check_return(value.as_ref(), span),
-            StmtKind::Defer(e) => {
+            StmtKind::Defer(DeferTarget::Call(e)) => {
                 // Block-scoped defer: any indented block — including the module body — is a defer
                 // scope, so top-level `defer` is legal (no `in_fn` requirement).
                 // `defer` targets a method call or a call to a first-class callable value (a user
@@ -1227,6 +1251,18 @@ impl Checker {
                 }
                 // Type-check the call (and its args); the result is discarded, like an expr stmt.
                 self.infer(e);
+            }
+            StmtKind::Defer(DeferTarget::Block(body)) => {
+                // `defer:` block — an ordinary nested scope checked in place. Unlike a `spawn:` block
+                // it runs in the same task (no thread airlock), so we push NO `capture_floor`: reads
+                // of enclosing locals (even non-sendable ones) are fine. We DO push a `defer_floor`
+                // so the reassign gate rejects writing back through the by-value snapshot — neither
+                // engine can do that (VM has no `SetCaptured`; the interp would write a discarded
+                // copy), so allowing it would crash the VM and silently no-op the interp.
+                let floor = self.scopes.len();
+                self.defer_floors.push(floor);
+                self.check_block(body);
+                self.defer_floors.pop();
             }
             StmtKind::Parallel { body } => {
                 self.push_scope();
@@ -1384,6 +1420,13 @@ impl Checker {
                     self.error(
                         target.span,
                         format!("cannot reassign captured binding '{name}' inside a spawned task (captures are read-only — communicate via a Channel or Shared)"),
+                    );
+                    return;
+                }
+                if self.is_defer_captured(name) {
+                    self.error(
+                        target.span,
+                        format!("cannot reassign captured binding '{name}' inside a defer: block (the block captures its free variables by value at the defer point; declare a new binding with ':=' instead)"),
                     );
                     return;
                 }
@@ -4572,8 +4615,13 @@ fn collect_free_calls_block(
                 collect_free_calls_expr(target, fns, scopes, out);
                 collect_free_calls_expr(value, fns, scopes, out);
             }
-            StmtKind::Return(Some(e)) | StmtKind::Expr(e) | StmtKind::Defer(e) => {
+            StmtKind::Return(Some(e))
+            | StmtKind::Expr(e)
+            | StmtKind::Defer(DeferTarget::Call(e)) => {
                 collect_free_calls_expr(e, fns, scopes, out)
+            }
+            StmtKind::Defer(DeferTarget::Block(body)) => {
+                collect_free_calls_block(body, fns, scopes, out)
             }
             StmtKind::If { branches, else_block } => {
                 for (c, b) in branches {
@@ -4751,8 +4799,13 @@ fn find_global_mutations(
                     find_mutations_in_expr(target, globals, scopes, out);
                 }
             }
-            StmtKind::Return(Some(e)) | StmtKind::Expr(e) | StmtKind::Defer(e) => {
+            StmtKind::Return(Some(e))
+            | StmtKind::Expr(e)
+            | StmtKind::Defer(DeferTarget::Call(e)) => {
                 find_mutations_in_expr(e, globals, scopes, out)
+            }
+            StmtKind::Defer(DeferTarget::Block(body)) => {
+                find_global_mutations(body, globals, scopes, out)
             }
             StmtKind::If { branches, else_block } => {
                 for (c, b) in branches {

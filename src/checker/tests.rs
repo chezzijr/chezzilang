@@ -3526,6 +3526,42 @@ fn defer_constructor_rejected() {
     );
 }
 
+#[test]
+fn defer_block_form_ok() {
+    // The block body is ordinary statements — built-ins like `print` are fine here (the call-only
+    // restriction applies only to the single-call form).
+    ok("fn w():\n    defer:\n        print(\"a\")\n        print(\"b\")\n");
+}
+
+#[test]
+fn defer_block_reads_outer_local_ok() {
+    // Same-task block: reading an enclosing local is allowed (no read-only capture floor).
+    ok("fn w():\n    x := 1\n    defer:\n        print(\"{x}\")\n");
+}
+
+#[test]
+fn defer_block_type_errors_still_caught() {
+    // The block is checked like any nested scope — a use of an unbound name is still an error.
+    rejects("fn w():\n    defer:\n        z := nope + 1\n", "unknown name 'nope'");
+}
+
+#[test]
+fn defer_block_reassign_capture_rejected() {
+    // Writing back through the by-value snapshot is rejected (the VM has no `SetCaptured` op; the
+    // interp would write a discarded copy — allowing it would crash one engine and no-op the other).
+    rejects(
+        "fn w():\n    x := 1\n    defer:\n        x = 2\n",
+        "cannot reassign captured binding 'x' inside a defer: block",
+    );
+}
+
+#[test]
+fn defer_block_new_binding_and_nonsendable_read_ok() {
+    // Reading a capture into a NEW binding is fine, and — unlike a `spawn:` block — reading a
+    // non-sendable captured value (a closure) is allowed (same task, no airlock).
+    ok("fn w():\n    x := 1\n    g := fn(): print(\"g\")\n    defer:\n        y := x + 1\n        print(\"{y}\")\n        g()\n");
+}
+
 // ===== optional chaining `?.` + null-coalescing `??` (desugared to `match`) =====
 
 #[test]

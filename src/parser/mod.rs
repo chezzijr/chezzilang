@@ -257,11 +257,7 @@ impl Parser {
                 self.expect_stmt_end()?;
                 k
             }
-            Token::Defer => {
-                let k = self.parse_defer()?;
-                self.expect_stmt_end()?;
-                k
-            }
+            Token::Defer => self.parse_defer()?,
             Token::Break => {
                 self.advance();
                 self.expect_stmt_end()?;
@@ -843,9 +839,18 @@ impl Parser {
 
     /// `defer <expr>` — the expression must be a call; the checker enforces that (the parser keeps
     /// the arm uniform with the other line-oriented statements).
+    /// `defer:` block (form 2) or `defer <call>` (form 1). Mirrors `parse_spawn`: form 1 is
+    /// line-oriented (terminated here); form 2 is compound (its block ends at its own `Dedent`). The
+    /// call-only restriction on form 1 is enforced by the checker (context-sensitive).
     fn parse_defer(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Defer)?;
-        Ok(StmtKind::Defer(self.parse_expr()?))
+        if self.check(&Token::Colon) {
+            let body = self.parse_block()?;
+            return Ok(StmtKind::Defer(DeferTarget::Block(body)));
+        }
+        let expr = self.parse_expr()?;
+        self.expect_stmt_end()?;
+        Ok(StmtKind::Defer(DeferTarget::Call(expr)))
     }
 
     /// `parallel:` — a nursery whose body is an indented (or inline) block. Compound: ends at its
@@ -2083,14 +2088,30 @@ mod tests {
             panic!()
         };
         assert!(matches!(f.body[0].kind, StmtKind::Defer(_)));
-        let StmtKind::Defer(Expr { kind: ExprKind::Call { .. }, .. }) = &f.body[0].kind else {
+        let StmtKind::Defer(DeferTarget::Call(Expr { kind: ExprKind::Call { .. }, .. })) =
+            &f.body[0].kind
+        else {
             panic!("first defer not a call")
         };
-        let StmtKind::Defer(Expr { kind: ExprKind::Call { callee, .. }, .. }) = &f.body[1].kind
+        let StmtKind::Defer(DeferTarget::Call(Expr { kind: ExprKind::Call { callee, .. }, .. })) =
+            &f.body[1].kind
         else {
             panic!("second defer not a call")
         };
         assert!(matches!(callee.kind, ExprKind::Field { .. }));
+    }
+
+    #[test]
+    fn defer_parses_block_form() {
+        let StmtKind::Fn(f) = only("fn f():\n    defer:\n        foo()\n        bar()\n") else {
+            panic!()
+        };
+        let StmtKind::Defer(DeferTarget::Block(body)) = &f.body[0].kind else {
+            panic!("defer: not parsed as a block")
+        };
+        assert_eq!(body.len(), 2);
+        assert!(matches!(body[0].kind, StmtKind::Expr(_)));
+        assert!(matches!(body[1].kind, StmtKind::Expr(_)));
     }
 
     #[test]

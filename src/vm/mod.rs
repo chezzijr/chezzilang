@@ -11798,8 +11798,10 @@ main()";
     }
 
     /// `defer` golden: LIFO order, method + free-fn calls, the `?` short-circuit path, args evaluated
-    /// at the defer statement (per-iteration snapshot), defers running before a `recover:` catch, and
-    /// a fault inside a deferred call. Byte-identical on the VM, the interpreter, and its `.expected`.
+    /// at the defer statement (per-iteration snapshot), the `defer:` block form (in-block order,
+    /// LIFO-as-a-unit, by-value snapshot at the defer point, `?`-path), defers running before a
+    /// `recover:` catch, and a fault inside a deferred call. Byte-identical on the VM, the
+    /// interpreter, and its `.expected`.
     #[test]
     fn golden_defer_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/defer.chz");
@@ -12811,6 +12813,51 @@ main()
         assert_defer_scope(
             "fn log(s: str):\n    print(s)\nfn main():\n    for i in 0..4:\n        defer log(\"d{i}\")\n        if i == 1:\n            continue\n        if i == 2:\n            break\n        log(\"body{i}\")\nmain()\n",
             "body0\nd0\nd1\nd2\n",
+        );
+    }
+
+    /// `defer:` block form — the body runs top-to-bottom at scope exit, but is LIFO *as a unit*
+    /// relative to a surrounding single-call defer. `MakeClosure` + `DeferCall(0)` on the VM;
+    /// `Deferred::Block` on the interp. Asserted byte-identical on both engines.
+    #[test]
+    fn defer_block_form_runs_in_order_lifo_as_unit() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn main():\n    defer log(\"outer\")\n    defer:\n        log(\"b1\")\n        log(\"b2\")\n    log(\"body\")\nmain()\n",
+            "body\nb1\nb2\nouter\n",
+        );
+    }
+
+    /// `defer:` block captures its free variables by value at the defer point — a later reassignment
+    /// of the local is not seen inside the block (matches `defer f(x)` eager arg eval + the VM's
+    /// `MakeClosure` capture). Parity-checked across both engines.
+    #[test]
+    fn defer_block_form_snapshots_by_value() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn main():\n    x := 1\n    defer:\n        log(\"x={x}\")\n    x = 2\n    log(\"now={x}\")\nmain()\n",
+            "now=2\nx=1\n",
+        );
+    }
+
+    /// A `?` short-circuit INSIDE a `defer:` block: the block has no error-return contract, so the
+    /// propagated `Err` is discarded (statements after the `?` don't run) — byte-identical on both
+    /// engines. The VM runs the block as a closure and discards its return at the defer boundary; the
+    /// interp absorbs the propagation in `run_block_task` to match (regression for a found divergence
+    /// where the interp leaked a "? propagation" runtime error).
+    #[test]
+    fn defer_block_form_discards_question_propagation() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return Ok(1)\n    return Err(\"boom\")\nfn main() -> int!:\n    defer:\n        log(\"clean start\")\n        n := risky(false)?\n        log(\"clean end\")\n    log(\"body\")\n    return Ok(0)\nmain()\n",
+            "body\nclean start\n",
+        );
+    }
+
+    /// A `defer:` block in a loop body runs per-iteration and drains on `break` (exercises
+    /// `EnterDeferScope`/`LeaveDeferScope` wrapping the closure-thunk defer).
+    #[test]
+    fn defer_block_form_per_iteration_and_break() {
+        assert_defer_scope(
+            "fn log(s: str):\n    print(s)\nfn main():\n    for i in 0..3:\n        defer:\n            log(\"d{i}a\")\n            log(\"d{i}b\")\n        if i == 1:\n            break\n        log(\"body{i}\")\n    log(\"done\")\nmain()\n",
+            "body0\nd0a\nd0b\nd1a\nd1b\ndone\n",
         );
     }
 

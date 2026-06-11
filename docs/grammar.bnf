@@ -29,10 +29,10 @@
 <stmts>  ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
-<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt>
+<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <deferStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
-<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <deferStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <exprStmt>
+<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <exprStmt>
 
 # ===== simple statements =====
 # The third form is a destructuring let: `a, b, … := expr` binds a tuple's elements positionally.
@@ -57,9 +57,10 @@
 
 <returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <expr> "NEWLINE"
 
-# `defer <call>` — the call-only restriction is enforced by the checker (context-sensitive),
-# not the grammar.
-<deferStmt> ::= "DEFER" <expr> "NEWLINE"
+# `defer <call>` (form 1) — the call-only restriction is enforced by the checker
+# (context-sensitive), not the grammar. `defer:` (form 2) takes an indented block whose body runs
+# top-to-bottom at scope exit; it is block-ending (terminated by the block's DEDENT), hence compound.
+<deferStmt> ::= "DEFER" <expr> "NEWLINE" | "DEFER" <block>
 
 # `break` / `continue` are bare line-oriented statements; "inside a loop" is enforced by the
 # checker (context-sensitive), not the grammar.

@@ -705,6 +705,29 @@ its value. Top-level defers run LIFO when the program ends (or while unwinding a
 top-level error). `std.os.exit` is a hard halt and does **not** run deferred calls (matching Go's
 `os.Exit`).
 
+**Block form `defer:`** — to group several cleanup actions, give `defer` an indented block instead
+of a single call (mirrors `spawn`'s dual form). The body runs **top-to-bottom** at scope exit, but
+is **LIFO as a unit** relative to other `defer`s. Unlike the call form (which has no call-only
+restriction inside the block) the body is ordinary statements — built-ins are fine. Free variables
+are **snapshotted by value at the `defer` point** (consistent with the call form's eager argument
+evaluation), and the block runs in the **same task** — so reads of enclosing locals (even
+non-sendable ones, unlike a `spawn:` block) are allowed. Two rules follow from the by-value snapshot:
+**reassigning** an enclosing local inside the block is an error (it can't be written back through the
+snapshot — declare a fresh binding with `:=`, or use a `Shared[T]`); and a `?` short-circuit inside
+the block is **discarded** (a cleanup body has no error-return contract, like a deferred call whose
+`Err` result is dropped).
+
+```chezzi
+fn handle(conn: Conn):
+    x := 1
+    defer:                        # both lines run at scope exit, top-to-bottom
+        log("closing")
+        conn.close()
+    defer:
+        log("x = {x}")            # prints "x = 1" — snapshotted here, not at exit
+    x = 2
+```
+
 ## 9b. Program entry — there is no automatic `main`
 
 Chezzi is a scripting language: a program runs **top-to-bottom**. There is **no automatic entry

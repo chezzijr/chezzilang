@@ -97,11 +97,12 @@ pub enum StmtKind {
     },
     /// `return` with an optional value.
     Return(Option<Expr>),
-    /// `defer <call>` — register a call to run when the enclosing function/method/closure frame
-    /// exits (normal return, `?` short-circuit, or panic), in LIFO order. The expression must be a
-    /// call (`f(a)` / `obj.m(a)`); its receiver + arguments are evaluated at the `defer` statement
-    /// (Go semantics), the call itself at frame exit.
-    Defer(Expr),
+    /// `defer <call>` (form 1) or `defer:` block (form 2) — register cleanup to run when the
+    /// enclosing block/frame exits (normal return, `?` short-circuit, `break`/`continue`, or panic),
+    /// in LIFO order. Form 1's receiver + arguments are evaluated at the `defer` statement (Go
+    /// semantics); form 2's free variables are snapshotted by value at the `defer` point. The
+    /// deferred body itself runs at scope exit.
+    Defer(DeferTarget),
     /// `parallel:` — a structured-concurrency nursery. Spawned children run to completion at the
     /// block's dedent (the join barrier); the first child error aborts the rest and propagates.
     Parallel { body: Block },
@@ -117,6 +118,19 @@ pub enum StmtKind {
     Import(Import),
     /// A bare expression used as a statement, e.g. `print(x)`.
     Expr(Expr),
+}
+
+/// The target of a `defer` statement: a single call (`defer f(x)` / `defer obj.m(x)`) or an
+/// indented block (`defer:`). Mirrors [`SpawnTarget`]: form 1 sidesteps the single-expression
+/// closure limit for the common case; form 2 allows a multi-statement cleanup body that runs
+/// top-to-bottom at scope exit (LIFO relative to other `defer`s). Unlike `spawn`, the block runs in
+/// the same task, so its captured free variables are not read-only.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeferTarget {
+    /// `defer f(args)` / `defer obj.m(args)` — the expression must be a call (checker-enforced).
+    Call(Expr),
+    /// `defer:` followed by an indented block.
+    Block(Block),
 }
 
 /// The target of a `spawn` statement: a named call (`spawn f(x)`) or an anonymous indented block

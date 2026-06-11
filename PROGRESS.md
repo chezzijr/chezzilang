@@ -91,6 +91,33 @@ where the same literal op repeats — fib/loop/primes/list don't). No regression
 `cargo test conformance` (7/7) + `cargo clippy -- -D warnings` clean. Numbers in
 [`docs/benchmarks.md`](docs/benchmarks.md).
 
+**✅ `defer:` block form LANDED (2026-06-11).** Ergonomic gap closure (was 🟡 in `gaps.md`), TDD'd and
+two-engine-parity-clean. `defer` now takes an indented block as well as a single call — multi-action
+cleanup without N `defer` lines:
+```chezzi
+defer:
+    log("closing")
+    conn.close()
+```
+Mirrored `spawn`'s dual form 1:1 with **no new VM op**: AST `Defer(Expr)` → `Defer(DeferTarget::{Call,
+Block})`; `parse_defer` branches on `:` → `parse_block`; grammar `<deferStmt>` gained `| "DEFER"
+<block>` and moved into `<compoundStmt>` (conformance 7/7 green); checker splits the arm (Block =
+ordinary nested scope, **no** capture floor — same-thread, so captures are not read-only, unlike a
+`spawn:` block); compiler's `compile_defer` Block arm emits **`MakeClosure(pid, entries)` +
+`DeferCall(0)`** (reuses existing ops); interp added `Deferred::Block` snapshotting locals **shallow
+(`.clone()`, matching `MakeClosure`'s handle copy — NOT the spawn airlock's `deep_clone`)** so both
+engines agree on container aliasing. **Semantics:** body runs top-to-bottom at scope exit; LIFO **as a
+unit** relative to other `defer`s; free vars snapshot **by value at the `defer` point**; runs on all
+exit paths (return/`?`/break/continue/panic/`recover:`). A 2-reviewer panel caught **two parity bugs**,
+both fixed before landing: (1) reassigning an enclosing local inside the block crashed the VM compiler
+(no `SetCaptured` op) and silently no-op'd the interp → now rejected at check time via a dedicated
+`defer_floors` write-gate (separate from `capture_floors`, so same-task non-sendable *reads* stay
+legal); (2) a `?` short-circuit inside the block leaked a runtime error on the interp but was discarded
+on the VM → interp's `run_block_task` now absorbs the propagation like `call_closure`, so both engines
+discard it. Tests: `examples/defer.chz` golden (VM == interp == `.expected`) extended with block-form +
+snapshot + `?`-path cases; 4 VM parity tests + 5 checker tests + 2 parser tests. **1535 tests** green +
+conformance (7/7) + `clippy --all-targets` clean.
+
 **Next (M19):** arithmetic specialization is largely already shipped (P1 superinstructions inline the
 monomorphic int path); frame pooling is low-ROI here (`CallFrame`'s `deferred`/`defer_markers` use
 alloc-free `Vec::new()`, and frames live in a capacity-reusing `Vec`). The remaining big lever is

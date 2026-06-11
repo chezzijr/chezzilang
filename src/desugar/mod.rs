@@ -17,8 +17,8 @@
 //! (mirroring the checker, which treats a call as a named function only when the name is not a local).
 
 use crate::ast::{
-    Block, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Param, Pattern, Span, SpawnTarget,
-    Stmt, StmtKind, Type,
+    Block, DeferTarget, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Param, Pattern, Span,
+    SpawnTarget, Stmt, StmtKind, Type,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolveError};
 use std::collections::{HashMap, HashSet};
@@ -589,7 +589,10 @@ impl Walker<'_> {
                 }
             }
             StmtKind::Return(Some(e)) => self.walk_expr(e)?,
-            StmtKind::Defer(e) => self.walk_expr(e)?,
+            StmtKind::Defer(target) => match target {
+                DeferTarget::Call(e) => self.walk_expr(e)?,
+                DeferTarget::Block(body) => self.walk_block(body)?,
+            },
             StmtKind::Expr(e) => self.walk_expr(e)?,
             StmtKind::Parallel { body } => self.walk_block(body)?,
             StmtKind::Spawn(target) => match target {

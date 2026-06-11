@@ -12,8 +12,8 @@
 //!      forward references resolve) and one proto per `fn` / method / closure.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CompKind, Expr, ExprKind, FnDecl, LitPattern, MatchArm, MatchExprArm,
-    Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp,
+    AssignOp, BinaryOp, Block, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern, MatchArm,
+    MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp,
 };
 use crate::resolver::{ModuleGraph, ResolvedImport};
 use crate::vm::op::{
@@ -425,7 +425,7 @@ impl Compiler {
                 }
                 Ok(())
             }
-            StmtKind::Defer(call) => self.compile_defer(fc, call, stmt.span),
+            StmtKind::Defer(target) => self.compile_defer(fc, target, stmt.span),
             StmtKind::If { branches, else_block } => self.compile_if(fc, branches, else_block.as_deref(), stmt.span),
             StmtKind::While { cond, body } => self.compile_while(fc, cond, body),
             StmtKind::For { vars, iter, body } => self.compile_for(fc, vars, iter, body, stmt.span),
@@ -1398,7 +1398,26 @@ impl Compiler {
     /// `defer <call>` — evaluate the receiver/args now (Go semantics) and register a deferred call
     /// on the frame; the call runs LIFO when the frame exits. Mirrors `compile_call`'s method-vs-value
     /// split: `DeferMethod` for `obj.m(a)`, `DeferCall` for a value callee.
-    fn compile_defer(&mut self, fc: &mut FnComp, call: &Expr, span: Span) -> Result<(), CompileError> {
+    fn compile_defer(&mut self, fc: &mut FnComp, target: &DeferTarget, span: Span) -> Result<(), CompileError> {
+        let call = match target {
+            DeferTarget::Call(call) => call,
+            DeferTarget::Block(body) => {
+                // `defer:` block → a synthetic zero-arg closure capturing the visible bindings by
+                // value at the defer point (exactly `compile_spawn`'s Block arm, minus the airlock),
+                // then defer-invoke it with 0 args. Reuses `MakeClosure` + `DeferCall` — no new op.
+                let entries = fc.snapshot_entries();
+                let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+                let mut child = FnComp::new("<deferred block>".to_string(), 0, false);
+                child.captured_names = captured_names;
+                self.compile_block_scoped(&mut child, body)?;
+                child.emit(Op::Nil, span);
+                child.emit(Op::Return, span);
+                let pid = self.finish(child);
+                fc.emit(Op::MakeClosure(pid, entries), span);
+                fc.emit(Op::DeferCall(0), span);
+                return Ok(());
+            }
+        };
         let ExprKind::Call { callee, args, .. } = &call.kind else {
             return Err(CompileError {
                 message: "defer requires a function or method call".to_string(),

@@ -55,6 +55,30 @@ fn block_scope():
         log("iter {i} work")
     log("loop exited")
 
+# --- `defer:` block form: a multi-statement cleanup body. Runs top-to-bottom at scope exit, but is
+#     LIFO *as a unit* relative to other `defer`s. Free variables are snapshotted by value at the
+#     `defer` point (just like `defer f(x)` evaluates its args eagerly). ---
+fn block_form():
+    defer log("single A (registered first)")
+    defer:
+        log("block step 1")
+        log("block step 2")
+    defer log("single B (registered last)")
+    x := 1
+    defer:
+        log("snapshot x = {x}")   # captures x == 1 here, not its later value
+    x = 2
+    log("block_form body, x now {x}")
+
+# --- a `defer:` block runs on the `?` short-circuit path too (block-scoped, all exit paths) ---
+fn block_q(ok: bool) -> int!:
+    defer:
+        log("block_q cleanup 1")
+        log("block_q cleanup 2")
+    if not ok:
+        return Err("nope")
+    return Ok(1)
+
 # --- defers run as a panic unwinds, before a `recover:` boundary regains control ---
 fn faults():
     defer log("faults cleanup")
@@ -87,6 +111,15 @@ fn main():
 
     log("== block scope ==")
     block_scope()
+
+    log("== block form ==")
+    block_form()
+
+    log("== block form on ? path ==")
+    rq := block_q(false)
+    match rq:
+        Ok(_): log("bq ok")
+        Err(e): log("bq err {e}")
 
     log("== panic + recover ==")
     res := recover:

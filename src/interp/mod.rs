@@ -2,7 +2,7 @@
 //! Chezzi before the bytecode VM (M5). Single-file programs run here.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CompKind, Expr, ExprKind, FnDecl, LitPattern, MatchArm,
+    AssignOp, BinaryOp, Block, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern, MatchArm,
     MatchExprArm, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp,
 };
 use crate::{lexer, parser};
@@ -241,6 +241,9 @@ enum Deferred {
     Call { callee: Value, args: Vec<Value>, span: Span },
     /// `defer recv.name(args)` — dispatch the named method on the receiver.
     Method { recv: Value, name: String, args: Vec<Value>, span: Span },
+    /// `defer:` block — run the body in its own frame against the locals snapshotted (by value,
+    /// shallow — sharing heap handles, matching the VM's `MakeClosure` capture) at the defer point.
+    Block { body: Block, locals: Vec<std::collections::HashMap<String, Value>>, home: value::ModEnv, span: Span },
 }
 
 /// Maximum user-function call depth. Bounds recursion well within the dedicated interpreter
@@ -876,20 +879,36 @@ impl Interp {
 
     /// `defer <call>` — evaluate the receiver + arguments now (Go semantics) and register the call on
     /// the current frame; it runs at frame exit. The checker guarantees `call` is an `ExprKind::Call`.
-    fn exec_defer(&mut self, call: &Expr, span: Span) -> Result<Flow, RuntimeError> {
-        let ExprKind::Call { callee, args, .. } = &call.kind else {
-            return Err(RuntimeError {
-                message: "defer requires a function or method call".to_string(),
-                span,
-            });
-        };
-        let arg_vals = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
-        let deferred = if let ExprKind::Field { obj, name } = &callee.kind {
-            let recv = self.eval(obj)?;
-            Deferred::Method { recv, name: name.clone(), args: arg_vals, span: call.span }
-        } else {
-            let callee_val = self.eval(callee)?;
-            Deferred::Call { callee: callee_val, args: arg_vals, span: call.span }
+    fn exec_defer(&mut self, target: &DeferTarget, span: Span) -> Result<Flow, RuntimeError> {
+        let deferred = match target {
+            DeferTarget::Block(body) => {
+                // Snapshot the locals by value at the defer point. Shallow `.clone()` (NOT
+                // `deep_clone`): the block runs in the same task, so it shares heap handles with the
+                // parent — matching the VM's `MakeClosure` capture (which copies `Value` handles).
+                let locals = self
+                    .env
+                    .snapshot_locals()
+                    .iter()
+                    .map(|frame| frame.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .collect();
+                Deferred::Block { body: body.clone(), locals, home: self.env.globals_rc(), span }
+            }
+            DeferTarget::Call(call) => {
+                let ExprKind::Call { callee, args, .. } = &call.kind else {
+                    return Err(RuntimeError {
+                        message: "defer requires a function or method call".to_string(),
+                        span,
+                    });
+                };
+                let arg_vals = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+                if let ExprKind::Field { obj, name } = &callee.kind {
+                    let recv = self.eval(obj)?;
+                    Deferred::Method { recv, name: name.clone(), args: arg_vals, span: call.span }
+                } else {
+                    let callee_val = self.eval(callee)?;
+                    Deferred::Call { callee: callee_val, args: arg_vals, span: call.span }
+                }
+            }
         };
         if let Some(frame) = self.deferred.last_mut() {
             frame.push(deferred);
@@ -992,7 +1011,7 @@ impl Interp {
                 self.dispatch_method(recv, &name, args, span).map(|_| ())
             }
             Task::Block { body, locals, home, span } => {
-                self.run_block_task(&body, locals, home, span)
+                self.run_block_task("<spawned task>", &body, locals, home, span)
             }
         }
     }
@@ -1001,6 +1020,7 @@ impl Interp {
     /// (mirrors [`Interp::call_closure`]'s frame setup). Any `return` / fall-through ends the task.
     fn run_block_task(
         &mut self,
+        name: &str,
         body: &[Stmt],
         locals: Vec<std::collections::HashMap<String, Value>>,
         home: value::ModEnv,
@@ -1008,13 +1028,19 @@ impl Interp {
     ) -> Result<(), RuntimeError> {
         self.enter_call(span)?;
         self.deferred.push(Vec::new());
-        self.call_stack.push(TraceFrame { function: "<spawned task>".to_string(), span });
+        self.call_stack.push(TraceFrame { function: name.to_string(), span });
         let saved_globals = self.env.swap_globals(home);
         let saved = self.env.swap_locals(locals);
         let result = self.exec_block_inner(body);
         let outcome = match self.finish_frame(saved, saved_globals) {
             Err(e) => Err(e),
-            Ok(_) => result.map(|_| ()),
+            // A `?` short-circuit inside the block sets `propagating`, which `finish_frame` surfaces
+            // as `Ok(Some(_))`. A block (spawn task or deferred body) has no error-return contract,
+            // so the propagated value is discarded — mirroring `call_closure` and the VM, which runs
+            // the block as a closure and discards its return at the task/defer boundary. Without this
+            // the "? propagation" `Err` in `result` would escape on the interp but not the VM.
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => result.map(|_| ()),
         };
         if outcome.is_ok() {
             self.call_stack.pop();
@@ -1035,6 +1061,9 @@ impl Interp {
                 Deferred::Method { recv, name, args, span } => {
                     self.dispatch_method(recv, &name, args, span)
                 }
+                Deferred::Block { body, locals, home, span } => self
+                    .run_block_task("<deferred block>", &body, locals, home, span)
+                    .map(|_| Value::Nil),
             };
             self.propagating = saved_prop;
             if let Err(e) = r {
@@ -2754,7 +2783,7 @@ impl Interp {
             }
             // Kept out of this match (its locals are large) so `exec_stmt`'s frame stays small for
             // deep recursion — same reason as `eval_slice`.
-            StmtKind::Defer(call) => self.exec_defer(call, stmt.span),
+            StmtKind::Defer(target) => self.exec_defer(target, stmt.span),
             // Kept out of this match (their locals are large) so `exec_stmt`'s frame stays small.
             StmtKind::Parallel { body } => self.exec_parallel(body),
             StmtKind::Spawn(target) => self.exec_spawn(target, stmt.span),

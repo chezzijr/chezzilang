@@ -89,34 +89,39 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   (loop body, `if`/branch, `recover:`, `match` arm, fn body, module top level), LIFO, inner-first,
   on every exit path (fall-through, `break`/`continue`, return, `?`, panic). Args evaluated at the
   `defer` statement (Go). (Considered & rejected: Python-style `with` — needs a new protocol + block.)
-- **🟡 `defer:` block form (multi-statement deferred body)** — `defer` today takes a **single call**
-  only (`defer f(x)` / `defer obj.m(x)`); grouping cleanup needs N `defer` lines. **Blocks:**
-  ergonomic multi-action cleanup —
-  ```chezzi
-  defer:
-      foo()   # runs foo then bar at scope exit
-      bar()
-  ```
-  **Fix sketch (mirror `spawn`'s dual form 1:1 — low risk, _no new VM op_):** `spawn` already pairs
-  `spawn f(x)` + `spawn:` block (`SpawnTarget::Call | Block`); closures can't be the desugar target
-  (single-expression bodies, `parser/mod.rs:1513`) — which is exactly why `spawn` added a `Block`
-  variant. (a) AST `Defer(Expr)` → `Defer(DeferTarget::{Call(Expr), Block(Block)})`, mirroring
-  `SpawnTarget` (`ast/mod.rs:126`). (b) `parse_defer` (`:846`) mirrors `parse_spawn` (`:862`): `Colon`
-  → `parse_block`. (c) grammar `<deferStmt>` gains `| "DEFER" <block>` and moves into `<compoundStmt>`
-  (mirror `spawnStmt:160`). (d) checker `:1206` splits the arm (Block = ordinary nested scope, **no**
-  capture floor — same-thread, not airlocked); the two `StmtKind::Defer(e)` analysis sites (`:4575`,
-  `:4754`) recurse into the block. (e) compiler `compile_defer` (`:1401`) builds a synthetic zero-arg
-  proto like `compile_spawn`'s Block arm (`:496`) then emits **`MakeClosure(pid, entries)` +
-  `DeferCall(0)`** (reuses existing ops); `block_has_defer` (`:1744`) matches both variants.
-  (f) interp adds `Deferred::Block` (`:239`) snapshotting locals like the spawn-block arm (`:961`),
-  run in `run_deferred` (`:1029`) mirroring `run_task`'s `Task::Block`. **Semantics:** body runs
-  top-to-bottom at scope exit; the block is LIFO relative to other `defer`s; free vars snapshot **by
-  value at the `defer` point** (consistent with `defer f(x)` eager arg eval + VM `MakeClosure`
-  capture); runs on all exit paths (return/`?`/break/continue/panic/`recover:`). Full plan:
-  `~/.claude/plans/there-has-been-something-lucky-kitten.md`.
+- ~~**`defer:` block form (multi-statement deferred body)**~~ — **resolved (2026-06-11; see
+  `examples/defer.chz` + `docs/syntax.md` §9 defer).** Mirrored `spawn`'s dual form 1:1 with **no new
+  VM op**: AST `Defer(Expr)` → `Defer(DeferTarget::{Call,Block})`; `parse_defer` branches on `Colon`
+  → `parse_block`; grammar `<deferStmt>` gained `| "DEFER" <block>` and moved into `<compoundStmt>`;
+  checker splits the arm (Block = ordinary nested scope, **no** capture floor — same-thread);
+  compiler's `compile_defer` Block arm builds a synthetic zero-arg proto then emits
+  **`MakeClosure(pid, entries)` + `DeferCall(0)`** (reuses existing ops); interp added
+  `Deferred::Block` snapshotting locals **shallow (`.clone()`, matching `MakeClosure`'s handle copy —
+  NOT `deep_clone`/airlock)**, run via `run_block_task`. **Semantics:** body runs top-to-bottom at
+  scope exit; LIFO as a unit relative to other `defer`s; free vars snapshot **by value at the `defer`
+  point**; runs on all exit paths (return/`?`/break/continue/panic/`recover:`). Two review-found
+  parity bugs were fixed before landing: (1) **reassigning** an enclosing local inside the block is
+  now rejected at check time (`defer_floors` write-gate — a separate floor that does NOT engage the
+  airlock read-sendability gate, so same-task non-sendable *reads* stay legal) instead of crashing
+  the VM compiler (no `SetCaptured` op) and silently no-op'ing the interp; (2) a `?` short-circuit
+  inside the block is **discarded** on both engines (the block has no error-return contract — VM runs
+  it as a closure and drops the return; interp's `run_block_task` now absorbs the propagation like
+  `call_closure`). Both engines byte-identical (golden + 4 VM parity tests + 5 checker tests).
+  **Note:** the broader **captured-local write soundness gap for plain closures** (below) stays open
+  — `defer:` closes only its own instance via the dedicated `defer_floors` gate.
 
 ### 🟡 Type-system + runtime depth (already-tracked open)
 
+- **🟡 `break`/`continue` inside a `spawn:` / `defer:` block: checker accepts, engines diverge** —
+  these blocks compile into a fresh child proto with an empty loop stack, so a `break`/`continue`
+  lexically nested in an enclosing loop is rejected by the **VM** at runtime (`break outside loop`,
+  from the compiler's child-proto isolation) but silently treated as a **block exit** by the interp,
+  while `check` reports "ok". A clean `check` should guarantee the program runs, and the two engines
+  must agree. Affects **both** block forms identically (pre-existing for `spawn:`, inherited by
+  `defer:`). **Fix sketch:** treat a `spawn:`/`defer:` block as a control-flow boundary in the
+  checker — save/zero `loop_depth` across `check_block` for these arms (`checker/mod.rs:1092`) so the
+  `loop_depth == 0` guard at `StmtKind::Break` fires, rejecting `break`/`continue` at check time on
+  both engines. One shared fix for both forms.
 - **🟡 Checker silently allows `=` to a by-value captured local (soundness gap)** — `infer_closure`
   pushes **no** capture floor (`checker/mod.rs:2841`), so an inner fn/closure that writes an
   **enclosing fn's local** (`x = 6`) type-checks fine, but the compiler can't resolve the local and
