@@ -402,6 +402,35 @@ conns. Items *not* in B3–B5 (cross-nursery wakeups, recv-in-native-callback / 
 **[`docs/concurrency.md` §11](docs/concurrency.md)** and **[`docs/concurrency-tier-d.md`](docs/concurrency-tier-d.md)**.
 Full A/B breakdown: §9.
 
+**D5 owe #3 — Path C residuals #1 + #3-sleep have landed** (this session, branch `d5-owe3-path-c`),
+closing the two actionable residuals from the Path C attempt (ranked correctness > perf; #3-socket +
+#2 remain — see `docs/concurrency-tier-d.md`). **#1 (deadlock false-positive, a correctness bug):**
+when 2+ fibers were demoted and one had a value already queued, `is_deadlocked` could fault an innocent
+**parked sibling** with a fake `deadlock` (the demoted fiber polls its OWN channel queue — a `send`
+`push_back`s + notifies `core.cv`, it does NOT bump `runnable` — so a queued value was invisible to the
+counter-only predicate). Fixed: `SchedCore` now registers each demoted fiber's `Arc<ChannelCore>`
+(refcounted `demoted_chans` map, `register/unregister_demoted`); `is_deadlocked` peeks the registered
+queues under core lock A (A-then-q, the `send_wake` order) and vetoes the fire if any is non-empty (that
+fiber will pop + progress); and `demote_recv_block` was restructured so `pop + blocked_native-- +
+un-register` is **atomic under core lock A** — the checker never observes an emptied-but-still-counted
+demoted fiber. **#3-sleep (perf/liveness):** a `sleep_ms(ms>0)` reached inside a native callback
+(`native_reentry > 0`) used to run **inline**, pinning the worker; it now calls a new
+`Vm::demote_block_sleep` — `spawn_replacement_worker` + `thread::sleep(ms)` in place + resume, accounted
+`running→inflight` (so a sleeper **vetoes** deadlock — it returns unconditionally, unlike a
+`blocked_native` recv); a cancel observed during/after the sleep swallows the task outcome (mirrors the
+recv demote, so a cancelled task stops sleeping through the rest of the callback). The offload gate is
+untouched (it requires `native_reentry == 0`); the **socket half of #3** (a socket op inside a callback
+handed to the netpoller) stays deferred — more complex, rare. **+4 tests** (`deadlock_predicate_vetoed_
+by_queued_value_on_demoted_channel` + `..._refcounted_for_two_fibers_on_one_channel` white-box;
+`d5_owe3_path_c_no_false_deadlock_when_demoted_fiber_has_queued_value` 200× race stress;
+`d5_owe3_path_c_sleep_in_callback_demotes_frees_worker` timing N=workers·4 <450ms +
+`..._sleep_in_callback_correct`); `d5_blocking_native_in_callback_runs_inline` repurposed to `fs.exists`
+(still inline — only `sleep_ms`/`recv` demote). **1422 green**, `cargo clippy` clean, conformance green.
+**2-agent S++ panel (Code Reviewer ×2): zero Critical;** Important applied — the sleep demote now checks
+cancel (was: a cancelled task slept through every remaining callback element + faulted normally instead
+of being swallowed); refcount>1 white-box coverage added; the existing no-sender deadlock test already
+guards the genuine-deadlock-still-faults path.
+
 > **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,
 > not a TODO.** The interpreter stays frozen at the **sequential concurrency subset** and serves as
 > the **differential-testing parity oracle** for the non-blocking language surface (its real value:

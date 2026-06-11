@@ -730,6 +730,31 @@ struct SchedCore {
     done: usize,     // fibers that have produced a `TaskOutcome`
     total: usize,    // nursery task count (fixed for D2b — no spawn-after-join)
     terminate: bool, // every worker loop exits once set (done==total, deadlock, or os.exit/fault)
+    /// D5 owe #3 Path C (#1 false-positive fix) — `ChannelCore`s that a demoted (blocked-in-callback)
+    /// fiber is waiting on, keyed by core ptr ([`Vm::channel_core_ptr`]) → (core, refcount). A demoted
+    /// fiber polls its OWN queue (a `send` `push_back`s + notifies the channel condvar, NOT `runnable`),
+    /// so a value queued for it is invisible to the counter-only predicate. [`MnSched::is_deadlocked`]
+    /// peeks each registered queue before firing: a non-empty one means that fiber WILL pop + progress,
+    /// so it is not a deadlock. Registered/un-registered under core lock A by [`Vm::demote_recv_block`];
+    /// the refcount handles 2+ fibers demoted on the same channel.
+    demoted_chans: std::collections::HashMap<usize, (Arc<ChannelCore>, usize)>,
+}
+
+impl SchedCore {
+    /// Register a demoted fiber's channel (refcounted). Caller holds core lock A.
+    fn register_demoted(&mut self, ptr: usize, core: &Arc<ChannelCore>) {
+        self.demoted_chans.entry(ptr).or_insert_with(|| (Arc::clone(core), 0)).1 += 1;
+    }
+
+    /// Drop a demoted fiber's channel registration (removes the entry at refcount 0). Caller holds A.
+    fn unregister_demoted(&mut self, ptr: usize) {
+        if let Some(entry) = self.demoted_chans.get_mut(&ptr) {
+            entry.1 -= 1;
+            if entry.1 == 0 {
+                self.demoted_chans.remove(&ptr);
+            }
+        }
+    }
 }
 
 /// What [`MnSched::take_runnable`] hands a worker: the next fiber to run, or `Stop` (this worker
@@ -754,6 +779,7 @@ impl MnSched {
                 done: 0,
                 total,
                 terminate: false,
+                demoted_chans: std::collections::HashMap::new(),
             }),
             cv: Condvar::new(),
             cancel,
@@ -1098,7 +1124,7 @@ impl MnSched {
     /// sound. The `done < total` half is guaranteed by the call site (the `done == total` terminate
     /// check precedes this).
     fn is_deadlocked(&self, c: &SchedCore) -> bool {
-        c.running == 0
+        if !(c.running == 0
             && self.runnable.load(Ordering::Relaxed) == 0
             && self.inflight.load(Ordering::Relaxed) == 0
             // D5 owe #3 (Path C) — a `blocked_native` fiber (demoted, waiting in place on a channel
@@ -1106,7 +1132,23 @@ impl MnSched {
             // no send can ever arrive, so an all-parked-or-blocked_native quiesce IS a deadlock. The
             // demoted thread observes the resulting `terminate` (via its bounded condvar poll) and
             // faults in place. (`blocked_native++` notifies `cv` so an idle puller re-evaluates this.)
-            && (c.parked_n > 0 || self.blocked_native.load(Ordering::Relaxed) > 0)
+            && (c.parked_n > 0 || self.blocked_native.load(Ordering::Relaxed) > 0))
+        {
+            return false;
+        }
+        // D5 owe #3 Path C (#1 false-positive fix) — before declaring deadlock, peek every demoted
+        // fiber's channel queue (A-then-q — the caller holds the `SchedCore` guard, the same order
+        // `send_wake` uses, so no ABBA). A value already queued for a demoted fiber is invisible to the
+        // counters above (a `send` doesn't bump `runnable` for a demoted fiber), but that fiber WILL pop
+        // it on its next poll and make progress — so this is NOT a deadlock. Without this peek, a sibling
+        // `send` racing the quiesce could spuriously fault an innocent PARKED sibling.
+        if c.demoted_chans
+            .values()
+            .any(|(core, _)| !core.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty())
+        {
+            return false;
+        }
+        true
     }
 
     /// D5 — hand a fiber that hit a blocking native call to the dirty/blocking pool, freeing this
@@ -2854,6 +2896,18 @@ impl Vm {
                 return Ok(Value::Nil); // sentinel; never pushed (the `paused()` gate at the call site)
             }
         }
+        // D5 owe #3 Path C (#3) — a `sleep_ms(ms>0)` reached INSIDE a native callback (the offload gate
+        // above is skipped here because it requires `native_reentry == 0`). Rather than run inline and
+        // pin the worker for `ms`, DEMOTE the worker: spawn a replacement + sleep in place + resume. A
+        // non-positive / non-int arg has nothing to wait for → falls through to the inline no-op.
+        if self.mn.is_some()
+            && self.native_reentry > 0
+            && name == "sleep_ms"
+            && let Some(Value::Int(ms)) = args.first()
+            && *ms > 0
+        {
+            return self.demote_block_sleep(*ms as u64, span);
+        }
         let mut host = VmHost { vm: self, args };
         let ret = func(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
         Ok(self.lower_native(ret))
@@ -4257,14 +4311,18 @@ impl Vm {
     fn demote_recv_block(&mut self, h: GcRef, span: Span) -> Result<Value, RuntimeError> {
         let sched = Arc::clone(self.mn.as_ref().expect("demote_recv_block on the cooperative engine"));
         let core = self.channel_core(h);
-        // 1. Account running → blocked_native under the core lock, then notify so an idle puller sitting
-        //    in an untimed `take_runnable` `cv.wait` re-evaluates the deadlock predicate now that this
-        //    fiber left `running` (without this notify a genuine all-blocked quiesce would never be
-        //    detected — a hang).
+        let ptr = self.channel_core_ptr(h);
+        // 1. Account running → blocked_native AND register the channel (#1 fix), under core lock A, then
+        //    notify so an idle puller sitting in an untimed `take_runnable` `cv.wait` re-evaluates the
+        //    deadlock predicate now that this fiber left `running` (without this notify a genuine
+        //    all-blocked quiesce would never be detected — a hang). The registration lets
+        //    `is_deadlocked` peek this fiber's queue so a value a sibling races in isn't misread as a
+        //    deadlock (the #1 false-positive against an innocent parked sibling).
         {
             let mut c = sched.lock();
             c.running -= 1;
             sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+            c.register_demoted(ptr, &core);
             drop(c);
             sched.cv.notify_all();
         }
@@ -4273,12 +4331,13 @@ impl Vm {
         //    reuse the already-spawned coverage — one spawn + one eventual exit per demoted thread.
         //    If the OS refuses the thread (a real mode for this raw-thread-per-demotion design under
         //    `RLIMIT_NPROC`/ENOMEM with many fibers blocked-in-callback), DON'T panic mid-accounting:
-        //    un-roll step 1 and fault this fiber cleanly so the join still completes.
+        //    un-roll step 1 (account + registry) and fault this fiber cleanly so the join still completes.
         if !self.demoted {
             if !self.spawn_replacement_worker(&sched, self.wid) {
                 let mut c = sched.lock();
                 c.running += 1;
                 sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+                c.unregister_demoted(ptr);
                 drop(c);
                 return Err(self.err(
                     "recv inside a native callback could not demote the worker (OS thread limit \
@@ -4289,56 +4348,126 @@ impl Vm {
             }
             self.demoted = true;
         }
-        // 3. Block in place on the channel's OWN condvar/queue. NEVER hold the core lock (A) and `core.q`
-        //    simultaneously (respects the A-outer / q-inner order `send_wake` uses → no ABBA). Check the
-        //    QUEUE FIRST each iteration so a genuinely-sent value always wins over a spuriously-set
-        //    `terminate` (the narrow deadlock-predicate false-positive); lost condvar wakeups are bounded
-        //    by `DEMOTE_POLL_BACKOFF` (≤ latency, never a hang).
-        let result = loop {
-            let popped = core.q.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
-            if let Some(w) = popped {
-                break Ok(self.from_wire(w));
-            }
-            // Cancel (a sibling faulted): set `cancelled` BEFORE returning the Err so the outcome is
-            // SWALLOWED (a cancelled task is dropped, not reported) instead of surfacing as a Fault —
-            // mirrors the snapshot-park recv's cancel branch.
-            if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
-                self.cancelled = true;
-                break Err(self.err("cancelled".to_string(), span));
-            }
-            // Terminate without a delivered value (genuine deadlock / nursery torn down): fault in place.
-            // Path C self-sufficient deadlock detection: also evaluate the predicate HERE rather than
-            // depending on a separate idle puller being alive to fire it (the replacement could be the
-            // last worker and itself demoted → otherwise a hang). The queue-first pop above means we only
-            // reach here with OUR OWN channel empty, so firing the predicate can never strand a value
-            // destined for THIS fiber — it narrows the residual false-positive to OTHER demoted fibers
-            // whose pending values this one can't observe.
+        // 3. Block in place. The pop + un-account (blocked_native--/running++) + un-register are ATOMIC
+        //    under core lock A (A-then-q — the order `send_wake` uses → no ABBA), so the deadlock checker
+        //    never observes an emptied-but-still-counted/registered demoted fiber (the #1 window). The
+        //    QUEUE is checked FIRST so a genuinely-sent value always wins over a spuriously-set
+        //    `terminate`. Each exit path un-accounts under A and returns directly (no separate "step 4");
+        //    lost condvar wakeups are bounded by `DEMOTE_POLL_BACKOFF` (≤ latency, never a hang).
+        loop {
+            // --- settle under core lock A: pop wins over cancel / terminate / deadlock ---
             {
                 let mut c = sched.lock();
+                let popped = core.q.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                if let Some(w) = popped {
+                    c.running += 1;
+                    sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+                    c.unregister_demoted(ptr);
+                    drop(c);
+                    return Ok(self.from_wire(w));
+                }
+                // Cancel (a sibling faulted): set `cancelled` BEFORE returning the Err so the outcome is
+                // SWALLOWED (a cancelled task is dropped, not reported) instead of surfacing as a Fault —
+                // mirrors the snapshot-park recv's cancel branch.
+                if self.cancel.as_ref().is_some_and(|x| x.load(Ordering::Relaxed)) {
+                    self.cancelled = true;
+                    c.running += 1;
+                    sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+                    c.unregister_demoted(ptr);
+                    drop(c);
+                    return Err(self.err("cancelled".to_string(), span));
+                }
+                // Terminate without a delivered value (genuine deadlock / nursery torn down): fault in
+                // place. Path C self-sufficient deadlock detection: evaluate the predicate HERE rather
+                // than depending on a separate idle puller being alive to fire it (the replacement could
+                // be the last worker and itself demoted → otherwise a hang). The queue-first pop above
+                // means OUR channel is empty here, and `is_deadlocked` now also peeks OTHER demoted
+                // channels (#1), so firing can never strand a value destined for any demoted fiber.
                 if c.terminate {
-                    break Err(sched.deadlock_err.clone());
+                    c.running += 1;
+                    sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+                    c.unregister_demoted(ptr);
+                    drop(c);
+                    return Err(sched.deadlock_err.clone());
                 }
                 if sched.is_deadlocked(&c) {
                     c.flag_deadlock(&sched.deadlock_err);
+                    c.running += 1;
+                    sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+                    c.unregister_demoted(ptr);
                     drop(c);
                     sched.cv.notify_all();
-                    break Err(sched.deadlock_err.clone());
+                    return Err(sched.deadlock_err.clone());
                 }
             }
+            // --- wait on the channel's OWN condvar (q-only; core lock A released) ---
             let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
             if q.is_empty() {
                 let _ = core.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
             }
-        };
-        // 4. Un-account blocked_native → running. The `+1` is essential: the fiber's next dispatch
-        //    (`finish` / `park` / `yield`) each do `running -= 1`, which would underflow a `usize`
-        //    without this restore (panic in debug / wrap → permanent false-deadlock veto in release).
+        }
+    }
+
+    /// D5 owe #3 Path C (#3) — a `sleep_ms(ms>0)` reached INSIDE a native callback (`native_reentry > 0`)
+    /// on the M:N engine. The offload gate (`running → timer thread`) requires `native_reentry == 0`
+    /// (the callback's `for`-loop state lives on the un-snapshottable Rust host stack), so without this
+    /// the sleep runs INLINE and pins the worker for `ms`. Instead DEMOTE like a recv-in-callback: spin a
+    /// replacement worker + sleep in place + resume, freeing the worker for `ms` (Go's `handoffp`).
+    /// Accounted as `inflight` (NOT `blocked_native`): a sleeper returns unconditionally, so it must VETO
+    /// the deadlock predicate (like an offloaded blocking native — `is_deadlocked` already treats
+    /// `inflight>0` as "external progress guaranteed"). A `blocked_native` fiber is the opposite (it
+    /// returns only via a sibling `send`). Returns `Ok(Nil)` (`sleep_ms` yields nothing). Residual: the
+    /// `thread::sleep` is uninterruptible, so a cancel during the sleep is observed only after it returns
+    /// (no worse than the inline pin it replaces — the worker is now freed).
+    fn demote_block_sleep(&mut self, ms: u64, span: Span) -> Result<Value, RuntimeError> {
+        let sched = Arc::clone(self.mn.as_ref().expect("demote_block_sleep on the cooperative engine"));
+        // 1. Account running → inflight under the core lock, then notify idle pullers (a worker sitting in
+        //    an untimed `cv.wait` re-evaluates now that this fiber left `running`).
+        {
+            let mut c = sched.lock();
+            c.running -= 1;
+            sched.inflight.fetch_add(1, Ordering::Relaxed);
+            drop(c);
+            sched.cv.notify_all();
+        }
+        // 2. Spin up a replacement worker ONCE per demoted thread (reuse the `self.demoted` coverage the
+        //    recv demote sets — one spawn + one eventual exit per demoted thread regardless of how many
+        //    times it blocks). Un-roll the accounting + fault cleanly if the OS refuses the thread.
+        if !self.demoted {
+            if !self.spawn_replacement_worker(&sched, self.wid) {
+                let mut c = sched.lock();
+                c.running += 1;
+                sched.inflight.fetch_sub(1, Ordering::Relaxed);
+                drop(c);
+                return Err(self.err(
+                    "sleep_ms inside a native callback could not demote the worker (OS thread limit \
+                     reached) — reduce concurrent in-callback blocking or raise the thread limit"
+                        .to_string(),
+                    span,
+                ));
+            }
+            self.demoted = true;
+        }
+        // 3. Sleep in place (the worker is covered by the replacement).
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        // 4. Un-account inflight → running (the `+1` is essential — the fiber's next dispatch does
+        //    `running -= 1`, which would underflow without this restore).
         {
             let mut c = sched.lock();
             c.running += 1;
-            sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+            sched.inflight.fetch_sub(1, Ordering::Relaxed);
         }
-        result
+        // Cancel observed during/after the sleep (a sibling faulted): set `cancelled` and fault so the
+        // outcome is SWALLOWED (a cancelled task is dropped, not reported), mirroring `demote_recv_block`
+        // + the snapshot-park recv. Without this, a cancelled task would sleep through every remaining
+        // callback element and then fault NORMALLY at a later back-edge — wrong classification (a
+        // cancelled-task Fault masking the real sibling error) and wasted in-callback sleeps. Faulting
+        // here aborts the native callback loop immediately, so no further elements sleep.
+        if self.cancel.as_ref().is_some_and(|x| x.load(Ordering::Relaxed)) {
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
+        Ok(Value::Nil)
     }
 
     /// D5 owe #3 (Path C) — spawn a fresh OS thread running a replacement M:N worker shell over the
@@ -7831,6 +7960,86 @@ mod tests {
         assert!(!sched.is_deadlocked(&c), "an in-flight blocking offload vetoes the deadlock fire");
     }
 
+    /// D5 owe #3 Path C (#1) — the deadlock false-positive fix. A demoted (blocked-in-callback) fiber
+    /// polls its OWN channel queue; a value a sibling already queued there is invisible to the
+    /// counter-only predicate (a `send` `push_back`s + notifies the channel condvar — it does NOT bump
+    /// `runnable`). Registering the demoted channel lets `is_deadlocked` peek it: a non-empty queue
+    /// means that fiber WILL pop + make progress (possibly waking a parked sibling), so an apparent
+    /// all-blocked quiesce is NOT a deadlock — don't fault an innocent parked sibling.
+    #[test]
+    fn deadlock_predicate_vetoed_by_queued_value_on_demoted_channel() {
+        let sched = mk_sched(2);
+        let core = empty_core();
+        let ptr = core_key(&core);
+        let mut c = sched.lock();
+        // The #1 race: one demoted fiber (blocked_native) + one parked sibling, nothing running /
+        // runnable / inflight — the counter-only predicate fires (the false positive).
+        c.parked_n = 1;
+        sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+        c.register_demoted(ptr, &core);
+        // A sibling already queued a value on the demoted fiber's channel: it will pop + progress.
+        core.q.lock().unwrap().push_back(WireValue::Int(7));
+        assert!(
+            !sched.is_deadlocked(&c),
+            "a queued value on a demoted channel must veto the deadlock fire (#1 false-positive)"
+        );
+        // Drain it: now the demoted fiber truly has nothing queued → a real all-blocked deadlock.
+        core.q.lock().unwrap().pop_front();
+        assert!(
+            sched.is_deadlocked(&c),
+            "an empty demoted channel with all fibers blocked IS a genuine deadlock"
+        );
+        // Un-register restores the pre-demote predicate (no stale registry entry vetoing forever).
+        c.unregister_demoted(ptr);
+        assert!(
+            sched.is_deadlocked(&c),
+            "after un-register the predicate is unchanged (still all-blocked)"
+        );
+    }
+
+    /// D5 owe #3 Path C (#1) — the registry is REFCOUNTED so 2+ fibers demoted on the SAME channel each
+    /// register/unregister independently (one `unregister` must not drop the channel while a second
+    /// demoted fiber still waits on it). Drives refcount 0→1→2→1→0 and asserts the veto survives the
+    /// single `unregister` (the entry is still present at refcount 1) and only the empty/fully-removed
+    /// state declares deadlock. Catches a refcount-direction regression (remove-at-1 / wrong increment)
+    /// that the single-fiber test cannot — exactly the "stale entry permanently vetoes a real deadlock"
+    /// vs "premature removal re-opens the false-positive" failure modes.
+    #[test]
+    fn demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel() {
+        let sched = mk_sched(3);
+        let core = empty_core();
+        let ptr = core_key(&core);
+        let mut c = sched.lock();
+        // Two fibers demoted on the SAME channel + one parked sibling; nothing else running.
+        c.parked_n = 1;
+        sched.blocked_native.fetch_add(2, Ordering::Relaxed);
+        c.register_demoted(ptr, &core);
+        c.register_demoted(ptr, &core); // refcount now 2
+        // A value queued on the shared channel → at least one demoted fiber pops + progresses.
+        core.q.lock().unwrap().push_back(WireValue::Int(7));
+        assert!(!sched.is_deadlocked(&c), "queued value on the shared demoted channel vetoes deadlock");
+        // One fiber pops + un-registers (refcount 2→1); the OTHER is still demoted on this channel, so
+        // the entry must remain. Queue now empty → but the entry's presence alone does NOT veto; the
+        // peek is queue-driven, so an empty registered channel is a genuine all-blocked deadlock.
+        core.q.lock().unwrap().pop_front();
+        c.unregister_demoted(ptr); // refcount 2→1, entry retained
+        assert!(
+            sched.is_deadlocked(&c),
+            "refcount 1 + empty queue = genuine deadlock (the surviving demoted fiber has nothing)"
+        );
+        // A fresh value for the surviving fiber re-vetoes via the retained entry (proves it wasn't
+        // dropped at the first unregister).
+        core.q.lock().unwrap().push_back(WireValue::Int(9));
+        assert!(
+            !sched.is_deadlocked(&c),
+            "the retained refcount-1 entry still peeks the queue (entry not dropped at refcount 1)"
+        );
+        core.q.lock().unwrap().pop_front();
+        c.unregister_demoted(ptr); // refcount 1→0, entry removed
+        assert!(c.demoted_chans.is_empty(), "the entry is removed only at refcount 0");
+        assert!(sched.is_deadlocked(&c), "all demoted fibers gone, still all-blocked = deadlock");
+    }
+
     /// D6: `poll_park_offload` hands a fiber whose socket op `WouldBlock`ed to the netpoller —
     /// running→inflight — so a socket-parked fiber is accounted as in-flight (it WILL be woken by the
     /// OS) and vetoes a false deadlock, exactly like a blocking-pool offload. Uses a real loopback fd
@@ -8264,6 +8473,105 @@ main()
         }
     }
 
+    /// D5 owe #3 Path C (#3 sleep-in-callback demote) — the discriminating proof, mirroring
+    /// `d5_blocking_sleeps_run_concurrently_not_serialized` but with the `sleep_ms` reached INSIDE a
+    /// native callback (`[1].map(nap)`, `native_reentry > 0`). The offload gate requires
+    /// `native_reentry == 0`, so without the demote this sleep runs INLINE and pins its worker:
+    /// `N = workers * 4` such tasks ⇒ 4 back-to-back batches ⇒ ≥ `4 * 150 = 600 ms` on any core count.
+    /// WITH the demote each sleeping callback frees its worker (spawns a replacement) so all `N` run
+    /// concurrently ⇒ ≈ `150 ms`. Asserting `< 450 ms` fails on the inline path and passes once the
+    /// in-callback demote is wired. Watchdog 30 s.
+    #[test]
+    fn d5_owe3_path_c_sleep_in_callback_demotes_frees_worker() {
+        let workers = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1).max(1);
+        let n = workers * 4;
+        let src = format!(
+            "\
+import std.time
+
+fn nap(x: int) -> int:
+    time.sleep_ms(150)
+    return x
+
+fn sleeper():
+    [1].map(nap)
+
+fn main():
+    parallel:
+        for _ in 0..{n}:
+            spawn sleeper()
+    print(\"done\")
+
+main()
+"
+        );
+        let entry = write_temp_chz("d5_owe3_sleep_cb", &src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let out = run_file_parallel(&run_entry, crate::native::HostConfig::default());
+            let _ = tx.send((out, start.elapsed()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok(((out, _err, res, _code), elapsed)) => {
+                assert!(res.is_ok(), "in-callback sleeper nursery faulted: {res:?}");
+                assert_eq!(out, "done\n");
+                assert!(
+                    elapsed < std::time::Duration::from_millis(450),
+                    "{n} sleep_ms(150)-in-callback fibers took {elapsed:?} — the in-callback sleep pinned \
+                     its worker (ran inline) instead of demoting (#3)"
+                );
+            }
+            Err(_) => panic!("hung — D5 owe #3 Path C sleep-in-callback demote regressed"),
+        }
+    }
+
+    /// D5 owe #3 Path C (#3) — correctness of the in-callback sleep demote: a `sleep_ms` inside a
+    /// native `xs.map` still produces the right result after demoting (the worker is freed + resumed in
+    /// place; output unchanged). The sum proves all three callbacks ran past their sleep. Watchdog 30 s.
+    #[test]
+    fn d5_owe3_path_c_sleep_in_callback_correct() {
+        let src = "\
+import std.time
+
+fn nap(x: int) -> int:
+    time.sleep_ms(20)
+    return x * 2
+
+fn work(sink: Shared[int]):
+    ys := [1, 2, 3].map(nap)
+    sink.update(fn(x): x + ys[0] + ys[1] + ys[2])
+
+fn main():
+    sink := Shared(0)
+    parallel:
+        spawn work(sink)
+        spawn work(sink)
+    print(sink.get())
+
+main()
+";
+        let entry = write_temp_chz("d5_owe3_sleep_correct", src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok((out, _err, res, _code)) => {
+                assert!(res.is_ok(), "in-callback sleep demote faulted: {res:?}");
+                // each work(): 2*(1+2+3) = 12; two tasks update the same sink → 24.
+                assert_eq!(out, "24\n");
+            }
+            Err(_) => panic!("hung — D5 owe #3 Path C sleep-in-callback demote regressed (correctness)"),
+        }
+    }
+
     /// D5 — a blocking *filesystem* native (`fs.exists`, returns a `bool`) is offloaded, runs off the
     /// core worker, and its result is lowered + pushed on resume so execution continues correctly
     /// past the call. `N` fibers each check a real temp file and bump a `Shared` — the join sum must
@@ -8311,19 +8619,26 @@ main()
         }
     }
 
-    /// D5 — a blocking native reached *inside a native callback* (here `time.sleep_ms` inside the
+    /// D5 — a blocking native reached *inside a native callback* (here `fs.exists` inside the
     /// per-element fn of `list.map`, which runs under the `native_reentry` guard) must NOT be
-    /// offloaded: the callback's loop state lives on the Rust host stack and cannot be parked into a
-    /// fiber. The offload is gated on `native_reentry == 0`, so it falls back to inline execution and
-    /// the map completes correctly (no fault, no corruption). Guards the gate. Watchdog 30 s.
+    /// offloaded to the dirty pool: the callback's loop state lives on the Rust host stack and cannot be
+    /// parked into a fiber. The offload is gated on `native_reentry == 0`, so it falls back to inline
+    /// execution and the map completes correctly (no fault, no corruption). Guards the gate for a
+    /// NON-sleep blocking native (`sleep_ms` specifically now DEMOTES the worker inside a callback —
+    /// see `d5_owe3_path_c_sleep_in_callback_*`). Watchdog 30 s.
     #[test]
     fn d5_blocking_native_in_callback_runs_inline() {
-        let src = "\
-import std.time
+        let path = std::env::temp_dir().join(format!("chezzi_d5_cb_exists_{}.txt", std::process::id()));
+        std::fs::write(&path, b"x").expect("write temp file");
+        let path_str = path.to_str().expect("utf8 temp path").to_string();
+        let src = format!(
+            "\
+import std.fs
 
 fn dbl(x: int) -> int:
-    time.sleep_ms(1)
-    return x * 2
+    if fs.exists(\"{path_str}\"):
+        return x * 2
+    return 0
 
 fn work(sink: Shared[int]):
     ys := [1, 2, 3].map(dbl)
@@ -8336,8 +8651,9 @@ fn main():
     print(sink.get())
 
 main()
-";
-        let entry = write_temp_chz("d5_callback", src);
+"
+        );
+        let entry = write_temp_chz("d5_callback", &src);
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -8345,6 +8661,7 @@ main()
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&entry);
+        let _ = std::fs::remove_file(&path);
         match result {
             Ok((out, _err, res, _code)) => {
                 assert!(res.is_ok(), "in-callback nursery faulted: {res:?}");
@@ -8543,6 +8860,61 @@ main()
                 Ok(()) => panic!("Path C: no-sender recv-in-callback unexpectedly succeeded"),
             },
             Err(_) => panic!("hung — D5 owe #3 Path C deadlock detection regressed (blocked_native predicate / notify)"),
+        }
+    }
+
+    /// D5 owe #3 Path C (#1 false-positive) — the deadlock checker must NOT fault an innocent parked
+    /// sibling when a demoted fiber has a value racing into its queue. F1 demotes on `a` inside a native
+    /// `xs.map`, then wakes F2 via `c.send(7)`; F2 snapshot-parks on `c`; F3 feeds `a` then finishes.
+    /// The bad interleaving (microseconds): F3's `running→0` quiesce can fire the predicate before F1
+    /// pops its queued `10`, wrongly killing the parked F2. With the #1 fix (`is_deadlocked` peeks the
+    /// demoted channel `a`, which holds `10`) the fire is vetoed. Run many times to expose the race; the
+    /// output must ALWAYS be `7` and NEVER a spurious `deadlock`. Watchdog per iteration.
+    #[test]
+    fn d5_owe3_path_c_no_false_deadlock_when_demoted_fiber_has_queued_value() {
+        let src = "\
+fn main():
+    a := Channel[int]()
+    c := Channel[int]()
+    xs := [1]
+    parallel:
+        spawn:
+            xs.map(fn(x): x + a.recv())
+            c.send(7)
+        spawn: print(c.recv())
+        spawn: a.send(10)
+
+main()
+";
+        let entry = write_temp_chz("d5_owe3_path_c_fp", src);
+        for i in 0..200 {
+            let run_entry = entry.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            });
+            let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+            // Remove the temp file BEFORE asserting so an assert panic doesn't leak it (the other paths
+            // out of this test all unwind, and the post-loop cleanup never runs on panic).
+            if i == 199 {
+                let _ = std::fs::remove_file(&entry);
+            }
+            match result {
+                Ok((out, _err, res, _code)) => {
+                    if res.is_err() || out != "7\n" {
+                        let _ = std::fs::remove_file(&entry);
+                    }
+                    assert!(
+                        res.is_ok(),
+                        "iter {i}: spurious fault (the #1 false-positive killing the parked sibling?): {res:?}"
+                    );
+                    assert_eq!(out, "7\n", "iter {i}: wrong output");
+                }
+                Err(_) => {
+                    let _ = std::fs::remove_file(&entry);
+                    panic!("iter {i}: hung — D5 owe #3 Path C regressed");
+                }
+            }
         }
     }
 

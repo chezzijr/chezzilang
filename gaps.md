@@ -185,17 +185,23 @@ thread-demotion landed (attempt)** for the native islands — see the residuals 
   attempt (2026-06-11, branch `d5-owe3-path-c`).** A blocking `recv` inside a native callback
   (`xs.map`/sort comparator/`Shared.update`) now **demotes the worker thread** (blocks in place +
   spins a replacement) and resumes on a sibling `send`, instead of faulting `deadlock` (M:N engine
-  only; the cooperative engine still faults). Three known residuals — **full worklist (corrected
-  examples + fix sketches + cross-language refs) in `docs/concurrency-tier-d.md` → "Path C residuals —
-  next-session worklist".** Ranked #1 > #3 > #2 (correctness > perf > rare-hang-with-a-rule):
-  - **(#1, fix next) narrow deadlock false-positive** — 2+ fibers demoted, one has a value queued the
-    checker can't see → can spuriously fault a *parked sibling* with a fake `deadlock` (the demoted
-    fiber with the pending value still resumes — queue is checked first). *Correctness bug; do first.*
-    Fix: register demoted channels, have `is_deadlocked` peek their queues, make `pop + blocked_native--`
-    atomic under the core lock.
-  - **(#3, fix next) `sleep_ms`/socket inside a callback not demoted** — `sleep_ms` runs inline (pins
-    the worker); a socket op isn't handed to the netpoller. *Perf/liveness, not wrong.* Fix: reuse the
-    demote mechanism (replacement + block in place).
+  only; the cooperative engine still faults). Two residuals **resolved** this session (#1, #3-sleep);
+  one half of #3 + #2 remain — **full worklist (corrected examples + fix sketches + cross-language
+  refs) in `docs/concurrency-tier-d.md` → "Path C residuals — next-session worklist".**
+  - ~~**(#1) narrow deadlock false-positive**~~ — **resolved (2026-06-11).** `SchedCore` now registers
+    each demoted fiber's `ChannelCore` (refcounted); `is_deadlocked` peeks the registered queues and
+    vetoes the fire if any holds a value (that fiber will pop + progress), and the demote loop's
+    `pop + blocked_native-- + un-register` is atomic under the core lock (A-then-q) so the checker never
+    sees an emptied-but-still-counted demoted fiber. No more spuriously-killed parked sibling. White-box
+    (`deadlock_predicate_vetoed_by_queued_value_on_demoted_channel`, `..._refcounted_for_two_fibers_...`)
+    + 200× black-box stress regression tests.
+  - **(#3) `sleep_ms` inside a callback** — ~~`sleep_ms` half~~ **resolved (2026-06-11):** a
+    `sleep_ms(ms>0)` reached inside a native callback now **demotes** (spawns a replacement + sleeps in
+    place + resumes, accounted `inflight` so it vetoes deadlock), instead of running inline + pinning
+    the worker; cancel during the sleep swallows the task outcome (mirrors the recv demote). **Socket
+    half still open:** a socket `read`/`accept`/`connect` inside a callback isn't handed to the
+    netpoller (more complex error/restore handling, rarer trigger — net I/O inside a `map` callback is
+    unusual). *Perf/liveness, not wrong.* Fix sketch: demote + a blocking fd wait in place.
   - **(#2, WON'T FIX by design) `Shared.update` same-box hold-and-wait** — a `recv` blocking inside
     `update(f)` holds `update_lock` while parked → a sender needing the *same* box deadlocks silently.
     A **universal** hold-and-wait deadlock (Go detects only the global case, not partial; Rust lints it

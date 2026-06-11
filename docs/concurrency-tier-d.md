@@ -502,20 +502,22 @@ Was never a D6 prerequisite.
 > cleanly; demotion is scoped to `recv` (`sleep_ms`/socket in a callback keep their current path); the
 > `Shared.update` same-box hazard survives (don't block on a value needing the same box).
 
-#### Path C residuals — next-session worklist *(ranked #1 > #3 > #2)*
+#### Path C residuals — worklist *(ranked #1 > #3 > #2; #1 + #3-sleep RESOLVED 2026-06-11)*
 
-> Three known limitations remain after the Path C attempt. Priority is **correctness > performance >
-> rare-hang-with-a-known-rule**. All chezzi examples below are **single-expression closures** (`fn(x):
-> <expr>`, the only closure form — `src/parser/mod.rs::parse_closure`); a multi-statement callback must
-> be a **named function** (block body), as in `slow_double` below.
+> Of three known limitations after the Path C attempt, **#1 and the `sleep_ms` half of #3 are now
+> resolved** (branch `d5-owe3-path-c`); the **socket half of #3** and **#2** remain. Priority was
+> **correctness > performance > rare-hang-with-a-known-rule**. All chezzi examples below are
+> **single-expression closures** (`fn(x): <expr>`, the only closure form —
+> `src/parser/mod.rs::parse_closure`); a multi-statement callback must be a **named function** (block
+> body), as in `slow_double` below.
 
-**#1 — deadlock false-positive *(priority 1; a correctness bug — wrong result, not a hang).*** When
-**2+ fibers are demoted** and one of them has a value already queued that the deadlock-checker can't
-see, `is_deadlocked` can fire and fault an innocent **parked sibling** with a fake `deadlock`. The
-demoted fiber with the pending value still resumes correctly (the demote loop pops its queue first) —
-only the parked sibling is wrongly killed.
+**~~#1 — deadlock false-positive~~ — RESOLVED (2026-06-11).** *(was: priority 1, a correctness bug —
+wrong result, not a hang.)* When **2+ fibers are demoted** and one had a value already queued that the
+deadlock-checker couldn't see, `is_deadlocked` could fire and fault an innocent **parked sibling** with
+a fake `deadlock` (the demoted fiber with the pending value still resumed — the demote loop pops its
+queue first — only the parked sibling was wrongly killed). Repro that now passes (run 200× in
+`d5_owe3_path_c_no_false_deadlock_when_demoted_fiber_has_queued_value`):
 ```
-import std.iter
 fn main():
     a := Channel[int]()
     c := Channel[int]()
@@ -527,37 +529,43 @@ fn main():
         spawn: print(c.recv())              # F2 snapshot-parks on `c`, woken by F1
         spawn: a.send(10)                   # F3 feeds F1, then finishes
 ```
-Bad interleaving (microseconds, usually does NOT happen): F3 queues `10` for F1 then finishes →
-`running==0`; before F1 pops `10`, the checker sees `running==0, parked=1 (F2), blocked_native=1 (F1)`
-→ fires → kills F2; then F1 pops `10` and would have woken F2 via `c.send(7)`.
-*Fix sketch:* register each demoted fiber's `Arc<ChannelCore>` in `SchedCore` (under core lock A); in
-`is_deadlocked`, before returning `true`, lock each demoted channel's `q` (A-then-q, the existing safe
-order) and return `false` if **any** is non-empty (that fiber will pop + progress); make the demoted
-fiber's `pop + blocked_native--` **atomic under core lock A** so there is no "popped-but-not-yet-
-un-accounted" window for the checker to misread. *Files:* `src/vm/mod.rs` — `is_deadlocked`,
-`demote_recv_block`, `SchedCore` (a demoted-channels map) + register/unregister.
+The bad interleaving (microseconds): F3 queued `10` for F1 then finished → `running==0`; before F1
+popped `10`, the checker saw `running==0, parked=1 (F2), blocked_native=1 (F1)` → fired → killed F2.
+**Fix landed:** `SchedCore` registers each demoted fiber's `Arc<ChannelCore>` (refcounted, under core
+lock A); `is_deadlocked`, before returning `true`, locks each demoted channel's `q` (A-then-q, the
+order `send_wake` uses) and returns `false` if **any** is non-empty (that fiber will pop + progress);
+and the demote loop's `pop + blocked_native-- + un-register` is **atomic under core lock A**, so the
+checker never observes a popped-but-not-yet-un-accounted demoted fiber. *Files:* `src/vm/mod.rs` —
+`is_deadlocked`, `demote_recv_block`, `SchedCore::{register,unregister}_demoted` + the `demoted_chans`
+map. *Tests:* `deadlock_predicate_vetoed_by_queued_value_on_demoted_channel`,
+`demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel`, the 200× stress test above.
 
-**#3 — `sleep_ms` / socket op inside a native callback is NOT demoted *(priority 2; perf/liveness,
-not wrong).*** A `sleep_ms` inside a native `.map` runs **inline** (pins the worker for the duration
-instead of freeing it); a socket `read`/`accept` inside a callback isn't handed to the netpoller. Same
-root cause as `recv`: the `Disp::Offload` / `Disp::PollPark` paths are snapshot mechanisms, gated on
-`native_reentry == 0` (`src/vm/mod.rs` ~2771 for the offload gate, ~5291/~5549 for the socket gates).
+**#3 — `sleep_ms` (RESOLVED) / socket op (OPEN) inside a native callback is NOT demoted *(priority 2;
+perf/liveness, not wrong).*** A `sleep_ms` inside a native `.map` *used to* run **inline** (pinning the
+worker for the duration); a socket `read`/`accept` inside a callback still isn't handed to the
+netpoller. Root cause: the `Disp::Offload` / `Disp::PollPark` paths are snapshot mechanisms gated on
+`native_reentry == 0` (the offload gate + the socket gates in `src/vm/mod.rs`).
 ```
 import std.time
 fn slow_double(x: int) -> int:              # named fn = block body (closures are single-expr)
-    time.sleep_ms(100)                      # runs INLINE inside .map — pins the worker, no demote
+    time.sleep_ms(100)                      # now DEMOTES inside .map — worker freed, replacement spun
     return x * 2
 fn main():
     parallel:
-        spawn: print([1, 2, 3].map(slow_double))   # 300ms of pinned thread, not freed
-        spawn: print("a worker is pinned during those sleeps")
+        spawn: print([1, 2, 3].map(slow_double))   # the .map's own 3 sleeps are still serial (one map
+        spawn: print("a worker is no longer pinned during those sleeps")  # loop), but the WORKER is freed
 ```
-*Fix sketch:* reuse the Path C demote mechanism. `sleep_ms` with `native_reentry > 0` under the M:N
-engine → `spawn_replacement_worker` + a real `thread::sleep(ms)` in place + resume (clean, common —
-do this first). Socket `WouldBlock` with `native_reentry > 0` → demote + a blocking fd wait in place
-(set the fd blocking, or synchronously poll it) + resume — more complex (error paths), rarer trigger
-(net I/O inside a `map` callback is unusual). *Files:* `src/vm/mod.rs` — the `sleep_ms` offload gate
-and the socket gates, a `demote_block_sleep` / `demote_block_socket` analogous to `demote_recv_block`.
+**`sleep_ms` half landed (2026-06-11):** a `sleep_ms(ms>0)` with `native_reentry > 0` under the M:N
+engine calls `demote_block_sleep` — `spawn_replacement_worker` + a real `thread::sleep(ms)` in place +
+resume, accounted `running→inflight` (so it **vetoes** deadlock — a sleeper returns unconditionally,
+unlike a `blocked_native` recv); a cancel observed during/after the sleep swallows the task outcome
+(mirrors the recv demote). *Tests:* `d5_owe3_path_c_sleep_in_callback_demotes_frees_worker`
+(N=workers·4 in-callback sleeps finish <450ms, i.e. concurrent not 4-batch-serial),
+`d5_owe3_path_c_sleep_in_callback_correct`. **Socket half still OPEN:** a socket `WouldBlock` with
+`native_reentry > 0` → demote + a blocking fd wait in place (set the fd blocking, or synchronously poll
+it) + resume — more complex (error/restore paths), rarer trigger (net I/O inside a `map` callback is
+unusual). *Fix sketch / files:* `src/vm/mod.rs` — the socket gates, a `demote_block_socket` analogous
+to `demote_block_sleep` / `demote_recv_block`.
 
 **#2 — `Shared.update` same-box hold-and-wait *(priority 3; WON'T FIX by design — a dev-authored,
 universal deadlock).*** `Shared.update(f)` holds the box's `update_lock` across `f`; if `f` blocks on a
