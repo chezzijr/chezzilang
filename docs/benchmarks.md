@@ -46,6 +46,32 @@ superinstructions (fused compare/arith/increment cut dispatch count in the inner
 moved** — its cost is string allocation (`BuildStr`/`ConstStr`), untouched this phase and the
 target of a later one. Startup unchanged (still the standing ~11× win).
 
+## After M19 Phase 2 — 2026-06-11 (same machine)
+
+Phase 2 landed two behavior-preserving allocation kills, both TDD'd under the two-engine parity
+suite: **(1)** the **per-call args `Vec`** in `do_call` is gone — a `Func`/`Closure` callee now runs
+in place over the args already on the operand stack (`copy_within` drops the callee from beneath
+them; native / non-callable callees keep the old `Vec` path that `invoke_native` needs); **(2)**
+**`stringify`-into-buffer** — `stringify`/`stringify_obj`/`stringify_seq` were rewritten to append
+into a caller-owned `String`, so `BuildStr` reuses one buffer across all interpolation parts instead
+of allocating an intermediate `String` per part. Re-run of the same harness:
+
+| bench    | chezzi (P1 → P2)        | python  | slower (P1 → P2)        |
+|----------|-------------------------|---------|-------------------------|
+| fib(30)  | 391 ms → **333 ms**     | 79 ms   | 4.9× → **4.2×**         |
+| str      | 283 ms → **264 ms**     | 84 ms   | 3.5× → **3.15×**        |
+| primes   | 738 ms → **714 ms**     | 281 ms  | 2.6× → **2.54×**        |
+| loop     | 1164 ms → **1106 ms**   | 851 ms  | 1.4× → **1.30×**        |
+| list     | 447 ms → **458 ms**     | 150 ms  | 2.9× → **3.05×** (flat) |
+| startup  | 0.80 ms → **0.80 ms**   | 9.0 ms  | 0.09× (win, unchanged)  |
+
+Moved where the fixes aimed: **`fib` −13%** (it is *all* calls — killing the per-call `Vec` is the
+single biggest lever) and **`str` −5%** (the buffer kills one `String` alloc per interpolated part;
+the residual cost is `ConstStr` boxing the literal part on every push — the next `str` lever).
+`primes`/`loop` drift down a little (they carry some call/return traffic). **`list` is flat** — its
+cost is `.push` (a method call, not `do_call`) + GC, untouched here; the 447→458 wobble and the
+2.9→3.05 ratio are run-to-run noise (CPython also measured 150 vs 154 ms this run, σ≈10 ms on both).
+
 ## Reading it
 
 The shape matches what `future.md §4` predicted from first principles: **the gap is
@@ -87,6 +113,8 @@ attack dispatch count, name lookup, and call overhead without touching the value
 the GC — and `fib`/`loop`/`primes` are exactly the benches they move.
 
 **Landed (M19 Phase 1):** ✅ per-call clone kill in `invoke_value`, ✅ peephole + constant
-folding, ✅ superinstructions (`BinLocalLocal` / `BinLocalConst` / `IncLocal`). **Still open:**
-inline caching, frame pooling, string interning / builder (the `str` lever), arithmetic
-specialization, NaN-boxing, generational GC — see `future.md §4`.
+folding, ✅ superinstructions (`BinLocalLocal` / `BinLocalConst` / `IncLocal`).
+**Landed (M19 Phase 2):** ✅ in-place call args in `do_call` (per-call `Vec` gone — `fib` −13%),
+✅ `stringify`-into-buffer for `BuildStr` (`str` −5%). **Still open:** inline caching (Phase 2b —
+needs global-slotting, see `future.md §4`), frame pooling, `ConstStr` interning (the remaining `str`
+lever), arithmetic specialization, NaN-boxing, generational GC — see `future.md §4`.

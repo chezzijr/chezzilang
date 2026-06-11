@@ -28,12 +28,29 @@ TDD'd and guarded by the full two-engine parity suite:
 
 Result: gap to CPython narrowed **loop 2.1×→1.4×, primes 3.5×→2.6×, list 3.8×→2.9×, fib 5.9×→4.9×**
 (startup still ~11× win). Full numbers in [`docs/benchmarks.md`](docs/benchmarks.md); backlog status in
-[`docs/future.md §4`](docs/future.md). **1516 tests** green + `cargo test conformance` (7/7) + `cargo
-clippy -- -D warnings` clean.
+[`docs/future.md §4`](docs/future.md).
 
-**Next (M19 Phase 2):** inline caching for name lookup (⚠ concurrency module-fault path), string
-interning / `BuildStr` builder (the `str` lever, untouched this phase), arithmetic specialization,
-frame pooling, and passing call args as a stack slice (`mod.rs:3181`).
+**🟦 M19 Perf track — Phase 2 LANDED (2026-06-11).** Two behavior-preserving allocation kills, TDD'd
+and guarded by the full two-engine parity suite + a 4-agent S++ review panel (all clean):
+1. **In-place call args** — `do_call`'s `Func`/`Closure` fast path runs directly over the args already
+   on the operand stack (a `copy_within` drops the callee from beneath them), killing the per-call
+   `split_off` `Vec` alloc + the re-push in `push_frame`. `push_frame` was refactored into shared
+   `frame_depth_guard` + `finish_frame` helpers so the `Vec` and in-place paths raise the identical
+   overflow error and install byte-identical frames. Native / non-callable callees keep the `Vec` path
+   (`invoke_native` needs an owned `Vec`; HOFs build args off-stack). → `fib` −13%.
+2. **`stringify`-into-buffer** — `stringify`/`stringify_obj`/`stringify_seq` rewritten to append into a
+   caller-owned `String` (`stringify_into` &co); `BuildStr` reuses one buffer across all interpolation
+   parts instead of allocating an intermediate `String` per part. Byte-exact output. → `str` −5%.
+
+Result: gap to CPython narrowed further **fib 4.9×→4.2×, str 3.5×→3.15×, primes 2.6×→2.54×,
+loop 1.4×→1.30×** (list flat, not call-bound; startup still ~11× win). **1518 tests** green + `cargo
+test conformance` (7/7) + `cargo clippy -- -D warnings` clean. Numbers in
+[`docs/benchmarks.md`](docs/benchmarks.md).
+
+**Next (M19 Phase 2b):** inline caching for name lookup — the next dispatch win, but its own milestone
+(needs global-slotting: `Module.globals` → `Vec<Value>` + compile-time slot ids + slot-order
+preservation across the lazy module-fault path). Design note in [`docs/future.md §4`](docs/future.md).
+Then: `ConstStr` interning (remaining `str` lever), arithmetic specialization, frame pooling.
 
 **Robustness pass — cyclic-data depth guard + order-independent map `==` — has now landed** (both
 engines). Two fuzzing-found bugs: (1) a cyclic data structure (a struct with a `list[Self]` field

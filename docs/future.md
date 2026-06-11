@@ -109,13 +109,22 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   fuse the hot `GetLocal+GetLocal+BinOp`, `GetLocal+Const+BinOp`, and `i += k` windows (Int fast
   path inlined; non-Int falls back to the exact unfused op). Cut `loop` −36%, `primes` −25%.
   Remaining candidates: `GetLocal+GetField`, fuse compare+`AsBool`, the load-store accumulator.
-- **Inline caching for name lookup** — globals / builtins / struct fields resolve *by name at
-  runtime* today. Cache the resolved slot/index on first hit (monomorphic IC). Field access, method
-  dispatch, and global reads all benefit. Moves `primes`. ⚠ must stay correct across the concurrency
-  module-fault path (`ensure_module_faulted` / lazy worker module snapshot).
+- **Inline caching for name lookup (→ Phase 2b)** — globals / builtins / struct fields resolve *by
+  name at runtime* today (a `HashMap<String,Value>` probe per `GetGlobal`). Cache the resolved
+  slot on first hit. **Not a local change** — see the design note at the bottom of this section:
+  the bytecode lives in `Arc<Program>` (read-only, shared across worker threads, so the opcode can't
+  carry a mutable cache) and globals are name-keyed (no slots). The principled fix is global-slotting
+  (`Module.globals` → `Vec<Value>` + compile-time slot ids), which must preserve slot order across
+  the lazy module-fault path (`ensure_module_faulted` / `fault_module`). Moves `primes`. ⚠ its own
+  parity surface — scheduled as **M19 Phase 2b**, not bundled with the Phase 2 allocation kills.
 - ✅ **Kill per-call clones in `invoke_value`** — *landed M19 Phase 1*: matches on `&Obj` (no whole-
   `Obj` / closure-`HashMap` clone) and drops the arity-check `name.clone()`. Cut `fib` −17%, `list`
-  −22%. Still open: the fresh `Vec<Value>` for args at `mod.rs:3181` (pass a stack slice).
+  −22%.
+- ✅ **Pass call args as a stack slice (no per-call `Vec`)** — *landed M19 Phase 2*: `do_call`'s
+  `Func`/`Closure` fast path runs in place over the args already on the operand stack (`copy_within`
+  drops the callee from beneath them), skipping the `split_off` `Vec` alloc + the re-push in
+  `push_frame`. Native / non-callable callees keep the `Vec` path (`invoke_native` needs it). Cut
+  `fib` −13%.
 
 **Medium:**
 - **NaN-boxing the `Value`** — pack into 8 bytes (vs the current ~16-byte enum). Better cache density
@@ -127,9 +136,12 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
 - **String interning + cached hash** — intern keys / short strings → pointer-compare equality + free
   map hash. Map hashes are already cached; interning extends it. `ConstStr` (`mod.rs:2228`) boxes a
   fresh string on every push — interning constants kills that.
-- **Reduce string-op allocations** — `BuildStr` (`mod.rs:2495`) stringifies each interpolation part
-  into a fresh `String`; concat / `split` / `+` build a fresh `Rc<str>` each time. A builder / rope
-  helps hot concatenation. Moves `str`. (See also: list clone per `for` iter at `mod.rs:2514`,
+- **Reduce string-op allocations** — ✅ *partly landed M19 Phase 2*: `stringify` now appends into a
+  caller-owned buffer (`stringify_into`/`stringify_obj_into`/`stringify_seq_into`), so `BuildStr`
+  reuses one `String` across all interpolation parts instead of one `String` per part (cut `str`
+  −5%). **Still open:** `ConstStr` (`mod.rs:2228`) boxes a fresh string on every push — interning
+  constants is the next `str` lever; concat / `split` / `+` still build a fresh `Rc<str>` each time
+  (a builder / rope helps hot concatenation). (See also: list clone per `for` iter at `mod.rs:2514`,
   per-char `String` on string iteration at `:2530`.)
 
 **Big (separate milestones):**
@@ -145,5 +157,35 @@ dispatch count and name lookup — the two actual costs — without touching the
 
 **M19 Phase 1 done (2026-06-11):** peephole/const-fold + superinstructions + `invoke_value` clone
 kill — all behavior-preserving (1516 tests + full two-engine parity green). Results in
-`docs/benchmarks.md`. Next lever for `str` is string interning / `BuildStr` builder; inline caching
-is the next dispatch win.
+`docs/benchmarks.md`.
+
+**M19 Phase 2 done (2026-06-11):** in-place call args in `do_call` (per-call `Vec` gone, `fib` −13%)
++ `stringify`-into-buffer for `BuildStr` (`str` −5%) — both behavior-preserving (1518 tests + full
+two-engine parity green, 4-agent S++ panel clean). Results in `docs/benchmarks.md`. Remaining `str`
+lever is `ConstStr` interning; the next dispatch win is inline caching (Phase 2b, below).
+
+### M19 Phase 2b — inline caching via global-slotting (design note)
+
+The next dispatch win, deliberately split out from Phase 2 because it is **not** a local opcode
+tweak. Today `Op::GetGlobal(String)` does a `HashMap<String,Value>` probe by name every read
+(`mod.rs` `module_global`). A monomorphic IC would cache the resolved location, but two facts block
+the naive "cache in the opcode" approach:
+
+1. **Bytecode is shared read-only across threads.** Under `--parallel` the `Program` is an
+   `Arc<Program>` and every worker fiber reads the *same* `Op` slices — so an opcode cannot carry a
+   per-site mutable cache cell without synchronization.
+2. **Globals are name-keyed, not slotted.** `Obj::Module { globals: HashMap<String,Value> }` has no
+   stable index to cache.
+
+**Plan:** resolve globals to slots at compile time. The compiler assigns each module global a stable
+`u32` slot and emits `GetGlobalSlot(u32)` / `SetGlobalSlot(u32)` / `DefineGlobalSlot(u32)`;
+`Module.globals` becomes a `Vec<Value>` (name→slot map kept only for `module.member` field reads and
+error messages). The read becomes a bounds-checked `Vec` index — no hashing, no string.
+
+**The concurrency constraint (the reason it is its own milestone):** the lazy module-fault path
+(`ensure_module_faulted` / `fault_module` / the worker module snapshot) reconstructs a worker's home
+module on first access. Slot order must be **identical** between the parent's compiled module and any
+faulted worker copy, or a worker reads the wrong global. The snapshot (`to_snap`/`replay_snap`) and
+`ModuleInline`/`ModuleAlias` replay must round-trip slots, not names. This needs its own two-engine
+parity pass + the `--parallel` module-fault tests, so it is scheduled separately rather than bundled
+with the Phase 2 allocation kills.

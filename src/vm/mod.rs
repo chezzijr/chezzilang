@@ -1916,6 +1916,26 @@ impl Vm {
         Ok(self.stack.pop().unwrap_or(Value::Nil))
     }
 
+    /// P1 — run `proto` over args already on the stack at `[base..base + argc]` (no `Vec`). The
+    /// pause / pop-result contract mirrors [`Vm::run_proto`]; `do_return` truncates to `base` and
+    /// pushes the result, which this then pops to hand back to the caller.
+    fn run_proto_in_place(
+        &mut self,
+        proto: ProtoId,
+        home: GcRef,
+        closure: Option<GcRef>,
+        base: usize,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let base_level = self.frames.len();
+        self.push_frame_in_place(proto, home, closure, base, span)?;
+        self.run_until(base_level)?;
+        if self.paused() {
+            return Ok(Value::Nil);
+        }
+        Ok(self.stack.pop().unwrap_or(Value::Nil))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn push_frame(
         &mut self,
@@ -1927,6 +1947,37 @@ impl Vm {
         is_toplevel: bool,
         span: Span,
     ) -> Result<(), RuntimeError> {
+        self.frame_depth_guard(counted, span)?;
+        let base = self.stack.len();
+        for a in args {
+            self.stack.push(a);
+        }
+        self.finish_frame(proto, home, closure, base, counted, is_toplevel, span);
+        Ok(())
+    }
+
+    /// P1 — push a frame whose `argc` parameters are *already* contiguous on the operand stack at
+    /// `[base..base + argc]` (the bytecode `Op::Call` fast path leaves them there to avoid the
+    /// per-call `Vec<Value>` round-trip). Identical to [`Vm::push_frame`] minus the arg copy; never a
+    /// top-level frame. The depth guard runs after the args are positioned — on overflow the args
+    /// stay on the stack, but a `recover:` handler truncates to its saved `stack_len` and an uncaught
+    /// overflow aborts, so the leftover slots are unobservable (same end state as the `Vec` path).
+    fn push_frame_in_place(
+        &mut self,
+        proto: ProtoId,
+        home: GcRef,
+        closure: Option<GcRef>,
+        base: usize,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        self.frame_depth_guard(true, span)?;
+        self.finish_frame(proto, home, closure, base, true, false, span);
+        Ok(())
+    }
+
+    /// Bump + bound-check the call-depth counter (the infinite-recursion guard). Shared by the
+    /// `Vec` and in-place frame-entry paths so both raise the identical overflow error.
+    fn frame_depth_guard(&mut self, counted: bool, span: Span) -> Result<(), RuntimeError> {
         if counted {
             self.call_depth += 1;
             if self.call_depth > MAX_CALL_DEPTH {
@@ -1937,11 +1988,23 @@ impl Vm {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Reserve the non-parameter local slots above `[base..]` and push the `CallFrame`. Assumes the
+    /// `argc` parameters are already on the stack starting at `base`. Shared frame-install tail.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_frame(
+        &mut self,
+        proto: ProtoId,
+        home: GcRef,
+        closure: Option<GcRef>,
+        base: usize,
+        counted: bool,
+        is_toplevel: bool,
+        span: Span,
+    ) {
         let n_slots = self.program.protos[proto].n_slots;
-        let base = self.stack.len();
-        for a in args {
-            self.stack.push(a);
-        }
         // Reserve the remaining (non-parameter) local slots.
         while self.stack.len() < base + n_slots {
             self.stack.push(Value::Nil);
@@ -1960,7 +2023,6 @@ impl Vm {
             call_span: span,
         });
         self.cur_base = base;
-        Ok(())
     }
 
     /// Build a stack trace from the live frames (innermost first), skipping module-toplevel frames.
@@ -2504,7 +2566,7 @@ impl Vm {
                 let mut s = String::new();
                 for i in 0..*n {
                     let p = self.stack[at + i];
-                    s.push_str(&self.stringify(p, span, 0)?);
+                    self.stringify_into(&mut s, p, span, 0)?; // one buffer, no per-part String
                 }
                 self.stack.truncate(at);
                 let h = self.heap.alloc(Obj::Str(s.into_boxed_str()));
@@ -3286,6 +3348,39 @@ impl Vm {
 
     fn do_call(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;
+        // Fast path — a plain `Func`/`Closure` runs directly over the args already contiguous on the
+        // stack, skipping the `split_off` `Vec` alloc + the re-push in `push_frame`. The callee sits
+        // one slot below the args; we drop it (shifting the args down one) so they become the new
+        // frame's parameter slots in place. Native / not-callable callees fall through to the `Vec`
+        // path (`invoke_native` needs an owned `Vec`, HOFs build args off-stack).
+        let callee = self.stack[at - 1];
+        if let Value::Obj(h) = callee {
+            let kind = match self.heap.get(h) {
+                Obj::Func { proto, home } => Some((*proto, *home, None)),
+                Obj::Closure { proto, home, .. } => Some((*proto, *home, Some(h))),
+                _ => None,
+            };
+            if let Some((proto, home, clo)) = kind {
+                // Arity check BEFORE disturbing the stack — identical messages to `invoke_value`, and
+                // the error path leaves `[callee, args…]` intact for the trace / `recover:`.
+                let arity = self.program.protos[proto].arity;
+                if clo.is_none() {
+                    self.check_arity("function", &self.program.protos[proto].name, arity, argc, span)?;
+                } else if argc != arity {
+                    return Err(self.err(format!("closure expects {arity} argument(s), got {argc}"), span));
+                }
+                // Drop the callee from beneath the args (argc-element memmove; `Value: Copy`).
+                self.stack.copy_within(at.., at - 1);
+                self.stack.pop();
+                let v = self.run_proto_in_place(proto, home, clo, at - 1, span)?;
+                if self.paused() {
+                    return Ok(());
+                }
+                self.push(v);
+                return Ok(());
+            }
+        }
+        // Slow path — native, struct, or not-callable.
         let args: Vec<Value> = self.stack.split_off(at);
         let callee = self.pop();
         let v = self.invoke_value(callee, args, span)?;
@@ -8000,6 +8095,17 @@ impl Vm {
     /// protocol too. Mirrors `interp::Interp::stringify` exactly (parity-tested). Distinct from the
     /// `&self` `display` above, which stays the pure structural form for error/debug text.
     fn stringify(&mut self, v: Value, span: Span, depth: usize) -> Result<String, RuntimeError> {
+        let mut s = String::new();
+        self.stringify_into(&mut s, v, span, depth)?;
+        Ok(s)
+    }
+
+    /// Render `v` by appending into `out` — the allocation-free core shared by `stringify` (which
+    /// wraps it in a fresh `String`) and `BuildStr` (which reuses one buffer across all interpolation
+    /// parts). Byte-identical output to the old return-a-`String` form; only the intermediate
+    /// per-part / per-element `String`s are gone.
+    fn stringify_into(&mut self, out: &mut String, v: Value, span: Span, depth: usize) -> Result<(), RuntimeError> {
+        use std::fmt::Write as _;
         // Guard against cyclic data overflowing the host stack — turns SIGABRT into a recoverable
         // `RuntimeError` (a `str` method re-stringifies at the *same* depth, so a non-recursive
         // protocol hook doesn't burn the budget).
@@ -8007,40 +8113,63 @@ impl Vm {
             return Err(self.err("maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(), span));
         }
         match v {
-            Value::Int(n) => Ok(n.to_string()),
-            Value::Float(x) => Ok(format_float(x)),
-            Value::Bool(b) => Ok(b.to_string()),
-            Value::Nil => Ok("nil".to_string()),
+            Value::Int(n) => {
+                let _ = write!(out, "{n}");
+            }
+            Value::Float(x) => out.push_str(&format_float(x)),
+            Value::Bool(b) => out.push_str(if b { "true" } else { "false" }),
+            Value::Nil => out.push_str("nil"),
             // ROOT the object on the operand stack: a `str` method runs nested frames that GC at
             // instruction boundaries, and the container keeps its transitive contents reachable.
             Value::Obj(h) => {
                 self.push(v);
-                let r = self.stringify_obj(h, span, depth);
+                let r = self.stringify_obj_into(out, h, span, depth);
                 self.pop();
-                r
+                return r;
             }
         }
+        Ok(())
     }
 
-    fn stringify_obj(&mut self, h: GcRef, span: Span, depth: usize) -> Result<String, RuntimeError> {
+    fn stringify_obj_into(&mut self, out: &mut String, h: GcRef, span: Span, depth: usize) -> Result<(), RuntimeError> {
+        use std::fmt::Write as _;
         // Clone the object's shape out so no heap borrow is held across the nested `&mut self` calls.
         match self.heap.get(h).clone() {
-            Obj::Str(s) => Ok(s.to_string()),
-            Obj::List(items) => Ok(format!("[{}]", self.stringify_seq(&items, span, depth + 1)?)),
-            Obj::Tuple(items) => Ok(format!("({})", self.stringify_seq(&items, span, depth + 1)?)),
+            Obj::Str(s) => out.push_str(&s),
+            Obj::List(items) => {
+                out.push('[');
+                self.stringify_seq_into(out, &items, span, depth + 1)?;
+                out.push(']');
+            }
+            Obj::Tuple(items) => {
+                out.push('(');
+                self.stringify_seq_into(out, &items, span, depth + 1)?;
+                out.push(')');
+            }
             Obj::Map(m) => {
-                let mut rendered = Vec::with_capacity(m.entries.len());
-                for (_, k, mv) in &m.entries {
-                    rendered.push(format!("{}: {}", self.stringify(*k, span, depth + 1)?, self.stringify(*mv, span, depth + 1)?));
+                out.push('{');
+                for (i, (_, k, mv)) in m.entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    self.stringify_into(out, *k, span, depth + 1)?;
+                    out.push_str(": ");
+                    self.stringify_into(out, *mv, span, depth + 1)?;
                 }
-                Ok(format!("{{{}}}", rendered.join(", ")))
+                out.push('}');
             }
             Obj::Set(s) => {
                 if s.entries.is_empty() {
-                    Ok("set()".to_string())
+                    out.push_str("set()");
                 } else {
-                    let elems: Vec<Value> = s.entries.iter().map(|(_, e)| *e).collect();
-                    Ok(format!("{{{}}}", self.stringify_seq(&elems, span, depth + 1)?))
+                    out.push('{');
+                    for (i, (_, e)) in s.entries.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        self.stringify_into(out, *e, span, depth + 1)?;
+                    }
+                    out.push('}');
                 }
             }
             Obj::Struct { name, fields } => {
@@ -8051,39 +8180,53 @@ impl Vm {
                 {
                     let home = self.module_objs[def.module_idx];
                     let res = self.guarded(|vm| vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span))?;
-                    return self.stringify(res, span, depth);
+                    return self.stringify_into(out, res, span, depth);
                 }
-                let mut rendered = Vec::with_capacity(fields.len());
-                for (k, fv) in &fields {
-                    rendered.push(format!("{k}={}", self.stringify(*fv, span, depth + 1)?));
+                let _ = write!(out, "{name}(");
+                for (i, (k, fv)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    let _ = write!(out, "{k}=");
+                    self.stringify_into(out, *fv, span, depth + 1)?;
                 }
-                Ok(format!("{name}({})", rendered.join(", ")))
+                out.push(')');
             }
             Obj::Enum { variant, payload, .. } => {
-                if payload.is_empty() {
-                    Ok(variant.to_string())
-                } else {
-                    Ok(format!("{variant}({})", self.stringify_seq(&payload, span, depth + 1)?))
+                out.push_str(&variant);
+                if !payload.is_empty() {
+                    out.push('(');
+                    self.stringify_seq_into(out, &payload, span, depth + 1)?;
+                    out.push(')');
                 }
             }
-            Obj::Func { proto, .. } => Ok(format!("<fn {}>", self.program.protos[proto].name)),
-            Obj::Closure { .. } => Ok("<closure>".to_string()),
-            Obj::Module { name, .. } => Ok(format!("<module {name}>")),
-            Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
+            Obj::Func { proto, .. } => {
+                let _ = write!(out, "<fn {}>", self.program.protos[proto].name);
+            }
+            Obj::Closure { .. } => out.push_str("<closure>"),
+            Obj::Module { name, .. } => {
+                let _ = write!(out, "<module {name}>");
+            }
+            Obj::Native { name, .. } => {
+                let _ = write!(out, "<native fn {name}>");
+            }
             // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
             // (matches the interpreter's `stringify` catch-all falling back to `Display`).
             Obj::Channel(_) | Obj::Shared(_) | Obj::Executor(_) | Obj::Socket(_) | Obj::Listener(_) => {
-                self.display_guarded(Value::Obj(h), depth)
+                out.push_str(&self.display_guarded(Value::Obj(h), depth)?);
             }
         }
+        Ok(())
     }
 
-    fn stringify_seq(&mut self, elems: &[Value], span: Span, depth: usize) -> Result<String, RuntimeError> {
-        let mut rendered = Vec::with_capacity(elems.len());
-        for e in elems {
-            rendered.push(self.stringify(*e, span, depth)?);
+    fn stringify_seq_into(&mut self, out: &mut String, elems: &[Value], span: Span, depth: usize) -> Result<(), RuntimeError> {
+        for (i, e) in elems.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            self.stringify_into(out, *e, span, depth)?;
         }
-        Ok(rendered.join(", "))
+        Ok(())
     }
 }
 
@@ -8466,6 +8609,73 @@ mod tests {
             Ok(out) => panic!("expected a runtime error, got output: {out:?}"),
             Err(e) => e.message,
         }
+    }
+
+    #[test]
+    fn calls_preserve_arg_order_nesting_and_result_slot() {
+        // P1 characterization: locks call semantics before the in-place-args refactor. The bugs an
+        // in-place fast path could introduce are stack-position errors — wrong arg order, a stale
+        // callee slot left under the result, or a misplaced return value in a larger expression.
+        // Non-commutative op catches arg-order swaps; the nested/expression forms catch slot drift.
+        assert_eq!(run("fn sub(a: int, b: int) -> int:\n    return a - b\nprint(sub(10, 3))\n"), "7\n");
+        assert_eq!(
+            run("fn sub(a: int, b: int) -> int:\n    return a - b\nprint(sub(sub(20, 5), sub(8, 3)))\n"),
+            "10\n"
+        );
+        assert_eq!(
+            run("fn sub(a: int, b: int) -> int:\n    return a - b\nprint(sub(10, 3) * 2 + 1)\n"),
+            "15\n"
+        );
+        // Zero-arg call returning a value; result used in an expression.
+        assert_eq!(run("fn five() -> int:\n    return 5\nprint(five() + 1)\n"), "6\n");
+        // Recursion through the call path.
+        assert_eq!(
+            run("fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nprint(fib(10))\n"),
+            "55\n"
+        );
+        // Closure value called via a binding (the Closure arm of the fast path).
+        assert_eq!(run("g := fn(x: int) -> int: x * 2\nprint(g(21))\n"), "42\n");
+        // Closure capturing an outer binding, then called.
+        assert_eq!(
+            run("k := 100\nadd := fn(x: int) -> int: x + k\nprint(add(7))\n"),
+            "107\n"
+        );
+        // HOF native (`map`) still routes through the Vec path in invoke_value — must stay correct.
+        assert_eq!(run("print([1, 2, 3].map(fn(x: int) -> int: x + 1))\n"), "[2, 3, 4]\n");
+        // `defer` inside a called fn runs at that fn's exit (LIFO), not the caller's.
+        assert_eq!(
+            run("fn log(s: str):\n    print(s)\nfn f():\n    defer log(\"a\")\n    defer log(\"b\")\n    log(\"body\")\nf()\nlog(\"after\")\n"),
+            "body\nb\na\nafter\n"
+        );
+    }
+
+    #[test]
+    fn fstring_and_str_render_all_value_shapes() {
+        // P2 characterization: locks the exact BuildStr / stringify output across every value
+        // shape before the stringify-into-buffer refactor (separators, braces, nesting, hooks).
+        assert_eq!(run("print(\"{1} {2.5} {true}\")\n"), "1 2.5 true\n");
+        assert_eq!(run("x := 42\nprint(\"i={x}\")\n"), "i=42\n");
+        assert_eq!(run("print(\"{[1, 2, 3]}\")\n"), "[1, 2, 3]\n");
+        assert_eq!(run("print(\"{(1, 2)}\")\n"), "(1, 2)\n");
+        assert_eq!(run("print(\"{[[1], [2, 3]]}\")\n"), "[[1], [2, 3]]\n");
+        assert_eq!(run("m := {\"a\": 1, \"b\": 2}\nprint(\"{m}\")\n"), "{a: 1, b: 2}\n");
+        assert_eq!(run("print(str({1, 2}))\n"), "{1, 2}\n");
+        assert_eq!(run("s: set[int] = set()\nprint(str(s))\n"), "set()\n");
+        // Struct default repr + a multi-part f-string mixing literal text and several holes.
+        assert_eq!(
+            run("struct P:\n    x: int\n    y: int\nprint(\"p={P(3, 4)} end\")\n"),
+            "p=P(x=3, y=4) end\n"
+        );
+        // `str(self)` protocol hook overrides the default repr inside interpolation.
+        assert_eq!(
+            run("struct Pt:\n    x: int\n    fn str(self) -> str:\n        return \"<{self.x}>\"\nprint(\"v={Pt(7)}\")\n"),
+            "v=<7>\n"
+        );
+        // Enum nullary + payload variants.
+        assert_eq!(
+            run("enum E:\n    A\n    B(int, int)\nprint(\"{A} {B(1, 2)}\")\n"),
+            "A B(1, 2)\n"
+        );
     }
 
     #[test]
