@@ -19,10 +19,14 @@ reason Go needs the lockless fence), so the core mutex *is* the StoreLoad barrie
 easier-to-prove gate suffices (see the D4e section below). **D5 (dirty/blocking pool) has landed.
 D6a (the netpoller + non-blocking `std.net` TCP surface) has landed** — an epoll/kqueue poll thread
 (`src/vm/poller.rs`, `polling` crate) parks a would-block socket op as `inflight` and injects it back
-via `complete_offload`; `Socket`/`Listener` are `Channel`-shaped `Arc`-core heap handles. **D6b (the
-small follow-up) is what remains: timer-into-poll fold, cancel/fault draining the poller registry (the
-one real gap — today a faulting sibling hangs a nursery with a poller-parked fiber), and non-blocking
-`connect`.**
+via `complete_offload`; `Socket`/`Listener` are `Channel`-shaped `Arc`-core heap handles. **D6b has
+landed too — the D-tier is complete through D6:** `poller::drain_sched` re-injects a nursery's
+poller-parked fibers on a sibling fault (closing the nursery-hang gap — the re-injected fiber unwinds at
+`run_until`'s loop-top cancel check before its socket op re-runs); the `sleep_ms` timer is folded onto
+the netpoller poll thread (one daemon, deadline-bounded `wait` + `notify`); and `connect` is a true
+non-blocking connect (`socket2`, `EINPROGRESS` → park on writability → `SO_ERROR`, with the connecting
+stream stashed non-heap in `FiberCtx`). A register-vs-cancel race was closed by serializing
+register/drain/fire under the registry lock.
 
 ## TL;DR
 
@@ -427,8 +431,9 @@ Goldens byte-identical.
 > (`src/vm/timer.rs`: deadline min-heap + one thread) replaces the one-pool-thread-per-sleep model:
 > `sleep_ms` parks the fiber on the timer (`OffloadReq.timer_ms` branches `MnSched::offload`), waking
 > it at the deadline through the same `inflight`/`complete_offload` path (deadlock predicate stays
-> sound). 10⁴ sleepers ≈ 1 thread; `checked_add` saturates a pathological `ms`. D6 will fold this
-> timer deadline into the pollset `poll()` timeout (one blocking wait covers I/O + timers).
+> sound). 10⁴ sleepers ≈ 1 thread; `checked_add` saturates a pathological `ms`. **D6b folded this timer
+> deadline into the netpoller `poll()` timeout (one blocking wait covers I/O + timers); the dedicated
+> timer thread is gone and `src/vm/timer.rs` is now a shim over `poller::submit_timer`.**
 > **Still deferred — owe #3:** the `recv`-inside-native-callback unblock. Its **resolution strategy is
 > now documented** (the "D5 owe #3" section below — Path A: move HOFs into `std/iter.chz` chezzi source,
 > proven to park; Path C: Go-`handoffp` thread-demote for the native-lock/hook islands; Path B stackful
@@ -536,7 +541,7 @@ pursued unless chezzi adopts Go/BEAM-grade uniformity as a core goal.
 `--parallel` test that `recv`s inside the closure. (2) Decide the builtin-method fate (keep fast vs
 dispatch-to-stdlib). (3) Path C only if real programs hit `update`/hooks/fast-`sort`. **B never.**
 
-### D6 — epoll / kqueue pollset + minimal `std.net` (TCP) *(Go netpoller)* — D6a ✅ LANDED
+### D6 — epoll / kqueue pollset + minimal `std.net` (TCP) *(Go netpoller)* — D6a + D6b ✅ LANDED
 
 > **Status: D6a LANDED.** The pollset (`src/vm/poller.rs`, `polling` crate: one poll thread + an
 > fd→parked-fiber registry) and the full non-blocking `std.net` surface
@@ -552,11 +557,29 @@ dispatch-to-stdlib). (3) Path C only if real programs hit `update`/hooks/fast-`s
 > the only thread. **Headline:** `examples/echo_server.chz` + `net_echo_server_services_more_conns_than_workers`
 > service **100 conns ≫ core workers** in one `parallel:`. 1404 tests green, clippy clean,
 > `primes_parallel=148933` both engines, goldens byte-identical. 2-agent S++ panel; Critical + both
-> Importants applied. **D6b remains:** fold the `sleep_ms` timer into the poll timeout; drain the poller
-> registry on cancel/fault (today a faulting sibling **hangs a nursery** with a poller-parked fiber —
-> the one real gap, `src/vm/poller.rs` module docs); true non-blocking `connect` parked on writability;
-> per-connection `spawn` handler (needs M:N spawn-after-join, currently the handler runs inline in the
-> acceptor). The plan below is the original full-D6 spec; D6a is its socket-surface + park/inject core.
+> Importants applied.
+>
+> **Status: D6b LANDED — the D-tier is complete through D6.** Three follow-ups closed the D6a gaps:
+> **(1) Drain-on-fault** (`poller::drain_sched`, called from `mn_worker_loop`'s abort branch beside
+> `cancel_drain`): re-injects every fiber parked on the faulting nursery's sockets; the re-injected
+> fiber unwinds at `run_until`'s loop-top cancel check **before** its rewound socket op re-runs, so the
+> fault propagates instead of **hanging the nursery** (the previous hard gate). **(2) Timer fold:** the
+> `sleep_ms` timer min-heap moved onto the netpoller poll thread — one `wait()` bounded by the nearest
+> deadline (`submit_timer` + `poller.notify()` to re-evaluate), `timer.rs` reduced to a shim. One OS
+> thread serves socket readiness + sleeps. **(3) Non-blocking `connect`** (`socket2`): an `EINPROGRESS`
+> handshake parks on **writability** (`Disp::PollPark` + `pending_connect` — the connecting `TcpStream`
+> stashed non-heap in `FiberCtx`, swapped per-fiber); on writability the poller injects and
+> `run_one_fiber` finishes via `finish_connect` (`SO_ERROR`), pushing the `Socket` with **no `ip`
+> rewind** (the call already advanced). Loopback completes synchronously; the top-level fallback blocks
+> with a 10 s cap; `connect` inside a native callback fails loud. A **register-vs-cancel race** (a fiber
+> parking on the poller *after* `drain_sched` swept) was closed by serializing
+> register/deregister/`drain_sched`/fire-path — incl. the fd `add`/`delete` — under the registry lock,
+> with `register` returning the fiber (to re-inject) when cancel is already set. 1410 tests green, clippy
+> clean; 2-agent S++ panel, no Critical, both Importants applied (bound the top-level blocking connect;
+> fail-loud connect inside a native callback). **Still deferred** (not D6 prerequisites): per-connection
+> `spawn` handler (needs M:N spawn-after-join — the handler still runs inline in the acceptor); a
+> user-facing per-socket read/accept **timeout** (the timer fold is the groundwork); D5 owe #3
+> (`recv` inside a native callback). The plan below is the original full-D6 spec.
 
 **Goal.** Cheap *massive* socket concurrency (10 k connections) without a thread per connection.
 Build the pollset **and** the socket surface that justifies it (regular files stay on D5's blocking

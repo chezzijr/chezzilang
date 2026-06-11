@@ -326,12 +326,34 @@ deadlock detector), and `read(n)` caps its buffer at 16 MiB (`MAX_SOCKET_READ`) 
 caller-controlled OOM. **1404 tests green** (+11: socket core ×1, poller unit ×4, `poll_park_offload`
 ×1, `net.rs` helpers ×3, loopback round-trip ×1, echo-server ×1), `cargo clippy` clean,
 `primes_parallel=148933` (VM + `--parallel`), all `--parallel` goldens byte-identical.
-**D6b (small follow-up) is next:** fold the `sleep_ms` timer deadline into the poll timeout; wire the
-B3.4 cancel/fault path to drain the poller registry so a faulting sibling aborts an `accept`/`read`-
-parked fiber (today that **hangs the nursery join** — a documented hard gate on "net production-ready",
-`src/vm/poller.rs` module docs); and a true non-blocking `connect` parked on writability. Items *not*
-in B3–B5 (cross-nursery wakeups, recv-in-native-callback, `Channel.close()`) are
-documented in **[`docs/concurrency.md` §11](docs/concurrency.md)**. Full A/B breakdown: §9.
+**D6b has landed — the D-tier is complete through D6.** Three follow-ups closed the D6a gaps:
+**(1) Drain-on-fault (the hard gate).** `poller::drain_sched(&sched)` re-injects every fiber parked on
+that nursery's sockets; `mn_worker_loop`'s abort branch now calls it beside `cancel_drain` (which only
+walks the channel-`recv` `parked` buckets). A re-injected fiber resumes and hits the cancel check at
+`run_until`'s loop-top **before** its rewound socket op re-runs, so it unwinds as `cancelled` and the
+fault propagates — a net server may now share a nursery with a fallible sibling instead of **hanging
+the join** (the previous documented hard gate). **(2) Timer fold.** The dedicated `sleep_ms` timer
+thread is gone: the netpoller's poll thread now owns the timer min-heap, `wait()`s with a
+deadline-bounded timeout, and fires due timers on wake (`submit_timer` + `poller.notify()`); `timer.rs`
+is a 2-line shim over `poller::submit_timer`. One OS thread serves both socket readiness and sleeps.
+**(3) True non-blocking `connect`.** `socket2`-based: a non-blocking connect that returns `EINPROGRESS`
+parks the fiber on **writability** (a fresh `Disp::PollPark` with `pending_connect` — the connecting
+`TcpStream` stashed in `FiberCtx`, swapped per-fiber, non-heap so no GC rooting); on writability the
+poller injects it and `run_one_fiber` completes via `finish_connect` (`SO_ERROR`), pushing the `Socket`
+with **no `ip` rewind** (the call already advanced). The loopback fast path still returns synchronously;
+the cooperative/top-level fallback blocks with a 10 s wall-clock cap (`CONNECT_BLOCK_TIMEOUT_SECS`),
+and a `connect` inside a native callback fails loud like `read`/`write`. A **register-vs-cancel race**
+surfaced and was fixed by serializing register/deregister/`drain_sched`/fire-path (incl. the fd
+`add`/`delete`) under the registry lock, with `register` rejecting (returning the fiber to re-inject)
+when cancel is already set. **2-agent S++ review panel (Code Reviewer ×2): no Critical; two Importants
+applied** — the top-level blocking connect is now bounded (was an unbounded spin on a black-hole
+address), and `connect` inside a native callback fails loud rather than pinning a worker. **1410 tests
+green** (+drain unit, +timer fold ×4, +3 net VM tests, +1 net unit), `cargo clippy` clean, full
+`--parallel` net suite + the hang-regression watchdog tests pass, `examples/echo_server.chz` serves 50
+conns. Items *not* in B3–B5 (cross-nursery wakeups, recv-in-native-callback / D5 owe #3,
+`Channel.close()`, per-connection `spawn`, per-socket read/accept timeout) are documented in
+**[`docs/concurrency.md` §11](docs/concurrency.md)** and **[`docs/concurrency-tier-d.md`](docs/concurrency-tier-d.md)**.
+Full A/B breakdown: §9.
 
 > **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,
 > not a TODO.** The interpreter stays frozen at the **sequential concurrency subset** and serves as
