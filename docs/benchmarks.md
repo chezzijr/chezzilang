@@ -24,6 +24,28 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > Ratios are the portable signal; absolutes move with hardware. The numbers above are this
 > machine on this date — regenerate before drawing conclusions on a different box.
 
+## After M19 Phase 1 — 2026-06-11 (same machine)
+
+Phase 1 landed three behavior-preserving VM/compiler optimizations: **(1)** killed the per-call
+`Obj`/`HashMap` clone in `invoke_value`; **(2)** a jump-relocating peephole pass with constant
+folding; **(3)** superinstructions for the hot numeric windows (`BinLocalLocal`, `BinLocalConst`,
+`IncLocal`). Re-run of the same harness:
+
+| bench    | chezzi (before → after) | python  | slower (before → after) |
+|----------|-------------------------|---------|-------------------------|
+| fib(30)  | 470 ms → **391 ms**     | 80 ms   | 5.9× → **4.9×**         |
+| str      | 300 ms → **283 ms**     | 82 ms   | 3.6× → **3.5×**         |
+| list     | 576 ms → **447 ms**     | 154 ms  | 3.8× → **2.9×**         |
+| primes   | 985 ms → **738 ms**     | 285 ms  | 3.5× → **2.6×**         |
+| loop     | 1806 ms → **1164 ms**   | 856 ms  | 2.1× → **1.4×**         |
+| startup  | 0.79 ms → **0.80 ms**   | 9.0 ms  | 0.09× (win, unchanged)  |
+
+The benches moved exactly where the fixes aimed: **`loop` −36%** and **`primes` −25%** from the
+superinstructions (fused compare/arith/increment cut dispatch count in the inner loop); **`fib`
+−17%** and **`list` −22%** from the `invoke_value` clone kill (both are call-heavy). **`str` barely
+moved** — its cost is string allocation (`BuildStr`/`ConstStr`), untouched this phase and the
+target of a later one. Startup unchanged (still the standing ~11× win).
+
 ## Reading it
 
 The shape matches what `future.md §4` predicted from first principles: **the gap is
@@ -63,3 +85,8 @@ Per `future.md §4`: **superinstructions + inline caching + peephole/const-fold*
 **per-call clone kills** in `invoke_value` (cheap, and `fib` is the worst bench). All four
 attack dispatch count, name lookup, and call overhead without touching the value model or
 the GC — and `fib`/`loop`/`primes` are exactly the benches they move.
+
+**Landed (M19 Phase 1):** ✅ per-call clone kill in `invoke_value`, ✅ peephole + constant
+folding, ✅ superinstructions (`BinLocalLocal` / `BinLocalConst` / `IncLocal`). **Still open:**
+inline caching, frame pooling, string interning / builder (the `str` lever), arithmetic
+specialization, NaN-boxing, generational GC — see `future.md §4`.

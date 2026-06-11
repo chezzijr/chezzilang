@@ -11,14 +11,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-**Next up — M19 Perf track (scheduled, not started).** A reproducible `benches/` harness now
-exists (`benches/run.chz` — a Chezzi-written driver shelling out to hyperfine — measuring 6 microbenches
-against CPython). Baseline 2026-06-11: **2.1×–5.9× slower than CPython**, **~11× faster cold startup**.
-The gap scales with call density (`loop` 2.1× → `fib` 5.9×). Numbers + per-bench bottleneck analysis
-(with `src/vm` `file:line` hot spots) in [`docs/benchmarks.md`](docs/benchmarks.md); ranked backlog in
-[`docs/future.md §4`](docs/future.md). First cheap wins: peephole/const-fold, superinstructions, inline
-caching, and killing the per-call clones in `invoke_value` (`mod.rs:3181/:3198/:3200`). No VM code
-changed yet — this session landed docs + harness only.
+**🟦 M19 Perf track — Phase 1 LANDED (2026-06-11).** Three behavior-preserving optimizations, all
+TDD'd and guarded by the full two-engine parity suite:
+1. **Killed the per-call clone in `invoke_value`** — was `self.heap.get(h).clone()` on the whole `Obj`
+   (a closure's captured `HashMap` included) plus an arity-check `name.clone()` every call. Now matches
+   on `&Obj`, copies out the `Copy` fields, defers the name to the error path. → `fib` −17%, `list` −22%.
+2. **Jump-relocating peephole pass + constant folding** (`src/compiler/peephole.rs`) — one forward
+   walk folds `ConstInt`/`ConstFloat` arith + `Neg`/`Not` (replicating the VM's checked semantics:
+   overflow / div-by-zero stay unfolded → identical runtime error), tracking an old→new index map and
+   renumbering every absolute jump. A window is refused if its interior is a jump target.
+3. **Superinstructions** (`Op::BinLocalLocal` / `BinLocalConst` / `IncLocal`, `src/vm/op.rs`) — fuse the
+   hot `GetLocal+GetLocal+BinOp`, `GetLocal+Const+BinOp`, and `i += k` windows. Int fast path inlined;
+   any other operand type falls back to the exact unfused `arith`/`compare_op` (struct overloading /
+   string concat / float promotion / fiber parking stay byte-identical). Bodies live in `#[inline(never)]`
+   helpers so `step`'s frame stays lean (it's on the deep-recursion cycle). → `loop` −36%, `primes` −25%.
+
+Result: gap to CPython narrowed **loop 2.1×→1.4×, primes 3.5×→2.6×, list 3.8×→2.9×, fib 5.9×→4.9×**
+(startup still ~11× win). Full numbers in [`docs/benchmarks.md`](docs/benchmarks.md); backlog status in
+[`docs/future.md §4`](docs/future.md). **1516 tests** green + `cargo test conformance` (7/7) + `cargo
+clippy -- -D warnings` clean.
+
+**Next (M19 Phase 2):** inline caching for name lookup (⚠ concurrency module-fault path), string
+interning / `BuildStr` builder (the `str` lever, untouched this phase), arithmetic specialization,
+frame pooling, and passing call args as a stack slice (`mod.rs:3181`).
 
 **Robustness pass — cyclic-data depth guard + order-independent map `==` — has now landed** (both
 engines). Two fuzzing-found bugs: (1) a cyclic data structure (a struct with a `list[Self]` field
