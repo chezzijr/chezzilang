@@ -10,7 +10,7 @@ in `PROGRESS.md` + the cited `examples/*.chz`.
 
 Legend: 🔴 blocks real apps · 🟡 notable friction · 🟢 works (recorded so we don't re-flag it).
 
-Last updated: 2026-06-09. Baseline: post-M18 (`defer` → block-scoped); gaps pass II in progress.
+Last updated: 2026-06-11. Baseline: post-M18 (`defer` → block-scoped) + concurrency D6 complete; gaps pass II in progress.
 
 > **Forward-looking brainstorm** (a non-Go concurrency model, VM/GC optimizations, far-out ideas)
 > lives in **[`docs/future.md`](docs/future.md)** — speculative, NOT scheduled. Concrete near-term
@@ -150,6 +150,41 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   per-iteration bindings (Python/Rust semantics), so the divergent program never reaches either
   engine. See `src/checker/mod.rs` (`is_loop_var`/`mark_loop_var`) + checker tests
   `for_*_reassign_rejected`.
+
+### 🟡 Concurrency (engine — deeper tracking in `docs/concurrency.md` §11 + `docs/concurrency-tier-d.md`)
+
+The `--parallel` engine is a true M:N scheduler through **D6** (fibers, work-stealing, dirty pool,
+netpoller + `std.net`). The items here are *correctness/semantics* gaps found by probing, not missing
+breadth. The big deferred *features* (D5 owe #3 `recv`-in-native-callback, per-connection `spawn`,
+`Channel.close()`, per-socket timeout) live in the tier-d doc.
+
+- **🟡 Pending `spawn` tasks are silently dropped on an early escape from `parallel:`** — **verified
+  both engines, 2026-06-11.** If the parent's inline code in a `parallel:` body escapes *before the
+  join* (a `?` error, `return`, or `break`), every task already `spawn`ed-but-not-yet-started is
+  **neither run nor cancelled nor awaited** — it just vanishes. Example:
+  ```
+  parallel:
+      spawn side()      # registered, not started
+      x := risky()?     # errors here → escapes before JoinNursery → side() never runs
+  ```
+  Faults *from a started task* correctly cancel siblings + propagate (B3.4); the asymmetry is only for
+  tasks that hadn't started. This violates structured-concurrency expectation (Trio/Kotlin run-or-cancel
+  children on scope exit). **Blocks:** relying on `parallel:` as a hard "all children accounted for"
+  barrier. **Design call needed:** run-pending-to-completion vs cancel-and-report before deciding the
+  fix. (Surface note: `spawn f()?` is a *parse* error — `?` can't sit at the spawn site; `?` inside a
+  spawned body/`spawn:` block is fine and faults the task.)
+
+- **🟡 VM leaks the nursery (+ its GC-rooted task args) on a `?`/return escape from `parallel:` not
+  caught by `recover:`** — **verified 2026-06-11; VM/interp divergence (internal memory only, output
+  identical).** `do_return` (`src/vm/mod.rs:3918`) reclaims defers + `recover:` handlers but does **not**
+  truncate `self.nurseries`, so a nursery whose `JoinNursery` was skipped by an early `?`/return stays
+  on the stack until program exit (its pending tasks' captured args stay GC-rooted). The `recover:`
+  unwind path *does* clean up (`nurseries.truncate(h.nursery_len)`, line 1767) and the interp reclaims
+  unconditionally (`exec_parallel` pops even on error) — so it's a divergence, not a crash; benign
+  beyond the leak (a skipped `JoinNursery` is never re-matched, so no wrong task runs). **Fix sketch:**
+  record the nursery depth at frame entry (mirror `Handler::nursery_len`) and `truncate` to it in
+  `do_return`; regression test asserting interp/VM parity + a clean nursery stack for a subsequent
+  `parallel:`. Tied to the dropped-task semantics above (the fix should also decide drop-vs-drain).
 
 ### 🟡 Stdlib breadth (low priority — language is feature-complete; this is library fill)
 
