@@ -4149,8 +4149,13 @@ impl Vm {
                     sched.finish(task_index, outcome);
                     // A fault/exit tripped the cancel flag (in `classify_mn_outcome`); requeue parked
                     // siblings so they observe it and unwind (running ones see it at a back-edge).
+                    // `cancel_drain` reaches channel-`recv`-parked fibers; `drain_sched` reaches the
+                    // ones parked on the netpoller (`accept`/`read`/`write`/`connect`) — together they
+                    // cover every parked fiber, so a net server sharing a nursery with a faulting
+                    // sibling now unwinds instead of hanging (D6b — the production-ready gate).
                     if aborts {
                         sched.cancel_drain();
+                        poller::drain_sched(sched);
                     }
                 }
             }
@@ -11652,6 +11657,44 @@ main()
         assert!(out.contains("echo:hello"), "the client received the server's echo: {out:?}");
         assert!(out.contains("done"), "the nursery joined and main continued: {out:?}");
         assert!(!out.contains("net error"), "no I/O error on the happy path: {out:?}");
+    }
+
+    /// D6b — the production-ready gate (regression for the documented HANG): a `parallel:` runs a
+    /// fiber parked on `accept` (no client ever connects, so it parks on the netpoller forever) beside
+    /// a sibling that faults. Before D6b's `poller::drain_sched`, the faulting sibling tripped cancel
+    /// but never reached the poller-parked acceptor — its task stayed `inflight`, the fault never
+    /// propagated, and the nursery wedged. Now the drain re-injects the acceptor, it unwinds on the
+    /// cancel flag, and the original fault surfaces. Watchdog-guarded: a regression re-hangs here.
+    #[test]
+    fn net_faulting_sibling_aborts_accept_parked_peer() {
+        let src = r#"import std.net
+
+fn faulter(z: int) -> int!:
+    return Ok(10 / z)
+
+fn acceptor(server: Listener) -> int!:
+    conn := server.accept()?
+    conn.close()
+    return Ok(0)
+
+fn run() -> int!:
+    server := net.listen("127.0.0.1:0")?
+    parallel:
+        spawn acceptor(server)
+        spawn faulter(0)
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print("joined ok")
+        Err(e): print("caught: " + e.message())
+
+main()
+"#;
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        let err = res.expect_err("the faulting sibling's error must propagate, not hang the nursery");
+        assert!(err.message.contains("division by zero"), "the original fault surfaces: {}", err.message);
+        assert!(!out.contains("joined ok"), "the nursery faulted rather than joining cleanly: {out:?}");
     }
 
     /// D6 — the headline netpoller test: an echo server services **far more connections than there are

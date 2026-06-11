@@ -22,16 +22,16 @@
 //! pending park) deletes then re-injects the stranded fiber so it resumes, finds the socket closed,
 //! and faults cleanly — never lost, never an `inflight` leak.
 //!
-//! **v1 limit (deferred to D6b).** A poller-parked fiber lives in this service's registry, *not* in
-//! the scheduler's `parked` buckets, so B3.4 cancellation / deadlock draining does not reach it. The
-//! observable consequence is **a nursery join HANG, not just a lingering fiber**: if one sibling
-//! faults while another is parked on `accept`/`read`, the parked fiber's task never reaches `done`,
-//! `is_deadlocked` stays vetoed (`inflight > 0`), and the fault never propagates — the whole
-//! `parallel:` wedges instead of unwinding. This breaks the structured-concurrency error-propagation
-//! guarantee for net-using nurseries and is a HARD GATE on any "net is production-ready" claim. D6b
-//! must give the fault path a "drain this sched's poller registrations" hook (and a socket-timeout
-//! escape hatch). Same spirit as the existing "`recv` inside a native callback" limit, but with a
-//! larger blast radius. Until then, a net server should not share a nursery with a fallible sibling.
+//! **Cancel/fault draining (D6b).** A poller-parked fiber lives in this service's registry, *not* in
+//! the scheduler's `parked` buckets — so B3.4's `cancel_drain` (which walks `parked`) does not reach
+//! it. [`drain_sched`] closes that gap: when a sibling faults / `os.exit`s, [`super::Vm::mn_worker_loop`]
+//! calls it alongside `cancel_drain`, re-injecting every fiber parked on this nursery's sockets. The
+//! re-injected fiber resumes and hits the cancel check at [`super::Vm::run_until`]'s loop-top BEFORE
+//! its rewound socket op re-runs, so it unwinds as `cancelled` and the fault propagates — the
+//! `parallel:` joins instead of wedging. A net server may now share a nursery with a fallible sibling.
+//! (Deadlock detection still needs no drain: an `inflight` poller-parked fiber vetoes a false
+//! deadlock, so the predicate can't fire while one is parked — only the cancel/fault path could
+//! strand them, and that is now drained.)
 
 use super::{Fiber, MnSched};
 use polling::{Event, Events, Poller};
@@ -88,6 +88,17 @@ pub fn deregister(key: usize) -> bool {
     SERVICE.get_or_init(NetPoller::new).deregister(key)
 }
 
+/// D6b — the cancel/fault hook: re-inject every fiber parked on a socket belonging to `sched` (a
+/// nursery whose sibling faulted / `os.exit`ed), disarming each fd. A re-injected fiber resumes,
+/// hits the cancel check at [`super::Vm::run_until`]'s loop-top (BEFORE its rewound socket op
+/// re-runs), and unwinds as `cancelled` — so the fault propagates and the nursery joins instead of
+/// hanging on a poller-parked peer. Called from [`super::Vm::mn_worker_loop`]'s abort branch beside
+/// [`super::MnSched::cancel_drain`] (which drains the channel-`recv` park set); together they reach
+/// every parked fiber. A no-op if this nursery has nothing parked on the poller (the common case).
+pub fn drain_sched(sched: &Arc<MnSched>) {
+    SERVICE.get_or_init(NetPoller::new).drain_sched(sched);
+}
+
 impl NetPoller {
     fn new() -> Self {
         let inner = Arc::new(Inner {
@@ -131,6 +142,27 @@ impl NetPoller {
             true
         } else {
             false
+        }
+    }
+
+    fn drain_sched(&self, sched: &Arc<MnSched>) {
+        // Collect-and-remove the matching entries UNDER the registry lock, then release it before
+        // touching the scheduler: `complete_offload` takes the sched lock, so doing it here (registry
+        // lock held) would nest registry→sched, whereas the fire path nests sched alone — keep the
+        // registry lock leaf-level to rule out any lock-order inversion. Selection is by `Arc::ptr_eq`
+        // (same scheduler instance), not the deadlock-error/cancel token, so sibling nurseries are
+        // never disturbed.
+        let drained: Vec<Parked> = {
+            let mut reg = self.lock_registry();
+            let keys: Vec<usize> =
+                reg.iter().filter(|(_, p)| Arc::ptr_eq(&p.sched, sched)).map(|(k, _)| *k).collect();
+            keys.into_iter().filter_map(|k| reg.remove(&k)).collect()
+        };
+        for Parked { fiber, sched, fd, in_flight } in drained {
+            // SAFETY: still in the registry ⇒ never injected ⇒ fd still open (rooted on `fiber`).
+            let _ = self.inner.poller.delete(unsafe { BorrowedFd::borrow_raw(fd) });
+            in_flight.store(false, Ordering::Release); // the op is no longer parked
+            sched.complete_offload(fiber); // inflight→runnable; the re-run unwinds on the cancel flag
         }
     }
 
@@ -275,6 +307,47 @@ mod tests {
 
         deregister(key); // clean up the registration (delete-before-drop) before `server` drops
         drop(server);
+    }
+
+    /// D6b — `drain_sched` (the cancel/fault hook): every fiber parked on `target`'s sockets is
+    /// re-injected (so it resumes, observes the nursery cancel flag at `run_until`'s loop-top, and
+    /// unwinds) and its fd disarmed; a fiber parked on a *different* sched is untouched. This is the
+    /// fix for the documented hang — a faulting sibling can now abort an `accept`/`read`-parked peer.
+    #[test]
+    fn drain_sched_reinjects_matching_and_disarms() {
+        let (mut client_a1, server_a1) = loopback_pair();
+        let (_client_a2, server_a2) = loopback_pair();
+        let (_client_b, server_b) = loopback_pair();
+        let sched_a = mk_sched();
+        let sched_b = mk_sched();
+        let (k_a1, k_a2, k_b) = (usize::MAX - 10, usize::MAX - 11, usize::MAX - 12);
+        let (if_a1, if_a2, if_b) = (new_in_flight(), new_in_flight(), new_in_flight());
+        for f in [&if_a1, &if_a2, &if_b] {
+            f.store(true, Ordering::Release);
+        }
+        sched_a.inflight.fetch_add(2, Ordering::Relaxed);
+        sched_b.inflight.fetch_add(1, Ordering::Relaxed);
+        register(k_a1, server_a1.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched_a), Arc::clone(&if_a1));
+        register(k_a2, server_a2.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched_a), Arc::clone(&if_a2));
+        register(k_b, server_b.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched_b), Arc::clone(&if_b));
+
+        drain_sched(&sched_a);
+
+        // sched_a's two parked fibers were re-injected (inflight→runnable) and their guards cleared.
+        assert_eq!(sched_a.lock().global.len(), 2, "both sched_a fibers re-injected exactly once");
+        assert_eq!(sched_a.inflight.load(Ordering::Relaxed), 0, "sched_a inflight drained");
+        assert!(!if_a1.load(Ordering::Acquire) && !if_a2.load(Ordering::Acquire), "drain clears in_flight");
+        // sched_b's fiber is a different nursery — left parked.
+        assert_eq!(sched_b.lock().global.len(), 0, "sched_b fiber untouched");
+        assert_eq!(sched_b.inflight.load(Ordering::Relaxed), 1, "sched_b still parked");
+
+        // Disarmed: making a drained fd readable must NOT inject a second time.
+        client_a1.write_all(b"x").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(sched_a.lock().global.len(), 2, "drained fd did not double-inject");
+
+        deregister(k_b); // clean up sched_b's registration before its server drops
+        drop((server_a1, server_a2, server_b));
     }
 
     /// deregister (a `close` racing a pending park) re-injects the stranded fiber and disarms the fd,
