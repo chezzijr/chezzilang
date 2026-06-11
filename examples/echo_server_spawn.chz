@@ -1,0 +1,53 @@
+# examples/echo_server_spawn.chz — a TCP echo server with PER-CONNECTION spawn (D-tier).
+#
+# Unlike examples/echo_server.chz (which services each connection INLINE in the accept loop), here
+# the acceptor `spawn`s a `handle(conn)` fiber PER accepted connection inside its own `parallel:`.
+# The acceptor returns to `accept()` immediately while handlers run concurrently on the M:N pool —
+# the structured-concurrency shape a real server wants. The inner `parallel:` is EAGER: a spawn
+# injects a live fiber into the running scheduler (not queued for the join), so the handler runs
+# now, not after the loop. The inner nursery joins (waits for every handler) when the loop ends.
+#
+# Per-connection spawn parks on the netpoller and is M:N-only, so run on --parallel:
+#
+#   chezzi run --parallel examples/echo_server_spawn.chz
+
+import std.net
+
+fn handle(conn: Socket) -> int!:
+    msg := conn.read(64)?
+    conn.write("echo:" + msg)?
+    conn.close()
+    return Ok(0)
+
+fn acceptor(server: Listener, n: int) -> int!:
+    parallel:
+        for _ in 0..n:
+            conn := server.accept()?
+            spawn handle(conn)        # injected into the live nursery — runs concurrently
+    server.close()
+    return Ok(0)
+
+fn client(addr: str) -> int!:
+    sock := net.connect(addr)?
+    sock.write("ping")?
+    reply := sock.read(64)?
+    sock.close()
+    if reply == "echo:ping":
+        return Ok(1)
+    return Err("bad reply: " + reply)
+
+fn run(n: int) -> int!:
+    server := net.listen("127.0.0.1:0")?
+    addr := server.addr()?
+    parallel:
+        spawn acceptor(server, n)
+        for _ in 0..n:
+            spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run(50):
+        Ok(_): print("echo server handled 50 connections, one fiber each")
+        Err(e): print("error: " + e.message())
+
+main()

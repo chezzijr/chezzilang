@@ -231,6 +231,11 @@ struct Vm {
     /// only THEN run the recover block's own defers — matching the interp, whose `exec_parallel`
     /// reports after the body's `exec_scoped_block` has already drained its defers.
     nursery_defer_floors: Vec<usize>,
+    /// Per-connection spawn — parallel to [`Vm::nurseries`] (lockstep): `Some` for an eager nursery
+    /// (entered under `--parallel` inside a fiber), `None` for a lazy/top-level one. A `spawn` whose
+    /// innermost nursery is eager injects its handler fiber straight into the scope's sched (runs
+    /// concurrently with the body) instead of queueing it for the join. See [`EagerScope`].
+    eager_scheds: Vec<Option<EagerScope>>,
     /// Every `Executor` created during the run (`Op::NewExecutor`), in creation order. These handles
     /// are GC roots (see [`Vm::collect`]) so an un-shut executor's queued work survives until the
     /// program-exit auto-drain (C5 / A2) reaps any executor never explicitly shut down — the VM
@@ -400,6 +405,12 @@ struct FiberCtx {
     /// TASK B — see [`Vm::nursery_defer_floors`]; carried per-fiber so a parked fiber's per-nursery
     /// defer floors travel with its `nurseries` across `swap_ctx`.
     nursery_defer_floors: Vec<usize>,
+    /// Per-connection spawn — parallel to [`Vm::nurseries`] (same length, pushed/popped in lockstep):
+    /// `Some` for an EAGER nursery (one entered under `--parallel` inside a live fiber, `mn.is_some()`)
+    /// holding the live inner [`MnSched`] a `spawn` in this body injects handlers into; `None` for a
+    /// lazy/top-level nursery (queue-at-join). Carried per-fiber so the open scope travels across a
+    /// park (the acceptor blocks on `accept` mid-loop).
+    eager_scheds: Vec<Option<EagerScope>>,
     fault_trace: Option<Vec<TraceFrame>>,
     fault_trace_depth: usize,
     /// D2a — an M:N fiber carries its OWN heap (share-nothing): `swap_ctx` swaps it with the host
@@ -716,6 +727,29 @@ impl LocalQ {
     }
 }
 
+/// Per-connection spawn — the open state of an EAGER `parallel:` nursery (one activated at
+/// `EnterNursery` under `--parallel` inside a live fiber, rather than lazily built at `JoinNursery`).
+/// A `spawn` in the body injects a handler fiber into `sched` immediately (see [`MnSched::inject`]),
+/// so the acceptor keeps running while handlers execute on the sched's farmed workers. Lives on a
+/// per-fiber stack ([`FiberCtx::eager_scheds`]) in lockstep with `nurseries`, so an early
+/// `?`/`return`/`break`/`recover:` reclaims it alongside the matching `nurseries` level.
+struct EagerScope {
+    /// The live inner sched handlers are injected into; the acceptor becomes its inline worker at join.
+    sched: Arc<MnSched>,
+    /// This inner nursery's cancel token (distinct from the outer's): a handler fault trips it to
+    /// abort the accept loop + sibling handlers; the fault then propagates up as the acceptor's fault.
+    cancel: Arc<AtomicBool>,
+    /// The DEDICATED raw OS thread (NOT the bounded pool) that drains injected handlers DURING the
+    /// body. The eager body has no inline worker between `EnterNursery` and `JoinNursery`, so a live
+    /// drainer that does not depend on the bounded pool is what guarantees liveness — on a 1-core box
+    /// the pool would farm zero helpers, and nested eager nurseries would exhaust the pool (an
+    /// undetectable hang, since `body_open` vetoes the deadlock predicate). Joined at the end of
+    /// `join_eager_nursery`/`abort_eager_nursery` (it exits once the sched terminates). `None` only if
+    /// the thread failed to spawn (then the inline join worker is the sole drainer — bounded loops
+    /// still complete, just without mid-body concurrency).
+    drainer: Option<std::thread::JoinHandle<()>>,
+}
+
 struct MnSched {
     core: Mutex<SchedCore>,
     cv: Condvar,
@@ -779,8 +813,15 @@ struct SchedCore {
     running: usize,  // fibers currently swapped into a worker (executing)
     parked_n: usize, // total fibers across every `parked` bucket
     done: usize,     // fibers that have produced a `TaskOutcome`
-    total: usize,    // nursery task count (fixed for D2b — no spawn-after-join)
+    total: usize,    // nursery task count — grows via `inject` for per-connection spawn (was fixed in D2b)
     terminate: bool, // every worker loop exits once set (done==total, deadlock, or os.exit/fault)
+    /// Per-connection spawn — `true` while an EAGER nursery's body is still running (between
+    /// `EnterNursery` and `JoinNursery`) and may still `inject` more tasks. While set, a transient
+    /// `done == total` must NOT terminate the sched (the acceptor may inject the next handler) and
+    /// `is_deadlocked` is vetoed (the body is live work the sched can't see). `JoinNursery` clears it
+    /// so the inline worker can terminate once every handler is done. Always `false` for a lazy
+    /// (queue-at-join) nursery, so the existing engine is byte-identical.
+    body_open: bool,
     /// D5 owe #3 Path C (#1 false-positive fix) — `ChannelCore`s that a demoted (blocked-in-callback)
     /// fiber is waiting on, keyed by core ptr ([`Vm::channel_core_ptr`]) → (core, refcount). A demoted
     /// fiber polls its OWN queue (a `send` `push_back`s + notifies the channel condvar, NOT `runnable`),
@@ -830,6 +871,7 @@ impl MnSched {
                 done: 0,
                 total,
                 terminate: false,
+                body_open: false,
                 demoted_chans: std::collections::HashMap::new(),
             }),
             cv: Condvar::new(),
@@ -858,6 +900,43 @@ impl MnSched {
     fn seed(&self, fibers: Vec<Fiber>) {
         self.runnable.fetch_add(fibers.len(), Ordering::Relaxed);
         self.lock().global.extend(fibers);
+    }
+
+    /// Per-connection `spawn` — inject a freshly-built handler fiber into a LIVE, running sched
+    /// (the twin of [`MnSched::complete_offload`], but it ADDS a task rather than re-queuing an
+    /// existing one). Assigns the fiber's outcome-slot index ITSELF (the pre-grow `total`) — so the
+    /// caller cannot mis-index a slot — then grows `total` + the Decision-F `slots` vec, queues the
+    /// fiber on the run queue, and bumps `runnable`, **all under the one core lock** so `total += 1`
+    /// is paired atomically with `runnable += 1`: at the instant `total` grows there is a queued
+    /// runnable fiber, so the deadlock predicate's `runnable == 0` clause stays sound (no spurious
+    /// deadlock from the grow). Indices are assigned under the lock, so a single injector (the
+    /// acceptor fiber — the only thing that can inject into ITS scope) gets monotonic spawn-order
+    /// indices and `reduce_task_slots` flushes injected-task output deterministically.
+    fn inject(&self, mut fiber: Fiber) {
+        debug_assert!(matches!(fiber.state, FiberState::Pending(_)), "an injected handler must be unstarted (Pending) so `run_one_fiber` runs its body via `start_task`");
+        let mut c = self.lock();
+        fiber.task_index = c.total; // authoritative — the slot index is `total`, never trust the caller
+        c.total += 1;
+        c.slots.push(None);
+        c.global.push_back(fiber);
+        self.runnable.fetch_add(1, Ordering::Relaxed);
+        drop(c);
+        self.cv.notify_all();
+    }
+
+    /// Per-connection spawn — mark this (eager) sched's body as still producing tasks: a transient
+    /// `done == total` will not terminate it and `is_deadlocked` is vetoed, so farmed workers park
+    /// waiting for the next `inject` instead of exiting. Called at `EnterNursery`.
+    fn open_body(&self) {
+        self.lock().body_open = true;
+    }
+
+    /// Per-connection spawn — the eager body reached `JoinNursery`: no more injections. Clear the flag
+    /// and wake every worker so the run-out-of-work path can terminate (`done == total`) or fire a
+    /// genuine deadlock now that the body is no longer live work.
+    fn close_body(&self) {
+        self.lock().body_open = false;
+        self.cv.notify_all();
     }
 
     /// Pop a runnable fiber for worker `wid`, marking it `running`. Search order (D4b): the worker's
@@ -941,7 +1020,11 @@ impl MnSched {
                 }
                 return Take::Run(first);
             }
-            if c.done == c.total {
+            // Per-connection spawn — `body_open` holds termination open while an eager nursery's body
+            // is still running (it may `inject` the next handler even though every task SO FAR is
+            // done). `JoinNursery`'s `close_body` clears it, after which the inline worker terminates.
+            // Always `false` on the lazy path, so this is the unchanged `done == total` terminate.
+            if c.done == c.total && !c.body_open {
                 c.terminate = true;
                 self.cv.notify_all();
                 return Take::Stop;
@@ -1146,7 +1229,11 @@ impl MnSched {
         c.running -= 1;
         c.slots[task_index] = Some(outcome);
         c.done += 1;
-        if c.done == c.total {
+        // Per-connection spawn — do NOT latch `terminate` while an eager body is still injecting: a
+        // transient `done == total` (every handler SO FAR finished) is not completion — the acceptor
+        // may inject more. `close_body` at `JoinNursery` clears `body_open`, and the next run-out-of-
+        // work `take_runnable` terminates. Always `false` on the lazy path → unchanged D2b behavior.
+        if c.done == c.total && !c.body_open {
             c.terminate = true;
         }
         self.cv.notify_all();
@@ -1202,6 +1289,14 @@ impl MnSched {
     /// sound. The `done < total` half is guaranteed by the call site (the `done == total` terminate
     /// check precedes this).
     fn is_deadlocked(&self, c: &SchedCore) -> bool {
+        // Per-connection spawn — an eager nursery whose body is still running is live work this sched
+        // can't account (the acceptor runs inline on its OUTER sched and may `inject` a handler that
+        // wakes a parked sibling). Never declare deadlock while the body is open; `close_body` at
+        // `JoinNursery` re-enables the predicate so a genuine post-join deadlock still fires. Always
+        // `false` on the lazy path — unchanged.
+        if c.body_open {
+            return false;
+        }
         if !(c.running == 0
             && self.runnable.load(Ordering::Relaxed) == 0
             && self.inflight.load(Ordering::Relaxed) == 0
@@ -1606,6 +1701,7 @@ impl Vm {
             gc_stress: false,
             parallel: false,
             nurseries: Vec::new(),
+            eager_scheds: Vec::new(),
             nursery_defer_floors: Vec::new(),
             executors: Vec::new(),
             suspend: None,
@@ -1651,6 +1747,7 @@ impl Vm {
         std::mem::swap(&mut self.handlers, &mut ctx.handlers);
         std::mem::swap(&mut self.nurseries, &mut ctx.nurseries);
         std::mem::swap(&mut self.nursery_defer_floors, &mut ctx.nursery_defer_floors);
+        std::mem::swap(&mut self.eager_scheds, &mut ctx.eager_scheds);
         std::mem::swap(&mut self.fault_trace, &mut ctx.fault_trace);
         std::mem::swap(&mut self.fault_trace_depth, &mut ctx.fault_trace_depth);
         // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
@@ -2510,6 +2607,24 @@ impl Vm {
                 // the body's defers before the cancel-report (see `nursery_defer_floors`).
                 let floor = self.frames.last().map(|f| f.deferred.len()).unwrap_or(0);
                 self.nursery_defer_floors.push(floor);
+                // Per-connection spawn — a NESTED nursery under `--parallel` (entered inside a live
+                // fiber, `mn.is_some()`) activates an EAGER sched NOW so `spawn`s in the body inject
+                // handlers that run concurrently with the accept loop. The top-level nursery
+                // (`mn.is_none()`) and the cooperative engine stay lazy (queue-at-join → `None`).
+                //
+                // Gated on ≥2 hardware threads: an eager inner join blocks the parent's OUTER worker
+                // (decision B — parent participates) while it waits for handlers, and a handler that
+                // services an OUTER sibling (a client) needs that sibling to make progress — which it
+                // can't if the outer nursery has only ONE worker (a 1-core box → every nursery is
+                // single-worker → deadlock). With ≥2 hw threads the outer nursery has a spare worker.
+                // On a single core we fall back to the lazy queue-at-join path (handlers drain at the
+                // join), which still serves a realistic parallel-client server and never deadlocks —
+                // and `--parallel` on one core is already a degenerate config.
+                let eager = self.parallel
+                    && self.mn.is_some()
+                    && std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) >= 2;
+                let scope = eager.then(|| self.activate_eager_nursery());
+                self.eager_scheds.push(scope);
             }
             Op::JoinNursery => self.join_nursery()?,
             // TASK B — `break`/`continue` leaving a `parallel:` scope: cancel-and-report its unstarted
@@ -4313,9 +4428,23 @@ impl Vm {
         self.register_task(PendingCall::Call { callee: Value::Obj(h), args: Vec::new(), span }, span)
     }
 
-    /// Push a registered task onto the innermost nursery. The checker guarantees a `parallel:` is
-    /// open, but we guard for parity with the interpreter's runtime error.
+    /// Register a spawned task on the innermost nursery. Per-connection spawn: if that nursery is
+    /// EAGER, build the handler into a live [`Fiber`] (serializing its args out of THIS fiber's heap,
+    /// the same airlock copy `do_spawn`'s `deep_clone` does) and [`MnSched::inject`] it straight into
+    /// the running sched — it runs concurrently with the rest of the body. The `task_index` is the
+    /// scope's monotonic `next_index` (spawn order), so Decision-F output stays deterministic.
+    /// Otherwise (lazy/top-level) push the `PendingCall` for the join to drain. The checker guarantees
+    /// a `parallel:` is open, but we guard for parity with the interpreter's runtime error.
     fn register_task(&mut self, task: PendingCall, span: Span) -> Result<(), RuntimeError> {
+        // Eager innermost nursery → inject a live fiber. Clone the sched Arc, drop the borrow so
+        // `prepare_worker` can take `&mut self`; `inject` assigns the real slot index under its lock
+        // (the `0` placeholder is overwritten), so no caller-side index bookkeeping is needed.
+        if let Some(Some(scope)) = self.eager_scheds.last() {
+            let sched = Arc::clone(&scope.sched);
+            let fiber = self.prepare_worker(task)?.into_fiber(0);
+            sched.inject(fiber);
+            return Ok(());
+        }
         match self.nurseries.last_mut() {
             Some(nursery) => {
                 nursery.push(task);
@@ -4346,9 +4475,15 @@ impl Vm {
         }
         let mut cancelled = 0usize;
         while self.nurseries.len() > from_len {
-            // Each `PendingCall` is one unstarted task; drop the whole level.
             self.nursery_defer_floors.pop(); // lockstep with `nurseries`
-            cancelled += self.nurseries.pop().map(|n| n.len()).unwrap_or(0);
+            let nursery = self.nurseries.pop().unwrap_or_default();
+            // Per-connection spawn — pop the eager scope in lockstep. An eager nursery's handlers are
+            // already-started live fibers (no unstarted `PendingCall`s to count): cancel + drain + flush
+            // them. A lazy nursery's entries are unstarted tasks → count them for the cancel-report.
+            match self.eager_scheds.pop().flatten() {
+                Some(scope) => self.abort_eager_nursery(scope),
+                None => cancelled += nursery.len(),
+            }
         }
         if cancelled >= 1 {
             self.out.push_str(&crate::runtime::pending_cancel_report(cancelled));
@@ -4360,6 +4495,11 @@ impl Vm {
         // end) keeps the parent's `Handler::nursery_len` accounting correct on a later fault.
         self.nursery_defer_floors.pop(); // keep the parallel floor stack in lockstep with `nurseries`
         let tasks = self.nurseries.pop().unwrap_or_default();
+        // Per-connection spawn — pop the eager scope in lockstep. An eager nursery injected its tasks
+        // live (so `tasks` is empty); its join drains the handlers it spawned, not a queued list.
+        if let Some(Some(scope)) = self.eager_scheds.pop() {
+            return self.join_eager_nursery(scope);
+        }
         if tasks.is_empty() {
             return Ok(());
         }
@@ -4465,6 +4605,88 @@ impl Vm {
         // 6. Reduce the per-task outcome slots (task order, decision F + Exit-over-Fault precedence).
         let slots = sched.take_slots();
         self.reduce_task_slots(slots)
+    }
+
+    /// Per-connection spawn — the EAGER counterpart to [`Vm::run_mn_nursery`], split across the
+    /// `parallel:` body. Activate at `EnterNursery`: build an empty live [`MnSched`] (`total` grows as
+    /// the body `inject`s handlers), flag its body open (so a transient `done == total` does not
+    /// terminate it), and spawn ONE dedicated **raw OS thread** (`wid` 1) that drains injected handlers
+    /// concurrently with the accept loop. `wid` 0 is the inline join worker ([`Vm::join_eager_nursery`]).
+    ///
+    /// Why a raw thread, not the bounded pool: the eager body has NO inline worker between
+    /// `EnterNursery` and `JoinNursery`, so liveness during the body depends entirely on this drainer.
+    /// A bounded-pool helper (the lazy path's accelerator) is the WRONG tool here — `available_parallelism()`
+    /// can be 1 (no helper farmed at all → the body never drains → the sequential-client pattern
+    /// deadlocks), and a long-running pool job per eager nursery exhausts the fixed pool under nesting
+    /// (an undetectable hang, since `body_open` vetoes the deadlock predicate). A raw thread (like the
+    /// D5-owe-#3 demote replacement) is unconditional and pool-independent — exactly one extra OS thread
+    /// per open eager nursery, joined when the nursery completes. Handlers within one eager nursery
+    /// multiplex over this one drainer + the join worker (M:N — handlers park on socket ops, so one
+    /// thread serves many); multi-core handler parallelism is future work.
+    fn activate_eager_nursery(&mut self) -> EagerScope {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let snap = self.ensure_snapshot();
+        debug_assert!(self.module_snapshot.is_some(), "an eager nursery only activates on a worker shell (gated by mn.is_some())");
+        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 });
+        // wid 0 = inline join worker; wid 1 = the dedicated raw drainer below.
+        let sched = Arc::new(MnSched::new(0, 2, Arc::clone(&cancel), deadlock_err));
+        sched.open_body();
+        let mut shell = self.spawn_shell(&snap, &sched, &cancel);
+        let drain_sched = Arc::clone(&sched);
+        let drainer = std::thread::Builder::new()
+            .stack_size(VM_STACK_BYTES)
+            .name("chezzi-eager".into())
+            .spawn(move || {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shell.mn_worker_loop(&drain_sched, 1)));
+            })
+            .ok();
+        EagerScope { sched, cancel, drainer }
+    }
+
+    /// Per-connection spawn — `JoinNursery` for an eager nursery (the normal fall-through path). Close
+    /// the body (no more injections → the sched may terminate once every handler is done), then run
+    /// the inline join worker (`wid` 0) to help drain remaining handlers, wait for every slot to fill,
+    /// and reduce (Decision-F output flush in spawn order; a handler fault propagates as the
+    /// acceptor's body fault, which the outer nursery then sees). Mirrors `run_mn_nursery`'s tail.
+    fn join_eager_nursery(&mut self, scope: EagerScope) -> Result<(), RuntimeError> {
+        let EagerScope { sched, cancel, drainer, .. } = scope;
+        sched.close_body();
+        let snap = self.ensure_snapshot();
+        let mut shell = self.spawn_shell(&snap, &sched, &cancel);
+        shell.mn_worker_loop(&sched, 0);
+        sched.wait_for_completion();
+        if let Some(h) = drainer {
+            let _ = h.join();
+        }
+        let slots = sched.take_slots();
+        self.reduce_task_slots(slots)
+    }
+
+    /// Per-connection spawn — reclaim an eager nursery whose body ESCAPED early (`?`/`return`/`break`/
+    /// `continue` or a `recover:` catch jumped past its `JoinNursery`). The injected handlers are live
+    /// fibers, so (unlike a lazy nursery's unstarted `PendingCall`s) they must be cancelled, not just
+    /// dropped: trip the inner cancel, drain channel- and socket-parked handlers (D6b
+    /// `cancel_drain` + `drain_sched`), run the inline worker to settle them, then flush their output
+    /// (Decision F). The body's own escape error is what propagates, so a handler fault here is
+    /// swallowed (only its buffered output + any `os.exit` are honored via `reduce_task_slots`).
+    fn abort_eager_nursery(&mut self, scope: EagerScope) {
+        let EagerScope { sched, cancel, drainer, .. } = scope;
+        cancel.store(true, Ordering::Relaxed);
+        sched.close_body();
+        sched.cancel_drain();
+        poller::drain_sched(&sched);
+        let snap = self.ensure_snapshot();
+        let mut shell = self.spawn_shell(&snap, &sched, &cancel);
+        shell.mn_worker_loop(&sched, 0);
+        sched.wait_for_completion();
+        if let Some(h) = drainer {
+            let _ = h.join();
+        }
+        let slots = sched.take_slots();
+        // The body's escape error is what propagates; a handler fault here is swallowed. But
+        // `reduce_task_slots` still sets `self.pending_exit` for a handler `os.exit` (decision C —
+        // a hard halt wins), which the catch site honors after the drain — so it is NOT lost.
+        let _ = self.reduce_task_slots(slots);
     }
 
     /// D2b — build a thin host **shell** `Vm` for the M:N engine: a worker `Vm` with the shared
@@ -8324,6 +8546,43 @@ mod tests {
         assert_eq!(ctx.module_objs, vec![fib_mod]);
     }
 
+    /// Per-connection spawn: a fiber running an eager `parallel:` body can PARK (its acceptor blocks
+    /// on `accept`) between `EnterNursery` and `JoinNursery`, so the open eager scope — the live
+    /// inner sched + its monotonic spawn index — MUST travel with the fiber across `swap_ctx`, just
+    /// like `nurseries`. Otherwise the scope leaks onto whatever fiber the shell schedules next.
+    #[test]
+    fn eager_scope_round_trips_with_fiber_ctx() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        vm.parallel = true;
+        let host_sched = Arc::new(mk_sched(0));
+        vm.eager_scheds.push(Some(EagerScope {
+            sched: Arc::clone(&host_sched),
+            cancel: Arc::new(AtomicBool::new(false)),
+            drainer: None,
+        }));
+
+        let fiber_sched = Arc::new(mk_sched(0));
+        let mut ctx = FiberCtx {
+            eager_scheds: vec![Some(EagerScope {
+                sched: Arc::clone(&fiber_sched),
+                cancel: Arc::new(AtomicBool::new(false)),
+                drainer: None,
+            })],
+            ..FiberCtx::default()
+        };
+
+        // Schedule the fiber in: its eager scope becomes live; the host's parks into the ctx.
+        vm.swap_ctx(&mut ctx);
+        assert_eq!(vm.eager_scheds.len(), 1);
+        assert!(Arc::ptr_eq(&vm.eager_scheds[0].as_ref().unwrap().sched, &fiber_sched), "the fiber's eager scope is now live");
+        assert!(Arc::ptr_eq(&ctx.eager_scheds[0].as_ref().unwrap().sched, &host_sched), "the host's scope parked into the ctx");
+
+        // Park the fiber out: the host's scope is restored; the fiber keeps its own.
+        vm.swap_ctx(&mut ctx);
+        assert!(Arc::ptr_eq(&vm.eager_scheds[0].as_ref().unwrap().sched, &host_sched), "host scope restored");
+        assert!(Arc::ptr_eq(&ctx.eager_scheds[0].as_ref().unwrap().sched, &fiber_sched));
+    }
+
     /// D2b companion to [`swap_ctx_leaves_heap_untouched_for_cooperative_fiber`]: a cooperative fiber
     /// (`heap: None`) must leave the shell's `out`/`module_objs`/`executors` untouched too, so the
     /// cooperative engine stays byte-identical.
@@ -8353,6 +8612,12 @@ mod tests {
     }
     fn mk_fiber(task_index: usize) -> Fiber {
         Fiber { ctx: FiberCtx::default(), state: FiberState::Ready, task_index, span: Span { line: 1, col: 1 }, resume_native: None }
+    }
+    /// An UNSTARTED fiber (`Pending`) — what `inject`/`seed` require so `run_one_fiber` runs the task
+    /// body via `start_task` (a `Ready` fiber is treated as a resume and runs no body).
+    fn mk_pending_fiber(task_index: usize) -> Fiber {
+        let task = PendingCall::Call { callee: Value::Nil, args: Vec::new(), span: Span { line: 1, col: 1 } };
+        Fiber { ctx: FiberCtx::default(), state: FiberState::Pending(task), task_index, span: Span { line: 1, col: 1 }, resume_native: None }
     }
     fn empty_core() -> Arc<ChannelCore> {
         Arc::new(ChannelCore::default())
@@ -8405,6 +8670,44 @@ mod tests {
         assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "finish transitions running→done (no change)");
         // The invariant: with no per-worker locals populated, runnable == global.len() at quiescence.
         assert_eq!(sched.runnable.load(Ordering::Relaxed), sched.lock().global.len());
+    }
+
+    /// Per-connection spawn: `inject` adds a task to a LIVE sched — it grows `total` + `slots`
+    /// (so the dynamically-spawned handler gets a Decision-F outcome slot) and queues the fiber
+    /// runnable, all under one core lock (the `complete_offload` twin). This is what lifts the
+    /// "fixed total — no spawn-after-join" restriction.
+    #[test]
+    fn mnsched_inject_grows_total_and_slots() {
+        let sched = mk_sched(1);
+        sched.seed(vec![mk_fiber(0)]); // total 1, slots.len 1, runnable 1
+        sched.inject(mk_pending_fiber(1));
+        let c = sched.lock();
+        assert_eq!(c.total, 2, "inject grows total");
+        assert_eq!(c.slots.len(), 2, "inject grows the outcome-slot vec");
+        assert_eq!(c.global.len(), 2, "the injected fiber is queued runnable");
+        drop(c);
+        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "inject runnable-accounts the new fiber");
+    }
+
+    /// Per-connection spawn: injecting a runnable fiber into a sched where every existing fiber is
+    /// parked must VETO the deadlock predicate — `total += 1` is paired with `runnable += 1` under
+    /// one lock, so the new fiber is immediately accounted and `is_deadlocked` sees `runnable > 0`.
+    #[test]
+    fn mnsched_inject_does_not_false_deadlock() {
+        let sched = mk_sched(1);
+        sched.seed(vec![mk_fiber(0)]);
+        let f0 = take_run(&sched); // running 1, runnable 0
+        let core = empty_core();
+        sched.park(core_key(&core), &core, f0); // parked 1, running 0, runnable 0 → deadlock
+        {
+            let c = sched.lock();
+            assert!(sched.is_deadlocked(&c), "all parked, nothing runnable/inflight = deadlock");
+        }
+        sched.inject(mk_pending_fiber(1)); // runnable 1
+        {
+            let c = sched.lock();
+            assert!(!sched.is_deadlocked(&c), "an injected runnable fiber vetoes the deadlock fire");
+        }
     }
 
     /// D4b: a `LocalQ` pops `runnext` first (locality), then the ring in FIFO order, then `None`.
@@ -13934,6 +14237,274 @@ main()
         assert!(res.is_ok(), "100-conn echo server must not fault: {res:?}");
         assert!(out.contains("all served"), "every connection was serviced + the nursery joined: {out:?}");
         assert!(!out.contains("error"), "no client saw a bad echo: {out:?}");
+    }
+
+    /// Per-connection spawn — the spec's canonical shape: the acceptor `spawn`s a `handle(conn)`
+    /// fiber PER connection inside its `parallel:` instead of serving inline, and the inner nursery
+    /// joins them. `#conns ≫ #workers` still completes (handlers multiplex over the core-sized pool).
+    /// Exercises the eager-nursery + `MnSched::inject` path end-to-end with the bytecode engine.
+    #[test]
+    fn net_echo_server_spawns_handler_per_connection() {
+        // Nested socket nurseries (an acceptor's `parallel:` servicing outer-sibling clients) need
+        // ≥2 hw threads: the inner join blocks the parent's outer worker (decision B), so on a single
+        // core the outer clients can't progress to drain the echoes — a pre-existing M:N limit that
+        // per-connection spawn is the first to exercise. Skip on 1 core (CI is ≥2 core) rather than hang.
+        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) < 2 {
+            return;
+        }
+        let src = r#"import std.net
+
+fn handle(conn: Socket) -> int!:
+    msg := conn.read(64)?
+    conn.write("echo:" + msg)?
+    conn.close()
+    return Ok(0)
+
+fn acceptor(server: Listener, n: int) -> int!:
+    parallel:
+        for _ in 0..n:
+            conn := server.accept()?
+            spawn handle(conn)
+    server.close()
+    return Ok(0)
+
+fn client(addr: str) -> int!:
+    sock := net.connect(addr)?
+    sock.write("ping")?
+    reply := sock.read(64)?
+    sock.close()
+    if reply == "echo:ping":
+        return Ok(1)
+    return Err("bad reply: " + reply)
+
+fn run(n: int) -> int!:
+    server := net.listen("127.0.0.1:0")?
+    addr := server.addr()?
+    parallel:
+        spawn acceptor(server, n)
+        for _ in 0..n:
+            spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run(100):
+        Ok(_): print("all served")
+        Err(e): print("error: " + e.message())
+
+main()
+"#;
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        assert!(res.is_ok(), "per-connection-spawn echo server must not fault: {res:?}");
+        assert!(out.contains("all served"), "every connection was handled by its own fiber: {out:?}");
+        assert!(!out.contains("error"), "no client saw a bad echo: {out:?}");
+    }
+
+    /// Per-connection spawn — proves handlers run CONCURRENTLY with accepting (not queued-to-join).
+    /// A single client opens N connections SEQUENTIALLY: each reply must arrive before the next
+    /// connect. The acceptor `spawn`s a handler per connection. Under the old queue-at-join model the
+    /// handler never ran during the accept loop, so the client's first `read` blocked forever and the
+    /// acceptor's second `accept` had no incoming connection → hang (watchdog fires). The eager
+    /// inner nursery runs each handler immediately, unblocking the client so the loop advances.
+    #[test]
+    fn net_echo_sequential_client_needs_concurrent_handlers() {
+        // Eager per-connection spawn requires ≥2 hardware threads (the inner join blocks the parent's
+        // sole outer worker on a single core — see `Op::EnterNursery`). This test's whole point is a
+        // handler running mid-loop to unblock the next connect, which a 1-core box cannot do; skip it
+        // there rather than hang. CI runners are ≥2 core in practice.
+        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) < 2 {
+            return;
+        }
+        let src = r#"import std.net
+
+fn handle(conn: Socket) -> int!:
+    msg := conn.read(64)?
+    conn.write("echo:" + msg)?
+    conn.close()
+    return Ok(0)
+
+fn acceptor(server: Listener, n: int) -> int!:
+    parallel:
+        for _ in 0..n:
+            conn := server.accept()?
+            spawn handle(conn)
+    server.close()
+    return Ok(0)
+
+fn client(addr: str, n: int) -> int!:
+    for i in 0..n:
+        sock := net.connect(addr)?
+        sock.write("ping")?
+        reply := sock.read(64)?
+        sock.close()
+        if reply != "echo:ping":
+            return Err("bad reply: " + reply)
+    return Ok(0)
+
+fn run(n: int) -> int!:
+    server := net.listen("127.0.0.1:0")?
+    addr := server.addr()?
+    parallel:
+        spawn acceptor(server, n)
+        spawn client(addr, n)
+    return Ok(0)
+
+fn main():
+    match run(8):
+        Ok(_): print("all served")
+        Err(e): print("error: " + e.message())
+
+main()
+"#;
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        assert!(res.is_ok(), "sequential client must complete once handlers run concurrently: {res:?}");
+        assert!(out.contains("all served"), "all 8 sequential round-trips serviced: {out:?}");
+        assert!(!out.contains("error"), "every reply was a correct echo: {out:?}");
+    }
+
+    /// Per-connection spawn — a per-connection HANDLER fault propagates as the acceptor's fault and
+    /// tears the run down WITHOUT hanging. One injected handler faults (index-out-of-bounds — a real
+    /// runtime fault, since a spawned task's `Result` *return value* is discarded); the eager inner
+    /// nursery trips its own cancel (D6b `cancel_drain` + `drain_sched` reach sibling handlers), the
+    /// join surfaces the fault as the acceptor's body fault, and the OUTER nursery then cancels the
+    /// clients (so a client stranded without its echo unwinds instead of blocking on `read` forever).
+    #[test]
+    fn net_echo_handler_fault_cancels_acceptor() {
+        // Nested socket nursery → needs ≥2 hw threads (see `net_echo_server_spawns_handler_per_connection`).
+        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) < 2 {
+            return;
+        }
+        let src = r#"import std.net
+
+fn handle(conn: Socket, i: int) -> int!:
+    msg := conn.read(64)?
+    if i == 0:
+        conn.close()
+        boom := [1]
+        return Ok(boom[10])
+    conn.write("echo:" + msg)?
+    conn.close()
+    return Ok(0)
+
+fn acceptor(server: Listener, n: int) -> int!:
+    parallel:
+        for i in 0..n:
+            conn := server.accept()?
+            spawn handle(conn, i)
+    server.close()
+    return Ok(0)
+
+fn client(addr: str) -> int!:
+    sock := net.connect(addr)?
+    sock.write("ping")?
+    reply := sock.read(64)?
+    sock.close()
+    return Ok(1)
+
+fn run(n: int) -> int!:
+    server := net.listen("127.0.0.1:0")?
+    addr := server.addr()?
+    parallel:
+        spawn acceptor(server, n)
+        for _ in 0..n:
+            spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run(6):
+        Ok(_): print("all served")
+        Err(e): print("error: " + e.message())
+
+main()
+"#;
+        // The whole point is "no hang": `run_parallel_watchdog` panics if the nursery never
+        // terminates. A faulting handler must drive the run to a clean finish (fault surfaced via the
+        // acceptor's `match`, or propagated), not deadlock the netpoller-parked siblings.
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        assert!(
+            res.is_err() || out.contains("error"),
+            "a per-connection handler fault must surface (faulted run or reported error), not be swallowed: res={res:?} out={out:?}"
+        );
+        assert!(!out.contains("all served"), "the run must not report success once a handler faulted: {out:?}");
+    }
+
+    /// Per-connection spawn — the DEGENERATE eager nursery: a `parallel:` body (entered eagerly under
+    /// `--parallel` inside a fiber) that injects NOTHING. `activate_eager_nursery` builds a `total==0`
+    /// sched with `body_open`; `JoinNursery` must `close_body` and have the inline worker terminate
+    /// immediately (`done==0==total`) and join the drainer — not hang on the empty sched. Pins the
+    /// `body_open` → `close_body` → terminate handshake on the empty path.
+    #[test]
+    fn eager_nursery_with_zero_spawns_completes() {
+        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) < 2 {
+            return;
+        }
+        let src = "fn worker():\n    parallel:\n        print(\"eager body, no spawn\")\n    print(\"worker done\")\nfn main():\n    parallel:\n        spawn worker()\nmain()\n";
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        assert!(res.is_ok(), "an empty eager nursery must join cleanly: {res:?}");
+        assert!(out.contains("eager body, no spawn"), "the body ran: {out:?}");
+        assert!(out.contains("worker done"), "the eager nursery joined and the worker continued: {out:?}");
+    }
+
+    /// Per-connection spawn — CONCURRENT eager nurseries (the pool-exhaustion regression): four
+    /// independent servers each run their OWN eager per-connection-spawn nursery at once. Because each
+    /// eager nursery drains on a DEDICATED raw OS thread (not the bounded process pool), they do not
+    /// starve each other — with the earlier pool-farmed design, four long-running eager drainers would
+    /// exhaust a core-sized pool and hang (undetectably, since `body_open` vetoes the deadlock predicate).
+    #[test]
+    fn net_concurrent_eager_servers_do_not_exhaust_pool() {
+        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) < 2 {
+            return;
+        }
+        let src = r#"import std.net
+
+fn handle(conn: Socket) -> int!:
+    msg := conn.read(64)?
+    conn.write("echo:" + msg)?
+    conn.close()
+    return Ok(0)
+
+fn server_loop(server: Listener, n: int) -> int!:
+    parallel:
+        for _ in 0..n:
+            conn := server.accept()?
+            spawn handle(conn)
+    server.close()
+    return Ok(0)
+
+fn pinger(addr: str) -> int!:
+    sock := net.connect(addr)?
+    sock.write("ping")?
+    reply := sock.read(64)?
+    sock.close()
+    if reply == "echo:ping":
+        return Ok(1)
+    return Err("bad reply: " + reply)
+
+fn one_server(n: int) -> int!:
+    server := net.listen("127.0.0.1:0")?
+    addr := server.addr()?
+    parallel:
+        spawn server_loop(server, n)
+        for _ in 0..n:
+            spawn pinger(addr)
+    return Ok(0)
+
+fn run(servers: int, conns: int) -> int!:
+    parallel:
+        for _ in 0..servers:
+            spawn one_server(conns)
+    return Ok(0)
+
+fn main():
+    match run(4, 12):
+        Ok(_): print("all servers done")
+        Err(e): print("error: " + e.message())
+
+main()
+"#;
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        assert!(res.is_ok(), "concurrent eager servers must not fault: {res:?}");
+        assert!(out.contains("all servers done"), "every concurrent eager nursery completed: {out:?}");
+        assert!(!out.contains("error"), "no pinger saw a bad echo: {out:?}");
     }
 
     /// B3.5 — a task that finishes normally but strands a `recv`-blocked sibling (it never sent the

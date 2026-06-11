@@ -398,7 +398,7 @@ address), and `connect` inside a native callback fails loud rather than pinning 
 green** (+drain unit, +timer fold ×4, +3 net VM tests, +1 net unit), `cargo clippy` clean, full
 `--parallel` net suite + the hang-regression watchdog tests pass, `examples/echo_server.chz` serves 50
 conns. Items *not* in B3–B5 (cross-nursery wakeups, recv-in-native-callback / D5 owe #3,
-~~`Channel.close()`~~ [landed — see below], per-connection `spawn`, per-socket read/accept timeout) are documented in
+~~`Channel.close()`~~ [landed], ~~per-connection `spawn`~~ [landed — eager injectable nursery, see below], per-socket read/accept timeout) are documented in
 **[`docs/concurrency.md` §11](docs/concurrency.md)** and **[`docs/concurrency-tier-d.md`](docs/concurrency-tier-d.md)**.
 Full A/B breakdown: §9.
 
@@ -518,6 +518,41 @@ doc on `timeout_ms==0` cooperative behavior) also applied.
 
 **Latest suite: 1475 tests green** (unit + parity + `cargo test conformance` 7/7), `cargo clippy
 --all-targets` clean; `primes_parallel=148933` and `examples/parallel*.chz` byte-identical both engines.
+
+**Per-connection `spawn` LANDED — eager injectable nursery (`--parallel` M:N, ≥2 cores).** A `spawn` in
+a *nested* `parallel:` body now runs CONCURRENTLY with the rest of the body instead of being queued for
+the join, so the canonical server shape works: an accept loop `spawn`s a `handle(conn)` fiber per
+connection and keeps accepting while handlers run. **Mechanism:** a nested nursery (entered inside a
+live fiber, `mn.is_some()`, on ≥2 hw threads) is now **eager** — `EnterNursery` builds the `MnSched`
+immediately (`activate_eager_nursery`, total starts 0, `body_open=true`, spawns ONE dedicated **raw OS
+thread** as the body's drainer), a `spawn` **injects** a live `Pending` fiber straight into that sched
+(`MnSched::inject` assigns the slot index under the lock, grows `total`+`slots`, queues runnable,
+notifies — the `complete_offload` twin), and `JoinNursery` `close_body`s + runs the inline join worker
+to drain remaining handlers + join the drainer + reduce (Decision-F flush in spawn order). The new
+`body_open` flag holds `finish`/`take_runnable` termination open and vetoes `is_deadlocked` while the
+body may still inject (top-level/lazy nurseries set it `false` → D2b path byte-identical). The open
+scope lives on a per-fiber `FiberCtx::eager_scheds` stack (lockstep with `nurseries`; swapped across a
+park; reclaimed by `drain_escaped_nursery`/recover-catch). A handler fault trips the inner cancel
+(D6b `cancel_drain`+`drain_sched`), surfaces as the acceptor's fault at the join, and the outer nursery
+then cancels the clients — no hang. **Why a raw thread (not the bounded pool):** the eager body has no
+inline worker until the join, so liveness during the body depends on the drainer — a pool helper is the
+wrong tool (a 1-core box farms zero helpers; nested eager nurseries would exhaust the fixed pool, an
+undetectable hang since `body_open` vetoes the deadlock predicate). One raw thread per open eager
+nursery is unconditional + pool-independent (verified: 4 concurrent eager servers complete; the old
+pool-farmed design hung). **v1 limits (documented):** (1) **needs ≥2 hw threads** — an eager inner join
+blocks the parent's OUTER worker (decision B); a handler servicing an outer-sibling client needs that
+sibling to run, impossible if the outer nursery is single-worker (1 core). On 1 core we fall back to
+the lazy queue-at-join path (which itself can't service a nested socket server — a pre-existing M:N
+limit; `--parallel` on 1 core is already degenerate). (2) bounded accept loops only (an unbounded
+`while true:` server never reaches the join → the scope never completes; graceful shutdown is future
+work). (3) a handler talking BACK to the acceptor via a Channel is a cross-nursery wakeup (handlers
+reach clients via sockets, OS-mediated, which works). **+8 tests** (2 `MnSched::inject` units, 1
+`eager_scheds` swap unit, `net_echo_server_spawns_handler_per_connection`,
+`net_echo_sequential_client_needs_concurrent_handlers`, `net_echo_handler_fault_cancels_acceptor`,
+`eager_nursery_with_zero_spawns_completes`, `net_concurrent_eager_servers_do_not_exhaust_pool`; the
+three socket e2e tests skip on 1 core); new `examples/echo_server_spawn.chz` serves 50 conns
+one-fiber-each. Found + fixed via a 2-agent S++ panel: the bounded-pool-farming design hung on 1 core
+and under nesting (replaced with the raw drainer). **1483 tests green**, `cargo clippy` clean.
 
 > **DECISION — do NOT build interp B1/B2 (suspendable tree-walker). This is a deliberate non-goal,
 > not a TODO.** The interpreter stays frozen at the **sequential concurrency subset** and serves as

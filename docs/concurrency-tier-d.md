@@ -720,10 +720,36 @@ recv-only scope). **B never.**
 > register/deregister/`drain_sched`/fire-path — incl. the fd `add`/`delete` — under the registry lock,
 > with `register` returning the fiber (to re-inject) when cancel is already set. 1410 tests green, clippy
 > clean; 2-agent S++ panel, no Critical, both Importants applied (bound the top-level blocking connect;
-> fail-loud connect inside a native callback). **Still deferred** (not D6 prerequisites): per-connection
-> `spawn` handler (needs M:N spawn-after-join — the handler still runs inline in the acceptor); a
+> fail-loud connect inside a native callback). **Still deferred** (not D6 prerequisites): a
 > user-facing per-socket read/accept **timeout** (the timer fold is the groundwork); D5 owe #3
 > (`recv` inside a native callback). The plan below is the original full-D6 spec.
+>
+> **UPDATE — per-connection `spawn` LANDED (eager injectable nursery, `--parallel` ≥2 cores).** The
+> "needs M:N spawn-after-join" item is done. A nested `parallel:` (entered inside a live fiber,
+> `mn.is_some()`, on ≥2 hw threads) is now **eager**: `EnterNursery` builds the `MnSched` immediately
+> (`activate_eager_nursery`, total 0, `body_open=true`, spawns ONE dedicated **raw OS thread** as the
+> body drainer), a `spawn` **injects** a live `Pending` fiber into that running sched (`MnSched::inject`
+> assigns the slot index under the lock, grows `total`+`slots`, queues it runnable — the
+> `complete_offload` twin), and `JoinNursery` `close_body`s + runs the inline join worker to drain +
+> join the drainer + reduce. A new `body_open` flag holds termination open + vetoes the deadlock
+> predicate while the body may still inject (always `false` on the lazy/top-level path → D2b
+> byte-identical). The open scope rides a per-fiber `FiberCtx::eager_scheds` stack (lockstep with
+> `nurseries`, swapped across a park). So the acceptor `spawn`s `handle(conn)` per connection and keeps
+> accepting while handlers run on the drainer — `examples/echo_server_spawn.chz`,
+> `net_echo_server_spawns_handler_per_connection`, `net_echo_sequential_client_needs_concurrent_handlers`
+> (the concurrency proof: serial client hangs under queue-at-join, completes under eager),
+> `net_echo_handler_fault_cancels_acceptor`, `net_concurrent_eager_servers_do_not_exhaust_pool`,
+> `eager_nursery_with_zero_spawns_completes`. **Why a raw thread, not the pool:** the eager body has no
+> inline worker until the join, so the drainer is the sole liveness guarantee during the body — a
+> bounded-pool helper fails (a 1-core box farms none; nested eager nurseries exhaust the fixed pool, an
+> undetectable hang since `body_open` vetoes the predicate). A 2-agent S++ panel reproduced exactly
+> those hangs in the first (pool-farmed) cut; the raw drainer fixes them. **v1 limits:** (1) **≥2 hw
+> threads** — the eager inner join blocks the parent's outer worker (decision B), so a handler
+> servicing an outer-sibling client deadlocks on a single-worker (1-core) outer nursery (a pre-existing
+> M:N limit — nested socket servers can't run on 1 core either way; the three socket e2e tests skip on
+> 1 core); (2) bounded accept loops only (`while true:` never reaches the join → graceful shutdown is
+> future work); (3) a handler signalling the acceptor via a Channel is a cross-nursery wakeup (handlers
+> reach clients via sockets — OS-mediated — which works). 1483 tests green, clippy clean.
 
 **Goal.** Cheap *massive* socket concurrency (10 k connections) without a thread per connection.
 Build the pollset **and** the socket surface that justifies it (regular files stay on D5's blocking
