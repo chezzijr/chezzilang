@@ -199,6 +199,14 @@ struct Vm {
     call_depth: usize,
     /// Each module's namespace object, indexed by module index (run-once cache + import targets).
     module_objs: Vec<GcRef>,
+    /// M19 Phase 3 — per-heap intern cache for `ConstStr` literals. Keyed by the literal's data
+    /// pointer (`s.as_ptr()`), which is stable for the program's lifetime (the `String` lives in the
+    /// immutable `Arc<Program>`). A `ConstStr` push reuses the cached `Obj::Str` instead of
+    /// alloc+clone+box every time — strings are never mutated in place, and there is no identity
+    /// operator, so aliasing is unobservable. The cached `GcRef`s are GC roots (see [`Vm::collect`])
+    /// so they're never swept; the cache is heap-keyed, so an M:N fiber swaps it WITH its heap in
+    /// [`Vm::swap_ctx`] (like `module_objs`/`executors`).
+    str_intern: std::collections::HashMap<usize, GcRef>,
     /// The current frame's slot base — cached so local access doesn't re-walk `frames` each op.
     cur_base: usize,
     /// Active `recover:` boundaries (a stack; the innermost is last). A runtime fault unwinds to the
@@ -439,6 +447,10 @@ struct FiberCtx {
     /// D2b — the fiber's `Executor` handles (GC roots into its own heap; same heap-keyed argument as
     /// `module_objs`). Empty for cooperative fibers.
     executors: Vec<GcRef>,
+    /// M19 Phase 3 — the fiber's `ConstStr` intern cache (GC roots into its own heap; same heap-keyed
+    /// argument as `module_objs`). Travels with `heap` across [`Vm::swap_ctx`]. Empty for cooperative
+    /// fibers (they alias the shell's cache).
+    str_intern: std::collections::HashMap<usize, GcRef>,
     /// D6b — a non-blocking `connect` parked on writability (see [`ConnectInProgress`]). Non-heap, so
     /// it carries no `GcRef` and needs no GC rooting; but it MUST travel with the fiber across the
     /// park, so it swaps in [`Vm::swap_ctx`] like the other per-fiber state. `None` unless this fiber
@@ -1608,6 +1620,9 @@ impl ReadyWorker {
             module_objs: worker.module_objs,
             module_faulted: worker.module_faulted,
             executors: worker.executors,
+            // M19 Phase 3 — the intern cache indexes `worker.heap`, which becomes `ctx.heap`; carry it
+            // so the heap-keyed invariant holds (its `GcRef`s stay valid against the heap they travel with).
+            str_intern: worker.str_intern,
             ..FiberCtx::default()
         };
         Fiber { ctx, state: FiberState::Pending(task), task_index, span, resume_native: None }
@@ -1714,6 +1729,7 @@ impl Vm {
             host: crate::native::HostConfig::default(),
             call_depth: 0,
             module_objs: Vec::new(),
+            str_intern: std::collections::HashMap::new(),
             cur_base: 0,
             handlers: Vec::new(),
             pending_exit: None,
@@ -1784,6 +1800,10 @@ impl Vm {
             std::mem::swap(&mut self.module_objs, &mut ctx.module_objs);
             std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
             std::mem::swap(&mut self.executors, &mut ctx.executors);
+            // M19 Phase 3 — the intern cache's `GcRef`s index this fiber's OWN heap, so it MUST travel
+            // atomically with the heap (same heap-keyed argument as `module_objs`). A cooperative fiber
+            // (`heap: None`) never reaches here and keeps aliasing the shell's cache.
+            std::mem::swap(&mut self.str_intern, &mut ctx.str_intern);
             // D6b — a mid-flight `connect` parked on writability swaps WITH its fiber (it owns the
             // connecting fd that the netpoller is watching; it must not be left on the shell where the
             // next fiber would inherit or drop it).
@@ -2256,6 +2276,10 @@ impl Vm {
         // even when no in-program handle remains.
         work.extend(self.executors.iter().copied());
         work.extend(self.module_objs.iter().copied());
+        // M19 Phase 3 — interned `ConstStr` handles are roots: they're cached for reuse across pushes
+        // of the same op, so they must never be swept out from under a later push. Heap-keyed, so this
+        // roots the cache for *this* heap (an M:N fiber's cache swapped in with its heap).
+        work.extend(self.str_intern.values().copied());
         // Parked fibers in active cooperative schedulers (B1/B2): each level's joining-fiber context
         // plus every child fiber's context are roots while the children run. The CURRENTLY running
         // fiber's context is the live `self.{stack,frames,nurseries}` already rooted above; a parked
@@ -2309,7 +2333,19 @@ impl Vm {
             Op::ConstInt(n) => self.push(Value::Int(*n)),
             Op::ConstFloat(x) => self.push(Value::Float(*x)),
             Op::ConstStr(s) => {
-                let h = self.heap.alloc(Obj::Str(s.clone().into_boxed_str()));
+                // M19 Phase 3 — intern by data pointer (stable for the program's lifetime, since the
+                // literal lives in the immutable `Arc<Program>`). First push of this op allocs the
+                // heap `Obj::Str`; every later push reuses the cached, GC-rooted handle — no clone,
+                // no alloc. Sound because strings are immutable and there is no identity operator.
+                let key = s.as_ptr() as usize;
+                let h = match self.str_intern.get(&key) {
+                    Some(&h) => h,
+                    None => {
+                        let h = self.heap.alloc(Obj::Str(s.as_str().into()));
+                        self.str_intern.insert(key, h);
+                        h
+                    }
+                };
                 self.push(Value::Obj(h));
             }
             Op::True => self.push(Value::Bool(true)),
@@ -2614,9 +2650,11 @@ impl Vm {
                         }
                         // A string iterates as 1-char strings (Python-style; gap: char type).
                         Obj::Str(s) => {
-                            let chars: Vec<String> = s.chars().map(|c| c.to_string()).collect();
+                            // Collect `char`s (Copy — no per-char `String`) to release the heap borrow,
+                            // then box each in one alloc via `alloc_char`.
+                            let chars: Vec<char> = s.chars().collect();
                             let items: Vec<Value> =
-                                chars.into_iter().map(|c| self.alloc_str(c)).collect();
+                                chars.into_iter().map(|c| self.alloc_char(c)).collect();
                             let nh = self.heap.alloc(Obj::List(items));
                             self.push(Value::Obj(nh));
                         }
@@ -4304,8 +4342,7 @@ impl Vm {
                     }
                     "chars" => {
                         self.arity_err("chars", args, 0, span)?;
-                        let cs: Vec<Value> =
-                            s.chars().map(|c| self.alloc_str(c.to_string())).collect();
+                        let cs: Vec<Value> = s.chars().map(|c| self.alloc_char(c)).collect();
                         Ok(Value::Obj(self.heap.alloc(Obj::List(cs))))
                     }
                     "starts_with" => {
@@ -4638,6 +4675,14 @@ impl Vm {
     /// Allocate a heap string and return its handle as a `Value`.
     fn alloc_str(&mut self, s: String) -> Value {
         Value::Obj(self.heap.alloc(Obj::Str(s.into_boxed_str())))
+    }
+
+    /// M19 Phase 3 — the 1-char `str` value for `c`, in a single allocation. `c.to_string()` +
+    /// `into_boxed_str` is two allocs (a `String`, then a shrink-to-fit realloc); encoding straight
+    /// into a stack buffer and boxing the `&str` is one. Used by string indexing/iteration/`chr`.
+    fn alloc_char(&mut self, c: char) -> Value {
+        let mut buf = [0u8; 4];
+        Value::Obj(self.heap.alloc(Obj::Str(Box::<str>::from(c.encode_utf8(&mut buf)))))
     }
 
     /// Return from the current frame. `propagated` true ⇒ the value came from `?` (no observable
@@ -7567,8 +7612,8 @@ impl Vm {
                 let chars: Vec<char> = s.chars().collect();
                 match usize::try_from(idx).ok().and_then(|i| chars.get(i).copied()) {
                     Some(c) => {
-                        let nh = self.heap.alloc(Obj::Str(c.to_string().into_boxed_str()));
-                        self.push(Value::Obj(nh));
+                        let nh = self.alloc_char(c);
+                        self.push(nh);
                         Ok(())
                     }
                     None => Err(self.err(format!("index {idx} out of bounds (len {})", chars.len()), span)),
@@ -7885,7 +7930,7 @@ impl Vm {
             Value::Int(n) => u32::try_from(n)
                 .ok()
                 .and_then(char::from_u32)
-                .map(|c| Value::Obj(self.heap.alloc(Obj::Str(c.to_string().into_boxed_str()))))
+                .map(|c| self.alloc_char(c))
                 .ok_or_else(|| self.err(format!("chr(): {n} is not a valid Unicode codepoint"), span)),
             other => Err(self.err(format!("chr() expects an int, got {}", self.type_name(other)), span)),
         }
@@ -8653,6 +8698,55 @@ mod tests {
         }
     }
 
+    // ---- M19 Phase 3: ConstStr interning + per-char alloc (correctness guards) ----
+
+    #[test]
+    fn interned_literal_repeated_pushes_render_identically() {
+        // The same literal op pushed many times must render identically — interning must not change
+        // the observed value (no identity operator exists, so aliasing is invisible).
+        assert_eq!(
+            run("i := 0\nwhile i < 3:\n    print(\"hi\")\n    i = i + 1\n"),
+            "hi\nhi\nhi\n"
+        );
+    }
+
+    #[test]
+    fn interned_fstring_literal_parts_in_loop() {
+        // Interpolation literal chunks (`n=` / `!`) are ConstStr pushes repeated per iteration.
+        assert_eq!(
+            run("i := 0\nwhile i < 3:\n    print(\"n={i}!\")\n    i = i + 1\n"),
+            "n=0!\nn=1!\nn=2!\n"
+        );
+    }
+
+    #[test]
+    fn interned_literal_as_map_key_repeated() {
+        // A literal reused as a map key: aliasing must preserve structural (by-content) map lookup.
+        assert_eq!(
+            run("m := {}\ni := 0\nwhile i < 3:\n    m[\"k\"] = i\n    i = i + 1\nprint(m[\"k\"])\n"),
+            "2\n"
+        );
+    }
+
+    #[test]
+    fn interned_strings_survive_gc_stress() {
+        // Proves interned ConstStr objects are GC-rooted: collect-before-every-instruction must not
+        // sweep a cached literal out from under a later push of the same op.
+        let src = "i := 0\nout := \"\"\nwhile i < 50:\n    out = out + \"x\"\n    i = i + 1\nprint(out.len())\n";
+        assert_eq!(run_capture_stress(src), run(src));
+        assert_eq!(run(src), "50\n");
+    }
+
+    #[test]
+    fn per_char_sites_render_unchanged() {
+        // `for c in str`, string indexing, `chars()`, and `chr()` all build 1-char strs via the
+        // single-allocation helper — output must stay byte-identical (same UTF-8).
+        assert_eq!(run("for c in \"héllo\":\n    print(c)\n"), "h\né\nl\nl\no\n");
+        assert_eq!(run("s := \"héllo\"\nprint(s[1])\n"), "é\n");
+        assert_eq!(run("for c in \"abc\".chars():\n    print(c)\n"), "a\nb\nc\n");
+        assert_eq!(run("print(chr(233))\n"), "é\n");
+    }
+
     #[test]
     fn calls_preserve_arg_order_nesting_and_result_slot() {
         // P1 characterization: locks call semantics before the in-place-args refactor. The bugs an
@@ -9017,10 +9111,14 @@ mod tests {
         vm.module_objs = vec![host_mod];
         vm.module_faulted = vec![true];
         vm.executors = vec![host_exec];
+        // M19 Phase 3 — the intern cache is heap-keyed too; it must round-trip with the heap.
+        let host_str = vm.heap.alloc(Obj::Str("host-str".into()));
+        vm.str_intern.insert(0x10, host_str);
 
         let mut fiber_heap = Heap::new();
         let fib_mod = fiber_heap.alloc(Obj::Str("fiber-mod".into()));
         let fib_exec = fiber_heap.alloc(Obj::Str("fiber-exec".into()));
+        let fib_str = fiber_heap.alloc(Obj::Str("fiber-str".into()));
         let mut ctx = FiberCtx {
             heap: Some(fiber_heap),
             out: "fiber-out".to_string(),
@@ -9028,6 +9126,7 @@ mod tests {
             module_objs: vec![fib_mod],
             module_faulted: vec![false],
             executors: vec![fib_exec],
+            str_intern: std::collections::HashMap::from([(0x20usize, fib_str)]),
             ..FiberCtx::default()
         };
 
@@ -9038,8 +9137,11 @@ mod tests {
         assert_eq!(vm.module_objs, vec![fib_mod]);
         assert_eq!(vm.module_faulted, vec![false]);
         assert_eq!(vm.executors, vec![fib_exec]);
+        assert_eq!(vm.str_intern.get(&0x20), Some(&fib_str));
+        assert_eq!(vm.str_intern.get(&0x10), None);
         assert_eq!(ctx.out, "host-out");
         assert_eq!(ctx.module_objs, vec![host_mod]);
+        assert_eq!(ctx.str_intern.get(&0x10), Some(&host_str));
 
         // Park out: the shell's side state is restored; the fiber keeps its own.
         vm.swap_ctx(&mut ctx);
@@ -9048,8 +9150,10 @@ mod tests {
         assert_eq!(vm.module_objs, vec![host_mod]);
         assert_eq!(vm.module_faulted, vec![true]);
         assert_eq!(vm.executors, vec![host_exec]);
+        assert_eq!(vm.str_intern.get(&0x10), Some(&host_str));
         assert_eq!(ctx.out, "fiber-out");
         assert_eq!(ctx.module_objs, vec![fib_mod]);
+        assert_eq!(ctx.str_intern.get(&0x20), Some(&fib_str));
     }
 
     /// Per-connection spawn: a fiber running an eager `parallel:` body can PARK (its acceptor blocks

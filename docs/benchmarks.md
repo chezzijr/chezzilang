@@ -102,6 +102,32 @@ allocation. CPython measured identically on `primes` (281→285 ms) this run, co
 stable — the small +ms drifts on the local-bound benches are thermal/run-to-run, not regressions
 (nothing got a *slower* code path; the slot read is strictly cheaper than the map probe it replaced).
 
+## After M19 Phase 3 — 2026-06-11 (same machine)
+
+Phase 3 is the **`str` allocation lever**: `Op::ConstStr` now interns its heap string in a per-heap
+cache keyed by the literal's data pointer (`s.as_ptr()`, stable because the `String` lives in the
+immutable `Arc<Program>`), so re-pushing the same literal op is a pointer lookup instead of
+`clone`+box+`heap.alloc`. Sound — strings are immutable and there's no identity operator, so aliasing
+is unobservable; the cached `GcRef`s are GC-rooted and travel heap-keyed across `swap_ctx` like
+`module_objs`. Also a `alloc_char` single-alloc helper for every 1-char-string site (iteration /
+`chars()` / indexing / `chr`). Behavior-preserving — 1525 tests green, both engines + a 2-agent review
+panel (SOUND). `fib`/`str`/`primes` isolated (`--warmup 2 -N -r 10`), rest from the sweep:
+
+| bench    | chezzi (P2b → P3)       | python  | slower (P2b → P3)       |
+|----------|-------------------------|---------|-------------------------|
+| fib(30)  | 302 ms → **308 ms**     | 80 ms   | 3.78× → **3.85×** (flat)|
+| str      | 273 ms → **227 ms**     | 83 ms   | 3.24× → **2.71×**       |
+| primes   | 740 ms → **713 ms**     | 285 ms  | 2.60× → **2.50×** (flat)|
+| loop     | 1105 ms → **1107 ms**   | 847 ms  | 1.29× → **1.31×** (flat)|
+| list     | 486 ms → **482 ms**     | 153 ms  | 3.18× → **3.16×** (flat)|
+| startup  | 0.84 ms → **0.80 ms**   | 9.1 ms  | 0.09× (win, unchanged)  |
+
+**`str` −17%** is the whole story, and it's the right story: the str bench re-pushes its f-string
+literal chunks ~500k times, so killing the per-push `clone`+box+alloc lands directly. Everything else
+is **flat within noise** — interning only bites where the *same literal op repeats*, which the
+arithmetic/call benches don't do (their hot loops push locals and computed values, not literals). No
+regressions (the cache lookup is strictly cheaper than the alloc it replaced).
+
 ## Reading it
 
 The shape matches what `future.md §4` predicted from first principles: **the gap is

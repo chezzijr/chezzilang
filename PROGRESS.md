@@ -68,9 +68,36 @@ global call per *outer* iteration). No regressions (the slot read is strictly ch
 it replaced). **1520 tests** green + `cargo test conformance` (7/7) + `cargo clippy -- -D warnings`
 clean. Numbers in [`docs/benchmarks.md`](docs/benchmarks.md).
 
-**Next (M19):** `ConstStr` interning (the remaining `str` lever), arithmetic specialization
-(monomorphic int-path guard in hot loops — the lever for `loop`/`primes`), frame pooling (helps
-recursion like `fib`). Ranked backlog in [`docs/future.md §4`](docs/future.md).
+**🟦 M19 Perf track — Phase 3 LANDED (2026-06-11).** Two behavior-preserving allocation kills on the
+string path, TDD'd and guarded by the full two-engine parity suite + a 2-agent review panel (both
+verdicts SOUND / behavior-preserving):
+1. **`ConstStr` interning** — `Op::ConstStr` pushed a freshly `clone`d, boxed, heap-allocated `Obj::Str`
+   *every* time. Now a per-heap cache keyed by the literal's **data pointer** (`s.as_ptr()`, stable for
+   the program's lifetime since the `String` lives in the immutable `Arc<Program>`) reuses the
+   already-allocated handle — first push allocs + caches, every later push of the same op is a pointer
+   lookup. Sound because `Obj::Str` is never mutated in place and there is no identity operator, so
+   aliasing is unobservable. The cached `GcRef`s are GC roots (`Vm::collect`) so they're never swept; the
+   cache is heap-keyed, so an M:N fiber swaps it WITH its heap in `swap_ctx` / carries it in `into_fiber`
+   — exactly mirroring `module_objs`/`executors`. → `str` −17% (the str bench re-pushes literal chunks
+   ~500k times).
+2. **Per-char single-alloc** — one shared `alloc_char(c)` helper (`Box::<str>::from(c.encode_utf8(&buf))`,
+   one alloc) replaces the `c.to_string().into_boxed_str()` two-alloc pattern at every 1-char-string site:
+   string for-iteration (`ListClone` Str arm, now `Vec<char>` not `Vec<String>`), `chars()`, string
+   indexing `s[i]`, and `chr(n)`. Byte-identical output; speeds string-iteration workloads (not in the
+   bench set directly).
+
+Result: **`str` 3.24×→2.71× (227 ms, was 273 ms)**; other benches flat within noise (interning only bites
+where the same literal op repeats — fib/loop/primes/list don't). No regressions. **1525 tests** green +
+`cargo test conformance` (7/7) + `cargo clippy -- -D warnings` clean. Numbers in
+[`docs/benchmarks.md`](docs/benchmarks.md).
+
+**Next (M19):** arithmetic specialization is largely already shipped (P1 superinstructions inline the
+monomorphic int path); frame pooling is low-ROI here (`CallFrame`'s `deferred`/`defer_markers` use
+alloc-free `Vec::new()`, and frames live in a capacity-reusing `Vec`). The remaining big lever is
+**NaN-boxing `Value`** (16 B → 8 B, cache density — moves `loop`/`list`/`fib`), best done as its own
+milestone (touches every `Value` match across the VM + frozen interp). Optional follow-ups to interning:
+compile-time cross-site literal dedup (`Op::ConstStr(u32)` + a `Program.str_consts` table) and a faster
+usize hasher. Ranked backlog in [`docs/future.md §4`](docs/future.md).
 
 **Robustness pass — cyclic-data depth guard + order-independent map `==` — has now landed** (both
 engines). Two fuzzing-found bugs: (1) a cyclic data structure (a struct with a `list[Self]` field
