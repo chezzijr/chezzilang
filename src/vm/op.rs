@@ -34,6 +34,22 @@ pub struct CapEntry {
     pub src: CapSrc,
 }
 
+/// The binary operator carried by a superinstruction (`BinLocalLocal` / `BinLocalConst`). Covers
+/// arithmetic and *ordered* comparison — the ops that route through `Vm::arith` / `Vm::compare_op`.
+/// `Eq`/`NotEq` are excluded (they use `values_equal_guarded`, a separate path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+}
+
 /// A single VM instruction. Operands are inline (typed), so there is no separate constant pool —
 /// strings and numbers live in the op. Jump targets are absolute indices into the proto's `code`.
 #[derive(Debug, Clone)]
@@ -87,6 +103,20 @@ pub enum Op {
     AsBool,
     /// Require the top of stack to be an int (range bounds, list index).
     AsInt,
+
+    // ----- superinstructions (M19 perf): peephole-fused windows of the hot numeric paths.
+    // Each carries a `BinKind` (arith + ordered-compare; not `Eq`/`NotEq`, which use a different
+    // VM path). The fast path is `Int`-only and inlined; any other operand type falls back to the
+    // exact unfused behaviour (`arith`/`compare_op`), so struct overloading / string concat / float
+    // promotion / fiber parking all stay identical. -----
+    /// `GetLocal(a), GetLocal(b), <binop>` fused — push `local[a] <op> local[b]`.
+    BinLocalLocal { a: usize, b: usize, kind: BinKind },
+    /// `GetLocal(slot), ConstInt(val), <binop>` fused — push `local[slot] <op> val`.
+    BinLocalConst { slot: usize, val: i64, kind: BinKind },
+    /// `GetLocal(s), ConstInt(d), Add, SetLocal(s)` fused — in-place `local[s] += d` with no stack
+    /// traffic. (Only `Add`; `-=` keeps the two-op `BinLocalConst{Sub} + SetLocal` form to avoid
+    /// negating the immediate and to preserve `Sub`'s error message for non-numeric operands.)
+    IncLocal { slot: usize, delta: i64 },
 
     // ----- control flow (absolute jump targets) -----
     Jump(usize),

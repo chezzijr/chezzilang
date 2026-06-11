@@ -2327,6 +2327,12 @@ impl Vm {
                     return Err(self.err(format!("expected int, found {}", self.type_name(v)), span));
                 }
             }
+            // ----- M19 superinstructions. Bodies live in `#[inline(never)]` helpers so `step`'s own
+            // stack frame stays lean — it is on the call-recursion cycle (`step → run_proto →
+            // run_until → step`), so inflating it overflows deep-recursion programs. -----
+            Op::BinLocalLocal { a, b, kind } => self.op_bin_local_local(*a, *b, *kind, span)?,
+            Op::BinLocalConst { slot, val, kind } => self.op_bin_local_const(*slot, *val, *kind, span)?,
+            Op::IncLocal { slot, delta } => self.op_inc_local(*slot, *delta, span)?,
             Op::PushHandler(target) => self.handlers.push(Handler {
                 stack_len: self.stack.len(),
                 frame_len: self.frames.len(),
@@ -2666,6 +2672,108 @@ impl Vm {
     }
 
     // ----- arithmetic / comparison -----
+
+    /// `BinLocalLocal{a,b,kind}` — push `local[a] <op> local[b]`. `#[inline(never)]` keeps the body
+    /// out of `step`'s frame (see the call site).
+    #[inline(never)]
+    fn op_bin_local_local(&mut self, a: usize, b: usize, kind: crate::vm::op::BinKind, span: Span) -> Result<(), RuntimeError> {
+        let l = self.stack[self.base() + a];
+        let r = self.stack[self.base() + b];
+        if let (Value::Int(x), Value::Int(y)) = (l, r) {
+            let v = self.fast_int_bin(x, y, kind, span)?;
+            self.push(v);
+        } else {
+            self.push(l);
+            self.push(r);
+            self.run_bin_kind(kind, span)?;
+        }
+        Ok(())
+    }
+
+    /// `BinLocalConst{slot,val,kind}` — push `local[slot] <op> val`.
+    #[inline(never)]
+    fn op_bin_local_const(&mut self, slot: usize, val: i64, kind: crate::vm::op::BinKind, span: Span) -> Result<(), RuntimeError> {
+        let l = self.stack[self.base() + slot];
+        if let Value::Int(x) = l {
+            let v = self.fast_int_bin(x, val, kind, span)?;
+            self.push(v);
+        } else {
+            self.push(l);
+            self.push(Value::Int(val));
+            self.run_bin_kind(kind, span)?;
+        }
+        Ok(())
+    }
+
+    /// `IncLocal{slot,delta}` — in-place `local[slot] += delta`. Falls back to the exact unfused
+    /// `GetLocal; ConstInt; Add; SetLocal` for a non-numeric local (so `arith`'s error wins).
+    #[inline(never)]
+    fn op_inc_local(&mut self, slot: usize, delta: i64, span: Span) -> Result<(), RuntimeError> {
+        let at = self.base() + slot;
+        match self.stack[at] {
+            Value::Int(x) => {
+                let v = x.checked_add(delta).ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?;
+                self.stack[at] = Value::Int(v);
+            }
+            Value::Float(f) => self.stack[at] = Value::Float(f + delta as f64),
+            other => {
+                self.push(other);
+                self.push(Value::Int(delta));
+                self.arith(&Op::Add, span)?;
+                let v = self.pop();
+                let at = self.base() + slot;
+                self.stack[at] = v;
+            }
+        }
+        Ok(())
+    }
+
+    /// Int/Int fast path for the fused binops (`BinLocalLocal` / `BinLocalConst`). Must match
+    /// `arith` (overflow / div-by-zero errors) and `compare_op` (ordering) for `Int` operands
+    /// exactly. Anything non-`Int` never reaches here — the caller falls back to the slow path.
+    fn fast_int_bin(&self, x: i64, y: i64, kind: crate::vm::op::BinKind, span: Span) -> Result<Value, RuntimeError> {
+        use crate::vm::op::BinKind;
+        let v = match kind {
+            BinKind::Add => Value::Int(x.checked_add(y).ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?),
+            BinKind::Sub => Value::Int(x.checked_sub(y).ok_or_else(|| self.err("integer overflow in Sub".to_string(), span))?),
+            BinKind::Mul => Value::Int(x.checked_mul(y).ok_or_else(|| self.err("integer overflow in Mul".to_string(), span))?),
+            BinKind::Div => {
+                if y == 0 {
+                    return Err(self.err("division by zero".to_string(), span));
+                }
+                Value::Int(x.checked_div(y).ok_or_else(|| self.err("integer overflow in Div".to_string(), span))?)
+            }
+            BinKind::Mod => {
+                if y == 0 {
+                    return Err(self.err("modulo by zero".to_string(), span));
+                }
+                Value::Int(x.checked_rem(y).ok_or_else(|| self.err("integer overflow in Mod".to_string(), span))?)
+            }
+            BinKind::Lt => Value::Bool(x < y),
+            BinKind::LtEq => Value::Bool(x <= y),
+            BinKind::Gt => Value::Bool(x > y),
+            BinKind::GtEq => Value::Bool(x >= y),
+        };
+        Ok(v)
+    }
+
+    /// Slow-path dispatch for a fused binop: the two operands are already on the stack, so route to
+    /// the existing `arith` / `compare_op` (preserving struct overloading, string concat, float
+    /// promotion, and fiber parking — anything the unfused op sequence would do).
+    fn run_bin_kind(&mut self, kind: crate::vm::op::BinKind, span: Span) -> Result<(), RuntimeError> {
+        use crate::vm::op::BinKind;
+        match kind {
+            BinKind::Add => self.arith(&Op::Add, span),
+            BinKind::Sub => self.arith(&Op::Sub, span),
+            BinKind::Mul => self.arith(&Op::Mul, span),
+            BinKind::Div => self.arith(&Op::Div, span),
+            BinKind::Mod => self.arith(&Op::Mod, span),
+            BinKind::Lt => self.compare_op(&Op::Lt, span),
+            BinKind::LtEq => self.compare_op(&Op::LtEq, span),
+            BinKind::Gt => self.compare_op(&Op::Gt, span),
+            BinKind::GtEq => self.compare_op(&Op::GtEq, span),
+        }
+    }
 
     fn arith(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
@@ -3195,20 +3303,40 @@ impl Vm {
     fn invoke_value(&mut self, callee: Value, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
         let argc = args.len();
         match callee {
-            Value::Obj(h) => match self.heap.get(h).clone() {
-                Obj::Func { proto, home } => {
-                    self.check_arity("function", &self.program.protos[proto].name.clone(), self.program.protos[proto].arity, argc, span)?;
-                    self.run_proto(proto, home, None, args, true, false, span)
+            Value::Obj(h) => {
+                // Borrow the heap object only long enough to read its `Copy` fields. The old code
+                // `self.heap.get(h).clone()` deep-cloned the whole `Obj` on *every* call — for a
+                // closure that meant cloning its captured-environment `HashMap` each time — just to
+                // read `proto`/`home`. `Native` still clones its (small) name `String`, but the hot
+                // user-function/closure paths now copy three scalars and allocate nothing.
+                enum Callee {
+                    Func { proto: ProtoId, home: GcRef },
+                    Closure { proto: ProtoId, home: GcRef },
+                    Native { func: crate::native::NativeFn, name: Box<str> },
+                    NotCallable,
                 }
-                Obj::Closure { proto, home, .. } => {
-                    if argc != self.program.protos[proto].arity {
-                        return Err(self.err(format!("closure expects {} argument(s), got {argc}", self.program.protos[proto].arity), span));
+                let kind = match self.heap.get(h) {
+                    Obj::Func { proto, home } => Callee::Func { proto: *proto, home: *home },
+                    Obj::Closure { proto, home, .. } => Callee::Closure { proto: *proto, home: *home },
+                    Obj::Native { func, name } => Callee::Native { func: *func, name: name.clone() },
+                    _ => Callee::NotCallable,
+                };
+                match kind {
+                    Callee::Func { proto, home } => {
+                        // `&...name` (no clone): `check_arity` only formats the message on mismatch.
+                        self.check_arity("function", &self.program.protos[proto].name, self.program.protos[proto].arity, argc, span)?;
+                        self.run_proto(proto, home, None, args, true, false, span)
                     }
-                    self.run_proto(proto, home, Some(h), args, true, false, span)
+                    Callee::Closure { proto, home } => {
+                        if argc != self.program.protos[proto].arity {
+                            return Err(self.err(format!("closure expects {} argument(s), got {argc}", self.program.protos[proto].arity), span));
+                        }
+                        self.run_proto(proto, home, Some(h), args, true, false, span)
+                    }
+                    Callee::Native { func, name } => self.invoke_native(func, &name, args, span),
+                    Callee::NotCallable => Err(self.err(format!("'{}' is not callable", self.type_name(callee)), span)),
                 }
-                Obj::Native { func, name } => self.invoke_native(func, &name, args, span),
-                _ => Err(self.err(format!("'{}' is not callable", self.type_name(callee)), span)),
-            },
+            }
             other => Err(self.err(format!("'{}' is not callable", self.type_name(other)), span)),
         }
     }
@@ -10710,6 +10838,38 @@ main()
     #[test]
     fn arithmetic_type_error_message() {
         assert!(run_err(r#"print(1 + "x")"#).contains("cannot apply Add to int and str"));
+    }
+
+    // ----- M19 superinstructions: operands are LOCALS (inside `fn`), so the fused ops actually
+    // execute (top-level `:=` is a global → `GetGlobal`, never fused). -----
+
+    #[test]
+    fn superinstruction_loop_sum_correct() {
+        // `i < 5` → BinLocalConst{Lt}; `total += i` → BinLocalLocal{Add}+SetLocal; `i += 1` → IncLocal.
+        let src = "fn main():\n    total := 0\n    i := 0\n    while i < 5:\n        total += i\n        i += 1\n    print(total)\nmain()";
+        assert_eq!(run(src), "10\n");
+    }
+
+    #[test]
+    fn superinstruction_div_mod_by_zero_via_locals() {
+        // BinLocalLocal fast path must raise the same message as `arith`.
+        assert_eq!(run_err("fn main():\n    x := 1\n    y := 0\n    print(x / y)\nmain()"), "division by zero");
+        assert_eq!(run_err("fn main():\n    x := 1\n    y := 0\n    print(x % y)\nmain()"), "modulo by zero");
+    }
+
+    #[test]
+    fn superinstruction_overflow_via_inc_and_mul() {
+        // IncLocal overflow.
+        assert!(run_err("fn main():\n    i := 9223372036854775807\n    i += 1\n    print(i)\nmain()").contains("integer overflow in Add"));
+        // BinLocalConst Mul overflow.
+        assert!(run_err("fn main():\n    x := 9223372036854775807\n    print(x * 2)\nmain()").contains("integer overflow in Mul"));
+    }
+
+    #[test]
+    fn superinstructions_run_under_parallel_engine() {
+        // Drives BinLocalConst / BinLocalLocal / IncLocal through the M:N engine (reduction path).
+        let out = run_capture_parallel("fn main():\n    total := 0\n    i := 0\n    while i < 1000:\n        total += i\n        i += 1\n    print(total)\nmain()").unwrap();
+        assert_eq!(out, "499500\n");
     }
 
     // ----- and / or short-circuit -----

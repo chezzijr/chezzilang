@@ -102,18 +102,20 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
 **dispatch count** and **name lookup** — with **per-call allocation** a close third on call-heavy code.
 
 **Cheap — do first:**
-- **Peephole + constant folding (compiler)** — fold `2+3`, fold constant interpolation chunks, drop
-  dead code. Free wins, no runtime change.
-- **Superinstructions** — fuse hot op pairs (`GetLocal+GetField`, `PushConst+Add`,
-  `GetLocal+GetLocal+BinOp`). Cuts dispatch count directly — the bottleneck. Moves `loop`/`primes`.
+- ✅ **Peephole + constant folding (compiler)** — *landed M19 Phase 1* (`src/compiler/peephole.rs`):
+  a jump-relocating pass that folds `ConstInt`/`ConstFloat` arith + `Neg`/`Not`, replicating the
+  VM's checked semantics (overflow / div-by-zero stay unfolded so the runtime raises the same error).
+- ✅ **Superinstructions** — *landed M19 Phase 1*: `BinLocalLocal` / `BinLocalConst` / `IncLocal`
+  fuse the hot `GetLocal+GetLocal+BinOp`, `GetLocal+Const+BinOp`, and `i += k` windows (Int fast
+  path inlined; non-Int falls back to the exact unfused op). Cut `loop` −36%, `primes` −25%.
+  Remaining candidates: `GetLocal+GetField`, fuse compare+`AsBool`, the load-store accumulator.
 - **Inline caching for name lookup** — globals / builtins / struct fields resolve *by name at
   runtime* today. Cache the resolved slot/index on first hit (monomorphic IC). Field access, method
-  dispatch, and global reads all benefit. Moves `primes`.
-- **Kill per-call clones in `invoke_value`** — every call does `self.heap.get(h).clone()` on the
-  whole `Obj` enum (cloning a closure's captured `HashMap`!) at `mod.rs:3198`, plus a
-  `name.clone()` for the arity check at `:3200`, plus a fresh `Vec<Value>` for args at `:3181`.
-  Match on `&Obj` and pass args as a stack slice instead. `fib` is the worst bench and this is its
-  hot path — cheap, high payoff.
+  dispatch, and global reads all benefit. Moves `primes`. ⚠ must stay correct across the concurrency
+  module-fault path (`ensure_module_faulted` / lazy worker module snapshot).
+- ✅ **Kill per-call clones in `invoke_value`** — *landed M19 Phase 1*: matches on `&Obj` (no whole-
+  `Obj` / closure-`HashMap` clone) and drops the arity-check `name.clone()`. Cut `fib` −17%, `list`
+  −22%. Still open: the fresh `Vec<Value>` for args at `mod.rs:3181` (pass a stack slice).
 
 **Medium:**
 - **NaN-boxing the `Value`** — pack into 8 bytes (vs the current ~16-byte enum). Better cache density
@@ -140,3 +142,8 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
 
 **Highest payoff-per-effort:** superinstructions + inline caching + peephole/const-fold. They attack
 dispatch count and name lookup — the two actual costs — without touching the value model or the GC.
+
+**M19 Phase 1 done (2026-06-11):** peephole/const-fold + superinstructions + `invoke_value` clone
+kill — all behavior-preserving (1516 tests + full two-engine parity green). Results in
+`docs/benchmarks.md`. Next lever for `str` is string interning / `BuildStr` builder; inline caching
+is the next dispatch win.

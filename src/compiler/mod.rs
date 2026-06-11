@@ -22,6 +22,8 @@ use crate::vm::op::{
 use crate::{lexer, parser};
 use std::collections::HashMap;
 
+mod peephole;
+
 /// A compile-time failure (e.g. a malformed string interpolation). Carries a span so the CLI can
 /// report it like any other error. Most user errors are caught earlier by the type checker; this
 /// covers what only the compiler can see.
@@ -184,12 +186,14 @@ impl Compiler {
 
     fn finish(&mut self, fc: FnComp) -> ProtoId {
         let pid = self.program.protos.len();
+        // M19: peephole pass — const-fold + superinstruction fusion, with jump relocation.
+        let (code, lines) = peephole::optimize(fc.code, fc.lines);
         self.program.protos.push(Proto {
             name: fc.name,
             arity: fc.arity,
             n_slots: fc.max_slots,
-            code: fc.code,
-            lines: fc.lines,
+            code,
+            lines,
         });
         pid
     }
