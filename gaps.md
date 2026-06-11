@@ -172,19 +172,13 @@ breadth. The big deferred *features* (D5 owe #3 `recv`-in-native-callback, per-c
   children on scope exit). **Blocks:** relying on `parallel:` as a hard "all children accounted for"
   barrier. **Design call needed:** run-pending-to-completion vs cancel-and-report before deciding the
   fix. (Surface note: `spawn f()?` is a *parse* error — `?` can't sit at the spawn site; `?` inside a
-  spawned body/`spawn:` block is fine and faults the task.)
+  spawned body/`spawn:` block is fine and faults the task.) **Now a pure *semantics* call** — the
+  related VM nursery *leak* is fixed (resolved log below), so both engines drop consistently; what's
+  left is only the run-vs-cancel design decision.
 
-- **🟡 VM leaks the nursery (+ its GC-rooted task args) on a `?`/return escape from `parallel:` not
-  caught by `recover:`** — **verified 2026-06-11; VM/interp divergence (internal memory only, output
-  identical).** `do_return` (`src/vm/mod.rs:3918`) reclaims defers + `recover:` handlers but does **not**
-  truncate `self.nurseries`, so a nursery whose `JoinNursery` was skipped by an early `?`/return stays
-  on the stack until program exit (its pending tasks' captured args stay GC-rooted). The `recover:`
-  unwind path *does* clean up (`nurseries.truncate(h.nursery_len)`, line 1767) and the interp reclaims
-  unconditionally (`exec_parallel` pops even on error) — so it's a divergence, not a crash; benign
-  beyond the leak (a skipped `JoinNursery` is never re-matched, so no wrong task runs). **Fix sketch:**
-  record the nursery depth at frame entry (mirror `Handler::nursery_len`) and `truncate` to it in
-  `do_return`; regression test asserting interp/VM parity + a clean nursery stack for a subsequent
-  `parallel:`. Tied to the dropped-task semantics above (the fix should also decide drop-vs-drain).
+- ~~**🟡 VM leaks the nursery on a `?`/return escape from `parallel:` not caught by `recover:`**~~ —
+  **resolved (see resolved log).** `do_return` now `truncate`s `self.nurseries` to the frame's
+  entry depth, mirroring `Handler::nursery_len` + the interp's unconditional `exec_parallel` pop.
 
 ### 🟡 Stdlib breadth (low priority — language is feature-complete; this is library fill)
 
@@ -353,3 +347,20 @@ catchable by `recover:` (`src/native/math.rs`). All other paths (`checked_*` ari
 `MIN / -1`, bounds-checked shifts, lexer literal overflow) were already correct — now guarded by
 regression tests. `i64`-only kept by design: no `byte`/`u8` scalar (Python model — binary work →
 future `bytes` sequence type); bignum a non-goal. `examples/overflow.chz` (golden + parity).
+
+**VM nursery-leak on `?`/return escape ✅** · (TDD, white-box) — a `?`/`return` escaping a `parallel:`
+body skips its `JoinNursery`, so the VM's `do_return` left the nursery (+ its GC-rooted pending-task
+args) on `self.nurseries` until program exit, while the interp's `exec_parallel` always pops — a
+VM/interp divergence (internal memory only; output identical). Fixed by recording `nursery_len` on the
+`CallFrame` at entry (mirroring `Handler::nursery_len`) and `self.nurseries.truncate(frame.nursery_len)`
+in `do_return` — a no-op on the normal path (`JoinNursery` already popped), reclaiming only the
+escaped nursery. Drop semantics unchanged (gap #1 still open). Black-box parity can't see the leak, so
+the regression tests assert the residual nursery depth via a new `run_capture_nursery_len` helper
+(`parallel_return_escape_leaves_clean_nursery_stack` + `..._try_escape_...` + the recover-caught
+boundary `..._try_caught_by_recover_...`). `src/vm/mod.rs`. **Residual (tracked, not a leak-to-exit):**
+a `break`/`continue` out of a `parallel:` inside a loop stays *in-frame* (a plain jump, no
+`do_return`), so its nursery is reclaimed only when the enclosing **function** returns — bounded to
+frame lifetime, output always correct, but not *block*-scoped like the interp's `exec_parallel` pop
+(`src/interp/mod.rs:902`). Closing that last divergence would need loop-exit-jump codegen to emit a
+nursery-drain when a `break`/`continue` crosses a nursery boundary (mirroring `emit_loop_body_drain`
+for defer scopes); deferred with the gap #1 drop-vs-drain design call above.
