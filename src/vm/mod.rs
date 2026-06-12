@@ -2222,6 +2222,10 @@ impl Vm {
                 }
                 Op::Call(argc) => self.do_call(*argc, span),
                 Op::Return => self.do_return(false),
+                // M19 Tier-2 — inline the index ops (hot in the `map` bench) so they skip the `step`
+                // call + big-match jump; the helpers carry the Int-key fast path. One source of truth.
+                Op::GetIndex => self.get_index(span),
+                Op::SetIndex => self.set_index(span),
                 other => self.step(other, span),
             };
             if let Err(rte) = step_result {
@@ -7807,6 +7811,37 @@ impl Vm {
         let Value::Obj(h) = obj else {
             return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
         };
+        // M19 Tier-2 — Int-key fast path. A `List` or `Map` indexed by an `Int` needs no rooting:
+        // `scalar_hash` on an int allocates nothing, can't GC, can't re-enter user code, so the
+        // `hash_key_rooted` push/pop the general Map arm does is pure waste. The `candidates` +
+        // `values_equal` probe is unchanged, so an Int key still matches a `values_equal` `Float`
+        // key. `Str`/`Struct` (and any non-Int key) fall through to the general match below.
+        if let Value::Int(n) = key {
+            match self.heap.get(h) {
+                Obj::List(items) => {
+                    return match usize::try_from(n).ok().and_then(|i| items.get(i).copied()) {
+                        Some(v) => {
+                            self.push(v);
+                            Ok(())
+                        }
+                        None => Err(self.err(format!("index {n} out of bounds (len {})", items.len()), span)),
+                    };
+                }
+                Obj::Map(_) => {
+                    let hk = self.scalar_hash(key);
+                    let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
+                    return match m.candidates(hk).iter().copied().find(|&p| self.values_equal(m.entries[p].1, key)) {
+                        Some(p) => {
+                            let v = m.entries[p].2;
+                            self.push(v);
+                            Ok(())
+                        }
+                        None => Err(self.err("key not found".to_string(), span)),
+                    };
+                }
+                _ => {}
+            }
+        }
         // Require an int index for list/str (the message matches the old `AsInt` exactly, for parity).
         let int_idx = |vm: &Vm| -> Result<i64, RuntimeError> {
             match key {
@@ -7910,6 +7945,23 @@ impl Vm {
         let Value::Obj(h) = obj else {
             return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
         };
+        // M19 Tier-2 — Int-key fast path for a Map write: `scalar_hash` on an int needs no rooting
+        // (it can't GC or re-enter, unlike a struct key's `hash()`), so skip `hash_key_rooted`. Same
+        // `candidates`/`values_equal`/`push` as the general Map arm → byte-identical behavior. A
+        // `Struct` with an Int key still falls through to its `set_index` protocol dispatch below.
+        if let Value::Int(_) = key
+            && matches!(self.heap.get(h), Obj::Map(_))
+        {
+            let hk = self.scalar_hash(key);
+            let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
+            let pos = m.candidates(hk).iter().copied().find(|&p| self.values_equal(m.entries[p].1, key));
+            let Obj::Map(m) = self.heap.get_mut(h) else { unreachable!() };
+            match pos {
+                Some(i) => m.entries[i].2 = val,
+                None => m.push(hk, key, val),
+            }
+            return Ok(());
+        }
         // For a map, hash the key (rooting the map/key/value across a struct key's re-entrant
         // hash()), locate the entry, then mutate — updating the side index on insert.
         if matches!(self.heap.get(h), Obj::Map(_)) {
@@ -9247,6 +9299,72 @@ mod tests {
         let src = "a := set([1, 2, 3, 2, 1])\nb := set([3, 4, 5])\n\
                    print(a.len())\nprint(a.union(b).len())\nprint(a.intersection(b).len())\nprint(a.difference(b).len())\n";
         assert_eq!(run_parity(src), "3\n5\n1\n2\n");
+    }
+
+    // ---- M19 Tier-2: index-access specialization (behavior-preserving guards) ----
+    // The Int-key fast path in `get_index`/`set_index` (skips the rooting that protects a struct
+    // key's re-entrant hash) and the inline `GetIndex`/`SetIndex` dispatch are VM-only speedups, so
+    // every result + error string must stay byte-identical to the frozen interpreter. `idx_parity`
+    // compares the full `Result` outcome (stdout OR error message). These pin the contract BEFORE the
+    // change and stay green AFTER.
+    fn idx_parity(src: &str) {
+        let vm = run_capture(src).map_err(|e| e.to_string());
+        let interp = crate::interp::run_capture(src).map_err(|e| e.to_string());
+        assert_eq!(vm, interp, "vm/interp divergence (index specialization must be behavior-preserving):\n{src}");
+    }
+
+    #[test]
+    fn idxspec_int_map_get_hit_and_miss() {
+        // Int-key map read: a present key returns its value; an absent key faults "key not found".
+        idx_parity("m := {1: 10, 2: 20}\nprint(m[1])\nprint(m[2])\n");
+        idx_parity("m := {1: 10}\nprint(m[99])\n"); // miss → "key not found", same on both engines
+    }
+
+    #[test]
+    fn idxspec_int_map_set_overwrite_and_insert() {
+        // Int-key map write: overwrite an existing entry, insert a new one; len + reads agree.
+        idx_parity(
+            "m := {1: 10}\nm[1] = 11\nm[2] = 20\nprint(m[1])\nprint(m[2])\nprint(m.len())\n",
+        );
+    }
+
+    #[test]
+    fn idxspec_int_list_get_set_in_bounds() {
+        idx_parity("xs := [5, 6, 7]\nprint(xs[0])\nxs[2] = 99\nprint(xs[2])\n");
+    }
+
+    #[test]
+    fn idxspec_list_out_of_bounds_message_exact() {
+        // Both get and set must surface the exact same bounds message through the fast path's fallback.
+        idx_parity("xs := [1, 2, 3]\nprint(xs[5])\n");
+        idx_parity("xs := [1, 2, 3]\nxs[5] = 0\n");
+        idx_parity("xs := [1, 2, 3]\nprint(xs[-1])\n"); // negative → out of bounds, not a panic
+    }
+
+    #[test]
+    fn idxspec_non_int_map_keys_via_fallback() {
+        // Str + bool keys must NOT take the Int fast path — they route through the unchanged general
+        // match (content/scalar hash). Output + a str-key miss message stay identical.
+        idx_parity("m := {\"a\": 1, \"b\": 2}\nprint(m[\"a\"])\nprint(m[\"b\"])\n");
+        idx_parity("m := {true: 1, false: 0}\nprint(m[false])\nprint(m[true])\n");
+        idx_parity("m := {\"a\": 1}\nprint(m[\"z\"])\n"); // str miss → "key not found"
+    }
+
+    #[test]
+    fn idxspec_struct_index_protocol_via_fallback() {
+        // THE TRAP: an Int key on a struct receiver must dispatch the `index`/`set_index` protocol,
+        // NOT the List/Map Int fast path. The receiver kind (Struct) gates the fast path, not the key.
+        let src = "struct Buf:\n    xs: list[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\n    fn set_index(self, k: int, v: int):\n        self.xs[k] = v\n\
+                   b := Buf([10, 20, 30])\nprint(b[0])\nb[1] = 99\nprint(b[1])\n";
+        idx_parity(src);
+    }
+
+    #[test]
+    fn idxspec_int_float_key_collision_resolves() {
+        // Int(3) and Float(3.0) hash identically (3.0.to_bits()) and are values_equal. The fast path
+        // shortcuts only the HASH, never the candidates+values_equal probe, so a Float key inserted as
+        // 3.0 is found by m[3] and vice-versa — exactly the interpreter's behavior.
+        idx_parity("m := {}\nm[3] = \"int\"\nprint(m[3.0])\nm[3.0] = \"float\"\nprint(m[3])\nprint(m.len())\n");
     }
 
     // ---- M19 Phase 4: struct-field inline cache (correctness guards) ----

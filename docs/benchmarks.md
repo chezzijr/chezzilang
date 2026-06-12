@@ -454,3 +454,37 @@ Ranked Tier-1 #3 (target `fib`), but analysis after Phase 7 shows the premise is
 
 fib's genuine next lever is **Tier 2 (PEP 659 adaptive quickening)** or **Tier 3 (Cranelift JIT)** —
 separate milestones, not an in-loop tweak. Deferred deliberately, not forgotten.
+
+## M19 Tier-2 — index-access specialization (`GetIndex`/`SetIndex`) — 2026-06-12
+
+Two composing, behavior-preserving levers on the index ops:
+
+- **Int-key fast path** inside `get_index`/`set_index` (`src/vm/mod.rs`): a `List` or `Map` indexed by
+  an `Int` skips `hash_key_rooted`'s operand-stack push/pop. That rooting exists to survive a *struct*
+  key's re-entrant `hash()` + GC; for an `Int` key, `scalar_hash` is allocation-free, infallible, and
+  can't re-enter, so the rooting is pure waste. The `candidates` + `values_equal` probe is unchanged —
+  only the *hashing* is shortcut — so an `Int` key still matches a `values_equal` `Float` key.
+- **Inline dispatch** (Phase-7 style): `Op::GetIndex`/`Op::SetIndex` are handled directly in the
+  `run_until` hot-op match (calling the same helpers), skipping the `step` call + giant match jump.
+
+**Measured (absolute chezzi time — the reliable signal; CPython ratios are noisy run-to-run):**
+
+| bench  | before | after | result |
+|--------|-------:|------:|--------|
+| `list` | 393.7 ms | **378.5 ms** | **−4%** (consistent across 3+ runs, beyond σ) |
+| `map`  | 226.4 ms | 225.7 ms | **neutral** |
+
+**The lever moved a *different* bench than predicted** — the project's recurring lesson (measure, don't
+trust the a-priori guess). `map` was the target (its `m[i]=i*2` + `total += m[j]` are index-bound) but
+came out neutral: `map` is **FxHashMap-probe-bound**, not rooting/dispatch-bound — the push/pop the
+fast path removes is a rounding error next to the hash-table lookup. `list`, *not* expected to move
+(its bench is `push` + `for`), gained ~4% instead: `for x in xs` lowers to a per-element `Op::GetIndex`
+(`src/compiler/mod.rs:823`), so the 2M-element loop runs through the inline Int-`List` fast path 2M
+times — the inline-dispatch + no-rooting win lands on iteration, not on map indexing.
+
+**Behavior-preserving:** 7 new VM==interp regression guards (`idxspec_*`, incl. the `Int(3)`/`Float(3.0)`
+key-collision trap and the struct-`Index`-protocol fallback) pin every result + error string before and
+after; full suite 1607 green, clippy clean. Kept as a principled cleanup (removes genuine waste + a real
+list-iteration win) in the spirit of Phase 5b's neutral-but-principled `tid` guard. To actually move
+`map` needs a bigger lever (map-shape specialization / a denser int-keyed representation) — out of scope
+for a behavior-preserving in-place tweak.
