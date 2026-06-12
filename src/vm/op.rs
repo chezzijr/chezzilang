@@ -296,6 +296,8 @@ pub enum Op {
     NewChannel,
     /// `Shared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Shared(init)`.
     NewShared,
+    /// `Atomic(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Atomic(init)`.
+    NewAtomic,
     /// `Executor()` — push a fresh, empty, explicitly-owned work queue (`Obj::Executor`). C5.
     NewExecutor,
 }

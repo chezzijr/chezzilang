@@ -5,7 +5,7 @@
 //! object. The VM owns the heap and mutates objects through `&mut heap[h]` — no `RefCell` needed.
 
 use super::chzstr::ChzStr;
-use super::core::{ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
+use super::core::{AtomicCore, ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use super::fxhash::FxHashMap;
 use super::op::ProtoId;
 use super::value::{GcRef, Value};
@@ -144,6 +144,9 @@ pub enum Obj {
     /// `Shared[T]` (C3) — a *handle* to the cross-task mutable box [`SharedCore`] (B3.1). See
     /// [`Channel`](Obj::Channel) for the handle/core split.
     Shared(Arc<SharedCore>),
+    /// `Atomic[T]` — a *handle* to the cross-task atomic box [`AtomicCore`]. Same handle/core split as
+    /// [`Shared`](Obj::Shared); the core holds one boxed wire value behind a `Mutex`.
+    Atomic(Arc<AtomicCore>),
     /// `Executor` (C5 escape hatch) — a *handle* to the shared work queue [`ExecutorCore`] (B3.1).
     /// The queued task closures live in the core as wire values (`Handle(closure)` at B3.1); `shut`
     /// lives in the shared core so aliasing handles agree on shutdown state. See
@@ -301,6 +304,10 @@ impl Heap {
                 }
             }
             Obj::Shared(core) => {
+                let mut seen = vec![Arc::as_ptr(core) as usize];
+                crate::vm::core::collect_core_gcrefs(&core.v.lock().unwrap(), &mut out, &mut seen);
+            }
+            Obj::Atomic(core) => {
                 let mut seen = vec![Arc::as_ptr(core) as usize];
                 crate::vm::core::collect_core_gcrefs(&core.v.lock().unwrap(), &mut out, &mut seen);
             }

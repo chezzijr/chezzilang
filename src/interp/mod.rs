@@ -113,6 +113,7 @@ fn deep_clone(v: &Value) -> Value {
         // An `Executor` likewise: the handle is copied so every task reaches the one work queue.
         | Value::Channel(_)
         | Value::Shared(_)
+        | Value::Atomic(_)
         | Value::Executor(_) => v.clone(),
         Value::List(items) => {
             let cloned = items.borrow().iter().map(deep_clone).collect::<Vec<_>>();
@@ -821,6 +822,17 @@ impl Interp {
                 let init = deep_clone(&arg_vals[0]);
                 return Ok(Value::Shared(std::rc::Rc::new(std::cell::RefCell::new(init))));
             }
+            // `Atomic(v)` — a fresh cross-task atomic box owning a copy of `v` (value-first, like `Shared`).
+            if name == "Atomic" {
+                if arg_vals.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!("Atomic(v) takes exactly one argument, got {}", arg_vals.len()),
+                        span,
+                    });
+                }
+                let init = deep_clone(&arg_vals[0]);
+                return Ok(Value::Atomic(std::rc::Rc::new(std::cell::RefCell::new(init))));
+            }
             // `Executor()` (C5 escape hatch) — a fresh, empty, explicitly-owned work queue.
             if name == "Executor" {
                 if !arg_vals.is_empty() {
@@ -1411,6 +1423,10 @@ impl Interp {
         if let Value::Shared(cell) = &receiver {
             let cell = std::rc::Rc::clone(cell);
             return self.eval_shared_method(&cell, method, arg_vals, span);
+        }
+        if let Value::Atomic(cell) = &receiver {
+            let cell = std::rc::Rc::clone(cell);
+            return self.eval_atomic_method(&cell, method, arg_vals, span);
         }
         if let Value::Executor(ex) = &receiver {
             let ex = std::rc::Rc::clone(ex);
@@ -2141,6 +2157,78 @@ impl Interp {
             }
             _ => Err(RuntimeError {
                 message: format!("type Shared has no method '{method}'"),
+                span,
+            }),
+        }
+    }
+
+    /// `Atomic[T]` methods. The box owns its value (copied in/out across the airlock, like `Shared`):
+    /// `load` copies out, `store` copies in, `exchange` swaps (returns the old value), `cas(expected,
+    /// new)` swaps iff the box equals `expected` (returns whether it did), and `add`/`sub` are numeric
+    /// read-modify-write returning the new value. Under the sequential executor a single thread
+    /// serialises every op, so no locking is needed. Mirrors `vm::atomic_method`.
+    fn eval_atomic_method(
+        &mut self,
+        cell: &std::rc::Rc<std::cell::RefCell<Value>>,
+        method: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            "load" => {
+                builtins::arity("load", &args, 0, span)?;
+                Ok(deep_clone(&cell.borrow()))
+            }
+            "store" => {
+                builtins::arity("store", &args, 1, span)?;
+                *cell.borrow_mut() = deep_clone(&args[0]);
+                Ok(Value::Nil)
+            }
+            "exchange" => {
+                builtins::arity("exchange", &args, 1, span)?;
+                let new = deep_clone(&args[0]);
+                Ok(std::mem::replace(&mut *cell.borrow_mut(), new))
+            }
+            "cas" => {
+                builtins::arity("cas", &args, 2, span)?;
+                let mut g = cell.borrow_mut();
+                let swapped = values_equal(&g, &args[0]);
+                if swapped {
+                    *g = deep_clone(&args[1]);
+                }
+                Ok(Value::Bool(swapped))
+            }
+            "add" | "sub" => {
+                builtins::arity(method, &args, 1, span)?;
+                let mut g = cell.borrow_mut();
+                let new = match (&*g, &args[0]) {
+                    (Value::Int(a), Value::Int(b)) => {
+                        let (r, label) = if method == "add" {
+                            (a.checked_add(*b), "Add")
+                        } else {
+                            (a.checked_sub(*b), "Sub")
+                        };
+                        Value::Int(r.ok_or(RuntimeError {
+                            message: format!("integer overflow in {label}"),
+                            span,
+                        })?)
+                    }
+                    (Value::Float(a), Value::Float(b)) => {
+                        Value::Float(if method == "add" { a + b } else { a - b })
+                    }
+                    // The checker gates `add`/`sub` to numeric element types, so this is unreachable.
+                    _ => {
+                        return Err(RuntimeError {
+                            message: format!("type Atomic has no method '{method}'"),
+                            span,
+                        });
+                    }
+                };
+                *g = new.clone();
+                Ok(new)
+            }
+            _ => Err(RuntimeError {
+                message: format!("type Atomic has no method '{method}'"),
                 span,
             }),
         }

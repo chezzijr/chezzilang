@@ -67,6 +67,16 @@ pub struct SharedCore {
     pub update_lock: Mutex<()>,
 }
 
+/// `Atomic[T]` core: the cross-task atomic box. Like [`SharedCore`] (one boxed wire value behind a
+/// `Mutex`, reachable across threads via the `Arc` handle), but presents atomic-operation methods —
+/// `load`/`store`/`exchange`/`cas` and (numeric `T`) `add`/`sub`. Each method is a single
+/// lock-op-unlock, so the read-modify-write of `add`/`sub`/`exchange`/`cas` is atomic across threads
+/// without a separate `update_lock` (no user closure runs under the lock, unlike `Shared.update`).
+#[derive(Debug, Default)]
+pub struct AtomicCore {
+    pub v: Mutex<WireValue>,
+}
+
 /// D6 — a monotonic, process-wide poll key. The netpoller (`super::poller`) keys an fd registration
 /// by an arbitrary `usize` we choose, NOT the raw fd: a closed-then-reopened fd reuses its integer,
 /// which would alias a stale registration (an ABA hazard); a fresh key per socket avoids that. It is
@@ -158,6 +168,9 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
             core.q.lock().unwrap().queue.iter().for_each(|w| collect_core_gcrefs(w, out, s))
         }),
         WireValue::Shared(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
+            collect_core_gcrefs(&core.v.lock().unwrap(), out, s)
+        }),
+        WireValue::Atomic(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
             collect_core_gcrefs(&core.v.lock().unwrap(), out, s)
         }),
         WireValue::Executor(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {

@@ -15,7 +15,7 @@ mod timer;
 pub mod value;
 pub mod wire;
 
-use core::{ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
+use core::{AtomicCore, ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, Op, Program, ProtoId, NO_IC, TID_NONE};
 use std::os::fd::AsRawFd;
@@ -2883,6 +2883,12 @@ impl Vm {
                 let h = self.heap.alloc(Obj::Shared(Arc::new(SharedCore { v: Mutex::new(init), ..Default::default() })));
                 self.push(Value::Obj(h));
             }
+            Op::NewAtomic => {
+                let init = self.pop();
+                let init = self.to_wire(init).expect("Atomic init must be sendable (B3.1 single-thread)");
+                let h = self.heap.alloc(Obj::Atomic(Arc::new(AtomicCore { v: Mutex::new(init) })));
+                self.push(Value::Obj(h));
+            }
             Op::NewExecutor => {
                 let h = self.heap.alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
                 // Register for the program-exit auto-drain; the handle is also a GC root, so the
@@ -4028,6 +4034,11 @@ impl Vm {
         }
         if matches!(self.heap.get(h), Obj::Shared(_)) {
             let result = self.shared_method(h, method, &args, span)?;
+            self.push(result);
+            return Ok(());
+        }
+        if matches!(self.heap.get(h), Obj::Atomic(_)) {
+            let result = self.atomic_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
         }
@@ -6033,6 +6044,7 @@ impl Vm {
                 // `from_wire` in any heap reaches the same mailbox/box/queue.
                 Obj::Channel(core) => WireValue::Channel(Arc::clone(core)),
                 Obj::Shared(core) => WireValue::Shared(Arc::clone(core)),
+                Obj::Atomic(core) => WireValue::Atomic(Arc::clone(core)),
                 Obj::Executor(core) => WireValue::Executor(Arc::clone(core)),
                 // D6: a socket/listener handle crosses as its shared `Arc` core (a spawned fiber
                 // reaches the same fd) — same shape as `Channel`/`Shared`/`Executor`.
@@ -6107,6 +6119,7 @@ impl Vm {
             // drives the program-exit auto-drain and shares this core, so the alias needs no entry.
             WireValue::Channel(core) => Value::Obj(self.heap.alloc(Obj::Channel(core))),
             WireValue::Shared(core) => Value::Obj(self.heap.alloc(Obj::Shared(core))),
+            WireValue::Atomic(core) => Value::Obj(self.heap.alloc(Obj::Atomic(core))),
             WireValue::Executor(core) => Value::Obj(self.heap.alloc(Obj::Executor(core))),
             // D6: rebuild a fresh heap handle onto the SAME shared socket/listener core (`Arc` cloned
             // in `to_wire`) — two fibers reach one fd.
@@ -6507,10 +6520,11 @@ impl Vm {
             Obj::Str(_)
             | Obj::Channel(_)
             | Obj::Shared(_)
+            | Obj::Atomic(_)
             | Obj::Executor(_)
             | Obj::Socket(_)
             | Obj::Listener(_) => {
-                SnapValue::Wire(self.to_wire(v).expect("str / channel / shared / executor / socket is always sendable"))
+                SnapValue::Wire(self.to_wire(v).expect("str / channel / shared / atomic / executor / socket is always sendable"))
             }
         }
     }
@@ -6636,6 +6650,13 @@ impl Vm {
         match self.heap.get(h) {
             Obj::Shared(core) => Arc::clone(core),
             _ => unreachable!("shared_core on non-shared"),
+        }
+    }
+
+    fn atomic_core(&self, h: GcRef) -> Arc<AtomicCore> {
+        match self.heap.get(h) {
+            Obj::Atomic(core) => Arc::clone(core),
+            _ => unreachable!("atomic_core on non-atomic"),
         }
     }
 
@@ -7302,6 +7323,77 @@ impl Vm {
                 Ok(Value::Nil)
             }
             _ => Err(self.err(format!("type Shared has no method '{method}'"), span)),
+        }
+    }
+
+    /// `Atomic[T]` methods: `load` (copy out), `store` (copy in), `exchange` (swap, returns old),
+    /// `cas(expected, new) -> bool` (swap iff the box equals `expected`), `add`/`sub` (numeric RMW,
+    /// returns the new value). Each is a single lock-op-unlock, so the RMW is atomic across threads —
+    /// no user closure runs under the lock (unlike `Shared.update`), so no `update_lock` is needed.
+    /// Mirrors `interp::eval_atomic_method`. `add`/`sub` use the language's `checked_add`/`checked_sub`
+    /// (int overflow faults, like the `+`/`-` operators) and plain float arithmetic.
+    fn atomic_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        match method {
+            "load" => {
+                self.arity_err("load", args, 0, span)?;
+                let w = self.atomic_core(h).v.lock().unwrap().clone();
+                Ok(self.from_wire(w))
+            }
+            "store" => {
+                self.arity_err("store", args, 1, span)?;
+                let w = self.to_wire(args[0])?;
+                *self.atomic_core(h).v.lock().unwrap() = w;
+                Ok(Value::Nil)
+            }
+            "exchange" => {
+                self.arity_err("exchange", args, 1, span)?;
+                let new_w = self.to_wire(args[0])?;
+                let core = self.atomic_core(h);
+                let old = {
+                    let mut g = core.v.lock().unwrap();
+                    std::mem::replace(&mut *g, new_w)
+                };
+                Ok(self.from_wire(old))
+            }
+            "cas" => {
+                self.arity_err("cas", args, 2, span)?;
+                let core = self.atomic_core(h);
+                // Hold the value lock across compare+swap so the CAS is atomic. `from_wire`/`to_wire`/
+                // `values_equal` borrow `self`, not the guard (which borrows the cloned `Arc`), so the
+                // lock can stay held while they run.
+                let mut g = core.v.lock().unwrap();
+                let cur = self.from_wire(g.clone());
+                let swapped = self.values_equal(cur, args[0]);
+                if swapped {
+                    *g = self.to_wire(args[1])?;
+                }
+                Ok(Value::Bool(swapped))
+            }
+            "add" | "sub" => {
+                self.arity_err(method, args, 1, span)?;
+                let delta = self.to_wire(args[0])?;
+                let core = self.atomic_core(h);
+                let mut g = core.v.lock().unwrap();
+                let new = match (&*g, &delta) {
+                    (WireValue::Int(a), WireValue::Int(b)) => {
+                        let (r, label) = if method == "add" {
+                            (a.checked_add(*b), "Add")
+                        } else {
+                            (a.checked_sub(*b), "Sub")
+                        };
+                        WireValue::Int(r.ok_or_else(|| self.err(format!("integer overflow in {label}"), span))?)
+                    }
+                    (WireValue::Float(a), WireValue::Float(b)) => {
+                        WireValue::Float(if method == "add" { a + b } else { a - b })
+                    }
+                    // The checker gates `add`/`sub` to numeric element types, so this is unreachable.
+                    _ => return Err(self.err(format!("type Atomic has no method '{method}'"), span)),
+                };
+                *g = new.clone();
+                drop(g);
+                Ok(self.from_wire(new))
+            }
+            _ => Err(self.err(format!("type Atomic has no method '{method}'"), span)),
         }
     }
 
@@ -8304,6 +8396,7 @@ impl Vm {
                 Obj::Native { .. } => "function",
                 Obj::Channel(_) => "Channel",
                 Obj::Shared(_) => "Shared",
+                Obj::Atomic(_) => "Atomic",
                 Obj::Executor(_) => "Executor",
                 Obj::Socket(_) => "Socket",
                 Obj::Listener(_) => "Listener",
@@ -8392,6 +8485,7 @@ impl Vm {
                 // B3.1: the box holds the wire form; render it directly (`display` is `&self` and
                 // cannot `from_wire`, which allocates — `display_wire` is the read-only equivalent).
                 Obj::Shared(core) => Ok(format!("Shared({})", self.display_wire(&core.v.lock().unwrap()))),
+                Obj::Atomic(core) => Ok(format!("Atomic({})", self.display_wire(&core.v.lock().unwrap()))),
                 Obj::Executor(core) => Ok(format!("Executor(pending={})", core.inner.lock().unwrap().queue.len())),
                 // D6: render open/closed without exposing the fd; matches no interp counterpart (net
                 // is VM-only) but mirrors the core handles' structural `Display`.
@@ -8455,6 +8549,7 @@ impl Vm {
             }
             WireValue::Channel(core) => format!("Channel(len={})", core.q.lock().unwrap().queue.len()),
             WireValue::Shared(core) => format!("Shared({})", self.display_wire(&core.v.lock().unwrap())),
+            WireValue::Atomic(core) => format!("Atomic({})", self.display_wire(&core.v.lock().unwrap())),
             WireValue::Executor(core) => format!("Executor(pending={})", core.inner.lock().unwrap().queue.len()),
             // D6: render open/closed without exposing the fd (mirrors the heap `Display`).
             WireValue::Socket(core) => {
@@ -8591,7 +8686,7 @@ impl Vm {
             }
             // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
             // (matches the interpreter's `stringify` catch-all falling back to `Display`).
-            Obj::Channel(_) | Obj::Shared(_) | Obj::Executor(_) | Obj::Socket(_) | Obj::Listener(_) => {
+            Obj::Channel(_) | Obj::Shared(_) | Obj::Atomic(_) | Obj::Executor(_) | Obj::Socket(_) | Obj::Listener(_) => {
                 out.push_str(&self.display_guarded(Value::Obj(h), depth)?);
             }
         }
@@ -12708,6 +12803,17 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// `Atomic[T]` golden: single-thread load/store/add/sub/exchange/cas sequence, byte-identical on
+    /// the VM, the interpreter, and `.expected`.
+    #[test]
+    fn golden_atomic_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/atomic.chz");
+        let expected = include_str!("../../examples/atomic.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     /// Slicing golden: `examples/slicing.chz` (list/str slicing + the `Index`/`IndexSet`/`Slice`
     /// protocols on a struct + a generic over both) byte-identical on the VM, interp, and `.expected`.
     #[test]
@@ -13349,6 +13455,31 @@ main()
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `Atomic[int].add` cross-thread atomicity: N real-OS-thread fibers each `add(1)` one shared
+    /// box; the join sum must be exactly N (no lost read-modify-write — the whole point of `Atomic`).
+    #[test]
+    fn parallel_atomic_add_is_exact() {
+        let n = 300;
+        let src = format!(
+            "fn work(a: Atomic[int]):\n    a.add(1)\n\
+             fn main():\n    a := Atomic(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn work(a)\n    print(a.load())\nmain()\n"
+        );
+        assert_eq!(run_capture_parallel(&src).expect("parallel"), format!("{n}\n"));
+    }
+
+    /// `Atomic[int].cas` under contention: N fibers each increment via a load-then-CAS retry loop. A
+    /// lost CAS (the box changed under us) retries, so the serialised total is exactly N — proving the
+    /// compare-and-swap is atomic across threads.
+    #[test]
+    fn parallel_atomic_cas_increment_is_exact() {
+        let n = 200;
+        let src = format!(
+            "fn bump(a: Atomic[int]):\n    while true:\n        cur := a.load()\n        if a.cas(cur, cur + 1):\n            break\n\
+             fn main():\n    a := Atomic(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn bump(a)\n    print(a.load())\nmain()\n"
+        );
+        assert_eq!(run_capture_parallel(&src).expect("parallel"), format!("{n}\n"));
     }
 
     /// A1 golden: `Channel[T].try_recv()` — a non-blocking poll returning `T?`. Workers `send` at the

@@ -3943,6 +3943,58 @@ fn ref_is_not_sendable() {
     );
 }
 
+// ----- Atomic[T]: the generic atomic box -----
+
+#[test]
+fn atomic_construct_and_methods_ok() {
+    // `Atomic(v)` infers its element type from the value (value-first, like `Shared`).
+    ok("fn main():\n    a := Atomic(0)\n    a.store(5)\n    n := a.add(1)\n    m := a.sub(2)\n    old := a.exchange(9)\n    ok := a.cas(9, 10)\n    print(a.load())\nmain()\n");
+}
+
+#[test]
+fn atomic_load_returns_element_type() {
+    // `load()` yields `T`, so it composes where a `T` is expected (here, str concat).
+    ok("fn main():\n    a := Atomic(\"hi\")\n    msg := a.load() + \"!\"\n    print(msg)\nmain()\n");
+}
+
+#[test]
+fn atomic_cas_returns_bool() {
+    // `cas(expected, new)` reports whether the swap happened.
+    ok("fn main():\n    a := Atomic(0)\n    if a.cas(0, 1):\n        print(\"swapped\")\nmain()\n");
+}
+
+#[test]
+fn atomic_store_wrong_type_rejected() {
+    rejects(
+        "fn main():\n    a := Atomic(0)\n    a.store(\"x\")\nmain()\n",
+        "expected int",
+    );
+}
+
+#[test]
+fn atomic_add_non_numeric_rejected() {
+    // `add`/`sub` are arithmetic — only `int`/`float` boxes have them.
+    rejects(
+        "fn main():\n    a := Atomic(\"x\")\n    a.add(1)\nmain()\n",
+        "no method 'add'",
+    );
+}
+
+#[test]
+fn atomic_rejects_type_arg() {
+    // The element type comes from the value — `Atomic[int](...)` is not the constructor form.
+    rejects(
+        "fn main():\n    a := Atomic[int](0)\n    print(a.load())\nmain()\n",
+        "'Atomic' takes no type arguments",
+    );
+}
+
+#[test]
+fn atomic_is_sendable() {
+    // An `Atomic[T]` handle crosses the airlock — both spawned tasks reach the same box.
+    ok("fn bump(a: Atomic[int]):\n    a.add(1)\nfn main():\n    a := Atomic(0)\n    parallel:\n        spawn bump(a)\n        spawn bump(a)\n    print(a.load())\nmain()\n");
+}
+
 // ----- C5: the `Executor` escape hatch -----
 
 #[test]
