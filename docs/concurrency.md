@@ -1,12 +1,14 @@
 # Chezzi — Concurrency & Parallelism (`spawn` / `parallel:`)
 
-> **Status:** design doc for *future* implementation — **not yet built**. This is the canonical
-> reference the eventual implementation works against. `PROGRESS.md` + `gaps.md` remain the source of
-> truth for what's actually scheduled. Promote a milestone into `gaps.md` when it's committed.
+> **Status:** canonical design doc — **implemented through Tier-D**. The surface (`spawn`,
+> `parallel:`, `Channel`/`Shared`/`Executor`) and both engines ship; `--parallel` is a real OS-thread
+> M:N work-stealing scheduler with reduction-counting preemption, a dirty/blocking pool, and an
+> epoll/kqueue netpoller behind non-blocking `std.net`. Phase history: [`concurrency-tier-d.md`](concurrency-tier-d.md)
+> (D0–D6c) + [`concurrency-b3.md`](concurrency-b3.md) (the B3 OS-thread foundation). Only **M-C implicit
+> nurseries** remain deferred (by design). `PROGRESS.md` is the live status tracker.
 >
-> Lifted and expanded from `docs/future.md §2` (which now points here). The syntax is fixed; the
-> *engine* is staged (a sequential executor first, real multicore later) so the surface never changes
-> when concurrency gets teeth.
+> The syntax was fixed up front and the *engine* shipped staged (a sequential executor first, real
+> multicore later) so the surface never changed as concurrency got teeth.
 
 Chezzi's concurrency is a **shared-nothing actor model** in the lineage of the Erlang/Elixir **BEAM**
 (shared-nothing tasks, per-task heap + GC, message passing) **plus** two borrowings — **Go's

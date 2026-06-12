@@ -808,10 +808,12 @@ result := [1, 2, 3, 4]
 # sum(map(filter([1,2,3,4], fn(x): x % 2 == 0), fn(x): x * 10))
 ```
 
-## 11b. Concurrency — `spawn` / `parallel:`  (planned — see [`concurrency.md`](concurrency.md))
+## 11b. Concurrency — `spawn` / `parallel:`  (see [`concurrency.md`](concurrency.md))
 
-> **Not yet implemented.** Syntax is fixed; the engine ships staged (a sequential run-to-completion
-> executor first, real multicore later). Full design + roadmap in [`concurrency.md`](concurrency.md).
+> **Implemented — shipped through Tier-D.** The cooperative engine is the default; `--parallel` is a
+> real OS-thread M:N scheduler (`Channel`/`Shared`/`Executor`, netpoller-backed `std.net`). Full
+> design in [`concurrency.md`](concurrency.md); phase history in
+> [`concurrency-tier-d.md`](concurrency-tier-d.md).
 
 ```chezzi
 fn worker(id: int, prefix: str, out: Channel[str]):

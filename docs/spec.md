@@ -2,7 +2,12 @@
 
 A fast, statically-typed, Python-feel scripting language. Hand-built in Rust.
 
-> **Status:** M1–M11 shipped (through panic recovery + Go-style `Result[T, E]`); M12 added the iterator protocol + match guards/range patterns; M13 added the parameterized `Iterator[T]` bound (`yield` dropped as a non-goal) — 951 tests passing. This doc is the source of truth for the *language design*; live build status lives in `PROGRESS.md` and the roadmap at the bottom.
+> **Status:** core language **feature-complete through M18** (scalars + collections, generics +
+> structural protocols, exhaustive `match`, closures/HOF, modules, `Iterator[T]`, slicing/indexing,
+> `defer` + `recover:`); **concurrency shipped through Tier-D** (`spawn` / `parallel:` nursery,
+> `Channel`/`Shared`/`Executor`, real OS-thread M:N scheduler + netpoller + `std.net`). **M19** (a
+> behavior-preserving perf track) is in progress — ~1565 tests passing. This doc is the source of truth
+> for the *language design*; live build status lives in `PROGRESS.md` and the roadmap at the bottom.
 
 ## Goals (ranked)
 
@@ -42,7 +47,7 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 - **Bitwise ops** — `& | ^ << >>` (int-only, M8/M11).
 - **`recover:` block** — panic-recovery boundary → `Result[T, Error]` catching any runtime fault beneath it (M11).
 
-**Shipped post-v1 (M7–M13):**
+**Shipped post-v1 (M7–M18):**
 - **M7** — user-defined generics + structural protocols (generic fns/structs, `Comparable`; `std.cmp`).
 - **M8** — tier-1 stdlib (`std.json`/`process`/`fs`/`time`), the `set` type, iterable strings (`s.chars()`).
 - **M9** — tier-2 stdlib (`std.regex`, `std.request`) — first runtime crate deps.
@@ -51,6 +56,8 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 - **M12** — iterator protocol (structs with `next(self) -> Option[T]` iterable in `for`), match guards + range patterns.
 - **M13** — `Iterator[T]`: the first **parameterized** protocol bound (`[S: Iterator[T], T]`) — any iterable, element type recovered; lazy adapter structs replace `yield`.
 - **M14** — method-level type params (`fn map_to[U](self, …)`) + **user-defined parameterized protocols** (`protocol Container[T]`, concrete-arg bounds `[X: Container[int]]`) — generalizing the special-cased `Iterator[T]`.
+- **M15** — slicing + indexing protocols (`xs[1..3]`; `Index`/`IndexSet`/`Slice` structural protocols, built-ins intrinsic + user structs via `index`/`set_index`/`slice`).
+- **M16–M18** — **concurrency** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, real OS-thread M:N engine via `--parallel`, netpoller + `std.net`) and the **`defer`** statement (call + block forms, `recover:`-integrated). See [`docs/concurrency.md`](concurrency.md).
 
 **Non-goals (by design, never):** classes & inheritance — Chezzi is composition-only with
 structural `protocol`s, like Rust/Go (see *Locked decisions*). **`yield`/generators** — lazy sequences
@@ -61,23 +68,21 @@ ergonomic cases variadics usually serve. **Spread/unpack syntax** (`[*a, *b]`, `
 is likewise dropped — list concatenation and map merge are served by plain methods/operators, not
 new syntax.
 
-**Still deferred (YAGNI v1):** concurrency, macros, package registry, native backend. Chezzi is
-**single-threaded and synchronous** — both engines run one sequential loop, there is no async/await
-and no scheduler, so all stdlib I/O (`std.request`, `std.fs`, …) blocks. A Go-style model (`go`
-keyword + `chan` queue) is a possible future milestone but is large (scheduler, `Rc`→`Arc` value
-sharing, a channel type across grammar/checker/both engines) and not part of v1. Most of the former
-"what's missing" list has since shipped (M8–M11: `std.json`, generic enums, `Stringable`/`Hashable`/
-numeric protocols, panic recovery, the **`Iterator[T]` protocol** (a parameterized bound:
-`[S: Iterator[T], T]` accepts any iterable — built-in `list`/`set`/`str`/`map` intrinsically, or a
-user struct with `next(self) -> Option[T]` — and recovers its element type `T`), and **match guards +
-range patterns** — see *Shipped post-v1* above, plus **default + named arguments** for functions and
-struct constructors, **slicing** `xs[1..3]`, **comprehensions** `[x*2 for x in xs if x>0]`, and the
-**scripting-ergonomics gap pass**: hex/binary/octal literals (`0xFF`/`0b1010`/`0o17`), list
-`.concat`/`.extend` + map `.merge`/`.update`, tuple-destructuring `for` (`for a, b in pairs`) with
-`std.iter` `enumerate`/`zip`, and optional chaining `?.` + null-coalescing `??`).
+**Concurrency — SHIPPED (Tiers A–D).** No longer deferred: Chezzi has a shared-nothing actor model
+(`spawn` cheap tasks + a `parallel:` structured-concurrency nursery), `Channel[T]` (move-on-send,
+`close`/`for v in ch`/`try_send`), `Shared[T]`, and `Executor`. The cooperative engine is the default
+parity oracle; `--parallel` is a real OS-thread **M:N work-stealing scheduler** (reduction-counting
+preemption, a dirty/blocking pool for opaque blocking natives, and an epoll/kqueue netpoller backing
+non-blocking `std.net` TCP). Only **M-C implicit nurseries** remain deferred (by design). Full design
+in [`docs/concurrency.md`](concurrency.md); phase history in
+[`docs/concurrency-tier-d.md`](concurrency-tier-d.md) + [`docs/concurrency-b3.md`](concurrency-b3.md).
+
+**Still deferred (YAGNI v1):** macros, package registry, native backend (a Cranelift AOT/JIT is the
+stretch end-game), and Level-3 FFI (dynamic `cdylib`/C-ABI plugins + userdata).
+
 **`yield`/generators are a deliberate non-goal** — lazy sequences are written as adapter structs over
-`Iterator[T]` (Rust's `Map`/`Take` model), so no coroutine runtime is needed. Open items stay tracked
-in `gaps.md` → *Roadmap to a complete v1*.
+`Iterator[T]` (Rust's `Map`/`Take` model), so no coroutine runtime is needed. Live status + open
+items are tracked in [`PROGRESS.md`](../PROGRESS.md).
 
 ### Syntax sketch
 
@@ -244,8 +249,9 @@ tests/          # Rust unit + golden tests
 | ✅ **M13** | `Iterator[T]` protocol | The language's first **parameterized** protocol bound: `[S: Iterator[T], T]` accepts any iterable (built-ins intrinsically, structs via `next`) and recovers element type `T`. Lazy adapters (Take/Mapped) replace `yield` (a non-goal). Checker/parser/grammar only; both engines parity-tested |
 | ✅ **M14** | Generics depth | **Method-level type params** (a method's own `[U]`, inferred at call) + **user-defined parameterized protocols** (`protocol Container[T]`, structural conformance with concrete-arg bounds `[X: Container[int]]`) — the special-cased `Iterator[T]` generalized. Checker/parser/grammar only; both engines parity-tested |
 | ✅ **M15** | Slicing + indexing protocols | `xs[1..3]` / `s[0..2]` (half-open, bounds-clamped, reusing `..`); prebuilt **`Index[K, V]` + `IndexSet[K, V]` + `Slice[R]`** structural protocols — built-in `list`/`map`/`str` conform intrinsically, user structs via `index`/`set_index`/`slice`, so `custom[k]`/`custom[k]=v`/`custom[a..b]` work and a generic can be bounded by `Index[int, V]`. Both engines parity-tested |
-| **M19** | Perf track (cheap wins) | Peephole + constant folding, superinstructions, inline caching for name lookup, kill per-call clones in `invoke_value`. *Scheduled, not started* — backlog ranked in [`docs/future.md §4`](future.md). Proof: `benches/run.chz` shrinks the chezzi÷python ratios vs the dated baseline in [`docs/benchmarks.md`](benchmarks.md) |
-| **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional) |
+| ✅ **M16–M18** | Concurrency + `defer` | `spawn` / `parallel:` nursery, `Channel`/`Shared`/`Executor`, real OS-thread M:N engine (`--parallel`) with work-stealing + reduction-counting preemption + netpoller + `std.net`; `defer` (call + block forms). Design in [`docs/concurrency.md`](concurrency.md), phases in [`docs/concurrency-tier-d.md`](concurrency-tier-d.md) |
+| 🟦 **M19** | Perf track (in progress) | Landed: peephole + const-fold, superinstructions, global-slotting, struct-field inline cache, FxHash, `ConstStr` interning, call-loop flatten, small-string optimization. Behavior-preserving + two-engine parity on every change. Backlog ranked in [`docs/future.md §4`](future.md); measured deltas in [`docs/benchmarks.md`](benchmarks.md) |
+| **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional; only once the language has truly stopped moving) |
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c** — see the *Standard library* note
 > above. Level-3 (dynamic `cdylib`/C-ABI plugins, userdata) remains a future idea.
@@ -257,5 +263,5 @@ tests/          # Rust unit + golden tests
 - **Manual end-to-end** via the `chezzi` CLI subcommand for each phase (`tokens`/`ast`/`run`).
 - **LLM-codegen eval** — feed the grammar cheatsheet + `--errors=json` to a model, measure first-try compile rate; failures feed grammar/error-message work.
 - **Perf check** — tracked against CPython via the `benches/` harness (`benches/run.chz`, hyperfine);
-  baseline + per-bench bottleneck analysis in [`docs/benchmarks.md`](benchmarks.md). Current: 2.1×–5.9×
-  slower than CPython, startup ~11× faster. M19 drives the ratios down.
+  baseline + per-bench bottleneck analysis in [`docs/benchmarks.md`](benchmarks.md). After the M19
+  phases: ~1.3×–3.9× slower than CPython (worst on call/alloc-bound benches), startup ~11× faster.

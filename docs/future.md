@@ -1,10 +1,10 @@
 # Chezzi — Future Directions (brainstorm, NOT scheduled)
 
-> **Status:** speculative design notes (recorded 2026-06-07). Forward-looking and opinionated.
-> Nothing here is committed work — `PROGRESS.md` + `gaps.md` remain the source of truth for what's
-> actually scheduled. This doc captures *what would make Chezzi an effective scripting language* and
-> *how to make it faster*, with verdicts and rough implementation shape. Promote items into `gaps.md`
-> when they're scheduled.
+> **Status:** speculative design notes. Forward-looking and opinionated. Nothing here is committed
+> work — [`PROGRESS.md`](../PROGRESS.md) is the source of truth for what's actually scheduled and done.
+> This doc captures *what would make Chezzi an effective scripting language* and *how to make it
+> faster*, with verdicts and rough implementation shape. Most of §1–§3 has since **shipped** (noted
+> inline); §4 (optimizations) is the live M19 backlog.
 
 The language **core** is feature-complete (scalars, `list`/`map`/`set`/`tuple`, generic structs +
 enums, `Result`/`Option` + `?`, generics + structural protocols, exhaustive `match`, closures/HOF,
@@ -14,12 +14,11 @@ real scripts."
 
 ---
 
-> **Promotion status (2026-06-07):** §1 (`defer`) and the §3 scripting features have been **promoted
-> into `gaps.md` → "Open gaps"** as tracked, near-term work. They stay documented here for the design
-> rationale; `gaps.md` is now the scheduling source of truth for them. §2 (concurrency) and §4
-> (optimizations) remain speculative and live only here.
+> **Promotion status:** §1 (`defer`) and the §3 scripting features have **shipped** (M15–M18); §2
+> (concurrency) has **shipped through Tier-D**. They stay documented here for the design rationale.
+> §4 (optimizations) is the live M19 backlog. See [`PROGRESS.md`](../PROGRESS.md) for landing detail.
 
-## 1. `defer` (cleanup on scope exit) — ✅ **SHIPPED (M17)**, **block-scoped since M18** — see `gaps.md` resolved log + `examples/defer.chz`
+## 1. `defer` (cleanup on scope exit) — ✅ **SHIPPED (M17)**, **block-scoped since M18** — see `examples/defer.chz`
 
 > **M18 update:** shipped frame-scoped in M17, then moved to **block/lexical scope** — a `defer` runs
 > when its enclosing indented block exits (loop body, branch, `recover:`, `match` arm, function body,
@@ -46,14 +45,18 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 
 ## 2. Concurrency + parallelism — the shared-nothing (BEAM) model
 
-> **Moved.** The full design — `spawn`/`parallel:` nursery, `Channel[T]`, `Shared[T]`, sendability,
-> and the sequential-first **C1–C5** staging — now lives in its own canonical doc:
-> **[`docs/concurrency.md`](concurrency.md)**. It is still speculative (not scheduled); promote a
-> milestone into `gaps.md` when committed.
+> **Shipped through Tier-D.** The full design — `spawn`/`parallel:` nursery, `Channel[T]`,
+> `Shared[T]`, sendability — lives in its own canonical doc **[`docs/concurrency.md`](concurrency.md)**,
+> with phase history in [`docs/concurrency-tier-d.md`](concurrency-tier-d.md). Real OS-thread M:N
+> engine via `--parallel`; only M-C implicit nurseries remain deferred.
 
 ---
 
-## 3. Missing features (ranked by leverage for scripting) → **all promoted to `gaps.md`**
+## 3. Missing features (ranked by leverage for scripting) → **mostly shipped (M12–M18)**
+
+> Comprehensions, slicing, the iterator protocol, concat/merge, hex/bin/oct literals, optional
+> chaining, tuple-destructuring `for`, match guards, and `std.os.exit` have all landed. A few items
+> below (mutable closure capture, runtime stack traces) remain open — see [`PROGRESS.md`](../PROGRESS.md).
 
 1. **Comprehensions** — `[x*2 for x in xs if x>0]` (+ dict/set). A Python-feel language without
    these feels broken. Pure parse-time desugar to loop + push. Cheap, large UX win.
@@ -68,7 +71,7 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
    engines, and the adapter-struct pattern covers lazy streaming without it.
 4. ~~**List concat + map merge**~~ — **DONE.** Method-based: list `.concat`/`.extend`, map
    `.merge`/`.update` (concat/merge new, extend/update mutate). No new syntax; spread/unpack stays
-   dropped. `examples/concat_merge.chz`. (See the `gaps.md` resolved log.)
+   dropped. `examples/concat_merge.chz`.
 5. ~~**Hex / binary / octal literals**~~ — **DONE.** `0xFF`/`0b1010`/`0o17`, lexer-only via
    `i64::from_str_radix`, `_` between digits. `examples/hex.chz`.
 6. ~~**Optional chaining + null-coalescing**~~ — **DONE.** `x?.field`/`x?.method()` + right-assoc

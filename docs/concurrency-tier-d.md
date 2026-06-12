@@ -5,28 +5,15 @@ Companion to [`concurrency.md` §10](concurrency.md) (the design) the way
 Tier-D is and *why*; this file is the *how* — the phase ladder **D0…D6**, each independently
 TDD-able, plus the **Go-vs-BEAM borrow ledger** so the split is not relitigated.
 
-**Status:** D0, D1, D2 (D2a + D2b), D3 landed — the `--parallel` engine is now a true M:N scheduler
-(lightweight fibers parking on `recv`, not thread-per-task) **with BEAM-style reduction-counting
-preemption** (a CPU-bound fiber yields its worker at budget exhaustion, so siblings make progress).
-**D4 (D4a–D4e) has landed** — per-worker local run queues + a global overflow, a capped global
-batch-grab (`globrunqget`), random-victim steal-half, a periodic global check, and **D4e — a
-runnable-gated park** that removed the `cv.wait_timeout` poll: an idle worker now does a true
-`cv.wait` (no timeout) when `runnable == 0` and re-steals after a brief bounded `wait_timeout` backoff
-when `runnable > 0`. **D4e
-deliberately did NOT adopt Go's `nmspinning` + SeqCst StoreLoad fence** — chezzi already maintains a
-precise core-lock-serialized `runnable` atomic (the reachability oracle Go lacks, which is the whole
-reason Go needs the lockless fence), so the core mutex *is* the StoreLoad barrier and a simpler,
-easier-to-prove gate suffices (see the D4e section below). **D5 (dirty/blocking pool) has landed.
-D6a (the netpoller + non-blocking `std.net` TCP surface) has landed** — an epoll/kqueue poll thread
-(`src/vm/poller.rs`, `polling` crate) parks a would-block socket op as `inflight` and injects it back
-via `complete_offload`; `Socket`/`Listener` are `Channel`-shaped `Arc`-core heap handles. **D6b has
-landed too — the D-tier is complete through D6:** `poller::drain_sched` re-injects a nursery's
-poller-parked fibers on a sibling fault (closing the nursery-hang gap — the re-injected fiber unwinds at
-`run_until`'s loop-top cancel check before its socket op re-runs); the `sleep_ms` timer is folded onto
-the netpoller poll thread (one daemon, deadline-bounded `wait` + `notify`); and `connect` is a true
-non-blocking connect (`socket2`, `EINPROGRESS` → park on writability → `SO_ERROR`, with the connecting
-stream stashed non-heap in `FiberCtx`). A register-vs-cancel race was closed by serializing
-register/drain/fire under the registry lock.
+**Status: Tier-D COMPLETE through D6c.** All phases landed — D0 (O(N) ready-queue), D1 (lazy module
+snapshot), D2 (D2a heap-into-`FiberCtx` + D2b M:N scheduler), D3 (reduction-counting preemption), D4
+(D4a–D4e work-stealing + runnable-gated park), D5 (dirty/blocking pool + owe #1/#2/#3), and D6
+(D6a netpoller + `std.net`, D6b drain-on-fault + timer-fold + non-blocking `connect`, D6c per-socket
+`read`/`accept`/`write` `timeout_ms`). Per-connection `spawn` (eager injectable nursery) also landed.
+The `--parallel` engine is a true Go-style GMP work-stealing M:N scheduler with BEAM-style preemption
+and a netpoller; **1565 tests green**, clippy clean, `primes_parallel=148933` on both engines, all
+`--parallel` goldens byte-identical, serial engine frozen as the parity oracle. **Only M-C implicit
+nurseries remain deferred (by design).**
 
 ## TL;DR
 
@@ -87,12 +74,12 @@ share-nothing, strictly simpler for a bytecode VM).
 
 | Go | Chezzi | Where |
 |---|---|---|
-| **G** goroutine | **Fiber** = `FiberCtx` (frames / stack / handlers / nurseries) **+ own `Heap` + Arc'd module snapshot** | `FiberCtx` `src/vm/mod.rs`; today `Heap` lives on `Vm`, D1 moves it into the swappable context |
+| **G** goroutine | **Fiber** = `FiberCtx` (frames / stack / handlers / nurseries) **+ own `Heap` + Arc'd module snapshot** | `FiberCtx` `src/vm/mod.rs` |
 | **M** OS thread | Pool worker thread (hosts a thin `Vm` shell = the execution engine) | `src/vm/pool.rs` |
-| **P** processor | Per-worker **run queue** (bounded ring + `runnext`) + the run-license, count = `available_parallelism()` | new in D2 |
-| LRQ / GRQ | Per-worker local queue + global overflow queue | new in D2 |
+| **P** processor | Per-worker **run queue** (bounded ring + `runnext`) + the run-license, count = `available_parallelism()` | D2/D4 |
+| LRQ / GRQ | Per-worker local queue + global overflow queue | D2/D4 |
 | `runqsteal` | Steal half from a random victim | D4 |
-| `gopark` / `goready` | Existing `self.suspend = Some(h)` park + `send`-side wake | `src/vm/mod.rs` recv arm (extend to wake a worker, D2) |
+| `gopark` / `goready` | Existing `self.suspend = Some(h)` park + `send`-side wake | `src/vm/mod.rs` recv arm |
 | function-prologue safepoint | `run_until` loop-top (already checks GC + cancel) | `src/vm/mod.rs` |
 | netpoller | epoll / kqueue pollset via the `polling` crate | D6 |
 | sysmon / dirty schedulers | growable blocking pool for `native_reentry` blocking calls | D5 |
@@ -102,683 +89,213 @@ share-nothing, strictly simpler for a bytecode VM).
 ## Phase ladder
 
 Each phase is independently TDD-able and (D1+) ships behind `--parallel`. **Serial parity goldens
-must stay byte-identical throughout.** Sequence: **D0 → D1 → D2 → D3 → D4 → D5 → D6.** D0 is
-standalone (cooperative engine). D1 is the foundation everything else builds on. D5 and D6 can swap
-order (D5 has real surface today; D6 needs the new `net` surface).
+stay byte-identical throughout.** Sequence: **D0 → D1 → D2 → D3 → D4 → D5 → D6.** D0 is standalone
+(cooperative engine). D1 is the foundation everything else builds on.
 
 ### D0 — O(N²) → O(N) ready-queue *(cooperative engine; standalone; FIRST)* — ✅ LANDED
 
-> **Shipped** as O(N·logN) (a `BTreeSet`, not a `VecDeque`) with **three deviations from the plan
-> below, each verified against the code:** (1) `blocked_on` is keyed by the **`ChannelCore` pointer**
-> (`Arc::as_ptr as usize`), not `GcRef` — cooperative `spawn` deep-clones a channel (`from_wire`
-> allocs a fresh handle onto the same `Arc<ChannelCore>`), so siblings hold distinct handles aliasing
-> one core and a `GcRef` key would lose every wakeup. (2) **`BTreeSet` (lowest-index pop)** preserves
-> the old `pick_runnable` scan order; a FIFO `VecDeque` would re-queue a woken low-index fiber behind
-> pending higher-index ones and reorder output. (3) `wake_on_send` **drains every scheduler level**,
-> not just the innermost, to preserve cross-level wakeup. `FiberState::Blocked` dropped its now-unused
-> `GcRef` payload (handle stays rooted on the fiber's operand stack). See `src/vm/mod.rs`
-> (`run_scheduler` / `run_child` / `channel_core_ptr` / `wake_on_send`) + PROGRESS.md.
+**Goal.** `run_scheduler` linear-scanned all live children for the lowest-index runnable one each
+turn → O(N²) (50 k→2.34 s; practical ceiling ~10 k–20 k tasks). Replace with an explicit ready-queue.
 
-**Goal.** `run_scheduler` calls `pick_runnable` each turn, which **linear-scans all live children**
-for the lowest-index runnable one → O(N²) (measured: 1 k→1.4 ms, 10 k→51 ms, 20 k→246 ms,
-50 k→2.34 s; practical ceiling ~10 k–20 k tasks). Replace with an explicit FIFO **ready-queue** of
-runnable child indices → O(1) amortized per turn, O(N) whole nursery.
+**Landed:** shipped as O(N·logN) (a `BTreeSet`, lowest-index pop, preserving the old `pick_runnable`
+scan order) with three verified deviations: (1) `blocked_on` is keyed by the **`ChannelCore` pointer**
+(`Arc::as_ptr`), not `GcRef` — cooperative `spawn` deep-clones a channel handle aliasing one core, so a
+`GcRef` key would lose every wakeup; (2) `BTreeSet` (not a FIFO `VecDeque`) keeps output order; (3)
+`wake_on_send` drains every scheduler level to preserve cross-level wakeup. Deadlock still fires
+byte-identically when `ready` empties with live blocked children. Cooperative-only — `--parallel`
+never runs `run_scheduler`. See `src/vm/mod.rs` (`run_scheduler` / `run_child` / `channel_core_ptr` /
+`wake_on_send`).
 
-**Changes** (all in `src/vm/mod.rs`, cooperative path only):
-- Add `ready: VecDeque<usize>` to `Nursery`; seed with all child indices on `join_nursery`.
-- `run_scheduler`: pop front of `ready` instead of `pick_runnable`. A finished child is not
-  re-pushed; a child blocked on `recv` is not re-pushed until unblocked.
-- **Unblock wiring**: when a fiber `send`s into a channel some sibling is `Blocked(h)` on, push those
-  sibling indices onto `ready`. Cheapest correct form: a per-nursery `blocked_on: HashMap<GcRef,
-  Vec<usize>>`; the `send` arm drains the matching bucket onto `ready`. (Alternative: after each turn
-  scan only the *blocked* set — O(blocked) not O(N), acceptable v1. Prefer the map for true O(1).)
-- `pick_runnable` / `all_children_done` collapse to: `ready` empty + any non-`Done` child ⇒ deadlock.
-- **Preserve FIFO contract**: `ready` is seeded in index order and `send` pushes in index order, so
-  first-runnable order is unchanged → goldens byte-identical.
+### D1 — Lightweight fiber: heap into the swappable context + lazy module snapshot *(foundation)* — ✅ LANDED
 
-**TDD.** (1) 20 k trivial fibers in one `parallel:` complete with the correct aggregate (sum via
-`Shared`), optional wall-clock ceiling far under the old 246 ms. (2) Existing cooperative goldens
-(producer/consumer, deadlock-fault, nested nurseries) stay green. (3) Deadlock test still faults
-`deadlock` byte-identically.
+**Goal.** Kill the per-task `Vm`-rebuild cost. A fiber should be **`FiberCtx` + its own small `Heap`
++ an `Arc` to a read-only module snapshot**, faulted in lazily — not a full `Vm`.
 
-**Risk.** Low; isolated. Main care: deadlock must still fire when `ready` empties with live blocked
-children. **Reuse:** `Nursery`, `FiberState::Blocked(h)`, `DEADLOCK_MSG`, existing `send` arm.
-
-> Note: D0 does *not* make cooperative tasks "green-thread cheap" — that is D1's per-task-cost work.
-> It only removes the quadratic wall, and it is the *cooperative* engine only (`--parallel` farms to
-> the pool and never runs `run_scheduler`).
-
-### D1 — Lightweight fiber: heap into the swappable context + lazy module snapshot *(foundation)*
-
-> **Status: lazy-module-snapshot half LANDED.** The per-task `build_worker_modules` eager
-> reconstruction is replaced by a heap-independent, read-only `Arc<ModuleSnapshot>` built once
-> (`snapshot_modules`/`to_snap`) and **faulted into each worker heap lazily, one module at a time, on
-> first global access** (`install_snapshot`/`fault_module`/`replay_snap`/`ensure_module_faulted`,
-> gated by `module_faulted`). FIFO pool unchanged → observably identical except faster; all
-> `--parallel` goldens byte-identical, `primes_parallel` → `148933` on both engines, 1346 tests green.
-> **The `Heap`-into-`FiberCtx` half is intentionally deferred to D2** — under the unchanged FIFO pool
-> (one worker `Vm` per task) it has no observable effect and would risk the cooperative engine's
-> share-by-ref single heap (decision A); it lands with the M:N share-nothing fiber model in D2.
-
-**Goal.** Kill the per-task `Vm`-rebuild cost. Today `prepare_worker` builds a fresh `Vm` + eagerly
-reconstructs the whole module graph (`build_worker_modules`) per task. A fiber should be **`FiberCtx`
-+ its own small `Heap` + an `Arc` to a read-only module snapshot**, faulted in lazily — not a full
-`Vm`.
-
-**Changes** (`src/vm/mod.rs`):
-- Make the **`Heap` part of the swappable context** so `swap_ctx` swaps `frames / stack / … / heap`
-  together. A worker thread's `Vm` becomes a *host shell* running whichever fiber's context (incl.
-  heap) is swapped in. Parked fibers carry their own heap in the `Fiber` struct — still share-nothing
-  (no cross-fiber refs).
-- **Lazy module snapshot**: replace eager `build_worker_modules` with an `Arc<ModuleSnapshot>`
-  (read-only `module_objs` + parent module globals in wire form). On a module-global miss,
-  reconstruct *that module* into the fiber's heap on first access and cache. `Program` is already
-  `Arc<Program>` (free to share).
-- GC `collect`: already roots parked fibers' contexts (Root 5); since each heap is independent, the
-  running `Vm` collects only the *current* fiber's heap — parked heaps are untouched.
-
-**TDD.** (1) Existing `--parallel` goldens (primes_parallel, shared, parallel_channel)
-byte-identical. (2) Microbench: 10 k trivial `spawn` under `--parallel` in ms-range (ceiling assert);
-the ~2 s prime-demo per-task overhead drops sharply. (3) A task that imports + calls a module fn
-works (lazy reconstruction correctness).
-
-**Risk.** Medium-high — the biggest refactor (heap ownership). **De-risk: land it with the existing
-FIFO pool still farming one fiber per worker** (no new scheduler yet) so D1 is observably identical
-except faster; the new loop is D2. **Reuse:** `swap_ctx`, `to_wire` / `from_wire` (`src/vm/wire.rs`),
-`Arc<Program>`, `module_objs`, `map_global_value`.
+**Landed (lazy-module-snapshot half):** the eager per-task `build_worker_modules` is replaced by a
+heap-independent read-only `Arc<ModuleSnapshot>` built once (`snapshot_modules`/`to_snap`) and faulted
+into each worker heap lazily, one module at a time on first global access
+(`install_snapshot`/`fault_module`/`ensure_module_faulted`, gated by `module_faulted`). FIFO pool
+unchanged → observably identical except faster. **The `Heap`-into-`FiberCtx` half was intentionally
+deferred to D2a** — under the unchanged FIFO pool it has no observable effect and would risk the
+cooperative engine's share-by-ref single heap; it lands with the M:N share-nothing fiber model.
+Reuse: `swap_ctx`, `to_wire`/`from_wire`, `Arc<Program>`, `module_objs`.
 
 ### D2 — GMP run queues + unified M:N scheduler loop *(no stealing yet)* — ✅ LANDED (D2a + D2b)
 
-> **Status: D2b LANDED.** The `--parallel` engine is now an M:N scheduler. `run_mn_nursery` replaces
-> `run_parallel_nursery`: each task is prepared (`prepare_worker` → `ReadyWorker::into_fiber`) into a
-> lightweight **`Fiber`** (own heap + per-task `out`/`stderr`/`module_objs`/`module_faulted`/`executors`
-> in `FiberCtx`, the D2a foundation) and seeded onto a **single shared per-nursery run queue**
-> (`MnSched`, one `Mutex<SchedCore>` + `Condvar`). Workers are thin host **shells** (`spawn_shell`);
-> `mn_worker_loop` (the cross-thread generalization of cooperative `run_child`) swaps a fiber's ctx in,
-> runs `start_task`/`run_until(0)`, and on an empty `recv` **parks** it (reusing the cooperative
-> suspend/rewind-`ip` mechanism, filed into the channel's wait set keyed by `ChannelCore` ptr) then
-> grabs the next fiber — no OS-thread blocking. `send` (`MnSched::send_wake`) enqueues the message AND
-> re-queues parked waiters **atomically under the sched lock**; `park` re-checks the queue + cancel
-> flag under that same lock to close the check-then-park **lost-wakeup gap** (lock order is
-> core-OUTER / channel-`q`-INNER everywhere → no ABBA). **Deviations from the plan below, each
-> verified:** (1) **one shared run queue**, not per-worker local rings + `runnext` + global overflow —
-> rings without work-stealing are pointless and harmful, so both are deferred together to D4. (2) The
-> deadlock detector is **not** B3.5's barrier-confirm `DeadlockWatch` (retired) but the exact predicate
-> `running==0 && runq empty && parked>0 && done<total`, race-free under the single coordinator. (3) The
-> joining thread runs an **inline shell that alone drains the whole run queue** (decision B), so
-> farmed helper shells are **fire-and-forget — never joined**; the join's liveness never depends on a
-> bounded pool resource, which is what prevents the nested/concurrent **pool-exhaustion join hang** (a
-> review-panel Critical). Decision-F flush + `Exit`-over-`Fault` precedence are factored into
-> `reduce_task_slots` (shared with the legacy `Executor`-drain `run_workers_on_pool`, which keeps the
-> per-task-`Vm` model — its `recv`-on-empty faults immediately, as it always did). Headline: 1000
-> consumers + 1000 producers finish in ~0.02 s (would starve on the old engine). **1361 tests** green
-> (5× full-suite + 60× the defer/cancel race + 10× headline), `cargo clippy` clean,
-> `primes_parallel=148933` both engines, all `--parallel` goldens byte-identical; 4-agent S++ review
-> panel + cold pass, two Criticals fixed (the pool-exhaustion hang above + a `defer`-on-cancel test
-> race: a sibling fault could trip cancel before a sibling registered its `defer`, so the test was
-> synchronized with a start-token — matching the Go semantic that an unregistered defer doesn't run).
-> **D3 is next.**
->
-> **Status: D1's deferred heap-into-`FiberCtx` half LANDED (D2a).** `FiberCtx` now carries
-> `heap: Option<Heap>`; `swap_ctx` swaps it **only for M:N fibers** (`Some`), while cooperative
-> fibers carry `None` and keep aliasing the single `Vm::heap` (decision A — share-by-ref), so the
-> cooperative engine is byte-identical **by construction** (every runtime `FiberCtx` is built via
-> `FiberCtx::default()` → `None`; the `Some` arm is reached only by unit tests). A `Fiber: Send`
-> compile-time guard + `debug_assert!`s in `swap_ctx`/`collect` pin the invariant; a parked M:N
-> fiber's heap is share-nothing + quiescent and is **never traced cross-heap** (collect runs only on
-> the swapped-in `self.heap`). **No runtime site sets `Some` yet** — the FIFO pool still runs one
-> fiber per worker (D1), so D2a is observably identical except that a `Fiber` is now self-contained
-> (owns its heap, `Send`), the prerequisite for parking it across worker threads. Tests:
-> `swap_ctx_round_trips_an_mn_fiber_heap`, `swap_ctx_leaves_heap_untouched_for_cooperative_fiber`,
-> `collect_under_swapped_in_fiber_heap_{preserves_parked_host_object,leaves_parked_host_heap_quiescent}`;
-> all `--parallel` goldens byte-identical, `primes_parallel=148933` both engines, 1350 tests green.
-> **The run queues + park-on-`recv` half (D2b below) is next** — that is where the share-nothing
-> fiber model becomes observable.
+**Goal.** Replace `run_parallel_nursery`'s "one `Vm` per task on a FIFO pool" with lightweight fibers
+parking on `recv` instead of pinning threads.
 
-**Goal.** Replace `run_parallel_nursery`'s "one `Vm` per task on a FIFO pool" with **per-worker run
-queues of lightweight fibers**, parking on `recv` instead of pinning threads.
+**Landed (D2a — D1's deferred heap half):** `FiberCtx` now carries `heap: Option<Heap>`; `swap_ctx`
+swaps it **only for M:N fibers** (`Some`), while cooperative fibers carry `None` and keep aliasing the
+single `Vm::heap` (decision A — share-by-ref), so the cooperative engine is byte-identical **by
+construction**. A `Fiber: Send` compile-time guard + `debug_assert!`s in `swap_ctx`/`collect` pin the
+invariant; a parked M:N fiber's heap is share-nothing, quiescent, never traced cross-heap.
 
-**Changes:**
-- **`src/vm/pool.rs`**: introduce **P** — each worker gets a local run queue (bounded ring +
-  `runnext`) + a shared **global** overflow queue. Worker loop: `runnext` → local → global.
-- A **Fiber** (from D1) is the job unit. `join_nursery` under `--parallel` pushes children as fibers
-  onto run queues; the **joining thread participates** (decision B — runs a fiber inline) so nesting
-  can't explode the thread count.
-- **Park on `recv`** (the core M:N win): in the channel `recv` arm, under the M:N engine an empty
-  `recv` **parks the fiber** (`self.suspend = Some(h)`, context saved to the channel's wait set) and
-  the **worker picks up the next fiber** — instead of `cv.wait_timeout` blocking the OS thread.
-  `send` enqueues the unblocked waiter + **wakes a parked worker** (`wakep`; D2 can over-notify, the
-  full barrier protocol is D4).
-- **Join/flush**: keep decision-F task-ordered output flush + `Exit`-over-`Fault` precedence (the
-  `run_workers_on_pool` reduce logic, ported to the fiber model).
-- Keep B3.4 **cancellation** + B3.5 **deadlock detection**: a deadlock is now "all fibers parked, no
-  runnable, run queues empty, no in-flight blocking-pool work."
-
-**TDD.** (1) Producer/consumer with **#fibers ≫ #threads** (e.g. 1000 fibers, 4 threads) completes —
-would deadlock/starve under today's thread-pinning (more blocked tasks than pool slots). (2) All
-`--parallel` goldens byte-identical. (3) Deadlock + cancellation + `os.exit` precedence still pass.
-
-**Risk.** High — the heart of the engine. Lost-wakeup hazard on `send`→`wakep` (mitigated in D4; D2
-over-notifies safely). The `native_reentry` guard still forbids parking inside a native callback —
-that fault path is **unchanged** here (fixed in D5). **Reuse:** `FiberCtx` / `Fiber` / `FiberState`,
-`swap_ctx`, `run_until(0)`, `DeadlockWatch`, `cancel: Arc<AtomicBool>`, decision-F flush logic.
+**Landed (D2b — the run-queue + park-on-`recv` half):** `run_mn_nursery` replaces
+`run_parallel_nursery`. Each task is a lightweight **`Fiber`** (own heap + per-task
+`out`/`stderr`/`module_objs`/`executors` in `FiberCtx`) seeded onto a single shared per-nursery run
+queue (`MnSched`, one `Mutex<SchedCore>` + `Condvar`). Workers are thin host **shells**; an empty
+`recv` **parks** the fiber (reusing the cooperative suspend/rewind-`ip` mechanism, filed into the
+channel's wait set keyed by `ChannelCore` ptr) and the worker grabs the next fiber — no OS-thread
+blocking. `send` (`send_wake`) enqueues the message AND re-queues parked waiters **atomically under
+the sched lock**; `park` re-checks queue + cancel under that same lock to close the lost-wakeup gap
+(lock order core-OUTER / channel-`q`-INNER → no ABBA). Verified deviations: (1) **one shared run
+queue**, not per-worker rings — pointless without stealing, both deferred to D4; (2) the deadlock
+predicate is the exact `running==0 && runq empty && parked>0 && done<total`; (3) the joining thread
+runs an **inline shell that alone drains the run queue** (decision B), farmed helper shells are
+fire-and-forget, so the join never depends on a bounded-pool resource (prevents the pool-exhaustion
+join hang — a review Critical). Headline: 1000 consumers + 1000 producers finish in ~0.02 s.
 
 ### D3 — Reduction-counting preemption *(BEAM)* — ✅ LANDED
 
-> **Status: LANDED.** A fiber now carries a reduction budget `reds: u32` (reset to `CONTEXT_REDS =
-> 4000` on every schedule-in in `run_one_fiber`); the `run_until` loop-top safepoint decrements it
-> **per dispatched op** under the M:N engine (`self.mn.is_some()`) and, at exhaustion (with
-> `native_reentry == 0`), sets `yield_now` and returns `Ok(())` to stop dispatch. `run_one_fiber`
-> maps that to a new `Disp::Yield`; `mn_worker_loop` calls `MnSched::yield_fiber`, which requeues the
-> fiber at the **tail** of the shared `runq` (round-robin) under the sched lock (`running--` +
-> `push_back` + `notify_all`) — no `parked` bucket touched, so no park-gap re-check is needed and a
-> false deadlock is impossible (`take_runnable` pops `runq` before testing `running==0 &&
-> parked_n>0`). **One deviation from the plan below, verified:** a yield reuses the recv-park
-> suspend/rewind contract, so it must unwind **every nested `run_until` level** without popping a
-> result — the gate that did this only checked `suspend`, so a yield deep in a call chain
-> (`main→worker→count_primes→is_prime`, the `primes_parallel` shape) let `run_proto` pop a live
-> operand-stack temp as a bogus return → `expected bool, found int`. Fixed by a `paused()` helper
-> (`suspend.is_some() || yield_now`) applied at every propagate-up gate (`run_proto`, `do_call`,
-> `do_method_call`, `run_until` bottom, `start_task`). The cooperative engine is byte-identical by
-> construction (`yield_now` is gated on `mn.is_some()`, always `None` there). **1365 tests** green
-> (+4: the fairness hang-watchdog, the 10 k-fiber soundness churn, the nested-call unwind regression,
-> the `yield_fiber` unit test), `cargo clippy` clean, `primes_parallel=148933` both engines, all
-> `--parallel` goldens byte-identical; 4-agent S++ backend review panel (Godot Gameplay / Solidity /
-> Incident Response / SRE) — zero real findings. **D4a–D4d landed (see the D4 status box below).**
+**Goal.** Fairness: a CPU-bound fiber must not hog a worker forever. Decrement a per-fiber **reduction
+budget** at the existing safepoint; yield at exhaustion.
 
-**Goal.** Fairness: a CPU-bound fiber must not hog a worker forever. Decrement a per-fiber
-**reduction budget** at the existing safepoint; yield at exhaustion.
+**Landed:** a fiber carries `reds: u32` (reset to `CONTEXT_REDS = 4000` on every schedule-in); the
+`run_until` loop-top safepoint decrements it per dispatched op under the M:N engine and, at exhaustion
+(with `native_reentry == 0`), sets `yield_now` and stops dispatch. `mn_worker_loop` maps that to
+`Disp::Yield` → `MnSched::yield_fiber`, which requeues the fiber at the **tail** of the shared `runq`
+(round-robin) under the sched lock — no `parked` bucket touched, so no false deadlock is possible.
+One verified deviation: a yield reuses the recv-park suspend/rewind contract, so it must unwind
+**every nested `run_until` level** without popping a result; the original gate only checked `suspend`,
+so a yield deep in a call chain let `run_proto` pop a live operand-stack temp as a bogus return. Fixed
+by a `paused()` helper (`suspend.is_some() || yield_now`) applied at every propagate-up gate.
+Cooperative byte-identical by construction (`yield_now` gated on `mn.is_some()`).
 
-**Changes** (`src/vm/mod.rs`):
-- Add `reds: u32` to the fiber/Vm context; reset to `CONTEXT_REDS` (BEAM uses 4000 — tune) on
-  schedule-in.
-- At the `run_until` loop-top safepoint (beside the GC + cancel checks): decrement `reds` per
-  dispatched op (or per back-edge/call for cheaper accounting); on `reds == 0`, **yield** — save
-  context, push the fiber to the **tail** of its run queue, return to the worker loop. Reuses the
-  exact suspend/resume machinery (a voluntary park with no channel handle — a new
-  `FiberState::Yielded`, or `Ready` + a "requeue me" flag).
-- The worker loop treats a yielded fiber as immediately-runnable (back of queue) → round-robin.
-
-**TDD.** (1) One long CPU fiber + many short fibers: all short ones progress before the long one
-finishes (observe via a `Shared` counter / monotonic timestamps). (2) 10 k CPU-bound fibers on 4
-threads all complete; no starvation. (3) Goldens byte-identical (preemption changes *scheduling*, not
-*results*; output stays task-ordered via flush-on-join).
-
-**Risk.** Medium. Per-op accounting overhead — measure; coarsen to back-edges/calls if hot. Must not
-yield while `native_reentry > 0` — gate the yield on `native_reentry == 0`, same guard as `recv`.
-**Reuse:** the loop-top safepoint, suspend/resume, the D2 run queue.
-
-### D4 — Work-stealing + `wakep` / spinning-worker protocol *(Go)*
-
-> **Status: D4a–D4d LANDED** (`--parallel` engine; cooperative untouched). The D2b single shared run
-> queue is now a **per-worker `LocalQ`** (a `runnext` slot + a ring, lock class **B**) + a shared
-> `global` overflow queue (in `SchedCore`, lock class **A**). `take_runnable(wid, tick)` searches:
-> a periodic global pull every `GLOBAL_CHECK_INTERVAL` (61) schedules → own local → **work-steal**
-> (`try_steal`: rotating-victim, ceil-half from the ring back, falling back to the victim's
-> `runnext`) → a **capped global batch-grab** (Go `globrunqget`: `min(g/nworkers+1, g, CAP/2)` into
-> the own local, run the first, leave the rest for siblings — one core-lock acquisition amortized over
-> the batch is the contention win) → park. **Deviations from the plan below, each verified:**
-> (1) **Only `take_runnable`'s batch-grab populates locals**, not `yield`/`send_wake`: a time-slice
-> `yield` goes to the **global** queue (Go-faithful — preserves cross-worker fairness; routing it to
-> the worker's own local would let a CPU hog re-pop itself forever, re-introducing the D3 starvation),
-> and `send_wake`/`park`-requeue/`cancel_drain` also stay on `global` (immediately balanced, no spill).
-> So locals are fed from `global` and rebalanced by stealing. (2) **Bounded-poll wake, NOT the full
-> `wakep` StoreLoad barrier** (→ D4e): a worker that finds no work parks on `cv.wait_timeout(2ms)` and
-> re-steals on wake/timeout, plus a `notify_all` after the batch-grab surplus push. Once a fiber can
-> land in a local *outside* the core lock, a plain `notify_all` is lost-wakeup-prone (a local push
-> between a parker's "no work?" check and its `wait`); the bounded timeout caps that to ≤2ms latency,
-> **never a hang** (mirrors B3.4's accepted 50ms recv-cancel re-check). Liveness still rests on the
-> always-running inline shell (decision B): `try_steal` reaches any local it needs, so no fiber is
-> stranded. (3) **Deadlock predicate reads a `runnable: AtomicUsize`** (D4a) — the count of fibers
-> queued anywhere (all locals + `global`) — instead of `runq.is_empty()`, since there is no single
-> queue to test under the split; maintained under the core lock at every transition (seed/pop/park/
-> yield/wake/drain/grab; steal is net-zero), byte-identical `DEADLOCK_MSG`. (4) **Per-queue `Mutex`,
-> not lock-free CAS** — a `Fiber` is a large move-only struct, not a word-sized CAS payload; per-worker
-> mutexes are uncontended in the common case and keep the correctness/test story tractable (the doc
-> allows this). **Lock order is strictly B-then-A (a local is taken alone and released before the core
-> lock) and A-then-C** (`send`/`park` take core then `ChannelCore.q`) → no ABBA. **1372 tests** green
-> (+8: `mnsched_runnable_tracks_single_queue`, `localq_runnext_then_ring_order`,
-> `take_runnable_prefers_local_over_global`, `schedule_steals_half_from_victim`,
-> `steal_skips_self_and_empty_victims`, `schedule_pulls_global_every_61st_tick`, the
-> `d4_worksteal_cpu_and_channel_stress` watchdog), `cargo clippy -- -D warnings` clean,
-> `primes_parallel=148933` both engines, all `--parallel` goldens byte-identical, full suite ×5 +
-> stress ×15 + defer/cancel race ×40 stable. 2-agent S++ concurrency panel (SRE + invariant/VM):
-> zero Critical; applied both Importants (the batch-grab `notify_all` to kill a 2ms steal-latency
-> cliff; `try_steal` now drains `runnext` so the predicate stays sound if a future commit ever
-> populates it). **D4e (below) is the remaining owe.**
->
-> **D4e — runnable-gated park (LANDED; deviates from the originally-planned Go barrier).** The poll is
-> gone. **Decision:** rather than port Go's SeqCst `store(work); fence; load(nmspinning/idle)` ⇄
-> `store(idle); fence; load(work)` publish/observe barrier + a `nmspinning` spinning-worker, the park
-> branch of `take_runnable` now gates on the **`runnable` atomic chezzi already maintains**:
-> `runnable > 0` ⇒ work exists somewhere (a local — stealable — or the sub-µs in-hand `Vec` window of a
-> concurrent grab/steal) ⇒ do NOT truly sleep; take a brief bounded `cv.wait_timeout(SPIN_BACKOFF=500µs)`
-> backoff that any wake `notify_all` cuts short, then re-loop (re-steal/re-grab);
-> `runnable == 0` ⇒ no fiber queued anywhere ⇒ a TRUE `cv.wait` (no timeout), woken only by a sibling's
-> `notify`. **Why not Go's fence.** Go needs the lockless StoreLoad fence precisely *because it has no
-> global runnable counter* — `nmspinning` reconstructs "is there work + is anyone hunting it" losslessly
-> without a lock. Chezzi already paid for a precise `runnable: AtomicUsize` (for the deadlock predicate),
-> mutated under the core lock at every enqueue and read under that same lock immediately before
-> `cv.wait`. The mutex serializes publish-against-observe — *it is* the StoreLoad barrier — so the gate
-> is lost-wakeup-free by the standard locked-condvar argument (a `runnable++`/`notify` either
-> happens-before the read, so the worker sees `runnable > 0` and skips the park, or after the wait is
-> registered, so the `notify` reaches it). The only counted-but-momentarily-unreachable state is the
-> in-hand `Vec` window — a bounded handful of `VecDeque` pushes by a non-blocked worker — so the
-> backoff re-loop is bounded, not a livelock. (The first cut busy-spun with `drop; yield_now; continue`;
-> the S++ SRE review flagged that as a thundering-herd lock-hammer on `runnable > 0` and an
-> oversubscription hazard where spinners starve the surplus-holder — hence the bounded `wait_timeout`
-> backoff, which sleeps instead of spinning while the `notify_all` still wakes it the instant the work
-> lands.) This is **simpler and easier to prove than the Go barrier
-> for this codebase**, with no new atomics, no fence, no per-worker park primitives. **What was NOT
-> done (deferred, optional, throughput-only):** the conditioned single-wake (`notify_one` when exactly
-> one fiber became runnable + an idle-worker count) that avoids the `notify_all` thundering herd — a
-> pure efficiency tweak the original plan folded in via `nmspinning`; it is correctness-irrelevant and
-> separable, to be added only if a benchmark justifies it (that is where a `cfg(loom)` model would earn
-> its keep — the runnable-gate's only race is the locked add-vs-locked-read, which stress tests +
-> a `debug_assert!(runnable == 0)` before `cv.wait` cover without loom's dev-dep + atomic-abstraction
-> cost). **TDD landed:** `d4e_pingpong_no_lost_wakeup_stress` (park-heavy consumer-first workload ×25
-> rounds under per-round watchdog — the lost-wakeup guard) + `d4e_wake_parked_workers_from_true_sleep`
-> (isolates wake-from-`runnable==0`-sleep: one CPU-burning producer drives every other worker to a real
-> `cv.wait`, then a `send` burst must wake them). 1386 tests green, clippy clean, `primes_parallel=148933`
-> both engines, all `--parallel` goldens byte-identical, release stress ×4 stable. **4-agent S++
-> concurrency panel** (Godot Gameplay / Solidity / Incident Response / SRE): zero Critical, zero
-> lost-wakeup/hang confirmed; applied SRE's two Importants (busy-spin → bounded `wait_timeout` backoff;
-> corrected a stale `runnable` doc-comment the gate's soundness depends on).
+### D4 — Work-stealing + `wakep` / runnable-gated park *(Go)* — ✅ LANDED (D4a–D4e)
 
 **Goal.** Load-balance across P's and wake parked workers correctly (no lost wakeups, no busy-wait).
 
-**Changes** (`src/vm/pool.rs` + scheduler):
-- **Work-stealing**: when `runnext` + local + global are empty, pick a **random victim P** and
-  **steal half** its local queue (Go `runqsteal` / `runqgrab`). 4 randomized steal passes, then park.
-- **Periodic global check**: every Nth schedule (Go uses `schedtick % 61`), pull from the global
-  queue first to prevent starvation.
-- **`wakep` protocol** *(SUPERSEDED — see the D4e blockquote above for what actually landed)*: the
-  original plan was Go's enqueue-time **StoreLoad full barrier** between "publish work" and "read
-  `nmspinning` / idle-P", waking a worker **only if** an idle P exists *and* `nmspinning == 0`, with
-  ~one spinning worker kept alive. **Not adopted** — chezzi's precise core-lock-serialized `runnable`
-  atomic makes the lockless fence unnecessary; D4e gates the park on `runnable` under the core lock
-  instead (the mutex *is* the StoreLoad barrier). Kept here for the GMP-reference contrast.
-- **Park/unpark**: an idle worker releases its P, parks on a semaphore/condvar, woken by `wakep`.
+**Landed (D4a–D4d — work-stealing):** the D2b single shared run queue becomes a **per-worker `LocalQ`**
+(a `runnext` slot + a ring, lock class B) + a shared `global` overflow queue (lock class A).
+`take_runnable(wid, tick)` searches: a periodic global pull every 61 schedules → own local →
+**work-steal** (`try_steal`: rotating-victim, ceil-half from the ring back, falling back to `runnext`)
+→ a **capped global batch-grab** (Go `globrunqget`: `min(g/nworkers+1, g, CAP/2)`, run the first, leave
+the rest — one core-lock acquisition amortized over the batch) → park. Verified deviations: (1) **only
+the batch-grab populates locals** — a `yield` goes to **global** (Go-faithful; routing it to the
+worker's own local would let a CPU hog re-pop itself forever, re-introducing D3 starvation),
+`send_wake`/`park`-requeue/`cancel_drain` also stay on `global`; (2) the deadlock predicate reads a
+`runnable: AtomicUsize` (count of fibers queued anywhere) instead of testing a single queue, maintained
+under the core lock at every transition; (3) per-queue `Mutex`, not lock-free CAS (a `Fiber` is a large
+move-only struct). Lock order strictly B-then-A and A-then-C → no ABBA.
 
-**TDD.** (1) Load-balance: skewed initial distribution (all fibers spawned from one fiber) still
-saturates all workers — assert via per-worker counters. (2) Stress: thousands of `send` / `recv`
-ping-pongs across many fibers, repeated runs, must never hang (lost-wakeup regression guard). (3)
-Goldens byte-identical.
+**Landed (D4e — runnable-gated park; deviates from Go's barrier):** the poll is gone. Rather than port
+Go's SeqCst StoreLoad publish/observe barrier + `nmspinning`, the park branch gates on the `runnable`
+atomic chezzi already maintains: `runnable > 0` ⇒ work exists somewhere (a stealable local, or the
+sub-µs in-hand `Vec` window of a concurrent grab/steal) ⇒ do **not** truly sleep, take a brief bounded
+`cv.wait_timeout(SPIN_BACKOFF=500µs)` backoff any `notify_all` cuts short, then re-loop;
+`runnable == 0` ⇒ a **true `cv.wait`** (no timeout), woken only by a sibling's `notify`. **Why not
+Go's fence:** Go needs the lockless fence *because it has no global runnable counter* — `nmspinning`
+reconstructs "is there work + is anyone hunting it" without a lock. Chezzi already pays for a precise
+`runnable: AtomicUsize`, mutated and read under the core lock; the mutex *is* the StoreLoad barrier, so
+the gate is lost-wakeup-free by the standard locked-condvar argument. Simpler and easier to prove than
+the Go barrier for this codebase — no new atomics, no fence. Deferred (throughput-only, separable):
+the conditioned single-wake that avoids the `notify_all` thundering herd.
 
-**Risk.** High — concurrency correctness (the lost-wakeup race); consider a `loom` test for the
-`wakep` barrier. Steal can use a per-queue mutex first, lock-free ring CAS later. **Reuse:** Go
-`proc.go` `runqsteal` / `wakep` / `stopm` as the reference algorithm.
+### D5 — Dirty / blocking pool for opaque blocking native calls *(BEAM)* — ✅ LANDED
 
-### D5 — Dirty / blocking pool for opaque blocking native calls *(BEAM; real surface today)*
+**Goal.** A blocking native call (`std.io.read_file`/`write_file`, `std.fs.*`, `std.time.sleep_ms`)
+must not pin a core-pool worker (G3, live today). Route it to a **growable blocking pool** so the core
+pool keeps scheduling.
 
-> **D5 HAS LANDED (core).** `src/vm/blocking_pool.rs` (growable: spawn-on-stall, reap idle >10 s, cap
-> 512) + the offload path in `src/vm/mod.rs`: `invoke_native` intercepts an off-heap-safe blocking
-> native (`native::is_blocking` — `io.read_file`/`write_file`, all `fs.*`, `time.sleep_ms`) under the
-> M:N engine (gated `native_reentry == 0`), materializes its args into `Send` `NativeArg`s, suspends
-> the fiber (`Vm::offload` + the `paused()` push-skip), and the worker hands it (`Disp::Offload`) to
-> the pool. The pool runs it with no `Vm`/heap (`OffloadHost`), stashes the raw `NativeRet` on
-> `Fiber.resume_native`, and `complete_offload`s the fiber back (inflight→runnable + `notify_all`);
-> the resuming worker lowers + pushes the result and continues past the `Call`. `MnSched.inflight`
-> (a 4th fiber state) is folded into the deadlock predicate (`is_deadlocked`) so an in-flight blocking
-> call can't fire a false deadlock. A panic in an offloaded native is caught in the pool job and
-> faulted (never a pinned `inflight` hang). The G3 starvation is fixed (`sleep_ms` ×N ≈ max not sum);
-> a blocking native inside a native callback (`native_reentry > 0`) still runs inline; cooperative/
-> `--interp` byte-identical. **+12 tests, 2-agent S++ panel (1 Critical + 1 Important applied).**
-> **D5 owes #1 + #2 HAVE LANDED.** Owe #1 — `std.request` (`get`/`post`) + `std.process` (`cmd`) are
-> classified blocking-offloadable (verified off-heap-safe: primitive args/returns, no heap/stdio touch
-> → they run on the `OffloadHost`), added to `native::is_blocking`, guarded by a member-name-uniqueness
-> test (bare-name classification stays sound). Owe #2 — a process-wide **timer thread**
-> (`src/vm/timer.rs`: deadline min-heap + one thread) replaces the one-pool-thread-per-sleep model:
-> `sleep_ms` parks the fiber on the timer (`OffloadReq.timer_ms` branches `MnSched::offload`), waking
-> it at the deadline through the same `inflight`/`complete_offload` path (deadlock predicate stays
-> sound). 10⁴ sleepers ≈ 1 thread; `checked_add` saturates a pathological `ms`. **D6b folded this timer
-> deadline into the netpoller `poll()` timeout (one blocking wait covers I/O + timers); the dedicated
-> timer thread is gone and `src/vm/timer.rs` is now a shim over `poller::submit_timer`.**
-> **Owe #3 — Path A LANDED.** The `recv`-inside-callback unblock for the iteration HOFs: `map` /
-> `filter` / `fold` / `reduce` now live in `std/iter.chz` (chezzi source → VM frames → a blocking
-> `recv` in the callback parks under `--parallel`, proven by `d5_owe3_*`). Native `xs.map` kept as the
-> fast non-blocking path. Path C (thread-demote for the native-lock/hook islands) residual — only when
-> real programs hit the wall; Path B (stackful) rejected. See the "D5 owe #3" section below.
+**Landed (core):** `src/vm/blocking_pool.rs` (growable: spawn-on-stall, reap idle >10 s, cap 512) +
+the offload path in `src/vm/mod.rs`. `invoke_native` intercepts an off-heap-safe blocking native
+(`native::is_blocking`) under the M:N engine (gated `native_reentry == 0`), materializes args into
+`Send` `NativeArg`s, suspends the fiber (`Vm::offload` + the `paused()` push-skip), and the worker
+hands it (`Disp::Offload`) to the pool. The pool runs it with no `Vm`/heap (`OffloadHost`), stashes the
+raw `NativeRet` on `Fiber.resume_native`, and `complete_offload`s the fiber back. `MnSched.inflight`
+(a 4th fiber state) folds into the deadlock predicate so an in-flight call can't fire a false deadlock;
+a panic in an offloaded native is caught and faulted (never a pinned hang). G3 starvation fixed
+(`sleep_ms` ×N ≈ max not sum); cooperative/`--interp` byte-identical.
 
-**Goal.** A blocking native call (`std.io.read_file` / `write_file`, `std.fs.*`, `std.time.sleep_ms`)
-must not pin a core-pool worker (G3, live today). Route it to a **growable blocking pool** so the
-core pool keeps scheduling. This is also the answer to the `native_reentry` "recv inside a native
-callback can't park" blocker — the dirty-pool worker just *blocks*, no parking needed.
+**Landed (owe #1 + #2):** owe #1 — `std.request` (`get`/`post`) + `std.process` (`cmd`) classified
+blocking-offloadable (verified off-heap-safe), guarded by a member-name-uniqueness test. Owe #2 — a
+process-wide **timer** replaced the one-pool-thread-per-sleep model: `sleep_ms` parks on a deadline
+min-heap, waking through the same `inflight`/`complete_offload` path; 10⁴ sleepers ≈ 1 thread. **D6b
+later folded this timer deadline into the netpoller `poll()` timeout** (one blocking wait covers I/O +
+timers); the dedicated timer thread is gone and `src/vm/timer.rs` is a shim over `poller::submit_timer`.
 
-**Changes:**
-- A **growable blocking pool** (separate from the core pool), à la Go `spawn_blocking` / BEAM async
-  pool (`+A`): spawns a thread on stall, caps + reaps idle ones.
-- **Classify** native fns — pure/fast (run inline) vs **blocking** (`fs` / `io` / `time.sleep_ms`,
-  flagged in the `NativeFn` table, `src/native/mod.rs`). A blocking call: park the *fiber*, hand the
-  work to the blocking pool, free the core worker; on completion re-enqueue the fiber + `wakep`.
-- **`sleep_ms`**: a **timer-park** (park the fiber, wake after the duration) rather than
-  `thread::sleep` (`src/native/time.rs`) — ideally via the D6 pollset timeout; interim via a timer
-  thread.
-- **`native_reentry` guard** becomes mode-conditional: under M:N a blocking native call is offloaded
-  (no fault); the cooperative engine keeps the existing guard.
+### D5 owe #3 — `recv` inside a native callback *(A + C landed; B rejected)* — ✅ RESOLVED
 
-**TDD.** (1) N fibers each doing `read_file` / `sleep_ms` with **N > core pool size** all complete
-concurrently (wall-clock ≈ max, not sum). (2) `sleep_ms(100)` ×100 fibers on 4 threads finishes in
-~100 ms, not ~2.5 s. (3) Goldens byte-identical; cooperative native-reentry fault unchanged.
+**The invariant.** `recv` can park **⟺** every frame between the fiber's entry and the `recv` is a
+**VM frame** (snapshotted into `FiberCtx`). **One native Rust frame anywhere in that chain → fault** —
+the suspend mechanism snapshots VM frames and returns out of `run_until`; it cannot snapshot a live
+Rust stack (the `map` `for`-loop frame, `i`, the partial result). This is exactly the Go/BEAM split:
+BEAM's `Enum.map` is bytecode (parks fine) and only NIFs (C) hit the wall; chezzi's only mistake was
+implementing its HOFs in native Rust where BEAM implemented them in the language.
 
-**Risk.** Medium. Classification correctness (mislabel CPU as I/O → starve). `io` stdout writes must
-respect decision-F flush. **Reuse:** `NativeFn` table, `guarded` / `native_reentry`, the D4 wake path.
+**Path A LANDED (primary fix).** The suspendable iteration HOFs `map`/`filter`/`fold`/`reduce` are now
+chezzi source in `std/iter.chz`. Reached through `iter.map(xs, f)` the per-element callback runs through
+**pure VM frames**, so a blocking `recv` (or `sleep`/socket op) inside `f` **parks** under `--parallel`
+instead of faulting — zero Rust runtime change, generic return inferred from the closure alone. Native
+`xs.map(f)` is **kept** as the faster non-blocking path (BEAM's NIF-vs-`Enum` split). `each` deferred (a
+void fn-type param `fn(T)` doesn't parse yet — use a bare `for`).
 
-### D5 owe #3 — `recv` inside a native callback: resolution strategy *(A LANDED; C ATTEMPTED/LANDED; B rejected)*
+**Path C LANDED (the intrinsically-native islands).** A blocking `recv`/`sleep_ms`/socket op reached
+inside a native callback (`native_reentry > 0`) under `--parallel` no longer faults — the worker thread
+**demotes**: accounts the op as a 5th fiber state (`blocked_native` for recv / `inflight` for
+sleep+socket), spins up **one raw replacement OS thread** (`spawn_replacement_worker`, net-zero worker
+count — Go's `handoffp`), and **blocks in place** (`ChannelCore.cv` for recv, `thread::sleep` for sleep,
+`wait_fd_ready`/`libc::poll` for sockets), resuming in place on a sibling's `send`/readiness. The narrow
+deadlock false-positive (#1) was resolved by registering each demoted fiber's channel and vetoing the
+predicate if any has a queued value. **Path B (stackful fibers) rejected** — a substrate rewrite
+(unsafe stack switching, memory-per-fiber, native re-entrancy re-audit); A + C deliver the same
+observable behaviour at a fraction of the risk.
 
-> **Path A HAS LANDED.** The suspendable iteration HOFs `map` / `filter` / `fold` / `reduce` are now
-> chezzi source in `std/iter.chz` (alongside the pre-existing `enumerate` / `zip`). Reached through
-> `iter.map(xs, f)` the per-element callback runs through **pure VM frames**, so a blocking `recv` (or
-> `sleep` / socket op) inside `f` **parks** under `--parallel` instead of faulting `deadlock` — proven
-> live by `d5_owe3_recv_in_iter_map_callback_parks` (a `recv`-in-closure across a nursery sums `66`, no
-> hang). Generic-return inference binds `U` (and `fold`'s `A`) **from the closure alone** — no explicit
-> type args needed (`d5_owe3_iter_hofs_correct_on_both_engines`, byte-identical VM/interp). Zero Rust
-> runtime change. The native builtin `xs.map(f)` is **kept** as the faster non-blocking path (the
-> recommended split — fast native loop vs suspendable bytecode HOF, exactly BEAM's NIF-vs-`Enum`). Guidance:
-> *use `iter.map` when the callback may block under `--parallel`.* **Deferred:** `each` (a void fn-type
-> param `fn(T)` does not yet parse — the grammar requires a `->` return; use a bare `for` loop). **Path C
-> (thread-demote) remains unimplemented** — only if real programs hit the intrinsically-native islands
-> (`Shared.update`'s lock, hash/compare/str hooks, fast native `sort`).
+**`Shared.update` same-box hold-and-wait — WON'T FIX by design.** `update(f)` holds the box's lock
+across `f`; if `f` blocks on a `recv` needing the **same** box, any such sender deadlocks. This is the
+classic hold-and-wait-while-blocking deadlock *every* language with locks + blocking hits (Go detects
+only the global case, golang/go#13759; Rust flags it statically via `clippy::await_holding_lock`; BEAM
+avoids it structurally with no shared locks). chezzi's rule mirrors BEAM's: **don't block on a value
+that needs the same `Shared` box** — `update` is a fast RMW, never park inside it. Future tooling may
+add a lint/runtime fault to turn the silent hang loud.
 
-**Status:** **Path A landed** (the iteration HOFs); **Path C attempted/landed** (this session, branch
-`d5-owe3-path-c` — thread-demotion for the `recv` site, pragmatic deadlock detection); **Path B rejected**.
-Was never a D6 prerequisite.
+### D6 — epoll / kqueue pollset + minimal `std.net` (TCP) *(Go netpoller)* — ✅ LANDED (D6a–D6c)
 
-> **Path C HAS LANDED (attempt).** A blocking `recv` reached inside a native callback (`native_reentry > 0`)
-> under `--parallel` no longer faults `deadlock` — the worker thread **demotes**: `Vm::demote_recv_block`
-> accounts it as a 5th fiber state `blocked_native` (running→blocked_native under the core lock +
-> `cv.notify_all`), spins up **one raw replacement OS thread** (`spawn_replacement_worker`, reusing the
-> `wid`; a fresh thread, NOT a pool job), and **blocks in place** on `ChannelCore.cv` (revived from B3.3),
-> resuming in place when a sibling `send`s (`send_wake` now also `core.cv.notify_all`s). After the fiber
-> settles, `mn_worker_loop` returns (`if self.demoted`) so the demoted thread exits — net-zero worker count
-> (Go's `handoffp`: +1 OS thread per fiber actually blocked in a callback). `is_deadlocked` gains
-> `|| blocked_native > 0` and the demote loop self-evaluates it + `flag_deadlock` (detection doesn't depend
-> on a live puller); the loop checks the queue **before** `terminate` so a real send always wins. The
-> joining thread `wait_for_completion`s before the slot reduce. Proven by `d5_owe3_path_c_recv_in_native_map_callback_demotes`
-> (recv inside native `xs.map`, producer `sleep_ms`s to force the empty recv, sums `66`) and
-> `d5_owe3_path_c_recv_in_callback_no_sender_still_deadlocks` (no-sender → faults, not hang). **Pragmatic
-> scope:** the narrow false-positive (parked siblings faulted when a value is queued for *another* demoted
-> fiber while `running==0`) is documented, not closed; spawn-failure (OS thread limit) faults the fiber
-> cleanly; demotion is scoped to `recv` (`sleep_ms`/socket in a callback keep their current path); the
-> `Shared.update` same-box hazard survives (don't block on a value needing the same box).
+**Goal.** Cheap *massive* socket concurrency (10 k connections) without a thread per connection. Build
+the pollset **and** the socket surface that justifies it (regular files stay on D5's blocking pool —
+not epoll-able).
 
-#### Path C residuals — worklist *(ranked #1 > #3 > #2; #1 RESOLVED 2026-06-11, #3 RESOLVED 2026-06-11/06-12)*
+**Landed (D6a — netpoller + `std.net`):** the pollset (`src/vm/poller.rs`, `polling` crate: one poll
+thread + an fd→parked-fiber registry) and the full non-blocking `std.net` surface
+(`connect`/`listen`/`accept`/`read`/`write`/`close`/`addr`) ship. Sockets are `Channel`-shaped heap
+handles (`Obj::Socket(Arc<SocketCore>)` / `Obj::Listener(Arc<ListenerCore>)`, a `WireValue` arm so a
+handle crosses to a spawned fiber, GC-trace-nothing). A would-block op rewinds `ip`, sets
+`Disp::PollPark`; `poll_park_offload` accounts it as **`inflight`** (reusing D5's counter → the deadlock
+predicate is unchanged) and registers fd interest; the poll thread injects it back via `complete_offload`
+on readiness. A per-`SocketCore` `in_flight` guard rejects a second concurrent op on a shared socket
+(oneshot epoll) with a clean fault (review Critical). Off `--parallel`, a would-block op fails loud.
+Headline: `examples/echo_server.chz` services **100 conns ≫ core workers** in one `parallel:`.
 
-> Of three known limitations after the Path C attempt, **#1 and all of #3 (sleep half 2026-06-11, socket
-> half 2026-06-12) are now resolved** (branch `d5-owe3-path-c`); only **#2** remains (WON'T FIX by
-> design). Priority was **correctness > performance > rare-hang-with-a-known-rule**. All chezzi examples below are
-> **single-expression closures** (`fn(x): <expr>`, the only closure form —
-> `src/parser/mod.rs::parse_closure`); a multi-statement callback must be a **named function** (block
-> body), as in `slow_double` below.
+**Landed (D6b):** three follow-ups closed the D6a gaps. (1) **Drain-on-fault** (`poller::drain_sched`):
+re-injects every fiber parked on the faulting nursery's sockets; the re-injected fiber unwinds at
+`run_until`'s loop-top cancel check **before** its rewound op re-runs, so the fault propagates instead
+of hanging the nursery. (2) **Timer fold:** the `sleep_ms` min-heap moved onto the netpoller poll thread
+— one `wait()` bounded by the nearest deadline. (3) **Non-blocking `connect`** (`socket2`): an
+`EINPROGRESS` handshake parks on writability (`pending_connect`, the connecting stream stashed non-heap
+in `FiberCtx`), finished via `finish_connect` (`SO_ERROR`); loopback completes synchronously, top-level
+fallback blocks with a 10 s cap, `connect` inside a native callback fails loud. A register-vs-cancel
+race was closed by serializing register/deregister/`drain_sched`/fire under the registry lock.
 
-**~~#1 — deadlock false-positive~~ — RESOLVED (2026-06-11).** *(was: priority 1, a correctness bug —
-wrong result, not a hang.)* When **2+ fibers are demoted** and one had a value already queued that the
-deadlock-checker couldn't see, `is_deadlocked` could fire and fault an innocent **parked sibling** with
-a fake `deadlock` (the demoted fiber with the pending value still resumed — the demote loop pops its
-queue first — only the parked sibling was wrongly killed). Repro that now passes (run 200× in
-`d5_owe3_path_c_no_false_deadlock_when_demoted_fiber_has_queued_value`):
-```
-fn main():
-    a := Channel[int]()
-    c := Channel[int]()
-    xs := [1]
-    parallel:
-        spawn:                              # F1 demotes on `a`; later wakes F2
-            xs.map(fn(x): x + a.recv())
-            c.send(7)
-        spawn: print(c.recv())              # F2 snapshot-parks on `c`, woken by F1
-        spawn: a.send(10)                   # F3 feeds F1, then finishes
-```
-The bad interleaving (microseconds): F3 queued `10` for F1 then finished → `running==0`; before F1
-popped `10`, the checker saw `running==0, parked=1 (F2), blocked_native=1 (F1)` → fired → killed F2.
-**Fix landed:** `SchedCore` registers each demoted fiber's `Arc<ChannelCore>` (refcounted, under core
-lock A); `is_deadlocked`, before returning `true`, locks each demoted channel's `q` (A-then-q, the
-order `send_wake` uses) and returns `false` if **any** is non-empty (that fiber will pop + progress);
-and the demote loop's `pop + blocked_native-- + un-register` is **atomic under core lock A**, so the
-checker never observes a popped-but-not-yet-un-accounted demoted fiber. *Files:* `src/vm/mod.rs` —
-`is_deadlocked`, `demote_recv_block`, `SchedCore::{register,unregister}_demoted` + the `demoted_chans`
-map. *Tests:* `deadlock_predicate_vetoed_by_queued_value_on_demoted_channel`,
-`demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel`, the 200× stress test above.
+**Landed (D6c — per-socket timeouts):** an optional trailing `timeout_ms` on `read`/`write`/`accept`
+parks on the netpoller with a deadline (`Parked.deadline`); `fire_due_socket_timeouts` re-injects the
+fiber with `poll_timed_out` set so the rewound op returns `Err("timeout")`; readiness wins ties
+(`examples/socket_timeout.chz`).
 
-**#3 — `sleep_ms` (RESOLVED) / socket op (OPEN) inside a native callback is NOT demoted *(priority 2;
-perf/liveness, not wrong).*** A `sleep_ms` inside a native `.map` *used to* run **inline** (pinning the
-worker for the duration); a socket `read`/`accept` inside a callback still isn't handed to the
-netpoller. Root cause: the `Disp::Offload` / `Disp::PollPark` paths are snapshot mechanisms gated on
-`native_reentry == 0` (the offload gate + the socket gates in `src/vm/mod.rs`).
-```
-import std.time
-fn slow_double(x: int) -> int:              # named fn = block body (closures are single-expr)
-    time.sleep_ms(100)                      # now DEMOTES inside .map — worker freed, replacement spun
-    return x * 2
-fn main():
-    parallel:
-        spawn: print([1, 2, 3].map(slow_double))   # the .map's own 3 sleeps are still serial (one map
-        spawn: print("a worker is no longer pinned during those sleeps")  # loop), but the WORKER is freed
-```
-**`sleep_ms` half landed (2026-06-11):** a `sleep_ms(ms>0)` with `native_reentry > 0` under the M:N
-engine calls `demote_block_sleep` — `spawn_replacement_worker` + a real `thread::sleep(ms)` in place +
-resume, accounted `running→inflight` (so it **vetoes** deadlock — a sleeper returns unconditionally,
-unlike a `blocked_native` recv); a cancel observed during/after the sleep swallows the task outcome
-(mirrors the recv demote). *Tests:* `d5_owe3_path_c_sleep_in_callback_demotes_frees_worker`
-(N=workers·4 in-callback sleeps finish <450ms, i.e. concurrent not 4-batch-serial),
-`d5_owe3_path_c_sleep_in_callback_correct`. **Socket half landed (2026-06-12):** a socket
-`read`/`write`/`accept` that `WouldBlock`s with `native_reentry > 0` now demotes via `demote_block_socket`
-(analogous to `demote_block_sleep`): `demote_socket_enter` accounts `running → inflight` + spins a
-replacement worker once, then the worker **kernel-blocks on the fd** with `wait_fd_ready` (`libc::poll`
-in the readability/writability direction, `DEMOTE_POLL_BACKOFF` timeout — woken immediately on readiness,
-no busy-poll, near-epoll latency) and re-runs the **non-blocking** op on wake; `demote_socket_exit`
-restores `inflight → running`. Accounted `inflight` for netpoller-park parity (it vetoes the deadlock
-predicate — a lone in-callback `accept` with no client never self-terminates, Go-identical). `cancel`/
-`terminate` are re-checked at the top of every wait iteration (cancelled task stops issuing socket work
-promptly, outcome swallowed); the closures lock the socket/listener core poison-tolerantly
-(`unwrap_or_else(|e| e.into_inner())`) so a concurrent-`close` poison can't skip the `inflight` restore
-and wedge the nursery's deadlock detector. Before the fix the in-callback op surfaced a misleading
-`"… require the --parallel engine"` error (we *are* on `--parallel`; the callback's Rust-stack loop just
-can't snapshot-park). *Tests:* `d5_owe3_path_c_socket_read_in_callback_demotes`,
-`d5_owe3_path_c_accept_in_callback_demotes`. *Files:* `src/vm/mod.rs` — `demote_block_socket`,
-`demote_socket_enter`/`exit`, `wait_fd_ready`, `enum SockPoll`, the three socket-op `WouldBlock` arms.
-(`connect`-in-callback is left unchanged: its half-finished handshake lives in `pending_connect`, an
-even rarer trigger.)
-
-**#2 — `Shared.update` same-box hold-and-wait *(priority 3; WON'T FIX by design — a dev-authored,
-universal deadlock).*** `Shared.update(f)` holds the box's `update_lock` across `f`; if `f` blocks on a
-`recv`, the lock stays held while parked, so any sender needing the **same** box deadlocks (silently —
-the pinned sender is `running`, vetoing detection).
-```
-fn main():
-    s := Shared(0)
-    ch := Channel[int]()
-    parallel:
-        spawn: s.update(fn(x): x + ch.recv())   # A: blocks on recv while holding s's lock
-        spawn:                                    # B: needs s's lock first → never reaches the send
-            s.update(fn(x): x + 1)
-            ch.send(41)
-```
-This is the classic **hold-and-wait-while-blocking** deadlock — *every* language with locks + blocking
-hits it. **Go** detects only the *global* all-goroutines-asleep case; a **partial** deadlock like this
-goes undetected ([golang/go#13759](https://github.com/golang/go/issues/13759); people use
-[go-deadlock](https://github.com/sasha-s/go-deadlock)). **Rust** flags it statically with
-[`clippy::await_holding_lock`](https://github.com/rust-lang/rust-clippy/pull/5439) ("holding a
-`MutexGuard` across an `await` is a logic bug that could lead to deadlock"). **BEAM** avoids it
-structurally (no shared locks — message passing; the analog rule is "don't block in a `gen_server`
-callback"). chezzi's rule is identical: **don't block on a value that needs the same `Shared` box** —
-`update` is a fast read-modify-write, never park inside it. *Decision:* do **not** solve. *Future:* when
-the tooling track lands, add a **lint/warning** (or a runtime "cannot block inside `update`" fault) to
-turn the silent hang into a loud error — strictly between Go (nothing for partial) and Rust (static
-lint).
-
-**The bug.** A blocking `recv` reached inside a native Rust callback (`list.map`/`filter`, `sort`,
-`compare`/`hash`/`str` hooks, `Shared.update`, the executor drain, a `defer`red call) faults
-`deadlock`. It is gated by the `native_reentry` guard (`guarded()`, `src/vm/mod.rs` — the *only* site
-that raises it, around the `invoke_value` re-entry inside each native HOF loop).
-
-**The invariant** (the thing to internalize):
-
-> `recv` can park **⟺** every frame between the fiber's entry and the `recv` is a **VM frame**
-> (snapshotted into `FiberCtx`). **One native Rust frame anywhere in that chain → fault.** The suspend
-> mechanism snapshots VM frames and returns out of `run_until`; it cannot snapshot a live Rust stack
-> (the `map` `for`-loop frame, `i`, the partial result), so the half-finished native call would be
-> lost.
-
-**Correction to the old §11 note.** [`concurrency.md` §11](concurrency.md) said this was "mooted by
-B3 — under real OS threads a `recv` inside a callback just blocks the thread on a condvar." That was
-true for the **B3.3 thread-per-task** model, but **D2's M:N transition un-mooted it**: fibers now park
-by *snapshot*, not by blocking their thread, so a native frame breaks the chain again. The guard is
-**live under `--parallel`** today (pinned by `d5_blocking_native_in_callback_runs_inline`).
-
-**Proven finding — the fix is "be bytecode."** A callback running through **pure chezzi frames** has
-*no* native frame in the chain, so it **already parks**. Verified live: a chezzi-defined HOF
-`fn apply[T](f: fn() -> T) -> T: return f()` invoked as `apply(fn() -> int: ch.recv())` under
-`--parallel` parks and resumes correctly (no fault). So this is **not** closure-vs-function and **not**
-inlining — it is purely *"does the path to `recv` cross native Rust?"*
-
-This is exactly the **Go / BEAM split**: Go is stackful so Go-on-Go never hits it (only cgo, handled
-by `handoffp`); BEAM's `Enum.map` is **Elixir bytecode** (parks fine) and only **NIFs** (C) hit the
-wall (handled by dirty schedulers + yielding NIFs). chezzi's only mistake was implementing its HOFs in
-**native Rust** where BEAM implemented them in the language.
-
-**Path A — move suspendable HOFs into chezzilang** *(primary fix; infra already exists).* Write
-`map` / `filter` / `fold` / `each` / `reduce` as chezzi functions in `std/iter.chz` (the `std/*.chz`
-chezzi-source stdlib is already resolved by `src/resolver/mod.rs`; function-typed params + generics
-already work — `examples/hof.chz`, `std/ref.chz`). They compile to bytecode → a blocking `recv` in
-their closure parks. **Zero Rust change, zero compiler magic.** This is BEAM's `Enum.map`.
-- *Surface choice:* the free function `iter.map(xs, f)` works immediately. The **builtin method**
-  `xs.map(f)` stays native Rust (`call_method`) → keep it as the fast non-blocking path and document
-  "use `iter.map` if the body blocks," **or** later make builtin-method dispatch fall back to the
-  chezzi stdlib fn (a dispatch indirection) so `xs.map()` is also suspendable.
-- *Cost:* a bytecode HOF is modestly slower than the Rust loop (the per-element `invoke_value`
-  re-entry was already paid; only the loop counter moves to bytecode). BEAM accepts the same trade.
-- *Coverage:* the iteration HOFs (the common case). `sort` can also move (a chezzi `iter.sort`
-  mergesort — suspendable but slower than Rust's; offer alongside the fast native `.sort`).
-
-**Path C — demote the fiber to a thread, Go-`handoffp`-style** *(residual; the native islands A can't
-move).* For callbacks that are **intrinsically native** — `Shared.update` (the RMW **lock** is the
-feature), `compare`/`hash`/`str` hooks (called by native dict/set/GC/format machinery), a fast native
-`sort`, embedder NIFs — the fiber cannot become bytecode. When a `recv` inside such a callback would
-block, the executing worker **blocks in place** on `ChannelCore.cv` (the B3.3 thread-block path is
-still in the tree) and **spins up a replacement worker** so the core pool stays at N; on `send` the
-condvar wakes it, it finishes the callback, returns. **No live-stack migration** (impossible without
-Path B) — the stuck thread stays stuck, a fresh one covers. This is literally Go's `handoffp` /
-BEAM's dirty schedulers.
-- *Overhead:* **zero when the callback doesn't block**; **+1 OS thread per fiber actually blocked in a
-  callback**, only while blocked (Go's exact cost). Bounded by concurrent-blocked-in-callback count.
-- *Reuse:* `ChannelCore.cv` (B3.3), the blocking pool, the `inflight`/deadlock accounting, the D4 wake
-  path. `send_wake` gains a **dual wake** (requeue a snapshot-parked fiber **or** `notify` a
-  thread-blocked one).
-- *The `Shared.update` hazard survives every path:* parking mid-RMW holds the update lock while
-  blocked, so a sender needing the **same** `Shared` deadlocks. The honest rule — BEAM's — is **"don't
-  block inside `update`"** (enforce or document), independent of A/B/C.
-
-**Path B — stackful fibers — REJECTED.** A native stack per fiber (corosensei-style) would fix
-*everything* uniformly with cheap runtime switching, but it is a **substrate rewrite**: unsafe stack
-switching, memory-per-fiber, and a re-audit of every native for re-entrancy. It is the same
-large/risky cost already declared a **non-goal** for interp B1/B2. The **A + C** combo delivers the
-same *observable* behaviour ("`recv` works in callbacks") at a fraction of the risk, so B is not
-pursued unless chezzi adopts Go/BEAM-grade uniformity as a core goal.
-
-**Plan of record.** (1) ✅ **DONE** — `map`/`filter`/`fold`/`reduce` added to `std/iter.chz` (chezzi
-source) + a `--parallel` test that `recv`s inside the closure parks (`66`, no hang); `each` deferred
-(void fn-type doesn't parse yet). (2) ✅ **DECIDED** — builtin `xs.map` **kept fast** (native loop);
-`iter.map` is the suspendable path, documented. No dispatch-to-stdlib indirection. (3) ✅ **DONE
-(attempt)** — Path C thread-demotion landed for the `recv` site (`Vm::demote_recv_block` +
-`spawn_replacement_worker` + `blocked_native` accounting + `wait_for_completion`), pragmatic deadlock
-detection, +2 tests. Residuals documented (narrow false-positive; `Shared.update` same-box hazard;
-recv-only scope). **B never.**
-
-### D6 — epoll / kqueue pollset + minimal `std.net` (TCP) *(Go netpoller)* — D6a + D6b ✅ LANDED
-
-> **Status: D6a LANDED.** The pollset (`src/vm/poller.rs`, `polling` crate: one poll thread + an
-> fd→parked-fiber registry) and the full non-blocking `std.net` surface
-> (`connect`/`listen`/`accept`/`read`/`write`/`close`/`addr`) ship. Sockets are `Channel`-shaped heap
-> handles — `Obj::Socket(Arc<SocketCore>)` / `Obj::Listener(Arc<ListenerCore>)`, a `WireValue` arm so a
-> handle crosses to a spawned fiber, GC-trace-nothing. A would-block op rewinds `ip` + re-roots
-> receiver/args, sets `Disp::PollPark`; `MnSched::poll_park_offload` accounts it as **`inflight`**
-> (reusing D5's counter → the deadlock predicate is unchanged) and registers fd interest; the poll
-> thread injects it back via the existing `complete_offload` on readiness, so the op re-runs. A
-> per-`SocketCore` `in_flight` guard rejects a second concurrent op on a shared socket (oneshot epoll =
-> one registration per fd) with a clean fault instead of a registry-corrupting double-`add`/overwrite
-> (review Critical). Off `--parallel`, a would-block op fails loud (`Result::Err`) rather than blocking
-> the only thread. **Headline:** `examples/echo_server.chz` + `net_echo_server_services_more_conns_than_workers`
-> service **100 conns ≫ core workers** in one `parallel:`. 1404 tests green, clippy clean,
-> `primes_parallel=148933` both engines, goldens byte-identical. 2-agent S++ panel; Critical + both
-> Importants applied.
->
-> **Status: D6b LANDED — the D-tier is complete through D6.** Three follow-ups closed the D6a gaps:
-> **(1) Drain-on-fault** (`poller::drain_sched`, called from `mn_worker_loop`'s abort branch beside
-> `cancel_drain`): re-injects every fiber parked on the faulting nursery's sockets; the re-injected
-> fiber unwinds at `run_until`'s loop-top cancel check **before** its rewound socket op re-runs, so the
-> fault propagates instead of **hanging the nursery** (the previous hard gate). **(2) Timer fold:** the
-> `sleep_ms` timer min-heap moved onto the netpoller poll thread — one `wait()` bounded by the nearest
-> deadline (`submit_timer` + `poller.notify()` to re-evaluate), `timer.rs` reduced to a shim. One OS
-> thread serves socket readiness + sleeps. **(3) Non-blocking `connect`** (`socket2`): an `EINPROGRESS`
-> handshake parks on **writability** (`Disp::PollPark` + `pending_connect` — the connecting `TcpStream`
-> stashed non-heap in `FiberCtx`, swapped per-fiber); on writability the poller injects and
-> `run_one_fiber` finishes via `finish_connect` (`SO_ERROR`), pushing the `Socket` with **no `ip`
-> rewind** (the call already advanced). Loopback completes synchronously; the top-level fallback blocks
-> with a 10 s cap; `connect` inside a native callback fails loud. A **register-vs-cancel race** (a fiber
-> parking on the poller *after* `drain_sched` swept) was closed by serializing
-> register/deregister/`drain_sched`/fire-path — incl. the fd `add`/`delete` — under the registry lock,
-> with `register` returning the fiber (to re-inject) when cancel is already set. 1410 tests green, clippy
-> clean; 2-agent S++ panel, no Critical, both Importants applied (bound the top-level blocking connect;
-> fail-loud connect inside a native callback). **Update — the user-facing per-socket
-> read/accept/write timeout LANDED (D6c):** an optional trailing `timeout_ms` on
-> `read`/`write`/`accept` parks on the netpoller with a deadline (`Parked.deadline`), and
-> `fire_due_socket_timeouts` re-injects the fiber with `poll_timed_out` set so the rewound op
-> returns `Err("timeout")`; readiness wins ties (`examples/socket_timeout.chz`, poller tests
-> `register_with_deadline_times_out_*` / `readiness_before_deadline_wins` / `deadline_past_fires_*`).
-> **Still deferred:** D5 owe #3 (`recv` inside a native callback). The plan below is the original
-> full-D6 spec.
->
-> **UPDATE — per-connection `spawn` LANDED (eager injectable nursery, `--parallel` ≥2 cores).** The
-> "needs M:N spawn-after-join" item is done. A nested `parallel:` (entered inside a live fiber,
-> `mn.is_some()`, on ≥2 hw threads) is now **eager**: `EnterNursery` builds the `MnSched` immediately
-> (`activate_eager_nursery`, total 0, `body_open=true`, spawns ONE dedicated **raw OS thread** as the
-> body drainer), a `spawn` **injects** a live `Pending` fiber into that running sched (`MnSched::inject`
-> assigns the slot index under the lock, grows `total`+`slots`, queues it runnable — the
-> `complete_offload` twin), and `JoinNursery` `close_body`s + runs the inline join worker to drain +
-> join the drainer + reduce. A new `body_open` flag holds termination open + vetoes the deadlock
-> predicate while the body may still inject (always `false` on the lazy/top-level path → D2b
-> byte-identical). The open scope rides a per-fiber `FiberCtx::eager_scheds` stack (lockstep with
-> `nurseries`, swapped across a park). So the acceptor `spawn`s `handle(conn)` per connection and keeps
-> accepting while handlers run on the drainer — `examples/echo_server_spawn.chz`,
-> `net_echo_server_spawns_handler_per_connection`, `net_echo_sequential_client_needs_concurrent_handlers`
-> (the concurrency proof: serial client hangs under queue-at-join, completes under eager),
-> `net_echo_handler_fault_cancels_acceptor`, `net_concurrent_eager_servers_do_not_exhaust_pool`,
-> `eager_nursery_with_zero_spawns_completes`. **Why a raw thread, not the pool:** the eager body has no
-> inline worker until the join, so the drainer is the sole liveness guarantee during the body — a
-> bounded-pool helper fails (a 1-core box farms none; nested eager nurseries exhaust the fixed pool, an
-> undetectable hang since `body_open` vetoes the predicate). A 2-agent S++ panel reproduced exactly
-> those hangs in the first (pool-farmed) cut; the raw drainer fixes them. **v1 limits:** (1) **≥2 hw
-> threads** — the eager inner join blocks the parent's outer worker (decision B), so a handler
-> servicing an outer-sibling client deadlocks on a single-worker (1-core) outer nursery (a pre-existing
-> M:N limit — nested socket servers can't run on 1 core either way; the three socket e2e tests skip on
-> 1 core); (2) bounded accept loops only (`while true:` never reaches the join → graceful shutdown is
-> future work); (3) a handler signalling the acceptor via a Channel is a cross-nursery wakeup (handlers
-> reach clients via sockets — OS-mediated — which works). 1483 tests green, clippy clean.
-
-**Goal.** Cheap *massive* socket concurrency (10 k connections) without a thread per connection.
-Build the pollset **and** the socket surface that justifies it (regular files stay on D5's blocking
-pool — they are not epoll-able).
-
-**Changes:**
-- **Pollset** via the `polling` crate (cross-platform epoll / kqueue / IOCP) on one poller thread (or
-  the about-to-park worker as poller-of-last-resort, Go-style). A would-block socket op registers fd
-  interest + parks the fiber on the `pollDesc`; the poller injects ready fibers back onto run queues
-  (`injectglist` + `wakep`).
-- **Minimal `std.net`**: `tcp.listen` / `accept` / `connect` / `read` / `write` / `close`, sockets
-  **non-blocking**, integrated with the pollset. New native module (`src/native/net.rs`, registered
-  in `src/native/mod.rs`).
-- Fold **timers** into the poll timeout (D5's `sleep_ms` timer-park rides the pollset deadline — one
-  blocking `poll()` covers I/O + timers).
-
-**TDD.** (1) Echo server: a `parallel:` accept-loop spawning a fiber per connection; drive with
-**#conns ≫ #threads** (e.g. 500 conns, 4 threads) — all serviced, worker count stays core-sized. (2)
-`connect` to a slow peer parks the fiber, frees the worker; others progress. (3) Timeout on a socket
-read wakes correctly.
-
-**Risk.** High + new dependency (`polling`). Platform differences handled by the crate. Largest new
-surface; gate behind the net module so non-net programs are unaffected. **Reuse:** `polling`, the
-park/inject/`wakep` machinery from D2/D4, decision-F flush.
+**Per-connection `spawn` LANDED (eager injectable nursery, `--parallel` ≥2 cores).** A nested
+`parallel:` entered inside a live fiber is now **eager**: `EnterNursery` builds the `MnSched`
+immediately (`activate_eager_nursery`, `body_open=true`, spawns ONE dedicated **raw OS thread** as the
+body drainer), a `spawn` **injects** a live fiber into the running sched (`MnSched::inject`, the
+`complete_offload` twin), and `JoinNursery` closes the body + runs the inline join worker to drain +
+join the drainer. A `body_open` flag holds termination open + vetoes the deadlock predicate while the
+body may still inject (always `false` on the lazy/top-level path → D2b byte-identical). So the acceptor
+`spawn`s `handle(conn)` per connection and keeps accepting while handlers run on the drainer. **Why a
+raw thread, not the pool:** the eager body has no inline worker until the join, so the drainer is the
+sole liveness guarantee during the body — a bounded-pool helper hangs on a 1-core box or nested eager
+nurseries (a 2-agent panel reproduced exactly those hangs in the first pool-farmed cut). **v1 limits:**
+(1) ≥2 hw threads (the eager inner join blocks the parent's outer worker — decision B); (2) bounded
+accept loops only (graceful shutdown is future work); (3) a handler signalling the acceptor via a
+Channel is a cross-nursery wakeup (handlers reach clients via sockets, which works).
 
 ---
 
@@ -818,11 +335,10 @@ Critical + Important findings before the completion claim.
 - ~~**`Channel.close()`**~~ — **LANDED** (branch `feat/channel-close`). Clean producer→consumer
   termination: `close()` (idempotent, wakes all receivers via `MnSched::close_wake`), `send`/`recv`
   after close fault, **`for v in ch:`** blocking iteration (drains then ends on close, Go's
-  `for v := range ch`), and **`try_send(v) -> bool`** (the safe partner of `send`; channels are
-  unbounded so `false` = closed is its only failure). `closed` folded into the queue mutex
+  `for v := range ch`), and **`try_send(v) -> bool`**. `closed` folded into the queue mutex
   (`ChanState`) so the park-gap re-check is TOCTOU-free. See PROGRESS.md.
+- **M-C implicit nurseries** — deferred by design (the only remaining deferral).
 - **Cross-nursery wakeups** ([§11](concurrency.md)) — mooted by real-thread blocking; M:N's flat run
-  queues may lift it for free — revisit after D2.
+  queues may lift it for free.
 - **Priority classes** (BEAM) — deferred; revisit if priority becomes a requirement.
-- **Reduction constant tuning** (D3) — `CONTEXT_REDS` value + per-op vs per-back-edge accounting,
-  measured under D3.
+- **Reduction constant tuning** (D3) — `CONTEXT_REDS` value + per-op vs per-back-edge accounting.
