@@ -2084,18 +2084,6 @@ impl Interp {
                     None => Value::Enum { ty: "Option".into(), variant: "None".into(), payload: vec![] },
                 })
             }
-            "recv_timeout" => {
-                // Poll-once parity: the sequential oracle has no time to wait, so `recv_timeout(ms)`
-                // returns `Some(v)` if queued else `None` — a timeout is a DEFINED non-fault outcome,
-                // so (unlike `recv`) this NEVER raises the deadlock fault on an empty channel. The `ms`
-                // arg is type-checked but ignored. The VM twin honors `ms` as real wall-clock; both
-                // print the same thing whenever the value is (not) already there — that's the parity.
-                builtins::arity("recv_timeout", &args, 1, span)?;
-                Ok(match q.borrow_mut().queue.pop_front() {
-                    Some(v) => Value::Enum { ty: "Option".into(), variant: "Some".into(), payload: vec![v] },
-                    None => Value::Enum { ty: "Option".into(), variant: "None".into(), payload: vec![] },
-                })
-            }
             // `close()` marks the channel closed (idempotent). In the sequential oracle there are no
             // parked receivers to wake — a later `recv`/`for` observes `closed` directly.
             "close" => {
@@ -5217,20 +5205,6 @@ b := Buf([10, 20, 30])
     fn channel_try_recv_with_value_returns_some() {
         let src = "fn main():\n    ch := Channel[int]()\n    ch.send(42)\n    match ch.try_recv():\n        Some(v): print(v)\n        None: print(\"empty\")\nmain()\n";
         assert_eq!(run(src), "42\n");
-    }
-
-    /// `recv_timeout` is total in the sequential oracle (poll-once): a queued value → `Some(v)`, an
-    /// empty channel → `None` (NEVER the deadlock fault `recv` raises). The `ms` arg is ignored — the
-    /// interpreter cannot block. Pins the parity contract the VM's wall-clock twin must match in stdout.
-    #[test]
-    fn channel_recv_timeout_poll_once() {
-        let queued = "fn main():\n    ch := Channel[int]()\n    ch.send(7)\n    match ch.recv_timeout(50):\n        Some(v): print(v)\n        None: print(\"none\")\nmain()\n";
-        assert_eq!(run(queued), "7\n");
-        let empty = "fn main():\n    ch := Channel[int]()\n    match ch.recv_timeout(50):\n        Some(v): print(\"got {v}\")\n        None: print(\"none\")\nmain()\n";
-        assert_eq!(run(empty), "none\n");
-        // Closed-and-empty → None too (total: a closed channel is just "no value will come").
-        let closed = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    match ch.recv_timeout(10):\n        Some(v): print(\"got {v}\")\n        None: print(\"none\")\nmain()\n";
-        assert_eq!(run(closed), "none\n");
     }
 
     /// Parity-gap pin (B1/B2 is VM-only for now): a mid-flight blocking `recv` that the VM resolves

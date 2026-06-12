@@ -5331,9 +5331,6 @@ fn channel_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
         "try_send" => (vec![elem.clone()], Ty::Bool),
         "recv" => (vec![], elem.clone()),
         "try_recv" => (vec![], Ty::option(elem.clone())),
-        // `recv_timeout(ms)` — wait up to `ms` for a value: `Some(v)` on arrival, `None` on timeout.
-        // Total (never faults), so it returns `Option[T]` like `try_recv` but takes a millisecond bound.
-        "recv_timeout" => (vec![Ty::Int], Ty::option(elem.clone())),
         // `close()` marks the channel closed (idempotent); a later `send` faults, `recv` drains then
         // faults, and `for v in ch:` ends cleanly once drained.
         "close" => (vec![], Ty::Nil),
@@ -5550,34 +5547,6 @@ mod graph_tests {
         let errs = errors(&bad);
         assert!(
             errs.iter().any(|m| m.contains("try_recv") && m.contains("argument")),
-            "got: {errs:?}"
-        );
-    }
-
-    // 24. `Channel[T].recv_timeout(ms: int)` is typed `T?` (Option[T]) and takes one `int`. A correct
-    // `int?` return checks clean; a non-int arg and wrong arity are both rejected.
-    #[test]
-    fn channel_recv_timeout_signature() {
-        let t = TmpDir::new();
-        let ok = t.write(
-            "ok.chz",
-            "fn f() -> int?:\n    ch := Channel[int]()\n    return ch.recv_timeout(100)\nfn main(): print(1)\n",
-        );
-        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
-
-        let bad_ty = t.write(
-            "bad_ty.chz",
-            "fn f() -> int?:\n    ch := Channel[int]()\n    return ch.recv_timeout(\"x\")\nfn main(): print(1)\n",
-        );
-        assert!(!errors(&bad_ty).is_empty(), "expected a type error for a str timeout arg");
-
-        let bad_arity = t.write(
-            "bad_arity.chz",
-            "fn f() -> int?:\n    ch := Channel[int]()\n    return ch.recv_timeout()\nfn main(): print(1)\n",
-        );
-        let errs = errors(&bad_arity);
-        assert!(
-            errs.iter().any(|m| m.contains("recv_timeout") && m.contains("argument")),
             "got: {errs:?}"
         );
     }
