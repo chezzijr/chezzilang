@@ -7531,12 +7531,8 @@ impl Vm {
                 // A `?` directly inside a `recover:` block (a handler installed in THIS frame)
                 // short-circuits to that boundary (try-block style): the `Err`/`None` value becomes
                 // the recover's result. Function-scoped `?` (no same-frame handler) falls through.
-                if self
-                    .handlers
-                    .last()
-                    .is_some_and(|h| h.frame_len == self.frames.len())
-                {
-                    let h = self.handlers.pop().unwrap();
+                let frame_len = self.frames.len();
+                if let Some(h) = self.handlers.pop_if(|h| h.frame_len == frame_len) {
                     self.stack.truncate(h.stack_len);
                     self.call_depth = h.call_depth;
                     // Drop scope markers of defer scopes opened inside the recover block — the `?`
