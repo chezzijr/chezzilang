@@ -1748,6 +1748,9 @@ enum RecvStep {
     Got(WireValue),
     ClosedEmpty,
     Parked,
+    /// `recv_timeout` only: the deadline elapsed (or `ms <= 0` polled empty, or no producer can ever
+    /// arrive) before a value came. The caller maps it to `None` — `recv_timeout` is total, never faults.
+    TimedOut,
 }
 
 /// D6b — a non-blocking `connect` whose TCP handshake is still in flight (`EINPROGRESS`): the
@@ -2817,6 +2820,7 @@ impl Vm {
                     // `chan_recv_step` re-rooted the handle + set `suspend`; `run_until`'s `paused()`
                     // gate returns to the scheduler, and the op re-runs (rewound `ip`) on resume.
                     RecvStep::Parked => {}
+                    RecvStep::TimedOut => unreachable!("chan_recv_step has no deadline; only recv_timeout times out"),
                 }
             }
             Op::EnsureEnum(slot) => {
@@ -5269,7 +5273,7 @@ impl Vm {
     /// → the fiber faults). Never [`RecvStep::Parked`] — a demoted recv blocks in place, it never
     /// snapshot-parks. Only ever called on the M:N engine inside a native callback (the recv site gates
     /// on `mn.is_some() && native_reentry > 0`).
-    fn demote_recv_block(&mut self, h: GcRef, span: Span) -> Result<RecvStep, RuntimeError> {
+    fn demote_recv_block(&mut self, h: GcRef, deadline: Option<std::time::Instant>, span: Span) -> Result<RecvStep, RuntimeError> {
         let sched = Arc::clone(self.mn.as_ref().expect("demote_recv_block on the cooperative engine"));
         let core = self.channel_core(h);
         let ptr = self.channel_core_ptr(h);
@@ -5353,10 +5357,22 @@ impl Vm {
                     drop(c);
                     return Ok(RecvStep::ClosedEmpty);
                 }
-                // Terminate without a delivered value (genuine deadlock / nursery torn down): fault in
-                // place. Path C self-sufficient deadlock detection: evaluate the predicate HERE rather
-                // than depending on a separate idle puller being alive to fire it (the replacement could
-                // be the last worker and itself demoted → otherwise a hang). The queue-first pop above
+                // `recv_timeout` deadline elapsed with the channel empty + open → `TimedOut` (the caller
+                // maps it to `None`). Ranks below a delivered value / cancel / closed, above terminate
+                // & deadlock. `None` deadline (a bare `recv`) never takes this branch.
+                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    c.running += 1;
+                    sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+                    c.unregister_demoted(ptr);
+                    drop(c);
+                    return Ok(RecvStep::TimedOut);
+                }
+                // Terminate without a delivered value (genuine deadlock / nursery torn down). A bare
+                // `recv` faults; a `recv_timeout` (deadline set) is TOTAL — "no producer can ever come"
+                // is exactly a timeout → `TimedOut` (→ `None`), never the deadlock fault.
+                // Path C self-sufficient deadlock detection: evaluate the predicate HERE rather than
+                // depending on a separate idle puller being alive to fire it (the replacement could be
+                // the last worker and itself demoted → otherwise a hang). The queue-first pop above
                 // means OUR channel is empty here, and `is_deadlocked` now also peeks OTHER demoted
                 // channels (#1), so firing can never strand a value destined for any demoted fiber.
                 if c.terminate {
@@ -5364,7 +5380,7 @@ impl Vm {
                     sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
                     c.unregister_demoted(ptr);
                     drop(c);
-                    return Err(sched.deadlock_err.clone());
+                    return if deadline.is_some() { Ok(RecvStep::TimedOut) } else { Err(sched.deadlock_err.clone()) };
                 }
                 if sched.is_deadlocked(&c) {
                     c.flag_deadlock(&sched.deadlock_err);
@@ -5373,13 +5389,19 @@ impl Vm {
                     c.unregister_demoted(ptr);
                     drop(c);
                     sched.cv.notify_all();
-                    return Err(sched.deadlock_err.clone());
+                    return if deadline.is_some() { Ok(RecvStep::TimedOut) } else { Err(sched.deadlock_err.clone()) };
                 }
             }
-            // --- wait on the channel's OWN condvar (q-only; core lock A released) ---
+            // --- wait on the channel's OWN condvar (q-only; core lock A released). A `recv_timeout`
+            // bounds the wait by the remaining time so it never sleeps past its deadline (a past-due
+            // deadline yields ZERO → return at once to fire the TimedOut branch above). ---
+            let wait = match deadline {
+                Some(d) => d.saturating_duration_since(std::time::Instant::now()).min(DEMOTE_POLL_BACKOFF),
+                None => DEMOTE_POLL_BACKOFF,
+            };
             let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
             if q.queue.is_empty() {
-                let _ = core.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
+                let _ = core.cv.wait_timeout(q, wait);
             }
         }
     }
@@ -7117,13 +7139,15 @@ impl Vm {
                 // `chan_recv_step` (which only covers the snapshot-park / cooperative-park / fault
                 // paths). `demote_recv_block` is itself closed-aware (a `close` faults the demoted recv).
                 if self.mn.is_some() && self.native_reentry > 0 {
-                    return match self.demote_recv_block(h, span)? {
+                    return match self.demote_recv_block(h, None, span)? {
                         RecvStep::Got(w) => Ok(self.from_wire(w)),
                         RecvStep::ClosedEmpty => {
                             Err(self.err("receive on a closed channel".to_string(), span))
                         }
                         // demote never parks (it blocks in place); a Parked here is impossible.
                         RecvStep::Parked => unreachable!("demote_recv_block never parks"),
+                        // No deadline passed (`None`) → it never times out.
+                        RecvStep::TimedOut => unreachable!("bare recv has no deadline"),
                     };
                 }
                 match self.chan_recv_step(h, span)? {
@@ -7135,6 +7159,45 @@ impl Vm {
                     RecvStep::ClosedEmpty => {
                         Err(self.err("receive on a closed channel".to_string(), span))
                     }
+                    RecvStep::TimedOut => unreachable!("chan_recv_step has no deadline; only recv_timeout times out"),
+                }
+            }
+            "recv_timeout" => {
+                // Wait up to `ms` for a value: `Some(v)` on arrival, `None` on timeout. Total — NEVER
+                // faults (a timeout, a closed-empty channel, and an unproducible empty channel are all
+                // "no value will come" → `None`). Rides `CallMethod` like `recv`; no new Op.
+                self.arity_err("recv_timeout", args, 1, span)?;
+                let ms = match args.first() {
+                    Some(Value::Int(n)) => *n,
+                    _ => return Err(self.err("recv_timeout expects an int (milliseconds)".to_string(), span)),
+                };
+                let none = |vm: &mut Vm| vm.alloc_enum("Option", "None", vec![]);
+                // M:N engine (in a callback OR not): demote-block with a deadline. The channel condvar +
+                // queue-pop-under-lock is the atomic send-vs-deadline arbiter — `wait_timeout` wakes on a
+                // sibling `send` (value → `Some`) or at the deadline (`TimedOut` → `None`), whichever first.
+                if self.mn.is_some() {
+                    let deadline = (ms > 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(ms as u64));
+                    // `ms <= 0` polls once: pop without blocking, `None` if empty.
+                    if ms <= 0 {
+                        let popped = self.channel_core(h).q.lock().unwrap().queue.pop_front();
+                        return Ok(match popped {
+                            Some(w) => { let v = self.from_wire(w); self.alloc_enum("Option", "Some", vec![v]) }
+                            None => none(self),
+                        });
+                    }
+                    return match self.demote_recv_block(h, deadline, span)? {
+                        RecvStep::Got(w) => { let v = self.from_wire(w); Ok(self.alloc_enum("Option", "Some", vec![v])) }
+                        // Closed-empty / deadline / unproducible → None (total).
+                        RecvStep::ClosedEmpty | RecvStep::TimedOut => Ok(none(self)),
+                        RecvStep::Parked => unreachable!("demote_recv_block never parks"),
+                    };
+                }
+                // Cooperative / no-scheduler: poll-or-park (no wall-clock). Got → Some; a sibling can
+                // still send → park (Some on its send); would-deadlock / closed-empty → None.
+                match self.chan_recv_timeout_step(h, ms)? {
+                    RecvStep::Got(w) => { let v = self.from_wire(w); Ok(self.alloc_enum("Option", "Some", vec![v])) }
+                    RecvStep::Parked => Ok(Value::Nil), // do_method_call suppresses the push (suspend set)
+                    RecvStep::ClosedEmpty | RecvStep::TimedOut => Ok(none(self)),
                 }
             }
             "try_recv" => {
@@ -7247,6 +7310,34 @@ impl Vm {
                 .to_string(),
             span,
         ))
+    }
+
+    /// `recv_timeout`'s cooperative / no-scheduler step (the M:N engine routes to `demote_recv_block`
+    /// instead — see `channel_method`). Total — NEVER faults: a queued value → `Got`; an empty closed
+    /// channel → `ClosedEmpty`; `ms <= 0` (poll-once) empty → `TimedOut`; empty+open under an active
+    /// cooperative scheduler → `Parked` (a sibling `send` resumes it with `Some`); empty+open with no
+    /// scheduler (top level / in-callback) → `TimedOut` (no producer can EVER arrive — the deadlock
+    /// `recv` would fault is, for `recv_timeout`, just a timeout). The cooperative engine has no
+    /// wall-clock timer, so `ms` only gates poll-once-vs-park, not a real duration (documented).
+    fn chan_recv_timeout_step(&mut self, h: GcRef, ms: i64) -> Result<RecvStep, RuntimeError> {
+        let core = self.channel_core(h);
+        let mut g = core.q.lock().unwrap();
+        if let Some(w) = g.queue.pop_front() {
+            return Ok(RecvStep::Got(w));
+        }
+        let closed = g.closed;
+        drop(g);
+        if closed {
+            return Ok(RecvStep::ClosedEmpty);
+        }
+        if ms <= 0 {
+            return Ok(RecvStep::TimedOut); // poll-once: empty → None without parking
+        }
+        if !self.scheduler_stack.is_empty() && self.native_reentry == 0 {
+            self.park_recv(h);
+            return Ok(RecvStep::Parked);
+        }
+        Ok(RecvStep::TimedOut)
     }
 
     /// Park the running fiber on an empty `recv`: re-root the receiver on the operand stack, rewind
@@ -12843,6 +12934,78 @@ main()";
         assert_eq!(run(src), crate::interp::run_capture(src).expect("interp"));
     }
 
+    /// `recv_timeout` cooperative-engine parity: the two parity-safe shapes must be byte-identical to
+    /// the frozen interpreter (which polls once). A queued value → `Some(7)`; an empty channel with no
+    /// producer (top level — no scheduler can fill it) → `None` (NOT the deadlock fault `recv` raises).
+    #[test]
+    fn vm_recv_timeout_cooperative_parity() {
+        let queued = "fn main():\n    ch := Channel[int]()\n    ch.send(7)\n    match ch.recv_timeout(50):\n        Some(v): print(v)\n        None: print(\"none\")\nmain()\n";
+        assert_eq!(run(queued), "7\n");
+        assert_eq!(run(queued), crate::interp::run_capture(queued).expect("interp"));
+        let empty = "fn main():\n    ch := Channel[int]()\n    match ch.recv_timeout(50):\n        Some(v): print(\"got {v}\")\n        None: print(\"none\")\nmain()\n";
+        assert_eq!(run(empty), "none\n");
+        assert_eq!(run(empty), crate::interp::run_capture(empty).expect("interp"));
+        // poll-once (ms<=0) on an empty channel → None, no parking.
+        let poll = "fn main():\n    ch := Channel[int]()\n    match ch.recv_timeout(0):\n        Some(v): print(\"got {v}\")\n        None: print(\"none\")\nmain()\n";
+        assert_eq!(run(poll), "none\n");
+        assert_eq!(run(poll), crate::interp::run_capture(poll).expect("interp"));
+    }
+
+    /// `--parallel`: a consumer `recv_timeout`s a channel whose producer NEVER sends. The deadline
+    /// elapses → `None`, the nursery joins, the program exits (no hang). Watchdog-guarded so a lost
+    /// timer-wake or a mis-mapped deadlock surfaces as a loud failure instead of a stuck test.
+    #[test]
+    fn parallel_recv_timeout_elapses_to_none() {
+        let src = "\
+fn waiter(ch: Channel[int]):
+    match ch.recv_timeout(20):
+        Some(v): print(\"got {v}\")
+        None: print(\"timed out\")
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn waiter(ch)
+main()
+";
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(src));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => assert_eq!(r.expect("parallel recv_timeout completed"), "timed out\n"),
+            Err(_) => panic!("hung — recv_timeout deadline never fired the demoted receiver"),
+        }
+    }
+
+    /// `--parallel`: a producer sends; a consumer `recv_timeout(5000)` waits with a deadline far longer
+    /// than any send latency → `Some(v)`. Asserts a sibling `send` wakes the demoted receiver (via the
+    /// queue re-check / condvar) BEFORE the 5 s deadline could fire.
+    #[test]
+    fn parallel_recv_timeout_send_beats_deadline() {
+        let src = "\
+fn slow(ch: Channel[int]):
+    ch.send(42)
+fn waiter(ch: Channel[int]):
+    match ch.recv_timeout(5000):
+        Some(v): print(\"got {v}\")
+        None: print(\"timed out\")
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn slow(ch)
+        spawn waiter(ch)
+main()
+";
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(src));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => assert_eq!(r.expect("parallel recv_timeout got value"), "got 42\n"),
+            Err(_) => panic!("hung — a sibling send did not wake the demoted recv_timeout"),
+        }
+    }
+
     #[test]
     fn vm_for_over_channel_drains_then_exits() {
         // Producer-first (no concurrency needed): the channel is closed+full before the `for` runs.
@@ -13377,6 +13540,19 @@ main()
         assert_eq!(vm_out, expected);
         // Parked fibers must survive collection: the same program under GC stress is byte-identical.
         assert_eq!(run_capture_stress(src), expected);
+    }
+
+    /// `recv_timeout` golden (3-engine parity): the example is written at top level so all three
+    /// engines agree — the `--parallel` VM honors `ms` as real wall-clock (demote-block + deadline),
+    /// while the cooperative VM and the frozen interpreter (no clock) resolve a no-producer empty
+    /// channel to `None` immediately. Queued → `Some(7)`, empty → `None`. Asserts each engine's output.
+    #[test]
+    fn golden_recv_timeout_chz_matches_expected() {
+        let src = include_str!("../../examples/recv_timeout.chz");
+        let expected = include_str!("../../examples/recv_timeout.expected");
+        assert_eq!(run_capture(src).expect("cooperative vm"), expected);
+        assert_eq!(run_capture_parallel(src).expect("--parallel vm"), expected);
+        assert_eq!(crate::interp::run_capture(src).expect("interp"), expected);
     }
 
     // ----- B1 + B2: cooperative fibers + blocking recv (VM engine) -----

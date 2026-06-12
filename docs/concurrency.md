@@ -224,6 +224,7 @@ n := ch.len()              # current queued count
 | `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); sender can't reuse a moved value |
 | `recv` | `recv(self) -> T` | dequeue (FIFO); blocking surface (see below) |
 | `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll (A1): `Some(v)` if queued, `None` if empty — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
+| `recv_timeout` | `recv_timeout(self, ms: int) -> T?` | **bounded wait**: `Some(v)` if a value arrives, `None` on timeout. **Total — never faults** (a timeout, a closed-empty channel, and an unproducible empty channel are all `None`). Honors `ms` as real wall-clock only on `--parallel`; the cooperative VM + interpreter (no clock) poll-or-resolve-to-`None`. `ms <= 0` polls once |
 | `len`  | `len(self) -> int` | queued count — use to guard a `recv` |
 
 - **Buffered (unbounded) FIFO** under the sequential executor, so `send` never blocks.
@@ -235,6 +236,17 @@ n := ch.len()              # current queued count
   — the checker enforces it, like a Rust channel). Deep-copy is the fallback when the sender wants to
   keep its copy.
 - **Channels are themselves sendable** — pass a `Channel` over a `Channel` for reply channels.
+- **`recv_timeout(ms) -> T?` is shipped (both engines).** A bounded-wait `recv` that is *total* —
+  it never faults. On `--parallel` it demote-blocks with a deadline (the channel condvar +
+  queue-pop-under-lock is the atomic send-vs-deadline arbiter): a sibling `send` → `Some(v)`, the
+  deadline → `None`, whichever fires first. On the cooperative VM and the frozen interpreter (no
+  wall-clock) it polls-or-resolves: a queued value → `Some(v)`, an empty channel with no producer →
+  `None` (NOT the deadlock fault `recv` raises). The parity-safe shapes (value already queued; empty
+  at top level → timeout) are byte-identical across all three engines (see `examples/recv_timeout.chz`);
+  a concurrent mid-flight producer is `--parallel`-only, like a blocking `recv`. **Known v1 cost:** a
+  `recv_timeout` that actually blocks on `--parallel` demotes its worker + spins one replacement
+  (reaped by the blocking pool) — acceptable for an "I'm willing to wait" op; the full park+timer
+  variant is a possible follow-up.
 - **`try_recv() -> T?` is shipped (A1, both engines).** The non-blocking sibling of `recv`: it
   pops-or-returns-`None` and never blocks, faults, or suspends a fiber — so it is identical under the
   sequential interpreter and the VM (parity-tested). With B1/B2's blocking `recv` on the VM, a fiber

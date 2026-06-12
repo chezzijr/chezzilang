@@ -851,7 +851,9 @@ fn fetch_all(urls: list[str]):
     print("dispatched")       # runs before the tasks; they join at end-of-function
 ```
 - **`Channel[T]`** — a mailbox (buffered FIFO): `ch.send(v)`, `ch.recv() -> T`,
-  `ch.try_recv() -> T?` (non-blocking poll — `Some(v)`/`None`, never blocks or faults), `ch.len()`,
+  `ch.try_recv() -> T?` (non-blocking poll — `Some(v)`/`None`, never blocks or faults),
+  `ch.recv_timeout(ms) -> T?` (bounded wait — `Some(v)` or `None` on timeout; total, never faults;
+  real wall-clock only on `--parallel`), `ch.len()`,
   `ch.close()`, `ch.try_send(v) -> bool` (safe `send` — `false` if closed, never faults). After
   `close()`: `send` faults, `recv` drains then faults, `try_send` returns `false`. Drain a channel to
   completion with **`for v in ch:`** — it blocks per value and ends cleanly once closed-and-drained

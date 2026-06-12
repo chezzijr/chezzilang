@@ -88,7 +88,15 @@ interp is untouched by VM-only work, so parity is automatic for those changes.
 
 Gap to CPython after Phases 6–7 **~1.1×–3.2×** slower (worst still call-bound `fib` ~3.2×, then `map`/
 `struct`/`list`/`primes` ~2.3–2.7×, `str` ~2.0×; **`loop` ~1.1×** — near parity, was the dispatch
-floor), startup ~11× **faster**. **1573 tests** green, conformance 7/7, `clippy --all-targets` clean.
+floor), startup ~11× **faster**. **1613 tests** green, conformance 7/7, `clippy --all-targets` clean.
+
+**Tier-2 index specialization landed (2026-06-12):** Int-key fast path in `get_index`/`set_index`
+(skips `hash_key_rooted`'s rooting — alloc-free for an int) + inline `GetIndex`/`SetIndex` in the
+`run_until` hot arm. **`list` −4%** (its `for x in xs` lowers to per-element `GetIndex`); **`map`
+neutral** (it's FxHashMap-probe-bound, not rooting/dispatch-bound — the predicted target didn't move,
+the recurring "measure, don't guess" lesson). Behavior-preserving (7 `idxspec_*` VM==interp guards,
+incl. the Int/Float key-collision trap). To move `map` needs a bigger lever (denser int-keyed map). See
+`docs/benchmarks.md` "M19 Tier-2".
 
 **▶ Next perf batch (Tier 1 DONE — Phases 6+7 landed, 8 deferred; Tier 2 is next; full detail +
 `file:line`s in [`docs/future.md §4` "Post-M19 next levers"](docs/future.md)).** Diagnosis: the
@@ -103,8 +111,10 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
 - **Tier 2 (structural) — START HERE NEXT:** 4. **adaptive opcode quickening (PEP 659)** — rewrite ops to
   type-specialized forms at runtime behind a deopt guard (generalizes superinstructions + ICs; cells in a
   per-`Vm` side table, not the shared `Arc<Program>`); the single most CPython-3.14-like lever, and the
-  unifying mechanism for the method/field/call caches. 5. **map/list index specialization** (`mod.rs`
-  `GetIndex`/`SetIndex`) → falls out of #4; hits `map`/`list`.
+  unifying mechanism for the method/field/call caches. ✅ 5. **map/list index specialization** (`mod.rs`
+  `GetIndex`/`SetIndex`) — **landed (Int-key fast path + inline dispatch): `list` −4%, `map` neutral**
+  (hash-probe-bound). The remaining `map` win needs a denser int-keyed representation, not this in-place
+  tweak — folds into #4 or its own lever.
 - **Tier 3 (big, separate):** 6. **Cranelift method-JIT** (end-game; the only path to match/beat fib;
   #4 is the stepping stone). 7. NaN-boxing (BLOCKED, above). 8. register VM / generational GC (low ROI).
 
@@ -131,7 +141,10 @@ Core feature-complete through **M18**; **concurrency shipped through Tier-D (D0�
 `spawn` / `parallel:` nursery / `Channel[T]` / `Shared[T]` / `Executor`, plus `--parallel` (the VM's real
 OS-thread engine) and the netpoller + `std.net` — is complete and stable. **M-C implicit nurseries shipped
 (2026-06-12)** — every function body and the module top level is an implicit nursery; a bare `spawn` is
-legal anywhere and joins at `return`/end. ~1592 tests green; the default cooperative engine and `--parallel`
+legal anywhere and joins at `return`/end. **`Channel.recv_timeout(ms)` added 2026-06-12** (bounded-wait
+`recv`, see below). Genuinely-unbuilt primitives (`select` / multi-channel wait, explicit `Atomic[int]`)
+remain **deferred — they need a design brainstorm, not blind TDD** (heterogeneous channel types +
+sequential-interp-oracle parity). ~1613 tests green; the default cooperative engine and `--parallel`
 stay byte-identical on every `examples/parallel*.chz` + `examples/implicit_nursery.chz` golden, and the
 frozen interp is the differential parity oracle for the sequential subset.
 
@@ -189,6 +202,24 @@ the headline consumer-side feature giving clean producer→consumer termination 
   closed is `send`'s only failure mode). `try_recv` unchanged (`None` on closed).
 - Comprehension-over-channel (`[v for v in ch]`) is **rejected by the checker** (it would diverge — VM
   drains, interp oracle can't).
+
+**`Channel.recv_timeout(ms: int) -> T?`** landed (all three engines, 2026-06-12) — a bounded-wait `recv`
+that is **total** (never faults): `Some(v)` on arrival, `None` on timeout / closed-empty / no-producer.
+- **`--parallel`**: real wall-clock — reuses `demote_recv_block` with an `Option<Instant>` deadline. The
+  channel condvar + queue-pop-under-lock is the atomic send-vs-deadline arbiter (a sibling `send` →
+  `Some`, the deadline → `None`, whichever first) — **no new `Fiber` field, no claim flag, no timer
+  plumbing.** `ms <= 0` polls once.
+- **cooperative VM + interp**: no wall-clock — a queued value → `Some`, an empty channel with no producer
+  → `None` (the new `chan_recv_timeout_step` maps the would-deadlock case to `None` instead of faulting;
+  interp polls once). The deadlock-detect fault `recv` raises is, for `recv_timeout`, just a timeout.
+- **Parity**: the value-already-queued and empty-at-top-level→timeout shapes are byte-identical across all
+  three engines (`examples/recv_timeout.chz`, `golden_recv_timeout_chz_matches_expected`); a concurrent
+  mid-flight producer is `--parallel`-only (cooperative parks→`Some`, interp polls→`None`), like a
+  blocking `recv`. **Known v1 cost:** a `recv_timeout` that blocks on `--parallel` demotes its worker +
+  spins one replacement (blocking-pool-reaped) — fine for a "willing to wait" op; the full park+timer
+  variant is a possible follow-up. Tests: `vm_recv_timeout_cooperative_parity`,
+  `parallel_recv_timeout_{elapses_to_none,send_beats_deadline}`, `channel_recv_timeout_poll_once`,
+  `channel_recv_timeout_signature`.
 
 **Pending-`spawn`-drop on early `parallel:` escape → cancel-and-report** landed (both engines): a
 `parallel:` body escaping via `?`/`return`/`break`/`continue` before the join now **cancels** unstarted
