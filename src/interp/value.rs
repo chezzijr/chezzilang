@@ -248,6 +248,11 @@ pub enum Value {
 pub struct ChanState {
     pub queue: std::collections::VecDeque<Value>,
     pub closed: bool,
+    /// `timer(ms)` one-shot timeout channel: `Some(deadline)` iff built by `timer`. A `recv` on the
+    /// empty channel inline-sleeps to the deadline then yields `true` (the interp is single-threaded,
+    /// so blocking is fine); `try_recv` reports `Some(true)` once the deadline passes. `None` for an
+    /// ordinary channel. Mirrors `vm::core::ChannelCore::timer`.
+    pub timer: Option<std::time::Instant>,
 }
 
 impl ChanState {

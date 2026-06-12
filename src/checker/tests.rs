@@ -3995,6 +3995,22 @@ fn atomic_is_sendable() {
     ok("fn bump(a: Atomic[int]):\n    a.add(1)\nfn main():\n    a := Atomic(0)\n    parallel:\n        spawn bump(a)\n        spawn bump(a)\n    print(a.load())\nmain()\n");
 }
 
+// ----- timer(ms): one-shot timeout channel -----
+
+#[test]
+fn timer_returns_channel_bool() {
+    // `timer(ms)` yields a `Channel[bool]`; `recv()` on it composes where a `bool` is expected.
+    ok("fn main():\n    t := timer(50)\n    if t.recv():\n        print(\"fired\")\nmain()\n");
+}
+
+#[test]
+fn timer_arg_must_be_int() {
+    rejects(
+        "fn main():\n    t := timer(\"x\")\n    print(t.recv())\nmain()\n",
+        "expected int",
+    );
+}
+
 // ----- C5: the `Executor` escape hatch -----
 
 #[test]

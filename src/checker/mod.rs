@@ -3099,6 +3099,13 @@ impl Checker {
                 let elem = self.one_arg("Atomic", args, span);
                 Some(Ty::atomic(elem))
             }
+            "timer" => {
+                // `timer(ms)` — a one-shot timeout channel: a `Channel[bool]` that delivers `true`
+                // once, `ms` milliseconds after creation. The composable timeout primitive (recv it in
+                // a `wait` arm). Takes an int; a `[T]` type arg is rejected upstream.
+                self.check_args("timer", &[Ty::Int], args, span);
+                Some(Ty::channel(Ty::Bool))
+            }
             "Executor" => {
                 // `Executor()` — a fresh, empty, explicitly-owned work queue (C5 escape hatch).
                 // Non-generic and zero-arg; a `[T]` type arg is rejected upstream.

@@ -298,6 +298,9 @@ pub enum Op {
     NewShared,
     /// `Atomic(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Atomic(init)`.
     NewAtomic,
+    /// `timer(ms)` — stack `[ms]`; pop it, push a fresh `Channel[bool]` whose deadline is `now + ms`.
+    /// Under `--parallel` also schedules a background `send(true)` at the deadline.
+    NewTimer,
     /// `Executor()` — push a fresh, empty, explicitly-owned work queue (`Obj::Executor`). C5.
     NewExecutor,
 }

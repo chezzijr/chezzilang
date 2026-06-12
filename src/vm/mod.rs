@@ -2889,6 +2889,24 @@ impl Vm {
                 let h = self.heap.alloc(Obj::Atomic(Arc::new(AtomicCore { v: Mutex::new(init) })));
                 self.push(Value::Obj(h));
             }
+            Op::NewTimer => {
+                let ms = match self.pop() {
+                    Value::Int(ms) => ms.max(0) as u64,
+                    other => return Err(self.err(format!("timer(ms) expects int, got {}", self.type_name(other)), span)),
+                };
+                // Saturate a pathological `ms` to a far-future deadline rather than panic on `Instant`
+                // overflow (mirrors the `sleep_ms` offload path).
+                let deadline = std::time::Instant::now()
+                    .checked_add(std::time::Duration::from_millis(ms))
+                    .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365));
+                // The channel just carries its deadline. Delivery is handled at `recv` time — in
+                // whatever engine/scheduler the receiver runs under — NOT here: a `timer` created at the
+                // top level (`mn = None`) can be `recv`'d inside a `--parallel` child, so binding the
+                // delivery mechanism to the *creation* site would strand it.
+                let core = Arc::new(ChannelCore { timer: Some(deadline), ..Default::default() });
+                let h = self.heap.alloc(Obj::Channel(core));
+                self.push(Value::Obj(h));
+            }
             Op::NewExecutor => {
                 let h = self.heap.alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
                 // Register for the program-exit auto-drain; the handle is also a GC root, so the
@@ -7137,7 +7155,9 @@ impl Vm {
                 // spin a replacement, resuming on a sibling `send` (Go's `handoffp`). Handled before
                 // `chan_recv_step` (which only covers the snapshot-park / cooperative-park / fault
                 // paths). `demote_recv_block` is itself closed-aware (a `close` faults the demoted recv).
-                if self.mn.is_some() && self.native_reentry > 0 {
+                // A `timer(ms)` channel is excluded from demote — it has no sibling sender to block on;
+                // `chan_recv_step` synthesises its value (inline-sleep to the deadline) at any reentry.
+                if self.mn.is_some() && self.native_reentry > 0 && self.channel_core(h).timer.is_none() {
                     return match self.demote_recv_block(h, span)? {
                         RecvStep::Got(w) => Ok(self.from_wire(w)),
                         RecvStep::ClosedEmpty => {
@@ -7163,7 +7183,15 @@ impl Vm {
                 // `native_reentry` / `suspend` / `ip` — it always returns immediately with an
                 // `Option`: `Some(v)` if queued, `None` if empty. Mirrors `interp::eval_channel_method`.
                 self.arity_err("try_recv", args, 0, span)?;
-                let popped = self.channel_core(h).q.lock().unwrap().queue.pop_front();
+                let core = self.channel_core(h);
+                let popped = core.q.lock().unwrap().queue.pop_front();
+                // A `timer(ms)` channel reports ready (`Some(true)`) once its deadline has passed, even
+                // with nothing queued — the level-triggered, non-blocking poll (used by `wait`'s
+                // source-order scan and the `else` arm). `--parallel` may also have a real `true`
+                // queued by the background send; either way `Some(true)`.
+                let popped = popped.or_else(|| {
+                    core.timer.filter(|d| std::time::Instant::now() >= *d).map(|_| WireValue::Bool(true))
+                });
                 Ok(match popped {
                     Some(w) => {
                         let v = self.from_wire(w);
@@ -7223,6 +7251,50 @@ impl Vm {
     /// the receiver + rewinding `ip` so the calling op re-runs on resume, setting `suspend`). Shared
     /// by `recv` (`CallMethod`) and the `ChanRecvOrClosed` op (`for v in ch:`).
     fn chan_recv_step(&mut self, h: GcRef, span: Span) -> Result<RecvStep, RuntimeError> {
+        // A `timer(ms)` channel delivers `true` once its deadline passes. Handled here (uniformly,
+        // before the ordinary park logic) so it works regardless of the engine the receiver runs in
+        // and where the timer was created. Delivery is scheduled at RECV time, in the recv's own
+        // scheduler — not at construction (a timer made at the top level can be recv'd in a child).
+        {
+            let core = self.channel_core(h);
+            if let Some(deadline) = core.timer {
+                // A prior park's timer `send` may already have delivered — consume it first.
+                if let Some(w) = core.q.lock().unwrap().queue.pop_front() {
+                    return Ok(RecvStep::Got(w));
+                }
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return Ok(RecvStep::Got(WireValue::Bool(true)));
+                }
+                if self.mn.is_some() && self.native_reentry == 0 {
+                    // --parallel, top level: schedule a one-shot background `send(true)` at the deadline
+                    // (in THIS scheduler) and park. The pending timer is accounted `inflight` so it
+                    // vetoes the deadlock predicate while the lone fiber waits; the job un-accounts it.
+                    if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                        self.cancelled = true;
+                        return Err(self.err("cancelled".to_string(), span));
+                    }
+                    let sched = self.mn.clone().unwrap();
+                    let key = self.channel_core_ptr(h);
+                    let core_job = Arc::clone(&core);
+                    let sched_job = Arc::clone(&sched);
+                    sched.inflight.fetch_add(1, Ordering::Relaxed);
+                    timer::submit_at(
+                        deadline,
+                        Box::new(move || {
+                            sched_job.send_wake(key, &core_job, WireValue::Bool(true));
+                            sched_job.inflight.fetch_sub(1, Ordering::Relaxed);
+                        }),
+                    );
+                    self.park_recv(h);
+                    return Ok(RecvStep::Parked);
+                }
+                // Cooperative VM / interp / a `--parallel` callback (`native_reentry > 0`): inline-sleep
+                // to the deadline (single-thread, or an already-blocking host-stack context), synthesise.
+                std::thread::sleep(deadline - now);
+                return Ok(RecvStep::Got(WireValue::Bool(true)));
+            }
+        }
         // M:N snapshot-park path (empty-open parks the fiber; the worker loop files it into the wait
         // set). Cancel is checked FIRST: a fiber woken only to be cancelled must not re-park.
         if self.mn.is_some() && self.native_reentry == 0 {
@@ -12801,6 +12873,30 @@ main()";
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `timer(ms)` golden: a one-shot timeout channel delivers `true`. Byte-identical on the
+    /// cooperative VM, the interpreter, and `.expected` (both inline-sleep to the deadline). `--parallel`
+    /// delivers the same value via the background timer `send` (asserted separately).
+    #[test]
+    fn golden_timer_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/timer.chz");
+        let expected = include_str!("../../examples/timer.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(run_capture_parallel(src).expect("parallel"), expected);
+    }
+
+    /// `timer(ms)` under `--parallel`: a spawned fiber recv-blocks on the timeout channel, PARKS, and
+    /// is woken by the background timer `send` at the deadline — not a false deadlock (the pending
+    /// timer is accounted as `inflight`, vetoing the predicate while the lone fiber waits). Proves the
+    /// async-delivery path + the deadlock veto + the park/wake on the timer channel's key.
+    #[test]
+    fn parallel_timer_wakes_blocked_recv() {
+        let src = "fn waiter(t: Channel[bool]):\n    print(t.recv())\n\
+                   fn main():\n    parallel:\n        spawn waiter(timer(20))\nmain()\n";
+        assert_eq!(run_capture_parallel(src).expect("parallel"), "true\n");
     }
 
     /// `Atomic[T]` golden: single-thread load/store/add/sub/exchange/cas sequence, byte-identical on

@@ -833,6 +833,31 @@ impl Interp {
                 let init = deep_clone(&arg_vals[0]);
                 return Ok(Value::Atomic(std::rc::Rc::new(std::cell::RefCell::new(init))));
             }
+            // `timer(ms)` — a one-shot timeout channel. The interp is single-threaded, so the value is
+            // synthesised on `recv` (inline-sleep to the deadline); here we only stamp the deadline.
+            if name == "timer" {
+                if arg_vals.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!("timer(ms) takes exactly one argument, got {}", arg_vals.len()),
+                        span,
+                    });
+                }
+                let ms = match &arg_vals[0] {
+                    Value::Int(ms) => (*ms).max(0) as u64,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!("timer(ms) expects int, got {}", other.type_name()),
+                            span,
+                        });
+                    }
+                };
+                let deadline = std::time::Instant::now()
+                    .checked_add(std::time::Duration::from_millis(ms))
+                    .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365));
+                let mut state = value::ChanState::new();
+                state.timer = Some(deadline);
+                return Ok(Value::Channel(std::rc::Rc::new(std::cell::RefCell::new(state))));
+            }
             // `Executor()` (C5 escape hatch) — a fresh, empty, explicitly-owned work queue.
             if name == "Executor" {
                 if !arg_vals.is_empty() {
@@ -2073,29 +2098,50 @@ impl Interp {
             }
             "recv" => {
                 builtins::arity("recv", &args, 0, span)?;
-                let mut s = q.borrow_mut();
-                match s.queue.pop_front() {
-                    Some(v) => Ok(v),
-                    // Drain-before-done: only consult `closed` on an empty queue. A closed-and-empty
-                    // channel faults distinctly (not the deadlock fault) — there is no producer left.
-                    None if s.closed => {
-                        Err(RuntimeError { message: "receive on a closed channel".to_string(), span })
-                    }
-                    None => Err(RuntimeError {
-                        message: "recv on an empty channel: deadlock — nothing is queued and the \
-                                  sequential executor cannot block waiting for a producer (a \
-                                  consumer that waits mid-flight on a live producer needs C5)"
-                            .to_string(),
-                        span,
-                    }),
+                let (popped, closed, timer) = {
+                    let mut s = q.borrow_mut();
+                    (s.queue.pop_front(), s.closed, s.timer)
+                };
+                if let Some(v) = popped {
+                    return Ok(v);
                 }
+                // A `timer(ms)` channel synthesises its one-shot `true` once the deadline passes:
+                // inline-sleep to it (single-threaded interp), then yield. Checked before the closed /
+                // deadlock arms — a timer channel is never closed and always eventually ready.
+                if let Some(deadline) = timer {
+                    let now = std::time::Instant::now();
+                    if now < deadline {
+                        std::thread::sleep(deadline - now);
+                    }
+                    return Ok(Value::Bool(true));
+                }
+                // Drain-before-done: only consult `closed` on an empty queue. A closed-and-empty
+                // channel faults distinctly (not the deadlock fault) — there is no producer left.
+                if closed {
+                    return Err(RuntimeError { message: "receive on a closed channel".to_string(), span });
+                }
+                Err(RuntimeError {
+                    message: "recv on an empty channel: deadlock — nothing is queued and the \
+                              sequential executor cannot block waiting for a producer (a \
+                              consumer that waits mid-flight on a live producer needs C5)"
+                        .to_string(),
+                    span,
+                })
             }
             "try_recv" => {
                 // A1: non-blocking poll. `Some(v)` if queued, `None` if empty — never the deadlock
                 // fault `recv` raises (and never suspends; the VM twin mirrors this exactly). A closed
                 // channel is indistinguishable here from an empty one (`None`) — by design.
                 builtins::arity("try_recv", &args, 0, span)?;
-                Ok(match q.borrow_mut().queue.pop_front() {
+                let popped = {
+                    let mut s = q.borrow_mut();
+                    // A `timer(ms)` channel reports ready (`Some(true)`) once its deadline passes, even
+                    // with nothing queued — the level-triggered, non-blocking poll.
+                    s.queue.pop_front().or_else(|| {
+                        s.timer.filter(|d| std::time::Instant::now() >= *d).map(|_| Value::Bool(true))
+                    })
+                };
+                Ok(match popped {
                     Some(v) => Value::Enum { ty: "Option".into(), variant: "Some".into(), payload: vec![v] },
                     None => Value::Enum { ty: "Option".into(), variant: "None".into(), payload: vec![] },
                 })
