@@ -1,0 +1,36 @@
+# std.str additive helpers demo: ends_with / index_of / count / replace / strip_prefix /
+# strip_suffix, each with a normal case plus the total/edge cases (absent, empty arg, no match).
+
+import std.str as text
+
+fn main():
+    # ends_with: hit, miss, empty suffix (always true), suffix longer than s (false).
+    print(text.ends_with("report.txt", ".txt"))
+    print(text.ends_with("report.txt", ".csv"))
+    print(text.ends_with("hi", ""))
+    print(text.ends_with("hi", "hello"))
+
+    # index_of: first occurrence, absent (-1), empty substring (0).
+    print(text.index_of("abcabc", "bc"))
+    print(text.index_of("abcabc", "zz"))
+    print(text.index_of("abc", ""))
+
+    # count: non-overlapping ("aaa","aa" -> 1), none, empty substring (0).
+    print(text.count("aaa", "aa"))
+    print(text.count("a.b.c.d", "."))
+    print(text.count("abc", "z"))
+    print(text.count("abc", ""))
+
+    # replace: all occurrences, no-op when absent, empty old returns s unchanged.
+    print(text.replace("a.b.c", ".", "-"))
+    print(text.replace("aaaa", "aa", "b"))
+    print(text.replace("hello", "z", "Z"))
+    print(text.replace("keep", "", "X"))
+
+    # strip_prefix / strip_suffix: present -> stripped, absent -> unchanged.
+    print(text.strip_prefix("unhappy", "un"))
+    print(text.strip_prefix("happy", "un"))
+    print(text.strip_suffix("file.tmp", ".tmp"))
+    print(text.strip_suffix("file.txt", ".tmp"))
+
+main()

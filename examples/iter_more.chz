@@ -1,0 +1,41 @@
+# std.iter additive helpers demo: take / drop / any / all / find / flatten, each with a normal
+# case plus the clamp/edge cases (n out of range, empty match).
+
+import std.iter
+
+fn main():
+    nums := [1, 2, 3, 4, 5]
+
+    # take: first n, clamp n > len -> all, clamp n <= 0 -> [].
+    print(iter.take(nums, 2))
+    print(iter.take(nums, 99))
+    print(iter.take(nums, 0))
+
+    # drop: all but first n, clamp n <= 0 -> all, clamp n >= len -> [].
+    print(iter.drop(nums, 2))
+    print(iter.drop(nums, 0))
+    print(iter.drop(nums, 99))
+
+    # any / all over an int predicate.
+    print(iter.any(nums, fn(x: int) -> bool: x > 4))
+    print(iter.any(nums, fn(x: int) -> bool: x > 9))
+    print(iter.all(nums, fn(x: int) -> bool: x > 0))
+    print(iter.all(nums, fn(x: int) -> bool: x > 2))
+
+    # find: Some(first match) and None.
+    match iter.find(nums, fn(x: int) -> bool: x > 3):
+        Some(v): print(v)
+        None: print("none")
+    match iter.find(nums, fn(x: int) -> bool: x > 99):
+        Some(v): print(v)
+        None: print("none")
+
+    # flatten: one level of nesting, order-preserving.
+    print(iter.flatten([[1, 2], [3], [4, 5]]))
+
+    # any/all over a str predicate too.
+    words := ["apple", "banana", "cherry"]
+    print(iter.any(words, fn(w: str) -> bool: w.starts_with("b")))
+    print(iter.all(words, fn(w: str) -> bool: w.len() > 3))
+
+main()

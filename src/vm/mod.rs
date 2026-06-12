@@ -16950,6 +16950,31 @@ main()
         assert_file_parity("examples/stdlib_cmp.chz");
     }
 
+    /// std.str helpers golden: `examples/str_more.chz` — the additive ends_with/index_of/count/
+    /// replace/strip_prefix/strip_suffix funcs, end-to-end on the VM, byte-identical to `.expected`
+    /// and the interpreter.
+    #[test]
+    fn golden_str_more_via_run_file() {
+        let path = fixture("examples/str_more.chz");
+        let expected = std::fs::read_to_string(fixture("examples/str_more.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/str_more.chz");
+    }
+
+    /// std.iter helpers golden: `examples/iter_more.chz` — the additive take/drop/any/all/find/
+    /// flatten funcs, end-to-end on the VM, byte-identical to `.expected` and the interpreter.
+    #[test]
+    fn golden_iter_more_via_run_file() {
+        let path = fixture("examples/iter_more.chz");
+        let expected = std::fs::read_to_string(fixture("examples/iter_more.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/iter_more.chz");
+    }
+
     /// M8-M5 golden: `examples/json_decode.chz` — type-directed `json.decode[T]` into struct /
     /// typed map / list / scalar, with Option fields, extra-key tolerance, and an error case.
     /// Byte-identical on interp + VM.
