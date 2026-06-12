@@ -178,6 +178,9 @@ mod tests {
         fn arg_str(&mut self, _i: usize) -> Result<String, HostError> {
             Err(HostError { message: "no str args".into() })
         }
+        fn arg_str_map(&mut self, _i: usize) -> Result<Vec<(String, String)>, HostError> {
+            Err(HostError { message: "no map args".into() })
+        }
         fn write_stdout(&mut self, _s: &str) {}
         fn write_stderr(&mut self, _s: &str) {}
         fn read_line(&mut self) -> Result<Option<String>, HostError> {

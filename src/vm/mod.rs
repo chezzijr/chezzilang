@@ -15412,6 +15412,52 @@ match regex.split(",", "a,b,c"):
         assert_eq!(out, "200\npong\nhi\n");
     }
 
+    /// `std.request` new verbs + custom headers, run through BOTH engines against a loopback server
+    /// that records every request's wire bytes. Each engine issues a `put` and a header-carrying
+    /// `request("DELETE", …)`, so the server accepts 4 times (2 per engine). Asserts (a) identical
+    /// stdout across VM and interp and (b) the right method line + custom header reached the wire —
+    /// locking the off-heap `NativeArg::Map` headers path and the verb wrappers under parity.
+    #[test]
+    fn request_verbs_and_headers_parity_against_local_server() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_srv = Arc::clone(&seen);
+        let server = std::thread::spawn(move || {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                seen_srv.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                // `Connection: close` so ureq's thread-local pool (shared across both engine runs on
+                // this test thread) never reuses a server-closed socket — one fresh conn per request.
+                let resp = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok";
+                stream.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+
+        // Each engine: a PUT verb wrapper, then a header-carrying general DELETE.
+        let src = format!(
+            "import std.request\nmatch request.put(\"http://{addr}/\", \"payload\"):\n    Ok(r): print(str(r.status))\n    Err(e): print(e)\nmatch request.request(\"DELETE\", \"http://{addr}/\", \"\", {{\"X-Custom\": \"value\"}}):\n    Ok(r): print(str(r.status))\n    Err(e): print(e)\n"
+        );
+        let out = parity_entry(&src);
+        server.join().unwrap();
+        assert_eq!(out, "200\n200\n", "VM/interp must agree and both requests succeed");
+
+        let reqs = seen.lock().unwrap();
+        assert_eq!(reqs.len(), 4, "two requests per engine");
+        let puts = reqs.iter().filter(|r| r.starts_with("PUT ")).count();
+        let deletes = reqs.iter().filter(|r| r.starts_with("DELETE ")).count();
+        let with_header = reqs.iter().filter(|r| r.contains("X-Custom: value")).count();
+        assert_eq!(puts, 2, "both engines must send PUT");
+        assert_eq!(deletes, 2, "both engines must send DELETE");
+        assert_eq!(with_header, 2, "the custom header must reach the wire on both engines");
+    }
+
     #[test]
     fn regex_find_groups_and_span_parity() {
         let out = parity_entry(
