@@ -5,6 +5,7 @@
 //! object. The VM owns the heap and mutates objects through `&mut heap[h]` — no `RefCell` needed.
 
 use super::core::{ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
+use super::fxhash::FxHashMap;
 use super::op::ProtoId;
 use super::value::{GcRef, Value};
 use std::collections::HashMap;
@@ -20,7 +21,9 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Default)]
 pub struct MapData {
     pub entries: Vec<(u64, Value, Value)>,
-    pub index: HashMap<u64, Vec<usize>>,
+    /// `cached-hash → candidate positions`. FxHash-keyed (the `u64` is already a content hash; see
+    /// [`super::fxhash`]). Plain `usize` values, **not** a GC child.
+    pub index: FxHashMap<u64, Vec<usize>>,
 }
 
 impl MapData {
@@ -53,7 +56,8 @@ impl MapData {
 #[derive(Debug, Clone, Default)]
 pub struct SetData {
     pub entries: Vec<(u64, Value)>,
-    pub index: HashMap<u64, Vec<usize>>,
+    /// `cached-hash → candidate positions`, FxHash-keyed (see [`MapData::index`]).
+    pub index: FxHashMap<u64, Vec<usize>>,
 }
 
 impl SetData {

@@ -111,6 +111,17 @@ bottleneck. The IC wins where field resolution actually dominates (wider/deeper 
 **type-id guard** (pure-int compare, no name re-verify) is the logged follow-up. **1541 tests** green +
 conformance (7/7) + `clippy -- -D warnings` clean. Numbers in [`docs/benchmarks.md`](docs/benchmarks.md).
 
+**🟦 M19 Perf track — Phase 5a LANDED (2026-06-12).** **FxHash map/set index hasher.** `MapData`/
+`SetData`'s `index` (`cached-hash → positions`) and `str_intern` (pointer-keyed) swapped stdlib SipHash
+for a tiny in-tree FxHash (`src/vm/fxhash.rs`, no new dependency). The hasher only routes the probe;
+`values_equal` confirms every hit ⇒ behavior-preserving, VM + interp parity (new tests lock map int/str
+keys, a constant-`hash()` collision struct, set ops). Maps/sets were **unbenched** — added a `map` bench
+(200k int inserts + 1M lookups). Result: **`map` 3.04×→2.82× (234 ms, was 252 ms, −7%)**; other benches
+flat (none touch map/set). **Footgun caught by measuring:** a naive multiply-only FxHash was **100×
+slower** — int keys store `f64::to_bits` (low mantissa bits zero), and FxHash mixes entropy only upward,
+collapsing hashbrown's low-bit bucket index → O(n) probes; a splitmix64 finalizer in `finish()` fixed it.
+**1547 tests** green + conformance (7/7) + `clippy -- -D warnings` clean.
+
 **✅ `defer:` block form LANDED (2026-06-11).** Ergonomic gap closure (was 🟡 in `gaps.md`), TDD'd and
 two-engine-parity-clean. `defer` now takes an indented block as well as a single call — multi-action
 cleanup without N `defer` lines:

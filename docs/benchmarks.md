@@ -163,6 +163,33 @@ untouched.
 > every struct. A struct **type-id guard** (pure-int compare, no name re-verify) is the logged
 > follow-up if this caveat needs closing — see `future.md §4`.
 
+## After M19 Phase 5a — FxHash map/set index — 2026-06-12 (same machine)
+
+The **`usize`/`u64` hasher lever**: `MapData`/`SetData`'s `index` (`cached-hash → positions`) and
+`str_intern` (pointer-keyed) swapped stdlib SipHash for a tiny in-tree FxHash (`src/vm/fxhash.rs`, no
+new dependency). The hasher only routes the probe; `values_equal` confirms every hit, so it's
+behavior-preserving — VM **and** interp parity (interp's map/set are unaffected; new parity tests
+lock map int/str keys, a constant-`hash()` collision struct, and set ops). Maps/sets were previously
+**unbenched** — added `benches/chz/map.chz` (200k int inserts + 1M lookups; int keys hash straight to
+their `f64` bits, isolating the index hasher) + `benches/py/map.py`.
+
+| bench    | chezzi (P4 → P5a)       | python  | slower (P4 → P5a)       |
+|----------|-------------------------|---------|-------------------------|
+| map      | 252 ms → **234 ms**     | 84 ms   | 3.04× → **2.82×**       |
+| str      | flat (~2.6×, str_intern noise) | — | unchanged              |
+| fib/list/loop/struct | flat (no map/intern traffic) | — | unchanged   |
+
+**`map` −7%** is the win, on the lever's target. Other benches are flat (none touch map/set; the
+`str_intern` get/insert is one lookup per `ConstStr`, lost in noise).
+
+> **Footgun, found by measuring (the a-priori-guess discipline):** a *naive* FxHash (multiply only,
+> no finalizer) made the map bench **100× slower** (252 ms → **24 s**). Cause: int keys store
+> `f64::to_bits`, whose **low mantissa bits are zero** for a run of integers (entropy is all in the
+> high bits). FxHash's multiply mixes entropy only *upward*, so hashbrown's low-bit bucket index
+> collapsed → O(n) probe chains. Fix: a splitmix64 finalizer in `finish()` avalanches high bits down.
+> Lesson logged: "the index `u64` is already a good hash" is true for **string** keys (avalanched
+> `DefaultHasher`) but **false** for int/float keys (raw `to_bits`) — the hasher must finalize.
+
 ## Reading it
 
 The shape matches what `future.md §4` predicted from first principles: **the gap is

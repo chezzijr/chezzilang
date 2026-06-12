@@ -7,6 +7,7 @@ pub mod core;
 pub mod heap;
 pub mod op;
 mod blocking_pool;
+mod fxhash;
 mod poller;
 mod pool;
 mod timer;
@@ -219,7 +220,7 @@ struct Vm {
     /// operator, so aliasing is unobservable. The cached `GcRef`s are GC roots (see [`Vm::collect`])
     /// so they're never swept; the cache is heap-keyed, so an M:N fiber swaps it WITH its heap in
     /// [`Vm::swap_ctx`] (like `module_objs`/`executors`).
-    str_intern: std::collections::HashMap<usize, GcRef>,
+    str_intern: fxhash::FxHashMap<usize, GcRef>,
     /// M19 Phase 4 — per-call-site struct-field inline caches, indexed by the `ic` id baked into
     /// `GetField`/`SetField` ops (dense `0..program.field_ic_sites`). Holds field indices, not
     /// `GcRef`s, so it carries no heap state: never snapshotted, never swapped in [`Vm::swap_ctx`].
@@ -469,7 +470,7 @@ struct FiberCtx {
     /// M19 Phase 3 — the fiber's `ConstStr` intern cache (GC roots into its own heap; same heap-keyed
     /// argument as `module_objs`). Travels with `heap` across [`Vm::swap_ctx`]. Empty for cooperative
     /// fibers (they alias the shell's cache).
-    str_intern: std::collections::HashMap<usize, GcRef>,
+    str_intern: fxhash::FxHashMap<usize, GcRef>,
     /// D6b — a non-blocking `connect` parked on writability (see [`ConnectInProgress`]). Non-heap, so
     /// it carries no `GcRef` and needs no GC rooting; but it MUST travel with the fiber across the
     /// park, so it swaps in [`Vm::swap_ctx`] like the other per-fiber state. `None` unless this fiber
@@ -1749,7 +1750,7 @@ impl Vm {
             host: crate::native::HostConfig::default(),
             call_depth: 0,
             module_objs: Vec::new(),
-            str_intern: std::collections::HashMap::new(),
+            str_intern: fxhash::FxHashMap::default(),
             field_ic,
             cur_base: 0,
             handlers: Vec::new(),
@@ -8808,6 +8809,56 @@ mod tests {
         assert_eq!(run("print(chr(233))\n"), "é\n");
     }
 
+    // ---- M19: FxHash map/set index hasher (correctness guards) ----
+    // The map/set `index` (cached-hash → positions) and `str_intern` swap SipHash for a cheap FxHash.
+    // The hasher only picks buckets; `values_equal` confirms every probe, so behavior must not change.
+
+    #[test]
+    fn fxhash_map_int_keys_insert_lookup_remove() {
+        // Int keys hash straight to f64 bits, so this exercises only the index BuildHasher. Insert,
+        // read, remove (rebuilds the index), then re-insert — all must agree with the interpreter.
+        let src = "m := {}\ni := 0\nwhile i < 50:\n    m[i] = i * 2\n    i = i + 1\n\
+                   m.remove(10)\nm.remove(20)\nm[10] = 999\n\
+                   acc := 0\nfor k in m:\n    acc = acc + m[k]\nprint(acc)\nprint(m.len())\n";
+        // sum(2i, i in 0..50) = 2450; drop 20→-40, drop10 then re-add 10→999: 2450-20-40+999 = 3389
+        assert_eq!(run_parity(src), "3389\n49\n");
+    }
+
+    #[test]
+    fn fxhash_map_str_keys() {
+        // String keys hash by content (DefaultHasher, unchanged) then route through the index
+        // BuildHasher (changed). Repeated-key updates must still land in the same entry.
+        let src = concat!(
+            "counts := {}\n",
+            "for w in [\"a\", \"b\", \"a\", \"c\", \"a\", \"b\"]:\n",
+            "    if counts.has(w):\n",
+            "        counts[w] = counts[w] + 1\n",
+            "    else:\n",
+            "        counts[w] = 1\n",
+            "for k in counts:\n",
+            "    print(\"{k}={counts[k]}\")\n",
+        );
+        assert_eq!(run_parity(src), "a=3\nb=2\nc=1\n");
+    }
+
+    #[test]
+    fn fxhash_constant_hash_collision_still_resolves() {
+        // A struct key whose hash() is constant forces every key into ONE index bucket. The probe
+        // must still find the right entry via structural ==, regardless of the bucket hasher.
+        let src = "struct K:\n    v: int\n    fn hash(self) -> int:\n        return 7\n\
+                   m := {}\ni := 0\nwhile i < 30:\n    m[K(i)] = i\n    i = i + 1\n\
+                   print(m[K(7)])\nprint(m[K(29)])\nprint(m.has(K(30)))\nprint(m.len())\n";
+        assert_eq!(run_parity(src), "7\n29\nfalse\n30\n");
+    }
+
+    #[test]
+    fn fxhash_set_dedup_and_ops() {
+        // Set dedup + union/intersection/difference over the index hasher.
+        let src = "a := set([1, 2, 3, 2, 1])\nb := set([3, 4, 5])\n\
+                   print(a.len())\nprint(a.union(b).len())\nprint(a.intersection(b).len())\nprint(a.difference(b).len())\n";
+        assert_eq!(run_parity(src), "3\n5\n1\n2\n");
+    }
+
     // ---- M19 Phase 4: struct-field inline cache (correctness guards) ----
 
     /// Run on the VM and the frozen interpreter; assert byte-identical stdout (the M19 parity bar),
@@ -9263,7 +9314,7 @@ mod tests {
             module_objs: vec![fib_mod],
             module_faulted: vec![false],
             executors: vec![fib_exec],
-            str_intern: std::collections::HashMap::from([(0x20usize, fib_str)]),
+            str_intern: fxhash::FxHashMap::from_iter([(0x20usize, fib_str)]),
             ..FiberCtx::default()
         };
 

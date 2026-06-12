@@ -154,8 +154,13 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   **Note:** "concat / `split` / `+` builder/rope" is *not* a benched lever — the `str` bench is
   `BuildStr` + `,".join`, and `join` already buffers into one `String` (`mod.rs:4377`); `+`/`split`
   aren't exercised. A builder/rope only helps un-benched `s = s + x` loops.
-- **Faster `usize` hasher** — the field/global IC and map paths hash small integer keys with the
-  default SipHash; a cheap identity/FxHash-style hasher on the IC-id and slot paths is a small win.
+- ✅ **Faster `usize`/`u64` hasher** — *landed M19 Phase 5a*: `MapData`/`SetData`'s `index` (keyed by
+  the cached content hash) and `str_intern` (pointer-keyed) swapped SipHash for an in-tree FxHash
+  (`src/vm/fxhash.rs`, no dep). **`map` −7%** (3.04×→2.82× CPython; maps were unbenched, so a `map`
+  bench was added). **Gotcha:** a naive multiply-only FxHash was **100× slower** — int keys store
+  `f64::to_bits` (zero low bits), and FxHash mixes entropy only upward, collapsing hashbrown's low-bit
+  bucket index; a splitmix64 finalizer in `finish()` fixed it. (The field/global IC paths don't use a
+  HashMap — they're `Vec`-indexed already — so the lever reduced to the map/set + intern paths.)
 - ✅ **`ConstStr` interning** — *landed M19 Phase 3*: a per-heap cache keyed by the literal's data
   pointer reuses the already-allocated handle, so a repeated `ConstStr` push is a pointer lookup,
   not a fresh box. (Cross-site compile-time dedup `Op::ConstStr(u32)` is marginal over this.)

@@ -1,0 +1,22 @@
+# Bench: map insert + lookup, 200k inserts + 1M lookups. Builds a map of 200k int->int,
+# then sums every value five times over. Int keys hash straight to their f64 bits, so this
+# isolates the map's index HashMap<hash, positions> lookup (the FxHash lever) rather than
+# string-content hashing. Prints 199999000000.
+
+fn main():
+    m := {}
+    i := 0
+    while i < 200000:
+        m[i] = i * 2
+        i += 1
+    total := 0
+    r := 0
+    while r < 5:
+        j := 0
+        while j < 200000:
+            total += m[j]
+            j += 1
+        r += 1
+    print(total)
+
+main()
