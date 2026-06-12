@@ -59,6 +59,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
         });
     }
     c.program.field_ic_sites = c.field_ic_next;
+    c.program.method_ic_sites = c.method_ic_next;
     Ok(c.program)
 }
 
@@ -85,6 +86,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         global_slots,
     });
     c.program.field_ic_sites = c.field_ic_next;
+    c.program.method_ic_sites = c.method_ic_next;
     Ok(c.program)
 }
 
@@ -103,6 +105,10 @@ struct Compiler {
     /// program (every module shares this `Compiler`), so each `GetField`/`SetField` on a struct
     /// field gets a unique slot into the VM's `field_ic` vector. Recorded into `Program::field_ic_sites`.
     field_ic_next: u32,
+    /// M19 Phase 6 — next method-call inline-cache site id, allocated densely across the whole program
+    /// (like `field_ic_next`). Each `CallMethod` op gets a unique slot into the VM's `method_ic`
+    /// vector. Recorded into `Program::method_ic_sites`.
+    method_ic_next: u32,
 }
 
 impl Compiler {
@@ -113,6 +119,7 @@ impl Compiler {
             variants: HashMap::new(),
             modules: Vec::new(),
             field_ic_sites: 0,
+            method_ic_sites: 0,
         };
         // Built-in Result / Option variants, available without declaration.
         for (v, e, arity) in [("Ok", "Result", 1), ("Err", "Result", 1), ("Some", "Option", 1), ("None", "Option", 0)] {
@@ -121,7 +128,16 @@ impl Compiler {
                 VariantDef { enum_name: e.to_string(), arity },
             );
         }
-        Compiler { program, struct_fields: HashMap::new(), globals: HashMap::new(), global_slots: Vec::new(), field_ic_next: 0 }
+        Compiler { program, struct_fields: HashMap::new(), globals: HashMap::new(), global_slots: Vec::new(), field_ic_next: 0, method_ic_next: 0 }
+    }
+
+    /// M19 Phase 6 — allocate an inline-cache site id for a `CallMethod` op. Every method/module-member
+    /// call gets a fresh dense id (the VM fills it only for struct-method dispatch; module/core-type
+    /// calls leave it empty, costing one unused `method_ic` slot — negligible).
+    fn next_method_ic(&mut self) -> u32 {
+        let id = self.method_ic_next;
+        self.method_ic_next += 1;
+        id
     }
 
     /// M19 Phase 4 — allocate an inline-cache site id for a field op. Numeric field names are tuple
@@ -738,7 +754,8 @@ impl Compiler {
             let to_seq_step = fc.emit_jump(Op::JumpIfFalse(0), span); // false ⇒ seq step
             // ----- struct step: call next() → opt_slot -----
             fc.emit(Op::GetLocal(iter_slot), span);
-            fc.emit(Op::CallMethod("next".to_string(), 0), span);
+            let ic = self.next_method_ic();
+            fc.emit(Op::CallMethod { name: "next".to_string(), argc: 0, ic }, span);
             fc.emit(Op::SetLocal(opt_slot), span);
             // ----- shared Option decoder (channel + struct): None ⇒ exit, Some(v) ⇒ bind v -----
             fc.patch_jump(chan_to_opt);
@@ -823,7 +840,8 @@ impl Compiler {
             fc.emit(Op::ListClone, iter.span);
             fc.emit(Op::SetLocal(lst), span);
             fc.emit(Op::GetLocal(src_slot), span);
-            fc.emit(Op::CallMethod("values".to_string(), 0), span);
+            let ic = self.next_method_ic();
+            fc.emit(Op::CallMethod { name: "values".to_string(), argc: 0, ic }, span);
             fc.emit(Op::SetLocal(vals), span);
             let after_init = fc.emit_jump(Op::Jump(0), span);
             // list init: clone the list of tuples into `lst`
@@ -1475,7 +1493,8 @@ impl Compiler {
             for a in args {
                 self.compile_expr(fc, a)?;
             }
-            fc.emit(Op::CallMethod(name.clone(), args.len()), span);
+            let ic = self.next_method_ic();
+            fc.emit(Op::CallMethod { name: name.clone(), argc: args.len(), ic }, span);
             return Ok(());
         }
         // Bare-ident callees resolve by name in the interpreter's order:

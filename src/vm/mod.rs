@@ -208,6 +208,25 @@ impl IcCell {
     const EMPTY: IcCell = IcCell { idx: u32::MAX, tid: TID_NONE };
 }
 
+/// M19 Phase 6 — a single method-call inline-cache cell. `tid` is the struct layout id the cached
+/// dispatch was resolved for (the sole liveness gate, like [`IcCell`]); a hit requires
+/// `tid != TID_NONE && tid == recv.tid`, so an empty cell or a different receiver type re-resolves.
+/// `proto` is the resolved method body (program-global, stable across heaps); `module_idx` recovers
+/// the method's home module from the *current* heap's `module_objs` on the fast path — held as an
+/// index, NOT a `GcRef`, so the cell stays heap-independent (invisible to GC / snapshots / `swap_ctx`,
+/// exactly like the field IC). Module-member / core-type calls never fill a cell (they don't match
+/// the `Obj::Struct` guard) and so always take the slow path.
+#[derive(Clone, Copy)]
+struct MethodIcCell {
+    tid: u32,
+    proto: ProtoId,
+    module_idx: u32,
+}
+
+impl MethodIcCell {
+    const EMPTY: MethodIcCell = MethodIcCell { tid: TID_NONE, proto: 0, module_idx: 0 };
+}
+
 struct Vm {
     program: Arc<Program>,
     heap: Heap,
@@ -235,6 +254,12 @@ struct Vm {
     /// Cooperative fibers share one `Vm` but run sequentially (no race); `--parallel` workers each
     /// own a separate `Vm` (no race). Each cell self-verifies, so sharing is always sound.
     field_ic: Vec<IcCell>,
+    /// M19 Phase 6 — per-call-site method inline caches, indexed by the `ic` id baked into
+    /// `CallMethod` ops (dense `0..program.method_ic_sites`). Holds proto ids + module indices, not
+    /// `GcRef`s, so it carries no heap state: never snapshotted, never swapped in [`Vm::swap_ctx`].
+    /// Same sharing argument as `field_ic` — sequential cooperative fibers / per-worker `Vm`s, each
+    /// cell tid-guarded so it self-verifies.
+    method_ic: Vec<MethodIcCell>,
     /// The current frame's slot base — cached so local access doesn't re-walk `frames` each op.
     cur_base: usize,
     /// Active `recover:` boundaries (a stack; the innermost is last). A runtime fault unwinds to the
@@ -1571,7 +1596,7 @@ impl ReadyWorker {
                 for a in args {
                     worker.push(a);
                 }
-                worker.do_method_call(&name, argc, span)?;
+                worker.do_method_call(&name, argc, NO_IC, span)?;
                 if worker.suspend.is_some() {
                     return Err(worker.err(
                         "spawn: a method task blocked on recv in an isolated worker (no scheduler until B3.3-threads)".to_string(),
@@ -1748,6 +1773,7 @@ struct OffloadReq {
 impl Vm {
     fn new(program: Arc<Program>) -> Self {
         let field_ic = vec![IcCell::EMPTY; program.field_ic_sites as usize];
+        let method_ic = vec![MethodIcCell::EMPTY; program.method_ic_sites as usize];
         Vm {
             program,
             heap: Heap::new(),
@@ -1760,6 +1786,7 @@ impl Vm {
             module_objs: Vec::new(),
             str_intern: fxhash::FxHashMap::default(),
             field_ic,
+            method_ic,
             cur_base: 0,
             handlers: Vec::new(),
             pending_exit: None,
@@ -2502,7 +2529,7 @@ impl Vm {
                 }
             }
             Op::Call(argc) => self.do_call(*argc, span)?,
-            Op::CallMethod(name, argc) => self.do_method_call(name, *argc, span)?,
+            Op::CallMethod { name, argc, ic } => self.do_method_call(name, *argc, *ic, span)?,
             Op::CallBuiltin(name, argc) => self.do_builtin(name, *argc, span)?,
             Op::CallPrint(argc) => self.do_print(*argc, span)?,
             Op::Return => self.do_return(false)?,
@@ -3865,7 +3892,12 @@ impl Vm {
         Ok(())
     }
 
-    fn do_method_call(&mut self, method: &str, argc: usize, span: Span) -> Result<(), RuntimeError> {
+    /// `ic`: the per-call-site method inline-cache id from the `CallMethod` op, or [`NO_IC`] for the
+    /// native-re-entry callers (`spawn`/`defer` method tasks) that need a *synchronous* result and so
+    /// must take the re-entrant `run_proto` path (never the in-place frame flatten). A real `ic` ⟺ the
+    /// caller is the running dispatch loop (the sole emit path), so a real `ic` is exactly the
+    /// "flatten-safe" signal: the pushed frame is executed by the `run_until` that called us.
+    fn do_method_call(&mut self, method: &str, argc: usize, ic: u32, span: Span) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
         let recv = self.pop();
@@ -3886,6 +3918,30 @@ impl Vm {
         let Value::Obj(h) = recv else {
             return Err(self.err(format!("type {} has no method '{method}'", self.type_name(recv)), span));
         };
+        // M19 Phase 6 — method-call inline-cache fast path (struct methods only). A hit on a matching
+        // `tid` collapses the `program.structs` clone + name-keyed `def.methods` probe to one int
+        // compare AND flattens the call: `[recv, args…]` go on the stack and the method frame is
+        // installed in place, so the running `run_until` executes the body and its `Return` pushes the
+        // result — no re-entrant `run_proto`. Only the dispatch loop reaches here (real `ic`); the
+        // arity guard re-runs (cheap) so a hit can never enter a frame with the wrong slot count.
+        if ic != NO_IC {
+            let cell = self.method_ic[ic as usize];
+            if cell.tid != TID_NONE
+                && let Obj::Struct { tid, .. } = self.heap.get(h)
+                && *tid == cell.tid
+            {
+                let proto = cell.proto;
+                let arity = self.program.protos[proto].arity;
+                if arity != argc + 1 {
+                    return Err(self.err(format!("function '{}' expects {} argument(s), got {}", self.program.protos[proto].name, arity, argc + 1), span));
+                }
+                let home = self.module_objs[cell.module_idx as usize];
+                let base = self.stack.len();
+                self.stack.push(recv);
+                self.stack.extend(args);
+                return self.push_frame_in_place(proto, home, None, base, span);
+            }
+        }
         // Higher-order list methods (`map`/`filter`/`fold`) call a closure per element, which runs
         // nested VM frames that may GC at instruction boundaries. They keep the source + result
         // (and fold's accumulator) rooted on the operand stack across the loop — see `list_hof`.
@@ -3963,13 +4019,25 @@ impl Vm {
                 self.stack.extend(args);
                 self.do_call(argc, span)
             }
-            Obj::Struct { name, fields, .. } => {
+            Obj::Struct { name, fields, tid, .. } => {
                 let def = self.program.structs.get(name.as_ref()).cloned().ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
                 if let Some(&proto) = def.methods.get(method) {
                     let home = self.module_objs[def.module_idx];
                     if self.program.protos[proto].arity != argc + 1 {
                         // `self` + explicit args.
                         return Err(self.err(format!("function '{}' expects {} argument(s), got {}", self.program.protos[proto].name, self.program.protos[proto].arity, argc + 1), span));
+                    }
+                    // M19 Phase 6 — fill the method IC so the next call at this site hits the fast path
+                    // above (only for the dispatch-loop path: a real `ic`, a registered layout `tid`).
+                    if ic != NO_IC && tid != TID_NONE {
+                        self.method_ic[ic as usize] = MethodIcCell { tid, proto, module_idx: def.module_idx as u32 };
+                        // Flatten: install the frame in place and let the running `run_until` execute it
+                        // (mirrors the IC fast path + the `Op::Call` flatten). The re-entrant callers
+                        // pass NO_IC and so keep the synchronous `run_proto` path below.
+                        let base = self.stack.len();
+                        self.stack.push(recv);
+                        self.stack.extend(args);
+                        return self.push_frame_in_place(proto, home, None, base, span);
                     }
                     let mut call_args = Vec::with_capacity(argc + 1);
                     call_args.push(recv);
@@ -4785,7 +4853,7 @@ impl Vm {
                 for a in args {
                     vm.push(a);
                 }
-                vm.do_method_call(&name, argc, span)?;
+                vm.do_method_call(&name, argc, NO_IC, span)?;
                 vm.pop(); // discard the deferred call's result
                 Ok(())
             }
@@ -5829,7 +5897,7 @@ impl Vm {
                 for a in args {
                     self.push(a);
                 }
-                self.do_method_call(&name, argc, span)?;
+                self.do_method_call(&name, argc, NO_IC, span)?;
                 if !self.paused() {
                     self.pop(); // discard the completed task's result (none pending if paused/yielded)
                 }
@@ -9032,6 +9100,90 @@ mod tests {
         assert_eq!(run(src), "10 20\n");
     }
 
+    // ---- M19 Phase 6: method-call inline cache (+ flatten) — correctness guards ----
+    // `Op::CallMethod` on a struct caches `(tid → proto, module_idx)` per call site, mirroring the
+    // field IC: a hit on a matching `tid` skips the `program.structs` clone + the name-keyed
+    // `def.methods` probe. The cell holds no `GcRef` (proto id + module_idx are heap-independent), so
+    // it is invisible to GC / snapshots / `swap_ctx` — sound across cooperative fibers and `--parallel`.
+
+    #[test]
+    fn method_ic_sites_allocated_and_vm_presized() {
+        // White-box wiring: a program with struct-method calls allocates ≥1 method-IC site, and the
+        // VM pre-sizes its per-`Vm` `method_ic` vector to match (mirrors `field_ic_sites`/`field_ic`).
+        let src = "struct C:\n    n: int\n\n    fn g(self) -> int:\n        return self.n\nc := C(5)\nprint(c.g())\n";
+        let tokens = lexer::tokenize(src).unwrap();
+        let module = parser::parse(tokens).unwrap();
+        let program = crate::compiler::compile_module_standalone(&module).unwrap();
+        assert!(program.method_ic_sites >= 1, "expected ≥1 method-IC site, got {}", program.method_ic_sites);
+        let vm = Vm::new(Arc::new(program.clone()));
+        assert_eq!(vm.method_ic.len(), program.method_ic_sites as usize);
+    }
+
+    #[test]
+    fn method_ic_monomorphic_hot_loop() {
+        // A struct method called in a hot loop — the IC hit path. The method DISPATCH (not a field
+        // read) is what the method IC caches; the cached proto must be re-used every iteration.
+        let src = "struct Acc:\n    n: int\n\n    fn add(self, k: int) -> int:\n        return self.n + k\n\
+                   a := Acc(10)\ni := 0\nout := 0\nwhile i < 5:\n    out = out + a.add(i)\n    i = i + 1\nprint(out)\n";
+        // per iter: 10 + i -> 10,11,12,13,14 = 60
+        assert_eq!(run_parity(src), "60\n");
+    }
+
+    #[test]
+    fn method_ic_polymorphic_one_site_via_protocol() {
+        // A protocol-bounded generic fn has ONE `CallMethod` site (type-erased body) reached by two
+        // distinct struct types. A method-IC hit that ignored type identity would dispatch a stale
+        // proto (Sq.area on a Rect); the `tid` guard forces a re-resolve on the type switch.
+        let src = "protocol Shape:\n    fn area(self) -> int\n\
+                   struct Sq:\n    s: int\n\n    fn area(self) -> int:\n        return self.s * self.s\n\
+                   struct Rect:\n    w: int\n    h: int\n\n    fn area(self) -> int:\n        return self.w * self.h\n\
+                   fn describe[S: Shape](x: S) -> int:\n    return x.area()\n\
+                   i := 0\nout := 0\nwhile i < 4:\n    out = out + describe(Sq(3)) + describe(Rect(2, 5))\n    i = i + 1\nprint(out)\n";
+        // per iter: 9 + 10 = 19 ; *4 = 76
+        assert_eq!(run_parity(src), "76\n");
+    }
+
+    #[test]
+    fn method_ic_under_parallel_engine() {
+        // The method IC lives on each worker `Vm`; method-heavy code on the real-thread engine must
+        // match the cooperative engine (caches are per-Vm, tid-guarded, self-verifying).
+        let src = "struct Pt:\n    x: int\n    y: int\n\n    fn sum(self) -> int:\n        return self.x + self.y\n\
+                   p := Pt(3, 4)\nacc := 0\ni := 0\nwhile i < 100:\n    acc = acc + p.sum()\n    p.x = p.x + 1\n    i = i + 1\n\
+                   print(acc)\nprint(p.x)\n";
+        assert_eq!(run_capture_parallel(src).expect("parallel"), run(src));
+    }
+
+    #[test]
+    fn method_ic_gc_stress() {
+        // Method dispatch under collect-before-every-instruction: the cached proto/module_idx stay
+        // valid because they hold no GcRef and GC never reorders a struct's identity.
+        let src = "struct Box:\n    v: int\n\n    fn doubled(self) -> int:\n        return self.v * 2\n\
+                   b := Box(21)\ni := 0\nacc := 0\nwhile i < 30:\n    acc = acc + b.doubled()\n    i = i + 1\nprint(acc)\n";
+        assert_eq!(run_capture_stress(src), run(src));
+        assert_eq!(run_parity(src), "1260\n");
+    }
+
+    #[test]
+    fn method_ic_function_typed_field_not_cached() {
+        // `recv.f(args)` where `f` is a function-typed FIELD (not a method) must keep dispatching via
+        // `invoke_value` — the method IC must never cache it as a method proto.
+        let src = "struct H:\n    op: fn(int) -> int\n\
+                   double := fn(x: int) -> int: x * 2\nh := H(double)\n\
+                   i := 0\nout := 0\nwhile i < 3:\n    out = out + h.op(i + 1)\n    i = i + 1\nprint(out)\n";
+        // per iter: (i+1)*2 -> 2,4,6 = 12
+        assert_eq!(run_parity(src), "12\n");
+    }
+
+    #[test]
+    fn method_call_flatten_deep_recursion_on_small_stack() {
+        // Phase 6b: a recursive struct method must not consume host stack (frames live in the heap
+        // `frames` Vec, executed by the running `run_until` — not a per-call Rust recursion). Survives
+        // a host stack far below production `VM_STACK_BYTES`, like the plain-call flatten guarantee.
+        let src = "struct R:\n    base: int\n\n    fn down(self, n: int) -> int:\n        if n == 0:\n            return self.base\n        return self.down(n - 1)\n\
+                   r := R(99)\nprint(r.down(8000))\n";
+        assert_eq!(run_capture_on_stack(src, 256 * 1024).expect("deep method recursion on small stack"), "99\n");
+    }
+
     #[test]
     fn calls_preserve_arg_order_nesting_and_result_slot() {
         // P1 characterization: locks call semantics before the in-place-args refactor. The bugs an
@@ -9137,6 +9289,7 @@ mod tests {
             variants: Default::default(),
             modules: vec![],
             field_ic_sites: 0,
+            method_ic_sites: 0,
         }
     }
 

@@ -150,8 +150,9 @@ pub enum Op {
     /// Stack: `[callee, arg0, …]`; pops `argc + 1`, pushes the result.
     Call(usize),
     /// `obj.method(args)` — stack `[recv, arg0, …]`. Resolves a struct method (binds `self`) or a
-    /// module member (plain call, no `self`).
-    CallMethod(String, usize),
+    /// module member (plain call, no `self`). `ic`: per-call-site method inline-cache id (dense
+    /// `0..Program::method_ic_sites`), or [`NO_IC`] for the synthetic iterator-protocol sites.
+    CallMethod { name: String, argc: usize, ic: u32 },
     CallBuiltin(String, usize),
     CallPrint(usize),
     Return,
@@ -357,6 +358,10 @@ pub struct Program {
     /// baked into `GetField`/`SetField` ops). The VM pre-sizes its per-`Vm` `field_ic` vector to
     /// this length. Carries no heap state, so it is never snapshotted or swapped.
     pub field_ic_sites: u32,
+    /// M19 Phase 6 — number of method-call inline-cache sites (dense ids `0..method_ic_sites` baked
+    /// into `CallMethod` ops). The VM pre-sizes its per-`Vm` `method_ic` vector to this length. Holds
+    /// proto ids + module indices, not `GcRef`s, so it carries no heap state (never snapshotted/swapped).
+    pub method_ic_sites: u32,
 }
 
 impl Program {
