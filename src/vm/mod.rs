@@ -7291,6 +7291,12 @@ impl Vm {
                 }
                 // Cooperative VM / interp / a `--parallel` callback (`native_reentry > 0`): inline-sleep
                 // to the deadline (single-thread, or an already-blocking host-stack context), synthesise.
+                // Limitation (vs `sleep_ms`, which DEMOTES at `native_reentry > 0`): a `timer.recv()`
+                // reached inside a native callback under `--parallel` pins THIS worker for the timeout
+                // (no replacement is spun). Sound — siblings on the other N-1 workers still progress —
+                // but lower throughput than `sleep_ms`'s demote. Acceptable for v1; demote-reuse is a
+                // future improvement. The cooperative/interp inline-sleep blocks siblings the same way
+                // their `sleep_ms` already does (single-thread).
                 std::thread::sleep(deadline - now);
                 return Ok(RecvStep::Got(WireValue::Bool(true)));
             }
@@ -13576,6 +13582,32 @@ main()
              fn main():\n    a := Atomic(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn bump(a)\n    print(a.load())\nmain()\n"
         );
         assert_eq!(run_capture_parallel(&src).expect("parallel"), format!("{n}\n"));
+    }
+
+    /// `Atomic[float]` add/sub/exchange/cas must behave identically on both engines (covers the
+    /// numeric-`T` arm for floats, not just ints).
+    #[test]
+    fn atomic_float_ops_two_engine_parity() {
+        let src = "fn main():\n    a := Atomic(1.5)\n    print(a.add(2.0))\n    print(a.sub(0.5))\n    print(a.exchange(9.0))\n    print(a.cas(9.0, 4.0))\n    print(a.load())\nmain()\n";
+        assert_eq!(run_capture(src).expect("vm"), crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// `cas` on a non-scalar `T` (a list) exercises the VM's lock-held `from_wire`/`values_equal` path
+    /// — the most distinctive Atomic code path. Both engines must agree.
+    #[test]
+    fn atomic_cas_on_list_two_engine_parity() {
+        let src = "fn main():\n    a := Atomic([1, 2])\n    print(a.cas([1, 2], [9]))\n    print(a.load())\n    print(a.cas([1, 2], [0]))\n    print(a.load())\nmain()\n";
+        assert_eq!(run_capture(src).expect("vm"), crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// `timer(0)` (and any already-elapsed deadline) delivers `true` immediately, on every engine.
+    #[test]
+    fn timer_zero_delivers_immediately() {
+        let src = "fn main():\n    print(timer(0).recv())\nmain()\n";
+        let out = run_capture(src).expect("vm");
+        assert_eq!(out, "true\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp"));
+        assert_eq!(run_capture_parallel(src).expect("parallel"), "true\n");
     }
 
     /// A1 golden: `Channel[T].try_recv()` — a non-blocking poll returning `T?`. Workers `send` at the

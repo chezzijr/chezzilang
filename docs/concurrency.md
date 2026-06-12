@@ -277,6 +277,131 @@ from C3 with no locking; under C5 it becomes a real owner-task + channel, same A
 
 ---
 
+## 6b. `Atomic[T]` — the cross-task atomic box
+
+`Atomic[T]` is `Shared[T]`'s sibling for when you want **atomic operation primitives** (compare-and-swap,
+exchange, fetch-add) rather than `Shared`'s closure-based `update`. Same shape: one box, many tasks; the
+**handle is sendable**, the value is copied in/out under a lock; constructed value-first (`Atomic(v)`,
+`T` inferred). Generic over any `T`; the arithmetic methods are restricted to numeric `T`.
+
+```chezzi
+a := Atomic(0)
+parallel:
+    for _ in 0..100:
+        spawn bump(a)
+print(a.load())            # 100 — every add is atomic, no lost update
+
+fn bump(a: Atomic[int]):
+    a.add(1)
+```
+
+| Method | Signature | Notes |
+|--------|-----------|-------|
+| `load`     | `load(self) -> T` | read out |
+| `store`    | `store(self, v: T) -> nil` | overwrite |
+| `exchange` | `exchange(self, v: T) -> T` | swap; returns the **old** value |
+| `cas`      | `cas(self, expected: T, new: T) -> bool` | compare-and-swap; swaps iff the box equals `expected`; returns whether it did |
+| `add`      | `add(self, x: T) -> T` | numeric `T` only; returns the **new** value |
+| `sub`      | `sub(self, x: T) -> T` | numeric `T` only; returns the **new** value |
+
+`add`/`sub` use the language's checked integer arithmetic (an overflow faults, exactly like `+`/`-`) and
+plain float arithmetic. `cas` compares with the same structural equality as `==`. Each method is a single
+lock-op-unlock, so the read-modify-write is atomic across threads with no separate update lock. `Atomic`
+vs `Shared`: reach for `Atomic` when a lock-free-style counter/flag/CAS-loop is clearer than
+`update(closure)`; reach for `Shared` when the update is an arbitrary transformation.
+
+---
+
+## 6c. `timer(ms)` — the one-shot timeout channel
+
+`timer(ms)` returns a `Channel[bool]` that becomes ready (`recv()` → `true`) once `ms` milliseconds have
+elapsed. It is the **composable timeout primitive**: instead of a bespoke timeout argument on `recv`, a
+timeout is just another channel you can receive from — and, once `wait` lands (§6d), race against real
+channels.
+
+```chezzi
+t := timer(500)
+print(t.recv())            # true — blocks ~500ms, then delivers
+```
+
+It is **level-triggered**: any `recv` at or after the deadline yields `true` (the typical use recvs it
+once). Delivery is handled at `recv` time, in the receiver's own engine — so a `timer` created at the top
+level can be `recv`'d inside a `--parallel` child. On `--parallel` the receiver parks and a background
+job (on the netpoller timer thread) `send`s `true` at the deadline, accounted so it can't trip a false
+deadlock; the cooperative VM and the interpreter inline-sleep to the deadline (single-threaded, like their
+`sleep_ms`). Observable output is identical across all three engines.
+
+> **v1 limitation:** a `timer.recv()` reached *inside a native callback* (a `Shared.update` closure, a
+> list-HOF, an `Executor` task) under `--parallel` pins that worker for the timeout rather than demoting a
+> replacement the way `sleep_ms` does — sound (the other workers progress), just lower throughput. Reuse
+> of the `sleep_ms` demote path is a future improvement.
+
+---
+
+## 6d. `wait` — racing multiple channel receives *(designed; not yet implemented)*
+
+> **Status:** the surface and semantics below are **locked** (brainstormed 2026-06). `Atomic` and `timer`
+> have shipped; `wait` is the remaining piece and is its own focused milestone — the blocking case needs a
+> multi-channel park in the scheduler (see the implementation notes), the exact area where a prior
+> `recv_timeout` was reverted, so it is being done carefully and separately rather than rushed.
+
+`wait` is Chezzi's `select`: block until **whichever of several channels is ready first**, bind its value,
+and run that arm. Because Chezzi channels are **unbounded** (a `send` never blocks), `wait` is purely
+*recv*-oriented — there are no send-arms (a send is always instantly ready, so it would be pointless).
+Combined with `timer`, `wait` subsumes a bounded-wait `recv` (`ch.recv_timeout(500)` ≡ a `wait` over `ch`
+and `timer(500)`), which is why no separate `recv_timeout` exists.
+
+```chezzi
+wait:
+    v := orders.recv():        handle(v)        # arm-local binding `v: T` (the channel's element type)
+    result = cancels.recv():   result = "x"     # `=` assigns an existing outer lvalue instead
+    _ := timer(500).recv():    on_timeout()      # `_` discards; a timer arm is just a recv
+    else:                      poll_miss()       # optional, non-blocking; if no arm is ready, run this
+```
+
+**Surface & grammar.** A new compound statement (sibling to `match`/`parallel`):
+`wait : NEWLINE INDENT <arm>+ DEDENT`. Each recv-arm is `<target> ( ":=" | "=" ) <chanExpr> ".recv()" ":"
+<block>`, where:
+- the RHS **must** be a `.recv()` on an expression of type `Channel[T]` — a non-`.recv()` RHS (e.g.
+  `v := fn():`) is a compile error (`wait` has nothing to block on without a channel). The `<chanExpr>`
+  itself can be any expression (`ch`, `chans[i]`, `get_chan()`, `timer(500)`), evaluated **once**.
+- the target is `:=` (a fresh arm-scoped binding, like a `match` arm pattern), `=` (assign an existing
+  outer lvalue — arm bodies are lexical sub-scopes, not closures, so outer mutation is normal), or `_`
+  (discard).
+- `else:` is optional, at most one, and must be **last**.
+
+**Type-check.** Each arm's `chanExpr: Channel[T]` → the target binds/assigns `T`. `wait` is **not**
+exhaustive (it's a runtime race, not a type match); ≥1 recv-arm is required.
+
+**Runtime semantics.**
+1. Evaluate each arm's channel expression once, in source order.
+2. Poll arms in **source order** (deterministic priority, not Go's random fairness — documentable, can
+   randomize later): the first channel with a queued value wins → pop, bind, run its block.
+3. A **closed + empty** channel's arm is **skipped** (option B). If *every* arm's channel is closed+empty
+   and there's no `else`, the `wait` faults `"wait: all channels closed"`.
+4. If no arm is ready: with an `else`, run it (non-blocking); otherwise **block** — park the fiber on *all*
+   live arm channels and re-poll on the first wake.
+
+**Implementation notes (for the next session).**
+- *Non-blocking* (`else` present) and the *poll* step reuse the existing `try_recv` path (a timer arm's
+  `try_recv` is already deadline-aware) — straightforward in all engines.
+- *Blocking* (no `else`) needs a **multi-channel park**: today a fiber parks in one `parked[key]` bucket
+  (`MnSched::park`/`send_wake`/`close_wake`) and is woken by a send to that key. `wait` needs one fiber
+  parked on N keys, woken by the first sender, and **swept out of the other N-1 buckets** — otherwise a
+  later send wakes a fiber that already moved on. Design: a `WaitPark { fiber, keys, claimed: Arc<AtomicBool> }`
+  held once, with a lightweight token in each `parked[key]`; the first waker CASes `claimed`, takes the
+  fiber, and removes its token from all `keys` — all under the existing sched lock (serialized with
+  `park`'s gap re-check). The single-channel `recv` park becomes the **1-key special case** (so plain
+  `recv` is provably unchanged — add a regression test). This must be done in **both** schedulers: the
+  M:N `MnSched` and the cooperative in-VM nursery scheduler, plus the interp's sequential poll-once form.
+- *Cooperative VM / interp* (sequential): poll arms once in source order; first ready wins; else if `else`,
+  run it; else if any arm is timer-backed, inline-sleep to the soonest deadline and take that arm; else
+  fault (all-closed or the existing deadlock fault). Deterministic → golden parity with the VM holds.
+- *`native_reentry > 0`* (inside a native callback) on `--parallel`: snapshot-park is impossible — mirror
+  `demote_recv_block` with a **multi-channel demote-poll** (bounded `wait_timeout` over all arm queues).
+
+---
+
 ## 7. Sendability
 
 Crossing a task boundary (a `spawn` capture or a `Channel.send`) is gated on **sendability**, and

@@ -34,11 +34,11 @@ use std::sync::{Arc, Condvar, Mutex};
 pub struct ChannelCore {
     pub q: Mutex<ChanState>,
     pub cv: Condvar,
-    /// `timer(ms)` one-shot timeout channel: `Some(deadline)` iff this channel was built by `timer`.
-    /// It delivers `true` once its deadline passes. On `--parallel` a background timer job `send`s the
-    /// value (so a parked receiver wakes normally); the cooperative VM and interp instead *synthesise*
-    /// it on `recv`/`try_recv` (inline-sleep to the deadline, then yield `true`) since they have no
-    /// thread-safe background sender. `None` for an ordinary `Channel[T]`.
+    /// `timer(ms)` timeout channel: `Some(deadline)` iff this channel was built by `timer`. It is
+    /// **level-triggered** — `recv` yields `true` on any call at/after the deadline (the typical use
+    /// recvs it once, in a `wait` arm). Delivery is handled at `recv` time in the receiver's own
+    /// scheduler: `--parallel` schedules a background `send(true)` + parks; cooperative VM / interp /
+    /// callbacks inline-sleep to the deadline and synthesise `true`. `None` for an ordinary `Channel[T]`.
     pub timer: Option<std::time::Instant>,
 }
 
