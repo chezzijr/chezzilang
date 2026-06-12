@@ -4972,6 +4972,21 @@ b := Buf([10, 20, 30])
         assert_eq!(run_capture(source).expect("set.chz should run"), expected);
     }
 
+    /// Additive std.math trig/exp/log intrinsics: interp-side twin of `golden_math_more_via_run_file`.
+    /// Imports (`std.io`/`std.math`) require the module-graph path, so this drives `run_file` (not
+    /// `run_capture`, which skips resolution) and asserts the interp stdout byte-matches `.expected`.
+    #[test]
+    fn golden_math_more_chz() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/math_more.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/math_more.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("math_more.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
     /// `defer` golden: LIFO cleanup across every frame-exit path (normal return, `?`, panic), with
     /// args evaluated at the defer statement. Cross-engine parity is asserted in `vm`'s twin test.
     #[test]
