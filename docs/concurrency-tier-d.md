@@ -12,8 +12,8 @@ snapshot), D2 (D2a heap-into-`FiberCtx` + D2b M:N scheduler), D3 (reduction-coun
 `read`/`accept`/`write` `timeout_ms`). Per-connection `spawn` (eager injectable nursery) also landed.
 The `--parallel` engine is a true Go-style GMP work-stealing M:N scheduler with BEAM-style preemption
 and a netpoller; **1565 tests green**, clippy clean, `primes_parallel=148933` on both engines, all
-`--parallel` goldens byte-identical, serial engine frozen as the parity oracle. **Only M-C implicit
-nurseries remain deferred (by design).**
+`--parallel` goldens byte-identical, serial engine frozen as the parity oracle. **M-C implicit
+nurseries shipped (2026-06-12)** — concurrency is feature-complete.
 
 ## TL;DR
 
@@ -337,7 +337,8 @@ Critical + Important findings before the completion claim.
   after close fault, **`for v in ch:`** blocking iteration (drains then ends on close, Go's
   `for v := range ch`), and **`try_send(v) -> bool`**. `closed` folded into the queue mutex
   (`ChanState`) so the park-gap re-check is TOCTOU-free. See PROGRESS.md.
-- **M-C implicit nurseries** — deferred by design (the only remaining deferral).
+- **M-C implicit nurseries** — shipped (2026-06-12): bare `spawn` legal anywhere; every function body /
+  module top level joins its tasks at `return`/end. See `docs/concurrency.md §10`.
 - **Cross-nursery wakeups** ([§11](concurrency.md)) — mooted by real-thread blocking; M:N's flat run
   queues may lift it for free.
 - **Priority classes** (BEAM) — deferred; revisit if priority becomes a requirement.

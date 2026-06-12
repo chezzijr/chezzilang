@@ -4,8 +4,9 @@
 > `parallel:`, `Channel`/`Shared`/`Executor`) and both engines ship; `--parallel` is a real OS-thread
 > M:N work-stealing scheduler with reduction-counting preemption, a dirty/blocking pool, and an
 > epoll/kqueue netpoller behind non-blocking `std.net`. Phase history: [`concurrency-tier-d.md`](concurrency-tier-d.md)
-> (D0–D6c) + [`concurrency-b3.md`](concurrency-b3.md) (the B3 OS-thread foundation). Only **M-C implicit
-> nurseries** remain deferred (by design). `PROGRESS.md` is the live status tracker.
+> (D0–D6c) + [`concurrency-b3.md`](concurrency-b3.md) (the B3 OS-thread foundation). **M-C implicit
+> nurseries shipped** (§10) — every function body and the module top level is an implicit nursery that
+> joins at its `return`/end, so a bare `spawn` is legal anywhere. `PROGRESS.md` is the live status tracker.
 >
 > The syntax was fixed up front and the *engine* shipped staged (a sequential executor first, real
 > multicore later) so the surface never changed as concurrency got teeth.
@@ -129,8 +130,10 @@ This is **structured concurrency**, the modern consensus that postdates Go: Pyth
 
 ### Nursery scoping rules
 
-- **`spawn` is only legal inside an enclosing `parallel:`.** A bare `spawn` (top level or in a
-  function with no nursery) is a **checker error**: *"spawn must be inside a parallel: block."*
+- **`spawn` is legal anywhere in a function body or at the module top level** (M-C, §10). Every
+  function body and the module top level is an *implicit nursery*; a bare `spawn` binds to it and
+  joins at the body's `return`/end (the module top level joins at program exit). An explicit
+  `parallel:` is an inner sub-nursery that joins earlier, at its dedent.
 - **Function-boundary rule (the safety invariant).** A `spawn` binds to a nursery **within its own
   function** — it can **never** reach an enclosing function's or the module's nursery. This is what
   stops a task spawned in `fn worker()` from outliving `worker`'s return:
@@ -413,8 +416,9 @@ Ships join semantics with side-effecting tasks (e.g. `print`). No channels yet.
 - **Parser** `src/parser/mod.rs`: dispatch in `parse_stmt`; `parse_parallel` (reuse `parse_block`);
   `parse_spawn` — `spawn:` → block form, else a call expr (reject a non-call form-1 with a clear
   message, mirror `defer`).
-- **Checker** `src/checker/mod.rs` (`check_stmt`): a nursery-depth counter — `Parallel` enters,
-  `Spawn` at depth 0 errors *"spawn must be inside a parallel: block"*; form-1 target must be a call.
+- **Checker** `src/checker/mod.rs` (`check_stmt`): `Spawn` is legal anywhere (M-C) — the implicit
+  function/module nursery always provides a binding target; form-1 target must be a call, and the
+  sendability/airlock checks on the receiver + args still apply.
 - **Interp** `src/interp/mod.rs`: `Interp.nurseries: Vec<Vec<Task>>`; `Task = Call { callee, args } |
   Block { body, scope }`. `Parallel` → push a list, run the body, pop, run tasks FIFO (reuse the
   re-entrant call path), first `Err` stops siblings + propagates. `Spawn` → eval callee+args (form 1)
@@ -545,15 +549,26 @@ outer nursery is not woken by an inner one).
 
 ## 10. Future evolution
 
-- **M-C — implicit nurseries (ergonomic sugar, deferred).** Today's model (**M-A**) requires every
-  `spawn` to sit inside an explicit `parallel:`, *including* top level — chosen because under the
-  sequential executor the dedent is *where tasks run*, so keeping it explicit keeps the run-barrier
-  visible. A later evolution (**M-C**) could make **every function body an implicit nursery** that
-  joins at its `return`/end (the module top level joins at program exit), demoting `parallel:` to an
-  explicit *inner* sub-nursery for earlier joins. Ergonomic ("spawn anywhere in a function"), uniform
-  (no top-level/function asymmetry), and still safe via the function-boundary rule. Deferred because an
-  invisible "joins at end of function" barrier hides *when* work runs — which matters precisely while
-  execution is observable-sequential. Revisit after C5.
+- **M-C — implicit nurseries (shipped).** The original model (**M-A**) required every `spawn` to sit
+  inside an explicit `parallel:`, *including* top level. **M-C** makes **every function body (and the
+  module top level) an implicit nursery** that joins at its `return`/end (the module top level joins
+  at program exit), demoting `parallel:` to an explicit *inner* sub-nursery for earlier joins. A bare
+  `spawn` is now legal anywhere in a function; it is ergonomic ("spawn anywhere"), uniform (no
+  top-level/function asymmetry), and still safe via the function-boundary rule (a task can't outlive
+  the function that spawned it).
+  - **Join semantics.** `return <value>`, fall-through end, and a `?` early-return are all **join
+    points**: the function's spawned tasks run to completion FIFO, *then* control leaves. An explicit
+    inner `parallel:` joins earlier at its dedent; a `return`/`?` that *escapes* an inner `parallel:`
+    still cancels-and-reports that inner nursery (unchanged) while joining the function's implicit one.
+    An uncaught **fault** propagating out of a body cancels-and-reports the implicit nursery's
+    unstarted tasks (abnormal exit, not a join). `defer`s run *after* the implicit join (tasks
+    complete, then cleanup).
+  - **Zero-overhead gate.** A body gets an implicit nursery only if it lexically contains a bare
+    `spawn` (a compile-time pre-scan, `compiler::block_has_bare_spawn`); bodies without one emit
+    byte-identical bytecode to pre-M-C. Implemented as a single join site — the compiler emits the
+    opening `Op::EnterNursery` and flags the `Proto`; the VM's `do_return` joins for `return`/`?`/end.
+    Implementation: `src/{checker,compiler,vm,interp}`; tests in `vm::tests::implicit_nursery_*` +
+    `examples/implicit_nursery.chz`.
 - **Real concurrency (C5):** the Tier-A cooperative scheduler and/or Tier-C OS threads — true
   multicore and mid-flight task communication, behind the unchanged surface.
 - **The `Executor` escape hatch (C5):** the separately-owned work queue for tasks that must outlive

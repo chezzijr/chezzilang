@@ -3693,11 +3693,16 @@ fn non_fn_field_call_still_rejected() {
 // ----- concurrency C1: spawn / parallel: nursery scoping -----
 
 #[test]
-fn spawn_outside_parallel_rejected() {
-    rejects(
-        "fn w():\n    print(1)\nfn main():\n    spawn w()\nmain()\n",
-        "spawn must be inside a parallel: block",
-    );
+fn spawn_at_function_scope_ok() {
+    // M-C implicit nurseries: every function body is an implicit nursery, so a bare `spawn`
+    // (no enclosing `parallel:`) is legal anywhere in a function. It joins at the function's end.
+    ok("fn w():\n    print(1)\nfn main():\n    spawn w()\nmain()\n");
+}
+
+#[test]
+fn spawn_at_module_toplevel_ok() {
+    // M-C: the module top level is itself an implicit nursery (joins at program exit).
+    ok("fn w():\n    print(1)\nspawn w()\n");
 }
 
 #[test]
@@ -3867,13 +3872,12 @@ fn task_local_binding_in_spawn_block_assignable() {
 }
 
 #[test]
-fn spawn_in_plain_fn_rejected() {
-    // The function-boundary rule (reset at fn entry): a `spawn` in a function whose body has no
-    // `parallel:` is illegal even when that function is *called* from inside another's nursery.
-    rejects(
-        "fn w():\n    spawn other()\nfn other():\n    print(1)\nfn main():\n    parallel:\n        w()\nmain()\n",
-        "spawn must be inside a parallel: block",
-    );
+fn spawn_in_plain_fn_ok() {
+    // M-C: a `spawn` in a function with no explicit `parallel:` is legal — the function body is an
+    // implicit nursery that joins at the function's end. The function-boundary rule still holds at
+    // runtime (the task binds to *this* function's nursery, never the caller's), enforced by the
+    // compiler/VM emitting a per-function implicit nursery.
+    ok("fn w():\n    spawn other()\nfn other():\n    print(1)\nfn main():\n    parallel:\n        w()\nmain()\n");
 }
 
 // ----- concurrency C3: Shared[T], the cross-task mutable box -----

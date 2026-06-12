@@ -1,0 +1,8 @@
+fanout body
+a ran
+b ran
+fanout returned 0
+inner ran
+after inner nursery
+outer ran
+done

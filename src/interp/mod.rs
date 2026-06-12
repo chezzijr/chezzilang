@@ -946,6 +946,46 @@ impl Interp {
         Ok(body_flow)
     }
 
+    /// M-C implicit nurseries — drain the implicit function / method / `spawn:`-block nursery that the
+    /// body wrap pushed at entry. The function's `return`/`?`/end is the JOIN barrier (vs. an explicit
+    /// `parallel:`, whose dedent is the barrier and whose early escapes cancel):
+    /// - clean exit (Normal fall-through, explicit `return`, or a `?` early-return — which surfaces as
+    ///   `Err("? propagation")` with `propagating` set) ⇒ JOIN: run the queued tasks FIFO;
+    /// - genuine fault (`Err` with no `propagating`) or a stray `break`/`continue` ⇒ CANCEL-and-report,
+    ///   byte-identical to the VM's escaped-nursery drain on its unwind path.
+    ///
+    /// A task that faults during the join supersedes the body result (clearing any in-flight `?`
+    /// value), so the function faults with the task's error — mirroring the VM's `join_nursery()?` in
+    /// `do_return`. The returned `Flow` flows on into the normal `finish_frame` teardown (so the
+    /// implicit join runs BEFORE the frame's defers — tasks complete, then cleanup).
+    fn leave_implicit_nursery(
+        &mut self,
+        body_result: Result<Flow, RuntimeError>,
+    ) -> Result<Flow, RuntimeError> {
+        let tasks = self.nurseries.pop().unwrap_or_default();
+        let joins = matches!(body_result, Ok(Flow::Return(_)) | Ok(Flow::Normal))
+            || (body_result.is_err() && self.propagating.is_some());
+        if joins {
+            // Protect the in-flight `?` value (set when the body short-circuited via `?`) from the
+            // joined tasks: each `run_task` descends into `finish_frame`, which does
+            // `propagating.take()` and would clear it before this function's own `finish_frame` can
+            // surface it (mirrors `run_deferred`'s save/restore). Without this, a `?`-returning body
+            // with a bare `spawn` leaks the `Err("? propagation")` sentinel instead of the user's
+            // `Err(...)` — a divergence from the VM, where joined tasks run in a swapped-out `FiberCtx`.
+            let saved_prop = self.propagating.take();
+            for task in tasks {
+                if let Err(e) = self.run_task(task) {
+                    self.propagating = None; // a task fault supersedes any in-flight `?` value
+                    return Err(e);
+                }
+            }
+            self.propagating = saved_prop;
+        } else if !tasks.is_empty() {
+            self.out.push_str(&crate::runtime::pending_cancel_report(tasks.len()));
+        }
+        body_result
+    }
+
     /// `spawn` — register a task on the innermost nursery (the checker guarantees one is open). The
     /// receiver/args (form 1) or captured locals (form 2) are deep-copied across the airlock now;
     /// the body runs later, at the nursery's dedent.
@@ -1031,7 +1071,14 @@ impl Interp {
         self.call_stack.push(TraceFrame { function: name.to_string(), span });
         let saved_globals = self.env.swap_globals(home);
         let saved = self.env.swap_locals(locals);
+        // M-C: a `spawn:` block (or deferred block) is its own function body — a nested bare `spawn`
+        // binds to the block's own implicit nursery, joined when the block returns/ends.
+        let implicit = crate::compiler::block_has_bare_spawn(body);
+        if implicit {
+            self.nurseries.push(Vec::new());
+        }
         let result = self.exec_block_inner(body);
+        let result = if implicit { self.leave_implicit_nursery(result) } else { result };
         let outcome = match self.finish_frame(saved, saved_globals) {
             Err(e) => Err(e),
             // A `?` short-circuit inside the block sets `propagating`, which `finish_frame` surfaces
@@ -2374,7 +2421,14 @@ impl Interp {
         let saved = self.env.swap_locals(vec![frame]);
         // The function body's *direct* defers belong to the per-call list (pushed above, drained by
         // `finish_frame`); nested blocks open their own defer scopes via `exec_block`.
+        // M-C: if the body has a bare `spawn` (not inside an explicit `parallel:`), it is an implicit
+        // nursery — push a task list now and JOIN it at the body's `return`/`?`/end (before defers).
+        let implicit = crate::compiler::block_has_bare_spawn(&decl.body);
+        if implicit {
+            self.nurseries.push(Vec::new());
+        }
         let result = self.exec_block_inner(&decl.body);
+        let result = if implicit { self.leave_implicit_nursery(result) } else { result };
         // Teardown (defer drain + scope restore + `?`/defer-fault selection) is a separate,
         // non-inlined frame so its locals don't enlarge `call`'s frame on the deep-recursion path.
         let outcome = match self.finish_frame(saved, saved_globals) {
@@ -2439,7 +2493,24 @@ impl Interp {
     /// `Err`/`None` propagated to the top by a top-level `?` is an unhandled error and exits.
     fn eval_top_level(&mut self, stmts: &[Stmt]) -> Result<(), RuntimeError> {
         self.hoist_declarations(stmts)?;
+        // M-C: the module top level is an implicit nursery that joins at program exit (here, before
+        // the run driver drains live executors). A bare top-level `spawn` registers on it. JOIN only
+        // on a clean run to the end; on a top-level fault or unhandled `?` the nursery is abandoned —
+        // matching the VM, where an uncaught top-level error never reaches the toplevel `Return`'s
+        // join and the pending tasks are silently dropped as the program errors out.
+        let implicit = crate::compiler::block_has_bare_spawn(stmts);
+        if implicit {
+            self.nurseries.push(Vec::new());
+        }
         let result = self.exec_block(stmts);
+        if implicit {
+            let tasks = self.nurseries.pop().unwrap_or_default();
+            if matches!(result, Ok(Flow::Normal)) {
+                for task in tasks {
+                    self.run_task(task)?;
+                }
+            }
+        }
         // A `?` that propagated to the top (no enclosing function) is an unhandled error. The
         // propagation marker still carries the `?`'s `expr.span`, so report at the real location
         // (matching the bare-expr path and the VM) rather than a hard-coded line 1.
@@ -4037,6 +4108,27 @@ mod tests {
 
     fn run(src: &str) -> String {
         run_capture(src).expect("run should succeed")
+    }
+
+    /// M-C implicit nurseries (interp side of the cross-engine parity twins in `vm::tests`): a bare
+    /// `spawn` at function scope joins at the body's end; `return` is a join point; the module top
+    /// level joins at program exit.
+    #[test]
+    fn implicit_nursery_basic_interp() {
+        let src = "fn w():\n    print(\"w\")\nfn main():\n    print(\"a\")\n    spawn w()\n    print(\"b\")\nmain()\n";
+        assert_eq!(run(src), "a\nb\nw\n");
+    }
+
+    #[test]
+    fn implicit_nursery_return_joins_interp() {
+        let src = "fn w(n: int):\n    print(\"w{n}\")\nfn f() -> int:\n    spawn w(1)\n    spawn w(2)\n    print(\"x\")\n    return 0\nfn main():\n    print(f())\nmain()\n";
+        assert_eq!(run(src), "x\nw1\nw2\n0\n");
+    }
+
+    #[test]
+    fn implicit_nursery_toplevel_interp() {
+        let src = "fn w():\n    print(\"w\")\nprint(\"end\")\nspawn w()\n";
+        assert_eq!(run(src), "end\nw\n");
     }
 
     #[test]

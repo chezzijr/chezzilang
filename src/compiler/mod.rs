@@ -271,7 +271,19 @@ impl Compiler {
                 fc.emit(Op::DefineGlobalSlot(self.global_slot(&decl.name)), stmt.span);
             }
         }
+        // M-C: the module top level is itself an implicit nursery (joins at program exit, i.e. the
+        // toplevel proto's `Return`). Gated like a function body — wraps the executable statements
+        // (after the hoisted-fn defines, which only create function values).
+        let implicit = block_has_bare_spawn(&module.stmts);
+        if implicit {
+            fc.has_implicit_nursery = true;
+            fc.emit(Op::EnterNursery, Span { line: 1, col: 1 });
+            fc.nursery_scopes += 1;
+        }
         self.compile_block_flat(&mut fc, &module.stmts)?;
+        if implicit {
+            fc.nursery_scopes -= 1;
+        }
         fc.emit(Op::Nil, Span { line: 1, col: 1 });
         fc.emit(Op::Return, Span { line: 1, col: 1 });
         Ok(self.finish(fc))
@@ -283,8 +295,20 @@ impl Compiler {
         for p in &decl.params {
             fc.add_local(p.name.clone());
         }
+        // M-C: if the body has a bare `spawn` (not inside an explicit `parallel:`), open an implicit
+        // nursery at entry. It is NOT joined here — `do_return` joins it at every `return`/`?`/end (a
+        // single join site), so we only emit the opening `EnterNursery` and flag the proto.
+        let implicit = block_has_bare_spawn(&decl.body);
+        if implicit {
+            fc.has_implicit_nursery = true;
+            fc.emit(Op::EnterNursery, Span { line: 1, col: 1 });
+            fc.nursery_scopes += 1;
+        }
         self.compile_block_scoped(&mut fc, &decl.body)?;
-        // Fall off the end → return Nil.
+        if implicit {
+            fc.nursery_scopes -= 1;
+        }
+        // Fall off the end → return Nil (do_return joins the implicit nursery).
         fc.emit(Op::Nil, Span { line: 1, col: 1 });
         fc.emit(Op::Return, Span { line: 1, col: 1 });
         Ok(self.finish(fc))
@@ -300,6 +324,7 @@ impl Compiler {
             n_slots: fc.max_slots,
             code,
             lines,
+            has_implicit_nursery: fc.has_implicit_nursery,
         });
         pid
     }
@@ -542,7 +567,18 @@ impl Compiler {
                 let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
                 let mut child = FnComp::new("<spawned task>".to_string(), 0, false);
                 child.captured_names = captured_names;
+                // M-C: a `spawn:` block is its own function body — a nested bare `spawn` inside it
+                // binds to the block's *own* implicit nursery, joined when the task returns.
+                let implicit = block_has_bare_spawn(body);
+                if implicit {
+                    child.has_implicit_nursery = true;
+                    child.emit(Op::EnterNursery, span);
+                    child.nursery_scopes += 1;
+                }
                 self.compile_block_scoped(&mut child, body)?;
+                if implicit {
+                    child.nursery_scopes -= 1;
+                }
                 child.emit(Op::Nil, span);
                 child.emit(Op::Return, span);
                 let pid = self.finish(child);
@@ -1455,7 +1491,20 @@ impl Compiler {
                 let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
                 let mut child = FnComp::new("<deferred block>".to_string(), 0, false);
                 child.captured_names = captured_names;
+                // M-C: a `defer:` block is its own function body (it runs as a closure in its own
+                // frame at frame exit) — a bare `spawn` inside it binds to the block's own implicit
+                // nursery, joined when the deferred block returns. Mirrors `compile_spawn`'s block arm
+                // (and the interp's `run_block_task`, which gates deferred blocks the same way).
+                let implicit = block_has_bare_spawn(body);
+                if implicit {
+                    child.has_implicit_nursery = true;
+                    child.emit(Op::EnterNursery, span);
+                    child.nursery_scopes += 1;
+                }
                 self.compile_block_scoped(&mut child, body)?;
+                if implicit {
+                    child.nursery_scopes -= 1;
+                }
                 child.emit(Op::Nil, span);
                 child.emit(Op::Return, span);
                 let pid = self.finish(child);
@@ -1811,6 +1860,33 @@ fn block_has_defer(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| matches!(s.kind, StmtKind::Defer(_)))
 }
 
+/// M-C implicit nurseries: does this body contain a bare `spawn` that is NOT already inside an
+/// explicit `parallel:` (so it would bind to the *implicit* function/module nursery)? Drives the
+/// gate in `compile_fn`/`compile_module` — a body with no such spawn emits byte-identical bytecode to
+/// pre-M-C (zero overhead). Recurses through control flow but **stops** at boundaries that are *their
+/// own* function-like body (and so get their own implicit nursery, gated separately): `parallel:` (its
+/// spawns belong to that explicit nursery), nested `fn`, a `spawn:` block, and a `defer:` block (each
+/// runs in its own frame, so a bare `spawn` inside it joins at *that* body's end, not this one's).
+pub(crate) fn block_has_bare_spawn(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_has_bare_spawn)
+}
+
+fn stmt_has_bare_spawn(s: &Stmt) -> bool {
+    match &s.kind {
+        StmtKind::Spawn(_) => true,
+        // Boundaries: spawns here do not belong to the enclosing implicit nursery.
+        StmtKind::Parallel { .. } | StmtKind::Fn(_) => false,
+        // Recurse through ordinary control flow.
+        StmtKind::If { branches, else_block } => {
+            branches.iter().any(|(_, b)| block_has_bare_spawn(b))
+                || else_block.as_ref().is_some_and(|b| block_has_bare_spawn(b))
+        }
+        StmtKind::For { body, .. } | StmtKind::While { body, .. } => block_has_bare_spawn(body),
+        StmtKind::Match { arms, .. } => arms.iter().any(|a| block_has_bare_spawn(&a.body)),
+        _ => false,
+    }
+}
+
 struct FnComp {
     name: String,
     arity: usize,
@@ -1836,6 +1912,10 @@ struct FnComp {
     /// the `EnterNursery` emit in `compile_parallel`, decremented at the matching `JoinNursery`). Read
     /// by `break`/`continue` to know how many `ReclaimNursery`s to emit before jumping out of the loop.
     nursery_scopes: usize,
+    /// M-C — this body opened an implicit nursery at entry (its `Op::EnterNursery` is the first body
+    /// op) because it contains a bare `spawn`. Stamped onto the [`Proto`] in `finish`; the VM's
+    /// `do_return` JOINS this nursery at the body's `return`/end.
+    has_implicit_nursery: bool,
 }
 
 impl FnComp {
@@ -1854,6 +1934,7 @@ impl FnComp {
             loops: Vec::new(),
             defer_scopes: 0,
             nursery_scopes: 0,
+            has_implicit_nursery: false,
         }
     }
 

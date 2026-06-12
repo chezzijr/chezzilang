@@ -73,7 +73,9 @@ new syntax.
 `close`/`for v in ch`/`try_send`), `Shared[T]`, and `Executor`. The cooperative engine is the default
 parity oracle; `--parallel` is a real OS-thread **M:N work-stealing scheduler** (reduction-counting
 preemption, a dirty/blocking pool for opaque blocking natives, and an epoll/kqueue netpoller backing
-non-blocking `std.net` TCP). Only **M-C implicit nurseries** remain deferred (by design). Full design
+non-blocking `std.net` TCP). **M-C implicit nurseries shipped** — every function body and the module
+top level is an implicit nursery that joins at its `return`/end, so a bare `spawn` is legal anywhere
+(an explicit `parallel:` is an inner sub-nursery for earlier joins). Full design
 in [`docs/concurrency.md`](concurrency.md); phase history in
 [`docs/concurrency-tier-d.md`](concurrency-tier-d.md) + [`docs/concurrency-b3.md`](concurrency-b3.md).
 

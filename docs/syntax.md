@@ -837,9 +837,19 @@ main()
 
 - **`parallel:` is a nursery** — all tasks spawned inside join at the dedent, then the parent
   proceeds. `spawn` returns immediately (the parent continues); tasks run at the barrier.
-- **`spawn` is only legal inside a `parallel:`** (a bare `spawn` is a checker error), and it binds to
-  a nursery **in its own function** — a task can't outlive the function that spawned it. A
-  "background" task = one spawned into a longer-lived *outer* `parallel:`.
+- **Every function body (and the module top level) is an implicit nursery** (M-C) — a bare `spawn`
+  is legal anywhere and joins at the body's `return`/end (the module top level joins at program exit).
+  `return`, fall-through, and `?` are all join points (tasks run, *then* control leaves); `defer`s run
+  after the join. An explicit `parallel:` is an *inner* sub-nursery for an earlier join. A `spawn`
+  always binds to a nursery **in its own function** — a task can't outlive the function that spawned
+  it (the function-boundary rule).
+
+```chezzi
+fn fetch_all(urls: list[str]):
+    for u in urls:
+        spawn fetch(u)        # no `parallel:` needed — joins when fetch_all returns
+    print("dispatched")       # runs before the tasks; they join at end-of-function
+```
 - **`Channel[T]`** — a mailbox (buffered FIFO): `ch.send(v)`, `ch.recv() -> T`,
   `ch.try_recv() -> T?` (non-blocking poll — `Some(v)`/`None`, never blocks or faults), `ch.len()`,
   `ch.close()`, `ch.try_send(v) -> bool` (safe `send` — `false` if closed, never faults). After

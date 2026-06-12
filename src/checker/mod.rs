@@ -329,10 +329,6 @@ struct Checker {
     /// Reset to 0 when descending into a (nested) function or closure body so an inner `break`
     /// can't escape into an outer loop. `> 0` ⇒ `break`/`continue` are legal here.
     loop_depth: usize,
-    /// How many enclosing `parallel:` nurseries we're inside *within the current function body*.
-    /// Reset to 0 across a (nested) fn/closure boundary so a task binds to a nursery within its own
-    /// function (the function-boundary rule). `> 0` ⇒ `spawn` is legal here.
-    nursery_depth: usize,
     /// For each `spawn:` block body currently being checked, the local-scope depth (`scopes.len()`)
     /// at the point the task body opened. A binding living at a scope index *below* the innermost
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
@@ -376,7 +372,6 @@ impl Checker {
             imported_poly: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
-            nursery_depth: 0,
             capture_floors: Vec::new(),
             defer_floors: Vec::new(),
             current_module_is_stdlib: false,
@@ -1266,17 +1261,17 @@ impl Checker {
             }
             StmtKind::Parallel { body } => {
                 self.push_scope();
-                self.nursery_depth += 1;
                 for stmt in body {
                     self.check_stmt(stmt);
                 }
-                self.nursery_depth -= 1;
                 self.pop_scope();
             }
             StmtKind::Spawn(target) => {
-                if self.nursery_depth == 0 {
-                    self.error(span, "spawn must be inside a parallel: block");
-                }
+                // M-C implicit nurseries: a bare `spawn` is legal anywhere in a function body and at
+                // the module top level — every function body (and the module top level) is an
+                // implicit nursery that joins at its `return`/end, so there is no longer a
+                // nursery-depth gate. The function-boundary rule (a task can't outlive the function
+                // that spawned it) is enforced at runtime by the per-function implicit nursery.
                 match target {
                     SpawnTarget::Call(e) => {
                         // `spawn` targets a method call or a call to a first-class callable (a user
@@ -1579,9 +1574,6 @@ impl Checker {
         // A nested fn opens a fresh `?`-target context: a `?` in this body targets this function,
         // not an enclosing recover at the definition site.
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
-        // A function body opens a fresh nursery context: a `spawn` here binds to a `parallel:`
-        // within this function, never one at the definition site (the function-boundary rule).
-        let saved_nursery = std::mem::replace(&mut self.nursery_depth, 0);
         self.push_scope();
         for (i, param) in decl.params.iter().enumerate() {
             let ty = if param.name == "self" {
@@ -1614,7 +1606,6 @@ impl Checker {
         self.inferring_ret = saved_inferring;
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
-        self.nursery_depth = saved_nursery;
         self.exit_type_params(saved_tps);
     }
 
@@ -2886,7 +2877,6 @@ impl Checker {
         // the closure's definition must not make a `break`/`continue` inside it legal.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
-        let saved_nursery = std::mem::replace(&mut self.nursery_depth, 0);
         // `?` inside the body targets THIS closure's return, not the enclosing function's. With no
         // annotation there is no Result/Option context, so `?` is rejected (`Unknown` → `infer_try`
         // errors). Mirrors `check_fn_body`'s `current_ret` handling.
@@ -2905,7 +2895,6 @@ impl Checker {
         self.pop_scope();
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
-        self.nursery_depth = saved_nursery;
         self.current_ret = saved_ret;
         let ret_ty = match ret {
             Some(t) => {

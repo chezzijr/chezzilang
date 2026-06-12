@@ -48,7 +48,8 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 > **Shipped through Tier-D.** The full design — `spawn`/`parallel:` nursery, `Channel[T]`,
 > `Shared[T]`, sendability — lives in its own canonical doc **[`docs/concurrency.md`](concurrency.md)**,
 > with phase history in [`docs/concurrency-tier-d.md`](concurrency-tier-d.md). Real OS-thread M:N
-> engine via `--parallel`; only M-C implicit nurseries remain deferred.
+> engine via `--parallel`. **M-C implicit nurseries shipped** — bare `spawn` legal anywhere; every
+> function body / module top level joins its tasks at `return`/end. Concurrency is feature-complete.
 
 ---
 

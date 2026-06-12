@@ -129,6 +129,11 @@ struct CallFrame {
     /// pending-task args) is reclaimed instead of leaking to program exit — matching the interp's
     /// unconditional `exec_parallel` pop.
     nursery_len: usize,
+    /// M-C: this frame's proto opened an implicit nursery at body entry (it contains a bare `spawn`).
+    /// On exit, `do_return` JOINS that nursery (runs its tasks) rather than cancelling it; any *inner*
+    /// `parallel:` escaped by the same `return`/`?` is still cancelled. Copied from
+    /// [`op::Proto::has_implicit_nursery`] at frame push.
+    has_implicit_nursery: bool,
     /// Source span of the call site that pushed this frame (where the function was invoked). Used to
     /// build a runtime stack trace; not part of execution.
     call_span: Span,
@@ -2098,6 +2103,7 @@ impl Vm {
             deferred: Vec::new(),
             defer_markers: Vec::new(),
             nursery_len: self.nurseries.len(),
+            has_implicit_nursery: self.program.protos[proto].has_implicit_nursery,
             call_span: span,
         });
         self.cur_base = base;
@@ -4824,8 +4830,26 @@ impl Vm {
     /// values — and the return value — rooted. A fault in a deferred call supersedes the frame's
     /// result (Go: a panic in a defer wins): it returns `Err` and the frame is still torn down.
     fn do_return(&mut self, _propagated: bool) -> Result<(), RuntimeError> {
+        // M-C implicit nurseries: if this frame opened one, JOIN it here (run its spawned tasks to
+        // completion) BEFORE the frame unwinds — `return`/`?`/fall-through is the join barrier. This
+        // runs while the frame is still current and the return value (if any) still sits on the
+        // operand stack; `join_nursery` swaps the whole `FiberCtx`, never the operand value, so the
+        // value survives. Any *inner* `parallel:` this return/`?` escaped sits ABOVE the implicit
+        // nursery and is cancelled-and-reported first (existing escape semantics). A task that faults
+        // during the join propagates as this function's error (the frame is intact, so the normal
+        // unwind machinery runs its defers). NB: an uncaught *body* fault never reaches here — it
+        // unwinds via the handler path, which cancels (not joins) the implicit nursery.
+        let frame_top = self.frames.last().unwrap();
+        let nursery_floor = frame_top.nursery_len;
+        if frame_top.has_implicit_nursery {
+            self.drain_escaped_nursery(nursery_floor + 1); // cancel inner escaped `parallel:` levels
+            if self.nurseries.len() > nursery_floor {
+                self.join_nursery()?; // join the implicit nursery (runs its tasks)
+            }
+        }
         // Drain with the return value still on top of the stack (rooted) and the frame still on
-        // `self.frames` (so `collect` roots the pending records).
+        // `self.frames` (so `collect` roots the pending records). Defers run AFTER the implicit-nursery
+        // join above (tasks complete, then cleanup).
         let defer_err = self.drain_top_frame_deferred();
         let ret = self.pop();
         let frame = self.frames.pop().unwrap();
@@ -4836,11 +4860,12 @@ impl Vm {
         self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
         // Reclaim any `parallel:` nursery this frame opened but whose `JoinNursery` was skipped by a
         // `?`/return escape (no-op on the normal fall-through path — `JoinNursery` already popped it,
-        // so `nurseries.len() == frame.nursery_len`). Mirrors the `recover:` catch path and the interp's
-        // unconditional `exec_parallel` pop; a nested frame keeps the parent's nursery (it captured the
-        // parent depth at entry). TASK B: route through `drain_escaped_nursery` so the unstarted tasks
-        // are cancelled-and-reported (not silently dropped). NB: within-frame `break`/`continue` out of
-        // a `parallel:` no longer rely on this — the compiler emits a `ReclaimNursery` before their
+        // so `nurseries.len() == frame.nursery_len`; also a no-op when the implicit nursery above was
+        // just joined). Mirrors the `recover:` catch path and the interp's unconditional
+        // `exec_parallel` pop; a nested frame keeps the parent's nursery (it captured the parent depth
+        // at entry). TASK B: route through `drain_escaped_nursery` so the unstarted tasks are
+        // cancelled-and-reported (not silently dropped). NB: within-frame `break`/`continue` out of a
+        // `parallel:` no longer rely on this — the compiler emits a `ReclaimNursery` before their
         // loop-exit `Jump` (see `compile_parallel`/`emit_loop_body_drain`), reclaiming block-scoped.
         self.drain_escaped_nursery(frame.nursery_len);
         // Drop any `recover:` handlers installed in the frame we just left (e.g. a `?` early-return
@@ -8900,6 +8925,97 @@ mod tests {
         run_capture(src).unwrap_or_else(|e| panic!("unexpected runtime error: {e}"))
     }
 
+    /// M-C implicit nurseries: a bare `spawn` at function scope (no explicit `parallel:`) joins at
+    /// the function's end — inline statements after the spawn run first, then the spawned body.
+    /// Identical on the cooperative default and the `--parallel` engine.
+    #[test]
+    fn implicit_nursery_basic_vm() {
+        let src = "fn w():\n    print(\"w\")\nfn main():\n    print(\"a\")\n    spawn w()\n    print(\"b\")\nmain()\n";
+        assert_eq!(run(src), "a\nb\nw\n");
+        assert_eq!(run_capture_parallel(src).expect("parallel"), "a\nb\nw\n");
+    }
+
+    /// M-C: `return <value>` is a JOIN point — pending spawned tasks run to completion, THEN the
+    /// value returns. No cancel-report. This is the regression guard for the cancel→join inversion.
+    #[test]
+    fn implicit_nursery_return_joins_vm() {
+        let src = "fn w(n: int):\n    print(\"w{n}\")\nfn f() -> int:\n    spawn w(1)\n    spawn w(2)\n    print(\"x\")\n    return 0\nfn main():\n    print(f())\nmain()\n";
+        assert_eq!(run(src), "x\nw1\nw2\n0\n");
+        assert_eq!(run_capture_parallel(src).expect("parallel"), "x\nw1\nw2\n0\n");
+    }
+
+    /// M-C: the module top level is an implicit nursery that joins at program exit.
+    #[test]
+    fn implicit_nursery_toplevel_vm() {
+        let src = "fn w():\n    print(\"w\")\nprint(\"end\")\nspawn w()\n";
+        assert_eq!(run(src), "end\nw\n");
+        assert_eq!(run_capture_parallel(src).expect("parallel"), "end\nw\n");
+    }
+
+    /// Assert a program yields `expected` on all three engines (cooperative VM, frozen interp,
+    /// `--parallel`) — the M-C parity bar.
+    #[cfg(test)]
+    fn assert_mc_parity(src: &str, expected: &str) {
+        assert_eq!(run(src), expected, "cooperative VM");
+        assert_eq!(crate::interp::run_capture(src).expect("interp"), expected, "interp");
+        assert_eq!(run_capture_parallel(src).expect("parallel"), expected, "--parallel");
+    }
+
+    /// M-C: spawned tasks JOIN before the frame's `defer`s run (tasks complete, then cleanup).
+    #[test]
+    fn implicit_nursery_defer_orders_tasks_then_defers() {
+        let src = "fn w():\n    print(\"task\")\nfn cleanup():\n    print(\"cleanup\")\nfn main():\n    defer cleanup()\n    spawn w()\n    print(\"body\")\nmain()\n";
+        assert_mc_parity(src, "body\ntask\ncleanup\n");
+    }
+
+    /// M-C: a `?` early-return is a JOIN point — pending tasks run before the error propagates.
+    #[test]
+    fn implicit_nursery_try_joins_before_propagating() {
+        let src = "fn w():\n    print(\"task ran\")\nfn g() -> int!:\n    return Err(\"inner\")\nfn f() -> int!:\n    spawn w()\n    x := g()?\n    print(\"unreached\")\n    return Ok(x)\nfn main():\n    r := recover:\n        f()?\n        0\n    print(\"done\")\nmain()\n";
+        assert_mc_parity(src, "task ran\ndone\n");
+    }
+
+    /// M-C function-boundary rule: a task spawned in a callee joins at the callee's end, not the
+    /// caller's `parallel:` dedent — it cannot outlive the function that spawned it.
+    #[test]
+    fn implicit_nursery_respects_function_boundary() {
+        let src = "fn task(label: str):\n    print(label)\nfn helper():\n    spawn task(\"helper-task\")\n    print(\"helper body\")\nfn main():\n    parallel:\n        spawn helper()\n    print(\"main after parallel\")\nmain()\n";
+        assert_mc_parity(src, "helper body\nhelper-task\nmain after parallel\n");
+    }
+
+    /// M-C: nested functions each have their own implicit nursery — no task leaks across a call.
+    #[test]
+    fn implicit_nursery_nested_functions() {
+        let src = "fn leaf(id: int):\n    print(\"leaf {id}\")\nfn inner():\n    spawn leaf(1)\n    spawn leaf(2)\n    print(\"inner body\")\nfn main():\n    spawn leaf(3)\n    inner()\n    print(\"main body\")\nmain()\n";
+        assert_mc_parity(src, "inner body\nleaf 1\nleaf 2\nmain body\nleaf 3\n");
+    }
+
+    /// M-C regression (review-panel BUG): a `?` early-return from a body with a bare `spawn` must
+    /// surface the USER's `Err(...)`, not the internal `? propagation` sentinel. The interp join loop
+    /// previously let the spawned task's `finish_frame` clear the in-flight `?` value.
+    #[test]
+    fn implicit_nursery_try_preserves_error_value() {
+        let src = "fn w():\n    print(\"task ran\")\nfn g() -> int!:\n    return Err(\"boom-value\")\nfn f() -> int!:\n    spawn w()\n    x := g()?\n    return Ok(x)\nfn main():\n    r := recover:\n        f()?\n        99\n    print(\"after: {r}\")\nmain()\n";
+        assert_mc_parity(src, "task ran\nafter: Err(boom-value)\n");
+    }
+
+    /// M-C regression (review-panel BUG): a bare `spawn` inside a `defer:` block is legal — the
+    /// deferred block runs in its own frame with its own implicit nursery, joined when the block ends.
+    /// The VM previously omitted the nursery for deferred-block protos and hit the runtime guard.
+    #[test]
+    fn implicit_nursery_spawn_in_defer_block() {
+        let src = "fn work(n: int):\n    print(n)\nfn main():\n    defer:\n        spawn work(1)\n    print(\"body\")\nmain()\n";
+        assert_mc_parity(src, "body\n1\n");
+    }
+
+    /// M-C: a genuine body fault caught by `recover:` cancels-and-reports the implicit nursery's
+    /// unstarted tasks (they do NOT run) — identical to an explicit `parallel:` escape, on all engines.
+    #[test]
+    fn implicit_nursery_fault_cancels_pending_tasks() {
+        let src = "fn w():\n    print(\"should not run\")\nfn f():\n    spawn w()\n    x := [1]\n    print(x[9])\nfn main():\n    r := recover:\n        f()\n        0\n    print(\"recovered\")\nmain()\n";
+        assert_mc_parity(src, "1 pending task(s) cancelled on early exit from parallel:\nrecovered\n");
+    }
+
     /// M19 SSO — the production `alloc_str` path stores short strings inline (no `Box` heap alloc)
     /// and spills longer ones to the heap. This guards the wiring of `ChzStr` into the VM's hot
     /// string-construction funnel; `chzstr.rs` unit tests cover the selection logic itself.
@@ -11502,7 +11618,7 @@ main()
     /// home module (the test protos never read globals). Mirrors how `do_spawn_block` shapes a task.
     fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         let sp = Span { line: 1, col: 1 };
-        let proto = op::Proto { name: "task".into(), arity: 0, n_slots: 0, lines: vec![sp; code.len()], code };
+        let proto = op::Proto { name: "task".into(), arity: 0, n_slots: 0, lines: vec![sp; code.len()], code, has_implicit_nursery: false };
         let program = Program { protos: vec![proto], ..empty_program() };
         let mut vm = Vm::new(Arc::new(program));
         let home = vm.heap.alloc(Obj::Module { name: "<test>".into(), slots: Vec::new(), index: Default::default() });
@@ -12409,6 +12525,19 @@ main()";
     fn parallel_engine_runs_simple_program() {
         let src = include_str!("../../examples/parallel.chz");
         let expected = include_str!("../../examples/parallel.expected");
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    }
+
+    /// M-C golden: implicit nurseries — bare `spawn` at function scope joins at the body's
+    /// `return`/end; an inner `parallel:` joins earlier at its dedent. Byte-identical on all three
+    /// engines (cooperative VM, frozen interp, `--parallel`).
+    #[test]
+    fn golden_implicit_nursery_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/implicit_nursery.chz");
+        let expected = include_str!("../../examples/implicit_nursery.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
         assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
     }
 

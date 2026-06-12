@@ -127,10 +127,12 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
 
 ## Concurrency — feature-complete (confirmed 2026-06-12)
 
-Core feature-complete through **M18**; **concurrency shipped through Tier-D (D0–D6c)**. The surface —
+Core feature-complete through **M18**; **concurrency shipped through Tier-D (D0–D6c) + M-C**. The surface —
 `spawn` / `parallel:` nursery / `Channel[T]` / `Shared[T]` / `Executor`, plus `--parallel` (the VM's real
-OS-thread engine) and the netpoller + `std.net` — is complete and stable. ~1565 tests green; the default
-cooperative engine and `--parallel` stay byte-identical on every `examples/parallel*.chz` golden, and the
+OS-thread engine) and the netpoller + `std.net` — is complete and stable. **M-C implicit nurseries shipped
+(2026-06-12)** — every function body and the module top level is an implicit nursery; a bare `spawn` is
+legal anywhere and joins at `return`/end. ~1592 tests green; the default cooperative engine and `--parallel`
+stay byte-identical on every `examples/parallel*.chz` + `examples/implicit_nursery.chz` golden, and the
 frozen interp is the differential parity oracle for the sequential subset.
 
 ### Tier-D — complete (D0–D6c)
@@ -221,13 +223,37 @@ shared-nothing architecture, decisions A–G, risk register). Summary of the lan
   engine keeps crossing it by handle so its same-heap drain shares captures by reference (matching the
   interp oracle — a by-value snapshot would break parity for the sequential subset).
 
-### Remaining concurrency work — only M-C, deferred
+### M-C — implicit nurseries (shipped 2026-06-12)
 
-The only open item is **M-C — implicit nurseries** ([`docs/concurrency.md §10`](docs/concurrency.md)):
-make every function body an implicit nursery that joins at its `return`/end, dropping the explicit
-`parallel:` requirement. **Deferred by design** — an invisible "joins at end of function" barrier hides
-*when* work runs, which matters while execution is observable-sequential ("revisit after C5"). Ergonomic
-sugar, not new capability. There is no Tier-E.
+Every function body and the module top level is an implicit nursery that joins at its `return`/end
+(module top joins at program exit); a bare `spawn` is legal anywhere, dropping the explicit `parallel:`
+requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earlier joins. Design:
+[`docs/concurrency.md §10`](docs/concurrency.md). Concurrency is now feature-complete (no Tier-E).
+
+- **Join-on-exit.** `return <value>`, fall-through end, and `?` early-return are all join points —
+  spawned tasks run FIFO, *then* control leaves; `defer`s run after the join (tasks, then cleanup). A
+  `return`/`?` that escapes an *inner* `parallel:` still cancels-and-reports that inner nursery while
+  joining the function's implicit one. An uncaught body fault cancels-and-reports the implicit nursery
+  (abnormal exit) — identical to an explicit `parallel:` escape.
+- **Single join site + zero-overhead gate.** Compiler pre-scans a body for a bare `spawn`
+  (`compiler::block_has_bare_spawn`, stops at `parallel:`/nested-fn/`spawn:`-block); if present it emits
+  one opening `Op::EnterNursery` and sets `Proto::has_implicit_nursery`. The VM's `do_return` joins it
+  (cancel-inner-then-join-implicit, before defers) for `return`/`?`/end. Bodies with no bare spawn emit
+  byte-identical bytecode to pre-M-C — perf benches (no spawns) unchanged.
+- **Implicit nursery sites.** Function bodies, the module top level, **`spawn:` blocks, and `defer:`
+  blocks** each get their own implicit nursery (each runs in its own frame; a bare `spawn` inside binds
+  to *that* body's nursery). Joins at the body's own `return`/end.
+- **Three-engine parity.** Interp (`call`/`run_block_task`/`eval_top_level` push an implicit nursery +
+  `leave_implicit_nursery` join/cancel), cooperative VM, and `--parallel` are byte-identical. Tests:
+  `vm::tests::implicit_nursery_*` (3-engine, incl. `_try_preserves_error_value` +
+  `_spawn_in_defer_block` review-panel regressions), `interp::tests::implicit_nursery_*`, golden
+  `examples/implicit_nursery.chz`. Checker `spawn_at_function_scope_ok` / `spawn_in_plain_fn_ok` /
+  `spawn_at_module_toplevel_ok` (the old `spawn_outside_parallel_rejected` flipped); dead
+  `nursery_depth` checker field removed.
+- **Known pre-existing parity gap (not M-C-specific):** an *uncaught* fault with un-run nursery tasks
+  prints the cancel-report on the interp's stdout but not the VM's — true for explicit `parallel:`
+  before M-C too; M-C follows the same `exec_parallel` convention. Goldens use recover-caught faults
+  (parity-clean). Fixing the gap would change explicit-`parallel:` behavior and is out of scope.
 
 ### Standing decisions & contracts (do not re-litigate)
 
@@ -382,7 +408,7 @@ branch names) is in the git log.
 
 - VM/GC optimizations beyond M19 — NaN-boxing (own milestone), register VM, generational/incremental GC,
   Cranelift AOT/JIT. Written up in [`docs/future.md`](docs/future.md).
-- **M-C — implicit nurseries** (deferred, see Concurrency above).
+- ~~**M-C — implicit nurseries**~~ — **shipped 2026-06-12** (see Concurrency above).
 
 ### Ideas — record-only (not scheduled)
 

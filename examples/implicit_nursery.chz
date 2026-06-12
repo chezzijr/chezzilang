@@ -1,0 +1,30 @@
+# M-C: implicit nurseries. Every function body is itself a nursery — a bare `spawn` (no enclosing
+# `parallel:`) is legal anywhere and joins at the function's `return`/end. `parallel:` still works as
+# an explicit *inner* sub-nursery that joins earlier (at its dedent).
+
+fn worker(label: str):
+    print("{label} ran")
+
+# Bare spawn at function scope: the task joins at end-of-body, after the inline statements.
+fn fanout() -> int:
+    spawn worker("a")
+    spawn worker("b")
+    print("fanout body")
+    # `return` is a JOIN point: the two tasks run to completion here, THEN the value is returned.
+    return 0
+
+# Function-scope spawn alongside an explicit inner `parallel:`: the inner nursery joins at its
+# dedent (first), the implicit function nursery joins at the function's end (last).
+fn mixed():
+    spawn worker("outer")
+    parallel:
+        spawn worker("inner")
+    print("after inner nursery")
+
+fn main():
+    n := fanout()
+    print("fanout returned {n}")
+    mixed()
+    print("done")
+
+main()

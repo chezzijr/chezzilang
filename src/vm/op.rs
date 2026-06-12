@@ -309,6 +309,12 @@ pub struct Proto {
     pub n_slots: usize,
     pub code: Vec<Op>,
     pub lines: Vec<Span>,
+    /// M-C implicit nurseries: `true` when this body (a function, or the module top level) contains a
+    /// bare `spawn` not already inside an explicit `parallel:`, so the compiler opened an implicit
+    /// nursery (`Op::EnterNursery`) at body entry. `do_return` joins it at the body's `return`/end
+    /// (vs. cancelling an *inner* escaped `parallel:`). `false` ⇒ zero-overhead, byte-identical to
+    /// pre-M-C bytecode.
+    pub has_implicit_nursery: bool,
 }
 
 /// A struct type's runtime shape (program-global). `module_idx` identifies the module that defined
