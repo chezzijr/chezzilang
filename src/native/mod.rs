@@ -128,6 +128,12 @@ pub enum NativeArg {
     Float(f64),
     Bool(bool),
     Str(String),
+    /// An insertion-ordered `map[str, str]`, pre-extracted so a blocking native that reads a map arg
+    /// (today only `std.request.request`'s custom headers) can still offload to the dirty pool: the
+    /// off-heap host has no `Vm`/heap, so the map is snapshotted into owned `(String, String)` pairs
+    /// before the handoff and served back via [`Host::arg_str_map`]. Order is preserved (the engine
+    /// reads `MapData.entries`), so header order is deterministic across engines.
+    Map(Vec<(String, String)>),
 }
 
 /// The engine-agnostic context a native function operates through. Object-safe (`&mut dyn Host`):
@@ -146,6 +152,10 @@ pub trait Host {
     fn arg_float(&mut self, i: usize) -> Result<f64, HostError>;
     /// `args[i]` as an owned string; errors if it is not a str.
     fn arg_str(&mut self, i: usize) -> Result<String, HostError>;
+    /// `args[i]` as an insertion-ordered `map[str, str]`, returned as owned `(key, value)` pairs in
+    /// map insertion order. Errors if the arg is not a map or any key/value is not a str. Used by
+    /// `std.request.request` to read custom request headers.
+    fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, HostError>;
 
     /// Append to the program's captured stdout buffer.
     fn write_stdout(&mut self, s: &str);
@@ -204,8 +214,10 @@ pub fn is_blocking(name: &str) -> bool {
         | "list_dir" | "exists" | "is_file" | "is_dir" | "size" | "glob"
         // std.time
         | "sleep_ms"
-        // std.request (network I/O) + std.process (subprocess) — D5 owe #1
-        | "get" | "post" | "cmd"
+        // std.request (network I/O) + std.process (subprocess) — D5 owe #1.
+        // `request`/`put`/`patch`/`delete`/`head` are the verb wrappers + the general header-carrying
+        // call; `request` offloads its `map[str, str]` headers via `NativeArg::Map` (off-heap-safe).
+        | "get" | "post" | "request" | "put" | "patch" | "delete" | "head" | "cmd"
     )
 }
 
@@ -301,6 +313,11 @@ mod tests {
                 message: "no str args".into(),
             })
         }
+        fn arg_str_map(&mut self, _i: usize) -> Result<Vec<(String, String)>, HostError> {
+            Err(HostError {
+                message: "no map args".into(),
+            })
+        }
         fn write_stdout(&mut self, s: &str) {
             self.stdout.push_str(s);
         }
@@ -380,6 +397,25 @@ mod tests {
         for name in ["get", "post", "cmd"] {
             assert!(is_blocking(name), "{name} should be blocking");
         }
+    }
+
+    /// The new `std.request` verbs (`put`/`patch`/`delete`/`head`) and the general `request()` are
+    /// network I/O — they must offload to the dirty pool under `--parallel`, same as `get`/`post`.
+    #[test]
+    fn is_blocking_flags_new_request_verbs() {
+        for name in ["request", "put", "patch", "delete", "head"] {
+            assert!(is_blocking(name), "{name} should be blocking");
+        }
+    }
+
+    /// `NativeArg::Map` carries an insertion-ordered str/str map across the off-heap offload boundary
+    /// so `request()`'s headers survive the handoff to the dirty pool.
+    #[test]
+    fn native_arg_map_constructs_and_compares() {
+        let a = NativeArg::Map(vec![("a".into(), "b".into())]);
+        let b = NativeArg::Map(vec![("a".into(), "b".into())]);
+        assert_eq!(a, b);
+        assert_ne!(a, NativeArg::Map(vec![]));
     }
 
     /// [`is_blocking`] classifies by *bare member name* (the engine has only the member name at the

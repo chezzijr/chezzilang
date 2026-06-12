@@ -4,8 +4,10 @@
 //! transport/DNS/TLS failures lower to `Err`. `Response` is the synthetic struct
 //! `{ status: int, body: str, headers: map[str, str] }` (header names are lowercased by `ureq`).
 //!
-//! v1 surface is `get(url)` / `post(url, body)`. Custom request headers, other verbs, redirect
-//! configuration, and streaming bodies are deferred.
+//! Surface: `get(url)` / `post(url, body)`, the verb wrappers `put(url, body)` / `patch(url, body)`
+//! / `delete(url)` / `head(url)`, and the general `request(method, url, body, headers)` carrying a
+//! `map[str, str]` of custom request headers (read in insertion order). Redirect configuration and
+//! streaming bodies are still deferred.
 
 use super::{expect_args, Host, HostError, NativeFn, NativeRet};
 use std::time::Duration;
@@ -79,6 +81,20 @@ fn do_post(url: &str, body: &str) -> NativeRet {
     AGENT.with(|a| lower_result(a.post(url).send_string(body)))
 }
 
+/// The general request path shared by `request`/`put`/`patch`/`delete`/`head`: build a request for
+/// `method` (UPPERCASE verb), apply each custom header via `set`, then send. An empty `body` uses
+/// `.call()` (no request body — correct for `DELETE`/`HEAD`/header-only calls); a non-empty `body`
+/// uses `.send_string(body)`. Lowers to `Result[Response]` exactly like `get`/`post`.
+fn do_request(method: &str, url: &str, body: &str, headers: &[(String, String)]) -> NativeRet {
+    AGENT.with(|a| {
+        let mut req = a.request(method, url);
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
+        lower_result(if body.is_empty() { req.call() } else { req.send_string(body) })
+    })
+}
+
 fn get(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "get", 1)?;
     let url = h.arg_str(0)?;
@@ -91,8 +107,49 @@ fn post(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(do_post(&url, &body))
 }
 
+/// `request(method, url, body, headers)` — the general verb + custom-header entry point. `headers`
+/// is a `map[str, str]` read in insertion order (deterministic across engines).
+fn request(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "request", 4)?;
+    let (method, url, body) = (h.arg_str(0)?, h.arg_str(1)?, h.arg_str(2)?);
+    let headers = h.arg_str_map(3)?;
+    Ok(do_request(&method, &url, &body, &headers))
+}
+
+fn put(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "put", 2)?;
+    let (url, body) = (h.arg_str(0)?, h.arg_str(1)?);
+    Ok(do_request("PUT", &url, &body, &[]))
+}
+
+fn patch(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "patch", 2)?;
+    let (url, body) = (h.arg_str(0)?, h.arg_str(1)?);
+    Ok(do_request("PATCH", &url, &body, &[]))
+}
+
+fn delete(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "delete", 1)?;
+    let url = h.arg_str(0)?;
+    Ok(do_request("DELETE", &url, "", &[]))
+}
+
+fn head(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "head", 1)?;
+    let url = h.arg_str(0)?;
+    Ok(do_request("HEAD", &url, "", &[]))
+}
+
 /// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[("get", get), ("post", post)];
+pub const MEMBERS: &[(&str, NativeFn)] = &[
+    ("get", get),
+    ("post", post),
+    ("request", request),
+    ("put", put),
+    ("patch", patch),
+    ("delete", delete),
+    ("head", head),
+];
 
 #[cfg(test)]
 mod tests {
@@ -200,5 +257,66 @@ mod tests {
         // Nothing is listening on this port → a transport failure → chezzi Err.
         let ret = do_get("http://127.0.0.1:1/");
         assert!(matches!(ret, NativeRet::Err(_)), "expected Err, got {ret:?}");
+    }
+
+    use std::sync::{Arc, Mutex};
+
+    /// Like [`serve_once`], but RECORDS the raw bytes the server received (request line + headers)
+    /// into a shared buffer so a test can assert on the method/headers the client actually sent.
+    /// Returns the bound URL, the server thread handle, and the recording buffer.
+    fn serve_once_recording(
+        body: &'static str,
+    ) -> (String, thread::JoinHandle<()>, Arc<Mutex<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let recorded = Arc::new(Mutex::new(String::new()));
+        let rec = Arc::clone(&recorded);
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            *rec.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nX-Test: hi\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+        });
+        (format!("http://{addr}/"), handle, recorded)
+    }
+
+    #[test]
+    fn put_reaches_server_with_put_request_line() {
+        let (url, handle, recorded) = serve_once_recording("ok");
+        let ret = do_request("PUT", &url, "payload", &[]);
+        handle.join().unwrap();
+        let req = recorded.lock().unwrap().clone();
+        assert!(req.starts_with("PUT "), "expected PUT request line, got: {req:?}");
+        // The 7-byte body is announced via Content-Length (the body bytes themselves may arrive in a
+        // later TCP segment than the headers, so assert on the header rather than the captured body).
+        assert!(req.contains("Content-Length: 7"), "PUT body should be sent: {req:?}");
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
+    }
+
+    #[test]
+    fn delete_reaches_server_with_delete_request_line_and_no_body() {
+        let (url, handle, recorded) = serve_once_recording("ok");
+        let ret = do_request("DELETE", &url, "", &[]);
+        handle.join().unwrap();
+        let req = recorded.lock().unwrap().clone();
+        assert!(req.starts_with("DELETE "), "expected DELETE request line, got: {req:?}");
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
+    }
+
+    #[test]
+    fn custom_header_is_sent_via_request_helper() {
+        let (url, handle, recorded) = serve_once_recording("ok");
+        let headers = vec![("X-Custom".to_string(), "value".to_string())];
+        let ret = do_request("POST", &url, "", &headers);
+        handle.join().unwrap();
+        let req = recorded.lock().unwrap().clone();
+        assert!(req.contains("X-Custom: value"), "custom header missing: {req:?}");
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
     }
 }

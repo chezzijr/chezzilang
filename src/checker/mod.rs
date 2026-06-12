@@ -272,6 +272,16 @@ fn native_module_sig(name: &str) -> ModuleSig {
             let resp = || Ty::Struct("Response".to_string(), vec![]);
             func("get", vec![Ty::Str], Ty::result(resp()));
             func("post", vec![Ty::Str, Ty::Str], Ty::result(resp()));
+            // General verb + custom headers; verb wrappers for the common non-GET/POST methods.
+            func(
+                "request",
+                vec![Ty::Str, Ty::Str, Ty::Str, Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str))],
+                Ty::result(resp()),
+            );
+            func("put", vec![Ty::Str, Ty::Str], Ty::result(resp()));
+            func("patch", vec![Ty::Str, Ty::Str], Ty::result(resp()));
+            func("delete", vec![Ty::Str], Ty::result(resp()));
+            func("head", vec![Ty::Str], Ty::result(resp()));
         }
         _ => {}
     }
