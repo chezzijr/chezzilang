@@ -181,6 +181,33 @@ picking the next task (full note in [`docs/benchmarks.md`](docs/benchmarks.md) +
 (pure-int compare, no name re-verify — closes the P4 shallow-struct caveat), **small-string optimization**,
 and a faster usize hasher. Ranked backlog in [`docs/future.md §4`](docs/future.md).
 
+**Next (M19) — top remaining lever DIAGNOSED (2026-06-12): flatten the call loop.** With the cheap
+dispatch/name-lookup batch spent (type-id guard P5b ✅ neutral, FxHash P5a ✅), the largest *measured*
+gap left is **per-call overhead on call-bound benches**. Root cause traced: every Chezzi call recurses
+into a fresh Rust `run_until` loop (`Op::Call` → `do_call` → `run_proto_in_place`, `mod.rs:1992` →
+`run_until`), so each call pays (1) a **native Rust stack frame** and (2) **`Arc::clone(&self.program)`**
+(`mod.rs:2115`) — an atomic per call. fib(30) ≈ 2.7M calls ⇒ 2.7M recursions + 2.7M atomics. **That's
+why `fib` is 3.85× CPython while `loop` is 1.31×: the gap is the *call*, not dispatch** (`primes` 2.50×
+is also call-bound and would move). Fix = CPython 3.11's "zero-cost frames": bytecode `Op::Call` pushes
+a frame and `continue`s the existing loop; `Op::Return` pops + pushes result + continues — no Rust
+recursion, one `Arc::clone` per `run_until` not per call. **Parity risk:** pause/park (B1/D3), `recover:`
+unwind, `defer` lean on Rust-stack unwinding — a flat loop must park by leaving `self.frames` intact and
+breaking (M:N `FiberCtx` save/restore already does this). **Keep `run_proto_in_place` for native callers**
+(HOFs need the callback result synchronously mid-method); only bytecode `Op::Call` flattens. Cheap
+stand-alone warm-up: hoist the per-call `Arc::clone`. VM-only blast radius; parity testable against the
+fib / recover-in-recursion / defer-in-recursion / deep-recursion-overflow goldens. Full write-up in
+[`docs/future.md §4`](docs/future.md). **GC is NOT the lever** — share-nothing per-thread, moves no bench;
+generational GC stays a low-priority separate milestone.
+
+**Remaining concurrency work — Tier-D is complete; only M-C (implicit nurseries) is left, deferred.**
+The concurrency roadmap landed through **Tier-D** (D0 ready-queue, D1 lazy module snapshot, D2a/D2b M:N
+scheduler + parking fibers, D3 reduction-counting preemption, D4 work-stealing run queues, D5 dirty/
+blocking pool, D6 netpoller + non-blocking `std.net`). There is **no Tier-E**. The single remaining item
+is **M-C — implicit nurseries** (`docs/concurrency.md §10`): make every function body an implicit
+nursery that joins at its `return`/end, dropping the explicit `parallel:` requirement. **Deferred** —
+an invisible "joins at end of function" barrier hides *when* work runs, which matters while execution is
+observable-sequential; "revisit after C5". Ergonomic sugar, not new capability.
+
 **Robustness pass — cyclic-data depth guard + order-independent map `==` — has now landed** (both
 engines). Two fuzzing-found bugs: (1) a cyclic data structure (a struct with a `list[Self]` field
 forming a cycle) made `print`/`==` recurse unbounded on the **host** stack inside the value-display

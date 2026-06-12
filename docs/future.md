@@ -178,6 +178,30 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   (P2 already killed the per-call args `Vec`).
 
 **Big (separate milestones):**
+- **Flatten the call loop (diagnosed 2026-06-12 — the top remaining lever for call-bound code).**
+  Every Chezzi function call currently **recurses into a fresh Rust `run_until` loop**:
+  `Op::Call` → `do_call` → `run_proto_in_place` (`mod.rs:1992`) → `run_until(base_level)`. Two costs
+  ride every call as a result: (1) a **native Rust stack frame** per Chezzi call (push + the
+  `frames.len() > base_level` bookkeeping + the `paused()`/result re-plumbing on unwind), and (2)
+  **`Arc::clone(&self.program)` on every `run_until` entry** (`mod.rs:2115`) — a per-call atomic
+  refcount bump+drop that exists purely as borrow-checker tax. fib(30) is ~2.7M calls ⇒ ~2.7M native
+  recursions + ~2.7M atomic clones. **This is why `fib` is 3.85× CPython but `loop` is only 1.31×: the
+  gap is the *call*, not the dispatch floor** (straight-line code is already near Python-par). `primes`
+  (2.50×) is also call-bound and would move. The fix is what CPython 3.11 did for its jump ("zero-cost
+  frames"): make the bytecode `Op::Call` **push a frame and `continue` the existing `run_until` loop**,
+  and `Op::Return` **pop + push the result and continue** — no Rust recursion, one `Arc::clone` per
+  whole `run_until` instead of per call. **Hard part / parity risk:** today pause/park (B1/D3),
+  `recover:` unwind, and `defer` all lean on Rust-stack unwinding through the nested `do_call`/`?`
+  chain. A flat loop must instead park by leaving `self.frames` intact and breaking the loop (the M:N
+  engine already saves/restores frame state via `FiberCtx`, so the machinery exists). **Keep the
+  re-entrant `run_proto_in_place` for native-initiated calls** (HOFs — `map`/`filter`/`sort` call
+  `invoke_value` per element and need the callback's result *synchronously* mid-native-method); only
+  the bytecode `Op::Call` path flattens. The two coexist: HOFs nest a sub-loop when they must, the
+  common recursive/bytecode call no longer does. Cheap warm-up that stands alone even without
+  flattening: **hoist the per-call `Arc::clone`** (raw-pointer/restructure the program borrow) — a free
+  few-percent on every call-bound bench. Blast radius is **VM-only** (the frozen interp is untouched);
+  parity is testable against the existing fib / recover-in-recursion / defer-in-recursion / deep-
+  recursion-overflow goldens. Bigger than a Medium item, smaller than the register-VM rewrite below.
 - **NaN-boxing the `Value` — BLOCKED by full 64-bit ints (2026-06-12 reality-check).** The goal
   (16 B → 8 B, operand-stack cache density, moves `loop`/`list`/`fib`) is real, but `Value::Int` is a
   **full `i64`** (`src/vm/value.rs:18`). NaN-boxing packs every value into 8 bytes, and a full i64 +
@@ -196,8 +220,15 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
 - **Cranelift AOT/JIT** — already the stretch goal. Near-native, but a whole backend. Only after the
   language stops moving.
 
-**Highest payoff-per-effort:** superinstructions + inline caching + peephole/const-fold. They attack
-dispatch count and name lookup — the two actual costs — without touching the value model or the GC.
+**Highest payoff-per-effort (original M19 batch, all landed):** superinstructions + inline caching +
+peephole/const-fold. They attacked dispatch count and name lookup — the two actual costs — without
+touching the value model or the GC.
+
+**Top remaining lever (post-M19 diagnosis, 2026-06-12):** **flatten the call loop** (above). With the
+cheap dispatch/name-lookup wins spent, the largest measured gap left is the per-call Rust recursion +
+`Arc::clone` on `fib`/`primes`. GC is *not* the lever — it's share-nothing per-thread, moves no bench,
+and the CPython gap is dispatch/call/alloc, not the collector. Generational GC stays a low-priority
+separate milestone.
 
 **M19 Phase 1 done (2026-06-11):** peephole/const-fold + superinstructions + `invoke_value` clone
 kill — all behavior-preserving (1516 tests + full two-engine parity green). Results in
