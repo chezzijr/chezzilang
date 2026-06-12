@@ -1,2 +1,5 @@
 /target
 .claude/
+
+# git worktrees (local, not tracked)
+.worktrees/
