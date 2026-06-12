@@ -108,10 +108,17 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   unshipped — predictably-false cheap branches, low expected payoff vs the inline win; revisit only if a
   profile shows them. ⏸️ 3. call-site specialization for `Op::Call` — **deferred (no-gain after inline);**
   see the Phase 8 bullet above + `docs/benchmarks.md`.
-- **Tier 2 (structural) — START HERE NEXT:** 4. **adaptive opcode quickening (PEP 659)** — rewrite ops to
-  type-specialized forms at runtime behind a deopt guard (generalizes superinstructions + ICs; cells in a
-  per-`Vm` side table, not the shared `Arc<Program>`); the single most CPython-3.14-like lever, and the
-  unifying mechanism for the method/field/call caches. ✅ 5. **map/list index specialization** (`mod.rs`
+- **Tier 2 (structural):** ✅ 4. **adaptive opcode quickening (PEP 659) — v1 binops LANDED (2026-06-13):**
+  the un-fused generic binop arms (`Add..GtEq` reached by stack operands; `Eq`/`NotEq`, never fused)
+  specialize to an int/int fast path behind a per-`Vm`, per-site `(proto,ip)` deopt guard. Side table
+  (`quicken: Vec<u8>` + `quicken_base` prefix-sum) mirrors `field_ic`/`method_ic` — heap-independent, not
+  swapped, **no `Op`/compiler/interpreter change → parity by construction**. Measured: **`primes` −7–8%**
+  (its never-fused `% … == 0` int `Eq` left `values_equal_guarded`), `fib` marginal, others flat (fused /
+  alloc / hash-bound — as scoped). Gotcha pinned by test: the int `Eq` fast path **replicates the generic
+  lossy `as_f64==as_f64`** (so `2^53 == 2^53+1` stays true), not exact `x==y`, to keep parity. 6 new guards,
+  1613 green, clippy clean. See `docs/benchmarks.md` "M19 Tier-2 … quickening, v1". **Next quickening
+  increment** (not started): extend the same side-table mechanism to `GetIndex`/`CallMethod` to *unify*
+  the existing field/method/index caches under one adaptive form. ✅ 5. **map/list index specialization** (`mod.rs`
   `GetIndex`/`SetIndex`) — **landed (Int-key fast path + inline dispatch): `list` −4%, `map` neutral**
   (hash-probe-bound). The remaining `map` win needs a denser int-keyed representation, not this in-place
   tweak — folds into #4 or its own lever.

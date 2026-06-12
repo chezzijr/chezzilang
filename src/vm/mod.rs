@@ -94,6 +94,16 @@ const MAX_CALL_DEPTH: usize = 10_000;
 /// HOST stack and SIGABRT (uncatchable). This bound turns that into a recoverable `RuntimeError`.
 const MAX_STRUCTURAL_DEPTH: usize = 10_000;
 
+// M19 Tier-2 — adaptive opcode quickening (PEP 659) per-site states (see [`Vm::quicken`]).
+/// Never executed yet: on first run, observe operand types and transition to `Q_INT` or `Q_GENERIC`.
+const Q_COLD: u8 = 0;
+/// Specialized: both operands were `Int` — take the int fast path, guarded (a non-int operand on a
+/// later run deopts the site to `Q_GENERIC`).
+const Q_INT: u8 = 1;
+/// Deopted / polymorphic: always run the generic path. Sticky — never re-specializes, so a site that
+/// sees mixed types never thrashes between fast and slow forms.
+const Q_GENERIC: u8 = 2;
+
 /// Stack size for the VM thread (same as the interpreter's): the VM recurses on the host stack
 /// when a builtin/method re-enters the dispatch loop, so a large dedicated stack decouples the
 /// call-depth limit from the caller's thread.
@@ -265,6 +275,19 @@ struct Vm {
     /// Same sharing argument as `field_ic` — sequential cooperative fibers / per-worker `Vm`s, each
     /// cell tid-guarded so it self-verifies.
     method_ic: Vec<MethodIcCell>,
+    /// M19 Tier-2 — adaptive opcode quickening (PEP 659) state, one byte per program instruction,
+    /// indexed by site `quicken_base[pid] + ip`. The un-fused generic binop arms (`Add..GtEq` reached
+    /// by stack operands; `Eq`/`NotEq` always) specialize to an int/int fast path behind a deopt
+    /// guard: `Q_COLD` → on first run observe operand types → `Q_INT` (int/int) or `Q_GENERIC`
+    /// (sticky; never re-specializes, so a polymorphic site never thrashes). Holds only state bytes
+    /// (no `GcRef`, no proto/heap handle), so it is heap-independent like `field_ic`/`method_ic`:
+    /// never snapshotted, never swapped in [`Vm::swap_ctx`]. Behaviour is byte-identical to the
+    /// generic path, so two-engine parity is preserved by construction.
+    quicken: Vec<u8>,
+    /// Prefix sum of per-proto `code.len()` over `program.protos` — the base offset into `quicken`
+    /// for each proto, so a site id is `quicken_base[pid] + ip`. Built once in `Vm::new`; program-
+    /// derived (heap-independent), so never swapped (mirrors `quicken`).
+    quicken_base: Vec<u32>,
     /// The current frame's slot base — cached so local access doesn't re-walk `frames` each op.
     cur_base: usize,
     /// Active `recover:` boundaries (a stack; the innermost is last). A runtime fault unwinds to the
@@ -1779,6 +1802,16 @@ impl Vm {
     fn new(program: Arc<Program>) -> Self {
         let field_ic = vec![IcCell::EMPTY; program.field_ic_sites as usize];
         let method_ic = vec![MethodIcCell::EMPTY; program.method_ic_sites as usize];
+        // M19 Tier-2 quickening: prefix-sum the per-proto code lengths into `quicken_base`, and size
+        // `quicken` to the program's total instruction count (one Q_COLD cell per site). Cheap — one
+        // pass at startup, which has ~11× headroom vs CPython.
+        let mut quicken_base = Vec::with_capacity(program.protos.len());
+        let mut acc: u32 = 0;
+        for p in &program.protos {
+            quicken_base.push(acc);
+            acc += p.code.len() as u32;
+        }
+        let quicken = vec![Q_COLD; acc as usize];
         Vm {
             program,
             heap: Heap::new(),
@@ -1792,6 +1825,8 @@ impl Vm {
             str_intern: fxhash::FxHashMap::default(),
             field_ic,
             method_ic,
+            quicken,
+            quicken_base,
             cur_base: 0,
             handlers: Vec::new(),
             pending_exit: None,
@@ -2226,6 +2261,23 @@ impl Vm {
                 // call + big-match jump; the helpers carry the Int-key fast path. One source of truth.
                 Op::GetIndex => self.get_index(span),
                 Op::SetIndex => self.set_index(span),
+                // M19 Tier-2 — adaptive opcode quickening (PEP 659). These are the UN-FUSED generic
+                // binop arms: `Add..GtEq` here are reached only by stack-operand binops (the
+                // `local⊕local`/`local⊕const` windows already fused to superinstructions); `Eq`/`NotEq`
+                // are never fused. Each consults a per-site (proto,ip) deopt cell and takes an int/int
+                // fast path once warm. Handled here (not in `step`) because the site id needs `pid`+`ip`,
+                // which only `run_until` has. The slow path is byte-identical to the kept `step` arms.
+                Op::Add => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Add, span),
+                Op::Sub => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Sub, span),
+                Op::Mul => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Mul, span),
+                Op::Div => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Div, span),
+                Op::Mod => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Mod, span),
+                Op::Lt => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Lt, span),
+                Op::LtEq => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::LtEq, span),
+                Op::Gt => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Gt, span),
+                Op::GtEq => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::GtEq, span),
+                Op::Eq => self.q_eq(self.quicken_base[pid] as usize + ip, false, span),
+                Op::NotEq => self.q_eq(self.quicken_base[pid] as usize + ip, true, span),
                 other => self.step(other, span),
             };
             if let Err(rte) = step_result {
@@ -2895,6 +2947,69 @@ impl Vm {
     }
 
     // ----- arithmetic / comparison -----
+
+    /// M19 Tier-2 — adaptive quickening for the un-fused generic arith/ordered-compare binops
+    /// (`Add..GtEq`). `site` indexes [`Vm::quicken`]. Cold: observe the two stack operands' types once,
+    /// then run the generic path. Int-specialized: take the `fast_int_bin` path (the exact int
+    /// behaviour the superinstructions already ship), deopting to `Q_GENERIC` if a non-int operand
+    /// shows up. Generic: always the unfused `arith`/`compare_op` via `run_bin_kind`. Every path
+    /// produces a byte-identical result to the original `step` arm.
+    #[inline(never)]
+    fn q_arith(&mut self, site: usize, kind: crate::vm::op::BinKind, span: Span) -> Result<(), RuntimeError> {
+        match self.quicken[site] {
+            Q_INT => {
+                let n = self.stack.len();
+                if let (Value::Int(x), Value::Int(y)) = (self.stack[n - 2], self.stack[n - 1]) {
+                    let v = self.fast_int_bin(x, y, kind, span)?;
+                    self.stack.truncate(n - 2);
+                    self.stack.push(v);
+                    Ok(())
+                } else {
+                    // A non-int operand reached a specialized site — deopt permanently (operands stay
+                    // on the stack for the generic path to pop).
+                    self.quicken[site] = Q_GENERIC;
+                    self.run_bin_kind(kind, span)
+                }
+            }
+            Q_GENERIC => self.run_bin_kind(kind, span),
+            _ => {
+                // Q_COLD — record whether this site is int/int, then run the generic path this once.
+                let n = self.stack.len();
+                let both_int = matches!((self.stack[n - 2], self.stack[n - 1]), (Value::Int(_), Value::Int(_)));
+                self.quicken[site] = if both_int { Q_INT } else { Q_GENERIC };
+                self.run_bin_kind(kind, span)
+            }
+        }
+    }
+
+    /// M19 Tier-2 — adaptive quickening for `Eq`/`NotEq` (never fused, so always reached here). The
+    /// int fast path REPLICATES the generic numeric comparison `as_f64(x) == as_f64(y)` (lossy for
+    /// `|i64| > 2^53`) — NOT exact `x == y` — so it stays byte-identical to `values_equal_guarded`
+    /// (`Value::Int` is numeric) and to the interpreter; preserving that loss is what keeps two-engine
+    /// parity. `negate` flips the result for `NotEq`. Mirrors the kept `Op::Eq`/`Op::NotEq` `step` arms.
+    #[inline(never)]
+    fn q_eq(&mut self, site: usize, negate: bool, span: Span) -> Result<(), RuntimeError> {
+        if self.quicken[site] == Q_INT {
+            let n = self.stack.len();
+            if let (Value::Int(x), Value::Int(y)) = (self.stack[n - 2], self.stack[n - 1]) {
+                self.stack.truncate(n - 2);
+                let eq = (x as f64) == (y as f64);
+                self.push(Value::Bool(eq ^ negate));
+                return Ok(());
+            }
+            self.quicken[site] = Q_GENERIC; // non-int at a specialized site → deopt
+        } else if self.quicken[site] == Q_COLD {
+            let n = self.stack.len();
+            let both_int = matches!((self.stack[n - 2], self.stack[n - 1]), (Value::Int(_), Value::Int(_)));
+            self.quicken[site] = if both_int { Q_INT } else { Q_GENERIC };
+            // fall through to the generic path this first time
+        }
+        let r = self.pop();
+        let l = self.pop();
+        let eq = self.values_equal_guarded(l, r, 0, span)?;
+        self.push(Value::Bool(eq ^ negate));
+        Ok(())
+    }
 
     /// `BinLocalLocal{a,b,kind}` — push `local[a] <op> local[b]`. `#[inline(never)]` keeps the body
     /// out of `step`'s frame (see the call site).
@@ -9478,6 +9593,93 @@ mod tests {
             "main()\n",
         );
         assert_eq!(run(src), "10 20\n");
+    }
+
+    // ---- M19 Tier-2: adaptive opcode quickening (PEP 659), v1 — binops — correctness guards ----
+    // The un-fused generic binop arms (`Add..GtEq` reached by stack operands; `Eq`/`NotEq` always)
+    // specialize to an int/int fast path behind a per-`Vm`, per-site (proto,ip) deopt guard. The
+    // side table holds only state bytes (no `GcRef`), so it is heap-independent — never swapped in
+    // `swap_ctx`, like `field_ic`/`method_ic`. Behaviour is byte-identical to the generic path; the
+    // interpreter is untouched, so two-engine parity holds by construction. These guard the gotchas.
+
+    #[test]
+    fn quicken_table_presized_and_based() {
+        // White-box wiring: the per-`Vm` quicken side table has one state byte per program
+        // instruction, and `quicken_base` is the prefix sum of per-proto code lengths so a site is
+        // `quicken_base[pid] + ip` (mirrors `field_ic_sites`/`field_ic` presizing).
+        let src = "i := 0\ntotal := 0\nwhile i < 5:\n    total = total + i * i\n    i = i + 1\nprint(total)\n";
+        let tokens = lexer::tokenize(src).unwrap();
+        let module = parser::parse(tokens).unwrap();
+        let program = crate::compiler::compile_module_standalone(&module).unwrap();
+        let vm = Vm::new(Arc::new(program.clone()));
+        let total: usize = program.protos.iter().map(|p| p.code.len()).sum();
+        assert_eq!(vm.quicken.len(), total, "one quicken cell per instruction");
+        assert_eq!(vm.quicken_base.len(), program.protos.len(), "one base per proto");
+        // prefix-sum invariant: base[0]==0, base[k+1]==base[k]+len(proto[k])
+        let mut acc = 0u32;
+        for (pid, p) in program.protos.iter().enumerate() {
+            assert_eq!(vm.quicken_base[pid], acc, "base[{pid}] is the running prefix sum");
+            acc += p.code.len() as u32;
+        }
+        // all cells start Cold (0)
+        assert!(vm.quicken.iter().all(|&b| b == 0), "every site starts Cold");
+    }
+
+    #[test]
+    fn quicken_eq_preserves_lossy_f64_semantics() {
+        // GOTCHA: the generic `Eq` compares numerics via `as_f64(a)==as_f64(b)` (mod.rs:3380), which
+        // is LOSSY for i64 beyond 2^53. The quickened int fast path MUST replicate the loss (NOT use
+        // exact `x==y`), or it diverges from the interpreter and breaks parity. 2^53 vs 2^53+1 both
+        // round to the same f64, so `==` is TRUE and `!=` is FALSE under the (preserved) semantics.
+        // Run it in a hot loop so the site warms past Cold into the specialized Int state.
+        let src = "i := 0\nhits := 0\nwhile i < 3:\n    if 9007199254740992 == 9007199254740993:\n        hits = hits + 1\n    i = i + 1\nprint(hits)\n";
+        assert_eq!(run_parity(src), "3\n");
+        let src2 = "i := 0\nmiss := 0\nwhile i < 3:\n    if 9007199254740992 != 9007199254740993:\n        miss = miss + 1\n    i = i + 1\nprint(miss)\n";
+        assert_eq!(run_parity(src2), "0\n");
+    }
+
+    #[test]
+    fn quicken_eq_small_ints_exact() {
+        // Small ints (within f64 exact range) compare normally; loop warms the site to Int state.
+        let src = "i := 0\nc := 0\nwhile i < 6:\n    if i == 3:\n        c = c + 100\n    if i != 3:\n        c = c + 1\n    i = i + 1\nprint(c)\n";
+        // i==3 once (+100), i!=3 five times (+5) = 105
+        assert_eq!(run_parity(src), "105\n");
+    }
+
+    #[test]
+    fn quicken_deopt_int_then_float_then_str() {
+        // A single generic `+` site reached first with ints (warms to Int), then floats, then strings
+        // (string concat) — each must deopt cleanly to the generic path and stay correct. The `+` of
+        // two CALL results is a stack-operand Add (un-fused), exactly the quickening target.
+        let src = "fn add2[T](a: T, b: T) -> T:\n    return a + b\n\
+                   print(add2(add2(2, 3), add2(4, 5)))\n\
+                   print(add2(1.5, 2.5))\n\
+                   print(add2(\"ab\", \"cd\"))\n";
+        // 5+9=14 ; 1.5+2.5=4.0 ; abcd
+        assert_eq!(run_parity(src), "14\n4.0\nabcd\n");
+    }
+
+    #[test]
+    fn quicken_stack_arith_and_compare_int_fast_path() {
+        // Stack-operand arith + ordered compare on ints (the un-fused generic arms). `(a*b) - (c+d)`
+        // pushes intermediate results then operates on them — not a `local⊕local`/`local⊕const`
+        // window, so it never fuses to a superinstruction and rides the quickened path instead.
+        let src = "fn f(a: int, b: int, c: int, d: int) -> int:\n    return (a * b) - (c + d)\n\
+                   i := 0\nacc := 0\nwhile i < 4:\n    if f(i + 2, i + 3, i, 1) > 0:\n        acc = acc + f(i + 2, i + 3, i, 1)\n    i = i + 1\nprint(acc)\n";
+        // f = (i+2)(i+3) - (i+1): i=0:6-1=5; i=1:12-2=10; i=2:20-3=17; i=3:30-4=26 ; all >0 => 58
+        assert_eq!(run_parity(src), "58\n");
+    }
+
+    #[test]
+    fn quicken_overflow_and_divzero_errors_match_generic() {
+        // The quickened int fast path reuses `fast_int_bin`, so overflow / div-by-zero must raise the
+        // SAME error as the generic `arith` path. Warm the site, then trip it.
+        let dz = "i := 0\nwhile i < 1:\n    print(10 / (i - i))\n    i = i + 1\n";
+        let err = run_capture(dz).unwrap_err().to_string();
+        assert!(err.contains("division by zero"), "got: {err}");
+        let mz = "i := 0\nwhile i < 1:\n    print(10 % (i - i))\n    i = i + 1\n";
+        let err2 = run_capture(mz).unwrap_err().to_string();
+        assert!(err2.contains("modulo by zero"), "got: {err2}");
     }
 
     // ---- M19 Phase 6: method-call inline cache (+ flatten) — correctness guards ----

@@ -488,3 +488,50 @@ after; full suite 1607 green, clippy clean. Kept as a principled cleanup (remove
 list-iteration win) in the spirit of Phase 5b's neutral-but-principled `tid` guard. To actually move
 `map` needs a bigger lever (map-shape specialization / a denser int-keyed representation) — out of scope
 for a behavior-preserving in-place tweak.
+
+## M19 Tier-2 — adaptive opcode quickening (PEP 659), v1: binops — 2026-06-13
+
+The single most CPython-3.14-like lever, scoped to its highest-probability first target. The static
+superinstructions (`BinLocalLocal`/`BinLocalConst`) already fuse arith **and ordered compare** for
+`local⊕local` / `local⊕const` operands, so the **generic** `Add..GtEq` arms are reached only by
+**stack-operand** binops (intermediate expression results), and `Eq`/`NotEq` are excluded from
+`BinKind` so they are **never** fused. Those un-fused arms are what quickening specializes.
+
+**Mechanism (mirrors `field_ic`/`method_ic`):** a per-`Vm` side table `quicken: Vec<u8>`, one state
+byte per program instruction, keyed by site `quicken_base[pid] + ip` (`quicken_base` = prefix sum of
+per-proto `code.len()`). No `Op`/compiler/interpreter change — the bytecode stays a shared read-only
+`Arc<Program>`; the table holds only state bytes (no `GcRef`), so it is heap-independent and never
+swapped by `swap_ctx`. State machine: `Q_COLD` → observe operand types once → `Q_INT` (int/int fast
+path via the already-proven `fast_int_bin`) or `Q_GENERIC` (sticky; a polymorphic site never
+thrashes). A non-int operand at a specialized site deopts to `Q_GENERIC`. Handled inline in
+`run_until` (not `step`) because the site id needs `pid`+`ip` — which also buys the Phase-7 dispatch
+win for these ops for free.
+
+**Measured (absolute chezzi time — the reliable signal; CPython ratios noisy run-to-run):**
+
+| bench    | before  | after   | result |
+|----------|--------:|--------:|--------|
+| `primes` | ~665 ms | **~614 ms** | **−7–8%** (consistent across runs, beyond σ — the target) |
+| `fib`    | ~258 ms | ~254 ms | marginal (~−1.5%, directionally consistent, near σ) |
+| `list`   | ~390 ms | ~387 ms | flat (within σ) |
+| `struct` | ~437 ms | ~441 ms | flat (within σ) |
+| `str` / `loop` / `map` | — | — | flat (alloc- / fully-fused- / hash-probe-bound) |
+| `empty` (startup) | ~0.85 ms | ~0.86 ms | unchanged (prefix-sum + table alloc is free) |
+
+**`primes` was the predicted target and it landed** — its inner loop is `n % i == 0` (a never-fused
+int `Eq`, previously routed through the heavyweight `values_equal_guarded`) plus stack-operand arith.
+Quickening the `Eq` to a direct `as_f64(x)==as_f64(y)` (skipping the depth guard / `is_numeric` /
+recursive match) is the bulk of the win. The fused hot loops (`loop`) and alloc/hash-bound benches
+(`str`/`map`) don't touch the generic arms, so they stay flat — exactly as scoped.
+
+**The Eq parity gotcha (pinned by test):** the generic numeric `Eq` is **lossy f64**
+(`as_f64(a)==as_f64(b)`), so `2^53 == 2^53+1` is **true**. The quickened int path deliberately
+replicates that loss rather than doing exact `x==y` — exactness would diverge from the interpreter and
+break two-engine parity. `quicken_eq_preserves_lossy_f64_semantics` locks the behavior; any future
+"fix" to int equality must change the generic path + interp together, as a separate non-perf change.
+
+**Behavior-preserving:** 6 new VM/parity guards (`quicken_*`: table presizing + prefix-sum,
+lossy-f64 Eq, small-int Eq, int→float→str deopt, stack arith/compare fast path, overflow/div-zero
+error parity). Full suite 1613 green, conformance green, clippy clean. v1 also lays the reusable
+side-table machinery the docs call the unifying base for later index/call quickening (out of scope
+here — `GetIndex` already has an Int-key fast path; `Op::Call` spec was deferred for ~0 gain).
