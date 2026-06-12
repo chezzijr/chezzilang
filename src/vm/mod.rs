@@ -3797,6 +3797,25 @@ impl Vm {
                 Value::Bool(b) => Some(A::Bool(*b)),
                 Value::Obj(h) => match self.heap.get(*h) {
                     Obj::Str(s) => Some(A::Str(s.to_string())),
+                    // A `map[str, str]` arg (today only `request`'s headers) is snapshotted into
+                    // owned pairs so it survives the off-heap handoff. Any non-str key/value reverts
+                    // to `None` → run inline (safe fallback; the checker guarantees str/str for
+                    // typed code, so this is unreachable from a well-typed program).
+                    Obj::Map(m) => {
+                        let mut pairs = Vec::with_capacity(m.entries.len());
+                        for (_, k, v) in &m.entries {
+                            let (Value::Obj(kh), Value::Obj(vh)) = (k, v) else {
+                                return None;
+                            };
+                            let (Obj::Str(ks), Obj::Str(vs)) =
+                                (self.heap.get(*kh), self.heap.get(*vh))
+                            else {
+                                return None;
+                            };
+                            pairs.push((ks.to_string(), vs.to_string()));
+                        }
+                        Some(A::Map(pairs))
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -8762,6 +8781,14 @@ impl crate::native::Host for OffloadHost {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
+    fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
+        match self.args.get(i) {
+            // Pre-extracted on the worker (heap live) into owned pairs; served back off-thread.
+            Some(crate::native::NativeArg::Map(pairs)) => Ok(pairs.clone()),
+            Some(_) => Err(crate::native::HostError::arg_type(i, "map[str, str]", "other")),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
     fn write_stdout(&mut self, _s: &str) {
         unreachable!("offloaded blocking native must not write stdout (off-heap host)")
     }
@@ -8824,6 +8851,36 @@ impl crate::native::Host for VmHost<'_> {
                 }
             },
             Some(other) => Err(crate::native::HostError::arg_type(i, "str", self.vm.type_name(*other))),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
+                Obj::Map(m) => {
+                    // Iterate `entries` (insertion order) so header order is deterministic and
+                    // matches the interp + off-heap hosts. Every key/value must be a str.
+                    let mut pairs = Vec::with_capacity(m.entries.len());
+                    for (_, k, v) in &m.entries {
+                        let (Value::Obj(kh), Value::Obj(vh)) = (k, v) else {
+                            return Err(crate::native::HostError::arg_type(i, "map[str, str]", "other"));
+                        };
+                        let (Obj::Str(ks), Obj::Str(vs)) = (self.vm.heap.get(*kh), self.vm.heap.get(*vh))
+                        else {
+                            return Err(crate::native::HostError::arg_type(i, "map[str, str]", "other"));
+                        };
+                        pairs.push((ks.to_string(), vs.to_string()));
+                    }
+                    Ok(pairs)
+                }
+                _ => {
+                    let got = self.vm.type_name(self.args[i]);
+                    Err(crate::native::HostError::arg_type(i, "map[str, str]", got))
+                }
+            },
+            Some(other) => {
+                Err(crate::native::HostError::arg_type(i, "map[str, str]", self.vm.type_name(*other)))
+            }
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -9116,6 +9173,76 @@ mod tests {
     /// Run a program to completion, returning its stdout (panics on runtime error).
     fn run(src: &str) -> String {
         run_capture(src).unwrap_or_else(|e| panic!("unexpected runtime error: {e}"))
+    }
+
+    /// Build a VM `map[str, str]` value with the given pairs (insertion order preserved), so the
+    /// host-side map readers can be unit-tested without compiling a program.
+    fn build_str_map(vm: &mut Vm, pairs: &[(&str, &str)]) -> Value {
+        let span = Span { line: 1, col: 1 };
+        let mut map = MapData::default();
+        for (k, v) in pairs {
+            let kv = vm.alloc_str((*k).to_string());
+            let vv = vm.alloc_str((*v).to_string());
+            let hk = vm.hash_value(kv, span).unwrap();
+            map.push(hk, kv, vv);
+        }
+        Value::Obj(vm.heap.alloc(Obj::Map(map)))
+    }
+
+    /// `OffloadHost::arg_str_map` serves the pre-extracted `NativeArg::Map` pairs back (so an
+    /// offloaded `request()` reads its headers off-thread); a non-map arg errors with `arg_type`.
+    #[test]
+    fn offload_host_arg_str_map_roundtrips() {
+        use crate::native::Host;
+        let mut host = OffloadHost {
+            args: vec![
+                crate::native::NativeArg::Map(vec![("X-Custom".into(), "value".into())]),
+                crate::native::NativeArg::Str("not-a-map".into()),
+            ],
+        };
+        assert_eq!(host.arg_str_map(0).unwrap(), vec![("X-Custom".into(), "value".into())]);
+        assert!(host.arg_str_map(1).is_err(), "a non-map NativeArg must error");
+        assert!(host.arg_str_map(9).is_err(), "a missing arg must error");
+    }
+
+    /// `extract_native_args` snapshots a `map[str, str]` Value into `NativeArg::Map` (insertion
+    /// order) so `request()` can offload; a non-str-valued map reverts to `None` (run inline).
+    #[test]
+    fn extract_native_args_snapshots_str_map() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        let m = build_str_map(&mut vm, &[("a", "1"), ("b", "2")]);
+        let got = vm.extract_native_args(&[m]).expect("str/str map extracts");
+        assert_eq!(
+            got,
+            vec![crate::native::NativeArg::Map(vec![
+                ("a".into(), "1".into()),
+                ("b".into(), "2".into()),
+            ])],
+            "pairs preserved in insertion order"
+        );
+        // A map with a non-str value (here an int) is not snapshottable → None (safe inline fallback).
+        let span = Span { line: 1, col: 1 };
+        let mut bad = MapData::default();
+        let kv = vm.alloc_str("k".to_string());
+        let hk = vm.hash_value(kv, span).unwrap();
+        bad.push(hk, kv, Value::Int(7));
+        let bad_map = Value::Obj(vm.heap.alloc(Obj::Map(bad)));
+        assert_eq!(vm.extract_native_args(&[bad_map]), None);
+    }
+
+    /// `VmHost::arg_str_map` reads a live heap map in insertion order; a non-map arg errors.
+    #[test]
+    fn vm_host_arg_str_map_reads_live_map() {
+        use crate::native::Host;
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        let m = build_str_map(&mut vm, &[("one", "1"), ("two", "2")]);
+        let not_map = Value::Int(3);
+        let mut host = VmHost { vm: &mut vm, args: vec![m, not_map] };
+        assert_eq!(
+            host.arg_str_map(0).unwrap(),
+            vec![("one".into(), "1".into()), ("two".into(), "2".into())]
+        );
+        assert!(host.arg_str_map(1).is_err(), "a non-map arg must error");
     }
 
     /// M-C implicit nurseries: a bare `spawn` at function scope (no explicit `parallel:`) joins at

@@ -3541,6 +3541,27 @@ impl crate::native::Host for InterpHost<'_> {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
+    fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Map(m)) => {
+                // Iterate `entries` (insertion order) so header order matches the VM + off-heap
+                // hosts exactly. Every key/value must be a str.
+                let m = m.borrow();
+                let mut pairs = Vec::with_capacity(m.entries.len());
+                for (_, k, v) in &m.entries {
+                    let (Value::Str(ks), Value::Str(vs)) = (k, v) else {
+                        return Err(crate::native::HostError::arg_type(i, "map[str, str]", "other"));
+                    };
+                    pairs.push((ks.to_string(), vs.to_string()));
+                }
+                Ok(pairs)
+            }
+            Some(other) => {
+                Err(crate::native::HostError::arg_type(i, "map[str, str]", other.type_name()))
+            }
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
     fn write_stdout(&mut self, s: &str) {
         self.out.push_str(s);
     }
@@ -4108,6 +4129,34 @@ mod tests {
 
     fn run(src: &str) -> String {
         run_capture(src).expect("run should succeed")
+    }
+
+    /// `InterpHost::arg_str_map` reads a `map[str, str]` Value in insertion order; a non-map arg
+    /// errors. Parity twin of `vm::tests::vm_host_arg_str_map_reads_live_map` — both iterate
+    /// `MapData.entries` so header order is identical across engines.
+    #[test]
+    fn interp_host_arg_str_map_reads_map() {
+        use crate::native::Host;
+        let mut map = MapData::default();
+        map.push(1, Value::Str("one".into()), Value::Str("1".into()));
+        map.push(2, Value::Str("two".into()), Value::Str("2".into()));
+        let m = Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map)));
+
+        let (mut out, mut stderr) = (String::new(), String::new());
+        let mut cfg = crate::native::HostConfig::default();
+        let mut exit = None;
+        let mut host = InterpHost {
+            args: vec![m, Value::Int(3)],
+            out: &mut out,
+            stderr: &mut stderr,
+            cfg: &mut cfg,
+            exit: &mut exit,
+        };
+        assert_eq!(
+            host.arg_str_map(0).unwrap(),
+            vec![("one".into(), "1".into()), ("two".into(), "2".into())]
+        );
+        assert!(host.arg_str_map(1).is_err(), "a non-map arg must error");
     }
 
     /// M-C implicit nurseries (interp side of the cross-engine parity twins in `vm::tests`): a bare
