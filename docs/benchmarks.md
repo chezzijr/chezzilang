@@ -379,3 +379,78 @@ UTF-8 by bytes-not-chars, `Eq`/`Hash` content-equal to `Box<str>`), `obj_size_un
 `sso_boundary_string_ops_parity` (concat/split/join/index/iterate/`==`/map-key across the boundary,
 VM == interp). 1565 tests green, conformance 7/7, `clippy --all-targets` clean. VM-only; frozen
 interp untouched.
+
+## M19 Phase 6 — method-call inline cache + flatten `do_method_call` — 2026-06-12
+
+`Op::CallMethod` carries a per-call-site `ic` id (dense `0..method_ic_sites`, allocated in the
+compiler like `field_ic`). On a struct receiver the VM caches `(tid → proto, module_idx)` in a
+per-`Vm` `method_ic` vector: a hit on a matching layout `tid` skips the `program.structs.get(name)`
+clone **and** the name-keyed `def.methods.get(method)` probe — collapsing dispatch to one int
+compare — **and** flattens the call (pushes the method frame in place, like the `Op::Call`
+flatten, so the running `run_until` executes the body instead of a re-entrant `run_proto`). The cell
+holds proto id + module index, **no `GcRef`**, so it is invisible to GC / snapshots / `swap_ctx` —
+the same heap-independence trick the field IC uses. Native-re-entry callers (`spawn`/`defer` method
+tasks) pass `NO_IC` and keep the synchronous `run_proto` path; a real `ic` is exactly the
+"flatten-safe, called-from-the-dispatch-loop" signal.
+
+Measured as **vs-CPython ratio** (lower = faster Chezzi; 3-run median, the ms are stable to ±noise):
+
+| bench    | before | after | result |
+|----------|-------:|------:|--------|
+| `struct` | 2.90×  | **2.63×** | **−9%** (the predicted target moved) |
+| `map`    | 2.78×  | 2.79× | neutral (its `.values()`/`.next()` sites are minor vs the hash work) |
+| `fib`/`str`/`primes`/`loop`/`list` | — | — | within noise (no struct-method dispatch) |
+
+Only `struct` moved, as predicted — it is the only bench dominated by struct-method calls. Honest
+no-mover note: `map`'s synthetic iterator-protocol method sites (`.values()`/`.next()`) are a tiny
+fraction of its FxHash-bound cost, so caching them is invisible. **Guarded by:**
+`method_ic_sites_allocated_and_vm_presized` (white-box wiring), `method_ic_monomorphic_hot_loop`,
+`method_ic_polymorphic_one_site_via_protocol` (a type-erased protocol-generic site hit by two struct
+types — the `tid` guard prevents a stale-proto dispatch), `method_ic_under_parallel_engine`,
+`method_ic_gc_stress`, `method_ic_function_typed_field_not_cached` (a `fn`-typed field stays on
+`invoke_value`, never cached), and `method_call_flatten_deep_recursion_on_small_stack` (recursive
+method no longer consumes host stack — the flatten's robustness bonus). VM-only; interp untouched.
+
+## M19 Phase 7 — inline hot opcodes in `run_until` — 2026-06-12
+
+The dispatch loop now handles the hottest opcodes **inline** before delegating the long tail to
+`self.step(op, span)`: `GetLocal`/`SetLocal`, the three superinstructions
+(`BinLocalLocal`/`BinLocalConst`/`IncLocal`), `Jump`/`JumpIfFalse`, and `Call`/`Return`. Each inlined
+arm calls the **same** helper as `step` (`op_bin_local_local`, `do_call`, `do_return`, …) or copies
+its 1–3-line body verbatim — one source of truth per op — so the change is purely *where* the op is
+dispatched, not *what* it does. The win: the common op skips a function call + the giant `step` match
+jump-table on every instruction.
+
+This was the single biggest lever of the session — it moved **every** op-bound bench:
+
+| bench    | before | after | result |
+|----------|-------:|------:|--------|
+| `loop`   | 1.30×  | **~1.10×** | **−15%** (was "the dispatch floor" — now near CPython parity) |
+| `list`   | 3.06×  | **~2.55×** | **−17%** |
+| `struct` | 2.63×  | ~2.60× | small further gain (stacks with Phase 6) |
+| `primes` | 2.47×  | **~2.27×** | **−8%** |
+| `fib`    | 3.43×  | **~3.24×** | **−6%** |
+| `str`    | 2.13×  | ~2.03× | −5% |
+| `map`    | 2.78×  | ~2.68× | −4% |
+| `empty`/startup | 0.09× | 0.09× | unchanged (11× win) |
+
+The improvement scales with op density per unit work — `loop`/`list` (tight per-op loops) move most;
+allocation/hash-bound benches move least. Consistent across 3 runs, all beyond the per-bench σ.
+**Behavior-preserving:** the inline arms are byte-identical to `step`'s; the full suite + every
+two-engine golden + `inlined_hot_ops_path_matches_step` (hammers all inlined ops in one program, VM
+== interp) stay green. VM-only; interp untouched. 1573 tests green, conformance 7/7, clippy clean.
+
+## M19 Phase 8 — call-site specialization for `Op::Call` — analyzed, DEFERRED (no-gain) — 2026-06-12
+
+Ranked Tier-1 #3 (target `fib`), but analysis after Phase 7 shows the premise is largely spent:
+- **Call-flatten (Phase 7 inline) already made `do_call`'s happy path lean** — the deref a call-IC
+  would skip is one `heap.get(h)` Vec-index + a 3-way match (~2–3 instructions); `check_arity` is a
+  single compare on success. fib's dominant residual is **frame construction** in `finish_frame` (the
+  Nil-slot fill + `CallFrame` push), which a *dispatch* cache does not touch.
+- **A correct call-IC cannot avoid `GcRef`s the way the method-IC did.** The method-IC keys on a
+  heap-independent `tid` read cheaply off the receiver; but the callee *is* a heap object, so any
+  call-site cache key is a heap-specific handle → a `swap_ctx` invalidation hazard for cooperative
+  fibers. That is real complexity/risk for ~0 measurable gain — below the M19 bar.
+
+fib's genuine next lever is **Tier 2 (PEP 659 adaptive quickening)** or **Tier 3 (Cranelift JIT)** —
+separate milestones, not an in-loop tweak. Deferred deliberately, not forgotten.
