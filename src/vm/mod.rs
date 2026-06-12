@@ -9209,6 +9209,58 @@ mod tests {
     }
 
     #[test]
+    fn method_ic_struct_method_shadowing_hof_name() {
+        // The IC fast path sits BEFORE the list-HOF / core-type guards in `do_method_call`. A struct
+        // whose own method is named `map` (a built-in list HOF name) must dispatch the STRUCT method,
+        // never the list HOF — the `Obj::Struct` tid guard makes the collision impossible, this pins it.
+        let src = "struct Grid:\n    n: int\n\n    fn map(self, k: int) -> int:\n        return self.n + k\n\
+                   g := Grid(100)\ni := 0\nacc := 0\nwhile i < 3:\n    acc = acc + g.map(i)\n    i = i + 1\nprint(acc)\n";
+        // 100+0 + 100+1 + 100+2 = 303
+        assert_eq!(run_parity(src), "303\n");
+    }
+
+    #[test]
+    fn method_ic_flattened_method_with_defer_in_loop() {
+        // A flattened method's `do_return` must drain the frame's `defer`s on the IC-hit path, every
+        // iteration, AFTER the return value is captured (Go order) — pinned across repeated hits.
+        let src = "fn note(id: int):\n    print(\"d{id}\")\n\
+                   struct Logger:\n    id: int\n\n    fn work(self, n: int) -> int:\n        defer note(self.id)\n        return n * 2\n\
+                   l := Logger(7)\ni := 0\nacc := 0\nwhile i < 3:\n    acc = acc + l.work(i)\n    i = i + 1\nprint(acc)\n";
+        // each call: prints d7 (defer), returns n*2 -> 0,2,4 = 6
+        assert_eq!(run_parity(src), "d7\nd7\nd7\n6\n");
+    }
+
+    #[test]
+    fn method_ic_uncaught_fault_on_hit_path() {
+        // Warm the IC with a good call, then fault on a cached hit. The flattened/cached path must
+        // produce the SAME uncaught-fault behavior (message + that the program errors) as a fresh
+        // resolve — the frozen interp is the oracle (run_err asserts the VM error; parity via interp).
+        let src = "struct Bomb:\n    n: int\n\n    fn blow(self, d: int) -> int:\n        return self.n / d\n\
+                   b := Bomb(10)\nprint(b.blow(2))\nprint(b.blow(0))\n";
+        let vm_err = run_err(src);
+        let interp_err = match crate::interp::run_capture(src) {
+            Ok(o) => panic!("expected interp error, got {o:?}"),
+            Err(e) => e.message,
+        };
+        assert_eq!(vm_err, interp_err, "VM/interp must agree on the IC-hit-path fault message");
+        assert!(vm_err.contains("zero") || vm_err.contains("division"), "got: {vm_err}");
+    }
+
+    #[test]
+    fn method_ic_survives_fiber_park_under_parallel() {
+        // The per-`Vm` `method_ic` must stay intact across a `swap_ctx` (a fiber parks on `recv`, another
+        // runs, the parked fiber resumes and makes a CACHED method call). The central liveness claim:
+        // the cell holds no `GcRef`, so a context swap can't invalidate it. VM == `--parallel`.
+        let src = "struct Acc:\n    base: int\n\n    fn fold_in(self, k: int) -> int:\n        return self.base + k\n\
+                   fn consumer(ch: Channel[int]):\n    a := Acc(1000)\n    total := 0\n    i := 0\n    while i < 4:\n        v := ch.recv()\n        total = total + a.fold_in(v)\n        i = i + 1\n    print(total)\n\
+                   fn producer(ch: Channel[int]):\n    i := 0\n    while i < 4:\n        ch.send(i)\n        i = i + 1\n\
+                   fn main():\n    ch := Channel[int]()\n    parallel:\n        spawn consumer(ch)\n        spawn producer(ch)\nmain()\n";
+        // total = 4*1000 + (0+1+2+3) = 4006
+        assert_eq!(run_capture_parallel(src).expect("parallel"), run(src));
+        assert_eq!(run(src), "4006\n");
+    }
+
+    #[test]
     fn inlined_hot_ops_path_matches_step() {
         // M19 Phase 7 — `run_until` dispatches the hottest ops (GetLocal/SetLocal, the superinstrs,
         // Jump/JumpIfFalse, Call/Return) inline and delegates the tail to `step`. This hammers every

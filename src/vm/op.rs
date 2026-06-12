@@ -151,7 +151,10 @@ pub enum Op {
     Call(usize),
     /// `obj.method(args)` — stack `[recv, arg0, …]`. Resolves a struct method (binds `self`) or a
     /// module member (plain call, no `self`). `ic`: per-call-site method inline-cache id (dense
-    /// `0..Program::method_ic_sites`), or [`NO_IC`] for the synthetic iterator-protocol sites.
+    /// `0..Program::method_ic_sites`). Every compiler-emitted `CallMethod` gets a real `ic` (including
+    /// the synthetic iterator-protocol `next`/`values` sites); [`NO_IC`] is passed ONLY by the
+    /// VM-internal native-re-entry callers (`spawn`/`defer`/fiber-start method tasks), never at compile
+    /// time — a real `ic` is exactly the "flatten-safe, called-from-the-dispatch-loop" signal.
     CallMethod { name: String, argc: usize, ic: u32 },
     CallBuiltin(String, usize),
     CallPrint(usize),
