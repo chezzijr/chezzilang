@@ -2156,7 +2156,9 @@ impl Vm {
                 self.cancelled = true;
                 let span = self.frames[self.frames.len() - 1].call_span;
                 let rte = self.err("cancelled".to_string(), span);
-                let rte = self.unwind_deferred(base_level).unwrap_or(rte);
+                // B3.4 cancel: no cancel-report — a cancelled task's pending nurseries are torn down
+                // silently (the parent that set the flag already escaped and reported its own).
+                let rte = self.unwind_deferred(base_level, false).unwrap_or(rte);
                 return Err(rte);
             }
             // D3: reduction-counting preemption (M:N engine only — the cooperative engine is the
@@ -2232,7 +2234,7 @@ impl Vm {
                 // whole worker — run defers, bypass `recover:`, mirroring the loop-top check. A
                 // cancelled task must not be caught and resumed.
                 if self.cancelled {
-                    let rte = self.unwind_deferred(base_level).unwrap_or(rte);
+                    let rte = self.unwind_deferred(base_level, false).unwrap_or(rte);
                     return Err(rte);
                 }
                 // Capture the stack trace of an uncaught fault now, while the frames are still intact
@@ -2254,7 +2256,13 @@ impl Vm {
                     Some(h) if h.frame_len > base_level => h.frame_len,
                     _ => base_level,
                 };
-                let rte = self.unwind_deferred(target).unwrap_or(rte);
+                // A genuine fault (not a B3.4 cancel / `std.os.exit`, both handled above) cancels-and-
+                // reports each unwound frame's escaped nurseries — emitted PER FRAME, BEFORE that
+                // frame's `defer`s, matching the interp oracle (whose `exec_parallel` /
+                // `leave_implicit_nursery` report as the body unwinds, then `finish_frame` runs the
+                // defers). `unwind_deferred` does the interleaving; this covers BOTH the uncaught arm
+                // (no handler) and the frames discarded above a catching `recover:`.
+                let rte = self.unwind_deferred(target, true).unwrap_or(rte);
                 // A deferred `std.os.exit` turns the unwind into a hard halt.
                 if self.pending_exit.is_some() {
                     return Err(rte);
@@ -2294,6 +2302,8 @@ impl Vm {
                         let err = self.alloc_enum("Result", "Err", vec![msg]);
                         self.push(err);
                     }
+                    // Uncaught: `unwind_deferred(target, true)` above already cancelled-and-reported
+                    // every unwound frame's escaped nurseries (the toplevel module nursery preserved).
                     _ => return Err(rte),
                 }
             }
@@ -4999,31 +5009,33 @@ impl Vm {
     /// The first child fault (or `std.os.exit`) aborts the remaining siblings and propagates; on that
     /// path the parent's restored `run_until` handles `recover:`/unwind in its own context.
     /// TASK B — cancel-and-report when a `parallel:` body escapes its `JoinNursery` early (`?` /
-    /// `return` / `break` / `continue`). Pop every nursery entry ABOVE `from_len` (the level the
-    /// escaping construct should restore to), count the unstarted [`PendingCall`]s they hold, and —
-    /// when that count is `>= 1` — write ONE report line to stdout (`out`, the stream the parity
-    /// harnesses read), byte-identical to the interpreter's `exec_parallel`. The tasks are then
-    /// DROPPED: they never started, so there is no fiber to cancel and no buffered output to flush.
-    /// This preserves the old `truncate`'s no-leak behavior (depth returns to `from_len`) and adds the
-    /// observable report. Replaces the bare `self.nurseries.truncate(from_len)` at every reclaim site.
+    /// `return` / `break` / `continue`) or when a fault unwinds past it. Pop every nursery entry ABOVE
+    /// `from_len` (the level the escaping construct should restore to); for each lazy nursery that
+    /// holds unstarted [`PendingCall`]s, write ONE report line to stdout (`out`, the stream the parity
+    /// harnesses read) — emitting PER-NURSERY, innermost-first, byte-identical to the interpreter,
+    /// whose `exec_parallel` / `leave_implicit_nursery` report once per frame/block as it unwinds (two
+    /// stacked nurseries → two lines, not one combined `2 pending`). The tasks are then DROPPED: they
+    /// never started, so there is no fiber to cancel and no buffered output to flush. This preserves
+    /// the old `truncate`'s no-leak behavior (depth returns to `from_len`) and adds the observable
+    /// report. Replaces the bare `self.nurseries.truncate(from_len)` at every reclaim site.
     fn drain_escaped_nursery(&mut self, from_len: usize) {
         if self.nurseries.len() <= from_len {
             return; // nothing escaped past the join (e.g. normal fall-through already popped it)
         }
-        let mut cancelled = 0usize;
         while self.nurseries.len() > from_len {
             self.nursery_defer_floors.pop(); // lockstep with `nurseries`
             let nursery = self.nurseries.pop().unwrap_or_default();
             // Per-connection spawn — pop the eager scope in lockstep. An eager nursery's handlers are
             // already-started live fibers (no unstarted `PendingCall`s to count): cancel + drain + flush
-            // them. A lazy nursery's entries are unstarted tasks → count them for the cancel-report.
+            // them. A lazy nursery's entries are unstarted tasks → report one line per such nursery.
             match self.eager_scheds.pop().flatten() {
                 Some(scope) => self.abort_eager_nursery(scope),
-                None => cancelled += nursery.len(),
+                None => {
+                    if !nursery.is_empty() {
+                        self.out.push_str(&crate::runtime::pending_cancel_report(nursery.len()));
+                    }
+                }
             }
-        }
-        if cancelled >= 1 {
-            self.out.push_str(&crate::runtime::pending_cancel_report(cancelled));
         }
     }
 
@@ -7452,10 +7464,28 @@ impl Vm {
     /// frame's deferred calls (innermost first) before dropping it. Used on a fault: deferred
     /// cleanup runs as the stack unwinds, before a `recover:` boundary regains control (or before
     /// the program exits on an uncaught fault). A fault in a deferred call supersedes the original.
-    fn unwind_deferred(&mut self, target_frame_len: usize) -> Option<RuntimeError> {
+    ///
+    /// `report_escaped` — a genuine fault (not a B3.4 cancel / `std.os.exit`) cancels-and-reports
+    /// each discarded frame's escaped nurseries (its implicit nursery + any inner `parallel:` the
+    /// fault unwound past) BEFORE that frame's `defer`s run — matching the interp oracle, which
+    /// reports in `exec_parallel` / `leave_implicit_nursery` as the body unwinds and only then runs
+    /// `finish_frame`'s defers. The MODULE top-level nursery is preserved (it joins only on a clean
+    /// run to program end; an uncaught top-level fault leaves it silent, as in the interp).
+    fn unwind_deferred(&mut self, target_frame_len: usize, report_escaped: bool) -> Option<RuntimeError> {
         let mut err = None;
         while self.frames.len() > target_frame_len {
             let fi = self.frames.len() - 1;
+            // Report this frame's escaped nurseries BEFORE its defers (drain pops innermost-first, so
+            // inner `parallel:` levels report before the frame's implicit one — the interp's order).
+            if report_escaped {
+                let f = &self.frames[fi];
+                let floor = if f.is_toplevel && f.has_implicit_nursery {
+                    f.nursery_len + 1 // preserve the module nursery
+                } else {
+                    f.nursery_len
+                };
+                self.drain_escaped_nursery(floor.min(self.nurseries.len()));
+            }
             if self.pending_exit.is_none() {
                 while let Some(d) = self.frames[fi].deferred.pop() {
                     if let Err(e) = self.run_one_deferred(d) {
@@ -9014,6 +9044,92 @@ mod tests {
     fn implicit_nursery_fault_cancels_pending_tasks() {
         let src = "fn w():\n    print(\"should not run\")\nfn f():\n    spawn w()\n    x := [1]\n    print(x[9])\nfn main():\n    r := recover:\n        f()\n        0\n    print(\"recovered\")\nmain()\n";
         assert_mc_parity(src, "1 pending task(s) cancelled on early exit from parallel:\nrecovered\n");
+    }
+
+    /// Assert an UNCAUGHT fault yields identical stdout on the cooperative VM and the frozen interp,
+    /// and that both actually faulted. `run_capture` drops stdout on `Err`, so go through the
+    /// `(stdout, result)` harness directly. This is the cancel-report parity bar for uncaught faults.
+    #[cfg(test)]
+    fn assert_fault_parity(src: &str, expected_out: &str) {
+        let (vm_out, vm_res) = run_program(src);
+        assert!(vm_res.is_err(), "VM expected to fault, got {vm_out:?}");
+        assert_eq!(vm_out, expected_out, "cooperative VM stdout");
+        let (it_out, it_res) = crate::interp::run_program(src);
+        assert!(it_res.is_err(), "interp expected to fault, got {it_out:?}");
+        assert_eq!(it_out, expected_out, "interp stdout");
+        assert_eq!(vm_out, it_out, "VM/interp cancel-report divergence");
+    }
+
+    /// Parity gap fix (T1): an UNCAUGHT body fault with one un-run task on the function's implicit
+    /// nursery reports the cancellation on stdout — previously only the interp printed it.
+    #[test]
+    fn uncaught_fault_reports_implicit_nursery() {
+        let src = "fn w():\n    print(\"should not run\")\nfn boom():\n    spawn w()\n    x := [1]\n    print(x[9])\nfn main():\n    boom()\nmain()\n";
+        assert_fault_parity(src, "1 pending task(s) cancelled on early exit from parallel:\n");
+    }
+
+    /// Parity gap fix (T2): an UNCAUGHT fault inside an explicit `parallel:` block reports its
+    /// un-run task on stdout (the pre-M-C form of the same gap).
+    #[test]
+    fn uncaught_fault_reports_explicit_parallel() {
+        let src = "fn w():\n    print(\"should not run\")\nfn main():\n    parallel:\n        spawn w()\n        x := [1]\n        print(x[9])\nmain()\n";
+        assert_fault_parity(src, "1 pending task(s) cancelled on early exit from parallel:\n");
+    }
+
+    /// Parity gap fix (T3): TWO stacked implicit nurseries each with a pending task report
+    /// PER-NURSERY (two lines, innermost first) — matching the interp's per-frame reporting, not one
+    /// combined line. Guards the `drain_escaped_nursery` sum→per-line change.
+    #[test]
+    fn uncaught_fault_reports_each_nursery_separately() {
+        let src = "fn w(tag: str):\n    print(\"ran {tag}\")\nfn boom():\n    spawn w(\"boom\")\n    x := [1]\n    print(x[9])\nfn main():\n    spawn w(\"main\")\n    boom()\nmain()\n";
+        let line = "1 pending task(s) cancelled on early exit from parallel:\n";
+        assert_fault_parity(src, &format!("{line}{line}"));
+    }
+
+    /// Parity gap fix (T4 guard): a top-level bare `spawn` followed by an uncaught TOP-LEVEL fault
+    /// stays SILENT on both engines — the module nursery is not reported (it joins only at clean
+    /// exit). The fix must preserve this (don't drain the toplevel frame's own implicit nursery).
+    #[test]
+    fn uncaught_toplevel_fault_does_not_report_module_nursery() {
+        let src = "fn w():\n    print(\"ran top\")\nspawn w()\nx := [1]\nprint(x[9])\n";
+        assert_fault_parity(src, "");
+    }
+
+    /// Parity gap fix: a recover-CAUGHT fault unwinding two stacked nurseries also reports
+    /// PER-NURSERY (two lines), then the recover continues — previously the VM combined them into
+    /// one `2 pending` line while the interp emitted two.
+    #[test]
+    fn recover_caught_fault_reports_each_nursery_separately() {
+        let src = "fn w(tag: str):\n    print(\"ran {tag}\")\nfn boom():\n    spawn w(\"boom\")\n    x := [1]\n    print(x[9])\nfn outer():\n    spawn w(\"outer\")\n    boom()\nfn main():\n    r := recover:\n        outer()\n        0\n    print(\"recovered\")\nmain()\n";
+        let line = "1 pending task(s) cancelled on early exit from parallel:\n";
+        assert_mc_parity(src, &format!("{line}{line}recovered\n"));
+    }
+
+    /// Parity gap fix (review-panel BUG, ordering): the cancel-report is emitted BEFORE the faulting
+    /// frame's `defer`s run — matching the interp (`leave_implicit_nursery` reports, then
+    /// `finish_frame` runs defers). The VM previously ran defers in `unwind_deferred` FIRST and only
+    /// reported afterward (`cleanup` then report — a divergence the no-defer tests above missed).
+    #[test]
+    fn uncaught_fault_reports_before_frame_defers() {
+        let src = "fn w():\n    print(\"task\")\nfn cleanup():\n    print(\"cleanup\")\nfn boom():\n    defer cleanup()\n    spawn w()\n    x := [1]\n    print(x[9])\nfn main():\n    boom()\nmain()\n";
+        assert_fault_parity(src, "1 pending task(s) cancelled on early exit from parallel:\ncleanup\n");
+    }
+
+    /// Same report-before-defer ordering on the recover-CAUGHT path, then the recover continues.
+    #[test]
+    fn recover_caught_fault_reports_before_frame_defers() {
+        let src = "fn w():\n    print(\"task\")\nfn cleanup():\n    print(\"cleanup\")\nfn boom():\n    defer cleanup()\n    spawn w()\n    x := [1]\n    print(x[9])\nfn main():\n    r := recover:\n        boom()\n        0\n    print(\"recovered\")\nmain()\n";
+        assert_mc_parity(src, "1 pending task(s) cancelled on early exit from parallel:\ncleanup\nrecovered\n");
+    }
+
+    /// Multi-frame interleave: each unwound frame reports its nursery, THEN runs its defer, before
+    /// the next (outer) frame — innermost-first (`report boom, cleanup boom, report outer, cleanup
+    /// outer`). Guards the per-frame interleave in `unwind_deferred` against batching regressions.
+    #[test]
+    fn uncaught_fault_interleaves_report_and_defer_per_frame() {
+        let src = "fn w(t: str):\n    print(\"task {t}\")\nfn cl(t: str):\n    print(\"cleanup {t}\")\nfn boom():\n    defer cl(\"boom\")\n    spawn w(\"boom\")\n    x := [1]\n    print(x[9])\nfn outer():\n    defer cl(\"outer\")\n    spawn w(\"outer\")\n    boom()\nfn main():\n    outer()\nmain()\n";
+        let line = "1 pending task(s) cancelled on early exit from parallel:\n";
+        assert_fault_parity(src, &format!("{line}cleanup boom\n{line}cleanup outer\n"));
     }
 
     /// M19 SSO — the production `alloc_str` path stores short strings inline (no `Box` heap alloc)

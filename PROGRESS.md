@@ -250,10 +250,23 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
   `examples/implicit_nursery.chz`. Checker `spawn_at_function_scope_ok` / `spawn_in_plain_fn_ok` /
   `spawn_at_module_toplevel_ok` (the old `spawn_outside_parallel_rejected` flipped); dead
   `nursery_depth` checker field removed.
-- **Known pre-existing parity gap (not M-C-specific):** an *uncaught* fault with un-run nursery tasks
-  prints the cancel-report on the interp's stdout but not the VM's — true for explicit `parallel:`
-  before M-C too; M-C follows the same `exec_parallel` convention. Goldens use recover-caught faults
-  (parity-clean). Fixing the gap would change explicit-`parallel:` behavior and is out of scope.
+- **RESOLVED (2026-06-12) — uncaught-fault cancel-report parity:** an *uncaught* fault with un-run
+  nursery tasks now prints the cancel-report on the VM's stdout too, matching the interp and the
+  `--parallel` engine. Three coordinated fixes in `src/vm/mod.rs`: (1) `unwind_deferred` gained a
+  `report_escaped: bool` param — on a genuine fault (passed `true` from the fault-unwind arm; `false`
+  from the two B3.4-cancel paths) it now cancels-and-reports each discarded frame's escaped nurseries
+  **before** that frame's `defer`s run, matching the interp order (`exec_parallel` /
+  `leave_implicit_nursery` report as the body unwinds, then `finish_frame` runs defers); the old
+  `_ => return Err(rte)` uncaught arm reported nothing. (2) `drain_escaped_nursery` now reports
+  **per-nursery** (innermost-first), not one combined line — two stacked nurseries → two lines, not
+  `2 pending` (also fixed a latent recover-caught combine divergence). (3) the MODULE top-level
+  nursery is preserved (`nursery_len + 1` floor): an uncaught *top-level* fault stays silent on both
+  engines (it joins only on clean program exit). Review-panel (SRE) caught a defer/report interleave
+  divergence the first cut missed; cold pass verified the shared `unwind_deferred` interactions.
+  Tests: `vm::tests::uncaught_fault_reports_implicit_nursery` / `_explicit_parallel` /
+  `_each_nursery_separately` / `_reports_before_frame_defers` / `_interleaves_report_and_defer_per_frame`
+  / `_uncaught_toplevel_fault_does_not_report_module_nursery`, plus `recover_caught_fault_reports_*`.
+  Full suite green (1600), three-engine parity.
 
 ### Standing decisions & contracts (do not re-litigate)
 
