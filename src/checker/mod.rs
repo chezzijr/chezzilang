@@ -215,6 +215,19 @@ fn native_module_sig(name: &str) -> ModuleSig {
             func("round", vec![Ty::Float], Ty::Float);
             func("pow", vec![Ty::Float, Ty::Float], Ty::Float);
             func("sqrt", vec![Ty::Float], Ty::Float);
+            // Trig / exp / log intrinsics (additive): plain `float -> float`, out-of-domain → NaN.
+            func("sin", vec![Ty::Float], Ty::Float);
+            func("cos", vec![Ty::Float], Ty::Float);
+            func("tan", vec![Ty::Float], Ty::Float);
+            func("asin", vec![Ty::Float], Ty::Float);
+            func("acos", vec![Ty::Float], Ty::Float);
+            func("atan", vec![Ty::Float], Ty::Float);
+            func("atan2", vec![Ty::Float, Ty::Float], Ty::Float);
+            func("exp", vec![Ty::Float], Ty::Float);
+            func("ln", vec![Ty::Float], Ty::Float);
+            func("log2", vec![Ty::Float], Ty::Float);
+            func("log10", vec![Ty::Float], Ty::Float);
+            func("log", vec![Ty::Float, Ty::Float], Ty::Float);
             sig.values.insert("pi".into(), Ty::Float);
             sig.values.insert("e".into(), Ty::Float);
         }

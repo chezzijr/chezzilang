@@ -16913,6 +16913,18 @@ main()
         assert_file_parity("examples/std_demo.chz");
     }
 
+    /// Additive std.math trig/exp/log intrinsics run end-to-end on the VM and byte-match both the
+    /// `.expected` file and the interpreter (parity via `assert_file_parity`).
+    #[test]
+    fn golden_math_more_via_run_file() {
+        let path = fixture("examples/math_more.chz");
+        let expected = std::fs::read_to_string(fixture("examples/math_more.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/math_more.chz");
+    }
+
     /// A complete self-contained program (merge sort + binary search + stats over std.math) runs on
     /// the VM, byte-matches `.expected`, and stays identical to the interpreter.
     #[test]
