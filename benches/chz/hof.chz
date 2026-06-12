@@ -1,0 +1,23 @@
+# Bench: HOF callback throughput. Builds a 1000-element list, then runs map+filter+fold
+# over it 2000 times. Each element of each pass invokes a closure through
+# invoke_value -> run_proto -> run_until — i.e. one run_until ENTRY per element, the exact
+# path the per-entry Arc::clone hoist targets (the standard suite has no HOFs, so this is
+# where that lever shows). ~6M run_until entries. Prints 501000000.
+
+fn main():
+    xs := []
+    i := 0
+    while i < 1000:
+        xs.push(i)
+        i += 1
+
+    total := 0
+    pass := 0
+    while pass < 2000:
+        ys := xs.map(fn(x: int) -> int: x + 1)
+        evens := ys.filter(fn(x: int) -> bool: x % 2 == 0)
+        total += evens.fold(0, fn(acc: int, x: int) -> int: acc + x)
+        pass += 1
+    print(total)
+
+main()

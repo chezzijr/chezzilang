@@ -11,6 +11,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ M19 — `Arc::clone` warm-up hoisted out of `run_until` LANDED (2026-06-12).** The call-flatten
+(`634c6f5`) had already killed the *per-call* `run_until` recursion, leaving one
+`Arc::clone(&self.program)` at the loop ENTRY (`mod.rs:2095`) — a per-entry atomic that was pure
+borrow-checker tax. Replaced with a raw `*const Program` borrow (sound: `self.program` is an
+immutable `Arc` never reassigned after `Vm::new` — verified; `swap_ctx` swaps heap/frames/stack, not
+`program`). Post-flatten this entry is hit per top-level / native-reentry (HOF callbacks,
+operator-overload `compare`, deferred calls) / fiber-resume — **not** per call — so it's **neutral on
+the no-HOF standard suite** (as predicted) but **1.05× on callback-heavy code**. Verified with a new
+`benches/chz/hof.chz` (A/B 30 runs, 383→363 ms) and guarded by a `native_reentry_hof_compare_defer_parity`
+unit test (HOF + operator overload + defer-in-recursion, VM == interp). VM-only; frozen interp
+untouched. **1552 tests** green, conformance 7/7, `clippy --all-targets` clean. This closes the
+"cheap warm-up" item under the call-flatten lever in [`docs/future.md §4`](docs/future.md).
+
+**Concurrency is feature-complete (confirmed 2026-06-12).** Roadmap landed through **Tier-D** (D0–D6);
+the per-socket read/accept/write **timeout** that `concurrency-tier-d.md` listed as "still deferred"
+is in fact **already shipped (D6c)** — `examples/socket_timeout.chz` + poller deadline tests; that
+doc line was stale and is now corrected. The only remaining concurrency item is **M-C implicit
+nurseries**, deliberately *deferred* (an invisible "joins at end of function" barrier hides *when*
+work runs while execution is observable-sequential). No new concurrency capability is open.
+
 **🟦 M19 Perf track — Phase 1 LANDED (2026-06-11).** Three behavior-preserving optimizations, all
 TDD'd and guarded by the full two-engine parity suite:
 1. **Killed the per-call clone in `invoke_value`** — was `self.heap.get(h).clone()` on the whole `Obj`

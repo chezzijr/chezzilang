@@ -178,6 +178,14 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   (P2 already killed the per-call args `Vec`).
 
 **Big (separate milestones):**
+- ✅ **Flatten the call loop — LANDED (`634c6f5`); the `Arc::clone` warm-up — LANDED (2026-06-12).**
+  `Op::Call` now pushes a frame and `continue`s the running `run_until` loop (no per-call Rust
+  recursion / per-call `Arc::clone`); `run_proto_in_place` is kept only for native-initiated calls
+  (HOFs). The stand-alone warm-up below — **hoist the per-entry `Arc::clone(&self.program)`** to a
+  raw `*const Program` borrow (`mod.rs:2095`; sound because `self.program` is immutable + never
+  reassigned) — also landed. Post-flatten the remaining entry is per top-level / native-reentry /
+  fiber-resume, **not** per call, so it's neutral on the no-HOF standard suite but **1.05× on
+  callback-heavy code** (`benches/chz/hof.chz`); see `benchmarks.md`. The original diagnosis follows.
 - **Flatten the call loop (diagnosed 2026-06-12 — the top remaining lever for call-bound code).**
   Every Chezzi function call currently **recurses into a fresh Rust `run_until` loop**:
   `Op::Call` → `do_call` → `run_proto_in_place` (`mod.rs:1992`) → `run_until(base_level)`. Two costs

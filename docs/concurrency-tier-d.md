@@ -720,9 +720,14 @@ recv-only scope). **B never.**
 > register/deregister/`drain_sched`/fire-path — incl. the fd `add`/`delete` — under the registry lock,
 > with `register` returning the fiber (to re-inject) when cancel is already set. 1410 tests green, clippy
 > clean; 2-agent S++ panel, no Critical, both Importants applied (bound the top-level blocking connect;
-> fail-loud connect inside a native callback). **Still deferred** (not D6 prerequisites): a
-> user-facing per-socket read/accept **timeout** (the timer fold is the groundwork); D5 owe #3
-> (`recv` inside a native callback). The plan below is the original full-D6 spec.
+> fail-loud connect inside a native callback). **Update — the user-facing per-socket
+> read/accept/write timeout LANDED (D6c):** an optional trailing `timeout_ms` on
+> `read`/`write`/`accept` parks on the netpoller with a deadline (`Parked.deadline`), and
+> `fire_due_socket_timeouts` re-injects the fiber with `poll_timed_out` set so the rewound op
+> returns `Err("timeout")`; readiness wins ties (`examples/socket_timeout.chz`, poller tests
+> `register_with_deadline_times_out_*` / `readiness_before_deadline_wins` / `deadline_past_fires_*`).
+> **Still deferred:** D5 owe #3 (`recv` inside a native callback). The plan below is the original
+> full-D6 spec.
 >
 > **UPDATE — per-connection `spawn` LANDED (eager injectable nursery, `--parallel` ≥2 cores).** The
 > "needs M:N spawn-after-join" item is done. A nested `parallel:` (entered inside a live fiber,

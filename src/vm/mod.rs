@@ -2092,7 +2092,16 @@ impl Vm {
     // ----- the dispatch loop -----
 
     fn run_until(&mut self, base_level: usize) -> Result<(), RuntimeError> {
-        let program = Arc::clone(&self.program);
+        // M19 — hoist the per-entry `Arc::clone(&self.program)`: borrow the program by raw
+        // pointer instead of bumping the refcount. `self.program` is an immutable
+        // `Arc<Program>` set once in `Vm::new` and NEVER reassigned (cooperative `spawn` /
+        // `--parallel` workers each build their own `Vm`; `swap_ctx` swaps heap/frames/stack,
+        // not `program`), so the pointee outlives this loop and the borrow is disjoint from
+        // the `&mut self` fields `step` mutates (`step` only reads program data). Post-flatten
+        // this entry is hit per top-level run + per native re-entry (HOF callbacks, operator
+        // overloads, deferred calls) + per fiber resume — so the saved atomic shows on
+        // callback-heavy code (see `benches/chz/hof.chz`).
+        let program: *const Program = Arc::as_ptr(&self.program);
         while self.frames.len() > base_level {
             // Collect at instruction boundaries only: here every live value is reachable from the
             // VM roots (operand stack, frame slots, frame homes/closures, module namespaces) —
@@ -2138,11 +2147,13 @@ impl Vm {
             let pid = self.frames[fi].proto;
             let ip = self.frames[fi].ip;
             self.frames[fi].ip = ip + 1;
-            // Borrow the instruction (no per-step clone — the hot path must not allocate). The
-            // `Arc` clone is a single refcount bump per loop entry; `op` then borrows program data
-            // that is disjoint from the `&mut self` fields `step` touches.
-            let op = &program.protos[pid].code[ip];
-            let span = program.protos[pid].lines[ip];
+            // Borrow the instruction (no per-step clone — the hot path must not allocate).
+            // SAFETY: `program` points into `self.program`'s immutable, never-reassigned
+            // `Arc<Program>` (see the loop-entry note); the pointee outlives the loop and `op`
+            // borrows program data disjoint from the `&mut self` fields `step` touches.
+            let proto_ref = &unsafe { &*program }.protos[pid];
+            let op = &proto_ref.code[ip];
+            let span = proto_ref.lines[ip];
             if let Err(rte) = self.step(op, span) {
                 // `std.os.exit(code)` is a hard halt: unwind past every `recover:` to the top.
                 if self.pending_exit.is_some() {
@@ -13627,6 +13638,39 @@ print(sum_to(5000))
         let out = super::run_capture_on_stack(src, 1024 * 1024)
             .expect("deep plain recursion should run on a 1 MiB host stack after call-flattening");
         assert_eq!(out, "12502500\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// M19 — guards the `run_until` per-entry program borrow (the hoisted `Arc::clone` →
+    /// raw-pointer) across the native-reentry paths that re-enter `run_until`: HOF callbacks
+    /// (`map`/`fold` closures), an operator-overload `compare` (`<` on a struct), and a
+    /// `defer` unwinding through a recursive call. If the raw pointer ever dangled across a
+    /// re-entry or resume, VM output would diverge from the interpreter.
+    #[test]
+    fn native_reentry_hof_compare_defer_parity() {
+        let src = "\
+struct P:
+    v: int
+    fn compare(self, other: P) -> int:
+        return self.v - other.v
+
+fn leave(n: int):
+    print(\"leave {n}\")
+
+fn rec(n: int) -> int:
+    defer leave(n)
+    if n <= 0:
+        return 0
+    doubled := [1, 2, 3].map(fn(x: int) -> int: x * n)
+    s := doubled.fold(0, fn(a: int, x: int) -> int: a + x)
+    if P(n) < P(n + 1):
+        s = s + rec(n - 1)
+    return s
+
+print(rec(3))
+";
+        let out = run_capture(src).expect("vm run");
+        assert_eq!(out, "leave 0\nleave 1\nleave 2\nleave 3\n36\n");
         assert_eq!(out, crate::interp::run_capture(src).expect("interp run"));
     }
 

@@ -314,3 +314,33 @@ next session doesn't re-discover these:
 
 **Real next levers** (contained, parity-safe, bench-moving): struct **type-id guard** for the field
 IC (P4 follow-up), **small-string optimization**, faster `usize` hasher — see `future.md §4`.
+
+## Hoist the per-entry `Arc::clone` out of `run_until` (2026-06-12)
+
+The call-flatten (`634c6f5`) killed the *per-call* `run_until` recursion, leaving one
+`Arc::clone(&self.program)` at **`run_until` entry** (`mod.rs:2095`) — an atomic refcount
+bump+drop that was pure borrow-checker tax (a second owner so `op = &program.protos[…]` doesn't
+alias `&mut self` in `step`). Replaced with a raw `*const Program` borrow: `self.program` is an
+immutable `Arc` never reassigned after `Vm::new` (verified — zero `self.program =` sites;
+`swap_ctx` swaps heap/frames/stack, not `program`), so the pointee outlives the loop. VM-only;
+frozen interp untouched.
+
+**Why the standard suite is the wrong place to measure it:** post-flatten, `run_until` is entered
+per *top-level run* + per *native re-entry* (HOF callbacks, operator-overload `compare`, deferred
+calls) + per *fiber resume* — **not** per call. The 8 standard benches use **no HOFs**, so they
+enter `run_until` ~once → the lever is invisible there (as predicted). Added `benches/chz/hof.chz`
+(1000-elem list × 2000 passes of `map`+`filter`+`fold`, ~6M `run_until` entries via per-element
+`invoke_value`→`run_proto`→`run_until`) to measure where it actually pays.
+
+| bench   | before (ms) | after (ms) | result |
+|---------|------------:|-----------:|--------|
+| `hof`   | 383.0 ±13.4 | 363.1 ±11.6 | **1.05× faster** (A/B 30 runs) |
+| `fib`   |           — |          — | within noise (1.02 ±0.05) |
+| `struct`|           — |          — | within noise (1.00 ±0.04) |
+| `list`  |           — |          — | within noise (1.02 ±0.05) |
+| `loop`  |           — |          — | within noise (1.01 ±0.04) |
+| `primes`|           — |          — | within noise (1.00 ±0.04) |
+
+**Verdict:** ~5% on callback-heavy code, neutral (non-regressing) on the standard suite. Kept.
+Guarded by `native_reentry_hof_compare_defer_parity` (HOF + operator-overload + defer-in-recursion,
+VM == interp). 1552 tests green, conformance 7/7, clippy clean.
