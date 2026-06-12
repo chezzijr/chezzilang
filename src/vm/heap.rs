@@ -96,9 +96,12 @@ pub enum Obj {
     /// `{a, b, …}` — an insertion-ordered hash set (see [`SetData`]). Elements may be heap objects,
     /// so they are traced as GC children.
     Set(SetData),
-    /// Fields in declaration order (deterministic `Display` / iteration).
+    /// Fields in declaration order (deterministic `Display` / iteration). `tid` is the struct type's
+    /// dense layout id (`StructDef::tid`), stamped at construction so the field IC can guard on a
+    /// pure-int compare; `TID_NONE` for a struct whose name isn't a registered type (never IC-cached).
     Struct {
         name: Box<str>,
+        tid: u32,
         fields: Vec<(Box<str>, Value)>,
     },
     Enum {

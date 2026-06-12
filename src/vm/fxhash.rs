@@ -39,6 +39,10 @@ impl Hasher for FxHasher {
             self.add(u64::from_le_bytes(buf));
         }
     }
+    // Only `write_u64`/`write_usize` are reached in this codebase (every map keys on one integer
+    // width). The byte `write` and `write_u32` exist for `Hasher` trait-completeness and are NOT
+    // consistency-matched to the int paths — don't key a composite/struct type on these maps expecting
+    // byte-path and int-path hashes to agree (they need not; no current key mixes paths).
     // The hot paths key on `u64` (cached hashes) and `usize` (pointers / slot ids) — feed them whole.
     #[inline]
     fn write_u64(&mut self, i: u64) {

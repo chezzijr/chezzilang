@@ -190,6 +190,32 @@ their `f64` bits, isolating the index hasher) + `benches/py/map.py`.
 > Lesson logged: "the index `u64` is already a good hash" is true for **string** keys (avalanched
 > `DefaultHasher`) but **false** for int/float keys (raw `to_bits`) — the hasher must finalize.
 
+## After M19 Phase 5b — struct type-id guard — 2026-06-12 (measured NEUTRAL)
+
+The logged P4 follow-up: stamp a dense numeric `tid` (layout id) on every `Obj::Struct` (from
+`StructDef::tid`, assigned in declaration order at compile), and make the field IC hit guard on
+`cell.tid == obj.tid` (a pure-int compare) instead of P4's `fields[idx].0 == name` string re-verify.
+Sentinel `TID_NONE` (unregistered/native structs, empty cells) never matches, so the guard can't
+false-hit across distinct unregistered layouts. VM-only ⇒ parity automatic; 1549 tests green.
+
+Same-session A/B (P5a binary vs P5b binary, `-N --warmup 5 -r 30..40`):
+
+| bench         | P5a → P5b            | ratio        | verdict            |
+|---------------|----------------------|--------------|--------------------|
+| struct (8-field, field-bound) | 459 ms → 451 ms | 1.02× | neutral (in noise) |
+| method-bound (6-field `self.*` in a hot method call) | 1.206 s → 1.191 s | 1.01× | neutral (in noise) |
+
+**Honest result: neutral.** The win this lever was supposed to capture (the P4 "shallow-struct
+caveat") didn't materialise — because **P4 already collapsed the O(field-position) name-probe to a
+single verify-compare**, and for short field names (`a`..`h`, 1 byte) that string compare is already
+cheap (length check + a 1-byte memcmp). Replacing it with a `u32` compare saves nothing measurable;
+method-call / dispatch overhead dominates both benches. No regression anywhere (construction reuses
+the already-fetched `def.tid`; the guard is int-compare). **Kept** as the principled guard (tid =
+layout identity removes the last string compare from the field hot path and is future-proof for any
+real polymorphic field site) — but the field-IC lever is now **spent**: no cheaper guard remains.
+Lesson logged (a-priori-guess discipline): the P4 caveat was a *prediction*, not a measured cost;
+once P4 removed the probe loop, the residual string compare was already in the noise.
+
 ## Reading it
 
 The shape matches what `future.md §4` predicted from first principles: **the gap is

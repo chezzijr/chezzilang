@@ -54,6 +54,11 @@ pub enum BinKind {
 /// See [`Op::GetField`]. Real ids are dense `0..Program::field_ic_sites`.
 pub const NO_IC: u32 = u32::MAX;
 
+/// Sentinel struct type id (`StructDef::tid` / `Obj::Struct.tid`) for a struct whose name is not a
+/// registered type. The field IC never treats it as a cache hit (distinct unregistered layouts would
+/// otherwise share it), so such a struct always falls to the name-probe. Real tids are dense `0..n`.
+pub const TID_NONE: u32 = u32::MAX;
+
 /// A single VM instruction. Operands are inline (typed), so there is no separate constant pool —
 /// strings and numbers live in the op. Jump targets are absolute indices into the proto's `code`.
 #[derive(Debug, Clone)]
@@ -309,6 +314,11 @@ pub struct StructDef {
     pub fields: Vec<String>,
     pub methods: HashMap<String, ProtoId>,
     pub module_idx: usize,
+    /// M19 Phase 5b — a dense, declaration-order numeric id (unique per struct type, hence per field
+    /// layout). Stamped onto every `Obj::Struct` instance so the field inline cache can guard on a
+    /// pure-int `tid` compare instead of re-verifying the field-name string. See [`super::mod`]'s
+    /// `field_ic` / `IcCell`.
+    pub tid: u32,
 }
 
 /// An enum variant's runtime shape: which enum it belongs to and how many payload values it holds.

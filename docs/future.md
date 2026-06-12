@@ -141,12 +141,14 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   `fib` −13%.
 
 **Medium:**
-- **Struct type-id guard for the field IC** — *the cleanest open lever* (logged as the P4 follow-up).
-  Stamp a numeric type id on `Obj::Struct`; the field IC then guards on `obj.tid == cell.tid` (a
-  pure-int compare) instead of the current `fields[idx].0 == name` string re-verify, closing the
-  shallow-struct caveat P4 hit (~neutral on method-bound shallow fields). Cost: a `tid` field +
-  the struct-construction / snapshot / wire sites. Moves `struct` + method-bound structs. VM-only ⇒
-  parity automatic.
+- ✅ **Struct type-id guard for the field IC** — *landed M19 Phase 5b, measured **NEUTRAL***. Stamped a
+  dense `tid` (layout id) on `Obj::Struct`; the field IC now guards on `obj.tid == cell.tid` (pure-int
+  compare) instead of the `fields[idx].0 == name` string re-verify. **But it didn't move the benches**
+  (struct 1.02×, method-bound 1.01× — noise): P4 had *already* collapsed the name-probe to a single
+  verify-compare, and for short field names that string compare is already cheap, so swapping it for an
+  int compare saves nothing measurable. Kept (correct, principled, no regression, future-proofs real
+  polymorphic field sites), but **the field-IC lever is spent** — there is no cheaper guard to reach
+  for. The "shallow-struct caveat" was a *prediction*, not a measured cost.
 - **Small-string optimization (the real open `str` lever)** — short strings are still a `Box<str>`
   heap alloc per value (`alloc_str`, `mod.rs:4697`). The `str` bench's `"item-N"` are all ≤12 bytes;
   inlining ≤N-byte strings in the `Obj` slot kills the per-element alloc + GC pressure. Touches every

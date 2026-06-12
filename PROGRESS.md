@@ -122,6 +122,18 @@ slower** — int keys store `f64::to_bits` (low mantissa bits zero), and FxHash 
 collapsing hashbrown's low-bit bucket index → O(n) probes; a splitmix64 finalizer in `finish()` fixed it.
 **1547 tests** green + conformance (7/7) + `clippy -- -D warnings` clean.
 
+**🟦 M19 Perf track — Phase 5b LANDED (2026-06-12, measured NEUTRAL).** **Struct type-id guard** — the
+logged P4 follow-up. Every `Obj::Struct` now carries a dense `tid` (layout id from `StructDef::tid`,
+assigned in declaration order at compile); the field IC hit guards on `cell.tid == obj.tid` (pure-int
+compare) instead of P4's `fields[idx].0 == name` string re-verify. Sentinel `TID_NONE` (unregistered/
+native structs, empty cells) never matches → can't false-hit across distinct unregistered layouts.
+VM-only ⇒ parity automatic. **Result: neutral** (struct 1.02×, method-bound 1.01× — both in noise),
+**no regression**. P4 had already collapsed the name-probe to a *single* verify-compare, and for short
+field names that string compare is already cheap, so swapping it for an int compare saves nothing
+measurable — the predicted "shallow-struct caveat" was a guess, not a measured cost. **Kept** as the
+principled guard (removes the last string compare from the field hot path, future-proofs polymorphic
+sites); the field-IC lever is now **spent**. **1549 tests** green + conformance (7/7) + clippy clean.
+
 **✅ `defer:` block form LANDED (2026-06-11).** Ergonomic gap closure (was 🟡 in `gaps.md`), TDD'd and
 two-engine-parity-clean. `defer` now takes an indented block as well as a single call — multi-action
 cleanup without N `defer` lines:

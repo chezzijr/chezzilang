@@ -16,7 +16,7 @@ pub mod wire;
 
 use core::{ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use heap::{Heap, MapData, Obj, SetData};
-use op::{CapEntry, CapSrc, Op, Program, ProtoId, NO_IC};
+use op::{CapEntry, CapSrc, Op, Program, ProtoId, NO_IC, TID_NONE};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -187,17 +187,24 @@ impl PendingCall {
     }
 }
 
-/// M19 Phase 4 — a struct-field inline-cache cell: the field index last resolved at this call site.
-/// Holds a plain index (no `GcRef`), so it is invisible to GC, snapshots, and `swap_ctx`. `idx ==
-/// u32::MAX` is the empty sentinel (forces a probe on first use). Every read re-verifies the cached
-/// index against the live field name, so a stale or cross-type cell can never return a wrong field.
+/// M19 Phase 4/5b — a struct-field inline-cache cell: the field `idx` last resolved at this call
+/// site, plus the `tid` (struct layout id) it was resolved against. Holds plain ints (no `GcRef`), so
+/// it is invisible to GC, snapshots, and `swap_ctx`. A hit requires `tid == obj.tid` (a pure-int
+/// compare — every instance of a given `tid` shares the field layout, so the cached `idx` is the
+/// right slot), replacing P4's field-name string re-verify. `tid == TID_NONE` is the empty/sentinel
+/// state: it never matches a live struct (unregistered structs also carry `TID_NONE`, so they fall to
+/// the probe), forcing a fill on first use and barring a false hit across distinct unregistered types.
 #[derive(Clone, Copy)]
 struct IcCell {
     idx: u32,
+    tid: u32,
 }
 
 impl IcCell {
-    const EMPTY: IcCell = IcCell { idx: u32::MAX };
+    /// `tid` is the sole liveness gate (a hit requires `tid != TID_NONE && tid == obj.tid`); the
+    /// `idx: u32::MAX` is just a defensive default, not a sentinel — don't reintroduce idx-based
+    /// empty-checking.
+    const EMPTY: IcCell = IcCell { idx: u32::MAX, tid: TID_NONE };
 }
 
 struct Vm {
@@ -3375,7 +3382,7 @@ impl Vm {
                         }
                         Ok(true)
                     }
-                    (Obj::Struct { name: na, fields: fa }, Obj::Struct { name: nb, fields: fb }) => {
+                    (Obj::Struct { name: na, fields: fa, .. }, Obj::Struct { name: nb, fields: fb, .. }) => {
                         if na != nb || fa.len() != fb.len() {
                             return Ok(false);
                         }
@@ -3628,7 +3635,8 @@ impl Vm {
                     let lv = self.lower_native(v);
                     fs.push((k.into_boxed_str(), lv));
                 }
-                Value::Obj(self.heap.alloc(Obj::Struct { name: name.into_boxed_str(), fields: fs }))
+                let tid = self.struct_tid(&name);
+                Value::Obj(self.heap.alloc(Obj::Struct { name: name.into_boxed_str(), tid, fields: fs }))
             }
             N::Map(entries) => {
                 // Native maps have unique scalar (str) keys — hash them directly (no re-entry, no
@@ -3812,7 +3820,8 @@ impl Vm {
                     };
                     field_vals.push((fname.clone().into_boxed_str(), v));
                 }
-                let h = self.heap.alloc(Obj::Struct { name: name.clone().into_boxed_str(), fields: field_vals });
+                let tid = self.struct_tid(name);
+                let h = self.heap.alloc(Obj::Struct { name: name.clone().into_boxed_str(), tid, fields: field_vals });
                 Ok(Value::Obj(h))
             }
         }
@@ -3955,7 +3964,7 @@ impl Vm {
                 self.stack.extend(args);
                 self.do_call(argc, span)
             }
-            Obj::Struct { name, fields } => {
+            Obj::Struct { name, fields, .. } => {
                 let def = self.program.structs.get(name.as_ref()).cloned().ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
                 if let Some(&proto) = def.methods.get(method) {
                     let home = self.module_objs[def.module_idx];
@@ -5915,7 +5924,7 @@ impl Vm {
                     }
                     WireValue::Set(out)
                 }
-                Obj::Struct { name, fields } => {
+                Obj::Struct { name, fields, .. } => {
                     let mut out = Vec::with_capacity(fields.len());
                     for (k, val) in fields {
                         out.push((k.clone(), self.to_wire(*val)?));
@@ -5988,7 +5997,8 @@ impl Vm {
             WireValue::Struct { name, fields } => {
                 let cloned: Vec<(Box<str>, Value)> =
                     fields.into_iter().map(|(k, val)| (k, self.from_wire(val))).collect();
-                Value::Obj(self.heap.alloc(Obj::Struct { name, fields: cloned }))
+                let tid = self.struct_tid(&name);
+                Value::Obj(self.heap.alloc(Obj::Struct { name, tid, fields: cloned }))
             }
             WireValue::Enum { ty, variant, payload } => {
                 let cloned: Vec<Value> = payload.into_iter().map(|x| self.from_wire(x)).collect();
@@ -6338,7 +6348,7 @@ impl Vm {
             // path above.)
             Obj::List(items) => SnapValue::List(items.iter().map(|x| self.to_snap(*x)).collect()),
             Obj::Tuple(items) => SnapValue::Tuple(items.iter().map(|x| self.to_snap(*x)).collect()),
-            Obj::Struct { name, fields } => {
+            Obj::Struct { name, fields, .. } => {
                 let fields = fields.iter().map(|(k, fv)| (k.clone(), self.to_snap(*fv))).collect();
                 SnapValue::Struct { name, fields }
             }
@@ -6444,7 +6454,8 @@ impl Vm {
             }
             SnapValue::Struct { name, fields } => {
                 let f = fields.iter().map(|(k, fv)| (k.clone(), self.replay_snap(fv))).collect();
-                Value::Obj(self.heap.alloc(Obj::Struct { name: name.clone(), fields: f }))
+                let tid = self.struct_tid(name);
+                Value::Obj(self.heap.alloc(Obj::Struct { name: name.clone(), tid, fields: f }))
             }
             SnapValue::Enum { ty, variant, payload } => {
                 let p = payload.iter().map(|x| self.replay_snap(x)).collect();
@@ -7453,9 +7464,15 @@ impl Vm {
         let at = self.stack.len() - argc;
         let vals: Vec<Value> = self.stack.split_off(at);
         let fields: Vec<(Box<str>, Value)> = def.fields.iter().cloned().map(|f| f.into_boxed_str()).zip(vals).collect();
-        let h = self.heap.alloc(Obj::Struct { name: name.into(), fields });
+        let h = self.heap.alloc(Obj::Struct { name: name.into(), tid: def.tid, fields });
         self.push(Value::Obj(h));
         Ok(())
+    }
+
+    /// The dense layout id for a struct type `name`, or [`TID_NONE`] if it isn't a registered type
+    /// (native/ad-hoc structs) — such a struct never IC-caches, so it stays sound on the probe path.
+    fn struct_tid(&self, name: &str) -> u32 {
+        self.program.structs.get(name).map_or(TID_NONE, |d| d.tid)
     }
 
     fn new_enum(&mut self, ty: &str, variant: &str, argc: usize, span: Span) -> Result<(), RuntimeError> {
@@ -7477,14 +7494,17 @@ impl Vm {
             return Err(self.err(format!("cannot read field '{name}' of {}", self.type_name(obj)), span));
         };
         self.ensure_module_faulted(h); // D1: `module.member` on a not-yet-faulted worker module
-        // M19 Phase 4 — inline-cache fast path: a hit collapses the struct name-probe to one verify-
-        // compare. The cached index is re-verified against the live field name, so it can never return
-        // a wrong field (worst case: a miss + re-probe below). Read the cell before borrowing the heap.
+        // M19 Phase 5b — inline-cache fast path: a hit collapses the struct name-probe to one pure-int
+        // `tid` compare (the struct's layout id). Same `tid` ⇒ same field order ⇒ the cached `idx` is
+        // the right slot, so the field-name re-verify is unnecessary. `cell.tid == TID_NONE` (empty or
+        // an unregistered struct) never matches, forcing the probe below. `fields.get` stays bounds-
+        // safe (defensive; same `tid` guarantees in-range). Worst case on a miss: a re-probe + refill.
         if ic != NO_IC {
-            let cached = self.field_ic[ic as usize].idx as usize;
-            if let Obj::Struct { fields, .. } = self.heap.get(h)
-                && let Some((k, v)) = fields.get(cached)
-                && k.as_ref() == name
+            let cell = self.field_ic[ic as usize];
+            if cell.tid != TID_NONE
+                && let Obj::Struct { tid, fields, .. } = self.heap.get(h)
+                && *tid == cell.tid
+                && let Some((_, v)) = fields.get(cell.idx as usize)
             {
                 let v = *v;
                 self.push(v);
@@ -7506,9 +7526,11 @@ impl Vm {
                     )),
                 }
             }
-            Obj::Struct { fields, .. } => {
-                // Probe + capture the index so the IC can cache it (Value is Copy, so `found` owns its
-                // data and the heap borrow ends here, freeing `self` for the field_ic write below).
+            Obj::Struct { tid, fields, .. } => {
+                // Probe + capture the index (and the layout `tid`) so the IC can cache both (Value is
+                // Copy and `tid` is a `u32`, so `found` owns its data and the heap borrow ends here,
+                // freeing `self` for the field_ic write below).
+                let tid = *tid;
                 let found = fields
                     .iter()
                     .enumerate()
@@ -7517,7 +7539,7 @@ impl Vm {
                 match found {
                     Some((i, v)) => {
                         if ic != NO_IC {
-                            self.field_ic[ic as usize].idx = i as u32;
+                            self.field_ic[ic as usize] = IcCell { idx: i as u32, tid };
                         }
                         self.push(v);
                         Ok(())
@@ -7692,34 +7714,38 @@ impl Vm {
         let Value::Obj(h) = obj else {
             return Err(self.err(format!("cannot assign field '{name}' of {}", self.type_name(obj)), span));
         };
-        // M19 Phase 4 — IC fast path (see [`Vm::get_field`]): a hit writes straight to the cached
-        // index after re-verifying its field name; a miss falls through to the probe + cache-fill.
+        // M19 Phase 5b — IC fast path (see [`Vm::get_field`]): a hit on the `tid` guard writes straight
+        // to the cached index (no field-name re-verify); a miss falls through to the probe + cache-fill.
         if ic != NO_IC {
-            let cached = self.field_ic[ic as usize].idx as usize;
-            if let Obj::Struct { fields, .. } = self.heap.get_mut(h)
-                && let Some((k, slot)) = fields.get_mut(cached)
-                && k.as_ref() == name
+            let cell = self.field_ic[ic as usize];
+            if cell.tid != TID_NONE
+                && let Obj::Struct { tid, fields, .. } = self.heap.get_mut(h)
+                && *tid == cell.tid
+                && let Some((_, slot)) = fields.get_mut(cell.idx as usize)
             {
                 *slot = val;
                 return Ok(());
             }
         }
-        let found_idx;
+        let found;
         match self.heap.get_mut(h) {
-            Obj::Struct { fields, .. } => match fields.iter_mut().enumerate().find(|(_, (k, _))| k.as_ref() == name) {
-                Some((i, (_, slot))) => {
-                    *slot = val;
-                    found_idx = i;
+            Obj::Struct { tid, fields, .. } => {
+                let tid = *tid;
+                match fields.iter_mut().enumerate().find(|(_, (k, _))| k.as_ref() == name) {
+                    Some((i, (_, slot))) => {
+                        *slot = val;
+                        found = (i as u32, tid);
+                    }
+                    None => {
+                        let shown = self.display(obj);
+                        return Err(self.err(format!("no field '{name}' on {shown}"), span));
+                    }
                 }
-                None => {
-                    let shown = self.display(obj);
-                    return Err(self.err(format!("no field '{name}' on {shown}"), span));
-                }
-            },
+            }
             _ => return Err(self.err(format!("cannot assign field '{name}' of {}", self.type_name(obj)), span)),
         }
         if ic != NO_IC {
-            self.field_ic[ic as usize].idx = found_idx as u32;
+            self.field_ic[ic as usize] = IcCell { idx: found.0, tid: found.1 };
         }
         Ok(())
     }
@@ -8136,7 +8162,7 @@ impl Vm {
                         Ok(format!("{{{}}}", parts.join(", ")))
                     }
                 }
-                Obj::Struct { name, fields } => {
+                Obj::Struct { name, fields, .. } => {
                     let mut parts = Vec::with_capacity(fields.len());
                     for (k, v) in fields {
                         parts.push(format!("{k}={}", self.display_guarded(*v, depth + 1)?));
@@ -8321,7 +8347,7 @@ impl Vm {
                     out.push('}');
                 }
             }
-            Obj::Struct { name, fields } => {
+            Obj::Struct { name, fields, .. } => {
                 // `str(self) -> str` overrides the default repr. Only a self-only method is the hook.
                 if let Some(def) = self.program.structs.get(name.as_ref()).cloned()
                     && let Some(&proto) = def.methods.get("str")
@@ -8934,6 +8960,44 @@ mod tests {
         assert_eq!(run_parity(src), "1800\n");
     }
 
+    // ---- M19 Phase 5b: struct type-id guard on the field IC (correctness guards) ----
+    // The IC hit now guards on a numeric `tid` (== struct layout identity) instead of re-verifying
+    // the field name string. Soundness rests on: every distinct layout has a distinct `tid`, and the
+    // empty/sentinel `tid` never matches. These lock that behavior is unchanged.
+
+    #[test]
+    fn typeid_guard_distinct_layouts_keep_distinct_values() {
+        // Same field names on two types at SWAPPED indices, read in a hot loop. With the tid guard,
+        // each per-type site caches (tid, idx); a guard that ignored type identity (or stamped a
+        // shared tid) would read the wrong slot. Values asserted, not just a sum, to pin the layout.
+        let src = concat!(
+            "struct A:\n    v: int\n    w: int\n",
+            "struct B:\n    w: int\n    v: int\n",
+            "a := A(1, 2)\n",
+            "b := B(3, 4)\n",
+            "i := 0\nout := 0\n",
+            "while i < 4:\n    out = out + a.v * 1000 + a.w * 100 + b.v * 10 + b.w\n    i = i + 1\n",
+            // per iter: a.v=1,a.w=2,b.v=4,b.w=3 -> 1000+200+40+3 = 1243 ; *4 = 4972
+            "print(out)\n",
+        );
+        assert_eq!(run_parity(src), "4972\n");
+    }
+
+    #[test]
+    fn typeid_guard_struct_round_trips_through_channel() {
+        // A struct sent across a Channel is serialized (to_wire) and rebuilt (from_wire) in the
+        // receiver; from_wire must stamp a `tid` so the receiver's field IC stays sound. VM-only
+        // (channels don't run under the frozen interp), so assert the VM output directly.
+        let src = concat!(
+            "struct Pt:\n    x: int\n    y: int\n",
+            "fn worker(ch: Channel[Pt]):\n    p := ch.recv()\n    print(\"{p.x} {p.y}\")\n",
+            "fn sender(ch: Channel[Pt]):\n    ch.send(Pt(10, 20))\n",
+            "fn main():\n    ch := Channel[Pt]()\n    parallel:\n        spawn worker(ch)\n        spawn sender(ch)\n",
+            "main()\n",
+        );
+        assert_eq!(run(src), "10 20\n");
+    }
+
     #[test]
     fn calls_preserve_arg_order_nesting_and_result_slot() {
         // P1 characterization: locks call semantics before the in-place-args refactor. The bugs an
@@ -9086,6 +9150,7 @@ mod tests {
         let tup = vm.heap.alloc(Obj::Tuple(vec![Value::Bool(true), Value::Nil]));
         let st = vm.heap.alloc(Obj::Struct {
             name: "P".into(),
+            tid: TID_NONE,
             fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Obj(s))],
         });
         let en = vm.heap.alloc(Obj::Enum {

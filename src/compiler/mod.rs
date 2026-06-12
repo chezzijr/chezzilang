@@ -200,12 +200,16 @@ impl Compiler {
                             span: stmt.span,
                         });
                     }
+                    // M19 Phase 5b — a dense, declaration-order type id (the map only grows, dup names
+                    // are rejected above, so the pre-insert count is a stable unique id per layout).
+                    let tid = self.program.structs.len() as u32;
                     self.program.structs.insert(
                         name.clone(),
                         StructDef {
                             fields: fields.iter().map(|f| f.name.clone()).collect(),
                             methods: HashMap::new(),
                             module_idx: 0, // filled in pass 2
+                            tid,
                         },
                     );
                     self.struct_fields.insert(name.clone(), fields.clone());
