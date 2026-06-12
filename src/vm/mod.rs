@@ -2182,7 +2182,41 @@ impl Vm {
             let proto_ref = &unsafe { &*program }.protos[pid];
             let op = &proto_ref.code[ip];
             let span = proto_ref.lines[ip];
-            if let Err(rte) = self.step(op, span) {
+            // M19 Phase 7 — inline the hottest opcodes here so they skip the per-op `self.step(op, span)`
+            // call + its big match jump-table; the long tail delegates to `step`. The inlined arms call
+            // the SAME helpers as `step` (or copy its 1–3-line body verbatim), so there is one source of
+            // truth per op — keep these in lock-step with `step` if either is edited. `fi` is the current
+            // frame index (valid for the `Jump` ip write: jumps never change the frame; `Call`/`Return`
+            // re-read frames in their helpers).
+            let step_result = match op {
+                Op::GetLocal(slot) => {
+                    let v = self.stack[self.cur_base + slot];
+                    self.stack.push(v);
+                    Ok(())
+                }
+                Op::SetLocal(slot) => {
+                    let v = self.pop();
+                    self.stack[self.cur_base + slot] = v;
+                    Ok(())
+                }
+                Op::BinLocalLocal { a, b, kind } => self.op_bin_local_local(*a, *b, *kind, span),
+                Op::BinLocalConst { slot, val, kind } => self.op_bin_local_const(*slot, *val, *kind, span),
+                Op::IncLocal { slot, delta } => self.op_inc_local(*slot, *delta, span),
+                Op::Jump(t) => {
+                    self.frames[fi].ip = *t;
+                    Ok(())
+                }
+                Op::JumpIfFalse(t) => {
+                    if let Value::Bool(false) = self.pop() {
+                        self.frames[fi].ip = *t;
+                    }
+                    Ok(())
+                }
+                Op::Call(argc) => self.do_call(*argc, span),
+                Op::Return => self.do_return(false),
+                other => self.step(other, span),
+            };
+            if let Err(rte) = step_result {
                 // `std.os.exit(code)` is a hard halt: unwind past every `recover:` to the top.
                 if self.pending_exit.is_some() {
                     return Err(rte);
@@ -9172,6 +9206,22 @@ mod tests {
                    i := 0\nout := 0\nwhile i < 3:\n    out = out + h.op(i + 1)\n    i = i + 1\nprint(out)\n";
         // per iter: (i+1)*2 -> 2,4,6 = 12
         assert_eq!(run_parity(src), "12\n");
+    }
+
+    #[test]
+    fn inlined_hot_ops_path_matches_step() {
+        // M19 Phase 7 — `run_until` dispatches the hottest ops (GetLocal/SetLocal, the superinstrs,
+        // Jump/JumpIfFalse, Call/Return) inline and delegates the tail to `step`. This hammers every
+        // inlined op in one program (locals + `a+b`/`a+const`/`i+=1` superinstrs + a conditional +
+        // a call + a return) and pins the inline path == the frozen interp (which has no such split).
+        let src = "fn f(a: int, b: int) -> int:\n    return a + b\n\
+                   i := 0\nacc := 0\n\
+                   while i < 20:\n    x := i * 2\n    if x % 3 == 0:\n        acc = acc + f(x, i)\n    else:\n        acc = acc + 1\n    i = i + 1\nprint(acc)\n";
+        // x=0,3*?: i=0 x=0 x%3==0 acc+=f(0,0)=0; i=1 x=2 no acc+=1; i=2 x=4 no +1; i=3 x=6 yes +f(6,3)=9;
+        // i=4 x=8 no +1; i=5 x=10 no +1; i=6 x=12 yes +f(12,6)=18; ... let the engines agree on the value.
+        let out = run_parity(src);
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp"));
+        assert!(!out.is_empty());
     }
 
     #[test]
