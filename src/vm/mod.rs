@@ -7,6 +7,7 @@ pub mod core;
 pub mod heap;
 pub mod op;
 mod blocking_pool;
+pub mod chzstr;
 mod fxhash;
 mod poller;
 mod pool;
@@ -2634,7 +2635,7 @@ impl Vm {
                 let v = self.stack[self.stack.len() - 1]; // leave rooted; stringify may run user code
                 let s = self.stringify(v, span, 0)?;
                 self.pop();
-                let h = self.heap.alloc(Obj::Str(s.into_boxed_str()));
+                let h = self.heap.alloc(Obj::Str(s.into()));
                 self.push(Value::Obj(h));
             }
             Op::BuildStr(n) => {
@@ -2646,7 +2647,7 @@ impl Vm {
                     self.stringify_into(&mut s, p, span, 0)?; // one buffer, no per-part String
                 }
                 self.stack.truncate(at);
-                let h = self.heap.alloc(Obj::Str(s.into_boxed_str()));
+                let h = self.heap.alloc(Obj::Str(s.into()));
                 self.push(Value::Obj(h));
             }
             Op::ListClone => {
@@ -2969,7 +2970,7 @@ impl Vm {
             (Value::Obj(ha), Value::Obj(hb)) if matches!(op, Op::Add) => {
                 if let (Obj::Str(a), Obj::Str(b)) = (self.heap.get(ha), self.heap.get(hb)) {
                     let s = format!("{a}{b}");
-                    let h = self.heap.alloc(Obj::Str(s.into_boxed_str()));
+                    let h = self.heap.alloc(Obj::Str(s.into()));
                     Value::Obj(h)
                 } else {
                     return Err(self.err(format!("cannot apply {name} to {} and {}", self.type_name(l), self.type_name(r)), span));
@@ -4703,7 +4704,7 @@ impl Vm {
 
     /// Allocate a heap string and return its handle as a `Value`.
     fn alloc_str(&mut self, s: String) -> Value {
-        Value::Obj(self.heap.alloc(Obj::Str(s.into_boxed_str())))
+        Value::Obj(self.heap.alloc(Obj::Str(s.into())))
     }
 
     /// M19 Phase 3 — the 1-char `str` value for `c`, in a single allocation. `c.to_string()` +
@@ -4711,7 +4712,7 @@ impl Vm {
     /// into a stack buffer and boxing the `&str` is one. Used by string indexing/iteration/`chr`.
     fn alloc_char(&mut self, c: char) -> Value {
         let mut buf = [0u8; 4];
-        Value::Obj(self.heap.alloc(Obj::Str(Box::<str>::from(c.encode_utf8(&mut buf)))))
+        Value::Obj(self.heap.alloc(Obj::Str((&*c.encode_utf8(&mut buf)).into())))
     }
 
     /// Return from the current frame. `propagated` true ⇒ the value came from `?` (no observable
@@ -5879,7 +5880,7 @@ impl Vm {
                 // B3.3a: `str` crosses by value (owned bytes) so it can survive an OS-thread heap
                 // boundary; immutable + value-compared, so a fresh handle on reconstruction is
                 // observationally identical to sharing this one.
-                Obj::Str(s) => WireValue::Str(s.clone()),
+                Obj::Str(s) => WireValue::Str(s.as_str().into()),
                 // By-reference callables: cross as the existing handle (matches the old deep_clone arm).
                 Obj::Func { .. }
                 | Obj::Closure { .. }
@@ -5956,7 +5957,7 @@ impl Vm {
             WireValue::Bool(b) => Value::Bool(b),
             WireValue::Nil => Value::Nil,
             // B3.3a: rebuild a fresh heap `str` from the owned bytes (by value, not the old handle).
-            WireValue::Str(s) => Value::Obj(self.heap.alloc(Obj::Str(s))),
+            WireValue::Str(s) => Value::Obj(self.heap.alloc(Obj::Str(s.into()))),
             WireValue::Handle(h) => Value::Obj(h),
             // B3.1: rebuild a fresh heap handle onto the SAME shared core (`Arc` already cloned in
             // `to_wire`). Not registered in `self.executors` — the original `NewExecutor` handle there
@@ -7604,7 +7605,7 @@ impl Vm {
                 self.push(Value::Obj(nh));
             }
             Sliced::Str(sub) => {
-                let nh = self.heap.alloc(Obj::Str(sub.into_boxed_str()));
+                let nh = self.heap.alloc(Obj::Str(sub.into()));
                 self.push(Value::Obj(nh));
             }
             Sliced::Struct => {
@@ -7991,7 +7992,7 @@ impl Vm {
     fn builtin_str(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         self.arity_err("str", args, 1, span)?;
         let s = self.stringify(args[0], span, 0)?;
-        Ok(Value::Obj(self.heap.alloc(Obj::Str(s.into_boxed_str()))))
+        Ok(Value::Obj(self.heap.alloc(Obj::Str(s.into()))))
     }
 
     /// `ord(s)` — codepoint of the first char of `s`. Mirrors `interp::builtins::ord` (errors too).
@@ -8795,6 +8796,20 @@ mod tests {
     /// Run a program to completion, returning its stdout (panics on runtime error).
     fn run(src: &str) -> String {
         run_capture(src).unwrap_or_else(|e| panic!("unexpected runtime error: {e}"))
+    }
+
+    /// M19 SSO — the production `alloc_str` path stores short strings inline (no `Box` heap alloc)
+    /// and spills longer ones to the heap. This guards the wiring of `ChzStr` into the VM's hot
+    /// string-construction funnel; `chzstr.rs` unit tests cover the selection logic itself.
+    #[test]
+    fn vm_alloc_str_inlines_short_spills_long() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        let short = vm.alloc_str("item-499999".to_string()); // 11 bytes ≤ INLINE_CAP
+        let long = vm.alloc_str("x".repeat(crate::vm::chzstr::INLINE_CAP + 1)); // > INLINE_CAP
+        let inline = matches!(vm.heap.get(match short { Value::Obj(h) => h, _ => unreachable!() }), Obj::Str(s) if s.is_inline());
+        let heap = matches!(vm.heap.get(match long { Value::Obj(h) => h, _ => unreachable!() }), Obj::Str(s) if !s.is_inline());
+        assert!(inline, "short string should be stored inline");
+        assert!(heap, "long string should spill to the heap");
     }
 
     /// Run a program expected to fail; return the runtime error message.
@@ -14251,6 +14266,80 @@ mod parity_tests {
 
     fn assert_parity(src: &str) {
         assert_eq!(vm_outcome(src), interp_outcome(src), "VM/interp divergence for:\n{src}");
+    }
+
+    /// M19 SSO — string ops must stay byte-identical across both engines for strings that straddle
+    /// the `ChzStr` inline/heap boundary (`INLINE_CAP` = 22 bytes), including multi-byte UTF-8.
+    /// Exercises concat, split/join, indexing, iteration, `==`, `.chars()`, and string map keys.
+    #[test]
+    fn sso_boundary_string_ops_parity() {
+        let src = r#"
+fn main():
+    a := "aaaaaaaaaaaaaaaaaaaaa"      # 21 bytes (inline)
+    b := "bbbbbbbbbbbbbbbbbbbbbb"     # 22 bytes (inline boundary)
+    c := "ccccccccccccccccccccccc"    # 23 bytes (heap)
+    print(a.len())
+    print(b.len())
+    print(c.len())
+
+    # concat crosses the boundary in both directions
+    ab := a + b
+    print(ab.len())
+    print(ab)
+    print(a + "z")                    # 22, still inline
+    print(b + "z")                    # 23, spills to heap
+
+    # equality across storage (built two ways)
+    print(b == "b" + "bbbbbbbbbbbbbbbbbbbbb")
+    print((a + b) == (a + b))
+
+    # indexing + iteration over a heap-length string
+    print(c[0])
+    print(c[22])
+    n := 0
+    for ch in c:
+        n += 1
+    print(n)
+
+    # range-slice producing results on both sides of the boundary (slice itself allocs a str)
+    print(c[0..22])                   # 22 bytes — inline
+    print(c[0..23])                   # 23 bytes — heap
+    print(ab[0..22])
+
+    # case-fold can change byte length, straddling the boundary either way
+    print(b.upper())                  # 22 ascii → 22, inline
+    print(c.lower())                  # 23 → 23, heap
+    print("héllo-wörld-straße".upper())   # multibyte fold (ß→SS grows length)
+
+    # split / join round trip straddling the boundary
+    joined := "left-segment-twelve,right-side-thirteen"
+    bits := joined.split(",")
+    print(bits[0])
+    print(bits[1])
+    print(",".join(bits) == joined)
+
+    # f-string interpolation growing past the boundary
+    i := 0
+    while i < 5:
+        print("prefix-pad-prefix-pad-{i}")   # ~22-23 bytes, straddles
+        i += 1
+
+    # multi-byte UTF-8: short (inline by bytes) and long (heap)
+    m := "héllo wörld"                # 13 bytes, 11 chars — inline
+    print(m.len())
+    print(m.chars().len())
+    big := "ñññññññññññññññ"          # 15 chars × 2 bytes = 30 — heap
+    print(big.len())
+    print(big.chars().len())
+
+    # string map keys straddling the boundary
+    mm := {a: 1, c: 2}
+    print(mm[a])
+    print(mm[c])
+
+main()
+"#;
+        assert_parity(src);
     }
 
     use std::sync::atomic::{AtomicUsize, Ordering};

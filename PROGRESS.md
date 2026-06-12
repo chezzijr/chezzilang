@@ -11,6 +11,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ M19 — Small-string optimization (SSO) LANDED (2026-06-12).** `Obj::Str` now holds a
+`ChzStr` (`src/vm/chzstr.rs`) instead of a `Box<str>`: strings ≤ `INLINE_CAP` (22 UTF-8 bytes)
+live **inline** in the variant — no per-value heap `Box` alloc — and longer strings spill to a
+`Box<str>`. The `str` bench's 500k `"item-N"` parts are all ≤11 bytes, so building them no longer
+touches the allocator per element. `ChzStr` impls `Deref<str>` + `From<&str>/<String>/<Box<str>>`,
+so the ~100 `Obj::Str` match arms and `"x".into()` test constructors compiled **unchanged**; only
+~8 real construction sites switched `.into_boxed_str()` → `.into()`. `Clone`/`Eq`/`Hash` delegate
+to `as_str()` so map keys / interning / `==` stay byte-identical. `size_of::<Obj>()` is **unchanged
+at 88 B** (pinned by a guard test — `Module`/`Closure` still dominate). **Result: `str`
+217→174 ms, 2.62×→2.10× CPython (−20%); `list`/`loop`/`fib` neutral (no regression).** TDD'd:
+`ChzStr` selection unit tests (inline/heap boundary, multi-byte UTF-8, Eq/Hash content semantics)
+proven red-then-green, a `vm_alloc_str_inlines_short_spills_long` wiring guard, and a
+`sso_boundary_string_ops_parity` two-engine test (concat/split/join/index/iterate/`==`/map-key
+straddling the 22-byte boundary). **1565 tests** green, conformance 7/7, `clippy --all-targets`
+clean. VM-only; frozen interp untouched. Closes the **small-string optimization** lever in
+[`docs/future.md §4`](docs/future.md). The pure-int `list` bench stays at the **parity floor** —
+`for x in xs` snapshots the list (`Op::ListClone`) and the frozen interp snapshots identically
+(`exec_for` → `iter_rows_from_value`), so the clone can't be dropped without diverging; ints are
+already unboxed `Value`, so there is no per-element box to kill there.
+
 **✅ M19 — `Arc::clone` warm-up hoisted out of `run_until` LANDED (2026-06-12).** The call-flatten
 (`634c6f5`) had already killed the *per-call* `run_until` recursion, leaving one
 `Arc::clone(&self.program)` at the loop ENTRY (`mod.rs:2095`) — a per-entry atomic that was pure

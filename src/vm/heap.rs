@@ -4,6 +4,7 @@
 //! lands in M5b). Objects are addressed by [`GcRef`] (a slot index), so handle copies alias one
 //! object. The VM owns the heap and mutates objects through `&mut heap[h]` — no `RefCell` needed.
 
+use super::chzstr::ChzStr;
 use super::core::{ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use super::fxhash::FxHashMap;
 use super::op::ProtoId;
@@ -85,7 +86,7 @@ impl SetData {
 /// A heap object — the reference half of the value space.
 #[derive(Debug, Clone)]
 pub enum Obj {
-    Str(Box<str>),
+    Str(ChzStr),
     List(Vec<Value>),
     /// `(a, b, …)` — a fixed-arity, immutable tuple. Elements may be heap objects, so they are
     /// traced as GC children (same as `List`).

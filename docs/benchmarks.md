@@ -268,7 +268,7 @@ item in `future.md §4`.
 | bench   | dominant cost | concrete hot spot | fix (future.md §4) |
 |---------|---------------|-------------------|--------------------|
 | fib     | recursive call overhead | per-call `Vec<Value>` arg alloc (`mod.rs:3181`); full `Obj` enum clone incl. captured `HashMap` in `invoke_value` (`:3198`); `name.clone()` for the arity check (`:3200`); per-call slot pre-fill (`push_frame`) | frame pooling; pass args as a stack slice; match on `&Obj` (no clone); kill `name.clone()` |
-| str     | f-string build + join | per-element `Box<str>` heap alloc for each `"item-N"` (`alloc_str`, `:4697`) — ≤12 bytes each (`stringify`-buffer + `ConstStr` interning already landed P2/P3) | small-string optimization (inline ≤N-byte strings in the `Obj` slot). NOT concat/split builder — `join` already buffers (`:4377`), `+`/`split` aren't benched |
+| str     | f-string build + join | ✅ per-element `Box<str>` heap alloc for each `"item-N"` — **killed by SSO** (inline ≤22-byte strings, `ChzStr`, 2026-06-12; `str` −20%). NOT concat/split builder — `join` already buffers (`:4377`), `+`/`split` aren't benched |
 | primes  | `while` + `%` | binary ops re-dispatch on operand type every iteration; per-access name lookup for globals/locals | specialize arithmetic (monomorphic int guard); inline caching; superinstructions |
 | loop    | 20M int adds | raw dispatch count (arith re-dispatch already killed by P1 superinstructions) | ✅ superinstructions (fuse `GetLocal+GetLocal+BinOp`) + arith specialize landed. NaN-box `Value` (16→8 B) would help but is BLOCKED by full i64 — see reality-check below. Floor likely needs register VM / JIT |
 | list    | push + sum | near the safe match-dispatch floor | general dispatch / `Value`-density work; no targeted fix |
@@ -344,3 +344,38 @@ enter `run_until` ~once → the lever is invisible there (as predicted). Added `
 **Verdict:** ~5% on callback-heavy code, neutral (non-regressing) on the standard suite. Kept.
 Guarded by `native_reentry_hof_compare_defer_parity` (HOF + operator-overload + defer-in-recursion,
 VM == interp). 1552 tests green, conformance 7/7, clippy clean.
+
+## Small-string optimization (SSO) — 2026-06-12
+
+`Obj::Str(Box<str>)` → `Obj::Str(ChzStr)` (`src/vm/chzstr.rs`). `ChzStr` stores strings ≤
+`INLINE_CAP` (22 UTF-8 bytes) **inline** in the enum variant (no per-value `Box<str>` heap alloc);
+longer strings spill to a `Box<str>`. The `str` bench builds 500k `"item-N"` parts (all ≤11 bytes)
+into a list before `,".join` — pre-SSO that was 500k inner `Box` allocs (and 500k retained heap
+objects for the GC to mark/sweep); now zero on both counts, so the win is fewer allocs **and** less
+GC pressure. (SSO therefore helps any string-*retaining* loop most; a string-churning loop that
+frees immediately benefits less.) `Deref<str>` +
+`From<&str>/<String>/<Box<str>>` kept all ~100 `Obj::Str` match arms + `"x".into()` test
+constructors compiling unchanged; `size_of::<Obj>()` stayed **88 B** (pinned by a guard test —
+`Module`/`Closure` still dominate, the `Str` variant went 16→24 B, well under).
+
+| bench  | before (ms) | after (ms) | vs CPython | result |
+|--------|------------:|-----------:|-----------:|--------|
+| `str`  | 217.3 ±3.7  | 173.7 ±2.1 | 2.62×→**2.10×** | **−20%** (output identical: `5888889`) |
+| `list` |           — | 460.4 ±10.5 | — | neutral (ints are unboxed `Value` — no per-element box) |
+| `loop` |           — | 1107 ±34   | — | neutral |
+| `fib`  |           — | 278.3 ±7.7  | — | neutral |
+
+**Why `list` (int) doesn't move — it's at the parity floor.** `for x in xs` snapshots the iterand
+(`Op::ListClone`, `mod.rs`) so a body mutating the list doesn't disturb iteration. The **frozen
+interpreter snapshots identically** (`exec_for` → `iter_rows_from_value`, "clone out so a body that
+mutates the collection doesn't disturb iteration"), so dropping the clone would diverge — it's
+mandated by parity, not an oversight. Ints already ride unboxed in the 16 B `Value`, so there's no
+per-element box to kill. SSO instead helps any string-heavy list workload (incl. the `str` bench's
+`parts` list of 500k now-inline strings).
+
+**Guarded by:** `ChzStr` unit tests (inline/heap selection at the 22-byte boundary, multi-byte
+UTF-8 by bytes-not-chars, `Eq`/`Hash` content-equal to `Box<str>`), `obj_size_unchanged_by_sso`,
+`vm_alloc_str_inlines_short_spills_long` (production-path wiring), and
+`sso_boundary_string_ops_parity` (concat/split/join/index/iterate/`==`/map-key across the boundary,
+VM == interp). 1565 tests green, conformance 7/7, `clippy --all-targets` clean. VM-only; frozen
+interp untouched.

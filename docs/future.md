@@ -149,13 +149,16 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   int compare saves nothing measurable. Kept (correct, principled, no regression, future-proofs real
   polymorphic field sites), but **the field-IC lever is spent** — there is no cheaper guard to reach
   for. The "shallow-struct caveat" was a *prediction*, not a measured cost.
-- **Small-string optimization (the real open `str` lever)** — short strings are still a `Box<str>`
-  heap alloc per value (`alloc_str`, `mod.rs:4697`). The `str` bench's `"item-N"` are all ≤12 bytes;
-  inlining ≤N-byte strings in the `Obj` slot kills the per-element alloc + GC pressure. Touches every
-  `Obj::Str` site in the VM (concat/split/join/len/index/stringify). Moves `str` + list-of-`str`.
-  **Note:** "concat / `split` / `+` builder/rope" is *not* a benched lever — the `str` bench is
-  `BuildStr` + `,".join`, and `join` already buffers into one `String` (`mod.rs:4377`); `+`/`split`
-  aren't exercised. A builder/rope only helps un-benched `s = s + x` loops.
+- ✅ **Small-string optimization (the real open `str` lever)** — *landed M19 (2026-06-12)*.
+  `Obj::Str` now holds a `ChzStr` (`src/vm/chzstr.rs`): strings ≤ `INLINE_CAP` (22 UTF-8 bytes) are
+  stored **inline** in the variant (no per-value `Box<str>` heap alloc), longer ones spill to a
+  `Box<str>`. `Deref<str>` + `From` impls kept the ~100 `Obj::Str` sites compiling unchanged;
+  `size_of::<Obj>()` stayed 88 B (pinned by a guard test). **`str` 217→174 ms, 2.62×→2.10× CPython
+  (−20%)**; `list`/`loop`/`fib` neutral. **Note:** "concat / `split` / `+` builder/rope" is *not* a
+  benched lever — the `str` bench is `BuildStr` + `,".join`, and `join` already buffers into one
+  `String` (`mod.rs:4377`); `+`/`split` aren't exercised. A builder/rope only helps un-benched
+  `s = s + x` loops. The pure-int `list` bench is at the **snapshot-parity floor** (both engines
+  clone the iterand at `for`; ints are already unboxed) — no safe alloc lever there.
 - ✅ **Faster `usize`/`u64` hasher** — *landed M19 Phase 5a*: `MapData`/`SetData`'s `index` (keyed by
   the cached content hash) and `str_intern` (pointer-keyed) swapped SipHash for an in-tree FxHash
   (`src/vm/fxhash.rs`, no dep). **`map` −7%** (3.04×→2.82× CPython; maps were unbenched, so a `map`
