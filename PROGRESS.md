@@ -88,7 +88,15 @@ interp is untouched by VM-only work, so parity is automatic for those changes.
 
 Gap to CPython after Phases 6–7 **~1.1×–3.2×** slower (worst still call-bound `fib` ~3.2×, then `map`/
 `struct`/`list`/`primes` ~2.3–2.7×, `str` ~2.0×; **`loop` ~1.1×** — near parity, was the dispatch
-floor), startup ~11× **faster**. **1573 tests** green, conformance 7/7, `clippy --all-targets` clean.
+floor), startup ~11× **faster**. **1607 tests** green, conformance 7/7, `clippy --all-targets` clean.
+
+**Tier-2 index specialization landed (2026-06-12):** Int-key fast path in `get_index`/`set_index`
+(skips `hash_key_rooted`'s rooting — alloc-free for an int key) + inline `GetIndex`/`SetIndex` in the
+`run_until` hot arm. **`list` −4%** (its `for x in xs` lowers to per-element `GetIndex`); **`map`
+neutral** (FxHashMap-probe-bound, not rooting/dispatch-bound — the predicted target didn't move, the
+recurring "measure, don't guess" lesson). Behavior-preserving (7 `idxspec_*` VM==interp guards, incl.
+the Int/Float key-collision trap). Moving `map` needs a denser int-keyed map, not this in-place tweak.
+See `docs/benchmarks.md` "M19 Tier-2".
 
 **▶ Next perf batch (Tier 1 DONE — Phases 6+7 landed, 8 deferred; Tier 2 is next; full detail +
 `file:line`s in [`docs/future.md §4` "Post-M19 next levers"](docs/future.md)).** Diagnosis: the
@@ -103,8 +111,10 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
 - **Tier 2 (structural) — START HERE NEXT:** 4. **adaptive opcode quickening (PEP 659)** — rewrite ops to
   type-specialized forms at runtime behind a deopt guard (generalizes superinstructions + ICs; cells in a
   per-`Vm` side table, not the shared `Arc<Program>`); the single most CPython-3.14-like lever, and the
-  unifying mechanism for the method/field/call caches. 5. **map/list index specialization** (`mod.rs`
-  `GetIndex`/`SetIndex`) → falls out of #4; hits `map`/`list`.
+  unifying mechanism for the method/field/call caches. ✅ 5. **map/list index specialization** (`mod.rs`
+  `GetIndex`/`SetIndex`) — **landed (Int-key fast path + inline dispatch): `list` −4%, `map` neutral**
+  (hash-probe-bound). The remaining `map` win needs a denser int-keyed representation, not this in-place
+  tweak — folds into #4 or its own lever.
 - **Tier 3 (big, separate):** 6. **Cranelift method-JIT** (end-game; the only path to match/beat fib;
   #4 is the stepping stone). 7. NaN-boxing (BLOCKED, above). 8. register VM / generational GC (low ROI).
 
@@ -134,6 +144,20 @@ OS-thread engine) and the netpoller + `std.net` — is complete and stable. **M-
 legal anywhere and joins at `return`/end. ~1592 tests green; the default cooperative engine and `--parallel`
 stay byte-identical on every `examples/parallel*.chz` + `examples/implicit_nursery.chz` golden, and the
 frozen interp is the differential parity oracle for the sequential subset.
+
+> **`Channel.recv_timeout(ms)` — attempted then reverted (2026-06-12).** A bounded-wait `recv` was
+> implemented with a **demote-always** shortcut (reuse `demote_recv_block` + a deadline) to avoid the
+> heavier park+timer machinery. The review panel found it **unsound at `native_reentry == 0`**: (1) a
+> top-level M:N `recv_timeout` demotes the worker, and a later reduction-budget yield strands the fiber →
+> **silent hang**; (2) the cooperative park path reused `park_recv` (built for 0-arg `recv`) but
+> `recv_timeout` has `argc=1` → **stack corruption** on resume; (3) cooperative-nursery no-producer faults
+> `deadlock` not `None`, and demote-failure faults (not total). Reverted (commit `653dfd2`). **Lesson: the
+> correct design is the heavier one** — at `native_reentry == 0`, snapshot-park on a timer (claim-flag +
+> a `MnSched::timeout_wake` racing `send_wake`, like the socket-timeout `poll_timed_out` path), demote
+> only at `native_reentry > 0`; cooperative needs a recv_timeout-aware quiesce (resolve-to-`None`, not
+> fault) or accept the documented deadlock-fault divergence. Checker `Ty::Int → Option[elem]` sig + interp
+> poll-once arm were correct; the VM scheduler integration is the hard part. A proper follow-up, not a
+> drop-in. (`select` / `Atomic[int]` remain deferred too — both need a design brainstorm.)
 
 ### Tier-D — complete (D0–D6c)
 
