@@ -15,7 +15,7 @@ pub mod wire;
 
 use core::{ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use heap::{Heap, MapData, Obj, SetData};
-use op::{CapEntry, CapSrc, Op, Program, ProtoId};
+use op::{CapEntry, CapSrc, Op, Program, ProtoId, NO_IC};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -186,6 +186,19 @@ impl PendingCall {
     }
 }
 
+/// M19 Phase 4 — a struct-field inline-cache cell: the field index last resolved at this call site.
+/// Holds a plain index (no `GcRef`), so it is invisible to GC, snapshots, and `swap_ctx`. `idx ==
+/// u32::MAX` is the empty sentinel (forces a probe on first use). Every read re-verifies the cached
+/// index against the live field name, so a stale or cross-type cell can never return a wrong field.
+#[derive(Clone, Copy)]
+struct IcCell {
+    idx: u32,
+}
+
+impl IcCell {
+    const EMPTY: IcCell = IcCell { idx: u32::MAX };
+}
+
 struct Vm {
     program: Arc<Program>,
     heap: Heap,
@@ -207,6 +220,12 @@ struct Vm {
     /// so they're never swept; the cache is heap-keyed, so an M:N fiber swaps it WITH its heap in
     /// [`Vm::swap_ctx`] (like `module_objs`/`executors`).
     str_intern: std::collections::HashMap<usize, GcRef>,
+    /// M19 Phase 4 — per-call-site struct-field inline caches, indexed by the `ic` id baked into
+    /// `GetField`/`SetField` ops (dense `0..program.field_ic_sites`). Holds field indices, not
+    /// `GcRef`s, so it carries no heap state: never snapshotted, never swapped in [`Vm::swap_ctx`].
+    /// Cooperative fibers share one `Vm` but run sequentially (no race); `--parallel` workers each
+    /// own a separate `Vm` (no race). Each cell self-verifies, so sharing is always sound.
+    field_ic: Vec<IcCell>,
     /// The current frame's slot base — cached so local access doesn't re-walk `frames` each op.
     cur_base: usize,
     /// Active `recover:` boundaries (a stack; the innermost is last). A runtime fault unwinds to the
@@ -1719,6 +1738,7 @@ struct OffloadReq {
 
 impl Vm {
     fn new(program: Arc<Program>) -> Self {
+        let field_ic = vec![IcCell::EMPTY; program.field_ic_sites as usize];
         Vm {
             program,
             heap: Heap::new(),
@@ -1730,6 +1750,7 @@ impl Vm {
             call_depth: 0,
             module_objs: Vec::new(),
             str_intern: std::collections::HashMap::new(),
+            field_ic,
             cur_base: 0,
             handlers: Vec::new(),
             pending_exit: None,
@@ -2592,10 +2613,10 @@ impl Vm {
                 let h = self.heap.alloc(Obj::Closure { proto: *proto, captured, home });
                 self.push(Value::Obj(h));
             }
-            Op::GetField(name) => self.get_field(name, span)?,
+            Op::GetField { name, ic } => self.get_field(name, *ic, span)?,
             Op::GetIndex => self.get_index(span)?,
             Op::GetSlice => self.get_slice(span)?, // Phase 4
-            Op::SetField(name) => self.set_field(name, span)?,
+            Op::SetField { name, ic } => self.set_field(name, *ic, span)?,
             Op::SetIndex => self.set_index(span)?,
             Op::Dup => {
                 let top = *self.stack.last().expect("Dup on empty stack");
@@ -7449,12 +7470,26 @@ impl Vm {
         Ok(())
     }
 
-    fn get_field(&mut self, name: &str, span: Span) -> Result<(), RuntimeError> {
+    fn get_field(&mut self, name: &str, ic: u32, span: Span) -> Result<(), RuntimeError> {
         let obj = self.pop();
         let Value::Obj(h) = obj else {
             return Err(self.err(format!("cannot read field '{name}' of {}", self.type_name(obj)), span));
         };
         self.ensure_module_faulted(h); // D1: `module.member` on a not-yet-faulted worker module
+        // M19 Phase 4 — inline-cache fast path: a hit collapses the struct name-probe to one verify-
+        // compare. The cached index is re-verified against the live field name, so it can never return
+        // a wrong field (worst case: a miss + re-probe below). Read the cell before borrowing the heap.
+        if ic != NO_IC {
+            let cached = self.field_ic[ic as usize].idx as usize;
+            if let Obj::Struct { fields, .. } = self.heap.get(h)
+                && let Some((k, v)) = fields.get(cached)
+                && k.as_ref() == name
+            {
+                let v = *v;
+                self.push(v);
+                return Ok(());
+            }
+        }
         match self.heap.get(h) {
             // `t.0`, `t.1`, … — tuple element access. The field name is the element index.
             Obj::Tuple(items) => {
@@ -7471,9 +7506,18 @@ impl Vm {
                 }
             }
             Obj::Struct { fields, .. } => {
-                let v = fields.iter().find(|(k, _)| k.as_ref() == name).map(|(_, v)| *v);
-                match v {
-                    Some(v) => {
+                // Probe + capture the index so the IC can cache it (Value is Copy, so `found` owns its
+                // data and the heap borrow ends here, freeing `self` for the field_ic write below).
+                let found = fields
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (k, _))| k.as_ref() == name)
+                    .map(|(i, (_, v))| (i, *v));
+                match found {
+                    Some((i, v)) => {
+                        if ic != NO_IC {
+                            self.field_ic[ic as usize].idx = i as u32;
+                        }
                         self.push(v);
                         Ok(())
                     }
@@ -7641,25 +7685,42 @@ impl Vm {
         }
     }
 
-    fn set_field(&mut self, name: &str, span: Span) -> Result<(), RuntimeError> {
+    fn set_field(&mut self, name: &str, ic: u32, span: Span) -> Result<(), RuntimeError> {
         let val = self.pop();
         let obj = self.pop();
         let Value::Obj(h) = obj else {
             return Err(self.err(format!("cannot assign field '{name}' of {}", self.type_name(obj)), span));
         };
+        // M19 Phase 4 — IC fast path (see [`Vm::get_field`]): a hit writes straight to the cached
+        // index after re-verifying its field name; a miss falls through to the probe + cache-fill.
+        if ic != NO_IC {
+            let cached = self.field_ic[ic as usize].idx as usize;
+            if let Obj::Struct { fields, .. } = self.heap.get_mut(h)
+                && let Some((k, slot)) = fields.get_mut(cached)
+                && k.as_ref() == name
+            {
+                *slot = val;
+                return Ok(());
+            }
+        }
+        let found_idx;
         match self.heap.get_mut(h) {
-            Obj::Struct { fields, .. } => match fields.iter_mut().find(|(k, _)| k.as_ref() == name) {
-                Some((_, slot)) => {
+            Obj::Struct { fields, .. } => match fields.iter_mut().enumerate().find(|(_, (k, _))| k.as_ref() == name) {
+                Some((i, (_, slot))) => {
                     *slot = val;
-                    Ok(())
+                    found_idx = i;
                 }
                 None => {
                     let shown = self.display(obj);
-                    Err(self.err(format!("no field '{name}' on {shown}"), span))
+                    return Err(self.err(format!("no field '{name}' on {shown}"), span));
                 }
             },
-            _ => Err(self.err(format!("cannot assign field '{name}' of {}", self.type_name(obj)), span)),
+            _ => return Err(self.err(format!("cannot assign field '{name}' of {}", self.type_name(obj)), span)),
         }
+        if ic != NO_IC {
+            self.field_ic[ic as usize].idx = found_idx as u32;
+        }
+        Ok(())
     }
 
     fn set_index(&mut self, span: Span) -> Result<(), RuntimeError> {
@@ -8747,6 +8808,81 @@ mod tests {
         assert_eq!(run("print(chr(233))\n"), "é\n");
     }
 
+    // ---- M19 Phase 4: struct-field inline cache (correctness guards) ----
+
+    /// Run on the VM and the frozen interpreter; assert byte-identical stdout (the M19 parity bar),
+    /// and return the shared output. The field IC is a VM-only speedup, so any divergence is a bug.
+    fn run_parity(src: &str) -> String {
+        let vm = run_capture(src).expect("vm run");
+        let interp = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(vm, interp, "vm/interp divergence (field IC must be behavior-preserving)");
+        vm
+    }
+
+    #[test]
+    fn ic_deep_field_read() {
+        // Read the LAST field of a 6-field struct in a loop: exercises the IC hit path past five
+        // would-be name-probes. Cached idx must point at `f` every iteration.
+        let src = "struct S:\n    a: int\n    b: int\n    c: int\n    d: int\n    e: int\n    f: int\n\
+                   s := S(1, 2, 3, 4, 5, 6)\n\
+                   i := 0\nacc := 0\nwhile i < 5:\n    acc = acc + s.f\n    i = i + 1\nprint(acc)\n";
+        assert_eq!(run_parity(src), "30\n");
+    }
+
+    #[test]
+    fn ic_field_write_then_read() {
+        // SetField IC: mutate `x` (plain) and `y` (compound) in a loop, then read both back. The
+        // write cache and the read cache must agree on the field index.
+        let src = "struct P:\n    x: int\n    y: int\n\
+                   p := P(0, 0)\n\
+                   i := 0\nwhile i < 4:\n    p.x = p.x + 2\n    p.y += 3\n    i = i + 1\n\
+                   print(p.x)\nprint(p.y)\n";
+        assert_eq!(run_parity(src), "8\n12\n");
+    }
+
+    #[test]
+    fn ic_distinct_layouts() {
+        // Two structs whose shared field names sit at DIFFERENT indices (A{x,y} vs B{y,x}), read at
+        // their own sites in one loop. A bug that confused per-site IC cells (bad id allocation, or a
+        // hit that skipped the name re-verify) would return a wrong field; the verify keeps it sound.
+        let src = "struct A:\n    x: int\n    y: int\nstruct B:\n    y: int\n    x: int\n\
+                   a := A(1, 2)\nb := B(3, 4)\n\
+                   i := 0\ns := 0\nwhile i < 3:\n    s = s + a.x + a.y + b.x + b.y\n    i = i + 1\nprint(s)\n";
+        // per iter: a.x=1 a.y=2 b.x=4 b.y=3 => 10; *3 = 30
+        assert_eq!(run_parity(src), "30\n");
+    }
+
+    #[test]
+    fn ic_self_field_method() {
+        // `self.field` reads inside a method called in a loop — the hot OO path the IC targets.
+        let src = "struct Counter:\n    n: int\n\n    fn get(self) -> int:\n        return self.n\n\
+                   c := Counter(7)\n\
+                   i := 0\nacc := 0\nwhile i < 5:\n    acc = acc + c.get()\n    i = i + 1\nprint(acc)\n";
+        assert_eq!(run_parity(src), "35\n");
+    }
+
+    #[test]
+    fn ic_struct_under_parallel_engine() {
+        // The IC lives on each worker `Vm` too; field-heavy code run on the real-thread engine must
+        // produce the same output as the cooperative engine (the caches are per-Vm, self-verifying).
+        let src = "struct Pt:\n    x: int\n    y: int\n\n    fn sum(self) -> int:\n        return self.x + self.y\n\
+                   p := Pt(3, 4)\n\
+                   acc := 0\ni := 0\nwhile i < 100:\n    acc = acc + p.sum()\n    p.x = p.x + 1\n    i = i + 1\n\
+                   print(acc)\nprint(p.x)\n";
+        assert_eq!(run_capture_parallel(src).expect("parallel"), run(src));
+    }
+
+    #[test]
+    fn ic_gc_stress_fields() {
+        // Field reads under collect-before-every-instruction: cached indices stay valid because GC
+        // never reorders a struct's `fields` Vec (and the IC holds indices, not GcRefs).
+        let src = "struct V:\n    a: int\n    b: int\n    c: int\n\
+                   v := V(10, 20, 30)\n\
+                   i := 0\nacc := 0\nwhile i < 30:\n    acc = acc + v.a + v.b + v.c\n    i = i + 1\nprint(acc)\n";
+        assert_eq!(run_capture_stress(src), run(src));
+        assert_eq!(run_parity(src), "1800\n");
+    }
+
     #[test]
     fn calls_preserve_arg_order_nesting_and_result_slot() {
         // P1 characterization: locks call semantics before the in-place-args refactor. The bugs an
@@ -8851,6 +8987,7 @@ mod tests {
             structs: Default::default(),
             variants: Default::default(),
             modules: vec![],
+            field_ic_sites: 0,
         }
     }
 

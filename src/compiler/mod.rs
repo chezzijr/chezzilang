@@ -17,7 +17,7 @@ use crate::ast::{
 };
 use crate::resolver::{ModuleGraph, ResolvedImport};
 use crate::vm::op::{
-    CapEntry, CapSrc, ModuleProto, Op, Program, Proto, ProtoId, StructDef, VariantDef,
+    CapEntry, CapSrc, ModuleProto, Op, Program, Proto, ProtoId, StructDef, VariantDef, NO_IC,
 };
 use crate::{lexer, parser};
 use std::collections::HashMap;
@@ -58,6 +58,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
             global_slots,
         });
     }
+    c.program.field_ic_sites = c.field_ic_next;
     Ok(c.program)
 }
 
@@ -83,6 +84,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         native: None,
         global_slots,
     });
+    c.program.field_ic_sites = c.field_ic_next;
     Ok(c.program)
 }
 
@@ -97,6 +99,10 @@ struct Compiler {
     /// The current module's globals in slot order (slot `i` ⇒ `global_slots[i]`), recorded into the
     /// module's [`ModuleProto`] so the run driver can pre-size storage + build its name→slot index.
     global_slots: Vec<String>,
+    /// M19 Phase 4 — next struct-field inline-cache site id. Allocated densely across the WHOLE
+    /// program (every module shares this `Compiler`), so each `GetField`/`SetField` on a struct
+    /// field gets a unique slot into the VM's `field_ic` vector. Recorded into `Program::field_ic_sites`.
+    field_ic_next: u32,
 }
 
 impl Compiler {
@@ -106,6 +112,7 @@ impl Compiler {
             structs: HashMap::new(),
             variants: HashMap::new(),
             modules: Vec::new(),
+            field_ic_sites: 0,
         };
         // Built-in Result / Option variants, available without declaration.
         for (v, e, arity) in [("Ok", "Result", 1), ("Err", "Result", 1), ("Some", "Option", 1), ("None", "Option", 0)] {
@@ -114,7 +121,21 @@ impl Compiler {
                 VariantDef { enum_name: e.to_string(), arity },
             );
         }
-        Compiler { program, struct_fields: HashMap::new(), globals: HashMap::new(), global_slots: Vec::new() }
+        Compiler { program, struct_fields: HashMap::new(), globals: HashMap::new(), global_slots: Vec::new(), field_ic_next: 0 }
+    }
+
+    /// M19 Phase 4 — allocate an inline-cache site id for a field op. Numeric field names are tuple
+    /// element access (`t.0`/`t.1`; identifiers can never start with a digit), which dispatches to
+    /// the tuple arm and never reads the IC — those get [`NO_IC`] and consume no slot. Every other
+    /// (identifier) field op gets a fresh dense id.
+    fn next_field_ic(&mut self, name: &str) -> u32 {
+        if name.bytes().all(|b| b.is_ascii_digit()) {
+            NO_IC
+        } else {
+            let id = self.field_ic_next;
+            self.field_ic_next += 1;
+            id
+        }
     }
 
     /// M19 Phase 2b — resolve a module-global name to its compile-time slot. The checker rejects
@@ -343,7 +364,7 @@ impl Compiler {
                     fc.emit(Op::SetLocal(tuple_slot), stmt.span);
                     for (i, name) in names.iter().enumerate() {
                         fc.emit(Op::GetLocal(tuple_slot), stmt.span);
-                        fc.emit(Op::GetField(i.to_string()), stmt.span);
+                        fc.emit(Op::GetField { name: i.to_string(), ic: NO_IC }, stmt.span); // tuple element
                         if fc.is_global_scope() {
                             fc.emit(Op::DefineGlobalSlot(self.global_slot(name)), stmt.span);
                         } else {
@@ -529,14 +550,16 @@ impl Compiler {
             ExprKind::Field { obj, name } => {
                 self.compile_expr(fc, obj)?;
                 if op != AssignOp::Eq {
+                    let ic = self.next_field_ic(name);
                     fc.emit(Op::Dup, span);
-                    fc.emit(Op::GetField(name.clone()), target.span);
+                    fc.emit(Op::GetField { name: name.clone(), ic }, target.span);
                     self.compile_expr(fc, value)?;
                     fc.emit(if op == AssignOp::PlusEq { Op::Add } else { Op::Sub }, span);
                 } else {
                     self.compile_expr(fc, value)?;
                 }
-                fc.emit(Op::SetField(name.clone()), span);
+                let ic = self.next_field_ic(name);
+                fc.emit(Op::SetField { name: name.clone(), ic }, span);
             }
             // `obj[i] = v` → [obj, i, v] SetIndex; compound dups `[obj, i]` to read-modify-write.
             ExprKind::Index { obj, index } => {
@@ -837,7 +860,7 @@ impl Compiler {
             fc.patch_jump(to_list_bind);
             for (j, &vs) in var_slots.iter().enumerate() {
                 fc.emit(Op::GetLocal(elem), span);
-                fc.emit(Op::GetField(j.to_string()), span);
+                fc.emit(Op::GetField { name: j.to_string(), ic: NO_IC }, span); // tuple element
                 fc.emit(Op::SetLocal(vs), span);
             }
             fc.patch_jump(after_bind);
@@ -1049,7 +1072,7 @@ impl Compiler {
             Pattern::Tuple(subs) => {
                 for (i, sub) in subs.iter().enumerate() {
                     fc.emit(Op::GetLocal(scrut), span);
-                    fc.emit(Op::GetField(i.to_string()), span); // tuple element `.i`
+                    fc.emit(Op::GetField { name: i.to_string(), ic: NO_IC }, span); // tuple element `.i`
                     let elem = fc.add_hidden();
                     fc.emit(Op::SetLocal(elem), span);
                     self.emit_pattern(fc, sub, elem, fails, span)?;
@@ -1266,7 +1289,8 @@ impl Compiler {
             ExprKind::Call { callee, args, .. } => self.compile_call(fc, callee, args, expr.span)?,
             ExprKind::Field { obj, name } => {
                 self.compile_expr(fc, obj)?;
-                fc.emit(Op::GetField(name.clone()), expr.span);
+                let ic = self.next_field_ic(name);
+                fc.emit(Op::GetField { name: name.clone(), ic }, expr.span);
             }
             ExprKind::Index { obj, index } => {
                 self.compile_expr(fc, obj)?;

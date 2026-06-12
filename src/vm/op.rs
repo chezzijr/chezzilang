@@ -50,6 +50,10 @@ pub enum BinKind {
     GtEq,
 }
 
+/// Sentinel `ic` id meaning "no inline cache for this field op" (tuple/numeric element access).
+/// See [`Op::GetField`]. Real ids are dense `0..Program::field_ic_sites`.
+pub const NO_IC: u32 = u32::MAX;
+
 /// A single VM instruction. Operands are inline (typed), so there is no separate constant pool —
 /// strings and numbers live in the op. Jump targets are absolute indices into the proto's `code`.
 #[derive(Debug, Clone)]
@@ -190,13 +194,17 @@ pub enum Op {
     MakeClosure(ProtoId, Vec<CapEntry>),
 
     // ----- access -----
-    GetField(String),
+    /// Read field `name`. `ic` is a per-call-site inline-cache id into the VM's `field_ic` vector
+    /// (M19 Phase 4): a monomorphic, name-verified cache of the field's index, collapsing the
+    /// struct name-probe to one verify-compare on a hit. `ic == NO_IC` ⇒ no cache (tuple `.0`/`.1`
+    /// element access, which dispatches to the tuple arm and never touches the IC).
+    GetField { name: String, ic: u32 },
     /// Stack `[obj, index]` (index already `AsInt`-checked).
     GetIndex,
     /// Stack `[obj, start, end]` → `[slice]` — half-open slice of a list/str, or a struct's `slice`.
     GetSlice,
-    /// Stack `[obj, value]` → `[]` — mutate a struct field in place.
-    SetField(String),
+    /// Stack `[obj, value]` → `[]` — mutate a struct field in place. `ic`: see [`Op::GetField`].
+    SetField { name: String, ic: u32 },
     /// Stack `[obj, index, value]` (index already `AsInt`-checked) → `[]` — mutate a list element.
     SetIndex,
     /// `[a]` → `[a, a]` — duplicate the top (compound field assignment).
@@ -335,6 +343,10 @@ pub struct Program {
     pub variants: HashMap<String, VariantDef>,
     /// Modules in dependency order (deps first, entry last) — the run order.
     pub modules: Vec<ModuleProto>,
+    /// M19 Phase 4 — number of struct-field inline-cache sites (dense ids `0..field_ic_sites`
+    /// baked into `GetField`/`SetField` ops). The VM pre-sizes its per-`Vm` `field_ic` vector to
+    /// this length. Carries no heap state, so it is never snapshotted or swapped.
+    pub field_ic_sites: u32,
 }
 
 impl Program {

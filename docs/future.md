@@ -117,8 +117,20 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   slot↔name by construction — removing the slot-order fragility rather than just guarding it.
   **Reality vs prediction:** it moved `fib` −9% (the call-heavy bench resolves its callee per call),
   but *not* `primes`/`loop` — their hot loops read locals, not globals, so the "moves `primes`" guess
-  was wrong about where global-read density actually is. Still cheaper on every global read; struct-
-  field caching (the other half of name-lookup ICs) remains future work.
+  was wrong about where global-read density actually is. Still cheaper on every global read.
+- ✅ **Struct-field caching (the other half of name-lookup ICs)** — *landed M19 Phase 4*: static
+  slotting (P2b's model) is impossible for fields because the compiler is **type-erased** (it knows the
+  field name but not the receiver's struct type at emit time), so `GetField`/`SetField` carry a
+  per-call-site IC id into a per-`Vm` `field_ic: Vec<IcCell>` that caches the field index; a hit
+  re-verifies `fields[idx].0 == name` and skips the name-probe. The cell holds an index, not a `GcRef`,
+  so it touches no GC / snapshot / `swap_ctx` machinery; each access self-verifies, so it stays sound
+  under any future polymorphism. **Reality vs prediction:** −13% on a field-access-bound bench
+  (`struct`, 3.32×→2.89× CPython), but **~neutral to −3% on a method-bound shallow-field bench** — the
+  cold `field_ic` indirection only pays off when field resolution is the actual bottleneck (wider /
+  deeper structs), not when method dispatch dominates. **Open follow-up:** a struct **type-id guard**
+  (stamp a numeric type id on `Obj::Struct`; guard on `obj.tid == cell.tid` — a pure-int compare with
+  no name re-verify) would tighten the hot path and could close the shallow-struct caveat; it costs a
+  `tid` field + the struct construction / snapshot / wire sites, so it was deferred out of P4.
 - ✅ **Kill per-call clones in `invoke_value`** — *landed M19 Phase 1*: matches on `&Obj` (no whole-
   `Obj` / closure-`HashMap` clone) and drops the arity-check `name.clone()`. Cut `fib` −17%, `list`
   −22%.

@@ -91,6 +91,26 @@ where the same literal op repeats — fib/loop/primes/list don't). No regression
 `cargo test conformance` (7/7) + `cargo clippy -- -D warnings` clean. Numbers in
 [`docs/benchmarks.md`](docs/benchmarks.md).
 
+**🟦 M19 Perf track — Phase 4 LANDED (2026-06-12).** **Struct-field inline cache** — the other half of
+name-lookup ICs (P2b did globals). `GetField`/`SetField` now carry a per-call-site IC id into a per-`Vm`
+`field_ic` vector that caches the field's index; a hit re-verifies the cached index against the live
+field name (`fields[idx].0 == name`) and collapses the `O(field-position)` name-probe to one verify-
+compare; a miss re-probes and refills. Static slotting (P2b's model) is impossible — **the compiler is
+type-erased**, so the field's struct type is unknown at emit time — hence a *runtime* IC. Sound +
+thread-safe by construction: the cell holds an index, **not a `GcRef`**, so it's invisible to GC /
+snapshots / `swap_ctx` (none of that machinery changed); cooperative fibers run sequentially and
+`--parallel` workers each own a `Vm`; every access self-verifies, so a stale/cross-type cell can never
+return a wrong field. The frozen interp is tree-walk (never sees the opcode) ⇒ parity automatic. Tuple/
+numeric element access (`t.0`) gets a `NO_IC` sentinel and stays zero-overhead.
+
+Result: new **`struct`** bench (field-access-bound, 8-field accumulator) **3.32×→2.89× (477 ms, was
+549 ms, −13%)**; non-struct benches unchanged (`Op` size unchanged, IC never engages). **Measured
+honestly:** a *method-bound* shallow-field bench (6-field particle, hot op is a `self.*` call) showed
+the IC **~neutral to −3%** — the cold `field_ic` indirection isn't amortized when field access isn't the
+bottleneck. The IC wins where field resolution actually dominates (wider/deeper structs); a struct
+**type-id guard** (pure-int compare, no name re-verify) is the logged follow-up. **1541 tests** green +
+conformance (7/7) + `clippy -- -D warnings` clean. Numbers in [`docs/benchmarks.md`](docs/benchmarks.md).
+
 **✅ `defer:` block form LANDED (2026-06-11).** Ergonomic gap closure (was 🟡 in `gaps.md`), TDD'd and
 two-engine-parity-clean. `defer` now takes an indented block as well as a single call — multi-action
 cleanup without N `defer` lines:
@@ -118,13 +138,16 @@ discard it. Tests: `examples/defer.chz` golden (VM == interp == `.expected`) ext
 snapshot + `?`-path cases; 4 VM parity tests + 5 checker tests + 2 parser tests. **1535 tests** green +
 conformance (7/7) + `clippy --all-targets` clean.
 
-**Next (M19):** arithmetic specialization is largely already shipped (P1 superinstructions inline the
-monomorphic int path); frame pooling is low-ROI here (`CallFrame`'s `deferred`/`defer_markers` use
-alloc-free `Vec::new()`, and frames live in a capacity-reusing `Vec`). The remaining big lever is
-**NaN-boxing `Value`** (16 B → 8 B, cache density — moves `loop`/`list`/`fib`), best done as its own
-milestone (touches every `Value` match across the VM + frozen interp). Optional follow-ups to interning:
-compile-time cross-site literal dedup (`Op::ConstStr(u32)` + a `Program.str_consts` table) and a faster
-usize hasher. Ranked backlog in [`docs/future.md §4`](docs/future.md).
+**Next (M19):** struct-field caching (P4, above) and global-slotting (P2b) are both done — name-lookup
+ICs are now covered for the cases the type-erased compiler allows. Arithmetic specialization is largely
+already shipped (P1 superinstructions inline the monomorphic int path); frame pooling is low-ROI here
+(`CallFrame`'s `deferred`/`defer_markers` use alloc-free `Vec::new()`, and frames live in a
+capacity-reusing `Vec`). The remaining big lever is **NaN-boxing `Value`** (16 B → 8 B, cache density —
+moves `loop`/`list`/`fib`, and shrinks struct `fields` entries so it *also* helps field access), best
+done as its own milestone (touches every `Value` match across the VM + frozen interp). Smaller
+follow-ups: a struct **type-id guard** for the field IC (pure-int compare, no name re-verify — closes the
+shallow-struct caveat from P4), compile-time cross-site literal dedup (`Op::ConstStr(u32)` +
+`Program.str_consts`), and a faster usize hasher. Ranked backlog in [`docs/future.md §4`](docs/future.md).
 
 **Robustness pass — cyclic-data depth guard + order-independent map `==` — has now landed** (both
 engines). Two fuzzing-found bugs: (1) a cyclic data structure (a struct with a `list[Self]` field

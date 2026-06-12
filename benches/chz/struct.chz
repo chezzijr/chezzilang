@@ -1,0 +1,28 @@
+# Bench: struct field read/write throughput, ~1M iterations. An 8-field accumulator updated in a
+# tight loop — eight field reads + four field writes per step, spread across declaration order.
+# Stresses struct field resolution (the M19 Phase 4 inline-cache target). Prints 39999996.
+
+struct Acc:
+    a: int
+    b: int
+    c: int
+    d: int
+    e: int
+    f: int
+    g: int
+    h: int
+
+fn main():
+    s := Acc(1, 2, 3, 4, 5, 6, 7, 8)
+    total := 0
+    i := 0
+    while i < 1000000:
+        total = total + s.a + s.b + s.c + s.d + s.e + s.f + s.g + s.h
+        s.a = s.b
+        s.c = s.d
+        s.e = s.f
+        s.g = s.h
+        i += 1
+    print(total)
+
+main()

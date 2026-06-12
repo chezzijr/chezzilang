@@ -128,6 +128,41 @@ is **flat within noise** — interning only bites where the *same literal op rep
 arithmetic/call benches don't do (their hot loops push locals and computed values, not literals). No
 regressions (the cache lookup is strictly cheaper than the alloc it replaced).
 
+## After M19 Phase 4 — 2026-06-12 (same machine)
+
+Phase 4 is the **struct-field lever**: `GetField`/`SetField` now carry a per-call-site inline-cache
+id into a per-`Vm` `field_ic` vector that caches the field's index. A hit re-verifies the cached
+index against the live field name (`fields[idx].0 == name`) and collapses the `O(field-position)`
+name-probe to one verify-compare; a miss re-probes and refills. Static slotting (the P2b model) is
+impossible here — the compiler is type-erased, so the field's struct type is unknown at emit time —
+hence a runtime IC. Sound + thread-safe: the cell holds an index (no `GcRef`), so it is invisible to
+GC / snapshots / `swap_ctx`; cooperative fibers run sequentially and `--parallel` workers each own a
+`Vm`; every access self-verifies, so a stale/cross-type cell can never return a wrong field. The
+frozen interp is tree-walk (never sees the opcode) ⇒ parity is automatic. 1541 tests green.
+
+New **`struct`** bench (8-field accumulator, eight reads + four writes/iter, 1M iters) — the
+field-access-bound case the IC targets — measured IC-on vs IC-off (`-N --warmup 5 -r 20`):
+
+| bench    | chezzi (P3 → P4)        | python  | slower (P3 → P4)        |
+|----------|-------------------------|---------|-------------------------|
+| struct   | 549 ms → **477 ms**     | 165 ms  | 3.32× → **2.89×**       |
+| fib(30)  | flat (1.02× IC, noise)  | —       | unchanged               |
+| list     | flat (1.01×, noise)     | —       | unchanged               |
+| loop     | flat (1.03×, noise)     | —       | unchanged               |
+
+**`struct` −13%** is the win, and it lands exactly where predicted — on *field-probe density*. The
+non-struct benches are flat because the IC never engages there (no struct `GetField`), and `Op`'s
+size is unchanged (`GetField`'s added `u32` stays under the max-payload variant), so dispatch is
+untouched.
+
+> **Caveat, measured honestly (the a-priori-guess discipline):** an earlier *method-bound* bench — a
+> 6-field particle whose hot op is a `self.*` method call, with shallow field access — showed the IC
+> **~neutral to −3%**. When field access is a small fraction of the loop (method dispatch dominates)
+> and fields are shallow, the IC's cold `field_ic` indirection isn't amortized. The IC wins where
+> field resolution is actually the bottleneck (wider structs, deeper fields); it is not a free win on
+> every struct. A struct **type-id guard** (pure-int compare, no name re-verify) is the logged
+> follow-up if this caveat needs closing — see `future.md §4`.
+
 ## Reading it
 
 The shape matches what `future.md §4` predicted from first principles: **the gap is
