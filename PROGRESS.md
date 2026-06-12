@@ -69,8 +69,28 @@ interp is untouched by VM-only work, so parity is automatic for those changes.
 - **Big/separate milestones** (only once the language has truly stopped moving): NaN-boxing as its own
   milestone, register VM, generational/incremental GC, and **Cranelift AOT/JIT as the stretch end-game**.
 
-Gap to CPython currently **~1.3×–2.9×** slower (worst on call/alloc-bound `fib`/`list`/`struct`),
-startup ~11× **faster**. **1565 tests** green, conformance 7/7, `clippy --all-targets` clean.
+Gap to CPython currently **~1.3×–3.5×** slower (worst on call-bound `fib` 3.54×, then `list`/`map`/
+`struct`/`str`/`primes` ~2.5–3.0×; `loop` 1.32× is at the dispatch floor), startup ~11× **faster**.
+**1565 tests** green, conformance 7/7, `clippy --all-targets` clean.
+
+**▶ Next perf batch (ranked, NOT started — do this next; full detail + `file:line`s in
+[`docs/future.md §4` "Post-M19 next levers"](docs/future.md)).** Diagnosis: the gap is **call overhead
++ per-op dispatch + a few alloc paths**, not the value model or GC. Target is CPython 3.14 (specializing
+interpreter + optional JIT) — the interpreter narrows, a JIT is the only thing that matches/beats it.
+- **Tier 1 (cheap→medium, behavior-preserving, do in order):**
+  1. **Method-call IC + flatten `do_method_call`** (`mod.rs:~3868` — still string-looks-up methods AND
+     recurses; add a `tid→proto` cache like `field_ic` + push the frame in place) → hits `struct`/OO.
+  2. **Trim per-op overhead in `run_until`** → hits `loop`/`primes` dispatch floor: lazy `span` load
+     (`mod.rs:2157`, only used on fault), split the serial loop from the MN reduction/cancel checks
+     (`mod.rs:2122`,`:2137`), inline the ~6 hottest ops instead of the per-op `step()` call.
+  3. **Call-site specialization for `Op::Call`** (cache resolved proto by callee identity, skip
+     type-dispatch + deref + arity recheck — CPython `CALL_PY_EXACT_ARGS`) → hits `fib`.
+- **Tier 2 (structural):** 4. **adaptive opcode quickening (PEP 659)** — rewrite ops to type-specialized
+  forms at runtime behind a deopt guard (generalizes superinstructions + ICs; cells in a per-`Vm` side
+  table, not the shared `Arc<Program>`). 5. **map/list index specialization** (`mod.rs:~7649`).
+- **Tier 3 (big, separate):** 6. **Cranelift method-JIT** (end-game; #4 is the stepping stone).
+  7. NaN-boxing (BLOCKED, above). 8. register VM / generational GC (low ROI — deprioritized).
+- Expected from Tier 1: fib ~3.5×→~2.2×, struct ~2.7×→~1.9×, loop/primes shaved toward the floor.
 
 ### Robustness pass (landed, both engines)
 - **Cyclic-data depth guard + order-independent map `==`.** Two fuzzing-found bugs: a cyclic struct made

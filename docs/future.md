@@ -96,10 +96,10 @@ built-in test runner, LSP.
 ## 4. Optimizations (ranked effort → payoff)
 
 > **Live numbers:** `docs/benchmarks.md` tracks Chezzi vs CPython (reproducible via
-> `benches/run.chz`). Current baseline (2026-06-11): **2.1×–5.9× slower than CPython**, and
-> a **standing startup win** (~11× faster cold). The gap scales with call density — `loop`
-> (no calls) is 2.1×, `fib` (all calls) is 5.9×. Source hot-spot `file:line`s below come
-> from that analysis; the scheduled work is roadmap **M19**.
+> `benches/run.chz`). After the M19 phases (call-flatten + SSO incl.): **~1.3×–3.5× slower than
+> CPython**, and a **standing startup win** (~11× faster cold). The gap scales with call density —
+> `loop` (no calls) is 1.32×, `fib` (all calls) is 3.54×. The M19 levers below are marked landed;
+> the **ranked not-started backlog is "Post-M19 next levers"** further down.
 
 Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. The two real costs are
 **dispatch count** and **name lookup** — with **per-call allocation** a close third on call-heavy code.
@@ -238,11 +238,61 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
 peephole/const-fold. They attacked dispatch count and name lookup — the two actual costs — without
 touching the value model or the GC.
 
-**Top remaining lever (post-M19 diagnosis, 2026-06-12):** **flatten the call loop** (above). With the
-cheap dispatch/name-lookup wins spent, the largest measured gap left is the per-call Rust recursion +
-`Arc::clone` on `fib`/`primes`. GC is *not* the lever — it's share-nothing per-thread, moves no bench,
-and the CPython gap is dispatch/call/alloc, not the collector. Generational GC stays a low-priority
-separate milestone.
+### Post-M19 next levers (ranked, not started — diagnosed 2026-06-12)
+
+The M19 cheap batch + call-flatten + SSO are spent. Latest gap tracks **call density**: `loop` (no
+calls) **1.32×**, `primes` 2.53×, `str` 2.65×, `struct` 2.71×, `map` 2.83×, `list` 2.97×, `fib` (all
+calls) **3.54×**; startup **0.094× (11× win)**. The bottleneck is **call overhead + per-op dispatch +
+a few alloc paths — NOT the value model or the GC** (confirmed: `loop` is already at the match-dispatch
+floor; ints are unboxed; GC is share-nothing per-thread and moves no bench). Target is **CPython 3.14**
+(specializing adaptive interpreter + optional copy-and-patch JIT), so the interpreter can *narrow* the
+gap but a JIT is the only path to *match/beat* it on tight compute.
+
+**Tier 1 — interpreter, cheap→medium, behavior-preserving, each hits a measured bench:**
+
+1. **Method-call IC + flatten `do_method_call`** *(hits `struct` 2.71× + all OO)*. `do_method_call`
+   (`mod.rs:~3868`) still string-looks-up `def.methods.get(method)` per call **and** still recurses into
+   a fresh `run_until` — call-flatten only covered `do_call`'s plain-fn fast path (see its own follow-up
+   note). Add a per-call-site monomorphic cache (`tid → proto`, the same shape as the landed `field_ic`)
+   and push the method frame in place. Symmetric to the field IC; reuses that machinery.
+2. **Trim per-op overhead in `run_until`** *(hits the dispatch floor: `loop`/`primes`)*. Three things run
+   **every instruction** that are pure overhead on the serial (default, benchmarked) engine:
+   - `span = proto_ref.lines[ip]` (`mod.rs:2157`) is loaded every op but used **only on fault** → pass
+     `(pid, ip)` to the error path and reconstruct the span lazily there.
+   - the `if self.mn.is_some()` reduction-count branch (`mod.rs:2137`) + the cancel check (`mod.rs:2122`)
+     are MN-only → split a lean serial loop body from the MN body (or hoist them off the serial back-edge).
+   - `self.step(op, span)` is a **separate fn call per opcode** → inline the ~6 hottest ops (GetLocal, the
+     superinstrs, Jump, Call, Return) directly in the loop, delegate the long tail to `step`.
+3. **Call-site specialization for `Op::Call`** *(hits `fib` 3.54×)*. Each call re-checks Func/Closure/
+   Native, derefs the heap callee, and re-validates arity. Cache the resolved proto at the call site keyed
+   by callee identity (CPython `CALL_PY_EXACT_ARGS`); skip the dispatch + deref + arity recheck on the
+   monomorphic common case. fib's remaining tax after call-flatten.
+
+**Tier 2 — structural, medium→large:**
+
+4. **Adaptive opcode quickening (PEP 659)** *(the single most CPython-like lever)*. The generalization of
+   Tier-1 + the existing static superinstructions/ICs: after an op runs once, rewrite it in place to a
+   type-specialized form (`Add`→`AddIntInt`, `GetIndex`→`GetIndexList`, `CallMethod`→cached) behind a
+   deopt guard. Unifies superinstructions + IC + call specialization under one mechanism. **Constraint
+   (same one P2b/P4 hit):** bytecode is shared `Arc<Program>` read-only across `--parallel` workers, so
+   quickened cells must live in a per-`Vm` side table keyed by site, not mutate the `Op`.
+5. **map/list index specialization** *(hits `map` 2.83×, `list` 2.97×)*. `GetIndex`/`SetIndex`
+   (`mod.rs:~7649`) are dynamic type-checked dispatches with no caching; specialize per shape — falls out
+   of #4.
+
+**Tier 3 — big, separate milestones:**
+
+6. **Cranelift method-JIT** — the only path to *match/beat* CPython 3.14 on compute. Counter-triggered,
+   JIT the hot protos (Python's tier-2 model). End-game; only once the language is fully frozen. #4 is the
+   lower-risk stepping stone toward it.
+7. **NaN-boxing — stays BLOCKED** (full i64; see the dedicated note above).
+8. **Register VM / generational+incremental GC — low ROI** (dispatch is already near the match floor; GC
+   moves no bench). Deprioritized; revisit only if a real workload proves otherwise.
+
+**Sequencing:** do **Tier 1 in order (1→2→3)** as the next perf batch — all cheap-to-medium,
+behavior-preserving, two-engine-parity-clean, each targeting a named bench (expected: fib ~3.5×→~2.2×,
+struct ~2.7×→~1.9×, loop/primes shaved toward the floor). Then choose **#4 (adaptive quickening)** as the
+high-ceiling interpreter play or **#6 (Cranelift)** as the JIT end-game.
 
 **M19 Phase 1 done (2026-06-11):** peephole/const-fold + superinstructions + `invoke_value` clone
 kill — all behavior-preserving (1516 tests + full two-engine parity green). Results in

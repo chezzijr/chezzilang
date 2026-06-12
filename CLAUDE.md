@@ -73,10 +73,20 @@ See **[`PROGRESS.md`](PROGRESS.md)** — single source of truth for "what's next
 Right now: **M19 — Perf track (in progress).** The language is frozen feature-wise; this milestone
 is pure optimization, so the bar is **behavior-preserving + two-engine parity** on every change —
 a VM speedup that diverges from the interpreter (or changes observable output) is a bug, not a win.
-Landed so far: Phase 1 (peephole/const-fold, superinstructions, `invoke_value` clone-kill),
-Phase 2 (in-place call args, stringify-into-buffer), Phase 2b (global-slotting), Phase 3 (`ConstStr`
-interning, per-char single-alloc). Current gap to CPython: **1.3×–3.9×** slower (worst on call/alloc-
-bound `fib`/`list`), startup ~11× **faster**.
+Landed: peephole/const-fold, superinstructions, `invoke_value` clone-kill, in-place call args,
+stringify-into-buffer, global-slotting, `ConstStr` interning, struct-field IC, FxHash, call-loop
+flatten, small-string optimization (SSO). Current gap to CPython: **~1.3×–3.5×** slower (worst on
+call-bound `fib` 3.54×; `loop` 1.32× is at the dispatch floor), startup ~11× **faster**.
+
+**Next perf batch (ranked, not started — start here next session).** The remaining gap is **call
+overhead + per-op dispatch + a few alloc paths**, not the value model or GC; target is CPython 3.14
+(specializing interpreter + optional JIT). Do **Tier 1 in order**: (1) **method-call IC + flatten
+`do_method_call`** (hits `struct`/OO), (2) **trim per-op overhead in `run_until`** (lazy `span`, split
+serial-vs-MN loop, inline the hottest ops — hits `loop`/`primes`), (3) **call-site specialization for
+`Op::Call`** (hits `fib`). Then Tier 2 (adaptive opcode quickening, PEP 659) → Tier 3 (Cranelift
+method-JIT). Full ranked detail + `file:line`s in **[`docs/future.md §4` "Post-M19 next levers"]**
+and **[`PROGRESS.md` "Next perf batch"]**. Same discipline: measure (`benches/run.chz`) → failing-then-
+green correctness test → keep parity → re-measure → record the delta in `docs/benchmarks.md`.
 
 **How to work a perf task here:** measure first (`cargo run --release -- run benches/run.chz`), land
 behind a failing-then-green correctness test, keep parity green, re-measure, record the delta in
