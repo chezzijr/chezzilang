@@ -448,6 +448,29 @@ branch names) is in the git log.
 
 ---
 
+## Stdlib additions (post-M18, 2026-06-13)
+
+Additive-only, two-engine-parity-clean library surface landed alongside the M19 perf freeze (the freeze
+is on *language semantics/syntax*; these add functions without changing any existing behavior). Built in
+3 parallel `auto-task` worktrees, merged A→B→C with a `post-merge-gate` pass (verdict **ship**; one
+cross-task semantic merge conflict — a test-mock `Host` impl missing the new trait method — caught at
+compile and fixed). All TDD'd; suite at **1630 green**.
+
+- **`std.math`** — trig/exp/log intrinsics: `sin cos tan asin acos atan atan2 exp ln log2 log10 log`
+  (native, `src/native/math.rs`; plain `Float` pass-through — domain errors yield NaN, no `Result`
+  wrapping, matching the minimal additive design). Golden: `examples/math_more.chz`.
+- **`std.str`** (pure-Chezzi, `std/str.chz`) — `ends_with index_of count replace strip_prefix
+  strip_suffix`, built only on existing native str methods. Golden: `examples/str_more.chz`.
+- **`std.iter`** (pure-Chezzi, `std/iter.chz`) — `take drop any all find flatten`, in the existing
+  fiber-park-safe generic style. Golden: `examples/iter_more.chz`.
+- **`std.request`** — non-GET/POST verbs `put`/`patch`/`delete`/`head` + a general
+  `request(method, url, body, headers: map[str,str])` for custom headers (`src/native/request.rs`).
+  Required a cross-engine `Host::arg_str_map` and a new **`NativeArg::Map`** variant so the
+  headers-carrying form stays in `is_blocking()` and offloads to the `--parallel` dirty pool without
+  pinning a core worker. Two-engine parity locked by `request_verbs_and_headers_parity_against_local_server`.
+- **Considered, not built:** `json.decode[T]` — already shipped (`src/json_decode.rs` + parser/compiler/
+  checker); first-class compiled `Regex` — deferred, blocked on Level-3 Userdata (see `docs/spec.md`).
+
 ## Roadmap (later)
 
 - VM/GC optimizations beyond M19 — NaN-boxing (own milestone), register VM, generational/incremental GC,

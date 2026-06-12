@@ -180,7 +180,13 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
   value.
 - **Shipped since (M10):** generic enums; the `Stringable` protocol (custom `str(x)`); the `Hashable`
   protocol — any `Hashable` type is now a valid map/set key.
-- **Later:** custom request headers / non-GET-POST verbs / a first-class compiled `Regex`.
+- **Shipped since (post-M18 stdlib batch):** `std.request` custom headers + non-GET/POST verbs
+  (`put`/`patch`/`delete`/`head` + a general `request(method, url, body, headers)`), carried off-heap
+  via a new `NativeArg::Map` so the headers form stays blocking-pool-offloadable under `--parallel`;
+  `std.math` trig/exp/log intrinsics (`sin cos tan asin acos atan atan2 exp ln log2 log10 log`);
+  pure-Chezzi `std.str` (`ends_with index_of count replace strip_prefix strip_suffix`) and `std.iter`
+  (`take drop any all find flatten`) helpers.
+- **Later:** a first-class compiled `Regex` (still blocked on Level-3 **Userdata** below).
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 deferred.** Because Chezzi is written in Rust, the
 > native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn and expose it as a
