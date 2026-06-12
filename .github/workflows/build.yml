@@ -27,12 +27,8 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             linker: gcc-aarch64-linux-gnu
-          - target: x86_64-apple-darwin
-            os: macos-13
           - target: aarch64-apple-darwin
             os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -56,17 +52,10 @@ jobs:
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Stage binary (unix)
-        if: runner.os != 'Windows'
+      - name: Stage binary
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/chezzi" "dist/chezzi-${{ matrix.target }}"
-
-      - name: Stage binary (windows)
-        if: runner.os == 'Windows'
-        run: |
-          mkdir dist
-          copy "target\${{ matrix.target }}\release\chezzi.exe" "dist\chezzi-${{ matrix.target }}.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
