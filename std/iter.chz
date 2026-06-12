@@ -66,3 +66,51 @@ fn reduce[T](xs: list[T], f: fn(T, T) -> T) -> T:
     for i in 1..xs.len():
         acc = f(acc, xs[i])
     return acc
+
+# The first `n` elements (clamped: `n <= 0` → `[]`, `n >= len` → the whole list).
+fn take[T](xs: list[T], n: int) -> list[T]:
+    out := []
+    i := 0
+    while i < n and i < xs.len():
+        out.push(xs[i])
+        i += 1
+    return out
+
+# All but the first `n` elements (clamped: `n <= 0` → the whole list, `n >= len` → `[]`).
+fn drop[T](xs: list[T], n: int) -> list[T]:
+    out := []
+    i := n
+    if i < 0:
+        i = 0
+    while i < xs.len():
+        out.push(xs[i])
+        i += 1
+    return out
+
+# Does `pred` hold for at least one element? (false for the empty list.)
+fn any[T](xs: list[T], pred: fn(T) -> bool) -> bool:
+    for x in xs:
+        if pred(x):
+            return true
+    return false
+
+# Does `pred` hold for every element? (true for the empty list.)
+fn all[T](xs: list[T], pred: fn(T) -> bool) -> bool:
+    for x in xs:
+        if not pred(x):
+            return false
+    return true
+
+# The first element for which `pred` holds, `Some(x)`, or `None` if there is none.
+fn find[T](xs: list[T], pred: fn(T) -> bool) -> Option[T]:
+    for x in xs:
+        if pred(x):
+            return Some(x)
+    return None
+
+# Concatenate a list of lists into one list (one level of nesting, order-preserving).
+fn flatten[T](xss: list[list[T]]) -> list[T]:
+    out := []
+    for xs in xss:
+        out.extend(xs)
+    return out

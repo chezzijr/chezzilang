@@ -36,3 +36,68 @@ fn pad_left(s: str, width: int, fill: str) -> str:
 # Split `s` on newlines into a list of lines.
 fn split_lines(s: str) -> list[str]:
     return s.split("\n")
+
+# Does `s` end with `suffix`? (mirror of the native `starts_with`). The empty suffix ends every
+# string. A suffix longer than `s` can't match, so guard before slicing the tail.
+fn ends_with(s: str, suffix: str) -> bool:
+    if suffix.len() > s.len():
+        return false
+    return s[s.len() - suffix.len() .. s.len()] == suffix
+
+# First index at which `sub` occurs in `s`, or -1 if absent (mirrors the native list `index_of`).
+# The empty substring is found at 0.
+fn index_of(s: str, sub: str) -> int:
+    m := sub.len()
+    if m == 0:
+        return 0
+    i := 0
+    while i + m <= s.len():
+        if s[i .. i + m] == sub:
+            return i
+        i += 1
+    return -1
+
+# Number of non-overlapping occurrences of `sub` in `s` (`count("aaa", "aa") == 1`). The empty
+# substring counts as 0 (no progress would be made enumerating it).
+fn count(s: str, sub: str) -> int:
+    m := sub.len()
+    if m == 0:
+        return 0
+    n := 0
+    i := 0
+    while i + m <= s.len():
+        if s[i .. i + m] == sub:
+            n += 1
+            i += m
+        else:
+            i += 1
+    return n
+
+# Replace every non-overlapping occurrence of `old` in `s` with `new`, left to right. An empty
+# `old` returns `s` unchanged (replacing it would loop forever). Replaced text is never re-scanned.
+fn replace(s: str, old: str, new: str) -> str:
+    m := old.len()
+    if m == 0:
+        return s
+    out := ""
+    i := 0
+    while i < s.len():
+        if i + m <= s.len() and s[i .. i + m] == old:
+            out = out + new
+            i += m
+        else:
+            out = out + s[i]
+            i += 1
+    return out
+
+# Remove `p` from the front of `s` if present, else return `s` unchanged.
+fn strip_prefix(s: str, p: str) -> str:
+    if s.starts_with(p):
+        return s[p.len() .. s.len()]
+    return s
+
+# Remove `p` from the end of `s` if present, else return `s` unchanged.
+fn strip_suffix(s: str, p: str) -> str:
+    if ends_with(s, p):
+        return s[0 .. s.len() - p.len()]
+    return s

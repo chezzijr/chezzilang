@@ -5886,4 +5886,30 @@ mod module_tests {
         .expect("fixture expected output should exist");
         assert_eq!(run_ok(&entry), expected);
     }
+
+    // std.str helpers golden (interp side): `examples/str_more.chz` imports `std.str` and exercises
+    // the additive ends_with/index_of/count/replace/strip_prefix/strip_suffix funcs. The frozen
+    // interpreter must produce exactly the captured `.expected` (so VM==expected==interp).
+    #[test]
+    fn golden_str_more_chz() {
+        let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/str_more.chz");
+        let expected = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/str_more.expected"),
+        )
+        .expect("str_more.expected should exist");
+        assert_eq!(run_ok(&entry), expected);
+    }
+
+    // std.iter helpers golden (interp side): `examples/iter_more.chz` imports `std.iter` and
+    // exercises the additive take/drop/any/all/find/flatten funcs. The frozen interpreter must
+    // produce exactly the captured `.expected` (so VM==expected==interp).
+    #[test]
+    fn golden_iter_more_chz() {
+        let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/iter_more.chz");
+        let expected = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/iter_more.expected"),
+        )
+        .expect("iter_more.expected should exist");
+        assert_eq!(run_ok(&entry), expected);
+    }
 }
