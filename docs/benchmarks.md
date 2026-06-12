@@ -216,6 +216,36 @@ real polymorphic field site) — but the field-IC lever is now **spent**: no che
 Lesson logged (a-priori-guess discipline): the P4 caveat was a *prediction*, not a measured cost;
 once P4 removed the probe loop, the residual string compare was already in the noise.
 
+## After M19 call-flattening — 2026-06-12 (same machine)
+
+The top remaining call-bound lever (diagnosed in [`future.md §4`](future.md)): every Chezzi call
+recursed into a **fresh Rust `run_until` loop** (`do_call` → `run_proto_in_place` → `run_until`), so
+each call cost a native Rust stack frame **and** an `Arc::clone(&self.program)` per call (`mod.rs`
+loop-entry, an atomic). The bytecode `Op::Call` fast path now **pushes the callee frame and lets the
+running `run_until` loop execute it** (CPython-3.11 "zero-cost frames"); `Op::Return`/`do_return`
+already push the result to the caller stack and pop the frame, so the loop just continues. HOFs /
+methods keep the re-entrant `run_proto` (they need the callee result synchronously mid-Rust-method).
+Behavior-preserving, VM-only, full two-engine parity green (1550 tests + conformance 7/7).
+
+| bench    | slower (before → after) | verdict                                  |
+|----------|-------------------------|------------------------------------------|
+| fib(30)  | 3.85× → **3.54×** (−8%) | the worst/most call-bound bench — moved most |
+| list     | 3.16× → **2.97×** (−6%) | per-element push + a call per row        |
+| primes   | 2.50× → 2.53×           | flat — hot path is inner-loop arith, ~1 call/outer-iter |
+| str      | 2.71× → 2.65×           | flat (noise) — alloc-bound, not call-bound |
+| loop     | 1.31× → 1.32×           | flat — no calls, pure dispatch floor     |
+| struct   | 2.89× → 2.71×           | method calls still use `run_proto` (follow-up); within noise |
+
+The shape is exactly as predicted: **`fib` (all calls) moved most, `loop` (no calls) stayed put.**
+The win is modest because flattening removes only the *per-call Rust recursion + atomic*, not the
+per-op dispatch of the call body (still ~7 ops/call) or the frame-setup cost — those are the next
+walls. **Robustness bonus (not a bench number):** deep *plain* recursion no longer consumes host
+stack (frames live in the heap `frames` `Vec`), so it runs bounded only by `MAX_CALL_DEPTH` (10_000),
+not the 256 MiB `VM_STACK_BYTES` thread — a recursion that SIGABRT'd a 1 MiB stack pre-change now
+completes (regression-guarded by `deep_plain_recursion_runs_on_small_host_stack`). **Follow-up:**
+flatten `do_method_call` (still `run_proto`) for the `struct`/method benches; `VM_STACK_BYTES` could
+shrink once method/HOF re-entry is the only host-stack recursor.
+
 ## Reading it
 
 The shape matches what `future.md §4` predicted from first principles: **the gap is

@@ -134,6 +134,27 @@ measurable — the predicted "shallow-struct caveat" was a guess, not a measured
 principled guard (removes the last string compare from the field hot path, future-proofs polymorphic
 sites); the field-IC lever is now **spent**. **1549 tests** green + conformance (7/7) + clippy clean.
 
+**🟦 M19 Perf track — call-flattening LANDED (2026-06-12).** The top call-bound lever, TDD'd
+(red→green) under the two-engine parity suite. Every Chezzi call recursed into a **fresh Rust
+`run_until` loop** (`do_call` → `run_proto_in_place` → `run_until`), costing a native Rust stack frame
+**and** an `Arc::clone(&self.program)` per call. The bytecode `Op::Call` fast path now **pushes the
+callee frame and lets the running `run_until` loop execute it** (CPython-3.11 "zero-cost frames");
+`do_return` already pushes the result to the caller stack + pops the frame, so the loop continues with
+no synchronous result to thread back. The dispatch loop is **unchanged** — it advances `ip` on the
+captured caller frame *before* `step`, so the pushed frame (at `frames.len()-1`, `ip=0`) runs next;
+pause/`recover:`/`defer` are caught by the loop body's own checks (they operate on `self.frames`, not
+the Rust stack). HOFs / struct methods keep the re-entrant `run_proto` (they need the callee result
+synchronously mid-Rust-method); the flat bytecode loop and the nested sub-loops coexist. Dead
+`run_proto_in_place` removed. **Result: `fib` 3.85×→3.54× (−8%, the worst/most call-bound bench),
+`list` 3.16×→2.97× (−6%); `loop`/`primes`/`str` flat** (no-call / arith-bound / alloc-bound — exactly
+the predicted shape). Modest because flattening removes only the per-call recursion + atomic, not the
+per-op dispatch of the call body. **Robustness bonus:** deep *plain* recursion no longer consumes host
+stack — bounded by `MAX_CALL_DEPTH` (10_000), not the 256 MiB `VM_STACK_BYTES` thread; a recursion that
+SIGABRT'd a 1 MiB stack pre-change now completes (guarded by `deep_plain_recursion_runs_on_small_host_stack`).
+**1550 tests** green + conformance (7/7) + `cargo clippy -- -D warnings` clean. Numbers in
+[`docs/benchmarks.md`](docs/benchmarks.md). **Follow-up:** flatten `do_method_call` (still `run_proto`)
+for the `struct`/method benches.
+
 **✅ `defer:` block form LANDED (2026-06-11).** Ergonomic gap closure (was 🟡 in `gaps.md`), TDD'd and
 two-engine-parity-clean. `defer` now takes an indented block as well as a single call — multi-action
 cleanup without N `defer` lines:

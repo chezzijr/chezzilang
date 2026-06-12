@@ -1986,26 +1986,6 @@ impl Vm {
         Ok(self.stack.pop().unwrap_or(Value::Nil))
     }
 
-    /// P1 — run `proto` over args already on the stack at `[base..base + argc]` (no `Vec`). The
-    /// pause / pop-result contract mirrors [`Vm::run_proto`]; `do_return` truncates to `base` and
-    /// pushes the result, which this then pops to hand back to the caller.
-    fn run_proto_in_place(
-        &mut self,
-        proto: ProtoId,
-        home: GcRef,
-        closure: Option<GcRef>,
-        base: usize,
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let base_level = self.frames.len();
-        self.push_frame_in_place(proto, home, closure, base, span)?;
-        self.run_until(base_level)?;
-        if self.paused() {
-            return Ok(Value::Nil);
-        }
-        Ok(self.stack.pop().unwrap_or(Value::Nil))
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn push_frame(
         &mut self,
@@ -2474,8 +2454,10 @@ impl Vm {
                 }
             }
             // ----- M19 superinstructions. Bodies live in `#[inline(never)]` helpers so `step`'s own
-            // stack frame stays lean — it is on the call-recursion cycle (`step → run_proto →
-            // run_until → step`), so inflating it overflows deep-recursion programs. -----
+            // stack frame stays lean. Plain calls no longer recurse the host stack (call-flattening:
+            // `Op::Call` pushes a frame and the running `run_until` loop executes it), but the
+            // HOF/method/deferred re-entrant path still cycles `step → run_proto → run_until → step`,
+            // so a fat `step` frame would still bloat that recursion. -----
             Op::BinLocalLocal { a, b, kind } => self.op_bin_local_local(*a, *b, *kind, span)?,
             Op::BinLocalConst { slot, val, kind } => self.op_bin_local_const(*slot, *val, *kind, span)?,
             Op::IncLocal { slot, delta } => self.op_inc_local(*slot, *delta, span)?,
@@ -3458,11 +3440,16 @@ impl Vm {
                 // Drop the callee from beneath the args (argc-element memmove; `Value: Copy`).
                 self.stack.copy_within(at.., at - 1);
                 self.stack.pop();
-                let v = self.run_proto_in_place(proto, home, clo, at - 1, span)?;
-                if self.paused() {
-                    return Ok(());
-                }
-                self.push(v);
+                // M19 call-flattening: push the callee frame and let the *running* `run_until` loop
+                // execute it, instead of recursing into a fresh `run_until` (which cost a native Rust
+                // stack frame + an `Arc::clone(&self.program)` per call). The frame lands at
+                // `frames.len()-1` with `ip = 0`; the loop already advanced the caller's `ip` past
+                // this `Call` (on the captured caller index, before `step`), so the next iteration
+                // runs the callee from its start. The callee's eventual `Op::Return` → `do_return`
+                // pushes the result onto the caller's stack and pops the frame, and the loop resumes
+                // the caller — no synchronous result to push here. Pause/`recover:`/`defer` are caught
+                // by the loop body's own checks (they operate on `self.frames`, not the Rust stack).
+                self.push_frame_in_place(proto, home, clo, at - 1, span)?;
                 return Ok(());
             }
         }
@@ -8662,6 +8649,27 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
         .expect("VM thread panicked")
 }
 
+/// Run a program on a deliberately SMALL host stack (test helper for the call-flattening guarantee).
+/// Deep *plain-function* recursion must not consume host stack — frames live in the heap `frames`
+/// `Vec`, not via a per-call `run_until` recursion — so it survives a stack far below the production
+/// [`VM_STACK_BYTES`]. On the old recurse-per-call engine this overflowed and aborted.
+#[cfg(test)]
+pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, RuntimeError> {
+    let src = src.to_string();
+    std::thread::Builder::new()
+        .stack_size(stack_bytes)
+        .spawn(move || {
+            let tokens = lexer::tokenize(&src).map_err(|e| RuntimeError { message: e.to_string(), span: Span { line: 1, col: 1 } })?;
+            let module = parser::parse(tokens).map_err(|e| RuntimeError { message: e.message, span: e.span })?;
+            let program = crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError { message: e.message, span: e.span })?;
+            let mut vm = Vm::new(Arc::new(program));
+            vm.run().and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 })).map(|()| vm.out)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked")
+}
+
 /// Stdout from a stress-mode run (panics on error) — convenience for parity-under-GC tests.
 #[cfg(test)]
 pub fn run_capture_stress(src: &str) -> String {
@@ -9321,6 +9329,40 @@ mod tests {
         let handle = std::thread::spawn(move || worker.channel_method(wh, "recv", &[], sp).unwrap());
         sender.channel_method(sh, "send", &[Value::Int(42)], sp).unwrap();
         assert_eq!(handle.join().unwrap(), Value::Int(42));
+    }
+
+    /// Call-flattening × M:N parking: a fiber that `recv`-parks **several flattened plain-function
+    /// frames deep** (`main → collect → deep_recv ×6`, all `Op::Call`, parking at `ip > 0`) must
+    /// suspend with its frames intact and, on a sibling `send`, resume through `run_until(0)` and
+    /// thread the received value back up the flattened chain. Pre-flatten each of those frames was a
+    /// nested Rust `run_until`; now they share one loop, so resume reads them straight from the heap
+    /// `frames` Vec. (Closes the coverage gap the review flagged: park deep in *bytecode* frames, not
+    /// just inside a native HOF callback.)
+    #[test]
+    fn parallel_recv_parks_deep_in_flattened_frames_and_resumes() {
+        let src = "\
+fn deep_recv(ch: Channel[int], depth: int) -> int:
+    if depth <= 0:
+        return ch.recv()
+    return deep_recv(ch, depth - 1)
+
+fn collect(ch: Channel[int], out: Channel[int]):
+    out.send(deep_recv(ch, 5))
+
+fn produce(ch: Channel[int], v: int):
+    ch.send(v)
+
+fn main():
+    ch := Channel[int]()
+    out := Channel[int]()
+    parallel:
+        spawn collect(ch, out)
+        spawn produce(ch, 99)
+    print(out.recv())
+
+main()
+";
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), "99\n");
     }
 
     /// D2a: an M:N fiber carries its OWN heap (share-nothing). `swap_ctx` swaps that heap with the
@@ -13565,6 +13607,27 @@ print(P(5) >= P(5))
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Call-flattening guarantee: deep *plain-function* recursion no longer consumes host Rust stack
+    /// (frames live in the heap `frames` `Vec`, not via a per-call `run_until` recursion), so it runs
+    /// to completion on a stack far below the production 256 MiB `VM_STACK_BYTES`. Before flattening,
+    /// the VM recursed ~25 KiB of host stack per call and overflowed a 1 MiB stack (an uncatchable
+    /// abort). Depth stays well under `MAX_CALL_DEPTH` (10_000). Parity: same value on the interpreter.
+    #[test]
+    fn deep_plain_recursion_runs_on_small_host_stack() {
+        let src = "\
+fn sum_to(n: int) -> int:
+    if n <= 0:
+        return 0
+    return n + sum_to(n - 1)
+
+print(sum_to(5000))
+";
+        let out = super::run_capture_on_stack(src, 1024 * 1024)
+            .expect("deep plain recursion should run on a 1 MiB host stack after call-flattening");
+        assert_eq!(out, "12502500\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp run"));
     }
 
     /// Gap #10 golden: `examples/cipher.chz` (ord/chr — ROT13 + manual digit parsing) is
