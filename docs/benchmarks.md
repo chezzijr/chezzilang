@@ -185,9 +185,9 @@ item in `future.md §4`.
 | bench   | dominant cost | concrete hot spot | fix (future.md §4) |
 |---------|---------------|-------------------|--------------------|
 | fib     | recursive call overhead | per-call `Vec<Value>` arg alloc (`mod.rs:3181`); full `Obj` enum clone incl. captured `HashMap` in `invoke_value` (`:3198`); `name.clone()` for the arity check (`:3200`); per-call slot pre-fill (`push_frame`) | frame pooling; pass args as a stack slice; match on `&Obj` (no clone); kill `name.clone()` |
-| str     | f-string build + join | `BuildStr` calls `stringify` per part into a fresh `String` (`:2495`); `ConstStr` clones + boxes on every push (`:2228`) | string interning + cached hash; concat builder/rope; intern constant strings |
+| str     | f-string build + join | per-element `Box<str>` heap alloc for each `"item-N"` (`alloc_str`, `:4697`) — ≤12 bytes each (`stringify`-buffer + `ConstStr` interning already landed P2/P3) | small-string optimization (inline ≤N-byte strings in the `Obj` slot). NOT concat/split builder — `join` already buffers (`:4377`), `+`/`split` aren't benched |
 | primes  | `while` + `%` | binary ops re-dispatch on operand type every iteration; per-access name lookup for globals/locals | specialize arithmetic (monomorphic int guard); inline caching; superinstructions |
-| loop    | 20M int adds | raw dispatch count + arith re-dispatch | superinstructions (fuse `GetLocal+GetLocal+BinOp`); arith specialize; NaN-box `Value` (16→8 B) |
+| loop    | 20M int adds | raw dispatch count (arith re-dispatch already killed by P1 superinstructions) | ✅ superinstructions (fuse `GetLocal+GetLocal+BinOp`) + arith specialize landed. NaN-box `Value` (16→8 B) would help but is BLOCKED by full i64 — see reality-check below. Floor likely needs register VM / JIT |
 | list    | push + sum | near the safe match-dispatch floor | general dispatch / `Value`-density work; no targeted fix |
 | startup | — | tree of small allocs, no warmup | already the strength — keep it |
 
@@ -206,6 +206,28 @@ the GC — and `fib`/`loop`/`primes` are exactly the benches they move.
 **Landed (M19 Phase 1):** ✅ per-call clone kill in `invoke_value`, ✅ peephole + constant
 folding, ✅ superinstructions (`BinLocalLocal` / `BinLocalConst` / `IncLocal`).
 **Landed (M19 Phase 2):** ✅ in-place call args in `do_call` (per-call `Vec` gone — `fib` −13%),
-✅ `stringify`-into-buffer for `BuildStr` (`str` −5%). **Still open:** inline caching (Phase 2b —
-needs global-slotting, see `future.md §4`), frame pooling, `ConstStr` interning (the remaining `str`
-lever), arithmetic specialization, NaN-boxing, generational GC — see `future.md §4`.
+✅ `stringify`-into-buffer for `BuildStr` (`str` −5%). **Landed since:** ✅ global-slotting (P2b),
+✅ `ConstStr` interning + per-char single-alloc (P3), ✅ struct-field inline cache (P4).
+
+## Backlog reality-check (2026-06-12)
+
+A pass over the three "remaining big levers" before picking the next perf task. Recording so the
+next session doesn't re-discover these:
+
+- **NaN-boxing `Value` is BLOCKED by full 64-bit ints.** `Value::Int` is a full `i64`
+  (`src/vm/value.rs:18`); an i64 + a type tag don't fit in 8 bytes alongside `f64`. Doing it means
+  boxing big ints (branch + alloc per int, semantics-sensitive overflow) — not a behavior-preserving
+  session, and an uncertain win on the int benches it targets. **Lua 5.4 stayed 16-byte for this
+  exact reason.** Blast radius is VM-only (the frozen interp has its own `Rc`-based `Value`), but
+  it's a milestone spike, not a lever. Demoted to "Big/separate" in `future.md §4`.
+- **The "concat / `split` builder/rope" lever does NOT move any bench.** The `str` bench is
+  `BuildStr` + `,".join`, and `join` already buffers into one `String` (`mod.rs:4377`); `+`/`split`
+  aren't exercised at all. The real open `str` lever is **small-string optimization** — `"item-N"`
+  are all ≤12 bytes, each a `Box<str>` heap alloc (`alloc_str`, `mod.rs:4697`); inlining short
+  strings in the `Obj` slot kills the per-element alloc.
+- **Arith specialization + frame pooling are effectively closed.** P1 superinstructions already
+  inline the monomorphic int path (`loop`/`primes`); `CallFrame`'s `Vec`s are alloc-free, so there's
+  no per-call frame alloc to pool. Both ✅/✗ in `future.md §4`.
+
+**Real next levers** (contained, parity-safe, bench-moving): struct **type-id guard** for the field
+IC (P4 follow-up), **small-string optimization**, faster `usize` hasher — see `future.md §4`.

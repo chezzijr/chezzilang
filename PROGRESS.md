@@ -138,16 +138,25 @@ discard it. Tests: `examples/defer.chz` golden (VM == interp == `.expected`) ext
 snapshot + `?`-path cases; 4 VM parity tests + 5 checker tests + 2 parser tests. **1535 tests** green +
 conformance (7/7) + `clippy --all-targets` clean.
 
-**Next (M19):** struct-field caching (P4, above) and global-slotting (P2b) are both done — name-lookup
-ICs are now covered for the cases the type-erased compiler allows. Arithmetic specialization is largely
-already shipped (P1 superinstructions inline the monomorphic int path); frame pooling is low-ROI here
-(`CallFrame`'s `deferred`/`defer_markers` use alloc-free `Vec::new()`, and frames live in a
-capacity-reusing `Vec`). The remaining big lever is **NaN-boxing `Value`** (16 B → 8 B, cache density —
-moves `loop`/`list`/`fib`, and shrinks struct `fields` entries so it *also* helps field access), best
-done as its own milestone (touches every `Value` match across the VM + frozen interp). Smaller
-follow-ups: a struct **type-id guard** for the field IC (pure-int compare, no name re-verify — closes the
-shallow-struct caveat from P4), compile-time cross-site literal dedup (`Op::ConstStr(u32)` +
-`Program.str_consts`), and a faster usize hasher. Ranked backlog in [`docs/future.md §4`](docs/future.md).
+**Next (M19) — backlog reality-check (2026-06-12).** A pass over the three big-ticket levers before
+picking the next task (full note in [`docs/benchmarks.md`](docs/benchmarks.md) + [`docs/future.md §4`](docs/future.md)):
+- **NaN-boxing `Value` is BLOCKED by full 64-bit ints, not "next."** `Value::Int` is a full `i64`
+  (`src/vm/value.rs:18`); an i64 + a type tag don't fit in 8 bytes alongside `f64`, so it needs
+  **boxed big ints** (branch + alloc per int, semantics-sensitive overflow) — *not* behavior-preserving,
+  uncertain win on the very int benches it targets. **Lua 5.4 stayed 16-byte for this exact reason.**
+  Blast radius is **VM-only** (the frozen interp has its own `Rc`-based `Value` in `src/interp/value.rs`
+  — the earlier "touches every match across VM + interp" was wrong), but it's still a milestone spike.
+  Parked.
+- **String concat/split builder/rope moves no bench.** The `str` bench is `BuildStr` + `,".join`, and
+  `join` already buffers into one `String` (`mod.rs:4377`); `+`/`split` aren't exercised. The real open
+  `str` lever is **small-string optimization** (inline ≤N-byte strings in the `Obj` slot — `alloc_str`,
+  `mod.rs:4697` — killing the per-element `Box<str>` alloc).
+- **Arith specialization + frame pooling: effectively closed** — P1 superinstructions inline the
+  monomorphic int path; `CallFrame`'s `Vec`s are alloc-free (no per-call frame alloc to pool).
+
+**Real next levers** (contained, parity-safe, bench-moving): a struct **type-id guard** for the field IC
+(pure-int compare, no name re-verify — closes the P4 shallow-struct caveat), **small-string optimization**,
+and a faster usize hasher. Ranked backlog in [`docs/future.md §4`](docs/future.md).
 
 **Robustness pass — cyclic-data depth guard + order-independent map `==` — has now landed** (both
 engines). Two fuzzing-found bugs: (1) a cyclic data structure (a struct with a `list[Self]` field

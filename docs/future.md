@@ -141,24 +141,47 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   `fib` −13%.
 
 **Medium:**
-- **NaN-boxing the `Value`** — pack into 8 bytes (vs the current ~16-byte enum). Better cache density
-  across the whole operand stack. Touches every `Value` site. Moves `loop`.
-- **Specialize arithmetic** — binary ops re-dispatch on type every iteration; type-guard a hot loop
-  to a monomorphic int path. Big on numeric loops (`loop`/`primes`, the current weak cases).
-- **Frame pooling** — reuse call frames + the per-call slot pre-fill in `push_frame` instead of
-  allocating per call. Helps recursion (`fib`).
-- **String interning + cached hash** — intern keys / short strings → pointer-compare equality + free
-  map hash. Map hashes are already cached; interning extends it. `ConstStr` (`mod.rs:2228`) boxes a
-  fresh string on every push — interning constants kills that.
-- **Reduce string-op allocations** — ✅ *partly landed M19 Phase 2*: `stringify` now appends into a
-  caller-owned buffer (`stringify_into`/`stringify_obj_into`/`stringify_seq_into`), so `BuildStr`
-  reuses one `String` across all interpolation parts instead of one `String` per part (cut `str`
-  −5%). **Still open:** `ConstStr` (`mod.rs:2228`) boxes a fresh string on every push — interning
-  constants is the next `str` lever; concat / `split` / `+` still build a fresh `Rc<str>` each time
-  (a builder / rope helps hot concatenation). (See also: list clone per `for` iter at `mod.rs:2514`,
-  per-char `String` on string iteration at `:2530`.)
+- **Struct type-id guard for the field IC** — *the cleanest open lever* (logged as the P4 follow-up).
+  Stamp a numeric type id on `Obj::Struct`; the field IC then guards on `obj.tid == cell.tid` (a
+  pure-int compare) instead of the current `fields[idx].0 == name` string re-verify, closing the
+  shallow-struct caveat P4 hit (~neutral on method-bound shallow fields). Cost: a `tid` field +
+  the struct-construction / snapshot / wire sites. Moves `struct` + method-bound structs. VM-only ⇒
+  parity automatic.
+- **Small-string optimization (the real open `str` lever)** — short strings are still a `Box<str>`
+  heap alloc per value (`alloc_str`, `mod.rs:4697`). The `str` bench's `"item-N"` are all ≤12 bytes;
+  inlining ≤N-byte strings in the `Obj` slot kills the per-element alloc + GC pressure. Touches every
+  `Obj::Str` site in the VM (concat/split/join/len/index/stringify). Moves `str` + list-of-`str`.
+  **Note:** "concat / `split` / `+` builder/rope" is *not* a benched lever — the `str` bench is
+  `BuildStr` + `,".join`, and `join` already buffers into one `String` (`mod.rs:4377`); `+`/`split`
+  aren't exercised. A builder/rope only helps un-benched `s = s + x` loops.
+- **Faster `usize` hasher** — the field/global IC and map paths hash small integer keys with the
+  default SipHash; a cheap identity/FxHash-style hasher on the IC-id and slot paths is a small win.
+- ✅ **`ConstStr` interning** — *landed M19 Phase 3*: a per-heap cache keyed by the literal's data
+  pointer reuses the already-allocated handle, so a repeated `ConstStr` push is a pointer lookup,
+  not a fresh box. (Cross-site compile-time dedup `Op::ConstStr(u32)` is marginal over this.)
+- ✅ **Reduce string-op allocations (`stringify`-into-buffer)** — *landed M19 Phase 2*: `stringify`
+  appends into a caller-owned buffer, so `BuildStr` reuses one `String` across all interpolation
+  parts (cut `str` −5%).
+- ✅ **Arithmetic specialization** — *largely shipped via P1 superinstructions*: `BinLocalLocal` /
+  `BinLocalConst` / `IncLocal` inline the monomorphic int path for the hot `local op local` /
+  `local op const` / `i += k` windows, so the int loops no longer re-dispatch per iteration. A
+  general per-op type-guard cache is the only remaining slice, and it overlaps the superinstructions.
+- ✗ **Frame pooling** — *low-ROI here*: `CallFrame`'s `deferred` / `defer_markers` are alloc-free
+  `Vec::new()` and frames live in a capacity-reusing `Vec`, so there's no per-call frame alloc to pool
+  (P2 already killed the per-call args `Vec`).
 
 **Big (separate milestones):**
+- **NaN-boxing the `Value` — BLOCKED by full 64-bit ints (2026-06-12 reality-check).** The goal
+  (16 B → 8 B, operand-stack cache density, moves `loop`/`list`/`fib`) is real, but `Value::Int` is a
+  **full `i64`** (`src/vm/value.rs:18`). NaN-boxing packs every value into 8 bytes, and a full i64 +
+  a type tag do **not** fit in 8 bytes alongside `f64` — the payload of a NaN-box is ~48–51 bits. To
+  do it you must **box big ints** (small-int tagging): a branch + a heap alloc on every int outside
+  the taggable range, plus a semantics-sensitive overflow path — i.e. *not* behavior-preserving for
+  free, and an uncertain net win on the very int-heavy benches it targets. **Lua 5.4 made exactly
+  this call** — it stayed at a 16-byte tagged union *because* it added 64-bit ints. Blast radius is
+  **VM-only** (the frozen interp has its own `Rc`-based `Value` in `src/interp/value.rs`, untouched),
+  but it's still a milestone-sized design spike (box-big-ints scheme + measure), not a clean
+  behavior-preserving session. Park until the int model is up for revisiting.
 - **Register VM** instead of stack — fewer ops, less stack traffic. Effectively a VM rewrite; only
   if dispatch count is still the wall after superinstructions.
 - **Generational / incremental GC** — current is stop-the-world full-heap (`next_gc = 2×live`).
