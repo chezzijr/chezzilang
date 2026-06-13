@@ -245,7 +245,16 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
 peephole/const-fold. They attacked dispatch count and name lookup — the two actual costs — without
 touching the value model or the GC.
 
-### Post-M19 next levers (ranked, not started — diagnosed 2026-06-12)
+### Post-M19 next levers (ranked — diagnosed 2026-06-12; **status updated 2026-06-13**)
+
+> **Status (2026-06-13):** Tier 1 is DONE — #1 method-IC (Phase 6) and #2 inline-hot-ops (Phase 7)
+> landed; #3 `Op::Call` spec was analyzed and **deferred (no-gain after the Phase 7 inline)**. Tier 2 is
+> underway — #4 adaptive quickening **v1 (binops) landed** and #5 **index specialization landed**
+> (`GetIndex`/`SetIndex` Int-key fast path). **Genuinely remaining:** the #4 *CallMethod* extension
+> (unify field/method caches under the quickening side-table — `GetIndex` is already covered by #5), a
+> **denser int-keyed `map`** representation (the `map` win #5 did not move — it's hash-probe-bound), and
+> the Tier-3 milestones (#6 JIT / #7 NaN-box (blocked) / #8 register VM). Per-lever tags below; landed
+> details + measured deltas in `PROGRESS.md` "Current focus" and `docs/benchmarks.md`.
 
 The M19 cheap batch + call-flatten + SSO are spent. Latest gap tracks **call density**: `loop` (no
 calls) **1.32×**, `primes` 2.53×, `str` 2.65×, `struct` 2.71×, `map` 2.83×, `list` 2.97×, `fib` (all
@@ -257,12 +266,12 @@ gap but a JIT is the only path to *match/beat* it on tight compute.
 
 **Tier 1 — interpreter, cheap→medium, behavior-preserving, each hits a measured bench:**
 
-1. **Method-call IC + flatten `do_method_call`** *(hits `struct` 2.71× + all OO)*. `do_method_call`
+1. **✅ DONE (Phase 6, 2026-06-13).** **Method-call IC + flatten `do_method_call`** *(hit `struct` −9%)*. `do_method_call`
    (`mod.rs:~3868`) still string-looks-up `def.methods.get(method)` per call **and** still recurses into
    a fresh `run_until` — call-flatten only covered `do_call`'s plain-fn fast path (see its own follow-up
    note). Add a per-call-site monomorphic cache (`tid → proto`, the same shape as the landed `field_ic`)
    and push the method frame in place. Symmetric to the field IC; reuses that machinery.
-2. **Trim per-op overhead in `run_until`** *(hits the dispatch floor: `loop`/`primes`)*. Three things run
+2. **✅ DONE (Phase 7, 2026-06-13) — landed as "inline hot ops"** *(moved every op-bound bench: `loop` −15%, `list` −17%, `primes` −8%, `fib` −6%)*. The inline-the-hottest-ops sub-lever shipped; the other two below (lazy `span`, serial/MN loop split) were left **unshipped** (predictably-false cheap branches, low payoff vs the inline win — revisit only if a profile shows them). **Trim per-op overhead in `run_until`** — three things run
    **every instruction** that are pure overhead on the serial (default, benchmarked) engine:
    - `span = proto_ref.lines[ip]` (`mod.rs:2157`) is loaded every op but used **only on fault** → pass
      `(pid, ip)` to the error path and reconstruct the span lazily there.
@@ -270,22 +279,16 @@ gap but a JIT is the only path to *match/beat* it on tight compute.
      are MN-only → split a lean serial loop body from the MN body (or hoist them off the serial back-edge).
    - `self.step(op, span)` is a **separate fn call per opcode** → inline the ~6 hottest ops (GetLocal, the
      superinstrs, Jump, Call, Return) directly in the loop, delegate the long tail to `step`.
-3. **Call-site specialization for `Op::Call`** *(hits `fib` 3.54×)*. Each call re-checks Func/Closure/
-   Native, derefs the heap callee, and re-validates arity. Cache the resolved proto at the call site keyed
-   by callee identity (CPython `CALL_PY_EXACT_ARGS`); skip the dispatch + deref + arity recheck on the
-   monomorphic common case. fib's remaining tax after call-flatten.
+3. **⏸️ DEFERRED — no-gain (Phase 8 analysis, 2026-06-13).** **Call-site specialization for `Op::Call`** *(was aimed at `fib`)*. After the Phase 7 inline, `do_call`'s happy path is already lean (the deref a call-IC skips is ~2–3 instrs); fib's residual is frame-setup in `finish_frame`, which a dispatch cache doesn't touch — and a correct call-IC can't avoid a heap-specific callee handle ⇒ `swap_ctx` hazard for ~0 gain. fib's real lever is #4/#6. Each call re-checks Func/Closure/
+   Native, derefs the heap callee, and re-validates arity (CPython `CALL_PY_EXACT_ARGS`); full rationale in `docs/benchmarks.md`.
 
 **Tier 2 — structural, medium→large:**
 
-4. **Adaptive opcode quickening (PEP 659)** *(the single most CPython-like lever)*. The generalization of
-   Tier-1 + the existing static superinstructions/ICs: after an op runs once, rewrite it in place to a
-   type-specialized form (`Add`→`AddIntInt`, `GetIndex`→`GetIndexList`, `CallMethod`→cached) behind a
-   deopt guard. Unifies superinstructions + IC + call specialization under one mechanism. **Constraint
+4. **🟦 v1 LANDED (2026-06-13); CallMethod extension remaining.** **Adaptive opcode quickening (PEP 659)** *(the single most CPython-like lever)*. v1 specializes the un-fused generic binop arms (`Add..GtEq`, `Eq`/`NotEq`) to an int/int fast path behind a per-`Vm`, per-site `(proto,ip)` deopt guard (side table `quicken`/`quicken_base`, mirrors `field_ic`/`method_ic` — no `Op`/compiler/interp change ⇒ parity by construction). Measured **`primes` −7–8%**. **Remaining:** extend the same side-table to **`CallMethod`** to unify field/method caches under one adaptive form (`GetIndex` is already covered by #5). After an op runs once, rewrite-in-place to a type-specialized form behind a deopt guard. **Constraint
    (same one P2b/P4 hit):** bytecode is shared `Arc<Program>` read-only across `--parallel` workers, so
    quickened cells must live in a per-`Vm` side table keyed by site, not mutate the `Op`.
-5. **map/list index specialization** *(hits `map` 2.83×, `list` 2.97×)*. `GetIndex`/`SetIndex`
-   (`mod.rs:~7649`) are dynamic type-checked dispatches with no caching; specialize per shape — falls out
-   of #4.
+5. **✅ DONE (2026-06-12).** **map/list index specialization** *(`list` −4%; `map` neutral — it's FxHashMap-probe-bound, not dispatch-bound, so the predicted `map` win needs a **denser int-keyed map** representation, a separate lever, not this tweak)*. `GetIndex`/`SetIndex`
+   got an Int-key fast path (skips `hash_key_rooted` rooting) + inline dispatch in the `run_until` hot arm; 7 `idxspec_*` parity guards.
 
 **Tier 3 — big, separate milestones:**
 
@@ -296,10 +299,13 @@ gap but a JIT is the only path to *match/beat* it on tight compute.
 8. **Register VM / generational+incremental GC — low ROI** (dispatch is already near the match floor; GC
    moves no bench). Deprioritized; revisit only if a real workload proves otherwise.
 
-**Sequencing:** do **Tier 1 in order (1→2→3)** as the next perf batch — all cheap-to-medium,
-behavior-preserving, two-engine-parity-clean, each targeting a named bench (expected: fib ~3.5×→~2.2×,
-struct ~2.7×→~1.9×, loop/primes shaved toward the floor). Then choose **#4 (adaptive quickening)** as the
-high-ceiling interpreter play or **#6 (Cranelift)** as the JIT end-game.
+**Sequencing (updated 2026-06-13):** Tier 1 is **done** (#1, #2 landed; #3 deferred), and Tier 2 #4-v1
++ #5 are **landed**. The next concrete perf steps, in order: **(a) `CallMethod` adaptive quickening**
+(the remaining #4 extension — unify the method cache under the side-table), then **(b) a denser
+int-keyed `map`** representation (the only thing that moves the hash-probe-bound `map` bench). After
+those, the high-ceiling play is **#6 (Cranelift method-JIT)** as the JIT end-game (#7 NaN-box stays
+blocked; #8 register VM / gen-GC stays low-ROI). All steps: behavior-preserving, two-engine-parity-clean,
+measure-first, each targeting a named bench.
 
 **M19 Phase 1 done (2026-06-11):** peephole/const-fold + superinstructions + `invoke_value` clone
 kill — all behavior-preserving (1516 tests + full two-engine parity green). Results in

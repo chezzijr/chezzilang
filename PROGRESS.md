@@ -117,8 +117,9 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   alloc / hash-bound — as scoped). Gotcha pinned by test: the int `Eq` fast path **replicates the generic
   lossy `as_f64==as_f64`** (so `2^53 == 2^53+1` stays true), not exact `x==y`, to keep parity. 6 new guards,
   1613 green, clippy clean. See `docs/benchmarks.md` "M19 Tier-2 … quickening, v1". **Next quickening
-  increment** (not started): extend the same side-table mechanism to `GetIndex`/`CallMethod` to *unify*
-  the existing field/method/index caches under one adaptive form. ✅ 5. **map/list index specialization** (`mod.rs`
+  increment** (not started): extend the same side-table mechanism to **`CallMethod`** to *unify* the
+  field/method caches under one adaptive form (`GetIndex`/`SetIndex` already got their Int-key fast path
+  in #5 below, so they are covered). ✅ 5. **map/list index specialization** (`mod.rs`
   `GetIndex`/`SetIndex`) — **landed (Int-key fast path + inline dispatch): `list` −4%, `map` neutral**
   (hash-probe-bound). The remaining `map` win needs a denser int-keyed representation, not this in-place
   tweak — folds into #4 or its own lever.
