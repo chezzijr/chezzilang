@@ -328,10 +328,11 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
             walk_idents(obj, f);
             walk_idents(index, f);
         }
-        ExprKind::Slice { obj, start, end } => {
+        ExprKind::Slice { obj, start, end, step } => {
             walk_idents(obj, f);
-            walk_idents(start, f);
-            walk_idents(end, f);
+            for c in [start, end, step].iter().filter_map(|c| c.as_deref()) {
+                walk_idents(c, f);
+            }
         }
         ExprKind::Try(x) => walk_idents(x, f),
         ExprKind::OptChain { obj, call, .. } => {
@@ -653,10 +654,11 @@ impl Walker<'_> {
                 self.walk_expr(obj)?;
                 self.walk_expr(index)?;
             }
-            ExprKind::Slice { obj, start, end } => {
+            ExprKind::Slice { obj, start, end, step } => {
                 self.walk_expr(obj)?;
-                self.walk_expr(start)?;
-                self.walk_expr(end)?;
+                for c in [start, end, step].into_iter().flatten() {
+                    self.walk_expr(c)?;
+                }
             }
             ExprKind::Try(inner) => self.walk_expr(inner)?,
             ExprKind::DecodeCall { obj, arg, .. } => {

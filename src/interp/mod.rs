@@ -501,9 +501,8 @@ impl Interp {
                     Value::List(items) => {
                         let idx = want_int(self.eval(index)?)?;
                         let items = items.borrow();
-                        usize::try_from(idx)
-                            .ok()
-                            .and_then(|i| items.get(i).cloned())
+                        crate::slice::norm_index(idx, items.len())
+                            .map(|i| items[i].clone())
                             .ok_or_else(|| RuntimeError {
                                 message: format!("index {idx} out of bounds (len {})", items.len()),
                                 span: expr.span,
@@ -512,10 +511,8 @@ impl Interp {
                     Value::Str(s) => {
                         let idx = want_int(self.eval(index)?)?;
                         let chars: Vec<char> = s.chars().collect();
-                        usize::try_from(idx)
-                            .ok()
-                            .and_then(|i| chars.get(i).copied())
-                            .map(|c| Value::Str(c.to_string().into()))
+                        crate::slice::norm_index(idx, chars.len())
+                            .map(|i| Value::Str(chars[i].to_string().into()))
                             .ok_or_else(|| RuntimeError {
                                 message: format!("index {idx} out of bounds (len {})", chars.len()),
                                 span: expr.span,
@@ -532,7 +529,13 @@ impl Interp {
                     }),
                 }
             }
-            ExprKind::Slice { obj, start, end } => self.eval_slice(obj, start, end, expr.span),
+            ExprKind::Slice { obj, start, end, step } => self.eval_slice(
+                obj,
+                start.as_deref(),
+                end.as_deref(),
+                step.as_deref(),
+                expr.span,
+            ),
             // `type_args` are type-erased — the interpreter ignores them (checker already used them).
             ExprKind::Call { callee, args, .. } => self.eval_call(callee, args, expr.span),
             ExprKind::Match { scrutinee, arms } => self.eval_match_expr(scrutinee, arms),
@@ -1651,27 +1654,45 @@ impl Interp {
     fn eval_slice(
         &mut self,
         obj: &Expr,
-        start: &Expr,
-        end: &Expr,
+        start: Option<&Expr>,
+        end: Option<&Expr>,
+        step: Option<&Expr>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let target = self.eval(obj)?;
-        let s = as_int_val(self.eval(start)?, span)?;
-        let e = as_int_val(self.eval(end)?, span)?;
+        // Each present component must be an int; an omitted one is `None` (direction-dependent default).
+        let comp = |me: &mut Self, c: Option<&Expr>| -> Result<Option<i64>, RuntimeError> {
+            match c {
+                Some(e) => Ok(Some(as_int_val(me.eval(e)?, span)?)),
+                None => Ok(None),
+            }
+        };
+        let s = comp(self, start)?;
+        let e = comp(self, end)?;
+        let st = comp(self, step)?;
         match &target {
             Value::List(items) => {
                 let items = items.borrow();
-                let (lo, hi) = clamp_range(s, e, items.len());
-                Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(items[lo..hi].to_vec()))))
+                let idxs = crate::slice::slice_indices(s, e, st, items.len())
+                    .map_err(|m| RuntimeError { message: m.to_string(), span })?;
+                Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(
+                    idxs.iter().map(|&i| items[i].clone()).collect(),
+                ))))
             }
             Value::Str(string) => {
                 let chars: Vec<char> = string.chars().collect();
-                let (lo, hi) = clamp_range(s, e, chars.len());
-                Ok(Value::Str(chars[lo..hi].iter().collect::<String>().into()))
+                let idxs = crate::slice::slice_indices(s, e, st, chars.len())
+                    .map_err(|m| RuntimeError { message: m.to_string(), span })?;
+                Ok(Value::Str(idxs.iter().map(|&i| chars[i]).collect::<String>().into()))
             }
-            // A struct satisfying `Slice` dispatches `obj[a..b]` to `slice(self, a, b)`.
+            // A struct satisfying `Slice` dispatches `obj[a:b:c]` to `slice(self, start?, end?, step?)`,
+            // passing real `Option[int]` components (`None`/`Some(n)`) the user body can match/`??`.
             Value::Struct { .. } => {
-                self.call_struct_method(target.clone(), "slice", vec![Value::Int(s), Value::Int(e)], span)
+                let opt = |c: Option<i64>| match c {
+                    None => enum_val("Option", "None", Vec::new()),
+                    Some(n) => enum_val("Option", "Some", vec![Value::Int(n)]),
+                };
+                self.call_struct_method(target.clone(), "slice", vec![opt(s), opt(e), opt(st)], span)
             }
             other => {
                 Err(RuntimeError { message: format!("cannot slice {}", other.type_name()), span })
@@ -3650,7 +3671,7 @@ impl Interp {
                 // before `SetIndex` bounds-checks; compound `+=`/`-=` reads the current element
                 // (`Dup2`+`GetIndex`, which bounds-checks) BEFORE `value`.
                 let bounds_check = |idx: i64, len: usize| {
-                    usize::try_from(idx).ok().filter(|i| *i < len).ok_or_else(|| RuntimeError {
+                    crate::slice::norm_index(idx, len).ok_or_else(|| RuntimeError {
                         message: format!("index {idx} out of bounds (len {len})"),
                         span,
                     })
@@ -4199,15 +4220,6 @@ fn as_int_val(v: Value, span: Span) -> Result<i64, RuntimeError> {
             span,
         }),
     }
-}
-
-/// Clamp a half-open `start..end` slice to a length-`len` sequence: both bounds clamp into
-/// `[0, len]`, and `start > end` collapses to an empty range. Returns `(lo, hi)` with `lo <= hi <= len`.
-fn clamp_range(start: i64, end: i64, len: usize) -> (usize, usize) {
-    let len_i = len as i64;
-    let lo = start.clamp(0, len_i) as usize;
-    let hi = end.clamp(0, len_i) as usize;
-    (lo, hi.max(lo))
 }
 
 /// If `v` is an unhandled error (`Err(..)` or `None`) reaching the top level, build the runtime
@@ -5258,7 +5270,9 @@ fn safe_div(a: int, b: int) -> Result[int]:
     #[test]
     fn list_index_out_of_bounds_errors() {
         assert!(run_capture("print([1, 2, 3][5])\n").is_err());
-        assert!(run_capture("print([1, 2, 3][-1])\n").is_err());
+        // `-1` now indexes the last element (Python); only out-of-range negatives fault.
+        assert_eq!(run("print([1, 2, 3][-1])\n"), "3\n");
+        assert!(run_capture("print([1, 2, 3][-4])\n").is_err());
     }
 
     #[test]
@@ -5286,17 +5300,48 @@ fn safe_div(a: int, b: int) -> Result[int]:
 
     #[test]
     fn slices_list_and_str() {
-        assert_eq!(run("print([1, 2, 3, 4, 5][1..3])\n"), "[2, 3]\n");
-        assert_eq!(run("print(\"hello\"[0..2])\n"), "he\n");
+        assert_eq!(run("print([1, 2, 3, 4, 5][1:3])\n"), "[2, 3]\n");
+        assert_eq!(run("print(\"hello\"[0:2])\n"), "he\n");
+        // Optional bounds (Python open slices).
+        assert_eq!(run("print([1, 2, 3, 4, 5][2:])\n"), "[3, 4, 5]\n");
+        assert_eq!(run("print([1, 2, 3, 4, 5][:2])\n"), "[1, 2]\n");
+        assert_eq!(run("print([1, 2, 3, 4, 5][:])\n"), "[1, 2, 3, 4, 5]\n");
+    }
+
+    #[test]
+    fn slice_step_and_reverse() {
+        assert_eq!(run("print([1, 2, 3, 4, 5][0:5:2])\n"), "[1, 3, 5]\n");
+        assert_eq!(run("print([1, 2, 3, 4, 5][::-1])\n"), "[5, 4, 3, 2, 1]\n");
+        assert_eq!(run("print(\"hello\"[::-1])\n"), "olleh\n");
+        // Zero step is a fault, message byte-identical to the VM.
+        let e = run_capture("print([1, 2, 3][::0])\n").unwrap_err();
+        assert!(e.message.contains("slice step cannot be zero"), "got: {}", e.message);
+    }
+
+    #[test]
+    fn slice_negative_bounds() {
+        // Negative bounds count from the end (Python), they do NOT fault on slices.
+        assert_eq!(run("print([1, 2, 3, 4, 5][-2:])\n"), "[4, 5]\n");
+        assert_eq!(run("print([1, 2, 3, 4, 5][:-1])\n"), "[1, 2, 3, 4]\n");
+        assert_eq!(run("print([1, 2, 3, 4, 5][-100:])\n"), "[1, 2, 3, 4, 5]\n"); // clamps, no fault
     }
 
     #[test]
     fn slice_bounds_are_clamped() {
-        assert_eq!(run("print([1, 2, 3][1..99])\n"), "[2, 3]\n");
-        assert_eq!(run("print([1, 2, 3][0..0])\n"), "[]\n");
-        assert_eq!(run("print([1, 2, 3][2..1])\n"), "[]\n"); // start > end → empty
-        assert_eq!(run("print([1, 2, 3][-1..2])\n"), "[1, 2]\n"); // negative start clamps to 0
-        assert_eq!(run("print(\"hello\"[3..99])\n"), "lo\n");
+        assert_eq!(run("print([1, 2, 3][1:99])\n"), "[2, 3]\n");
+        assert_eq!(run("print([1, 2, 3][0:0])\n"), "[]\n");
+        assert_eq!(run("print([1, 2, 3][2:1])\n"), "[]\n"); // start > end → empty
+        assert_eq!(run("print(\"hello\"[3:99])\n"), "lo\n");
+    }
+
+    #[test]
+    fn negative_index_read_and_assign() {
+        assert_eq!(run("print([10, 20, 30][-1])\n"), "30\n");
+        assert_eq!(run("print([10, 20, 30][-3])\n"), "10\n");
+        assert_eq!(run("xs := [1, 2, 3]\nxs[-1] = 99\nprint(xs[2])\n"), "99\n");
+        assert_eq!(run("print(\"hello\"[-1])\n"), "o\n");
+        // Plain negative index out of range FAULTS (Python asymmetry vs slice clamping).
+        assert!(run_capture("print([1, 2, 3][-100])\n").is_err());
     }
 
     const BUF_PROG: &str = "\
@@ -5306,8 +5351,18 @@ struct Buf:
         return self.xs[key]
     fn set_index(self, key: int, val: int):
         self.xs[key] = val
-    fn slice(self, start: int, end: int) -> list[int]:
-        return self.xs[start..end]
+    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> list[int]:
+        # Forward each component straight to the backing list's slice; an omitted
+        # component stays omitted so the built-in Python defaults apply per direction.
+        match (start, end, step):
+            (Some(s), Some(e), Some(c)): return self.xs[s:e:c]
+            (Some(s), Some(e), None): return self.xs[s:e]
+            (Some(s), None, Some(c)): return self.xs[s::c]
+            (Some(s), None, None): return self.xs[s:]
+            (None, Some(e), Some(c)): return self.xs[:e:c]
+            (None, Some(e), None): return self.xs[:e]
+            (None, None, Some(c)): return self.xs[::c]
+            (None, None, None): return self.xs[:]
 b := Buf([10, 20, 30])
 ";
 
@@ -5323,7 +5378,10 @@ b := Buf([10, 20, 30])
 
     #[test]
     fn struct_slice_dispatch() {
-        assert_eq!(run(&format!("{BUF_PROG}print(b[0..2])\n")), "[10, 20]\n");
+        assert_eq!(run(&format!("{BUF_PROG}print(b[0:2])\n")), "[10, 20]\n");
+        // Optional bounds + reverse route through the protocol's None-aware body.
+        assert_eq!(run(&format!("{BUF_PROG}print(b[:])\n")), "[10, 20, 30]\n");
+        assert_eq!(run(&format!("{BUF_PROG}print(b[::-1])\n")), "[30, 20, 10]\n");
     }
 
     #[test]

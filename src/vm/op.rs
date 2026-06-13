@@ -219,7 +219,8 @@ pub enum Op {
     GetField { name: String, ic: u32 },
     /// Stack `[obj, index]` (index already `AsInt`-checked).
     GetIndex,
-    /// Stack `[obj, start, end]` → `[slice]` — half-open slice of a list/str, or a struct's `slice`.
+    /// Stack `[obj, start, end, step]` → `[slice]` — Python-style slice of a list/str, or a
+    /// struct's `slice`. Each of `start`/`end`/`step` is `Nil` when its component was omitted.
     GetSlice,
     /// Stack `[obj, value]` → `[]` — mutate a struct field in place. `ic`: see [`Op::GetField`].
     SetField { name: String, ic: u32 },

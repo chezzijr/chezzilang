@@ -280,7 +280,7 @@
             | <postfix> "LPAREN" <argList> "RPAREN"
             | <postfix> "DOT" "IDENT"
             | <postfix> "DOT" "INT"
-            | <postfix> "LBRACKET" <expr> "RBRACKET"   # plain index, or a slice when <expr> is a `..` range
+            | <postfix> "LBRACKET" <subscript> "RBRACKET"   # plain index (no colon) or a Python slice
             | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
             | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <exprList> "RPAREN"
             | <postfix> "DOT" "IDENT" "LBRACKET" <type> "RBRACKET" "LPAREN" <expr> "RPAREN"
@@ -290,6 +290,26 @@
             | <postfix> "QUESTIONDOT" "INT"
             | <postfix> "QUESTIONDOT" "IDENT" "LPAREN" "RPAREN"
             | <postfix> "QUESTIONDOT" "IDENT" "LPAREN" <argList> "RPAREN"
+
+# The inside of a subscript `[ … ]`. With no colon it is a plain index expression; one or two colons
+# make it a Python slice `start:end:step`, each component optional (`xs[:]`, `xs[1:]`, `xs[::-1]`,
+# `xs[a:b:c]`). The colon is unambiguous here — map-literal / type-annotation / match-arm colons never
+# occur inside a subscript bracket — so the parser owns it directly (see parser::parse_subscript),
+# replacing the old "parse one expr then check if it's a `..` range" rewrite. The Range operator `..`
+# is untouched: it stays the for-loop / match-pattern range (see <rangeExpr>, <patternPrimary>).
+<subscript> ::= <expr>
+              | "COLON"
+              | "COLON" <expr>
+              | <expr> "COLON"
+              | <expr> "COLON" <expr>
+              | "COLON" "COLON"
+              | "COLON" "COLON" <expr>
+              | "COLON" <expr> "COLON"
+              | "COLON" <expr> "COLON" <expr>
+              | <expr> "COLON" "COLON"
+              | <expr> "COLON" "COLON" <expr>
+              | <expr> "COLON" <expr> "COLON"
+              | <expr> "COLON" <expr> "COLON" <expr>
 
 # A parenthesized expression is grouping when it holds one expr (`(e)`); a comma makes it a tuple
 # — `(e,)` is a 1-element tuple and `(e1, e2, …)` an N-tuple. The empty `()` is not valid.
