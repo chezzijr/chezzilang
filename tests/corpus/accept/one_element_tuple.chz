@@ -1,4 +1,3 @@
 # rule: primary
-# expect: 1-element tuples
 fn main():
     t := (1,)

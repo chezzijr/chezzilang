@@ -126,6 +126,12 @@ fn main():
 main()                                 # no auto-entry — `main` is a normal fn you call yourself
 ```
 
+**Multi-line literals.** Inside `[]`, `{}`, and `()` the lexer suppresses layout (newlines /
+indentation), so collection literals, call arguments, and parameter lists may span lines. A single
+optional trailing comma is accepted before the closer (`[1, 2,]` ≡ `[1, 2]`); a lone comma is still
+an error. `(x)` is grouping; `(x,)` is a one-element tuple. (See [`syntax.md` §2](syntax.md) and the
+collection/`<params>`/`<argList>` productions in [`grammar.bnf`](grammar.bnf).)
+
 **Entry model.** Programs run top-to-bottom; there is no automatic `main`. An `Err`/`None` left
 unhandled at the top level (a bare expression statement, or a top-level `?`) exits the program with
 `unhandled error: …` and a non-zero code. A future `chezzi.toml` `entrypoint` (tooling-only) may

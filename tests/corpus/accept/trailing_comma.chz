@@ -1,0 +1,10 @@
+# rule: primary, argList, params
+fn g(a, b,):
+    a
+
+fn main():
+    xs := [1, 2, 3,]
+    m := {"a": 1, "b": 2,}
+    s := {1, 2, 3,}
+    t := (1, 2,)
+    g(1, 2,)

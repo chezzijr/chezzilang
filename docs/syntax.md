@@ -36,6 +36,29 @@ true  false   # bool
 {"a": 1}      # map[str, int]
 ```
 
+**Multi-line literals & trailing commas.** Inside `[]`, `{}`, and `()` the layout (newlines /
+indentation) is suppressed, so a collection literal, a call's arguments, or a function's parameter
+list may span lines. A single **optional trailing comma** is allowed before the closing delimiter
+— `[1, 2,]` is identical to `[1, 2]` (a lone `[,]` / `(,)` / `f(,)` is still an error):
+
+```chezzi
+nums := [
+    1, 2, 3,
+    4, 5, 6,
+]
+m := {
+    "a": 1,
+    "b": 2,
+}
+t := (
+    1,
+    2,
+)
+```
+
+A parenthesised expression is grouping; a trailing comma makes a tuple, so **`(x)` is just `x`**
+while **`(x,)` is a one-element tuple**.
+
 ## 3. Variables & types
 
 ```chezzi

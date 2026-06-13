@@ -179,6 +179,7 @@ pub struct Lexer {
     indents: Vec<usize>, // the indentation stack. Starts as vec![0].
     at_line_start: bool, // true when the next char begins a fresh logical line
     pending: VecDeque<Tok>, // layout tokens computed together but emitted one-per-call (Dedents)
+    bracket_depth: usize, // nesting depth of (), [], {}; >0 suppresses layout (multi-line literals)
 }
 
 impl Lexer {
@@ -191,6 +192,7 @@ impl Lexer {
             indents: vec![0],
             at_line_start: true,
             pending: VecDeque::new(),
+            bracket_depth: 0,
         }
     }
 
@@ -287,8 +289,16 @@ impl Lexer {
             return Ok(tok);
         }
 
+        // The suppressed-newline path inside brackets `continue 'scan`s here (instead of
+        // recursing) so an unbounded run of blank lines inside a literal cannot overflow the
+        // stack. Every other path returns, so the loop runs at most once per emitted token.
+        'scan: loop {
         // === STEP A: start-of-line indentation (1h) ===
-        if self.at_line_start {
+        // Inside brackets (multi-line literals) layout is suppressed: skip scan_indentation so
+        // the indent stack stays frozen. We deliberately leave `at_line_start` untouched —
+        // STEP B/C/D/E below still run, and STEP C's EOF guard depends on at_line_start, so
+        // clobbering it here would spin the loop on an unclosed bracket (the OOM tripwire).
+        if self.at_line_start && self.bracket_depth == 0 {
             match self.scan_indentation()? {
                 Some(layout) => {
                     // a real content line begins here; emit its Indent/Dedent(s) before its tokens
@@ -344,9 +354,17 @@ impl Lexer {
         // so when we see '\n' we're always ending a line that had real content.)
         if self.peek() == '\n' {
             let span = self.span_at(self.pos);
+            // CRITICAL forward-progress: always advance past '\n' so the loop cannot spin.
             self.advance();
             self.line += 1;
             self.line_start = self.pos;
+            if self.bracket_depth > 0 {
+                // Inside a multi-line literal: keep spans honest (line/line_start bumped above)
+                // but suppress the Newline. `continue` (not recurse) so thousands of blank lines
+                // inside a bracket can't overflow the stack; `at_line_start` stays false so layout
+                // is frozen. Forward progress is guaranteed: we already advance()d past '\n'.
+                continue 'scan;
+            }
             self.at_line_start = true;
             return Ok(Tok { kind: Token::Newline, span });
         }
@@ -404,12 +422,18 @@ impl Lexer {
             } else {
                 Token::Question
             },
-            '(' => Token::LParen,
-            ')' => Token::RParen,
-            '[' => Token::LBracket,
-            ']' => Token::RBracket,
-            '{' => Token::LBrace,
-            '}' => Token::RBrace,
+            // Openers/closers also drive `bracket_depth` (multi-line literal layout suppression).
+            '(' => { self.bracket_depth += 1; Token::LParen }
+            '[' => { self.bracket_depth += 1; Token::LBracket }
+            // `{` in token position is always a map/set literal — Chezzi blocks are
+            // `: NEWLINE INDENT`, never brace-delimited; interpolation `{}` lives inside
+            // Token::Str content and never reaches here.
+            '{' => { self.bracket_depth += 1; Token::LBrace }
+            // saturating_sub clamps a stray closer at 0 (no LexError; the parser reports the
+            // unmatched closer).
+            ')' => { self.bracket_depth = self.bracket_depth.saturating_sub(1); Token::RParen }
+            ']' => { self.bracket_depth = self.bracket_depth.saturating_sub(1); Token::RBracket }
+            '}' => { self.bracket_depth = self.bracket_depth.saturating_sub(1); Token::RBrace }
             ',' => Token::Comma,
             '.' => if self.match_char('.') { Token::DotDot } else { Token::Dot },
 
@@ -421,7 +445,8 @@ impl Lexer {
 
             other => return Err(self.error(&format!("unexpected character {other:?}"))),
         };
-        Ok(Tok { kind, span })
+        return Ok(Tok { kind, span });
+        }
     }
 
     /// Small helper to build a `LexError` at the current line.
@@ -1198,5 +1223,152 @@ mod tests {
             .unwrap();
         // `b" z` → z is the 4th char on line 2 (1-based col 4).
         assert_eq!(z.span, Span { line: 2, col: 4 });
+    }
+
+    // ===== Multi-line collection literals (layout suppression inside brackets) =====
+
+    /// OOM TRIPWIRE: an unclosed bracket must terminate at Eof, never spin the tokenize loop.
+    /// Passes on the unmodified lexer (no suppression yet) — a forward-progress regression guard.
+    #[test]
+    fn unclosed_bracket_terminates_at_eof() {
+        for src in ["[1, 2", "(", "{a: 1", "[[\n1\n", "(((\n"] {
+            let toks = tokenize(src).expect("unclosed bracket should still tokenize");
+            assert_eq!(
+                toks.last().map(|t| &t.kind),
+                Some(&Token::Eof),
+                "input {src:?} must terminate at Eof"
+            );
+        }
+    }
+
+    /// String interpolation braces live inside Token::Str content — they must NEVER be
+    /// tokenized as LBrace/RBrace and so can never reach the bracket-depth counter.
+    #[test]
+    fn string_braces_not_counted() {
+        let toks = tokenize("\"x{y}z\"\n").unwrap();
+        let ks: Vec<&Token> = toks.iter().map(|t| &t.kind).collect();
+        assert_eq!(
+            ks,
+            vec![&Token::Str("x{y}z".to_string()), &Token::Newline, &Token::Eof]
+        );
+        assert!(!ks.contains(&&Token::LBrace) && !ks.contains(&&Token::RBrace));
+    }
+
+    /// Newlines/Indent/Dedent inside `[...]` are suppressed; a Newline appears after the closer.
+    #[test]
+    fn newline_suppressed_inside_brackets() {
+        assert_eq!(
+            kinds("x = [\n1,\n2\n]\n"),
+            vec![
+                Token::Ident("x".to_string()),
+                Token::Assign,
+                Token::LBracket,
+                Token::Int(1),
+                Token::Comma,
+                Token::Int(2),
+                Token::RBracket,
+                Token::Newline,
+                Token::Eof,
+            ]
+        );
+    }
+
+    /// Same suppression for `(...)` and `{...}`.
+    #[test]
+    fn newline_suppressed_inside_paren_and_brace() {
+        assert_eq!(
+            kinds("(\n1,\n2\n)\n"),
+            vec![
+                Token::LParen,
+                Token::Int(1),
+                Token::Comma,
+                Token::Int(2),
+                Token::RParen,
+                Token::Newline,
+                Token::Eof,
+            ]
+        );
+        assert_eq!(
+            kinds("{\n1: 2\n}\n"),
+            vec![
+                Token::LBrace,
+                Token::Int(1),
+                Token::Colon,
+                Token::Int(2),
+                Token::RBrace,
+                Token::Newline,
+                Token::Eof,
+            ]
+        );
+    }
+
+    /// REGRESSION GUARD: statement newlines OUTSIDE brackets are still emitted.
+    #[test]
+    fn statement_newlines_outside_brackets_unchanged() {
+        assert_eq!(
+            kinds("a\nb\n"),
+            vec![
+                Token::Ident("a".to_string()),
+                Token::Newline,
+                Token::Ident("b".to_string()),
+                Token::Newline,
+                Token::Eof,
+            ]
+        );
+    }
+
+    /// REGRESSION GUARD: an indented `if` body still lexes with Indent/Dedent.
+    #[test]
+    fn indented_body_lexes_identically() {
+        assert_eq!(
+            kinds("if x:\n    y\n"),
+            vec![
+                Token::If,
+                Token::Ident("x".to_string()),
+                Token::Colon,
+                Token::Newline,
+                Token::Indent,
+                Token::Ident("y".to_string()),
+                Token::Newline,
+                Token::Dedent,
+                Token::Eof,
+            ]
+        );
+    }
+
+    /// Nested brackets across lines: layout suppressed throughout; depth returns to 0.
+    #[test]
+    fn nested_multiline_brackets() {
+        assert_eq!(
+            kinds("[[\n1\n], {\n}]\n"),
+            vec![
+                Token::LBracket,
+                Token::LBracket,
+                Token::Int(1),
+                Token::RBracket,
+                Token::Comma,
+                Token::LBrace,
+                Token::RBrace,
+                Token::RBracket,
+                Token::Newline,
+                Token::Eof,
+            ]
+        );
+    }
+
+    /// A stray closer must not underflow the depth counter (saturating_sub) nor panic.
+    #[test]
+    fn stray_closer_no_underflow() {
+        // After the stray `]`, depth stays clamped at 0, so the following newline is emitted.
+        assert_eq!(
+            kinds("]\nx\n"),
+            vec![
+                Token::RBracket,
+                Token::Newline,
+                Token::Ident("x".to_string()),
+                Token::Newline,
+                Token::Eof,
+            ]
+        );
     }
 }
