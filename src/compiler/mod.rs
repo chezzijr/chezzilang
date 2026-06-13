@@ -1642,9 +1642,12 @@ impl Compiler {
         for chunk in chunks {
             match chunk {
                 Chunk::Lit(s) => fc.emit(Op::ConstStr(s), span),
-                Chunk::Expr(e) => {
+                Chunk::Expr(e, spec) => {
                     self.compile_expr(fc, &e)?;
-                    fc.emit(Op::ToStr, span);
+                    match spec {
+                        None => fc.emit(Op::ToStr, span),
+                        Some(fs) => fc.emit(Op::ToStrFmt(Box::new(fs)), span),
+                    }
                 }
             }
         }
@@ -1760,9 +1763,12 @@ fn emit_lit_const(fc: &mut FnComp, lit: &LitPattern, span: Span) {
 
 // ===== string interpolation (compile-time pre-parse) =====
 
+#[derive(Debug)]
 enum Chunk {
     Lit(String),
-    Expr(Expr),
+    /// An interpolated `{expr}` or `{expr:spec}`; the format spec (parsed at compile time) is
+    /// `None` for a bare `{expr}`.
+    Expr(Expr, Option<crate::fmtspec::FormatSpec>),
 }
 
 /// Split an interpolated string literal into literal/expr chunks, mirroring `interp::interpolate`
@@ -1801,8 +1807,18 @@ fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, CompileError
                         span,
                     });
                 }
-                let expr = parse_expr_str(&inner, span)?;
-                chunks.push(Chunk::Expr(expr));
+                // Split on the first top-level `:` into (expr, spec); a `:` inside brackets/quotes
+                // (e.g. `{m["a:b"]}`, slices `a[1:2]`) is NOT a separator. Spec parse errors are
+                // surfaced as compile errors (good UX); type/value mismatches are deferred to the VM.
+                let (expr_src, spec_src) = crate::fmtspec::split_spec(&inner);
+                let spec = match spec_src {
+                    Some(s) => Some(
+                        crate::fmtspec::parse(s).map_err(|message| CompileError { message, span })?,
+                    ),
+                    None => None,
+                };
+                let expr = parse_expr_str(expr_src, span)?;
+                chunks.push(Chunk::Expr(expr, spec));
             }
             '}' => {
                 return Err(CompileError {
@@ -2062,5 +2078,51 @@ impl FnComp {
             }
         }
         entries
+    }
+}
+
+#[cfg(test)]
+mod interp_tests {
+    use super::*;
+
+    fn sp() -> Span {
+        Span { line: 1, col: 1 }
+    }
+
+    #[test]
+    fn parse_interpolation_attaches_spec() {
+        let chunks = parse_interpolation("{x:>5}", sp()).unwrap();
+        match &chunks[..] {
+            [Chunk::Expr(_, Some(spec))] => {
+                assert_eq!(spec.width, 5);
+                assert_eq!(spec.align, Some(crate::fmtspec::Align::Right));
+            }
+            _ => panic!("expected one spec'd expr chunk"),
+        }
+    }
+
+    #[test]
+    fn parse_interpolation_bare_expr_has_no_spec() {
+        let chunks = parse_interpolation("{x}", sp()).unwrap();
+        assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
+    }
+
+    #[test]
+    fn parse_interpolation_width_cap_is_compile_error() {
+        let err = parse_interpolation("{x:>99999999}", sp()).unwrap_err();
+        assert!(err.message.contains("exceeds maximum 4096"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn parse_interpolation_colon_inside_index_not_a_separator() {
+        // The `:` inside the string-key index is NOT the spec separator; only the trailing one is.
+        let chunks = parse_interpolation("{m[\"a:b\"]:>3}", sp()).unwrap();
+        match &chunks[..] {
+            [Chunk::Expr(_, Some(spec))] => assert_eq!(spec.width, 3),
+            _ => panic!("expected spec'd expr"),
+        }
+        // And with no trailing spec, the inner `:` stays part of the expression.
+        let chunks = parse_interpolation("{m[\"a:b\"]}", sp()).unwrap();
+        assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
     }
 }

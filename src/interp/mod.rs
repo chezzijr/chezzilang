@@ -742,9 +742,36 @@ impl Interp {
                             span,
                         });
                     }
-                    let expr = parse_expr_str(&inner)?;
+                    // Split on the first top-level `:` into (expr, spec) — same bracket/quote-aware
+                    // logic the compiler uses (shared `fmtspec::split_spec`), so a `:` inside an
+                    // index/string is not a separator. Spec parse errors surface as runtime errors
+                    // here (the interpreter has no separate compile phase); the VM catches them at
+                    // compile time — the message string is identical.
+                    let (expr_src, spec_src) = crate::fmtspec::split_spec(&inner);
+                    let expr = parse_expr_str(expr_src)?;
                     let value = self.eval(&expr)?;
-                    out.push_str(&self.stringify(&value, span, 0)?);
+                    match spec_src {
+                        None => out.push_str(&self.stringify(&value, span, 0)?),
+                        Some(spec_src) => {
+                            let spec = crate::fmtspec::parse(spec_src)
+                                .map_err(|message| RuntimeError { message, span })?;
+                            // Scalars map straight to a FmtArg; everything else is rendered via
+                            // `stringify` first then formatted as a plain string (fill/align/width).
+                            match &value {
+                                Value::Int(n) => crate::fmtspec::apply(&spec, crate::fmtspec::FmtArg::Int(*n), &mut out)
+                                    .map_err(|message| RuntimeError { message, span })?,
+                                Value::Float(x) => crate::fmtspec::apply(&spec, crate::fmtspec::FmtArg::Float(*x), &mut out)
+                                    .map_err(|message| RuntimeError { message, span })?,
+                                Value::Str(s) => crate::fmtspec::apply(&spec, crate::fmtspec::FmtArg::Str(s), &mut out)
+                                    .map_err(|message| RuntimeError { message, span })?,
+                                _ => {
+                                    let rendered = self.stringify(&value, span, 0)?;
+                                    crate::fmtspec::apply(&spec, crate::fmtspec::FmtArg::Other(&rendered), &mut out)
+                                        .map_err(|message| RuntimeError { message, span })?;
+                                }
+                            }
+                        }
+                    }
                 }
                 '}' => {
                     return Err(RuntimeError {

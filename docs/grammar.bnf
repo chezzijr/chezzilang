@@ -247,6 +247,12 @@
 
 # A parenthesized expression is grouping when it holds one expr (`(e)`) and a tuple literal when it
 # holds two or more (`(e1, e2, …)`). A 1-element `(e,)` and the empty `()` are not valid.
+#
+# A "STR" token is the whole string literal (the lexer has already stripped quotes + resolved
+# backslash escapes). Its `{expr}` / `{expr:spec}` interpolations — including the Python-style format
+# mini-language after a `:` (see syntax.md §10, implemented in src/fmtspec.rs) — are parsed in a
+# SEPARATE post-lexer pass over the STR token's contents (compiler::parse_interpolation /
+# interp::interpolate), so they need NO production here.
 <primary> ::= "INT" | "FLOAT" | "STR" | "TRUE" | "FALSE" | "IDENT"
             | "LPAREN" <expr> "RPAREN"
             | "LPAREN" <expr> "COMMA" <exprList> "RPAREN"

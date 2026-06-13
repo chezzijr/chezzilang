@@ -762,6 +762,47 @@ print("tab\tgap, quote \"x\", path C:\\tmp")
 print("literal {{x}} vs value {x}")
 ```
 
+**Format specifiers.** An interpolation may carry a Python-style format spec after a `:` —
+`{expr:spec}`. The mini-language is a coherent subset:
+
+```
+{expr:[[fill]align][sign][0][width][.precision][type]}
+```
+
+```chezzi
+print("|{name:<10}|")     # left,  width 10            → "|thuan     |"
+print("|{name:>10}|")     # right                      → "|     thuan|"
+print("|{name:^10}|")     # center                     → "|  thuan   |"
+print("|{name:*^10}|")    # center, '*' fill           → "|**thuan***|"
+print("{42:06}")          # zero-pad to width 6        → "000042"
+print("{-7:06}")          # sign kept before zeros     → "-00007"
+print("{3.14159:.2f}")    # 2 decimals                 → "3.14"
+print("{0.1357:.1%}")     # percent: ×100, 1 decimal   → "13.6%"
+print("{255:x} {255:X}")  # hex (lower/upper)          → "ff FF"
+print("{255:b} {255:o}")  # binary / octal             → "11111111 377"
+print("{12345.678:.2e}")  # scientific                 → "1.23e4"
+print("{5:+d}")           # force a leading '+'         → "+5"
+print("{greeting:.5}")    # string precision truncates → "hello"
+```
+
+- **align**: `<` left, `>` right, `^` center; an optional **fill** char may precede it (default space).
+  Numbers default to right-align, everything else to left.
+- **sign**: `+` forces a leading `+` on non-negative numbers (numeric only).
+- **`0`**: zero-pad numerics to *width* (the sign stays ahead of the zeros).
+- **width**: minimum field width. **Capped at 4096** — a larger width (e.g. `{x:>9999999999}`) is a
+  parse error, *not* a multi-gigabyte allocation.
+- **precision** `.N`: float decimals; on a **string** it **truncates** to N chars (Python parity);
+  also capped at 4096.
+- **type**: `d` int · `f` fixed float · `x`/`X` hex · `b` binary · `o` octal · `e` scientific ·
+  `%` percent (×100 then `%`). A float type char (`f`/`e`/`%`) promotes an int.
+
+A **bare** `{expr}` (or `{expr:}` with an empty spec) renders exactly as before — e.g. a whole float
+prints `5.0`. An **unknown type char** or trailing junk in the spec is a **compile-time** error;
+a **type/value mismatch** (e.g. `{name:d}` on a string, `{x:.2f}` on a string, zero-pad on a
+non-number) is a **runtime** error. The spec is parsed once, shared by both engines (`src/fmtspec.rs`),
+so the VM and interpreter produce byte-identical output. The `:` split is bracket/quote-aware — a `:`
+inside an index, string key, or slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator.
+
 Core-type string methods (built in — no import needed):
 
 ```chezzi

@@ -40,6 +40,12 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 **Included:**
 - **Pattern matching** — `match` on enums (also int/str/bool + tuple scrutinees), exhaustiveness-checked.
 - **String interpolation** — `"hi {name}, sum {a+b}"`. First-class; string ops are a UX priority.
+  Supports Python-style **format specifiers** after a `:` — `{expr:[[fill]align][sign][0][width][.precision][type]}`,
+  e.g. `{name:>10}` (right-align width 10), `{f:.2f}` (2 decimals), `{n:04d}` (zero-pad), `{pct:.1%}`
+  (percent), `{255:x}` (hex). Type chars: `d f x X b o e %`. **Width and precision are capped at 4096**
+  (a larger spec is a parse error — never a giant allocation). String `.N` truncates; an unknown type
+  char is a compile error; a type/value mismatch is a runtime error. The spec parser+formatter is
+  shared by both engines (`src/fmtspec.rs`) → byte-identical output. Full grammar in [`syntax.md` §10](syntax.md).
 - **Struct methods** — `fn dist(self)` on structs. Composition + structural `protocol`s, no classes or inheritance (Rust/Go style).
 - **Pipe `|>`** — functional chaining. Implemented in M6 (parse-time desugar to a call).
 - **Tuples** — `(1, "a")`, fixed-arity, immutable; nestable in patterns.

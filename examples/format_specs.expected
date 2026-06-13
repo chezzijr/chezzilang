@@ -1,0 +1,23 @@
+|left      |
+|     right|
+|   mid    |
+|***mid****|
+[    42]
+[000042]
+[-00007]
+pi = 3.14
+whole = 5.000
+bare =      5.0
+hex   = ff
+HEX   = FF
+oct   = 377
+bin   = 11111111
+zerox = 0000ff
+sci   = 1.23e4
+pct   = 13.6%
+sign+ = +5
+sign- = -5
+trunc = hello
+apple       3    0.50
+banana     12    0.25
+fig       100    1.00
