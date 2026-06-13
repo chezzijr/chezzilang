@@ -40,6 +40,7 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 **Included:**
 - **Pattern matching** — `match` on enums (also int/str/bool + tuple scrutinees), exhaustiveness-checked.
 - **String interpolation** — `"hi {name}, sum {a+b}"`. First-class; string ops are a UX priority.
+- **Literal forms** — int (`42`, `0xFF`/`0b1010`/`0o17`, `_` separators), float (`3.14`, scientific `6.022e23`/`1e3`/`1.5e-9` — any exponent ⇒ float), str in either `"…"` or `'…'` (interchangeable: same escapes & interpolation) with escapes `\n \t \r \\ \" \' \0` and `\u{HEX}` unicode (1-6 hex digits). See `docs/syntax.md §2/§10`.
 - **Struct methods** — `fn dist(self)` on structs. Composition + structural `protocol`s, no classes or inheritance (Rust/Go style).
 - **Pipe `|>`** — functional chaining. Implemented in M6 (parse-time desugar to a call).
 - **Tuples** — `(1, "a")`, fixed-arity, immutable; nestable in patterns.

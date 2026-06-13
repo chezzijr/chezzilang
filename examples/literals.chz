@@ -1,0 +1,24 @@
+# examples/literals.chz — golden for the three lexer-local literal features:
+#   1. scientific-notation float literals
+#   2. \u{...} unicode escapes in strings
+#   3. single-quote strings (interchangeable with double quotes, incl. interpolation)
+
+fn main():
+    # --- scientific notation (always a float, even 1e3) ---
+    print("thousand: {1e3}")
+    print("avogadro: {6.022e23}")
+    print("tiny: {1.5e-9}")
+    print("big: {2E10}")
+
+    # --- \u{...} unicode escapes (work in both quote styles) ---
+    print("letter: \u{41}")
+    print("accent: \u{e9}")
+    print('emoji: \u{1F600}')
+
+    # --- single-quote strings: equivalent to double, same interpolation ---
+    x := 7
+    print('single: {x}')
+    print('inner "double" is literal')
+    print('escaped quote: it\'s here')
+
+main()

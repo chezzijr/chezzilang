@@ -414,7 +414,8 @@ impl Lexer {
             '.' => if self.match_char('.') { Token::DotDot } else { Token::Dot },
 
             // delegate the "munching" token kinds to the helpers below
-            '"' => self.string()?,
+            '"' => self.string('"')?,
+            '\'' => self.string('\'')?,
             c if c.is_ascii_digit() => self.number(start)?,
             c if c.is_alphabetic() || c == '_' => self.identifier(start),
 
@@ -583,9 +584,38 @@ impl Lexer {
             }
         }
 
+        // exponent part — `e`/`E` then an optional sign then one-or-more ascii digits.
+        // Peek-ahead-before-commit so a bare `e` (e.g. `1e`, `1e+`) is never half-consumed:
+        // only advance once we know a full, valid exponent follows. Any number with an
+        // exponent is a float (even `1e3` → 1000.0). No underscores in the exponent.
+        if self.peek() == 'e' || self.peek() == 'E' {
+            // index (relative to the cursor) of the first exponent digit candidate
+            let mut probe = self.pos + 1;
+            if matches!(self.chars.get(probe), Some('+') | Some('-')) {
+                probe += 1;
+            }
+            if self.chars.get(probe).is_some_and(|c| c.is_ascii_digit()) {
+                is_float = true;
+                self.advance(); // consume 'e'/'E'
+                if matches!(self.peek(), '+' | '-') {
+                    self.advance(); // consume the sign
+                }
+                while self.peek().is_ascii_digit() {
+                    self.advance();
+                }
+            }
+            // else: leave the 'e' for identifier()/next_token — no error (matches Python/Rust).
+        }
+
         let word: Vec<char> = self.chars[start..self.pos].to_vec();
+        // Validate underscores over the MANTISSA only — the exponent (its sign + digits) is
+        // underscore-free by construction, and a '+'/'-' sign there must not trip this check.
+        let mantissa_end = word
+            .iter()
+            .position(|&c| c == 'e' || c == 'E')
+            .unwrap_or(word.len());
         // Validate underscores: every '_' must be flanked by a digit on both sides.
-        for (i, &c) in word.iter().enumerate() {
+        for (i, &c) in word[..mantissa_end].iter().enumerate() {
             if c == '_' {
                 let prev_ok = i > 0 && word[i - 1].is_ascii_digit();
                 let next_ok = word.get(i + 1).is_some_and(|n| n.is_ascii_digit());
@@ -605,15 +635,19 @@ impl Lexer {
         }
     }
 
-    /// (1d) Scan a string literal. The opening `"` is already consumed.
+    /// (1d) Scan a string literal. The opening `quote` (`"` or `'`) is already consumed.
     ///
-    /// Munches up to the closing `"`, translating backslash escapes (`\n \t \r \\ \" \0`). An
-    /// unknown escape, or a `\` at end-of-input, is a `LexError`. The stored contents are the
-    /// *processed* text (escapes resolved, quotes stripped); brace interpolation (`{…}`) is a
-    /// separate, later pass in the interpreter — not handled here.
-    fn string(&mut self) -> Result<Token, LexError> {
+    /// Munches up to the matching closing `quote`, translating backslash escapes
+    /// (`\n \t \r \\ \" \' \0 \u{HEX}`). An unknown escape, or a `\` at end-of-input, is a
+    /// `LexError`. Both quote styles produce the same `Token::Str` and share all escape
+    /// handling, so `'…'` and `"…"` are interchangeable: in a single-quoted string `"` is a
+    /// literal char and `\'` escapes the quote; in a double-quoted string `'` is a literal char
+    /// and `\"` escapes the quote (both `\'` and `\"` are accepted in either style). The stored
+    /// contents are the *processed* text (escapes resolved, quotes stripped); brace
+    /// interpolation (`{…}`) is a separate, later pass — not handled here.
+    fn string(&mut self, quote: char) -> Result<Token, LexError> {
         let mut text = String::new();
-        while !self.is_at_end() && self.peek() != '"' {
+        while !self.is_at_end() && self.peek() != quote {
             if self.peek() == '\\' {
                 self.advance(); // consume the backslash
                 if self.is_at_end() {
@@ -626,7 +660,13 @@ impl Lexer {
                     'r' => '\r',
                     '\\' => '\\',
                     '"' => '"',
+                    '\'' => '\'',
                     '0' => '\0',
+                    // `\u{HEX}` — 1-6 hex digits naming a Unicode scalar value.
+                    'u' => {
+                        text.push(self.unicode_escape()?);
+                        continue;
+                    }
                     '\n' | '\r' => {
                         return Err(self.error(
                             "line continuations are not supported; close the string or use \\n",
@@ -646,8 +686,42 @@ impl Lexer {
         if self.is_at_end() {
             return Err(self.error("unterminated string literal"));
         }
-        self.advance(); // consume the closing '"'
+        self.advance(); // consume the closing quote
         Ok(Token::Str(text))
+    }
+
+    /// Scan the body of a `\u{HEX}` escape. The `\u` is already consumed; the cursor sits on
+    /// what must be `{`. Reads 1-6 hex digits naming a Unicode scalar value and returns it.
+    /// Rejects a missing `{`, an empty `{}`, more than 6 hex digits, any non-hex char, an
+    /// unterminated brace, and invalid code points (surrogates D800-DFFF, > 10FFFF).
+    fn unicode_escape(&mut self) -> Result<char, LexError> {
+        if !self.match_char('{') {
+            return Err(self.error("expected '{' after \\u in unicode escape"));
+        }
+        let mut digits = String::new();
+        loop {
+            if self.is_at_end() {
+                return Err(self.error("unterminated unicode escape"));
+            }
+            let c = self.peek();
+            if c == '}' {
+                self.advance();
+                break;
+            }
+            if !c.is_ascii_hexdigit() {
+                return Err(self.error("invalid hex digit in unicode escape"));
+            }
+            if digits.len() == 6 {
+                return Err(self.error("unicode escape too long (max 6 hex digits)"));
+            }
+            digits.push(self.advance());
+        }
+        if digits.is_empty() {
+            return Err(self.error("empty unicode escape"));
+        }
+        let cp = u32::from_str_radix(&digits, 16)
+            .map_err(|e| self.error(&format!("invalid unicode escape: {e}")))?;
+        char::from_u32(cp).ok_or_else(|| self.error("invalid unicode code point"))
     }
 
     // ----- you'll likely add private helpers below as you go -----
@@ -843,6 +917,40 @@ mod tests {
         assert!(tokenize(r#""\q""#).is_err());
     }
 
+    // ----- \u{...} unicode escapes (Task 2) -----
+
+    #[test]
+    fn unicode_escape_basic() {
+        assert_eq!(
+            kinds(r#""\u{41}""#),
+            vec![Token::Str("A".to_string()), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds(r#""\u{e9}""#),
+            vec![Token::Str("é".to_string()), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds(r#""\u{1F600}""#),
+            vec![Token::Str("😀".to_string()), Token::Newline, Token::Eof]
+        );
+        // surrounded by ordinary text
+        assert_eq!(
+            kinds(r#""x\u{41}y""#),
+            vec![Token::Str("xAy".to_string()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn unicode_escape_rejects_malformed() {
+        assert!(tokenize(r#""\u41""#).is_err(), "missing brace");
+        assert!(tokenize(r#""\u{}""#).is_err(), "empty");
+        assert!(tokenize(r#""\u{D800}""#).is_err(), "surrogate");
+        assert!(tokenize(r#""\u{110000}""#).is_err(), ">10FFFF");
+        assert!(tokenize(r#""\u{1234567}""#).is_err(), "7 hex digits");
+        assert!(tokenize(r#""\u{GG}""#).is_err(), "non-hex");
+        assert!(tokenize(r#""\u{41""#).is_err(), "unterminated brace");
+    }
+
     #[test]
     fn trailing_backslash_is_unterminated() {
         // "abc\  with no closing quote
@@ -859,6 +967,51 @@ mod tests {
             .find(|t| t.kind == Token::Ident("z".to_string()))
             .unwrap();
         assert_eq!(z.span.line, 1);
+    }
+
+    // ----- single-quote strings (Task 3) -----
+
+    #[test]
+    fn single_quote_basic() {
+        assert_eq!(
+            kinds("'hello'"),
+            vec![Token::Str("hello".to_string()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn single_quote_equals_double() {
+        // Same escape handling: `\n` in a single-quoted string resolves identically.
+        assert_eq!(kinds(r"'a\nb'"), kinds(r#""a\nb""#));
+        // and the new \u{} escape works in single quotes too
+        assert_eq!(kinds(r"'\u{41}'"), vec![Token::Str("A".to_string()), Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn single_quote_inner_double_literal() {
+        // A `"` inside a single-quoted string is a literal char (no escape needed).
+        assert_eq!(
+            kinds(r#"'say "hi"'"#),
+            vec![Token::Str("say \"hi\"".to_string()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn single_quote_escapes() {
+        // `\'` escapes the closing quote inside a single-quoted string.
+        assert_eq!(
+            kinds(r"'it\'s'"),
+            vec![Token::Str("it's".to_string()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn double_quote_single_literal() {
+        // A `'` inside a double-quoted string is a literal char.
+        assert_eq!(
+            kinds(r#""it's""#),
+            vec![Token::Str("it's".to_string()), Token::Newline, Token::Eof]
+        );
     }
 
     #[test]
@@ -982,6 +1135,47 @@ mod tests {
             kinds("x?"),
             vec![Token::Ident("x".into()), Token::Question, Token::Newline, Token::Eof]
         );
+    }
+
+    // ----- scientific notation (Task 1) -----
+
+    #[test]
+    fn lexes_scientific_notation() {
+        assert_eq!(kinds("1e3"), vec![Token::Float(1000.0), Token::Newline, Token::Eof]);
+        assert_eq!(kinds("1.5e-9"), vec![Token::Float(1.5e-9), Token::Newline, Token::Eof]);
+        assert_eq!(kinds("2E10"), vec![Token::Float(2e10), Token::Newline, Token::Eof]);
+        assert_eq!(kinds("1e+5"), vec![Token::Float(1e5), Token::Newline, Token::Eof]);
+        assert_eq!(kinds("6.022e23"), vec![Token::Float(6.022e23), Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn scientific_trailing_e_not_consumed() {
+        // A bare `e` with no valid exponent must NOT be eaten as part of the number.
+        assert_eq!(
+            kinds("1e"),
+            vec![Token::Int(1), Token::Ident("e".into()), Token::Newline, Token::Eof]
+        );
+        // `1e+` — the `e` falls to identifier(), the `+` to the operator dispatch.
+        assert_eq!(
+            kinds("1e+"),
+            vec![Token::Int(1), Token::Ident("e".into()), Token::Plus, Token::Newline, Token::Eof]
+        );
+        // `1.5e` — float mantissa already committed, then a bare `e`.
+        assert_eq!(
+            kinds("1.5e"),
+            vec![Token::Float(1.5), Token::Ident("e".into()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn scientific_no_exponent_underscores() {
+        // Exponent digit run consumes only ascii digits (no '_'); `1e1_0` -> Float(10.0) then `_0`.
+        assert_eq!(
+            kinds("1e1_0"),
+            vec![Token::Float(10.0), Token::Ident("_0".into()), Token::Newline, Token::Eof]
+        );
+        // regression: hex literal never reaches the exponent block.
+        assert_eq!(kinds("0xFF"), vec![Token::Int(255), Token::Newline, Token::Eof]);
     }
 
     #[test]

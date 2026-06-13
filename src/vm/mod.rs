@@ -13216,6 +13216,18 @@ main()";
         assert_eq!(vm_out, interp_out);
     }
 
+    /// Literals golden: `examples/literals.chz` (scientific-notation floats, `\u{…}` unicode
+    /// escapes, single-quote strings incl. interpolation) byte-identical on the VM, interp, and
+    /// `.expected`. Proves the new lexer forms lex the same for both engines (parity by construction).
+    #[test]
+    fn golden_literals_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/literals.chz");
+        let expected = include_str!("../../examples/literals.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     /// M8-M4 golden: `examples/set.chz` (the set type — literals, membership, algebra, iteration)
     /// byte-identical on the VM, the interpreter, and its `.expected`.
     #[test]
