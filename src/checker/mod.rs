@@ -55,9 +55,12 @@ fn module_label(import: &Import) -> String {
 
 /// `Result`/`Option` are builtin generic types — the `?` operator and the top-level-error logic in
 /// both engines key on these literal names, so a user type that shadows them would collide. Reject
-/// the redefinition at declaration.
+/// the redefinition at declaration. `Iterator` is likewise reserved: as a value type it names the
+/// experimental generator existential (`Ty::Struct("Iterator", [T])`) that `iter_elem` / `.next()`
+/// typing key on, so a user `struct Iterator[T]` would be silently shadowed (and crash at runtime
+/// on a phantom `.next()`).
 fn is_reserved_type(name: &str) -> bool {
-    name == "Result" || name == "Option" || name == "Executor"
+    name == "Result" || name == "Option" || name == "Executor" || name == "Iterator"
 }
 
 /// Prebuilt protocols a user program may use as bounds but must not redeclare (mirrors
@@ -3161,6 +3164,10 @@ impl Checker {
         // errors). Mirrors `check_fn_body`'s `current_ret` handling.
         let declared_ret = ret.map(|t| self.resolve_type(t, body.span)).unwrap_or(Ty::Unknown);
         let saved_ret = std::mem::replace(&mut self.current_ret, declared_ret);
+        // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
+        // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
+        // one. (Closure bodies are single expressions today, so this is a latent-invariant guard.)
+        let saved_yield = self.yield_ty.take();
         self.push_scope();
         let param_tys: Vec<Ty> = params
             .iter()
@@ -3175,6 +3182,7 @@ impl Checker {
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
         self.current_ret = saved_ret;
+        self.yield_ty = saved_yield;
         let ret_ty = match ret {
             Some(t) => {
                 let declared = self.resolve_type(t, body.span);

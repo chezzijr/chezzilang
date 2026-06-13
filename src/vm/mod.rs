@@ -4412,6 +4412,16 @@ impl Vm {
                     return Err(self.err(format!("function '{}' expects {} argument(s), got {}", self.program.protos[proto].name, arity, argc + 1), span));
                 }
                 let home = self.module_objs[cell.module_idx as usize];
+                // Experimental generators — a generator method allocates rather than running (else its
+                // `Op::Yield` would poison the host run with no `generator_next` to drive it).
+                if self.program.protos[proto].is_generator {
+                    let mut gen_args = Vec::with_capacity(argc + 1);
+                    gen_args.push(recv);
+                    gen_args.extend(args);
+                    let g = self.alloc_generator(proto, home, None, gen_args);
+                    self.push(g);
+                    return Ok(());
+                }
                 let base = self.stack.len();
                 self.stack.push(recv);
                 self.stack.extend(args);
@@ -4517,6 +4527,17 @@ impl Vm {
                     if self.program.protos[proto].arity != argc + 1 {
                         // `self` + explicit args.
                         return Err(self.err(format!("function '{}' expects {} argument(s), got {}", self.program.protos[proto].name, self.program.protos[proto].arity, argc + 1), span));
+                    }
+                    // Experimental generators — a generator method allocates rather than running (else
+                    // its `Op::Yield` would poison the host run). Covers both the IC-flatten and the
+                    // re-entrant `run_proto` paths below; never IC-cached (it returns, not push-frame).
+                    if self.program.protos[proto].is_generator {
+                        let mut gen_args = Vec::with_capacity(argc + 1);
+                        gen_args.push(recv);
+                        gen_args.extend(args);
+                        let g = self.alloc_generator(proto, home, None, gen_args);
+                        self.push(g);
+                        return Ok(());
                     }
                     // M19 Phase 6 — fill the method IC so the next call at this site hits the fast path
                     // above (only for the dispatch-loop path: a real `ic`, a registered layout `tid`).
@@ -13764,6 +13785,15 @@ main()";
     fn vm_generator_nested() {
         let src = "fn inner(n: int) -> Iterator[int]:\n    yield n\n    yield n * 10\nfn outer() -> Iterator[int]:\n    for a in inner(1):\n        yield a\n    for b in inner(2):\n        yield b\nfn main():\n    for x in outer():\n        print(x)\nmain()\n";
         assert_eq!(run(src), "1\n10\n2\n20\n");
+    }
+
+    /// A generator declared as a STRUCT METHOD must also allocate-not-run: dispatched through
+    /// `do_method_call`, it returns a suspendable generator (regression — the method path once ran
+    /// the body inline, poisoning the host with a stray `gen_yielding`).
+    #[test]
+    fn vm_generator_struct_method() {
+        let src = "struct C:\n    n: int\n    fn items(self) -> Iterator[int]:\n        yield self.n\n        yield self.n + 1\nfn main():\n    c := C(5)\n    for x in c.items():\n        print(x)\nmain()\n";
+        assert_eq!(run(src), "5\n6\n");
     }
 
     /// A generator yielding heap values (strings) survives GC stress between/within `.next()` calls:

@@ -4507,6 +4507,13 @@ fn iterator_value_unknown_method_rejected() {
 }
 
 #[test]
+fn user_struct_named_iterator_rejected() {
+    // `Iterator` is reserved (it names the generator existential value type); a user `struct
+    // Iterator[T]` would be silently shadowed and crash on a phantom `.next()` — reject it.
+    rejects("struct Iterator[T]:\n    val: T\n", "is reserved");
+}
+
+#[test]
 fn yield_outside_generator_rejected() {
     rejects("yield 1\n", "`yield` can only appear inside a generator function");
 }
