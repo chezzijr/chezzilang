@@ -1329,6 +1329,34 @@ impl MnSched {
         scope_id
     }
 
+    /// Register a fresh trailing scope AND seed its fibers **atomically under one core lock**. Unlike
+    /// `register_scope` followed by a separate `seed` (two locks with a wide gap — `prepare_worker` runs
+    /// in between), this guarantees there is never an instant where the scope is visible (`done < total`,
+    /// `awaiting_builder == false`) with `runnable == 0`. That window is a false-quiesce a SENTINEL helper
+    /// could read via `is_deadlocked` and fault an innocent parked outer sibling — reachable on the
+    /// late-spawn-into-middle path where the inline builder driving the registration is NOT counted in
+    /// `running`. Mirrors [`MnSched::inject`]'s grow+runnable atomicity contract. `workers` are already
+    /// prepared (no fallible/heap work happens inside the lock); each fiber's flat `task_index` is
+    /// `base_index + i`, assigned here under the lock.
+    fn register_scope_seeded(&self, cancel: Arc<AtomicBool>, workers: Vec<ReadyWorker>) -> usize {
+        let total = workers.len();
+        let mut c = self.lock();
+        let base_index = c.slots.len();
+        c.slots.extend((0..total).map(|_| None));
+        let scope_id = c.scopes.len();
+        c.scopes.push(JoinScope { base_index, total, done: 0, body_open: false, awaiting_builder: false, cancel });
+        // A freshly-registered scope has unfinished work — un-latch any stale global `terminate` (see
+        // `register_scope`) so the inline owner that drains it is not stopped on the stale flag.
+        c.terminate = false;
+        // Seed in the SAME lock: bump `runnable` and queue every fiber before the lock is dropped, so the
+        // scope and its runnable fibers become visible together (no `runnable == 0` gap).
+        self.runnable.fetch_add(total, Ordering::Relaxed);
+        for (i, w) in workers.into_iter().enumerate() {
+            c.global.push_back(w.into_fiber(base_index + i, scope_id));
+        }
+        scope_id
+    }
+
     /// Lock a worker's local run queue (lock class **B**), tolerating poison.
     fn lock_local(&self, wid: usize) -> std::sync::MutexGuard<'_, LocalQ> {
         self.locals[wid].lock().unwrap_or_else(|e| e.into_inner())
@@ -6036,7 +6064,7 @@ impl Vm {
             // (coop runs nursery tasks at the join too; late spawns post-date the nested `inner()` join,
             // so they have no live inner peer → parity holds). Falls through to the normal task path:
             // `run_mn_nursery` routes them to the HELD sched (if an outer scope is still enlisted) as a
-            // fresh TRAILING scope — `register_scope` is append-only so the flat slots stay contiguous,
+            // fresh TRAILING scope — `register_scope_seeded` is append-only so the flat slots stay contiguous,
             // and it un-latches a stale `terminate` so the inline owner runs the late task instead of
             // stopping on the prior-scopes-all-done flag — else to a fresh outermost sched once no sched
             // is held. No clobber of the held sched, no panic, no drop. (Cross-nursery flat scheduler — #3.)
@@ -6113,7 +6141,7 @@ impl Vm {
         // flat sched is HELD in `mn_enlist_sched` because an OUTER nursery was early-enlisted and has not
         // joined yet. This is a late `spawn:` into a non-outermost nursery (charge #3): the leftover late
         // tasks reach `JoinNursery` after the enlist drained the original vec. They must run on the HELD
-        // sched as a fresh TRAILING scope (`register_scope` is append-only, so the flat slot ranges stay
+        // sched as a fresh TRAILING scope (`register_scope_seeded` is append-only, so the flat slot ranges stay
         // contiguous) — NOT via `run_mn_nursery_outermost`, which would build a fresh sched and CLOBBER
         // the held one, leaving a later `join_enlisted_scope(scope_id)` to index a stale scope_id into the
         // fresh (len-1) sched → `index out of bounds` panic. Reusing the nested path is correct: the late
@@ -6201,16 +6229,19 @@ impl Vm {
     /// sub-range. Farms NO helpers (runs inline on the worker thread that called it, reusing `self.wid`).
     fn run_mn_nursery_nested(&mut self, sched: &Arc<MnSched>, tasks: Vec<PendingCall>) -> Result<(), RuntimeError> {
         let snap = self.ensure_snapshot();
-        // This nursery's OWN scope.
-        let total = tasks.len();
+        // This nursery's OWN scope. Prepare every worker FIRST (the fallible/heap-heavy step — touches no
+        // scheduler state), THEN register the scope and seed its fibers atomically. Doing the prepare
+        // BEFORE registration is what makes `register_scope_seeded` race-free: there is no window where the
+        // scope exists with `runnable == 0` (the old `register_scope` → prepare_worker → `seed` ordering
+        // left exactly that gap, which on the late-spawn-into-middle path — inline builder not counted in
+        // `running` — let a SENTINEL helper fault an innocent parked outer sibling). On a `prepare_worker`
+        // Err no scope is registered (clean unwind).
         let cancel = Arc::new(AtomicBool::new(false));
-        let scope_id = sched.register_scope(total, Arc::clone(&cancel));
-        let base_index = sched.lock().scopes[scope_id].base_index;
-        let mut fibers = Vec::with_capacity(total);
-        for (i, t) in tasks.into_iter().enumerate() {
-            fibers.push(self.prepare_worker(t)?.into_fiber(base_index + i, scope_id));
+        let mut workers = Vec::with_capacity(tasks.len());
+        for t in tasks {
+            workers.push(self.prepare_worker(t)?);
         }
-        sched.seed(fibers);
+        let scope_id = sched.register_scope_seeded(Arc::clone(&cancel), workers);
         let wid = self.wid;
         let mut shell = self.spawn_shell(&snap, sched, &cancel);
         shell.mn_worker_loop(sched, wid, scope_id);
@@ -16655,6 +16686,31 @@ main()
             Ok(Ok(_)) => {}
             Ok(Err(e)) => assert!(e.message.contains("deadlock"), "contended case must succeed or deadlock-fault, got: {}", e.message),
             Err(_) => panic!("hung — contended cross-nursery must complete or deadlock-fault, never hang/panic"),
+        }
+    }
+
+    /// Cross-nursery flat scheduler — late-spawn-into-middle with a PARKED outer receiver. Guards the
+    /// `register_scope_seeded` atomicity: a non-atomic register→seed of the late trailing scope opened a
+    /// window where a SENTINEL helper could read (scope incomplete, awaiting_builder=false, runnable==0,
+    /// outer recv parked) as a false quiesce and spuriously fault the parked receiver. Single sender /
+    /// single receiver → no contention → deterministic, so VM (`--parallel`) MUST equal the cooperative
+    /// engine. Run many times to shake the race. (Hardening for the auto-task panel's blocker.)
+    #[test]
+    fn parallel_cross_nursery_late_spawn_parked_matches_coop() {
+        let src = include_str!("../../examples/parallel_cross_nursery_late_spawn_parked.chz");
+        let expected = include_str!("../../examples/parallel_cross_nursery_late_spawn_parked.expected");
+        let coop = run(src);
+        assert_eq!(coop, expected, "coop must match expected");
+        for _ in 0..12 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let s = src.to_string();
+            std::thread::spawn(move || {
+                let _ = tx.send(run_capture_parallel(&s));
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(r) => assert_eq!(r.expect("parallel run (no spurious deadlock on the parked outer receiver)"), expected),
+                Err(_) => panic!("hung — late-spawn-into-middle with a parked receiver regressed"),
+            }
         }
     }
 

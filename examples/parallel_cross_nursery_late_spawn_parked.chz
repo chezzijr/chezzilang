@@ -1,0 +1,31 @@
+# Cross-nursery late-spawn into a MIDDLE nursery, with a PARKED outer receiver (M:N / --parallel).
+#
+# Regression guard for the register->seed atomicity of the late-spawn trailing scope. `main`'s O parks
+# on `c.recv()` until the inline body sends; meanwhile `mid()` does a late `spawn:` (M2) AFTER inner(),
+# which registers a fresh trailing scope on the HELD sched. If that register+seed were non-atomic, a
+# SENTINEL helper could read the gap (scope incomplete, awaiting_builder=false, runnable==0, O parked)
+# as a false quiesce and spuriously fault the parked O. Single sender / single receiver → no contention
+# → output is deterministic and MUST match the cooperative engine.
+fn inner():
+    spawn:
+        print("inner")
+
+fn mid():
+    parallel:
+        spawn:
+            print("M1")
+        inner()
+        spawn:                       # late spawn into a MIDDLE nursery -> fresh trailing scope
+            print("M2")
+
+fn main():
+    c := Channel[int]()
+    parallel:
+        spawn:
+            x := c.recv()            # O parks here until the inline body sends
+            print("O {x}")
+        mid()
+        c.send(1)                    # wakes the parked O
+    print("done")
+
+main()
