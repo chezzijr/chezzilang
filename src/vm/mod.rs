@@ -110,6 +110,9 @@ const Q_GENERIC: u8 = 2;
 const VM_STACK_BYTES: usize = 256 * 1024 * 1024;
 
 /// One activation record.
+// `Clone` is only used to snapshot a generator's suspended frames (experimental); the hot call
+// paths never clone a frame.
+#[derive(Clone)]
 struct CallFrame {
     proto: ProtoId,
     ip: usize,
@@ -149,8 +152,95 @@ struct CallFrame {
     call_span: Span,
 }
 
+/// Experimental generators — a generator's private execution context. While the generator runs its
+/// frames/stack are live in the `Vm`; between `.next()` calls they are parked here so it resumes
+/// exactly where it suspended. Base/`cur_base` indices are relative to this private `stack` (the
+/// generator always runs from a base-0 stack), so resuming needs no rebasing.
+#[derive(Clone, Default)]
+struct GenCtx {
+    frames: Vec<CallFrame>,
+    stack: Vec<Value>,
+    call_depth: usize,
+    cur_base: usize,
+    handlers: Vec<Handler>,
+}
+
+/// Experimental generators — lifecycle of a generator object.
+#[derive(Clone)]
+enum GenState {
+    /// Created but not yet started: holds the call args until the first `.next()` builds the frame.
+    Pending(Vec<Value>),
+    /// Started and suspended at a `yield`; its frames/stack live in [`GeneratorCore::ctx`].
+    Suspended,
+    /// Body returned / fell off the end (or faulted). Every further `.next()` yields `None`.
+    Done,
+}
+
+/// Experimental generators — the heap payload of an `Obj::Generator`. A one-shot coroutine driven
+/// synchronously by `.next()`: each call resumes [`Vm::generator_next`] until the next `Op::Yield`
+/// (returns `Some(v)`) or the body ends (`None`, state → `Done`). VM-only (the interpreter rejects
+/// `yield`).
+#[derive(Clone)]
+pub(crate) struct GeneratorCore {
+    proto: ProtoId,
+    home: GcRef,
+    closure: Option<GcRef>,
+    state: GenState,
+    ctx: GenCtx,
+}
+
+// Hand-rolled so `CallFrame`/`Handler`/`Deferred` need not derive `Debug` (keeps the hot call
+// record free of an unused derive); prints lifecycle + frame count, not the whole parked stack.
+impl std::fmt::Debug for GeneratorCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match &self.state {
+            GenState::Pending(_) => "Pending",
+            GenState::Suspended => "Suspended",
+            GenState::Done => "Done",
+        };
+        f.debug_struct("GeneratorCore")
+            .field("proto", &self.proto)
+            .field("state", &state)
+            .field("parked_frames", &self.ctx.frames.len())
+            .finish()
+    }
+}
+
+impl GeneratorCore {
+    /// GC roots held while the generator is suspended: its home + backing closure, every object on
+    /// its parked stack, each parked frame's home/closure/deferred roots, and any not-yet-consumed
+    /// `Pending` call args. Reachable only through the generator object, so missing one is a
+    /// use-after-free. (When the generator is running, `ctx` is empty — its frames/stack are the
+    /// live `Vm` roots — so this returns just home/closure + nothing from the empty ctx.)
+    fn gc_roots(&self) -> Vec<GcRef> {
+        let mut out = vec![self.home];
+        if let Some(c) = self.closure {
+            out.push(c);
+        }
+        if let GenState::Pending(args) = &self.state {
+            out.extend(args.iter().filter_map(|v| if let Value::Obj(h) = v { Some(*h) } else { None }));
+        }
+        for v in &self.ctx.stack {
+            if let Value::Obj(h) = v {
+                out.push(*h);
+            }
+        }
+        for f in &self.ctx.frames {
+            out.push(f.home);
+            if let Some(c) = f.closure {
+                out.push(c);
+            }
+            for d in &f.deferred {
+                out.extend(d.roots());
+            }
+        }
+        out
+    }
+}
+
 /// A call registered by `defer`, with its receiver/arguments already evaluated. The held values are
 /// GC roots while the deferred call is pending.
+#[derive(Clone)]
 enum Deferred {
     /// `defer f(args)` — invoke the callable value with the args (`invoke_value`).
     Call { callee: Value, args: Vec<Value>, span: Span },
@@ -427,6 +517,21 @@ struct Vm {
     /// requeue this fiber (round-robin) instead of treating its `run_until` return as a finish.
     /// Set at the safepoint, consumed in [`Vm::run_one_fiber`]; mutually exclusive with `suspend`.
     yield_now: bool,
+    /// Experimental generators — transient signal: an `Op::Yield` set this, asking the generator's
+    /// private `run_until` to return control to the host `.next()` call (the yielded value is on the
+    /// stack top). Reset by `generator_next` before each resume; never true on the cooperative host
+    /// stack, so it leaves the frozen engine byte-identical. Not swapped by `swap_ctx` (it is only
+    /// ever live across the single nested `run_until` that `generator_next` drives).
+    gen_yielding: bool,
+    /// Experimental generators — saved HOST contexts, one per generator currently executing (LIFO for
+    /// nested generators). A running generator's frames/stack live in the live `Vm` fields; the host
+    /// it suspended is parked here. `collect` roots every entry so the host's object graph survives a
+    /// GC triggered inside a generator body. Empty whenever no generator runs — and at every
+    /// fiber-switch point, since generators run `guarded` and so never park mid-body.
+    gen_host_ctx: Vec<GenCtx>,
+    /// Experimental generators — handles of generators whose bodies are currently executing (LIFO).
+    /// `collect` marks each so the generator object survives to have its state written back.
+    active_generators: Vec<GcRef>,
     /// D5 owe #3 (Path C) — this M:N worker shell's worker id (its `locals[wid]` slot), set at the top
     /// of [`Vm::mn_worker_loop`]. Read by [`Vm::demote_recv_block`] so a demoted worker's raw
     /// replacement thread reuses the same `wid` (safe: a demoted worker never touches `locals[wid]`
@@ -1854,6 +1959,9 @@ impl Vm {
             native_reentry: 0,
             reds: 0,           // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
             yield_now: false,  // D3
+            gen_yielding: false, // experimental generators
+            gen_host_ctx: Vec::new(),
+            active_generators: Vec::new(),
             wid: 0,            // D5 owe #3 (Path C) — set in mn_worker_loop
             demoted: false,    // D5 owe #3 (Path C)
             scheduler_stack: Vec::new(),
@@ -1943,6 +2051,100 @@ impl Vm {
         let r = f(self);
         self.native_reentry -= 1;
         r
+    }
+
+    // ----- experimental generators (VM-only) -----
+
+    /// Swap the live execution context (frames/stack/depth/base/handlers) with a parked [`GenCtx`].
+    /// Smaller sibling of [`Vm::swap_ctx`]: a generator shares the host heap (like a cooperative
+    /// fiber, decision A) and cannot open nurseries/spawn (checker-forbidden), so none of the
+    /// heap-keyed or nursery state moves.
+    fn swap_gen_ctx(&mut self, ctx: &mut GenCtx) {
+        std::mem::swap(&mut self.frames, &mut ctx.frames);
+        std::mem::swap(&mut self.stack, &mut ctx.stack);
+        std::mem::swap(&mut self.call_depth, &mut ctx.call_depth);
+        std::mem::swap(&mut self.cur_base, &mut ctx.cur_base);
+        std::mem::swap(&mut self.handlers, &mut ctx.handlers);
+    }
+
+    /// Allocate a not-yet-started generator object over a generator proto + its call args. Calling a
+    /// `yield`-ing function lands here instead of running the body (see `do_call`/`invoke_value`).
+    fn alloc_generator(&mut self, proto: ProtoId, home: GcRef, closure: Option<GcRef>, args: Vec<Value>) -> Value {
+        let core = GeneratorCore { proto, home, closure, state: GenState::Pending(args), ctx: GenCtx::default() };
+        Value::Obj(self.heap.alloc(Obj::Generator(Box::new(core))))
+    }
+
+    /// Resume a generator until its next `yield` (→ `Some(v)`) or until its body ends (→ `None`,
+    /// state `Done`). Driven intrinsically by `.next()` (see `do_method_call`). The generator runs in
+    /// its own private base-0 context swapped into the live `Vm`; the host context is parked in
+    /// `gen_host_ctx` (GC-rooted) for the duration. Runs `guarded`, so a would-be blocking op inside a
+    /// generator faults `deadlock` rather than parking the host.
+    fn generator_next(&mut self, h: GcRef, span: Span) -> Result<Value, RuntimeError> {
+        // Take the generator's lifecycle state + parked context out of the heap object. `state` is
+        // left as `Done` and `ctx` as empty; the real state is written back after the run. An
+        // already-`Done` generator short-circuits to `None`.
+        let (proto, home, closure, mut gen_ctx, state) = {
+            let Obj::Generator(g) = self.heap.get_mut(h) else {
+                return Err(self.err("`.next()` on a non-generator value".to_string(), span));
+            };
+            if matches!(g.state, GenState::Done) {
+                return Ok(self.alloc_enum("Option", "None", Vec::new()));
+            }
+            let state = std::mem::replace(&mut g.state, GenState::Done);
+            let ctx = std::mem::take(&mut g.ctx);
+            (g.proto, g.home, g.closure, ctx, state)
+        };
+
+        // Park the host context (rooted via `gen_host_ctx`) and install the generator's private
+        // context into the live `Vm`. Two swaps: host out to a temp, then the generator in.
+        let mut host = GenCtx::default();
+        self.swap_gen_ctx(&mut host); // self.* now default-empty; `host` holds the real host context
+        self.swap_gen_ctx(&mut gen_ctx); // self.* now the generator's (suspended) context; gen_ctx empty
+        self.gen_host_ctx.push(host);
+        self.active_generators.push(h);
+
+        // First `.next()` builds the initial frame over the pending args (private stack starts empty,
+        // so the frame lands at base 0). A resumed generator's frames are already in `self`.
+        let first_call = matches!(state, GenState::Pending(_));
+        let push_res = if let GenState::Pending(args) = state {
+            self.push_frame(proto, home, closure, args, true, false, span)
+        } else {
+            Ok(())
+        };
+
+        // Run to the next suspension / end (guarded: no parking inside a generator).
+        self.gen_yielding = false;
+        let run = push_res.and_then(|()| self.guarded(|s| s.run_until(0)));
+        let yielded = self.gen_yielding;
+        self.gen_yielding = false;
+
+        // Pull the generator's now-updated context back out and restore the host.
+        let mut new_ctx = GenCtx::default();
+        self.swap_gen_ctx(&mut new_ctx); // new_ctx = generator's current context; self.* now empty
+        let mut host = self.gen_host_ctx.pop().expect("generator host context");
+        self.swap_gen_ctx(&mut host); // self.* = host restored
+        self.active_generators.pop();
+        let _ = first_call;
+
+        // A fault inside the generator: leave it `Done` (already set) with an empty ctx, propagate.
+        run?;
+
+        if yielded {
+            // The yielded value sits on the generator's private stack top. Park the rest to resume.
+            let v = new_ctx.stack.pop().expect("yielded value on the generator stack");
+            if let Obj::Generator(g) = self.heap.get_mut(h) {
+                g.ctx = new_ctx;
+                g.state = GenState::Suspended;
+            }
+            Ok(self.alloc_enum("Option", "Some", vec![v]))
+        } else {
+            // Body returned / fell off → exhausted. Drop the (drained) context.
+            if let Obj::Generator(g) = self.heap.get_mut(h) {
+                g.ctx = GenCtx::default();
+                g.state = GenState::Done;
+            }
+            Ok(self.alloc_enum("Option", "None", Vec::new()))
+        }
     }
 
     /// If `v` is an unhandled error (`Err(..)`/`None`) reaching the top level, build the runtime
@@ -2226,6 +2428,13 @@ impl Vm {
                     self.reds -= 1;
                 }
             }
+            // Experimental generators — an `Op::Yield` (handled last iteration) asked us to suspend:
+            // hand control back to the host `.next()` with the generator's frames/stack intact. The
+            // yielded value sits on the stack top for `generator_next` to take. Only ever true inside
+            // the private `run_until` that `generator_next` drives, so the host loop is unaffected.
+            if self.gen_yielding {
+                return Ok(());
+            }
             let fi = self.frames.len() - 1;
             let pid = self.frames[fi].proto;
             let ip = self.frames[fi].ip;
@@ -2438,6 +2647,28 @@ impl Vm {
                 work.extend(task.roots());
             }
         }
+        // Experimental generators — while a generator body runs in the live `Vm` fields above, the
+        // host(s) it suspended are parked in `gen_host_ctx` (their frames/stack are not in `self`), so
+        // root them here exactly like a parked fiber. The running generators' own handles are roots so
+        // their objects survive to be written back (each generator's PARKED ctx, if any, is empty
+        // while it runs, so `children` adds nothing extra). Both are empty outside a `generator_next`.
+        for host in &self.gen_host_ctx {
+            for v in &host.stack {
+                if let Value::Obj(h) = v {
+                    work.push(*h);
+                }
+            }
+            for f in &host.frames {
+                work.push(f.home);
+                if let Some(c) = f.closure {
+                    work.push(c);
+                }
+                for d in &f.deferred {
+                    work.extend(d.roots());
+                }
+            }
+        }
+        work.extend(self.active_generators.iter().copied());
         // Live executors (C5 / A2): their queued work must survive to the program-exit auto-drain
         // even when no in-program handle remains.
         work.extend(self.executors.iter().copied());
@@ -2850,6 +3081,18 @@ impl Vm {
                 let is_struct =
                     matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Struct { .. }));
                 self.push(Value::Bool(is_struct));
+            }
+            Op::IsGenerator => {
+                let v = self.pop();
+                let is_gen =
+                    matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Generator(_)));
+                self.push(Value::Bool(is_gen));
+            }
+            Op::Yield => {
+                // Experimental generator suspend. The yielded value is already on the stack top; flag
+                // the request and let `run_until` return to the host `.next()` after this op (the
+                // frame `ip` has already advanced past the `Yield`, so resume continues after it).
+                self.gen_yielding = true;
             }
             Op::IsMap => {
                 let v = self.pop();
@@ -3674,6 +3917,15 @@ impl Vm {
                 } else if argc != arity {
                     return Err(self.err(format!("closure expects {arity} argument(s), got {argc}"), span));
                 }
+                // Experimental generators — calling a generator function does NOT run its body; it
+                // allocates a suspendable generator object over the args. (Arity was just checked.)
+                if self.program.protos[proto].is_generator {
+                    let args: Vec<Value> = self.stack.split_off(at); // the argc args
+                    self.stack.pop(); // drop the callee left beneath them
+                    let g = self.alloc_generator(proto, home, clo, args);
+                    self.push(g);
+                    return Ok(());
+                }
                 // Drop the callee from beneath the args (argc-element memmove; `Value: Copy`).
                 self.stack.copy_within(at.., at - 1);
                 self.stack.pop();
@@ -3730,11 +3982,18 @@ impl Vm {
                     Callee::Func { proto, home } => {
                         // `&...name` (no clone): `check_arity` only formats the message on mismatch.
                         self.check_arity("function", &self.program.protos[proto].name, self.program.protos[proto].arity, argc, span)?;
+                        // Experimental generators — allocate, don't run (see `do_call`'s fast path).
+                        if self.program.protos[proto].is_generator {
+                            return Ok(self.alloc_generator(proto, home, None, args));
+                        }
                         self.run_proto(proto, home, None, args, true, false, span)
                     }
                     Callee::Closure { proto, home } => {
                         if argc != self.program.protos[proto].arity {
                             return Err(self.err(format!("closure expects {} argument(s), got {argc}", self.program.protos[proto].arity), span));
+                        }
+                        if self.program.protos[proto].is_generator {
+                            return Ok(self.alloc_generator(proto, home, Some(h), args));
                         }
                         self.run_proto(proto, home, Some(h), args, true, false, span)
                     }
@@ -4186,6 +4445,16 @@ impl Vm {
             if self.suspend.is_some() {
                 return Ok(()); // B1: `recv` parked this fiber and re-rooted the receiver itself.
             }
+            self.push(result);
+            return Ok(());
+        }
+        // Experimental generators — `.next()` is intrinsic (resumes the coroutine), so a generator
+        // result drives `for x in g():` through the same lazy `next()` step as a struct iterator.
+        if matches!(self.heap.get(h), Obj::Generator(_)) {
+            if method != "next" || !args.is_empty() {
+                return Err(self.err(format!("a generator has no method '{method}' (only `next()`)"), span));
+            }
+            let result = self.generator_next(h, span)?;
             self.push(result);
             return Ok(());
         }
@@ -6278,6 +6547,12 @@ impl Vm {
                     }
                     WireValue::Enum { ty: ty.clone(), variant: variant.clone(), payload: out }
                 }
+                // Experimental generators cannot cross an OS-thread heap boundary — their parked
+                // frames reference this heap. The checker marks them non-sendable, so this is a
+                // defensive fault (an erased path that smuggled one into a `spawn`/channel).
+                Obj::Generator(_) => {
+                    return Err(self.err("a generator cannot be sent across tasks".to_string(), Span { line: 0, col: 0 }));
+                }
             },
         })
     }
@@ -6712,6 +6987,9 @@ impl Vm {
             | Obj::Listener(_) => {
                 SnapValue::Wire(self.to_wire(v).expect("str / channel / shared / atomic / executor / socket is always sendable"))
             }
+            // Experimental generators are not sendable and are never legal as a module global crossing
+            // to an M:N worker — reaching here means one was smuggled past the checker.
+            Obj::Generator(_) => unreachable!("a generator cannot be snapshotted (not sendable)"),
         }
     }
 
@@ -8778,6 +9056,7 @@ impl Vm {
                 Obj::Executor(_) => "Executor",
                 Obj::Socket(_) => "Socket",
                 Obj::Listener(_) => "Listener",
+                Obj::Generator(_) => "generator",
             },
         }
     }
@@ -8873,6 +9152,7 @@ impl Vm {
                 Obj::Listener(core) => {
                     Ok(format!("Listener({})", if core.listener.lock().unwrap().is_some() { "open" } else { "closed" }))
                 }
+                Obj::Generator(_) => Ok("<generator>".to_string()),
             },
         }
     }
@@ -9105,6 +9385,8 @@ impl Vm {
             Obj::Channel(_) | Obj::Shared(_) | Obj::Atomic(_) | Obj::Executor(_) | Obj::Socket(_) | Obj::Listener(_) => {
                 out.push_str(&self.display_guarded(Value::Obj(h), depth)?);
             }
+            // Experimental generators stringify opaquely (no protocol hook).
+            Obj::Generator(_) => out.push_str("<generator>"),
         }
         Ok(())
     }
@@ -12554,7 +12836,7 @@ main()
     /// home module (the test protos never read globals). Mirrors how `do_spawn_block` shapes a task.
     fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         let sp = Span { line: 1, col: 1 };
-        let proto = op::Proto { name: "task".into(), arity: 0, n_slots: 0, lines: vec![sp; code.len()], code, has_implicit_nursery: false };
+        let proto = op::Proto { name: "task".into(), arity: 0, n_slots: 0, lines: vec![sp; code.len()], code, has_implicit_nursery: false, is_generator: false };
         let program = Program { protos: vec![proto], ..empty_program() };
         let mut vm = Vm::new(Arc::new(program));
         let home = vm.heap.alloc(Obj::Module { name: "<test>".into(), slots: Vec::new(), index: Default::default() });
@@ -13436,6 +13718,60 @@ main()";
         let out = run(src);
         assert_eq!(out, "inner-none\nother\n");
         assert_eq!(out, crate::interp::run_capture(src).expect("interp"));
+    }
+
+    // ----- experimental generators (VM-only) -----
+
+    /// Milestone: a 3-yield counting generator drives a `for` loop, printing each value.
+    #[test]
+    fn vm_generator_basic_for_loop() {
+        let src = "fn count() -> Iterator[int]:\n    yield 1\n    yield 2\n    yield 3\nfn main():\n    for x in count():\n        print(x)\nmain()\n";
+        assert_eq!(run(src), "1\n2\n3\n");
+    }
+
+    /// The interpreter is the frozen reference engine and rejects `yield` (VM-only feature).
+    #[test]
+    fn interp_rejects_generators() {
+        let src = "fn count() -> Iterator[int]:\n    yield 1\nfn main():\n    for x in count():\n        print(x)\nmain()\n";
+        let err = crate::interp::run_capture(src).expect_err("interp must reject generators");
+        assert!(err.message.contains("not supported by the interpreter"), "got: {}", err.message);
+    }
+
+    /// Driving a generator by explicit `.next()` yields `Some(v)` per yield, then `None` forever.
+    #[test]
+    fn vm_generator_explicit_next() {
+        let src = "fn two() -> Iterator[int]:\n    yield 10\n    yield 20\nfn main():\n    g := two()\n    print(g.next())\n    print(g.next())\n    print(g.next())\n    print(g.next())\nmain()\n";
+        assert_eq!(run(src), "Some(10)\nSome(20)\nNone\nNone\n");
+    }
+
+    /// A generator whose `yield` is never reached drains immediately: the `for` body never runs.
+    #[test]
+    fn vm_generator_never_yields() {
+        let src = "fn empty() -> Iterator[int]:\n    if false:\n        yield 1\nfn main():\n    print(\"before\")\n    for x in empty():\n        print(x)\n    print(\"after\")\nmain()\n";
+        assert_eq!(run(src), "before\nafter\n");
+    }
+
+    /// Captured args mutate across yields; an infinite generator terminates via `break`.
+    #[test]
+    fn vm_generator_captured_args_and_break() {
+        let src = "fn count_from(n: int) -> Iterator[int]:\n    while true:\n        yield n\n        n = n + 1\nfn main():\n    for x in count_from(10):\n        if x > 13:\n            break\n        print(x)\nmain()\n";
+        assert_eq!(run(src), "10\n11\n12\n13\n");
+    }
+
+    /// Nested generators: an outer generator's body drives an inner generator, each with its own
+    /// suspended context. Proves the private-context swap + host-rooting compose under recursion.
+    #[test]
+    fn vm_generator_nested() {
+        let src = "fn inner(n: int) -> Iterator[int]:\n    yield n\n    yield n * 10\nfn outer() -> Iterator[int]:\n    for a in inner(1):\n        yield a\n    for b in inner(2):\n        yield b\nfn main():\n    for x in outer():\n        print(x)\nmain()\n";
+        assert_eq!(run(src), "1\n10\n2\n20\n");
+    }
+
+    /// A generator yielding heap values (strings) survives GC stress between/within `.next()` calls:
+    /// the suspended frames + yielded objects must stay rooted across collections.
+    #[test]
+    fn vm_generator_survives_gc_stress() {
+        let src = "fn words() -> Iterator[str]:\n    yield \"alpha\"\n    yield \"beta\"\n    yield \"gamma\"\nfn main():\n    for w in words():\n        print(w)\nmain()\n";
+        assert_eq!(run_capture_stress(src), "alpha\nbeta\ngamma\n");
     }
 
     // ----- golden parity -----

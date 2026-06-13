@@ -293,6 +293,7 @@ impl Compiler {
     /// Compile a named function / method to its own proto. `params` occupy slots `0..arity`.
     fn compile_fn(&mut self, decl: &FnDecl, _is_method: bool) -> Result<ProtoId, CompileError> {
         let mut fc = FnComp::new(decl.name.clone(), decl.params.len(), false);
+        fc.is_generator = decl.is_generator;
         for p in &decl.params {
             fc.add_local(p.name.clone());
         }
@@ -326,6 +327,7 @@ impl Compiler {
             code,
             lines,
             has_implicit_nursery: fc.has_implicit_nursery,
+            is_generator: fc.is_generator,
         });
         pid
     }
@@ -461,12 +463,13 @@ impl Compiler {
                 fc.emit(Op::Return, stmt.span);
                 Ok(())
             }
-            // Real codegen (compile operand + `Op::Yield`) lands in Stage 4 together with the
-            // runtime generator object. Until then a `yield` cannot be compiled.
-            StmtKind::Yield(_) => Err(CompileError {
-                message: "yield: generator codegen not yet implemented".to_string(),
-                span: stmt.span,
-            }),
+            // `yield <expr>` — evaluate the operand and suspend (experimental generators). The value
+            // is left on the stack for `Op::Yield`'s runtime handler to hand back to `.next()`.
+            StmtKind::Yield(e) => {
+                self.compile_expr(fc, e)?;
+                fc.emit(Op::Yield, stmt.span);
+                Ok(())
+            }
             StmtKind::Break => {
                 // Drain the current iteration's loop-body defers (and any nested block defers) before
                 // jumping out, so they run at the `break`, not at function return.
@@ -842,6 +845,15 @@ impl Compiler {
             fc.emit(Op::IsStruct, span);
             let struct_mode_slot = fc.add_hidden(); // true ⇒ struct-iterator path (next())
             fc.emit(Op::SetLocal(struct_mode_slot), span);
+            // A generator result (experimental, VM-only) answers `next()` intrinsically, so it rides
+            // the exact same lazy step as a struct iterator: force `struct_mode` true when the iterand
+            // is a generator. (Kept off the seq path, which would wrongly snapshot it to a list.)
+            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit(Op::IsGenerator, span);
+            let not_gen = fc.emit_jump(Op::JumpIfFalse(0), span);
+            fc.emit(Op::True, span);
+            fc.emit(Op::SetLocal(struct_mode_slot), span);
+            fc.patch_jump(not_gen);
             // The loop variable, plus the seq-path bookkeeping slots (allocated unconditionally; the
             // lazy paths simply never touch them) and the lazy paths' `Option` result slot.
             let item_slot = fc.add_local(vars[0].clone());
@@ -2206,6 +2218,8 @@ struct FnComp {
     /// op) because it contains a bare `spawn`. Stamped onto the [`Proto`] in `finish`; the VM's
     /// `do_return` JOINS this nursery at the body's `return`/end.
     has_implicit_nursery: bool,
+    /// Experimental — this proto is a generator body (its `Op::Yield`s suspend the generator).
+    is_generator: bool,
 }
 
 impl FnComp {
@@ -2225,6 +2239,7 @@ impl FnComp {
             defer_scopes: 0,
             nursery_scopes: 0,
             has_implicit_nursery: false,
+            is_generator: false,
         }
     }
 

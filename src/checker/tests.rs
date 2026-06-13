@@ -4498,6 +4498,22 @@ fn yield_outside_generator_rejected() {
 }
 
 #[test]
+fn generator_defer_rejected() {
+    rejects(
+        "fn g() -> Iterator[int]:\n    defer print(0)\n    yield 1\n",
+        "`defer` is not supported inside a generator",
+    );
+}
+
+#[test]
+fn generator_spawn_rejected() {
+    rejects(
+        "fn g() -> Iterator[int]:\n    parallel:\n        spawn print(0)\n    yield 1\n",
+        "`parallel:` is not supported inside a generator",
+    );
+}
+
+#[test]
 fn generator_bare_return_ok() {
     // A bare `return` inside a generator stops it early — legal.
     ok("fn g() -> Iterator[int]:\n    yield 1\n    return\n    yield 2\n");

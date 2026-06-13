@@ -298,6 +298,7 @@ fn parser_rules_match_fns() {
         ("subpattern", "parse_subpattern"),
         ("tuplePattern", "parse_tuple_pattern"),
         ("returnStmt", "parse_return"),
+        ("yieldStmt", "parse_yield"),
         ("deferStmt", "parse_defer"),
         ("parallelStmt", "parse_parallel"),
         ("spawnStmt", "parse_spawn"),

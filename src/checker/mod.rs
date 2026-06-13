@@ -1612,6 +1612,38 @@ impl Checker {
         }
     }
 
+    /// Experimental generators do not support the structured-concurrency / cleanup statements whose
+    /// state (nurseries, frame defers) the suspendable generator context does not manage. Reject them
+    /// with a clear message rather than mis-execute. Recurses through nested control-flow blocks but
+    /// not into nested `fn` definitions (those have their own generator status).
+    fn check_generator_restrictions(&mut self, body: &[Stmt]) {
+        for s in body {
+            match &s.kind {
+                StmtKind::Defer(_) => self.error(s.span, "`defer` is not supported inside a generator (experimental)"),
+                StmtKind::Spawn(_) => self.error(s.span, "`spawn` is not supported inside a generator (experimental)"),
+                StmtKind::Parallel { .. } => self.error(s.span, "`parallel:` is not supported inside a generator (experimental)"),
+                StmtKind::Wait { .. } => self.error(s.span, "`wait:` is not supported inside a generator (experimental)"),
+                StmtKind::If { branches, else_block } => {
+                    for (_, b) in branches {
+                        self.check_generator_restrictions(b);
+                    }
+                    if let Some(b) = else_block {
+                        self.check_generator_restrictions(b);
+                    }
+                }
+                StmtKind::For { body, .. } | StmtKind::While { body, .. } => {
+                    self.check_generator_restrictions(body)
+                }
+                StmtKind::Match { arms, .. } => {
+                    for a in arms {
+                        self.check_generator_restrictions(&a.body);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// `yield <expr>` — legal only inside a generator function (one whose return type is
     /// `Iterator[T]`); the operand must be assignable to the element type `T`.
     fn check_yield(&mut self, e: &Expr, span: Span) {
@@ -1650,6 +1682,9 @@ impl Checker {
         } else {
             None
         };
+        if decl.is_generator {
+            self.check_generator_restrictions(&decl.body);
+        }
         let saved_yield = std::mem::replace(&mut self.yield_ty, new_yield_ty);
         // A nested function checked while pass-1 is inferring an *outer* function's return must not
         // feed the outer `collected_rets` — this body's `return`s are diagnosed, not collected.
