@@ -1,0 +1,10 @@
+thousand: 1000.0
+avogadro: 602200000000000027262976.0
+tiny: 0.0000000015
+big: 20000000000.0
+letter: A
+accent: é
+emoji: 😀
+single: 7
+inner "double" is literal
+escaped quote: it's here
