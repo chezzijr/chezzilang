@@ -400,6 +400,16 @@ branch names) is in the git log.
   v1 = scalars only (structs/callbacks/varargs/userdata/`char*`-ownership deferred); extern stays OUT
   of `is_blocking` (a slow C call runs inline). Golden `examples/ffi.chz` (cos/sqrt/strlen) two-engine
   parity-tested + `cargo test cffi/conformance/golden_ffi` green; +`libffi`/`libloading` deps.
+  **Post-review blocker fixes** (merge `0a5938d`, after adversarial reject): (1) `nil` is now a
+  return-only type — rejected as a param (the backend's `ctype_of` has no nil case, so accepting it
+  panicked every engine on a *checked* program); (2) compiler + interp now resolve type aliases
+  **program-globally** (matching the checker), so a cross-module alias used bare in an `extern` sig no
+  longer panics / silently-voids the return — backends use `and_then` (None ⇒ void) not `.expect`;
+  (3) a `str`-declared return that comes back `NULL` now **faults** instead of silently yielding `nil`
+  (was a static non-null-`str` soundness hole). +5 regression tests (checker nil-param, vm+interp
+  cross-module-alias + explicit-`-> nil`-return, cffi NULL-str-fault). Merged over `wait_select`
+  (2 union conflicts: `<compoundStmt>` grammar + compiler imports); re-verified on merged HEAD —
+  **1790 pass, conformance 7, clippy clean**; post-merge-gate verdict **ship**.
 - ✅ **Match or-patterns + nested nullary variants** (2026-06-13) — one new AST `Pattern::Or(Vec<Pattern>)`,
   no new opcodes. `p1 | p2 | ...` at the top of an arm AND in sub-positions (`(1|2, x)`, `Some(a|b)`);
   every alternative must bind the same variables (checker-enforced, clear error otherwise); a full enum
