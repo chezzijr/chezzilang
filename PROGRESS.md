@@ -130,10 +130,16 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   (its never-fused `% … == 0` int `Eq` left `values_equal_guarded`), `fib` marginal, others flat (fused /
   alloc / hash-bound — as scoped). Gotcha pinned by test: the int `Eq` fast path **replicates the generic
   lossy `as_f64==as_f64`** (so `2^53 == 2^53+1` stays true), not exact `x==y`, to keep parity. 6 new guards,
-  1613 green, clippy clean. See `docs/benchmarks.md` "M19 Tier-2 … quickening, v1". **Next quickening
-  increment** (not started): extend the same side-table mechanism to **`CallMethod`** to *unify* the
-  field/method caches under one adaptive form (`GetIndex`/`SetIndex` already got their Int-key fast path
-  in #5 below, so they are covered). ✅ 5. **map/list index specialization** (`mod.rs`
+  1613 green, clippy clean. See `docs/benchmarks.md` "M19 Tier-2 … quickening, v1". ✅ **CallMethod
+  adaptive LANDED (2026-06-13): `poly_method` −33% (6.0× → 4.28× CPython)** — the method-call IC's
+  single `MethodIcCell` is widened to an N-way (4-way) `MethodIcSite` with the binop quickening's
+  one-way sticky-deopt: a bounded-megamorphic site (≤4 receiver types) HITS a way per type and flattens
+  instead of refill-thrashing through a per-miss `StructDef` clone; a 5th distinct type latches `sticky`
+  and goes slow (clone-free: borrows `Arc<Program>.structs` instead of cloning the `StructDef`). Side
+  table still int-only (tids/proto/module-idx), no `GcRef` — heap-independent, parity by construction
+  (interp has no IC). New `poly_method` bench + 5 guards + golden `examples/poly_method.chz`; 1838 green.
+  This *unifies* the field/method caches under one adaptive form (`GetIndex`/`SetIndex` already got their
+  Int-key fast path in #5 below, so they are covered). ✅ 5. **map/list index specialization** (`mod.rs`
   `GetIndex`/`SetIndex`) — **landed (Int-key fast path + inline dispatch): `list` −4%, `map` neutral**
   (hash-probe-bound). The remaining `map` win shipped as its own lever — ✅ **denser int-keyed map/set
   index LANDED (2026-06-13): `map` −36% (2.68× → ~1.7× CPython)** — `Vec<usize>` candidate list → inline

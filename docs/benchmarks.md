@@ -584,3 +584,56 @@ clear win (**~−26% absolute**). The slightly higher ratio than the branch's `~
 variance (σ ≈ 6%) plus the heavier merged base; the conclusion (Vec-alloc elimination is the bulk of
 the win, `values_equal`/probe is the next suspect) is unchanged. Merged tree: 1832 tests green,
 conformance 7/7, clippy `--all-targets -D warnings` clean.
+
+## M19 — N-way polymorphic method-call IC (CALLMETHOD ADAPTIVE) — 2026-06-13
+
+New **`poly_method`** bench (`benches/chz/poly_method.chz`: a protocol `Shape.area()` implemented by
+four distinct struct types, a heterogeneous `list[Shape]` walked at ONE `.area()` call site, ~4M
+method calls) — a genuinely **megamorphic** `CallMethod` site. Measured baseline on the merged HEAD
+(`2a934a8`): **1.886 s ± 0.003 / 6.0× CPython** — *worse* than the monomorphic `struct` bench, because
+the existing single-cell `MethodIcCell` holds ONE `tid`. A rotating-4-type site misses on **every**
+call, falling to the slow path which (a) re-resolved the dispatch and (b) cloned the whole `StructDef`
+(its `fields` Vec + `methods` HashMap) per miss.
+
+**Lever (two complementary fixes, landed together).**
+- **Fix B — N-way polymorphic IC.** The single `MethodIcCell` per site becomes an N-way
+  `MethodIcSite` (`[MethodIcCell; 4]` + a one-way `sticky` latch). On a miss, fill the next free way;
+  once all 4 ways are occupied AND a 5th distinct `tid` arrives, latch `sticky` so the site stops
+  probing the ways and goes straight to the slow path — exactly the binop quickening's `Q_GENERIC`
+  one-way deopt (a megamorphic site never thrashes). A bounded-megamorphic site (≤4 types) now HITS a
+  way for every receiver type and **flattens** (`push_frame_in_place`, no clone, no re-entrant
+  `run_proto`). Each way is `tid`- + arity-re-guarded on every hit, so a wrong body can never dispatch.
+- **Fix A — clone-free megamorphic slow path.** The slow path resolves `(proto, module_idx)` by
+  borrowing `prog.structs.get(name)` (bumping the cheap read-only `Arc<Program>` refcount to release
+  the `&mut self` borrow) instead of `.cloned()`-ing the whole `StructDef`. Helps the truly-megamorphic
+  / sticky-generic (>4 types) tail that Fix B still sends slow.
+
+The side table holds only ints (tids / proto ids / u32 module indices) — no `GcRef` — so it stays
+heap-independent like `field_ic`/`method_ic`/`quicken`: never snapshotted, never swapped in `swap_ctx`.
+
+**Measured** (same machine; `hyperfine --warmup 2 -N -r 3`, serial):
+
+| bench          | before        | after          | result |
+|----------------|--------------:|---------------:|--------|
+| `poly_method`  | 1.886 s / 6.0× CPython | **1.268 s / 4.28×** | **−33% absolute** |
+| `struct` (monomorphic) | ~456 ms | ~456–467 ms (min touches baseline) | flat / noise (has **no** method calls — field-IC bound, untouched) |
+| `fib` / `loop` / `list` / `map` / `str` / `primes` | — | — | unaffected (the IC only changes struct-method dispatch) |
+
+**The lever moved its predicted target.** The 33% win is overwhelmingly **Fix B**: the rotating-4
+site now flatten-HITS instead of refill-thrashing through the per-miss `StructDef` clone. Fix A only
+trims the 1-in-5 sticky tail (the bench's 5th type is not in this 4-type-dominant workload; the golden
+`examples/poly_method.chz` adds a 5th `Line` type to exercise the sticky slow path under parity). The
+`struct` bench is monomorphic with **zero method calls** (pure field read/write), so it cannot move —
+its ±10 ms is pure run-to-run noise (min = baseline mean). Two-engine parity is preserved by
+construction (the frozen interpreter has no IC; the IC only changes *which path* computes an identical
+result) — `diff` of VM vs `--interp` on the bench workload is byte-identical.
+
+**Behavior-preserving:** five new VM/parity guards — `mega_dispatch_correctness_parity` (4 types, right
+body per type across repeated calls, VM==interp), `poly_ic_all_ways_distinct_bodies` (every way a
+distinct body; RED on a way-0-only match), `poly_ic_overflow_goes_sticky_generic` (5+ types, correct
+dispatch through overflow), `poly_ic_site_latches_sticky_on_5th_type` (white-box: the 5th type latches
+`sticky` with all 4 ways filled; RED if sticky never sets), `structdef_clone_free_slow_path_parity`
+(megamorphic + a function-typed FIELD call, guards the clone-removal), plus the golden
+`examples/poly_method.chz`/`.expected`. Full suite **1838 green**, conformance **7/7**, clippy
+`--all-targets -D warnings` clean. **Next suspect for `poly_method`:** the residual ~4.3× is per-op
+dispatch + the `for`-loop iterator protocol overhead around the now-fast dispatch, not the IC.

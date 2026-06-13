@@ -313,13 +313,13 @@ impl IcCell {
     const EMPTY: IcCell = IcCell { idx: u32::MAX, tid: TID_NONE };
 }
 
-/// M19 Phase 6 — a single method-call inline-cache cell. `tid` is the struct layout id the cached
+/// M19 Phase 6 — one *way* of a method-call inline cache. `tid` is the struct layout id the cached
 /// dispatch was resolved for (the sole liveness gate, like [`IcCell`]); a hit requires
-/// `tid != TID_NONE && tid == recv.tid`, so an empty cell or a different receiver type re-resolves.
+/// `tid != TID_NONE && tid == recv.tid`, so an empty way or a different receiver type re-resolves.
 /// `proto` is the resolved method body (program-global, stable across heaps); `module_idx` recovers
 /// the method's home module from the *current* heap's `module_objs` on the fast path — held as an
-/// index, NOT a `GcRef`, so the cell stays heap-independent (invisible to GC / snapshots / `swap_ctx`,
-/// exactly like the field IC). Module-member / core-type calls never fill a cell (they don't match
+/// index, NOT a `GcRef`, so the way stays heap-independent (invisible to GC / snapshots / `swap_ctx`,
+/// exactly like the field IC). Module-member / core-type calls never fill a way (they don't match
 /// the `Obj::Struct` guard) and so always take the slow path.
 #[derive(Clone, Copy)]
 struct MethodIcCell {
@@ -330,6 +330,33 @@ struct MethodIcCell {
 
 impl MethodIcCell {
     const EMPTY: MethodIcCell = MethodIcCell { tid: TID_NONE, proto: 0, module_idx: 0 };
+}
+
+/// Number of ways in the polymorphic method-call IC. A bounded-megamorphic site (e.g. a
+/// `list[Shape]` walked at one `.area()` call across N≤4 distinct struct types) keeps every receiver
+/// type cached so each call HITS a way and flattens — no monomorphic-refill thrash. Four covers the
+/// common protocol fan-out; a 5th+ distinct type tips the site sticky-generic (see [`MethodIcSite`]).
+const METHOD_IC_WAYS: usize = 4;
+
+/// M19 — an N-way *polymorphic* method-call inline cache, one per `CallMethod` call site (indexed by
+/// the baked `ic` id). Generalises the old single [`MethodIcCell`] to [`METHOD_IC_WAYS`] tid-keyed
+/// ways with the binop quickening's sticky-deopt discipline: fill the next free way on a miss; once
+/// all ways are occupied AND a further distinct `tid` arrives, latch `sticky` so the site stops
+/// probing the ways and goes straight to the (clone-free) slow path — mirroring `Q_GENERIC` (one-way,
+/// never clears, so a polymorphic site never thrashes). Holds only ints (tids / proto ids / u32
+/// module indices), no `GcRef`, so it stays heap-independent like `field_ic`/`method_ic`/`quicken`:
+/// never snapshotted, never swapped in [`Vm::swap_ctx`]. Each way is tid+arity re-guarded on every
+/// hit, so a wrong body can never dispatch.
+#[derive(Clone, Copy)]
+struct MethodIcSite {
+    ways: [MethodIcCell; METHOD_IC_WAYS],
+    /// One-way latch: set when a 5th distinct `tid` overflows a full set of ways. Once sticky, the
+    /// fast-path probe is skipped entirely (every receiver type beyond the 4 cached goes slow).
+    sticky: bool,
+}
+
+impl MethodIcSite {
+    const EMPTY: MethodIcSite = MethodIcSite { ways: [MethodIcCell::EMPTY; METHOD_IC_WAYS], sticky: false };
 }
 
 struct Vm {
@@ -359,12 +386,12 @@ struct Vm {
     /// Cooperative fibers share one `Vm` but run sequentially (no race); `--parallel` workers each
     /// own a separate `Vm` (no race). Each cell self-verifies, so sharing is always sound.
     field_ic: Vec<IcCell>,
-    /// M19 Phase 6 — per-call-site method inline caches, indexed by the `ic` id baked into
-    /// `CallMethod` ops (dense `0..program.method_ic_sites`). Holds proto ids + module indices, not
-    /// `GcRef`s, so it carries no heap state: never snapshotted, never swapped in [`Vm::swap_ctx`].
-    /// Same sharing argument as `field_ic` — sequential cooperative fibers / per-worker `Vm`s, each
-    /// cell tid-guarded so it self-verifies.
-    method_ic: Vec<MethodIcCell>,
+    /// M19 Phase 6 / N-way poly — per-call-site method inline caches, indexed by the `ic` id baked
+    /// into `CallMethod` ops (dense `0..program.method_ic_sites`). Each site is an N-way
+    /// [`MethodIcSite`] holding proto ids + module indices, not `GcRef`s, so it carries no heap state:
+    /// never snapshotted, never swapped in [`Vm::swap_ctx`]. Same sharing argument as `field_ic` —
+    /// sequential cooperative fibers / per-worker `Vm`s, each way tid-guarded so it self-verifies.
+    method_ic: Vec<MethodIcSite>,
     /// M19 Tier-2 — adaptive opcode quickening (PEP 659) state, one byte per program instruction,
     /// indexed by site `quicken_base[pid] + ip`. The un-fused generic binop arms (`Add..GtEq` reached
     /// by stack operands; `Eq`/`NotEq` always) specialize to an int/int fast path behind a deopt
@@ -2063,7 +2090,7 @@ struct OffloadReq {
 impl Vm {
     fn new(program: Arc<Program>) -> Self {
         let field_ic = vec![IcCell::EMPTY; program.field_ic_sites as usize];
-        let method_ic = vec![MethodIcCell::EMPTY; program.method_ic_sites as usize];
+        let method_ic = vec![MethodIcSite::EMPTY; program.method_ic_sites as usize];
         // M19 Tier-2 quickening: prefix-sum the per-proto code lengths into `quicken_base`, and size
         // `quicken` to the program's total instruction count (one Q_COLD cell per site). Cheap — one
         // pass at startup, which has ~11× headroom vs CPython.
@@ -4573,38 +4600,51 @@ impl Vm {
         let Value::Obj(h) = recv else {
             return Err(self.err(format!("type {} has no method '{method}'", self.type_name(recv)), span));
         };
-        // M19 Phase 6 — method-call inline-cache fast path (struct methods only). A hit on a matching
-        // `tid` collapses the `program.structs` clone + name-keyed `def.methods` probe to one int
-        // compare AND flattens the call: `[recv, args…]` go on the stack and the method frame is
-        // installed in place, so the running `run_until` executes the body and its `Return` pushes the
-        // result — no re-entrant `run_proto`. Only the dispatch loop reaches here (real `ic`); the
-        // arity guard re-runs (cheap) so a hit can never enter a frame with the wrong slot count.
+        // M19 Phase 6 / N-way poly — method-call inline-cache fast path (struct methods only). Scan
+        // the site's ways for a way whose cached `tid` matches the receiver layout: a hit collapses the
+        // `program.structs` clone + name-keyed `def.methods` probe to a short int-compare scan AND
+        // flattens the call: `[recv, args…]` go on the stack and the method frame is installed in place,
+        // so the running `run_until` executes the body and its `Return` pushes the result — no re-entrant
+        // `run_proto`. A megamorphic-but-bounded site (≤4 distinct receiver types) hits a way for each,
+        // so it never thrashes the monomorphic refill. Only the dispatch loop reaches here (real `ic`);
+        // the arity guard re-runs per hit (cheap) so a hit can never enter a frame with the wrong slot
+        // count, and the tid re-compare on every probe bars a wrong body. A `sticky` site (overflowed
+        // past 4 types) skips the probe and falls straight through to the slow path.
         if ic != NO_IC {
-            let cell = self.method_ic[ic as usize];
-            if cell.tid != TID_NONE
+            let site = self.method_ic[ic as usize];
+            if !site.sticky
                 && let Obj::Struct { tid, .. } = self.heap.get(h)
-                && *tid == cell.tid
             {
-                let proto = cell.proto;
-                let arity = self.program.protos[proto].arity;
-                if arity != argc + 1 {
-                    return Err(self.err(format!("function '{}' expects {} argument(s), got {}", self.program.protos[proto].name, arity, argc + 1), span));
+                let recv_tid = *tid;
+                let mut hit: Option<MethodIcCell> = None;
+                for way in &site.ways {
+                    if way.tid != TID_NONE && way.tid == recv_tid {
+                        hit = Some(*way);
+                        break;
+                    }
                 }
-                let home = self.module_objs[cell.module_idx as usize];
-                // Experimental generators — a generator method allocates rather than running (else its
-                // `Op::Yield` would poison the host run with no `generator_next` to drive it).
-                if self.program.protos[proto].is_generator {
-                    let mut gen_args = Vec::with_capacity(argc + 1);
-                    gen_args.push(recv);
-                    gen_args.extend(args);
-                    let g = self.alloc_generator(proto, home, None, gen_args);
-                    self.push(g);
-                    return Ok(());
+                if let Some(cell) = hit {
+                    let proto = cell.proto;
+                    let arity = self.program.protos[proto].arity;
+                    if arity != argc + 1 {
+                        return Err(self.err(format!("function '{}' expects {} argument(s), got {}", self.program.protos[proto].name, arity, argc + 1), span));
+                    }
+                    let home = self.module_objs[cell.module_idx as usize];
+                    // Experimental generators — a generator method allocates rather than running (else its
+                    // `Op::Yield` would poison the host run with no `generator_next` to drive it).
+                    if self.program.protos[proto].is_generator {
+                        let mut gen_args = Vec::with_capacity(argc + 1);
+                        gen_args.push(recv);
+                        gen_args.extend(args);
+                        let g = self.alloc_generator(proto, home, None, gen_args);
+                        self.push(g);
+                        return Ok(());
+                    }
+                    let base = self.stack.len();
+                    self.stack.push(recv);
+                    self.stack.extend(args);
+                    return self.push_frame_in_place(proto, home, None, base, span);
                 }
-                let base = self.stack.len();
-                self.stack.push(recv);
-                self.stack.extend(args);
-                return self.push_frame_in_place(proto, home, None, base, span);
             }
         }
         // Higher-order list methods (`map`/`filter`/`fold`) call a closure per element, which runs
@@ -4700,9 +4740,17 @@ impl Vm {
                 self.do_call(argc, span)
             }
             Obj::Struct { name, fields, tid, .. } => {
-                let def = self.program.structs.get(name.as_ref()).cloned().ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
-                if let Some(&proto) = def.methods.get(method) {
-                    let home = self.module_objs[def.module_idx];
+                // Fix A — resolve `(proto, module_idx)` WITHOUT cloning the whole StructDef (its
+                // `fields` Vec + `methods` HashMap). On a megamorphic / sticky-generic site this slow
+                // path runs per call, so the per-miss StructDef clone dwarfed the dispatch itself. We
+                // bump the cheap `Arc<Program>` refcount (read-only, never alias-mutated) so the
+                // immutable `structs` borrow is released before the later `&mut self` calls.
+                let prog = Arc::clone(&self.program);
+                let def = prog.structs.get(name.as_ref()).ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
+                let resolved = def.methods.get(method).copied();
+                let def_module_idx = def.module_idx;
+                if let Some(proto) = resolved {
+                    let home = self.module_objs[def_module_idx];
                     if self.program.protos[proto].arity != argc + 1 {
                         // `self` + explicit args.
                         return Err(self.err(format!("function '{}' expects {} argument(s), got {}", self.program.protos[proto].name, self.program.protos[proto].arity, argc + 1), span));
@@ -4718,10 +4766,23 @@ impl Vm {
                         self.push(g);
                         return Ok(());
                     }
-                    // M19 Phase 6 — fill the method IC so the next call at this site hits the fast path
-                    // above (only for the dispatch-loop path: a real `ic`, a registered layout `tid`).
+                    // M19 N-way poly — fill the next free way so the next call at this site hits the fast
+                    // path above (only for the dispatch-loop path: a real `ic`, a registered layout
+                    // `tid`). When all ways are occupied AND this `tid` is new, latch `sticky` so the
+                    // site stops probing the (full) ways and goes straight here, mirroring the binop
+                    // quickening's one-way `Q_GENERIC` deopt — a megamorphic site never thrashes.
                     if ic != NO_IC && tid != TID_NONE {
-                        self.method_ic[ic as usize] = MethodIcCell { tid, proto, module_idx: def.module_idx as u32 };
+                        let site = &mut self.method_ic[ic as usize];
+                        if !site.sticky {
+                            let cell = MethodIcCell { tid, proto, module_idx: def_module_idx as u32 };
+                            if let Some(free) = site.ways.iter_mut().find(|w| w.tid == TID_NONE) {
+                                *free = cell;
+                            } else {
+                                // All ways occupied and `tid` is distinct from every one of them (else
+                                // the fast path would have hit) — the site is megamorphic; go sticky.
+                                site.sticky = true;
+                            }
+                        }
                         // Flatten: install the frame in place and let the running `run_until` execute it
                         // (mirrors the IC fast path + the `Op::Call` flatten). The re-entrant callers
                         // pass NO_IC and so keep the synchronous `run_proto` path below.
@@ -11026,6 +11087,116 @@ mod tests {
         assert_eq!(run(src), "4006\n");
     }
 
+    // ---- M19 — N-way polymorphic method-call IC (CALLMETHOD ADAPTIVE) correctness guards ----
+    // The single `MethodIcCell` per site is widened to a small N-way poly cache: a megamorphic site
+    // (a `list[Shape]` walked at one `.area()` call) must HIT a way for each distinct receiver `tid`
+    // — never thrash the monomorphic refill, never dispatch a wrong body. Each way is tid+arity
+    // re-guarded on every hit (a way can never enter a frame with the wrong slot count or body). A
+    // 5th+ distinct tid sets a one-way sticky-generic bit so the site stops probing the ways and goes
+    // straight to the (clone-free) slow path, mirroring the binop quickening's `Q_GENERIC`.
+
+    #[test]
+    fn mega_dispatch_correctness_parity() {
+        // A `Shape` protocol with `.area()` on FOUR distinct struct types (distinct layouts/tids).
+        // A heterogeneous `list[Shape]` is walked at ONE call site, repeatedly (each type hit many
+        // times). The right body must dispatch per type across repeated calls; VM == interp.
+        let src = "protocol Shape:\n    fn area(self) -> int\n\
+                   struct Sq:\n    s: int\n\n    fn area(self) -> int:\n        return self.s * self.s\n\
+                   struct Rect:\n    w: int\n    h: int\n\n    fn area(self) -> int:\n        return self.w * self.h\n\
+                   struct Tri:\n    b: int\n    hh: int\n\n    fn area(self) -> int:\n        return self.b * self.hh / 2\n\
+                   struct Circ:\n    r: int\n\n    fn area(self) -> int:\n        return self.r + self.r\n\
+                   fn total(shapes: list[Shape]) -> int:\n    acc := 0\n    for s in shapes:\n        acc = acc + s.area()\n    return acc\n\
+                   shapes := []\nshapes.push(Sq(3))\nshapes.push(Rect(2, 4))\nshapes.push(Tri(4, 5))\nshapes.push(Circ(3))\n\
+                   out := 0\ni := 0\nwhile i < 8:\n    out = out + total(shapes)\n    i = i + 1\nprint(out)\n";
+        // per pass: 9 + 8 + 10 + 6 = 33 ; *8 = 264
+        assert_eq!(run_parity(src), "264\n");
+    }
+
+    #[test]
+    fn poly_ic_all_ways_distinct_bodies() {
+        // Four distinct tids each map to a DIFFERENT body returning a tid-distinguishing constant.
+        // Every way fills, then each type is re-called: each must still return its OWN body's value,
+        // not a stale neighbour way's. A broken way-match (compare only way[0].tid) returns way-0's
+        // body for the 2nd/3rd/4th types → wrong sum → this fails.
+        let src = "protocol Tag:\n    fn id(self) -> int\n\
+                   struct A:\n    n: int\n\n    fn id(self) -> int:\n        return 1\n\
+                   struct B:\n    n: int\n\n    fn id(self) -> int:\n        return 2\n\
+                   struct C:\n    n: int\n\n    fn id(self) -> int:\n        return 4\n\
+                   struct D:\n    n: int\n\n    fn id(self) -> int:\n        return 8\n\
+                   fn sum(xs: list[Tag]) -> int:\n    acc := 0\n    for x in xs:\n        acc = acc + x.id()\n    return acc\n\
+                   xs := []\nxs.push(A(0))\nxs.push(B(0))\nxs.push(C(0))\nxs.push(D(0))\n\
+                   out := 0\ni := 0\nwhile i < 5:\n    out = out + sum(xs)\n    i = i + 1\nprint(out)\n";
+        // per pass 1+2+4+8 = 15 ; *5 = 75 (a stale-way bug would smear the bits)
+        assert_eq!(run_parity(src), "75\n");
+    }
+
+    #[test]
+    fn poly_ic_overflow_goes_sticky_generic() {
+        // FIVE+ distinct struct types at ONE site overflow the N(=4)-way cache. The 5th+ must resolve
+        // via the slow path (sticky-generic), never a wrong way. All five bodies must still dispatch
+        // correctly across repeated calls; VM == interp.
+        let src = "protocol Tag:\n    fn id(self) -> int\n\
+                   struct A:\n    n: int\n\n    fn id(self) -> int:\n        return 1\n\
+                   struct B:\n    n: int\n\n    fn id(self) -> int:\n        return 10\n\
+                   struct C:\n    n: int\n\n    fn id(self) -> int:\n        return 100\n\
+                   struct D:\n    n: int\n\n    fn id(self) -> int:\n        return 1000\n\
+                   struct E:\n    n: int\n\n    fn id(self) -> int:\n        return 10000\n\
+                   struct F:\n    n: int\n\n    fn id(self) -> int:\n        return 100000\n\
+                   fn sum(xs: list[Tag]) -> int:\n    acc := 0\n    for x in xs:\n        acc = acc + x.id()\n    return acc\n\
+                   xs := []\nxs.push(A(0))\nxs.push(B(0))\nxs.push(C(0))\nxs.push(D(0))\nxs.push(E(0))\nxs.push(F(0))\n\
+                   out := 0\ni := 0\nwhile i < 6:\n    out = out + sum(xs)\n    i = i + 1\nprint(out)\n";
+        // per pass 111111 ; *6 = 666666
+        assert_eq!(run_parity(src), "666666\n");
+    }
+
+    #[test]
+    fn poly_ic_site_latches_sticky_on_5th_type() {
+        // White-box: after a 5-type megamorphic site runs, the site's 4 ways are all occupied AND the
+        // `sticky` latch is set (so further calls skip way-probing — the anti-thrash guarantee). Pins
+        // the deopt mechanism directly, not just the output. A monomorphic site stays non-sticky.
+        let src = "protocol Tag:\n    fn id(self) -> int\n\
+                   struct A:\n    n: int\n\n    fn id(self) -> int:\n        return 1\n\
+                   struct B:\n    n: int\n\n    fn id(self) -> int:\n        return 2\n\
+                   struct C:\n    n: int\n\n    fn id(self) -> int:\n        return 3\n\
+                   struct D:\n    n: int\n\n    fn id(self) -> int:\n        return 4\n\
+                   struct E:\n    n: int\n\n    fn id(self) -> int:\n        return 5\n\
+                   fn sum(xs: list[Tag]) -> int:\n    acc := 0\n    for x in xs:\n        acc = acc + x.id()\n    return acc\n\
+                   xs := []\nxs.push(A(0))\nxs.push(B(0))\nxs.push(C(0))\nxs.push(D(0))\nxs.push(E(0))\n\
+                   print(sum(xs))\n";
+        let tokens = lexer::tokenize(src).unwrap();
+        let module = parser::parse(tokens).unwrap();
+        let program = crate::compiler::compile_module_standalone(&module).unwrap();
+        let mut vm = Vm::new(Arc::new(program));
+        vm.run().expect("run");
+        assert_eq!(vm.out, "15\n");
+        // Exactly one method-call site (the `x.id()` in `sum`), and it must have gone sticky with all
+        // 4 ways filled by the first four distinct tids.
+        let sticky_sites = vm.method_ic.iter().filter(|s| s.sticky).count();
+        assert_eq!(sticky_sites, 1, "expected the megamorphic `id` site to latch sticky");
+        let sticky = vm.method_ic.iter().find(|s| s.sticky).unwrap();
+        assert!(sticky.ways.iter().all(|w| w.tid != TID_NONE), "all 4 ways should be occupied before sticky");
+    }
+
+    #[test]
+    fn structdef_clone_free_slow_path_parity() {
+        // A megamorphic site (>4 types → sticky-generic slow path) PLUS a function-typed FIELD call
+        // `recv.f(args)` (the fields-fallback arm that previously read the cloned Obj). Removing the
+        // per-miss StructDef clone must not break either. VM == interp.
+        let src = "protocol Tag:\n    fn id(self) -> int\n\
+                   struct A:\n    n: int\n\n    fn id(self) -> int:\n        return 1\n\
+                   struct B:\n    n: int\n\n    fn id(self) -> int:\n        return 2\n\
+                   struct C:\n    n: int\n\n    fn id(self) -> int:\n        return 3\n\
+                   struct D:\n    n: int\n\n    fn id(self) -> int:\n        return 4\n\
+                   struct E:\n    n: int\n\n    fn id(self) -> int:\n        return 5\n\
+                   struct H:\n    op: fn(int) -> int\n\
+                   fn sum(xs: list[Tag]) -> int:\n    acc := 0\n    for x in xs:\n        acc = acc + x.id()\n    return acc\n\
+                   xs := []\nxs.push(A(0))\nxs.push(B(0))\nxs.push(C(0))\nxs.push(D(0))\nxs.push(E(0))\n\
+                   double := fn(x: int) -> int: x * 2\nh := H(double)\n\
+                   out := 0\ni := 0\nwhile i < 3:\n    out = out + sum(xs) + h.op(i)\n    i = i + 1\nprint(out)\n";
+        // per pass sum=15 ; h.op(i)=2*i -> i=0:15+0, i=1:15+2, i=2:15+4 => 45+6 = 51
+        assert_eq!(run_parity(src), "51\n");
+    }
+
     #[test]
     fn inlined_hot_ops_path_matches_step() {
         // M19 Phase 7 — `run_until` dispatches the hottest ops (GetLocal/SetLocal, the superinstrs,
@@ -14573,6 +14744,20 @@ main()";
     fn golden_literals_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/literals.chz");
         let expected = include_str!("../../examples/literals.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Polymorphic method-IC golden: `examples/poly_method.chz` (a `list[Shape]` walked at one
+    /// `.area()` call site across FIVE distinct struct types — four fill the N-way method-call IC,
+    /// the fifth overflows it to the sticky-generic slow path) byte-identical on the VM, the
+    /// interpreter, and its `.expected`. Pins that the N-way IC is behavior-preserving (the interp,
+    /// which has no IC, is the oracle).
+    #[test]
+    fn golden_poly_method_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/poly_method.chz");
+        let expected = include_str!("../../examples/poly_method.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
