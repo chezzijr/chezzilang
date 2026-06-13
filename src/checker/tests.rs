@@ -4545,6 +4545,14 @@ fn extern_named_after_variant_rejected() {
 }
 
 #[test]
+fn extern_named_after_enum_type_ok() {
+    // An enum TYPE name is NOT callable in either backend (only its variants are), so an extern
+    // sharing the enum's type name is reachable and must be ACCEPTED — symmetric with a plain
+    // `fn Tree` alongside `enum Tree`. Only struct names and variant names are real collisions.
+    ok("extern \"libc.so.6\":\n    fn Tree(x: int) -> int\n\nenum Tree:\n    Leaf\n    Node\n");
+}
+
+#[test]
 fn extern_type_alias_param_ok() {
     // A transparent alias resolving to a marshallable scalar is accepted (check runs on resolved Ty).
     ok("type Len = int\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Len\n\nprint(strlen(\"hi\"))\n");

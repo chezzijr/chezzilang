@@ -932,10 +932,11 @@ impl Checker {
         // only populated on unix (the `#[cfg(unix)]` arm above); on other targets the extern was
         // already rejected wholesale, so the sweep is a no-op.
         for (name, span) in &extern_names {
-            if self.structs.contains_key(name)
-                || self.variants.contains_key(name)
-                || self.enums.contains_key(name)
-            {
+            // Struct names and enum *variant* names register backend-resolved constructors; an
+            // enum *type* name does not (it is not callable in either engine), so it is NOT a
+            // collision — `extern fn Foo` alongside `enum Foo` resolves to the extern, exactly as
+            // a plain `fn Foo` alongside `enum Foo` does.
+            if self.structs.contains_key(name) || self.variants.contains_key(name) {
                 self.error(
                     *span,
                     format!("'{name}' is a builtin/reserved name and cannot be an extern fn"),
