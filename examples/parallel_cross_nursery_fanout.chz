@@ -1,0 +1,30 @@
+# Cross-nursery flat scheduler (M:N / --parallel ONLY) — a MULTI-TASK inner nursery.
+# `inner` spawns TWO fibers (I1, I2); the outer `parallel:` spawns sibling O and calls inner(). I1
+# needs O (recv b after O sends b); I2 needs O (recv c after O sends c); O needs I1 (recv a after I1
+# sends a). This exercises the deadlock-predicate race the single-task case A could not: with >1 inner
+# task, helper workers exist, so the early-enlist of O MUST happen before any worker can run an inner
+# fiber to a park — else the global deadlock predicate fires before O is enlisted. Still M:N-only
+# (faults deadlock on cooperative `run`/`--interp` — the cooperative flatten is a later commit).
+fn inner(a: Channel[int], b: Channel[int], c: Channel[int]):
+    spawn:
+        a.send(1)
+        y := b.recv()
+        print("I1 got {y}")
+    spawn:
+        z := c.recv()
+        print("I2 got {z}")
+
+fn main():
+    a := Channel[int]()
+    b := Channel[int]()
+    c := Channel[int]()
+    parallel:
+        spawn:
+            x := a.recv()
+            b.send(x)
+            c.send(99)
+            print("O got {x}")
+        inner(a, b, c)
+    print("done")
+
+main()

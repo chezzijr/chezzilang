@@ -339,13 +339,16 @@ Critical + Important findings before the completion claim.
   (`ChanState`) so the park-gap re-check is TOCTOU-free. See PROGRESS.md.
 - **M-C implicit nurseries** — shipped (2026-06-12): bare `spawn` legal anywhere; every function body /
   module top level joins its tasks at `return`/end. See `docs/concurrency.md §10`.
-- **Cross-nursery wakeups** ([§11](concurrency.md)) — **partly resolved; one narrow case open** (both
-  engines). D0's `wake_on_send` drains *every* scheduler level, so cross-level **wake-marking** and the
-  **common case** (outer consumer, inner producer that finishes) work. The residual: a fiber whose
-  unblocker is an *outer sibling the inner scheduler can't run* — it's marked ready but can't be *run*
-  until the inner nursery joins, so it faults `deadlock`. A true fix needs a **flat/global scheduler**
-  (partly conflicts with inner-joins-first scoping). (Backstory: "mooted by B3" real-thread blocking,
-  **un-mooted by D2's M:N snapshot-park**. See `concurrency.md §11`.) **Pick-up brief for the fix:**
-  [`docs/cross-nursery-flat-scheduler.md`](cross-nursery-flat-scheduler.md).
+- **Cross-nursery wakeups** ([§11](concurrency.md)) — **M:N (`--parallel`) RESOLVED, cooperative
+  pending.** The circular outer-sibling case (`examples/parallel_cross_nursery_circular.chz`) now
+  completes under `--parallel`: one VM-global `MnSched` holds a `Vec<JoinScope>` flat scheduler (each
+  nested nursery = a scope enlisted into the same global run queue; the inline owner returns on a
+  scope-scoped stop having drained the GLOBAL queue), and a nested builder EARLY-ENLISTS the outer
+  nursery's still-pending siblings (so the nested owner runs them — the cross-nursery wake) while
+  DEFERRING each enlisted scope's output flush to its OWN `JoinNursery` (per-nursery flush order →
+  three-engine parity for non-blocking nested spawns). The cooperative (default `run`) engine still
+  serializes nested levels, so the same program **still faults `deadlock` on `run`/`--interp`**; the
+  cooperative-engine flatten is a **separate, later commit**. Workaround on `run`: siblings in ONE
+  nursery (doc case C).
 - **Priority classes** (BEAM) — deferred; revisit if priority becomes a requirement.
 - **Reduction constant tuning** (D3) — `CONTEXT_REDS` value + per-op vs per-back-edge accounting.

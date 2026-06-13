@@ -697,10 +697,17 @@ blocking-`recv` divergence).
 **Landed (VM):** **B3** OS-thread multicore (the alternative bet, taken — B3.0–B3.6), **B4** real
 `Shared`, **B5** real `Executor` pool (+ A3b) — then **Tier-D** rebuilt `--parallel` as an M:N
 work-stealing scheduler, **complete through D6** (D0–D6 + owes #1/#2/#3; epoll/`std.net` netpoller
-landed). **Still open:** one narrow VM v1 limit — the **cross-nursery deadlock** edge case. D0 fixed
-cross-level wake-marking (the common case works), but a fiber whose unblocker is an *outer sibling the
-inner nursery can't run* faults `deadlock` and needs a flat scheduler (§11). Blocking `recv` inside a
-native callback (**D5 owe #3**) is **resolved** — see below.
+landed). Blocking `recv` inside a native callback (**D5 owe #3**) is **resolved** — see below.
+
+**Cross-nursery wakeups — M:N RESOLVED, cooperative pending.** A fiber in an outer nursery being woken
+(and *run*) by an inner one (the circular outer-sibling case — `examples/parallel_cross_nursery_circular.chz`)
+is **fixed under `--parallel`** (the M:N engine): one VM-global `MnSched` with a `Vec<JoinScope>` flat
+scheduler (each nested nursery is a scope enlisted into the same global run queue, with a scope-scoped
+owner stop), plus early-enlisting an outer nursery's siblings so a nested owner — draining the GLOBAL
+queue — runs them. The cooperative (default `run`) engine still serializes nested nursery levels, so the
+same program **still faults `deadlock` on `run`** (and on `--interp`); the cooperative-engine flatten is a
+**separate, later commit**. Workaround on the cooperative engine: keep mutually-dependent blocking tasks as
+SIBLINGS in ONE nursery (the doc case C pattern).
 
 ---
 

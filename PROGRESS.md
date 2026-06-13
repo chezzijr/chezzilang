@@ -298,6 +298,40 @@ open and vetoes the deadlock predicate while the body may still inject. **v1 lim
 graceful shutdown is future work); a handler talking back to the acceptor via a Channel is a cross-nursery
 wakeup. `examples/echo_server_spawn.chz`.
 
+**Cross-nursery flat scheduler — M:N (`--parallel`) DONE, cooperative DEFERRED.** The circular
+outer-sibling cross-nursery deadlock (`examples/parallel_cross_nursery_circular.chz`: `inner()` spawns a
+nested nursery while `main`'s outer `parallel:` still has an un-run sibling `O`; the inner owner used to
+drain only its private queue and could never RUN `O` → `deadlock` fault) is **fixed under `--parallel`**:
+- **One VM-global `MnSched`** with `SchedCore.scopes: Vec<JoinScope>` (replacing the scalar
+  `{done,total,body_open}`) + a flat `slots` vec. Each nested nursery is a SCOPE enlisted into the SAME
+  global run queue; `Fiber` carries a `scope_id`. The inline owner returns on a **scope-scoped stop**
+  (`Take::Stop` when ITS scope's `done==total`, having drained the GLOBAL queue meanwhile — so it ran the
+  cross-nursery sibling), while farmed helpers drain until global `terminate` (a `SENTINEL_SCOPE` owner id).
+- A nested builder **early-enlists** the outer nursery's still-pending siblings (so the nested owner can
+  run them — the cross-nursery wake) but **DEFERS** each enlisted scope's output flush to its OWN
+  `JoinNursery` (`mn_scopes` records the scope; `mn_enlist_sched` holds the sched alive until the last
+  enlisted scope joins). This preserves the **per-nursery-join flush order**, so three-engine parity for
+  non-blocking nested spawns is byte-identical (`implicit_nursery_nested_functions` etc. unchanged).
+  Outer scopes are enlisted **before** any helper worker is farmed, so a multi-task inner nursery can't
+  trip the global deadlock predicate before the outer sibling is seeded (caught + regression-guarded by
+  `examples/parallel_cross_nursery_fanout.chz` — a 2-task inner nursery, looped under a watchdog).
+- The deadlock predicate + `finish`/`flag_deadlock`/`cancel_drain` went **global over scopes** (fault only
+  when SOME scope is incomplete and nothing can progress anywhere); per-scope **cancel** Arcs (the shell's
+  `self.cancel` re-pointed to the running fiber's scope cancel on each `run_one_fiber` swap-in;
+  `cancel_drain(scope_id)` requeues only that scope's parked fibers) keep an inner fault from cancelling
+  outer siblings (structured concurrency preserved). Genuine no-sender deadlocks still fault
+  (`golden_parallel_deadlock_still_faults`, 30s watchdog).
+- **Output order note:** because `O` (outer) and `I` (inner) live in DIFFERENT nurseries with different
+  join points, the M:N flush order is `I` (inner join) then `O` (outer join) — i.e.
+  `I got 1\nO got 1\ndone` — NOT the case-C single-nursery order (`O got 1\nI got 1`). Both complete; the
+  ordering follows the parity-preserving per-nursery flush.
+- **Eager nurseries unchanged (OPTION A):** the per-connection eager nursery keeps its OWN sched +
+  dedicated drainer (single-scope fast path), untouched.
+- **Cooperative (default `run`) + `--interp`:** still serialize nested nursery levels → the same program
+  **still faults `deadlock`** there. The cooperative-engine flatten is a **separate, later commit**.
+  Workaround on `run`: siblings in ONE nursery (doc case C). Golden is M:N-only (no coop/interp leg),
+  watchdog-wrapped — mirrors `golden_channel_block`.
+
 **`Channel.close()` + closed-channel semantics + `try_send` + `for v in ch:`** landed (both engines) —
 the headline consumer-side feature giving clean producer→consumer termination (was: a consumer looping
 `recv` after the producer was done could only deadlock-fault):

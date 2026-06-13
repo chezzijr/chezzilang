@@ -230,7 +230,10 @@ worker blocked in its child nursery's join.
 worker; a barrier-confirm detector in the blocking `recv` — a parked worker confirms its channel empty at
 most once per `epoch`, and `confirms == live` ⇒ fault `deadlock` with the cooperative engine's byte-identical
 message. `send`/`task_finished` bump `epoch`; watch and channel `q` locks are never held together.
-**Residual hangs documented:** cross-nursery / `Executor`-spanning / orphaned-message / saturated-pool cases.
+**Residual hangs documented:** `Executor`-spanning / orphaned-message / saturated-pool cases. (The
+**cross-nursery** circular case is now **RESOLVED under `--parallel`** by Tier-D's VM-global flat
+scheduler — `examples/parallel_cross_nursery_circular.chz`; the cooperative engine's cross-nursery
+flatten is a separate, later commit. See `docs/concurrency-tier-d.md` "Open / deferred".)
 
 **B3.6 — `Executor` on the pool + A3b. B3 epic complete.** **Checker (A3b):** the `submit` arm pushes a
 `capture_floor` so a submitted closure's captures are gated exactly like a `spawn:` block's. **VM —
