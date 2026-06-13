@@ -106,6 +106,8 @@ fn deep_clone(v: &Value) -> Value {
         | Value::Func(_, _)
         | Value::Closure(_)
         | Value::Native(_)
+        // An extern C fn passes by handle (clone the `Arc`) — a callable entry point, not data.
+        | Value::Cffi(_)
         | Value::Module(_)
         // A Channel is a shared mailbox: the handle crosses the airlock by reference (clone the
         // `Rc`), never deep-copied — both ends must see the same queue. A `Shared` box is the same:
@@ -215,6 +217,12 @@ struct Interp {
     /// gracefully drain any executor never explicitly `shutdown`/`shutdown_now`-ed at program exit
     /// (C5 / A2) — without it, that submitted work would silently never run.
     executors: Vec<std::rc::Rc<std::cell::RefCell<value::ExecState>>>,
+    /// Program-global type-alias table (`type Name = T`), gathered across EVERY module before
+    /// evaluation begins, mirroring the checker's program-global alias scope. Used only to lower an
+    /// extern fn's scalar-alias param/return types to `CType` in `hoist_declarations` — so an alias
+    /// declared in one module and used bare in another's `extern` signature resolves here exactly as
+    /// the checker accepted it. Empty for a single-source run (the module's own aliases suffice).
+    extern_aliases: std::collections::HashMap<String, crate::ast::Type>,
 }
 
 /// A task registered by `spawn`, awaiting its nursery's join barrier. The callee/receiver and
@@ -277,6 +285,7 @@ impl Interp {
             call_stack: Vec::new(),
             nurseries: Vec::new(),
             executors: Vec::new(),
+            extern_aliases: std::collections::HashMap::new(),
         };
         // Built-in Result / Option variants — available without any declaration.
         interp.register_variant("Ok", "Result", 1);
@@ -934,6 +943,7 @@ impl Interp {
             Value::Func(decl, home) => self.call(&decl, &home, args, span),
             Value::Closure(clo) => self.call_closure(&clo, args, span),
             Value::Native(e) => self.call_native(e.func, args, span),
+            Value::Cffi(c) => self.call_cffi(&c, args, span),
             other => Err(RuntimeError {
                 message: format!("'{}' is not callable", other.type_name()),
                 span,
@@ -1310,6 +1320,38 @@ impl Interp {
             exit: &mut self.pending_exit,
         };
         let ret = func(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
+        Ok(lower_native(ret))
+    }
+
+    /// Call a dynamic C-ABI FFI function (`extern "lib":`). Reuses the same `Host`/`NativeRet` seam
+    /// as `call_native` (so the VM and interp produce identical output): build an [`InterpHost`] over
+    /// the evaluated args, invoke the C fn through libffi, and lower its `NativeRet` to a `Value`.
+    fn call_cffi(
+        &mut self,
+        cffi: &crate::native::cffi::Cffi,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        // Arity is checker-guaranteed; guard defensively so a wrong count can't index out of bounds.
+        if args.len() != cffi.param_count() {
+            return Err(RuntimeError {
+                message: format!(
+                    "function '{}' expects {} argument(s), got {}",
+                    cffi.name(),
+                    cffi.param_count(),
+                    args.len()
+                ),
+                span,
+            });
+        }
+        let mut host = InterpHost {
+            args,
+            out: &mut self.out,
+            stderr: &mut self.stderr,
+            cfg: &mut self.host,
+            exit: &mut self.pending_exit,
+        };
+        let ret = cffi.call(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
         Ok(lower_native(ret))
     }
 
@@ -2902,6 +2944,37 @@ impl Interp {
                         self.register_variant(&v.name, name, v.payload.len());
                     }
                 }
+                StmtKind::Extern { lib, fns } => {
+                    // Eager `dlopen` + `dlsym` at module init (like the VM's `MakeCffi`): a missing
+                    // library/symbol surfaces as a startup error. Each extern fn binds a `Cffi` value
+                    // into the module's globals, exactly where a top-level `fn` binds.
+                    // Program-global aliases (cross-module, populated by the run driver) plus this
+                    // module's own — so a same-file alias works even on the single-source path where
+                    // `extern_aliases` is empty.
+                    let mut aliases = self.extern_aliases.clone();
+                    for s in stmts {
+                        if let StmtKind::TypeAlias { name, ty } = &s.kind {
+                            aliases.insert(name.clone(), ty.clone());
+                        }
+                    }
+                    for ef in fns {
+                        let params: Vec<crate::native::cffi::CType> = ef
+                            .params
+                            .iter()
+                            .map(|p| {
+                                ctype_of(p.ty.as_ref(), &aliases)
+                                    .expect("checker verified marshallable param")
+                            })
+                            .collect();
+                        // `None` ⇒ void: no annotation, or one resolving to `nil` (incl. an alias to
+                        // `nil`). The checker guarantees a non-void return is a scalar, so `and_then`
+                        // (never `.expect`) — a non-scalar resolution can only mean void.
+                        let ret = ef.ret.as_ref().and_then(|t| ctype_of(Some(t), &aliases));
+                        let cffi = crate::native::cffi::Cffi::new(lib, &ef.name, params, ret)
+                            .map_err(|e| RuntimeError { message: e.message, span: stmt.span })?;
+                        self.env.define(&ef.name, Value::Cffi(std::sync::Arc::new(cffi)));
+                    }
+                }
                 _ => {}
             }
         }
@@ -3106,6 +3179,7 @@ impl Interp {
             StmtKind::Struct { .. }
             | StmtKind::Enum { .. }
             | StmtKind::Protocol { .. }
+            | StmtKind::Extern { .. } // bound by hoist_declarations, like top-level fn
             | StmtKind::TypeAlias { .. }
             | StmtKind::Import(_) => Ok(Flow::Normal),
             StmtKind::Match { scrutinee, arms } => self.exec_match(scrutinee, arms),
@@ -3714,6 +3788,16 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     };
     let mut interp = Interp::new();
     interp.host = cfg;
+    // Gather every module's type aliases up front so an `extern` signature in any module can resolve
+    // a scalar alias declared anywhere (program-global, matching the checker). Per-module hoisting
+    // would otherwise miss an alias imported from another file (panic / silently-void return).
+    for lm in &graph.modules {
+        for s in &lm.ast.stmts {
+            if let StmtKind::TypeAlias { name, ty } = &s.kind {
+                interp.extern_aliases.insert(name.clone(), ty.clone());
+            }
+        }
+    }
     // Modules are in load order: dependencies first, entry last.
     for lm in &graph.modules {
         if let Err(e) = interp.eval_module(lm) {
@@ -3801,6 +3885,13 @@ impl crate::native::Host for InterpHost<'_> {
             Some(Value::Float(f)) => Ok(*f),
             Some(Value::Int(n)) => Ok(*n as f64),
             Some(other) => Err(crate::native::HostError::arg_type(i, "float", other.type_name())),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_bool(&mut self, i: usize) -> Result<bool, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(other) => Err(crate::native::HostError::arg_type(i, "bool", other.type_name())),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -3901,6 +3992,26 @@ fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec
             })
         }
     })
+}
+
+/// Map an extern fn's surface [`crate::ast::Type`] to its runtime [`crate::native::cffi::CType`],
+/// resolving transparent type aliases (`type Len = int`) through `aliases`. v1 scalars only; the
+/// checker has already rejected non-marshallable types, so a `None` is unreachable for valid input.
+fn ctype_of(
+    ty: Option<&crate::ast::Type>,
+    aliases: &std::collections::HashMap<String, crate::ast::Type>,
+) -> Option<crate::native::cffi::CType> {
+    use crate::native::cffi::CType;
+    match ty {
+        Some(crate::ast::Type::Named(n)) => match n.as_str() {
+            "int" => Some(CType::Int),
+            "float" => Some(CType::Float),
+            "bool" => Some(CType::Bool),
+            "str" => Some(CType::Str),
+            other => aliases.get(other).and_then(|t| ctype_of(Some(t), aliases)),
+        },
+        _ => None,
+    }
 }
 
 /// Lower a native fn's engine-neutral [`crate::native::NativeRet`] into an interpreter `Value`.
@@ -5348,6 +5459,62 @@ b := Buf([10, 20, 30])
         let (out, _err, res, _) = run_file(&path);
         res.expect("math_more.chz should run on the interp");
         assert_eq!(out, expected);
+    }
+
+    /// C-ABI FFI golden (interp side): an `extern "lib":` block calls `cos`/`sqrt` (libm) and
+    /// `strlen` (libc) via dlopen+libffi. Deterministic by design (cos(0.0)=1.0, sqrt(4.0)=2.0,
+    /// strlen("hello")=5 — no ULP drift). Drives `run_file` (extern decls need the module-graph +
+    /// MakeCffi/hoist path). Linux-only (needs libm.so.6/libc.so.6). The VM twin asserts parity.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_chz() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("ffi.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
+    /// Regression (blocker): an extern fn declared with an explicit `-> nil` (void) return must RUN,
+    /// not panic. `ctype_of("nil")` is `None`, which means *void* here — not an unresolvable type — so
+    /// the return slot must use `and_then` (None ⇒ void), never `.expect`. Linux-only (needs libc).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_explicit_nil_return_runs() {
+        let src = "extern \"libc.so.6\":\n    fn srand(seed: int) -> nil\n\nsrand(1)\nprint(42)\n";
+        let path = std::env::temp_dir()
+            .join(format!("chezzi_interp_ffi_nilret_{}.chz", std::process::id()));
+        std::fs::write(&path, src).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        let _ = std::fs::remove_file(&path);
+        res.expect("extern with `-> nil` return should run on the interp");
+        assert_eq!(out, "42\n");
+    }
+
+    /// Regression (blocker): a type alias defined in an IMPORTED module, used bare in an extern
+    /// signature, type-checks (the checker's alias table is program-global) — so the interp's
+    /// `ctype_of` must resolve aliases program-globally too, else it returns `None` and either panics
+    /// (param) or silently drops the return (would-be void). Linux-only (needs libc).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_cross_module_alias_runs() {
+        let dir = std::env::temp_dir()
+            .join(format!("chezzi_interp_ffi_xmod_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sizes.chz"), "type Size = int\n").unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import sizes\n\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Size\n\nprint(strlen(\"hello\"))\n",
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        res.expect("extern with a cross-module alias should run on the interp");
+        assert_eq!(out, "5\n");
     }
 
     /// `defer` golden: LIFO cleanup across every frame-exit path (normal return, `?`, panic), with

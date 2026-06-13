@@ -125,8 +125,25 @@ pub enum StmtKind {
     Continue,
     /// An `import …` statement.
     Import(Import),
+    /// `extern "lib":` — a block of body-less C function signatures bound to a shared library.
+    /// Each `fn` becomes a module-global callable dispatched at runtime via dlopen + libffi. v1
+    /// marshals scalars only (int/float/bool/str→char*).
+    Extern {
+        lib: String,
+        fns: Vec<ExternFn>,
+    },
     /// A bare expression used as a statement, e.g. `print(x)`.
     Expr(Expr),
+}
+
+/// A single C function signature inside an `extern "lib":` block — like a body-less [`FnDecl`],
+/// mirroring [`MethodSig`] but carrying its own [`Span`] (for per-fn marshallability errors).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternFn {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret: Option<Type>,
+    pub span: Span,
 }
 
 /// The target of a `defer` statement: a single call (`defer f(x)` / `defer obj.m(x)`) or an

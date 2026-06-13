@@ -818,8 +818,77 @@ impl Checker {
                     self.enums.insert(name.clone(), names);
                     self.enum_type_params.insert(name.clone(), type_params.clone());
                 }
+                StmtKind::Extern { fns, .. } => {
+                    // Each extern C fn becomes a plain module-global signature, hoisted exactly like
+                    // a top-level `fn` so calls type-check through the normal `infer_named_call` path.
+                    // v1 marshals scalars only — every resolved param + return type must be
+                    // C-marshallable (int/float/bool/str, or void return).
+                    for ef in fns {
+                        if self.functions.contains_key(&ef.name) {
+                            self.error(
+                                ef.span,
+                                format!("function '{}' is already defined", ef.name),
+                            );
+                        }
+                        let params: Vec<Ty> = ef
+                            .params
+                            .iter()
+                            .map(|p| match &p.ty {
+                                Some(t) => {
+                                    let ty = self.resolve_type(t, ef.span);
+                                    // A parameter must be a real C scalar — `nil` (void) is a
+                                    // return-only sentinel and would panic the backend's `ctype_of`.
+                                    self.assert_marshallable(&ty, &ef.name, ef.span, false);
+                                    ty
+                                }
+                                None => {
+                                    self.error(
+                                        ef.span,
+                                        format!(
+                                            "extern parameter '{}' needs a type annotation",
+                                            p.name
+                                        ),
+                                    );
+                                    Ty::Unknown
+                                }
+                            })
+                            .collect();
+                        let ret = match &ef.ret {
+                            Some(t) => {
+                                let ty = self.resolve_type(t, ef.span);
+                                // The return slot may be `nil` (void) in addition to the C scalars.
+                                self.assert_marshallable(&ty, &ef.name, ef.span, true);
+                                ty
+                            }
+                            // A void extern returns nothing observable; model it as `Nil`.
+                            None => Ty::Nil,
+                        };
+                        self.functions.insert(ef.name.clone(), FnSig::plain(params, ret));
+                    }
+                }
                 _ => {}
             }
+        }
+    }
+
+    /// v1 C-ABI marshallability: an extern fn's param/return types must be C-scalar — `int`, `float`,
+    /// `bool`, or `str` (`char*`). `Nil` (void) is accepted ONLY for the return slot (`allow_void`),
+    /// never for a parameter: a `nil` param has no `CType` lowering and would panic the backend's
+    /// `ctype_of`, while a void-returning extern's `Nil` value would otherwise satisfy it. Everything
+    /// else (list/map/set/tuple/struct/enum/func/option/result/protocol/channel/…) is rejected with a
+    /// single uniform error. Called on the **resolved** `Ty` (after `resolve_type`), so a transparent
+    /// alias to a scalar is accepted. `Unknown` is already-errored and silently allowed (no cascade).
+    fn assert_marshallable(&mut self, ty: &Ty, fn_name: &str, span: Span, allow_void: bool) {
+        let ok = matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown)
+            || (allow_void && matches!(ty, Ty::Nil));
+        if !ok {
+            self.error(
+                span,
+                format!(
+                    "type '{ty}' is not C-marshallable in extern fn '{fn_name}' \
+                     (v1 supports only int, float, bool, str)"
+                ),
+            );
         }
     }
 
@@ -1214,6 +1283,7 @@ impl Checker {
             StmtKind::Enum { .. }
             | StmtKind::Import(_)
             | StmtKind::Protocol { .. }
+            | StmtKind::Extern { .. }
             | StmtKind::TypeAlias { .. } => {}
             StmtKind::If { branches, else_block } => {
                 for (cond, body) in branches {

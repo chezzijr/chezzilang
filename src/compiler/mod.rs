@@ -13,12 +13,14 @@
 
 use crate::ast::{
     AssignOp, BinaryOp, Block, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern, MatchArm,
-    MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp, WaitArm, WaitTarget,
+    MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, UnaryOp, WaitArm,
+    WaitTarget,
 };
+use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ResolvedImport};
 use crate::vm::op::{
-    CapEntry, CapSrc, ModuleProto, Op, Program, Proto, ProtoId, StructDef, VariantDef, WaitMeta,
-    NO_IC,
+    CapEntry, CapSrc, CffiDef, ModuleProto, Op, Program, Proto, ProtoId, StructDef, VariantDef,
+    WaitMeta, NO_IC,
 };
 use crate::{lexer, parser};
 use std::collections::HashMap;
@@ -45,6 +47,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // Pass 1: hoist all type declarations across every module.
     for lm in &graph.modules {
         c.hoist_types(&lm.ast.stmts)?;
+        c.gather_aliases(&lm.ast.stmts);
     }
     // Pass 2: compile each module's toplevel + functions.
     for (idx, lm) in graph.modules.iter().enumerate() {
@@ -74,6 +77,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     let module = &module;
     let mut c = Compiler::new();
     c.hoist_types(&module.stmts)?;
+    c.gather_aliases(&module.stmts);
     let toplevel = c.compile_module(0, module, &[])?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -110,6 +114,11 @@ struct Compiler {
     /// (like `field_ic_next`). Each `CallMethod` op gets a unique slot into the VM's `method_ic`
     /// vector. Recorded into `Program::method_ic_sites`.
     method_ic_next: u32,
+    /// Program-global type-alias table (`type Name = T`), gathered across EVERY module before
+    /// compilation, mirroring the checker's program-global `aliases`. Used only to lower an extern
+    /// fn's scalar-alias param/return types to `CType` — an alias defined in one module and used bare
+    /// in another's `extern` signature must resolve here exactly as the checker accepted it.
+    aliases: HashMap<String, Type>,
 }
 
 impl Compiler {
@@ -121,6 +130,7 @@ impl Compiler {
             modules: Vec::new(),
             field_ic_sites: 0,
             method_ic_sites: 0,
+            cffi_defs: Vec::new(),
         };
         // Built-in Result / Option variants, available without declaration.
         for (v, e, arity) in [("Ok", "Result", 1), ("Err", "Result", 1), ("Some", "Option", 1), ("None", "Option", 0)] {
@@ -129,7 +139,18 @@ impl Compiler {
                 VariantDef { enum_name: e.to_string(), arity },
             );
         }
-        Compiler { program, struct_fields: HashMap::new(), globals: HashMap::new(), global_slots: Vec::new(), field_ic_next: 0, method_ic_next: 0 }
+        Compiler { program, struct_fields: HashMap::new(), globals: HashMap::new(), global_slots: Vec::new(), field_ic_next: 0, method_ic_next: 0, aliases: HashMap::new() }
+    }
+
+    /// Gather `type Name = T` aliases from a module's statements into `self.aliases`. Called once per
+    /// module before compilation so an extern signature in any module can resolve a scalar alias
+    /// declared anywhere in the program (matching the checker's program-global alias scope).
+    fn gather_aliases(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            if let StmtKind::TypeAlias { name, ty } = &stmt.kind {
+                self.aliases.insert(name.clone(), ty.clone());
+            }
+        }
     }
 
     /// M19 Phase 6 — allocate an inline-cache site id for a `CallMethod` op. Every method/module-member
@@ -195,6 +216,12 @@ impl Compiler {
         for stmt in stmts {
             if let StmtKind::Fn(decl) = &stmt.kind {
                 add(decl.name.clone(), &mut self.globals, &mut self.global_slots);
+            }
+            // Each extern C fn is a module global bound at init (like a top-level `fn`).
+            if let StmtKind::Extern { fns, .. } = &stmt.kind {
+                for ef in fns {
+                    add(ef.name.clone(), &mut self.globals, &mut self.global_slots);
+                }
             }
         }
         for stmt in stmts {
@@ -270,6 +297,34 @@ impl Compiler {
                 let pid = self.compile_fn(decl, false)?;
                 fc.emit(Op::MakeFunc(pid), stmt.span);
                 fc.emit(Op::DefineGlobalSlot(self.global_slot(&decl.name)), stmt.span);
+            }
+            // extern C fns: register a CffiDef and bind the name to a `Cffi` value at module init,
+            // exactly like a top-level `fn`. The checker has already verified marshallability, so the
+            // param/return types are scalars (possibly via a transparent alias) resolvable to `CType`.
+            if let StmtKind::Extern { lib, fns } = &stmt.kind {
+                for ef in fns {
+                    let params: Vec<CType> = ef
+                        .params
+                        .iter()
+                        .map(|p| {
+                            ctype_of(p.ty.as_ref(), &self.aliases)
+                                .expect("checker verified marshallable param")
+                        })
+                        .collect();
+                    // `None` ⇒ void: either no annotation, or an annotation resolving to `nil`
+                    // (incl. an alias to `nil`). The checker guarantees a non-void return is a scalar,
+                    // so a non-scalar here can only mean void — use `and_then`, never `.expect`.
+                    let ret = ef.ret.as_ref().and_then(|t| ctype_of(Some(t), &self.aliases));
+                    let id = self.program.cffi_defs.len() as u32;
+                    self.program.cffi_defs.push(CffiDef {
+                        lib: lib.clone(),
+                        name: ef.name.clone(),
+                        params,
+                        ret,
+                    });
+                    fc.emit(Op::MakeCffi(id), stmt.span);
+                    fc.emit(Op::DefineGlobalSlot(self.global_slot(&ef.name)), stmt.span);
+                }
             }
         }
         // M-C: the module top level is itself an implicit nursery (joins at program exit, i.e. the
@@ -451,6 +506,7 @@ impl Compiler {
             StmtKind::Struct { .. }
             | StmtKind::Enum { .. }
             | StmtKind::Protocol { .. }
+            | StmtKind::Extern { .. } // bound at module init (see compile_module), like top-level fn
             | StmtKind::TypeAlias { .. }
             | StmtKind::Import(_) => Ok(()),
             StmtKind::Return(value) => {
@@ -2147,6 +2203,25 @@ fn block_has_defer(stmts: &[Stmt]) -> bool {
 /// own* function-like body (and so get their own implicit nursery, gated separately): `parallel:` (its
 /// spawns belong to that explicit nursery), nested `fn`, a `spawn:` block, and a `defer:` block (each
 /// runs in its own frame, so a bare `spawn` inside it joins at *that* body's end, not this one's).
+/// Map an extern fn's surface [`Type`] annotation to its runtime [`CType`]. Only the v1 scalar set
+/// (`int`/`float`/`bool`/`str`) is supported, resolving transparent type aliases (`type Len = int`)
+/// through `aliases` first. Everything else (incl. a `None` annotation) returns `None`. The checker
+/// has already rejected non-marshallable types, so a `None` here is unreachable for a well-typed
+/// program (the call sites `.expect(...)` on it).
+fn ctype_of(ty: Option<&Type>, aliases: &HashMap<String, Type>) -> Option<CType> {
+    match ty {
+        Some(Type::Named(n)) => match n.as_str() {
+            "int" => Some(CType::Int),
+            "float" => Some(CType::Float),
+            "bool" => Some(CType::Bool),
+            "str" => Some(CType::Str),
+            // A transparent alias to a scalar (resolve once; the checker rejected cyclic/non-scalar).
+            other => aliases.get(other).and_then(|t| ctype_of(Some(t), aliases)),
+        },
+        _ => None,
+    }
+}
+
 pub(crate) fn block_has_bare_spawn(stmts: &[Stmt]) -> bool {
     stmts.iter().any(stmt_has_bare_spawn)
 }

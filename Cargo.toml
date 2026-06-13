@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 libc = "0.2.186"
+libffi = "3"
+libloading = "0.8"
 polling = "3"
 regex = "1"
 socket2 = "0.5"

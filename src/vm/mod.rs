@@ -729,6 +729,9 @@ enum SnapValue {
     ModuleInline { name: Box<str>, globals: Vec<(String, SnapValue)> },
     /// A native (Rust) fn — re-allocated with the same fn pointer (`NativeFn` is `Clone`/`Send`).
     Native { name: Box<str>, func: crate::native::NativeFn },
+    /// A dynamic C-ABI FFI fn — shares its `Arc<Cffi>` to the worker (same address space; no
+    /// re-dlopen). `Cffi` is `Send + Sync`, so the Arc crosses the OS-thread boundary safely.
+    Cffi(Arc<crate::native::cffi::Cffi>),
     List(Vec<SnapValue>),
     Tuple(Vec<SnapValue>),
     Enum { ty: Box<str>, variant: Box<str>, payload: Vec<SnapValue> },
@@ -2888,6 +2891,9 @@ impl Vm {
                 let h = self.heap.alloc(Obj::Func { proto: *proto, home });
                 self.push(Value::Obj(h));
             }
+            // Body in an `#[inline(never)]` helper so `step`'s frame stays small (the deep-recursion
+            // depth-guard test overflows in debug if `step` grows — same discipline as `ToStrFmt`).
+            Op::MakeCffi(id) => self.op_make_cffi(*id, span)?,
             Op::MakeClosure(proto, entries) => {
                 let frame = self.frames.last().unwrap();
                 let (base, home, enclosing) = (frame.base, frame.home, frame.closure);
@@ -3130,6 +3136,20 @@ impl Vm {
     /// behaviour the superinstructions already ship), deopting to `Q_GENERIC` if a non-int operand
     /// shows up. Generic: always the unfused `arith`/`compare_op` via `run_bin_kind`. Every path
     /// produces a byte-identical result to the original `step` arm.
+    /// `MakeCffi(id)` — eager `dlopen` + `dlsym` at module init from `Program.cffi_defs[id]`, then
+    /// push the resolved `Obj::Cffi`. A missing library / symbol surfaces as a runtime error here
+    /// (the spec's startup-failure model). `#[inline(never)]` keeps its locals (the cloned `CffiDef`'s
+    /// `Vec`s) off `step`'s stack frame, preserving the deep-recursion depth-guard headroom.
+    #[inline(never)]
+    fn op_make_cffi(&mut self, id: u32, span: Span) -> Result<(), RuntimeError> {
+        let def = self.program.cffi_defs[id as usize].clone();
+        let cffi = crate::native::cffi::Cffi::new(&def.lib, &def.name, def.params, def.ret)
+            .map_err(|e| self.err(e.message, span))?;
+        let h = self.heap.alloc(Obj::Cffi(std::sync::Arc::new(cffi)));
+        self.push(Value::Obj(h));
+        Ok(())
+    }
+
     #[inline(never)]
     fn q_arith(&mut self, site: usize, kind: crate::vm::op::BinKind, span: Span) -> Result<(), RuntimeError> {
         match self.quicken[site] {
@@ -3865,12 +3885,14 @@ impl Vm {
                     Func { proto: ProtoId, home: GcRef },
                     Closure { proto: ProtoId, home: GcRef },
                     Native { func: crate::native::NativeFn, name: Box<str> },
+                    Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
                     NotCallable,
                 }
                 let kind = match self.heap.get(h) {
                     Obj::Func { proto, home } => Callee::Func { proto: *proto, home: *home },
                     Obj::Closure { proto, home, .. } => Callee::Closure { proto: *proto, home: *home },
                     Obj::Native { func, name } => Callee::Native { func: *func, name: name.clone() },
+                    Obj::Cffi(c) => Callee::Cffi(std::sync::Arc::clone(c)),
                     _ => Callee::NotCallable,
                 };
                 match kind {
@@ -3886,6 +3908,16 @@ impl Vm {
                         self.run_proto(proto, home, Some(h), args, true, false, span)
                     }
                     Callee::Native { func, name } => self.invoke_native(func, &name, args, span),
+                    Callee::Cffi(cffi) => {
+                        // Arity is checker-guaranteed, but guard defensively (a hand-built program
+                        // could bypass the checker) so a wrong arg count never indexes out of bounds.
+                        self.check_arity("function", cffi.name(), cffi.param_count(), argc, span)?;
+                        let mut host = VmHost { vm: self, args };
+                        let ret = cffi
+                            .call(&mut host)
+                            .map_err(|e| RuntimeError { message: e.message, span })?;
+                        Ok(self.lower_native(ret))
+                    }
                     Callee::NotCallable => Err(self.err(format!("'{}' is not callable", self.type_name(callee)), span)),
                 }
             }
@@ -6494,7 +6526,10 @@ impl Vm {
                 Obj::Func { .. }
                 | Obj::Closure { .. }
                 | Obj::Module { .. }
-                | Obj::Native { .. } => WireValue::Handle(h),
+                | Obj::Native { .. }
+                // A Cffi handle crosses as the existing handle — same shared heap (B3.0); under the
+                // M:N engine the worker shares the parent address space, so the symbol stays valid.
+                | Obj::Cffi(_) => WireValue::Handle(h),
                 // B3.1: the shared cores cross as the `Arc` itself (clone = refcount bump), so a
                 // `from_wire` in any heap reaches the same mailbox/box/queue.
                 Obj::Channel(core) => WireValue::Channel(Arc::clone(core)),
@@ -6954,6 +6989,9 @@ impl Vm {
                 }
             },
             Obj::Native { name, func } => SnapValue::Native { name, func },
+            // A Cffi shares its `Arc` to the worker (which shares the parent address space): the
+            // worker re-allocs `Obj::Cffi` from the SAME Arc — no re-dlopen, no symbol re-resolution.
+            Obj::Cffi(c) => SnapValue::Cffi(Arc::clone(&c)),
             // Containers embedding a callable: encode each element. (Pure-data containers took the fast
             // path above.)
             Obj::List(items) => SnapValue::List(items.iter().map(|x| self.to_snap(*x)).collect()),
@@ -7055,6 +7093,8 @@ impl Vm {
                 Value::Obj(wm)
             }
             SnapValue::Native { name, func } => Value::Obj(self.heap.alloc(Obj::Native { name: name.clone(), func: *func })),
+            // Re-alloc from the SAME shared `Arc<Cffi>` — no re-dlopen (shared address space).
+            SnapValue::Cffi(c) => Value::Obj(self.heap.alloc(Obj::Cffi(Arc::clone(c)))),
             SnapValue::List(xs) => {
                 let v = xs.iter().map(|x| self.replay_snap(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::List(v)))
@@ -9053,6 +9093,7 @@ impl Vm {
                 Obj::Func { .. } | Obj::Closure { .. } => "function",
                 Obj::Module { .. } => "module",
                 Obj::Native { .. } => "function",
+                Obj::Cffi(_) => "function",
                 Obj::Channel(_) => "Channel",
                 Obj::Shared(_) => "Shared",
                 Obj::Atomic(_) => "Atomic",
@@ -9140,6 +9181,7 @@ impl Vm {
                 Obj::Closure { .. } => Ok("<closure>".to_string()),
                 Obj::Module { name, .. } => Ok(format!("<module {name}>")),
                 Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
+                Obj::Cffi(c) => Ok(format!("<extern fn {}>", c.name())),
                 Obj::Channel(core) => Ok(format!("Channel(len={})", core.q.lock().unwrap().queue.len())),
                 // B3.1: the box holds the wire form; render it directly (`display` is `&self` and
                 // cannot `from_wire`, which allocates — `display_wire` is the read-only equivalent).
@@ -9381,6 +9423,9 @@ impl Vm {
             Obj::Native { name, .. } => {
                 let _ = write!(out, "<native fn {name}>");
             }
+            Obj::Cffi(c) => {
+                let _ = write!(out, "<extern fn {}>", c.name());
+            }
             // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
             // (matches the interpreter's `stringify` catch-all falling back to `Display`).
             Obj::Channel(_) | Obj::Shared(_) | Obj::Atomic(_) | Obj::Executor(_) | Obj::Socket(_) | Obj::Listener(_) => {
@@ -9496,6 +9541,13 @@ impl crate::native::Host for VmHost<'_> {
             Some(Value::Float(f)) => Ok(*f),
             Some(Value::Int(n)) => Ok(*n as f64),
             Some(other) => Err(crate::native::HostError::arg_type(i, "float", self.vm.type_name(*other))),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_bool(&mut self, i: usize) -> Result<bool, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(other) => Err(crate::native::HostError::arg_type(i, "bool", self.vm.type_name(*other))),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -10725,6 +10777,7 @@ mod tests {
             modules: vec![],
             field_ic_sites: 0,
             method_ic_sites: 0,
+            cffi_defs: vec![],
         }
     }
 
@@ -12649,6 +12702,66 @@ main()
         let path = std::env::temp_dir().join(format!("chezzi_{tag}_{}_{seq}.chz", std::process::id()));
         std::fs::write(&path, src).expect("write temp .chz");
         path
+    }
+
+    /// C-ABI FFI under the M:N engine: an extern fn called INSIDE a `spawn:` block exercises the
+    /// `SnapValue::Cffi` snapshot path (the worker re-allocs `Obj::Cffi` from the shared `Arc` — no
+    /// re-dlopen, same address space). Must produce the same deterministic output as the cooperative
+    /// VM. Linux-only (needs libm.so.6). This is the hard parallel-parity proof from the FFI plan.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_in_spawn_parallel_snapshot() {
+        let src = "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\n\n\
+                   ch := Channel[float]()\nparallel:\n    spawn:\n        ch.send(sqrt(9.0))\n\
+                   r := ch.recv()\nprint(r)\n";
+        let entry = write_temp_chz("ffi_spawn", src);
+        let (vm_out, _e, vm_res, _) = run_file(&entry);
+        let (par_out, _pe, par_res, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+        let _ = std::fs::remove_file(&entry);
+        assert!(vm_res.is_ok(), "cooperative VM faulted: {vm_res:?}");
+        assert!(par_res.is_ok(), "parallel engine faulted: {par_res:?}");
+        assert_eq!(vm_out, "3.0\n");
+        assert_eq!(vm_out, par_out, "cooperative VM and --parallel diverged on an extern-in-spawn call");
+    }
+
+    /// Regression (blocker): an extern fn with an explicit `-> nil` (void) return must RUN, not panic.
+    /// The compiler's `ctype_of("nil")` is `None` meaning *void*, so the return slot must be built with
+    /// `and_then` (None ⇒ void), never `.expect`. Linux-only (needs libc.so.6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_explicit_nil_return_runs() {
+        let src = "extern \"libc.so.6\":\n    fn srand(seed: int) -> nil\n\nsrand(1)\nprint(42)\n";
+        let entry = write_temp_chz("ffi_nilret", src);
+        let (out, _e, res, _) = run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(res.is_ok(), "VM faulted on `-> nil` extern: {res:?}");
+        assert_eq!(out, "42\n");
+    }
+
+    /// Regression (blocker): a type alias defined in an IMPORTED module, used bare in an extern
+    /// signature, type-checks (the checker's alias table is program-global). The compiler must build
+    /// its extern alias map program-globally too — else `ctype_of` returns `None` and the call site
+    /// `.expect`s (param) or silently drops a scalar return. Linux-only (needs libc.so.6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_cross_module_alias_runs() {
+        let dir = std::env::temp_dir().join(format!("chezzi_vm_ffi_xmod_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sizes.chz"), "type Size = int\n").unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import sizes\n\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Size\n\nprint(strlen(\"hello\"))\n",
+        )
+        .unwrap();
+        let (vm_out, _e, vm_res, _) = run_file(&entry);
+        let (par_out, _pe, par_res, _) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(vm_res.is_ok(), "VM faulted on cross-module alias extern: {vm_res:?}");
+        assert!(par_res.is_ok(), "parallel engine faulted on cross-module alias extern: {par_res:?}");
+        assert_eq!(vm_out, "5\n");
+        assert_eq!(vm_out, par_out, "VM and --parallel diverged on a cross-module alias extern");
     }
 
     /// D3/the discriminating fairness test. 64 CPU "hog" fibers (≫ the core-sized worker pool) each
@@ -18598,6 +18711,20 @@ main()
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/math_more.chz");
+    }
+
+    /// C-ABI FFI golden (VM twin of `interp::golden_ffi_chz`): the `extern "lib":` block calls
+    /// `cos`/`sqrt` (libm) and `strlen` (libc) via dlopen+libffi on the VM, byte-matches `.expected`,
+    /// and stays identical to the interpreter (`assert_file_parity`). Linux-only (needs libm/libc).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_chz_via_run_file() {
+        let path = fixture("examples/ffi.chz");
+        let expected = std::fs::read_to_string(fixture("examples/ffi.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/ffi.chz");
     }
 
     /// A complete self-contained program (merge sort + binary search + stats over std.math) runs on
