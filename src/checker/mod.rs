@@ -1941,6 +1941,16 @@ impl Checker {
                         return false;
                     }
                 }
+                // A globally-known variant name that ISN'T a variant of `ty` cannot be a binding: the
+                // compiler routes it by the variant registry (a `MatchArm` test), so it would trap on
+                // the VM while the interp binds. Reject it so all engines agree (rename to bind).
+                if !ty.is_unknown()
+                    && (self.variants.contains_key(name)
+                        || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None"))
+                {
+                    self.error(span, format!("'{name}' is not a variant of {ty}"));
+                    return false;
+                }
                 self.declare(name, ty.clone());
                 true
             }
