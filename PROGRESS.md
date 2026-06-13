@@ -164,7 +164,9 @@ frozen interp is the differential parity oracle for the sequential subset.
 > only at `native_reentry > 0`; cooperative needs a recv_timeout-aware quiesce (resolve-to-`None`, not
 > fault) or accept the documented deadlock-fault divergence. Checker `Ty::Int → Option[elem]` sig + interp
 > poll-once arm were correct; the VM scheduler integration is the hard part. A proper follow-up, not a
-> drop-in. (`select` / `Atomic[int]` remain deferred too — both need a design brainstorm.)
+> drop-in. (`Atomic[T]` + `timer(ms)` have since **shipped** — see `concurrency.md` §6b/§6c,
+> `examples/atomic.chz`. `wait` — Chezzi's `select` — is **designed + locked** (`concurrency.md` §6d),
+> not deferred for lack of a design; it just awaits implementation as its own focused milestone.)
 
 > **Concurrency follow-ups — `Atomic[T]` + `timer(ms)` LANDED, `recv_timeout` DROPPED, `wait` designed
 > (2026-06-13).** Brainstormed the deferred trio and shipped two of three; `recv_timeout` is dropped as
