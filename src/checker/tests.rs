@@ -4442,3 +4442,63 @@ fn nested_nullary_correct_ok() {
         "oo: Option[Option[int]] = Some(None)\nmatch oo:\n    Some(None): print(0)\n    _: print(-1)\n",
     );
 }
+
+// ===== generators (experimental, VM-only) =====
+
+#[test]
+fn generator_basic_ok() {
+    // A generator declares `-> Iterator[T]`, yields T, and its result drives a `for` (x: int).
+    ok("fn count() -> Iterator[int]:\n    yield 1\n    yield 2\n\nfn use() -> int:\n    s := 0\n    for x in count():\n        s = s + x\n    return s\n");
+}
+
+#[test]
+fn generator_for_binds_element_type() {
+    // `for x in count()` must bind `x: int`, so using it as a str is a type error.
+    rejects(
+        "fn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    for x in count():\n        print(x + \"a\")\n",
+        "",
+    );
+}
+
+#[test]
+fn generator_yield_type_mismatch_rejected() {
+    rejects(
+        "fn g() -> Iterator[int]:\n    yield \"nope\"\n",
+        "expected yield type int",
+    );
+}
+
+#[test]
+fn generator_missing_iterator_return_rejected() {
+    rejects(
+        "fn g() -> int:\n    yield 1\n",
+        "must declare a return type of `Iterator[T]`",
+    );
+}
+
+#[test]
+fn generator_no_return_type_rejected() {
+    rejects(
+        "fn g():\n    yield 1\n",
+        "must declare a return type of `Iterator[T]`",
+    );
+}
+
+#[test]
+fn generator_return_value_rejected() {
+    rejects(
+        "fn g() -> Iterator[int]:\n    yield 1\n    return 5\n",
+        "cannot `return` a value",
+    );
+}
+
+#[test]
+fn yield_outside_generator_rejected() {
+    rejects("yield 1\n", "`yield` can only appear inside a generator function");
+}
+
+#[test]
+fn generator_bare_return_ok() {
+    // A bare `return` inside a generator stops it early — legal.
+    ok("fn g() -> Iterator[int]:\n    yield 1\n    return\n    yield 2\n");
+}

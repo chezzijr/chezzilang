@@ -330,6 +330,10 @@ struct Checker {
     alias_resolving: Vec<String>,
     /// Declared return type of the function body currently being checked (`Nil` at top level).
     current_ret: Ty,
+    /// `Some(T)` while checking a generator function body whose declared return is `Iterator[T]` —
+    /// the element type each `yield` must produce. `None` outside a generator, so a stray `yield`
+    /// is diagnosed. Saved/restored across nested fn/closure boundaries like `current_ret`.
+    yield_ty: Option<Ty>,
     /// `> 0` while checking statements lexically inside a `recover:` block (within the current
     /// function — reset across nested fn/closure boundaries). A `?` here targets the recover
     /// boundary (yielding to `r`), not the enclosing function's return.
@@ -387,6 +391,7 @@ impl Checker {
             aliases: HashMap::new(),
             alias_resolving: Vec::new(),
             current_ret: Ty::Nil,
+            yield_ty: None,
             recover_depth: 0,
             inferring_ret: false,
             collected_rets: Vec::new(),
@@ -1019,6 +1024,14 @@ impl Checker {
                     Ty::result_e(self.resolve_type(t, span), self.resolve_type(e, span))
                 }
                 ("Option", [inner]) => Ty::option(self.resolve_type(inner, span)),
+                // `Iterator[T]` as a *value* type — the result of calling a generator function.
+                // Represented as `Ty::Struct("Iterator", [T])`, an existential iterator whose element
+                // type `iter_elem` recovers (so `for`-loops and `[S: Iterator[T]]` bounds accept it).
+                // Experimental: only generators produce these; ordinary code still uses adapter
+                // structs / built-in collections.
+                ("Iterator", [elem]) => {
+                    Ty::Struct("Iterator".to_string(), vec![self.resolve_type(elem, span)])
+                }
                 ("Channel", [inner]) => {
                     let elem = self.resolve_type(inner, span);
                     if !self.sendable(&elem) {
@@ -1572,6 +1585,15 @@ impl Checker {
             self.collected_rets.push(ty);
             return;
         }
+        // Inside a generator, a `return` may only be bare (stop the iterator early). A returned
+        // value is meaningless — the generator's result type is the stream, not a single value.
+        if self.yield_ty.is_some() {
+            if let Some(e) = value {
+                let _ = self.infer(e);
+                self.error(e.span, "a generator cannot `return` a value; use a bare `return` to stop early");
+            }
+            return;
+        }
         let ret = self.current_ret.clone();
         match value {
             Some(e) => {
@@ -1590,16 +1612,45 @@ impl Checker {
         }
     }
 
-    /// `yield <expr>` inside a generator function. Stage 2 scaffold: infer the operand so name
-    /// resolution and sub-expression checks still run. The full rule (must be inside a generator,
-    /// operand assignable to the declared `Iterator[T]` element type) lands in Stage 4.
-    fn check_yield(&mut self, e: &Expr, _span: Span) {
-        self.infer(e);
+    /// `yield <expr>` — legal only inside a generator function (one whose return type is
+    /// `Iterator[T]`); the operand must be assignable to the element type `T`.
+    fn check_yield(&mut self, e: &Expr, span: Span) {
+        let ty = self.infer(e);
+        match self.yield_ty.clone() {
+            Some(elem) => {
+                if !self.assignable(&elem, &ty) {
+                    self.error(e.span, format!("expected yield type {elem}, found {ty}"));
+                }
+            }
+            None => self.error(span, "`yield` can only appear inside a generator function"),
+        }
     }
 
     fn check_fn_body(&mut self, decl: &FnDecl, self_ty: Option<Ty>, sig: FnSig) {
         let saved_tps = self.enter_type_params(&decl.type_params);
         let saved_ret = std::mem::replace(&mut self.current_ret, sig.ret.clone());
+        // A generator (`is_generator`, i.e. its body contains `yield`) must declare `-> Iterator[T]`.
+        // Recover `T` as the per-yield element type; a wrong/missing return type is an error here.
+        let new_yield_ty = if decl.is_generator {
+            match &sig.ret {
+                Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
+                    Some(args[0].clone())
+                }
+                _ => {
+                    let span = decl.body.first().map(|s| s.span);
+                    if let Some(span) = span {
+                        self.error(
+                            span,
+                            "a generator function (one that uses `yield`) must declare a return type of `Iterator[T]`",
+                        );
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let saved_yield = std::mem::replace(&mut self.yield_ty, new_yield_ty);
         // A nested function checked while pass-1 is inferring an *outer* function's return must not
         // feed the outer `collected_rets` — this body's `return`s are diagnosed, not collected.
         let saved_inferring = std::mem::replace(&mut self.inferring_ret, false);
@@ -1638,6 +1689,7 @@ impl Checker {
         }
         self.pop_scope();
         self.current_ret = saved_ret;
+        self.yield_ty = saved_yield;
         self.inferring_ret = saved_inferring;
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
@@ -1675,6 +1727,8 @@ impl Checker {
             Ty::List(e) | Ty::Set(e) => Some((**e).clone()),
             Ty::Str => Some(Ty::Str),
             Ty::Map(k, _) => Some((**k).clone()),
+            // `Iterator[T]` value (a generator result): element type is its single type argument.
+            Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => Some(args[0].clone()),
             _ => self.struct_iter_elem(ty),
         }
     }
@@ -1827,6 +1881,14 @@ impl Checker {
                         unknowns(vars)
                     }
                 }
+            }
+            // A generator result `Iterator[T]` (experimental, VM-only) binds a single element of T.
+            Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
+                if vars.len() != 1 {
+                    self.error(iter.span, "a generator iterator binds a single loop variable");
+                    return unknowns(vars);
+                }
+                vec![(vars[0].clone(), args[0].clone())]
             }
             _ if self.struct_iter_elem(&it).is_some() => {
                 // A user struct with `next(self) -> Option[E]` is iterable; it binds a single element.
