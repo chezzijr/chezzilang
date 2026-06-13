@@ -5747,6 +5747,7 @@ impl Vm {
     fn demote_wait_block(
         &mut self,
         arms: Vec<(usize, Arc<ChannelCore>)>,
+        timer: Option<(usize, std::time::Instant)>,
         span: Span,
     ) -> Result<(usize, WireValue), RuntimeError> {
         let sched = Arc::clone(self.mn.as_ref().expect("demote_wait_block on the cooperative engine"));
@@ -5813,7 +5814,19 @@ impl Vm {
                     drop(c);
                     return Err(self.err("cancelled".to_string(), span));
                 }
-                // Every arm closed+empty: no value can ever arrive — the all-closed `wait` fault.
+                // WAIT-1 (demote path) — a live timer arm fires only AFTER the source-order channel scan
+                // failed (so a real `send` to any arm beats the timer on a tie). Once `now >= deadline`,
+                // take the timer arm with `true`. A still-pending timer vetoes the deadlock fault below
+                // (a value WILL arrive at the deadline — like an `inflight` job on the snapshot path).
+                if let Some((idx, deadline)) = timer
+                    && std::time::Instant::now() >= deadline
+                {
+                    un_account(&mut c);
+                    drop(c);
+                    return Ok((idx, WireValue::Bool(true)));
+                }
+                // Every arm closed+empty: no value can ever arrive — the all-closed `wait` fault. (A live
+                // timer arm keeps `all_closed` false, so this fires only with no timer pending.)
                 if all_closed {
                     un_account(&mut c);
                     drop(c);
@@ -5824,7 +5837,9 @@ impl Vm {
                     drop(c);
                     return Err(sched.deadlock_err.clone());
                 }
-                if sched.is_deadlocked(&c) {
+                // A pending timer guarantees future progress (its deadline send), so it vetoes the
+                // self-detected deadlock just like an `inflight` job does on the snapshot-park path.
+                if timer.is_none() && sched.is_deadlocked(&c) {
                     c.flag_deadlock(&sched.deadlock_err);
                     un_account(&mut c);
                     drop(c);
@@ -5838,7 +5853,13 @@ impl Vm {
             let first = &arms[0].1;
             let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
             if q.queue.is_empty() {
-                let _ = first.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
+                // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
+                // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
+                let backoff = match timer {
+                    Some((_, d)) => DEMOTE_POLL_BACKOFF.min(d.saturating_duration_since(std::time::Instant::now())),
+                    None => DEMOTE_POLL_BACKOFF,
+                };
+                let _ = first.cv.wait_timeout(q, backoff);
             }
         }
     }
@@ -7909,22 +7930,13 @@ impl Vm {
             self.frames.last_mut().unwrap().ip = t;
             return Ok(());
         }
-        // A live timer arm → inline-sleep to the soonest deadline and take it (matches the interp
-        // oracle; works in every engine). Reached only with no `else` and no already-ready arm.
-        if let Some((i, deadline)) = soonest {
-            let now = std::time::Instant::now();
-            if now < deadline {
-                std::thread::sleep(deadline - now);
-            }
-            self.take_wait_arm(base, Value::Bool(true), meta.arm_targets[i]);
-            return Ok(());
-        }
-        // Every arm closed+empty, no `else` → distinct fault.
+        // Every arm closed+empty, no `else`, no timer → distinct fault. (A live timer arm set
+        // `all_closed = false` above, so this fires only when there is genuinely nothing to wait on.)
         if all_closed {
             return Err(self.err("wait: all channels closed".to_string(), span));
         }
-        // Pure live channels, no `else`, no timer → block on all of them. The N arm handles are on the
-        // stack (they root the channels + re-supply the poll on resume).
+        // Block on all live arms. The N arm handles are on the stack (they root the channels + re-supply
+        // the poll on resume). A live timer arm (`soonest`) is just another arm bucket on the M:N paths.
         let keys: Vec<GcRef> = (0..n)
             .map(|i| match self.stack[base + i] {
                 Value::Obj(h) => h,
@@ -7937,20 +7949,62 @@ impl Vm {
         // `send`/`close` to any arm claims the fiber once and sweeps the rest (lost-wakeup-safe via the
         // park-gap re-check). Mirrors the single-`recv` `park_recv`/`Disp::Park` path, generalized to N.
         if self.mn.is_some() && self.native_reentry == 0 {
+            // WAIT-1 fix — a live timer arm is NOT taken by an inline-sleep (which would pin the worker
+            // and strand a sibling `send` that lands mid-window). Instead, for the soonest timer arm
+            // submit ONE background `send_wake(true)` at its deadline (in THIS scheduler) and fall
+            // through to the snapshot-park, so the timer channel parks as an ordinary arm bucket. On
+            // wake the re-poll pops a sibling's value (timer NOT taken) OR finds `now >= deadline` and
+            // takes the timer arm. The existing `WaitPark` claimed-CAS sweep guarantees exactly one of
+            // {a sibling send/close, the timer's own deadline send} wins (WAIT-2 late-alarm = CAS
+            // already claimed = no-op; WAIT-3 same-instant = single claimed CAS = one winner).
+            if let Some((i, deadline)) = soonest {
+                // Cancel checked first: a fiber about to be cancelled must not arm a stray timer (mirror
+                // the single-`recv` timer-park at `chan_recv_step`).
+                if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    self.cancelled = true;
+                    return Err(self.err("cancelled".to_string(), span));
+                }
+                let sched = self.mn.clone().unwrap();
+                let key = self.channel_core_ptr(keys[i]);
+                let core_job = self.channel_core(keys[i]);
+                let sched_job = Arc::clone(&sched);
+                // Account the pending timer `inflight` (gated STRICTLY on `soonest.is_some()`) so it
+                // vetoes the deadlock predicate while a lone fiber waits; the job un-accounts it.
+                sched.inflight.fetch_add(1, Ordering::Relaxed);
+                timer::submit_at(
+                    deadline,
+                    Box::new(move || {
+                        sched_job.send_wake(key, &core_job, WireValue::Bool(true));
+                        sched_job.inflight.fetch_sub(1, Ordering::Relaxed);
+                    }),
+                );
+            }
             self.frames.last_mut().unwrap().ip -= 1; // re-run this WaitPoll on resume
             self.wait_suspend = Some(keys);
             return Ok(());
         }
         // M:N inside a native callback (`native_reentry > 0`): a host-stack loop frame sits between the
         // worker loop and here, so we cannot snapshot-park. Demote: block this worker in place, polling
-        // all N arm queues in source order on a bounded backoff (mirrors `demote_recv_block`). Lower
-        // throughput but sound — the documented v1 limitation (§6d).
+        // all N arm queues in source order on a bounded backoff (mirrors `demote_recv_block`). A live
+        // timer arm (`soonest`) is threaded in: after the source-order channel scan fails, the demote
+        // loop takes the timer arm once `now >= deadline` (so a real send still beats the timer), and
+        // clamps its backoff to the deadline. Lower throughput but sound — the documented v1 limit (§6d).
         if self.mn.is_some() {
             let arms: Vec<(usize, Arc<ChannelCore>)> =
                 keys.iter().map(|&h| (self.channel_core_ptr(h), self.channel_core(h))).collect();
-            let (arm_index, w) = self.demote_wait_block(arms, span)?;
+            let (arm_index, w) = self.demote_wait_block(arms, soonest, span)?;
             let v = self.from_wire(w);
             self.take_wait_arm(base, v, meta.arm_targets[arm_index]);
+            return Ok(());
+        }
+        // Cooperative VM / interp (single-threaded) — a live timer arm inline-sleeps to the soonest
+        // deadline and takes it (the frozen parity oracle; reached only when `mn.is_none()`).
+        if let Some((i, deadline)) = soonest {
+            let now = std::time::Instant::now();
+            if now < deadline {
+                std::thread::sleep(deadline - now);
+            }
+            self.take_wait_arm(base, Value::Bool(true), meta.arm_targets[i]);
             return Ok(());
         }
         if !self.scheduler_stack.is_empty() && self.native_reentry == 0 {
@@ -11335,6 +11389,36 @@ main()
         assert_eq!(c.global.len(), 0, "no second wake of the already-moved fiber");
     }
 
+    /// WAIT-2/WAIT-3 unit guard — the timed-park files the timer channel as an ORDINARY arm bucket,
+    /// so the timer's own deadline `send_wake` claims+sweeps the fiber exactly like a data send. A
+    /// LATE `send_wake` on the swept data key (a sibling that landed after the alarm already won) is a
+    /// clean no-op. Pins the "timer-arm-as-bucket" design invariant the VM timed-park relies on.
+    #[test]
+    fn mn_wait_park_timer_self_send_claims_then_late_send_noop() {
+        let sched = mk_sched(1);
+        sched.seed(vec![mk_fiber(0)]);
+        let f0 = take_run(&sched); // running 1
+        let timer_core = empty_core(); // stands in for the timer channel's bucket
+        let data_core = empty_core();
+        let (timer_key, data_key) = (core_key(&timer_core), core_key(&data_core));
+        sched.park_wait(vec![(timer_key, Arc::clone(&timer_core)), (data_key, Arc::clone(&data_core))], f0);
+        assert_eq!(sched.lock().parked_n, 1, "wait on [timer,data] is ONE parked fiber");
+        // The timer's deadline job fires: `send_wake(true)` on the timer key claims + sweeps.
+        sched.send_wake(timer_key, &timer_core, WireValue::Bool(true));
+        {
+            let c = sched.lock();
+            assert_eq!(c.parked_n, 0, "the timer deadline send claims the wait fiber");
+            assert!(c.parked.get(&data_key).is_none_or(|v| v.is_empty()), "data_key token swept by the timer win");
+            assert_eq!(c.global.len(), 1, "exactly one fiber re-queued");
+        }
+        assert_eq!(take_run(&sched).task_index, 0, "the wait fiber is back on the run queue exactly once");
+        // A LATE send on the swept data key (a sibling that lost the race) is a clean no-op.
+        sched.send_wake(data_key, &data_core, WireValue::Int(9));
+        let c = sched.lock();
+        assert_eq!(c.parked_n, 0, "no double-wake from the swept data bucket");
+        assert_eq!(c.global.len(), 0, "the late send does not re-wake the already-moved fiber");
+    }
+
     /// §6d M:N wait-park: `close_wake` claims+sweeps a wait fiber identically to `send_wake` (a close
     /// has no value but must still unblock the waiter so it re-polls and skips the closed arm).
     #[test]
@@ -12550,6 +12634,58 @@ main()
                 assert_eq!(out, "66\n");
             }
             Err(_) => panic!("hung — M:N wait-in-callback demote-and-resume regressed"),
+        }
+    }
+
+    /// WAIT-1 (HIGH) on the DEMOTE path — a `wait` over a long timer + data channel reached INSIDE a
+    /// native `xs.map` callback (`native_reentry > 0`, cannot snapshot-park) must let a mid-window
+    /// sibling `send` win the data arm, NOT pin the worker on the 2000ms timer. The demote poll loop's
+    /// source-order channel scan must beat the timer deadline. Pre-fix the demote loop had no deadline
+    /// handling and behaved inconsistently / could mishandle the timer arm. 30s watchdog.
+    #[test]
+    fn vm_wait_timer_loses_to_send_in_native_callback_parallel() {
+        let src = "\
+import std.time
+
+fn pick(a: Channel[int], t: Channel[bool], x: int) -> int:
+    wait:
+        v := a.recv(): return x + v
+        _ := t.recv(): return -1
+
+fn use_map(a: Channel[int], t: Channel[bool], out: Shared[int]):
+    xs := [0]
+    ys := xs.map(fn(x): pick(a, t, x))
+    out.set(ys[0])
+
+fn fill(a: Channel[int]):
+    time.sleep_ms(5)
+    a.send(7)
+
+fn main():
+    a := Channel[int]()
+    t := timer(2000)
+    out := Shared(0)
+    parallel:
+        spawn use_map(a, t, out)
+        spawn fill(a)
+    print(out.get())
+
+main()
+";
+        let entry = write_temp_chz("vm_wait_callback_timer", src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok((out, _err, res, _code)) => {
+                assert!(res.is_ok(), "wait+timer inside native xs.map faulted under --parallel: {res:?}");
+                assert_eq!(out, "7\n", "the timer arm took the wait instead of the mid-window send (WAIT-1, demote path)");
+            }
+            Err(_) => panic!("hung — M:N wait-in-callback timer demote regressed"),
         }
     }
 
@@ -14411,6 +14547,37 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(\"got {v}\")\n        w := b.recv(): print(\"got {w}\")\nfn producer(a: Channel[int]):\n    a.send(5)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn producer(a)\nmain()\n";
         assert_eq!(run_capture_parallel(src).expect("live sibling vetoes deadlock"), "got 5\n");
         assert_eq!(run(src), "got 5\n");
+    }
+
+    /// WAIT-1 (HIGH) regression — a `wait` over a long timer arm + a data channel under `--parallel`
+    /// must NOT pin the worker on the inline-sleep and unconditionally take the timer. A sibling
+    /// `send` landing mid-window (after a tiny `sleep_ms`) must win the channel arm. Pre-fix the
+    /// 2000ms inline-sleep strands the send and the timer arm fires (prints "timeout"). Looped to
+    /// catch any straggler ordering. `--parallel`-only (timer+wait is observably nondeterministic, so
+    /// no two-engine golden).
+    #[test]
+    fn vm_wait_timer_loses_to_midwindow_send_parallel() {
+        let src = "fn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn producer(ch: Channel[int]):\n    d := timer(5)\n    _ := d.recv()\n    ch.send(7)\nfn main():\n    ch := Channel[int]()\n    t := timer(2000)\n    parallel:\n        spawn consumer(ch, t)\n        spawn producer(ch)\nmain()\n";
+        for _ in 0..20 {
+            assert_eq!(
+                run_capture_parallel(src).expect("mid-window send must win the channel arm"),
+                "got 7\n",
+                "timer arm took the wait instead of the mid-window send (WAIT-1)"
+            );
+        }
+    }
+
+    /// Companion to the WAIT-1 fix: a short timer with NO sender must still fire its arm and the run
+    /// must COMPLETE (no hang). Proves the timed-park files the timer channel in the park set and the
+    /// deadline `send_wake` claims the fiber. A fix that forgot the timer arm in the park set would
+    /// hang; the `inflight` veto keeps the deadlock predicate quiet while the lone fiber waits.
+    #[test]
+    fn vm_wait_short_timer_fires_when_no_send_parallel() {
+        let src = "fn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn main():\n    ch := Channel[int]()\n    t := timer(5)\n    parallel:\n        spawn consumer(ch, t)\nmain()\n";
+        assert_eq!(
+            run_capture_parallel(src).expect("short timer must fire its arm, not hang"),
+            "timeout\n"
+        );
     }
 
     // ----- §6d edge cases: control flow + nesting + spawn inside `wait` arm bodies (VM == interp) -----
