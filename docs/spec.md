@@ -94,9 +94,14 @@ in [`docs/concurrency.md`](concurrency.md); phase history in
 **Still deferred (YAGNI v1):** macros, package registry, native backend (a Cranelift AOT/JIT is the
 stretch end-game), and Level-3 FFI (dynamic `cdylib`/C-ABI plugins + userdata).
 
-**`yield`/generators are a deliberate non-goal** — lazy sequences are written as adapter structs over
-`Iterator[T]` (Rust's `Map`/`Take` model), so no coroutine runtime is needed. Live status + open
-items are tracked in [`PROGRESS.md`](../PROGRESS.md).
+**`yield`/generators** were originally a deliberate non-goal (lazy sequences are written as adapter
+structs over `Iterator[T]`, Rust's `Map`/`Take` model). They now exist as an **experimental,
+VM-only** feature: a `fn` declaring `-> Iterator[T]` may `yield` values; calling it returns a
+suspendable generator usable anywhere an `Iterator[T]` is (`for` loops, `Iterator[T]` bounds). It is
+VM-only — the frozen tree-walk interpreter rejects `yield` (it cannot suspend a native Rust call),
+so two-engine parity is **waived** for generators. The adapter-struct model remains the
+parity-clean, recommended way to write lazy sequences. Live status is tracked in
+[`PROGRESS.md`](../PROGRESS.md).
 
 ### Syntax sketch
 

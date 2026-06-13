@@ -358,9 +358,19 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
   callback may block under `--parallel` — they run through VM frames so a blocking `recv` parks. The
   native `xs.map(f)` is the faster non-blocking path (and demotes via Path C if a `recv` blocks in it).
 
-**Permanent non-goals:** interp B1/B2 (above); `yield`/generators, variadic args, Level-3 dynamic
+**Permanent non-goals:** interp B1/B2 (above); variadic args, Level-3 dynamic
 `cdylib`/C-ABI FFI, bignum (`i64`-only — every overflow is a recoverable fault; binary work → a future
 `bytes` *sequence*, no `byte`/`u8` scalar).
+
+> **`yield`/generators — experimental, VM-only (landed on `feat/yield-generators`).** No longer a
+> non-goal: a `fn` declaring `-> Iterator[T]` may `yield`; the call returns a suspendable generator
+> (a one-shot cooperative coroutine — its own private frame/stack swapped into the VM, resumed by an
+> intrinsic `.next()` that the `for`-loop step drives). VM-only: the frozen interpreter rejects
+> `yield` (it cannot suspend a native Rust call), so **two-engine parity is waived** for generators.
+> `defer`/`spawn`/`parallel:`/`wait:` are checker-forbidden inside a generator. See
+> `examples/generators_basic.chz`, the `vm_generator_*` tests, and the `generator_*` checker tests.
+> The adapter-struct model over `Iterator[T]` (`examples/iter_adapters.chz`) stays the parity-clean,
+> recommended way to write lazy sequences.
 
 ---
 

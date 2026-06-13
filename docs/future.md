@@ -69,9 +69,12 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 3. ~~**Iterator protocol + generators (`yield`)**~~ — **iterator DONE; generators removed.** The
    `Iterator[T]` parameterized protocol shipped (M13): user structs usable in `for`, generic
    `[S: Iterator[T], T]` bounds, and lazy `map`/`filter`/`take` written as **adapter structs** over it
-   (Rust `std::iter` model — `examples/iter_adapters.chz`). **`yield`/generators are a permanent
-   non-goal** (see `spec.md` *Non-goals*): they would need coroutine/continuation support in both
-   engines, and the adapter-struct pattern covers lazy streaming without it.
+   (Rust `std::iter` model — `examples/iter_adapters.chz`). **`yield`/generators have since landed as
+   an experimental, VM-only feature** (was a permanent non-goal): a `fn` declaring `-> Iterator[T]`
+   may `yield`; the call returns a suspendable generator (one-shot cooperative coroutine, own private
+   frame/stack swapped into the VM, resumed by an intrinsic `.next()`). VM-only — the frozen
+   interpreter cannot suspend a native Rust call and rejects `yield`, so two-engine parity is waived
+   here. The adapter-struct pattern stays the parity-clean default for lazy streaming.
 4. ~~**List concat + map merge**~~ — **DONE.** Method-based: list `.concat`/`.extend`, map
    `.merge`/`.update` (concat/merge new, extend/update mutate). No new syntax; spread/unpack stays
    dropped. `examples/concat_merge.chz`.

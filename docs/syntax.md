@@ -236,8 +236,21 @@ fn first_or[S: Iterator[T], T](xs: S, default: T) -> T:
     return default
 first_or([10, 20], 0)      # 10   (T = int, recovered from the list element)
 first_or("hi", "?")        # "h"  (T = str)
-# There is NO `yield`/generator keyword — lazy sequences are built as adapter structs over this
-# protocol (Rust-style; see examples/iter_adapters.chz for Take/Mapped).
+# Lazy sequences are normally built as adapter structs over this protocol (Rust-style; see
+# examples/iter_adapters.chz for Take/Mapped) — the parity-clean, recommended form.
+
+# `yield` / generators (EXPERIMENTAL, VM-only — the interpreter rejects `yield`). A fn that declares
+# `-> Iterator[T]` and uses `yield` is a generator: calling it returns a suspendable iterator, not a
+# value. It runs lazily, suspending at each `yield` and resuming on the next `.next()`.
+fn count_up(n: int) -> Iterator[int]:
+    i := 0
+    while i < n:
+        yield i            # produce a value, suspend until the next .next()
+        i = i + 1
+for x in count_up(3):      # drives the generator: prints 0, 1, 2
+    print(x)
+# `return` (bare only) stops a generator early; `defer`/`spawn`/`parallel:`/`wait:` are not allowed
+# inside a generator. See examples/generators_basic.chz.
 
 while cond:
     cond = step()
