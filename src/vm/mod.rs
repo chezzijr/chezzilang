@@ -14272,14 +14272,23 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         assert_eq!(run(src), "b 99\n");
     }
 
-    /// M:N wait-park cross-bucket SWEEP (TDD step 5): a consumer parks on {a,b}; a `send` to `a` wakes
-    /// it and it finishes — a later `send` to `b` must NOT re-wake the now-Done fiber (its stale `b`
+    /// M:N wait-park cross-bucket SWEEP (TDD step 5): a consumer parks on {a,b}; a `send` to one wakes
+    /// it and it finishes — a later `send` to the OTHER must NOT re-wake the now-Done fiber (its stale
     /// token was swept under the sched lock). Without the sweep this re-schedules a Done fiber → panic.
+    /// Two real-thread producers race, so EITHER arm may win — the sweep's guarantee is structural (no
+    /// panic, no hang), NOT a specific value; assert the run completes cleanly with a valid value, and
+    /// loop to exercise both orderings + the post-done send. The cooperative engine is deterministic
+    /// (source order ⇒ "1\n"); only `--parallel` races.
     #[test]
     fn vm_wait_sweeps_other_buckets_after_waking_parallel() {
         let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\n        w := b.recv(): print(w)\nfn p_a(a: Channel[int]):\n    a.send(1)\nfn p_b(b: Channel[int]):\n    b.send(2)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn p_a(a)\n        spawn p_b(b)\nmain()\n";
-        assert_eq!(run_capture_parallel(src).expect("parallel wait sweep"), "1\n");
-        assert_eq!(run(src), "1\n");
+        for _ in 0..20 {
+            // `.expect` catches a panic-to-fault ("scheduled a Done fiber") or a hang-then-deadlock; the
+            // membership check tolerates the genuine producer race.
+            let out = run_capture_parallel(src).expect("parallel wait sweep must not panic or hang");
+            assert!(out == "1\n" || out == "2\n", "unexpected sweep output: {out:?}");
+        }
+        assert_eq!(run(src), "1\n"); // cooperative engine is deterministic (source-order poll)
     }
 
     /// M:N wait-park: a wait-parked fiber with a LIVE sibling that will send must take the arm and
