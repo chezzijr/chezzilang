@@ -1680,11 +1680,19 @@ impl Parser {
 /// so it is never reached by this statement-only walk — a `yield` inside one stays invisible here
 /// and is later flagged by the checker as "yield outside a generator").
 fn body_contains_yield(block: &Block) -> bool {
-    block.iter().any(|s| stmt_contains_yield(&s.kind))
+    block.iter().any(stmt_contains_yield)
 }
 
-fn stmt_contains_yield(kind: &StmtKind) -> bool {
-    match kind {
+fn stmt_contains_yield(s: &Stmt) -> bool {
+    // A `yield` can also live in a `recover:` block in expression position (`x := recover: … yield …`),
+    // which the statement structure does not reach — scan those too. Stops at closures (a closure's
+    // yields are its own). See `ast::expr_recover_blocks`.
+    let mut recover_blocks = Vec::new();
+    stmt_expr_recover_blocks(s, &mut recover_blocks);
+    if recover_blocks.iter().any(|b| body_contains_yield(b)) {
+        return true;
+    }
+    match &s.kind {
         StmtKind::Yield(_) => true,
         StmtKind::If { branches, else_block } => {
             branches.iter().any(|(_, b)| body_contains_yield(b))
@@ -1867,6 +1875,16 @@ mod tests {
     fn yield_in_nested_block_marks_generator() {
         match only("fn g() -> Iterator[int]:\n    for i in 0..3:\n        yield i\n") {
             StmtKind::Fn(d) => assert!(d.is_generator),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn yield_inside_recover_block_marks_generator() {
+        // A `yield` reachable only through a `recover:` expression block still makes the fn a
+        // generator (the detection walk descends into recover blocks).
+        match only("fn g() -> Iterator[int]:\n    x := recover:\n        yield 1\n        1\n    print(x)\n") {
+            StmtKind::Fn(d) => assert!(d.is_generator, "yield in a recover: block must mark the fn a generator"),
             other => panic!("{other:?}"),
         }
     }

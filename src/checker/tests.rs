@@ -4528,6 +4528,22 @@ fn generator_spawn_rejected() {
 }
 
 #[test]
+fn generator_yield_only_in_recover_ok() {
+    // A generator whose only `yield` lives in a `recover:` block is valid (detected as a generator,
+    // so `yield` is legal there) — guards the parser/checker recover-descent fix.
+    ok("fn g() -> Iterator[int]:\n    x := recover:\n        yield 1\n        1\n    print(x)\n");
+}
+
+#[test]
+fn generator_defer_in_recover_rejected() {
+    // The `defer` ban must not be bypassable by nesting inside a `recover:` block.
+    rejects(
+        "fn cleanup():\n    print(\"c\")\nfn g() -> Iterator[int]:\n    yield 0\n    x := recover:\n        defer cleanup()\n        1\n    print(x)\n",
+        "`defer` is not supported inside a generator",
+    );
+}
+
+#[test]
 fn generator_bare_return_ok() {
     // A bare `return` inside a generator stops it early — legal.
     ok("fn g() -> Iterator[int]:\n    yield 1\n    return\n    yield 2\n");

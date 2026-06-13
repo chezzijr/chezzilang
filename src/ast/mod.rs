@@ -516,3 +516,114 @@ pub enum BinaryOp {
     Shl,    // <<
     Shr,    // >>
 }
+
+/// Collect every `recover:` block reachable from expression `e`, in source order, **without
+/// descending into a nested closure** (a closure's body is its own scope). `recover:` is the only
+/// expression form carrying a statement block, so generator analyses that must see statements buried
+/// in expression position (`x := recover: … yield …`) walk into these. The recover block's *own*
+/// statements are NOT recursed here — the caller drives that via its statement walk (which re-applies
+/// this to each nested statement's expressions), so nested recovers compose correctly.
+pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
+    let mut go = |x: &'a Expr| expr_recover_blocks(x, out);
+    match &e.kind {
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Ident(_) => {}
+        ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => es.iter().for_each(go),
+        ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
+            expr_recover_blocks(k, out);
+            expr_recover_blocks(v, out);
+        }),
+        ExprKind::Comprehension { key, elem, iter, guard, .. } => {
+            if let Some(k) = key {
+                expr_recover_blocks(k, out);
+            }
+            expr_recover_blocks(elem, out);
+            expr_recover_blocks(iter, out);
+            if let Some(g) = guard {
+                expr_recover_blocks(g, out);
+            }
+        }
+        ExprKind::Unary { expr, .. } => go(expr),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
+            go(lhs);
+            go(rhs);
+        }
+        ExprKind::Range { start, end } => {
+            go(start);
+            go(end);
+        }
+        ExprKind::Call { callee, args, named, .. } => {
+            go(callee);
+            args.iter().for_each(&mut go);
+            named.iter().for_each(|(_, v)| expr_recover_blocks(v, out));
+        }
+        ExprKind::Field { obj, .. } | ExprKind::Try(obj) => go(obj),
+        ExprKind::Index { obj, index } => {
+            go(obj);
+            go(index);
+        }
+        ExprKind::Slice { obj, start, end } => {
+            go(obj);
+            go(start);
+            go(end);
+        }
+        ExprKind::OptChain { obj, call, .. } => {
+            go(obj);
+            if let Some(c) = call {
+                c.args.iter().for_each(&mut go);
+                c.named.iter().for_each(|(_, v)| expr_recover_blocks(v, out));
+            }
+        }
+        ExprKind::DecodeCall { obj, arg, .. } => {
+            go(obj);
+            go(arg);
+        }
+        // A closure is its own scope: a `yield`/restricted statement inside it belongs to the closure
+        // (which can never be a generator), not the enclosing function. Do not descend.
+        ExprKind::Closure { .. } => {}
+        ExprKind::Match { scrutinee, arms } => {
+            go(scrutinee);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    expr_recover_blocks(g, out);
+                }
+                expr_recover_blocks(&a.body, out);
+            }
+        }
+        ExprKind::IfElse { cond, then, els } => {
+            go(cond);
+            go(then);
+            go(els);
+        }
+        // The one block-carrying expression: record it; the caller recurses into its statements.
+        ExprKind::Recover(block) => out.push(block),
+    }
+}
+
+/// Collect every `recover:` block reachable from the expressions a single statement holds directly
+/// (not its sub-blocks — those are walked as statements by the caller). Companion to
+/// [`expr_recover_blocks`]; together they let a statement-level walk also see statements that live in
+/// `recover:` blocks in expression position.
+pub fn stmt_expr_recover_blocks<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
+    let mut go = |e: &'a Expr| expr_recover_blocks(e, out);
+    match &s.kind {
+        StmtKind::Let { value, .. } => go(value),
+        StmtKind::Assign { target, value, .. } => {
+            go(target);
+            go(value);
+        }
+        StmtKind::Expr(e) | StmtKind::Yield(e) => go(e),
+        StmtKind::Return(Some(e)) => go(e),
+        StmtKind::If { branches, .. } => branches.iter().for_each(|(c, _)| go(c)),
+        StmtKind::While { cond, .. } => go(cond),
+        StmtKind::For { iter, .. } => go(iter),
+        StmtKind::Match { scrutinee, .. } => go(scrutinee),
+        StmtKind::Defer(DeferTarget::Call(e)) => go(e),
+        StmtKind::Spawn(SpawnTarget::Call(e)) => go(e),
+        StmtKind::Wait { arms, .. } => arms.iter().for_each(|a| expr_recover_blocks(&a.chan, out)),
+        _ => {}
+    }
+}

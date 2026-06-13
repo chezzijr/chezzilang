@@ -1618,6 +1618,14 @@ impl Checker {
     /// not into nested `fn` definitions (those have their own generator status).
     fn check_generator_restrictions(&mut self, body: &[Stmt]) {
         for s in body {
+            // A restricted statement can also hide in a `recover:` block in expression position
+            // (`x := recover: … defer … `), which the statement structure does not reach — descend
+            // into those too so the ban can't be bypassed. (Mirrors the parser's yield detection.)
+            let mut recover_blocks = Vec::new();
+            crate::ast::stmt_expr_recover_blocks(s, &mut recover_blocks);
+            for b in recover_blocks {
+                self.check_generator_restrictions(b);
+            }
             match &s.kind {
                 StmtKind::Defer(_) => self.error(s.span, "`defer` is not supported inside a generator (experimental)"),
                 StmtKind::Spawn(_) => self.error(s.span, "`spawn` is not supported inside a generator (experimental)"),
