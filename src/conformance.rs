@@ -292,6 +292,7 @@ fn parser_rules_match_fns() {
         ("whileStmt", "parse_while"),
         ("matchStmt", "parse_match"),
         ("pattern", "parse_pattern"),
+        ("patternPrimary", "parse_pattern_primary"),
         ("subpattern", "parse_subpattern"),
         ("tuplePattern", "parse_tuple_pattern"),
         ("returnStmt", "parse_return"),

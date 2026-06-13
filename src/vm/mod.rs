@@ -13073,6 +13073,20 @@ main()";
         assert_eq!(vm_out, interp_out);
     }
 
+    /// or-pattern golden: `examples/match_or.chz` (or-patterns with + without bindings, a 3-variant
+    /// enum or-pattern that is exhaustive without `_`, a guard on an or-pattern, and nested nullary
+    /// variants `Some(None)` / `Ok(Err(e))`) byte-identical on the VM, the interpreter, the
+    /// `--parallel` engine, and its `.expected`.
+    #[test]
+    fn golden_match_or_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/match_or.chz");
+        let expected = include_str!("../../examples/match_or.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    }
+
     /// M8-M4 golden: `examples/set.chz` (the set type — literals, membership, algebra, iteration)
     /// byte-identical on the VM, the interpreter, and its `.expected`.
     #[test]

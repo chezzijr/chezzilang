@@ -1,0 +1,73 @@
+# examples/match_or.chz — or-patterns (`p | q | ...`) and nested nullary-variant patterns.
+#
+# An or-pattern matches if ANY alternative matches (first match wins). Every alternative must bind
+# the same variables (so the body sees them regardless of which alternative hit). A nested bare
+# capitalized name like the `None` in `Some(None)` is a refutable variant match, not a binding.
+
+# --- or-pattern without bindings: literals ---
+fn size(n: int) -> str:
+    return match n:
+        0 | 1 | 2: "small"
+        3 | 4 | 5: "medium"
+        _: "large"
+
+print(size(1))
+print(size(4))
+print(size(9))
+
+# --- or-pattern without bindings: a 3-variant enum is exhaustive WITHOUT a `_` ---
+enum Color:
+    Red
+    Green
+    Blue
+
+fn is_primary(c: Color) -> str:
+    return match c:
+        Red | Green | Blue: "primary"
+
+print(is_primary(Red))
+print(is_primary(Green))
+print(is_primary(Blue))
+
+# --- or-pattern WITH bindings: both alternatives bind `a` (same type) ---
+enum Shape:
+    Circle(int)
+    Square(int)
+
+fn measure(s: Shape) -> int:
+    return match s:
+        Circle(a) | Square(a): a
+
+print(measure(Circle(7)))
+print(measure(Square(11)))
+
+# --- a guard on an or-pattern: the guard runs with the bindings in scope ---
+fn classify(n: int) -> str:
+    return match n:
+        1 | 2 | 3 if n % 2 == 0: "even-low"
+        1 | 2 | 3: "odd-low"
+        _: "other"
+
+print(classify(2))
+print(classify(3))
+print(classify(8))
+
+# --- nested nullary variant: the bare `None` in `Some(None)` is a refutable variant match ---
+fn describe(oo: Option[Option[int]]) -> str:
+    return match oo:
+        Some(None): "inner-none"
+        _: "other"
+
+a: Option[Option[int]] = Some(None)
+b: Option[Option[int]] = Some(Some(42))
+c: Option[Option[int]] = None
+print(describe(a))
+print(describe(b))
+print(describe(c))
+
+# --- nested nullary in a Result: `Ok(Err(e))` (distinct outer variants per arm) ---
+nested: Result[Result[int, str], str] = Ok(Err("boom"))
+match nested:
+    Ok(Err(e)): print("nested-err-{e}")
+    Err(e): print("outer-err-{e}")
+    _: print("nested-ok")
