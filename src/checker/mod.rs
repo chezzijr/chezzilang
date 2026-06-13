@@ -1927,19 +1927,19 @@ impl Checker {
             Pattern::Ident(name) => {
                 // A nested bare identifier names either a nullary variant of the matched type (a
                 // refutable variant match — `Some(None)`, `Ok(Err(e))`) or a fresh binding.
-                if let Some(vmap) = self.variants_of(ty) {
-                    if let Some(payload) = vmap.get(name) {
-                        if payload.is_empty() {
-                            // A nullary variant of `ty`: a refutable variant match, binds nothing.
-                            return false;
-                        }
-                        // A non-nullary variant used without its payload — needs `Name(...)`.
-                        self.error(
-                            span,
-                            format!("variant '{name}' of {ty} requires its payload — write '{name}(...)'"),
-                        );
+                if let Some(vmap) = self.variants_of(ty)
+                    && let Some(payload) = vmap.get(name)
+                {
+                    if payload.is_empty() {
+                        // A nullary variant of `ty`: a refutable variant match, binds nothing.
                         return false;
                     }
+                    // A non-nullary variant used without its payload — needs `Name(...)`.
+                    self.error(
+                        span,
+                        format!("variant '{name}' of {ty} requires its payload — write '{name}(...)'"),
+                    );
+                    return false;
                 }
                 // A globally-known variant name that ISN'T a variant of `ty` cannot be a binding: the
                 // compiler routes it by the variant registry (a `MatchArm` test), so it would trap on
