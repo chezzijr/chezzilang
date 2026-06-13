@@ -56,8 +56,10 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 ## 3. Missing features (ranked by leverage for scripting) → **mostly shipped (M12–M18)**
 
 > Comprehensions, slicing, the iterator protocol, concat/merge, hex/bin/oct literals, optional
-> chaining, tuple-destructuring `for`, match guards, and `std.os.exit` have all landed. A few items
-> below (mutable closure capture, runtime stack traces) remain open — see [`PROGRESS.md`](../PROGRESS.md).
+> chaining, tuple-destructuring `for`, match guards, `std.os.exit`, and runtime stack traces have all
+> landed. Mutable closure capture was **resolved by decision** (kept snapshot-by-value by design, with
+> `std.ref` `Ref[T]` as the idiomatic mutable box). Nothing in this list is still open — see
+> [`PROGRESS.md`](../PROGRESS.md).
 
 1. **Comprehensions** — `[x*2 for x in xs if x>0]` (+ dict/set). A Python-feel language without
    these feels broken. Pure parse-time desugar to loop + push. Cheap, large UX win.
@@ -81,13 +83,17 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 7. ~~**Tuple-destructuring `for` (+ `enumerate` / `zip`)**~~ — **DONE.** `for a, b in list[(A,B)]`
    (N-var over `list[tupleN]`); VM splits map vs list-of-tuples at runtime on a new `Op::IsMap`.
    `enumerate`/`zip` shipped as pure-Chezzi `std/iter.chz`. `examples/for_tuple.chz`.
-8. **Mutable closure capture** — currently snapshot-by-value, so closure counters / accumulators
-   don't work. Real functional gap. Decide: keep intentional (document loudly) or fix (capture cell).
+8. ~~**Mutable closure capture**~~ — **RESOLVED by decision.** Capture stays **snapshot-by-value**
+   *intentionally* (a bare scalar is copied when a closure closes over it); the idiomatic mutable box
+   is `std.ref` `Ref[T]` (a one-field struct, shared by reference, mutated through a method). Documented
+   loudly in `std/ref.chz`. So closure counters / accumulators *are* expressible — via `Ref[T]`, not a
+   raw captured `int`.
 9. **Match guards + range patterns** — `n if n>0:`, `1..10:`. Roadmap. Guards subsume the rest.
-10. **`std.os.exit(code)` + real exit codes** — currently deferred, but scripts *must* signal
-    failure. Needs an exit-code channel threaded through both run drivers + the CLI.
-11. **Runtime stack traces** — error + call chain + line numbers. Debuggability is a scripting
-    feature.
+10. ~~**`std.os.exit(code)` + real exit codes**~~ — **DONE.** `std.os.exit(code)` is a hard, uncatchable
+    halt (unwinds past `recover:`, bypasses `defer`), with the code threaded through both run drivers +
+    the CLI; exit-wins precedence holds under `--parallel`. `examples/exit.chz`.
+11. ~~**Runtime stack traces**~~ — **DONE.** Error + call chain + line numbers, both engines
+    (`37f374a`).
 
 **Ecosystem (Tier 4, separate track):** REPL (huge for scripting iteration), formatter, `assert` +
 built-in test runner, LSP.

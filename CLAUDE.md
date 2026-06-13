@@ -36,7 +36,7 @@ cargo run -- check  examples/hello.chz   # type-check only (M4); --errors=json f
 cargo run -- run    examples/hello.chz   # type-check + run on the bytecode VM (default, M5)
 cargo run -- run --interp   examples/hello.chz   # tree-walk interpreter (frozen reference engine)
 cargo run -- run --parallel examples/primes_parallel.chz   # VM-only OS-thread engine
-cargo run -- repl                        # interactive REPL
+cargo run -- repl                        # interactive REPL (NOT IMPLEMENTED — stub errors; see src/main.rs:65)
 
 cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see docs/benchmarks.md)
 ```

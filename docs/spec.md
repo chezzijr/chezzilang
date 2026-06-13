@@ -6,7 +6,7 @@ A fast, statically-typed, Python-feel scripting language. Hand-built in Rust.
 > structural protocols, exhaustive `match`, closures/HOF, modules, `Iterator[T]`, slicing/indexing,
 > `defer` + `recover:`); **concurrency shipped through Tier-D** (`spawn` / `parallel:` nursery,
 > `Channel`/`Shared`/`Executor`, real OS-thread M:N scheduler + netpoller + `std.net`). **M19** (a
-> behavior-preserving perf track) is in progress — ~1565 tests passing. This doc is the source of truth
+> behavior-preserving perf track) is in progress — ~1630 tests passing. This doc is the source of truth
 > for the *language design*; live build status lives in `PROGRESS.md` and the roadmap at the bottom.
 
 ## Goals (ranked)
@@ -197,11 +197,13 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >   (`arg_int`/`arg_float`/`arg_str`, stdout/stderr/stdin, args/env/cwd) so a binding is written
 >   once and runs on both the interp (Rc values) and the VM (heap handles). Returns flow back as an
 >   engine-neutral `NativeRet`, lowered to each engine's value *after* the call (GC-safe).
-> - **Dependency policy:** default build stays **zero third-party crates** (Rust `std` only);
->   crate-backed bindings would ride behind **Cargo features** (`--features regex`).
+> - **Dependency policy:** the **core** (lexer/parser/checker/compiler/VM/GC) is Rust `std` only.
+>   The **runtime** links a small fixed set of crates *unconditionally* (no Cargo features): `regex`
+>   (`std.regex`), `ureq`+TLS (`std.request`), and `libc`/`polling`/`socket2` (the `--parallel`
+>   netpoller + `std.net`). See `Cargo.toml`.
 > - **Still deferred (Level-3):** **Userdata** (`Box<dyn Any>` for opaque `File`/`Regex` handles —
->   io is whole-string for now), and *dynamic* `cdylib` plugins over a stable C ABI. `std.os.exit`
->   awaits an exit-code channel through the run drivers.
+>   io is whole-string for now), and *dynamic* `cdylib` plugins over a stable C ABI. (`std.os.exit`
+>   with a real exit-code channel through the run drivers has since **shipped** — see `examples/exit.chz`.)
 
 ## Architecture — pipeline
 
@@ -209,6 +211,7 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 source.chz
   → Lexer        (indent-aware: INDENT/DEDENT tokens)
   → Parser       (Pratt expr parsing + recursive-descent stmts) → AST
+  → Desugar      (AST → AST lowering: pipe, optional chaining/`??`, comprehensions, defaults)
   → Checker      (local inference; explicit fn sigs; machine-readable errors) → typed AST
   → [Phase 1] Tree-walk interpreter        ← reference semantics, working lang fast
   → [Phase 2] Bytecode compiler → Stack VM (+ mark-sweep GC)
@@ -224,6 +227,7 @@ src/
   lexer/        # chars → tokens, indent stack
   parser/       # tokens → AST (Pratt)
   ast/          # node definitions
+  desugar/      # AST → AST lowering (pipe, ?., ??, comprehensions, defaults)
   checker/      # type inference + checking
   interp/       # tree-walk interpreter (Phase 1)
   compiler/     # AST → bytecode (Phase 2)

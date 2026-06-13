@@ -147,9 +147,10 @@ unknown to the desugar pass, methods are resolved by name: if two structs define
 with **different** parameters, a named call to it is rejected as ambiguous and — since the binding
 can't be chosen safely — its **defaults aren't filled** either (the call then fails the arity check),
 so give same-named methods the same parameter shape or unique names. A method that reuses a built-in
-method name (`map`, `push`, `len`, …) does not get default/named support. **Not yet** supported on
-closures or enum variants; defaults must be constant literals (no `compute()` or references to other
-params).
+method name (`map`, `push`, `len`, …) does not get default/named support. Defaults are **not yet**
+supported on closures or enum variants. (Per §above, a default may be any expression that doesn't
+reference another parameter — a literal, a global, arithmetic, or a call; only param-referencing
+defaults are rejected.)
 
 **`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
 **explicit `-> Result[…]`/`-> Option[…]`** return type. The `?` propagates to *that closure's*
@@ -788,7 +789,8 @@ Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m
 / `for k, v in m`.
 
 Sets: `{a, b, c}` is a set literal (deduped, insertion-ordered; `{}` is the empty *map*, the empty
-set is `set()`; `set(list)` builds one from a list). Elements are hashable scalars (int/str/bool).
+set is `set()`; `set(list)` builds one from a list). Elements are any `Hashable` type (int/str/bool,
+or a struct with `hash(self) -> int`).
 Methods: `s.add(x)` `s.remove(x)→bool` `s.has(x)` `s.len()` `s.union(t)` `s.intersection(t)`
 `s.difference(t)`; iterate with `for x in s`. `==` is order-independent.
 
@@ -921,7 +923,7 @@ single thread until the response arrives. `Match` and `Response` are reserved (p
 names.
 
 Importable: `std.io`, `std.math`, `std.str`, `std.cmp`, `std.os`, `std.json`, `std.process`,
-`std.fs`, `std.time`, `std.regex`, `std.request`.
+`std.fs`, `std.time`, `std.regex`, `std.request`, `std.net`, `std.iter`, `std.ref`.
 
 ---
 
