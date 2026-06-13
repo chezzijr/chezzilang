@@ -236,6 +236,26 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >   varargs, opaque pointers / userdata, and `char*` ownership transfer / `free` are deferred (a
 >   `char*` return is copied immediately; a malloc'd return leaks). A slow C call runs inline (extern
 >   names are NOT in `is_blocking`, so it pins its worker under `--parallel`).
+> - **FFI v1 limits (known + by design):**
+>   - **Integer width (FFI-2):** Chezzi `int` (i64) marshals as C **`long`** — 64-bit on every
+>     supported **LP64** unix target. 32-bit C ints, `unsigned`, and other fixed-width C integer types
+>     are **out of v1 scope**; there is **no `int32` type** (the language is feature-frozen). A C API
+>     taking a 32-bit `int` parameter still works in practice on LP64 (the value is passed in a 64-bit
+>     register and the callee reads the low 32 bits), but a value that does not fit the C type's range
+>     is the caller's responsibility. **Non-unix is unsupported:** on an LLP64 target (Windows x64) C
+>     `long` is 32-bit and would truncate, so the checker **rejects `extern` on non-unix targets** and
+>     the `cffi` module is `#[cfg(unix)]`-gated.
+>   - **`char*` return leaks (FFI-3):** a `str`-typed return is copied immediately into an owned Chezzi
+>     string, but the C pointer is **never `free`d** — v1 has no ownership transfer. A function that
+>     returns a freshly `malloc`'d `char*` (rather than a static / interned string) therefore **leaks**
+>     that allocation on every call. Prefer C APIs that return a borrowed/static string, or accept the
+>     leak for short-lived programs. (Code-commented at `src/native/cffi.rs`.)
+>   - **No `--parallel` serialization / non-reentrant C (FFI-7):** `extern` calls are **NOT** serialized
+>     under `--parallel` — two OS-thread workers can be inside C code at the same time. Calling a
+>     **non-reentrant** C function (e.g. `strtok`, `gmtime`/`localtime`, `setlocale`, anything using
+>     `errno` carelessly or static internal buffers) concurrently **races at the C level** (Chezzi
+>     cannot guard state it does not own). Use only thread-safe/reentrant C entry points under
+>     `--parallel`, or confine such calls to the sequential engines.
 > - **Still deferred (Level-3):** **Userdata** (`Box<dyn Any>` for opaque `File`/`Regex` handles —
 >   io is whole-string for now), and the deferred FFI features above (structs/callbacks/varargs/
 >   userdata). (`std.os.exit` with a real exit-code channel through the run drivers has since

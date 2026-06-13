@@ -60,6 +60,25 @@ fn is_reserved_type(name: &str) -> bool {
     name == "Result" || name == "Option" || name == "Executor"
 }
 
+/// Names an `extern` C fn may NOT take: a builtin (`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/
+/// `set`), `print`, or a runtime constructor (`Channel`/`Shared`/`Atomic`/`timer`/`Executor`). Both
+/// backends resolve these names to a special op *before* a plain named call (`compiler::compile_call`
+/// / `interp::eval_call`), so an extern fn with one of these names is silently shadowed — dead code
+/// that the compiler's eager `MakeCffi` would still `dlsym` (aborting on a symbol it can never call).
+/// Mirrors `compiler::is_builtin` + the constructor/`print` special cases. (Struct- and variant-name
+/// collisions are caught separately against the built registries, since those are user-declared.)
+fn is_reserved_name(name: &str) -> bool {
+    matches!(
+        name,
+        // builtins (mirrors compiler::is_builtin / interp::builtins::is_builtin)
+        "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set"
+        // the special print op
+        | "print"
+        // runtime constructors the backends special-case before a plain call
+        | "Channel" | "Shared" | "Atomic" | "timer" | "Executor"
+    )
+}
+
 /// Prebuilt protocols a user program may use as bounds but must not redeclare (mirrors
 /// [`prebuilt_protocols`]).
 fn is_reserved_protocol(name: &str) -> bool {
@@ -748,6 +767,13 @@ impl Checker {
                 self.hoist_protocol(name, type_params, methods, s.span);
             }
         }
+        // extern fn (name, span) pairs, collected during the hoist loop and checked against the
+        // fully-built struct/variant/enum registries AFTER the loop (so a `struct S` declared *after*
+        // an `extern fn S` still collides — the check is order-independent).
+        // `mut` + the post-loop sweep are unix-only (only the `#[cfg(unix)]` arm pushes); on other
+        // targets extern is rejected wholesale, leaving this empty.
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut extern_names: Vec<(String, Span)> = Vec::new();
         for s in stmts {
             match &s.kind {
                 StmtKind::Fn(decl) => {
@@ -819,11 +845,41 @@ impl Checker {
                     self.enum_type_params.insert(name.clone(), type_params.clone());
                 }
                 StmtKind::Extern { fns, .. } => {
+                    // Dynamic C-ABI FFI (`dlopen`/libffi) is unix-only — `int` marshals as C `long`,
+                    // which is 64-bit on every supported (LP64) unix target. On a non-unix target
+                    // (e.g. LLP64 Windows, where C `long` is 32-bit) `extern` is unavailable; reject
+                    // it here so the `MakeCffi`/`dlopen` + `as c_long` truncation path is statically
+                    // unreachable off-unix.
+                    #[cfg(not(unix))]
+                    for ef in fns {
+                        self.error(
+                            ef.span,
+                            format!(
+                                "extern FFI is only supported on unix targets ('{}')",
+                                ef.name
+                            ),
+                        );
+                    }
                     // Each extern C fn becomes a plain module-global signature, hoisted exactly like
                     // a top-level `fn` so calls type-check through the normal `infer_named_call` path.
                     // v1 marshals scalars only — every resolved param + return type must be
                     // C-marshallable (int/float/bool/str, or void return).
+                    #[cfg(unix)]
                     for ef in fns {
+                        // An extern fn may not take a builtin/print/constructor name — both backends
+                        // resolve those to a special op before a plain call, so the extern would be
+                        // dead code (and the compiler's eager `MakeCffi` would `dlsym` a symbol it can
+                        // never reach). Struct/variant collisions are checked after the loop.
+                        if is_reserved_name(&ef.name) {
+                            self.error(
+                                ef.span,
+                                format!(
+                                    "'{}' is a builtin/reserved name and cannot be an extern fn",
+                                    ef.name
+                                ),
+                            );
+                        }
+                        extern_names.push((ef.name.clone(), ef.span));
                         if self.functions.contains_key(&ef.name) {
                             self.error(
                                 ef.span,
@@ -867,6 +923,23 @@ impl Checker {
                     }
                 }
                 _ => {}
+            }
+        }
+        // Order-independent extern/registry collision sweep: a struct or enum variant registers a
+        // same-named constructor the backends resolve before a plain call, so an extern sharing that
+        // name is unreachable. Done after the loop so a `struct S`/`enum {Leaf}` declared *after* an
+        // `extern fn S`/`fn Leaf` still collides (the maps are fully built by now). `extern_names` is
+        // only populated on unix (the `#[cfg(unix)]` arm above); on other targets the extern was
+        // already rejected wholesale, so the sweep is a no-op.
+        for (name, span) in &extern_names {
+            if self.structs.contains_key(name)
+                || self.variants.contains_key(name)
+                || self.enums.contains_key(name)
+            {
+                self.error(
+                    *span,
+                    format!("'{name}' is a builtin/reserved name and cannot be an extern fn"),
+                );
             }
         }
     }

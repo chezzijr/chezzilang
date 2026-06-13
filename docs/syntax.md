@@ -1031,6 +1031,23 @@ recoverable runtime fault (catch with `recover:`). A returned `char*` is copied 
 `free`d, so a `malloc`'d return **leaks**, and a non-NUL-terminated return over-reads (the signature
 is a user assertion across the C trust boundary).
 
+An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
+it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
+(`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/`set`), `print`, a constructor
+(`Channel`/`Shared`/`Atomic`/`timer`/`Executor`), or any of your `struct`/enum-variant names — those
+resolve to a special op before a plain call, so the extern would be silently shadowed; the checker
+rejects the collision (*'…' is a builtin/reserved name*).
+
+**Known v1 limits (see `docs/spec.md` for detail):**
+- **C `int` width:** Chezzi `int` (i64) marshals as C **`long`** — 64-bit on supported **LP64 unix**
+  targets. 32-bit/`unsigned` C ints are out of scope, and there is **no `int32` type** (feature-frozen).
+  Non-unix (LLP64, where C `long` is 32-bit) is **unsupported**: the checker rejects `extern` there.
+- **`char*` return leaks:** a `str` return is copied into a Chezzi string but the C pointer is never
+  `free`d (no ownership transfer) — a `malloc`'d return **leaks** on every call.
+- **No `--parallel` serialization:** extern calls are **not** serialized; calling a **non-reentrant** C
+  function (`strtok`, `gmtime`/`localtime`, `setlocale`, static-buffer APIs) from multiple workers
+  **races at the C level**. Use thread-safe/reentrant C only under `--parallel`.
+
 **Deferred (v1 limits):** structs-by-value, callbacks / function pointers, varargs, opaque pointers /
 userdata, nullable returns (`str?`), and `char*` ownership transfer / `free`.
 
