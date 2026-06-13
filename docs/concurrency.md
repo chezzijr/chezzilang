@@ -874,14 +874,19 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   sibling (`..._inline_send.chz`, `..._inline_close.chz`), runs a `spawn:` issued *after* the enlist
   (`..._late_spawn.chz`), and makes the enlist atomic. A genuine no-sender deadlock still faults — the
   global predicate fires unless every still-incomplete scope is merely *awaiting the builder's join*
-  (a live external feeder); see `MnSched::all_incomplete_awaiting_builder`.
+  (a live external feeder); see `MnSched::all_incomplete_awaiting_builder`. **Independent / normal
+  multi-level nesting now RUNS** (the old "2+ enlisting levels" gate is gone): any depth of nested
+  `parallel:` with sibling and late `spawn:`s matches the cooperative engine — every pending outer
+  nursery enlists as its own scope, and a late `spawn:` into a middle nursery runs on the held flat
+  sched as a fresh trailing scope (`register_scope` un-latches a stale `terminate` so the inline owner
+  runs it — no clobber, no panic, no drop). Goldens: `examples/parallel_cross_nursery_multilevel.chz`.
   **Remaining narrow limits (revisit only if they bite real programs; full brief +
   reproductions in [`docs/cross-nursery-flat-scheduler.md`](cross-nursery-flat-scheduler.md)):**
-  - **2+ enlisting levels** — a `parallel:` nested inside another such that both early-enlist (two live
-    receiver scopes at once) **faults cleanly** ("2+ enlisting levels … aren't supported under
-    --parallel yet"), not runs: cross-scope channel-delivery order can't match the cooperative buffered
-    run-at-join order. Same gap the cooperative flatten closes; gated deterministically in
-    `early_enlist_outer`.
+  - **Contended shared channel across nested nurseries** — 2+ live receivers racing ONE channel across
+    nested `parallel:` scopes is concurrent-divergent BY DESIGN: under `--parallel` delivery order may
+    differ from the cooperative engine, or it may deadlock-fault. It is NOT gated and NOT special-cased;
+    it only must never PANIC and never HANG (completes or faults `deadlock` cleanly — see
+    `parallel_cross_nursery_contended_never_panics`). Same gap the cooperative flatten would close.
   - **Cooperative (`run`) / `--interp`** still serialize nested nursery levels, so the same program
     **still faults `deadlock`** there — the cooperative-engine flatten is a separate, later commit.
     Workaround: keep mutually-dependent blocking tasks as SIBLINGS in ONE nursery

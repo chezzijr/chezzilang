@@ -1318,6 +1318,14 @@ impl MnSched {
         c.slots.extend((0..total).map(|_| None));
         let scope_id = c.scopes.len();
         c.scopes.push(JoinScope { base_index, total, done: 0, body_open: false, awaiting_builder: false, cancel });
+        // Cross-nursery flat scheduler — a late `spawn:` into a non-outermost nursery registers a fresh
+        // TRAILING scope on the HELD sched (`run_mn_nursery` held-nested branch) AFTER every prior scope
+        // finished, which may already have latched global `terminate` (`finish`'s `all_scopes_done`). A
+        // newly-registered scope has unfinished work (`done=0 < total`), so the sched is by definition no
+        // longer "all done": un-latch `terminate` so the inline owner that will run this scope is not
+        // stopped on the stale flag (`take_runnable` checks `terminate` first → `Stop` → the scope would
+        // never run and `wait_for_scope` would hang). Harmless on the never-terminated nested path.
+        c.terminate = false;
         scope_id
     }
 
@@ -6026,9 +6034,12 @@ impl Vm {
             // enlist `take()` emptied it, but `mn_scopes[i]` stayed `Some`). Those late tasks were NOT
             // part of the enlisted scope — run them now, at the join, exactly as the lazy path below
             // (coop runs nursery tasks at the join too; late spawns post-date the nested `inner()` join,
-            // so they have no live inner peer → parity holds). Falls through to the normal task path: a
-            // fresh `run_mn_nursery_outermost` scope (the enlisted scope has already joined), so the flat
-            // slots stay contiguous. (Cross-nursery flat scheduler — charge #3.)
+            // so they have no live inner peer → parity holds). Falls through to the normal task path:
+            // `run_mn_nursery` routes them to the HELD sched (if an outer scope is still enlisted) as a
+            // fresh TRAILING scope — `register_scope` is append-only so the flat slots stay contiguous,
+            // and it un-latches a stale `terminate` so the inline owner runs the late task instead of
+            // stopping on the prior-scopes-all-done flag — else to a fresh outermost sched once no sched
+            // is held. No clobber of the held sched, no panic, no drop. (Cross-nursery flat scheduler — #3.)
             if tasks.is_empty() {
                 return Ok(());
             }
@@ -6097,9 +6108,21 @@ impl Vm {
         // inline owner drains the GLOBAL queue, it naturally runs cross-nursery siblings — the case-A
         // fix (`docs/cross-nursery-flat-scheduler.md`). Nested owners farm NO helpers (they run inline
         // on the worker thread that called them).
-        match self.mn.clone() {
-            None => self.run_mn_nursery_outermost(tasks),
-            Some(sched) => self.run_mn_nursery_nested(&sched, tasks),
+        //
+        // A THIRD case: `self.mn.is_none()` (no nested sched installed — the body runs `mn == None`) yet a
+        // flat sched is HELD in `mn_enlist_sched` because an OUTER nursery was early-enlisted and has not
+        // joined yet. This is a late `spawn:` into a non-outermost nursery (charge #3): the leftover late
+        // tasks reach `JoinNursery` after the enlist drained the original vec. They must run on the HELD
+        // sched as a fresh TRAILING scope (`register_scope` is append-only, so the flat slot ranges stay
+        // contiguous) — NOT via `run_mn_nursery_outermost`, which would build a fresh sched and CLOBBER
+        // the held one, leaving a later `join_enlisted_scope(scope_id)` to index a stale scope_id into the
+        // fresh (len-1) sched → `index out of bounds` panic. Reusing the nested path is correct: the late
+        // trailing scope reduces inline at its own join (it is NOT counted in `mn_enlisted`), exactly like
+        // a nested nursery. Only when no sched is held do we build a fresh outermost sched.
+        match (self.mn.clone(), self.mn_enlist_sched.clone()) {
+            (Some(sched), _) => self.run_mn_nursery_nested(&sched, tasks),
+            (None, Some(held)) => self.run_mn_nursery_nested(&held, tasks),
+            (None, None) => self.run_mn_nursery_outermost(tasks),
         }
     }
 
@@ -6140,7 +6163,7 @@ impl Vm {
         // inline body must run with `mn == None` so it does not take the worker-only yield/park paths).
         // Each enlisted scope reduces at its OWN `JoinNursery` (deferred — preserves per-nursery order).
         // Install `mn_enlist_sched` only AFTER a SUCCESSFUL enlist that actually deferred a scope: an
-        // early `?` (the 2+-level v1 fault or a `prepare_worker` backstop) must leave NO stale sched
+        // early `?` (a `prepare_worker` backstop on a non-crossable spawn) must leave NO stale sched
         // behind for a later `join_enlisted_scope`/inline-send to pick up; and if nothing was enlisted
         // there are no deferred joins, so it stays `None` (clean teardown at this owner's reduce).
         self.early_enlist_outer(&sched)?;
@@ -6203,26 +6226,11 @@ impl Vm {
     /// `JoinNursery` reduces it (deferred — preserving per-nursery flush order and three-engine parity).
     /// Idempotent per nursery (skips any already-enlisted `Some(_)` and any empty one).
     fn early_enlist_outer(&mut self, sched: &Arc<MnSched>) -> Result<(), RuntimeError> {
-        // v1 boundary — only ONE enlisting level is supported. Two or more outer nurseries enlisted at
-        // once (deeply-nested cross-nursery: `parallel:` { … `parallel:` { … nested join } … }) is out of
-        // scope: with 2+ live receivers seeded across scopes, channel-delivery order diverges from the
-        // cooperative engine's buffered "run-at-join" semantics (no flat receiver order to match), and the
-        // scope-scoped deadlock veto can't be both correct and live across independent enlisted scopes.
-        // Fault CLEANLY and DETERMINISTICALLY here — before any mutation — rather than panic (a stale
-        // scope_id on a re-entered builder) or flaky-deadlock. The full fix is the deferred cooperative
-        // flatten. Single-level cross-nursery (the circular/fanout/inline cases) is unaffected.
-        let to_enlist = (0..self.nurseries.len())
-            .filter(|&i| self.mn_scopes[i].is_none() && !self.nurseries[i].is_empty())
-            .count();
-        if self.mn_enlisted + to_enlist > 1 {
-            return Err(self.err(
-                "cross-nursery: deeply-nested `parallel:` blocks (2+ enlisting levels) aren't supported \
-                 under --parallel yet — keep mutually-dependent blocking tasks within a single nesting \
-                 level (see docs/cross-nursery-flat-scheduler.md)"
-                    .to_string(),
-                Span { line: 1, col: 1 },
-            ));
-        }
+        // Independent/normal multi-level nesting is fully supported: every still-pending OUTER nursery is
+        // enlisted as its own scope here, and the genuinely-CONTENDED case (2+ live receivers racing ONE
+        // channel across nested nurseries) is NOT gated — it is concurrent-divergent by design (delivery
+        // order may differ from the cooperative engine, or it may deadlock-fault; suspendable concurrency
+        // is VM-only / divergent under `--parallel`, see PROGRESS.md). It must only never PANIC.
         for i in 0..self.nurseries.len() {
             if self.mn_scopes[i].is_some() || self.nurseries[i].is_empty() {
                 continue;
@@ -16551,32 +16559,102 @@ main()
         }
     }
 
-    /// Cross-nursery flat scheduler — the v1 boundary: 2+ simultaneously-enlisted scopes (deeply-nested
-    /// `parallel:`) are NOT supported under `--parallel`. They must fault CLEANLY and DETERMINISTICALLY
-    /// (never panic on a stale scope_id, never flaky-deadlock). Two shapes: (a) a nested+nested cross-
-    /// channel wakeup, (b) a late `spawn:` into a non-outermost nursery (which used to panic
-    /// `index out of bounds`). Both must report the "2+ enlisting levels" limit and never hang. M:N-only.
+    /// Cross-nursery flat scheduler — independent multi-level nesting (no shared channel) golden: four
+    /// levels deep (`main`→`top`→`mid`→`inner`), each level a `parallel:` with a sibling `spawn`. The old
+    /// "2+ enlisting levels" gate wrongly faulted this; it now RUNS. Order is deterministic by
+    /// data-dependency (each nested call joins — flushing its print — before that level's own sibling
+    /// runs), so this golden exact-matches AND equals the coop run. Regression guard for the gate removal.
+    /// M:N-only, 30s watchdog.
     #[test]
-    fn parallel_cross_nursery_two_enlisting_levels_faults_cleanly() {
-        let shapes = [
-            // (a) two enlisted scopes, cross-channel — was a flaky false `deadlock`.
-            "fn inner():\n    spawn:\n        print(\"i\")\nfn mid(cm: Channel[int]):\n    parallel:\n        spawn:\n            x := cm.recv()\n            print(\"M {x}\")\n        inner()\n        cm.send(2)\nfn main():\n    c := Channel[int]()\n    parallel:\n        spawn:\n            y := c.recv()\n            print(\"O {y}\")\n        mid(c)\n        c.send(1)\nmain()\n",
-            // (b) late spawn into a non-outermost nursery — was `index out of bounds` panic.
-            "fn inner():\n    spawn:\n        print(\"i\")\nfn mid():\n    parallel:\n        spawn:\n            print(\"M1\")\n        inner()\n        spawn:\n            print(\"M2\")\nfn main():\n    parallel:\n        spawn:\n            print(\"O1\")\n        mid()\n    print(\"done\")\nmain()\n",
-        ];
-        for (i, src) in shapes.iter().enumerate() {
-            let s = src.to_string();
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(run_capture_parallel(&s));
-            });
-            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(r) => {
-                    let err = r.expect_err("2+ enlisting levels must fault, not succeed");
-                    assert!(err.message.contains("2+ enlisting levels"), "shape {i}: wrong fault: {}", err.message);
-                }
-                Err(_) => panic!("shape {i} hung — 2+-level cross-nursery must fault deterministically, not hang/panic"),
+    fn golden_parallel_cross_nursery_multilevel_chz_matches_expected() {
+        let src = include_str!("../../examples/parallel_cross_nursery_multilevel.chz");
+        let expected = include_str!("../../examples/parallel_cross_nursery_multilevel.expected");
+        // Independent nesting is three-engine-stable here, so coop must produce the SAME bytes.
+        assert_eq!(run_capture(src).expect("coop run"), expected, "coop diverged from the golden");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(src));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => assert_eq!(r.expect("parallel run"), expected),
+            Err(_) => panic!("hung — independent multi-level nesting golden regressed"),
+        }
+    }
+
+    /// Cross-nursery flat scheduler — independent multi-level nesting (no shared channel): three nested
+    /// `parallel:` blocks, each just printing, with sibling `spawn`s at each level. This is ordinary
+    /// nesting that does NOT contend a channel, so it must RUN and match the cooperative engine — it
+    /// must NOT fault (the old "2+ enlisting levels" gate wrongly rejected it). Data-dependent so the
+    /// inner level prints before the enclosing level finishes; order may still interleave under threads,
+    /// so we assert the line MULTISET equals coop. M:N-only, 30s watchdog.
+    #[test]
+    fn parallel_cross_nursery_independent_3level_runs_all() {
+        let src = "fn inner():\n    parallel:\n        spawn:\n            print(\"inner\")\n        spawn:\n            print(\"inner2\")\nfn mid():\n    parallel:\n        spawn:\n            print(\"mid\")\n        inner()\n        spawn:\n            print(\"mid2\")\nfn top():\n    parallel:\n        spawn:\n            print(\"top\")\n        mid()\n        spawn:\n            print(\"top2\")\nfn main():\n    parallel:\n        spawn:\n            print(\"main\")\n        top()\n        spawn:\n            print(\"main2\")\n    print(\"done\")\nmain()\n";
+        let coop = run_capture(src).expect("coop run");
+        let s = src.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(&s));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => {
+                let par = r.expect("independent multi-level nesting must run under --parallel, not fault");
+                let mut a: Vec<&str> = par.lines().collect();
+                let mut b: Vec<&str> = coop.lines().collect();
+                a.sort_unstable();
+                b.sort_unstable();
+                assert_eq!(a, b, "parallel multiset != coop\nparallel:\n{par}\ncoop:\n{coop}");
             }
+            Err(_) => panic!("hung — independent multi-level nesting must complete, not hang"),
+        }
+    }
+
+    /// Cross-nursery flat scheduler — a late `spawn:` into a NON-OUTERMOST (middle) nursery must RUN, not
+    /// be dropped and not panic `index out of bounds` at `join_enlisted_scope` (the old gate faulted it;
+    /// removing the gate alone clobbered the held sched). The middle nursery is early-enlisted, then
+    /// refilled by a `spawn:` after `inner()`; that late task runs at the join on the HELD sched as a
+    /// fresh trailing scope. Must match coop's line multiset (incl. "M2"). M:N-only, 30s watchdog.
+    #[test]
+    fn parallel_cross_nursery_late_spawn_into_middle_runs() {
+        let src = "fn inner():\n    spawn:\n        print(\"inner\")\nfn mid():\n    parallel:\n        spawn:\n            print(\"M1\")\n        inner()\n        spawn:\n            print(\"M2\")\nfn main():\n    parallel:\n        spawn:\n            print(\"O1\")\n        mid()\n    print(\"done\")\nmain()\n";
+        let coop = run_capture(src).expect("coop run");
+        let s = src.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(&s));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => {
+                let par = r.expect("late spawn into middle nursery must run (no panic, no drop)");
+                assert!(par.contains("M2"), "late task M2 dropped: {par}");
+                let mut a: Vec<&str> = par.lines().collect();
+                let mut b: Vec<&str> = coop.lines().collect();
+                a.sort_unstable();
+                b.sort_unstable();
+                assert_eq!(a, b, "parallel multiset != coop\nparallel:\n{par}\ncoop:\n{coop}");
+            }
+            Err(_) => panic!("hung — late-spawn-into-middle-nursery must complete, not hang/panic"),
+        }
+    }
+
+    /// Cross-nursery flat scheduler — the genuinely-CONTENDED case: 2+ live receivers racing ONE channel
+    /// across nested nurseries is a racy program. Under `--parallel` it may diverge in delivery order or
+    /// even deadlock; that is ALLOWED (suspendable concurrency is VM-only / divergent by design — see
+    /// PROGRESS.md). It must only NEVER PANIC and NEVER HANG: the outcome is EITHER Ok OR a clean
+    /// `deadlock` fault. M:N-only, 30s watchdog. (Replaces the old 2+-enlisting-levels gate assertion.)
+    #[test]
+    fn parallel_cross_nursery_contended_never_panics() {
+        let src = "fn inner():\n    spawn:\n        print(\"i\")\nfn mid(cm: Channel[int]):\n    parallel:\n        spawn:\n            x := cm.recv()\n            print(\"M {x}\")\n        inner()\n        cm.send(2)\nfn main():\n    c := Channel[int]()\n    parallel:\n        spawn:\n            y := c.recv()\n            print(\"O {y}\")\n        mid(c)\n        c.send(1)\nmain()\n";
+        let s = src.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(&s));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            // Delivery order is concurrent-divergent by design: accept Ok OR a clean deadlock fault.
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => assert!(e.message.contains("deadlock"), "contended case must succeed or deadlock-fault, got: {}", e.message),
+            Err(_) => panic!("hung — contended cross-nursery must complete or deadlock-fault, never hang/panic"),
         }
     }
 

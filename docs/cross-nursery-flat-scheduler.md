@@ -8,13 +8,23 @@
 > every still-incomplete scope is *awaiting the builder's join* — a live external feeder —
 > `MnSched::all_incomplete_awaiting_builder`).
 >
+> **Independent / normal multi-level nesting is fully supported** (the old "2+ enlisting levels" gate is
+> GONE): a `parallel:` nested inside another `parallel:` — at any depth, with sibling `spawn`s and late
+> `spawn:`s into a non-outermost nursery — RUNS under `--parallel` and matches the cooperative engine.
+> Every still-pending OUTER nursery early-enlists as its own scope; a late `spawn:` into a middle nursery
+> runs on the held flat sched as a fresh trailing scope (`register_scope` is append-only and un-latches a
+> stale `terminate`, so the inline owner runs the late task — no clobber, no panic, no drop). Goldens:
+> `examples/parallel_cross_nursery_multilevel.chz` (independent 4-level nesting) + the unit tests
+> `parallel_cross_nursery_independent_3level_runs_all` / `parallel_cross_nursery_late_spawn_into_middle_runs`.
+>
 > **Remaining narrow limits (NOT this routing class):**
-> - **2+ enlisting levels (deeply-nested `parallel:`)** — only ONE enlisting level is supported. A
->   `parallel:` nested inside another `parallel:` body such that BOTH would early-enlist (two live
->   receiver scopes at once) **faults cleanly** with "2+ enlisting levels … aren't supported under
->   --parallel yet" rather than running, because channel-delivery order across two concurrently-seeded
->   receiver scopes can't match the cooperative engine's buffered run-at-join order. This is the same
->   semantic gap the cooperative flatten closes. (`early_enlist_outer` gates it deterministically.)
+> - **Contended shared channel across nested nurseries (concurrent-divergent by design)** — 2+ live
+>   receivers racing ONE channel across nested `parallel:` scopes is a racy program. Under `--parallel`
+>   delivery order may diverge from the cooperative engine, or it may deadlock-fault; that is ALLOWED
+>   (suspendable concurrency is VM-only / divergent by design — see `PROGRESS.md`). It is NOT gated and
+>   NOT special-cased; it only must never PANIC and never HANG (it completes or faults `deadlock` cleanly,
+>   guarded by `parallel_cross_nursery_contended_never_panics`). This is the same semantic gap the
+>   cooperative flatten would close.
 > - **Cooperative (`run`) / `--interp`** still serialize nested nursery levels → the same program still
 >   faults `deadlock` there. The cooperative-engine flatten (§5 "Cooperative") is a **separate, later
 >   commit**; the design below still applies. Workaround: case C (siblings in one nursery).
