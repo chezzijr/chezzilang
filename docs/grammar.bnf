@@ -35,7 +35,7 @@
 <stmts>  ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
-<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <deferStmt>
+<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <externDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <deferStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
 <simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <exprStmt>
@@ -138,6 +138,16 @@
                  | "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
                  | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
                  | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+
+# A dynamic C-ABI FFI block: a body-less list of C function signatures bound to a shared library
+# (`extern "libm.so.6":`). Each `fn` becomes a module-global callable dispatched via dlopen+libffi.
+# v1 marshals scalars only (int/float/bool/str→char*).
+<externDecl> ::= "EXTERN" "STR" "COLON" "NEWLINE" "INDENT" <externFns> "DEDENT"
+<externFns>  ::= <externFn> | <externFn> <externFns>
+<externFn>   ::= "FN" "IDENT" "LPAREN" "RPAREN" "NEWLINE"
+              | "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
+              | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
+              | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
 
 <enumDecl> ::= "ENUM" "IDENT" "COLON" "NEWLINE" "INDENT" <variants> "DEDENT"
             | "ENUM" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <variants> "DEDENT"

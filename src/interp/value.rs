@@ -202,6 +202,9 @@ pub enum Value {
     Closure(Rc<Closure>),
     /// A native (Rust) function — a member of a native std module (`std.math` etc., M6c).
     Native(NativeFnEntry),
+    /// A dynamic C-ABI FFI function (`extern "lib":`). Shares the resolved library + symbol +
+    /// signature behind an `Arc` (the same `Cffi` type the VM uses — one machinery, two engines).
+    Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
     /// An imported module — a namespace of its top-level bindings. `io.read()` is a field access
     /// on one of these.
     Module(Rc<ModuleNamespace>),
@@ -290,6 +293,7 @@ impl Value {
             Value::Func(_, _) => "function",
             Value::Closure(_) => "function",
             Value::Native(_) => "function",
+            Value::Cffi(_) => "function",
             Value::Module(_) => "module",
             Value::Struct { .. } => "struct",
             Value::Enum { .. } => "enum",
@@ -348,6 +352,7 @@ impl std::fmt::Display for Value {
             Value::Func(decl, _) => write!(f, "<fn {}>", decl.name),
             Value::Closure(_) => write!(f, "<closure>"),
             Value::Native(e) => write!(f, "<native fn {}>", e.name),
+            Value::Cffi(c) => write!(f, "<extern fn {}>", c.name()),
             Value::Module(ns) => write!(f, "<module {}>", ns.name),
             Value::Struct { name, fields } => {
                 let inner = fields

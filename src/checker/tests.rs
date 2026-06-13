@@ -4391,3 +4391,60 @@ fn nested_nullary_correct_ok() {
         "oo: Option[Option[int]] = Some(None)\nmatch oo:\n    Some(None): print(0)\n    _: print(-1)\n",
     );
 }
+
+// ===== extern / C-ABI FFI =====
+
+#[test]
+fn extern_call_typechecks() {
+    // An extern fn's signature is hoisted; calling it type-checks like any named fn.
+    ok("extern \"libm.so.6\":\n    fn cos(x: float) -> float\n\ny: float = cos(0.0)\nprint(y)\n");
+}
+
+#[test]
+fn extern_call_wrong_arg_type_rejected() {
+    // No implicit int->float (matches std.math): `cos(2)` with an int literal is an error.
+    rejects(
+        "extern \"libm.so.6\":\n    fn cos(x: float) -> float\n\nprint(cos(2))\n",
+        "",
+    );
+}
+
+#[test]
+fn extern_str_param_and_int_return_ok() {
+    ok("extern \"libc.so.6\":\n    fn strlen(s: str) -> int\n\nn: int = strlen(\"hello\")\nprint(n)\n");
+}
+
+#[test]
+fn extern_void_return_ok() {
+    ok("extern \"libc.so.6\":\n    fn srand(seed: int)\n\nsrand(1)\n");
+}
+
+#[test]
+fn extern_non_marshallable_param_rejected() {
+    rejects(
+        "extern \"libc.so.6\":\n    fn f(xs: list[int]) -> int\n",
+        "not C-marshallable",
+    );
+}
+
+#[test]
+fn extern_non_marshallable_return_rejected() {
+    rejects(
+        "extern \"libc.so.6\":\n    fn f(x: int) -> list[int]\n",
+        "not C-marshallable",
+    );
+}
+
+#[test]
+fn extern_duplicate_name_rejected() {
+    rejects(
+        "extern \"libm.so.6\":\n    fn cos(x: float) -> float\n    fn cos(x: float) -> float\n",
+        "already defined",
+    );
+}
+
+#[test]
+fn extern_type_alias_param_ok() {
+    // A transparent alias resolving to a marshallable scalar is accepted (check runs on resolved Ty).
+    ok("type Len = int\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Len\n\nprint(strlen(\"hi\"))\n");
+}

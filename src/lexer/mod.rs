@@ -41,6 +41,7 @@ pub enum Token {
     Spawn,
     Parallel,
     Import,
+    Extern,
     From,
     As,
     And,
@@ -154,6 +155,7 @@ fn keyword(word: &str) -> Option<Token> {
         "spawn" => Token::Spawn,
         "parallel" => Token::Parallel,
         "import" => Token::Import,
+        "extern" => Token::Extern,
         "from" => Token::From,
         "as" => Token::As,
         "and" => Token::And,
@@ -794,6 +796,14 @@ mod tests {
     #[test]
     fn single_plus() {
         assert_eq!(kinds("+"), vec![Token::Plus, Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn extern_keyword() {
+        assert_eq!(
+            kinds("extern"),
+            vec![Token::Extern, Token::Newline, Token::Eof]
+        );
     }
 
     #[test]

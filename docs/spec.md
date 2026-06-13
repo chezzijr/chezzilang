@@ -91,8 +91,11 @@ top level is an implicit nursery that joins at its `return`/end, so a bare `spaw
 in [`docs/concurrency.md`](concurrency.md); phase history in
 [`docs/concurrency-tier-d.md`](concurrency-tier-d.md) + [`docs/concurrency-b3.md`](concurrency-b3.md).
 
-**Still deferred (YAGNI v1):** macros, package registry, native backend (a Cranelift AOT/JIT is the
-stretch end-game), and Level-3 FFI (dynamic `cdylib`/C-ABI plugins + userdata).
+**Still deferred (YAGNI v1):** macros, package registry, and native backend (a Cranelift AOT/JIT is
+the stretch end-game). **Level-3 dynamic C-ABI FFI is now partially shipped** (`extern "lib":` blocks
+calling C functions via dlopen+libffi) — v1 marshals scalars only (int/float/bool/str→`char*`);
+structs-by-value, callbacks, varargs, opaque pointers / userdata, and `char*` ownership transfer are
+still deferred. See the FFI subsection below + [`docs/syntax.md`](syntax.md).
 
 **`yield`/generators are a deliberate non-goal** — lazy sequences are written as adapter structs over
 `Iterator[T]` (Rust's `Map`/`Take` model), so no coroutine runtime is needed. Live status + open
@@ -206,9 +209,9 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
   (`take drop any all find flatten`) helpers.
 - **Later:** a first-class compiled `Regex` (still blocked on Level-3 **Userdata** below).
 
-> **Native FFI — Level-2 SHIPPED in M6c; Level-3 deferred.** Because Chezzi is written in Rust, the
-> native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn and expose it as a
-> module member, instead of reimplementing everything in Chezzi.
+> **Native FFI — Level-2 SHIPPED in M6c; Level-3 dynamic C-ABI v1 SHIPPED.** Because Chezzi is
+> written in Rust, the native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn
+> and expose it as a module member, instead of reimplementing everything in Chezzi.
 > - ✅ **`NativeFn`** — a Rust fn registered as a callable Chezzi value (member of a native module),
 >   added to both `interp::Value` (`Native`) and `vm::Obj` (`Native`); parity-tested.
 > - ✅ **`Host` trait** (`src/native/mod.rs`) — the engine-agnostic context a native fn uses
@@ -217,11 +220,26 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >   engine-neutral `NativeRet`, lowered to each engine's value *after* the call (GC-safe).
 > - **Dependency policy:** the **core** (lexer/parser/checker/compiler/VM/GC) is Rust `std` only.
 >   The **runtime** links a small fixed set of crates *unconditionally* (no Cargo features): `regex`
->   (`std.regex`), `ureq`+TLS (`std.request`), and `libc`/`polling`/`socket2` (the `--parallel`
->   netpoller + `std.net`). See `Cargo.toml`.
+>   (`std.regex`), `ureq`+TLS (`std.request`), `libc`/`polling`/`socket2` (the `--parallel` netpoller
+>   + `std.net`), and `libffi`/`libloading` (the Level-3 C-ABI FFI). See `Cargo.toml`.
+> - ✅ **Level-3 dynamic C-ABI (v1)** — an `extern "lib":` indentation block of statically-typed C
+>   signatures, bound at module init by `dlopen`+`dlsym` and called at runtime via `libffi`, reusing
+>   the SAME `Host`/`NativeRet` seam (so VM + interp + `--parallel` produce identical output).
+>   `extern` fns become ordinary module globals (`vm::Obj::Cffi(Arc<Cffi>)` / `interp::Value::Cffi`),
+>   so the normal call-dispatch and `infer_named_call` type-check paths work with zero special-casing.
+>   The checker enforces **C-marshallability** (only int/float/bool/str params + returns, void return)
+>   on the resolved type, so a non-scalar param is a compile error. The `Cffi` keeps its `Library`
+>   alive + stores the resolved symbol as a `usize` (libloading `Symbol` is `!Send`) and rebuilds the
+>   `Cif` per call (libffi `Cif` is `!Send`), so it is `Send + Sync` for `--parallel`; the M:N
+>   snapshot path shares the `Arc<Cffi>` (same address space — no re-`dlopen`). See `src/native/cffi.rs`
+>   + `examples/ffi.chz`. **v1 limits:** scalars only — structs-by-value, callbacks/function pointers,
+>   varargs, opaque pointers / userdata, and `char*` ownership transfer / `free` are deferred (a
+>   `char*` return is copied immediately; a malloc'd return leaks). A slow C call runs inline (extern
+>   names are NOT in `is_blocking`, so it pins its worker under `--parallel`).
 > - **Still deferred (Level-3):** **Userdata** (`Box<dyn Any>` for opaque `File`/`Regex` handles —
->   io is whole-string for now), and *dynamic* `cdylib` plugins over a stable C ABI. (`std.os.exit`
->   with a real exit-code channel through the run drivers has since **shipped** — see `examples/exit.chz`.)
+>   io is whole-string for now), and the deferred FFI features above (structs/callbacks/varargs/
+>   userdata). (`std.os.exit` with a real exit-code channel through the run drivers has since
+>   **shipped** — see `examples/exit.chz`.)
 
 ## Architecture — pipeline
 
@@ -283,8 +301,10 @@ tests/          # Rust unit + golden tests
 | 🟦 **M19** | Perf track (in progress) | Landed: peephole + const-fold, superinstructions, global-slotting, struct-field inline cache, FxHash, `ConstStr` interning, call-loop flatten, small-string optimization. Behavior-preserving + two-engine parity on every change. Backlog ranked in [`docs/future.md §4`](future.md); measured deltas in [`docs/benchmarks.md`](benchmarks.md) |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional; only once the language has truly stopped moving) |
 
-> Native FFI (Level-2 compiled-in bindings) **shipped in M6c** — see the *Standard library* note
-> above. Level-3 (dynamic `cdylib`/C-ABI plugins, userdata) remains a future idea.
+> Native FFI (Level-2 compiled-in bindings) **shipped in M6c**; **Level-3 dynamic C-ABI FFI v1
+> shipped** (`extern "lib":` scalar calls via dlopen+libffi) — see the *Standard library* note above.
+> The remaining Level-3 surface (structs-by-value, callbacks, varargs, opaque pointers / userdata)
+> is still a future idea.
 
 ## Verification
 

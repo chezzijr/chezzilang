@@ -106,6 +106,8 @@ fn deep_clone(v: &Value) -> Value {
         | Value::Func(_, _)
         | Value::Closure(_)
         | Value::Native(_)
+        // An extern C fn passes by handle (clone the `Arc`) — a callable entry point, not data.
+        | Value::Cffi(_)
         | Value::Module(_)
         // A Channel is a shared mailbox: the handle crosses the airlock by reference (clone the
         // `Rc`), never deep-copied — both ends must see the same queue. A `Shared` box is the same:
@@ -934,6 +936,7 @@ impl Interp {
             Value::Func(decl, home) => self.call(&decl, &home, args, span),
             Value::Closure(clo) => self.call_closure(&clo, args, span),
             Value::Native(e) => self.call_native(e.func, args, span),
+            Value::Cffi(c) => self.call_cffi(&c, args, span),
             other => Err(RuntimeError {
                 message: format!("'{}' is not callable", other.type_name()),
                 span,
@@ -1207,6 +1210,38 @@ impl Interp {
             exit: &mut self.pending_exit,
         };
         let ret = func(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
+        Ok(lower_native(ret))
+    }
+
+    /// Call a dynamic C-ABI FFI function (`extern "lib":`). Reuses the same `Host`/`NativeRet` seam
+    /// as `call_native` (so the VM and interp produce identical output): build an [`InterpHost`] over
+    /// the evaluated args, invoke the C fn through libffi, and lower its `NativeRet` to a `Value`.
+    fn call_cffi(
+        &mut self,
+        cffi: &crate::native::cffi::Cffi,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        // Arity is checker-guaranteed; guard defensively so a wrong count can't index out of bounds.
+        if args.len() != cffi.param_count() {
+            return Err(RuntimeError {
+                message: format!(
+                    "function '{}' expects {} argument(s), got {}",
+                    cffi.name(),
+                    cffi.param_count(),
+                    args.len()
+                ),
+                span,
+            });
+        }
+        let mut host = InterpHost {
+            args,
+            out: &mut self.out,
+            stderr: &mut self.stderr,
+            cfg: &mut self.host,
+            exit: &mut self.pending_exit,
+        };
+        let ret = cffi.call(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
         Ok(lower_native(ret))
     }
 
@@ -2799,6 +2834,35 @@ impl Interp {
                         self.register_variant(&v.name, name, v.payload.len());
                     }
                 }
+                StmtKind::Extern { lib, fns } => {
+                    // Eager `dlopen` + `dlsym` at module init (like the VM's `MakeCffi`): a missing
+                    // library/symbol surfaces as a startup error. Each extern fn binds a `Cffi` value
+                    // into the module's globals, exactly where a top-level `fn` binds.
+                    let aliases: std::collections::HashMap<String, crate::ast::Type> = stmts
+                        .iter()
+                        .filter_map(|s| match &s.kind {
+                            StmtKind::TypeAlias { name, ty } => Some((name.clone(), ty.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                    for ef in fns {
+                        let params: Vec<crate::native::cffi::CType> = ef
+                            .params
+                            .iter()
+                            .map(|p| {
+                                ctype_of(p.ty.as_ref(), &aliases)
+                                    .expect("checker verified marshallable param")
+                            })
+                            .collect();
+                        let ret = ef
+                            .ret
+                            .as_ref()
+                            .map(|t| ctype_of(Some(t), &aliases).expect("checker verified return"));
+                        let cffi = crate::native::cffi::Cffi::new(lib, &ef.name, params, ret)
+                            .map_err(|e| RuntimeError { message: e.message, span: stmt.span })?;
+                        self.env.define(&ef.name, Value::Cffi(std::sync::Arc::new(cffi)));
+                    }
+                }
                 _ => {}
             }
         }
@@ -3003,6 +3067,7 @@ impl Interp {
             StmtKind::Struct { .. }
             | StmtKind::Enum { .. }
             | StmtKind::Protocol { .. }
+            | StmtKind::Extern { .. } // bound by hoist_declarations, like top-level fn
             | StmtKind::TypeAlias { .. }
             | StmtKind::Import(_) => Ok(Flow::Normal),
             StmtKind::Match { scrutinee, arms } => self.exec_match(scrutinee, arms),
@@ -3695,6 +3760,13 @@ impl crate::native::Host for InterpHost<'_> {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
+    fn arg_bool(&mut self, i: usize) -> Result<bool, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(other) => Err(crate::native::HostError::arg_type(i, "bool", other.type_name())),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
     fn arg_str(&mut self, i: usize) -> Result<String, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Str(s)) => Ok(s.to_string()),
@@ -3792,6 +3864,26 @@ fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec
             })
         }
     })
+}
+
+/// Map an extern fn's surface [`crate::ast::Type`] to its runtime [`crate::native::cffi::CType`],
+/// resolving transparent type aliases (`type Len = int`) through `aliases`. v1 scalars only; the
+/// checker has already rejected non-marshallable types, so a `None` is unreachable for valid input.
+fn ctype_of(
+    ty: Option<&crate::ast::Type>,
+    aliases: &std::collections::HashMap<String, crate::ast::Type>,
+) -> Option<crate::native::cffi::CType> {
+    use crate::native::cffi::CType;
+    match ty {
+        Some(crate::ast::Type::Named(n)) => match n.as_str() {
+            "int" => Some(CType::Int),
+            "float" => Some(CType::Float),
+            "bool" => Some(CType::Bool),
+            "str" => Some(CType::Str),
+            other => aliases.get(other).and_then(|t| ctype_of(Some(t), aliases)),
+        },
+        _ => None,
+    }
 }
 
 /// Lower a native fn's engine-neutral [`crate::native::NativeRet`] into an interpreter `Value`.
@@ -5238,6 +5330,23 @@ b := Buf([10, 20, 30])
         .unwrap();
         let (out, _err, res, _) = run_file(&path);
         res.expect("math_more.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
+    /// C-ABI FFI golden (interp side): an `extern "lib":` block calls `cos`/`sqrt` (libm) and
+    /// `strlen` (libc) via dlopen+libffi. Deterministic by design (cos(0.0)=1.0, sqrt(4.0)=2.0,
+    /// strlen("hello")=5 — no ULP drift). Drives `run_file` (extern decls need the module-graph +
+    /// MakeCffi/hoist path). Linux-only (needs libm.so.6/libc.so.6). The VM twin asserts parity.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_chz() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("ffi.chz should run on the interp");
         assert_eq!(out, expected);
     }
 

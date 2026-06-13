@@ -165,6 +165,20 @@ impl Parser {
         }
     }
 
+    /// Expect a string literal (used for the library name in an `extern "lib":` header).
+    fn expect_str(&mut self) -> PResult<String> {
+        match self.peek() {
+            Token::Str(_) => {
+                if let Token::Str(s) = self.advance().kind {
+                    Ok(s)
+                } else {
+                    unreachable!()
+                }
+            }
+            _ => Err(self.err(format!("expected string literal, found {}", describe(self.peek())))),
+        }
+    }
+
     /// A simple statement must end the logical line; otherwise trailing tokens are a syntax error
     /// (e.g. `x := 5 y := 6` packed onto one line).
     fn expect_stmt_end(&mut self) -> PResult<()> {
@@ -241,6 +255,7 @@ impl Parser {
             Token::Struct => self.parse_struct()?,
             Token::Enum => self.parse_enum()?,
             Token::Protocol => self.parse_protocol()?,
+            Token::Extern => self.parse_extern()?,
             Token::Type => {
                 let k = self.parse_type_alias()?;
                 self.expect_stmt_end()?;
@@ -452,6 +467,42 @@ impl Parser {
         }
         self.expect(&Token::Dedent)?;
         Ok(StmtKind::Protocol { name, type_params, methods })
+    }
+
+    /// A body-less C function signature inside an `extern "lib":` block: `fn name(params) -> ret`
+    /// then NEWLINE. Mirrors [`parse_fn_sig`] but produces an [`ExternFn`] carrying its own span (for
+    /// per-fn marshallability diagnostics) and forbids default arguments.
+    fn parse_extern_fn(&mut self) -> PResult<ExternFn> {
+        let span = self.cur_span();
+        self.expect(&Token::Fn)?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::LParen)?;
+        let params = self.parse_params(false)?;
+        self.expect(&Token::RParen)?;
+        let ret = if self.eat(&Token::Arrow) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        Ok(ExternFn { name, params, ret, span })
+    }
+
+    /// `extern "lib":` then an INDENT block of body-less C function signatures. Mirrors
+    /// [`parse_protocol`]: the library name is a string literal, the body is `open_block` + a loop of
+    /// `parse_extern_fn` until `Dedent`.
+    fn parse_extern(&mut self) -> PResult<StmtKind> {
+        self.expect(&Token::Extern)?;
+        let lib = self.expect_str()?;
+        self.open_block()?;
+        let mut fns = Vec::new();
+        self.skip_newlines();
+        while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            fns.push(self.parse_extern_fn()?);
+            self.expect_stmt_end()?;
+            self.skip_newlines();
+        }
+        self.expect(&Token::Dedent)?;
+        Ok(StmtKind::Extern { lib, fns })
     }
 
     /// Comma-separated `name[: Type]` until (but not consuming) the closing `)`.
@@ -1685,6 +1736,47 @@ mod tests {
         let mut m = parse_ok(src);
         assert_eq!(m.stmts.len(), 1, "expected exactly one statement");
         m.stmts.remove(0).kind
+    }
+
+    #[test]
+    fn parses_extern_block() {
+        match only("extern \"libm.so.6\":\n    fn cos(x: float) -> float\n    fn sqrt(x: float) -> float\n") {
+            StmtKind::Extern { lib, fns } => {
+                assert_eq!(lib, "libm.so.6");
+                assert_eq!(fns.len(), 2);
+                assert_eq!(fns[0].name, "cos");
+                assert_eq!(fns[0].params.len(), 1);
+                assert_eq!(fns[0].params[0].name, "x");
+                assert_eq!(fns[0].params[0].ty, Some(Type::Named("float".to_string())));
+                assert_eq!(fns[0].ret, Some(Type::Named("float".to_string())));
+                assert_eq!(fns[1].name, "sqrt");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_extern_void_return() {
+        match only("extern \"libc.so.6\":\n    fn srand(seed: int)\n") {
+            StmtKind::Extern { lib, fns } => {
+                assert_eq!(lib, "libc.so.6");
+                assert_eq!(fns.len(), 1);
+                assert_eq!(fns[0].name, "srand");
+                assert_eq!(fns[0].ret, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn extern_braces_is_error() {
+        // Chezzi has no brace blocks; `extern "x" {` must not parse.
+        parse_err("extern \"libc.so.6\" {\n    fn strlen(s: str) -> int\n}\n");
+    }
+
+    #[test]
+    fn extern_requires_string_lib() {
+        parse_err("extern libc:\n    fn strlen(s: str) -> int\n");
     }
 
     #[test]

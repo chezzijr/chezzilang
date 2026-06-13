@@ -354,9 +354,10 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
   callback may block under `--parallel` — they run through VM frames so a blocking `recv` parks. The
   native `xs.map(f)` is the faster non-blocking path (and demotes via Path C if a `recv` blocks in it).
 
-**Permanent non-goals:** interp B1/B2 (above); `yield`/generators, variadic args, Level-3 dynamic
-`cdylib`/C-ABI FFI, bignum (`i64`-only — every overflow is a recoverable fault; binary work → a future
-`bytes` *sequence*, no `byte`/`u8` scalar).
+**Permanent non-goals:** interp B1/B2 (above); `yield`/generators, variadic args, bignum (`i64`-only —
+every overflow is a recoverable fault; binary work → a future `bytes` *sequence*, no `byte`/`u8`
+scalar). **Level-3 dynamic C-ABI FFI is NO LONGER a non-goal — v1 shipped** (`extern "lib":` scalar
+calls via dlopen+libffi; structs/callbacks/varargs/userdata still deferred — see "Done" below).
 
 ---
 
@@ -365,6 +366,20 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **Level-3 dynamic C-ABI FFI (v1)** (2026-06-13, `feat/c-abi-ffi`) — reverses the documented
+  non-goal. New `extern "lib":` indentation block of statically-typed C signatures (`Token::Extern` →
+  `StmtKind::Extern{lib, fns}` → `parse_extern` mirroring `parse_protocol`; grammar `<externDecl>` +
+  conformance corpus). New `src/native/cffi.rs` holds `Cffi` (`dlopen`'d `Library` + symbol as `usize`
+  + per-call `Cif`) whose `call(&mut dyn Host)` reuses the **same** `Host`/`NativeRet` seam as the std
+  modules, so VM + interp + `--parallel` emit identical output (structural parity). `extern` fns are
+  module globals (`vm::Obj::Cffi(Arc<Cffi>)` via `Op::MakeCffi`/`CffiDef`; `interp::Value::Cffi`), so
+  the normal call-dispatch + `infer_named_call` type-check paths work with zero call-site special-casing.
+  Checker enforces C-marshallability (int/float/bool/str + void) on the **resolved** type (aliases OK).
+  `Cffi` is `Send+Sync` (symbol as `usize`, `Cif` rebuilt per call — both libloading `Symbol`/libffi
+  `Cif` are `!Send`); the M:N snapshot path shares the `Arc<Cffi>` (same address space, no re-dlopen).
+  v1 = scalars only (structs/callbacks/varargs/userdata/`char*`-ownership deferred); extern stays OUT
+  of `is_blocking` (a slow C call runs inline). Golden `examples/ffi.chz` (cos/sqrt/strlen) two-engine
+  parity-tested + `cargo test cffi/conformance/golden_ffi` green; +`libffi`/`libloading` deps.
 - ✅ **Match or-patterns + nested nullary variants** (2026-06-13) — one new AST `Pattern::Or(Vec<Pattern>)`,
   no new opcodes. `p1 | p2 | ...` at the top of an arm AND in sub-positions (`(1|2, x)`, `Some(a|b)`);
   every alternative must bind the same variables (checker-enforced, clear error otherwise); a full enum
@@ -550,8 +565,9 @@ then `parser::parse`; interp untouched). TDD'd, conformance + clippy clean; suit
 ### Ideas — record-only (not scheduled)
 
 - **Native FFI / Rust-library bindings** — let Chezzi call into Rust libs; design sketch in `docs/spec.md`
-  → *Standard library* → "Future idea — native FFI". Default build stays zero third-party crates; dynamic
-  `cdylib` plugins deferred. Do not start without an explicit decision.
+  → *Standard library* → "Future idea — native FFI". **Dynamic C-ABI FFI v1 has since shipped** (`extern
+  "lib":` scalar calls via dlopen+libffi — see "Done" below); remaining surface (structs-by-value,
+  callbacks, varargs, opaque pointers / userdata, `char*` ownership) is still deferred.
 
 ---
 

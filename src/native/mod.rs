@@ -12,6 +12,7 @@
 //! This is the CPython-built-in-C-module model (compiled-in bindings), **not** dynamic `cdylib`/
 //! C-ABI loading — that (Level-3) stays deferred per `docs/spec.md`.
 
+pub mod cffi;
 pub mod fs;
 pub mod io;
 pub mod math;
@@ -150,6 +151,13 @@ pub trait Host {
     fn arg_is_int(&self, i: usize) -> bool;
     /// `args[i]` as a float; an int argument is promoted (matches the builtin `sqrt`).
     fn arg_float(&mut self, i: usize) -> Result<f64, HostError>;
+    /// `args[i]` as a bool; errors if it is not a bool. Used by the C-ABI FFI (`extern`) to marshal a
+    /// Chezzi `bool` into a C `int`. The default returns a "no bool args" error so a host that never
+    /// passes bools (the std-module test fixtures / off-heap host) needn't implement it.
+    fn arg_bool(&mut self, i: usize) -> Result<bool, HostError> {
+        let _ = i;
+        Err(HostError { message: "this host does not support bool arguments".into() })
+    }
     /// `args[i]` as an owned string; errors if it is not a str.
     fn arg_str(&mut self, i: usize) -> Result<String, HostError>;
     /// `args[i]` as an insertion-ordered `map[str, str]`, returned as owned `(key, value)` pairs in

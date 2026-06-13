@@ -1,0 +1,10 @@
+extern "libm.so.6":
+    fn cos(x: float) -> float
+    fn sqrt(x: float) -> float
+
+extern "libc.so.6":
+    fn strlen(s: str) -> int
+
+print(cos(0.0))
+print(sqrt(4.0))
+print(strlen("hello"))

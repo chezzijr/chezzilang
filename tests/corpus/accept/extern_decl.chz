@@ -1,0 +1,8 @@
+# rule: externDecl, externFn
+extern "libm.so.6":
+    fn cos(x: float) -> float
+    fn sqrt(x: float) -> float
+
+extern "libc.so.6":
+    fn strlen(s: str) -> int
+    fn srand(seed: int)

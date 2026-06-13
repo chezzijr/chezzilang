@@ -605,6 +605,7 @@ impl Walker<'_> {
             | StmtKind::Continue
             | StmtKind::Import(_)
             | StmtKind::Protocol { .. }
+            | StmtKind::Extern { .. }
             | StmtKind::Enum { .. }
             | StmtKind::TypeAlias { .. } => {}
         }

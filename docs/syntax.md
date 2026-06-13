@@ -992,6 +992,36 @@ import core.db.pool              # local module → <root>/core/db/pool.chz
 **Resolution:** walk up from the file for `chezzi.toml`; found → that's the project root, else the
 script's own dir is root. `std.*` is reserved (stdlib). `a.b.c` → `<root>/a/b/c.chz`. No `./` relative imports.
 
+## 12b. Dynamic C-ABI FFI — `extern "lib":`
+
+Call C functions in a shared library directly, with full static type-checking. An `extern "lib":`
+block (indentation, not braces — `{` is a map literal) lists body-less C signatures; each becomes a
+module-global callable, bound at module init by `dlopen` + `dlsym` and dispatched at runtime via
+`libffi`. A missing library or symbol fails at startup.
+
+```chezzi
+extern "libm.so.6":
+    fn cos(x: float) -> float
+    fn sqrt(x: float) -> float
+
+extern "libc.so.6":
+    fn strlen(s: str) -> int
+
+print(cos(0.0))        # 1.0
+print(sqrt(4.0))       # 2.0
+print(strlen("hello")) # 5
+```
+
+**Marshalling (v1 — scalars only):** `int` ↔ C `long`, `float` ↔ C `double`, `bool` ↔ C `int`,
+`str` → null-terminated `const char*` (a `char*` return is copied into a Chezzi `str`). No implicit
+`int`→`float` (`cos(2)` is a type error — pass `2.0`). A no-return signature (`fn srand(seed: int)`)
+maps to C `void`. The checker rejects any non-scalar param/return (list/map/set/tuple/struct/enum/…)
+with a *not C-marshallable* error. Calls run inline (a slow C call pins its worker under `--parallel`)
+and produce identical output on all three engines (VM / `--interp` / `--parallel`).
+
+**Deferred (v1 limits):** structs-by-value, callbacks / function pointers, varargs, opaque pointers /
+userdata, and `char*` ownership transfer / `free` (a malloc'd `char*` return leaks).
+
 ## 13. Standard library (v1)
 
 Always available (no import): `print`, `len`, `range`, `int()`, `str()`, `float()`,

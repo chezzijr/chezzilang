@@ -198,6 +198,10 @@ pub enum Op {
     NewEnum(String, String, usize),
     /// Build a `Func` value over `ProtoId`, capturing the current frame's home module.
     MakeFunc(ProtoId),
+    /// Build a `Cffi` value from `Program.cffi_defs[id]`: `dlopen` the library + resolve the symbol
+    /// at module init (eager — a missing library/symbol fails here). Pushed onto the stack, then
+    /// bound to its global slot by the following `DefineGlobalSlot`.
+    MakeCffi(u32),
     /// Build a `Closure`: snapshot each `CapEntry`'s value from the enclosing frame into the new
     /// closure's captured env, and capture the current frame's home module.
     MakeClosure(ProtoId, Vec<CapEntry>),
@@ -380,6 +384,21 @@ pub struct Program {
     /// into `CallMethod` ops). The VM pre-sizes its per-`Vm` `method_ic` vector to this length. Holds
     /// proto ids + module indices, not `GcRef`s, so it carries no heap state (never snapshotted/swapped).
     pub method_ic_sites: u32,
+    /// C-ABI FFI — one entry per `extern "lib":` function, referenced by `Op::MakeCffi(id)`. The
+    /// resolved symbol address is *not* stored here (it is per-process, resolved at `MakeCffi` via
+    /// `dlopen`+`dlsym`); only the library path, name, and marshalling signature are.
+    pub cffi_defs: Vec<CffiDef>,
+}
+
+/// A compile-time description of one `extern` C function: enough to `dlopen`+`dlsym` and build the
+/// runtime [`crate::native::cffi::Cffi`] at module init. The symbol address is resolved at runtime
+/// (per-process), so it is deliberately absent here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CffiDef {
+    pub lib: String,
+    pub name: String,
+    pub params: Vec<crate::native::cffi::CType>,
+    pub ret: Option<crate::native::cffi::CType>,
 }
 
 impl Program {
