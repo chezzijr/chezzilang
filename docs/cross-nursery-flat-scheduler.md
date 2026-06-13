@@ -1,10 +1,31 @@
-# Cross-nursery wakeups — flat-scheduler fix (design / pick-up brief)
+# Cross-nursery wakeups — flat-scheduler fix (design + resolution)
 
-> **Status:** open v1 limit, design captured for a future session. Not started.
-> The mechanism + common case were resolved at **D0** (`wake_on_send` drains all levels); what
-> remains is a **narrow circular case** that needs a structural change. This doc is the brief: read it,
-> understand the problem, and execute the fix. Cross-refs: [`concurrency.md §11`](concurrency.md),
-> [`concurrency-tier-d.md` "Open / deferred"](concurrency-tier-d.md), `PROGRESS.md`.
+> **Status: RESOLVED under `--parallel` (M:N).** The circular outer-sibling case (§1–§2 below) is fixed
+> by the flat scheduler described in §4. The landed fix covers: the circular wakeup, the inline
+> outer-body's own `send`/`close` waking an enlisted parked sibling, a `spawn:` issued *after* the
+> enlist, and an atomic enlist. Goldens: `examples/parallel_cross_nursery_{circular,fanout,inline_send,
+> inline_close,late_spawn}.chz`. Genuine deadlocks still fault (the deadlock predicate vetoes only while
+> every still-incomplete scope is *awaiting the builder's join* — a live external feeder —
+> `MnSched::all_incomplete_awaiting_builder`).
+>
+> **Remaining narrow limits (NOT this routing class):**
+> - **2+ enlisting levels (deeply-nested `parallel:`)** — only ONE enlisting level is supported. A
+>   `parallel:` nested inside another `parallel:` body such that BOTH would early-enlist (two live
+>   receiver scopes at once) **faults cleanly** with "2+ enlisting levels … aren't supported under
+>   --parallel yet" rather than running, because channel-delivery order across two concurrently-seeded
+>   receiver scopes can't match the cooperative engine's buffered run-at-join order. This is the same
+>   semantic gap the cooperative flatten closes. (`early_enlist_outer` gates it deterministically.)
+> - **Cooperative (`run`) / `--interp`** still serialize nested nursery levels → the same program still
+>   faults `deadlock` there. The cooperative-engine flatten (§5 "Cooperative") is a **separate, later
+>   commit**; the design below still applies. Workaround: case C (siblings in one nursery).
+> - **Case B — inline outer-body *blocking* recv (§4 last paragraph):** the fix is **wake-side only**.
+>   A blocking `recv`/`for v in ch:`/`wait:` issued directly in the inline `parallel:` body (not inside
+>   a `spawn:`) still faults "sequential executor cannot block." Put blocking work in a `spawn:`.
+> - **Eager (per-connection) nurseries** run on a private `MnSched` (`activate_eager_nursery`, for
+>   liveness), so a cross-nursery wake into/out of an eager body is a separate limit.
+>
+> Cross-refs: [`concurrency.md §11`](concurrency.md),
+> [`concurrency-tier-d.md`](concurrency-tier-d.md), `PROGRESS.md`.
 
 ## 1. The problem in one sentence
 

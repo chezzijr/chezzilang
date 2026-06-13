@@ -331,6 +331,31 @@ drain only its private queue and could never RUN `O` → `deadlock` fault) is **
   **still faults `deadlock`** there. The cooperative-engine flatten is a **separate, later commit**.
   Workaround on `run`: siblings in ONE nursery (doc case C). Golden is M:N-only (no coop/interp leg),
   watchdog-wrapped — mirrors `golden_channel_block`.
+- **Post-review hardening (the first cut was REJECTED by the adversarial panel — 3 blocking; now fixed):**
+  - **Inline outer-body `send`/`close` routing (charges #1/#2):** the inline `parallel:` builder runs with
+    `self.mn == None` (sched only in `mn_enlist_sched`), so its own `send`/`close` used to bypass the
+    global park set and never wake an enlisted, parked sibling → false `deadlock`. `channel_send_wire` +
+    the `close` arm now route through `self.mn.or(self.mn_enlist_sched)`. Guards:
+    `..._inline_send.chz`, `..._inline_close.chz`.
+  - **`awaiting_builder` deadlock veto:** an early-enlisted scope is marked `awaiting_builder` (the live
+    builder body is its feeder); `is_deadlocked` vetoes only while EVERY incomplete scope is awaiting the
+    builder (`all_incomplete_awaiting_builder`). A genuine NESTED deadlock keeps a non-awaiting scope
+    incomplete → still faults (`parallel_cross_nursery_genuine_nested_deadlock_still_faults`).
+  - **Late spawn after enlist (charge #3):** a `spawn:` issued after `early_enlist_outer` drained the
+    nursery vec used to be silently dropped at the join. `join_nursery` now runs the refilled tasks (a
+    fresh trailing scope keeps the flat slots contiguous); `drain_escaped_nursery` reports them on an
+    escape. Guards: `..._late_spawn.chz`, `parallel_cross_nursery_late_spawn_escape_reports_pending`.
+  - **Atomic enlist (charge #4):** `early_enlist_outer` now validates (prepares workers from clones)
+    BEFORE consuming the nursery / registering a scope, so a `prepare_worker` `Err` (checker-gated
+    backstop) can't leave an unseeded scope (hang) or a half-state — it unwinds cleanly.
+  - **2+ enlisting levels (v1 boundary, found in re-review):** a `parallel:` nested in another such
+    that both early-enlist (two live receiver scopes) now **faults cleanly + deterministically** in
+    `early_enlist_outer` ("2+ enlisting levels … aren't supported under --parallel yet"), replacing a
+    flaky false-`deadlock` / `index out of bounds` panic. Cross-scope channel-delivery order can't match
+    the cooperative buffered run-at-join order — that's the deferred cooperative-flatten work. Guard:
+    `parallel_cross_nursery_two_enlisting_levels_faults_cleanly`.
+  - **Out of scope (documented separate limits):** the inline-body *blocking* recv (case B — wake-side
+    fix only) and eager (per-connection) nurseries' private sched.
 
 **`Channel.close()` + closed-channel semantics + `try_send` + `for v in ch:`** landed (both engines) —
 the headline consumer-side feature giving clean producer→consumer termination (was: a consumer looping
@@ -438,11 +463,14 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
 - **Known VM v1 limits (acceptable; not parity issues):** a blocking `recv` reached inside a native
   callback (list HOFs, `sort`, `compare`/`hash`/`str` hooks, `Shared.update`, executor drain, a `defer`red
   call) faults `deadlock` *unless* Path C demotion applies (`recv`/`sleep`/socket under `--parallel`); a
-  fiber blocked in an outer nursery *is* woken (D0 cross-level wake-marking, common case works) but cannot be
-  *run* until the inner nursery joins, so the narrow circular case — its unblocker is an outer sibling the
-  inner scheduler can't run — faults `deadlock` (needs a flat scheduler; structured-concurrency scoping).
-  Fix design captured in [`docs/cross-nursery-flat-scheduler.md`](docs/cross-nursery-flat-scheduler.md);
-  correct user pattern in `examples/parallel_cross_nursery_ok.chz`.
+  fiber blocked in an outer nursery *is* woken (D0 cross-level wake-marking, common case works); the narrow
+  circular case (its unblocker is an outer sibling the inner scheduler must run) is **RESOLVED under
+  `--parallel`** by the M:N flat scheduler (see the cross-nursery section above) but **still faults
+  `deadlock` on the cooperative `run`/`--interp`** engines (the cooperative flatten is a separate, later
+  commit). Residual M:N limits: the inline outer-body's *blocking* recv (case B — wake-side fix only; put
+  blocking work in a `spawn:`) and eager (per-connection) nurseries' private sched.
+  Fix design + resolution in [`docs/cross-nursery-flat-scheduler.md`](docs/cross-nursery-flat-scheduler.md);
+  correct cooperative pattern in `examples/parallel_cross_nursery_ok.chz`.
   Documented residuals: a narrow parked-sibling false-positive under multi-demote; the `Shared.update`
   same-box recv hazard; a saturated-pool queued-task counted live (no-false-positive choice).
 - **Use `iter.map`/`iter.filter`/`iter.fold`/`iter.reduce` (chezzi source, `std/iter.chz`)** if a

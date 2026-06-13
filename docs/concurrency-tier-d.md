@@ -349,6 +349,12 @@ Critical + Important findings before the completion claim.
   three-engine parity for non-blocking nested spawns). The cooperative (default `run`) engine still
   serializes nested levels, so the same program **still faults `deadlock` on `run`/`--interp`**; the
   cooperative-engine flatten is a **separate, later commit**. Workaround on `run`: siblings in ONE
-  nursery (doc case C).
+  nursery (doc case C). The fix also routes the inline outer-body's own `send`/`close` through the held
+  sched (`..._inline_send.chz`/`..._inline_close.chz`), runs a `spawn:` issued *after* the enlist
+  (`..._late_spawn.chz`), and makes the enlist atomic; genuine deadlocks still fault (the predicate
+  vetoes only while every incomplete scope is *awaiting the builder's join*). **Wake-side only:** a
+  *blocking* recv issued directly in the inline body (case B) still faults — put it in a `spawn:`. Eager
+  (per-connection) nurseries run on a private sched, so a cross-nursery wake into/out of an eager body is
+  a separate limit.
 - **Priority classes** (BEAM) — deferred; revisit if priority becomes a requirement.
 - **Reduction constant tuning** (D3) — `CONTEXT_REDS` value + per-op vs per-back-edge accounting.

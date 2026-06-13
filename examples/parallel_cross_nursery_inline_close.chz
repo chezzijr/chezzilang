@@ -1,0 +1,29 @@
+# Cross-nursery INLINE-BODY close (M:N / --parallel ONLY) — companion to the inline-send guard.
+#
+# The outer `parallel:` spawns sibling O, which RANGES over channel t (`for v in t:`) until it is
+# closed. inner()'s nested join early-enlists the outer nursery (O) into the global MnSched. The OUTER
+# BODY then `t.send(1)` (wakes O with a value) and `t.close()` (ends O's range) — both issued on the
+# inline builder VM (self.mn == None). Each must route through the held `mn_enlist_sched` to wake the
+# enlisted, parked O; otherwise O never observes the value or the close → false `deadlock` / hang.
+#
+#   chezzi run --parallel examples/parallel_cross_nursery_inline_close.chz
+#
+# NOTE: under the cooperative engine (plain `run`) this STILL faults deadlock — case A is M:N-only.
+fn inner():
+    spawn:
+        print("inner ran")
+
+fn main():
+    t := Channel[int]()
+    parallel:                        # OUTER nursery
+        spawn:                       # O: ranges over t until the inline body closes it
+            for v in t:
+                print("O got {v}")
+            print("O done")
+        inner()                      # nested nursery join → early-enlists OUTER (seeds O)
+        t.send(1)                    # INLINE-BODY send — wakes the enlisted, parked O
+        t.close()                    # INLINE-BODY close — ends O's range
+
+    print("done")
+
+main()

@@ -1,0 +1,27 @@
+# Cross-nursery LATE SPAWN (M:N / --parallel ONLY) — regression guard for the enlist-then-spawn drop.
+#
+# The outer `parallel:` spawns O1, then calls inner() whose nested join EARLY-ENLISTS the outer nursery
+# (draining its task vec via std::mem::take). AFTER inner() returns, the outer body does a SECOND
+# `spawn:` — O2 — which refills the just-drained outer nursery vec. Before the fix, the outer
+# JoinNursery took the "already enlisted" branch and silently DROPPED the refilled O2 (it never ran).
+# O2's print proves it was scheduled and joined.
+#
+#   chezzi run --parallel examples/parallel_cross_nursery_late_spawn.chz
+#
+# NOTE: under the cooperative engine (plain `run`) the spawned tasks run at the join; this example is
+# kept --parallel-only for parity with the other cross-nursery goldens.
+fn inner():
+    spawn:
+        print("inner ran")
+
+fn main():
+    parallel:                        # OUTER nursery
+        spawn:                       # O1: registered BEFORE the enlist
+            print("O1 ran")
+        inner()                      # nested join → early-enlists OUTER (drains its task vec)
+        spawn:                       # O2: registered AFTER the enlist — must NOT be dropped
+            print("O2 ran")
+
+    print("done")
+
+main()

@@ -1,0 +1,31 @@
+# Cross-nursery INLINE-BODY send (M:N / --parallel ONLY) — regression guard for the routing leak.
+#
+# The outer `parallel:` spawns sibling O (recvs t, prints) and then calls inner(), whose nested
+# nursery join EARLY-ENLISTS the outer nursery (O) into the one global MnSched. AFTER inner() returns,
+# the OUTER BODY itself does `t.send(42)` — a send issued on the inline builder VM (self.mn == None,
+# the sched held only in mn_enlist_sched). The wake of the enlisted, parked receiver O must route
+# through that held sched; otherwise the value is queued but O is never made runnable → a false
+# `deadlock` fault (or hang) under --parallel even though coop would print "O got 42".
+#
+#   chezzi run --parallel examples/parallel_cross_nursery_inline_send.chz   # → inner ran / O got 42 / done
+#
+# Output order: "inner ran" flushes at inner's nested join (during the body, before the send); O's
+# output is buffered to its outer-nursery scope and flushes at the outer join, before "done".
+#
+# NOTE: under the cooperative engine (plain `run`) this STILL faults deadlock — case A is M:N-only.
+fn inner():
+    spawn:
+        print("inner ran")
+
+fn main():
+    t := Channel[int]()
+    parallel:                        # OUTER nursery
+        spawn:                       # O: child of OUTER — parks on recv until the inline body sends
+            x := t.recv()
+            print("O got {x}")
+        inner()                      # nested nursery join → early-enlists OUTER (seeds O)
+        t.send(42)                   # INLINE-BODY send — must wake the enlisted, parked O
+
+    print("done")
+
+main()

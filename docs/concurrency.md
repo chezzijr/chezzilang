@@ -704,7 +704,10 @@ landed). Blocking `recv` inside a native callback (**D5 owe #3**) is **resolved*
 is **fixed under `--parallel`** (the M:N engine): one VM-global `MnSched` with a `Vec<JoinScope>` flat
 scheduler (each nested nursery is a scope enlisted into the same global run queue, with a scope-scoped
 owner stop), plus early-enlisting an outer nursery's siblings so a nested owner — draining the GLOBAL
-queue — runs them. The cooperative (default `run`) engine still serializes nested nursery levels, so the
+queue — runs them. The fix also routes the inline outer-body's own `send`/`close` through the held sched
+(so they wake an enlisted, parked sibling), runs a `spawn:` issued *after* the enlist, and makes the
+enlist atomic — see §11 below and [`docs/cross-nursery-flat-scheduler.md`](cross-nursery-flat-scheduler.md).
+The cooperative (default `run`) engine still serializes nested nursery levels, so the
 same program **still faults `deadlock` on `run`** (and on `--interp`); the cooperative-engine flatten is a
 **separate, later commit**. Workaround on the cooperative engine: keep mutually-dependent blocking tasks as
 SIBLINGS in ONE nursery (the doc case C pattern).
@@ -862,22 +865,37 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   **wake-marking** works — a `send` in any nursery marks the blocked fiber ready wherever it parked. The
   **common case** (consumer in an *outer* nursery, producer in an *inner* one that finishes) works end to
   end: the inner nursery completes, the outer resumes, the consumer gets its value.
-  **Still open:** the scheduler only *runs* the **innermost** level to completion before unwinding
-  outward (structured concurrency: inner joins before outer proceeds). So a fiber that is woken in an
-  *outer* nursery is marked ready but cannot be *run* until the inner nursery joins — and if completing
-  the inner nursery *requires* that outer fiber to run, you get a circular wait that faults `deadlock`
-  (`examples/parallel_deadlock.chz`). **Why still deferred:** a true fix needs a flat/global scheduler,
-  which partly conflicts with inner-joins-first scoping. **Full pick-up brief (problem + reproduction +
-  target design + per-engine deltas + test plan):**
-  [`docs/cross-nursery-flat-scheduler.md`](cross-nursery-flat-scheduler.md). The correct user-facing
-  pattern (siblings in one nursery) is `examples/parallel_cross_nursery_ok.chz`. **(Symbol note:** the
-  old `pick_runnable` linear scan named in earlier drafts is gone — replaced by D0's `ready`-set.)
-  **Correction:** this was once "mooted by B3" on the theory that real OS-thread `recv` blocks the
-  thread (no level-local polling) — but **Tier-D D2's M:N transition un-mooted it**: `--parallel` now
-  parks fibers by *snapshot* into the level's park set, not by blocking a thread, so the level scoping
-  is back. So the **narrow circular case** is a limit on **both** engines; revisit only if it bites real
-  programs. Acceptable v1 limit
-  (also noted in `PROGRESS.md`).
+  **RESOLVED under `--parallel` (M:N):** the circular outer-sibling case — a fiber woken in an *outer*
+  nursery being *run* by an inner one — is fixed by the flat scheduler (one VM-global `MnSched` with a
+  `Vec<JoinScope>`; each nested nursery is a scope enlisted into the same global run queue; scope-scoped
+  owner stop). Early-enlisting an outer nursery's siblings lets a nested owner draining the GLOBAL queue
+  run them (`examples/parallel_cross_nursery_circular.chz`, `..._fanout.chz`). The full fix also routes
+  the **inline outer-body's** own `send`/`close` through the held sched so they wake an enlisted, parked
+  sibling (`..._inline_send.chz`, `..._inline_close.chz`), runs a `spawn:` issued *after* the enlist
+  (`..._late_spawn.chz`), and makes the enlist atomic. A genuine no-sender deadlock still faults — the
+  global predicate fires unless every still-incomplete scope is merely *awaiting the builder's join*
+  (a live external feeder); see `MnSched::all_incomplete_awaiting_builder`.
+  **Remaining narrow limits (revisit only if they bite real programs; full brief +
+  reproductions in [`docs/cross-nursery-flat-scheduler.md`](cross-nursery-flat-scheduler.md)):**
+  - **2+ enlisting levels** — a `parallel:` nested inside another such that both early-enlist (two live
+    receiver scopes at once) **faults cleanly** ("2+ enlisting levels … aren't supported under
+    --parallel yet"), not runs: cross-scope channel-delivery order can't match the cooperative buffered
+    run-at-join order. Same gap the cooperative flatten closes; gated deterministically in
+    `early_enlist_outer`.
+  - **Cooperative (`run`) / `--interp`** still serialize nested nursery levels, so the same program
+    **still faults `deadlock`** there — the cooperative-engine flatten is a separate, later commit.
+    Workaround: keep mutually-dependent blocking tasks as SIBLINGS in ONE nursery
+    (`examples/parallel_cross_nursery_ok.chz`, the doc case C pattern).
+  - **Inline outer-body *blocking* recv (case B)** — the cross-nursery fix is **wake-side only**. The
+    inline `parallel:` builder body runs with no scheduler frame, so a *blocking* `recv`/`for v in ch:`/
+    `wait:` issued directly in the body (not inside a `spawn:`) still faults "sequential executor cannot
+    block." Put blocking work in a `spawn:`.
+  - **Eager (per-connection) nurseries** run on their OWN private `MnSched` (`activate_eager_nursery`,
+    for liveness — no inline worker between Enter/Join), so a cross-nursery wake INTO or OUT OF an eager
+    body is a separate limit, not the flat-scheduler routing class.
+
+  **(Symbol note:** the old `pick_runnable` linear scan named in earlier drafts is gone — replaced by
+  D0's `ready`-set.)
 
 - **`recv` inside a native callback** *(D5 owe #3)* — **RESOLVED (both paths landed).** A blocking
   `recv`/I/O reached inside a Rust callback (list HOFs, `Shared.update`, socket ops, `sleep_ms`, a

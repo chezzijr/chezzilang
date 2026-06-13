@@ -266,6 +266,10 @@ impl Deferred {
 /// arg-evaluation timing); the body runs at the `parallel:` dedent. Mirrors the interpreter's
 /// `Task` enum — a `spawn:` block is lowered to a zero-arg closure, so it rides the `Call` variant.
 /// The held values are GC roots while the task is pending (see [`Vm::collect`]).
+/// `Clone` is shallow (a `Value`/`GcRef` copy — both originals and clones stay rooted), used by
+/// `early_enlist_outer` to prepare workers from a copy so a non-crossable task faults BEFORE the
+/// nursery is consumed (atomic enlist — charge #4).
+#[derive(Clone)]
 enum PendingCall {
     /// `spawn f(args)` (or a `spawn:` block, lowered to a zero-arg closure) — invoke the callable.
     Call { callee: Value, args: Vec<Value>, span: Span },
@@ -1143,6 +1147,14 @@ struct JoinScope {
     /// terminate the global sched and `is_deadlocked` is vetoed (the body is live work the sched can't
     /// see). `JoinNursery` clears it. Always `false` for a lazy (queue-at-join) nursery.
     body_open: bool,
+    /// Cross-nursery flat scheduler — `true` while this scope is an EARLY-ENLISTED outer nursery still
+    /// awaiting the inline builder's own `JoinNursery` (`early_enlist_outer` sets it; `join_enlisted_scope`
+    /// / `abort_enlisted_scope` clear it as the builder begins draining the scope). While set, the scope's
+    /// parked fibers have a live external feeder — the builder body, which may still `send`/`close`/`spawn`
+    /// — so a quiesce in which EVERY incomplete scope is `awaiting_builder` is NOT a deadlock: the builder
+    /// has finished all nested service and will return to the body to feed them (see
+    /// `all_incomplete_awaiting_builder` + `is_deadlocked`). Always `false` for an owned/eager scope.
+    awaiting_builder: bool,
     /// This scope's cancel token (the SAME `Arc` cloned onto fibers running in this scope; distinct
     /// per nursery so an inner fault cancels ONLY its scope, never an outer sibling — the structured-
     /// concurrency invariant). Read by `park`/`park_wait`'s gap re-check and the running fiber's
@@ -1208,6 +1220,28 @@ impl SchedCore {
         self.scopes.iter().any(|s| s.body_open)
     }
 
+    /// Cross-nursery flat scheduler — true when EVERY still-incomplete scope is one merely awaiting the
+    /// inline builder's own `JoinNursery` (early-enlisted). The builder, having finished all nested
+    /// service (else a non-`awaiting_builder` scope would still be incomplete), WILL return to the body
+    /// and can `send`/`close`/`spawn` to feed these parked siblings — so this quiesce is NOT a deadlock.
+    /// A single-scope sched never holds an enlisted scope, so the fast path is always `false` (zero cost
+    /// on the common path). (Cross-nursery flat scheduler — charges #1/#2.)
+    fn all_incomplete_awaiting_builder(&self) -> bool {
+        if self.scopes.len() == 1 {
+            return false;
+        }
+        let mut any_incomplete = false;
+        for s in &self.scopes {
+            if s.done < s.total {
+                any_incomplete = true;
+                if !s.awaiting_builder {
+                    return false;
+                }
+            }
+        }
+        any_incomplete
+    }
+
     /// Cross-nursery flat scheduler — some scope has unfinished tasks (the `done < total` half of the
     /// global deadlock predicate). Fast path for the common single-nursery case.
     fn any_scope_incomplete(&self) -> bool {
@@ -1257,7 +1291,7 @@ impl MnSched {
                 slots: (0..total).map(|_| None).collect(),
                 running: 0,
                 parked_n: 0,
-                scopes: vec![JoinScope { base_index: 0, total, done: 0, body_open: false, cancel: Arc::clone(&cancel) }],
+                scopes: vec![JoinScope { base_index: 0, total, done: 0, body_open: false, awaiting_builder: false, cancel: Arc::clone(&cancel) }],
                 terminate: false,
                 demoted_chans: std::collections::HashMap::new(),
             }),
@@ -1283,7 +1317,7 @@ impl MnSched {
         let base_index = c.slots.len();
         c.slots.extend((0..total).map(|_| None));
         let scope_id = c.scopes.len();
-        c.scopes.push(JoinScope { base_index, total, done: 0, body_open: false, cancel });
+        c.scopes.push(JoinScope { base_index, total, done: 0, body_open: false, awaiting_builder: false, cancel });
         scope_id
     }
 
@@ -1877,6 +1911,15 @@ impl MnSched {
         // re-enables the predicate so a genuine post-join deadlock still fires. Always `false` on the
         // lazy path — unchanged.
         if c.any_body_open() {
+            return false;
+        }
+        // Cross-nursery flat scheduler — if every still-incomplete scope is an early-enlisted outer
+        // nursery awaiting the inline builder's join, the builder has finished all nested service and
+        // will return to the body to feed those parked siblings (`send`/`close`/`spawn`). That is a live
+        // external feeder the counter-only predicate can't see, so it is NOT a deadlock. The flag clears
+        // as the builder begins draining each enlisted scope, so a genuine post-body deadlock still fires
+        // (and a stuck NESTED scope keeps a non-`awaiting_builder` scope incomplete → fires). (#1/#2.)
+        if c.all_incomplete_awaiting_builder() {
             return false;
         }
         if !(c.running == 0
@@ -5939,6 +5982,12 @@ impl Vm {
             // nursery's `abort_eager_nursery`. No pending-task report (the tasks DID start).
             if let Some(scope_id) = mn_scope {
                 self.abort_enlisted_scope(scope_id);
+                // A `spawn:` issued after the enlist refilled `nursery` with unstarted late tasks; on an
+                // escape they never started → report them cancelled (parity with the lazy arm below and
+                // with coop), rather than silently dropping them. (Cross-nursery flat scheduler — #3.)
+                if !nursery.is_empty() {
+                    self.out.push_str(&crate::runtime::pending_cancel_report(nursery.len()));
+                }
                 continue;
             }
             // Per-connection spawn — pop the eager scope in lockstep. An eager nursery's handlers are
@@ -5972,7 +6021,17 @@ impl Vm {
         // siblings), wait, and reduce THAT scope's slot sub-range (preserving per-nursery-join flush
         // order → parity). See `run_mn_nursery_nested`.
         if let Some(scope_id) = mn_scope {
-            return self.join_enlisted_scope(scope_id);
+            self.join_enlisted_scope(scope_id)?;
+            // A `spawn:` issued AFTER this nursery was enlisted refilled the drained `tasks` vec (the
+            // enlist `take()` emptied it, but `mn_scopes[i]` stayed `Some`). Those late tasks were NOT
+            // part of the enlisted scope — run them now, at the join, exactly as the lazy path below
+            // (coop runs nursery tasks at the join too; late spawns post-date the nested `inner()` join,
+            // so they have no live inner peer → parity holds). Falls through to the normal task path: a
+            // fresh `run_mn_nursery_outermost` scope (the enlisted scope has already joined), so the flat
+            // slots stay contiguous. (Cross-nursery flat scheduler — charge #3.)
+            if tasks.is_empty() {
+                return Ok(());
+            }
         }
         if tasks.is_empty() {
             return Ok(());
@@ -6080,8 +6139,14 @@ impl Vm {
         // multi-task inner nursery race). The sched is held in `mn_enlist_sched` (NOT `self.mn` — the
         // inline body must run with `mn == None` so it does not take the worker-only yield/park paths).
         // Each enlisted scope reduces at its OWN `JoinNursery` (deferred — preserves per-nursery order).
-        self.mn_enlist_sched = Some(Arc::clone(&sched));
+        // Install `mn_enlist_sched` only AFTER a SUCCESSFUL enlist that actually deferred a scope: an
+        // early `?` (the 2+-level v1 fault or a `prepare_worker` backstop) must leave NO stale sched
+        // behind for a later `join_enlisted_scope`/inline-send to pick up; and if nothing was enlisted
+        // there are no deferred joins, so it stays `None` (clean teardown at this owner's reduce).
         self.early_enlist_outer(&sched)?;
+        if self.mn_enlisted > 0 {
+            self.mn_enlist_sched = Some(Arc::clone(&sched));
+        }
         // NOW farm helper shells — SENTINEL (drain the global queue across all scopes until global
         // terminate). Farming AFTER the enlist closes the deadlock-predicate race above.
         for wid in 1..nworkers {
@@ -6138,19 +6203,60 @@ impl Vm {
     /// `JoinNursery` reduces it (deferred — preserving per-nursery flush order and three-engine parity).
     /// Idempotent per nursery (skips any already-enlisted `Some(_)` and any empty one).
     fn early_enlist_outer(&mut self, sched: &Arc<MnSched>) -> Result<(), RuntimeError> {
+        // v1 boundary — only ONE enlisting level is supported. Two or more outer nurseries enlisted at
+        // once (deeply-nested cross-nursery: `parallel:` { … `parallel:` { … nested join } … }) is out of
+        // scope: with 2+ live receivers seeded across scopes, channel-delivery order diverges from the
+        // cooperative engine's buffered "run-at-join" semantics (no flat receiver order to match), and the
+        // scope-scoped deadlock veto can't be both correct and live across independent enlisted scopes.
+        // Fault CLEANLY and DETERMINISTICALLY here — before any mutation — rather than panic (a stale
+        // scope_id on a re-entered builder) or flaky-deadlock. The full fix is the deferred cooperative
+        // flatten. Single-level cross-nursery (the circular/fanout/inline cases) is unaffected.
+        let to_enlist = (0..self.nurseries.len())
+            .filter(|&i| self.mn_scopes[i].is_none() && !self.nurseries[i].is_empty())
+            .count();
+        if self.mn_enlisted + to_enlist > 1 {
+            return Err(self.err(
+                "cross-nursery: deeply-nested `parallel:` blocks (2+ enlisting levels) aren't supported \
+                 under --parallel yet — keep mutually-dependent blocking tasks within a single nesting \
+                 level (see docs/cross-nursery-flat-scheduler.md)"
+                    .to_string(),
+                Span { line: 1, col: 1 },
+            ));
+        }
         for i in 0..self.nurseries.len() {
             if self.mn_scopes[i].is_some() || self.nurseries[i].is_empty() {
                 continue;
             }
-            let g = std::mem::take(&mut self.nurseries[i]); // consume → its JoinNursery reduces the scope
-            let total = g.len();
+            let total = self.nurseries[i].len();
+            // VALIDATE THEN COMMIT (atomic enlist — charge #4). Prepare every task from a CLONE first,
+            // BEFORE any irreversible mutation. `prepare_worker` is the only fallible step (the checker
+            // gates non-crossable spawns, so this backstop normally never fires — but if it did, an early
+            // `?` here must not leave a half-state). On `Err` the nursery is untouched (originals still in
+            // `self.nurseries[i]`), no scope is registered (so no unseeded scope can hang `wait_for_scope`)
+            // and `mn_scopes`/`mn_enlisted` are unbumped — the fault propagates cleanly, matching coop.
+            let clones: Vec<PendingCall> = self.nurseries[i].clone();
+            let mut prepared = Vec::with_capacity(total);
+            for t in clones {
+                prepared.push(self.prepare_worker(t)?);
+            }
+            // COMMIT — nothing fallible remains. Discard the originals (the clones became the fibers),
+            // register + seed the scope, and record it for its OWN `JoinNursery` to reduce.
+            let _ = std::mem::take(&mut self.nurseries[i]);
             let cancel = Arc::new(AtomicBool::new(false));
             let scope_id = sched.register_scope(total, Arc::clone(&cancel));
-            let base = sched.lock().scopes[scope_id].base_index;
-            let mut fibers = Vec::with_capacity(total);
-            for (j, t) in g.into_iter().enumerate() {
-                fibers.push(self.prepare_worker(t)?.into_fiber(base + j, scope_id));
-            }
+            // Mark the scope as awaiting the builder's own join: its parked fibers have the live builder
+            // body as a feeder, so the deadlock predicate must not fault them until the builder reaches
+            // this scope's `JoinNursery` (which clears the flag). (Cross-nursery flat scheduler — #1/#2.)
+            let base = {
+                let mut c = sched.lock();
+                c.scopes[scope_id].awaiting_builder = true;
+                c.scopes[scope_id].base_index
+            };
+            let fibers: Vec<Fiber> = prepared
+                .into_iter()
+                .enumerate()
+                .map(|(j, p)| p.into_fiber(base + j, scope_id))
+                .collect();
             sched.seed(fibers);
             self.mn_scopes[i] = Some(scope_id);
             self.mn_enlisted += 1;
@@ -6165,6 +6271,10 @@ impl Vm {
     /// joins. Runs on the INLINE builder VM (`self.mn == None`), so the owner loop is on a SHELL.
     fn join_enlisted_scope(&mut self, scope_id: usize) -> Result<(), RuntimeError> {
         let sched = self.mn_enlist_sched.clone().expect("join_enlisted_scope without a held sched");
+        // The builder has reached THIS scope's join — it is no longer feeding it from body code, it is now
+        // blocked draining it. Clear `awaiting_builder` so a genuine post-body deadlock (this scope parked
+        // with no live sender) faults instead of being vetoed. (Cross-nursery flat scheduler — #1/#2.)
+        sched.lock().scopes[scope_id].awaiting_builder = false;
         let snap = self.ensure_snapshot();
         let cancel = Arc::clone(&sched.lock().scopes[scope_id].cancel);
         let wid = self.wid;
@@ -6185,6 +6295,9 @@ impl Vm {
     /// honored — the escape error is what propagates), and release the held sched at the last scope.
     fn abort_enlisted_scope(&mut self, scope_id: usize) {
         let Some(sched) = self.mn_enlist_sched.clone() else { return };
+        // Draining (cancelling) this scope, not feeding it — clear `awaiting_builder` so the cancel
+        // quiesce is observed promptly rather than vetoed. (Cross-nursery flat scheduler — #1/#2.)
+        sched.lock().scopes[scope_id].awaiting_builder = false;
         let cancel = Arc::clone(&sched.lock().scopes[scope_id].cancel);
         cancel.store(true, Ordering::Relaxed);
         sched.cancel_drain(scope_id);
@@ -8458,7 +8571,10 @@ impl Vm {
                 self.arity_err("close", args, 0, span)?;
                 let core = self.channel_core(h);
                 core.q.lock().unwrap().closed = true;
-                if let Some(sched) = self.mn.clone() {
+                // Same routing as `channel_send_wire`: an inline outermost-`parallel:` builder VM
+                // (`self.mn == None`) closing a channel must wake enlisted, parked receivers via the
+                // held `mn_enlist_sched`, not just the local condvar. (Cross-nursery flat scheduler #2.)
+                if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
                     let key = self.channel_core_ptr(h);
                     sched.close_wake(key, &core);
                 } else {
@@ -8486,7 +8602,13 @@ impl Vm {
     /// in-callback recv) + re-adds any cooperative fiber parked on this channel.
     fn channel_send_wire(&mut self, h: GcRef, w: WireValue) {
         let core = self.channel_core(h);
-        if let Some(sched) = self.mn.clone() {
+        // Route the enqueue+wake through whatever sched is in scope. A worker shell holds it in
+        // `self.mn`; the INLINE outermost-`parallel:` builder VM runs with `self.mn == None` but holds
+        // the global sched in `self.mn_enlist_sched` while early-enlisted outer scopes are still pending.
+        // An inline-body send must still wake an enlisted, parked receiver (the cross-nursery wake), so
+        // fall back to the held sched. The sender never parks, so this does not pull the inline owner
+        // onto a worker yield/park path. (Cross-nursery flat scheduler — charges #1/#2.)
+        if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
             let key = self.channel_core_ptr(h);
             sched.send_wake(key, &core, w);
         } else {
@@ -16390,6 +16512,130 @@ main()
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => assert_eq!(r.expect("parallel run"), expected),
             Err(_) => panic!("hung — multi-task inner cross-nursery regressed (early-enlist/deadlock-predicate race)"),
+        }
+    }
+
+    /// Cross-nursery flat scheduler — an INLINE-BODY `send` (issued on the builder VM, `self.mn ==
+    /// None`, sched held only in `mn_enlist_sched`) must wake an enlisted, parked outer sibling. Before
+    /// the routing fix this false-faulted `deadlock` under `--parallel` (value queued, receiver never
+    /// made runnable) while coop prints "O got 42". M:N-only, 30s watchdog.
+    #[test]
+    fn golden_parallel_cross_nursery_inline_send_chz_matches_expected() {
+        let src = include_str!("../../examples/parallel_cross_nursery_inline_send.chz");
+        let expected = include_str!("../../examples/parallel_cross_nursery_inline_send.expected");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(src));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => assert_eq!(r.expect("parallel run"), expected),
+            Err(_) => panic!("hung — inline-body send to an enlisted sibling regressed (lost wakeup)"),
+        }
+    }
+
+    /// Cross-nursery flat scheduler — an INLINE-BODY `close` (and the `send` before it) issued on the
+    /// builder VM must wake an enlisted sibling RANGING over the channel (`for v in t:`): it receives the
+    /// value, then observes the close and ends. Same routing fix as inline-send, exercising the `close`
+    /// arm. M:N-only, 30s watchdog.
+    #[test]
+    fn golden_parallel_cross_nursery_inline_close_chz_matches_expected() {
+        let src = include_str!("../../examples/parallel_cross_nursery_inline_close.chz");
+        let expected = include_str!("../../examples/parallel_cross_nursery_inline_close.expected");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(src));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => assert_eq!(r.expect("parallel run"), expected),
+            Err(_) => panic!("hung — inline-body close to an enlisted ranging sibling regressed (lost wakeup)"),
+        }
+    }
+
+    /// Cross-nursery flat scheduler — the v1 boundary: 2+ simultaneously-enlisted scopes (deeply-nested
+    /// `parallel:`) are NOT supported under `--parallel`. They must fault CLEANLY and DETERMINISTICALLY
+    /// (never panic on a stale scope_id, never flaky-deadlock). Two shapes: (a) a nested+nested cross-
+    /// channel wakeup, (b) a late `spawn:` into a non-outermost nursery (which used to panic
+    /// `index out of bounds`). Both must report the "2+ enlisting levels" limit and never hang. M:N-only.
+    #[test]
+    fn parallel_cross_nursery_two_enlisting_levels_faults_cleanly() {
+        let shapes = [
+            // (a) two enlisted scopes, cross-channel — was a flaky false `deadlock`.
+            "fn inner():\n    spawn:\n        print(\"i\")\nfn mid(cm: Channel[int]):\n    parallel:\n        spawn:\n            x := cm.recv()\n            print(\"M {x}\")\n        inner()\n        cm.send(2)\nfn main():\n    c := Channel[int]()\n    parallel:\n        spawn:\n            y := c.recv()\n            print(\"O {y}\")\n        mid(c)\n        c.send(1)\nmain()\n",
+            // (b) late spawn into a non-outermost nursery — was `index out of bounds` panic.
+            "fn inner():\n    spawn:\n        print(\"i\")\nfn mid():\n    parallel:\n        spawn:\n            print(\"M1\")\n        inner()\n        spawn:\n            print(\"M2\")\nfn main():\n    parallel:\n        spawn:\n            print(\"O1\")\n        mid()\n    print(\"done\")\nmain()\n",
+        ];
+        for (i, src) in shapes.iter().enumerate() {
+            let s = src.to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(run_capture_parallel(&s));
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(r) => {
+                    let err = r.expect_err("2+ enlisting levels must fault, not succeed");
+                    assert!(err.message.contains("2+ enlisting levels"), "shape {i}: wrong fault: {}", err.message);
+                }
+                Err(_) => panic!("shape {i} hung — 2+-level cross-nursery must fault deterministically, not hang/panic"),
+            }
+        }
+    }
+
+    /// Cross-nursery flat scheduler — the `awaiting_builder` deadlock veto must be SURGICAL: a genuine
+    /// deadlock inside a NESTED nursery (`inner` spawns a no-sender `recv`) must STILL fault even while an
+    /// outer sibling is early-enlisted (`awaiting_builder`). The nested scope stays incomplete and is NOT
+    /// `awaiting_builder`, so `all_incomplete_awaiting_builder` is false → the predicate fires. Guards
+    /// against the veto hanging a real deadlock. M:N-only, 30s watchdog. (charges #1/#2 risk.)
+    #[test]
+    fn parallel_cross_nursery_genuine_nested_deadlock_still_faults() {
+        let src = "fn inner(dead: Channel[int]):\n    spawn:\n        v := dead.recv()\n        print(\"never {v}\")\nfn main():\n    dead := Channel[int]()\n    parallel:\n        spawn:\n            print(\"O ran\")\n        inner(dead)\n    print(\"done\")\nmain()\n";
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(src));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => {
+                let err = r.expect_err("a genuine nested no-sender recv must still fault deadlock");
+                assert!(err.message.contains("deadlock"), "expected deadlock, got: {}", err.message);
+            }
+            Err(_) => panic!("hung — awaiting_builder veto wrongly suppressed a genuine nested deadlock"),
+        }
+    }
+
+    /// Cross-nursery flat scheduler — a `spawn:` issued AFTER a nursery was early-enlisted (which drained
+    /// its task vec) must NOT be silently dropped: the late task runs at the join. Before the fix the
+    /// "already enlisted" join branch discarded the refilled vec. M:N-only, 30s watchdog. (charge #3.)
+    #[test]
+    fn golden_parallel_cross_nursery_late_spawn_chz_matches_expected() {
+        let src = include_str!("../../examples/parallel_cross_nursery_late_spawn.chz");
+        let expected = include_str!("../../examples/parallel_cross_nursery_late_spawn.expected");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(src));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => assert_eq!(r.expect("parallel run"), expected),
+            Err(_) => panic!("hung — late-spawn-into-enlisted-nursery regressed"),
+        }
+    }
+
+    /// Cross-nursery flat scheduler — on an EARLY EXIT (`return`) past a join whose nursery was
+    /// early-enlisted AND then refilled by a late `spawn:`, the late task must still be accounted: it
+    /// never started, so it is reported "pending … cancelled" (not silently leaked/dropped). Guards the
+    /// `drain_escaped_nursery` half of charge #3. M:N-only.
+    #[test]
+    fn parallel_cross_nursery_late_spawn_escape_reports_pending() {
+        let src = "fn inner():\n    spawn:\n        print(\"inner ran\")\nfn run():\n    parallel:\n        spawn:\n            print(\"O1 ran\")\n        inner()\n        spawn:\n            print(\"O2 ran\")\n        return\nfn main():\n    run()\n    print(\"after\")\nmain()\n";
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(src));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => {
+                let out = r.expect("parallel run");
+                assert!(out.contains("pending task(s) cancelled"), "late escaped task dropped, not reported: {out}");
+                assert!(out.ends_with("after\n"), "post-parallel statement must run: {out}");
+            }
+            Err(_) => panic!("hung — late-spawn escape path regressed"),
         }
     }
 
