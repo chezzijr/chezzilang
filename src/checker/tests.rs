@@ -4568,3 +4568,116 @@ fn extern_nil_param_rejected() {
         "not C-marshallable",
     );
 }
+
+// ===== generators (experimental, VM-only) =====
+
+#[test]
+fn generator_basic_ok() {
+    // A generator declares `-> Iterator[T]`, yields T, and its result drives a `for` (x: int).
+    ok("fn count() -> Iterator[int]:\n    yield 1\n    yield 2\n\nfn use() -> int:\n    s := 0\n    for x in count():\n        s = s + x\n    return s\n");
+}
+
+#[test]
+fn generator_for_binds_element_type() {
+    // `for x in count()` must bind `x: int`, so using it as a str is a type error.
+    rejects(
+        "fn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    for x in count():\n        print(x + \"a\")\n",
+        "",
+    );
+}
+
+#[test]
+fn generator_yield_type_mismatch_rejected() {
+    rejects(
+        "fn g() -> Iterator[int]:\n    yield \"nope\"\n",
+        "expected yield type int",
+    );
+}
+
+#[test]
+fn generator_missing_iterator_return_rejected() {
+    rejects(
+        "fn g() -> int:\n    yield 1\n",
+        "must declare a return type of `Iterator[T]`",
+    );
+}
+
+#[test]
+fn generator_no_return_type_rejected() {
+    rejects(
+        "fn g():\n    yield 1\n",
+        "must declare a return type of `Iterator[T]`",
+    );
+}
+
+#[test]
+fn generator_return_value_rejected() {
+    rejects(
+        "fn g() -> Iterator[int]:\n    yield 1\n    return 5\n",
+        "cannot `return` a value",
+    );
+}
+
+#[test]
+fn generator_explicit_next_ok() {
+    // A generator result is an `Iterator[int]`; `.next()` returns `Option[int]`, drivable explicitly.
+    ok("fn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    g := count()\n    match g.next():\n        Some(v): print(v)\n        None: print(-1)\n");
+}
+
+#[test]
+fn iterator_value_unknown_method_rejected() {
+    rejects(
+        "fn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    g := count()\n    g.bogus()\n",
+        "has no method 'bogus'",
+    );
+}
+
+#[test]
+fn user_struct_named_iterator_rejected() {
+    // `Iterator` is reserved (it names the generator existential value type); a user `struct
+    // Iterator[T]` would be silently shadowed and crash on a phantom `.next()` — reject it.
+    rejects("struct Iterator[T]:\n    val: T\n", "is reserved");
+}
+
+#[test]
+fn yield_outside_generator_rejected() {
+    rejects("yield 1\n", "`yield` can only appear inside a generator function");
+}
+
+#[test]
+fn generator_defer_rejected() {
+    rejects(
+        "fn g() -> Iterator[int]:\n    defer print(0)\n    yield 1\n",
+        "`defer` is not supported inside a generator",
+    );
+}
+
+#[test]
+fn generator_spawn_rejected() {
+    rejects(
+        "fn g() -> Iterator[int]:\n    parallel:\n        spawn print(0)\n    yield 1\n",
+        "`parallel:` is not supported inside a generator",
+    );
+}
+
+#[test]
+fn generator_yield_only_in_recover_ok() {
+    // A generator whose only `yield` lives in a `recover:` block is valid (detected as a generator,
+    // so `yield` is legal there) — guards the parser/checker recover-descent fix.
+    ok("fn g() -> Iterator[int]:\n    x := recover:\n        yield 1\n        1\n    print(x)\n");
+}
+
+#[test]
+fn generator_defer_in_recover_rejected() {
+    // The `defer` ban must not be bypassable by nesting inside a `recover:` block.
+    rejects(
+        "fn cleanup():\n    print(\"c\")\nfn g() -> Iterator[int]:\n    yield 0\n    x := recover:\n        defer cleanup()\n        1\n    print(x)\n",
+        "`defer` is not supported inside a generator",
+    );
+}
+
+#[test]
+fn generator_bare_return_ok() {
+    // A bare `return` inside a generator stops it early — legal.
+    ok("fn g() -> Iterator[int]:\n    yield 1\n    return\n    yield 2\n");
+}

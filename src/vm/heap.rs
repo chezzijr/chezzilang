@@ -163,6 +163,11 @@ pub enum Obj {
     /// `Listener` (D6) — a *handle* to a non-blocking accepting socket [`ListenerCore`]. See
     /// [`Socket`](Obj::Socket).
     Listener(Arc<ListenerCore>),
+    /// Experimental generators (VM-only) — a suspendable coroutine produced by calling a `yield`-ing
+    /// function. Holds its bytecode + home/closure + lifecycle state + parked execution context; its
+    /// `.next()` is intrinsic (see `Vm::generator_next`). Boxed to keep `Obj` small (the core carries
+    /// `Vec`s of frames/stack). GC children come from [`super::GeneratorCore::gc_roots`].
+    Generator(Box<super::GeneratorCore>),
 }
 
 /// One heap slot: the object (or a hole, for swept/free slots) + its GC mark bit.
@@ -324,6 +329,8 @@ impl Heap {
             }
             // D6: a socket/listener core holds only an OS fd + a poll key — no heap refs to trace.
             Obj::Socket(_) | Obj::Listener(_) => {}
+            // Experimental generators — root the suspended frames/stack/args (see `gc_roots`).
+            Obj::Generator(g) => out.extend(g.gc_roots()),
         }
         out
     }

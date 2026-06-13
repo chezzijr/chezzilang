@@ -1,0 +1,49 @@
+# Experimental generators (VM-only). A function or method declaring `-> Iterator[T]` that uses
+# `yield` is a generator: calling it returns a suspendable iterator, not a value. Run with the VM
+# (`chezzi run`); the frozen interpreter rejects `yield`.
+
+# Free-function generator.
+fn count_up(n: int) -> Iterator[int]:
+    i := 0
+    while i < n:
+        yield i
+        i = i + 1
+
+# Generator as a struct method.
+struct Range:
+    lo: int
+    hi: int
+
+    fn each(self) -> Iterator[int]:
+        i := self.lo
+        while i < self.hi:
+            yield i
+            i = i + 1
+
+# A generic that accepts ANY iterator (built-in collection, user struct, or a generator) via an
+# `Iterator[T]` bound — proof a generator value is a first-class `Iterator[T]`.
+fn count_items[S: Iterator[T], T](xs: S) -> int:
+    c := 0
+    for x in xs:
+        c = c + 1
+    return c
+
+fn main():
+    # 1) for-loop over a free-function generator
+    for x in count_up(3):
+        print(x)
+
+    # 2) for-loop over a struct-method generator
+    for y in Range(10, 13).each():
+        print(y)
+
+    # 3) explicit `.next()` — Some(v) per yield, then None once exhausted
+    g := count_up(2)
+    print(g.next())
+    print(g.next())
+    print(g.next())
+
+    # 4) a generator satisfies an Iterator[T] bound
+    print(count_items(count_up(5)))
+
+main()

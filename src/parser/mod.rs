@@ -282,6 +282,11 @@ impl Parser {
                 self.expect_stmt_end()?;
                 k
             }
+            Token::Yield => {
+                let k = self.parse_yield()?;
+                self.expect_stmt_end()?;
+                k
+            }
             Token::Defer => self.parse_defer()?,
             Token::Break => {
                 self.advance();
@@ -393,12 +398,14 @@ impl Parser {
             None
         };
         let body = self.parse_block()?;
+        let is_generator = body_contains_yield(&body);
         Ok(FnDecl {
             name,
             type_params,
             params,
             ret,
             body,
+            is_generator,
         })
     }
 
@@ -916,6 +923,12 @@ impl Parser {
         } else {
             Ok(StmtKind::Return(Some(self.parse_expr()?)))
         }
+    }
+
+    /// `yield <expr>` — always carries a value (unlike `return`). Experimental generator syntax.
+    fn parse_yield(&mut self) -> PResult<StmtKind> {
+        self.expect(&Token::Yield)?;
+        Ok(StmtKind::Yield(self.parse_expr()?))
     }
 
     /// `defer <expr>` — the expression must be a call; the checker enforces that (the parser keeps
@@ -1721,6 +1734,46 @@ impl Parser {
     }
 }
 
+/// Does this function body contain a `yield` that belongs to *this* function? Recurses through
+/// compound statements' sub-blocks but deliberately does NOT descend into a nested `fn`
+/// definition (its yields are its own) nor into closure expressions (a closure is an expression,
+/// so it is never reached by this statement-only walk — a `yield` inside one stays invisible here
+/// and is later flagged by the checker as "yield outside a generator").
+fn body_contains_yield(block: &Block) -> bool {
+    block.iter().any(stmt_contains_yield)
+}
+
+fn stmt_contains_yield(s: &Stmt) -> bool {
+    // A `yield` can also live in a `recover:` block in expression position (`x := recover: … yield …`),
+    // which the statement structure does not reach — scan those too. Stops at closures (a closure's
+    // yields are its own). See `ast::expr_recover_blocks`.
+    let mut recover_blocks = Vec::new();
+    stmt_expr_recover_blocks(s, &mut recover_blocks);
+    if recover_blocks.iter().any(|b| body_contains_yield(b)) {
+        return true;
+    }
+    match &s.kind {
+        StmtKind::Yield(_) => true,
+        StmtKind::If { branches, else_block } => {
+            branches.iter().any(|(_, b)| body_contains_yield(b))
+                || else_block.as_ref().is_some_and(body_contains_yield)
+        }
+        StmtKind::For { body, .. } | StmtKind::While { body, .. } | StmtKind::Parallel { body } => {
+            body_contains_yield(body)
+        }
+        StmtKind::Match { arms, .. } => arms.iter().any(|a| body_contains_yield(&a.body)),
+        StmtKind::Defer(DeferTarget::Block(b)) | StmtKind::Spawn(SpawnTarget::Block(b)) => {
+            body_contains_yield(b)
+        }
+        StmtKind::Wait { arms, else_block } => {
+            arms.iter().any(|a| body_contains_yield(&a.body))
+                || else_block.as_ref().is_some_and(body_contains_yield)
+        }
+        // A nested `fn` owns its own yields — do not descend.
+        _ => false,
+    }
+}
+
 /// Render a token as the user would recognize it, for error messages — `':='` not `Walrus`.
 fn describe(tok: &Token) -> String {
     use Token::*;
@@ -1906,6 +1959,59 @@ mod tests {
         assert!(parse_err("parallel:\n    spawn x + 1\n")
             .message
             .contains("spawn requires a function or method call"));
+    }
+
+    #[test]
+    fn parses_yield_statement() {
+        match only("fn g() -> Iterator[int]:\n    yield 1\n") {
+            StmtKind::Fn(d) => {
+                assert!(d.is_generator, "fn with yield must be a generator");
+                assert!(matches!(d.body[0].kind, StmtKind::Yield(_)));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn yield_in_nested_block_marks_generator() {
+        match only("fn g() -> Iterator[int]:\n    for i in 0..3:\n        yield i\n") {
+            StmtKind::Fn(d) => assert!(d.is_generator),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn yield_inside_recover_block_marks_generator() {
+        // A `yield` reachable only through a `recover:` expression block still makes the fn a
+        // generator (the detection walk descends into recover blocks).
+        match only("fn g() -> Iterator[int]:\n    x := recover:\n        yield 1\n        1\n    print(x)\n") {
+            StmtKind::Fn(d) => assert!(d.is_generator, "yield in a recover: block must mark the fn a generator"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn fn_without_yield_is_not_generator() {
+        match only("fn f() -> int:\n    return 1\n") {
+            StmtKind::Fn(d) => assert!(!d.is_generator),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn yield_in_nested_fn_does_not_mark_outer() {
+        // The inner `fn` owns its yield; the outer must NOT be flagged a generator.
+        let src = "fn outer() -> int:\n    fn inner() -> Iterator[int]:\n        yield 1\n    return 0\n";
+        match only(src) {
+            StmtKind::Fn(d) => {
+                assert!(!d.is_generator, "outer fn must not be a generator");
+                match &d.body[0].kind {
+                    StmtKind::Fn(inner) => assert!(inner.is_generator, "inner fn is the generator"),
+                    other => panic!("{other:?}"),
+                }
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

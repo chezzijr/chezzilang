@@ -55,9 +55,12 @@ fn module_label(import: &Import) -> String {
 
 /// `Result`/`Option` are builtin generic types — the `?` operator and the top-level-error logic in
 /// both engines key on these literal names, so a user type that shadows them would collide. Reject
-/// the redefinition at declaration.
+/// the redefinition at declaration. `Iterator` is likewise reserved: as a value type it names the
+/// experimental generator existential (`Ty::Struct("Iterator", [T])`) that `iter_elem` / `.next()`
+/// typing key on, so a user `struct Iterator[T]` would be silently shadowed (and crash at runtime
+/// on a phantom `.next()`).
 fn is_reserved_type(name: &str) -> bool {
-    name == "Result" || name == "Option" || name == "Executor"
+    name == "Result" || name == "Option" || name == "Executor" || name == "Iterator"
 }
 
 /// Names an `extern` C fn may NOT take: a builtin (`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/
@@ -349,6 +352,10 @@ struct Checker {
     alias_resolving: Vec<String>,
     /// Declared return type of the function body currently being checked (`Nil` at top level).
     current_ret: Ty,
+    /// `Some(T)` while checking a generator function body whose declared return is `Iterator[T]` —
+    /// the element type each `yield` must produce. `None` outside a generator, so a stray `yield`
+    /// is diagnosed. Saved/restored across nested fn/closure boundaries like `current_ret`.
+    yield_ty: Option<Ty>,
     /// `> 0` while checking statements lexically inside a `recover:` block (within the current
     /// function — reset across nested fn/closure boundaries). A `?` here targets the recover
     /// boundary (yielding to `r`), not the enclosing function's return.
@@ -406,6 +413,7 @@ impl Checker {
             aliases: HashMap::new(),
             alias_resolving: Vec::new(),
             current_ret: Ty::Nil,
+            yield_ty: None,
             recover_depth: 0,
             inferring_ret: false,
             collected_rets: Vec::new(),
@@ -1162,6 +1170,14 @@ impl Checker {
                     Ty::result_e(self.resolve_type(t, span), self.resolve_type(e, span))
                 }
                 ("Option", [inner]) => Ty::option(self.resolve_type(inner, span)),
+                // `Iterator[T]` as a *value* type — the result of calling a generator function.
+                // Represented as `Ty::Struct("Iterator", [T])`, an existential iterator whose element
+                // type `iter_elem` recovers (so `for`-loops and `[S: Iterator[T]]` bounds accept it).
+                // Experimental: only generators produce these; ordinary code still uses adapter
+                // structs / built-in collections.
+                ("Iterator", [elem]) => {
+                    Ty::Struct("Iterator".to_string(), vec![self.resolve_type(elem, span)])
+                }
                 ("Channel", [inner]) => {
                     let elem = self.resolve_type(inner, span);
                     if !self.sendable(&elem) {
@@ -1392,6 +1408,7 @@ impl Checker {
             }
             StmtKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms),
             StmtKind::Return(value) => self.check_return(value.as_ref(), span),
+            StmtKind::Yield(e) => self.check_yield(e, span),
             StmtKind::Defer(DeferTarget::Call(e)) => {
                 // Block-scoped defer: any indented block — including the module body — is a defer
                 // scope, so top-level `defer` is legal (no `in_fn` requirement).
@@ -1715,6 +1732,15 @@ impl Checker {
             self.collected_rets.push(ty);
             return;
         }
+        // Inside a generator, a `return` may only be bare (stop the iterator early). A returned
+        // value is meaningless — the generator's result type is the stream, not a single value.
+        if self.yield_ty.is_some() {
+            if let Some(e) = value {
+                let _ = self.infer(e);
+                self.error(e.span, "a generator cannot `return` a value; use a bare `return` to stop early");
+            }
+            return;
+        }
         let ret = self.current_ret.clone();
         match value {
             Some(e) => {
@@ -1733,9 +1759,88 @@ impl Checker {
         }
     }
 
+    /// Experimental generators do not support the structured-concurrency / cleanup statements whose
+    /// state (nurseries, frame defers) the suspendable generator context does not manage. Reject them
+    /// with a clear message rather than mis-execute. Recurses through nested control-flow blocks but
+    /// not into nested `fn` definitions (those have their own generator status).
+    fn check_generator_restrictions(&mut self, body: &[Stmt]) {
+        for s in body {
+            // A restricted statement can also hide in a `recover:` block in expression position
+            // (`x := recover: … defer … `), which the statement structure does not reach — descend
+            // into those too so the ban can't be bypassed. (Mirrors the parser's yield detection.)
+            let mut recover_blocks = Vec::new();
+            crate::ast::stmt_expr_recover_blocks(s, &mut recover_blocks);
+            for b in recover_blocks {
+                self.check_generator_restrictions(b);
+            }
+            match &s.kind {
+                StmtKind::Defer(_) => self.error(s.span, "`defer` is not supported inside a generator (experimental)"),
+                StmtKind::Spawn(_) => self.error(s.span, "`spawn` is not supported inside a generator (experimental)"),
+                StmtKind::Parallel { .. } => self.error(s.span, "`parallel:` is not supported inside a generator (experimental)"),
+                StmtKind::Wait { .. } => self.error(s.span, "`wait:` is not supported inside a generator (experimental)"),
+                StmtKind::If { branches, else_block } => {
+                    for (_, b) in branches {
+                        self.check_generator_restrictions(b);
+                    }
+                    if let Some(b) = else_block {
+                        self.check_generator_restrictions(b);
+                    }
+                }
+                StmtKind::For { body, .. } | StmtKind::While { body, .. } => {
+                    self.check_generator_restrictions(body)
+                }
+                StmtKind::Match { arms, .. } => {
+                    for a in arms {
+                        self.check_generator_restrictions(&a.body);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `yield <expr>` — legal only inside a generator function (one whose return type is
+    /// `Iterator[T]`); the operand must be assignable to the element type `T`.
+    fn check_yield(&mut self, e: &Expr, span: Span) {
+        let ty = self.infer(e);
+        match self.yield_ty.clone() {
+            Some(elem) => {
+                if !self.assignable(&elem, &ty) {
+                    self.error(e.span, format!("expected yield type {elem}, found {ty}"));
+                }
+            }
+            None => self.error(span, "`yield` can only appear inside a generator function"),
+        }
+    }
+
     fn check_fn_body(&mut self, decl: &FnDecl, self_ty: Option<Ty>, sig: FnSig) {
         let saved_tps = self.enter_type_params(&decl.type_params);
         let saved_ret = std::mem::replace(&mut self.current_ret, sig.ret.clone());
+        // A generator (`is_generator`, i.e. its body contains `yield`) must declare `-> Iterator[T]`.
+        // Recover `T` as the per-yield element type; a wrong/missing return type is an error here.
+        let new_yield_ty = if decl.is_generator {
+            match &sig.ret {
+                Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
+                    Some(args[0].clone())
+                }
+                _ => {
+                    let span = decl.body.first().map(|s| s.span);
+                    if let Some(span) = span {
+                        self.error(
+                            span,
+                            "a generator function (one that uses `yield`) must declare a return type of `Iterator[T]`",
+                        );
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if decl.is_generator {
+            self.check_generator_restrictions(&decl.body);
+        }
+        let saved_yield = std::mem::replace(&mut self.yield_ty, new_yield_ty);
         // A nested function checked while pass-1 is inferring an *outer* function's return must not
         // feed the outer `collected_rets` — this body's `return`s are diagnosed, not collected.
         let saved_inferring = std::mem::replace(&mut self.inferring_ret, false);
@@ -1774,6 +1879,7 @@ impl Checker {
         }
         self.pop_scope();
         self.current_ret = saved_ret;
+        self.yield_ty = saved_yield;
         self.inferring_ret = saved_inferring;
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
@@ -1811,6 +1917,8 @@ impl Checker {
             Ty::List(e) | Ty::Set(e) => Some((**e).clone()),
             Ty::Str => Some(Ty::Str),
             Ty::Map(k, _) => Some((**k).clone()),
+            // `Iterator[T]` value (a generator result): element type is its single type argument.
+            Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => Some(args[0].clone()),
             _ => self.struct_iter_elem(ty),
         }
     }
@@ -1963,6 +2071,14 @@ impl Checker {
                         unknowns(vars)
                     }
                 }
+            }
+            // A generator result `Iterator[T]` (experimental, VM-only) binds a single element of T.
+            Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
+                if vars.len() != 1 {
+                    self.error(iter.span, "a generator iterator binds a single loop variable");
+                    return unknowns(vars);
+                }
+                vec![(vars[0].clone(), args[0].clone())]
             }
             _ if self.struct_iter_elem(&it).is_some() => {
                 // A user struct with `next(self) -> Option[E]` is iterable; it binds a single element.
@@ -3192,6 +3308,10 @@ impl Checker {
         // errors). Mirrors `check_fn_body`'s `current_ret` handling.
         let declared_ret = ret.map(|t| self.resolve_type(t, body.span)).unwrap_or(Ty::Unknown);
         let saved_ret = std::mem::replace(&mut self.current_ret, declared_ret);
+        // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
+        // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
+        // one. (Closure bodies are single expressions today, so this is a latent-invariant guard.)
+        let saved_yield = self.yield_ty.take();
         self.push_scope();
         let param_tys: Vec<Ty> = params
             .iter()
@@ -3206,6 +3326,7 @@ impl Checker {
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
         self.current_ret = saved_ret;
+        self.yield_ty = saved_yield;
         let ret_ty = match ret {
             Some(t) => {
                 let declared = self.resolve_type(t, body.span);
@@ -3557,6 +3678,18 @@ impl Checker {
                 }
                 self.infer_all(args);
                 self.error(span, format!("type {pname} has no method '{method}'"));
+                Ty::Unknown
+            }
+            // An `Iterator[T]` value (a generator result) exposes the protocol's one method,
+            // `next(self) -> Option[T]`, so it is drivable by explicit `.next()` as well as `for`.
+            // (There is no registered struct named `Iterator`, so this must be handled here.)
+            Ty::Struct(sname, targs) if sname == "Iterator" && targs.len() == 1 => {
+                if method == "next" {
+                    self.check_args(method, &[], args, span);
+                    return Ty::option(targs[0].clone());
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}' (an iterator only has `next()`)"));
                 Ty::Unknown
             }
             Ty::Struct(sname, targs) => {

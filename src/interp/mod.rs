@@ -3190,6 +3190,13 @@ impl Interp {
                 };
                 Ok(Flow::Return(v))
             }
+            // Generators (`yield`) are an experimental VM-only feature; the frozen tree-walk
+            // interpreter cannot suspend a native Rust call mid-body, so it rejects them outright.
+            StmtKind::Yield(_) => Err(RuntimeError {
+                message: "generators (`yield`) are not supported by the interpreter (VM-only)"
+                    .to_string(),
+                span: stmt.span,
+            }),
             // Kept out of this match (its locals are large) so `exec_stmt`'s frame stays small for
             // deep recursion — same reason as `eval_slice`.
             StmtKind::Defer(target) => self.exec_defer(target, stmt.span),

@@ -159,6 +159,11 @@ pub enum Op {
     CallBuiltin(String, usize),
     CallPrint(usize),
     Return,
+    /// `yield <expr>` (experimental generators) — stack top holds the yielded value. Suspends the
+    /// running generator: returns control out of the generator's private `run_until` to the host's
+    /// `.next()` call, leaving the frames/stack intact to resume on the next `.next()`. Only emitted
+    /// inside a generator proto (`Proto::is_generator`); never reached on the cooperative host stack.
+    Yield,
     /// `defer f(args)` — stack `[callee, arg0, …]`; pops `argc + 1` and records a deferred call on
     /// the current frame. Drained LIFO when the frame exits (return / `?` / panic).
     DeferCall(usize),
@@ -244,6 +249,10 @@ pub enum Op {
     /// struct-iterator path (`next(self) -> Option[T]`) vs the sequence path at runtime, since the
     /// compiler is type-erased and can't decide statically.
     IsStruct,
+    /// Pop a value; push `true` if it is a generator (experimental), else `false`. Used by `for x in
+    /// g():` to route a generator result into the same lazy `next()` step as a struct iterator
+    /// (type-erased: the compiler can't tell a generator result from a struct statically).
+    IsGenerator,
     /// Pop a value; push `true` if it is a map, else `false`. Used by the multi-name `for` to pick
     /// the map (key, value) path vs the list-of-tuples destructuring path at runtime, since the
     /// compiler is type-erased and can't decide statically.
@@ -344,6 +353,9 @@ pub struct Proto {
     /// (vs. cancelling an *inner* escaped `parallel:`). `false` ⇒ zero-overhead, byte-identical to
     /// pre-M-C bytecode.
     pub has_implicit_nursery: bool,
+    /// True if this proto is a generator body (its source fn uses `yield`). Calling it does not run
+    /// the body — the VM allocates a suspendable `Obj::Generator` instead. Experimental, VM-only.
+    pub is_generator: bool,
 }
 
 /// A struct type's runtime shape (program-global). `module_idx` identifies the module that defined

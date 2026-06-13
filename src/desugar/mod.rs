@@ -589,6 +589,7 @@ impl Walker<'_> {
                 }
             }
             StmtKind::Return(Some(e)) => self.walk_expr(e)?,
+            StmtKind::Yield(e) => self.walk_expr(e)?,
             StmtKind::Defer(target) => match target {
                 DeferTarget::Call(e) => self.walk_expr(e)?,
                 DeferTarget::Block(body) => self.walk_block(body)?,

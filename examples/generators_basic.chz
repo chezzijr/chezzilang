@@ -1,0 +1,10 @@
+fn count() -> Iterator[int]:
+    yield 1
+    yield 2
+    yield 3
+
+fn main():
+    for x in count():
+        print(x)
+
+main()
