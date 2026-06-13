@@ -106,8 +106,9 @@ candidate list is length 1. Collapsed the per-key `Vec` to an inline single posi
 index logic into one shared `HashIndex(FxHashMap<u64, Pos>)` in `src/vm/heap.rs`. `One` is zero-alloc/inline;
 `Many` (real hash collisions only) is `Box`ed to keep `Pos` 2 words so struct sizes are unchanged.
 `candidates`/`push` signatures are identical → **VM hot paths in `mod.rs` unchanged, parity by construction**
-(interp keeps its `Vec<usize>` oracle; both confirm hits with `values_equal`). **`map` −36% absolute
-(~225.7 ms → ~144.7 ms, 2.68× → ~1.7× CPython)** — the predicted target landed. Others flat (touch no
+(interp keeps its `Vec<usize>` oracle; both confirm hits with `values_equal`). **`map` 2.68× → 1.94×
+CPython (−26%, remeasured on merged HEAD `2a934a8`; the dev-base figure was ~1.7×/−36% — variance +
+heavier base, see `docs/benchmarks.md` merge-remeasure note)** — the predicted target landed. Others flat (touch no
 map/set). 2 new collision-upgrade guards (RED on a `One`-only stub, GREEN with `Many`), 1712 green,
 conformance green, clippy clean. **Next `map` suspect:** `values_equal` per-probe cost + `FxHashMap`
 lookup/rehash (no longer the `Vec` alloc). See `docs/benchmarks.md` "M19 — denser int-keyed map/set".
@@ -142,7 +143,7 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   Int-key fast path in #5 below, so they are covered). ✅ 5. **map/list index specialization** (`mod.rs`
   `GetIndex`/`SetIndex`) — **landed (Int-key fast path + inline dispatch): `list` −4%, `map` neutral**
   (hash-probe-bound). The remaining `map` win shipped as its own lever — ✅ **denser int-keyed map/set
-  index LANDED (2026-06-13): `map` −36% (2.68× → ~1.7× CPython)** — `Vec<usize>` candidate list → inline
+  index LANDED (2026-06-13): `map` 2.68× → 1.94× CPython (−26% on merged HEAD)** — `Vec<usize>` candidate list → inline
   `Pos::One` / `Pos::Many` overflow in a shared `HashIndex` (`src/vm/heap.rs`). See the landed note above.
 - **Tier 3 (big, separate):** 6. **Cranelift method-JIT** (end-game; the only path to match/beat fib;
   #4 is the stepping stone). 7. NaN-boxing (BLOCKED, above). 8. register VM / generational GC (low ROI).

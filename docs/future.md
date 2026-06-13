@@ -257,7 +257,7 @@ touching the value model or the GC.
 > N-way polymorphic method-call IC + sticky-deopt + clone-free megamorphic slow path, `poly_method`
 > −33% (6.0× → 4.28× CPython)** — this unifies the field/method caches under one adaptive form.
 > **Genuinely remaining:** the **denser int-keyed `map`** representation **also landed (2026-06-13,
-> `map` −36%)**, so what's left is the Tier-3 milestones (#6 JIT / #7 NaN-box (blocked) / #8 register
+> `map` 2.68× → 1.94× CPython, −26% on merged HEAD)**, so what's left is the Tier-3 milestones (#6 JIT / #7 NaN-box (blocked) / #8 register
 > VM). Per-lever tags below; landed details + measured deltas in `PROGRESS.md` "Current focus" and
 > `docs/benchmarks.md`.
 
