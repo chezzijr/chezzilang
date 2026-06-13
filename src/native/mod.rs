@@ -12,6 +12,12 @@
 //! This is the CPython-built-in-C-module model (compiled-in bindings), **not** dynamic `cdylib`/
 //! C-ABI loading — that (Level-3) stays deferred per `docs/spec.md`.
 
+// Dynamic C-ABI FFI is unix-only: it builds on `dlopen`/libffi, and `int` marshals as C `long`
+// (64-bit on every supported LP64 unix target; on a non-unix LLP64 target like Windows x64 C `long`
+// is 32-bit, which would silently truncate). The checker rejects `extern` on non-unix (see
+// `checker::hoist`), so this module + its `Op::MakeCffi`/`Obj::Cffi`/`Value::Cffi` consumers are
+// only reached on unix. All supported Chezzi targets are unix; non-unix is unsupported by design.
+#[cfg(unix)]
 pub mod cffi;
 pub mod fs;
 pub mod io;

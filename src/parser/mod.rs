@@ -248,6 +248,15 @@ impl Parser {
             return Err(self.err("statement nested too deeply".to_string()));
         }
         let span = self.cur_span();
+        // An `extern "lib":` block is a top-level-only declaration (it dlopens a library + binds
+        // module-global C fns at init). `parse_stmt` runs at depth 1 for a top-level statement
+        // (entered from `parse_module`) and at depth >1 inside any block, so a nested extern is
+        // rejected here — the checker's hoist + the compiler's eager `MakeCffi` only walk top-level
+        // stmts, so a nested extern would silently skip marshallability validation and later die
+        // with a misleading "unknown name". Reject it at parse time instead.
+        if matches!(self.peek(), Token::Extern) && self.depth > 1 {
+            return Err(self.err("extern block must be a top-level declaration".to_string()));
+        }
         // Compound statements own a block and end at its `Dedent`; line-oriented statements
         // (let/assign/expr/return/import) must be followed by a line terminator.
         let kind = match self.peek() {

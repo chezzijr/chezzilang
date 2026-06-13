@@ -31,11 +31,17 @@
 # A file is zero or more statements then EOF. The lexer always emits a trailing NEWLINE before
 # EOF when the last line had content, and one DEDENT per still-open block; blank/comment-only
 # lines emit no tokens, so no stray NEWLINEs appear between statements.
-<module> ::= "EOF" | <stmts> "EOF"
-<stmts>  ::= <stmt> | <stmt> <stmts>
+# `extern "lib":` is a TOP-LEVEL-only declaration: the checker's hoist + the compiler's eager
+# `MakeCffi` only walk module-level statements, so an extern nested in a block would silently skip
+# marshallability validation. It therefore appears in <topLevelStmt> but NOT in <compoundStmt> (the
+# latter feeds <stmts>, which a <block> uses) — so a nested extern is a parse error.
+<module>        ::= "EOF" | <topLevelStmts> "EOF"
+<topLevelStmts> ::= <topLevelStmt> | <topLevelStmt> <topLevelStmts>
+<topLevelStmt>  ::= <stmt> | <externDecl>
+<stmts>         ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
-<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <externDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
+<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
 <simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <exprStmt>

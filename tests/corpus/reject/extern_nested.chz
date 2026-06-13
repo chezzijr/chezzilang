@@ -1,0 +1,5 @@
+# rule: externDecl
+# expect: top-level
+if true:
+    extern "libm.so.6":
+        fn foo() -> int

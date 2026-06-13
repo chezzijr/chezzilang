@@ -4495,6 +4495,64 @@ fn extern_duplicate_name_rejected() {
 }
 
 #[test]
+fn extern_named_after_builtin_rejected() {
+    // An extern fn named after a builtin (len/range/int/float/str/ord/chr/set) would be silently
+    // shadowed: `compile_call`/`eval_call` resolve the name to the builtin op before a plain call,
+    // so the extern is dead — and the compiler's eager `MakeCffi` dlsyms a symbol it can never call.
+    // Reject the collision at hoist with a clear message.
+    rejects(
+        "extern \"libc.so.6\":\n    fn len(x: int) -> int\n",
+        "builtin/reserved name",
+    );
+}
+
+#[test]
+fn extern_named_after_constructor_rejected() {
+    // `Channel`/`Shared`/`Atomic`/`timer`/`Executor` are constructor names the backends special-case
+    // before a plain call, so an extern with that name is unreachable. Reject it.
+    rejects(
+        "extern \"libc.so.6\":\n    fn Channel() -> int\n",
+        "builtin/reserved name",
+    );
+}
+
+#[test]
+fn extern_named_after_print_rejected() {
+    rejects(
+        "extern \"libc.so.6\":\n    fn print(x: int) -> int\n",
+        "builtin/reserved name",
+    );
+}
+
+#[test]
+fn extern_named_after_struct_rejected() {
+    // A struct registers a same-named constructor the backends resolve before a plain call, so an
+    // extern colliding with a struct name is dead. The guard is order-independent: the struct is
+    // declared AFTER the extern, yet the collision must still fire.
+    rejects(
+        "extern \"libc.so.6\":\n    fn S(x: int) -> int\n\nstruct S:\n    a: int\n",
+        "builtin/reserved name",
+    );
+}
+
+#[test]
+fn extern_named_after_variant_rejected() {
+    // An enum variant is keyed globally and resolved as a constructor before a plain call.
+    rejects(
+        "extern \"libc.so.6\":\n    fn Leaf(x: int) -> int\n\nenum Tree:\n    Leaf\n    Node\n",
+        "builtin/reserved name",
+    );
+}
+
+#[test]
+fn extern_named_after_enum_type_ok() {
+    // An enum TYPE name is NOT callable in either backend (only its variants are), so an extern
+    // sharing the enum's type name is reachable and must be ACCEPTED — symmetric with a plain
+    // `fn Tree` alongside `enum Tree`. Only struct names and variant names are real collisions.
+    ok("extern \"libc.so.6\":\n    fn Tree(x: int) -> int\n\nenum Tree:\n    Leaf\n    Node\n");
+}
+
+#[test]
 fn extern_type_alias_param_ok() {
     // A transparent alias resolving to a marshallable scalar is accepted (check runs on resolved Ty).
     ok("type Len = int\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Len\n\nprint(strlen(\"hi\"))\n");
