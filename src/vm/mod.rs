@@ -14996,6 +14996,18 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
     }
 
+    /// The "correct pattern" companion to the cross-nursery deadlock: two mutually-dependent
+    /// blocking tasks as SIBLINGS in one nursery interleave fine (nesting them would deadlock — see
+    /// `docs/cross-nursery-flat-scheduler.md`). VM-only blocking, so checked on the VM + `--parallel`
+    /// engines (the frozen interp cannot suspend a cross-fiber `recv`).
+    #[test]
+    fn golden_parallel_cross_nursery_ok_chz_matches_expected() {
+        let src = include_str!("../../examples/parallel_cross_nursery_ok.chz");
+        let expected = include_str!("../../examples/parallel_cross_nursery_ok.expected");
+        assert_eq!(run_capture(src).expect("vm run"), expected);
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    }
+
     // ---- Channel.close() + closed semantics (both engines) ----
 
     #[test]

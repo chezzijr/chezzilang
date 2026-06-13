@@ -345,6 +345,7 @@ Critical + Important findings before the completion claim.
   unblocker is an *outer sibling the inner scheduler can't run* — it's marked ready but can't be *run*
   until the inner nursery joins, so it faults `deadlock`. A true fix needs a **flat/global scheduler**
   (partly conflicts with inner-joins-first scoping). (Backstory: "mooted by B3" real-thread blocking,
-  **un-mooted by D2's M:N snapshot-park**. See `concurrency.md §11`.)
+  **un-mooted by D2's M:N snapshot-park**. See `concurrency.md §11`.) **Pick-up brief for the fix:**
+  [`docs/cross-nursery-flat-scheduler.md`](cross-nursery-flat-scheduler.md).
 - **Priority classes** (BEAM) — deferred; revisit if priority becomes a requirement.
 - **Reduction constant tuning** (D3) — `CONTEXT_REDS` value + per-op vs per-back-edge accounting.

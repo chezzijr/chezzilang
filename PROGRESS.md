@@ -392,6 +392,8 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
   fiber blocked in an outer nursery *is* woken (D0 cross-level wake-marking, common case works) but cannot be
   *run* until the inner nursery joins, so the narrow circular case — its unblocker is an outer sibling the
   inner scheduler can't run — faults `deadlock` (needs a flat scheduler; structured-concurrency scoping).
+  Fix design captured in [`docs/cross-nursery-flat-scheduler.md`](docs/cross-nursery-flat-scheduler.md);
+  correct user pattern in `examples/parallel_cross_nursery_ok.chz`.
   Documented residuals: a narrow parked-sibling false-positive under multi-demote; the `Shared.update`
   same-box recv hazard; a saturated-pool queued-task counted live (no-false-positive choice).
 - **Use `iter.map`/`iter.filter`/`iter.fold`/`iter.reduce` (chezzi source, `std/iter.chz`)** if a

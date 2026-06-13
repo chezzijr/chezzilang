@@ -1,0 +1,19 @@
+# The correct pattern for mutually-dependent blocking tasks: SIBLINGS in ONE nursery.
+# (Counter-example to examples/parallel_deadlock.chz — see docs/cross-nursery-flat-scheduler.md.)
+# Nesting them — an inner `parallel:` or a function that `spawn`s — would deadlock; running one
+# inline on the owner would block sequentially. Keep them as siblings at the same level.
+fn main():
+    a := Channel[int]()
+    b := Channel[int]()
+    parallel:
+        spawn:
+            x := a.recv()
+            b.send(x)
+            print("O got {x}")
+        spawn:
+            a.send(1)
+            y := b.recv()
+            print("I got {y}")
+    print("done")
+
+main()

@@ -860,9 +860,11 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   *outer* nursery is marked ready but cannot be *run* until the inner nursery joins — and if completing
   the inner nursery *requires* that outer fiber to run, you get a circular wait that faults `deadlock`
   (`examples/parallel_deadlock.chz`). **Why still deferred:** a true fix needs a flat/global scheduler,
-  which partly conflicts with inner-joins-first scoping — the design tension to resolve when picking this
-  up. **(Symbol note:** the old `pick_runnable` linear scan named in earlier drafts is gone — replaced
-  by D0's `ready`-set.)
+  which partly conflicts with inner-joins-first scoping. **Full pick-up brief (problem + reproduction +
+  target design + per-engine deltas + test plan):**
+  [`docs/cross-nursery-flat-scheduler.md`](cross-nursery-flat-scheduler.md). The correct user-facing
+  pattern (siblings in one nursery) is `examples/parallel_cross_nursery_ok.chz`. **(Symbol note:** the
+  old `pick_runnable` linear scan named in earlier drafts is gone — replaced by D0's `ready`-set.)
   **Correction:** this was once "mooted by B3" on the theory that real OS-thread `recv` blocks the
   thread (no level-local polling) — but **Tier-D D2's M:N transition un-mooted it**: `--parallel` now
   parks fibers by *snapshot* into the level's park set, not by blocking a thread, so the level scoping
