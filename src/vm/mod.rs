@@ -13010,6 +13010,53 @@ main()";
         assert_eq!(run(src), "hi thuan, {not interpolated}\n");
     }
 
+    // ----- or-patterns + nested nullary (VM execution + interp parity) -----
+
+    /// A literal or-pattern (`1 | 2 | 3`) routes any alternative to the body; the interp agrees.
+    #[test]
+    fn vm_or_pattern_literals() {
+        let src = "fn f(n: int) -> str:\n    return match n:\n        1 | 2 | 3: \"low\"\n        _: \"high\"\nprint(f(2))\nprint(f(5))\n";
+        let out = run(src);
+        assert_eq!(out, "low\nhigh\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// A 3-variant enum or-pattern is exhaustive and matches each alternative; the interp agrees.
+    #[test]
+    fn vm_or_pattern_enum_variants() {
+        let src = "enum Color:\n    Red\n    Green\n    Blue\nfn name(c: Color) -> str:\n    return match c:\n        Red | Green | Blue: \"primary\"\nprint(name(Green))\nprint(name(Blue))\n";
+        let out = run(src);
+        assert_eq!(out, "primary\nprimary\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// A binding or-pattern (`A(a) | B(a)`) writes `a` into the same slot regardless of alternative.
+    #[test]
+    fn vm_or_pattern_binding() {
+        let src = "enum E:\n    A(int)\n    B(int)\nfn val(e: E) -> int:\n    return match e:\n        A(a) | B(a): a\nprint(val(A(7)))\nprint(val(B(9)))\n";
+        let out = run(src);
+        assert_eq!(out, "7\n9\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// A guard on an or-pattern: `p | q if cond:` falls through to the next arm when the guard fails.
+    #[test]
+    fn vm_or_pattern_with_guard() {
+        let src = "fn f(n: int) -> str:\n    return match n:\n        1 | 2 | 3 if n == 2: \"two\"\n        _: \"other\"\nprint(f(2))\nprint(f(1))\n";
+        let out = run(src);
+        assert_eq!(out, "two\nother\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// A nested nullary variant (`Some(None)`) is a refutable variant match; the interp agrees.
+    #[test]
+    fn vm_nested_nullary_variant() {
+        let src = "fn f(oo: Option[Option[int]]) -> str:\n    return match oo:\n        Some(None): \"inner-none\"\n        Some(Some(v)): \"got {v}\"\n        None: \"outer-none\"\nx: Option[Option[int]] = Some(None)\ny: Option[Option[int]] = Some(Some(5))\nprint(f(x))\nprint(f(y))\n";
+        let out = run(src);
+        assert_eq!(out, "inner-none\ngot 5\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp"));
+    }
+
     // ----- golden parity -----
 
     #[test]

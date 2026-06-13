@@ -4225,6 +4225,29 @@ mod tests {
     }
 
     #[test]
+    fn interp_or_pattern_matches() {
+        // Literal or-pattern (first-match-wins), enum or-pattern, and a binding or-pattern.
+        assert_eq!(
+            run("fn f(n: int) -> str:\n    return match n:\n        1 | 2 | 3: \"low\"\n        _: \"high\"\nprint(f(2))\nprint(f(9))\n"),
+            "low\nhigh\n"
+        );
+        assert_eq!(
+            run("enum E:\n    A(int)\n    B(int)\nfn v(e: E) -> int:\n    return match e:\n        A(a) | B(a): a\nprint(v(A(4)))\nprint(v(B(6)))\n"),
+            "4\n6\n"
+        );
+    }
+
+    #[test]
+    fn interp_nested_nullary_matches() {
+        // A bare nested `None` is a refutable variant match (not a binding): `Some(None)` matches
+        // only `Some(None)`, `Some(Some(v))` falls through to the next arm.
+        assert_eq!(
+            run("fn f(oo: Option[Option[int]]) -> str:\n    return match oo:\n        Some(None): \"in\"\n        Some(Some(v)): \"v{v}\"\n        None: \"out\"\nx: Option[Option[int]] = Some(None)\ny: Option[Option[int]] = Some(Some(7))\nprint(f(x))\nprint(f(y))\n"),
+            "in\nv7\n"
+        );
+    }
+
+    #[test]
     fn list_comprehension_over_range() {
         assert_eq!(run("print([x * x for x in 0..5])\n"), "[0, 1, 4, 9, 16]\n");
     }

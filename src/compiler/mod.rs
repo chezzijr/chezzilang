@@ -1025,6 +1025,40 @@ impl Compiler {
         patterns.into_iter().all(|p| self.pattern_is_literal(p))
     }
 
+    /// Whether `name` is a registered NULLARY variant (`None`, a user enum's empty-payload
+    /// variant). A nested bare `Ident` naming one is a refutable variant match (the checker has
+    /// promoted it), not a binding — routed by the same registry the runtime uses.
+    fn is_nullary_variant(&self, name: &str) -> bool {
+        self.program.variants.get(name).is_some_and(|v| v.arity == 0)
+    }
+
+    /// The sorted, de-duplicated *binding* names introduced by an or-pattern's first alternative
+    /// (the checker has verified every alternative binds the same set, so the first is canonical).
+    /// A nested bare `Ident` naming a nullary variant is a variant match, NOT a binding, so it is
+    /// excluded. Recurses into nested patterns; bounded by the finite pattern tree.
+    fn or_binding_names(&self, alts: &[Pattern]) -> Vec<String> {
+        let mut names = std::collections::BTreeSet::new();
+        if let Some(first) = alts.first() {
+            self.collect_binding_names(first, &mut names);
+        }
+        names.into_iter().collect()
+    }
+
+    fn collect_binding_names(&self, p: &Pattern, out: &mut std::collections::BTreeSet<String>) {
+        match p {
+            Pattern::Ident(n) if !self.is_nullary_variant(n) => {
+                out.insert(n.clone());
+            }
+            Pattern::Ident(_) => {}
+            Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) | Pattern::Or(bindings) => {
+                for b in bindings {
+                    self.collect_binding_names(b, out);
+                }
+            }
+            Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
+        }
+    }
+
     /// Whether a single pattern is literal-eligible (literal/range/wildcard/binding-only), recursing
     /// into or-patterns (eligible iff every alternative is). Bounded by the finite pattern tree.
     fn pattern_is_literal(&self, p: &Pattern) -> bool {
@@ -1125,7 +1159,7 @@ impl Compiler {
                 // variant match (`Some(None)`, `Ok(Err(e))` — the checker has promoted it); it
                 // binds nothing and is tested like a top-level nullary variant. Otherwise it is a
                 // binding capturing the whole sub-value.
-                if self.program.variants.get(name).is_some_and(|v| v.arity == 0) {
+                if self.is_nullary_variant(name) {
                     let bind_start = fc.next_slot();
                     let arm_op = fc.emit_jump(
                         Op::MatchArm { scrut, variant: name.clone(), nbind: 0, bind_start, next: 0 },
@@ -1157,13 +1191,14 @@ impl Compiler {
                 }
             }
             Pattern::Variant { name, bindings } => {
-                // One slot per payload element. A plain `Ident` binding names its slot directly (so
-                // `Some(c)` binds `c` with no copy); other sub-patterns get a hidden slot to
+                // One slot per payload element. A plain `Ident` *binding* names its slot directly (so
+                // `Some(c)` binds `c` with no copy); a nested nullary-variant `Ident` (e.g. the
+                // `None` in `Some(None)`) and any other sub-pattern get a hidden slot to test/
                 // destructure afterwards.
                 let bind_start = fc.next_slot();
                 for b in bindings {
                     match b {
-                        Pattern::Ident(n) => {
+                        Pattern::Ident(n) if !self.is_nullary_variant(n) => {
                             fc.add_local(n.clone());
                         }
                         _ => {
@@ -1177,7 +1212,9 @@ impl Compiler {
                 );
                 fails.push(arm_op);
                 for (i, b) in bindings.iter().enumerate() {
-                    if !matches!(b, Pattern::Ident(_)) {
+                    let is_plain_binding =
+                        matches!(b, Pattern::Ident(n) if !self.is_nullary_variant(n));
+                    if !is_plain_binding {
                         self.emit_pattern(fc, b, bind_start + i, fails, span)?;
                     }
                 }
@@ -1187,7 +1224,7 @@ impl Compiler {
                 // every alternative binds the same set). Each alternative binds into fresh scratch
                 // slots, then copies its values into the canonical slots before jumping to a shared
                 // matched-label; the body reads the canonical slots regardless of which alt matched.
-                let names = or_binding_names(alts);
+                let names = self.or_binding_names(alts);
                 let canon: Vec<(String, usize)> =
                     names.iter().map(|n| (n.clone(), fc.add_local(n.clone()))).collect();
                 let mut matched_jumps = Vec::new();
@@ -1857,31 +1894,6 @@ impl MatchArmLike for MatchExprArm {
 
 /// Emit a half-open range test `start <= scrut < end`: two comparisons, each jumping to the next
 /// arm on failure (jumps pushed onto `fails`). Reuses `GtEq`/`Lt` + `JumpIfFalse` (no new opcode).
-/// The sorted, de-duplicated binding names introduced by an or-pattern's first alternative. The
-/// checker has verified every alternative binds the same set, so the first alternative's names are
-/// canonical. Recurses into nested patterns; bounded by the finite pattern tree.
-fn or_binding_names(alts: &[Pattern]) -> Vec<String> {
-    let mut names = std::collections::BTreeSet::new();
-    if let Some(first) = alts.first() {
-        collect_binding_names(first, &mut names);
-    }
-    names.into_iter().collect()
-}
-
-fn collect_binding_names(p: &Pattern, out: &mut std::collections::BTreeSet<String>) {
-    match p {
-        Pattern::Ident(n) => {
-            out.insert(n.clone());
-        }
-        Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) | Pattern::Or(bindings) => {
-            for b in bindings {
-                collect_binding_names(b, out);
-            }
-        }
-        Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
-    }
-}
-
 fn emit_range_test(fc: &mut FnComp, scrut: usize, start: i64, end: i64, fails: &mut Vec<usize>, span: Span) {
     // scrut >= start
     fc.emit(Op::GetLocal(scrut), span);
