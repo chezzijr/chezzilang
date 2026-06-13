@@ -3520,6 +3520,18 @@ impl Checker {
                 self.error(span, format!("type {pname} has no method '{method}'"));
                 Ty::Unknown
             }
+            // An `Iterator[T]` value (a generator result) exposes the protocol's one method,
+            // `next(self) -> Option[T]`, so it is drivable by explicit `.next()` as well as `for`.
+            // (There is no registered struct named `Iterator`, so this must be handled here.)
+            Ty::Struct(sname, targs) if sname == "Iterator" && targs.len() == 1 => {
+                if method == "next" {
+                    self.check_args(method, &[], args, span);
+                    return Ty::option(targs[0].clone());
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}' (an iterator only has `next()`)"));
+                Ty::Unknown
+            }
             Ty::Struct(sname, targs) => {
                 // Substitute the struct's type arguments into the method signature, so calling
                 // `Stack[int].push(x)` checks `x` against `int`, not the parameter `T`.

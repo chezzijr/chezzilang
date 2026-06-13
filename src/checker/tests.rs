@@ -4493,6 +4493,20 @@ fn generator_return_value_rejected() {
 }
 
 #[test]
+fn generator_explicit_next_ok() {
+    // A generator result is an `Iterator[int]`; `.next()` returns `Option[int]`, drivable explicitly.
+    ok("fn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    g := count()\n    match g.next():\n        Some(v): print(v)\n        None: print(-1)\n");
+}
+
+#[test]
+fn iterator_value_unknown_method_rejected() {
+    rejects(
+        "fn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    g := count()\n    g.bogus()\n",
+        "has no method 'bogus'",
+    );
+}
+
+#[test]
 fn yield_outside_generator_rejected() {
     rejects("yield 1\n", "`yield` can only appear inside a generator function");
 }
