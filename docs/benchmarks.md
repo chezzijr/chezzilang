@@ -535,3 +535,44 @@ lossy-f64 Eq, small-int Eq, int→float→str deopt, stack arith/compare fast pa
 error parity). Full suite 1613 green, conformance green, clippy clean. v1 also lays the reusable
 side-table machinery the docs call the unifying base for later index/call quickening (out of scope
 here — `GetIndex` already has an Int-key fast path; `Op::Call` spec was deferred for ~0 gain).
+
+## M19 — denser int-keyed map/set index representation — 2026-06-13
+
+The `map` bench (`benches/chz/map.chz`: 200k distinct int keys, 1M lookups) was the last
+**hash-probe-bound** bench — the Tier-2 Int-key fast path came out **neutral** on it because it only
+skipped operand rooting, not the probe (logged above). Root cause (`src/vm/heap.rs`): the index was
+`FxHashMap<u64, Vec<usize>>`, so each distinct key paid one tiny `Vec<usize>` heap allocation (200k of
+them) plus a pointer-chase per lookup. But numeric keys hash injectively (`(n as f64).to_bits()`), so
+**every candidate list is length 1** — the `Vec` is pure overhead.
+
+**Lever:** collapse the per-key `Vec` to an inline single position. Added
+`enum Pos { One(usize), Many(Box<Vec<usize>>) }` and extracted the (formerly duplicated, identical)
+index logic from `MapData`/`SetData` into one shared `HashIndex(FxHashMap<u64, Pos>)`:
+`candidates` (One → `slice::from_ref`, Many → `as_slice`, absent → `&[]`), `insert`
+(absent → `One`; first collision → upgrade to `Many` carrying both positions; further → push), `clear`.
+`Pos::One` is **zero-alloc** and inline; `Pos::Many` (a real hash collision only — string
+`DefaultHasher`, or a user `hash()` returning a constant) is `Box`ed to keep `Pos` at 2 words so
+`MapData`/`SetData` size is unchanged. `MapData::candidates`/`push` keep their exact signatures, so the
+VM hot paths in `src/vm/mod.rs` needed **zero change**. `remove_at`→`rebuild_index` re-inserts through
+the same `HashIndex::insert`, so the One→Many upgrade is identical on rebuild and initial push.
+
+**Measured** (same machine; `cargo run --release -- run benches/run.chz`, ≥2 runs):
+
+| bench  | before (~) | after | result |
+|--------|-----------:|------:|--------|
+| `map`  | 2.68× CPython / ~225.7 ms | **1.68–1.72× / ~144.7 ms** | **−36% absolute** (the predicted target landed) |
+| `fib` / `loop` / `list` / `struct` / `str` / `primes` | — | — | flat within σ (touch no map/set) |
+
+**The lever moved its predicted target.** Killing 200k tiny allocs + the per-lookup indirection is
+the bulk of the win: the probe is now `slice::from_ref` over an inline `usize` (no heap deref) plus the
+unchanged `values_equal` confirm. The two-engine parity bar is preserved by construction — the frozen
+interpreter (`src/interp/value.rs`) keeps its `Vec<usize>` index, and both engines confirm every hash
+hit with the same `values_equal` probe, so output is byte-identical.
+
+**Behavior-preserving:** new `dense_index_collision_upgrade_parity` guard (two distinct constant-`hash()`
+struct keys land in one bucket, both read back distinctly via the `Many` upgrade) plus the borrowed
+`fxhash_constant_hash_collision_still_resolves` (30 constant-hash keys) — both go RED on a `One`-only
+stub (key dropped → "key not found"), GREEN with `Many`. `fxhash_map_int_keys_insert_lookup_remove`
+(remove→rebuild parity), `idxspec_int_float_key_collision_resolves`, and `fxhash_set_dedup_and_ops`
+stay green. Full suite 1712 green, conformance green, clippy clean. **Next suspect for `map`:** the
+remaining gap is `values_equal` per-probe cost + `FxHashMap` lookup/rehash (no longer the `Vec` alloc).

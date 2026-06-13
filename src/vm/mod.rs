@@ -9767,6 +9767,18 @@ mod tests {
     }
 
     #[test]
+    fn dense_index_collision_upgrade_parity() {
+        // Two DISTINCT struct keys whose hash() is the same constant land in ONE index bucket. The
+        // dense index must UPGRADE that bucket from a single inline position to hold BOTH positions
+        // (the `Many` path) so each key reads back distinctly, and an absent third constant-hash key
+        // still misses. A One-only / single-slot index would drop the second key and diverge.
+        let src = "struct K:\n    v: int\n    fn hash(self) -> int:\n        return 42\n\
+                   m := {}\nm[K(1)] = \"one\"\nm[K(2)] = \"two\"\n\
+                   print(m[K(1)])\nprint(m[K(2)])\nprint(m.has(K(3)))\nprint(m.len())\n";
+        assert_eq!(run_parity(src), "one\ntwo\nfalse\n2\n");
+    }
+
+    #[test]
     fn fxhash_set_dedup_and_ops() {
         // Set dedup + union/intersection/difference over the index hasher.
         let src = "a := set([1, 2, 3, 2, 1])\nb := set([3, 4, 5])\n\
