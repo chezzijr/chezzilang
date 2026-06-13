@@ -252,6 +252,11 @@ pub enum Pattern {
     Range { start: i64, end: i64 },
     /// The `_` catch-all arm.
     Wildcard,
+    /// An or-pattern `p1 | p2 | ...` — matches if ANY alternative matches (first match wins).
+    /// Always holds two-or-more alternatives (a single primary parses to that primary unchanged).
+    /// Every alternative must bind the same set of variables with unifiable types; the agreed set
+    /// is declared once. Irrefutable iff every alternative is.
+    Or(Vec<Pattern>),
 }
 
 /// A literal value usable as a `match` pattern.
