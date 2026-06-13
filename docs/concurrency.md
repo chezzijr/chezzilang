@@ -696,10 +696,10 @@ blocking-`recv` divergence).
 
 **Landed (VM):** **B3** OS-thread multicore (the alternative bet, taken — B3.0–B3.6), **B4** real
 `Shared`, **B5** real `Executor` pool (+ A3b) — then **Tier-D** rebuilt `--parallel` as an M:N
-work-stealing scheduler (D0–D5 + owes #1/#2). **Still open:** Tier-D **D6** (epoll/`std.net`) and the
-VM v1 limits to lift if wanted — blocking `recv` inside a native callback (**D5 owe #3**, resolution
-strategy in [`concurrency-tier-d.md`](concurrency-tier-d.md)) and cross-nursery wakeups (a fiber in an
-outer nursery is not woken by an inner one).
+work-stealing scheduler, **complete through D6** (D0–D6 + owes #1/#2/#3; epoll/`std.net` netpoller
+landed). **Still open:** one VM v1 limit — **cross-nursery wakeups** (a fiber blocked in an *outer*
+nursery is not woken by an *inner* one's `send`, because `MnSched.parked` is per-nursery). Blocking
+`recv` inside a native callback (**D5 owe #3**) is **resolved** — see below.
 
 ---
 
@@ -788,11 +788,12 @@ blocks. The Chezzi analogue is the `native_reentry` sites.)
   (D1) with the heap swapped into the fiber context (D2a). "The first thing to fix" — fixed.
 - **Suspend at *every* yield point, not just `recv`** — including a `recv`/I/O reached **inside a native
   callback** (HOF, `sort`, `Shared.update`, executor drain), whose loop state is on the Rust stack and
-  can't be snapshotted. Today the `native_reentry` guard faults instead. **This is D5 owe #3** — its
-  resolution strategy (Path A: move HOFs into chezzi `std/iter.chz`, like BEAM's `Enum.map`; Path C:
-  Go-`handoffp` thread-demote for the native-lock/hook islands; Path B stackful rejected) is written up
-  in [`concurrency-tier-d.md` § "D5 owe #3"](concurrency-tier-d.md). The same fiddly bit Go's runtime
-  wrestles with for cgo.
+  can't be snapshotted. **RESOLVED (D5 owe #3):** **Path A** moved the suspendable list HOFs into chezzi
+  (`std/iter.chz` `map`/`filter`/`fold`/`reduce`, like BEAM's `Enum.map`) so a `recv` in their callback
+  *parks* normally; **Path C** Go-`handoffp`-demotes the fiber to a thread for the intrinsically-native
+  islands (a `recv`/`sleep_ms`/socket op / `wait` reached inside a Rust callback) instead of faulting.
+  (Path B stackful was rejected.) Residual: a `recv` with no possible sender still *correctly* deadlocks.
+  The same fiddly bit Go's runtime wrestles with for cgo. See [`concurrency-tier-d.md` § "D5 owe #3"].
 - **Correct lock-free work-stealing + pollset wake-ups + preemption.** Preemption is the *easy* part
   here: reduction-style cooperative yield — check a "should-yield" flag at back-edges, reusing the
   existing `cancel`/`gc_stress` dispatch check sites (Erlang's model). Signal-based preemption (Go 1.14)
@@ -863,19 +864,19 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   is back. Now a limit on **both** engines; revisit only if it bites real programs. Acceptable v1 limit
   (also noted in `PROGRESS.md`).
 
-- **`recv` inside a native callback** *(now a `--parallel` M:N limit too — D5 owe #3)*. The
-  `native_reentry` guard (`src/vm/mod.rs`, `guarded()`) faults `deadlock` when a blocking `recv` is
-  reached inside a Rust callback (list HOFs, `sort`, `compare`/`hash`/`str`, `Shared.update`, the
-  executor drain, a `defer`red call), because that loop/recursion state lives on the host stack and
-  can't be snapshotted into a fiber. **Note (corrected):** this was once "mooted by B3" — true for the
-  **B3.3 thread-per-task** model (a callback `recv` just blocked the thread on a condvar) — but **D2's
-  M:N transition un-mooted it**: fibers now park by *snapshot*, not by blocking their thread, so a
-  native frame breaks the chain again. The guard is **live under `--parallel`** (pinned by
-  `d5_blocking_native_in_callback_runs_inline`). **Resolution strategy (A + C; B rejected)** is written
-  up in [`concurrency-tier-d.md` § "D5 owe #3"](concurrency-tier-d.md): move the suspendable HOFs into
-  chezzi (`std/iter.chz`, like BEAM's `Enum.map` — proven to park) and Go-`handoffp`-demote the fiber
-  to a thread for the intrinsically-native islands (`Shared.update`'s lock, hash/compare hooks). An
-  accepted v1 limit until then.
+- **`recv` inside a native callback** *(D5 owe #3)* — **RESOLVED (both paths landed).** A blocking
+  `recv`/I/O reached inside a Rust callback (list HOFs, `Shared.update`, socket ops, `sleep_ms`, a
+  `wait`) once faulted `deadlock`, because that loop/recursion state lives on the host stack and can't
+  be snapshotted into a fiber. (Backstory: "mooted by B3" under the B3.3 thread-per-task model, then
+  **un-mooted by D2's M:N transition** — fibers park by snapshot, so a native frame breaks the chain.)
+  Fixed two ways: **Path A** moved the suspendable list HOFs into chezzi (`std/iter.chz`
+  `map`/`filter`/`fold`/`reduce`, like BEAM's `Enum.map`) so their callback `recv` *parks* normally
+  (`d5_owe3_recv_in_iter_map_callback_parks`); **Path C** Go-`handoffp`-demotes the fiber to a thread
+  for the intrinsically-native islands (`d5_owe3_path_c_*_demotes`). Path B (stackful) rejected.
+  Residual: a `recv` with no possible sender still *correctly* deadlocks
+  (`d5_owe3_path_c_recv_in_callback_no_sender_still_deadlocks`). The lone surviving same-box hazard is
+  `Shared.update`'s hold-and-wait (won't-fix by design, separate). Details in
+  [`concurrency-tier-d.md` § "D5 owe #3"](concurrency-tier-d.md).
 
 - **`Channel.close()` + closed-channel semantics** — **LANDED** (both engines, branch
   `feat/channel-close`). The natural complement to B1/B2's blocking `recv`: a consumer looping past the
