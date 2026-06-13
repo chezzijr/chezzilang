@@ -1033,6 +1033,9 @@ impl Checker {
                 // isn't gated on sendability — the value lives in one owner and is copied in/out
                 // through `get`/`set`; the *handle* is what crosses (always sendable).
                 ("Shared", [inner]) => Ty::shared(self.resolve_type(inner, span)),
+                // `Atomic[T]` (type annotation): the cross-task atomic box. Like `Shared`, its element
+                // type isn't gated on sendability — the handle is what crosses.
+                ("Atomic", [inner]) => Ty::atomic(self.resolve_type(inner, span)),
                 ("map", [k, v]) => {
                     let key = self.resolve_type(k, span);
                     let value = self.resolve_type(v, span);
@@ -3113,6 +3116,19 @@ impl Checker {
                 let elem = self.one_arg("Shared", args, span);
                 Some(Ty::shared(elem))
             }
+            "Atomic" => {
+                // `Atomic(v)` — a fresh cross-task atomic box initialised with `v`. Value-first like
+                // `Shared`; a `[T]` type arg is rejected upstream by the `name_is_generic` gate.
+                let elem = self.one_arg("Atomic", args, span);
+                Some(Ty::atomic(elem))
+            }
+            "timer" => {
+                // `timer(ms)` — a one-shot timeout channel: a `Channel[bool]` that delivers `true`
+                // once, `ms` milliseconds after creation. The composable timeout primitive (recv it in
+                // a `wait` arm). Takes an int; a `[T]` type arg is rejected upstream.
+                self.check_args("timer", &[Ty::Int], args, span);
+                Some(Ty::channel(Ty::Bool))
+            }
             "Executor" => {
                 // `Executor()` — a fresh, empty, explicitly-owned work queue (C5 escape hatch).
                 // Non-generic and zero-arg; a `[T]` type arg is rejected upstream.
@@ -3391,6 +3407,17 @@ impl Checker {
                 // `get()->T`, `set(T)->nil`, `update(fn(T)->T)->nil` — the same box API as `Ref[T]`,
                 // but reachable across tasks.
                 if let Some(sig) = shared_method_sig(method, elem) {
+                    self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
+            Ty::Atomic(elem) => {
+                // `load()->T`, `store(T)`, `exchange(T)->T`, `cas(T,T)->bool`; `add(T)->T`/`sub(T)->T`
+                // only when `T` is numeric (gated inside `atomic_method_sig`).
+                if let Some(sig) = atomic_method_sig(method, elem) {
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -3977,6 +4004,7 @@ impl Checker {
                 ("Option", [x]) => Ty::option(self.resolve_ty_ro(x)),
                 ("Channel", [x]) => Ty::channel(self.resolve_ty_ro(x)),
                 ("Shared", [x]) => Ty::shared(self.resolve_ty_ro(x)),
+                ("Atomic", [x]) => Ty::atomic(self.resolve_ty_ro(x)),
                 ("Result", [x]) => Ty::result(self.resolve_ty_ro(x)),
                 ("Result", [x, e]) => Ty::result_e(self.resolve_ty_ro(x), self.resolve_ty_ro(e)),
                 ("map", [k, v]) => Ty::map(self.resolve_ty_ro(k), self.resolve_ty_ro(v)),
@@ -4183,6 +4211,9 @@ impl Checker {
             // A `Shared[T]` handle always crosses — that's its whole point (one box, many tasks);
             // its element type is *not* a constraint (the value never crosses, only the handle).
             Ty::Shared(_) => true,
+            // An `Atomic[T]` handle crosses for the same reason as `Shared` — one box, many tasks;
+            // the element type is not a constraint (only the handle crosses).
+            Ty::Atomic(_) => true,
             // An `Executor` handle crosses the airlock like a `Channel`/`Shared` handle (the queue
             // lives outside every heap; tasks reach the one work queue).
             Ty::Executor => true,
@@ -5373,6 +5404,25 @@ fn shared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
             vec![Ty::Func { params: vec![elem.clone()], ret: Box::new(elem.clone()) }],
             Ty::Nil,
         ),
+        _ => return None,
+    };
+    Some(FnSig::plain(params, ret))
+}
+
+/// Built-in method signatures on `Atomic[T]` — the cross-task atomic box. `elem` is the box's
+/// element type. `load`/`store`/`exchange`/`cas` work for any `T`; `add`/`sub` are arithmetic and
+/// exist **only when `T` is numeric** (`int`/`float`) — for any other `T` they return `None`, so the
+/// caller reports "no method 'add'".
+fn atomic_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
+    let (params, ret) = match method {
+        "load" => (vec![], elem.clone()),
+        "store" => (vec![elem.clone()], Ty::Nil),
+        // swap in `x`, return the previous value.
+        "exchange" => (vec![elem.clone()], elem.clone()),
+        // compare-and-swap: if the box holds `expected`, replace with `new`; report whether it did.
+        "cas" => (vec![elem.clone(), elem.clone()], Ty::Bool),
+        // arithmetic RMW — numeric `T` only; returns the NEW value.
+        "add" | "sub" if elem.is_numeric() => (vec![elem.clone()], elem.clone()),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))

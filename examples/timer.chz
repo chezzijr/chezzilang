@@ -1,0 +1,4 @@
+fn main():
+    t := timer(20)
+    print(t.recv())
+main()

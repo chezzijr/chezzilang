@@ -862,6 +862,19 @@ fn fetch_all(urls: list[str]):
 - **`Shared[T]`** — the cross-task mutable box: `s.get()`, `s.set(v)`, `s.update(fn(x): ...)`. The
   ladder is `value` (copied) → `Ref[T]` (in-task) → `Shared[T]` (cross-task). `Ref` is **not**
   sendable; `Shared` is.
+- **`Atomic[T]`** — the cross-task **atomic** box (sibling of `Shared`, sendable handle, value-first
+  `Atomic(v)`): `a.load()`, `a.store(v)`, `a.exchange(v) -> T` (returns old), `a.cas(expected, new) ->
+  bool`, and on numeric `T` `a.add(x) -> T` / `a.sub(x) -> T` (return the new value; checked-overflow
+  like `+`/`-`). Each op is atomic across threads. Use it for counters/flags/CAS-loops; `Shared` for
+  arbitrary-transform updates.
+- **`timer(ms) -> Channel[bool]`** — a one-shot timeout channel: `timer(500).recv()` blocks ~500ms then
+  yields `true` (level-triggered — ready on any recv at/after the deadline). The composable timeout
+  primitive; once `wait` lands it races against real channels (`recv_timeout` is just `wait` over a
+  channel and a `timer`).
+- **`wait:` (select)** — *designed, not yet implemented.* Blocks until the first of several channel
+  `recv`s is ready: `wait:` then arms `v := ch.recv():` (or `=`/`_`), an optional non-blocking `else:`,
+  and timer arms for timeouts. Recv-only (sends never block on unbounded channels). See
+  [`concurrency.md §6d`](concurrency.md) for the locked design.
 - **Sendability:** captures are copies, **read-only** inside a task (reassign = error); only sendable
   types (scalars/str/containers+structs of sendable/`Channel`/`Shared`) cross — not closures, native
   handles, or `Ref`.

@@ -34,6 +34,12 @@ use std::sync::{Arc, Condvar, Mutex};
 pub struct ChannelCore {
     pub q: Mutex<ChanState>,
     pub cv: Condvar,
+    /// `timer(ms)` timeout channel: `Some(deadline)` iff this channel was built by `timer`. It is
+    /// **level-triggered** — `recv` yields `true` on any call at/after the deadline (the typical use
+    /// recvs it once, in a `wait` arm). Delivery is handled at `recv` time in the receiver's own
+    /// scheduler: `--parallel` schedules a background `send(true)` + parks; cooperative VM / interp /
+    /// callbacks inline-sleep to the deadline and synthesise `true`. `None` for an ordinary `Channel[T]`.
+    pub timer: Option<std::time::Instant>,
 }
 
 /// The locked interior of a [`ChannelCore`]: the message FIFO plus a `closed` flag. Folding `closed`
@@ -65,6 +71,16 @@ pub struct ChanState {
 pub struct SharedCore {
     pub v: Mutex<WireValue>,
     pub update_lock: Mutex<()>,
+}
+
+/// `Atomic[T]` core: the cross-task atomic box. Like [`SharedCore`] (one boxed wire value behind a
+/// `Mutex`, reachable across threads via the `Arc` handle), but presents atomic-operation methods —
+/// `load`/`store`/`exchange`/`cas` and (numeric `T`) `add`/`sub`. Each method is a single
+/// lock-op-unlock, so the read-modify-write of `add`/`sub`/`exchange`/`cas` is atomic across threads
+/// without a separate `update_lock` (no user closure runs under the lock, unlike `Shared.update`).
+#[derive(Debug, Default)]
+pub struct AtomicCore {
+    pub v: Mutex<WireValue>,
 }
 
 /// D6 — a monotonic, process-wide poll key. The netpoller (`super::poller`) keys an fd registration
@@ -158,6 +174,9 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
             core.q.lock().unwrap().queue.iter().for_each(|w| collect_core_gcrefs(w, out, s))
         }),
         WireValue::Shared(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
+            collect_core_gcrefs(&core.v.lock().unwrap(), out, s)
+        }),
+        WireValue::Atomic(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
             collect_core_gcrefs(&core.v.lock().unwrap(), out, s)
         }),
         WireValue::Executor(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {

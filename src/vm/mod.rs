@@ -15,7 +15,7 @@ mod timer;
 pub mod value;
 pub mod wire;
 
-use core::{ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
+use core::{AtomicCore, ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, Op, Program, ProtoId, NO_IC, TID_NONE};
 use std::os::fd::AsRawFd;
@@ -2935,6 +2935,30 @@ impl Vm {
                 let h = self.heap.alloc(Obj::Shared(Arc::new(SharedCore { v: Mutex::new(init), ..Default::default() })));
                 self.push(Value::Obj(h));
             }
+            Op::NewAtomic => {
+                let init = self.pop();
+                let init = self.to_wire(init).expect("Atomic init must be sendable (B3.1 single-thread)");
+                let h = self.heap.alloc(Obj::Atomic(Arc::new(AtomicCore { v: Mutex::new(init) })));
+                self.push(Value::Obj(h));
+            }
+            Op::NewTimer => {
+                let ms = match self.pop() {
+                    Value::Int(ms) => ms.max(0) as u64,
+                    other => return Err(self.err(format!("timer(ms) expects int, got {}", self.type_name(other)), span)),
+                };
+                // Saturate a pathological `ms` to a far-future deadline rather than panic on `Instant`
+                // overflow (mirrors the `sleep_ms` offload path).
+                let deadline = std::time::Instant::now()
+                    .checked_add(std::time::Duration::from_millis(ms))
+                    .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365));
+                // The channel just carries its deadline. Delivery is handled at `recv` time — in
+                // whatever engine/scheduler the receiver runs under — NOT here: a `timer` created at the
+                // top level (`mn = None`) can be `recv`'d inside a `--parallel` child, so binding the
+                // delivery mechanism to the *creation* site would strand it.
+                let core = Arc::new(ChannelCore { timer: Some(deadline), ..Default::default() });
+                let h = self.heap.alloc(Obj::Channel(core));
+                self.push(Value::Obj(h));
+            }
             Op::NewExecutor => {
                 let h = self.heap.alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
                 // Register for the program-exit auto-drain; the handle is also a GC root, so the
@@ -4162,6 +4186,11 @@ impl Vm {
         }
         if matches!(self.heap.get(h), Obj::Shared(_)) {
             let result = self.shared_method(h, method, &args, span)?;
+            self.push(result);
+            return Ok(());
+        }
+        if matches!(self.heap.get(h), Obj::Atomic(_)) {
+            let result = self.atomic_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
         }
@@ -6167,6 +6196,7 @@ impl Vm {
                 // `from_wire` in any heap reaches the same mailbox/box/queue.
                 Obj::Channel(core) => WireValue::Channel(Arc::clone(core)),
                 Obj::Shared(core) => WireValue::Shared(Arc::clone(core)),
+                Obj::Atomic(core) => WireValue::Atomic(Arc::clone(core)),
                 Obj::Executor(core) => WireValue::Executor(Arc::clone(core)),
                 // D6: a socket/listener handle crosses as its shared `Arc` core (a spawned fiber
                 // reaches the same fd) — same shape as `Channel`/`Shared`/`Executor`.
@@ -6241,6 +6271,7 @@ impl Vm {
             // drives the program-exit auto-drain and shares this core, so the alias needs no entry.
             WireValue::Channel(core) => Value::Obj(self.heap.alloc(Obj::Channel(core))),
             WireValue::Shared(core) => Value::Obj(self.heap.alloc(Obj::Shared(core))),
+            WireValue::Atomic(core) => Value::Obj(self.heap.alloc(Obj::Atomic(core))),
             WireValue::Executor(core) => Value::Obj(self.heap.alloc(Obj::Executor(core))),
             // D6: rebuild a fresh heap handle onto the SAME shared socket/listener core (`Arc` cloned
             // in `to_wire`) — two fibers reach one fd.
@@ -6641,10 +6672,11 @@ impl Vm {
             Obj::Str(_)
             | Obj::Channel(_)
             | Obj::Shared(_)
+            | Obj::Atomic(_)
             | Obj::Executor(_)
             | Obj::Socket(_)
             | Obj::Listener(_) => {
-                SnapValue::Wire(self.to_wire(v).expect("str / channel / shared / executor / socket is always sendable"))
+                SnapValue::Wire(self.to_wire(v).expect("str / channel / shared / atomic / executor / socket is always sendable"))
             }
         }
     }
@@ -6770,6 +6802,13 @@ impl Vm {
         match self.heap.get(h) {
             Obj::Shared(core) => Arc::clone(core),
             _ => unreachable!("shared_core on non-shared"),
+        }
+    }
+
+    fn atomic_core(&self, h: GcRef) -> Arc<AtomicCore> {
+        match self.heap.get(h) {
+            Obj::Atomic(core) => Arc::clone(core),
+            _ => unreachable!("atomic_core on non-atomic"),
         }
     }
 
@@ -7250,7 +7289,9 @@ impl Vm {
                 // spin a replacement, resuming on a sibling `send` (Go's `handoffp`). Handled before
                 // `chan_recv_step` (which only covers the snapshot-park / cooperative-park / fault
                 // paths). `demote_recv_block` is itself closed-aware (a `close` faults the demoted recv).
-                if self.mn.is_some() && self.native_reentry > 0 {
+                // A `timer(ms)` channel is excluded from demote — it has no sibling sender to block on;
+                // `chan_recv_step` synthesises its value (inline-sleep to the deadline) at any reentry.
+                if self.mn.is_some() && self.native_reentry > 0 && self.channel_core(h).timer.is_none() {
                     return match self.demote_recv_block(h, span)? {
                         RecvStep::Got(w) => Ok(self.from_wire(w)),
                         RecvStep::ClosedEmpty => {
@@ -7276,7 +7317,15 @@ impl Vm {
                 // `native_reentry` / `suspend` / `ip` — it always returns immediately with an
                 // `Option`: `Some(v)` if queued, `None` if empty. Mirrors `interp::eval_channel_method`.
                 self.arity_err("try_recv", args, 0, span)?;
-                let popped = self.channel_core(h).q.lock().unwrap().queue.pop_front();
+                let core = self.channel_core(h);
+                let popped = core.q.lock().unwrap().queue.pop_front();
+                // A `timer(ms)` channel reports ready (`Some(true)`) once its deadline has passed, even
+                // with nothing queued — the level-triggered, non-blocking poll (used by `wait`'s
+                // source-order scan and the `else` arm). `--parallel` may also have a real `true`
+                // queued by the background send; either way `Some(true)`.
+                let popped = popped.or_else(|| {
+                    core.timer.filter(|d| std::time::Instant::now() >= *d).map(|_| WireValue::Bool(true))
+                });
                 Ok(match popped {
                     Some(w) => {
                         let v = self.from_wire(w);
@@ -7336,6 +7385,56 @@ impl Vm {
     /// the receiver + rewinding `ip` so the calling op re-runs on resume, setting `suspend`). Shared
     /// by `recv` (`CallMethod`) and the `ChanRecvOrClosed` op (`for v in ch:`).
     fn chan_recv_step(&mut self, h: GcRef, span: Span) -> Result<RecvStep, RuntimeError> {
+        // A `timer(ms)` channel delivers `true` once its deadline passes. Handled here (uniformly,
+        // before the ordinary park logic) so it works regardless of the engine the receiver runs in
+        // and where the timer was created. Delivery is scheduled at RECV time, in the recv's own
+        // scheduler — not at construction (a timer made at the top level can be recv'd in a child).
+        {
+            let core = self.channel_core(h);
+            if let Some(deadline) = core.timer {
+                // A prior park's timer `send` may already have delivered — consume it first.
+                if let Some(w) = core.q.lock().unwrap().queue.pop_front() {
+                    return Ok(RecvStep::Got(w));
+                }
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return Ok(RecvStep::Got(WireValue::Bool(true)));
+                }
+                if self.mn.is_some() && self.native_reentry == 0 {
+                    // --parallel, top level: schedule a one-shot background `send(true)` at the deadline
+                    // (in THIS scheduler) and park. The pending timer is accounted `inflight` so it
+                    // vetoes the deadlock predicate while the lone fiber waits; the job un-accounts it.
+                    if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                        self.cancelled = true;
+                        return Err(self.err("cancelled".to_string(), span));
+                    }
+                    let sched = self.mn.clone().unwrap();
+                    let key = self.channel_core_ptr(h);
+                    let core_job = Arc::clone(&core);
+                    let sched_job = Arc::clone(&sched);
+                    sched.inflight.fetch_add(1, Ordering::Relaxed);
+                    timer::submit_at(
+                        deadline,
+                        Box::new(move || {
+                            sched_job.send_wake(key, &core_job, WireValue::Bool(true));
+                            sched_job.inflight.fetch_sub(1, Ordering::Relaxed);
+                        }),
+                    );
+                    self.park_recv(h);
+                    return Ok(RecvStep::Parked);
+                }
+                // Cooperative VM / interp / a `--parallel` callback (`native_reentry > 0`): inline-sleep
+                // to the deadline (single-thread, or an already-blocking host-stack context), synthesise.
+                // Limitation (vs `sleep_ms`, which DEMOTES at `native_reentry > 0`): a `timer.recv()`
+                // reached inside a native callback under `--parallel` pins THIS worker for the timeout
+                // (no replacement is spun). Sound — siblings on the other N-1 workers still progress —
+                // but lower throughput than `sleep_ms`'s demote. Acceptable for v1; demote-reuse is a
+                // future improvement. The cooperative/interp inline-sleep blocks siblings the same way
+                // their `sleep_ms` already does (single-thread).
+                std::thread::sleep(deadline - now);
+                return Ok(RecvStep::Got(WireValue::Bool(true)));
+            }
+        }
         // M:N snapshot-park path (empty-open parks the fiber; the worker loop files it into the wait
         // set). Cancel is checked FIRST: a fiber woken only to be cancelled must not re-park.
         if self.mn.is_some() && self.native_reentry == 0 {
@@ -7436,6 +7535,77 @@ impl Vm {
                 Ok(Value::Nil)
             }
             _ => Err(self.err(format!("type Shared has no method '{method}'"), span)),
+        }
+    }
+
+    /// `Atomic[T]` methods: `load` (copy out), `store` (copy in), `exchange` (swap, returns old),
+    /// `cas(expected, new) -> bool` (swap iff the box equals `expected`), `add`/`sub` (numeric RMW,
+    /// returns the new value). Each is a single lock-op-unlock, so the RMW is atomic across threads —
+    /// no user closure runs under the lock (unlike `Shared.update`), so no `update_lock` is needed.
+    /// Mirrors `interp::eval_atomic_method`. `add`/`sub` use the language's `checked_add`/`checked_sub`
+    /// (int overflow faults, like the `+`/`-` operators) and plain float arithmetic.
+    fn atomic_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        match method {
+            "load" => {
+                self.arity_err("load", args, 0, span)?;
+                let w = self.atomic_core(h).v.lock().unwrap().clone();
+                Ok(self.from_wire(w))
+            }
+            "store" => {
+                self.arity_err("store", args, 1, span)?;
+                let w = self.to_wire(args[0])?;
+                *self.atomic_core(h).v.lock().unwrap() = w;
+                Ok(Value::Nil)
+            }
+            "exchange" => {
+                self.arity_err("exchange", args, 1, span)?;
+                let new_w = self.to_wire(args[0])?;
+                let core = self.atomic_core(h);
+                let old = {
+                    let mut g = core.v.lock().unwrap();
+                    std::mem::replace(&mut *g, new_w)
+                };
+                Ok(self.from_wire(old))
+            }
+            "cas" => {
+                self.arity_err("cas", args, 2, span)?;
+                let core = self.atomic_core(h);
+                // Hold the value lock across compare+swap so the CAS is atomic. `from_wire`/`to_wire`/
+                // `values_equal` borrow `self`, not the guard (which borrows the cloned `Arc`), so the
+                // lock can stay held while they run.
+                let mut g = core.v.lock().unwrap();
+                let cur = self.from_wire(g.clone());
+                let swapped = self.values_equal(cur, args[0]);
+                if swapped {
+                    *g = self.to_wire(args[1])?;
+                }
+                Ok(Value::Bool(swapped))
+            }
+            "add" | "sub" => {
+                self.arity_err(method, args, 1, span)?;
+                let delta = self.to_wire(args[0])?;
+                let core = self.atomic_core(h);
+                let mut g = core.v.lock().unwrap();
+                let new = match (&*g, &delta) {
+                    (WireValue::Int(a), WireValue::Int(b)) => {
+                        let (r, label) = if method == "add" {
+                            (a.checked_add(*b), "Add")
+                        } else {
+                            (a.checked_sub(*b), "Sub")
+                        };
+                        WireValue::Int(r.ok_or_else(|| self.err(format!("integer overflow in {label}"), span))?)
+                    }
+                    (WireValue::Float(a), WireValue::Float(b)) => {
+                        WireValue::Float(if method == "add" { a + b } else { a - b })
+                    }
+                    // The checker gates `add`/`sub` to numeric element types, so this is unreachable.
+                    _ => return Err(self.err(format!("type Atomic has no method '{method}'"), span)),
+                };
+                *g = new.clone();
+                drop(g);
+                Ok(self.from_wire(new))
+            }
+            _ => Err(self.err(format!("type Atomic has no method '{method}'"), span)),
         }
     }
 
@@ -8438,6 +8608,7 @@ impl Vm {
                 Obj::Native { .. } => "function",
                 Obj::Channel(_) => "Channel",
                 Obj::Shared(_) => "Shared",
+                Obj::Atomic(_) => "Atomic",
                 Obj::Executor(_) => "Executor",
                 Obj::Socket(_) => "Socket",
                 Obj::Listener(_) => "Listener",
@@ -8526,6 +8697,7 @@ impl Vm {
                 // B3.1: the box holds the wire form; render it directly (`display` is `&self` and
                 // cannot `from_wire`, which allocates — `display_wire` is the read-only equivalent).
                 Obj::Shared(core) => Ok(format!("Shared({})", self.display_wire(&core.v.lock().unwrap()))),
+                Obj::Atomic(core) => Ok(format!("Atomic({})", self.display_wire(&core.v.lock().unwrap()))),
                 Obj::Executor(core) => Ok(format!("Executor(pending={})", core.inner.lock().unwrap().queue.len())),
                 // D6: render open/closed without exposing the fd; matches no interp counterpart (net
                 // is VM-only) but mirrors the core handles' structural `Display`.
@@ -8589,6 +8761,7 @@ impl Vm {
             }
             WireValue::Channel(core) => format!("Channel(len={})", core.q.lock().unwrap().queue.len()),
             WireValue::Shared(core) => format!("Shared({})", self.display_wire(&core.v.lock().unwrap())),
+            WireValue::Atomic(core) => format!("Atomic({})", self.display_wire(&core.v.lock().unwrap())),
             WireValue::Executor(core) => format!("Executor(pending={})", core.inner.lock().unwrap().queue.len()),
             // D6: render open/closed without exposing the fd (mirrors the heap `Display`).
             WireValue::Socket(core) => {
@@ -8725,7 +8898,7 @@ impl Vm {
             }
             // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
             // (matches the interpreter's `stringify` catch-all falling back to `Display`).
-            Obj::Channel(_) | Obj::Shared(_) | Obj::Executor(_) | Obj::Socket(_) | Obj::Listener(_) => {
+            Obj::Channel(_) | Obj::Shared(_) | Obj::Atomic(_) | Obj::Executor(_) | Obj::Socket(_) | Obj::Listener(_) => {
                 out.push_str(&self.display_guarded(Value::Obj(h), depth)?);
             }
         }
@@ -13037,6 +13210,41 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// `timer(ms)` golden: a one-shot timeout channel delivers `true`. Byte-identical on the
+    /// cooperative VM, the interpreter, and `.expected` (both inline-sleep to the deadline). `--parallel`
+    /// delivers the same value via the background timer `send` (asserted separately).
+    #[test]
+    fn golden_timer_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/timer.chz");
+        let expected = include_str!("../../examples/timer.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(run_capture_parallel(src).expect("parallel"), expected);
+    }
+
+    /// `timer(ms)` under `--parallel`: a spawned fiber recv-blocks on the timeout channel, PARKS, and
+    /// is woken by the background timer `send` at the deadline — not a false deadlock (the pending
+    /// timer is accounted as `inflight`, vetoing the predicate while the lone fiber waits). Proves the
+    /// async-delivery path + the deadlock veto + the park/wake on the timer channel's key.
+    #[test]
+    fn parallel_timer_wakes_blocked_recv() {
+        let src = "fn waiter(t: Channel[bool]):\n    print(t.recv())\n\
+                   fn main():\n    parallel:\n        spawn waiter(timer(20))\nmain()\n";
+        assert_eq!(run_capture_parallel(src).expect("parallel"), "true\n");
+    }
+
+    /// `Atomic[T]` golden: single-thread load/store/add/sub/exchange/cas sequence, byte-identical on
+    /// the VM, the interpreter, and `.expected`.
+    #[test]
+    fn golden_atomic_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/atomic.chz");
+        let expected = include_str!("../../examples/atomic.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     /// Slicing golden: `examples/slicing.chz` (list/str slicing + the `Index`/`IndexSet`/`Slice`
     /// protocols on a struct + a generic over both) byte-identical on the VM, interp, and `.expected`.
     #[test]
@@ -13678,6 +13886,57 @@ main()
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `Atomic[int].add` cross-thread atomicity: N real-OS-thread fibers each `add(1)` one shared
+    /// box; the join sum must be exactly N (no lost read-modify-write — the whole point of `Atomic`).
+    #[test]
+    fn parallel_atomic_add_is_exact() {
+        let n = 300;
+        let src = format!(
+            "fn work(a: Atomic[int]):\n    a.add(1)\n\
+             fn main():\n    a := Atomic(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn work(a)\n    print(a.load())\nmain()\n"
+        );
+        assert_eq!(run_capture_parallel(&src).expect("parallel"), format!("{n}\n"));
+    }
+
+    /// `Atomic[int].cas` under contention: N fibers each increment via a load-then-CAS retry loop. A
+    /// lost CAS (the box changed under us) retries, so the serialised total is exactly N — proving the
+    /// compare-and-swap is atomic across threads.
+    #[test]
+    fn parallel_atomic_cas_increment_is_exact() {
+        let n = 200;
+        let src = format!(
+            "fn bump(a: Atomic[int]):\n    while true:\n        cur := a.load()\n        if a.cas(cur, cur + 1):\n            break\n\
+             fn main():\n    a := Atomic(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn bump(a)\n    print(a.load())\nmain()\n"
+        );
+        assert_eq!(run_capture_parallel(&src).expect("parallel"), format!("{n}\n"));
+    }
+
+    /// `Atomic[float]` add/sub/exchange/cas must behave identically on both engines (covers the
+    /// numeric-`T` arm for floats, not just ints).
+    #[test]
+    fn atomic_float_ops_two_engine_parity() {
+        let src = "fn main():\n    a := Atomic(1.5)\n    print(a.add(2.0))\n    print(a.sub(0.5))\n    print(a.exchange(9.0))\n    print(a.cas(9.0, 4.0))\n    print(a.load())\nmain()\n";
+        assert_eq!(run_capture(src).expect("vm"), crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// `cas` on a non-scalar `T` (a list) exercises the VM's lock-held `from_wire`/`values_equal` path
+    /// — the most distinctive Atomic code path. Both engines must agree.
+    #[test]
+    fn atomic_cas_on_list_two_engine_parity() {
+        let src = "fn main():\n    a := Atomic([1, 2])\n    print(a.cas([1, 2], [9]))\n    print(a.load())\n    print(a.cas([1, 2], [0]))\n    print(a.load())\nmain()\n";
+        assert_eq!(run_capture(src).expect("vm"), crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// `timer(0)` (and any already-elapsed deadline) delivers `true` immediately, on every engine.
+    #[test]
+    fn timer_zero_delivers_immediately() {
+        let src = "fn main():\n    print(timer(0).recv())\nmain()\n";
+        let out = run_capture(src).expect("vm");
+        assert_eq!(out, "true\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp"));
+        assert_eq!(run_capture_parallel(src).expect("parallel"), "true\n");
     }
 
     /// A1 golden: `Channel[T].try_recv()` — a non-blocking poll returning `T?`. Workers `send` at the

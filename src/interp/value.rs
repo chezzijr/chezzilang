@@ -227,6 +227,10 @@ pub enum Value {
     /// `set`/construction and out on `get`. Under the sequential executor a single thread already
     /// serialises every write, so no locking is needed.
     Shared(Rc<RefCell<Value>>),
+    /// `Atomic[T]` — the cross-task atomic box. Like `Shared` (the handle is what `spawn` copies; the
+    /// value lives in the one box, copied in/out), but presents atomic-operation methods. Under the
+    /// sequential executor a single thread serialises every op, so no locking is needed.
+    Atomic(Rc<RefCell<Value>>),
     /// `Executor` (C5 escape hatch) — an explicitly-owned work queue. Shared by reference (the
     /// handle is what `spawn` copies across the airlock). Holds detached task closures that drain at
     /// `shutdown()` (graceful) and are discarded by `shutdown_now()`. Under the sequential executor
@@ -244,6 +248,11 @@ pub enum Value {
 pub struct ChanState {
     pub queue: std::collections::VecDeque<Value>,
     pub closed: bool,
+    /// `timer(ms)` one-shot timeout channel: `Some(deadline)` iff built by `timer`. A `recv` on the
+    /// empty channel inline-sleeps to the deadline then yields `true` (the interp is single-threaded,
+    /// so blocking is fine); `try_recv` reports `Some(true)` once the deadline passes. `None` for an
+    /// ordinary channel. Mirrors `vm::core::ChannelCore::timer`.
+    pub timer: Option<std::time::Instant>,
 }
 
 impl ChanState {
@@ -286,6 +295,7 @@ impl Value {
             Value::Enum { .. } => "enum",
             Value::Channel(_) => "Channel",
             Value::Shared(_) => "Shared",
+            Value::Atomic(_) => "Atomic",
             Value::Executor(_) => "Executor",
             Value::Nil => "nil",
         }
@@ -364,6 +374,7 @@ impl std::fmt::Display for Value {
             }
             Value::Channel(q) => write!(f, "Channel(len={})", q.borrow().queue.len()),
             Value::Shared(cell) => write!(f, "Shared({})", cell.borrow()),
+            Value::Atomic(cell) => write!(f, "Atomic({})", cell.borrow()),
             Value::Executor(ex) => write!(f, "Executor(pending={})", ex.borrow().queue.len()),
             Value::Nil => write!(f, "nil"),
         }

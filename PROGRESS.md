@@ -166,6 +166,35 @@ frozen interp is the differential parity oracle for the sequential subset.
 > poll-once arm were correct; the VM scheduler integration is the hard part. A proper follow-up, not a
 > drop-in. (`select` / `Atomic[int]` remain deferred too — both need a design brainstorm.)
 
+> **Concurrency follow-ups — `Atomic[T]` + `timer(ms)` LANDED, `recv_timeout` DROPPED, `wait` designed
+> (2026-06-13).** Brainstormed the deferred trio and shipped two of three; `recv_timeout` is dropped as
+> redundant.
+> - **`Atomic[T]`** (commit `07ae080`) — generic atomic box mirroring `Shared[T]` (Mutex-backed, sendable
+>   handle, value-first `Atomic(v)`): `load`/`store`/`exchange`/`cas` for any `T`, `add`/`sub` on numeric
+>   `T` (checked-overflow like `+`/`-`). Two-engine parity; `--parallel` add/cas atomicity stress tests
+>   (300-thread exact sum, 200-fiber CAS-retry). See `docs/concurrency.md §6b`.
+> - **`timer(ms) -> Channel[bool]`** (commit `cd1673e`) — one-shot, **level-triggered** timeout channel.
+>   Delivery is scheduled **at `recv` time in the receiver's own scheduler** (NOT at construction — a
+>   top-level timer can be recv'd in a `--parallel` child): `--parallel` schedules a background `send` +
+>   parks (accounted `inflight` so no false deadlock); cooperative VM / interp / callbacks inline-sleep to
+>   the deadline (like their `sleep_ms`). 3-engine parity. Adversarial review (Reality Checker + Code
+>   Reviewer) found **no Critical/Important** — sound park-gap (reuses `MnSched::park`'s queue re-check),
+>   no inflight leak (job holds Arcs + always `fetch_sub`s), no double-schedule (queue-first on re-run).
+>   Known v1 limitation: `timer.recv()` inside a native callback pins a worker (no demote). `docs §6c`.
+> - **`recv_timeout` DROPPED** — `wait` + `timer` subsume it (`ch.recv_timeout(500)` ≡ `wait` over `ch`
+>   and `timer(500)`), and it was the unsound/reverted one. No separate primitive.
+> - **`wait` (select) — DESIGNED, NOT IMPLEMENTED. Start the next concurrency session here.** Full locked
+>   design + grammar + per-engine semantics + the multi-channel-park implementation notes are in
+>   **`docs/concurrency.md §6d`** (and the `wait`/`timer`/`Atomic` cheat rows in `docs/syntax.md §11b`).
+>   Summary: a `wait:` compound statement racing channel `recv`s — arms `v := ch.recv():` (`:=`/`=`/`_`
+>   targets), optional non-blocking `else:`, recv-only (unbounded channels → sends never block). Keyword
+>   chosen to **not** look Go-like; `else` reuses the existing keyword; closed+empty arm is **skipped**
+>   (option B), all-closed+no-else faults. The hard part (its own milestone, the area `recv_timeout` was
+>   reverted in): the **blocking multi-channel park** — one fiber parked on N channels, first sender wins +
+>   sweeps it from the other buckets via a claim-flag, in BOTH the M:N and cooperative schedulers, with the
+>   single-channel `recv` as the 1-key special case. Non-blocking (`else`) + the poll step reuse `try_recv`
+>   (timer arms are already deadline-aware).
+
 ### Tier-D — complete (D0–D6c)
 
 Designed in [`docs/concurrency.md §10`](docs/concurrency.md); the full per-phase TDD breakdown lives in

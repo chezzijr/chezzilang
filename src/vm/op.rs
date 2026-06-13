@@ -296,6 +296,12 @@ pub enum Op {
     NewChannel,
     /// `Shared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Shared(init)`.
     NewShared,
+    /// `Atomic(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Atomic(init)`.
+    NewAtomic,
+    /// `timer(ms)` — stack `[ms]`; pop it, push a fresh `Channel[bool]` whose deadline is `now + ms`.
+    /// Delivery happens at `recv` time (in the receiver's own scheduler), NOT here — see
+    /// `chan_recv_step`'s timer branch.
+    NewTimer,
     /// `Executor()` — push a fresh, empty, explicitly-owned work queue (`Obj::Executor`). C5.
     NewExecutor,
 }

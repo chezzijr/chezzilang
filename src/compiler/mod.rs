@@ -1562,6 +1562,22 @@ impl Compiler {
                 fc.emit(Op::NewShared, span);
                 return Ok(());
             }
+            // `Atomic(v)` → a fresh atomic box over the deep-copied init value (checker validated 1 arg).
+            if name == "Atomic" {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(Op::NewAtomic, span);
+                return Ok(());
+            }
+            // `timer(ms)` → a fresh one-shot timeout channel (checker validated 1 int arg).
+            if name == "timer" {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(Op::NewTimer, span);
+                return Ok(());
+            }
             // C5: `Executor()` → a fresh work queue (checker validated 0 args).
             if name == "Executor" {
                 fc.emit(Op::NewExecutor, span);

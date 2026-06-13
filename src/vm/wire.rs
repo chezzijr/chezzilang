@@ -9,7 +9,7 @@
 //! data arms — the only `GcRef` is the by-reference `Handle` arm, which B3.1 replaces with the
 //! shared `Arc` core).
 
-use super::core::{ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
+use super::core::{AtomicCore, ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use super::op::ProtoId;
 use super::value::GcRef;
 use std::sync::Arc;
@@ -61,6 +61,8 @@ pub enum WireValue {
     Channel(Arc<ChannelCore>),
     /// A `Shared` handle crossing the airlock as its shared [`SharedCore`] (B3.1). See [`Channel`].
     Shared(Arc<SharedCore>),
+    /// An `Atomic` handle crossing the airlock as its shared [`AtomicCore`]. See [`Channel`]/[`Shared`].
+    Atomic(Arc<AtomicCore>),
     /// An `Executor` handle crossing the airlock as its shared [`ExecutorCore`] (B3.1). See [`Channel`].
     Executor(Arc<ExecutorCore>),
     /// A `Socket` handle crossing the airlock as its shared [`SocketCore`] (D6) — an `Arc`'d fd, so a

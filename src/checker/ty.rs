@@ -43,6 +43,11 @@ pub enum Ty {
     /// serialised. The handle is sendable (it's what `spawn` copies in — every task reaches the
     /// same box); the value isn't copied. Constructed value-first as `Shared(v)` (`T` = `typeof v`).
     Shared(Box<Ty>),
+    /// `Atomic[T]` — the cross-task atomic box. Like `Shared[T]` (one box, many tasks; the handle is
+    /// sendable, the value is copied in/out under a lock), but it presents atomic-operation methods
+    /// (`load`/`store`/`exchange`/`cas`, plus `add`/`sub` on numeric `T`) instead of `Shared`'s
+    /// `get`/`set`/`update`. Constructed value-first as `Atomic(v)` (`T` = `typeof v`).
+    Atomic(Box<Ty>),
     /// `Executor` — the C5 escape hatch: an explicitly-owned work queue for detached tasks that
     /// outlive a `parallel:` scope. Non-generic; the handle is sendable (like `Channel`/`Shared`).
     Executor,
@@ -94,6 +99,9 @@ impl Ty {
     pub fn shared(inner: Ty) -> Ty {
         Ty::Shared(Box::new(inner))
     }
+    pub fn atomic(inner: Ty) -> Ty {
+        Ty::Atomic(Box::new(inner))
+    }
     /// A non-generic struct type (no type arguments) — the common case.
     pub fn strukt(name: impl Into<String>) -> Ty {
         Ty::Struct(name.into(), Vec::new())
@@ -116,7 +124,8 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
     match (expected, actual) {
         (Unknown, _) | (_, Unknown) => true,
         (Int, Int) | (Float, Float) | (Bool, Bool) | (Str, Str) | (Nil, Nil) => true,
-        (List(a), List(b)) | (Option(a), Option(b)) | (Channel(a), Channel(b)) | (Shared(a), Shared(b)) => {
+        (List(a), List(b)) | (Option(a), Option(b)) | (Channel(a), Channel(b)) | (Shared(a), Shared(b))
+        | (Atomic(a), Atomic(b)) => {
             compatible(a, b)
         }
         (Result(at, ae), Result(bt, be)) => compatible(at, bt) && compatible(ae, be),
@@ -162,6 +171,7 @@ impl fmt::Display for Ty {
             Ty::Option(t) => write!(f, "Option[{t}]"),
             Ty::Channel(t) => write!(f, "Channel[{t}]"),
             Ty::Shared(t) => write!(f, "Shared[{t}]"),
+            Ty::Atomic(t) => write!(f, "Atomic[{t}]"),
             Ty::Executor => write!(f, "Executor"),
             Ty::Socket => write!(f, "Socket"),
             Ty::Listener => write!(f, "Listener"),
