@@ -7968,16 +7968,28 @@ impl Vm {
                 let key = self.channel_core_ptr(keys[i]);
                 let core_job = self.channel_core(keys[i]);
                 let sched_job = Arc::clone(&sched);
-                // Account the pending timer `inflight` (gated STRICTLY on `soonest.is_some()`) so it
-                // vetoes the deadlock predicate while a lone fiber waits; the job un-accounts it.
-                sched.inflight.fetch_add(1, Ordering::Relaxed);
-                timer::submit_at(
-                    deadline,
-                    Box::new(move || {
-                        sched_job.send_wake(key, &core_job, WireValue::Bool(true));
-                        sched_job.inflight.fetch_sub(1, Ordering::Relaxed);
-                    }),
-                );
+                // Arm ONCE per timer channel: a re-park of this same wait (woken with no consumable
+                // value — e.g. a sibling `close` on another arm) re-runs WaitPoll and re-enters this
+                // block, but the CAS fails the second time so we do NOT submit a redundant job. The
+                // first job survives the re-park (it captures the stable `key`+`core` and wakes
+                // whatever token is in this bucket at the deadline). Fresh `timer(ms)` ⇒ fresh core
+                // ⇒ `armed=false`, so no reset is needed.
+                if core_job
+                    .timer_armed
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    // Account the pending timer `inflight` (gated STRICTLY on `soonest.is_some()`) so it
+                    // vetoes the deadlock predicate while a lone fiber waits; the job un-accounts it.
+                    sched.inflight.fetch_add(1, Ordering::Relaxed);
+                    timer::submit_at(
+                        deadline,
+                        Box::new(move || {
+                            sched_job.send_wake(key, &core_job, WireValue::Bool(true));
+                            sched_job.inflight.fetch_sub(1, Ordering::Relaxed);
+                        }),
+                    );
+                }
             }
             self.frames.last_mut().unwrap().ip -= 1; // re-run this WaitPoll on resume
             self.wait_suspend = Some(keys);
@@ -14578,6 +14590,23 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
             run_capture_parallel(src).expect("short timer must fire its arm, not hang"),
             "timeout\n"
         );
+    }
+
+    /// Re-park with a live timer arm: a sibling `close`s the channel arm mid-window, which wakes the
+    /// waiting fiber WITHOUT a consumable value, so it re-runs WaitPoll and re-enters the snapshot-park
+    /// block while the timer is still pending. The timer must still fire correctly ("timeout") and the
+    /// run must COMPLETE — no hang. This path (a timer-armed wait that re-parks) was previously
+    /// untested; it also guards the arm-once `timer_armed` CAS latch against ever wedging the wake.
+    #[test]
+    fn vm_wait_timer_arm_survives_channel_close_repark_parallel() {
+        let src = "fn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn closer(ch: Channel[int]):\n    d := timer(5)\n    _ := d.recv()\n    ch.close()\nfn main():\n    ch := Channel[int]()\n    t := timer(40)\n    parallel:\n        spawn consumer(ch, t)\n        spawn closer(ch)\nmain()\n";
+        for _ in 0..20 {
+            assert_eq!(
+                run_capture_parallel(src).expect("timer arm must fire after a mid-window close; no hang"),
+                "timeout\n",
+                "a channel close that re-parks the wait stranded the timer arm"
+            );
+        }
     }
 
     // ----- §6d edge cases: control flow + nesting + spawn inside `wait` arm bodies (VM == interp) -----
