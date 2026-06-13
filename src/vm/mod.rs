@@ -13750,6 +13750,14 @@ main()";
         assert_eq!(run(src), "1\n2\n3\n");
     }
 
+    /// Golden: the `examples/generators.chz` showcase (free-fn + struct-method generators, `for`,
+    /// explicit `.next()`, and an `Iterator[T]`-bounded generic) produces exactly this output.
+    #[test]
+    fn golden_generators_chz() {
+        let out = run(include_str!("../../examples/generators.chz"));
+        assert_eq!(out, "0\n1\n2\n10\n11\n12\nSome(0)\nSome(1)\nNone\n5\n");
+    }
+
     /// The interpreter is the frozen reference engine and rejects `yield` (VM-only feature).
     #[test]
     fn interp_rejects_generators() {
