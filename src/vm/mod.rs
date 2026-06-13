@@ -2935,29 +2935,18 @@ impl Vm {
                 let h = self.heap.alloc(Obj::Shared(Arc::new(SharedCore { v: Mutex::new(init), ..Default::default() })));
                 self.push(Value::Obj(h));
             }
+            // `NewAtomic`/`NewTimer` delegate to `#[inline(never)]` helpers so their locals (the timer's
+            // `Instant`/`Duration` math) do NOT inflate `step`'s stack frame — `step` is on the per-op
+            // recursion path, so a fatter frame here multiplies across a deep call chain (debug builds
+            // don't reuse match-arm stack slots) and can overflow the host stack before the
+            // `MAX_CALL_DEPTH` guard fires. Keep these cold constructors out of line.
             Op::NewAtomic => {
-                let init = self.pop();
-                let init = self.to_wire(init).expect("Atomic init must be sendable (B3.1 single-thread)");
-                let h = self.heap.alloc(Obj::Atomic(Arc::new(AtomicCore { v: Mutex::new(init) })));
-                self.push(Value::Obj(h));
+                let v = self.new_atomic();
+                self.push(v);
             }
             Op::NewTimer => {
-                let ms = match self.pop() {
-                    Value::Int(ms) => ms.max(0) as u64,
-                    other => return Err(self.err(format!("timer(ms) expects int, got {}", self.type_name(other)), span)),
-                };
-                // Saturate a pathological `ms` to a far-future deadline rather than panic on `Instant`
-                // overflow (mirrors the `sleep_ms` offload path).
-                let deadline = std::time::Instant::now()
-                    .checked_add(std::time::Duration::from_millis(ms))
-                    .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365));
-                // The channel just carries its deadline. Delivery is handled at `recv` time — in
-                // whatever engine/scheduler the receiver runs under — NOT here: a `timer` created at the
-                // top level (`mn = None`) can be `recv`'d inside a `--parallel` child, so binding the
-                // delivery mechanism to the *creation* site would strand it.
-                let core = Arc::new(ChannelCore { timer: Some(deadline), ..Default::default() });
-                let h = self.heap.alloc(Obj::Channel(core));
-                self.push(Value::Obj(h));
+                let v = self.new_timer(span)?;
+                self.push(v);
             }
             Op::NewExecutor => {
                 let h = self.heap.alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
@@ -6810,6 +6799,34 @@ impl Vm {
             Obj::Atomic(core) => Arc::clone(core),
             _ => unreachable!("atomic_core on non-atomic"),
         }
+    }
+
+    /// `Atomic(v)` — pop the init, box its wire form behind a fresh `Arc<AtomicCore>`. `#[inline(never)]`
+    /// so its locals stay out of `step`'s (recursion-path) stack frame.
+    #[inline(never)]
+    fn new_atomic(&mut self) -> Value {
+        let init = self.pop();
+        let init = self.to_wire(init).expect("Atomic init must be sendable (B3.1 single-thread)");
+        Value::Obj(self.heap.alloc(Obj::Atomic(Arc::new(AtomicCore { v: Mutex::new(init) }))))
+    }
+
+    /// `timer(ms)` — pop the `ms` int, push a fresh `Channel[bool]` stamped with `now + ms`. Delivery is
+    /// handled at `recv` time (in the receiver's scheduler), NOT here, so a timer made at the top level
+    /// can be `recv`'d inside a `--parallel` child. `#[inline(never)]` so the `Instant`/`Duration` math
+    /// stays out of `step`'s (recursion-path) stack frame.
+    #[inline(never)]
+    fn new_timer(&mut self, span: Span) -> Result<Value, RuntimeError> {
+        let ms = match self.pop() {
+            Value::Int(ms) => ms.max(0) as u64,
+            other => return Err(self.err(format!("timer(ms) expects int, got {}", self.type_name(other)), span)),
+        };
+        // Saturate a pathological `ms` to a far-future deadline rather than panic on `Instant` overflow
+        // (mirrors the `sleep_ms` offload path).
+        let deadline = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(ms))
+            .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365));
+        let core = Arc::new(ChannelCore { timer: Some(deadline), ..Default::default() });
+        Ok(Value::Obj(self.heap.alloc(Obj::Channel(core))))
     }
 
     fn executor_core(&self, h: GcRef) -> Arc<ExecutorCore> {
