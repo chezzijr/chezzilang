@@ -13098,6 +13098,22 @@ print(\"bare={5.0}|fmt={5.0:.2f}|w={5.0:>8}\")
         assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"), "parallel parity");
     }
 
+    /// Regression: an interpolated ternary `{if b: a else: b}` has top-level colons that are NOT a
+    /// format-spec separator — it must run (not be mis-split), and a parenthesized ternary CAN carry
+    /// a spec. Byte-identical across the VM, the interpreter, and `--parallel`.
+    #[test]
+    fn fmt_interpolated_ternary_parity() {
+        let src = "\
+b := true
+print(\"val={if b: 10 else: 20}\")
+print(\"fmt={(if b: 1 else: 2):>5}\")
+";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "val=10\nfmt=    1\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"), "interp parity");
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"), "parallel parity");
+    }
+
     /// A pathological field width is rejected (with the cap message) BEFORE any allocation — the
     /// fix for the prior OOM. Must error identically on both engines (it is a compile-time error on
     /// the VM path, a runtime error on the interpreter; the message string is the same).

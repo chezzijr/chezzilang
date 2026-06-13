@@ -797,11 +797,18 @@ print("{greeting:.5}")    # string precision truncates → "hello"
   `%` percent (×100 then `%`). A float type char (`f`/`e`/`%`) promotes an int.
 
 A **bare** `{expr}` (or `{expr:}` with an empty spec) renders exactly as before — e.g. a whole float
-prints `5.0`. An **unknown type char** or trailing junk in the spec is a **compile-time** error;
-a **type/value mismatch** (e.g. `{name:d}` on a string, `{x:.2f}` on a string, zero-pad on a
-non-number) is a **runtime** error. The spec is parsed once, shared by both engines (`src/fmtspec.rs`),
-so the VM and interpreter produce byte-identical output. The `:` split is bracket/quote-aware — a `:`
-inside an index, string key, or slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator.
+prints `5.0`. An **unknown type char** or trailing junk in the spec, and a **type/value mismatch**
+(e.g. `{name:d}` on a string, `{x:.2f}` on a string, zero-pad on a non-number), are both reported as
+**errors before any output** — surfaced with a runtime-error prefix and *not* caught by `chezzi check`
+(interpolation specs are validated when the program starts running, after the type-check phase). The
+spec is parsed once, shared by both engines (`src/fmtspec.rs`), so the VM and interpreter produce
+byte-identical output. The `:` split is bracket/quote-aware — a `:` inside an index, string key, or
+slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator. **Ternaries:** a bare interpolated
+ternary `{if b: a else: b}` works (its colons are part of the expression, not a spec); to attach a
+spec to a ternary, **parenthesize** it — `{(if b: 1 else: 2):>5}`. (Edge case: on a *malformed* spec
+over a side-effecting expression, the interpreter evaluates the expression before erroring while the
+VM errors at compile time, so observable stdout-before-error can differ; well-formed programs are
+always byte-identical.)
 
 Core-type string methods (built in — no import needed):
 

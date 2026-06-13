@@ -72,6 +72,16 @@ pub enum FmtArg<'a> {
 /// `(expr, None)` if there is no spec. A `:` inside `()[]{}` or inside a `"`/`'` string literal is
 /// NOT a separator (so `{m["a:b"]:>5}` splits only at the final colon, and `{m["a:b"]}` not at all).
 pub fn split_spec(inner: &str) -> (&str, Option<&str>) {
+    // Chezzi's ternary `if cond: a else: b` is an expression whose top-level colons are structural,
+    // NOT format-spec separators. A bare top-level ternary therefore carries no spec — splitting on
+    // its first colon would corrupt the expression. To attach a spec to a ternary, parenthesize it
+    // (`{(if b: 1 else: 2):>5}`), which pushes the inner colons to depth > 0 so only the trailing
+    // top-level colon splits.
+    let head = inner.trim_start();
+    let after_if = head.strip_prefix("if");
+    if after_if.is_some_and(|rest| rest.starts_with(|c: char| c.is_whitespace() || c == '(')) {
+        return (inner, None);
+    }
     let mut depth: i32 = 0;
     let mut in_str: Option<char> = None;
     for (i, c) in inner.char_indices() {
@@ -473,5 +483,19 @@ mod tests {
         assert_eq!(split_spec("m[\"a:b\"]:>8"), ("m[\"a:b\"]", Some(">8")));
         assert_eq!(split_spec("a[1:2]"), ("a[1:2]", None)); // slice colon is inside brackets
         assert_eq!(split_spec("f(x):.2f"), ("f(x)", Some(".2f")));
+    }
+
+    #[test]
+    fn split_spec_bare_ternary_has_no_spec() {
+        // Chezzi's ternary `if cond: a else: b` is an expression whose top-level colons are NOT
+        // format-spec separators. A bare top-level ternary therefore carries no spec (regression
+        // guard: `{if b: 10 else: 20}` must keep working, not be mis-split into expr `if b`).
+        assert_eq!(split_spec("if b: 10 else: 20"), ("if b: 10 else: 20", None));
+        assert_eq!(split_spec("if x > 0: a else: b"), ("if x > 0: a else: b", None));
+        // A parenthesized ternary CAN carry a spec — the inner colons are bracketed (depth > 0),
+        // so only the trailing top-level colon splits.
+        assert_eq!(split_spec("(if b: 1 else: 2):>5"), ("(if b: 1 else: 2)", Some(">5")));
+        // `if` as a leading substring of an identifier is not the keyword — still splits normally.
+        assert_eq!(split_spec("iffy:>5"), ("iffy", Some(">5")));
     }
 }
