@@ -40,6 +40,13 @@ pub struct ChannelCore {
     /// scheduler: `--parallel` schedules a background `send(true)` + parks; cooperative VM / interp /
     /// callbacks inline-sleep to the deadline and synthesise `true`. `None` for an ordinary `Channel[T]`.
     pub timer: Option<std::time::Instant>,
+    /// `wait`-arm timed-park latch: set once (CAS false→true) when a `--parallel` `wait` arms the
+    /// background `send_wake(true)` for this timer channel, so a re-park of the SAME wait (woken with
+    /// no consumable value, e.g. a sibling `close` on another arm) does NOT arm a redundant second
+    /// job. A fresh `timer(ms)` builds a fresh core (`armed=false`), so no reset is needed; a reused
+    /// timer handle is still served by its single job (it wakes whatever token sits in this bucket at
+    /// the deadline). Only the snapshot-park path arms a job; the single-`recv` and demote paths don't.
+    pub timer_armed: AtomicBool,
 }
 
 /// The locked interior of a [`ChannelCore`]: the message FIFO plus a `closed` flag. Folding `closed`
