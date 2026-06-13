@@ -29,7 +29,7 @@ fn main():
             print("build failed: {e.message()}")
             return
 
-    benches := ["fib", "str", "primes", "loop", "list", "struct", "map", "empty"]
+    benches := ["fib", "str", "primes", "loop", "list", "struct", "poly_method", "map", "empty"]
     for name in benches:
         print("=== {name} ===")
         bench(name)

@@ -1,0 +1,59 @@
+# Polymorphic (megamorphic) method dispatch — four Shape implementors walked at one `.area()` call
+# site, plus a fifth type to overflow the 4-way method-IC into its sticky-generic slow path. The
+# small-iteration golden twin of benches/chz/poly_method.chz: pins two-engine (VM == interp) parity
+# on the N-way method-call inline cache. Each pass sums 9+8+10+7+0 = 34; prints 34 three times.
+
+protocol Shape:
+    fn area(self) -> int
+
+struct Sq:
+    s: int
+
+    fn area(self) -> int:
+        return self.s * self.s
+
+struct Rect:
+    w: int
+    h: int
+
+    fn area(self) -> int:
+        return self.w * self.h
+
+struct Tri:
+    b: int
+    hh: int
+
+    fn area(self) -> int:
+        return self.b * self.hh / 2
+
+struct Circ:
+    r: int
+
+    fn area(self) -> int:
+        return self.r + self.r + 1
+
+struct Line:
+    len: int
+
+    fn area(self) -> int:
+        return 0
+
+fn total(shapes: list[Shape]) -> int:
+    acc := 0
+    for s in shapes:
+        acc = acc + s.area()
+    return acc
+
+fn main():
+    shapes := []
+    shapes.push(Sq(3))      # 9
+    shapes.push(Rect(2, 4)) # 8
+    shapes.push(Tri(4, 5))  # 10
+    shapes.push(Circ(3))    # 7  (fills the 4th way)
+    shapes.push(Line(99))   # 0  (5th distinct type -> sticky-generic slow path)
+    i := 0
+    while i < 3:
+        print(total(shapes))
+        i += 1
+
+main()

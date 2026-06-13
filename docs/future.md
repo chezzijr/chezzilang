@@ -252,12 +252,14 @@ touching the value model or the GC.
 
 > **Status (2026-06-13):** Tier 1 is DONE — #1 method-IC (Phase 6) and #2 inline-hot-ops (Phase 7)
 > landed; #3 `Op::Call` spec was analyzed and **deferred (no-gain after the Phase 7 inline)**. Tier 2 is
-> underway — #4 adaptive quickening **v1 (binops) landed** and #5 **index specialization landed**
-> (`GetIndex`/`SetIndex` Int-key fast path). **Genuinely remaining:** the #4 *CallMethod* extension
-> (unify field/method caches under the quickening side-table — `GetIndex` is already covered by #5), a
-> **denser int-keyed `map`** representation (the `map` win #5 did not move — it's hash-probe-bound), and
-> the Tier-3 milestones (#6 JIT / #7 NaN-box (blocked) / #8 register VM). Per-lever tags below; landed
-> details + measured deltas in `PROGRESS.md` "Current focus" and `docs/benchmarks.md`.
+> underway — #4 adaptive quickening **v1 (binops) landed**, #5 **index specialization landed**
+> (`GetIndex`/`SetIndex` Int-key fast path), and the #4 *CallMethod* extension **landed (2026-06-13):
+> N-way polymorphic method-call IC + sticky-deopt + clone-free megamorphic slow path, `poly_method`
+> −33% (6.0× → 4.28× CPython)** — this unifies the field/method caches under one adaptive form.
+> **Genuinely remaining:** the **denser int-keyed `map`** representation **also landed (2026-06-13,
+> `map` −36%)**, so what's left is the Tier-3 milestones (#6 JIT / #7 NaN-box (blocked) / #8 register
+> VM). Per-lever tags below; landed details + measured deltas in `PROGRESS.md` "Current focus" and
+> `docs/benchmarks.md`.
 
 The M19 cheap batch + call-flatten + SSO are spent. Latest gap tracks **call density**: `loop` (no
 calls) **1.32×**, `primes` 2.53×, `str` 2.65×, `struct` 2.71×, `map` 2.83×, `list` 2.97×, `fib` (all
@@ -287,7 +289,7 @@ gap but a JIT is the only path to *match/beat* it on tight compute.
 
 **Tier 2 — structural, medium→large:**
 
-4. **🟦 v1 LANDED (2026-06-13); CallMethod extension remaining.** **Adaptive opcode quickening (PEP 659)** *(the single most CPython-like lever)*. v1 specializes the un-fused generic binop arms (`Add..GtEq`, `Eq`/`NotEq`) to an int/int fast path behind a per-`Vm`, per-site `(proto,ip)` deopt guard (side table `quicken`/`quicken_base`, mirrors `field_ic`/`method_ic` — no `Op`/compiler/interp change ⇒ parity by construction). Measured **`primes` −7–8%**. **Remaining:** extend the same side-table to **`CallMethod`** to unify field/method caches under one adaptive form (`GetIndex` is already covered by #5). After an op runs once, rewrite-in-place to a type-specialized form behind a deopt guard. **Constraint
+4. **✅ v1 + CallMethod extension LANDED (2026-06-13).** **Adaptive opcode quickening (PEP 659)** *(the single most CPython-like lever)*. v1 specializes the un-fused generic binop arms (`Add..GtEq`, `Eq`/`NotEq`) to an int/int fast path behind a per-`Vm`, per-site `(proto,ip)` deopt guard (side table `quicken`/`quicken_base`, mirrors `field_ic`/`method_ic` — no `Op`/compiler/interp change ⇒ parity by construction). Measured **`primes` −7–8%**. **CallMethod extension (done):** the method-call IC's single `MethodIcCell` is widened to an N-way (4-way) `MethodIcSite` carrying the *same* one-way sticky-deopt discipline — a bounded-megamorphic site (≤4 receiver types) HITS a way per type and flattens; a 5th distinct type latches `sticky` and goes slow (now clone-free: borrows `Arc<Program>.structs` instead of cloning the whole `StructDef`). This **unifies** the field+method caches under one adaptive form (`GetIndex` is already covered by #5). Measured **`poly_method` −33% (6.0× → 4.28× CPython)** on a new megamorphic bench; side table still int-only (no `GcRef`) ⇒ parity by construction. After an op runs once, rewrite-in-place to a type-specialized form behind a deopt guard. **Constraint
    (same one P2b/P4 hit):** bytecode is shared `Arc<Program>` read-only across `--parallel` workers, so
    quickened cells must live in a per-`Vm` side table keyed by site, not mutate the `Op`.
 5. **✅ DONE (2026-06-12).** **map/list index specialization** *(`list` −4%; `map` neutral — it's FxHashMap-probe-bound, not dispatch-bound, so the predicted `map` win needs a **denser int-keyed map** representation, a separate lever, not this tweak)*. `GetIndex`/`SetIndex`
@@ -302,11 +304,10 @@ gap but a JIT is the only path to *match/beat* it on tight compute.
 8. **Register VM / generational+incremental GC — low ROI** (dispatch is already near the match floor; GC
    moves no bench). Deprioritized; revisit only if a real workload proves otherwise.
 
-**Sequencing (updated 2026-06-13):** Tier 1 is **done** (#1, #2 landed; #3 deferred), and Tier 2 #4-v1
-+ #5 are **landed**. The next concrete perf steps, in order: **(a) `CallMethod` adaptive quickening**
-(the remaining #4 extension — unify the method cache under the side-table), then **(b) a denser
-int-keyed `map`** representation (the only thing that moves the hash-probe-bound `map` bench). After
-those, the high-ceiling play is **#6 (Cranelift method-JIT)** as the JIT end-game (#7 NaN-box stays
+**Sequencing (updated 2026-06-13):** Tier 1 is **done** (#1, #2 landed; #3 deferred), and Tier 2 is
+**done** — #4 (v1 binops **and** the `CallMethod` N-way extension) + #5 (index spec **and** the denser
+int-keyed `map`) all landed. With both the `CallMethod` adaptive quickening and the denser `map`
+shipped, the high-ceiling play left is **#6 (Cranelift method-JIT)** as the JIT end-game (#7 NaN-box stays
 blocked; #8 register VM / gen-GC stays low-ROI). All steps: behavior-preserving, two-engine-parity-clean,
 measure-first, each targeting a named bench.
 
