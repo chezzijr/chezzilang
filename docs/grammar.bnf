@@ -69,7 +69,7 @@
 
 <returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <expr> "NEWLINE"
 
-# `yield <expr>` (experimental generators, VM-only) — always carries a value. Legal only inside a
+# `yield <expr>` (generators, VM-only) — always carries a value. Legal only inside a
 # function declaring `-> Iterator[T]` (checker-enforced, not grammar). Suspends the generator.
 <yieldStmt> ::= "YIELD" <expr> "NEWLINE"
 

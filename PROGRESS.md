@@ -400,9 +400,9 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
 recoverable fault; binary work → a future `bytes` *sequence*, no `byte`/`u8` scalar). **Level-3 dynamic
 C-ABI FFI is NO LONGER a non-goal — v1 shipped** (`extern "lib":` scalar calls via dlopen+libffi;
 structs/callbacks/varargs/userdata still deferred — see "Done" below). **`yield`/generators are likewise
-no longer a non-goal — experimental VM-only support shipped** (see below).
+no longer a non-goal — complete VM-only support shipped** (see below).
 
-> **`yield`/generators — experimental, VM-only (landed on `feat/yield-generators`).** No longer a
+> **`yield`/generators — complete, VM-only (landed on `feat/yield-generators`).** No longer a
 > non-goal: a `fn` declaring `-> Iterator[T]` may `yield`; the call returns a suspendable generator
 > (a one-shot cooperative coroutine — its own private frame/stack swapped into the VM, resumed by an
 > intrinsic `.next()` that the `for`-loop step drives). VM-only: the frozen interpreter rejects

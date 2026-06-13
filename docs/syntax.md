@@ -239,7 +239,7 @@ first_or("hi", "?")        # "h"  (T = str)
 # Lazy sequences are normally built as adapter structs over this protocol (Rust-style; see
 # examples/iter_adapters.chz for Take/Mapped) — the parity-clean, recommended form.
 
-# `yield` / generators (EXPERIMENTAL, VM-only — the interpreter rejects `yield`). A fn that declares
+# `yield` / generators (VM-only — the frozen interpreter rejects `yield`, so parity is waived). A fn that declares
 # `-> Iterator[T]` and uses `yield` is a generator: calling it returns a suspendable iterator, not a
 # value. It runs lazily, suspending at each `yield` and resuming on the next `.next()`.
 fn count_up(n: int) -> Iterator[int]:
@@ -980,9 +980,16 @@ fn fetch_all(urls: list[str]):
   completion with **`for v in ch:`** — it blocks per value and ends cleanly once closed-and-drained
   (Go's `for v := range ch`). Values **move/copy** across the boundary; the sender can't reuse a sent
   value.
-- **`Shared[T]`** — the cross-task mutable box: `s.get()`, `s.set(v)`, `s.update(fn(x): ...)`. The
-  ladder is `value` (copied) → `Ref[T]` (in-task) → `Shared[T]` (cross-task). `Ref` is **not**
-  sendable; `Shared` is.
+- **`Ref[T]`** (`import std.ref`) — the **in-task** mutable box: `Ref(v)` then `r.get() -> T`,
+  `r.set(v)`, `r.update(fn(x): ...)`. Backed by `Rc<RefCell>`, so it is a true *shared reference*
+  within one task: a closure that closes over a `Ref[T]` and any other holder see each other's writes
+  — the answer to "I need a mutable value to close over or pass by reference" without hand-rolling a
+  one-field struct. It is **not sendable**: copying a `Ref` across a `spawn`/`submit` would silently
+  duplicate the box, so the checker rejects it (`non-sendable value of type Ref[T]`). Cross a task
+  boundary with `Shared[T]` instead.
+- **`Shared[T]`** — the cross-task mutable box, same `s.get()` / `s.set(v)` / `s.update(fn(x): ...)`
+  API as `Ref` but synchronized and **sendable**. The mutation ladder is `value` (copied) →
+  `Ref[T]` (in-task, unsynchronized) → `Shared[T]` (cross-task, synchronized).
 - **`Atomic[T]`** — the cross-task **atomic** box (sibling of `Shared`, sendable handle, value-first
   `Atomic(v)`): `a.load()`, `a.store(v)`, `a.exchange(v) -> T` (returns old), `a.cas(expected, new) ->
   bool`, and on numeric `T` `a.add(x) -> T` / `a.sub(x) -> T` (return the new value; checked-overflow
@@ -990,14 +997,14 @@ fn fetch_all(urls: list[str]):
   arbitrary-transform updates.
 - **`timer(ms) -> Channel[bool]`** — a one-shot timeout channel: `timer(500).recv()` blocks ~500ms then
   yields `true` (level-triggered — ready on any recv at/after the deadline). The composable timeout
-  primitive; once `wait` lands it races against real channels (`recv_timeout` is just `wait` over a
-  channel and a `timer`).
+  primitive; it races against real channels inside a `wait:` — there is **no separate `recv_timeout`**
+  (a `wait` over a channel and a `timer` subsumes it).
 - **`wait:` (select)** — race several channel `recv`s; the first ready arm wins (source-order priority).
   `wait:` then arms `v := ch.recv():` (or `result = ch.recv():` / `_ := ch.recv():`), an optional
   non-blocking `else:` (must be last), and `timer` arms for timeouts. Recv-only (sends never block on
-  unbounded channels); a closed+empty arm is skipped; all-closed + no `else` faults. **Shipped on the
-  default engine + interpreter**; non-blocking arms also work under `--parallel`, but a `wait` that would
-  truly *block* under `--parallel` faults for now (the M:N multi-channel park is a follow-up). See
+  unbounded channels); a closed+empty arm is skipped; all-closed + no `else` faults. **Shipped on all
+  engines** — the cooperative default, the interpreter, and `--parallel` (the M:N multi-channel blocking
+  park, including `timer` arms, has landed). See
   [`concurrency.md §6d`](concurrency.md) and `examples/wait_select.chz`.
 - **Sendability:** captures are copies, **read-only** inside a task (reassign = error); only sendable
   types (scalars/str/containers+structs of sendable/`Channel`/`Shared`) cross — not closures, native

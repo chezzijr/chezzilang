@@ -12,6 +12,13 @@ Claude implements directly. Ship working, tested code each session.
 - Each compiler phase is its own module under `src/`. Keep modules focused.
 - Verify before claiming done: run the tests and the relevant `chezzi` subcommand, show real output.
 - Keep `PROGRESS.md` current after each session; commit in conventional, single-line messages.
+- **Docs are part of the change, not a follow-up.** When a change adds/alters/removes observable
+  behavior — syntax, stdlib/builtin surface, engine semantics, a flag, a limit lifted/added, or a perf
+  delta — update the affected `.md` in the **same commit**: `PROGRESS.md` always, plus as relevant
+  `docs/syntax.md`, `docs/spec.md`, `docs/grammar.bnf`, `docs/concurrency*.md`, `docs/future.md`,
+  `docs/benchmarks.md`. Grep the docs for any now-stale claim about what you changed (`deferred`,
+  `experimental`, `not yet`, `follow-up`, `mooted`) and fix or delete it. A green build with stale docs
+  is not done.
 - Match the existing code's style and patterns; reuse before adding new abstractions.
 
 ## Workflow per milestone

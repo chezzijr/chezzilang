@@ -72,8 +72,9 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 - **M16–M18** — **concurrency** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, real OS-thread M:N engine via `--parallel`, netpoller + `std.net`) and the **`defer`** statement (call + block forms, `recover:`-integrated). See [`docs/concurrency.md`](concurrency.md).
 
 **Non-goals (by design, never):** classes & inheritance — Chezzi is composition-only with
-structural `protocol`s, like Rust/Go (see *Locked decisions*). **`yield`/generators** — lazy sequences
-are adapter structs over `Iterator[T]` (Rust model), so no coroutine runtime is ever needed.
+structural `protocol`s, like Rust/Go (see *Locked decisions*). (**`yield`/generators** were once
+listed here as a non-goal; they have since shipped as a complete VM-only coroutine runtime — see
+below.)
 **Variadics** — neither variadic arguments (`fn log(*args)`) nor variadic generics (`Foo[T...]`):
 pass an explicit `list`, and generics are always fixed-arity. Default + named arguments cover the
 ergonomic cases variadics usually serve. **Spread/unpack syntax** (`[*a, *b]`, `{**m}`, `f(*args)`)
@@ -98,8 +99,8 @@ structs-by-value, callbacks, varargs, opaque pointers / userdata, and `char*` ow
 still deferred. See the FFI subsection below + [`docs/syntax.md`](syntax.md).
 
 **`yield`/generators** were originally a deliberate non-goal (lazy sequences are written as adapter
-structs over `Iterator[T]`, Rust's `Map`/`Take` model). They now exist as an **experimental,
-VM-only** feature: a `fn` declaring `-> Iterator[T]` may `yield` values; calling it returns a
+structs over `Iterator[T]`, Rust's `Map`/`Take` model). They are now a **complete, VM-only**
+feature: a `fn` declaring `-> Iterator[T]` may `yield` values; calling it returns a
 suspendable generator usable anywhere an `Iterator[T]` is (`for` loops, `Iterator[T]` bounds). It is
 VM-only — the frozen tree-walk interpreter rejects `yield` (it cannot suspend a native Rust call),
 so two-engine parity is **waived** for generators. The adapter-struct model remains the
@@ -212,7 +213,9 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
   `std.math` trig/exp/log intrinsics (`sin cos tan asin acos atan atan2 exp ln log2 log10 log`);
   pure-Chezzi `std.str` (`ends_with index_of count replace strip_prefix strip_suffix`) and `std.iter`
   (`take drop any all find flatten`) helpers.
-- **Later:** a first-class compiled `Regex` (still blocked on Level-3 **Userdata** below).
+- **Shipped:** whole-string `std.regex` (`is_match`, `find`, `find_all`, `replace_all`, `split` —
+  each takes the pattern as a string, compiled behind an internal cache). **Later:** a first-class
+  *compiled* `Regex` handle value (compile once, reuse) — still blocked on Level-3 **Userdata** below.
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 dynamic C-ABI v1 SHIPPED.** Because Chezzi is
 > written in Rust, the native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn

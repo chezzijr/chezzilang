@@ -339,7 +339,9 @@ Critical + Important findings before the completion claim.
   (`ChanState`) so the park-gap re-check is TOCTOU-free. See PROGRESS.md.
 - **M-C implicit nurseries** — shipped (2026-06-12): bare `spawn` legal anywhere; every function body /
   module top level joins its tasks at `return`/end. See `docs/concurrency.md §10`.
-- **Cross-nursery wakeups** ([§11](concurrency.md)) — mooted by real-thread blocking; M:N's flat run
-  queues may lift it for free.
+- **Cross-nursery wakeups** ([§11](concurrency.md)) — still a deferred limit on **both** engines.
+  (Was once "mooted by B3" real-thread blocking, but D2's M:N transition **un-mooted it**: `--parallel`
+  now parks fibers by snapshot into the level's park set, not by blocking a thread, so the level
+  scoping is back. See the corrected note in `concurrency.md §11`.)
 - **Priority classes** (BEAM) — deferred; revisit if priority becomes a requirement.
 - **Reduction constant tuning** (D3) — `CONTEXT_REDS` value + per-op vs per-back-edge accounting.
