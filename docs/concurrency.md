@@ -386,10 +386,23 @@ exhaustive (it's a runtime race, not a type match); ≥1 recv-arm is required.
    live arm channels and re-poll on the first wake.
 
 **Implementation notes.** *(Done on all three engines. A new `Op::WaitPoll` holds the N arm channel
-handles on the operand stack, polls source order, and jumps to the chosen arm's body / `else`,
-inline-sleeps to the soonest live `timer`, faults all-closed, or parks. The cooperative multi-channel park
+handles on the operand stack, polls source order, and jumps to the chosen arm's body / `else`, handles a
+live `timer` arm (see below), faults all-closed, or parks. The cooperative multi-channel park
 files the fiber under every key (`run_child` reads `wait_suspend`) and sweeps the index out of the other
 buckets on resume; the M:N park (below) does the same with an `Arc<WaitPark>` token.)*
+
+> **Timer arm under `--parallel` — timed-park, not inline-sleep.** A live `timer(ms)` arm is handled
+> differently per engine. The cooperative VM + interp are single-threaded, so they **inline-sleep** to the
+> soonest deadline then take the timer arm — nothing can `send` during the sleep, so the source-order
+> "first ready wins" rule is preserved. The M:N engine (`--parallel`) must **not** inline-sleep: that would
+> pin the OS worker and strand a sibling `send` that lands mid-window. Instead it arms **one** background
+> `timer::submit_at(deadline, send_wake(true))` on the soonest timer arm's own channel (guarded by an
+> arm-once `ChannelCore.timer_armed` CAS so a re-park can't re-arm) and falls through to the normal
+> snapshot-park, so the timer is just another bucket. The `WaitPark` claimed-CAS sweep then picks **exactly
+> one** of {a sibling `send`/`close` on any arm, the timer's own deadline `send_wake`} — a value arriving
+> before the deadline wins the wait (the value is **not** stranded), the deadline wins only if nothing else
+> did. The `native_reentry > 0` demote path threads the deadline into its bounded poll (channel scan first,
+> so a real send still beats the timer).
 - *Non-blocking* (`else` present) and the *poll* step reuse the existing `try_recv` path (a timer arm's
   `try_recv` is already deadline-aware) — straightforward in all engines. **(Done.)**
 - *Blocking* (no `else`) needs a **multi-channel park** — **done in both schedulers.** A fiber parks in one
