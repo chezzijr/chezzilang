@@ -19,6 +19,7 @@ mod native;
 mod parser;
 mod resolver;
 mod runtime;
+mod slice;
 mod vm;
 
 #[cfg(test)]

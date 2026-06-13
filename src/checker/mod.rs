@@ -1974,10 +1974,12 @@ impl Checker {
             Ty::Struct(name, targs) => {
                 let info = self.structs.get(name)?;
                 let sig = info.methods.get("slice")?;
-                // The `Slice` protocol fixes the bounds: `slice(self, int, int) -> R`. Both engines
-                // pass int start/end, so a non-conforming signature (wrong arity or non-int bounds)
-                // is not a valid `Slice` impl — reject rather than green-light a runtime crash.
-                if sig.params.len() != 3 || sig.params[1] != Ty::Int || sig.params[2] != Ty::Int {
+                // The `Slice` protocol fixes the bounds: `slice(self, int? , int?, int?) -> R`.
+                // Both engines always pass three `Option[int]` components (start/end/step, each
+                // `None` when omitted), so a non-conforming signature (wrong arity or non-`int?`
+                // bounds) is not a valid `Slice` impl — reject rather than green-light a crash.
+                let opt_int = Ty::option(Ty::Int);
+                if sig.params.len() != 4 || sig.params[1..=3].iter().any(|p| *p != opt_int) {
                     return None;
                 }
                 let map = struct_param_map(info, targs);
@@ -2705,7 +2707,13 @@ impl Checker {
             }
             ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner),
             ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
-            ExprKind::Slice { obj, start, end } => self.infer_slice(obj, start, end, expr.span),
+            ExprKind::Slice { obj, start, end, step } => self.infer_slice(
+                obj,
+                start.as_deref(),
+                end.as_deref(),
+                step.as_deref(),
+                expr.span,
+            ),
             ExprKind::Range { start, end } => {
                 self.expect_int(start, "range bound");
                 self.expect_int(end, "range bound");
@@ -3151,11 +3159,21 @@ impl Checker {
         Some((k, v))
     }
 
-    /// Type `obj[start..end]`. Bounds must be `int`; the result type follows the `Slice` protocol —
-    /// `list[T] → list[T]`, `str → str`, or a struct's `slice(self, int, int) -> R`.
-    fn infer_slice(&mut self, obj: &Expr, start: &Expr, end: &Expr, span: Span) -> Ty {
-        self.expect_int(start, "slice bound");
-        self.expect_int(end, "slice bound");
+    /// Type `obj[start:end:step]`. Each *present* component must be `int`; the result type follows the
+    /// `Slice` protocol — `list[T] → list[T]`, `str → str`, or a struct's
+    /// `slice(self, int?, int?, int?) -> R`.
+    fn infer_slice(
+        &mut self,
+        obj: &Expr,
+        start: Option<&Expr>,
+        end: Option<&Expr>,
+        step: Option<&Expr>,
+        span: Span,
+    ) -> Ty {
+        // Only the *present* components are constrained to int; an omitted bound/step is `None`.
+        for comp in [start, end, step].into_iter().flatten() {
+            self.expect_int(comp, "slice bound");
+        }
         let obj_ty = self.infer(obj);
         if obj_ty.is_unknown() {
             return Ty::Unknown;
@@ -5215,10 +5233,11 @@ fn collect_free_calls_expr(
             collect_free_calls_expr(obj, fns, scopes, out);
             collect_free_calls_expr(index, fns, scopes, out);
         }
-        ExprKind::Slice { obj, start, end } => {
+        ExprKind::Slice { obj, start, end, step } => {
             collect_free_calls_expr(obj, fns, scopes, out);
-            collect_free_calls_expr(start, fns, scopes, out);
-            collect_free_calls_expr(end, fns, scopes, out);
+            for c in [start, end, step].into_iter().flatten() {
+                collect_free_calls_expr(c, fns, scopes, out);
+            }
         }
         ExprKind::Try(inner) => collect_free_calls_expr(inner, fns, scopes, out),
         ExprKind::OptChain { obj, call, .. } => {
@@ -5423,10 +5442,11 @@ fn find_mutations_in_expr(
             find_mutations_in_expr(obj, globals, scopes, out);
             find_mutations_in_expr(index, globals, scopes, out);
         }
-        ExprKind::Slice { obj, start, end } => {
+        ExprKind::Slice { obj, start, end, step } => {
             find_mutations_in_expr(obj, globals, scopes, out);
-            find_mutations_in_expr(start, globals, scopes, out);
-            find_mutations_in_expr(end, globals, scopes, out);
+            for c in [start, end, step].into_iter().flatten() {
+                find_mutations_in_expr(c, globals, scopes, out);
+            }
         }
         ExprKind::Try(inner) => find_mutations_in_expr(inner, globals, scopes, out),
         ExprKind::OptChain { obj, call, .. } => {
@@ -5597,7 +5617,12 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             type_params: vec!["R".to_string()],
             methods: vec![(
                 "slice".to_string(),
-                FnSig::plain(vec![Ty::Unknown, Ty::Int, Ty::Int], Ty::Param("R".into())),
+                // Python-style: three `Option[int]` components (start/end/step), each `None` when
+                // omitted. Both engines always pass all three explicitly.
+                FnSig::plain(
+                    vec![Ty::Unknown, Ty::option(Ty::Int), Ty::option(Ty::Int), Ty::option(Ty::Int)],
+                    Ty::Param("R".into()),
+                ),
             )],
         },
     );

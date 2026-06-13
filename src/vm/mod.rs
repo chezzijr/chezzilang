@@ -8934,19 +8934,25 @@ impl Vm {
         }
     }
 
-    /// `obj[start..end]` — bounds-clamped half-open copy of a list/str, or a struct's `slice`.
+    /// `obj[start:end:step]` — Python-style slice copy of a list/str, or a struct's `slice`. Each
+    /// component arrives as `Nil` (omitted → `None`) or `Int`; the shared `slice::slice_indices`
+    /// resolver owns all the clamp/step/reverse math (byte-identical with the interpreter).
     fn get_slice(&mut self, span: Span) -> Result<(), RuntimeError> {
+        let step = self.pop();
         let end = self.pop();
         let start = self.pop();
         let obj = self.pop();
-        let s = match start {
-            Value::Int(n) => n,
-            other => return Err(self.err(format!("expected int, found {}", self.type_name(other)), span)),
+        // Each component is `Nil` (omitted) → `None`, or an `Int` → `Some`. Anything else faults.
+        let comp = |vm: &Vm, v: Value| -> Result<Option<i64>, RuntimeError> {
+            match v {
+                Value::Nil => Ok(None),
+                Value::Int(n) => Ok(Some(n)),
+                other => Err(vm.err(format!("expected int, found {}", vm.type_name(other)), span)),
+            }
         };
-        let e = match end {
-            Value::Int(n) => n,
-            other => return Err(self.err(format!("expected int, found {}", self.type_name(other)), span)),
-        };
+        let s = comp(self, start)?;
+        let e = comp(self, end)?;
+        let st = comp(self, step)?;
         let Value::Obj(h) = obj else {
             return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span));
         };
@@ -8958,13 +8964,13 @@ impl Vm {
         }
         let sliced = match self.heap.get(h) {
             Obj::List(items) => {
-                let (lo, hi) = clamp_range(s, e, items.len());
-                Sliced::List(items[lo..hi].to_vec())
+                let idxs = crate::slice::slice_indices(s, e, st, items.len()).map_err(|m| self.err(m.to_string(), span))?;
+                Sliced::List(idxs.iter().map(|&i| items[i]).collect())
             }
             Obj::Str(string) => {
                 let chars: Vec<char> = string.chars().collect();
-                let (lo, hi) = clamp_range(s, e, chars.len());
-                Sliced::Str(chars[lo..hi].iter().collect())
+                let idxs = crate::slice::slice_indices(s, e, st, chars.len()).map_err(|m| self.err(m.to_string(), span))?;
+                Sliced::Str(idxs.iter().map(|&i| chars[i]).collect())
             }
             Obj::Struct { .. } => Sliced::Struct,
             _ => return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span)),
@@ -8983,7 +8989,19 @@ impl Vm {
                 self.push(Value::Obj(nh));
             }
             Sliced::Struct => {
-                let v = self.dispatch_index_method(h, "slice", vec![obj, Value::Int(s), Value::Int(e)], span)?;
+                // The `slice` protocol takes three `Option[int]` components — pass real `Option`
+                // values (`None`/`Some(n)`) so the user body can `match`/`??` them. Root `obj`
+                // across the enum allocs (it's the only reference keeping the receiver alive).
+                self.push(obj);
+                let opt = |vm: &mut Vm, c: Option<i64>| match c {
+                    None => vm.alloc_enum("Option", "None", Vec::new()),
+                    Some(n) => vm.alloc_enum("Option", "Some", vec![Value::Int(n)]),
+                };
+                let s_v = opt(self, s);
+                let e_v = opt(self, e);
+                let st_v = opt(self, st);
+                self.pop();
+                let v = self.dispatch_index_method(h, "slice", vec![obj, s_v, e_v, st_v], span)?;
                 self.push(v);
             }
         }
@@ -9036,7 +9054,7 @@ impl Vm {
         if let Value::Int(n) = key {
             match self.heap.get(h) {
                 Obj::List(items) => {
-                    return match usize::try_from(n).ok().and_then(|i| items.get(i).copied()) {
+                    return match crate::slice::norm_index(n, items.len()).map(|i| items[i]) {
                         Some(v) => {
                             self.push(v);
                             Ok(())
@@ -9069,7 +9087,7 @@ impl Vm {
         match self.heap.get(h) {
             Obj::List(items) => {
                 let idx = int_idx(self)?;
-                let v = usize::try_from(idx).ok().and_then(|i| items.get(i).copied());
+                let v = crate::slice::norm_index(idx, items.len()).map(|i| items[i]);
                 match v {
                     Some(v) => {
                         self.push(v);
@@ -9081,7 +9099,7 @@ impl Vm {
             Obj::Str(s) => {
                 let idx = int_idx(self)?;
                 let chars: Vec<char> = s.chars().collect();
-                match usize::try_from(idx).ok().and_then(|i| chars.get(i).copied()) {
+                match crate::slice::norm_index(idx, chars.len()).map(|i| chars[i]) {
                     Some(c) => {
                         let nh = self.alloc_char(c);
                         self.push(nh);
@@ -9202,7 +9220,7 @@ impl Vm {
             other => return Err(self.err(format!("expected int, found {}", self.type_name(other)), span)),
         };
         match self.heap.get_mut(h) {
-            Obj::List(items) => match usize::try_from(idx).ok().filter(|i| *i < items.len()) {
+            Obj::List(items) => match crate::slice::norm_index(idx, items.len()) {
                 Some(i) => {
                     items[i] = val;
                     Ok(())
@@ -10053,15 +10071,6 @@ fn is_numeric(v: Value) -> bool {
     matches!(v, Value::Int(_) | Value::Float(_))
 }
 
-/// Clamp a half-open `start..end` slice to a length-`len` sequence: both bounds clamp into
-/// `[0, len]`, `start > end` collapses to empty. Returns `(lo, hi)` with `lo <= hi <= len`.
-/// Mirrors `interp::clamp_range` (the two engines keep byte-identical slice semantics).
-fn clamp_range(start: i64, end: i64, len: usize) -> (usize, usize) {
-    let len_i = len as i64;
-    let lo = start.clamp(0, len_i) as usize;
-    let hi = end.clamp(0, len_i) as usize;
-    (lo, hi.max(lo))
-}
 
 fn as_f64(v: Value) -> f64 {
     match v {
@@ -17424,10 +17433,10 @@ fn main():
         n += 1
     print(n)
 
-    # range-slice producing results on both sides of the boundary (slice itself allocs a str)
-    print(c[0..22])                   # 22 bytes — inline
-    print(c[0..23])                   # 23 bytes — heap
-    print(ab[0..22])
+    # slice producing results on both sides of the boundary (slice itself allocs a str)
+    print(c[0:22])                    # 22 bytes — inline
+    print(c[0:23])                    # 23 bytes — heap
+    print(ab[0:22])
 
     # case-fold can change byte length, straddling the boundary either way
     print(b.upper())                  # 22 ascii → 22, inline
@@ -20121,15 +20130,39 @@ main()";
 
     #[test]
     fn slice_list_and_str_parity() {
-        assert_parity_out("print([1, 2, 3, 4, 5][1..3])\n", "[2, 3]\n");
-        assert_parity_out("print(\"hello\"[0..2])\n", "he\n");
+        assert_parity_out("print([1, 2, 3, 4, 5][1:3])\n", "[2, 3]\n");
+        assert_parity_out("print(\"hello\"[0:2])\n", "he\n");
+        // Open bounds + step + reverse — both engines byte-identical.
+        assert_parity_out("print([1, 2, 3, 4, 5][2:])\n", "[3, 4, 5]\n");
+        assert_parity_out("print([1, 2, 3, 4, 5][:2])\n", "[1, 2]\n");
+        assert_parity_out("print([1, 2, 3, 4, 5][::2])\n", "[1, 3, 5]\n");
+        assert_parity_out("print([1, 2, 3, 4, 5][::-1])\n", "[5, 4, 3, 2, 1]\n");
+        assert_parity_out("print(\"hello\"[::-1])\n", "olleh\n");
+        // Multibyte UTF-8 must round-trip through char-stepping (SSO/heap boundary) on both engines.
+        assert_parity_out("print(\"héllo\"[::-1])\n", "olléh\n");
+        assert_parity_out("print(\"héllo\"[1:3])\n", "él\n");
     }
 
     #[test]
     fn slice_clamped_parity() {
-        assert_parity_out("print([1, 2, 3][1..99])\n", "[2, 3]\n");
-        assert_parity_out("print([1, 2, 3][2..1])\n", "[]\n");
-        assert_parity_out("print([1, 2, 3][-1..2])\n", "[1, 2]\n");
+        assert_parity_out("print([1, 2, 3][1:99])\n", "[2, 3]\n");
+        assert_parity_out("print([1, 2, 3][2:1])\n", "[]\n");
+        // Negative bound counts from the end (Python): [-1:2] -> start=2,end=2 -> [].
+        assert_parity_out("print([1, 2, 3][-1:2])\n", "[]\n");
+        assert_parity_out("print([1, 2, 3, 4, 5][-2:])\n", "[4, 5]\n");
+        // Slice bounds CLAMP (no fault) even far out of range...
+        assert_parity_out("print([1, 2, 3][-100:])\n", "[1, 2, 3]\n");
+        // ...but a plain out-of-range negative index FAULTS, byte-identically.
+        assert_parity("print([1, 2, 3][0 - 100])\n");
+        // Zero step faults with the same message in both engines.
+        assert_parity("print([1, 2, 3][::0])\n");
+    }
+
+    #[test]
+    fn negative_index_parity() {
+        assert_parity_out("print([10, 20, 30][-1])\n", "30\n");
+        assert_parity_out("print(\"hello\"[-2])\n", "l\n");
+        assert_parity_out("xs := [1, 2, 3]\nxs[-1] = 99\nprint(xs[2])\n", "99\n");
     }
 
     const BUF_PROG: &str = "\
@@ -20139,8 +20172,17 @@ struct Buf:
         return self.xs[key]
     fn set_index(self, key: int, val: int):
         self.xs[key] = val
-    fn slice(self, start: int, end: int) -> list[int]:
-        return self.xs[start..end]
+    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> list[int]:
+        match (start, end, step):
+            (Some(s), Some(e), Some(c)): return self.xs[s:e:c]
+            (Some(s), Some(e), None): return self.xs[s:e]
+            (Some(s), None, Some(c)): return self.xs[s::c]
+            (Some(s), None, None): return self.xs[s:]
+            (None, Some(e), Some(c)): return self.xs[:e:c]
+            (None, Some(e), None): return self.xs[:e]
+            (None, None, Some(c)): return self.xs[::c]
+            (None, None, None): return self.xs[:]
+            _: return self.xs[:]
 fn main():
     b := Buf([10, 20, 30])
     print(b[0])
@@ -20148,19 +20190,21 @@ fn main():
     print(b[1])
     b[0] += 5
     print(b[0])
-    print(b[0..2])
+    print(b[0:2])
+    print(b[:])
+    print(b[::-1])
 main()";
 
     #[test]
     fn struct_index_slice_dispatch_parity() {
-        assert_parity_out(BUF_PROG, "10\n99\n15\n[15, 99]\n");
+        assert_parity_out(BUF_PROG, "10\n99\n15\n[15, 99]\n[15, 99, 30]\n[30, 99, 15]\n");
     }
 
     #[test]
     fn slice_survives_gc_stress() {
         // The sliced list shares the source's element handles; a GC during the slice alloc must not
         // collect them. (Source is an inline temporary, unrooted except by the slice path.)
-        let src = "print([1, 2, 3, 4, 5][1..4])\n";
+        let src = "print([1, 2, 3, 4, 5][1:4])\n";
         assert_parity(src);
         assert_eq!(run_capture_stress(src), "[2, 3, 4]\n", "slice elements not GC-rooted?");
     }

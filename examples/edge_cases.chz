@@ -95,14 +95,21 @@ fn collections():
 fn slicing():
     print("-- slicing --")
     xs := [10, 20, 30, 40, 50]
-    print(xs[1..3])                   # [20, 30]
-    print(xs[0..99])                  # clamps to len
-    print(xs[3..1])                   # start > end -> []
-    print(xs[2..2])                   # empty
+    print(xs[1:3])                    # [20, 30]
+    print(xs[0:99])                   # clamps to len
+    print(xs[3:1])                    # start > end -> []
+    print(xs[2:2])                    # empty
+    print(xs[2:])                     # open end -> [30, 40, 50]
+    print(xs[:2])                     # open start -> [10, 20]
+    print(xs[::2])                    # step -> [10, 30, 50]
+    print(xs[::-1])                   # reverse -> [50, 40, 30, 20, 10]
+    print(xs[-2:])                    # negative bound -> [40, 50]
+    print(xs[-1])                     # negative index -> 50
     s := "hello"
-    print(s[0..2])                    # he
-    print(s[1..99])                   # ello
+    print(s[0:2])                     # he
+    print(s[1:99])                    # ello
     print(s[2])                       # single char -> "l"
+    print(s[::-1])                    # olleh
 
 # ---- index faults (caught) ----------------------------------------------------------------------
 
@@ -110,8 +117,10 @@ fn f_oob() -> int:
     xs := [1, 2, 3]
     return xs[9]
 fn f_neg() -> int:
+    # A negative index counts from the end (`xs[-1]` is the last element); only an
+    # *out-of-range* negative faults — the Python asymmetry (slice bounds clamp, plain index faults).
     xs := [1, 2, 3]
-    return xs[0 - 1]
+    return xs[0 - 100]
 fn f_stroob() -> int:
     s := "ab"
     return ord(s[5])

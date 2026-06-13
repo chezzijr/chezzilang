@@ -18,6 +18,21 @@ parity green, re-measure, record the delta in [`docs/benchmarks.md`](docs/benchm
 moved a *different* bench than predicted — trust the measurement, not the a-priori guess. The frozen
 interp is untouched by VM-only work, so parity is automatic for those changes.
 
+**Slice syntax → Python colon (owner-requested language change, mid-M19).** The subscript-slice form
+moved from Rust-range `xs[a..b]` to Python `xs[a:b]` with the full surface: open bounds (`xs[1:]`,
+`xs[:3]`, `xs[:]`), step (`xs[a:b:c]`), reverse (`xs[::-1]`), and **negative indexing** (`xs[-1]`,
+`xs[-2:]`) on plain index AND slice bounds, for `list`/`str` and as an assignment target (`xs[-1] = v`).
+Out-of-range rule = Python's asymmetry: a plain `xs[-100]` **faults** (`index -100 out of bounds (len N)`),
+a slice bound `xs[-100:]` **clamps**. The `..` operator is unchanged — it stays the for-loop / match-pattern
+range. The parser owns the colon (`parser::parse_subscript`, replacing the old post-hoc Range→Slice rewrite);
+`ExprKind::Slice` now carries `start/end/step: Option<Box<Expr>>`. Runtime is a single shared resolver
+(`src/slice.rs`: `slice_indices` + `norm_index`, derived from CPython `slice.indices`) called byte-identically
+by both engines — it replaced the duplicated `clamp_range`. User `Slice` structs get the full surface via
+default params: `slice(self, start: int?=None, end: int?=None, step: int?=None) -> R` (the runtime passes
+real `Option[int]` components). Strict TDD, both-engine parity green, `examples/slicing.chz` +
+`examples/edge_cases.chz` + `std/str.chz` migrated, `docs/grammar.bnf` colon-slice rule + `cargo test
+conformance` green.
+
 **Landed phases** (all TDD'd, two-engine-parity-clean; numbers + per-lever notes in
 [`docs/benchmarks.md`](docs/benchmarks.md), ranked backlog in [`docs/future.md §4`](docs/future.md)):
 
@@ -549,8 +564,12 @@ branch names) is in the git log.
   `defer` statement.
 - ✅ **M16 — comprehensions + `std.os.exit(code)`** — `[e for x in it if g]` (+ set/map forms),
   first-class AST node; hard uncatchable cooperative exit.
-- ✅ **M15 — slicing + `Index`/`IndexSet`/`Slice` protocols** — `xs[1..3]` half-open/clamped; list/map/str
-  intrinsic, user structs structural.
+- ✅ **M15 — slicing + `Index`/`IndexSet`/`Slice` protocols** — **Python-style** `xs[a:b:c]` (open bounds,
+  step, reverse `[::-1]`, bounds-clamped) + **negative indexing** `xs[-1]` (plain index faults out of range,
+  slice bounds clamp — Python's asymmetry); the `..` operator stays the for-loop/match range. list/map/str
+  intrinsic, user structs structural via `slice(self, start: int?=None, end: int?=None, step: int?=None)`.
+  (Originally shipped as Rust-range `xs[a..b]`; migrated to colon syntax — see "Slice syntax → Python colon"
+  below.)
 - ✅ **M14 — method-level type params** · user-defined parameterized protocols · default + named args on
   methods (desugar-pass).
 - ✅ **Default + named arguments** — free fns + struct ctors; scope-aware desugar pass, both engines

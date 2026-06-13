@@ -420,12 +420,14 @@ pub enum ExprKind {
         obj: Box<Expr>,
         index: Box<Expr>,
     },
-    /// `obj[start..end]` — half-open slice. Emitted when the subscript is a `..` range (distinct
-    /// from `Index` so the `Slice` protocol dispatches separately from `Index`).
+    /// `obj[start:end:step]` — Python-style slice. Emitted when the subscript holds at least one
+    /// `:` (distinct from `Index` so the `Slice` protocol dispatches separately). Each of
+    /// `start`/`end`/`step` is `None` when the component is omitted (`xs[:]`, `xs[1:]`, `xs[::2]`).
     Slice {
         obj: Box<Expr>,
-        start: Box<Expr>,
-        end: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        step: Option<Box<Expr>>,
     },
     /// postfix `expr?` — error propagation.
     Try(Box<Expr>),
@@ -582,10 +584,11 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
             go(obj);
             go(index);
         }
-        ExprKind::Slice { obj, start, end } => {
+        ExprKind::Slice { obj, start, end, step } => {
             go(obj);
-            go(start);
-            go(end);
+            for c in [start, end, step].into_iter().flatten() {
+                expr_recover_blocks(c, out);
+            }
         }
         ExprKind::OptChain { obj, call, .. } => {
             go(obj);

@@ -1402,22 +1402,7 @@ impl Parser {
                         Some(call) => call,
                         None => {
                             self.advance(); // '['
-                            let index = self.parse_expr()?;
-                            self.expect(&Token::RBracket)?;
-                            // A `..` range subscript is a slice; anything else is a plain index.
-                            match index.kind {
-                                ExprKind::Range { start, end } => Expr {
-                                    kind: ExprKind::Slice { obj: Box::new(e), start, end },
-                                    span,
-                                },
-                                _ => Expr {
-                                    kind: ExprKind::Index {
-                                        obj: Box::new(e),
-                                        index: Box::new(index),
-                                    },
-                                    span,
-                                },
-                            }
+                            self.parse_subscript(e, span)?
                         }
                     }
                 }
@@ -1457,6 +1442,49 @@ impl Parser {
             };
         }
         Ok(e)
+    }
+
+    /// Parse the inside of a subscript `[ ... ]` (the `[` already consumed) and the closing `]`,
+    /// producing either an `Index` (no `:`) or a `Slice` (one or two `:`). Grammar:
+    /// `[ expr? ( ':' expr? ( ':' expr? )? )? ]`. The colon is unambiguous here — a map literal,
+    /// type annotation, or match arm `:` never appears inside a subscript bracket — so a context-local
+    /// colon parser replaces the old "parse one expr then inspect if it's a `..` Range" rewrite, and
+    /// naturally extends to a third (step) component the Range form could not express.
+    fn parse_subscript(&mut self, obj: Expr, span: Span) -> PResult<Expr> {
+        // A component is present iff the next token is not `:` or `]`.
+        let component = |p: &mut Self| -> PResult<Option<Box<Expr>>> {
+            if p.check(&Token::Colon) || p.check(&Token::RBracket) {
+                Ok(None)
+            } else {
+                Ok(Some(Box::new(p.parse_expr()?)))
+            }
+        };
+        let start = component(self)?;
+        // No colon → plain index. `xs[]` (empty) is rejected as a missing index.
+        if !self.check(&Token::Colon) {
+            self.expect(&Token::RBracket)?;
+            let index = start.ok_or_else(|| ParseError {
+                message: "expected an index expression".to_string(),
+                span,
+            })?;
+            return Ok(Expr {
+                kind: ExprKind::Index { obj: Box::new(obj), index },
+                span,
+            });
+        }
+        self.advance(); // first ':'
+        let end = component(self)?;
+        let step = if self.check(&Token::Colon) {
+            self.advance(); // second ':'
+            component(self)?
+        } else {
+            None
+        };
+        self.expect(&Token::RBracket)?;
+        Ok(Expr {
+            kind: ExprKind::Slice { obj: Box::new(obj), start, end, step },
+            span,
+        })
     }
 
     /// Parse a comma-separated argument list and the closing `)`, assuming the opening `(` has just
@@ -2423,6 +2451,92 @@ mod tests {
         ));
     }
 
+    /// Helper: is this Slice-component a literal int `n`?
+    fn is_int(c: &Option<Box<Expr>>, n: i64) -> bool {
+        matches!(c.as_deref(), Some(Expr { kind: ExprKind::Int(v), .. }) if *v == n)
+    }
+
+    #[test]
+    fn subscript_colon_parses_slice() {
+        // 0 colons → Index
+        match let_value("y := xs[2]\n").kind {
+            ExprKind::Index { .. } => {}
+            other => panic!("expected Index, got {other:?}"),
+        }
+        // xs[1:3] → Slice{Some(1), Some(3), None}
+        match let_value("y := xs[1:3]\n").kind {
+            ExprKind::Slice { start, end, step, .. } => {
+                assert!(is_int(&start, 1) && is_int(&end, 3) && step.is_none());
+            }
+            other => panic!("expected Slice, got {other:?}"),
+        }
+        // xs[1:] → {Some, None, None}
+        match let_value("y := xs[1:]\n").kind {
+            ExprKind::Slice { start, end, step, .. } => {
+                assert!(is_int(&start, 1) && end.is_none() && step.is_none());
+            }
+            other => panic!("expected Slice, got {other:?}"),
+        }
+        // xs[:3] → {None, Some, None}
+        match let_value("y := xs[:3]\n").kind {
+            ExprKind::Slice { start, end, step, .. } => {
+                assert!(start.is_none() && is_int(&end, 3) && step.is_none());
+            }
+            other => panic!("expected Slice, got {other:?}"),
+        }
+        // xs[:] → all None
+        match let_value("y := xs[:]\n").kind {
+            ExprKind::Slice { start, end, step, .. } => {
+                assert!(start.is_none() && end.is_none() && step.is_none());
+            }
+            other => panic!("expected Slice, got {other:?}"),
+        }
+        // xs[1:5:2] → {Some, Some, Some}
+        match let_value("y := xs[1:5:2]\n").kind {
+            ExprKind::Slice { start, end, step, .. } => {
+                assert!(is_int(&start, 1) && is_int(&end, 5) && is_int(&step, 2));
+            }
+            other => panic!("expected Slice, got {other:?}"),
+        }
+        // xs[::-1] → {None, None, Some(-1)}  (unary minus on 1)
+        match let_value("y := xs[::-1]\n").kind {
+            ExprKind::Slice { start, end, step, .. } => {
+                assert!(start.is_none() && end.is_none());
+                assert!(matches!(step.as_deref(), Some(Expr { kind: ExprKind::Unary { .. }, .. })));
+            }
+            other => panic!("expected Slice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dotdot_still_range_outside_subscript() {
+        // for-loop iterable stays a Range
+        match only("for i in 0..10:\n    print(i)\n") {
+            StmtKind::For { iter, .. } => assert!(matches!(iter.kind, ExprKind::Range { .. })),
+            other => panic!("{other:?}"),
+        }
+        // match range-pattern still parses (0..10 => ...)
+        assert!(parse(lexer::tokenize("fn f(x: int):\n    match x:\n        0..10: print(1)\n        _: print(2)\n").unwrap()).is_ok());
+    }
+
+    #[test]
+    fn slice_is_not_an_lvalue() {
+        // A slice is not in the lvalue grammar — `xs[1:3] = v` must be a parse error.
+        let e = parse_err("xs := [1, 2, 3]\nxs[1:3] = [9]\n");
+        assert!(e.message.contains("invalid assignment target"), "got: {}", e.message);
+    }
+
+    #[test]
+    fn fns_index_then_call_still_parses() {
+        // fns[0](x) must remain index-then-call, not a slice.
+        match let_value("y := fns[0](x)\n").kind {
+            ExprKind::Call { callee, .. } => {
+                assert!(matches!(callee.kind, ExprKind::Index { .. }));
+            }
+            other => panic!("expected Call over Index, got {other:?}"),
+        }
+    }
+
     #[test]
     fn match_inline_arms() {
         match only("match s:\n    Circle(r): return r\n    Square(n): return n\n    Point: return 0\n") {
@@ -2613,15 +2727,15 @@ mod tests {
         // m["k"] → Index (non-int key still plain index)
         let StmtKind::Expr(e) = only("m[\"k\"]\n") else { panic!() };
         assert!(matches!(e.kind, ExprKind::Index { .. }));
-        // xs[1..3] → Slice with int bounds
-        let StmtKind::Expr(e) = only("xs[1..3]\n") else { panic!() };
+        // xs[1:3] → Slice with int bounds
+        let StmtKind::Expr(e) = only("xs[1:3]\n") else { panic!() };
         let ExprKind::Slice { start, end, .. } = e.kind else {
             panic!("expected Slice, got {:?}", e.kind)
         };
-        assert!(matches!(start.kind, ExprKind::Int(1)));
-        assert!(matches!(end.kind, ExprKind::Int(3)));
-        // nested xs[a..b][0] → Index(Slice)
-        let StmtKind::Expr(e) = only("xs[a..b][0]\n") else { panic!() };
+        assert!(matches!(start.unwrap().kind, ExprKind::Int(1)));
+        assert!(matches!(end.unwrap().kind, ExprKind::Int(3)));
+        // nested xs[a:b][0] → Index(Slice)
+        let StmtKind::Expr(e) = only("xs[a:b][0]\n") else { panic!() };
         let ExprKind::Index { obj, .. } = e.kind else {
             panic!("expected Index, got {:?}", e.kind)
         };

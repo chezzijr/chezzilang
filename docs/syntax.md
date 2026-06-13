@@ -272,15 +272,35 @@ while cond:
 xs := [10, 20, 30, 40]
 print(xs[1])           # 20    — index
 xs[1] = 99             # mutate in place
-sub := xs[1..3]        # slice: half-open, reuses the `..` range → [99, 30]
-print("hello"[0..2])   # he    — strings slice too (→ a new str)
-print(xs[1..99])       # [99, 30, 40]   — bounds are clamped (no panic)
+print(xs[-1])          # 40    — negative index counts from the end
+xs[-1] = 0             # negative index works as an assignment target too
+sub := xs[1:3]         # slice: half-open `start:end` → [99, 30]
+print("hello"[0:2])    # he    — strings slice too (→ a new str)
+print(xs[1:99])        # [99, 30, 0]   — slice bounds are clamped (no panic)
+print(xs[2:])          # [30, 0]       — open end (defaults to len)
+print(xs[:2])          # [10, 99]      — open start (defaults to 0)
+print(xs[:])           # full copy
+print(xs[0:4:2])       # [10, 30]      — `start:end:step`
+print(xs[::-1])        # [0, 30, 99, 10]  — negative step reverses
+print(xs[-2:])         # [30, 0]       — negative bounds count from the end
 ```
 
-Slicing reuses the existing `..` range (no `[a:b]` colon syntax, no step): `obj[start..end]` is
-half-open and bounds-clamped. `list[T]` slices to `list[T]`, `str` to `str`. Indexing and slicing
-are **protocols**, so custom types opt in — see `Index`/`IndexSet`/`Slice` in §7b. (Deferred:
-omitted bounds `xs[..n]`/`xs[1..]`, inclusive `..=`, negative indices.)
+Slicing is **Python-style** `obj[start:end:step]`. Each component is optional — an omitted bound
+defaults per direction (forward: start `0`, end `len`; reverse: start `len-1`, end "before 0"), and an
+omitted step defaults to `1`. A `step` of `0` faults (`slice step cannot be zero`). The `..` operator
+is unchanged — it stays the **range** used by `for i in 0..10` and match range-patterns (`0..10 =>`);
+only the subscript-slice form moved from `[a..b]` to `[a:b]`.
+
+**Negative indexing** counts from the end (`xs[-1]` is the last element) for plain indexing *and*
+slice bounds, on `list`/`str`, including as an assignment target (`xs[-1] = v`). The out-of-range
+rule follows Python's asymmetry: a plain `xs[-100]` on a short list **faults** (`index -100 out of
+bounds (len N)`), while a slice bound `xs[-100:]` **clamps** to the start (never faults). Both engines
+emit byte-identical messages.
+
+`list[T]` slices to `list[T]`, `str` to `str`. Indexing and slicing are **protocols**, so custom
+types opt in — see `Index`/`IndexSet`/`Slice` in §7b. A user `Slice` impl gets the full Python
+surface via default parameters: `slice(self, start: int? = None, end: int? = None, step: int? = None)
+-> R` (each component arrives as `None` when omitted, `Some(n)` otherwise).
 
 ## 6c. Comprehensions  (M16)
 
@@ -379,7 +399,8 @@ print((Vec2(1, 2) + Vec2(3, 4)).x)   # 4   — `+` calls Vec2.add
 
 Indexing and slicing are overloaded through the prebuilt **`Index[K, V]`** (read `obj[k]` via
 `index(self, key: K) -> V`), **`IndexSet[K, V]`** (mutable `obj[k] = v`, adds `set_index(self, key: K,
-val: V)`), and **`Slice[R]`** (`obj[a..b]` via `slice(self, start: int, end: int) -> R`) protocols.
+val: V)`), and **`Slice[R]`** (`obj[a:b:c]` via `slice(self, start: int? = None, end: int? = None,
+step: int? = None) -> R` — each component is `None` when omitted) protocols.
 Built-in `list`/`map`/`str` satisfy them intrinsically (`str` is read-only — `Index`/`Slice` but not
 `IndexSet`); a struct defining the matching methods becomes indexable/sliceable. Because they are real
 protocols, a generic can be bounded by them — `K`/`V`/`R` are recovered at the call site like
@@ -392,13 +413,15 @@ struct Ring:
         return self.data[key % self.data.len()]
     fn set_index(self, key: int, val: int):
         self.data[key % self.data.len()] = val
-    fn slice(self, start: int, end: int) -> list[int]:
-        return self.data[start..end]
+    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> list[int]:
+        s := start ?? 0
+        e := end ?? self.data.len()
+        return self.data[s:e:step ?? 1]
 
 r := Ring([10, 20, 30])
 print(r[3])            # 10   — wraps; `index` dispatched
 r[1] = 99              # `set_index` dispatched
-print(r[0..2])         # [10, 99]   — `slice` dispatched
+print(r[0:2])          # [10, 99]   — `slice` dispatched
 
 fn first[C: Index[int, V], V](c: C) -> V:   # works over a list OR a Ring
     return c[0]

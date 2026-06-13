@@ -63,9 +63,13 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 
 1. **Comprehensions** — `[x*2 for x in xs if x>0]` (+ dict/set). A Python-feel language without
    these feels broken. Pure parse-time desugar to loop + push. Cheap, large UX win.
-2. **Sub-ranges — Rust-style `xs[1..3]`** — sub-list / substring via the existing `..` range
-   (half-open), no new lexer token, no step. `Slice { obj, start, end }` → container-typed →
-   bounds-clamped range-copy. (Omitted bounds / `..=` / negative index are deferred extensions.)
+2. **Slicing — DONE, and since upgraded to Python colon syntax.** Originally shipped as Rust-style
+   `xs[1..3]` (half-open, bounds-clamped, reusing `..`). Mid-M19 (owner-requested language change) the
+   subscript-slice form moved to **Python `xs[a:b:c]`** with the full surface: open bounds, step, reverse
+   `[::-1]`, and negative indexing (plain index faults out of range, slice bounds clamp — Python's
+   asymmetry). `ExprKind::Slice { obj, start, end, step }` (each `Option`); one shared resolver in
+   `src/slice.rs` drives both engines. The `..` operator stays the for-loop/match range. See
+   [`PROGRESS.md`](../PROGRESS.md) "Slice syntax → Python colon".
 3. ~~**Iterator protocol + generators (`yield`)**~~ — **iterator DONE; generators removed.** The
    `Iterator[T]` parameterized protocol shipped (M13): user structs usable in `for`, generic
    `[S: Iterator[T], T]` bounds, and lazy `map`/`filter`/`take` written as **adapter structs** over it

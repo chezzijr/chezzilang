@@ -3325,29 +3325,34 @@ main()
 
 #[test]
 fn slice_of_list_types_as_list() {
-    ok("xs := [1, 2, 3, 4]\nys: list[int] = xs[1..3]\n");
+    ok("xs := [1, 2, 3, 4]\nys: list[int] = xs[1:3]\n");
+    // Optional bounds / step still type as the same container type.
+    ok("xs := [1, 2, 3, 4]\nys: list[int] = xs[1:]\n");
+    ok("xs := [1, 2, 3, 4]\nys: list[int] = xs[:3]\n");
+    ok("xs := [1, 2, 3, 4]\nys: list[int] = xs[::2]\n");
     rejects(
-        "xs := [1, 2, 3, 4]\nys: str = xs[1..3]\n",
+        "xs := [1, 2, 3, 4]\nys: str = xs[1:3]\n",
         "cannot assign list[int] to variable of type str",
     );
 }
 
 #[test]
 fn slice_of_str_types_as_str() {
-    ok("s := \"hello\"\nt: str = s[0..2]\n");
-    rejects("s := \"hello\"\nn: int = s[0..2]\n", "cannot assign str to variable of type int");
+    ok("s := \"hello\"\nt: str = s[0:2]\n");
+    rejects("s := \"hello\"\nn: int = s[0:2]\n", "cannot assign str to variable of type int");
 }
 
 #[test]
 fn slice_bounds_must_be_int() {
-    rejects("xs := [1, 2, 3]\nys := xs[\"a\"..2]\n", "slice bound must be int, found str");
-    rejects("xs := [1, 2, 3]\nys := xs[0..\"b\"]\n", "slice bound must be int, found str");
+    rejects("xs := [1, 2, 3]\nys := xs[\"a\":2]\n", "slice bound must be int, found str");
+    rejects("xs := [1, 2, 3]\nys := xs[0:\"b\"]\n", "slice bound must be int, found str");
+    rejects("xs := [1, 2, 3]\nys := xs[::\"c\"]\n", "slice bound must be int, found str");
 }
 
 #[test]
 fn map_is_not_sliceable() {
     rejects(
-        "m: map[int, int] = {}\nx := m[0..2]\n",
+        "m: map[int, int] = {}\nx := m[0:2]\n",
         "cannot slice",
     );
 }
@@ -3359,7 +3364,7 @@ struct Buf:
         return self.xs[key]
     fn set_index(self, key: int, val: int):
         self.xs[key] = val
-    fn slice(self, start: int, end: int) -> Buf:
+    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> Buf:
         return self
 ";
 
@@ -3379,7 +3384,10 @@ fn struct_index_assign_ok() {
 
 #[test]
 fn struct_slice_ok() {
-    ok(&format!("{BUF}b := Buf([1, 2, 3])\nc: Buf = b[0..2]\n"));
+    ok(&format!("{BUF}b := Buf([1, 2, 3])\nc: Buf = b[0:2]\n"));
+    // Optional bounds / step all route through the same protocol method.
+    ok(&format!("{BUF}b := Buf([1, 2, 3])\nc: Buf = b[:]\n"));
+    ok(&format!("{BUF}b := Buf([1, 2, 3])\nc: Buf = b[::-1]\n"));
 }
 
 #[test]
@@ -3414,7 +3422,7 @@ struct NS:
         return self.xs[key]
 ";
     rejects(
-        &format!("{no_slice}b := NS([1, 2, 3])\nc := b[0..2]\n"),
+        &format!("{no_slice}b := NS([1, 2, 3])\nc := b[0:2]\n"),
         "cannot slice NS",
     );
 }
@@ -3447,8 +3455,9 @@ struct WO:
 
 #[test]
 fn struct_slice_wrong_bound_types_rejected() {
-    // The `Slice` protocol fixes the bounds as `slice(self, int, int)` — both engines pass int
-    // start/end. A `slice` with non-int bounds must NOT count as a valid `Slice` impl (would crash).
+    // The `Slice` protocol fixes the bounds as `slice(self, int?, int?, int?)` — both engines pass
+    // three `Option[int]` components. A `slice` with non-`int?` bounds (or wrong arity) must NOT
+    // count as a valid `Slice` impl (would crash).
     let bad = "\
 struct BadSlice:
     xs: list[int]
@@ -3456,8 +3465,19 @@ struct BadSlice:
         return self.xs.len()
 ";
     rejects(
-        &format!("{bad}b := BadSlice([1, 2, 3])\nc := b[0..2]\n"),
+        &format!("{bad}b := BadSlice([1, 2, 3])\nc := b[0:2]\n"),
         "cannot slice BadSlice",
+    );
+    // Old 2-arg `slice(self, int, int)` is no longer a conforming `Slice` impl.
+    let two_arg = "\
+struct TwoArg:
+    xs: list[int]
+    fn slice(self, start: int, end: int) -> int:
+        return self.xs.len()
+";
+    rejects(
+        &format!("{two_arg}b := TwoArg([1, 2, 3])\nc := b[0:2]\n"),
+        "cannot slice TwoArg",
     );
 }
 
@@ -3484,7 +3504,7 @@ fn generic_indexset_rejects_str() {
 fn generic_over_slice_protocol_ok() {
     // A struct AND a built-in list both satisfy `Slice[R]`; the bound recovers `R`.
     ok(&format!(
-        "{BUF}fn mid[C: Slice[R], R](c: C) -> R:\n    return c[1..2]\n\
+        "{BUF}fn mid[C: Slice[R], R](c: C) -> R:\n    return c[1:2]\n\
          b := Buf([1, 2, 3])\nc: Buf = mid(b)\nd: list[int] = mid([1, 2, 3])\n"
     ));
 }

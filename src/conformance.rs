@@ -322,6 +322,7 @@ fn parser_rules_match_fns() {
         "parse_bp",
         "parse_unary",
         "parse_postfix",
+        "parse_subscript",
         "parse_call_args",
         "parse_type_postfix",
         "parse_primary",

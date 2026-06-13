@@ -1679,10 +1679,15 @@ impl Compiler {
                 // `GetIndex` validates int-ness in its list/str arm at runtime.
                 fc.emit(Op::GetIndex, expr.span);
             }
-            ExprKind::Slice { obj, start, end } => {
+            ExprKind::Slice { obj, start, end, step } => {
                 self.compile_expr(fc, obj)?;
-                self.compile_expr(fc, start)?;
-                self.compile_expr(fc, end)?;
+                // Each omitted component compiles to `nil` (mapped to `None`/default at runtime).
+                for comp in [start, end, step] {
+                    match comp {
+                        Some(e) => self.compile_expr(fc, e)?,
+                        None => fc.emit(Op::Nil, expr.span),
+                    }
+                }
                 fc.emit(Op::GetSlice, expr.span);
             }
             ExprKind::Try(inner) => {

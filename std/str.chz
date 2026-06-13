@@ -42,7 +42,7 @@ fn split_lines(s: str) -> list[str]:
 fn ends_with(s: str, suffix: str) -> bool:
     if suffix.len() > s.len():
         return false
-    return s[s.len() - suffix.len() .. s.len()] == suffix
+    return s[s.len() - suffix.len() : s.len()] == suffix
 
 # First index at which `sub` occurs in `s`, or -1 if absent (mirrors the native list `index_of`).
 # The empty substring is found at 0.
@@ -52,7 +52,7 @@ fn index_of(s: str, sub: str) -> int:
         return 0
     i := 0
     while i + m <= s.len():
-        if s[i .. i + m] == sub:
+        if s[i : i + m] == sub:
             return i
         i += 1
     return -1
@@ -66,7 +66,7 @@ fn count(s: str, sub: str) -> int:
     n := 0
     i := 0
     while i + m <= s.len():
-        if s[i .. i + m] == sub:
+        if s[i : i + m] == sub:
             n += 1
             i += m
         else:
@@ -82,7 +82,7 @@ fn replace(s: str, old: str, new: str) -> str:
     out := ""
     i := 0
     while i < s.len():
-        if i + m <= s.len() and s[i .. i + m] == old:
+        if i + m <= s.len() and s[i : i + m] == old:
             out = out + new
             i += m
         else:
@@ -93,11 +93,11 @@ fn replace(s: str, old: str, new: str) -> str:
 # Remove `p` from the front of `s` if present, else return `s` unchanged.
 fn strip_prefix(s: str, p: str) -> str:
     if s.starts_with(p):
-        return s[p.len() .. s.len()]
+        return s[p.len() : s.len()]
     return s
 
 # Remove `p` from the end of `s` if present, else return `s` unchanged.
 fn strip_suffix(s: str, p: str) -> str:
     if ends_with(s, p):
-        return s[0 .. s.len() - p.len()]
+        return s[0 : s.len() - p.len()]
     return s

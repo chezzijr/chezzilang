@@ -1,30 +1,61 @@
 # Slicing + the Index / IndexSet / Slice protocols.
 # Built-in list/map/str and user structs all share one indexing vocabulary.
 
-# Built-in list & string slicing — half-open `start..end`, bounds-clamped.
+# Built-in list & string slicing — Python-style `start:end:step`, bounds-clamped.
 xs := [1, 2, 3, 4, 5]
-print(xs[1..3])        # [2, 3]
-print(xs[1..99])       # [2, 3, 4, 5]  (end clamped to len)
-print(xs[2..1])        # []            (start > end → empty)
-print("hello"[0..2])   # he
+print(xs[1:3])         # [2, 3]
+print(xs[1:99])        # [2, 3, 4, 5]  (end clamped to len)
+print(xs[2:1])         # []            (start > end -> empty)
+print("hello"[0:2])    # he
+
+# Open bounds: an omitted component defaults (start -> 0, end -> len).
+print(xs[2:])          # [3, 4, 5]
+print(xs[:2])          # [1, 2]
+print(xs[:])           # [1, 2, 3, 4, 5]
+
+# Step + reverse.
+print(xs[0:5:2])       # [1, 3, 5]
+print(xs[::-1])        # [5, 4, 3, 2, 1]
+print("hello"[::-1])   # olleh
+
+# Negative indexing counts from the end (plain index AND slice bounds).
+print(xs[-1])          # 5
+print(xs[-2])          # 4
+print(xs[-2:])         # [4, 5]
+print(xs[:-1])         # [1, 2, 3, 4]
+xs[-1] = 50            # assignment to a negative index
+print(xs[4])           # 50
 
 # A custom collection satisfies the protocols structurally: `index` (read), `set_index`
-# (write), and `slice`. A `Ring` wraps its index around the backing list.
+# (write), and `slice`. A `Ring` wraps its index around the backing list. The `slice` protocol
+# is full Python slicing: `slice(self, start: int?, end: int?, step: int?) -> R`, each component
+# `None` when omitted — so the body forwards them straight to the backing list's slice.
 struct Ring:
     data: list[int]
     fn index(self, key: int) -> int:
         return self.data[key % self.data.len()]
     fn set_index(self, key: int, val: int):
         self.data[key % self.data.len()] = val
-    fn slice(self, start: int, end: int) -> list[int]:
-        return self.data[start..end]
+    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> list[int]:
+        match (start, end, step):
+            (Some(s), Some(e), Some(c)): return self.data[s:e:c]
+            (Some(s), Some(e), None): return self.data[s:e]
+            (Some(s), None, Some(c)): return self.data[s::c]
+            (Some(s), None, None): return self.data[s:]
+            (None, Some(e), Some(c)): return self.data[:e:c]
+            (None, Some(e), None): return self.data[:e]
+            (None, None, Some(c)): return self.data[::c]
+            (None, None, None): return self.data[:]
+            _: return self.data[:]
 
 r := Ring([10, 20, 30])
 print(r[0])            # 10
 print(r[3])            # 10   (wraps: 3 % 3 == 0)
 r[1] = 99
 print(r[1])            # 99
-print(r[0..2])         # [10, 99]
+print(r[0:2])          # [10, 99]
+print(r[:])            # [10, 99, 30]
+print(r[::-1])         # [30, 99, 10]
 
 # A generic bounded by `Index[int, V]` works over the built-in list AND the user struct,
 # recovering `V` from each argument.
