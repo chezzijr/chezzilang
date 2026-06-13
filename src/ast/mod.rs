@@ -97,6 +97,9 @@ pub enum StmtKind {
     },
     /// `return` with an optional value.
     Return(Option<Expr>),
+    /// `yield <expr>` — produce a value from a generator function and suspend until the next
+    /// `.next()` resumes the body. Experimental, VM-only (the interpreter does not support it).
+    Yield(Expr),
     /// `defer <call>` (form 1) or `defer:` block (form 2) — register cleanup to run when the
     /// enclosing block/frame exits (normal return, `?` short-circuit, `break`/`continue`, or panic),
     /// in LIFO order. Form 1's receiver + arguments are evaluated at the `defer` statement (Go
@@ -189,6 +192,9 @@ pub struct FnDecl {
     pub params: Vec<Param>,
     pub ret: Option<Type>, // None ⇒ returns nothing
     pub body: Block,
+    /// True if the body contains a `yield` (computed by the parser). A generator function is not
+    /// run on call — it allocates a suspendable generator object. Experimental, VM-only.
+    pub is_generator: bool,
 }
 
 /// A generic type parameter declaration: `T`, `T: Comparable`, `T: Add + Mul`, or a parameterized

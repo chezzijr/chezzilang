@@ -1248,6 +1248,7 @@ impl Checker {
             }
             StmtKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms),
             StmtKind::Return(value) => self.check_return(value.as_ref(), span),
+            StmtKind::Yield(e) => self.check_yield(e, span),
             StmtKind::Defer(DeferTarget::Call(e)) => {
                 // Block-scoped defer: any indented block — including the module body — is a defer
                 // scope, so top-level `defer` is legal (no `in_fn` requirement).
@@ -1587,6 +1588,13 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// `yield <expr>` inside a generator function. Stage 2 scaffold: infer the operand so name
+    /// resolution and sub-expression checks still run. The full rule (must be inside a generator,
+    /// operand assignable to the declared `Iterator[T]` element type) lands in Stage 4.
+    fn check_yield(&mut self, e: &Expr, _span: Span) {
+        self.infer(e);
     }
 
     fn check_fn_body(&mut self, decl: &FnDecl, self_ty: Option<Ty>, sig: FnSig) {

@@ -461,6 +461,12 @@ impl Compiler {
                 fc.emit(Op::Return, stmt.span);
                 Ok(())
             }
+            // Real codegen (compile operand + `Op::Yield`) lands in Stage 4 together with the
+            // runtime generator object. Until then a `yield` cannot be compiled.
+            StmtKind::Yield(_) => Err(CompileError {
+                message: "yield: generator codegen not yet implemented".to_string(),
+                span: stmt.span,
+            }),
             StmtKind::Break => {
                 // Drain the current iteration's loop-body defers (and any nested block defers) before
                 // jumping out, so they run at the `break`, not at function return.
