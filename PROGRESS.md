@@ -386,6 +386,24 @@ calls via dlopen+libffi; structs/callbacks/varargs/userdata still deferred — s
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **Adversarial-review remediation — `wait`/timer + C-ABI FFI** (2026-06-13, merges `b697ce0` (wait) +
+  `e9dc3c1` (ffi)) — fixes the 8 findings from an adversarial review of the freshly-merged `wait`/`select`
+  and FFI features, run as two file-disjoint auto-task worktrees (post-merge-gated, both `ship`; 1801 tests).
+  **WAIT (vm only):** the `--parallel` `wait` lost-wakeup — a live `timer(N)` arm + live channel arm with
+  nothing ready inline-`thread::sleep`d the worker and unconditionally took the timer, stranding a sibling
+  `send` that landed mid-window (HIGH) and pinning the OS worker (MEDIUM). Fix = **full timed-park**: arm one
+  background `timer::submit_at(deadline, send_wake(true))` on the soonest timer arm's own channel and fall
+  through to the existing snapshot-park, so the `WaitPark` claimed-CAS sweep picks exactly one of {a sibling
+  send/close, the timer's deadline send}; demote path (`native_reentry>0`) threads the deadline into the
+  bounded poll. An **arm-once `ChannelCore.timer_armed` CAS latch** stops a re-park (woken by a `close` with
+  no value) re-arming a redundant job (adversarial low finding). Cooperative VM + interp inline-sleep
+  unchanged (parity oracle, `--parallel`-only + licensed-nondeterministic; 5 new VM tests, 600-race stress).
+  **FFI (checker/parser/native/docs):** reject an `extern fn` colliding with a builtin/`print`/constructor
+  or a struct/variant name (was silently shadowed → dead extern + startup `dlsym` abort) — order-independent,
+  and corrected to NOT reject enum *type* names (not callable, so reachable; adversarial fix); reject
+  non-top-level `extern` at the parser + grammar (was skipping marshallability validation); gate `cffi`
+  `#[cfg(unix)]` (LLP64 `c_long` truncation now unreachable; project is unix-only); documented v1 limits
+  (int↔C `long` width, malloc'd `char*` leak, non-reentrant C under `--parallel`).
 - ✅ **Level-3 dynamic C-ABI FFI (v1)** (2026-06-13, `feat/c-abi-ffi`) — reverses the documented
   non-goal. New `extern "lib":` indentation block of statically-typed C signatures (`Token::Extern` →
   `StmtKind::Extern{lib, fns}` → `parse_extern` mirroring `parse_protocol`; grammar `<externDecl>` +
