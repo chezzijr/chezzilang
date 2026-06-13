@@ -12,9 +12,65 @@ use super::value::{GcRef, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// A single key's position(s) in `entries`. Numeric keys hash injectively (`(n as f64).to_bits()`),
+/// so the overwhelmingly common case is a single candidate — [`Pos::One`] inlines it with **zero
+/// heap allocation** (the old `Vec<usize>` paid one tiny alloc per distinct key). [`Pos::Many`]
+/// holds the overflow for genuine hash collisions only (string `DefaultHasher`, or a user `hash()`
+/// that returns a constant); boxing the `Vec` keeps `Pos` at two words so `MapData`/`SetData` size
+/// is unchanged. Probing always confirms a hit with `values_equal`, so a collision is still correct.
+#[derive(Debug, Clone)]
+enum Pos {
+    One(usize),
+    // `Box` keeps `Pos` at 2 words (`usize` + tag) instead of 4; the alloc only happens on a real
+    // collision, which is off the numeric-key hot path entirely.
+    #[allow(clippy::box_collection)]
+    Many(Box<Vec<usize>>),
+}
+
+/// `cached-hash → candidate position(s)`, FxHash-keyed (the `u64` is already a content hash; see
+/// [`super::fxhash`]). Shared by [`MapData`] and [`SetData`] — the index logic is identical for both.
+/// Holds plain `usize`s, **not** GC children (only `entries`' keys/values are traced).
+#[derive(Debug, Clone, Default)]
+struct HashIndex(FxHashMap<u64, Pos>);
+
+impl HashIndex {
+    /// Positions whose key hashed to `h` (the probe candidates). One → a 1-element slice in place;
+    /// Many → the overflow vec; absent → empty.
+    #[inline]
+    fn candidates(&self, h: u64) -> &[usize] {
+        match self.0.get(&h) {
+            Some(Pos::One(p)) => std::slice::from_ref(p),
+            Some(Pos::Many(v)) => v.as_slice(),
+            None => &[],
+        }
+    }
+    /// Record that `entries[pos]`'s key hashed to `h`. Absent → `One`; first collision → upgrade to
+    /// `Many` carrying BOTH the prior and the new position; further collisions → push.
+    #[inline]
+    fn insert(&mut self, h: u64, pos: usize) {
+        use std::collections::hash_map::Entry;
+        match self.0.entry(h) {
+            Entry::Vacant(e) => {
+                e.insert(Pos::One(pos));
+            }
+            Entry::Occupied(mut e) => match e.get_mut() {
+                Pos::One(prev) => {
+                    let prev = *prev;
+                    e.insert(Pos::Many(Box::new(vec![prev, pos])));
+                }
+                Pos::Many(v) => v.push(pos),
+            },
+        }
+    }
+    #[inline]
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
 /// A real hash table that *also* preserves insertion order. `entries` is the insertion-ordered
 /// store (so iteration, `keys()`, set equality, and GC tracing stay deterministic); `index` maps a
-/// key's cached hash to its candidate positions in `entries` for O(1)-average lookup. The cached
+/// key's cached hash to its candidate position(s) in `entries` for O(1)-average lookup. The cached
 /// `u64` per entry makes index rebuild (after a remove) a pure, engine-free pass — no re-hashing of
 /// user `hash()` methods. Probing always confirms a hash hit with the engine's `values_equal`
 /// (structural), so a collision never returns the wrong key. The `index` holds plain `usize` — it
@@ -22,21 +78,22 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Default)]
 pub struct MapData {
     pub entries: Vec<(u64, Value, Value)>,
-    /// `cached-hash → candidate positions`. FxHash-keyed (the `u64` is already a content hash; see
-    /// [`super::fxhash`]). Plain `usize` values, **not** a GC child.
-    pub index: FxHashMap<u64, Vec<usize>>,
+    /// `cached-hash → candidate position(s)` (see [`HashIndex`]). **Not** a GC child.
+    index: HashIndex,
 }
 
 impl MapData {
     /// Positions in `entries` whose key hashed to `h` (the probe candidates).
+    #[inline]
     pub fn candidates(&self, h: u64) -> &[usize] {
-        self.index.get(&h).map_or(&[], |v| v.as_slice())
+        self.index.candidates(h)
     }
     /// Append a fresh entry (caller has confirmed the key is absent), updating the index.
+    #[inline]
     pub fn push(&mut self, h: u64, k: Value, v: Value) {
         let pos = self.entries.len();
         self.entries.push((h, k, v));
-        self.index.entry(h).or_default().push(pos);
+        self.index.insert(h, pos);
     }
     /// Remove the entry at `i` (shifting the tail, preserving order) and rebuild the index from the
     /// cached hashes — pure, no re-hashing.
@@ -48,7 +105,7 @@ impl MapData {
     fn rebuild_index(&mut self) {
         self.index.clear();
         for (pos, (h, _, _)) in self.entries.iter().enumerate() {
-            self.index.entry(*h).or_default().push(pos);
+            self.index.insert(*h, pos);
         }
     }
 }
@@ -57,18 +114,20 @@ impl MapData {
 #[derive(Debug, Clone, Default)]
 pub struct SetData {
     pub entries: Vec<(u64, Value)>,
-    /// `cached-hash → candidate positions`, FxHash-keyed (see [`MapData::index`]).
-    pub index: FxHashMap<u64, Vec<usize>>,
+    /// `cached-hash → candidate position(s)` (see [`HashIndex`]).
+    index: HashIndex,
 }
 
 impl SetData {
+    #[inline]
     pub fn candidates(&self, h: u64) -> &[usize] {
-        self.index.get(&h).map_or(&[], |v| v.as_slice())
+        self.index.candidates(h)
     }
+    #[inline]
     pub fn push(&mut self, h: u64, e: Value) {
         let pos = self.entries.len();
         self.entries.push((h, e));
-        self.index.entry(h).or_default().push(pos);
+        self.index.insert(h, pos);
     }
     pub fn remove_at(&mut self, i: usize) -> (u64, Value) {
         let removed = self.entries.remove(i);
@@ -78,7 +137,7 @@ impl SetData {
     fn rebuild_index(&mut self) {
         self.index.clear();
         for (pos, (h, _)) in self.entries.iter().enumerate() {
-            self.index.entry(*h).or_default().push(pos);
+            self.index.insert(*h, pos);
         }
     }
 }

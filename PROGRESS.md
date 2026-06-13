@@ -98,6 +98,20 @@ recurring "measure, don't guess" lesson). Behavior-preserving (7 `idxspec_*` VM=
 the Int/Float key-collision trap). Moving `map` needs a denser int-keyed map, not this in-place tweak.
 See `docs/benchmarks.md` "M19 Tier-2".
 
+**Denser int-keyed map/set index landed (2026-06-13):** the map index was
+`FxHashMap<u64, Vec<usize>>`, paying a tiny `Vec<usize>` heap alloc per distinct key (200k of them in
+`benches/chz/map.chz`) + a pointer-chase per lookup — yet numeric keys hash injectively, so every
+candidate list is length 1. Collapsed the per-key `Vec` to an inline single position via
+`enum Pos { One(usize), Many(Box<Vec<usize>>) }`, extracting the (formerly duplicated) `MapData`/`SetData`
+index logic into one shared `HashIndex(FxHashMap<u64, Pos>)` in `src/vm/heap.rs`. `One` is zero-alloc/inline;
+`Many` (real hash collisions only) is `Box`ed to keep `Pos` 2 words so struct sizes are unchanged.
+`candidates`/`push` signatures are identical → **VM hot paths in `mod.rs` unchanged, parity by construction**
+(interp keeps its `Vec<usize>` oracle; both confirm hits with `values_equal`). **`map` −36% absolute
+(~225.7 ms → ~144.7 ms, 2.68× → ~1.7× CPython)** — the predicted target landed. Others flat (touch no
+map/set). 2 new collision-upgrade guards (RED on a `One`-only stub, GREEN with `Many`), 1712 green,
+conformance green, clippy clean. **Next `map` suspect:** `values_equal` per-probe cost + `FxHashMap`
+lookup/rehash (no longer the `Vec` alloc). See `docs/benchmarks.md` "M19 — denser int-keyed map/set".
+
 **▶ Next perf batch (Tier 1 DONE — Phases 6+7 landed, 8 deferred; Tier 2 is next; full detail +
 `file:line`s in [`docs/future.md §4` "Post-M19 next levers"](docs/future.md)).** Diagnosis: the
 remaining gap is **call frame-setup + the alloc/hash paths**, not per-op dispatch (Phase 7 took `loop`
@@ -121,8 +135,9 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   field/method caches under one adaptive form (`GetIndex`/`SetIndex` already got their Int-key fast path
   in #5 below, so they are covered). ✅ 5. **map/list index specialization** (`mod.rs`
   `GetIndex`/`SetIndex`) — **landed (Int-key fast path + inline dispatch): `list` −4%, `map` neutral**
-  (hash-probe-bound). The remaining `map` win needs a denser int-keyed representation, not this in-place
-  tweak — folds into #4 or its own lever.
+  (hash-probe-bound). The remaining `map` win shipped as its own lever — ✅ **denser int-keyed map/set
+  index LANDED (2026-06-13): `map` −36% (2.68× → ~1.7× CPython)** — `Vec<usize>` candidate list → inline
+  `Pos::One` / `Pos::Many` overflow in a shared `HashIndex` (`src/vm/heap.rs`). See the landed note above.
 - **Tier 3 (big, separate):** 6. **Cranelift method-JIT** (end-game; the only path to match/beat fib;
   #4 is the stepping stone). 7. NaN-boxing (BLOCKED, above). 8. register VM / generational GC (low ROI).
 
