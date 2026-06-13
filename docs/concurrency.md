@@ -338,17 +338,15 @@ deadlock; the cooperative VM and the interpreter inline-sleep to the deadline (s
 
 ---
 
-## 6d. `wait` — racing multiple channel receives *(cooperative engine: shipped; M:N park: follow-up)*
+## 6d. `wait` — racing multiple channel receives *(shipped on all three engines)*
 
 > **Status:** the surface and semantics below are **locked** (brainstormed 2026-06) and **implemented on
-> the default cooperative engine + the interpreter** (2026-06-13): lexer→parser→checker→interp→VM, with
-> non-blocking arms (`else:`, an already-ready arm, a `timer` arm) working in **all three** engines and the
-> **blocking multi-channel park** working in the cooperative scheduler (one fiber parked on N channels,
-> woken by the first sender, swept out of the other buckets on resume). **Deferred to a focused follow-up:**
-> the **M:N (`--parallel`) blocking park** — the exact area where a prior `recv_timeout` was reverted, so it
-> is being done separately rather than rushed. Until then a `wait` that would truly block under `--parallel`
-> faults clearly (`"wait: blocking under --parallel is not yet supported …"`); add an `else:`/`timer` arm,
-> or run on the default engine. See `examples/wait_select.chz`.
+> all three engines** (2026-06-13): lexer→parser→checker→interp→VM, with non-blocking arms (`else:`, an
+> already-ready arm, a `timer` arm) AND the **blocking multi-channel park** working in **every** engine —
+> the cooperative scheduler, the interpreter (sequential poll/inline-sleep), and now the **M:N
+> (`--parallel`) blocking park** (landed 2026-06-13, the M:N park notes below). A blocking `wait` under
+> `--parallel` now parks one fiber on N channels (woken by the first sender, swept out of the other
+> buckets) instead of faulting. See `examples/wait_select.chz` (byte-identical across VM/interp/`--parallel`).
 
 `wait` is Chezzi's `select`: block until **whichever of several channels is ready first**, bind its value,
 and run that arm. Because Chezzi channels are **unbounded** (a `send` never blocks), `wait` is purely
@@ -387,28 +385,38 @@ exhaustive (it's a runtime race, not a type match); ≥1 recv-arm is required.
 4. If no arm is ready: with an `else`, run it (non-blocking); otherwise **block** — park the fiber on *all*
    live arm channels and re-poll on the first wake.
 
-**Implementation notes.** *(Done: front end + checker + interp + cooperative VM. A new `Op::WaitPoll`
-holds the N arm channel handles on the operand stack, polls source order, and jumps to the chosen arm's
-body / `else`, inline-sleeps to the soonest live `timer`, faults all-closed, or parks. The cooperative
-multi-channel park files the fiber under every key (`run_child` reads `wait_suspend`) and sweeps the index
-out of the other buckets on resume. **Remaining follow-up: the M:N park below.**)*
+**Implementation notes.** *(Done on all three engines. A new `Op::WaitPoll` holds the N arm channel
+handles on the operand stack, polls source order, and jumps to the chosen arm's body / `else`,
+inline-sleeps to the soonest live `timer`, faults all-closed, or parks. The cooperative multi-channel park
+files the fiber under every key (`run_child` reads `wait_suspend`) and sweeps the index out of the other
+buckets on resume; the M:N park (below) does the same with an `Arc<WaitPark>` token.)*
 - *Non-blocking* (`else` present) and the *poll* step reuse the existing `try_recv` path (a timer arm's
   `try_recv` is already deadline-aware) — straightforward in all engines. **(Done.)**
-- *Blocking* (no `else`) needs a **multi-channel park** — **done for the cooperative scheduler; the M:N
-  `MnSched` park below is the remaining follow-up.** Today a fiber parks in one `parked[key]` bucket
-  (`MnSched::park`/`send_wake`/`close_wake`) and is woken by a send to that key. `wait` needs one fiber
-  parked on N keys, woken by the first sender, and **swept out of the other N-1 buckets** — otherwise a
-  later send wakes a fiber that already moved on. Design: a `WaitPark { fiber, keys, claimed: Arc<AtomicBool> }`
-  held once, with a lightweight token in each `parked[key]`; the first waker CASes `claimed`, takes the
-  fiber, and removes its token from all `keys` — all under the existing sched lock (serialized with
-  `park`'s gap re-check). The single-channel `recv` park becomes the **1-key special case** (so plain
-  `recv` is provably unchanged — add a regression test). This must be done in **both** schedulers: the
-  M:N `MnSched` and the cooperative in-VM nursery scheduler, plus the interp's sequential poll-once form.
+- *Blocking* (no `else`) needs a **multi-channel park** — **done in both schedulers.** A fiber parks in one
+  `parked[key]` bucket (`MnSched::park`/`send_wake`/`close_wake`) and is woken by a send to that key. `wait`
+  needs one fiber parked on N keys, woken by the first sender, and **swept out of the other N-1 buckets** —
+  otherwise a later send wakes a fiber that already moved on. **M:N implementation (landed):** a
+  `WaitPark { fiber: Mutex<Option<Fiber>>, keys, claimed: AtomicBool }` held once behind an `Arc`, with a
+  `ParkedEntry::Wait(token)` filed in every `parked[key]` (the bucket is now
+  `HashMap<usize, Vec<ParkedEntry>>` where `ParkedEntry` is `Recv(Fiber)` or `Wait(Arc<WaitPark>)`).
+  `MnSched::park_wait` does the N-key gap re-check (any arm ready/closed/cancel → requeue, not park) and
+  files all N tokens + `parked_n += 1` (ONE fiber) under one core-lock hold. The first waker (in
+  `send_wake`/`close_wake`/`cancel_drain`/`flag_deadlock`) CASes `claimed`, `take()`s the fiber, and
+  removes its token from every other bucket by `Arc::ptr_eq` — all under the one lock, serialized with
+  `park_wait`'s gap re-check (lost-wakeup-safe). Routed via `Disp::WaitPark(Vec<(key, core)>)` captured
+  while the fiber heap is live (mirrors `Disp::Park`). The single-channel `recv` park stays the **1-key
+  `ParkedEntry::Recv` special case** (alloc-free, provably unchanged — regression test
+  `vm_wait_single_arm_recv_park_unchanged_under_parallel`).
 - *Cooperative VM / interp* (sequential): poll arms once in source order; first ready wins; else if `else`,
   run it; else if any arm is timer-backed, inline-sleep to the soonest deadline and take that arm; else
   fault (all-closed or the existing deadlock fault). Deterministic → golden parity with the VM holds.
 - *`native_reentry > 0`* (inside a native callback) on `--parallel`: snapshot-park is impossible — mirror
-  `demote_recv_block` with a **multi-channel demote-poll** (bounded `wait_timeout` over all arm queues).
+  `demote_recv_block` with a **multi-channel demote-poll** (`demote_wait_block`: register all N arm
+  channels in `demoted_chans`, poll all N queues source-order under the core lock on a bounded
+  `DEMOTE_POLL_BACKOFF`). **v1 limitation (sound, lower-throughput):** there are N channel condvars and no
+  single one to block on, so the demote loop polls on a backoff timer rather than waiting on a targeted
+  condvar — same shape as the timer-in-callback note in §6c. The snapshot-park (reentry == 0) is the fast
+  path; the demote is only reached when a `wait` is run from inside a host-stack native callback.
 
 ---
 

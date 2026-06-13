@@ -192,6 +192,15 @@ pub fn optimize(code: Vec<Op>, lines: Vec<Span>) -> (Vec<Op>, Vec<Span>) {
         {
             is_target[t] = true;
         }
+        // `WaitPoll` carries N arm targets + an optional `else` target (all absolute jump targets);
+        // each marks an entry point a fold must not erase, exactly like a `Jump` target.
+        if let Op::WaitPoll(m) = op {
+            for &t in m.arm_targets.iter().chain(m.else_target.iter()) {
+                if t <= n {
+                    is_target[t] = true;
+                }
+            }
+        }
     }
 
     let mut out: Vec<Op> = Vec::with_capacity(n);
@@ -230,6 +239,16 @@ pub fn optimize(code: Vec<Op>, lines: Vec<Span>) -> (Vec<Op>, Vec<Span>) {
     for op in &mut out {
         if let Some(t) = jump_target_mut(op) {
             *t = map[*t];
+        }
+        // Relocate `WaitPoll`'s arm + else targets through the same `map` (they are absolute jump
+        // targets the VM dispatches to in `take_wait_arm` / the `else` jump).
+        if let Op::WaitPoll(m) = op {
+            for t in &mut m.arm_targets {
+                *t = map[*t];
+            }
+            if let Some(t) = &mut m.else_target {
+                *t = map[*t];
+            }
         }
     }
     (out, out_lines)
@@ -287,6 +306,58 @@ mod tests {
         assert!(matches!(out[0], Op::ConstInt(5)));
         assert!(matches!(out[1], Op::Jump(3)), "jump must relocate to 3, got {:?}", out[1]);
         assert!(matches!(out[3], Op::Return));
+    }
+
+    /// §6d regression — `WaitPoll`'s `arm_targets`/`else_target` are absolute jump targets and MUST
+    /// be relocated like `Jump`. A fold before the arm bodies shifts their indices; without
+    /// relocation the arm target lands one or more ops past the bind prologue (the cooperative `wait`
+    /// arm-body parity bug: VM 65 vs interp 66). `[CI2, CI3, Add, WaitPoll{arms:[5,7]}, body@5..]` —
+    /// the fold removes 2 ops so the arm bodies move 5→3 and 7→5.
+    fn waitpoll(arm_targets: Vec<usize>, else_target: Option<usize>) -> Op {
+        Op::WaitPoll(Box::new(crate::vm::op::WaitMeta { n: 1, arm_targets, else_target }))
+    }
+
+    #[test]
+    fn relocates_waitpoll_arm_and_else_targets_past_a_fold() {
+        let out = opt(vec![
+            Op::ConstInt(2),
+            Op::ConstInt(3),
+            Op::Add,                       // [0..2] fold to one ConstInt(5)
+            waitpoll(vec![5, 7], Some(9)), // arm/else absolute targets in the ORIGINAL stream
+            Op::Nil,                       // [4]
+            Op::SetLocal(0),               // [5] arm 0 body
+            Op::Return,                    // [6]
+            Op::SetLocal(1),               // [7] arm 1 body
+            Op::Return,                    // [8]
+            Op::Pop,                       // [9] else body
+            Op::Return,                    // [10]
+        ]);
+        // The fold removes 2 ops, so every index ≥3 shifts down by 2: 5→3, 7→5, 9→7.
+        match &out[1] {
+            Op::WaitPoll(m) => {
+                assert_eq!(m.arm_targets, vec![3, 5], "arm targets must relocate, got {:?}", m.arm_targets);
+                assert_eq!(m.else_target, Some(7), "else target must relocate, got {:?}", m.else_target);
+            }
+            other => panic!("expected WaitPoll at out[1], got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn does_not_fold_across_interior_waitpoll_arm_target() {
+        // A WaitPoll arm target pointing at the interior of a foldable window must block the fold
+        // (folding would erase that entry point), exactly like an interior `Jump` target.
+        let out = opt(vec![
+            waitpoll(vec![2], None), // [0] arm 0 targets index 2 (the interior `ConstInt(3)`)
+            Op::ConstInt(2),         // [1]
+            Op::ConstInt(3),         // [2] ← arm target — folding [1,2,3] would erase it
+            Op::Add,                 // [3]
+            Op::Return,              // [4]
+        ]);
+        assert!(matches!(out[3], Op::Add), "fold must be refused, got {out:?}");
+        match &out[0] {
+            Op::WaitPoll(m) => assert_eq!(m.arm_targets, vec![2], "interior target unchanged, got {:?}", m.arm_targets),
+            other => panic!("expected WaitPoll, got {other:?}"),
+        }
     }
 
     #[test]

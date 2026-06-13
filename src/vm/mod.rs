@@ -871,6 +871,38 @@ struct EagerScope {
     drainer: Option<std::thread::JoinHandle<()>>,
 }
 
+/// §6d M:N `wait` (select) park — ONE blocked fiber shared across the N arm-channel buckets it parks
+/// on. A `Fiber` owns its live `FiberCtx` and is NOT `Clone`, so it cannot be filed under N keys the
+/// way the cooperative engine files a cheap `usize` index; instead the single fiber lives here behind
+/// `Mutex<Option<Fiber>>` and a refcounted `Arc<WaitPark>` token is filed in each key's bucket. The
+/// first waker to ANY key CASes `claimed` false→true; the winner `take()`s the fiber and sweeps the
+/// (now stale) token out of every OTHER key's bucket by `Arc::ptr_eq` — all under one hold of the core
+/// lock (serialized with [`MnSched::park_wait`]'s gap re-check), so a later `send`/`close` to a swept
+/// channel can never re-wake the already-moved fiber. A single-`recv` park stays the cheaper
+/// [`ParkedEntry::Recv`] 1-key case and allocates no `WaitPark`.
+struct WaitPark {
+    /// The single parked fiber, taken exactly once by the winning CAS. `None` after it is claimed.
+    fiber: Mutex<Option<Fiber>>,
+    /// Every bucket key this token was filed under — the sweep set the winner removes itself from.
+    keys: Vec<usize>,
+    /// Wake-once gate: the first waker to win the CAS owns the fiber; all later wakers see it set and
+    /// drop their (stale) token. Distinct from `parked_n` (a fiber count, not a key count).
+    claimed: AtomicBool,
+}
+
+/// An entry in a `SchedCore.parked` bucket: either a single fiber blocked on a plain `recv` (the
+/// common 1-key case, byte-identical to the pre-`wait` engine) OR a refcounted token referencing the
+/// one fiber blocked on a multi-channel `wait` (shared across N buckets — see [`WaitPark`]).
+// The `Recv` variant inherently carries a whole `Fiber` (the unit of parked work — it must live
+// somewhere while blocked), exactly like the `Take` enum above; boxing it would add an allocation on
+// the hot recv-park path for no benefit. The `Wait` variant is a cheap `Arc`. The size asymmetry is
+// the cost of keeping the common recv park alloc-free.
+#[allow(clippy::large_enum_variant)]
+enum ParkedEntry {
+    Recv(Fiber),
+    Wait(Arc<WaitPark>),
+}
+
 struct MnSched {
     core: Mutex<SchedCore>,
     cv: Condvar,
@@ -927,8 +959,12 @@ struct SchedCore {
     /// cancel drain) land here; per-worker requeues go to a worker's `locals[wid]` (D4c). Drained by
     /// a worker only after its own local is empty, so the global queue is the shared fallback.
     global: std::collections::VecDeque<Fiber>,
-    /// Fibers parked on an empty `recv`, keyed by `ChannelCore` pointer ([`Vm::channel_core_ptr`]).
-    parked: std::collections::HashMap<usize, Vec<Fiber>>,
+    /// Fibers parked on an empty `recv` OR a multi-channel `wait`, keyed by `ChannelCore` pointer
+    /// ([`Vm::channel_core_ptr`]). A bucket holds either a `ParkedEntry::Recv(fiber)` (1-key recv park)
+    /// or a `ParkedEntry::Wait(token)` (a shared [`WaitPark`] referenced from every arm channel's
+    /// bucket — see [`MnSched::park_wait`]/`send_wake`). `parked_n` counts FIBERS (a wait fiber is +1
+    /// regardless of how many buckets hold its token), not bucket entries.
+    parked: std::collections::HashMap<usize, Vec<ParkedEntry>>,
     /// Decision-F per-task outcome slots, indexed by `Fiber::task_index`. `None` until that task ends.
     slots: Vec<Option<TaskOutcome>>,
     running: usize,  // fibers currently swapped into a worker (executing)
@@ -1229,9 +1265,51 @@ impl MnSched {
             self.cv.notify_all();
         } else {
             fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
-            c.parked.entry(key).or_default().push(fiber);
+            c.parked.entry(key).or_default().push(ParkedEntry::Recv(fiber));
             c.parked_n += 1;
         }
+    }
+
+    /// §6d M:N multi-channel `wait` park — the N-key generalization of [`MnSched::park`]. The running
+    /// fiber blocked on a `wait` whose every arm channel was empty/live; `arms` is `(key, core)` for
+    /// each live arm (captured by the worker loop while the fiber heap was live, exactly like
+    /// `Disp::Park`). Holding the core lock (the SAME lock `send_wake`/`close_wake`/`cancel_drain`
+    /// take), close the park gap for ALL N arms first: if ANY arm has a queued message, was closed, or
+    /// cancel was tripped between the `WaitPoll` empty-poll and here, requeue the fiber `Ready` (it
+    /// re-runs `WaitPoll`, re-polls source order, and takes/skips the now-ready arm) instead of
+    /// parking — else strand-forever. Otherwise allocate ONE `Arc<WaitPark>` holding the fiber and file
+    /// a clone of the token in every arm's bucket; `parked_n += 1` (one fiber, not N tokens). Lock
+    /// order core-OUTER / channel-`q`-INNER matches `park`, so no ABBA; no `cv` notify on the park path
+    /// (parking creates no runnable work — an all-parked deadlock is caught by the next `take_runnable`).
+    fn park_wait(&self, arms: Vec<(usize, Arc<ChannelCore>)>, mut fiber: Fiber) {
+        let mut c = self.lock();
+        c.running -= 1;
+        // Gap re-check for EVERY arm (mirrors `park`'s 1-key re-check): a concurrent `send`/`close`/
+        // cancel to any arm must requeue, not park.
+        let mut ready_now = self.cancel.load(Ordering::Relaxed);
+        if !ready_now {
+            for (_, core) in &arms {
+                let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                if !g.queue.is_empty() || g.closed {
+                    ready_now = true;
+                    break;
+                }
+            }
+        }
+        if ready_now {
+            fiber.state = FiberState::Ready;
+            c.global.push_back(fiber);
+            self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued, re-polls)
+            self.cv.notify_all();
+            return;
+        }
+        fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
+        let keys: Vec<usize> = arms.iter().map(|(k, _)| *k).collect();
+        let wp = Arc::new(WaitPark { fiber: Mutex::new(Some(fiber)), keys: keys.clone(), claimed: AtomicBool::new(false) });
+        for key in keys {
+            c.parked.entry(key).or_default().push(ParkedEntry::Wait(Arc::clone(&wp)));
+        }
+        c.parked_n += 1; // ONE fiber, regardless of arm count
     }
 
     /// D3 — the running fiber exhausted its reduction budget; requeue it at the TAIL of the **global**
@@ -1301,17 +1379,60 @@ impl MnSched {
     /// gap re-check and a fiber parking concurrently is never lost. `notify_all` may over-notify (a
     /// spuriously woken worker finds the queue empty and re-parks) — targeted wake + the StoreLoad
     /// barrier are D4. Lock order: core-OUTER, channel-`q`-INNER (matches `park`).
+    /// Wake every fiber parked on `key`, draining the bucket. Caller holds the core lock (`c`). Two
+    /// entry kinds:
+    /// * `ParkedEntry::Recv(f)` — a plain `recv` park: requeue the fiber `Ready` (the pre-`wait`
+    ///   behavior, byte-identical: a `send` enqueues then makes the one receiver runnable; a `close`
+    ///   makes all receivers runnable to observe the closed flag).
+    /// * `ParkedEntry::Wait(wp)` — a multi-channel `wait` token: CAS `wp.claimed` false→true. The
+    ///   FIRST waker (this key or a concurrent waker on a sibling key) wins → `take()` the single
+    ///   fiber, requeue it `Ready` exactly once (`parked_n -= 1`), and SWEEP its token out of every
+    ///   OTHER `wp.keys` bucket (by `Arc::ptr_eq`) under this same lock hold, so a later `send`/`close`
+    ///   to a swept channel can never re-wake the now-moved fiber. A loser sees `claimed` already set
+    ///   and drops the stale token (no double-wake, no panic). All under the one core-lock hold.
+    fn wake_bucket(&self, c: &mut SchedCore, key: usize) {
+        let Some(entries) = c.parked.remove(&key) else { return };
+        for entry in entries {
+            match entry {
+                ParkedEntry::Recv(mut f) => {
+                    c.parked_n -= 1;
+                    self.runnable.fetch_add(1, Ordering::Relaxed); // parked → ready
+                    f.state = FiberState::Ready;
+                    c.global.push_back(f);
+                }
+                ParkedEntry::Wait(wp) => {
+                    // CAS the wake-once gate: only the winner takes the fiber + sweeps.
+                    if wp.claimed.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                        continue; // already claimed by a concurrent waker on another key — stale token
+                    }
+                    let mut f = wp.fiber.lock().unwrap_or_else(|e| e.into_inner()).take().expect("WaitPark fiber claimed twice");
+                    c.parked_n -= 1; // ONE fiber, matching park_wait's +1
+                    self.runnable.fetch_add(1, Ordering::Relaxed); // parked → ready
+                    f.state = FiberState::Ready;
+                    c.global.push_back(f);
+                    // Sweep the stale token out of every OTHER arm bucket (this `key` is already drained
+                    // via the `remove` above). Match by Arc identity so we never disturb an unrelated
+                    // fiber that happens to share a bucket.
+                    for &other in &wp.keys {
+                        if other == key {
+                            continue;
+                        }
+                        if let Some(bucket) = c.parked.get_mut(&other) {
+                            bucket.retain(|e| !matches!(e, ParkedEntry::Wait(o) if Arc::ptr_eq(o, &wp)));
+                            if bucket.is_empty() {
+                                c.parked.remove(&other);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) {
         let mut c = self.lock();
         core.q.lock().unwrap_or_else(|e| e.into_inner()).queue.push_back(w);
-        if let Some(woken) = c.parked.remove(&key) {
-            c.parked_n -= woken.len();
-            self.runnable.fetch_add(woken.len(), Ordering::Relaxed); // parked → ready
-            for mut f in woken {
-                f.state = FiberState::Ready;
-                c.global.push_back(f);
-            }
-        }
+        self.wake_bucket(&mut c, key);
         drop(c);
         self.cv.notify_all();
         // D5 owe #3 (Path C) — also wake any worker thread DEMOTED on this channel (blocked in place
@@ -1330,14 +1451,7 @@ impl MnSched {
     /// `send_wake`; `core.cv.notify_all` also wakes any thread DEMOTED on this channel.
     fn close_wake(&self, key: usize, core: &Arc<ChannelCore>) {
         let mut c = self.lock();
-        if let Some(woken) = c.parked.remove(&key) {
-            c.parked_n -= woken.len();
-            self.runnable.fetch_add(woken.len(), Ordering::Relaxed); // parked → ready
-            for mut f in woken {
-                f.state = FiberState::Ready;
-                c.global.push_back(f);
-            }
-        }
+        self.wake_bucket(&mut c, key);
         drop(c);
         self.cv.notify_all();
         core.cv.notify_all();
@@ -1367,16 +1481,31 @@ impl MnSched {
         if c.parked_n == 0 {
             return;
         }
-        let buckets: Vec<Vec<Fiber>> = c.parked.drain().map(|(_, v)| v).collect();
-        let drained: usize = buckets.iter().map(|v| v.len()).sum();
-        c.parked_n = 0;
-        self.runnable.fetch_add(drained, Ordering::Relaxed); // parked → ready
+        // Drain every bucket. A `Recv` entry yields its fiber directly; a `Wait` token yields its
+        // fiber only via the wake-once CAS (the same token sits in N buckets, so claim-once dedups it).
+        let buckets: Vec<Vec<ParkedEntry>> = c.parked.drain().map(|(_, v)| v).collect();
+        let mut drained = 0usize;
         for v in buckets {
-            for mut f in v {
-                f.state = FiberState::Ready;
-                c.global.push_back(f);
+            for entry in v {
+                let fiber = match entry {
+                    ParkedEntry::Recv(f) => Some(f),
+                    ParkedEntry::Wait(wp) => {
+                        if wp.claimed.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                            None // already claimed (or a sibling-bucket copy of this token) — skip
+                        } else {
+                            Some(wp.fiber.lock().unwrap_or_else(|e| e.into_inner()).take().expect("WaitPark fiber claimed twice"))
+                        }
+                    }
+                };
+                if let Some(mut f) = fiber {
+                    drained += 1;
+                    f.state = FiberState::Ready;
+                    c.global.push_back(f);
+                }
             }
         }
+        c.parked_n = 0;
+        self.runnable.fetch_add(drained, Ordering::Relaxed); // parked → ready
         self.cv.notify_all();
     }
 
@@ -1557,12 +1686,26 @@ fn run_offload(
 
 impl SchedCore {
     /// Fault every still-parked fiber with the deadlock error and terminate (called under the lock).
+    /// A `Wait` token sits in N buckets but is ONE fiber — claim-once (the wake CAS) dedups it so the
+    /// slot is faulted and `done` bumped exactly once.
     fn flag_deadlock(&mut self, err: &RuntimeError) {
-        let buckets: Vec<Vec<Fiber>> = self.parked.drain().map(|(_, v)| v).collect();
+        let buckets: Vec<Vec<ParkedEntry>> = self.parked.drain().map(|(_, v)| v).collect();
         for v in buckets {
-            for f in v {
-                self.slots[f.task_index] = Some(TaskOutcome::Fault(err.clone()));
-                self.done += 1;
+            for entry in v {
+                let fiber = match entry {
+                    ParkedEntry::Recv(f) => Some(f),
+                    ParkedEntry::Wait(wp) => {
+                        if wp.claimed.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                            None
+                        } else {
+                            Some(wp.fiber.lock().unwrap_or_else(|e| e.into_inner()).take().expect("WaitPark fiber claimed twice"))
+                        }
+                    }
+                };
+                if let Some(f) = fiber {
+                    self.slots[f.task_index] = Some(TaskOutcome::Fault(err.clone()));
+                    self.done += 1;
+                }
             }
         }
         self.parked_n = 0;
@@ -1722,6 +1865,10 @@ impl ReadyWorker {
 /// queue under the sched lock) or finish it with a terminal outcome.
 enum Disp {
     Park(usize, Arc<ChannelCore>),
+    /// §6d — the fiber blocked on a multi-channel `wait` (every arm empty/live). Carries `(key, core)`
+    /// for each live arm, captured WHILE the fiber heap was live (like `Park`); the worker loop hands
+    /// it to [`MnSched::park_wait`], which files ONE shared `WaitPark` token in every arm bucket.
+    WaitPark(Vec<(usize, Arc<ChannelCore>)>),
     /// D3 — the fiber exhausted its reduction budget; the worker requeues it at the tail of the global queue.
     Yield,
     /// D5 — the fiber hit a blocking native call; the worker hands the call (and the fiber) to the
@@ -5552,6 +5699,118 @@ impl Vm {
         }
     }
 
+    /// §6d M:N — a blocking multi-channel `wait` reached INSIDE a native callback (`native_reentry > 0`).
+    /// A host-stack loop frame sits between the worker loop and the `wait`, so the fiber CANNOT
+    /// snapshot-park (`park_wait`); it demotes — blocks this worker in place, polling all N arm queues
+    /// in **source order** on a bounded `DEMOTE_POLL_BACKOFF` backoff. The N-arm analogue of
+    /// [`Vm::demote_recv_block`]: account `running → blocked_native`, register EVERY arm channel in
+    /// `demoted_chans` (so `is_deadlocked` peeks them all and a value racing onto any arm vetoes a false
+    /// fire), spin a replacement worker once, then loop. Because there are N channel condvars (no single
+    /// one to block on), the wait is a bounded poll rather than a targeted condvar wait — lower
+    /// throughput but sound (the documented v1 limitation, same shape as the timer-in-callback note).
+    /// Returns `(arm_index, value)` for the first source-order arm to deliver. A per-arm `close`+empty
+    /// is SKIPPED; once EVERY arm is closed+empty it returns "all channels closed". Cancel/terminate/
+    /// self-detected-deadlock fault in place. Never parks. Only called on the M:N engine inside a
+    /// callback (gated `mn.is_some() && native_reentry > 0`).
+    fn demote_wait_block(
+        &mut self,
+        arms: Vec<(usize, Arc<ChannelCore>)>,
+        span: Span,
+    ) -> Result<(usize, WireValue), RuntimeError> {
+        let sched = Arc::clone(self.mn.as_ref().expect("demote_wait_block on the cooperative engine"));
+        // 1. Account running → blocked_native AND register EVERY arm channel, under core lock A, then
+        //    notify so an idle puller re-evaluates the deadlock predicate now this fiber left `running`.
+        {
+            let mut c = sched.lock();
+            c.running -= 1;
+            sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+            for (ptr, core) in &arms {
+                c.register_demoted(*ptr, core);
+            }
+            drop(c);
+            sched.cv.notify_all();
+        }
+        // Un-account helper: reverse step 1 (called on every exit path), caller holds core lock A.
+        let un_account = |c: &mut SchedCore| {
+            c.running += 1;
+            sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+            for (ptr, _) in &arms {
+                c.unregister_demoted(*ptr);
+            }
+        };
+        // 2. Spin a replacement worker ONCE per demoted thread (covers this `wid` while we block). If the
+        //    OS refuses the thread, un-roll step 1 and fault cleanly so the join still completes.
+        if !self.demoted {
+            if !self.spawn_replacement_worker(&sched, self.wid) {
+                let mut c = sched.lock();
+                un_account(&mut c);
+                drop(c);
+                return Err(self.err(
+                    "wait inside a native callback could not demote the worker (OS thread limit \
+                     reached) — reduce concurrent in-callback blocking or raise the thread limit"
+                        .to_string(),
+                    span,
+                ));
+            }
+            self.demoted = true;
+        }
+        // 3. Block in place. Each poll: under core lock A, scan all N arms in source order — the first
+        //    with a queued value wins (un-account + return). Then rank cancel > all-closed > terminate
+        //    > self-detected-deadlock, exactly like `demote_recv_block`, but generalized over N arms.
+        loop {
+            {
+                let mut c = sched.lock();
+                // Source-order poll: pop the first arm with a queued value (atomic with the A hold).
+                let mut all_closed = true;
+                for (idx, (_, core)) in arms.iter().enumerate() {
+                    let mut qg = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(w) = qg.queue.pop_front() {
+                        drop(qg);
+                        un_account(&mut c);
+                        drop(c);
+                        return Ok((idx, w));
+                    }
+                    if !qg.closed {
+                        all_closed = false;
+                    }
+                }
+                // Cancel (a sibling faulted): swallow the outcome (mirror the snapshot-park cancel arm).
+                if self.cancel.as_ref().is_some_and(|x| x.load(Ordering::Relaxed)) {
+                    self.cancelled = true;
+                    un_account(&mut c);
+                    drop(c);
+                    return Err(self.err("cancelled".to_string(), span));
+                }
+                // Every arm closed+empty: no value can ever arrive — the all-closed `wait` fault.
+                if all_closed {
+                    un_account(&mut c);
+                    drop(c);
+                    return Err(self.err("wait: all channels closed".to_string(), span));
+                }
+                if c.terminate {
+                    un_account(&mut c);
+                    drop(c);
+                    return Err(sched.deadlock_err.clone());
+                }
+                if sched.is_deadlocked(&c) {
+                    c.flag_deadlock(&sched.deadlock_err);
+                    un_account(&mut c);
+                    drop(c);
+                    sched.cv.notify_all();
+                    return Err(sched.deadlock_err.clone());
+                }
+            }
+            // No single condvar to wait on (N arms, N condvars) → bounded backoff poll. Sleep on the
+            // FIRST arm's condvar with a timeout so a `send`/`close` to arm 0 wakes promptly, and any
+            // other arm is observed within `DEMOTE_POLL_BACKOFF` (the documented lower-throughput path).
+            let first = &arms[0].1;
+            let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
+            if q.queue.is_empty() {
+                let _ = first.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
+            }
+        }
+    }
+
     /// D5 owe #3 Path C (#3) — a `sleep_ms(ms>0)` reached INSIDE a native callback (`native_reentry > 0`)
     /// on the M:N engine. The offload gate (`running → timer thread`) requires `native_reentry == 0`
     /// (the callback's `for`-loop state lives on the un-snapshottable Rust host stack), so without this
@@ -5755,6 +6014,8 @@ impl Vm {
             let span = fiber.span;
             match self.run_one_fiber(&mut fiber, span) {
                 Disp::Park(key, core) => sched.park(key, &core, fiber),
+                // §6d — multi-channel `wait` park: file ONE shared token in every arm's bucket.
+                Disp::WaitPark(arms) => sched.park_wait(arms, fiber),
                 Disp::Yield => sched.yield_fiber(fiber),
                 // D5 — the fiber hit a blocking native; hand it + the call to the dirty pool (frees
                 // this worker). The pool re-enqueues it on completion via `complete_offload`.
@@ -5795,7 +6056,7 @@ impl Vm {
     fn run_one_fiber(&mut self, fiber: &mut Fiber, span: Span) -> Disp {
         self.swap_ctx(&mut fiber.ctx);
         self.suspend = None;
-        self.wait_suspend = None; // never set under M:N (a blocking `wait` faults there for now)
+        self.wait_suspend = None; // set by `op_wait_poll`'s M:N snapshot-park (→ `Disp::WaitPark`)
         self.offload = None;
         self.poll_park = None;
         self.cancelled = false;
@@ -5853,6 +6114,14 @@ impl Vm {
                 // Capture the park key + the channel `Arc` WHILE the fiber heap is live (`h` is a
                 // GcRef into it); `park` re-checks the queue through this `Arc` under the sched lock.
                 Disp::Park(self.channel_core_ptr(h), self.channel_core(h))
+            } else if res.is_ok() && self.wait_suspend.is_some() {
+                // §6d — the fiber blocked on a multi-channel `wait`. Capture each arm's (key, core)
+                // WHILE the fiber heap is live (the `GcRef`s index into it), exactly as `Disp::Park`
+                // captures the single recv key; `park_wait` re-checks every arm under the sched lock.
+                let handles = self.wait_suspend.take().unwrap();
+                let arms: Vec<(usize, Arc<ChannelCore>)> =
+                    handles.iter().map(|&h| (self.channel_core_ptr(h), self.channel_core(h))).collect();
+                Disp::WaitPark(arms)
             } else if res.is_ok() && self.yield_now {
                 // D3 — budget exhausted (mutually exclusive with `suspend`: the safepoint returns
                 // before dispatching, so no `recv` ran this slice). Frames stay intact; resume
@@ -7614,28 +7883,40 @@ impl Vm {
         if all_closed {
             return Err(self.err("wait: all channels closed".to_string(), span));
         }
-        // Pure live channels, no `else`, no timer → block on all of them.
+        // Pure live channels, no `else`, no timer → block on all of them. The N arm handles are on the
+        // stack (they root the channels + re-supply the poll on resume).
+        let keys: Vec<GcRef> = (0..n)
+            .map(|i| match self.stack[base + i] {
+                Value::Obj(h) => h,
+                _ => unreachable!("wait arm operand is not a channel handle"),
+            })
+            .collect();
+        // M:N (`--parallel`) snapshot-park, top level: rewind to re-run `WaitPoll` on wake and set
+        // `wait_suspend`; the worker loop captures each arm's (key, core) WHILE the fiber heap is live
+        // (`Disp::WaitPark`) and `MnSched::park_wait` files ONE shared token in every arm bucket. A
+        // `send`/`close` to any arm claims the fiber once and sweeps the rest (lost-wakeup-safe via the
+        // park-gap re-check). Mirrors the single-`recv` `park_recv`/`Disp::Park` path, generalized to N.
+        if self.mn.is_some() && self.native_reentry == 0 {
+            self.frames.last_mut().unwrap().ip -= 1; // re-run this WaitPoll on resume
+            self.wait_suspend = Some(keys);
+            return Ok(());
+        }
+        // M:N inside a native callback (`native_reentry > 0`): a host-stack loop frame sits between the
+        // worker loop and here, so we cannot snapshot-park. Demote: block this worker in place, polling
+        // all N arm queues in source order on a bounded backoff (mirrors `demote_recv_block`). Lower
+        // throughput but sound — the documented v1 limitation (§6d).
         if self.mn.is_some() {
-            // The M:N multi-channel park is the recv_timeout-graveyard area; deferred to a focused
-            // follow-up. Fault clearly rather than hang or risk an unsound park.
-            return Err(self.err(
-                "wait: blocking under --parallel is not yet supported — add an `else:` arm, a \
-                 `timer` arm, or run on the default engine (the M:N multi-channel park is a \
-                 planned follow-up)"
-                    .to_string(),
-                span,
-            ));
+            let arms: Vec<(usize, Arc<ChannelCore>)> =
+                keys.iter().map(|&h| (self.channel_core_ptr(h), self.channel_core(h))).collect();
+            let (arm_index, w) = self.demote_wait_block(arms, span)?;
+            let v = self.from_wire(w);
+            self.take_wait_arm(base, v, meta.arm_targets[arm_index]);
+            return Ok(());
         }
         if !self.scheduler_stack.is_empty() && self.native_reentry == 0 {
             // Cooperative multi-channel park: keep the N handles on the stack (they root the channels
             // + re-supply the poll), rewind to re-run `WaitPoll` on wake, and register the fiber on
             // every live arm channel via `wait_suspend` (consumed by `run_child`).
-            let keys: Vec<GcRef> = (0..n)
-                .map(|i| match self.stack[base + i] {
-                    Value::Obj(h) => h,
-                    _ => unreachable!("wait arm operand is not a channel handle"),
-                })
-                .collect();
             self.frames.last_mut().unwrap().ip -= 1; // re-run this WaitPoll on resume
             self.wait_suspend = Some(keys);
             return Ok(());
@@ -10948,6 +11229,95 @@ main()
         }
     }
 
+    /// §6d M:N wait-park (TDD step 2): a plain `recv` park (the 1-key `ParkedEntry::Recv` case)
+    /// round-trips through the refactored `parked` map — park a fiber, `send_wake` it, and it lands
+    /// back on `global` as Ready with `parked_n` returned to 0. Pins that the refactor keeps the
+    /// recv-park path byte-identical at the scheduler level.
+    #[test]
+    fn mn_parked_entry_recv_roundtrips() {
+        let sched = mk_sched(1);
+        sched.seed(vec![mk_fiber(0)]);
+        let f0 = take_run(&sched); // running 1
+        let core = empty_core();
+        let key = core_key(&core);
+        sched.park(key, &core, f0); // parked 1, running 0
+        assert_eq!(sched.lock().parked_n, 1, "recv park accounts one parked fiber");
+        sched.send_wake(key, &core, WireValue::Int(5));
+        assert_eq!(sched.lock().parked_n, 0, "send_wake un-parks the recv fiber");
+        let woke = take_run(&sched);
+        assert_eq!(woke.task_index, 0, "the recv-parked fiber is back on the run queue");
+    }
+
+    /// §6d M:N wait-park (TDD step 3): a wait fiber filed under keys [k1,k2,k3] as ONE shared
+    /// `WaitPark` token. A `send_wake` on the middle key claims it exactly once (moves the single
+    /// fiber to Ready, `claimed==true`, `parked_n` 1→0) AND sweeps the stale tokens out of k1 and k3.
+    /// A follow-up `send_wake` on either swept key is a no-op (no double-wake, no panic).
+    #[test]
+    fn mn_wait_park_first_waker_claims_and_sweeps() {
+        let sched = mk_sched(1);
+        sched.seed(vec![mk_fiber(0)]);
+        let f0 = take_run(&sched); // running 1
+        let c1 = empty_core();
+        let c2 = empty_core();
+        let c3 = empty_core();
+        let (k1, k2, k3) = (core_key(&c1), core_key(&c2), core_key(&c3));
+        sched.park_wait(vec![(k1, Arc::clone(&c1)), (k2, Arc::clone(&c2)), (k3, Arc::clone(&c3))], f0);
+        assert_eq!(sched.lock().parked_n, 1, "a wait fiber on N keys counts as ONE parked fiber");
+        // Wake on the MIDDLE key.
+        sched.send_wake(k2, &c2, WireValue::Int(99));
+        {
+            let c = sched.lock();
+            assert_eq!(c.parked_n, 0, "claiming the wait fiber returns parked_n to 0");
+            assert!(c.parked.get(&k1).is_none_or(|v| v.is_empty()), "k1 token swept");
+            assert!(c.parked.get(&k3).is_none_or(|v| v.is_empty()), "k3 token swept");
+        }
+        assert_eq!(sched.lock().global.len(), 1, "exactly one fiber re-queued by the wake");
+        let woke = take_run(&sched);
+        assert_eq!(woke.task_index, 0, "the wait fiber is back on the run queue exactly once");
+        // A later send to a swept key must be a clean no-op (the token is gone): no new runnable fiber.
+        sched.send_wake(k1, &c1, WireValue::Int(1));
+        sched.send_wake(k3, &c3, WireValue::Int(3));
+        let c = sched.lock();
+        assert_eq!(c.parked_n, 0, "no double-wake from swept buckets");
+        assert_eq!(c.global.len(), 0, "no second wake of the already-moved fiber");
+    }
+
+    /// §6d M:N wait-park: `close_wake` claims+sweeps a wait fiber identically to `send_wake` (a close
+    /// has no value but must still unblock the waiter so it re-polls and skips the closed arm).
+    #[test]
+    fn mn_wait_park_close_wake_claims_and_sweeps() {
+        let sched = mk_sched(1);
+        sched.seed(vec![mk_fiber(0)]);
+        let f0 = take_run(&sched);
+        let c1 = empty_core();
+        let c2 = empty_core();
+        let (k1, k2) = (core_key(&c1), core_key(&c2));
+        sched.park_wait(vec![(k1, Arc::clone(&c1)), (k2, Arc::clone(&c2))], f0);
+        assert_eq!(sched.lock().parked_n, 1);
+        sched.close_wake(k1, &c1);
+        {
+            let c = sched.lock();
+            assert_eq!(c.parked_n, 0, "close_wake un-parks the wait fiber");
+            assert!(c.parked.get(&k2).is_none_or(|v| v.is_empty()), "k2 token swept by close");
+        }
+        assert_eq!(take_run(&sched).task_index, 0);
+    }
+
+    /// §6d M:N wait-park: a lone wait-parked fiber on N empty keys with nothing running/runnable/
+    /// inflight IS a deadlock — `park_wait` must increment `parked_n` so `is_deadlocked` fires (the
+    /// accounting choice: one fiber, +1 regardless of key count).
+    #[test]
+    fn mn_wait_park_lone_fiber_is_deadlock() {
+        let sched = mk_sched(1);
+        sched.seed(vec![mk_fiber(0)]);
+        let f0 = take_run(&sched);
+        let c1 = empty_core();
+        let c2 = empty_core();
+        sched.park_wait(vec![(core_key(&c1), Arc::clone(&c1)), (core_key(&c2), Arc::clone(&c2))], f0);
+        let c = sched.lock();
+        assert!(sched.is_deadlocked(&c), "a lone wait-parked fiber with no sender is a deadlock");
+    }
+
     /// D4b: a `LocalQ` pops `runnext` first (locality), then the ring in FIFO order, then `None`.
     #[test]
     fn localq_runnext_then_ring_order() {
@@ -12072,6 +12442,101 @@ main()
                 Ok(()) => panic!("Path C: no-sender recv-in-callback unexpectedly succeeded"),
             },
             Err(_) => panic!("hung — D5 owe #3 Path C deadlock detection regressed (blocked_native predicate / notify)"),
+        }
+    }
+
+    /// §6d M:N wait-in-callback DEMOTE (TDD step 8) — a blocking `wait` reached inside a native `xs.map`
+    /// callback (`native_reentry > 0`) cannot snapshot-park (the HOF's loop state is on the Rust host
+    /// stack), so it DEMOTES: blocks the worker in place, polling all N arm queues on a bounded backoff
+    /// until a sibling `send` to either arm delivers (mirrors `demote_recv_block`, the documented
+    /// lower-throughput v1 path). The producer `sleep_ms`s before its `send` so the callback's first
+    /// `wait` poll is GUARANTEED empty — forcing the demote path deterministically. The send lands on
+    /// the SECOND arm, so the demote loop's source-order N-arm scan is exercised. Watchdog 30 s so a
+    /// demote/resume hang fails loud. `66` = 1 + 65 (the second-arm value).
+    #[test]
+    fn vm_wait_in_native_callback_demotes_under_parallel() {
+        let src = "\
+import std.time
+
+fn pick(a: Channel[int], b: Channel[int], x: int) -> int:
+    wait:
+        v := a.recv(): return x + v
+        w := b.recv(): return x + w
+
+fn use_map(a: Channel[int], b: Channel[int], out: Shared[int]):
+    xs := [1]
+    ys := xs.map(fn(x): pick(a, b, x))
+    out.set(ys[0])
+
+fn fill(b: Channel[int]):
+    time.sleep_ms(50)
+    b.send(65)
+
+fn main():
+    a := Channel[int]()
+    b := Channel[int]()
+    out := Shared(0)
+    parallel:
+        spawn use_map(a, b, out)
+        spawn fill(b)
+    print(out.get())
+
+main()
+";
+        let entry = write_temp_chz("vm_wait_callback_demote", src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok((out, _err, res, _code)) => {
+                assert!(res.is_ok(), "wait inside native xs.map faulted under --parallel: {res:?}");
+                assert_eq!(out, "66\n");
+            }
+            Err(_) => panic!("hung — M:N wait-in-callback demote-and-resume regressed"),
+        }
+    }
+
+    /// §6d M:N wait-in-callback DEMOTE with no possible sender must still fault `deadlock`, not hang —
+    /// the demote loop's self-detected-deadlock path (`is_deadlocked` over the registered arm channels).
+    #[test]
+    fn vm_wait_in_native_callback_no_sender_deadlocks() {
+        let src = "\
+fn pick(a: Channel[int], b: Channel[int], x: int) -> int:
+    wait:
+        v := a.recv(): return x + v
+        w := b.recv(): return x + w
+
+fn use_map(a: Channel[int], b: Channel[int]):
+    xs := [1]
+    ys := xs.map(fn(x): pick(a, b, x))
+    print(ys)
+
+fn main():
+    a := Channel[int]()
+    b := Channel[int]()
+    parallel:
+        spawn use_map(a, b)
+
+main()
+";
+        let entry = write_temp_chz("vm_wait_callback_dl", src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        match result {
+            Ok((_out, _err, res, _code)) => match res {
+                Err(e) => assert!(format!("{e:?}").contains("deadlock"), "no-sender wait-in-callback should deadlock: {e:?}"),
+                Ok(()) => panic!("no-sender wait-in-callback unexpectedly succeeded"),
+            },
+            Err(_) => panic!("hung — M:N wait-in-callback deadlock detection regressed"),
         }
     }
 
@@ -13787,13 +14252,124 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         assert_eq!(run(src), "42\n");
     }
 
-    /// `wait` blocking under `--parallel` is a documented follow-up: it faults clearly (rather than
-    /// hang or risk an unsound park). Non-blocking `wait` (`else`/ready/timer) is unaffected.
+    /// A lone blocking `wait` under `--parallel` with NO possible sender is a genuine deadlock — it
+    /// must fault `deadlock` (NOT hang, NOT "not yet supported"). Proves the M:N wait-park accounts
+    /// the parked fiber via `parked_n` so the deadlock predicate fires.
     #[test]
-    fn vm_wait_blocking_under_parallel_engine_faults() {
-        let src = "fn consumer(a: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\nfn main():\n    a := Channel[int]()\n    parallel:\n        spawn consumer(a)\nmain()\n";
-        let err = run_capture_parallel(src).expect_err("blocking wait under --parallel must fault");
-        assert!(err.message.contains("not yet supported"), "{}", err.message);
+    fn vm_wait_lone_blocked_parallel_deadlocks() {
+        let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\n        w := b.recv(): print(w)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\nmain()\n";
+        let err = run_capture_parallel(src).expect_err("lone blocked wait under --parallel must deadlock");
+        assert!(err.message.contains("deadlock"), "{}", err.message);
+    }
+
+    /// M:N blocking wait-park (TDD step 4): a spawned consumer `wait`s on two empty channels and parks
+    /// under `--parallel`; a sibling `send` to the SECOND channel wakes it and the re-poll takes that
+    /// arm. Asserts the parallel output AND parity with the cooperative VM.
+    #[test]
+    fn vm_wait_blocks_then_wakes_on_second_channel_parallel() {
+        let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(\"a {v}\")\n        w := b.recv(): print(\"b {w}\")\nfn producer(b: Channel[int]):\n    b.send(99)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn producer(b)\nmain()\n";
+        assert_eq!(run_capture_parallel(src).expect("parallel wait park"), "b 99\n");
+        assert_eq!(run(src), "b 99\n");
+    }
+
+    /// M:N wait-park cross-bucket SWEEP (TDD step 5): a consumer parks on {a,b}; a `send` to `a` wakes
+    /// it and it finishes — a later `send` to `b` must NOT re-wake the now-Done fiber (its stale `b`
+    /// token was swept under the sched lock). Without the sweep this re-schedules a Done fiber → panic.
+    #[test]
+    fn vm_wait_sweeps_other_buckets_after_waking_parallel() {
+        let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\n        w := b.recv(): print(w)\nfn p_a(a: Channel[int]):\n    a.send(1)\nfn p_b(b: Channel[int]):\n    b.send(2)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn p_a(a)\n        spawn p_b(b)\nmain()\n";
+        assert_eq!(run_capture_parallel(src).expect("parallel wait sweep"), "1\n");
+        assert_eq!(run(src), "1\n");
+    }
+
+    /// M:N wait-park: a wait-parked fiber with a LIVE sibling that will send must take the arm and
+    /// print — NOT fault deadlock (the live sibling vetoes the predicate). Parity with cooperative VM.
+    #[test]
+    fn vm_wait_sibling_send_vetoes_deadlock_parallel() {
+        let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(\"got {v}\")\n        w := b.recv(): print(\"got {w}\")\nfn producer(a: Channel[int]):\n    a.send(5)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn producer(a)\nmain()\n";
+        assert_eq!(run_capture_parallel(src).expect("live sibling vetoes deadlock"), "got 5\n");
+        assert_eq!(run(src), "got 5\n");
+    }
+
+    // ----- §6d edge cases: control flow + nesting + spawn inside `wait` arm bodies (VM == interp) -----
+
+    /// A `wait` arm body that `break`s out of an enclosing loop (compiled via `compile_defer_scoped_arm`,
+    /// the same path as a `match` arm). VM == interp.
+    #[test]
+    fn vm_wait_arm_break_in_loop() {
+        let src = "fn main():\n    found := -1\n    i := 0\n    while i < 3:\n        a := Channel[int]()\n        a.send(i * 10)\n        wait:\n            v := a.recv():\n                if v == 10:\n                    found = v\n                    break\n        i += 1\n    print(found)\nmain()\n";
+        let vm = run(src);
+        assert_eq!(vm, "10\n");
+        assert_eq!(vm, crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// A `wait` arm body that `continue`s the enclosing loop.
+    #[test]
+    fn vm_wait_arm_continue_in_loop() {
+        let src = "fn main():\n    total := 0\n    i := 0\n    while i < 3:\n        a := Channel[int]()\n        a.send(i)\n        i += 1\n        wait:\n            v := a.recv():\n                if v == 1:\n                    continue\n                total += v\n    print(total)\nmain()\n";
+        let vm = run(src);
+        assert_eq!(vm, "2\n");
+        assert_eq!(vm, crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// A `wait` arm body that `return`s a value from the enclosing function.
+    #[test]
+    fn vm_wait_arm_return() {
+        let src = "fn pick(a: Channel[int]) -> int:\n    wait:\n        v := a.recv():\n            return v * 100\nfn main():\n    a := Channel[int]()\n    a.send(7)\n    print(pick(a))\nmain()\n";
+        let vm = run(src);
+        assert_eq!(vm, "700\n");
+        assert_eq!(vm, crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// A `wait` arm body containing ANOTHER `wait` (nested select).
+    #[test]
+    fn vm_wait_nested() {
+        let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.send(1)\n    b.send(2)\n    wait:\n        v := a.recv():\n            wait:\n                w := b.recv(): print(v + w)\nmain()\n";
+        let vm = run(src);
+        assert_eq!(vm, "3\n");
+        assert_eq!(vm, crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// A `wait` inside a loop that blocks, wakes, re-iterates, and blocks again under `--parallel`: the
+    /// consumer parks on each iteration until the producer feeds it. VM == interp == --parallel.
+    #[test]
+    fn vm_wait_in_loop_reparks_parallel() {
+        let src = "fn consumer(ch: Channel[int], done: Channel[int]):\n    sum := 0\n    i := 0\n    while i < 3:\n        wait:\n            v := ch.recv(): sum += v\n        i += 1\n    done.send(sum)\nfn producer(ch: Channel[int]):\n    ch.send(10)\n    ch.send(20)\n    ch.send(30)\nfn main():\n    ch := Channel[int]()\n    done := Channel[int]()\n    parallel:\n        spawn consumer(ch, done)\n        spawn producer(ch)\n    print(done.recv())\nmain()\n";
+        assert_eq!(run(src), "60\n");
+        assert_eq!(run_capture_parallel(src).expect("parallel repark loop"), "60\n");
+    }
+
+    /// A `wait` arm body containing a bare `spawn` (exercises `block_has_bare_spawn`'s recursion into
+    /// wait arms — the body opens an implicit nursery that joins at function return). VM == interp.
+    #[test]
+    fn vm_wait_arm_bare_spawn() {
+        let src = "fn worker():\n    print(\"worker ran\")\nfn main():\n    a := Channel[int]()\n    a.send(1)\n    wait:\n        v := a.recv():\n            spawn worker()\n    print(\"after wait\")\nmain()\n";
+        let vm = run(src);
+        assert_eq!(vm, "after wait\nworker ran\n");
+        assert_eq!(vm, crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// §6d regression — a multi-arm `wait` whose arm body references an OUTER local inside a fused
+    /// binop (`x + w`): the peephole fuses `GetLocal+GetLocal+Add` → `BinLocalLocal`, shifting the
+    /// arm-body indices, so `WaitPoll.arm_targets` must be relocated (else the wake jumps PAST the
+    /// bind prologue → VM 65, interp 66). Pins VM == interp on every arm.
+    #[test]
+    fn vm_wait_arm_body_outer_local_in_binop_matches_interp() {
+        let src = "fn pick(a: Channel[int], b: Channel[int], x: int) -> int:\n    wait:\n        v := a.recv(): return x + v\n        w := b.recv(): return x + w\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    b.send(65)\n    print(pick(a, b, 1))\nmain()\n";
+        let vm = run(src);
+        assert_eq!(vm, "66\n");
+        assert_eq!(vm, crate::interp::run_capture(src).expect("interp"));
+    }
+
+    /// 1-key regression PIN (TDD step 1): an ordinary blocking `recv` (NOT a `wait`) under
+    /// `--parallel`, woken by a sibling `send`, still works byte-identically — this guards the
+    /// `SchedCore.parked` refactor (`Vec<Fiber>` → `Vec<ParkedEntry>`) from regressing the recv park.
+    /// Asserts both the parallel output AND parity with the cooperative VM.
+    #[test]
+    fn vm_wait_single_arm_recv_park_unchanged_under_parallel() {
+        let src = "fn consumer(a: Channel[int]):\n    v := a.recv()\n    print(\"got {v}\")\nfn producer(a: Channel[int]):\n    a.send(7)\nfn main():\n    a := Channel[int]()\n    parallel:\n        spawn consumer(a)\n        spawn producer(a)\nmain()\n";
+        assert_eq!(run_capture_parallel(src).expect("parallel recv park"), "got 7\n");
+        assert_eq!(run(src), "got 7\n");
     }
 
     #[test]

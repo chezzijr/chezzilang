@@ -186,21 +186,37 @@ frozen interp is the differential parity oracle for the sequential subset.
 >   Known v1 limitation: `timer.recv()` inside a native callback pins a worker (no demote). `docs §6c`.
 > - **`recv_timeout` DROPPED** — `wait` + `timer` subsume it (`ch.recv_timeout(500)` ≡ `wait` over `ch`
 >   and `timer(500)`), and it was the unsound/reverted one. No separate primitive.
-> - **`wait` (select) — SHIPPED on the default engine + interpreter (2026-06-13); M:N blocking park is a
->   scoped follow-up.** Full design + grammar + per-engine semantics in **`docs/concurrency.md §6d`** (cheat
->   row in `docs/syntax.md §11b`; `examples/wait_select.chz`). A `wait:` compound statement races channel
+> - **`wait` (select) — SHIPPED on ALL THREE engines (2026-06-13; M:N blocking park landed 2026-06-13).**
+>   Full design + grammar + per-engine semantics in **`docs/concurrency.md §6d`** (cheat row in
+>   `docs/syntax.md §11b`; `examples/wait_select.chz`). A `wait:` compound statement races channel
 >   `recv`s — arms `v := ch.recv():` (`:=`/`=`/`_` targets), optional non-blocking `else:` (last), `timer`
 >   arms, recv-only (unbounded channels → sends never block); source-order priority; closed+empty arm
 >   **skipped**; all-closed+no-`else` faults. **Done:** lexer→parser (`parse_wait`)→checker (`check_wait`)
 >   →interp (`exec_wait`, the parity oracle)→cooperative VM (`Op::WaitPoll` + `compile_wait`), incl. the
 >   **cooperative multi-channel park** (one fiber filed under N keys via `wait_suspend`/`run_child`, swept
 >   out of the other buckets on resume — `vm_wait_blocks_then_wakes_on_second_channel` +
->   `vm_wait_sweeps_other_buckets_after_waking`). Non-blocking arms (`else`/ready/`timer`) work in all three
->   engines; `examples/wait_select.chz` is byte-identical across VM/interp/`--parallel`. **Follow-up (the
->   recv_timeout-graveyard area, deliberately separate):** the **M:N `--parallel` blocking park** — a
->   blocking `wait` under `--parallel` currently faults clearly (`"wait: blocking under --parallel is not
->   yet supported …"`); design is the `WaitPark { fiber, keys, claimed }` + per-key token sweep in
->   `MnSched::send_wake`/`close_wake`, plus the `native_reentry > 0` multi-channel demote-poll.
+>   `vm_wait_sweeps_other_buckets_after_waking`). **M:N `--parallel` blocking park — LANDED:** a blocking
+>   `wait` now parks under `--parallel` instead of faulting. ONE `WaitPark { fiber, keys, claimed }` held
+>   behind an `Arc`, with a `ParkedEntry::Wait(token)` filed in every arm's `MnSched.parked[key]` bucket
+>   (`MnSched::park_wait`, the N-key generalization of `park`); the first waker CASes `claimed`, takes the
+>   fiber, and sweeps the stale token out of all other buckets under one core-lock hold
+>   (`send_wake`/`close_wake`/`cancel_drain`/`flag_deadlock` all token-aware). Routed via
+>   `Disp::WaitPark(Vec<(key, core)>)` captured while the fiber heap is live (mirrors `Disp::Park`). The
+>   1-key recv park stays the cheaper `ParkedEntry::Recv` case (alloc-free, byte-identical —
+>   `vm_wait_single_arm_recv_park_unchanged_under_parallel`). Deadlock accounting: a wait-parked fiber is
+>   `parked_n += 1` (ONE fiber, regardless of arm count) so the `is_deadlocked` predicate stays sound
+>   (`vm_wait_lone_blocked_parallel_deadlocks`; a live sibling vetoes —
+>   `vm_wait_sibling_send_vetoes_deadlock_parallel`). **`native_reentry > 0` (wait inside a native
+>   callback):** can't snapshot-park → `demote_wait_block` blocks in place, polling all N arm queues
+>   source-order on a bounded `DEMOTE_POLL_BACKOFF` (the N-arm analogue of `demote_recv_block`;
+>   lower-throughput-but-sound **v1 limitation** — there are N channel condvars, no single one to block on).
+>   All three engines byte-identical on `examples/wait_select.chz`; 150× + 4×80× stress loops clean (no
+>   lost-wakeup). **Fixed in passing (a pre-existing two-engine parity bug exposed by the edge tests):**
+>   the peephole optimizer did not relocate `Op::WaitPoll`'s `arm_targets`/`else_target` through its
+>   fold/fuse index remap, so a multi-arm `wait` whose arm body fused a binop (`x + w`) jumped PAST the
+>   bind prologue (VM 65 vs interp 66). Now `WaitPoll`'s targets are marked + relocated like `Jump`/
+>   `MatchArm` (`relocates_waitpoll_arm_and_else_targets_past_a_fold`,
+>   `vm_wait_arm_body_outer_local_in_binop_matches_interp`).
 
 ### Tier-D — complete (D0–D6c)
 
