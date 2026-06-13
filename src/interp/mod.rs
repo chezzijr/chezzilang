@@ -3,7 +3,7 @@
 
 use crate::ast::{
     AssignOp, BinaryOp, Block, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern, MatchArm,
-    MatchExprArm, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp,
+    MatchExprArm, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp, WaitArm, WaitTarget,
 };
 use crate::{lexer, parser};
 
@@ -985,6 +985,109 @@ impl Interp {
     /// The first task to fault aborts the remaining siblings and propagates (composing with
     /// `recover:` / `defer`, which see it as an ordinary `Err`). A fault in the body itself
     /// propagates without running any queued task.
+    /// `wait:` — Chezzi's `select` (§6d), the sequential reference semantics (the VM's parity oracle).
+    /// Evaluate each arm's channel once (source order), poll once in source order: the first channel
+    /// with a queued value (or a fired timer) wins. A closed+empty arm is skipped. Nothing ready →
+    /// run `else` if present; otherwise, if any arm is a live timer, inline-sleep to the soonest
+    /// deadline and take it (deterministic, single-threaded); else fault — `"wait: all channels
+    /// closed"` if every arm is closed+empty, the sequential `deadlock` fault otherwise.
+    fn exec_wait(
+        &mut self,
+        arms: &[WaitArm],
+        else_block: Option<&[Stmt]>,
+        span: Span,
+    ) -> Result<Flow, RuntimeError> {
+        // 1. Evaluate each arm's channel expression once, in source order.
+        let mut chans = Vec::with_capacity(arms.len());
+        for arm in arms {
+            match self.eval(&arm.chan)? {
+                Value::Channel(q) => chans.push(q),
+                other => {
+                    return Err(RuntimeError {
+                        message: format!("a wait arm must recv from a Channel, found {}", other.type_name()),
+                        span: arm.chan.span,
+                    })
+                }
+            }
+        }
+        // 2. Poll source order. Track the soonest live-timer deadline and whether every arm is
+        //    closed+empty (so an all-closed `wait` with no `else` faults distinctly).
+        let mut soonest_timer: Option<(usize, std::time::Instant)> = None;
+        let mut all_closed = true;
+        for (i, q) in chans.iter().enumerate() {
+            let (popped, closed, timer) = {
+                let mut s = q.borrow_mut();
+                (s.queue.pop_front(), s.closed, s.timer)
+            };
+            if let Some(v) = popped {
+                return self.run_wait_arm(&arms[i], v, span);
+            }
+            if let Some(deadline) = timer {
+                // A timer channel is never closed and always eventually ready: fired now, or a live
+                // waiter whose deadline we may sleep to below.
+                if std::time::Instant::now() >= deadline {
+                    return self.run_wait_arm(&arms[i], Value::Bool(true), span);
+                }
+                all_closed = false;
+                if soonest_timer.is_none_or(|(_, d)| deadline < d) {
+                    soonest_timer = Some((i, deadline));
+                }
+            } else if !closed {
+                all_closed = false;
+            }
+        }
+        // 3. Nothing ready → the non-blocking fallback.
+        if let Some(b) = else_block {
+            return self.exec_scoped_block(b);
+        }
+        // 4. A live timer arm → inline-sleep to the soonest deadline and take it (deterministic).
+        if let Some((i, deadline)) = soonest_timer {
+            let now = std::time::Instant::now();
+            if now < deadline {
+                std::thread::sleep(deadline - now);
+            }
+            return self.run_wait_arm(&arms[i], Value::Bool(true), span);
+        }
+        // 5. No `else`, no live timer: every arm closed+empty faults distinctly; otherwise the
+        //    sequential `deadlock` fault (the interp cannot block waiting for a producer — like `recv`).
+        if all_closed {
+            return Err(RuntimeError { message: "wait: all channels closed".to_string(), span });
+        }
+        Err(RuntimeError {
+            message: "wait on channels that are all empty: deadlock — nothing is queued and the \
+                      sequential executor cannot block waiting for a producer (a consumer that \
+                      waits mid-flight on a live producer needs C5)"
+                .to_string(),
+            span,
+        })
+    }
+
+    /// Run a chosen `wait` arm: deliver `val` per the arm's target in a fresh arm-local scope, then
+    /// execute the arm body in that scope.
+    fn run_wait_arm(&mut self, arm: &WaitArm, val: Value, span: Span) -> Result<Flow, RuntimeError> {
+        self.env.push();
+        let r = match &arm.target {
+            WaitTarget::Bind(name) => {
+                self.env.define(name, val);
+                self.exec_block(&arm.body)
+            }
+            WaitTarget::Discard => self.exec_block(&arm.body),
+            WaitTarget::Assign(target) => {
+                // Reuse the ordinary assignment path so `=` semantics (outer lvalue, index/field
+                // mutation) match a plain `target = recv()` exactly. The received value is delivered
+                // through a reserved, un-lexable temp binding (no user identifier can collide).
+                self.env.define(WAIT_RECV_TMP, val);
+                let value_expr = Expr { kind: ExprKind::Ident(WAIT_RECV_TMP.to_string()), span };
+                match self.exec_assign(target, AssignOp::Eq, &value_expr, span) {
+                    Ok(()) => self.exec_block(&arm.body),
+                    Err(e) => Err(e),
+                }
+            }
+        };
+        self.env.pop();
+        r
+    }
+
     fn exec_parallel(&mut self, body: &[Stmt]) -> Result<Flow, RuntimeError> {
         self.nurseries.push(Vec::new());
         let body_result = self.exec_scoped_block(body);
@@ -3019,6 +3122,7 @@ impl Interp {
             // Kept out of this match (their locals are large) so `exec_stmt`'s frame stays small.
             StmtKind::Parallel { body } => self.exec_parallel(body),
             StmtKind::Spawn(target) => self.exec_spawn(target, stmt.span),
+            StmtKind::Wait { arms, else_block } => self.exec_wait(arms, else_block.as_deref(), stmt.span),
             StmtKind::Break => Ok(Flow::Break),
             StmtKind::Continue => Ok(Flow::Continue),
             StmtKind::If {
@@ -3525,6 +3629,11 @@ impl Interp {
 /// frames are far larger and can still overflow at the limit (a pre-existing property, not specific
 /// to `defer`).
 const INTERP_STACK_BYTES: usize = 384 * 1024 * 1024;
+
+/// A reserved, un-lexable binding name `wait`'s `=` arm uses to hand the received value to the shared
+/// `exec_assign` path (so `wait` `=` semantics match a plain assignment). The NUL bytes guarantee no
+/// user identifier can collide.
+const WAIT_RECV_TMP: &str = "\u{0}wait-recv\u{0}";
 
 /// Run a whole program from a source string, returning the output produced **so far** alongside
 /// the outcome. The single-file test entry point — the CLI uses [`run_file`] so multi-file
@@ -5484,6 +5593,52 @@ b := Buf([10, 20, 30])
     fn channel_block_chz_faults_deadlock_on_interp() {
         let source = include_str!("../../examples/channel_block.chz");
         let err = run_capture(source).unwrap_err();
+        assert!(err.message.contains("deadlock"), "got: {}", err.message);
+    }
+
+    // ----- §6d: `wait` (select) — interp reference semantics -----
+
+    #[test]
+    fn wait_picks_first_ready_arm_in_source_order() {
+        let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.send(1)\n    b.send(2)\n    wait:\n        v := a.recv(): print(10 + v)\n        w := b.recv(): print(20 + w)\nmain()\n";
+        assert_eq!(run(src), "11\n");
+    }
+
+    #[test]
+    fn wait_skips_closed_empty_arm() {
+        let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.close()\n    b.send(9)\n    wait:\n        v := a.recv(): print(100)\n        w := b.recv(): print(w)\nmain()\n";
+        assert_eq!(run(src), "9\n");
+    }
+
+    #[test]
+    fn wait_runs_else_when_nothing_ready() {
+        let src = "fn main():\n    ch := Channel[int]()\n    wait:\n        v := ch.recv(): print(v)\n        else: print(0)\nmain()\n";
+        assert_eq!(run(src), "0\n");
+    }
+
+    #[test]
+    fn wait_assign_arm_mutates_outer_lvalue() {
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.send(5)\n    n := 0\n    wait:\n        n = ch.recv(): print(n)\n    print(n)\nmain()\n";
+        assert_eq!(run(src), "5\n5\n");
+    }
+
+    #[test]
+    fn wait_timer_arm_fires() {
+        let src = "fn main():\n    t := timer(1)\n    wait:\n        _ := t.recv(): print(\"tick\")\nmain()\n";
+        assert_eq!(run(src), "tick\n");
+    }
+
+    #[test]
+    fn wait_all_closed_no_else_faults() {
+        let err = run_capture("fn main():\n    ch := Channel[int]()\n    ch.close()\n    wait:\n        v := ch.recv(): print(v)\nmain()\n")
+            .unwrap_err();
+        assert!(err.message.contains("all channels closed"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn wait_live_empty_no_else_deadlocks() {
+        let err = run_capture("fn main():\n    ch := Channel[int]()\n    wait:\n        v := ch.recv(): print(v)\nmain()\n")
+            .unwrap_err();
         assert!(err.message.contains("deadlock"), "got: {}", err.message);
     }
 

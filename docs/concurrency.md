@@ -338,12 +338,17 @@ deadlock; the cooperative VM and the interpreter inline-sleep to the deadline (s
 
 ---
 
-## 6d. `wait` — racing multiple channel receives *(designed; not yet implemented)*
+## 6d. `wait` — racing multiple channel receives *(cooperative engine: shipped; M:N park: follow-up)*
 
-> **Status:** the surface and semantics below are **locked** (brainstormed 2026-06). `Atomic` and `timer`
-> have shipped; `wait` is the remaining piece and is its own focused milestone — the blocking case needs a
-> multi-channel park in the scheduler (see the implementation notes), the exact area where a prior
-> `recv_timeout` was reverted, so it is being done carefully and separately rather than rushed.
+> **Status:** the surface and semantics below are **locked** (brainstormed 2026-06) and **implemented on
+> the default cooperative engine + the interpreter** (2026-06-13): lexer→parser→checker→interp→VM, with
+> non-blocking arms (`else:`, an already-ready arm, a `timer` arm) working in **all three** engines and the
+> **blocking multi-channel park** working in the cooperative scheduler (one fiber parked on N channels,
+> woken by the first sender, swept out of the other buckets on resume). **Deferred to a focused follow-up:**
+> the **M:N (`--parallel`) blocking park** — the exact area where a prior `recv_timeout` was reverted, so it
+> is being done separately rather than rushed. Until then a `wait` that would truly block under `--parallel`
+> faults clearly (`"wait: blocking under --parallel is not yet supported …"`); add an `else:`/`timer` arm,
+> or run on the default engine. See `examples/wait_select.chz`.
 
 `wait` is Chezzi's `select`: block until **whichever of several channels is ready first**, bind its value,
 and run that arm. Because Chezzi channels are **unbounded** (a `send` never blocks), `wait` is purely
@@ -382,10 +387,15 @@ exhaustive (it's a runtime race, not a type match); ≥1 recv-arm is required.
 4. If no arm is ready: with an `else`, run it (non-blocking); otherwise **block** — park the fiber on *all*
    live arm channels and re-poll on the first wake.
 
-**Implementation notes (for the next session).**
+**Implementation notes.** *(Done: front end + checker + interp + cooperative VM. A new `Op::WaitPoll`
+holds the N arm channel handles on the operand stack, polls source order, and jumps to the chosen arm's
+body / `else`, inline-sleeps to the soonest live `timer`, faults all-closed, or parks. The cooperative
+multi-channel park files the fiber under every key (`run_child` reads `wait_suspend`) and sweeps the index
+out of the other buckets on resume. **Remaining follow-up: the M:N park below.**)*
 - *Non-blocking* (`else` present) and the *poll* step reuse the existing `try_recv` path (a timer arm's
-  `try_recv` is already deadline-aware) — straightforward in all engines.
-- *Blocking* (no `else`) needs a **multi-channel park**: today a fiber parks in one `parked[key]` bucket
+  `try_recv` is already deadline-aware) — straightforward in all engines. **(Done.)**
+- *Blocking* (no `else`) needs a **multi-channel park** — **done for the cooperative scheduler; the M:N
+  `MnSched` park below is the remaining follow-up.** Today a fiber parks in one `parked[key]` bucket
   (`MnSched::park`/`send_wake`/`close_wake`) and is woken by a send to that key. `wait` needs one fiber
   parked on N keys, woken by the first sender, and **swept out of the other N-1 buckets** — otherwise a
   later send wakes a fiber that already moved on. Design: a `WaitPark { fiber, keys, claimed: Arc<AtomicBool> }`

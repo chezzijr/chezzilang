@@ -35,7 +35,7 @@
 <stmts>  ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
-<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <deferStmt>
+<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
 <simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <exprStmt>
@@ -166,6 +166,17 @@
 # "spawn only inside a parallel:" rule are enforced by the parser/checker, not the grammar.
 <parallelStmt> ::= "PARALLEL" <block>
 <spawnStmt>    ::= "SPAWN" <expr> "NEWLINE" | "SPAWN" <block>
+
+# Concurrency (C6d): `wait:` — Chezzi's `select`, racing channel `recv`s. Each recv-arm is
+# `<target> (":=" | "=") <chanExpr> ".recv()" <block>`; the optional `else:` arm is the non-blocking
+# fallback. The grammar accepts any `<expr>` on both sides of `:=`/`=` — the "RHS must be a bare
+# `.recv()`", "`:=` LHS must be a name / `=` LHS must be an lvalue", "`else` is last", and "≥1 recv-arm"
+# rules are enforced by the parser/checker, not the grammar (like `spawn`'s call-only restriction).
+<waitStmt> ::= "WAIT" "COLON" "NEWLINE" "INDENT" <waitArms> "DEDENT"
+<waitArms> ::= <waitArm> | <waitArm> <waitArms>
+<waitArm>  ::= <expr> "WALRUS" <expr> <block>
+             | <expr> "ASSIGN" <expr> <block>
+             | "ELSE" <block>
 
 <matchStmt> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <arms> "DEDENT"
 <arms>      ::= <arm> | <arm> <arms>

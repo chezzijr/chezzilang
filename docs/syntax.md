@@ -971,10 +971,13 @@ fn fetch_all(urls: list[str]):
   yields `true` (level-triggered — ready on any recv at/after the deadline). The composable timeout
   primitive; once `wait` lands it races against real channels (`recv_timeout` is just `wait` over a
   channel and a `timer`).
-- **`wait:` (select)** — *designed, not yet implemented.* Blocks until the first of several channel
-  `recv`s is ready: `wait:` then arms `v := ch.recv():` (or `=`/`_`), an optional non-blocking `else:`,
-  and timer arms for timeouts. Recv-only (sends never block on unbounded channels). See
-  [`concurrency.md §6d`](concurrency.md) for the locked design.
+- **`wait:` (select)** — race several channel `recv`s; the first ready arm wins (source-order priority).
+  `wait:` then arms `v := ch.recv():` (or `result = ch.recv():` / `_ := ch.recv():`), an optional
+  non-blocking `else:` (must be last), and `timer` arms for timeouts. Recv-only (sends never block on
+  unbounded channels); a closed+empty arm is skipped; all-closed + no `else` faults. **Shipped on the
+  default engine + interpreter**; non-blocking arms also work under `--parallel`, but a `wait` that would
+  truly *block* under `--parallel` faults for now (the M:N multi-channel park is a follow-up). See
+  [`concurrency.md §6d`](concurrency.md) and `examples/wait_select.chz`.
 - **Sendability:** captures are copies, **read-only** inside a task (reassign = error); only sendable
   types (scalars/str/containers+structs of sendable/`Channel`/`Shared`) cross — not closures, native
   handles, or `Ref`.

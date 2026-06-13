@@ -18,7 +18,7 @@
 
 use crate::ast::{
     Block, DeferTarget, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Param, Pattern, Span,
-    SpawnTarget, Stmt, StmtKind, Type,
+    SpawnTarget, Stmt, StmtKind, Type, WaitTarget,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolveError};
 use std::collections::{HashMap, HashSet};
@@ -599,6 +599,18 @@ impl Walker<'_> {
                 SpawnTarget::Call(e) => self.walk_expr(e)?,
                 SpawnTarget::Block(body) => self.walk_block(body)?,
             },
+            StmtKind::Wait { arms, else_block } => {
+                for arm in arms {
+                    self.walk_expr(&mut arm.chan)?;
+                    if let WaitTarget::Assign(e) = &mut arm.target {
+                        self.walk_expr(e)?;
+                    }
+                    self.walk_block(&mut arm.body)?;
+                }
+                if let Some(b) = else_block {
+                    self.walk_block(b)?;
+                }
+            }
             // No nested expressions / bindings to rewrite.
             StmtKind::Return(None)
             | StmtKind::Break

@@ -295,6 +295,13 @@ pub enum Op {
     /// over `ProtoId`, and register it as a `Call` task. (Form 2; the block was compiled to a
     /// synthetic zero-arg proto.)
     SpawnBlock(ProtoId, Vec<CapEntry>),
+    /// `wait:` — Chezzi's `select` (§6d). The N arm channel handles are on the operand stack
+    /// (source order; arm 0 deepest). Poll source order: the first channel with a queued value (or a
+    /// fired timer) wins → pop the N handles, push the value, and jump to that arm's body target. A
+    /// closed+empty arm is skipped. Nothing ready → jump to `else_target` if present; else inline-
+    /// sleep to the soonest live timer and take it; else fault (all-closed) or block (cooperative
+    /// multi-channel park: keep the handles, rewind to re-poll on wake). See `Vm::op_wait_poll`.
+    WaitPoll(Box<WaitMeta>),
     /// `Channel[T]()` — push a fresh empty mailbox (`Obj::Channel`).
     NewChannel,
     /// `Shared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Shared(init)`.
@@ -307,6 +314,15 @@ pub enum Op {
     NewTimer,
     /// `Executor()` — push a fresh, empty, explicitly-owned work queue (`Obj::Executor`). C5.
     NewExecutor,
+}
+
+/// Static layout for an [`Op::WaitPoll`]: the arm count `n` (== channel handles on the stack), each
+/// arm's body target ip (the bind/assign/discard prologue), and the optional `else` block target.
+#[derive(Debug, Clone)]
+pub struct WaitMeta {
+    pub n: usize,
+    pub arm_targets: Vec<usize>,
+    pub else_target: Option<usize>,
 }
 
 /// A compiled function (or the synthetic module-toplevel) — its code, parallel spans, arity, and

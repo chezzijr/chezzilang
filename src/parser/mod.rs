@@ -252,6 +252,7 @@ impl Parser {
             Token::Match => self.parse_match()?,
             Token::Parallel => self.parse_parallel()?,
             Token::Spawn => self.parse_spawn()?,
+            Token::Wait => self.parse_wait()?,
             Token::Return => {
                 let k = self.parse_return()?;
                 self.expect_stmt_end()?;
@@ -899,6 +900,95 @@ impl Parser {
         }
         self.expect_stmt_end()?;
         Ok(StmtKind::Spawn(SpawnTarget::Call(expr)))
+    }
+
+    /// `wait:` — Chezzi's `select` (see [`StmtKind::Wait`]). Indented arms `<target> (:=|=)
+    /// <chan>.recv(): <body>`, with an optional non-blocking `else:` that must be the last arm. The
+    /// RHS must be a bare `.recv()` (no args); a non-`recv` RHS or `recv(args)` is a parse error.
+    fn parse_wait(&mut self) -> PResult<StmtKind> {
+        self.expect(&Token::Wait)?;
+        self.open_block()?; // ':' Newline Indent
+        let mut arms = Vec::new();
+        let mut else_block = None;
+        self.skip_newlines();
+        while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            if self.check(&Token::Else) {
+                self.advance();
+                else_block = Some(self.parse_block()?);
+                self.skip_newlines();
+                if !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+                    return Err(self.err("`else` must be the last arm of a `wait`".to_string()));
+                }
+                break;
+            }
+            let arm_span = self.cur_span();
+            let lhs = self.parse_expr()?;
+            let lhs_span = lhs.span;
+            let target = if self.eat(&Token::Walrus) {
+                match lhs.kind {
+                    ExprKind::Ident(n) if n == "_" => WaitTarget::Discard,
+                    ExprKind::Ident(n) => WaitTarget::Bind(n),
+                    _ => {
+                        return Err(ParseError {
+                            message: "left side of ':=' in a wait arm must be a name".to_string(),
+                            span: lhs_span,
+                        })
+                    }
+                }
+            } else if self.eat(&Token::Assign) {
+                if matches!(lhs.kind, ExprKind::Ident(ref n) if n == "_") {
+                    WaitTarget::Discard
+                } else if matches!(
+                    lhs.kind,
+                    ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { .. }
+                ) {
+                    WaitTarget::Assign(lhs)
+                } else {
+                    return Err(ParseError {
+                        message: "invalid wait-arm assignment target".to_string(),
+                        span: lhs_span,
+                    });
+                }
+            } else {
+                return Err(self.err(
+                    "a wait arm needs `:=` or `=` before the channel `recv`".to_string(),
+                ));
+            };
+            // The RHS must be a bare `<chan>.recv()` — the thing a wait arm blocks on.
+            let rhs = self.parse_expr()?;
+            let rhs_span = rhs.span;
+            let chan = match rhs.kind {
+                ExprKind::Call { callee, args, named, .. }
+                    if matches!(&callee.kind, ExprKind::Field { name, .. } if name == "recv") =>
+                {
+                    if !args.is_empty() || !named.is_empty() {
+                        return Err(ParseError {
+                            message: "`recv` in a wait arm takes no arguments".to_string(),
+                            span: rhs_span,
+                        });
+                    }
+                    match callee.kind {
+                        ExprKind::Field { obj, .. } => *obj,
+                        _ => unreachable!("guarded by the matches! above"),
+                    }
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "a wait arm must `recv` from a channel (`v := ch.recv():`)"
+                            .to_string(),
+                        span: rhs_span,
+                    })
+                }
+            };
+            let body = self.parse_block()?;
+            arms.push(WaitArm { target, chan, body, span: arm_span });
+            self.skip_newlines();
+        }
+        self.expect(&Token::Dedent)?;
+        if arms.is_empty() {
+            return Err(self.err("`wait` needs at least one `recv` arm".to_string()));
+        }
+        Ok(StmtKind::Wait { arms, else_block })
     }
 
     fn parse_import(&mut self) -> PResult<Import> {
@@ -1715,6 +1805,65 @@ mod tests {
         assert!(parse_err("parallel:\n    spawn x + 1\n")
             .message
             .contains("spawn requires a function or method call"));
+    }
+
+    #[test]
+    fn parses_wait_with_bind_assign_discard_and_else() {
+        let src = "wait:\n    v := orders.recv(): handle(v)\n    result = cancels.recv(): result = 1\n    _ := timer(500).recv(): on_timeout()\n    else: poll_miss()\n";
+        match only(src) {
+            StmtKind::Wait { arms, else_block } => {
+                assert_eq!(arms.len(), 3);
+                assert!(matches!(arms[0].target, WaitTarget::Bind(ref n) if n == "v"));
+                assert!(matches!(&arms[0].chan.kind, ExprKind::Ident(n) if n == "orders"));
+                assert!(matches!(arms[1].target, WaitTarget::Assign(_)));
+                assert!(matches!(arms[2].target, WaitTarget::Discard));
+                // a timer arm's channel expr is the `timer(500)` call, evaluated once.
+                assert!(matches!(&arms[2].chan.kind, ExprKind::Call { .. }));
+                assert!(else_block.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_wait_indented_arm_bodies() {
+        let src = "wait:\n    v := ch.recv():\n        print(v)\n        f(v)\n";
+        match only(src) {
+            StmtKind::Wait { arms, else_block } => {
+                assert_eq!(arms.len(), 1);
+                assert_eq!(arms[0].body.len(), 2);
+                assert!(else_block.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn wait_arm_non_recv_rhs_rejected() {
+        assert!(parse_err("wait:\n    v := f(): g()\n")
+            .message
+            .contains("must `recv` from a channel"));
+    }
+
+    #[test]
+    fn wait_arm_recv_with_args_rejected() {
+        assert!(parse_err("wait:\n    v := ch.recv(5): g()\n")
+            .message
+            .contains("takes no arguments"));
+    }
+
+    #[test]
+    fn wait_else_must_be_last() {
+        assert!(parse_err("wait:\n    else: a()\n    v := ch.recv(): b()\n")
+            .message
+            .contains("must be the last arm"));
+    }
+
+    #[test]
+    fn wait_requires_at_least_one_arm() {
+        assert!(parse_err("wait:\n    else: a()\n")
+            .message
+            .contains("at least one `recv` arm"));
     }
 
     #[test]

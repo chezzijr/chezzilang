@@ -11,7 +11,7 @@ mod ty;
 use crate::ast::{
     AssignOp, BinaryOp, Block, Bound, CompKind, DeferTarget, Expr, ExprKind, FnDecl, Import,
     LitPattern, MethodSig, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, TypeParam,
-    UnaryOp,
+    UnaryOp, WaitArm, WaitTarget,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
 use std::collections::HashMap;
@@ -1370,6 +1370,7 @@ impl Checker {
                     }
                 }
             }
+            StmtKind::Wait { arms, else_block } => self.check_wait(arms, else_block.as_ref()),
             StmtKind::Break => {
                 if self.loop_depth == 0 {
                     self.error(span, "break outside loop");
@@ -2317,6 +2318,41 @@ impl Checker {
                 // all-binding sub-patterns). `has_wildcard` already captured that.
                 self.error(span, "non-exhaustive match: add a `_` arm".to_string());
             }
+        }
+    }
+
+    /// `wait:` — Chezzi's `select` (§6d). Each arm's channel expr must be a `Channel[T]`; the arm's
+    /// target binds (`:=`)/assigns (`=`)/discards (`_`) the element `T`. `wait` is a runtime race, not
+    /// a type match, so it is **not** exhaustive — no coverage analysis, ≥1 arm is the only structural
+    /// rule (parser-enforced). Each arm body is its own lexical sub-scope (like a `match` arm).
+    fn check_wait(&mut self, arms: &[WaitArm], else_block: Option<&Block>) {
+        for arm in arms {
+            let elem = match self.infer(&arm.chan) {
+                Ty::Channel(e) => *e,
+                Ty::Unknown => Ty::Unknown,
+                other => {
+                    self.error(
+                        arm.chan.span,
+                        format!("a wait arm must recv from a Channel, found {other}"),
+                    );
+                    Ty::Unknown
+                }
+            };
+            self.push_scope();
+            match &arm.target {
+                WaitTarget::Bind(name) => self.declare(name, elem),
+                // `=` assigns an existing outer lvalue — reuse the ordinary assignment checks
+                // (assignability, type match, read-only/loop-var gates).
+                WaitTarget::Assign(target) => self.check_assign(target, AssignOp::Eq, elem, arm.span),
+                WaitTarget::Discard => {}
+            }
+            for stmt in &arm.body {
+                self.check_stmt(stmt);
+            }
+            self.pop_scope();
+        }
+        if let Some(b) = else_block {
+            self.check_block(b);
         }
     }
 
@@ -4734,6 +4770,20 @@ fn walk_spawn_roots(
                     walk_spawn_roots(&m.body, fns, &mut s2, out);
                 }
             }
+            StmtKind::Wait { arms, else_block } => {
+                for a in arms {
+                    if let WaitTarget::Bind(n) = &a.target {
+                        scopes.push(std::iter::once(n.clone()).collect());
+                        walk_spawn_roots(&a.body, fns, scopes, out);
+                        scopes.pop();
+                    } else {
+                        walk_spawn_roots(&a.body, fns, scopes, out);
+                    }
+                }
+                if let Some(b) = else_block {
+                    walk_spawn_roots(b, fns, scopes, out);
+                }
+            }
             _ => {}
         }
     }
@@ -4804,6 +4854,25 @@ fn collect_free_calls_block(
             StmtKind::Spawn(SpawnTarget::Call(e)) => collect_free_calls_expr(e, fns, scopes, out),
             StmtKind::Spawn(SpawnTarget::Block(body)) => {
                 collect_free_calls_block(body, fns, scopes, out)
+            }
+            StmtKind::Wait { arms, else_block } => {
+                for a in arms {
+                    collect_free_calls_expr(&a.chan, fns, scopes, out);
+                    if let WaitTarget::Assign(e) = &a.target {
+                        collect_free_calls_expr(e, fns, scopes, out);
+                    }
+                    // A `:=` arm introduces an arm-local binding for its body.
+                    if let WaitTarget::Bind(n) = &a.target {
+                        scopes.push(std::iter::once(n.clone()).collect());
+                        collect_free_calls_block(&a.body, fns, scopes, out);
+                        scopes.pop();
+                    } else {
+                        collect_free_calls_block(&a.body, fns, scopes, out);
+                    }
+                }
+                if let Some(b) = else_block {
+                    collect_free_calls_block(b, fns, scopes, out);
+                }
             }
             _ => {}
         }
@@ -4987,6 +5056,31 @@ fn find_global_mutations(
             StmtKind::Parallel { body } => find_global_mutations(body, globals, scopes, out),
             StmtKind::Spawn(SpawnTarget::Call(e)) => {
                 find_mutations_in_expr(e, globals, scopes, out)
+            }
+            StmtKind::Wait { arms, else_block } => {
+                for a in arms {
+                    find_mutations_in_expr(&a.chan, globals, scopes, out);
+                    // A `=` arm to a global is itself a global mutation.
+                    if let WaitTarget::Assign(target) = &a.target {
+                        if let ExprKind::Ident(name) = &target.kind {
+                            if !is_locally_shadowed(name, scopes) && globals.contains(name) {
+                                out.push((target.span, name.clone()));
+                            }
+                        } else {
+                            find_mutations_in_expr(target, globals, scopes, out);
+                        }
+                    }
+                    if let WaitTarget::Bind(n) = &a.target {
+                        scopes.push(std::iter::once(n.clone()).collect());
+                        find_global_mutations(&a.body, globals, scopes, out);
+                        scopes.pop();
+                    } else {
+                        find_global_mutations(&a.body, globals, scopes, out);
+                    }
+                }
+                if let Some(b) = else_block {
+                    find_global_mutations(b, globals, scopes, out);
+                }
             }
             _ => {}
         }

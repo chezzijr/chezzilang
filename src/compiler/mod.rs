@@ -13,11 +13,12 @@
 
 use crate::ast::{
     AssignOp, BinaryOp, Block, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern, MatchArm,
-    MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp,
+    MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp, WaitArm, WaitTarget,
 };
 use crate::resolver::{ModuleGraph, ResolvedImport};
 use crate::vm::op::{
-    CapEntry, CapSrc, ModuleProto, Op, Program, Proto, ProtoId, StructDef, VariantDef, NO_IC,
+    CapEntry, CapSrc, ModuleProto, Op, Program, Proto, ProtoId, StructDef, VariantDef, WaitMeta,
+    NO_IC,
 };
 use crate::{lexer, parser};
 use std::collections::HashMap;
@@ -499,7 +500,95 @@ impl Compiler {
             // Concurrency C4 — sequential, run-to-completion executor (mirrors the interpreter).
             StmtKind::Parallel { body } => self.compile_parallel(fc, body, stmt.span),
             StmtKind::Spawn(target) => self.compile_spawn(fc, target, stmt.span),
+            StmtKind::Wait { arms, else_block } => {
+                self.compile_wait(fc, arms, else_block.as_deref(), stmt.span)
+            }
         }
+    }
+
+    /// `wait:` — Chezzi's `select` (§6d). Evaluate each arm's channel once (source order) → N handles
+    /// on the stack, then a single `Op::WaitPoll` that polls them and jumps to the chosen arm's body
+    /// (or `else`), or parks. Each arm body is a lexical sub-scope (like a `match` arm): the selected
+    /// value arrives on the stack top and the prologue binds (`:=`) / assigns (`=`) / drops (`_`) it.
+    fn compile_wait(
+        &mut self,
+        fc: &mut FnComp,
+        arms: &[WaitArm],
+        else_block: Option<&[Stmt]>,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        // Evaluate each arm's channel expression once, source order (handles left on the stack).
+        for arm in arms {
+            self.compile_expr(fc, &arm.chan)?;
+        }
+        // Placeholder; back-patched with the arm/else targets once the bodies are laid out.
+        let poll_at = fc.emit_jump(
+            Op::WaitPoll(Box::new(WaitMeta { n: arms.len(), arm_targets: Vec::new(), else_target: None })),
+            span,
+        );
+        let mut arm_targets = Vec::with_capacity(arms.len());
+        let mut end_jumps = Vec::new();
+        for arm in arms {
+            arm_targets.push(fc.here());
+            fc.begin_scope();
+            // The selected value is on the stack top — deliver it per the arm's target.
+            match &arm.target {
+                WaitTarget::Bind(name) => {
+                    let slot = fc.add_local(name.clone());
+                    fc.emit(Op::SetLocal(slot), arm.span);
+                }
+                WaitTarget::Discard => fc.emit(Op::Pop, arm.span),
+                WaitTarget::Assign(target) => self.emit_wait_assign(fc, target, arm.span)?,
+            }
+            self.compile_defer_scoped_arm(fc, &arm.body)?;
+            fc.end_scope();
+            end_jumps.push(fc.emit_jump(Op::Jump(0), arm.span));
+        }
+        let else_target = if let Some(b) = else_block {
+            let t = fc.here();
+            self.compile_defer_scoped_block(fc, b)?;
+            end_jumps.push(fc.emit_jump(Op::Jump(0), span));
+            Some(t)
+        } else {
+            None
+        };
+        let end = fc.here();
+        for j in end_jumps {
+            fc.patch_jump_to(j, end);
+        }
+        fc.set_code(
+            poll_at,
+            Op::WaitPoll(Box::new(WaitMeta { n: arms.len(), arm_targets, else_target })),
+        );
+        Ok(())
+    }
+
+    /// A `wait` `=` arm: store the value on the stack top into an existing lvalue. `Ident` pops
+    /// straight into the binding; `Field`/`Index` stash the value in a hidden temp, evaluate the
+    /// object (and index), then reload it — so the `[obj, (index,) value]` order `SetField`/`SetIndex`
+    /// expect is reconstructed even though the value was produced first by `WaitPoll`.
+    fn emit_wait_assign(&mut self, fc: &mut FnComp, target: &Expr, span: Span) -> Result<(), CompileError> {
+        match &target.kind {
+            ExprKind::Ident(name) => self.emit_store(fc, name, span),
+            ExprKind::Field { obj, name } => {
+                let tmp = fc.add_hidden();
+                fc.emit(Op::SetLocal(tmp), span);
+                self.compile_expr(fc, obj)?;
+                fc.emit(Op::GetLocal(tmp), span);
+                let ic = self.next_field_ic(name);
+                fc.emit(Op::SetField { name: name.clone(), ic }, span);
+            }
+            ExprKind::Index { obj, index } => {
+                let tmp = fc.add_hidden();
+                fc.emit(Op::SetLocal(tmp), span);
+                self.compile_expr(fc, obj)?;
+                self.compile_expr(fc, index)?;
+                fc.emit(Op::GetLocal(tmp), span);
+                fc.emit(Op::SetIndex, span);
+            }
+            _ => return Err(CompileError { message: "invalid wait-arm assignment target".to_string(), span }),
+        }
+        Ok(())
     }
 
     /// `parallel:` — open a nursery, run the body (spawns register tasks; inline statements run
@@ -2074,6 +2163,10 @@ fn stmt_has_bare_spawn(s: &Stmt) -> bool {
         }
         StmtKind::For { body, .. } | StmtKind::While { body, .. } => block_has_bare_spawn(body),
         StmtKind::Match { arms, .. } => arms.iter().any(|a| block_has_bare_spawn(&a.body)),
+        StmtKind::Wait { arms, else_block } => {
+            arms.iter().any(|a| block_has_bare_spawn(&a.body))
+                || else_block.as_ref().is_some_and(|b| block_has_bare_spawn(b))
+        }
         _ => false,
     }
 }
@@ -2151,6 +2244,12 @@ impl FnComp {
     fn emit(&mut self, op: Op, span: Span) {
         self.code.push(op);
         self.lines.push(span);
+    }
+
+    /// Overwrite a previously-emitted op in place — used to back-patch `Op::WaitPoll`'s arm/else
+    /// targets once the arm bodies have been laid out.
+    fn set_code(&mut self, at: usize, op: Op) {
+        self.code[at] = op;
     }
 
     /// Emit a jump-like op, returning its index so it can be patched once the target is known.

@@ -17,7 +17,7 @@ pub mod wire;
 
 use core::{AtomicCore, ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use heap::{Heap, MapData, Obj, SetData};
-use op::{CapEntry, CapSrc, Op, Program, ProtoId, NO_IC, TID_NONE};
+use op::{CapEntry, CapSrc, Op, Program, ProtoId, WaitMeta, NO_IC, TID_NONE};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -342,6 +342,13 @@ struct Vm {
     /// VM-global (not part of [`FiberCtx`]): only one fiber runs at a time, so at most one suspend is
     /// pending. See [`Vm::run_scheduler`].
     suspend: Option<GcRef>,
+    /// `wait` (§6d) — the multi-channel analogue of `suspend`: the live arm-channel handles a blocking
+    /// `wait:` parked the running fiber on. Set by [`Vm::op_wait_poll`] (cooperative engine only; the
+    /// M:N engine faults a blocking `wait` for now), consumed by [`Vm::run_child`], which files the
+    /// fiber under every key so any sibling `send` re-runs the `WaitPoll` and re-polls. Mutually
+    /// exclusive with `suspend` (a fiber parks via one or the other, never both). A VM-global like
+    /// `suspend` (one fiber runs at a time).
+    wait_suspend: Option<Vec<GcRef>>,
     /// D5 — set when a blocking native call (`is_blocking`) is reached under the M:N engine: instead
     /// of running inline (pinning the worker), `invoke_native` records the call here and returns a
     /// sentinel; the worker loop hands it to the dirty/blocking pool ([`Disp::Offload`]) and is freed.
@@ -1839,6 +1846,7 @@ impl Vm {
             nursery_defer_floors: Vec::new(),
             executors: Vec::new(),
             suspend: None,
+            wait_suspend: None,
             offload: None,
             poll_park: None,
             pending_connect: None,
@@ -1919,7 +1927,11 @@ impl Vm {
     /// `mn.is_some()` — so the cooperative engine, where it is always false, is unchanged by
     /// construction.)
     fn paused(&self) -> bool {
-        self.suspend.is_some() || self.yield_now || self.offload.is_some() || self.poll_park.is_some()
+        self.suspend.is_some()
+            || self.wait_suspend.is_some()
+            || self.yield_now
+            || self.offload.is_some()
+            || self.poll_park.is_some()
     }
 
     /// Run `f` with the native-reentry guard raised (B1). A blocking `recv` reached while the guard
@@ -2927,6 +2939,7 @@ impl Vm {
             Op::SpawnCall(argc) => self.do_spawn(None, *argc, span)?,
             Op::SpawnMethod(name, argc) => self.do_spawn(Some(name.clone()), *argc, span)?,
             Op::SpawnBlock(proto, entries) => self.do_spawn_block(*proto, entries, span)?,
+            Op::WaitPoll(meta) => self.op_wait_poll(meta, span)?,
             Op::NewChannel => {
                 let h = self.heap.alloc(Obj::Channel(Arc::new(ChannelCore::default())));
                 self.push(Value::Obj(h));
@@ -5782,6 +5795,7 @@ impl Vm {
     fn run_one_fiber(&mut self, fiber: &mut Fiber, span: Span) -> Disp {
         self.swap_ctx(&mut fiber.ctx);
         self.suspend = None;
+        self.wait_suspend = None; // never set under M:N (a blocking `wait` faults there for now)
         self.offload = None;
         self.poll_park = None;
         self.cancelled = false;
@@ -6042,6 +6056,18 @@ impl Vm {
         };
         self.swap_ctx(&mut child.ctx); // self.* = child's execution context
         self.suspend = None; // clear any prior wait before (re)running
+        self.wait_suspend = None;
+        // `wait` (§6d) multi-channel park: this fiber may be filed under SEVERAL `blocked_on` keys.
+        // A sibling `send` to ONE of them woke it (draining only that bucket); sweep the index out of
+        // every other bucket here, before it re-runs, so a later `send` to one of those channels can
+        // never re-wake a fiber that already moved on (the doc's "swept out of the other buckets").
+        // A no-op for an ordinary single-`recv` park (already removed from its one bucket by the wake).
+        if let Some(level) = self.scheduler_stack.last_mut() {
+            for bucket in level.blocked_on.values_mut() {
+                bucket.retain(|&x| x != i);
+            }
+            level.blocked_on.retain(|_, v| !v.is_empty());
+        }
         let outcome = match std::mem::replace(&mut child.state, FiberState::Ready) {
             FiberState::Pending(task) => self.start_task(task),
             // Resume: the saved frames replay via the rewound `recv` op and ordinary `Return`s — no
@@ -6055,8 +6081,10 @@ impl Vm {
         // channel's core pointer so a sibling `send` can re-add it to `ready` ([`wake_on_send`]).
         let result = match outcome {
             Ok(()) => {
-                child.state = match self.suspend.take() {
-                    Some(h) => {
+                child.state = if let Some(handles) = self.wait_suspend.take() {
+                    // `wait` blocking park: file this child under EVERY live arm-channel key, so a
+                    // `send` to any of them re-runs the `WaitPoll` (which re-polls source order).
+                    for h in handles {
                         let key = self.channel_core_ptr(h);
                         self.scheduler_stack
                             .last_mut()
@@ -6065,9 +6093,23 @@ impl Vm {
                             .entry(key)
                             .or_default()
                             .push(i);
-                        FiberState::Blocked
                     }
-                    None => FiberState::Done,
+                    FiberState::Blocked
+                } else {
+                    match self.suspend.take() {
+                        Some(h) => {
+                            let key = self.channel_core_ptr(h);
+                            self.scheduler_stack
+                                .last_mut()
+                                .expect("scheduler level present")
+                                .blocked_on
+                                .entry(key)
+                                .or_default()
+                                .push(i);
+                            FiberState::Blocked
+                        }
+                        None => FiberState::Done,
+                    }
                 };
                 Ok(())
             }
@@ -7510,6 +7552,110 @@ impl Vm {
         self.push(Value::Obj(h));
         self.frames.last_mut().unwrap().ip -= 1;
         self.suspend = Some(h);
+    }
+
+    /// `wait:` runtime (§6d) — execute [`Op::WaitPoll`]. The `n` arm channel handles are on the
+    /// operand stack (`stack[base..base+n]`, source order). Poll source order: the first channel with
+    /// a queued value (or a fired timer) wins → drop the handles, push the value, jump to that arm's
+    /// body. A closed+empty arm is skipped. Nothing ready → run `else` (jump), else inline-sleep to
+    /// the soonest live timer and take it, else fault (all-closed) or block (cooperative multi-channel
+    /// park; the M:N park is a follow-up — a blocking `wait` faults under `--parallel` for now).
+    fn op_wait_poll(&mut self, meta: &WaitMeta, span: Span) -> Result<(), RuntimeError> {
+        let n = meta.n;
+        let base = self.stack.len() - n;
+        let mut soonest: Option<(usize, std::time::Instant)> = None;
+        let mut all_closed = true;
+        for i in 0..n {
+            let Value::Obj(h) = self.stack[base + i] else {
+                unreachable!("wait arm operand is not a channel handle");
+            };
+            let core = self.channel_core(h);
+            let (popped, closed) = {
+                let mut g = core.q.lock().unwrap();
+                (g.queue.pop_front(), g.closed)
+            };
+            if let Some(w) = popped {
+                let v = self.from_wire(w);
+                self.take_wait_arm(base, v, meta.arm_targets[i]);
+                return Ok(());
+            }
+            if let Some(deadline) = core.timer {
+                // A timer channel is never closed and always eventually ready: fired now → take it;
+                // otherwise a live waiter whose deadline we may sleep to below.
+                if std::time::Instant::now() >= deadline {
+                    self.take_wait_arm(base, Value::Bool(true), meta.arm_targets[i]);
+                    return Ok(());
+                }
+                all_closed = false;
+                if soonest.is_none_or(|(_, d)| deadline < d) {
+                    soonest = Some((i, deadline));
+                }
+            } else if !closed {
+                all_closed = false;
+            }
+        }
+        // Nothing ready → the non-blocking `else` fallback.
+        if let Some(t) = meta.else_target {
+            self.stack.truncate(base);
+            self.frames.last_mut().unwrap().ip = t;
+            return Ok(());
+        }
+        // A live timer arm → inline-sleep to the soonest deadline and take it (matches the interp
+        // oracle; works in every engine). Reached only with no `else` and no already-ready arm.
+        if let Some((i, deadline)) = soonest {
+            let now = std::time::Instant::now();
+            if now < deadline {
+                std::thread::sleep(deadline - now);
+            }
+            self.take_wait_arm(base, Value::Bool(true), meta.arm_targets[i]);
+            return Ok(());
+        }
+        // Every arm closed+empty, no `else` → distinct fault.
+        if all_closed {
+            return Err(self.err("wait: all channels closed".to_string(), span));
+        }
+        // Pure live channels, no `else`, no timer → block on all of them.
+        if self.mn.is_some() {
+            // The M:N multi-channel park is the recv_timeout-graveyard area; deferred to a focused
+            // follow-up. Fault clearly rather than hang or risk an unsound park.
+            return Err(self.err(
+                "wait: blocking under --parallel is not yet supported — add an `else:` arm, a \
+                 `timer` arm, or run on the default engine (the M:N multi-channel park is a \
+                 planned follow-up)"
+                    .to_string(),
+                span,
+            ));
+        }
+        if !self.scheduler_stack.is_empty() && self.native_reentry == 0 {
+            // Cooperative multi-channel park: keep the N handles on the stack (they root the channels
+            // + re-supply the poll), rewind to re-run `WaitPoll` on wake, and register the fiber on
+            // every live arm channel via `wait_suspend` (consumed by `run_child`).
+            let keys: Vec<GcRef> = (0..n)
+                .map(|i| match self.stack[base + i] {
+                    Value::Obj(h) => h,
+                    _ => unreachable!("wait arm operand is not a channel handle"),
+                })
+                .collect();
+            self.frames.last_mut().unwrap().ip -= 1; // re-run this WaitPoll on resume
+            self.wait_suspend = Some(keys);
+            return Ok(());
+        }
+        // No scheduler (top level / single fiber) or inside a native callback: no sibling could ever
+        // fill the channels — a real deadlock (mirrors `chan_recv_step`'s sequential `recv` fault).
+        Err(self.err(
+            "wait on channels that are all empty: deadlock — nothing is queued and the sequential \
+             executor cannot block waiting for a producer"
+                .to_string(),
+            span,
+        ))
+    }
+
+    /// Commit a chosen `wait` arm: drop the `n` channel handles (`stack[base..]`), push the received
+    /// value, and jump to the arm body's target ip (the bind/assign/discard prologue).
+    fn take_wait_arm(&mut self, base: usize, value: Value, target: usize) {
+        self.stack.truncate(base);
+        self.push(value);
+        self.frames.last_mut().unwrap().ip = target;
     }
 
     /// `Shared[T]` methods (C3/C4): `get` (copies out), `set` (copies in), `update` (read-modify-write
@@ -13347,6 +13493,20 @@ main()";
 
     /// `timer(ms)` golden: a one-shot timeout channel delivers `true`. Byte-identical on the
     /// cooperative VM, the interpreter, and `.expected` (both inline-sleep to the deadline). `--parallel`
+    /// §6d golden: `examples/wait_select.chz` (Chezzi's `select` — source-order priority, `else:`,
+    /// a `timer` arm, `=` assignment, and a skipped closed+empty arm). Uses only non-blocking arms so
+    /// the VM, the interpreter, AND `--parallel` are byte-identical (a truly-blocking `wait` is a
+    /// VM/cooperative capability tested separately in `vm_wait_blocks_then_wakes_on_second_channel`).
+    #[test]
+    fn golden_wait_select_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/wait_select.chz");
+        let expected = include_str!("../../examples/wait_select.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(run_capture_parallel(src).expect("parallel"), expected);
+    }
+
     /// delivers the same value via the background timer `send` (asserted separately).
     #[test]
     fn golden_timer_chz_matches_expected_and_interp() {
@@ -13545,6 +13705,95 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
     fn vm_channel_send_after_close_faults() {
         let err = run_err("fn main():\n    ch := Channel[int]()\n    ch.close()\n    ch.send(1)\nmain()\n");
         assert!(err.contains("send on a closed channel"), "{err}");
+    }
+
+    // ----- §6d: `wait` (select) — VM, parity twins of the interp tests + VM-only blocking -----
+
+    #[test]
+    fn vm_wait_picks_first_ready_arm_in_source_order() {
+        let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.send(1)\n    b.send(2)\n    wait:\n        v := a.recv(): print(10 + v)\n        w := b.recv(): print(20 + w)\nmain()\n";
+        assert_eq!(run(src), "11\n");
+    }
+
+    #[test]
+    fn vm_wait_skips_closed_empty_arm() {
+        let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.close()\n    b.send(9)\n    wait:\n        v := a.recv(): print(100)\n        w := b.recv(): print(w)\nmain()\n";
+        assert_eq!(run(src), "9\n");
+    }
+
+    #[test]
+    fn vm_wait_runs_else_when_nothing_ready() {
+        let src = "fn main():\n    ch := Channel[int]()\n    wait:\n        v := ch.recv(): print(v)\n        else: print(0)\nmain()\n";
+        assert_eq!(run(src), "0\n");
+    }
+
+    #[test]
+    fn vm_wait_assign_arm_mutates_outer_lvalue() {
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.send(5)\n    n := 0\n    wait:\n        n = ch.recv(): print(n)\n    print(n)\nmain()\n";
+        assert_eq!(run(src), "5\n5\n");
+    }
+
+    #[test]
+    fn vm_wait_timer_arm_fires() {
+        let src = "fn main():\n    t := timer(1)\n    wait:\n        _ := t.recv(): print(\"tick\")\nmain()\n";
+        assert_eq!(run(src), "tick\n");
+    }
+
+    #[test]
+    fn vm_wait_all_closed_no_else_faults() {
+        let err = run_err("fn main():\n    ch := Channel[int]()\n    ch.close()\n    wait:\n        v := ch.recv(): print(v)\nmain()\n");
+        assert!(err.contains("all channels closed"), "{err}");
+    }
+
+    #[test]
+    fn vm_wait_live_empty_no_else_top_level_deadlocks() {
+        let err = run_err("fn main():\n    ch := Channel[int]()\n    wait:\n        v := ch.recv(): print(v)\nmain()\n");
+        assert!(err.contains("deadlock"), "{err}");
+    }
+
+    /// VM-only (the interp would deadlock): a spawned consumer `wait`s on two empty channels and
+    /// blocks (cooperative multi-channel park); a sibling `send` to the SECOND channel wakes it, and
+    /// the re-poll takes that arm. Exercises the multi-key park + wake on a non-first channel.
+    #[test]
+    fn vm_wait_blocks_then_wakes_on_second_channel() {
+        let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(\"a {v}\")\n        w := b.recv(): print(\"b {w}\")\nfn producer(b: Channel[int]):\n    b.send(99)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn producer(b)\nmain()\n";
+        assert_eq!(run(src), "b 99\n");
+    }
+
+    /// The multi-channel park SWEEP: a consumer parks on {a, b}, a `send` to `a` wakes it and it
+    /// finishes — then a later `send` to `b` must NOT re-wake the now-done fiber (its stale `b`
+    /// registration was swept on resume). Without the sweep this re-schedules a `Done` fiber → panic.
+    #[test]
+    fn vm_wait_sweeps_other_buckets_after_waking() {
+        let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\n        w := b.recv(): print(w)\nfn p_a(a: Channel[int]):\n    a.send(1)\nfn p_b(b: Channel[int]):\n    b.send(2)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn p_a(a)\n        spawn p_b(b)\nmain()\n";
+        assert_eq!(run(src), "1\n");
+    }
+
+    /// A `wait` `=` arm to a Field/Index lvalue (the custom `emit_wait_assign` stash-and-reload path):
+    /// the received value must land in the struct field / list slot, identical to the interp.
+    #[test]
+    fn vm_wait_assign_to_field_and_index_matches_interp() {
+        let src = "struct Box:\n    v: int\nfn main():\n    ch := Channel[int]()\n    ch.send(7)\n    b := Box(0)\n    wait:\n        b.v = ch.recv(): print(b.v)\n    xs := [0, 0]\n    ch.send(9)\n    wait:\n        xs[1] = ch.recv(): print(xs[1])\nmain()\n";
+        let vm = run(src);
+        assert_eq!(vm, "7\n9\n");
+        assert_eq!(vm, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// A single-arm `wait` reduces to a plain `recv`: ready value taken (the recv-park 1-key special
+    /// case stays correct — plain `recv` is covered by its own tests, unchanged).
+    #[test]
+    fn vm_wait_single_arm_takes_ready_value() {
+        let src = "fn main():\n    ch := Channel[int]()\n    ch.send(42)\n    wait:\n        v := ch.recv(): print(v)\nmain()\n";
+        assert_eq!(run(src), "42\n");
+    }
+
+    /// `wait` blocking under `--parallel` is a documented follow-up: it faults clearly (rather than
+    /// hang or risk an unsound park). Non-blocking `wait` (`else`/ready/timer) is unaffected.
+    #[test]
+    fn vm_wait_blocking_under_parallel_engine_faults() {
+        let src = "fn consumer(a: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\nfn main():\n    a := Channel[int]()\n    parallel:\n        spawn consumer(a)\nmain()\n";
+        let err = run_capture_parallel(src).expect_err("blocking wait under --parallel must fault");
+        assert!(err.message.contains("not yet supported"), "{}", err.message);
     }
 
     #[test]

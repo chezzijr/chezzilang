@@ -110,6 +110,15 @@ pub enum StmtKind {
     /// enclosing `parallel:` nursery. Legal only inside a `parallel:` (checker-enforced). Under the
     /// sequential executor the task is registered here and run at the nursery's dedent.
     Spawn(SpawnTarget),
+    /// `wait:` — Chezzi's `select`. Race the `recv`s in `arms`: block until whichever channel has a
+    /// value first, bind it (per the arm's [`WaitTarget`]), and run that arm's body. Source-order
+    /// poll (deterministic, not Go-random); a closed+empty arm is skipped; `else_block` (optional,
+    /// last) is the non-blocking fallback. Recv-only — unbounded channels never block a `send`. See
+    /// `docs/concurrency.md §6d`.
+    Wait {
+        arms: Vec<WaitArm>,
+        else_block: Option<Block>,
+    },
     /// `break` — exit the innermost enclosing loop. Carries only its `Span` (via `Stmt`).
     Break,
     /// `continue` — skip to the next iteration of the innermost enclosing loop.
@@ -142,6 +151,26 @@ pub enum SpawnTarget {
     Call(Expr),
     /// `spawn:` followed by an indented block.
     Block(Block),
+}
+
+/// One arm of a `wait:` — `<target> (:= | =) <chan>.recv() : <body>`. The RHS is required (parser-
+/// enforced) to be a bare `.recv()` on `chan`; `chan` is the channel expression, evaluated once.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaitArm {
+    pub target: WaitTarget,
+    pub chan: Expr,
+    pub body: Block,
+    pub span: Span,
+}
+
+/// Where a `wait` arm delivers the received value: a fresh arm-scoped binding (`v :=`), an existing
+/// outer lvalue (`result =`), or discarded (`_`). Mirrors the `:=`/`=`/`_` split of ordinary `let`/
+/// assignment; arm bodies are plain lexical sub-scopes (not closures), so `=` mutation is normal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WaitTarget {
+    Bind(String),
+    Assign(Expr),
+    Discard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

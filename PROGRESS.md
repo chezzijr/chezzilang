@@ -186,17 +186,21 @@ frozen interp is the differential parity oracle for the sequential subset.
 >   Known v1 limitation: `timer.recv()` inside a native callback pins a worker (no demote). `docs §6c`.
 > - **`recv_timeout` DROPPED** — `wait` + `timer` subsume it (`ch.recv_timeout(500)` ≡ `wait` over `ch`
 >   and `timer(500)`), and it was the unsound/reverted one. No separate primitive.
-> - **`wait` (select) — DESIGNED, NOT IMPLEMENTED. Start the next concurrency session here.** Full locked
->   design + grammar + per-engine semantics + the multi-channel-park implementation notes are in
->   **`docs/concurrency.md §6d`** (and the `wait`/`timer`/`Atomic` cheat rows in `docs/syntax.md §11b`).
->   Summary: a `wait:` compound statement racing channel `recv`s — arms `v := ch.recv():` (`:=`/`=`/`_`
->   targets), optional non-blocking `else:`, recv-only (unbounded channels → sends never block). Keyword
->   chosen to **not** look Go-like; `else` reuses the existing keyword; closed+empty arm is **skipped**
->   (option B), all-closed+no-else faults. The hard part (its own milestone, the area `recv_timeout` was
->   reverted in): the **blocking multi-channel park** — one fiber parked on N channels, first sender wins +
->   sweeps it from the other buckets via a claim-flag, in BOTH the M:N and cooperative schedulers, with the
->   single-channel `recv` as the 1-key special case. Non-blocking (`else`) + the poll step reuse `try_recv`
->   (timer arms are already deadline-aware).
+> - **`wait` (select) — SHIPPED on the default engine + interpreter (2026-06-13); M:N blocking park is a
+>   scoped follow-up.** Full design + grammar + per-engine semantics in **`docs/concurrency.md §6d`** (cheat
+>   row in `docs/syntax.md §11b`; `examples/wait_select.chz`). A `wait:` compound statement races channel
+>   `recv`s — arms `v := ch.recv():` (`:=`/`=`/`_` targets), optional non-blocking `else:` (last), `timer`
+>   arms, recv-only (unbounded channels → sends never block); source-order priority; closed+empty arm
+>   **skipped**; all-closed+no-`else` faults. **Done:** lexer→parser (`parse_wait`)→checker (`check_wait`)
+>   →interp (`exec_wait`, the parity oracle)→cooperative VM (`Op::WaitPoll` + `compile_wait`), incl. the
+>   **cooperative multi-channel park** (one fiber filed under N keys via `wait_suspend`/`run_child`, swept
+>   out of the other buckets on resume — `vm_wait_blocks_then_wakes_on_second_channel` +
+>   `vm_wait_sweeps_other_buckets_after_waking`). Non-blocking arms (`else`/ready/`timer`) work in all three
+>   engines; `examples/wait_select.chz` is byte-identical across VM/interp/`--parallel`. **Follow-up (the
+>   recv_timeout-graveyard area, deliberately separate):** the **M:N `--parallel` blocking park** — a
+>   blocking `wait` under `--parallel` currently faults clearly (`"wait: blocking under --parallel is not
+>   yet supported …"`); design is the `WaitPark { fiber, keys, claimed }` + per-key token sweep in
+>   `MnSched::send_wake`/`close_wake`, plus the `native_reentry > 0` multi-channel demote-poll.
 
 ### Tier-D — complete (D0–D6c)
 

@@ -3752,6 +3752,57 @@ fn channel_non_sendable_element_rejected() {
     );
 }
 
+// ----- concurrency §6d: `wait` (select) -----
+
+#[test]
+fn wait_binds_element_type_in_arm() {
+    ok("fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    wait:\n        v := ch.recv(): print(v + 1)\nmain()\n");
+}
+
+#[test]
+fn wait_assign_target_typechecks() {
+    ok("fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    n := 0\n    wait:\n        n = ch.recv(): print(n)\nmain()\n");
+}
+
+#[test]
+fn wait_discard_and_else_ok() {
+    ok("fn main():\n    ch := Channel[int]()\n    wait:\n        _ := ch.recv(): print(1)\n        else: print(0)\nmain()\n");
+}
+
+#[test]
+fn wait_arm_bound_var_wrong_use_rejected() {
+    // `v: int` bound by the arm — using it as a str is a type error.
+    rejects(
+        "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    wait:\n        v := ch.recv(): print(v + \"x\")\nmain()\n",
+        "int",
+    );
+}
+
+#[test]
+fn wait_assign_wrong_target_type_rejected() {
+    rejects(
+        "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    s := \"a\"\n    wait:\n        s = ch.recv(): print(s)\nmain()\n",
+        "int",
+    );
+}
+
+#[test]
+fn wait_arm_binding_is_arm_local() {
+    // `v` is scoped to its arm — referencing it after the `wait` is undeclared.
+    rejects(
+        "fn main():\n    ch := Channel[int]()\n    wait:\n        v := ch.recv(): print(v)\n    print(v)\nmain()\n",
+        "v",
+    );
+}
+
+#[test]
+fn wait_non_channel_arm_rejected() {
+    rejects(
+        "fn main():\n    f := fn() -> int: 1\n    wait:\n        v := f.recv(): print(v)\nmain()\n",
+        "Channel",
+    );
+}
+
 #[test]
 fn channel_close_ok() {
     ok("fn main():\n    ch := Channel[int]()\n    ch.close()\nmain()\n");

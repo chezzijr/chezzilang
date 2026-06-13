@@ -1,0 +1,49 @@
+# `wait:` — Chezzi's `select`. Race several channel `recv`s: block until whichever channel is ready
+# first, bind its value, and run that arm (source-order priority, not Go's random fairness).
+#
+# This example uses only NON-blocking arms — a value already queued, a fired `timer`, or `else:` —
+# so the VM, the tree-walking interpreter, and the `--parallel` engine all produce identical output.
+# (A `wait` that truly blocks until a sibling produces is a VM/cooperative capability; see the
+# `vm_wait_blocks_then_wakes_on_second_channel` test.)
+
+fn main():
+    orders := Channel[str]()
+    cancels := Channel[str]()
+
+    # 1. Both arms ready → the FIRST arm (source order) wins.
+    orders.send("a1")
+    cancels.send("c1")
+    wait:
+        v := orders.recv(): print("order {v}")
+        w := cancels.recv(): print("cancel {w}")
+
+    # 2. `orders` is drained now; the buffered `cancels` value is taken.
+    wait:
+        v := orders.recv(): print("order {v}")
+        w := cancels.recv(): print("cancel {w}")
+
+    # 3. Nothing ready → the non-blocking `else:` fallback runs.
+    wait:
+        v := orders.recv(): print("order {v}")
+        else: print("idle")
+
+    # 4. A `timer` arm fires once its deadline passes (inline-sleep, every engine).
+    wait:
+        _ := timer(1).recv(): print("timeout")
+
+    # 5. `=` assigns an existing outer lvalue instead of binding a fresh name.
+    nums := Channel[int]()
+    nums.send(7)
+    sum := 0
+    wait:
+        sum = nums.recv(): print("sum {sum}")
+
+    # 6. A closed+empty arm is skipped; a ready sibling wins.
+    done := Channel[int]()
+    done.close()
+    nums.send(9)
+    wait:
+        d := done.recv(): print("done {d}")
+        n := nums.recv(): print("num {n}")
+
+main()
