@@ -542,7 +542,7 @@ match nested:                 # nested nullary variant — the bare `None` MATCH
 ```
 
 **Or-patterns** (`p1 | p2 | ...`) match when **any** alternative matches (first match wins). They
-work at the top of an arm and in sub-positions (`(1 | 2, x)`, `Some(a | b)`). Every alternative must
+work at the top of an arm and in sub-positions (`(1 | 2, x)`, `Some(1 | 2)`). Every alternative must
 bind the **same** variables with unifiable types, so the body sees them regardless of which hit:
 
 ```chezzi

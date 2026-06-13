@@ -4239,11 +4239,12 @@ mod tests {
 
     #[test]
     fn interp_nested_nullary_matches() {
-        // A bare nested `None` is a refutable variant match (not a binding): `Some(None)` matches
-        // only `Some(None)`, `Some(Some(v))` falls through to the next arm.
+        // A bare nested `None` is a refutable variant match (not a binding): `Some(None)` matches only
+        // the inner-none case; `Some(Some(7))` falls through to `_`. Single outer `Some` arm + `_` keeps
+        // this CLI-valid (one arm per outer variant), so it mirrors a runnable program.
         assert_eq!(
-            run("fn f(oo: Option[Option[int]]) -> str:\n    return match oo:\n        Some(None): \"in\"\n        Some(Some(v)): \"v{v}\"\n        None: \"out\"\nx: Option[Option[int]] = Some(None)\ny: Option[Option[int]] = Some(Some(7))\nprint(f(x))\nprint(f(y))\n"),
-            "in\nv7\n"
+            run("fn f(oo: Option[Option[int]]) -> str:\n    return match oo:\n        Some(None): \"in\"\n        _: \"out\"\nx: Option[Option[int]] = Some(None)\ny: Option[Option[int]] = Some(Some(7))\nprint(f(x))\nprint(f(y))\n"),
+            "in\nout\n"
         );
     }
 

@@ -4287,6 +4287,17 @@ fn bool_or_not_exhaustive() {
 }
 
 #[test]
+fn or_pattern_with_wildcard_is_exhaustive() {
+    // `1 | _` — the `_` alternative is irrefutable, so the or-pattern is irrefutable and closes
+    // the int domain with no further arm. Regression guard: an or-pattern's irrefutability is
+    // OR-of-alternatives (ANY irrefutable alt suffices), not AND-of-alternatives.
+    ok("n := 3\nmatch n:\n    1 | _: print(\"x\")\n");
+    ok("s := \"hi\"\nmatch s:\n    \"a\" | \"b\" | _: print(\"y\")\n");
+    // Soundness guard: without an irrefutable alternative it is still non-exhaustive.
+    rejects("n := 3\nmatch n:\n    1 | 2: print(\"x\")\n", "non-exhaustive");
+}
+
+#[test]
 fn nested_nullary_wrong_type_rejected() {
     // `Some(None)` where the inner type is `int` — `None` is not a variant of int.
     rejects(

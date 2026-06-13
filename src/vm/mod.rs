@@ -13051,9 +13051,13 @@ main()";
     /// A nested nullary variant (`Some(None)`) is a refutable variant match; the interp agrees.
     #[test]
     fn vm_nested_nullary_variant() {
-        let src = "fn f(oo: Option[Option[int]]) -> str:\n    return match oo:\n        Some(None): \"inner-none\"\n        Some(Some(v)): \"got {v}\"\n        None: \"outer-none\"\nx: Option[Option[int]] = Some(None)\ny: Option[Option[int]] = Some(Some(5))\nprint(f(x))\nprint(f(y))\n";
+        // Nested nullary `None` inside `Some(...)` is a refutable variant match: `Some(None)` matches
+        // only the inner-none case; everything else falls to `_`. A single outer `Some` arm + `_` keeps
+        // this CLI-valid (the checker allows one arm per outer variant), so the test reflects a program
+        // a user can actually run, not just the checker-skipping runtime harness.
+        let src = "fn f(oo: Option[Option[int]]) -> str:\n    return match oo:\n        Some(None): \"inner-none\"\n        _: \"other\"\nx: Option[Option[int]] = Some(None)\ny: Option[Option[int]] = Some(Some(5))\nprint(f(x))\nprint(f(y))\n";
         let out = run(src);
-        assert_eq!(out, "inner-none\ngot 5\n");
+        assert_eq!(out, "inner-none\nother\n");
         assert_eq!(out, crate::interp::run_capture(src).expect("interp"));
     }
 

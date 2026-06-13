@@ -2040,15 +2040,17 @@ impl Checker {
 
     /// Bind the alternatives of an or-pattern in a *sub-pattern* position against `ty`, enforcing
     /// that every alternative binds the EXACT same set of names with unifiable types, then declaring
-    /// the agreed set once into the current scope. Returns `true` iff every alternative is
+    /// the agreed set once into the current scope. Returns `true` iff ANY alternative is
     /// irrefutable. Bounded by the finite pattern tree (recursion only descends sub-patterns).
     fn bind_or_alternatives(&mut self, alts: &[Pattern], ty: &Ty, span: Span) -> bool {
-        let mut irref = true;
+        // An or-pattern is irrefutable iff ANY alternative is irrefutable (one alt that always
+        // matches makes the whole or-pattern always match) — OR, not AND.
+        let mut irref = false;
         let mut binders: Vec<(usize, std::collections::BTreeMap<String, Ty>)> = Vec::new();
         for (i, alt) in alts.iter().enumerate() {
             self.push_scope();
             let alt_irref = self.bind_subpattern(alt, ty, span);
-            irref &= alt_irref;
+            irref |= alt_irref;
             // Snapshot the names this alternative introduced (its scratch scope's top frame).
             let snap: std::collections::BTreeMap<String, Ty> =
                 self.scopes.last().cloned().unwrap_or_default().into_iter().collect();
@@ -2123,10 +2125,10 @@ impl Checker {
         // An or-pattern at the top of an arm: bind each alternative into a scratch scope (threading
         // coverage so `Red | Green | Blue` closes the variant domain), enforce that all alternatives
         // bind the same names with unifiable types, then declare the agreed set into the arm scope.
-        // Irrefutable iff every alternative is. Bounded by the finite pattern tree.
+        // Irrefutable iff ANY alternative is (e.g. `1 | _` is irrefutable via `_`). OR, not AND.
         if let Pattern::Or(alts) = pattern {
             self.push_scope(); // the arm scope the caller pops
-            let mut irref = true;
+            let mut irref = false;
             let mut binders: Vec<(usize, std::collections::BTreeMap<String, Ty>)> = Vec::new();
             for (i, alt) in alts.iter().enumerate() {
                 // Recurse: this pushes a scratch scope, threads `covered`, binds the alternative.
@@ -2134,7 +2136,7 @@ impl Checker {
                 let snap: std::collections::BTreeMap<String, Ty> =
                     self.scopes.last().cloned().unwrap_or_default().into_iter().collect();
                 self.pop_scope(); // discard the scratch scope (we re-declare into the arm scope)
-                irref &= alt_irref;
+                irref |= alt_irref;
                 binders.push((i, snap));
             }
             self.enforce_or_consistency(&binders, span);
