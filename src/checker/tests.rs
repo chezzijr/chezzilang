@@ -2264,11 +2264,12 @@ fn match_nested_tuple_element_type_mismatch_rejected() {
 }
 
 #[test]
-fn match_nested_nullary_variant_rejected() {
-    // `Cons(h, None)`-style: a nested nullary variant isn't supported; the checker guides the user.
+fn match_nested_nullary_variant_ok() {
+    // `Cons(h, Nil)`: a nested nullary variant is now a refutable variant match (the checker
+    // promotes the bare `Nil`). Previously rejected (gap #15 limit); now supported.
     let src = "enum L:\n    Nil\n    Cons(int, L)\n\
-               fn f(x: L):\n    match x:\n        Nil: print(\"e\")\n        Cons(h, Nil): print(h)\n";
-    rejects(src, "nested nullary-variant");
+               fn f(x: L):\n    match x:\n        Cons(h, Nil): print(h)\n        _: print(\"e\")\n";
+    ok(src);
 }
 
 
@@ -4314,4 +4315,79 @@ fn socket_read_with_too_many_args_rejected() {
 #[test]
 fn listener_accept_with_too_many_args_rejected() {
     rejects("fn use_listener(l: Listener):\n    l.accept(100, 1)\n", "argument");
+}
+
+// ===== or-patterns + nested nullary =====
+
+#[test]
+fn or_pattern_mismatched_bindings_rejected() {
+    // `Some(a) | None` — one alternative binds `a`, the other binds nothing.
+    rejects(
+        "o := Some(5)\nmatch o:\n    Some(a) | None: print(\"x\")\n",
+        "must bind the same variables",
+    );
+}
+
+#[test]
+fn or_pattern_consistent_bindings_ok() {
+    // Two enum variants whose single payload is the same type both bind `a`.
+    ok(
+        "enum E:\n    A(int)\n    B(int)\ne := A(1)\nmatch e:\n    A(a) | B(a): print(a)\n",
+    );
+}
+
+#[test]
+fn enum_or_pattern_exhaustive_without_wildcard() {
+    // A 3-variant enum covered by a single or-pattern is exhaustive WITHOUT a `_`.
+    ok(
+        "enum Color:\n    Red\n    Green\n    Blue\nc := Red\nmatch c:\n    Red | Green | Blue: print(\"c\")\n",
+    );
+}
+
+#[test]
+fn bool_or_not_exhaustive() {
+    // `true | false` does NOT close the bool domain — a `_` is still required (resolved decision:
+    // one rule, no bool special-case). Asserts the existing exhaustiveness rule is preserved.
+    rejects(
+        "b := true\nmatch b:\n    true | false: print(\"b\")\n",
+        "non-exhaustive",
+    );
+}
+
+#[test]
+fn or_pattern_with_wildcard_is_exhaustive() {
+    // `1 | _` — the `_` alternative is irrefutable, so the or-pattern is irrefutable and closes
+    // the int domain with no further arm. Regression guard: an or-pattern's irrefutability is
+    // OR-of-alternatives (ANY irrefutable alt suffices), not AND-of-alternatives.
+    ok("n := 3\nmatch n:\n    1 | _: print(\"x\")\n");
+    ok("s := \"hi\"\nmatch s:\n    \"a\" | \"b\" | _: print(\"y\")\n");
+    // Soundness guard: without an irrefutable alternative it is still non-exhaustive.
+    rejects("n := 3\nmatch n:\n    1 | 2: print(\"x\")\n", "non-exhaustive");
+}
+
+#[test]
+fn nested_nullary_wrong_type_rejected() {
+    // `Some(None)` where the inner type is `int` — `None` is not a variant of int.
+    rejects(
+        "o := Some(5)\nmatch o:\n    Some(None): print(0)\n    _: print(1)\n",
+        "not a variant of int",
+    );
+}
+
+#[test]
+fn non_nullary_variant_without_payload_rejected() {
+    // A nested non-nullary variant used without its payload — `Some` requires `Some(...)`.
+    rejects(
+        "oo: Option[Option[int]] = Some(Some(3))\nmatch oo:\n    Some(Some): print(0)\n    _: print(1)\n",
+        "requires its payload",
+    );
+}
+
+#[test]
+fn nested_nullary_correct_ok() {
+    // `Some(None)` over `Option[Option[int]]` — the inner `None` is a nullary variant of the
+    // inner Option type, a refutable variant match. (One `Some` arm + `_` to be exhaustive.)
+    ok(
+        "oo: Option[Option[int]] = Some(None)\nmatch oo:\n    Some(None): print(0)\n    _: print(-1)\n",
+    );
 }

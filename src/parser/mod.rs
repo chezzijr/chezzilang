@@ -756,7 +756,23 @@ impl Parser {
         self.parse_pattern_impl(false)
     }
 
+    /// Parse one-or-more primaries separated by `|` (Token::BitOr), the or-alternation level.
+    /// Returns `Pattern::Or` only when there is more than one alternative; a single primary is
+    /// returned unchanged (zero AST regression). Works at both top-arm and sub-pattern positions
+    /// (the `top` flag flows into each primary so every alternative disambiguates identically).
     fn parse_pattern_impl(&mut self, top: bool) -> PResult<Pattern> {
+        let mut alts = vec![self.parse_pattern_primary(top)?];
+        while self.eat(&Token::BitOr) {
+            alts.push(self.parse_pattern_primary(top)?);
+        }
+        if alts.len() == 1 {
+            Ok(alts.pop().expect("one alternative"))
+        } else {
+            Ok(Pattern::Or(alts))
+        }
+    }
+
+    fn parse_pattern_primary(&mut self, top: bool) -> PResult<Pattern> {
         // Literal patterns: int / str / bool. Float is intentionally not a pattern.
         match self.peek() {
             Token::Int(n) => {
@@ -3116,6 +3132,116 @@ mod tests {
         assert!(parse_err("struct S:\n    x: int\n    fn f(self, a: int = 1, b: int) -> int:\n        return a\n")
             .message
             .contains("required parameter"));
+    }
+
+    // --- or-patterns + nested nullary -----------------------------------------------------------
+
+    /// The pattern of the first arm of `match x:` in a one-statement program.
+    fn first_arm_pattern(src: &str) -> Pattern {
+        match only(src) {
+            StmtKind::Match { mut arms, .. } => arms.remove(0).pattern,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn or_pattern_top_level() {
+        // `1 | 2 | 3` -> Or of three int literals.
+        match first_arm_pattern("match x:\n    1 | 2 | 3: print(1)\n    _: print(0)\n") {
+            Pattern::Or(alts) => {
+                assert_eq!(alts.len(), 3);
+                assert!(matches!(alts[0], Pattern::Literal(LitPattern::Int(1))));
+                assert!(matches!(alts[1], Pattern::Literal(LitPattern::Int(2))));
+                assert!(matches!(alts[2], Pattern::Literal(LitPattern::Int(3))));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn or_pattern_variants() {
+        // `Red | Green` -> Or of two nullary variants (top position).
+        match first_arm_pattern("match c:\n    Red | Green: print(1)\n    _: print(0)\n") {
+            Pattern::Or(alts) => {
+                assert_eq!(alts.len(), 2);
+                assert!(matches!(&alts[0], Pattern::Variant { name, bindings } if name == "Red" && bindings.is_empty()));
+                assert!(matches!(&alts[1], Pattern::Variant { name, bindings } if name == "Green" && bindings.is_empty()));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn or_pattern_in_tuple() {
+        // `(1 | 2, x)` -> Tuple([Or([1,2]), Ident(x)]).
+        match first_arm_pattern("match p:\n    (1 | 2, x): print(x)\n    _: print(0)\n") {
+            Pattern::Tuple(elems) => {
+                assert_eq!(elems.len(), 2);
+                assert!(matches!(&elems[0], Pattern::Or(a) if a.len() == 2));
+                assert!(matches!(&elems[1], Pattern::Ident(n) if n == "x"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn or_pattern_in_payload() {
+        // `Some(a | b)` -> Variant{Some, [Or([Ident a, Ident b])]}.
+        match first_arm_pattern("match o:\n    Some(a | b): print(a)\n    _: print(0)\n") {
+            Pattern::Variant { name, bindings } => {
+                assert_eq!(name, "Some");
+                assert_eq!(bindings.len(), 1);
+                match &bindings[0] {
+                    Pattern::Or(alts) => {
+                        assert_eq!(alts.len(), 2);
+                        assert!(matches!(&alts[0], Pattern::Ident(n) if n == "a"));
+                        assert!(matches!(&alts[1], Pattern::Ident(n) if n == "b"));
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_primary_unchanged() {
+        // A single primary still parses to that primary unchanged (zero regression — no Or wrapper).
+        match first_arm_pattern("match x:\n    1: print(1)\n    _: print(0)\n") {
+            Pattern::Literal(LitPattern::Int(1)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_nullary_parses() {
+        // `Some(None)` -> Variant{Some, [Ident("None")]} (parser is type-blind; checker promotes).
+        match first_arm_pattern("match o:\n    Some(None): print(0)\n    _: print(1)\n") {
+            Pattern::Variant { name, bindings } => {
+                assert_eq!(name, "Some");
+                assert_eq!(bindings.len(), 1);
+                assert!(matches!(&bindings[0], Pattern::Ident(n) if n == "None"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_nullary_in_result_parses() {
+        // `Ok(Err(e))` -> Variant{Ok, [Variant{Err, [Ident e]}]}.
+        match first_arm_pattern("match r:\n    Ok(Err(e)): print(e)\n    _: print(0)\n") {
+            Pattern::Variant { name, bindings } => {
+                assert_eq!(name, "Ok");
+                match &bindings[0] {
+                    Pattern::Variant { name, bindings } => {
+                        assert_eq!(name, "Err");
+                        assert!(matches!(&bindings[0], Pattern::Ident(n) if n == "e"));
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
 

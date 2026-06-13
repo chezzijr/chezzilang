@@ -939,7 +939,7 @@ impl Walker<'_> {
 fn bind_pattern(pat: &Pattern, f: &mut impl FnMut(String)) {
     match pat {
         Pattern::Ident(n) => f(n.clone()),
-        Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) => {
+        Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) | Pattern::Or(bindings) => {
             for b in bindings {
                 bind_pattern(b, f);
             }

@@ -173,18 +173,26 @@
 # guard (a bool, evaluated with the pattern's bindings in scope) is true.
 <arm>       ::= <pattern> <block>
                 | <pattern> "IF" <expr> <block>
-# A top-level arm pattern. A bare "IDENT" names a (nullary) variant; "IDENT" "(" … ")" a variant
-# with sub-patterns; "(" … ")" a tuple pattern; an int/str/bool literal; or a half-open integer
-# range "INT" ".." "INT" (matches `start <= v < end`). Sub-patterns nest (gap #15): a variant payload
-# slot or tuple element is itself a <subpattern>.
-<pattern>     ::= "IDENT"
+# A top-level arm pattern: one-or-more primaries joined by "|" (BITOR) — an or-pattern matches if
+# ANY alternative matches (first match wins). A single primary parses unchanged. Every alternative
+# must bind the same variables (checker-enforced). A primary: a bare "IDENT" names a (nullary)
+# variant; "IDENT" "(" … ")" a variant with sub-patterns; "(" … ")" a tuple pattern; an int/str/bool
+# literal; or a half-open integer range "INT" ".." "INT" (matches `start <= v < end`). Sub-patterns
+# nest (gap #15): a variant payload slot or tuple element is itself a <subpattern>.
+<pattern>     ::= <patternPrimary>
+                | <patternPrimary> "BITOR" <pattern>
+<patternPrimary> ::= "IDENT"
                 | "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | "INT" | "STR" | "TRUE" | "FALSE"
                 | "INT" "DOTDOT" "INT"
-# A sub-pattern (nested position). A bare "IDENT" here is a binding name, not a variant.
-<subpattern>  ::= "IDENT"
+# A sub-pattern (nested position) is itself an or-alternation of primaries. A bare "IDENT" here is a
+# binding name OR — when it names a nullary variant of the matched type — a refutable variant match
+# (checker-promoted; e.g. the `None` in `Some(None)`). Same surface grammar either way.
+<subpattern>  ::= <subpatternPrimary>
+                | <subpatternPrimary> "BITOR" <subpattern>
+<subpatternPrimary> ::= "IDENT"
                 | "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>

@@ -549,7 +549,8 @@ match safe_div(10, 2):
 
 A scrutinee can also be an **int/str/bool** (literal arms + a required `_` wildcard) or a **tuple**.
 Patterns **nest**: a variant payload or tuple element may itself be a binding, a literal, a wildcard,
-a tuple, or another variant.
+a tuple, or another variant — including a **nested nullary variant** like the `None` in `Some(None)`
+(a refutable variant match, not a binding).
 
 ```chezzi
 match point:                  # tuple scrutinee
@@ -560,9 +561,26 @@ match point:                  # tuple scrutinee
 match maybe_pair:             # nested: a tuple inside Some(...)
     None:         print("none")
     Some((a, b)): print(a + b)
+
+match nested:                 # nested nullary variant — the bare `None` MATCHES (not binds)
+    Some(None):    "inner none"
+    Some(Some(v)): "value {v}"  # (one arm per outer variant; refine the rest with `_`)
+    _:             "outer none"
 ```
 
-(Nested **nullary** variants like `Cons(h, None)` aren't supported yet — nest a `match`.)
+**Or-patterns** (`p1 | p2 | ...`) match when **any** alternative matches (first match wins). They
+work at the top of an arm and in sub-positions (`(1 | 2, x)`, `Some(1 | 2)`). Every alternative must
+bind the **same** variables with unifiable types, so the body sees them regardless of which hit:
+
+```chezzi
+match c:
+    Red | Green | Blue: "primary"   # a full enum or-pattern is exhaustive WITHOUT a `_`
+match shape:
+    Circle(a) | Square(a): a        # both alternatives bind `a` (same type)
+```
+
+A `bool` or-pattern `true | false` still does **not** close the bool domain — keep a `_` (one rule:
+the int/str/bool literal domains are always open).
 
 **Guards** (`pattern if cond:`) add a boolean test to an arm — it matches only when the pattern
 binds *and* the guard (which sees the pattern's bindings) is true; otherwise the next arm is tried.

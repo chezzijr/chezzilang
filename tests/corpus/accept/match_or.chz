@@ -1,0 +1,9 @@
+# rule: matchStmt, arm, pattern, patternPrimary, subpattern, tuplePattern
+fn classify(n: int) -> str:
+    match n:
+        1 | 2 | 3: return "low"
+        Red | Green | Blue: return "color"
+        (1 | 2, x): return "pair"
+        Some(a | b): return "opt"
+        Some(None): return "nested"
+        _: return "other"

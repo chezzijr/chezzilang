@@ -39,6 +39,9 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 
 **Included:**
 - **Pattern matching** — `match` on enums (also int/str/bool + tuple scrutinees), exhaustiveness-checked.
+  Nested patterns (incl. nested nullary variants like `Some(None)`) + **or-patterns** (`p1 | p2`; every
+  alternative must bind the same variables; a full enum or-pattern is exhaustive without `_`, but the
+  open int/str/bool domains — including `true | false` — still require a `_`).
 - **String interpolation** — `"hi {name}, sum {a+b}"`. First-class; string ops are a UX priority.
 - **Literal forms** — int (`42`, `0xFF`/`0b1010`/`0o17`, `_` separators), float (`3.14`, scientific `6.022e23`/`1e3`/`1.5e-9` — any exponent ⇒ float), str in either `"…"` or `'…'` (interchangeable: same escapes & interpolation) with escapes `\n \t \r \\ \" \' \0` and `\u{HEX}` unicode (1-6 hex digits). See `docs/syntax.md §2/§10`.
 - **Struct methods** — `fn dist(self)` on structs. Composition + structural `protocol`s, no classes or inheritance (Rust/Go style).

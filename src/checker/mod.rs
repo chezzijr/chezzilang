@@ -1928,21 +1928,36 @@ impl Checker {
         match pattern {
             Pattern::Wildcard => true,
             Pattern::Ident(name) => {
-                // A nested bare identifier is a binding. Guard the footgun where it shadows a
-                // nullary variant of the matched type (`Cons(h, None)`): that's a variant the user
-                // likely meant to match, which nested patterns don't support yet.
+                // A nested bare identifier names either a nullary variant of the matched type (a
+                // refutable variant match — `Some(None)`, `Ok(Err(e))`) or a fresh binding.
                 if let Some(vmap) = self.variants_of(ty)
-                    && vmap.get(name).is_some_and(|p| p.is_empty())
+                    && let Some(payload) = vmap.get(name)
                 {
+                    if payload.is_empty() {
+                        // A nullary variant of `ty`: a refutable variant match, binds nothing.
+                        return false;
+                    }
+                    // A non-nullary variant used without its payload — needs `Name(...)`.
                     self.error(
                         span,
-                        format!("'{name}' is a variant of {ty}; nested nullary-variant patterns aren't supported — use a nested match"),
+                        format!("variant '{name}' of {ty} requires its payload — write '{name}(...)'"),
                     );
-                    return true;
+                    return false;
+                }
+                // A globally-known variant name that ISN'T a variant of `ty` cannot be a binding: the
+                // compiler routes it by the variant registry (a `MatchArm` test), so it would trap on
+                // the VM while the interp binds. Reject it so all engines agree (rename to bind).
+                if !ty.is_unknown()
+                    && (self.variants.contains_key(name)
+                        || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None"))
+                {
+                    self.error(span, format!("'{name}' is not a variant of {ty}"));
+                    return false;
                 }
                 self.declare(name, ty.clone());
                 true
             }
+            Pattern::Or(alts) => self.bind_or_alternatives(alts, ty, span),
             Pattern::Literal(lit) => {
                 let lit_ty = lit_pattern_ty(lit);
                 if !ty.is_unknown() && &lit_ty != ty {
@@ -2026,6 +2041,75 @@ impl Checker {
         }
     }
 
+    /// Bind the alternatives of an or-pattern in a *sub-pattern* position against `ty`, enforcing
+    /// that every alternative binds the EXACT same set of names with unifiable types, then declaring
+    /// the agreed set once into the current scope. Returns `true` iff ANY alternative is
+    /// irrefutable. Bounded by the finite pattern tree (recursion only descends sub-patterns).
+    fn bind_or_alternatives(&mut self, alts: &[Pattern], ty: &Ty, span: Span) -> bool {
+        // An or-pattern is irrefutable iff ANY alternative is irrefutable (one alt that always
+        // matches makes the whole or-pattern always match) — OR, not AND.
+        let mut irref = false;
+        let mut binders: Vec<(usize, std::collections::BTreeMap<String, Ty>)> = Vec::new();
+        for (i, alt) in alts.iter().enumerate() {
+            self.push_scope();
+            let alt_irref = self.bind_subpattern(alt, ty, span);
+            irref |= alt_irref;
+            // Snapshot the names this alternative introduced (its scratch scope's top frame).
+            let snap: std::collections::BTreeMap<String, Ty> =
+                self.scopes.last().cloned().unwrap_or_default().into_iter().collect();
+            self.pop_scope();
+            binders.push((i, snap));
+        }
+        self.enforce_or_consistency(&binders, span);
+        irref
+    }
+
+    /// Enforce that all alternatives' binder snapshots agree on the bound-name set + unifiable types,
+    /// then declare the agreed names once into the current (real) scope. `binders[0]` is the
+    /// reference set; mismatches are reported once, clearly, and the first set is still declared so
+    /// the arm body type-checks (no cascading "unknown name" errors).
+    fn enforce_or_consistency(
+        &mut self,
+        binders: &[(usize, std::collections::BTreeMap<String, Ty>)],
+        span: Span,
+    ) {
+        if binders.is_empty() {
+            return;
+        }
+        let (_, first) = &binders[0];
+        for (_, other) in &binders[1..] {
+            if first.keys().ne(other.keys()) {
+                let left: Vec<&str> = first.keys().map(|s| s.as_str()).collect();
+                let right: Vec<&str> = other.keys().map(|s| s.as_str()).collect();
+                self.error(
+                    span,
+                    format!(
+                        "or-pattern alternatives must bind the same variables: left binds {{{}}}, right binds {{{}}}",
+                        left.join(", "),
+                        right.join(", "),
+                    ),
+                );
+                break;
+            }
+            // Same key set — check per-name type compatibility (in either direction).
+            for (name, lt) in first.iter() {
+                if let Some(rt) = other.get(name)
+                    && !compatible(lt, rt)
+                    && !compatible(rt, lt)
+                {
+                    self.error(
+                        span,
+                        format!("or-pattern binds '{name}' as {lt} in one alternative and {rt} in another"),
+                    );
+                }
+            }
+        }
+        // Declare the agreed set once into the real scope.
+        for (name, ty) in first.iter() {
+            self.declare(name, ty.clone());
+        }
+    }
+
     /// Push a scope and bind one arm's pattern, recording coverage + diagnostics. Returns `true` if
     /// this arm is **irrefutable** (a `_` wildcard, or a tuple of irrefutable sub-patterns — either
     /// makes the match exhaustive). The caller must `pop_scope` after the arm body.
@@ -2040,6 +2124,26 @@ impl Checker {
         if let Pattern::Wildcard = pattern {
             self.push_scope();
             return true;
+        }
+        // An or-pattern at the top of an arm: bind each alternative into a scratch scope (threading
+        // coverage so `Red | Green | Blue` closes the variant domain), enforce that all alternatives
+        // bind the same names with unifiable types, then declare the agreed set into the arm scope.
+        // Irrefutable iff ANY alternative is (e.g. `1 | _` is irrefutable via `_`). OR, not AND.
+        if let Pattern::Or(alts) = pattern {
+            self.push_scope(); // the arm scope the caller pops
+            let mut irref = false;
+            let mut binders: Vec<(usize, std::collections::BTreeMap<String, Ty>)> = Vec::new();
+            for (i, alt) in alts.iter().enumerate() {
+                // Recurse: this pushes a scratch scope, threads `covered`, binds the alternative.
+                let alt_irref = self.bind_match_arm(alt, kind, span, covered);
+                let snap: std::collections::BTreeMap<String, Ty> =
+                    self.scopes.last().cloned().unwrap_or_default().into_iter().collect();
+                self.pop_scope(); // discard the scratch scope (we re-declare into the arm scope)
+                irref |= alt_irref;
+                binders.push((i, snap));
+            }
+            self.enforce_or_consistency(&binders, span);
+            return irref;
         }
         match kind {
             MatchKind::Skip => {
@@ -2094,8 +2198,8 @@ impl Checker {
                     Pattern::Literal(_) => self.error(span, format!("cannot match a literal against {label}")),
                     Pattern::Range { .. } => self.error(span, format!("cannot match a range against {label}")),
                     Pattern::Tuple(_) => self.error(span, format!("cannot match a tuple against {label}")),
-                    Pattern::Ident(_) | Pattern::Wildcard => {
-                        unreachable!("ident/wildcard handled elsewhere")
+                    Pattern::Ident(_) | Pattern::Wildcard | Pattern::Or(_) => {
+                        unreachable!("ident/wildcard/or handled elsewhere")
                     }
                 }
             }
@@ -2151,8 +2255,8 @@ impl Checker {
                         }
                     }
                     Pattern::Tuple(_) => self.error(span, format!("cannot match a tuple against {ty}")),
-                    Pattern::Ident(_) | Pattern::Wildcard => {
-                        unreachable!("ident/wildcard handled elsewhere")
+                    Pattern::Ident(_) | Pattern::Wildcard | Pattern::Or(_) => {
+                        unreachable!("ident/wildcard/or handled elsewhere")
                     }
                 }
             }
@@ -4995,7 +5099,7 @@ fn pattern_bindings(p: &Pattern) -> std::collections::HashSet<String> {
             Pattern::Ident(n) => {
                 out.insert(n.clone());
             }
-            Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) => {
+            Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) | Pattern::Or(bindings) => {
                 bindings.iter().for_each(|b| go(b, out))
             }
             Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}

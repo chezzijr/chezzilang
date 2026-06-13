@@ -1257,7 +1257,7 @@ impl Interp {
             });
         }
         for arm in arms {
-            if let Some(binds) = try_bind(&arm.pattern, &value) {
+            if let Some(binds) = try_bind(&arm.pattern, &value, &self.variants) {
                 self.env.push();
                 for (name, v) in binds {
                     self.env.define(&name, v);
@@ -1306,7 +1306,7 @@ impl Interp {
             });
         }
         for arm in arms {
-            if let Some(binds) = try_bind(&arm.pattern, &value) {
+            if let Some(binds) = try_bind(&arm.pattern, &value, &self.variants) {
                 self.env.push();
                 for (name, v) in binds {
                     self.env.define(&name, v);
@@ -4212,10 +4212,30 @@ fn pattern_needs_enum(pattern: &Pattern) -> bool {
 /// or `None` on a mismatch. Recurses through nested tuple/variant patterns (gap #15). The program is
 /// type-checked, so a shape mismatch here is a genuine value mismatch (a different variant / a
 /// non-matching literal / a different tuple shape), not a type error.
-fn try_bind(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
+fn try_bind(
+    pattern: &Pattern,
+    value: &Value,
+    variants: &std::collections::HashMap<String, VariantDef>,
+) -> Option<Vec<(String, Value)>> {
     match pattern {
         Pattern::Wildcard => Some(Vec::new()),
-        Pattern::Ident(name) => Some(vec![(name.clone(), value.clone())]),
+        Pattern::Ident(name) => {
+            // A bare nested identifier naming a known NULLARY variant is a refutable variant match
+            // (`Some(None)`, `Ok(Err(e))` — the checker has promoted it), binding nothing: it
+            // matches iff the value IS that variant (mirrors the VM's variant-registry routing). A
+            // non-variant name is a binding capturing the whole sub-value.
+            if variants.get(name).is_some_and(|d| d.arity == 0) {
+                return match value {
+                    Value::Enum { variant, payload, .. } if variant.as_ref() == name && payload.is_empty() => {
+                        Some(Vec::new())
+                    }
+                    _ => None,
+                };
+            }
+            Some(vec![(name.clone(), value.clone())])
+        }
+        // An or-pattern matches the first alternative that matches (first match wins).
+        Pattern::Or(alts) => alts.iter().find_map(|a| try_bind(a, value, variants)),
         Pattern::Literal(lit) => literal_matches(lit, value).then(Vec::new),
         Pattern::Range { start, end } => match value {
             Value::Int(v) => (*start <= *v && *v < *end).then(Vec::new),
@@ -4228,7 +4248,7 @@ fn try_bind(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
             }
             let mut out = Vec::new();
             for (sub, v) in subs.iter().zip(elems.iter()) {
-                out.extend(try_bind(sub, v)?);
+                out.extend(try_bind(sub, v, variants)?);
             }
             Some(out)
         }
@@ -4246,7 +4266,7 @@ fn try_bind(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
             }
             let mut out = Vec::new();
             for (sub, v) in bindings.iter().zip(payload.iter()) {
-                out.extend(try_bind(sub, v)?);
+                out.extend(try_bind(sub, v, variants)?);
             }
             Some(out)
         }
@@ -4336,6 +4356,30 @@ mod tests {
     fn list_comprehension_maps_and_filters() {
         assert_eq!(run("print([x * 2 for x in [1, 2, 3]])\n"), "[2, 4, 6]\n");
         assert_eq!(run("print([x for x in [1, 2, 3, 4] if x % 2 == 0])\n"), "[2, 4]\n");
+    }
+
+    #[test]
+    fn interp_or_pattern_matches() {
+        // Literal or-pattern (first-match-wins), enum or-pattern, and a binding or-pattern.
+        assert_eq!(
+            run("fn f(n: int) -> str:\n    return match n:\n        1 | 2 | 3: \"low\"\n        _: \"high\"\nprint(f(2))\nprint(f(9))\n"),
+            "low\nhigh\n"
+        );
+        assert_eq!(
+            run("enum E:\n    A(int)\n    B(int)\nfn v(e: E) -> int:\n    return match e:\n        A(a) | B(a): a\nprint(v(A(4)))\nprint(v(B(6)))\n"),
+            "4\n6\n"
+        );
+    }
+
+    #[test]
+    fn interp_nested_nullary_matches() {
+        // A bare nested `None` is a refutable variant match (not a binding): `Some(None)` matches only
+        // the inner-none case; `Some(Some(7))` falls through to `_`. Single outer `Some` arm + `_` keeps
+        // this CLI-valid (one arm per outer variant), so it mirrors a runnable program.
+        assert_eq!(
+            run("fn f(oo: Option[Option[int]]) -> str:\n    return match oo:\n        Some(None): \"in\"\n        _: \"out\"\nx: Option[Option[int]] = Some(None)\ny: Option[Option[int]] = Some(Some(7))\nprint(f(x))\nprint(f(y))\n"),
+            "in\nout\n"
+        );
     }
 
     #[test]

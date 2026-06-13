@@ -364,6 +364,15 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **Match or-patterns + nested nullary variants** (2026-06-13) — one new AST `Pattern::Or(Vec<Pattern>)`,
+  no new opcodes. `p1 | p2 | ...` at the top of an arm AND in sub-positions (`(1|2, x)`, `Some(a|b)`);
+  every alternative must bind the same variables (checker-enforced, clear error otherwise); a full enum
+  or-pattern is exhaustive without `_`, but the open int/str/bool domains (incl. `true | false`) still
+  need a `_` (one rule preserved). Nested nullary variants (`Some(None)`, `Ok(Err(e))`) are now refutable
+  variant matches — checker promotes a bare nested capitalized ident via the variant registry; compiler +
+  interp route by the same registry so all three engines agree (golden `examples/match_or.chz` byte-
+  identical on VM / `--interp` / `--parallel`). Grammar `<pattern> ::= <patternPrimary> ("|" ...)*`;
+  `cargo test conformance` green.
 - ✅ **D6c — per-socket read/accept/write timeout** (`--parallel`) — `read(n, timeout_ms)` /
   `write(s, timeout_ms)` / `accept(timeout_ms)` → `Err("timeout")`; reuses the deadline-bounded poll, no
   new thread/heap/job. In-callback (Path-C) timeout out of scope v1.
@@ -542,8 +551,9 @@ then `parser::parse`; interp untouched). TDD'd, conformance + clippy clean; suit
 Surfaced by coverage passes; no `src/` changes pending, recorded for when they bite:
 
 - **Collection literals must be single-line** — a newline inside `[`/`{` ends the expression.
-- **`match` limits** — no multiple `Some(...)` arms, no nested nullary-variant patterns (nest a second
-  `match`).
+- **`match` limits** — no multiple `Some(...)` arms (one arm per outer variant; refine with `_`).
+  Nested nullary-variant patterns (`Some(None)`, `Ok(Err(e))`) and **or-patterns** (`p1 | p2`) now
+  work — see below.
 - **Float division by zero is a runtime fault**, not an IEEE `Inf`/`NaN`.
 - **`std.os.getcwd`** not yet injectable via `HostConfig` (parity holds); **`read_file`** capped at 64 MiB.
 

@@ -1022,14 +1022,55 @@ impl Compiler {
     /// top-level identifier is a *binding* unless it names a known enum variant — that distinction is
     /// type-free thanks to the program-global variant registry, mirroring the runtime.
     fn arms_are_literal<'a>(&self, patterns: impl Iterator<Item = &'a Pattern>) -> bool {
-        patterns.into_iter().all(|p| match p {
+        patterns.into_iter().all(|p| self.pattern_is_literal(p))
+    }
+
+    /// Whether `name` is a registered NULLARY variant (`None`, a user enum's empty-payload
+    /// variant). A nested bare `Ident` naming one is a refutable variant match (the checker has
+    /// promoted it), not a binding — routed by the same registry the runtime uses.
+    fn is_nullary_variant(&self, name: &str) -> bool {
+        self.program.variants.get(name).is_some_and(|v| v.arity == 0)
+    }
+
+    /// The sorted, de-duplicated *binding* names introduced by an or-pattern's first alternative
+    /// (the checker has verified every alternative binds the same set, so the first is canonical).
+    /// A nested bare `Ident` naming a nullary variant is a variant match, NOT a binding, so it is
+    /// excluded. Recurses into nested patterns; bounded by the finite pattern tree.
+    fn or_binding_names(&self, alts: &[Pattern]) -> Vec<String> {
+        let mut names = std::collections::BTreeSet::new();
+        if let Some(first) = alts.first() {
+            self.collect_binding_names(first, &mut names);
+        }
+        names.into_iter().collect()
+    }
+
+    fn collect_binding_names(&self, p: &Pattern, out: &mut std::collections::BTreeSet<String>) {
+        match p {
+            Pattern::Ident(n) if !self.is_nullary_variant(n) => {
+                out.insert(n.clone());
+            }
+            Pattern::Ident(_) => {}
+            Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) | Pattern::Or(bindings) => {
+                for b in bindings {
+                    self.collect_binding_names(b, out);
+                }
+            }
+            Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
+        }
+    }
+
+    /// Whether a single pattern is literal-eligible (literal/range/wildcard/binding-only), recursing
+    /// into or-patterns (eligible iff every alternative is). Bounded by the finite pattern tree.
+    fn pattern_is_literal(&self, p: &Pattern) -> bool {
+        match p {
             Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => true,
             // empty-binding `Name`: a binding unless it's a real variant.
             Pattern::Variant { name, bindings } if bindings.is_empty() => {
                 !self.program.variants.contains_key(name)
             }
+            Pattern::Or(alts) => alts.iter().all(|a| self.pattern_is_literal(a)),
             _ => false,
-        })
+        }
     }
 
     fn compile_match(&mut self, fc: &mut FnComp, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<(), CompileError> {
@@ -1114,9 +1155,22 @@ impl Compiler {
         match pattern {
             Pattern::Wildcard => {}
             Pattern::Ident(name) => {
-                let s = fc.add_local(name.clone());
-                fc.emit(Op::GetLocal(scrut), span);
-                fc.emit(Op::SetLocal(s), span);
+                // A nested bare identifier naming a known NULLARY variant is a refutable
+                // variant match (`Some(None)`, `Ok(Err(e))` — the checker has promoted it); it
+                // binds nothing and is tested like a top-level nullary variant. Otherwise it is a
+                // binding capturing the whole sub-value.
+                if self.is_nullary_variant(name) {
+                    let bind_start = fc.next_slot();
+                    let arm_op = fc.emit_jump(
+                        Op::MatchArm { scrut, variant: name.clone(), nbind: 0, bind_start, next: 0 },
+                        span,
+                    );
+                    fails.push(arm_op);
+                } else {
+                    let s = fc.add_local(name.clone());
+                    fc.emit(Op::GetLocal(scrut), span);
+                    fc.emit(Op::SetLocal(s), span);
+                }
             }
             Pattern::Literal(lit) => {
                 fc.emit(Op::GetLocal(scrut), span);
@@ -1137,13 +1191,14 @@ impl Compiler {
                 }
             }
             Pattern::Variant { name, bindings } => {
-                // One slot per payload element. A plain `Ident` binding names its slot directly (so
-                // `Some(c)` binds `c` with no copy); other sub-patterns get a hidden slot to
+                // One slot per payload element. A plain `Ident` *binding* names its slot directly (so
+                // `Some(c)` binds `c` with no copy); a nested nullary-variant `Ident` (e.g. the
+                // `None` in `Some(None)`) and any other sub-pattern get a hidden slot to test/
                 // destructure afterwards.
                 let bind_start = fc.next_slot();
                 for b in bindings {
                     match b {
-                        Pattern::Ident(n) => {
+                        Pattern::Ident(n) if !self.is_nullary_variant(n) => {
                             fc.add_local(n.clone());
                         }
                         _ => {
@@ -1157,9 +1212,52 @@ impl Compiler {
                 );
                 fails.push(arm_op);
                 for (i, b) in bindings.iter().enumerate() {
-                    if !matches!(b, Pattern::Ident(_)) {
+                    let is_plain_binding =
+                        matches!(b, Pattern::Ident(n) if !self.is_nullary_variant(n));
+                    if !is_plain_binding {
                         self.emit_pattern(fc, b, bind_start + i, fails, span)?;
                     }
+                }
+            }
+            Pattern::Or(alts) => {
+                // Pre-allocate ONE canonical slot per agreed binding name (the checker has verified
+                // every alternative binds the same set). Each alternative binds into fresh scratch
+                // slots, then copies its values into the canonical slots before jumping to a shared
+                // matched-label; the body reads the canonical slots regardless of which alt matched.
+                let names = self.or_binding_names(alts);
+                let canon: Vec<(String, usize)> =
+                    names.iter().map(|n| (n.clone(), fc.add_local(n.clone()))).collect();
+                let mut matched_jumps = Vec::new();
+                for (idx, alt) in alts.iter().enumerate() {
+                    // Scope each alternative's scratch slots so they don't leak between alternatives.
+                    fc.begin_scope();
+                    let mut alt_fails = Vec::new();
+                    self.emit_pattern(fc, alt, scrut, &mut alt_fails, span)?;
+                    // Copy this alternative's bindings into the canonical slots, then jump to the
+                    // shared matched-label (fall-through past the remaining alternatives).
+                    for (name, slot) in &canon {
+                        let src = fc.resolve_local(name).expect("alt binds the agreed name");
+                        if src != *slot {
+                            fc.emit(Op::GetLocal(src), span);
+                            fc.emit(Op::SetLocal(*slot), span);
+                        }
+                    }
+                    matched_jumps.push(fc.emit_jump(Op::Jump(0), span));
+                    // A miss in this alternative falls through to the next alternative (or, for the
+                    // last alternative, joins the arm `fails` → next arm).
+                    let next = fc.here();
+                    if idx + 1 < alts.len() {
+                        for j in alt_fails {
+                            fc.patch_jump_to(j, next);
+                        }
+                    } else {
+                        fails.extend(alt_fails);
+                    }
+                    fc.end_scope();
+                }
+                // All matched-jumps land here: bindings are in the canonical slots, run guard+body.
+                for j in matched_jumps {
+                    fc.patch_jump(j);
                 }
             }
         }
@@ -1241,6 +1339,67 @@ impl Compiler {
                     fc.emit(Op::GetLocal(scrut), span);
                     fc.emit(Op::SetLocal(s), span);
                     let mut fails = Vec::new();
+                    self.emit_guard(fc, arm.guard(), &mut fails)?;
+                    run_body(self, fc, arm.body())?;
+                    end_jumps.push(fc.emit_jump(Op::Jump(0), span));
+                    let next = fc.here();
+                    for j in fails {
+                        fc.patch_jump_to(j, next);
+                    }
+                    fc.end_scope();
+                }
+                Pattern::Or(alts) => {
+                    // All-literal or-pattern = OR-of-equality chain: any alternative hit runs the
+                    // body; only when EVERY alternative misses do we fall through to the next arm.
+                    // Literal/range alternatives bind nothing; a bare-binding/wildcard alternative is
+                    // an unconditional hit (an irrefutable catch-all inside the or).
+                    fc.begin_scope();
+                    let mut hit_jumps = Vec::new();
+                    let mut fails = Vec::new();
+                    for (idx, alt) in alts.iter().enumerate() {
+                        let last = idx + 1 == alts.len();
+                        match alt {
+                            Pattern::Literal(lit) => {
+                                fc.emit(Op::GetLocal(scrut), scrutinee.span);
+                                emit_lit_const(fc, lit, span);
+                                fc.emit(Op::Eq, span);
+                                if last {
+                                    // Last alternative: a miss joins `fails` → next arm.
+                                    fails.push(fc.emit_jump(Op::JumpIfFalse(0), span));
+                                } else {
+                                    // Earlier alternative: a miss falls through to the next
+                                    // alternative's test; a hit jumps to the body.
+                                    let miss = fc.emit_jump(Op::JumpIfFalse(0), span);
+                                    hit_jumps.push(fc.emit_jump(Op::Jump(0), span));
+                                    fc.patch_jump(miss);
+                                }
+                            }
+                            Pattern::Range { start, end } => {
+                                let mut alt_fails = Vec::new();
+                                emit_range_test(fc, scrut, *start, *end, &mut alt_fails, span);
+                                if last {
+                                    fails.extend(alt_fails);
+                                } else {
+                                    // On a hit (no fail), jump to the body; patch the range's fails
+                                    // to the next alternative.
+                                    hit_jumps.push(fc.emit_jump(Op::Jump(0), span));
+                                    let next = fc.here();
+                                    for j in alt_fails {
+                                        fc.patch_jump_to(j, next);
+                                    }
+                                }
+                            }
+                            Pattern::Wildcard | Pattern::Variant { .. } => {
+                                // An unconditional catch-all alternative — always hits.
+                                hit_jumps.push(fc.emit_jump(Op::Jump(0), span));
+                            }
+                            _ => unreachable!("literal or-pattern has only literal/range/wildcard/binding alternatives"),
+                        }
+                    }
+                    // All hit_jumps land here (the body); a last-alt miss in `fails` skips it.
+                    for j in hit_jumps {
+                        fc.patch_jump(j);
+                    }
                     self.emit_guard(fc, arm.guard(), &mut fails)?;
                     run_body(self, fc, arm.body())?;
                     end_jumps.push(fc.emit_jump(Op::Jump(0), span));
