@@ -13037,6 +13037,18 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// Multi-line literals golden: `examples/multiline_literals.chz` (newline/indent suppression
+    /// inside `[]`/`{}`/`()` + optional trailing commas on list/map/tuple/call/params) byte-identical
+    /// on the VM, interp, and `.expected`.
+    #[test]
+    fn golden_multiline_literals_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/multiline_literals.chz");
+        let expected = include_str!("../../examples/multiline_literals.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
     /// Slicing golden: `examples/slicing.chz` (list/str slicing + the `Index`/`IndexSet`/`Slice`
     /// protocols on a struct + a generic over both) byte-identical on the VM, interp, and `.expected`.
     #[test]

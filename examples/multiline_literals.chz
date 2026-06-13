@@ -1,0 +1,42 @@
+# examples/multiline_literals.chz — multi-line collection literals (layout suppressed inside
+# brackets) and optional trailing commas on list/map/tuple literals + call args + params.
+# Behaviour is identical to the single-line forms; this just exercises the lexer/parser feature.
+
+# A multi-line list with a trailing comma.
+nums := [
+    1, 2, 3,
+    4, 5, 6,
+]
+print(nums.len())            # 6
+print(nums[0])               # 1
+print(nums[5])               # 6
+
+# A multi-line map with a trailing comma. Maps keep insertion order.
+m := {
+    "a": 1,
+    "b": 2,
+    "c": 3,
+}
+print(m.len())               # 3
+print(m["a"])                # 1
+print(m["c"])                # 3
+
+# A multi-line tuple with a trailing comma (2 elements so the printed form is unambiguous).
+t := (
+    10,
+    20,
+)
+print(t.0)                   # 10
+print(t.1)                   # 20
+
+# Trailing comma on a function declaration's params and on a call's arguments.
+fn add(
+    a: int,
+    b: int,
+) -> int:
+    return a + b
+
+print(add(
+    4,
+    5,
+))                           # 9

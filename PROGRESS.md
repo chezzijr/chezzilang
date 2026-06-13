@@ -471,6 +471,24 @@ compile and fixed). All TDD'd; suite at **1630 green**.
 - **Considered, not built:** `json.decode[T]` — already shipped (`src/json_decode.rs` + parser/compiler/
   checker); first-class compiled `Regex` — deferred, blocked on Level-3 Userdata (see `docs/spec.md`).
 
+## Syntax ergonomics (post-M18, 2026-06-13)
+
+Token/parser-level only — two-engine parity is by construction (both engines call `lexer::tokenize`
+then `parser::parse`; interp untouched). TDD'd, conformance + clippy clean; suite at **1642 green**.
+
+- **Multi-line collection literals** — the lexer gained a `bracket_depth` counter; while `>0` it
+  suppresses layout (Indent/Dedent/Newline) so `[]`/`{}`/`()` literals, call args, and param lists
+  can span lines (`src/lexer/mod.rs`). Stray closer clamps via `saturating_sub`; the suppressed-
+  newline path always `advance()`s past `\n` and `continue 'scan`s (never recurses) so an unclosed
+  bracket terminates at `Eof` — guarded by the `unclosed_bracket_terminates_at_eof` tripwire (a prior
+  attempt OOM-killed the box by spinning the tokenize loop on malformed input; this is the invariant).
+- **Optional trailing comma** — one trailing `,` before the closer on list/map/set/tuple literals +
+  call arguments + fn/closure params (`[1,2,]` ≡ `[1,2]`; lone `[,]`/`(,)`/`f(,)` still error).
+- **One-element tuples** — `(x,)` is now a 1-tuple (was rejected); `(x)` stays grouping. Flipped the
+  `reject/one_element_tuple` corpus → `accept/`, added `accept/trailing_comma.chz`, and relaxed the
+  `<primary>`/`<params>`/`<argList>` productions in `docs/grammar.bnf` (conformance green). Golden:
+  `examples/multiline_literals.chz` (VM == interp == `--parallel`).
+
 ## Roadmap (later)
 
 - VM/GC optimizations beyond M19 — NaN-boxing (own milestone), register VM, generational/incremental GC,

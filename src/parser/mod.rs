@@ -494,6 +494,10 @@ impl Parser {
                 if !self.eat(&Token::Comma) {
                     break;
                 }
+                // optional trailing comma: a `)` right after a comma ends the parameter list
+                if self.check(&Token::RParen) {
+                    break;
+                }
             }
         }
         Ok(params)
@@ -1306,6 +1310,10 @@ impl Parser {
                 if !self.eat(&Token::Comma) {
                     break;
                 }
+                // optional trailing comma: a `)` right after a comma ends the argument list
+                if self.check(&Token::RParen) {
+                    break;
+                }
             }
         }
         self.expect(&Token::RParen)?;
@@ -1392,13 +1400,11 @@ impl Parser {
                 }
                 let first = self.parse_expr()?;
                 if self.eat(&Token::Comma) {
-                    // a comma after the first element ⇒ a tuple. A trailing `(e,)` (comma then `)`)
-                    // is a 1-element tuple, which we do not support.
-                    if self.check(&Token::RParen) {
-                        return Err(self.err("1-element tuples are not supported".to_string()));
-                    }
+                    // A comma after the first element ⇒ a tuple. `(e,)` is a 1-element tuple
+                    // (distinct from grouping `(e)`); `(e1, e2,)` allows an optional trailing comma.
                     let mut elems = vec![first];
-                    loop {
+                    // The just-eaten comma may be the trailing one (`(e,)` or `(…,)`): stop here.
+                    while !self.check(&Token::RParen) {
                         elems.push(self.parse_expr()?);
                         if !self.eat(&Token::Comma) {
                             break;
@@ -1433,6 +1439,10 @@ impl Parser {
                     } else {
                         let mut elems = vec![first];
                         while self.eat(&Token::Comma) {
+                            // optional trailing comma: a `]` right after a comma ends the literal
+                            if self.check(&Token::RBracket) {
+                                break;
+                            }
                             elems.push(self.parse_expr()?);
                         }
                         self.expect(&Token::RBracket)?;
@@ -1467,6 +1477,10 @@ impl Parser {
                             // Map literal: finish the first pair, then the rest.
                             let mut entries = vec![(first, value)];
                             while self.eat(&Token::Comma) {
+                                // optional trailing comma: a `}` right after a comma ends the map
+                                if self.check(&Token::RBrace) {
+                                    break;
+                                }
                                 let key = self.parse_expr()?;
                                 self.expect(&Token::Colon)?;
                                 let value = self.parse_expr()?;
@@ -1491,6 +1505,10 @@ impl Parser {
                         // Set literal: a comma-separated list of elements.
                         let mut elems = vec![first];
                         while self.eat(&Token::Comma) {
+                            // optional trailing comma: a `}` right after a comma ends the set
+                            if self.check(&Token::RBrace) {
+                                break;
+                            }
                             elems.push(self.parse_expr()?);
                         }
                         self.expect(&Token::RBrace)?;
@@ -2864,10 +2882,67 @@ mod tests {
         assert!(matches!(e.kind, ExprKind::Binary { op: BinaryOp::Add, .. }));
     }
 
-    /// `(e,)` (a trailing-comma 1-tuple) is intentionally a parse error.
+    /// `(e,)` is a 1-element tuple (distinct from grouping `(e)`).
     #[test]
-    fn one_element_tuple_rejected() {
-        assert!(parse_err("(1,)\n").message.contains("1-element tuples"));
+    fn one_element_tuple_parses() {
+        let StmtKind::Expr(e) = only("(1,)\n") else { panic!() };
+        match e.kind {
+            ExprKind::Tuple(elems) => {
+                assert_eq!(elems.len(), 1);
+                assert_eq!(elems[0].kind, ExprKind::Int(1));
+            }
+            other => panic!("expected 1-tuple, got {other:?}"),
+        }
+    }
+
+    /// `(x,)` is a 1-tuple, `(x)` is grouping (bare expr), `(x, y,)` is a 2-tuple.
+    #[test]
+    fn tuple_one_two_grouping_trio() {
+        let StmtKind::Expr(e1) = only("(x,)\n") else { panic!() };
+        assert!(matches!(&e1.kind, ExprKind::Tuple(es) if es.len() == 1));
+        let StmtKind::Expr(e2) = only("(x)\n") else { panic!() };
+        assert!(matches!(e2.kind, ExprKind::Ident(_)), "grouping, got {:?}", e2.kind);
+        let StmtKind::Expr(e3) = only("(x, y,)\n") else { panic!() };
+        assert!(matches!(&e3.kind, ExprKind::Tuple(es) if es.len() == 2));
+        // Lone-comma form still errors (parse_err asserts a parse failure occurred).
+        parse_err("(,)\n");
+    }
+
+    /// Optional trailing comma on list/map/set produces identical AST and `[,]`/`{,}` still error.
+    #[test]
+    fn collection_trailing_comma_same_ast() {
+        // list
+        let StmtKind::Expr(a) = only("[1, 2]\n") else { panic!() };
+        let StmtKind::Expr(b) = only("[1, 2,]\n") else { panic!() };
+        assert_eq!(a.kind, b.kind);
+        assert!(matches!(&b.kind, ExprKind::List(es) if es.len() == 2));
+        parse_err("[,]\n");
+        // map
+        let StmtKind::Expr(a) = only("{\"a\": 1}\n") else { panic!() };
+        let StmtKind::Expr(b) = only("{\"a\": 1,}\n") else { panic!() };
+        assert_eq!(a.kind, b.kind);
+        assert!(matches!(&b.kind, ExprKind::Map(es) if es.len() == 1));
+        parse_err("{,}\n");
+        // set
+        let StmtKind::Expr(a) = only("{1, 2}\n") else { panic!() };
+        let StmtKind::Expr(b) = only("{1, 2,}\n") else { panic!() };
+        assert_eq!(a.kind, b.kind);
+        assert!(matches!(&b.kind, ExprKind::Set(es) if es.len() == 2));
+    }
+
+    /// Optional trailing comma on call args and fn/closure params; `f(,)` still errors.
+    #[test]
+    fn call_args_and_params_trailing_comma() {
+        // call args
+        let StmtKind::Expr(a) = only("f(1, 2)\n") else { panic!() };
+        let StmtKind::Expr(b) = only("f(1, 2,)\n") else { panic!() };
+        assert_eq!(a.kind, b.kind);
+        parse_err("f(,)\n");
+        // fn params
+        parse_ok("fn g(a, b,):\n    a\n");
+        // closure params (closures live in expression position, e.g. a let RHS)
+        let StmtKind::Let { value, .. } = only("c := fn(a, b,): a\n") else { panic!() };
+        assert!(matches!(value.kind, ExprKind::Closure { .. }), "got {:?}", value.kind);
     }
 
     #[test]

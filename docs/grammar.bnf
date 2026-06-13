@@ -100,7 +100,8 @@
 # accept it; closures and protocol signatures reject it. The default may be any expression that does
 # not reference another parameter (a desugar-pass rule). These are rules the permissive grammar does
 # not model.
-<params> ::= <param> | <param> "COMMA" <params>
+# An optional trailing comma before the closing `)` is permitted (`fn g(a, b,)`).
+<params> ::= <param> | <param> "COMMA" | <param> "COMMA" <params>
 <param>  ::= "IDENT" | "IDENT" "COLON" <type>
            | "IDENT" "ASSIGN" <expr> | "IDENT" "COLON" <type> "ASSIGN" <expr>
 
@@ -245,17 +246,25 @@
             | <postfix> "QUESTIONDOT" "IDENT" "LPAREN" "RPAREN"
             | <postfix> "QUESTIONDOT" "IDENT" "LPAREN" <argList> "RPAREN"
 
-# A parenthesized expression is grouping when it holds one expr (`(e)`) and a tuple literal when it
-# holds two or more (`(e1, e2, …)`). A 1-element `(e,)` and the empty `()` are not valid.
+# A parenthesized expression is grouping when it holds one expr (`(e)`); a comma makes it a tuple
+# — `(e,)` is a 1-element tuple and `(e1, e2, …)` an N-tuple. The empty `()` is not valid.
+# Collection literals and the parenthesised forms accept ONE optional trailing comma before the
+# closer (`[1, 2,]`, `{1, 2,}`, `{a: 1,}`, `(1, 2,)`). A `(e)` is grouping; a lone `(e,)` (comma
+# then `)`) is a 1-element tuple. Comprehension forms take no trailing comma.
 <primary> ::= "INT" | "FLOAT" | "STR" | "TRUE" | "FALSE" | "IDENT"
             | "LPAREN" <expr> "RPAREN"
+            | "LPAREN" <expr> "COMMA" "RPAREN"
             | "LPAREN" <expr> "COMMA" <exprList> "RPAREN"
+            | "LPAREN" <expr> "COMMA" <exprList> "COMMA" "RPAREN"
             | "LBRACKET" "RBRACKET"
             | "LBRACKET" <exprList> "RBRACKET"
+            | "LBRACKET" <exprList> "COMMA" "RBRACKET"
             | "LBRACKET" <expr> <compClause> "RBRACKET"
             | "LBRACE" "RBRACE"
             | "LBRACE" <mapEntries> "RBRACE"
+            | "LBRACE" <mapEntries> "COMMA" "RBRACE"
             | "LBRACE" <exprList> "RBRACE"
+            | "LBRACE" <exprList> "COMMA" "RBRACE"
             | "LBRACE" <expr> <compClause> "RBRACE"
             | "LBRACE" <mapEntry> <compClause> "RBRACE"
             | <closure>
@@ -298,9 +307,13 @@
 # A call argument list: zero or more positional args, then zero or more named args (`name = expr`).
 # Positional must precede named — `f(y=2, 1)` is rejected by both the grammar and the parser. Used
 # only for ordinary calls; pipe (`|>`) and explicit-type-arg calls take positional <exprList> only.
+# An optional trailing comma is permitted after the final argument (`f(1, 2,)`, `f(x=1,)`).
 <argList>       ::= <posArgList>
                   | <namedArgList>
                   | <posArgList> "COMMA" <namedArgList>
+                  | <posArgList> "COMMA"
+                  | <namedArgList> "COMMA"
+                  | <posArgList> "COMMA" <namedArgList> "COMMA"
 <posArgList>    ::= <expr> | <expr> "COMMA" <posArgList>
 <namedArgList>  ::= <namedArg> | <namedArg> "COMMA" <namedArgList>
 <namedArg>      ::= "IDENT" "ASSIGN" <expr>
