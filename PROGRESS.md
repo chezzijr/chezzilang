@@ -389,7 +389,9 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
 - **Known VM v1 limits (acceptable; not parity issues):** a blocking `recv` reached inside a native
   callback (list HOFs, `sort`, `compare`/`hash`/`str` hooks, `Shared.update`, executor drain, a `defer`red
   call) faults `deadlock` *unless* Path C demotion applies (`recv`/`sleep`/socket under `--parallel`); a
-  fiber in an outer nursery cannot be woken by progress in an inner one (structured-concurrency scoping).
+  fiber blocked in an outer nursery *is* woken (D0 cross-level wake-marking, common case works) but cannot be
+  *run* until the inner nursery joins, so the narrow circular case — its unblocker is an outer sibling the
+  inner scheduler can't run — faults `deadlock` (needs a flat scheduler; structured-concurrency scoping).
   Documented residuals: a narrow parked-sibling false-positive under multi-demote; the `Shared.update`
   same-box recv hazard; a saturated-pool queued-task counted live (no-false-positive choice).
 - **Use `iter.map`/`iter.filter`/`iter.fold`/`iter.reduce` (chezzi source, `std/iter.chz`)** if a

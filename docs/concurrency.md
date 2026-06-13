@@ -697,9 +697,10 @@ blocking-`recv` divergence).
 **Landed (VM):** **B3** OS-thread multicore (the alternative bet, taken — B3.0–B3.6), **B4** real
 `Shared`, **B5** real `Executor` pool (+ A3b) — then **Tier-D** rebuilt `--parallel` as an M:N
 work-stealing scheduler, **complete through D6** (D0–D6 + owes #1/#2/#3; epoll/`std.net` netpoller
-landed). **Still open:** one VM v1 limit — **cross-nursery wakeups** (a fiber blocked in an *outer*
-nursery is not woken by an *inner* one's `send`, because `MnSched.parked` is per-nursery). Blocking
-`recv` inside a native callback (**D5 owe #3**) is **resolved** — see below.
+landed). **Still open:** one narrow VM v1 limit — the **cross-nursery deadlock** edge case. D0 fixed
+cross-level wake-marking (the common case works), but a fiber whose unblocker is an *outer sibling the
+inner nursery can't run* faults `deadlock` and needs a flat scheduler (§11). Blocking `recv` inside a
+native callback (**D5 owe #3**) is **resolved** — see below.
 
 ---
 
@@ -849,19 +850,24 @@ engine is now a true M:N work-stealing scheduler); D6 (epoll/kqueue pollset + `s
 Concurrency work that is real but **outside the B3–B5 multicore epic**. Recorded so it isn't lost or
 reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md`](concurrency-b3.md).)
 
-- **Cross-nursery wakeups** *(cooperative-engine limit)*. The cooperative scheduler (`run_scheduler` +
-  the per-nursery `ready: BTreeSet`; cross-level wake via `wake_on_send`, `src/vm/mod.rs`) wakes only
-  within the **innermost** scheduler level, so a fiber blocked in an *outer* nursery is not woken by an
-  *inner* nursery's `send` until the inner scheduler completes. The common case (consumer in the outer
-  nursery, producer in an inner one that *does* finish) already works — the gap is only a fiber whose
-  filler is an outer sibling the inner scheduler can't run, which then faults `deadlock`.
-  **Why deferred:** a true fix needs a flat/global scheduler and partly conflicts with
-  structured-concurrency scoping (inner should join before outer proceeds). **(Symbol note:** the old
-  `pick_runnable` linear scan named in earlier drafts is gone — replaced by D0's `ready`-set.)
+- **Cross-nursery wakeups** *(partly resolved by D0; one narrow case open, both engines)*.
+  **Resolved (D0):** `wake_on_send` (`src/vm/mod.rs`) drains *every* scheduler level, so cross-level
+  **wake-marking** works — a `send` in any nursery marks the blocked fiber ready wherever it parked. The
+  **common case** (consumer in an *outer* nursery, producer in an *inner* one that finishes) works end to
+  end: the inner nursery completes, the outer resumes, the consumer gets its value.
+  **Still open:** the scheduler only *runs* the **innermost** level to completion before unwinding
+  outward (structured concurrency: inner joins before outer proceeds). So a fiber that is woken in an
+  *outer* nursery is marked ready but cannot be *run* until the inner nursery joins — and if completing
+  the inner nursery *requires* that outer fiber to run, you get a circular wait that faults `deadlock`
+  (`examples/parallel_deadlock.chz`). **Why still deferred:** a true fix needs a flat/global scheduler,
+  which partly conflicts with inner-joins-first scoping — the design tension to resolve when picking this
+  up. **(Symbol note:** the old `pick_runnable` linear scan named in earlier drafts is gone — replaced
+  by D0's `ready`-set.)
   **Correction:** this was once "mooted by B3" on the theory that real OS-thread `recv` blocks the
   thread (no level-local polling) — but **Tier-D D2's M:N transition un-mooted it**: `--parallel` now
   parks fibers by *snapshot* into the level's park set, not by blocking a thread, so the level scoping
-  is back. Now a limit on **both** engines; revisit only if it bites real programs. Acceptable v1 limit
+  is back. So the **narrow circular case** is a limit on **both** engines; revisit only if it bites real
+  programs. Acceptable v1 limit
   (also noted in `PROGRESS.md`).
 
 - **`recv` inside a native callback** *(D5 owe #3)* — **RESOLVED (both paths landed).** A blocking

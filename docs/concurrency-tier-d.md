@@ -339,9 +339,12 @@ Critical + Important findings before the completion claim.
   (`ChanState`) so the park-gap re-check is TOCTOU-free. See PROGRESS.md.
 - **M-C implicit nurseries** — shipped (2026-06-12): bare `spawn` legal anywhere; every function body /
   module top level joins its tasks at `return`/end. See `docs/concurrency.md §10`.
-- **Cross-nursery wakeups** ([§11](concurrency.md)) — still a deferred limit on **both** engines.
-  (Was once "mooted by B3" real-thread blocking, but D2's M:N transition **un-mooted it**: `--parallel`
-  now parks fibers by snapshot into the level's park set, not by blocking a thread, so the level
-  scoping is back. See the corrected note in `concurrency.md §11`.)
+- **Cross-nursery wakeups** ([§11](concurrency.md)) — **partly resolved; one narrow case open** (both
+  engines). D0's `wake_on_send` drains *every* scheduler level, so cross-level **wake-marking** and the
+  **common case** (outer consumer, inner producer that finishes) work. The residual: a fiber whose
+  unblocker is an *outer sibling the inner scheduler can't run* — it's marked ready but can't be *run*
+  until the inner nursery joins, so it faults `deadlock`. A true fix needs a **flat/global scheduler**
+  (partly conflicts with inner-joins-first scoping). (Backstory: "mooted by B3" real-thread blocking,
+  **un-mooted by D2's M:N snapshot-park**. See `concurrency.md §11`.)
 - **Priority classes** (BEAM) — deferred; revisit if priority becomes a requirement.
 - **Reduction constant tuning** (D3) — `CONTEXT_REDS` value + per-op vs per-back-edge accounting.
