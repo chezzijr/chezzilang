@@ -1,0 +1,50 @@
+# String format specifiers in `{expr:spec}` interpolation.
+# Mini-language: [[fill]align][sign][0][width][.precision][type]
+
+# --- alignment + fill + width (string values via vars) ---
+left := "left"
+right := "right"
+mid := "mid"
+print("|{left:<10}|")
+print("|{right:>10}|")
+print("|{mid:^10}|")
+print("|{mid:*^10}|")
+
+# --- numeric width / zero-pad ---
+print("[{42:>6}]")
+print("[{42:06}]")
+print("[{-7:06}]")
+
+# --- float precision ---
+print("pi = {3.14159:.2f}")
+print("whole = {5.0:.3f}")
+print("bare = {5.0:>8}")
+
+# --- type chars ---
+print("hex   = {255:x}")
+print("HEX   = {255:X}")
+print("oct   = {255:o}")
+print("bin   = {255:b}")
+print("zerox = {255:06x}")
+print("sci   = {12345.678:.2e}")
+print("pct   = {0.1357:.1%}")
+
+# --- sign ---
+print("sign+ = {5:+d}")
+print("sign- = {-5:+d}")
+
+# --- string precision (truncate) ---
+greeting := "hello world"
+print("trunc = {greeting:.5}")
+
+# --- a little table ---
+names := ["apple", "banana", "fig"]
+qtys := [3, 12, 100]
+prices := [0.5, 0.25, 1.0]
+i := 0
+while i < 3:
+    name := names[i]
+    qty := qtys[i]
+    price := prices[i]
+    print("{name:<8}{qty:>5}{price:>8.2f}")
+    i = i + 1

@@ -224,6 +224,9 @@ pub enum Op {
     // ----- strings -----
     /// Pop a value, push its `Display` form as a `Str` (interpolation chunk).
     ToStr,
+    /// Pop a value, push it formatted per the parsed format spec as a `Str` (`{expr:spec}` chunk).
+    /// The spec was parsed at compile time; type/value mismatches surface as runtime errors.
+    ToStrFmt(Box<crate::fmtspec::FormatSpec>),
     /// Concatenate the top `n` `Str` values into one.
     BuildStr(usize),
 

@@ -2771,6 +2771,9 @@ impl Vm {
                 let h = self.heap.alloc(Obj::Str(s.into()));
                 self.push(Value::Obj(h));
             }
+            // Body in an `#[inline(never)]` helper so `step`'s frame stays small (the deep-recursion
+            // depth-guard test overflows in debug if `step` grows — see commit 1450077).
+            Op::ToStrFmt(spec) => self.op_to_str_fmt(spec, span)?,
             Op::BuildStr(n) => {
                 let at = self.stack.len() - *n;
                 // Stringify in place so each interpolated part stays rooted while a `str` method runs.
@@ -8807,6 +8810,44 @@ impl Vm {
     /// wraps it in a fresh `String`) and `BuildStr` (which reuses one buffer across all interpolation
     /// parts). Byte-identical output to the old return-a-`String` form; only the intermediate
     /// per-part / per-element `String`s are gone.
+    /// `Op::ToStrFmt` — render the top-of-stack value per the parsed format spec. Scalars map
+    /// straight to a [`crate::fmtspec::FmtArg`]; non-scalars are rendered via the normal
+    /// `stringify_into` first (rooted on the operand stack, so a `str` method's nested frames see a
+    /// live object), then formatted as a plain string. The spec's width is already capped at compile
+    /// time, so no pathological allocation is possible here. Lives in its own `#[inline(never)]`
+    /// helper to keep `step`'s frame small (commit 1450077).
+    #[inline(never)]
+    fn op_to_str_fmt(&mut self, spec: &crate::fmtspec::FormatSpec, span: Span) -> Result<(), RuntimeError> {
+        let v = self.stack[self.stack.len() - 1]; // leave rooted; rendering may run user code
+        let mut out = String::new();
+        match v {
+            Value::Int(n) => crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Int(n), &mut out)
+                .map_err(|m| self.err(m, span))?,
+            Value::Float(x) => crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Float(x), &mut out)
+                .map_err(|m| self.err(m, span))?,
+            Value::Obj(h) if matches!(self.heap.get(h), Obj::Str(_)) => {
+                let s = match self.heap.get(h) {
+                    Obj::Str(s) => s.clone(),
+                    _ => unreachable!(),
+                };
+                crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Str(&s), &mut out)
+                    .map_err(|m| self.err(m, span))?;
+            }
+            other => {
+                // Bool/Nil/containers/structs: render with the normal stringify, then treat as a
+                // string for fill/align/width (type chars/precision error via `apply`).
+                let mut rendered = String::new();
+                self.stringify_into(&mut rendered, other, span, 0)?;
+                crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Other(&rendered), &mut out)
+                    .map_err(|m| self.err(m, span))?;
+            }
+        }
+        self.pop();
+        let h = self.heap.alloc(Obj::Str(out.into()));
+        self.push(Value::Obj(h));
+        Ok(())
+    }
+
     fn stringify_into(&mut self, out: &mut String, v: Value, span: Span, depth: usize) -> Result<(), RuntimeError> {
         use std::fmt::Write as _;
         // Guard against cyclic data overflowing the host stack — turns SIGABRT into a recoverable
@@ -13349,6 +13390,66 @@ main()";
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Format-spec parity: every supported `{expr:spec}` case (align/fill/width/zero-pad/precision/
+    /// each type char/percent/sign/string-truncate, plus a bare float and a `:`-inside-index) must
+    /// be byte-identical across the VM, the interpreter, and `--parallel`.
+    #[test]
+    fn fmt_specs_parity() {
+        let src = "\
+m := {\"a:b\": 7}
+print(\"[{m[\\\"a:b\\\"]:>4}]\")
+print(\"|{42:>6}|{42:<6}|{42:^6}|\")
+print(\"z={42:06}|{-7:06}\")
+print(\"f={3.14159:.2f}|e={2.5:e}|p={0.1357:.1%}\")
+print(\"x={255:x}|X={255:X}|b={255:b}|o={255:o}\")
+print(\"s={5:+d}|{-5:+d}\")
+print(\"bare={5.0}|fmt={5.0:.2f}|w={5.0:>8}\")
+";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"), "interp parity");
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"), "parallel parity");
+    }
+
+    /// Regression: an interpolated ternary `{if b: a else: b}` has top-level colons that are NOT a
+    /// format-spec separator — it must run (not be mis-split), and a parenthesized ternary CAN carry
+    /// a spec. Byte-identical across the VM, the interpreter, and `--parallel`.
+    #[test]
+    fn fmt_interpolated_ternary_parity() {
+        let src = "\
+b := true
+print(\"val={if b: 10 else: 20}\")
+print(\"fmt={(if b: 1 else: 2):>5}\")
+";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "val=10\nfmt=    1\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"), "interp parity");
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"), "parallel parity");
+    }
+
+    /// A pathological field width is rejected (with the cap message) BEFORE any allocation — the
+    /// fix for the prior OOM. Must error identically on both engines (it is a compile-time error on
+    /// the VM path, a runtime error on the interpreter; the message string is the same).
+    #[test]
+    fn pathological_width_rejected() {
+        let src = "x := 1\nprint(\"{x:>100000000}\")\n";
+        let vm_err = run_capture(src).expect_err("vm must reject pathological width");
+        assert!(vm_err.to_string().contains("exceeds maximum 4096"), "vm: {vm_err}");
+        let interp_err = crate::interp::run_capture(src).expect_err("interp must reject");
+        assert!(interp_err.to_string().contains("exceeds maximum 4096"), "interp: {interp_err}");
+    }
+
+    /// Golden: `examples/format_specs.chz` (the full format mini-language) byte-identical on the VM,
+    /// the interpreter, `--parallel`, and its `.expected`.
+    #[test]
+    fn golden_format_specs_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/format_specs.chz");
+        let expected = include_str!("../../examples/format_specs.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
     }
 
     /// Slicing golden: `examples/slicing.chz` (list/str slicing + the `Index`/`IndexSet`/`Slice`

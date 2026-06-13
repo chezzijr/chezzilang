@@ -434,6 +434,14 @@ branch names) is in the git log.
 - ✅ **Integer overflow policy** — every `i64` overflow is a recoverable fault (never wrap/crash).
 - ✅ **Gaps pass II** — `Ref[T]` mutable box (`std/ref.chz`); `sort_by_key`; call fn-typed field
   `self.f(x)`; relaxed non-const defaults; runtime stack traces (both engines).
+- ✅ **String format specifiers** (6th/last of the f-string ergonomics batch) — Python-style
+  `{expr:[[fill]align][sign][0][width][.precision][type]}` after a `:` in interpolation. Type chars
+  `d f x X b o e %`; string `.N` truncates. **Width/precision capped at 4096 at parse time** (fixes a
+  prior OOM from unbounded `repeat`). Spec parse+format is a single shared module `src/fmtspec.rs`
+  (`split_spec`/`parse`/`apply` + neutral `FmtArg`) routed through BOTH engines (`Op::ToStrFmt` in the
+  VM, `interp::interpolate`) → byte-identical output. `:`-split is bracket/quote-aware (`{m["a:b"]}`,
+  slices). Unknown type char = compile error; type/value mismatch = runtime error (same message both
+  engines). Golden `examples/format_specs.chz` parity-checked VM/interp/--parallel.
 - ✅ **Scripting-ergonomics gap pass** — hex/bin/oct literals; list `.concat`/`.extend` + map
   `.merge`/`.update`; tuple-destructuring `for` + `enumerate`/`zip`; `?.` + `??`; tuple destructuring +
   match-on-tuple + guards.

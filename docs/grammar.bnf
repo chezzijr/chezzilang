@@ -265,6 +265,12 @@
 # Collection literals and the parenthesised forms accept ONE optional trailing comma before the
 # closer (`[1, 2,]`, `{1, 2,}`, `{a: 1,}`, `(1, 2,)`). A `(e)` is grouping; a lone `(e,)` (comma
 # then `)`) is a 1-element tuple. Comprehension forms take no trailing comma.
+#
+# A "STR" token is the whole string literal (the lexer has already stripped quotes + resolved
+# backslash escapes). Its `{expr}` / `{expr:spec}` interpolations — including the Python-style format
+# mini-language after a `:` (see syntax.md §10, implemented in src/fmtspec.rs) — are parsed in a
+# SEPARATE post-lexer pass over the STR token's contents (compiler::parse_interpolation /
+# interp::interpolate), so they need NO production here.
 <primary> ::= "INT" | "FLOAT" | "STR" | "TRUE" | "FALSE" | "IDENT"
             | "LPAREN" <expr> "RPAREN"
             | "LPAREN" <expr> "COMMA" "RPAREN"
