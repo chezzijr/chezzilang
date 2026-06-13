@@ -50,6 +50,7 @@ fn symbol(tok: &Token) -> &'static str {
         Token::Spawn => "SPAWN",
         Token::Parallel => "PARALLEL",
         Token::Wait => "WAIT",
+        Token::Yield => "YIELD",
         Token::Import => "IMPORT",
         Token::From => "FROM",
         Token::As => "AS",

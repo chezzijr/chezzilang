@@ -41,6 +41,7 @@ pub enum Token {
     Spawn,
     Parallel,
     Wait,
+    Yield,
     Import,
     From,
     As,
@@ -155,6 +156,7 @@ fn keyword(word: &str) -> Option<Token> {
         "spawn" => Token::Spawn,
         "parallel" => Token::Parallel,
         "wait" => Token::Wait,
+        "yield" => Token::Yield,
         "import" => Token::Import,
         "from" => Token::From,
         "as" => Token::As,
@@ -1046,6 +1048,14 @@ mod tests {
         assert_eq!(
             kinds("spawn parallel"),
             vec![Token::Spawn, Token::Parallel, Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lexes_yield_keyword() {
+        assert_eq!(
+            kinds("yield 1"),
+            vec![Token::Yield, Token::Int(1), Token::Newline, Token::Eof]
         );
     }
 
