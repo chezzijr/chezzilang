@@ -26,9 +26,12 @@ For the *why* behind each choice see [`spec.md`](spec.md); for token names see [
 0xFF 0b1010 0o17   # int — hex / binary / octal literals ('_' ok between digits)
 3.14          # float (f64)
 1_234.567_8   # float — '_' works in both parts
+6.022e23  1e3  1.5e-9  2E10  1e+5   # float — scientific notation (any exponent ⇒ float, so 1e3 = 1000.0)
 true  false   # bool
 "hello"       # str
+'hello'       # str — single quotes are equivalent to double (same escapes & interpolation)
 "hi {name}"   # str with interpolation — see §10
+"emoji \u{1F600}, A=\u{41}"   # str — \u{HEX} unicode escape (1-6 hex digits)
 [1, 2, 3]     # list[int]
 {"a": 1}      # map[str, int]
 ```
@@ -753,12 +756,20 @@ print("sum: {a + b}")             # any expression
 print("brace: {{not interpolated}}")   # '{{' / '}}' = literal braces
 ```
 
-**Escapes.** Backslash escapes resolve at lex time: `\n` `\t` `\r` `\\` `\"` `\0`. An unknown
-escape is an error. Two independent layers, like Python f-strings: `\` escapes a *character*
-(`\"` → a quote), while `{{` / `}}` escape *interpolation* (→ a literal brace).
+**Quote styles.** A string may be delimited by `"…"` or `'…'`; the two are fully interchangeable —
+same `str` type, same escapes, same interpolation. Inside a double-quoted string `'` is a literal
+char (and `\"` escapes the quote); inside a single-quoted string `"` is a literal char (and `\'`
+escapes the quote). `\'` and `\"` are both accepted in either style.
+
+**Escapes.** Backslash escapes resolve at lex time: `\n` `\t` `\r` `\\` `\"` `\'` `\0` and
+`\u{HEX}` (1-6 hex digits naming a Unicode scalar value, e.g. `\u{41}` → `A`, `\u{1F600}` → 😀).
+A surrogate (`D800`-`DFFF`), a value above `10FFFF`, an empty `\u{}`, a missing brace, a non-hex
+digit, or any other unknown escape is an error. Two independent layers, like Python f-strings: `\`
+escapes a *character* (`\"` → a quote), while `{{` / `}}` escape *interpolation* (→ a literal brace).
 
 ```chezzi
 print("tab\tgap, quote \"x\", path C:\\tmp")
+print('single quotes work too: {name}, with \'apostrophe\' and \u{2728}')
 print("literal {{x}} vs value {x}")
 ```
 

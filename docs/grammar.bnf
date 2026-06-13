@@ -20,6 +20,12 @@
 #
 # Terminals = exactly the `Token` enum variants, one class each. PIPE ("|>") drives the pipe
 # operator (see <pipeExpr>, M6).
+#
+# Because terminals are token classes (not source forms), several lexical spellings collapse to
+# one terminal and need NO production here: FLOAT covers scientific notation (`1e3`, `1.5e-9`,
+# `6.022e23` — any exponent makes the literal a float); STR covers both `"…"` and `'…'` quoting
+# and all string escapes including `\u{HEX}` unicode. The exact lexical grammar lives in
+# `src/lexer/mod.rs` + `docs/syntax.md §2/§10`.
 
 # ===== top level =====
 # A file is zero or more statements then EOF. The lexer always emits a trailing NEWLINE before

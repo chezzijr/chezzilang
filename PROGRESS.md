@@ -444,7 +444,10 @@ branch names) is in the git log.
   differential-tested vs the parser. `cargo test conformance`.
 - ✅ **M2 — parser → AST** — recursive descent + Pratt; spans; depth-capped.
 - ✅ **M1 — lexer** — full `examples/hello.chz` incl. Indent/Dedent; string escapes, numeric underscores.
-  Open follow-ups: scientific notation `1e3`, single-quote strings, unicode `\u{…}` escapes.
+  Shipped follow-ups: scientific-notation floats (`1e3`/`1.5e-9`/`6.022e23` — any exponent ⇒ float;
+  bare `e` not half-consumed), single-quote strings (`'…'` ≡ `"…"`, same escapes & interpolation),
+  unicode `\u{HEX}` escapes (1-6 hex digits, rejects surrogates/>10FFFF/malformed). Golden:
+  `examples/literals.chz` (VM + interp + `.expected`).
 
 ---
 
