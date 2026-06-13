@@ -4448,3 +4448,14 @@ fn extern_type_alias_param_ok() {
     // A transparent alias resolving to a marshallable scalar is accepted (check runs on resolved Ty).
     ok("type Len = int\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Len\n\nprint(strlen(\"hi\"))\n");
 }
+
+#[test]
+fn extern_nil_param_rejected() {
+    // `nil` is a valid VOID return but NOT a valid parameter (the backend's `ctype_of` has no nil
+    // case, so accepting it as a param would panic every engine on a checked program). A
+    // void-returning extern yields a `Nil` value, which would otherwise satisfy a `nil` param.
+    rejects(
+        "extern \"libc.so.6\":\n    fn f(x: nil) -> int\n",
+        "not C-marshallable",
+    );
+}

@@ -1012,15 +1012,24 @@ print(sqrt(4.0))       # 2.0
 print(strlen("hello")) # 5
 ```
 
-**Marshalling (v1 — scalars only):** `int` ↔ C `long`, `float` ↔ C `double`, `bool` ↔ C `int`,
-`str` → null-terminated `const char*` (a `char*` return is copied into a Chezzi `str`). No implicit
-`int`→`float` (`cos(2)` is a type error — pass `2.0`). A no-return signature (`fn srand(seed: int)`)
-maps to C `void`. The checker rejects any non-scalar param/return (list/map/set/tuple/struct/enum/…)
-with a *not C-marshallable* error. Calls run inline (a slow C call pins its worker under `--parallel`)
-and produce identical output on all three engines (VM / `--interp` / `--parallel`).
+**Marshalling (v1 — scalars only):** `int` ↔ C `long` (so a 32-bit-`int` C API is called at the wrong
+ABI width — declare against `long`-based APIs, or expect truncation), `float` ↔ C `double`, `bool` ↔ C
+`int`, `str` → null-terminated `const char*` (a `char*` return is copied into a Chezzi `str`). No
+implicit `int`→`float` (`cos(2)` is a type error — pass `2.0`). A no-return signature
+(`fn srand(seed: int)`) — or an explicit `-> nil` — maps to C `void`; `nil` is a **return-only** type
+(it is rejected as a parameter). The checker rejects any other non-scalar param/return
+(list/map/set/tuple/struct/enum/…) with a *not C-marshallable* error. Calls run inline (a slow C call
+pins its worker under `--parallel`) and produce identical output on all three engines
+(VM / `--interp` / `--parallel`).
+
+**Caveats:** a `str`-declared return that comes back `NULL` (e.g. `getenv` of an unset var) is **not**
+silently turned into `nil` — that would break the static non-null `str` guarantee — it raises a
+recoverable runtime fault (catch with `recover:`). A returned `char*` is copied immediately and never
+`free`d, so a `malloc`'d return **leaks**, and a non-NUL-terminated return over-reads (the signature
+is a user assertion across the C trust boundary).
 
 **Deferred (v1 limits):** structs-by-value, callbacks / function pointers, varargs, opaque pointers /
-userdata, and `char*` ownership transfer / `free` (a malloc'd `char*` return leaks).
+userdata, nullable returns (`str?`), and `char*` ownership transfer / `free`.
 
 ## 13. Standard library (v1)
 

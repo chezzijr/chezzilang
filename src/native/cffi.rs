@@ -202,12 +202,21 @@ impl Cffi {
                 Some(CType::Str) => {
                     let p: *const std::os::raw::c_char = cif.call(code, &ffi_args);
                     if p.is_null() {
-                        NativeRet::Nil
-                    } else {
-                        // Copy immediately into an owned Chezzi str. We never `free` the pointer
-                        // (v1 documented limit: no ownership transfer), so a malloc'd return leaks.
-                        NativeRet::Str(CStr::from_ptr(p).to_string_lossy().into_owned())
+                        // The extern is statically typed to return `str`, a non-null type. Yielding
+                        // `nil` here would silently break that guarantee (a later `len(v)` would fault
+                        // far from the cause). Fault honestly at the boundary instead — recoverable via
+                        // `recover:`. (A genuinely-nullable C return is out of v1 scope; model it by
+                        // returning `int`/a sentinel, or wait for a future `str?` extern return.)
+                        return Err(HostError {
+                            message: format!(
+                                "extern fn '{}' returned NULL for its declared `str` return",
+                                self.name
+                            ),
+                        });
                     }
+                    // Copy immediately into an owned Chezzi str. We never `free` the pointer
+                    // (v1 documented limit: no ownership transfer), so a malloc'd return leaks.
+                    NativeRet::Str(CStr::from_ptr(p).to_string_lossy().into_owned())
                 }
                 None => {
                     let _: () = cif.call(code, &ffi_args);
@@ -331,6 +340,17 @@ mod tests {
             .expect("dlopen strlen");
         let mut host = MockHost::default().string("hello");
         assert_eq!(f.call(&mut host), Ok(NativeRet::Int(5)));
+    }
+
+    #[test]
+    fn null_str_return_is_a_fault_not_nil() {
+        // `getenv` of an almost-certainly-unset var returns NULL. A `str`-typed return must NOT
+        // silently become `nil` (that would break the static non-null `str` guarantee) — it faults.
+        let f = Cffi::new("libc.so.6", "getenv", vec![CType::Str], Some(CType::Str))
+            .expect("dlopen getenv");
+        let mut host = MockHost::default().string("CHEZZI_DEFINITELY_UNSET_VAR_XYZ_42");
+        let err = f.call(&mut host).expect_err("NULL char* for a `str` return must fault");
+        assert!(err.message.contains("returned NULL"), "{}", err.message);
     }
 
     #[test]

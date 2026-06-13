@@ -46,6 +46,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // Pass 1: hoist all type declarations across every module.
     for lm in &graph.modules {
         c.hoist_types(&lm.ast.stmts)?;
+        c.gather_aliases(&lm.ast.stmts);
     }
     // Pass 2: compile each module's toplevel + functions.
     for (idx, lm) in graph.modules.iter().enumerate() {
@@ -75,6 +76,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     let module = &module;
     let mut c = Compiler::new();
     c.hoist_types(&module.stmts)?;
+    c.gather_aliases(&module.stmts);
     let toplevel = c.compile_module(0, module, &[])?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -111,6 +113,11 @@ struct Compiler {
     /// (like `field_ic_next`). Each `CallMethod` op gets a unique slot into the VM's `method_ic`
     /// vector. Recorded into `Program::method_ic_sites`.
     method_ic_next: u32,
+    /// Program-global type-alias table (`type Name = T`), gathered across EVERY module before
+    /// compilation, mirroring the checker's program-global `aliases`. Used only to lower an extern
+    /// fn's scalar-alias param/return types to `CType` — an alias defined in one module and used bare
+    /// in another's `extern` signature must resolve here exactly as the checker accepted it.
+    aliases: HashMap<String, Type>,
 }
 
 impl Compiler {
@@ -131,7 +138,18 @@ impl Compiler {
                 VariantDef { enum_name: e.to_string(), arity },
             );
         }
-        Compiler { program, struct_fields: HashMap::new(), globals: HashMap::new(), global_slots: Vec::new(), field_ic_next: 0, method_ic_next: 0 }
+        Compiler { program, struct_fields: HashMap::new(), globals: HashMap::new(), global_slots: Vec::new(), field_ic_next: 0, method_ic_next: 0, aliases: HashMap::new() }
+    }
+
+    /// Gather `type Name = T` aliases from a module's statements into `self.aliases`. Called once per
+    /// module before compilation so an extern signature in any module can resolve a scalar alias
+    /// declared anywhere in the program (matching the checker's program-global alias scope).
+    fn gather_aliases(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            if let StmtKind::TypeAlias { name, ty } = &stmt.kind {
+                self.aliases.insert(name.clone(), ty.clone());
+            }
+        }
     }
 
     /// M19 Phase 6 — allocate an inline-cache site id for a `CallMethod` op. Every method/module-member
@@ -283,26 +301,19 @@ impl Compiler {
             // exactly like a top-level `fn`. The checker has already verified marshallability, so the
             // param/return types are scalars (possibly via a transparent alias) resolvable to `CType`.
             if let StmtKind::Extern { lib, fns } = &stmt.kind {
-                let aliases: HashMap<String, Type> = module
-                    .stmts
-                    .iter()
-                    .filter_map(|s| match &s.kind {
-                        StmtKind::TypeAlias { name, ty } => Some((name.clone(), ty.clone())),
-                        _ => None,
-                    })
-                    .collect();
                 for ef in fns {
                     let params: Vec<CType> = ef
                         .params
                         .iter()
                         .map(|p| {
-                            ctype_of(p.ty.as_ref(), &aliases)
+                            ctype_of(p.ty.as_ref(), &self.aliases)
                                 .expect("checker verified marshallable param")
                         })
                         .collect();
-                    let ret = ef.ret.as_ref().map(|t| {
-                        ctype_of(Some(t), &aliases).expect("checker verified marshallable return")
-                    });
+                    // `None` ⇒ void: either no annotation, or an annotation resolving to `nil`
+                    // (incl. an alias to `nil`). The checker guarantees a non-void return is a scalar,
+                    // so a non-scalar here can only mean void — use `and_then`, never `.expect`.
+                    let ret = ef.ret.as_ref().and_then(|t| ctype_of(Some(t), &self.aliases));
                     let id = self.program.cffi_defs.len() as u32;
                     self.program.cffi_defs.push(CffiDef {
                         lib: lib.clone(),

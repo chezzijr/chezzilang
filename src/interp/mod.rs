@@ -217,6 +217,12 @@ struct Interp {
     /// gracefully drain any executor never explicitly `shutdown`/`shutdown_now`-ed at program exit
     /// (C5 / A2) — without it, that submitted work would silently never run.
     executors: Vec<std::rc::Rc<std::cell::RefCell<value::ExecState>>>,
+    /// Program-global type-alias table (`type Name = T`), gathered across EVERY module before
+    /// evaluation begins, mirroring the checker's program-global alias scope. Used only to lower an
+    /// extern fn's scalar-alias param/return types to `CType` in `hoist_declarations` — so an alias
+    /// declared in one module and used bare in another's `extern` signature resolves here exactly as
+    /// the checker accepted it. Empty for a single-source run (the module's own aliases suffice).
+    extern_aliases: std::collections::HashMap<String, crate::ast::Type>,
 }
 
 /// A task registered by `spawn`, awaiting its nursery's join barrier. The callee/receiver and
@@ -279,6 +285,7 @@ impl Interp {
             call_stack: Vec::new(),
             nurseries: Vec::new(),
             executors: Vec::new(),
+            extern_aliases: std::collections::HashMap::new(),
         };
         // Built-in Result / Option variants — available without any declaration.
         interp.register_variant("Ok", "Result", 1);
@@ -2838,13 +2845,15 @@ impl Interp {
                     // Eager `dlopen` + `dlsym` at module init (like the VM's `MakeCffi`): a missing
                     // library/symbol surfaces as a startup error. Each extern fn binds a `Cffi` value
                     // into the module's globals, exactly where a top-level `fn` binds.
-                    let aliases: std::collections::HashMap<String, crate::ast::Type> = stmts
-                        .iter()
-                        .filter_map(|s| match &s.kind {
-                            StmtKind::TypeAlias { name, ty } => Some((name.clone(), ty.clone())),
-                            _ => None,
-                        })
-                        .collect();
+                    // Program-global aliases (cross-module, populated by the run driver) plus this
+                    // module's own — so a same-file alias works even on the single-source path where
+                    // `extern_aliases` is empty.
+                    let mut aliases = self.extern_aliases.clone();
+                    for s in stmts {
+                        if let StmtKind::TypeAlias { name, ty } = &s.kind {
+                            aliases.insert(name.clone(), ty.clone());
+                        }
+                    }
                     for ef in fns {
                         let params: Vec<crate::native::cffi::CType> = ef
                             .params
@@ -2854,10 +2863,10 @@ impl Interp {
                                     .expect("checker verified marshallable param")
                             })
                             .collect();
-                        let ret = ef
-                            .ret
-                            .as_ref()
-                            .map(|t| ctype_of(Some(t), &aliases).expect("checker verified return"));
+                        // `None` ⇒ void: no annotation, or one resolving to `nil` (incl. an alias to
+                        // `nil`). The checker guarantees a non-void return is a scalar, so `and_then`
+                        // (never `.expect`) — a non-scalar resolution can only mean void.
+                        let ret = ef.ret.as_ref().and_then(|t| ctype_of(Some(t), &aliases));
                         let cffi = crate::native::cffi::Cffi::new(lib, &ef.name, params, ret)
                             .map_err(|e| RuntimeError { message: e.message, span: stmt.span })?;
                         self.env.define(&ef.name, Value::Cffi(std::sync::Arc::new(cffi)));
@@ -3670,6 +3679,16 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     };
     let mut interp = Interp::new();
     interp.host = cfg;
+    // Gather every module's type aliases up front so an `extern` signature in any module can resolve
+    // a scalar alias declared anywhere (program-global, matching the checker). Per-module hoisting
+    // would otherwise miss an alias imported from another file (panic / silently-void return).
+    for lm in &graph.modules {
+        for s in &lm.ast.stmts {
+            if let StmtKind::TypeAlias { name, ty } = &s.kind {
+                interp.extern_aliases.insert(name.clone(), ty.clone());
+            }
+        }
+    }
     // Modules are in load order: dependencies first, entry last.
     for lm in &graph.modules {
         if let Err(e) = interp.eval_module(lm) {
@@ -5348,6 +5367,45 @@ b := Buf([10, 20, 30])
         let (out, _err, res, _) = run_file(&path);
         res.expect("ffi.chz should run on the interp");
         assert_eq!(out, expected);
+    }
+
+    /// Regression (blocker): an extern fn declared with an explicit `-> nil` (void) return must RUN,
+    /// not panic. `ctype_of("nil")` is `None`, which means *void* here — not an unresolvable type — so
+    /// the return slot must use `and_then` (None ⇒ void), never `.expect`. Linux-only (needs libc).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_explicit_nil_return_runs() {
+        let src = "extern \"libc.so.6\":\n    fn srand(seed: int) -> nil\n\nsrand(1)\nprint(42)\n";
+        let path = std::env::temp_dir()
+            .join(format!("chezzi_interp_ffi_nilret_{}.chz", std::process::id()));
+        std::fs::write(&path, src).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        let _ = std::fs::remove_file(&path);
+        res.expect("extern with `-> nil` return should run on the interp");
+        assert_eq!(out, "42\n");
+    }
+
+    /// Regression (blocker): a type alias defined in an IMPORTED module, used bare in an extern
+    /// signature, type-checks (the checker's alias table is program-global) — so the interp's
+    /// `ctype_of` must resolve aliases program-globally too, else it returns `None` and either panics
+    /// (param) or silently drops the return (would-be void). Linux-only (needs libc).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_cross_module_alias_runs() {
+        let dir = std::env::temp_dir()
+            .join(format!("chezzi_interp_ffi_xmod_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sizes.chz"), "type Size = int\n").unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import sizes\n\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Size\n\nprint(strlen(\"hello\"))\n",
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        res.expect("extern with a cross-module alias should run on the interp");
+        assert_eq!(out, "5\n");
     }
 
     /// `defer` golden: LIFO cleanup across every frame-exit path (normal return, `?`, panic), with

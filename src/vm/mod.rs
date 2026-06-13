@@ -12113,6 +12113,46 @@ main()
         assert_eq!(vm_out, par_out, "cooperative VM and --parallel diverged on an extern-in-spawn call");
     }
 
+    /// Regression (blocker): an extern fn with an explicit `-> nil` (void) return must RUN, not panic.
+    /// The compiler's `ctype_of("nil")` is `None` meaning *void*, so the return slot must be built with
+    /// `and_then` (None ⇒ void), never `.expect`. Linux-only (needs libc.so.6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_explicit_nil_return_runs() {
+        let src = "extern \"libc.so.6\":\n    fn srand(seed: int) -> nil\n\nsrand(1)\nprint(42)\n";
+        let entry = write_temp_chz("ffi_nilret", src);
+        let (out, _e, res, _) = run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(res.is_ok(), "VM faulted on `-> nil` extern: {res:?}");
+        assert_eq!(out, "42\n");
+    }
+
+    /// Regression (blocker): a type alias defined in an IMPORTED module, used bare in an extern
+    /// signature, type-checks (the checker's alias table is program-global). The compiler must build
+    /// its extern alias map program-globally too — else `ctype_of` returns `None` and the call site
+    /// `.expect`s (param) or silently drops a scalar return. Linux-only (needs libc.so.6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_cross_module_alias_runs() {
+        let dir = std::env::temp_dir().join(format!("chezzi_vm_ffi_xmod_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sizes.chz"), "type Size = int\n").unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import sizes\n\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Size\n\nprint(strlen(\"hello\"))\n",
+        )
+        .unwrap();
+        let (vm_out, _e, vm_res, _) = run_file(&entry);
+        let (par_out, _pe, par_res, _) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(vm_res.is_ok(), "VM faulted on cross-module alias extern: {vm_res:?}");
+        assert!(par_res.is_ok(), "parallel engine faulted on cross-module alias extern: {par_res:?}");
+        assert_eq!(vm_out, "5\n");
+        assert_eq!(vm_out, par_out, "VM and --parallel diverged on a cross-module alias extern");
+    }
+
     /// D3/the discriminating fairness test. 64 CPU "hog" fibers (≫ the core-sized worker pool) each
     /// busy-wait on a `Shared[int]` until it reaches 50, spawned FIRST; then 50 "short" fibers that
     /// each `update(+1)` and exit. WITHOUT preemption every worker grabs a hog (FIFO seed order), all

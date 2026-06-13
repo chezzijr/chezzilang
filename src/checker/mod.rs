@@ -836,7 +836,9 @@ impl Checker {
                             .map(|p| match &p.ty {
                                 Some(t) => {
                                     let ty = self.resolve_type(t, ef.span);
-                                    self.assert_marshallable(&ty, &ef.name, ef.span);
+                                    // A parameter must be a real C scalar — `nil` (void) is a
+                                    // return-only sentinel and would panic the backend's `ctype_of`.
+                                    self.assert_marshallable(&ty, &ef.name, ef.span, false);
                                     ty
                                 }
                                 None => {
@@ -854,7 +856,8 @@ impl Checker {
                         let ret = match &ef.ret {
                             Some(t) => {
                                 let ty = self.resolve_type(t, ef.span);
-                                self.assert_marshallable(&ty, &ef.name, ef.span);
+                                // The return slot may be `nil` (void) in addition to the C scalars.
+                                self.assert_marshallable(&ty, &ef.name, ef.span, true);
                                 ty
                             }
                             // A void extern returns nothing observable; model it as `Nil`.
@@ -869,12 +872,15 @@ impl Checker {
     }
 
     /// v1 C-ABI marshallability: an extern fn's param/return types must be C-scalar — `int`, `float`,
-    /// `bool`, or `str` (`char*`), plus a `Nil` (void) return. Everything else (list/map/set/tuple/
-    /// struct/enum/func/option/result/protocol/channel/…) is rejected with a single uniform error.
-    /// Called on the **resolved** `Ty` (after `resolve_type`), so a transparent type alias to a scalar
-    /// is accepted. `Unknown` is already-errored and silently allowed (no cascade).
-    fn assert_marshallable(&mut self, ty: &Ty, fn_name: &str, span: Span) {
-        let ok = matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Nil | Ty::Unknown);
+    /// `bool`, or `str` (`char*`). `Nil` (void) is accepted ONLY for the return slot (`allow_void`),
+    /// never for a parameter: a `nil` param has no `CType` lowering and would panic the backend's
+    /// `ctype_of`, while a void-returning extern's `Nil` value would otherwise satisfy it. Everything
+    /// else (list/map/set/tuple/struct/enum/func/option/result/protocol/channel/…) is rejected with a
+    /// single uniform error. Called on the **resolved** `Ty` (after `resolve_type`), so a transparent
+    /// alias to a scalar is accepted. `Unknown` is already-errored and silently allowed (no cascade).
+    fn assert_marshallable(&mut self, ty: &Ty, fn_name: &str, span: Span, allow_void: bool) {
+        let ok = matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown)
+            || (allow_void && matches!(ty, Ty::Nil));
         if !ok {
             self.error(
                 span,
