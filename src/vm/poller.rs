@@ -434,6 +434,7 @@ mod tests {
             ctx: super::super::FiberCtx::default(),
             state: super::super::FiberState::Ready,
             task_index: 0,
+            scope_id: 0,
             span: Span { line: 1, col: 1 },
             resume_native: None,
         }

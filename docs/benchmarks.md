@@ -637,3 +637,33 @@ dispatch through overflow), `poly_ic_site_latches_sticky_on_5th_type` (white-box
 `examples/poly_method.chz`/`.expected`. Full suite **1838 green**, conformance **7/7**, clippy
 `--all-targets -D warnings` clean. **Next suspect for `poly_method`:** the residual ~4.3× is per-op
 dispatch + the `for`-loop iterator protocol overhead around the now-fast dispatch, not the IC.
+
+## Cross-nursery flat scheduler (M:N) — 2026-06-14 (behavior-preserving concurrency change)
+
+The cross-nursery circular deadlock fix (M:N `--parallel` only — `examples/parallel_cross_nursery_circular.chz`)
+is **not a perf lever**; it touches only the `--parallel` scheduler (`SchedCore` scalar
+`{done,total,body_open}` → `Vec<JoinScope>` + flat `slots`, scope-scoped owner stop, global deadlock
+predicate, early-enlist-with-deferred-reduce). The serial benches (`benches/run.chz`) do **not** use
+`--parallel`, and the new `Vec<JoinScope>` scans are behind a `scopes.len() == 1` fast path, so no
+regression was expected or measured:
+
+| bench | before (CPython×, baseline doc) | after (this change) | delta |
+|-------|----------------------------------|---------------------|-------|
+| fib   | 3.54× | 3.28× | within run-to-run noise (faster, not slower) |
+| loop  | 1.32× | 1.13× | within noise |
+| primes| ~2.3× | 2.26× | flat |
+| list  | ~2.7× | 2.67× | flat |
+| struct| ~2.85×| 2.85× | flat |
+| poly_method | 4.3× | 4.37× | flat |
+| map   | 1.94× | 1.82× | within noise (faster) |
+| str   | ~2.1× | 2.10× | flat |
+| empty | ~11× faster | 10.82× faster | flat |
+
+The per-fiber `Fiber::scope_id` (one `usize`) and the per-VM `mn_scopes`/`mn_enlisted`/`mn_enlist_sched`
+fields add nothing to the hot dispatch loop (the inline body runs with `mn == None` — unchanged serial
+path). Full suite **1838 → 1845 green** (4 new MnSched unit tests + the case-A golden + a multi-task
+inner-nursery golden + the deadlock guard), conformance **7/7**, clippy `--all-targets -D warnings`
+clean. Cross-nursery goldens looped 10–12× under a 30s watchdog (no lost-wakeup from the now-global
+parked set; the multi-task case shook out an early-enlist-vs-deadlock-predicate race, since fixed by
+enlisting outer scopes BEFORE farming any helper — see
+`examples/parallel_cross_nursery_fanout.chz`).

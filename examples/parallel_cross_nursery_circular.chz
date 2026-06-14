@@ -1,0 +1,37 @@
+# Cross-nursery circular wakeup — the case-A flat-scheduler fix (M:N / --parallel ONLY).
+#
+# `inner` spawns an implicit (nested) nursery; the OUTER `parallel:` spawns sibling O and then calls
+# inner(a, b). O recvs a → sends b; inner's spawned fiber sends a → recvs b. The cross-nursery
+# circular wait used to fault `deadlock` because the inner nursery's inline owner drained only its
+# own private queue and could never RUN the outer sibling O. With the M:N flat scheduler (one global
+# MnSched, scope-scoped owner stop), the inline owner's OS thread drains the GLOBAL queue, so it runs
+# O, which unblocks I.
+#
+#   chezzi run --parallel examples/parallel_cross_nursery_circular.chz   # → I got 1 / O got 1 / done
+#
+# Output ORDER note: O and I live in DIFFERENT nurseries (O in main's outer, I in inner's), and each
+# nursery flushes its buffered task output at its OWN join (inner's join < main's join) — so the order
+# is "I got 1" then "O got 1", NOT the single-nursery case-C order. Both tasks complete; the runtime
+# wake order is O-then-I, but the buffered Decision-F flush is per-nursery-join (preserves engine parity).
+#
+# NOTE: under the cooperative engine (plain `run`, no --parallel) this STILL faults deadlock — the
+# cooperative-engine flatten is a separate, later commit. See docs/concurrency-tier-d.md "Open / deferred".
+fn inner(a: Channel[int], b: Channel[int]):
+    spawn:
+        a.send(1)
+        y := b.recv()
+        print("I got {y}")
+
+fn main():
+    a := Channel[int]()
+    b := Channel[int]()
+    parallel:                        # OUTER nursery
+        spawn:                       # O: child of OUTER
+            x := a.recv()
+            b.send(x)
+            print("O got {x}")
+        inner(a, b)                  # inner's spawn → NESTED nursery, joins at fn return
+
+    print("done")
+
+main()
