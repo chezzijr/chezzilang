@@ -860,7 +860,7 @@ engine is now a true M:N work-stealing scheduler); D6 (epoll/kqueue pollset + `s
 Concurrency work that is real but **outside the B3–B5 multicore epic**. Recorded so it isn't lost or
 reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md`](concurrency-b3.md).)
 
-- **Cross-nursery wakeups** *(partly resolved by D0; one narrow case open, both engines)*.
+- **Cross-nursery wakeups** *(RESOLVED under `--parallel` (M:N) incl. multi-level nesting + late-spawn; cooperative-engine flatten + a few narrow limits still open — see below)*.
   **Resolved (D0):** `wake_on_send` (`src/vm/mod.rs`) drains *every* scheduler level, so cross-level
   **wake-marking** works — a `send` in any nursery marks the blocked fiber ready wherever it parked. The
   **common case** (consumer in an *outer* nursery, producer in an *inner* one that finishes) works end to
