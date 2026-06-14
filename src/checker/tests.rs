@@ -143,6 +143,13 @@ fn in_rejects_non_container() {
     rejects("fn main():\n    print(1 in 5)\nmain()\n", "in");
 }
 
+#[test]
+fn in_rejects_range_rhs() {
+    // A range types as list[int] but has no runtime value (only valid as a `for` iterable);
+    // accepting it here would diverge the engines (VM rejects at compile time, interp at runtime).
+    rejects("fn main():\n    print(5 in 1..10)\nmain()\n", "range");
+}
+
 // ===== 1. unknown name =====
 
 #[test]

@@ -3086,6 +3086,14 @@ impl Checker {
             // yields `bool`. No user-`Contains` overload (reject anything else). The element/key
             // type must be compatible with the LHS.
             In => {
+                // A bare range has no runtime value (only valid as a `for` iterable) yet types as
+                // `list[int]` — reject a range RHS here or the engines diverge: the VM rejects the
+                // bare range at compile time, the interpreter dies at runtime. Mirrors the
+                // compiler's bare-range rejection.
+                if matches!(rhs.kind, ExprKind::Range { .. }) {
+                    self.error(rhs.span, "cannot use `in` on a range (a range is only valid as the iterable of a `for` loop)".to_string());
+                    return Ty::Bool;
+                }
                 match &r {
                     Ty::List(elem) | Ty::Set(elem) => {
                         if !either_unknown && !compatible(elem, &l) {
