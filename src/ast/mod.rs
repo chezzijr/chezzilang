@@ -195,9 +195,37 @@ pub enum WaitTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AssignOp {
-    Eq,      // =
-    PlusEq,  // +=
-    MinusEq, // -=
+    Eq,        // =
+    PlusEq,    // +=
+    MinusEq,   // -=
+    StarEq,    // *=
+    SlashEq,   // /=
+    PercentEq, // %=
+    AmpEq,     // &=
+    PipeEq,    // |=
+    CaretEq,   // ^=
+    ShlEq,     // <<=
+    ShrEq,     // >>=
+}
+
+impl AssignOp {
+    /// The binary operator a compound-assignment desugars to (`x += v` ⇒ `x = x + v`). `Eq` has no
+    /// underlying binary op. Shared by the compiler and the interpreter so both lower identically.
+    pub fn to_binop(self) -> Option<BinaryOp> {
+        Some(match self {
+            AssignOp::Eq => return None,
+            AssignOp::PlusEq => BinaryOp::Add,
+            AssignOp::MinusEq => BinaryOp::Sub,
+            AssignOp::StarEq => BinaryOp::Mul,
+            AssignOp::SlashEq => BinaryOp::Div,
+            AssignOp::PercentEq => BinaryOp::Mod,
+            AssignOp::AmpEq => BinaryOp::BitAnd,
+            AssignOp::PipeEq => BinaryOp::BitOr,
+            AssignOp::CaretEq => BinaryOp::BitXor,
+            AssignOp::ShlEq => BinaryOp::Shl,
+            AssignOp::ShrEq => BinaryOp::Shr,
+        })
+    }
 }
 
 /// A function definition — used both for top-level `fn`s and `struct` methods.
@@ -534,6 +562,8 @@ pub enum BinaryOp {
     BitXor, // ^
     Shl,    // <<
     Shr,    // >>
+    /// `x in xs` — membership test (list/set element, map KEY, str substring). Always yields `bool`.
+    In,
 }
 
 /// Collect every `recover:` block reachable from expression `e`, in source order, **without

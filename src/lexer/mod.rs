@@ -68,6 +68,14 @@ pub enum Token {
     GtEq,       // >=
     PlusEq,     // +=
     MinusEq,    // -=
+    StarEq,     // *=
+    SlashEq,    // /=
+    PercentEq,  // %=
+    AmpEq,      // &=
+    PipeEq,     // |=
+    CaretEq,    // ^=
+    ShlEq,      // <<=
+    ShrEq,      // >>=
     Arrow,      // ->
     Pipe,       // |>
     Question,   // ?
@@ -392,9 +400,9 @@ impl Lexer {
                     Token::Minus
                 }
             }
-            '*' => Token::Star,
-            '/' => Token::Slash,
-            '%' => Token::Percent,
+            '*' => if self.match_char('=') { Token::StarEq } else { Token::Star },
+            '/' => if self.match_char('=') { Token::SlashEq } else { Token::Slash },
+            '%' => if self.match_char('=') { Token::PercentEq } else { Token::Percent },
             ':' => if self.match_char('=') { Token::Walrus } else { Token::Colon },
             '=' => if self.match_char('=') { Token::EqEq } else { Token::Assign },
             '!' => if self.match_char('=') { Token::NotEq } else { Token::Bang },
@@ -402,7 +410,8 @@ impl Lexer {
                 if self.match_char('=') {
                     Token::LtEq
                 } else if self.match_char('<') {
-                    Token::Shl
+                    // `<<` then an optional `=` → `<<=`.
+                    if self.match_char('=') { Token::ShlEq } else { Token::Shl }
                 } else {
                     Token::Lt
                 }
@@ -411,14 +420,22 @@ impl Lexer {
                 if self.match_char('=') {
                     Token::GtEq
                 } else if self.match_char('>') {
-                    Token::Shr
+                    if self.match_char('=') { Token::ShrEq } else { Token::Shr }
                 } else {
                     Token::Gt
                 }
             }
-            '|' => if self.match_char('>') { Token::Pipe } else { Token::BitOr },
-            '&' => Token::Amp,
-            '^' => Token::Caret,
+            '|' => {
+                if self.match_char('>') {
+                    Token::Pipe
+                } else if self.match_char('=') {
+                    Token::PipeEq
+                } else {
+                    Token::BitOr
+                }
+            }
+            '&' => if self.match_char('=') { Token::AmpEq } else { Token::Amp },
+            '^' => if self.match_char('=') { Token::CaretEq } else { Token::Caret },
             // `??` / `?.` are recognized only when adjacent (no whitespace): `match_char` checks the
             // very next char. `x? .field` (space) stays `Question` + `Dot` (try-then-field).
             '?' => if self.match_char('?') {
@@ -443,7 +460,15 @@ impl Lexer {
             ',' => Token::Comma,
             '.' => if self.match_char('.') { Token::DotDot } else { Token::Dot },
 
-            // delegate the "munching" token kinds to the helpers below
+            // delegate the "munching" token kinds to the helpers below. A triple of the same
+            // quote char (`"""` / `'''`) opens a *triple-quoted* string in which a lone quote is
+            // an ordinary char (same escapes + interpolation as a regular string; only unescaped
+            // quotes differ). Detect it before the single-quote path by peeking two ahead.
+            '"' | '\'' if self.peek() == c && self.peek_next() == c => {
+                self.advance(); // second quote
+                self.advance(); // third quote
+                self.triple_string(c)?
+            }
             '"' => self.string('"')?,
             '\'' => self.string('\'')?,
             c if c.is_ascii_digit() => self.number(start)?,
@@ -721,6 +746,62 @@ impl Lexer {
         Ok(Token::Str(text))
     }
 
+    /// (1d′) Scan a *triple-quoted* string literal (`"""…"""` or `'''…'''`). The opening triple
+    /// `quote` is already consumed. Identical to [`string`] — same backslash escapes, `\u{…}`, and
+    /// literal-newline handling, leaving `{…}` interpolation to the later pass — except the
+    /// terminator is a triple of `quote`, so a single or double `quote` inside is an ordinary char.
+    /// Produces a normal `Token::Str`.
+    fn triple_string(&mut self, quote: char) -> Result<Token, LexError> {
+        let mut text = String::new();
+        // Closes only when the next THREE chars are all `quote`.
+        while !(self.peek() == quote
+            && self.peek_next() == quote
+            && self.chars.get(self.pos + 2) == Some(&quote))
+        {
+            if self.is_at_end() {
+                return Err(self.error("unterminated triple-quoted string literal"));
+            }
+            if self.peek() == '\\' {
+                self.advance(); // consume the backslash
+                if self.is_at_end() {
+                    return Err(self.error("unterminated string literal (trailing '\\')"));
+                }
+                let esc = self.advance();
+                let translated = match esc {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '\\' => '\\',
+                    '"' => '"',
+                    '\'' => '\'',
+                    '0' => '\0',
+                    'u' => {
+                        text.push(self.unicode_escape()?);
+                        continue;
+                    }
+                    '\n' | '\r' => {
+                        return Err(self.error(
+                            "line continuations are not supported; close the string or use \\n",
+                        ));
+                    }
+                    other => return Err(self.error(&format!("unknown escape '\\{other}'"))),
+                };
+                text.push(translated);
+            } else {
+                if self.peek() == '\n' {
+                    self.line += 1; // keep the line count honest across embedded newlines
+                    self.line_start = self.pos + 1;
+                }
+                text.push(self.advance());
+            }
+        }
+        // consume the closing triple
+        self.advance();
+        self.advance();
+        self.advance();
+        Ok(Token::Str(text))
+    }
+
     /// Scan the body of a `\u{HEX}` escape. The `\u` is already consumed; the cursor sits on
     /// what must be `{`. Reads 1-6 hex digits naming a Unicode scalar value and returns it.
     /// Rejects a missing `{`, an empty `{}`, more than 6 hex digits, any non-hex char, an
@@ -800,6 +881,61 @@ mod tests {
     #[test]
     fn single_plus() {
         assert_eq!(kinds("+"), vec![Token::Plus, Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn triple_double_quote_unescaped_quote() {
+        // Inside a triple-quoted string, a lone `"` is an ordinary char (the only added value
+        // over a regular string). `"""say "hi"""` lexes to Str(`say "hi`).
+        assert_eq!(
+            kinds("\"\"\"say \"hi\"\"\""),
+            vec![Token::Str("say \"hi".into()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn triple_string_newline_and_interp() {
+        // `\n` escape is a real newline; a literal newline is preserved; `{x}` is left
+        // un-processed (interpolation is a later pass, same as regular strings).
+        assert_eq!(
+            kinds("\"\"\"a\\nb {x}\"\"\""),
+            vec![Token::Str("a\nb {x}".into()), Token::Newline, Token::Eof]
+        );
+        // Literal newline inside the triple string is preserved verbatim.
+        assert_eq!(
+            kinds("\"\"\"a\nb\"\"\""),
+            vec![Token::Str("a\nb".into()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn triple_single_quote_string() {
+        assert_eq!(
+            kinds("'''it's \"quoted\"'''"),
+            vec![Token::Str("it's \"quoted\"".into()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn empty_triple_string() {
+        assert_eq!(
+            kinds("\"\"\"\"\"\""),
+            vec![Token::Str("".into()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn empty_regular_string_not_triple() {
+        // `""` is an empty regular string, NOT a triple opener.
+        assert_eq!(
+            kinds("\"\""),
+            vec![Token::Str("".into()), Token::Newline, Token::Eof]
+        );
+        // `"" x` — empty string then an ident.
+        assert_eq!(
+            kinds("\"\" x"),
+            vec![Token::Str("".into()), Token::Ident("x".into()), Token::Newline, Token::Eof]
+        );
     }
 
     #[test]

@@ -3287,6 +3287,11 @@ impl Vm {
                 self.push(Value::Bool(!eq));
             }
             Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => self.bitwise(op, span)?,
+            // `return` (not `?`): keeps `step`'s frame from materializing an extra `RuntimeError`
+            // temporary, which would bloat the deep re-entrant recursion path (`str(self)`-style
+            // infinite recursion must hit the 10_000 call-depth limit before exhausting the host
+            // stack — `self_referential_stringable_hits_depth_limit` guards exactly this).
+            Op::Contains => return self.op_contains(span),
             Op::AsBool => {
                 let v = *self.stack.last().unwrap();
                 if !matches!(v, Value::Bool(_)) {
@@ -3985,6 +3990,51 @@ impl Vm {
             _ => return Err(self.err(format!("cannot apply {name} to {} and {}", self.type_name(l), self.type_name(r)), span)),
         };
         self.push(result);
+        Ok(())
+    }
+
+    /// `x in container` — membership test. Pops `[x, container]`, pushes a `Bool`. Dispatches on the
+    /// container kind, reusing the same equality / hashing the `.contains`/`.has` methods use: a
+    /// list/set tests element membership, a map tests KEY membership (Python-style), a str tests
+    /// substring. The checker has already type-directed this; the runtime is the fallback.
+    /// `#[inline(never)]` keeps `step`'s own stack frame lean (its String/Vec locals would otherwise
+    /// bloat the deep-recursion path `step → run_proto → run_until → step`).
+    #[inline(never)]
+    fn op_contains(&mut self, span: Span) -> Result<(), RuntimeError> {
+        let container = self.pop();
+        let needle = self.pop();
+        let found = match container {
+            Value::Obj(h) => match self.heap.get(h) {
+                Obj::List(items) => {
+                    let elems = items.clone();
+                    elems.iter().any(|v| self.values_equal(*v, needle))
+                }
+                Obj::Set(_) => {
+                    let hx = self.hash_key_rooted(needle, &[Value::Obj(h), needle], span)?;
+                    let Obj::Set(s) = self.heap.get(h) else { unreachable!() };
+                    s.candidates(hx).iter().any(|&p| self.values_equal(s.entries[p].1, needle))
+                }
+                Obj::Map(_) => {
+                    let hk = self.hash_key_rooted(needle, &[Value::Obj(h), needle], span)?;
+                    let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
+                    m.candidates(hk).iter().any(|&p| self.values_equal(m.entries[p].1, needle))
+                }
+                Obj::Str(_) => {
+                    let Value::Obj(nh) = needle else {
+                        return Err(self.err(format!("substring `in` requires a str on the left, found {}", self.type_name(needle)), span));
+                    };
+                    let sub = match self.heap.get(nh) {
+                        Obj::Str(sub) => sub.to_string(),
+                        _ => return Err(self.err(format!("substring `in` requires a str on the left, found {}", self.type_name(needle)), span)),
+                    };
+                    let Obj::Str(hay) = self.heap.get(h) else { unreachable!() };
+                    hay.contains(sub.as_str())
+                }
+                _ => return Err(self.err(format!("cannot use `in` on {}", self.type_name(container)), span)),
+            },
+            _ => return Err(self.err(format!("cannot use `in` on {}", self.type_name(container)), span)),
+        };
+        self.push(Value::Bool(found));
         Ok(())
     }
 
@@ -15085,6 +15135,91 @@ main()";
     }
 
     #[test]
+    fn compound_assign_all_ops_all_targets_parity() {
+        // Every compound op across ident / index / field / map-key targets; VM == interp == --parallel.
+        let src = "\
+struct P:
+    f: int
+fn main():
+    x := 100
+    x *= 3
+    x /= 2
+    x %= 40
+    x &= 12
+    x |= 1
+    x ^= 5
+    x <<= 2
+    x >>= 1
+    print(x)
+    xs := [8]
+    xs[0] *= 2
+    xs[0] <<= 1
+    print(xs)
+    p := P(7)
+    p.f *= 6
+    p.f %= 5
+    print(p.f)
+    m := {\"k\": 10}
+    m[\"k\"] |= 4
+    m[\"k\"] *= 2
+    print(m[\"k\"])
+main()";
+        let vm_out = run_capture(src).expect("vm");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel"));
+    }
+
+    #[test]
+    fn membership_in_runtime_parity() {
+        // list / set / map-key / substring, true + false; VM == interp == --parallel.
+        let src = "\
+fn main():
+    print(2 in [1, 2, 3])
+    print(9 in [1, 2, 3])
+    s := {10, 20, 30}
+    print(20 in s)
+    print(99 in s)
+    m := {\"a\": 1, \"b\": 2}
+    print(\"a\" in m)
+    print(\"z\" in m)
+    print(\"ell\" in \"hello\")
+    print(\"xyz\" in \"hello\")
+main()";
+        let vm_out = run_capture(src).expect("vm");
+        assert_eq!(vm_out, "true\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel"));
+    }
+
+    #[test]
+    fn tuple_swap_runtime_parity() {
+        // vars, list elements (same indices appear on both sides → proves RHS-first eval),
+        // and struct fields; VM == interp == --parallel.
+        let src = "\
+struct P:
+    x: int
+    y: int
+fn main():
+    a := 1
+    b := 2
+    a, b = b, a
+    print(a)
+    print(b)
+    data := [10, 20, 30]
+    data[0], data[2] = data[2], data[0]
+    print(data)
+    p := P(7, 9)
+    p.x, p.y = p.y, p.x
+    print(p.x)
+    print(p.y)
+main()";
+        let vm_out = run_capture(src).expect("vm");
+        assert_eq!(vm_out, "2\n1\n[30, 20, 10]\n9\n7\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel"));
+    }
+
+    #[test]
     fn index_assign_out_of_bounds_errors() {
         assert_eq!(run_err("xs := [1, 2, 3]\nxs[5] = 0\n"), "index 5 out of bounds (len 3)");
     }
@@ -15385,6 +15520,59 @@ main()";
     fn golden_match_or_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/match_or.chz");
         let expected = include_str!("../../examples/match_or.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    }
+
+    /// QoL golden: `examples/membership.chz` (the `in` operator across list/set/map-key/substring,
+    /// true + false cases) byte-identical on the VM, the interpreter, the `--parallel` engine, and
+    /// its `.expected`.
+    #[test]
+    fn golden_membership_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/membership.chz");
+        let expected = include_str!("../../examples/membership.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    }
+
+    /// QoL golden: `examples/compound_assign.chz` (the 8 compound-assign ops across var/index/field/
+    /// map-value targets) byte-identical on the VM, the interpreter, the `--parallel` engine, and
+    /// its `.expected`.
+    #[test]
+    fn golden_compound_assign_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/compound_assign.chz");
+        let expected = include_str!("../../examples/compound_assign.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    }
+
+    /// QoL golden: `examples/multiline_str.chz` (triple-quoted strings — unescaped quotes, `\n`,
+    /// literal newlines, interpolation) byte-identical on the VM, the interpreter, the `--parallel`
+    /// engine, and its `.expected`. (Lexer-only feature; parity is by construction.)
+    #[test]
+    fn golden_multiline_str_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/multiline_str.chz");
+        let expected = include_str!("../../examples/multiline_str.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    }
+
+    /// QoL golden: `examples/tuple_swap.chz` (multi-target assignment — vars, list elements, struct
+    /// fields, three-way rotation, and `a, b = f()` tuple destructuring; RHS-first eval proven by
+    /// same-index swaps) byte-identical on the VM, the interpreter, the `--parallel` engine, and its
+    /// `.expected`.
+    #[test]
+    fn golden_tuple_swap_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/tuple_swap.chz");
+        let expected = include_str!("../../examples/tuple_swap.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));

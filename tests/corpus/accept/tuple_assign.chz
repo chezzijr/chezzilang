@@ -1,0 +1,7 @@
+# rule: assignStmt, lvalueList, lvalue, postfix
+fn main():
+    a := 1
+    b := 2
+    a, b = b, a
+    data := [1, 2]
+    data[0], data[1] = data[1], data[0]

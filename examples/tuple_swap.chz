@@ -1,0 +1,46 @@
+# examples/tuple_swap.chz — multi-target assignment `a, b = b, a`. The full right-hand side is
+# evaluated FIRST (Python semantics), then stored into each target left-to-right, so a swap is
+# correct even when the same place appears on both sides. Targets may be variables, list elements,
+# or struct fields. Only `=` is allowed (no compound op with multiple targets).
+
+struct Point:
+    x: int
+    y: int
+
+fn main():
+    # Plain variable swap.
+    a := 1
+    b := 2
+    a, b = b, a
+    print(a)        # 2
+    print(b)        # 1
+
+    # Three-way rotation (RHS fully evaluated first).
+    p := 10
+    q := 20
+    r := 30
+    p, q, r = r, p, q
+    print(p)        # 30
+    print(q)        # 10
+    print(r)        # 20
+
+    # List-element swap — same indices on both sides.
+    data := [100, 200, 300]
+    data[0], data[2] = data[2], data[0]
+    print(data)     # [300, 200, 100]
+
+    # Struct-field swap.
+    pt := Point(3, 4)
+    pt.x, pt.y = pt.y, pt.x
+    print(pt.x)     # 4
+    print(pt.y)     # 3
+
+    # Multiple returns can feed a tuple assignment too.
+    a, b = compute()
+    print(a)        # 7
+    print(b)        # 8
+
+fn compute() -> (int, int):
+    return (7, 8)
+
+main()

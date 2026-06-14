@@ -1693,6 +1693,29 @@ impl Checker {
                     ),
                 }
             }
+            // `a, b = b, a` (and index/field forms) — multi-target tuple assignment. The parser
+            // guarantees `op == Eq` here. The value must be a tuple of equal arity; each target is
+            // then checked against its positional element type (recursing into the ident/index/field
+            // arms above — so vars, list elements, and struct fields all work, identically).
+            ExprKind::Tuple(targets) => {
+                let Ty::Tuple(elems) = &val_ty else {
+                    if !val_ty.is_unknown() {
+                        self.error(span, format!("cannot assign {val_ty} to {} targets", targets.len()));
+                    }
+                    return;
+                };
+                if elems.len() != targets.len() {
+                    self.error(
+                        span,
+                        format!("assignment has {} target(s) but the value has {} element(s)", targets.len(), elems.len()),
+                    );
+                    return;
+                }
+                let elems = elems.clone();
+                for (t, ety) in targets.iter().zip(elems.into_iter()) {
+                    self.check_assign(t, AssignOp::Eq, ety, span);
+                }
+            }
             _ => self.error(target.span, "invalid assignment target (only variables can be assigned)"),
         }
     }
@@ -1704,17 +1727,51 @@ impl Checker {
                     self.error(span, format!("cannot assign {val_ty} to {target_ty}"));
                 }
             }
-            AssignOp::PlusEq | AssignOp::MinusEq => {
-                // `+=` mirrors `+` (numeric, or str+str for `+=`); `-=` is numeric only.
-                // No implicit widening: `int <op> float` yields a float, which can't flow back
-                // into a concrete int slot — reject it (gap #9), mirroring strict `=` (`x = 1.5`).
+            // Numeric compound ops `+= -= *= /= %=` (and str+str for `+=`). No implicit widening:
+            // `int <op> float` yields a float, which can't flow back into a concrete int slot —
+            // reject it (gap #9), mirroring strict `=` (`x = 1.5`). `/=` inherits this rule, so
+            // `int /= float` is rejected (true division would widen the slot).
+            AssignOp::PlusEq
+            | AssignOp::MinusEq
+            | AssignOp::StarEq
+            | AssignOp::SlashEq
+            | AssignOp::PercentEq => {
                 let str_ok = op == AssignOp::PlusEq && *target_ty == Ty::Str && *val_ty == Ty::Str;
                 let widens = *target_ty == Ty::Int && *val_ty == Ty::Float;
                 let num_ok = target_ty.is_numeric() && val_ty.is_numeric() && !widens;
                 let known = !target_ty.is_unknown() && !val_ty.is_unknown();
                 if known && !str_ok && !num_ok {
-                    let sym = if op == AssignOp::PlusEq { "+=" } else { "-=" };
+                    let sym = match op {
+                        AssignOp::PlusEq => "+=",
+                        AssignOp::MinusEq => "-=",
+                        AssignOp::StarEq => "*=",
+                        AssignOp::SlashEq => "/=",
+                        _ => "%=",
+                    };
                     self.error(span, format!("cannot apply {sym} to {target_ty} and {val_ty}"));
+                }
+            }
+            // Bitwise/shift compound ops `&= |= ^= <<= >>=` — int-only (mirrors `infer_binary`'s
+            // bitwise arm).
+            AssignOp::AmpEq
+            | AssignOp::PipeEq
+            | AssignOp::CaretEq
+            | AssignOp::ShlEq
+            | AssignOp::ShrEq => {
+                let int_ok = *target_ty == Ty::Int && *val_ty == Ty::Int;
+                let known = !target_ty.is_unknown() && !val_ty.is_unknown();
+                if known && !int_ok {
+                    let sym = match op {
+                        AssignOp::AmpEq => "&=",
+                        AssignOp::PipeEq => "|=",
+                        AssignOp::CaretEq => "^=",
+                        AssignOp::ShlEq => "<<=",
+                        _ => ">>=",
+                    };
+                    self.error(
+                        span,
+                        format!("bitwise operator {sym} requires int operands, found {target_ty} and {val_ty}"),
+                    );
                 }
             }
         }
@@ -3024,6 +3081,34 @@ impl Checker {
                 }
             }
             Eq | NotEq => Ty::Bool, // equality is permissive (matches the interpreter)
+            // `x in xs` — membership, type-directed on the RHS container. List/Set test element
+            // membership, Map tests KEY membership (Python-style), Str tests substring. Always
+            // yields `bool`. No user-`Contains` overload (reject anything else). The element/key
+            // type must be compatible with the LHS.
+            In => {
+                match &r {
+                    Ty::List(elem) | Ty::Set(elem) => {
+                        if !either_unknown && !compatible(elem, &l) {
+                            self.error(lhs.span, format!("cannot test membership of {l} in {r}"));
+                        }
+                    }
+                    Ty::Map(key, _) => {
+                        if !either_unknown && !compatible(key, &l) {
+                            self.error(lhs.span, format!("cannot test membership of {l} in {r} (map `in` tests keys)"));
+                        }
+                    }
+                    Ty::Str => {
+                        if l != Ty::Str && !either_unknown {
+                            self.error(lhs.span, format!("substring `in` requires a str on the left, found {l}"));
+                        }
+                    }
+                    Ty::Unknown => {}
+                    other => {
+                        self.error(rhs.span, format!("cannot use `in` on {other} (expected a list, set, map, or str)"));
+                    }
+                }
+                Ty::Bool
+            }
         }
     }
 
@@ -5753,6 +5838,7 @@ fn op_sym(op: BinaryOp) -> &'static str {
         BitXor => "^",
         Shl => "<<",
         Shr => ">>",
+        In => "in",
         _ => "?",
     }
 }

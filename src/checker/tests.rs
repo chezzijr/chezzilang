@@ -57,6 +57,92 @@ fn rejects_desugared(src: &str, needle: &str) {
     );
 }
 
+// ===== compound assignment (*= /= %= &= |= ^= <<= >>=) =====
+
+#[test]
+fn compound_arith_assign_ok() {
+    ok("fn main():\n    x := 5\n    x *= 2\n    x /= 2\n    x %= 3\n    print(x)\nmain()\n");
+}
+
+#[test]
+fn compound_bitor_int_only() {
+    // `&= |= ^= <<= >>=` require int operands.
+    rejects(
+        "fn main():\n    x := 1.0\n    x |= 2\nmain()\n",
+        "requires int",
+    );
+    ok("fn main():\n    x := 5\n    x |= 2\n    x &= 3\n    x ^= 1\n    x <<= 1\n    x >>= 1\n    print(x)\nmain()\n");
+}
+
+#[test]
+fn compound_div_rejects_float_into_int_slot() {
+    // `/=` inherits the true-division rule: `int /= float` would widen to float — rejected for an int slot.
+    rejects(
+        "fn main():\n    x: int = 5\n    x /= 2.0\nmain()\n",
+        "cannot apply",
+    );
+}
+
+#[test]
+fn compound_mul_rejects_str() {
+    rejects(
+        "fn main():\n    s := \"a\"\n    s *= 2\nmain()\n",
+        "cannot apply",
+    );
+}
+
+// ===== tuple-swap / multi-target assignment =====
+
+#[test]
+fn tuple_swap_checks() {
+    ok("fn main():\n    a := 1\n    b := 2\n    a, b = b, a\n    print(a)\n    print(b)\nmain()\n");
+}
+
+#[test]
+fn tuple_swap_list_elements_check() {
+    ok("fn main():\n    data := [1, 2, 3]\n    data[0], data[2] = data[2], data[0]\n    print(data)\nmain()\n");
+}
+
+#[test]
+fn tuple_swap_type_mismatch_rejected() {
+    // swapping an int var with a str var is a type error.
+    rejects(
+        "fn main():\n    a := 1\n    b := \"x\"\n    a, b = b, a\nmain()\n",
+        "cannot assign",
+    );
+}
+
+// ===== `in` membership operator =====
+
+#[test]
+fn in_operator_types() {
+    ok("fn main():\n    print(1 in [1, 2, 3])\nmain()\n");
+    ok("fn main():\n    print('k' in {'k': 1})\nmain()\n");
+    ok("fn main():\n    print('b' in 'abc')\nmain()\n");
+    ok("fn main():\n    s := {1, 2, 3}\n    print(2 in s)\nmain()\n");
+}
+
+#[test]
+fn in_operator_result_is_bool() {
+    // Result of `in` must be usable where a Bool is expected.
+    ok("fn main():\n    if 1 in [1, 2]:\n        print(\"yes\")\nmain()\n");
+}
+
+#[test]
+fn in_substring_requires_str_lhs() {
+    rejects("fn main():\n    print(1 in \"abc\")\nmain()\n", "in");
+}
+
+#[test]
+fn in_list_elem_type_mismatch() {
+    rejects("fn main():\n    print(\"x\" in [1, 2, 3])\nmain()\n", "in");
+}
+
+#[test]
+fn in_rejects_non_container() {
+    rejects("fn main():\n    print(1 in 5)\nmain()\n", "in");
+}
+
 // ===== 1. unknown name =====
 
 #[test]

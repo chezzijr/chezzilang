@@ -329,19 +329,89 @@ impl Parser {
             });
         }
 
-        // destructuring let: `a, b, … := expr` — a bare-identifier list (≥2) before `:=`. Only the
-        // walrus form introduces destructuring; `a, b = …` reassignment is intentionally out of scope.
-        if matches!(self.peek(), Token::Ident(_)) && self.peek_at(1) == &Token::Comma {
-            let mut names = vec![self.expect_ident()?];
+        let expr = self.parse_expr()?;
+
+        // A comma after the first lvalue introduces a *multi-target* form (a bare-ident list).
+        // Two shapes share this seam:
+        //   - destructuring let `a, b := expr` (all bare idents, `:=`)
+        //   - tuple assignment `a, b = b, a` / `data[0], data[1] = …` (lvalues, `=`; op==Eq only)
+        // `for k, v in m:` never reaches here (parse_for handles it); a parenthesized `(a, b)` is a
+        // single expr (no top-level comma).
+        if self.peek() == &Token::Comma {
+            let mut targets = vec![expr];
             while self.eat(&Token::Comma) {
-                names.push(self.expect_ident()?);
+                targets.push(self.parse_expr()?);
             }
-            self.expect(&Token::Walrus)?;
-            let value = self.parse_expr()?;
-            return Ok(StmtKind::Let { names, ty: None, value });
+            // `a, b := pair()` — destructuring let. Requires every target to be a bare identifier.
+            if self.peek() == &Token::Walrus {
+                self.advance();
+                let value = self.parse_expr()?;
+                let mut names = Vec::with_capacity(targets.len());
+                for t in targets {
+                    match t.kind {
+                        ExprKind::Ident(n) => names.push(n),
+                        _ => {
+                            return Err(ParseError {
+                                message: "expected an identifier on the left of ':=' (destructuring binds names)".to_string(),
+                                span: t.span,
+                            })
+                        }
+                    }
+                }
+                return Ok(StmtKind::Let { names, ty: None, value });
+            }
+            // `a, b = b, a` — tuple assignment. Only `=` is allowed (compound `+=`, … with multiple
+            // targets is rejected); the RHS must be a value list of equal arity.
+            if self.peek() != &Token::Assign {
+                let msg = if is_compound_assign(self.peek()) {
+                    "compound assignment is not allowed with multiple targets; assign each separately"
+                } else {
+                    "expected '=' after a multi-target assignment list"
+                };
+                return Err(ParseError { message: msg.to_string(), span: self.cur_span() });
+            }
+            let target_span = targets[0].span;
+            // Every target must be an assignable place.
+            for t in &targets {
+                if !matches!(t.kind, ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { .. }) {
+                    return Err(ParseError {
+                        message: "invalid assignment target".to_string(),
+                        span: t.span,
+                    });
+                }
+            }
+            self.advance(); // '='
+            let mut values = vec![self.parse_expr()?];
+            while self.eat(&Token::Comma) {
+                values.push(self.parse_expr()?);
+            }
+            let value_span = values[0].span;
+            // A single RHS expression with multiple targets (`a, b = f()`) destructures a
+            // tuple-valued expression at runtime — the value is passed through as-is (the checker
+            // enforces it's a tuple of matching arity). A comma-list RHS must have equal arity and
+            // is wrapped as a tuple literal.
+            let value = if values.len() == 1 && targets.len() > 1 {
+                values.into_iter().next().unwrap()
+            } else {
+                if values.len() != targets.len() {
+                    return Err(ParseError {
+                        message: format!(
+                            "assignment has {} target(s) but {} value(s)",
+                            targets.len(),
+                            values.len()
+                        ),
+                        span: target_span,
+                    });
+                }
+                Expr { kind: ExprKind::Tuple(values), span: value_span }
+            };
+            return Ok(StmtKind::Assign {
+                target: Expr { kind: ExprKind::Tuple(targets), span: target_span },
+                op: AssignOp::Eq,
+                value,
+            });
         }
 
-        let expr = self.parse_expr()?;
         let op = match self.peek() {
             Token::Walrus => {
                 self.advance();
@@ -364,6 +434,14 @@ impl Parser {
             Token::Assign => AssignOp::Eq,
             Token::PlusEq => AssignOp::PlusEq,
             Token::MinusEq => AssignOp::MinusEq,
+            Token::StarEq => AssignOp::StarEq,
+            Token::SlashEq => AssignOp::SlashEq,
+            Token::PercentEq => AssignOp::PercentEq,
+            Token::AmpEq => AssignOp::AmpEq,
+            Token::PipeEq => AssignOp::PipeEq,
+            Token::CaretEq => AssignOp::CaretEq,
+            Token::ShlEq => AssignOp::ShlEq,
+            Token::ShrEq => AssignOp::ShrEq,
             _ => return Ok(StmtKind::Expr(expr)),
         };
         // only an assignable place — a name, field, or index — can be on the left of `= += -=`
@@ -1860,6 +1938,24 @@ enum InfixOp {
 
 /// Map a token to its infix operator and (left, right) binding powers, per `docs/syntax.md` §4.
 /// All operators are left-associative (`right = left + 1`). `None` means "not an infix operator".
+/// True for the compound-assignment tokens (`+= -= *= /= %= &= |= ^= <<= >>=`). Used to give a
+/// clear error when one appears with a multi-target list (`a, b += 1`).
+fn is_compound_assign(tok: &Token) -> bool {
+    matches!(
+        tok,
+        Token::PlusEq
+            | Token::MinusEq
+            | Token::StarEq
+            | Token::SlashEq
+            | Token::PercentEq
+            | Token::AmpEq
+            | Token::PipeEq
+            | Token::CaretEq
+            | Token::ShlEq
+            | Token::ShrEq
+    )
+}
+
 fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
     use BinaryOp::*;
     use InfixOp::*;
@@ -1877,6 +1973,9 @@ fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
         Token::And => (Bin(And), 5),
         Token::EqEq => (Bin(Eq), 7),
         Token::NotEq => (Bin(NotEq), 7),
+        // `in` membership — comparison-level precedence (same as `==`). `for x in xs:` never
+        // reaches here: `parse_for`/`parse_comp_clause` consume `in` explicitly via `expect`.
+        Token::In => (Bin(In), 7),
         Token::Lt => (Bin(Lt), 9),
         Token::LtEq => (Bin(LtEq), 9),
         Token::Gt => (Bin(Gt), 9),
@@ -1916,6 +2015,106 @@ mod tests {
         let mut m = parse_ok(src);
         assert_eq!(m.stmts.len(), 1, "expected exactly one statement");
         m.stmts.remove(0).kind
+    }
+
+    #[test]
+    fn tuple_swap_parses() {
+        match only("a, b = b, a\n") {
+            StmtKind::Assign { target, op, value } => {
+                assert_eq!(op, AssignOp::Eq);
+                match (&target.kind, &value.kind) {
+                    (ExprKind::Tuple(ts), ExprKind::Tuple(vs)) => {
+                        assert_eq!(ts.len(), 2);
+                        assert_eq!(vs.len(), 2);
+                    }
+                    other => panic!("expected Tuple targets/values, got {other:?}"),
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn tuple_index_swap_parses() {
+        // index/field targets on the left — must NOT become a bare Expr statement.
+        match only("data[0], data[1] = data[1], data[0]\n") {
+            StmtKind::Assign { target, op, .. } => {
+                assert_eq!(op, AssignOp::Eq);
+                assert!(matches!(target.kind, ExprKind::Tuple(_)));
+            }
+            other => panic!("expected tuple-target Assign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tuple_compound_rejected() {
+        // compound op with multiple targets is a clean parse error.
+        let e = parse_err("a, b += 1\n");
+        assert!(
+            e.message.contains("compound assignment") || e.message.contains("multiple targets"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn tuple_arity_mismatch_rejected() {
+        let e = parse_err("a, b = 1, 2, 3\n");
+        assert!(e.message.contains("target") || e.message.contains("value"), "got: {}", e.message);
+    }
+
+    #[test]
+    fn destructuring_let_still_walrus() {
+        // `a, b := pair()` stays a destructuring Let (not tuple-assign).
+        match only("a, b := pair()\n") {
+            StmtKind::Let { names, .. } => assert_eq!(names.len(), 2),
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn in_expr_parses_as_binary() {
+        match only("x := 1 in xs\n") {
+            StmtKind::Let { value, .. } => match value.kind {
+                ExprKind::Binary { op: BinaryOp::In, .. } => {}
+                other => panic!("expected Binary(In), got {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_in_still_parses() {
+        // `in` as an operator must NOT break `for x in xs:` or `for x in 0..3:`.
+        match only("for x in xs:\n    print(x)\n") {
+            StmtKind::For { .. } => {}
+            other => panic!("expected For, got {other:?}"),
+        }
+        match only("for x in 0..3:\n    print(x)\n") {
+            StmtKind::For { .. } => {}
+            other => panic!("expected For, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compound_assign_parses() {
+        // `*= /= %= &= |= ^= <<= >>=` each lower to a distinct AssignOp.
+        let cases = [
+            ("x *= 2\n", AssignOp::StarEq),
+            ("x /= 2\n", AssignOp::SlashEq),
+            ("x %= 2\n", AssignOp::PercentEq),
+            ("x &= 2\n", AssignOp::AmpEq),
+            ("x |= 2\n", AssignOp::PipeEq),
+            ("x ^= 2\n", AssignOp::CaretEq),
+            ("x <<= 2\n", AssignOp::ShlEq),
+            ("x >>= 2\n", AssignOp::ShrEq),
+        ];
+        for (src, want) in cases {
+            match only(src) {
+                StmtKind::Assign { op, .. } => assert_eq!(op, want, "for {src:?}"),
+                other => panic!("{src:?} -> {other:?}"),
+            }
+        }
     }
 
     #[test]

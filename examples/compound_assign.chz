@@ -1,0 +1,43 @@
+# examples/compound_assign.chz — compound assignment operators. Each `x OP= v` is exactly
+# `x = x OP v`. Arithmetic forms (`*= /= %=`) are numeric; bitwise/shift forms (`&= |= ^= <<= >>=`)
+# are int-only. They work on variables, list elements, struct fields, and map values.
+
+struct Counter:
+    n: int
+
+fn main():
+    # Variable targets — arithmetic.
+    x := 100
+    x *= 3          # 300
+    x /= 2          # 150
+    x %= 40         # 30
+    print(x)
+
+    # Variable targets — bitwise / shift (int-only).
+    b := 12
+    b &= 10         # 8
+    b |= 1          # 9
+    b ^= 5          # 12
+    b <<= 2         # 48
+    b >>= 1         # 24
+    print(b)
+
+    # List elements.
+    xs := [2, 4, 8]
+    xs[0] *= 5      # 10
+    xs[2] <<= 1     # 16
+    print(xs)
+
+    # Struct fields.
+    c := Counter(7)
+    c.n *= 6        # 42
+    c.n %= 5        # 2
+    print(c.n)
+
+    # Map values (compound on an existing key).
+    m := {"hits": 10}
+    m["hits"] |= 4  # 14
+    m["hits"] *= 2  # 28
+    print(m["hits"])
+
+main()

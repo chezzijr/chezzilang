@@ -30,6 +30,8 @@ For the *why* behind each choice see [`spec.md`](spec.md); for token names see [
 true  false   # bool
 "hello"       # str
 'hello'       # str — single quotes are equivalent to double (same escapes & interpolation)
+"""say "hi""""  # str — triple-quoted; unescaped quotes allowed inside (same escapes & interpolation)
+'''it's "ok"'''  # str — triple single-quote, equivalent
 "hi {name}"   # str with interpolation — see §10
 "emoji \u{1F600}, A=\u{41}"   # str — \u{HEX} unicode escape (1-6 hex digits)
 [1, 2, 3]     # list[int]
@@ -65,11 +67,38 @@ while **`(x,)` is a one-element tuple**.
 x := 5                 # declare + infer  (type = int)
 name: str = "thuan"    # declare with explicit type
 count := 0
-count += 1             # reassignment (+= -= also)
+count += 1             # compound assignment — see below
+a, b = b, a            # tuple swap — multi-target assignment, see below
 ```
 
 - **Local inference:** inside function bodies you rarely write types — `:=` infers.
 - **Explicit annotation** (`name: T = ...`) is allowed anywhere and **required on function signatures** (§5).
+
+**Compound assignment.** `x OP= v` is exactly `x = x OP v`, on variables, list elements, struct
+fields, and map values. The full set is `+= -= *= /= %=` (numeric; `+=` also concatenates `str`)
+and `&= |= ^= <<= >>=` (int-only, mirroring the bitwise operators). No implicit widening — `int /=
+float` is a type error (the result would be a float, which can't flow back into an `int` slot).
+(`//=` and `**=` are not provided — there is no `//`/`**` base operator yet.)
+
+```chezzi
+x *= 3        # x = x * 3
+xs[0] <<= 1   # xs[0] = xs[0] << 1
+p.n |= 4      # p.n = p.n | 4
+```
+
+**Multi-target (tuple) assignment.** `a, b = b, a` assigns several targets at once. The **whole**
+right-hand side is evaluated **first** (Python semantics), then stored into each target left-to-
+right — so a swap is correct even when the same place appears on both sides. Targets may be
+variables, list elements, or struct fields; the RHS is a same-arity value list or a single tuple-
+valued expression (`a, b = f()` where `f` returns a 2-tuple). Only plain `=` is allowed (a compound
+op with multiple targets is a parse error).
+
+```chezzi
+a, b = b, a                              # swap two variables
+data[0], data[1] = data[1], data[0]      # swap two list elements
+p, q, r = r, p, q                        # three-way rotation (RHS evaluated first)
+a, b = compute()                         # compute() returns (int, int)
+```
 
 ### Built-in types
 
@@ -108,7 +137,7 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 | 9 | `^` | bitwise xor (int-only) |
 | 10 | `\|` | bitwise or (int-only) |
 | 11 | `<` `<=` `>` `>=` | |
-| 12 | `==` `!=` | |
+| 12 | `==` `!=` `in` | `in` = membership, yields `bool` (see below) |
 | 13 | `and` | |
 | 14 | `or` | |
 | 15 | `\|>` | pipe (§11), left-assoc |
@@ -116,6 +145,17 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 > This table is the contract for the Pratt parser. Bitwise ops are **int-only** (a float operand is
 > a type error); the relative order follows Python (comparison looser than `\|` < `^` < `&` < shifts).
 > A shift amount outside `0..64` is a runtime error.
+
+**Membership `in`.** `x in xs` is a `bool`: element-of for a `list`/`set`, **key**-of for a `map`
+(Python-style — `k in m` tests keys, not values), and substring-of for a `str`. The container type
+directs the check; the element/key/`str` types must match the left operand.
+
+```chezzi
+3 in [1, 2, 3]      # true   — list element
+20 in {10, 20}      # true   — set element
+"a" in {"a": 1}     # true   — map KEY
+"ell" in "hello"    # true   — substring
+```
 
 ## 5. Functions  (M3)
 
@@ -846,6 +886,16 @@ print("brace: {{not interpolated}}")   # '{{' / '}}' = literal braces
 same `str` type, same escapes, same interpolation. Inside a double-quoted string `'` is a literal
 char (and `\"` escapes the quote); inside a single-quoted string `"` is a literal char (and `\'`
 escapes the quote). `\'` and `\"` are both accepted in either style.
+
+**Triple-quoted strings.** `"""…"""` and `'''…'''` produce an ordinary `str` with the **same**
+escapes and interpolation as a regular string — the one difference is that a single (or double)
+unescaped quote inside is a literal char, so you can embed quotes without backslashes. (Regular
+strings already span literal newlines, so triple quotes are about quotes, not multi-line per se.)
+
+```chezzi
+print("""She said "hello" to {name}""")   # unescaped quotes + interpolation
+print('''it's a "quoted" word''')          # apostrophes and double-quotes, literal
+```
 
 **Escapes.** Backslash escapes resolve at lex time: `\n` `\t` `\r` `\\` `\"` `\'` `\0` and
 `\u{HEX}` (1-6 hex digits naming a Unicode scalar value, e.g. `\u{41}` → `A`, `\u{1F600}` → 😀).
