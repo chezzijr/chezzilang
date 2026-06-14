@@ -10,7 +10,7 @@ in `PROGRESS.md` + the cited `examples/*.chz`.
 
 Legend: 🔴 blocks real apps · 🟡 notable friction · 🟢 works (recorded so we don't re-flag it).
 
-Last updated: 2026-06-11. Baseline: post-M18 (`defer` → block-scoped) + concurrency D6 complete; gaps pass II in progress.
+Last updated: 2026-06-15. Baseline: post-M18 (`defer` → block-scoped) + concurrency D6 complete; gaps pass II in progress.
 
 > **Forward-looking brainstorm** (a non-Go concurrency model, VM/GC optimizations, far-out ideas)
 > lives in **[`docs/future.md`](docs/future.md)** — speculative, NOT scheduled. Concrete near-term
@@ -258,6 +258,39 @@ thread-demotion landed (attempt)** for the native islands — see the residuals 
     needs the same `Shared` box.* Future: a lint/warning when the tooling track lands.
   - **(cost, by design)** one raw OS thread per fiber *actually* blocked in a callback (Go's `handoffp`
     cost), faulted cleanly if the OS refuses the thread.
+
+- **🟡 No first-class task cancellation / timeout API** — cancellation *plumbing* exists (a per-scope
+  `cancel: Arc<AtomicBool>` polled at safepoints: the `run_until` back-edge `src/vm/mod.rs:2862` + a
+  blocking `recv`'s re-check loop `:6585`/`:6708`/`:8769`) but it is tripped by **only two things** —
+  a **sibling fault** (`:6391`) or **`std.os.exit`** (`:10642`, halts the whole process). There is no
+  `task.cancel()` handle, no pollable cancellation token (Go's `context.Context` / `ctx.Done()`), and
+  no `with_timeout:` scope. **Blocks:** any "cancel a specific task" or "bound a task's latency"
+  use-case — e.g. a test-runner per-test timeout. **The naive timeout is wrong** because structured
+  concurrency joins at scope exit (a task can't outlive its nursery), so the obvious `wait:`/`timer`
+  pattern returns `Err("timeout")` *logically* but still **blocks for the full work** — measured 2.50s
+  for a 0.5s timeout over 2s work, identical on coop/interp/`--parallel`. A *true* cancel-and-continue
+  timeout IS expressible today only as a workaround — race a `timer`, deliberately fault to trip the
+  scope cancel, wrap in `recover:` (verified ~0.3s, work aborted, `Shared` stays 0 on `--parallel`) —
+  but it is a hack riding fault-propagation, not an API, and the cancel unwind bypasses `recover:`
+  inside the cancelled task (`:2856-2858`). **Fix sketch:** a first-class cancel token + `with_timeout:`
+  (or `spawn`-returns-a-handle with `.cancel()`), lowering to a scope-cancel trip that does NOT require
+  a synthetic fault; needs a serial-oracle analogue for two-engine parity. Cross-ref gap below — on the
+  default engine it only works for non-CPU-bound tasks anyway.
+
+- **🟡 The cooperative (default) + `--interp` engines cannot preempt CPU-bound tasks** — cooperative
+  engines switch fibers only at yield points (channel ops, blocking `recv`, the back-edge *when it
+  returns to the scheduler*). A pure-CPU loop with no channel op never yields → it **monopolizes the
+  single thread**, so sibling tasks (a canceller/timeout) never run and the cancel flag is never polled
+  mid-loop. **Consequence:** the *same source* diverges by engine — the cancel-and-continue workaround
+  above, with a 2e9-iteration CPU worker: `--parallel` aborts it mid-flight (`s == 0`, ~0.5s);
+  cooperative + `--interp` run it to completion (`s == 2000000000`, **~69s**). IO/channel-bound tasks
+  *can* be cancelled cooperatively (they hit yield points); pure-CPU tasks cannot. This is why
+  cancellation examples carry **no golden `.expected`** — their output diverges by engine, so they'd
+  fail two-engine parity by construction (`examples/parallel_cancel.chz` has none). **Implication:** any
+  per-task timeout would only catch a runaway task under `--parallel`, never a CPU-spinning one on the
+  default engine. **Fix sketch:** reduction-counting preemption already exists on the M:N engine (D3,
+  `:2871`); the cooperative engine would need a back-edge yield budget for CPU loops to be interruptible
+  — a behavior change weighed against the frozen cooperative oracle's determinism.
 
 ### 🟡 Stdlib breadth (low priority — language is feature-complete; this is library fill)
 
