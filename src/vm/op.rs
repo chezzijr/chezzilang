@@ -110,6 +110,9 @@ pub enum Op {
     BitXor,
     Shl,
     Shr,
+    /// `x in xs` — membership test. Pops `[x, container]`, pushes a `Bool`. Dispatches on the
+    /// container: list/set element, map KEY, str substring.
+    Contains,
     /// Require the top of stack to be a bool (operand of `and`/`or`/`not`, `if`/`while` condition).
     AsBool,
     /// Require the top of stack to be an int (range bounds, list index).

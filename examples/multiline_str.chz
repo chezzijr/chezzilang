@@ -1,0 +1,23 @@
+# examples/multiline_str.chz — triple-quoted strings `"""..."""` and '''...'''. They carry the
+# SAME escapes and interpolation as regular strings; their one added power is letting unescaped
+# quote characters appear inside without backslashes. (Regular strings already span literal
+# newlines, so triple quotes are about quotes, not multi-line per se.)
+
+name := "Chezzi"
+
+# Unescaped quotes inside a triple-quoted string.
+greeting := """She said "hello" to the """
+print(greeting)
+
+# Single-quote triples carry double quotes (and apostrophes) literally.
+note := '''it's a "quoted" word'''
+print(note)
+
+# Interpolation works exactly like a regular string.
+banner := """Welcome to {name}!"""
+print(banner)
+
+# `\n` is a real newline; a literal newline is preserved verbatim.
+block := """line one\nline two
+line three"""
+print(block)

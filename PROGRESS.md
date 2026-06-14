@@ -738,6 +738,38 @@ then `parser::parse`; interp untouched). TDD'd, conformance + clippy clean; suit
   `<primary>`/`<params>`/`<argList>` productions in `docs/grammar.bnf` (conformance green). Golden:
   `examples/multiline_literals.chz` (VM == interp == `--parallel`).
 
+## QoL syntax batch (post-M18, 2026-06-14)
+
+Four ergonomics features, each a vertical TDD slice through lexer→parser→checker→compiler/vm + interp,
+VM == interp == `--parallel` on every registered example. Conformance + clippy clean; suite at **1902 green**.
+
+- **`in` membership operator** — `x in xs` → `bool`: list/set element, map **KEY** (Python-style),
+  str substring. `BinaryOp::In` at comparison precedence (level 7 == `==`); `for x in xs:` is
+  unaffected (the parser consumes `in` explicitly there). New `Op::Contains` + `op_contains` helper
+  (reuses `values_equal`/`hash_key_rooted`/`candidates` — the same machinery as `.has`/`.contains`);
+  interp `eval_binary` scans linearly with `values_equal_guarded`. No user `Contains` overload.
+  Example: `examples/membership.chz`.
+- **Compound assignment** — `*= /= %= &= |= ^= <<= >>=` (joining `+= -=`), all desugaring to the
+  existing binary ops via `AssignOp::to_binop()` (shared by compiler + interp). Arithmetic forms
+  numeric (no int-slot widening — `int /= float` rejected); bitwise forms int-only. Works on var /
+  index / field / map-value targets. (`//=`/`**=` excluded — no `//`/`**` base op yet.) Example:
+  `examples/compound_assign.chz`.
+- **Triple-quoted strings** — `"""…"""` / `'''…'''`, lexer-only. Same escapes + interpolation as a
+  regular string; the only added power is unescaped quotes inside. Produces a normal `Token::Str`, so
+  everything downstream is unchanged (parity by construction). Example: `examples/multiline_str.chz`.
+- **Multi-target / tuple-swap assignment** — `a, b = b, a` (also `data[0], data[1] = …`, struct
+  fields, and `a, b = f()` for a tuple-returning `f`). Parser collects a comma lvalue list before
+  `=` (op `=` only — compound with multiple targets is a clean parse error); the full RHS is
+  evaluated into a hidden temp FIRST (Python semantics — correct even when an index appears on both
+  sides), mirroring the destructuring-`let` lowering. Example: `examples/tuple_swap.chz`.
+
+> One sharp edge found + fixed: adding the `Op::Contains` arm to the VM's `step` grew its frame just
+> enough to trip `self_referential_stringable_hits_depth_limit` (infinite `str(self)` recursion must
+> hit the 10_000 call-depth limit before exhausting the host stack). Dispatching with `return
+> self.op_contains(span)` instead of `… ?` keeps `step`'s frame from materializing the extra
+> `RuntimeError` temporary. Grammar (`<eqExpr>` + IN; `<assignStmt>` + 8 compound ops + tuple alt) and
+> conformance corpus updated; `cargo test conformance` green.
+
 ## Roadmap (later)
 
 - VM/GC optimizations beyond M19 — NaN-boxing (own milestone), register VM, generational/incremental GC,

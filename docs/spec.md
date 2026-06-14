@@ -51,7 +51,8 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
   `check`). A bare interpolated ternary works; parenthesize to give it a spec (`{(if b: 1 else: 2):>5}`).
   The spec parser+formatter is shared by both engines (`src/fmtspec.rs`) → byte-identical output for
   well-formed programs. Full grammar in [`syntax.md` §10](syntax.md).
-- **Literal forms** — int (`42`, `0xFF`/`0b1010`/`0o17`, `_` separators), float (`3.14`, scientific `6.022e23`/`1e3`/`1.5e-9` — any exponent ⇒ float), str in either `"…"` or `'…'` (interchangeable: same escapes & interpolation) with escapes `\n \t \r \\ \" \' \0` and `\u{HEX}` unicode (1-6 hex digits). See `docs/syntax.md §2/§10`.
+- **Literal forms** — int (`42`, `0xFF`/`0b1010`/`0o17`, `_` separators), float (`3.14`, scientific `6.022e23`/`1e3`/`1.5e-9` — any exponent ⇒ float), str in either `"…"` or `'…'` (interchangeable: same escapes & interpolation), also **triple-quoted** `"""…"""` / `'''…'''` (same escapes/interpolation, but unescaped quotes allowed inside) with escapes `\n \t \r \\ \" \' \0` and `\u{HEX}` unicode (1-6 hex digits). See `docs/syntax.md §2/§10`.
+- **Membership & assignment ops** — `x in xs` membership (`bool`; list/set element, map **key**, str substring); compound assignment `+= -= *= /= %= &= |= ^= <<= >>=` (= `x = x OP v`; bitwise forms int-only); and multi-target / tuple-swap assignment `a, b = b, a` (RHS evaluated first). See `docs/syntax.md §3/§4`.
 - **Struct methods** — `fn dist(self)` on structs. Composition + structural `protocol`s, no classes or inheritance (Rust/Go style).
 - **Pipe `|>`** — functional chaining. Implemented in M6 (parse-time desugar to a call).
 - **Tuples** — `(1, "a")`, fixed-arity, immutable; nestable in patterns.

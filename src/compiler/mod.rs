@@ -744,27 +744,27 @@ impl Compiler {
 
     fn compile_assign(&mut self, fc: &mut FnComp, target: &Expr, op: AssignOp, value: &Expr, span: Span) -> Result<(), CompileError> {
         match &target.kind {
-            ExprKind::Ident(name) => match op {
-                AssignOp::Eq => {
+            ExprKind::Ident(name) => match op.to_binop() {
+                None => {
                     self.compile_expr(fc, value)?;
                     self.emit_store(fc, name, span);
                 }
-                AssignOp::PlusEq | AssignOp::MinusEq => {
+                Some(bin) => {
                     self.emit_load(fc, name, span);
                     self.compile_expr(fc, value)?;
-                    fc.emit(if op == AssignOp::PlusEq { Op::Add } else { Op::Sub }, span);
+                    fc.emit(binary_op(bin), span);
                     self.emit_store(fc, name, span);
                 }
             },
             // `obj.f = v` → [obj, v] SetField; compound dups `obj` to read-modify-write.
             ExprKind::Field { obj, name } => {
                 self.compile_expr(fc, obj)?;
-                if op != AssignOp::Eq {
+                if let Some(bin) = op.to_binop() {
                     let ic = self.next_field_ic(name);
                     fc.emit(Op::Dup, span);
                     fc.emit(Op::GetField { name: name.clone(), ic }, target.span);
                     self.compile_expr(fc, value)?;
-                    fc.emit(if op == AssignOp::PlusEq { Op::Add } else { Op::Sub }, span);
+                    fc.emit(binary_op(bin), span);
                 } else {
                     self.compile_expr(fc, value)?;
                 }
@@ -777,14 +777,65 @@ impl Compiler {
                 self.compile_expr(fc, index)?;
                 // No `AsInt`: the index may be a map key (str/bool). `GetIndex`/`SetIndex`
                 // validate int-ness in their list/str arms at runtime.
-                if op != AssignOp::Eq {
+                if let Some(bin) = op.to_binop() {
                     fc.emit(Op::Dup2, span);
                     fc.emit(Op::GetIndex, target.span);
                     self.compile_expr(fc, value)?;
-                    fc.emit(if op == AssignOp::PlusEq { Op::Add } else { Op::Sub }, span);
+                    fc.emit(binary_op(bin), span);
                 } else {
                     self.compile_expr(fc, value)?;
                 }
+                fc.emit(Op::SetIndex, span);
+            }
+            // `a, b = b, a` — multi-target tuple assignment (op is always `Eq`; the parser enforces
+            // it). Evaluate the FULL RHS tuple into a hidden local FIRST (Python semantics — so a
+            // swap whose index appears on both sides is correct), then store each element into its
+            // target left-to-right. Mirrors the destructuring-let lowering.
+            ExprKind::Tuple(targets) => {
+                // `value` is either a tuple literal (`b, a`) or any tuple-valued expression
+                // (`f()` returning a tuple). Either way `compile_expr` leaves the full tuple on the
+                // stack; the checker has verified arity.
+                self.compile_expr(fc, value)?; // builds the full RHS tuple on the stack
+                let tuple_slot = fc.add_hidden();
+                fc.emit(Op::SetLocal(tuple_slot), span);
+                for (i, t) in targets.iter().enumerate() {
+                    self.compile_assign_element(fc, t, tuple_slot, i, span)?;
+                }
+            }
+            _ => return Err(CompileError { message: "invalid assignment target".to_string(), span }),
+        }
+        Ok(())
+    }
+
+    /// Lower one element of a multi-target tuple assignment: load the stashed RHS tuple's element
+    /// `i` (`GetLocal(slot)` + `GetField(i)`) onto the stack, then store it into `target` with plain
+    /// `=` semantics across the ident / field / index target shapes.
+    fn compile_assign_element(
+        &mut self,
+        fc: &mut FnComp,
+        target: &Expr,
+        tuple_slot: usize,
+        i: usize,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        match &target.kind {
+            ExprKind::Ident(name) => {
+                fc.emit(Op::GetLocal(tuple_slot), span);
+                fc.emit(Op::GetField { name: i.to_string(), ic: NO_IC }, span);
+                self.emit_store(fc, name, span);
+            }
+            ExprKind::Field { obj, name } => {
+                self.compile_expr(fc, obj)?;
+                fc.emit(Op::GetLocal(tuple_slot), span);
+                fc.emit(Op::GetField { name: i.to_string(), ic: NO_IC }, span);
+                let ic = self.next_field_ic(name);
+                fc.emit(Op::SetField { name: name.clone(), ic }, span);
+            }
+            ExprKind::Index { obj, index } => {
+                self.compile_expr(fc, obj)?;
+                self.compile_expr(fc, index)?;
+                fc.emit(Op::GetLocal(tuple_slot), span);
+                fc.emit(Op::GetField { name: i.to_string(), ic: NO_IC }, span);
                 fc.emit(Op::SetIndex, span);
             }
             _ => return Err(CompileError { message: "invalid assignment target".to_string(), span }),
@@ -2038,6 +2089,7 @@ fn binary_op(op: BinaryOp) -> Op {
         BinaryOp::BitXor => Op::BitXor,
         BinaryOp::Shl => Op::Shl,
         BinaryOp::Shr => Op::Shr,
+        BinaryOp::In => Op::Contains,
         BinaryOp::And | BinaryOp::Or => unreachable!("and/or handled by short-circuit path"),
     }
 }

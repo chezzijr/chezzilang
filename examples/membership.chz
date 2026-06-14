@@ -1,0 +1,31 @@
+# examples/membership.chz — the `in` membership operator. `x in xs` is a Bool: element-of for
+# lists and sets, KEY-of for maps (Python-style), substring-of for strings. Precedence is at the
+# comparison level, so `1 in xs == true` parses as `(1 in xs) == true`.
+
+# Lists: element membership.
+xs := [1, 2, 3, 4, 5]
+print(3 in xs)            # true
+print(9 in xs)            # false
+
+# Sets: element membership.
+s := {10, 20, 30}
+print(20 in s)            # true
+print(25 in s)            # false
+
+# Maps: KEY membership (not values).
+m := {"a": 1, "b": 2, "c": 3}
+print("b" in m)          # true
+print("z" in m)          # false — `in` tests keys, not values
+
+# Strings: substring.
+print("ell" in "hello")  # true
+print("xyz" in "hello")  # false
+print("" in "hello")     # true — the empty string is a substring of everything
+
+# Usable directly as a condition.
+if 4 in xs:
+    print("found 4")
+
+# Combines with boolean operators.
+print(1 in xs and 9 in xs)   # false
+print(1 in xs or 9 in xs)    # true

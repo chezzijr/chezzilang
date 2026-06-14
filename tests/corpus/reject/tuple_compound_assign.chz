@@ -1,0 +1,3 @@
+# rule: assignStmt
+# expect: compound assignment
+a, b += 1

@@ -3568,14 +3568,13 @@ impl Interp {
         match &target.kind {
             ExprKind::Ident(name) => {
                 let rhs = self.eval(value)?;
-                let new_val = match op {
-                    AssignOp::Eq => rhs,
-                    AssignOp::PlusEq | AssignOp::MinusEq => {
+                let new_val = match op.to_binop() {
+                    None => rhs,
+                    Some(bin) => {
                         let cur = self.env.get(name).ok_or_else(|| RuntimeError {
                             message: format!("undefined name '{name}'"),
                             span,
                         })?;
-                        let bin = if op == AssignOp::PlusEq { BinaryOp::Add } else { BinaryOp::Sub };
                         eval_binary(bin, cur, rhs, span)?
                     }
                 };
@@ -3596,9 +3595,9 @@ impl Interp {
                     let key = self.eval(index)?;
                     // Hash before borrowing (a struct key's hash() may re-read this map).
                     let hk = self.hash_value(&key, span)?;
-                    let new_val = match op {
-                        AssignOp::Eq => self.eval(value)?,
-                        AssignOp::PlusEq | AssignOp::MinusEq => {
+                    let new_val = match op.to_binop() {
+                        None => self.eval(value)?,
+                        Some(bin) => {
                             // Compound on a missing key is an error (consistent with read-missing).
                             let cur = {
                                 let m = entries.borrow();
@@ -3615,7 +3614,6 @@ impl Interp {
                                 });
                             };
                             let rhs = self.eval(value)?;
-                            let bin = if op == AssignOp::PlusEq { BinaryOp::Add } else { BinaryOp::Sub };
                             eval_binary(bin, cur, rhs, span)?
                         }
                     };
@@ -3633,9 +3631,9 @@ impl Interp {
                 // `+=`/`-=` reads the current element via `index` first.
                 if let Value::Struct { .. } = &target_val {
                     let key = self.eval(index)?;
-                    let new_val = match op {
-                        AssignOp::Eq => self.eval(value)?,
-                        AssignOp::PlusEq | AssignOp::MinusEq => {
+                    let new_val = match op.to_binop() {
+                        None => self.eval(value)?,
+                        Some(bin) => {
                             let cur = self.call_struct_method(
                                 target_val.clone(),
                                 "index",
@@ -3643,8 +3641,6 @@ impl Interp {
                                 span,
                             )?;
                             let rhs = self.eval(value)?;
-                            let bin =
-                                if op == AssignOp::PlusEq { BinaryOp::Add } else { BinaryOp::Sub };
                             eval_binary(bin, cur, rhs, span)?
                         }
                     };
@@ -3676,13 +3672,12 @@ impl Interp {
                         span,
                     })
                 };
-                let new_val = match op {
-                    AssignOp::Eq => self.eval(value)?,
-                    AssignOp::PlusEq | AssignOp::MinusEq => {
+                let new_val = match op.to_binop() {
+                    None => self.eval(value)?,
+                    Some(bin) => {
                         let i = bounds_check(idx, items.borrow().len())?;
                         let cur = items.borrow()[i].clone();
                         let rhs = self.eval(value)?;
-                        let bin = if op == AssignOp::PlusEq { BinaryOp::Add } else { BinaryOp::Sub };
                         eval_binary(bin, cur, rhs, span)?
                     }
                 };
@@ -3707,12 +3702,122 @@ impl Interp {
                         span,
                     });
                 };
-                let new_val = match op {
-                    AssignOp::Eq => rhs,
-                    AssignOp::PlusEq => eval_binary(BinaryOp::Add, fields.borrow()[pos].1.clone(), rhs, span)?,
-                    AssignOp::MinusEq => eval_binary(BinaryOp::Sub, fields.borrow()[pos].1.clone(), rhs, span)?,
+                let new_val = match op.to_binop() {
+                    None => rhs,
+                    Some(bin) => eval_binary(bin, fields.borrow()[pos].1.clone(), rhs, span)?,
                 };
                 fields.borrow_mut()[pos].1 = new_val;
+                Ok(())
+            }
+            // `a, b = b, a` — multi-target tuple assignment (op is always `Eq`; the parser
+            // enforces it). Evaluate the FULL RHS tuple FIRST into a temp `Vec` (Python semantics —
+            // so a swap whose index appears on both sides is correct), then store each value into
+            // its target left-to-right.
+            ExprKind::Tuple(targets) => {
+                // `value` is either a tuple literal (`b, a`) or any tuple-valued expression
+                // (`f()` returning a tuple). Evaluate it FULLY first (Python semantics), then store
+                // each element into its target left-to-right.
+                let rhs = self.eval(value)?;
+                let Value::Tuple(items) = &rhs else {
+                    return Err(RuntimeError {
+                        message: format!("cannot destructure {} in assignment", rhs.type_name()),
+                        span,
+                    });
+                };
+                if items.len() != targets.len() {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "assignment has {} target(s) but the value has {} element(s)",
+                            targets.len(),
+                            items.len()
+                        ),
+                        span,
+                    });
+                }
+                let items: Vec<Value> = items.iter().cloned().collect();
+                for (t, v) in targets.iter().zip(items.into_iter()) {
+                    self.store_plain(t, v, span)?;
+                }
+                Ok(())
+            }
+            _ => Err(RuntimeError {
+                message: "invalid assignment target".to_string(),
+                span,
+            }),
+        }
+    }
+
+    /// Store an already-evaluated `value` into `target` with plain `=` semantics (no re-evaluation,
+    /// no compound op). Used by multi-target tuple assignment, where the RHS is evaluated up front.
+    fn store_plain(&mut self, target: &Expr, value: Value, span: Span) -> Result<(), RuntimeError> {
+        match &target.kind {
+            ExprKind::Ident(name) => {
+                if !self.env.assign(name, value) {
+                    return Err(RuntimeError {
+                        message: format!("cannot assign to undefined name '{name}'"),
+                        span,
+                    });
+                }
+                Ok(())
+            }
+            ExprKind::Index { obj, index } => {
+                let target_val = self.eval(obj)?;
+                if let Value::Map(entries) = &target_val {
+                    let key = self.eval(index)?;
+                    let hk = self.hash_value(&key, span)?;
+                    let pos = {
+                        let m = entries.borrow();
+                        m.candidates(hk).iter().copied().find(|&p| values_equal(&m.entries[p].1, &key))
+                    };
+                    match pos {
+                        Some(i) => entries.borrow_mut().entries[i].2 = value,
+                        None => entries.borrow_mut().push(hk, key, value),
+                    }
+                    return Ok(());
+                }
+                if let Value::Struct { .. } = &target_val {
+                    let key = self.eval(index)?;
+                    self.call_struct_method(target_val.clone(), "set_index", vec![key, value], span)?;
+                    return Ok(());
+                }
+                let idx = match self.eval(index)? {
+                    Value::Int(n) => n,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!("expected int, found {}", other.type_name()),
+                            span,
+                        })
+                    }
+                };
+                let Value::List(items) = &target_val else {
+                    return Err(RuntimeError {
+                        message: format!("cannot index {}", target_val.type_name()),
+                        span,
+                    });
+                };
+                let i = crate::slice::norm_index(idx, items.borrow().len()).ok_or_else(|| RuntimeError {
+                    message: format!("index {idx} out of bounds (len {})", items.borrow().len()),
+                    span,
+                })?;
+                items.borrow_mut()[i] = value;
+                Ok(())
+            }
+            ExprKind::Field { obj, name } => {
+                let target_val = self.eval(obj)?;
+                let Value::Struct { fields, .. } = &target_val else {
+                    return Err(RuntimeError {
+                        message: format!("cannot assign field '{name}' of {}", target_val.type_name()),
+                        span,
+                    });
+                };
+                let pos = fields.borrow().iter().position(|(k, _)| k == name);
+                let Some(pos) = pos else {
+                    return Err(RuntimeError {
+                        message: format!("no field '{name}' on {target_val}"),
+                        span,
+                    });
+                };
+                fields.borrow_mut()[pos].1 = value;
                 Ok(())
             }
             _ => Err(RuntimeError {
@@ -4194,6 +4299,50 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, Ru
         },
         Eq => Ok(Value::Bool(values_equal_guarded(&l, &r, 0, span)?)),
         NotEq => Ok(Value::Bool(!values_equal_guarded(&l, &r, 0, span)?)),
+        // `x in container` — membership. Type-directed by the checker; this is the runtime. A
+        // free fn (no `&self`/hasher), so containers are scanned linearly with the same
+        // `values_equal_guarded` the VM's `candidates` scan ultimately uses — identical result.
+        In => match &r {
+            Value::List(items) => {
+                let items = items.borrow();
+                for e in items.iter() {
+                    if values_equal_guarded(e, &l, 0, span)? {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            Value::Set(set) => {
+                let set = set.borrow();
+                for (_, e) in set.entries.iter() {
+                    if values_equal_guarded(e, &l, 0, span)? {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            // Map `in` tests KEY membership (Python-style).
+            Value::Map(map) => {
+                let map = map.borrow();
+                for (_, k, _) in map.entries.iter() {
+                    if values_equal_guarded(k, &l, 0, span)? {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            Str(hay) => match &l {
+                Str(sub) => Ok(Value::Bool(hay.contains(sub.as_ref()))),
+                _ => Err(RuntimeError {
+                    message: format!("substring `in` requires a str on the left, found {}", l.type_name()),
+                    span,
+                }),
+            },
+            _ => Err(RuntimeError {
+                message: format!("cannot use `in` on {}", r.type_name()),
+                span,
+            }),
+        },
         And | Or => Err(RuntimeError {
             message: "logical operators are handled before evaluation".to_string(),
             span,
