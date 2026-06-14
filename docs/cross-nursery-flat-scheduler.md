@@ -12,8 +12,10 @@
 > GONE): a `parallel:` nested inside another `parallel:` — at any depth, with sibling `spawn`s and late
 > `spawn:`s into a non-outermost nursery — RUNS under `--parallel` and matches the cooperative engine.
 > Every still-pending OUTER nursery early-enlists as its own scope; a late `spawn:` into a middle nursery
-> runs on the held flat sched as a fresh trailing scope (`register_scope` is append-only and un-latches a
-> stale `terminate`, so the inline owner runs the late task — no clobber, no panic, no drop). Goldens:
+> runs on the held flat sched as a fresh trailing scope via `register_scope_seeded` (registers + seeds it
+> atomically under one core lock — append-only slots, un-latches a stale `terminate`), so the inline owner
+> runs the late task with no clobber, no panic, no drop, and no deadlock-veto race (the atomic register+seed
+> closes the `runnable==0` window a SENTINEL helper could otherwise misread). Goldens:
 > `examples/parallel_cross_nursery_multilevel.chz` (independent 4-level nesting) + the unit tests
 > `parallel_cross_nursery_independent_3level_runs_all` / `parallel_cross_nursery_late_spawn_into_middle_runs`.
 >

@@ -878,8 +878,9 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   multi-level nesting now RUNS** (the old "2+ enlisting levels" gate is gone): any depth of nested
   `parallel:` with sibling and late `spawn:`s matches the cooperative engine — every pending outer
   nursery enlists as its own scope, and a late `spawn:` into a middle nursery runs on the held flat
-  sched as a fresh trailing scope (`register_scope` un-latches a stale `terminate` so the inline owner
-  runs it — no clobber, no panic, no drop). Goldens: `examples/parallel_cross_nursery_multilevel.chz`.
+  sched as a fresh trailing scope via `register_scope_seeded` (atomic register+seed under one lock,
+  un-latches a stale `terminate`) so the inline owner runs it — no clobber, panic, drop, or deadlock-veto
+  race. Goldens: `examples/parallel_cross_nursery_multilevel.chz`, `..._late_spawn_parked.chz`.
   **Remaining narrow limits (revisit only if they bite real programs; full brief +
   reproductions in [`docs/cross-nursery-flat-scheduler.md`](cross-nursery-flat-scheduler.md)):**
   - **Contended shared channel across nested nurseries** — 2+ live receivers racing ONE channel across

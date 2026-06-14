@@ -355,6 +355,10 @@ Critical + Important findings before the completion claim.
   vetoes only while every incomplete scope is *awaiting the builder's join*). **Wake-side only:** a
   *blocking* recv issued directly in the inline body (case B) still faults — put it in a `spawn:`. Eager
   (per-connection) nurseries run on a private sched, so a cross-nursery wake into/out of an eager body is
-  a separate limit.
+  a separate limit. **Independent / normal multi-level nesting RUNS** (no "2+ enlisting levels" gate): any
+  depth of nested `parallel:` with sibling + late `spawn:`s matches coop; a late `spawn:` into a middle
+  nursery runs on the held sched as a fresh trailing scope (`register_scope_seeded`, atomic). The only
+  residual M:N divergence is a genuinely-CONTENDED shared channel (2+ live receivers racing one channel
+  across scopes) — concurrent-divergent by design, never panics/hangs.
 - **Priority classes** (BEAM) — deferred; revisit if priority becomes a requirement.
 - **Reduction constant tuning** (D3) — `CONTEXT_REDS` value + per-op vs per-back-edge accounting.

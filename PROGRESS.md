@@ -362,6 +362,10 @@ drain only its private queue and could never RUN `O` → `deadlock` fault) is **
     only must never PANIC and never HANG. Guards: `parallel_cross_nursery_independent_3level_runs_all`,
     `parallel_cross_nursery_late_spawn_into_middle_runs`, `parallel_cross_nursery_contended_never_panics`,
     golden `examples/parallel_cross_nursery_multilevel.chz`.
+    A late `spawn:` into a middle nursery runs on the HELD flat sched as a fresh trailing scope via
+    `register_scope_seeded` — register + seed atomically under one core lock (mirrors `inject`), closing a
+    `runnable==0` TOCTOU window where a SENTINEL helper could have falsely deadlock-faulted a parked outer
+    receiver. Guard: `parallel_cross_nursery_late_spawn_parked_matches_coop`.
   - **Out of scope (documented separate limits):** the inline-body *blocking* recv (case B — wake-side
     fix only) and eager (per-connection) nurseries' private sched.
 
