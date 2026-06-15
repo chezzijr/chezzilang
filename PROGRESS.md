@@ -11,6 +11,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Qualified enum-variant access `Enum.Variant` (owner-requested, explicit exception to the M19/M18
+feature freeze).** Variants can now be written **qualified** (`Color.Red`, `Shape.Circle(2)`,
+`case Shape.Circle(r):`) as an optional, equivalent spelling of the bare form — `Shape.Circle(7) ==
+Circle(7)`. It is a pure readability aid: variant names stay program-global (the cross-enum collision
+rule is **unchanged** — two enums still can't share a variant name), so the qualifier validates and
+then resolves to the same variant. **Both engines + parity** (VM/`--serial`/interp byte-identical via
+`examples/enum_qualified.chz` + golden). Implemented by intercepting `Field{Ident(enum), variant}`
+(value/pattern) and `Call{callee: Field{…}}` (payload constructor) in the checker, compiler, and
+interp, gated so a real binding named like the enum wins; the parser gained an optional `enum_name`
+qualifier on `Pattern::Variant` (validated by the checker, ignored at runtime). Out of scope: letting
+two enums share a variant name (would need enum-scoped variant lookup — a separate, larger change);
+qualified **built-in** variants (`Option.Some`) are accepted in patterns but bare stays canonical.
+
 **✅ M20 — In-language test framework (`assert` + `test fn` + `chezzi test`).** Chezzi now has a real
 test facility. Three layers, all TDD'd:
 

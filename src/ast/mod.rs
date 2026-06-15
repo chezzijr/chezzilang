@@ -333,6 +333,10 @@ pub enum Pattern {
     Variant {
         name: String,
         bindings: Vec<Pattern>,
+        /// Optional `Enum.` qualifier from `case Enum.Variant:` (`None` for the bare `case Variant:`).
+        /// A pure spelling aid: validated by the checker, then ignored by both engines (variant names
+        /// are globally unique, so `name` alone still identifies the variant).
+        enum_name: Option<String>,
     },
     /// A tuple pattern, e.g. `(a, b)` or `(0, _)`. Two-or-more elements (matches a tuple value).
     Tuple(Vec<Pattern>),

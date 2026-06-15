@@ -41,7 +41,9 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 - **Pattern matching** — `match` on enums (also int/str/bool + tuple scrutinees), exhaustiveness-checked.
   Nested patterns (incl. nested nullary variants like `Some(None)`) + **or-patterns** (`p1 | p2`; every
   alternative must bind the same variables; a full enum or-pattern is exhaustive without `_`, but the
-  open int/str/bool domains — including `true | false` — still require a `_`).
+  open int/str/bool domains — including `true | false` — still require a `_`). Variants are bare by
+  default but may also be written **qualified** as `Enum.Variant` (value, constructor, or `match` arm)
+  — an equivalent spelling, not a per-enum namespace (variant names stay program-global).
 - **String interpolation** — `"hi {name}, sum {a+b}"`. First-class; string ops are a UX priority.
   Supports Python-style **format specifiers** after a `:` — `{expr:[[fill]align][sign][0][width][.precision][type]}`,
   e.g. `{name:>10}` (right-align width 10), `{f:.2f}` (2 decimals), `{n:04d}` (zero-pad), `{pct:.1%}`

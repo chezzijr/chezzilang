@@ -666,6 +666,15 @@ impl Checker {
     fn lookup(&self, name: &str) -> Option<Ty> {
         self.scopes.iter().rev().find_map(|s| s.get(name).cloned())
     }
+    /// Is `name` bound *below* the module-global scope (scope 0) — i.e. a local, parameter, or
+    /// captured binding? The qualified enum-variant form `Enum.Variant` yields to such a binding but
+    /// NOT to a module global or function, mirroring both engines' locals-only precedence gate (VM
+    /// `resolve_local`/`captures`, interp `get_local`). Using full [`Self::lookup`] here would let a
+    /// top-level global named like the enum shadow in the checker but not the engines — a soundness
+    /// hole (the checker would validate a different program than the one that runs).
+    fn is_local_binding(&self, name: &str) -> bool {
+        self.scopes.iter().skip(1).any(|s| s.contains_key(name))
+    }
     /// Mark `name` (already declared in the current scope) as an immutable `for`-loop variable.
     fn mark_loop_var(&mut self, name: &str) {
         if let Some(set) = self.loop_vars.last_mut() {
@@ -2392,7 +2401,8 @@ impl Checker {
                     }
                 }
             }
-            Pattern::Variant { name, bindings } => {
+            Pattern::Variant { name, bindings, enum_name } => {
+                self.check_pattern_qualifier(enum_name, name, span);
                 match self.variants_of(ty) {
                     Some(vmap) => match vmap.get(name) {
                         Some(payload) => {
@@ -2540,7 +2550,8 @@ impl Checker {
                 // as `Unknown`. Still scope so the caller can `pop_scope` uniformly.
                 self.push_scope();
                 match pattern {
-                    Pattern::Variant { name, bindings } => {
+                    Pattern::Variant { name, bindings, enum_name } => {
+                        self.check_pattern_qualifier(enum_name, name, span);
                         covered.insert(name.clone());
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
@@ -2557,7 +2568,8 @@ impl Checker {
             MatchKind::Variants { label, variants } => {
                 self.push_scope();
                 match pattern {
-                    Pattern::Variant { name, bindings } => {
+                    Pattern::Variant { name, bindings, enum_name } => {
+                        self.check_pattern_qualifier(enum_name, name, span);
                         let payload = variants.get(name).cloned();
                         if payload.is_none() {
                             self.error(span, format!("'{name}' is not a variant of {label}"));
@@ -2616,7 +2628,16 @@ impl Checker {
                     // name is a registered variant (e.g. `None`). The compiler routes by the variant
                     // registry, so a colliding name would bind in the interp but trap on the VM; reject
                     // it here so all engines agree. (Rename the binding to fix.)
-                    Pattern::Variant { name, bindings } if bindings.is_empty() => {
+                    Pattern::Variant { name, bindings, enum_name } if bindings.is_empty() => {
+                        // A *qualified* `Enum.Variant` is unambiguously a variant, never a binding —
+                        // validate the qualifier and reject it against an int/str/bool scrutinee (a
+                        // variant cannot match a literal-typed value). Falls through the bare path
+                        // below otherwise.
+                        if enum_name.is_some() {
+                            self.check_pattern_qualifier(enum_name, name, span);
+                            self.error(span, format!("cannot match a variant against {ty}"));
+                            return false;
+                        }
                         // Match the compiler's variant registry: user enums PLUS the built-in
                         // Result/Option variants (which the checker special-cases elsewhere).
                         if self.variants.contains_key(name)
@@ -2633,7 +2654,8 @@ impl Checker {
                         self.declare(name, ty.clone());
                         return true;
                     }
-                    Pattern::Variant { bindings, .. } => {
+                    Pattern::Variant { bindings, enum_name, name } => {
+                        self.check_pattern_qualifier(enum_name, name, span);
                         self.error(span, format!("cannot match a variant against {ty}"));
                         // Still bind the payload sub-patterns (as Unknown) so the arm body doesn't
                         // cascade into spurious "unknown name" errors — notably the desugared `?.`
@@ -3189,7 +3211,50 @@ impl Checker {
         }
     }
 
+    /// Validate the optional `Enum.` qualifier on a `case Enum.Variant:` pattern: the named variant
+    /// must belong to `enum_name`. A no-op when unqualified. The qualifier is a pure spelling aid —
+    /// variant names are globally unique, so resolution still keys on `name` alone.
+    fn check_pattern_qualifier(&mut self, enum_name: &Option<String>, name: &str, span: Span) {
+        if let Some(en) = enum_name {
+            // User variants live in `self.variants`; the built-in Result/Option variants don't, so
+            // accept their canonical enums explicitly.
+            let builtin_ok = matches!(
+                (en.as_str(), name),
+                ("Result", "Ok") | ("Result", "Err") | ("Option", "Some") | ("Option", "None")
+            );
+            if !builtin_ok && self.variants.get(name).is_none_or(|v| &v.enum_name != en) {
+                self.error(span, format!("enum '{en}' has no variant '{name}'"));
+            }
+        }
+    }
+
     fn infer_field(&mut self, obj: &Expr, name: &str) -> Ty {
+        // `Enum.Variant` used as a value: a bare *unbound* name that is an enum, dotted with one of
+        // its nullary variants — sugar for the bare `Variant`. A real binding (struct/tuple/local
+        // named like the enum) wins, so only when `lookup` finds nothing.
+        if let ExprKind::Ident(ename) = &obj.kind
+            && !self.is_local_binding(ename)
+            && self.enums.contains_key(ename)
+        {
+            let resolved = self.variants.get(name).filter(|v| &v.enum_name == ename).cloned();
+            match resolved {
+                Some(v) if v.payload.is_empty() => {
+                    let nparams = self.enum_type_params.get(ename).map_or(0, |t| t.len());
+                    return Ty::Enum(ename.clone(), vec![Ty::Unknown; nparams]);
+                }
+                Some(_) => {
+                    self.error(
+                        obj.span,
+                        format!("variant '{name}' of enum '{ename}' carries a payload; construct it as {ename}.{name}(…)"),
+                    );
+                    return Ty::Unknown;
+                }
+                None => {
+                    self.error(obj.span, format!("enum '{ename}' has no variant '{name}'"));
+                    return Ty::Unknown;
+                }
+            }
+        }
         let obj_ty = self.infer(obj);
         match &obj_ty {
             // `t.0`, `t.1`, … — tuple element access. The field name is the element index as a
@@ -3531,6 +3596,24 @@ impl Checker {
         let targs: Vec<Ty> = type_args.iter().map(|t| self.resolve_type(t, span)).collect();
         // Method call: `obj.method(args)`. The parser never attaches type args to a method callee.
         if let ExprKind::Field { obj, name } = &callee.kind {
+            // `Enum.Variant(args)` — qualified payload-variant constructor. Same gate as the nullary
+            // value form in `infer_field`: an unbound enum name dotted with one of its variants.
+            if let ExprKind::Ident(ename) = &obj.kind
+                && !self.is_local_binding(ename)
+                && self.enums.contains_key(ename)
+            {
+                if self.variants.get(name).is_some_and(|v| &v.enum_name == ename) {
+                    if let Some(ty) = self.infer_named_call(name, args, &targs, span) {
+                        return ty;
+                    }
+                } else {
+                    self.error(obj.span, format!("enum '{ename}' has no variant '{name}'"));
+                    for a in args {
+                        self.infer(a);
+                    }
+                    return Ty::Unknown;
+                }
+            }
             return self.infer_method_call(obj, name, args, span);
         }
         if let ExprKind::Ident(name) = &callee.kind {
@@ -6288,6 +6371,119 @@ mod graph_tests {
         assert!(
             errs.iter().any(|m| m.contains("try_recv") && m.contains("argument")),
             "got: {errs:?}"
+        );
+    }
+
+    // 24. Qualified enum-variant access `Color.Red` (nullary) type-checks as the enum type, exactly
+    // like the bare `Red`. A wrong variant `Color.Bogus` is a targeted error.
+    #[test]
+    fn qualified_nullary_variant_checks() {
+        let t = TmpDir::new();
+        let ok = t.write(
+            "ok.chz",
+            "enum Color:\n    Red\n    Green\nfn f() -> Color:\n    return Color.Red\nfn main(): print(1)\n",
+        );
+        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
+
+        let bad = t.write(
+            "bad.chz",
+            "enum Color:\n    Red\n    Green\nfn f() -> Color:\n    return Color.Bogus\nfn main(): print(1)\n",
+        );
+        let errs = errors(&bad);
+        assert!(
+            errs.iter().any(|m| m.contains("Color") && m.contains("Bogus")),
+            "expected 'no variant Bogus' style error: {errs:?}"
+        );
+    }
+
+    // 25. Qualified payload-variant construction `Shape.Circle(2)` type-checks as the enum type and
+    // still validates argument types, exactly like the bare `Circle(2)`.
+    #[test]
+    fn qualified_payload_variant_checks() {
+        let t = TmpDir::new();
+        let ok = t.write(
+            "ok.chz",
+            "enum Shape:\n    Circle(int)\n    Dot\nfn f() -> Shape:\n    return Shape.Circle(2)\nfn main(): print(1)\n",
+        );
+        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
+
+        let bad = t.write(
+            "bad.chz",
+            "enum Shape:\n    Circle(int)\n    Dot\nfn f() -> Shape:\n    return Shape.Circle(\"x\")\nfn main(): print(1)\n",
+        );
+        let errs = errors(&bad);
+        assert!(
+            errs.iter().any(|m| m.contains("Circle") && m.contains("int")),
+            "expected payload type mismatch: {errs:?}"
+        );
+    }
+
+    // 26. A real binding wins over an enum name: `c.0` where `c` is a tuple is normal field access,
+    // never reinterpreted as a qualified variant.
+    #[test]
+    fn binding_wins_over_enum_qualifier() {
+        let t = TmpDir::new();
+        let ok = t.write(
+            "ok.chz",
+            "enum Color:\n    Red\nfn main():\n    pair := (1, 2)\n    print(pair.0)\n",
+        );
+        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
+    }
+
+    // 27. Qualified variant patterns `case Color.Red:` check clean (mixed with bare arms); a wrong
+    // qualifier `case Color.Circle:` (Circle belongs to a different enum) is a targeted error.
+    #[test]
+    fn qualified_variant_pattern_checks() {
+        let t = TmpDir::new();
+        let ok = t.write(
+            "ok.chz",
+            "enum Color:\n    Red\n    Green\nfn f(c: Color) -> str:\n    return match c:\n        Color.Red: \"r\"\n        Green: \"g\"\nfn main(): print(f(Red))\n",
+        );
+        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
+
+        let bad = t.write(
+            "bad.chz",
+            "enum Color:\n    Red\n    Green\nenum Shape:\n    Circle(int)\nfn f(c: Color) -> str:\n    return match c:\n        Color.Circle: \"c\"\n        _: \"x\"\nfn main(): print(f(Red))\n",
+        );
+        let errs = errors(&bad);
+        assert!(
+            errs.iter().any(|m| m.contains("Color") && m.contains("Circle")),
+            "expected qualifier mismatch error: {errs:?}"
+        );
+    }
+
+    // 28. A *module-global* binding named like an enum does NOT shadow qualified access — both engines
+    // gate on locals/captures only, so the checker must too (else it validates a different program
+    // than the one that runs → runtime fault). `Color.Red` here is the variant (type Color), so
+    // returning it as `int` is a *checker* error, not a clean compile + runtime crash.
+    #[test]
+    fn global_binding_does_not_shadow_qualified_variant() {
+        let t = TmpDir::new();
+        let bad = t.write(
+            "bad.chz",
+            "enum Color:\n    Red\n    Green\nstruct Box:\n    Red: int\nColor := Box(7)\nfn show() -> int:\n    return Color.Red\nfn main(): print(show())\n",
+        );
+        let errs = errors(&bad);
+        assert!(
+            errs.iter().any(|m| m.contains("Color")),
+            "expected a checker type error (Color variant returned as int), got: {errs:?}"
+        );
+    }
+
+    // 29. The `Enum.` qualifier is validated even under an int/str/bool scrutinee: `case Color.Bogus:`
+    // against an `int` must be rejected (a qualified variant is never a catch-all binding), not
+    // silently accepted as a binding named `Bogus`.
+    #[test]
+    fn qualified_pattern_validated_under_literal_scrutinee() {
+        let t = TmpDir::new();
+        let bad = t.write(
+            "bad.chz",
+            "enum Color:\n    Red\n    Green\nfn f(n: int) -> str:\n    return match n:\n        1: \"one\"\n        Color.Bogus: \"x\"\nfn main(): print(f(1))\n",
+        );
+        let errs = errors(&bad);
+        assert!(
+            !errs.is_empty(),
+            "expected a checker error for `Color.Bogus` against an int scrutinee, got none"
         );
     }
 }

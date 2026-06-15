@@ -436,6 +436,20 @@ impl Interp {
                 })))
             }
             ExprKind::Field { obj, name } => {
+                // `Enum.Variant` (nullary) → the variant value, mirroring the bare Ident path. A
+                // binding named like the enum wins, matching the checker/compiler.
+                if let ExprKind::Ident(ename) = &obj.kind
+                    && self.env.get_local(ename).is_none()
+                    && let Some(def) = self.variants.get(name)
+                    && def.enum_name.as_ref() == ename.as_str()
+                    && def.arity == 0
+                {
+                    return Ok(Value::Enum {
+                        ty: def.enum_name.clone(),
+                        variant: name.as_str().into(),
+                        payload: Vec::new(),
+                    });
+                }
                 let target = self.eval(obj)?;
                 match &target {
                     // `t.0`, `t.1`, … — tuple element access. The field name is the element index.
@@ -805,8 +819,33 @@ impl Interp {
         args: &[Expr],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        // A method call `obj.name(args)` — bind `obj` as `self`.
+        // A method call `obj.name(args)` — bind `obj` as `self`. But `Enum.Variant(args)` is a
+        // qualified variant constructor, not a method: an unbound enum name dotted with its variant.
         if let ExprKind::Field { obj, name } = &callee.kind {
+            if let ExprKind::Ident(ename) = &obj.kind
+                && self.env.get_local(ename).is_none()
+                && self.variants.get(name).map(|d| d.enum_name.as_ref()) == Some(ename.as_str())
+            {
+                let arg_vals =
+                    args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+                let def = self.variants.get(name).cloned().unwrap();
+                if arg_vals.len() != def.arity {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "variant '{}' expects {} value(s), got {}",
+                            name,
+                            def.arity,
+                            arg_vals.len()
+                        ),
+                        span,
+                    });
+                }
+                return Ok(Value::Enum {
+                    ty: def.enum_name.clone(),
+                    variant: name.as_str().into(),
+                    payload: arg_vals,
+                });
+            }
             return self.eval_method_call(obj, name, args, span);
         }
 
@@ -4702,7 +4741,7 @@ fn try_bind(
             }
             Some(out)
         }
-        Pattern::Variant { name, bindings } => {
+        Pattern::Variant { name, bindings, .. } => {
             let Value::Enum { variant, payload, .. } = value else {
                 // A bare top-level identifier (no payload) against a non-enum value is a binding
                 // capturing the whole value — the checker permits this only for literal scrutinees.

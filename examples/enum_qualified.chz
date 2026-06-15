@@ -1,0 +1,52 @@
+# examples/enum_qualified.chz — optional qualified enum-variant access `Enum.Variant`: the dotted
+# spelling of the bare variant. Bare and qualified are equivalent everywhere — construction (nullary
+# + payload) and `match` arms — and both engines must agree (parity) and match the golden. Arms and
+# constructors are interleaved bare/qualified on purpose, plus a generic enum, to pin that the
+# qualifier is a pure spelling aid resolving to the same variant.
+
+enum Color:
+    Red
+    Green
+    Blue
+
+enum Shape:
+    Circle(int)
+    Rect(int, int)
+    Dot
+
+enum Tree[T]:
+    Leaf
+    Node(T, Tree[T], Tree[T])
+
+fn color_name(c: Color) -> str:
+    return match c:
+        Color.Red: "red"
+        Green: "green"          # bare arm interleaved with qualified ones
+        Color.Blue: "blue"
+
+fn shape_area(s: Shape) -> int:
+    return match s:
+        Shape.Circle(r): r * r
+        Rect(w, h): w * h       # bare payload arm
+        Shape.Dot: 0
+
+fn tree_sum(t: Tree[int]) -> int:
+    return match t:
+        Tree.Leaf: 0
+        Node(v, l, r): tree_sum(l) + v + tree_sum(r)   # bare payload arm
+
+fn main():
+    # Construction in both spellings.
+    print(color_name(Color.Red))
+    print(color_name(Green))
+    print(shape_area(Shape.Circle(5)))
+    print(shape_area(Shape.Rect(3, 4)))
+    print(shape_area(Dot))
+    # Generic enum, qualified and bare constructors mixed in one value.
+    t: Tree[int] = Tree.Node(2, Tree.Node(1, Leaf, Leaf), Node(3, Tree.Leaf, Leaf))
+    print(tree_sum(t))
+    # Qualified and bare construct equal values.
+    print(Color.Red == Red)
+    print(Shape.Circle(7) == Circle(7))
+
+main()

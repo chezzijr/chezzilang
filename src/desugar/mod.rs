@@ -976,7 +976,7 @@ fn err(span: crate::lexer::Span, message: String) -> ResolveError {
 
 /// A nullary-or-payload variant pattern (`Some(__c)` / `None`) for desugared opt-chain `match` arms.
 fn variant_pat(name: &str, bindings: Vec<Pattern>) -> Pattern {
-    Pattern::Variant { name: name.to_string(), bindings }
+    Pattern::Variant { name: name.to_string(), bindings, enum_name: None }
 }
 
 /// A bare identifier expression at `span`.
@@ -1240,7 +1240,7 @@ mod tests {
                 assert_eq!(arms.len(), 2);
                 // Some(__optN): __optN ; None: 0
                 assert!(matches!(&arms[0].pattern, Pattern::Variant { name, .. } if name == "Some"));
-                assert!(matches!(&arms[1].pattern, Pattern::Variant { name, bindings } if name == "None" && bindings.is_empty()));
+                assert!(matches!(&arms[1].pattern, Pattern::Variant { name, bindings, .. } if name == "None" && bindings.is_empty()));
             }
             other => panic!("expected a Match, got {other:?}"),
         }

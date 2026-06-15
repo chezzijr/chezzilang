@@ -81,6 +81,13 @@ impl Env {
             .or_else(|| self.globals.0.borrow().get(name).cloned())
     }
 
+    /// Look up a name in the LOCAL scopes only (skipping globals/functions). Used to decide whether a
+    /// real lexical binding shadows a same-named enum in qualified-variant access `Enum.Variant` —
+    /// matching the VM's locals/captures-only gate (`resolve_local`), so the two engines agree.
+    pub fn get_local(&self, name: &str) -> Option<Value> {
+        self.locals.iter().rev().find_map(|scope| scope.get(name).cloned())
+    }
+
     /// Mutate an existing binding (`=`, `+=`, `-=`). Returns `false` if undefined.
     pub fn assign(&mut self, name: &str, value: Value) -> bool {
         for scope in self.locals.iter_mut().rev() {

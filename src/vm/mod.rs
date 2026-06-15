@@ -15720,6 +15720,32 @@ main()";
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// Qualified enum-variant access golden: `examples/enum_qualified.chz` (the dotted `Enum.Variant`
+    /// spelling, nullary + payload, in construction AND `match` arms, interleaved with the bare form
+    /// and a generic enum) byte-identical on the VM, the interpreter, and its `.expected`. Pins that
+    /// the qualifier is a pure spelling aid resolving to the same variant on both engines.
+    #[test]
+    fn golden_enum_qualified_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/enum_qualified.chz");
+        let expected = include_str!("../../examples/enum_qualified.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Parity edge: a top-level `fn` named like an enum must NOT shadow qualified-variant access
+    /// `Enum.Variant` (the checker and VM ignore functions in the precedence gate; the interp must
+    /// too). Both engines must agree — previously the interp diverged ("cannot read field of
+    /// function") while the VM constructed the variant.
+    #[test]
+    fn qualified_variant_not_shadowed_by_function_parity() {
+        let src = "enum Color:\n    Red\n    Green\nfn Color() -> int:\n    return 5\nprint(Color.Red)\n";
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(vm_out, interp_out, "engines diverged on fn-vs-qualified-variant");
+        assert_eq!(vm_out, "Red\n");
+    }
+
     /// Polymorphic method-IC golden: `examples/poly_method.chz` (a `list[Shape]` walked at one
     /// `.area()` call site across FIVE distinct struct types — four fill the N-way method-call IC,
     /// the fifth overflows it to the sticky-generic slow path) byte-identical on the VM, the

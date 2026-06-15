@@ -978,6 +978,14 @@ impl Parser {
             _ => {}
         }
         let name = self.expect_ident()?;
+        // `Enum.Variant` — a qualified variant pattern. The first ident is the enum qualifier; the
+        // ident after `.` is the variant. A qualified pattern is always a variant (never a binding),
+        // even in a sub-position.
+        let (name, enum_name) = if self.eat(&Token::Dot) {
+            (self.expect_ident()?, Some(name))
+        } else {
+            (name, None)
+        };
         if self.eat(&Token::LParen) {
             // `Name(p, …)` — a variant with (possibly nested) sub-patterns.
             let mut bindings = Vec::new();
@@ -990,11 +998,12 @@ impl Parser {
                 }
             }
             self.expect(&Token::RParen)?;
-            return Ok(Pattern::Variant { name, bindings });
+            return Ok(Pattern::Variant { name, bindings, enum_name });
         }
         // A bare identifier: a nullary variant at the top of an arm, or a binding in a sub-position.
-        if top {
-            Ok(Pattern::Variant { name, bindings: Vec::new() })
+        // A qualified `Enum.Variant` is unambiguously a nullary variant in either position.
+        if top || enum_name.is_some() {
+            Ok(Pattern::Variant { name, bindings: Vec::new(), enum_name })
         } else {
             Ok(Pattern::Ident(name))
         }
@@ -2829,13 +2838,16 @@ mod tests {
             StmtKind::Match { arms, .. } => {
                 assert_eq!(arms.len(), 3);
                 match &arms[0].pattern {
-                    Pattern::Variant { name, bindings } => {
+                    Pattern::Variant { name, bindings, .. } => {
                         assert_eq!(name, "Circle");
                         assert_eq!(bindings, &vec![Pattern::Ident("r".to_string())]);
                     }
                     other => panic!("{other:?}"),
                 }
-                assert!(arms[2].pattern == Pattern::Variant { name: "Point".into(), bindings: vec![] });
+                assert!(
+                    arms[2].pattern
+                        == Pattern::Variant { name: "Point".into(), bindings: vec![], enum_name: None }
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -3520,6 +3532,7 @@ mod tests {
             Pattern::Variant {
                 name: "Circle".into(),
                 bindings: vec![Pattern::Ident("r".into())],
+                enum_name: None,
             }
         );
     }
@@ -3920,8 +3933,8 @@ mod tests {
         match first_arm_pattern("match c:\n    Red | Green: print(1)\n    _: print(0)\n") {
             Pattern::Or(alts) => {
                 assert_eq!(alts.len(), 2);
-                assert!(matches!(&alts[0], Pattern::Variant { name, bindings } if name == "Red" && bindings.is_empty()));
-                assert!(matches!(&alts[1], Pattern::Variant { name, bindings } if name == "Green" && bindings.is_empty()));
+                assert!(matches!(&alts[0], Pattern::Variant { name, bindings, .. } if name == "Red" && bindings.is_empty()));
+                assert!(matches!(&alts[1], Pattern::Variant { name, bindings, .. } if name == "Green" && bindings.is_empty()));
             }
             other => panic!("{other:?}"),
         }
@@ -3941,10 +3954,40 @@ mod tests {
     }
 
     #[test]
+    fn qualified_variant_pattern_parses() {
+        // `Color.Red` (nullary) -> Variant{name: "Red", enum_name: Some("Color")}.
+        match first_arm_pattern("match c:\n    Color.Red: print(0)\n    _: print(1)\n") {
+            Pattern::Variant { name, bindings, enum_name } => {
+                assert_eq!(name, "Red");
+                assert!(bindings.is_empty());
+                assert_eq!(enum_name.as_deref(), Some("Color"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // `Shape.Circle(r)` (payload) -> Variant{name: "Circle", enum_name: Some("Shape"), [Ident r]}.
+        match first_arm_pattern("match s:\n    Shape.Circle(r): print(r)\n    _: print(0)\n") {
+            Pattern::Variant { name, bindings, enum_name } => {
+                assert_eq!(name, "Circle");
+                assert_eq!(enum_name.as_deref(), Some("Shape"));
+                assert!(matches!(&bindings[0], Pattern::Ident(n) if n == "r"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Bare `None` stays unqualified.
+        match first_arm_pattern("match o:\n    None: print(0)\n    _: print(1)\n") {
+            Pattern::Variant { name, enum_name, .. } => {
+                assert_eq!(name, "None");
+                assert_eq!(enum_name, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn or_pattern_in_payload() {
         // `Some(a | b)` -> Variant{Some, [Or([Ident a, Ident b])]}.
         match first_arm_pattern("match o:\n    Some(a | b): print(a)\n    _: print(0)\n") {
-            Pattern::Variant { name, bindings } => {
+            Pattern::Variant { name, bindings, .. } => {
                 assert_eq!(name, "Some");
                 assert_eq!(bindings.len(), 1);
                 match &bindings[0] {
@@ -3973,7 +4016,7 @@ mod tests {
     fn nested_nullary_parses() {
         // `Some(None)` -> Variant{Some, [Ident("None")]} (parser is type-blind; checker promotes).
         match first_arm_pattern("match o:\n    Some(None): print(0)\n    _: print(1)\n") {
-            Pattern::Variant { name, bindings } => {
+            Pattern::Variant { name, bindings, .. } => {
                 assert_eq!(name, "Some");
                 assert_eq!(bindings.len(), 1);
                 assert!(matches!(&bindings[0], Pattern::Ident(n) if n == "None"));
@@ -3986,10 +4029,10 @@ mod tests {
     fn nested_nullary_in_result_parses() {
         // `Ok(Err(e))` -> Variant{Ok, [Variant{Err, [Ident e]}]}.
         match first_arm_pattern("match r:\n    Ok(Err(e)): print(e)\n    _: print(0)\n") {
-            Pattern::Variant { name, bindings } => {
+            Pattern::Variant { name, bindings, .. } => {
                 assert_eq!(name, "Ok");
                 match &bindings[0] {
-                    Pattern::Variant { name, bindings } => {
+                    Pattern::Variant { name, bindings, .. } => {
                         assert_eq!(name, "Err");
                         assert!(matches!(&bindings[0], Pattern::Ident(n) if n == "e"));
                     }

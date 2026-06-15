@@ -233,9 +233,15 @@
 # nest (gap #15): a variant payload slot or tuple element is itself a <subpattern>.
 <pattern>     ::= <patternPrimary>
                 | <patternPrimary> "BITOR" <pattern>
+# A leading "IDENT" "DOT" "IDENT" is a QUALIFIED variant `Enum.Variant` — the enum-qualified spelling
+# of a bare variant (nullary or, with "LPAREN", payload-carrying). Equivalent to the bare form; the
+# checker validates the qualifier and resolution still keys on the variant name (program-global).
 <patternPrimary> ::= "IDENT"
                 | "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "LPAREN" <subpatterns> "RPAREN"
+                | "IDENT" "DOT" "IDENT"
+                | "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
+                | "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | "INT" | "STR" | "TRUE" | "FALSE"
                 | "INT" "DOTDOT" "INT"
@@ -247,6 +253,9 @@
 <subpatternPrimary> ::= "IDENT"
                 | "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "LPAREN" <subpatterns> "RPAREN"
+                | "IDENT" "DOT" "IDENT"
+                | "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
+                | "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | "INT" | "STR" | "TRUE" | "FALSE"
                 | "INT" "DOTDOT" "INT"

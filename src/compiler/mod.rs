@@ -1363,7 +1363,7 @@ impl Compiler {
         match p {
             Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => true,
             // empty-binding `Name`: a binding unless it's a real variant.
-            Pattern::Variant { name, bindings } if bindings.is_empty() => {
+            Pattern::Variant { name, bindings, .. } if bindings.is_empty() => {
                 !self.program.variants.contains_key(name)
             }
             Pattern::Or(alts) => alts.iter().all(|a| self.pattern_is_literal(a)),
@@ -1488,7 +1488,7 @@ impl Compiler {
                     self.emit_pattern(fc, sub, elem, fails, span)?;
                 }
             }
-            Pattern::Variant { name, bindings } => {
+            Pattern::Variant { name, bindings, .. } => {
                 // One slot per payload element. A plain `Ident` *binding* names its slot directly (so
                 // `Some(c)` binds `c` with no copy); a nested nullary-variant `Ident` (e.g. the
                 // `None` in `Some(None)`) and any other sub-pattern get a hidden slot to test/
@@ -1631,7 +1631,7 @@ impl Compiler {
                 }
                 // A bare top-level identifier that isn't a known variant is a binding catch-all
                 // capturing the whole scrutinee (irrefutable, like `_` but named).
-                Pattern::Variant { name, bindings } if bindings.is_empty() => {
+                Pattern::Variant { name, bindings, .. } if bindings.is_empty() => {
                     fc.begin_scope();
                     let s = fc.add_local(name.clone());
                     fc.emit(Op::GetLocal(scrut), span);
@@ -1803,9 +1803,23 @@ impl Compiler {
             // `type_args` are type-erased — the compiler never sees them (checker already used them).
             ExprKind::Call { callee, args, .. } => self.compile_call(fc, callee, args, expr.span)?,
             ExprKind::Field { obj, name } => {
-                self.compile_expr(fc, obj)?;
-                let ic = self.next_field_ic(name);
-                fc.emit(Op::GetField { name: name.clone(), ic }, expr.span);
+                // `Enum.Variant` (nullary) → construct the variant, mirroring bare `compile_ident`.
+                // A real binding (local/captured) named like the enum wins, matching the checker.
+                if let ExprKind::Ident(ename) = &obj.kind
+                    && fc.resolve_local(ename).is_none()
+                    && !fc.captures(ename)
+                    && self
+                        .program
+                        .variants
+                        .get(name)
+                        .is_some_and(|d| &d.enum_name == ename && d.arity == 0)
+                {
+                    fc.emit(Op::NewEnum(ename.clone(), name.clone(), 0), expr.span);
+                } else {
+                    self.compile_expr(fc, obj)?;
+                    let ic = self.next_field_ic(name);
+                    fc.emit(Op::GetField { name: name.clone(), ic }, expr.span);
+                }
             }
             ExprKind::Index { obj, index } => {
                 self.compile_expr(fc, obj)?;
@@ -2000,6 +2014,19 @@ impl Compiler {
     fn compile_call(&mut self, fc: &mut FnComp, callee: &Expr, args: &[Expr], span: Span) -> Result<(), CompileError> {
         // Method / module-member call: `obj.name(args)`.
         if let ExprKind::Field { obj, name } = &callee.kind {
+            // `Enum.Variant(args)` → variant constructor, mirroring the bare-ident variant path
+            // below. Gated like the value form: an unbound enum name dotted with one of its variants.
+            if let ExprKind::Ident(ename) = &obj.kind
+                && fc.resolve_local(ename).is_none()
+                && !fc.captures(ename)
+                && self.program.variants.get(name).is_some_and(|d| &d.enum_name == ename)
+            {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(Op::NewEnum(ename.clone(), name.clone(), args.len()), span);
+                return Ok(());
+            }
             self.compile_expr(fc, obj)?;
             for a in args {
                 self.compile_expr(fc, a)?;
