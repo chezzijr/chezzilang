@@ -43,11 +43,14 @@ COMMANDS:
 
 FLAGS:
     --errors=json    Emit type errors as JSON (for `check` / `run`)
+    --serial         Run on the cooperative single-thread VM (the frozen parity oracle)
+    --parallel       Select the OS-thread engine (now the DEFAULT; flag kept as a no-op)
+    --threads=N      Worker threads for the OS-thread engine (0 = all cores; env: CHEZZI_THREADS)
     --interp         Run on the tree-walk interpreter instead of the bytecode VM
 
 NOTE: flags must come BEFORE the file path. Anything after the file is passed
-      to the program as an argument, so `chezzi run prog.chz --interp` runs the
-      default VM and hands `--interp` to the program. Use `chezzi run --interp prog.chz`.
+      to the program as an argument, so `chezzi run prog.chz --serial` runs the
+      default parallel VM and hands `--serial` to the program. Use `chezzi run --serial prog.chz`.
 ";
 
 fn main() -> ExitCode {
@@ -168,22 +171,32 @@ fn cmd_check(args: &[String]) -> ExitCode {
     }
 }
 
-/// `chezzi run <file> [--errors=json] [--interp] [--parallel]` — type-check first (M4 gate), then
-/// execute on the bytecode VM (default, M5) or the tree-walk interpreter (`--interp`, the reference
-/// engine). `--parallel` (VM-only) selects the real OS-thread engine (B3.3-threads); without it the
-/// cooperative single-thread VM runs (decision A — the default stays the byte-identical oracle).
+/// `chezzi run <file> [--errors=json] [--interp] [--serial] [--parallel] [--threads=N]` —
+/// type-check first (M4 gate), then execute on the bytecode VM (default, M5) or the tree-walk
+/// interpreter (`--interp`, the reference engine). The VM now runs the real OS-thread engine
+/// (B3.3-threads) BY DEFAULT; `--serial` opts back into the cooperative single-thread VM (the frozen
+/// byte-identical oracle). `--parallel` is kept as an accepted no-op alias for the (now default)
+/// OS-thread engine. `--threads=N` (or the `CHEZZI_THREADS` env var) sizes the OS-thread engine's
+/// worker pool — `0` (or omitted) = all cores; the flag wins over the env var.
 fn cmd_run(args: &[String]) -> ExitCode {
     let mut path = None;
     let mut json = false;
     let mut use_vm = true;
-    // B3.3-threads: `--parallel` selects the real OS-thread engine (bounded pool + condvar `recv`);
-    // the cooperative single-thread VM stays the default (decision A). VM-only — `--interp` is the
-    // frozen sequential oracle and never runs parallel.
-    let mut parallel = false;
+    // The OS-thread engine (bounded pool + condvar `recv`) is now the DEFAULT VM engine.
+    // `--serial` opts back into the cooperative single-thread VM (the frozen parity oracle).
+    // `--interp` is the frozen sequential oracle and never runs parallel.
+    let mut parallel = true;
+    // Track explicit `--parallel`/`--serial` so contradictory combos (and `--interp --parallel`)
+    // still error instead of silently picking one.
+    let mut saw_parallel = false;
+    let mut saw_serial = false;
+    // `--threads=N` worker count for the M:N engine (orthogonal to which engine runs). `0` = all
+    // cores. `None` = unset (fall through to `CHEZZI_THREADS`, then auto). The flag wins over env.
+    let mut threads_flag: Option<usize> = None;
     // Positional args after the script path are the program's own args (std.os.args).
-    // GOTCHA: this means flags MUST precede the file — `chezzi run prog.chz --interp`
-    // treats `--interp` as a program arg (path is already set) and silently runs the
-    // default VM. Correct form: `chezzi run --interp prog.chz`.
+    // GOTCHA: this means flags MUST precede the file — `chezzi run prog.chz --serial`
+    // treats `--serial` as a program arg (path is already set) and silently runs the
+    // default parallel VM. Correct form: `chezzi run --serial prog.chz`.
     let mut prog_args: Vec<String> = Vec::new();
     for arg in args {
         match arg.as_str() {
@@ -191,7 +204,21 @@ fn cmd_run(args: &[String]) -> ExitCode {
             "--errors=json" => json = true,
             "--vm" => use_vm = true,
             "--interp" => use_vm = false,
-            "--parallel" => parallel = true,
+            "--parallel" => saw_parallel = true,
+            "--serial" => {
+                saw_serial = true;
+                parallel = false;
+            }
+            s if s.starts_with("--threads=") => {
+                let v = &s["--threads=".len()..];
+                match v.parse::<usize>() {
+                    Ok(n) => threads_flag = Some(n),
+                    Err(_) => {
+                        eprintln!("chezzi run: --threads expects a non-negative integer (0 = all cores), got '{v}'");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
             other if other.starts_with("--") => {
                 eprintln!("chezzi run: unknown flag '{other}'");
                 return ExitCode::FAILURE;
@@ -200,13 +227,39 @@ fn cmd_run(args: &[String]) -> ExitCode {
         }
     }
     let Some(path) = path else {
-        eprintln!("chezzi run: missing file argument\nusage: chezzi run <file.chz> [--errors=json] [--interp] [--parallel]");
+        eprintln!("chezzi run: missing file argument\nusage: chezzi run <file.chz> [--errors=json] [--interp] [--serial] [--parallel] [--threads=N]");
         return ExitCode::FAILURE;
     };
-    if parallel && !use_vm {
+    if saw_parallel && saw_serial {
+        eprintln!("chezzi run: --parallel and --serial are mutually exclusive");
+        return ExitCode::FAILURE;
+    }
+    if saw_parallel && !use_vm {
         eprintln!("chezzi run: --parallel is VM-only and cannot combine with --interp (the interpreter is the frozen sequential engine)");
         return ExitCode::FAILURE;
     }
+
+    // Resolve the M:N worker count. An explicit `--threads` wins and errors if the parallel engine
+    // won't run (contradiction); otherwise `CHEZZI_THREADS` applies only when it actually will, so a
+    // stray env var never breaks `--serial`/`--interp`. `0`/unset both mean auto (all cores).
+    let runs_parallel = use_vm && parallel;
+    if let Some(n) = threads_flag {
+        if !runs_parallel {
+            let conflict = if !use_vm { "--interp (the interpreter is single-threaded)" } else { "--serial (the cooperative single-thread engine)" };
+            eprintln!("chezzi run: --threads sizes the parallel engine and has no effect with {conflict}");
+            return ExitCode::FAILURE;
+        }
+        vm::set_worker_count(n);
+    } else if runs_parallel && let Ok(raw) = std::env::var("CHEZZI_THREADS") {
+        let s = raw.trim();
+        if !s.is_empty() {
+            match s.parse::<usize>() {
+                Ok(n) => vm::set_worker_count(n),
+                Err(_) => eprintln!("chezzi run: ignoring invalid CHEZZI_THREADS='{s}' (expected a non-negative integer; 0 = all cores)"),
+            }
+        }
+    }
+
     if read_source(&path).is_none() {
         return ExitCode::FAILURE;
     }

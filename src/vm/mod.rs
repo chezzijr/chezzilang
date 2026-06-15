@@ -109,6 +109,28 @@ const Q_GENERIC: u8 = 2;
 /// call-depth limit from the caller's thread.
 const VM_STACK_BYTES: usize = 256 * 1024 * 1024;
 
+/// Configured worker count for the M:N OS-thread engine. `0` = auto (size to
+/// [`std::thread::available_parallelism`]). Set once at startup from `--threads=N` /
+/// `CHEZZI_THREADS` (see `main::cmd_run`), BEFORE any `parallel:` join runs — the process-wide pool
+/// ([`pool`]) is a `OnceLock` created lazily on first use, so a later store would not resize it.
+static WORKER_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+
+/// Override the M:N engine's worker count. `0` restores auto (= `available_parallelism()`). Must be
+/// called before the first parallel run; see [`WORKER_OVERRIDE`].
+pub fn set_worker_count(n: usize) {
+    WORKER_OVERRIDE.store(n, Ordering::Relaxed);
+}
+
+/// The effective M:N worker count: the configured override, or `available_parallelism()` when unset
+/// (`0`). Always `>= 1`. Read by the pool size, the scheduler's `nworkers`, and the eager-nursery
+/// gate so all three agree.
+pub fn worker_count() -> usize {
+    match WORKER_OVERRIDE.load(Ordering::Relaxed) {
+        0 => std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1).max(1),
+        n => n.max(1),
+    }
+}
+
 /// One activation record.
 // `Clone` is only used to snapshot a generator's suspended frames (experimental); the hot call
 // paths never clone a frame.
@@ -3633,9 +3655,7 @@ impl Vm {
                 // On a single core we fall back to the lazy queue-at-join path (handlers drain at the
                 // join), which still serves a realistic parallel-client server and never deadlocks —
                 // and `--parallel` on one core is already a degenerate config.
-                let eager = self.parallel
-                    && self.mn.is_some()
-                    && std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) >= 2;
+                let eager = self.parallel && self.mn.is_some() && worker_count() >= 2;
                 let scope = eager.then(|| self.activate_eager_nursery());
                 self.eager_scheds.push(scope);
             }
@@ -6230,7 +6250,7 @@ impl Vm {
         // the outer totals here, so size to a reasonable upper bound (core count) capped by total work
         // after enlisting is impossible to know pre-register; use core count (the inline owner alone
         // still guarantees completion, helpers only accelerate).
-        let nworkers = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1).max(1);
+        let nworkers = worker_count();
         let sched = Arc::new(MnSched::new(total, nworkers, Arc::clone(&cancel), deadlock_err));
         sched.seed(fibers);
         // Early-enlist OUTER still-pending nurseries (case-A: `main`'s sibling `O` when the builder is a
@@ -15546,6 +15566,32 @@ main()";
     fn golden_compound_assign_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/compound_assign.chz");
         let expected = include_str!("../../examples/compound_assign.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    }
+
+    /// Concurrency demo golden: `examples/demo_spawn.chz` (`spawn` in a `parallel:` nursery, results
+    /// collected over a `Channel` and summed — order-independent, so byte-identical on the VM, the
+    /// interpreter, the `--parallel` engine, and its `.expected`). Its twin is `demo_executor`.
+    #[test]
+    fn golden_demo_spawn_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/demo_spawn.chz");
+        let expected = include_str!("../../examples/demo_spawn.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    }
+
+    /// Concurrency demo golden: `examples/demo_executor.chz` (the `Executor` twin of `demo_spawn` —
+    /// detached `submit` + `shutdown` drain producing the same summed result). Byte-identical on the
+    /// VM, the interpreter, the `--parallel` engine, and its `.expected`.
+    #[test]
+    fn golden_demo_executor_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/demo_executor.chz");
+        let expected = include_str!("../../examples/demo_executor.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));

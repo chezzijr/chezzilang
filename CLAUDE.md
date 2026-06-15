@@ -40,17 +40,24 @@ cargo run -- help        # CLI usage
 cargo run -- tokens examples/hello.chz   # token stream (M1)
 cargo run -- ast    examples/hello.chz   # parsed AST (M2)
 cargo run -- check  examples/hello.chz   # type-check only (M4); --errors=json for machine output
-cargo run -- run    examples/hello.chz   # type-check + run on the bytecode VM (default, M5)
+cargo run -- run    examples/hello.chz   # type-check + run on the VM, OS-thread engine (default, M5)
+cargo run -- run --serial   examples/hello.chz   # cooperative single-thread VM (frozen parity oracle)
 cargo run -- run --interp   examples/hello.chz   # tree-walk interpreter (frozen reference engine)
-cargo run -- run --parallel examples/primes_parallel.chz   # VM-only OS-thread engine
+cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alias (engine is now default)
+cargo run -- run --threads=4 examples/primes_parallel.chz  # size the OS-thread pool (0/omitted = all cores; env CHEZZI_THREADS)
 cargo run -- repl                        # interactive REPL (NOT IMPLEMENTED — stub errors; see src/main.rs:65)
 
 cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see docs/benchmarks.md)
 ```
 
 > Flags go **before** the file path; anything after the file is passed to the program.
-> `--interp` and `--parallel` are mutually exclusive (the interpreter is the frozen
-> sequential engine; `--parallel` is the VM's real-thread engine).
+> `chezzi run` now defaults to the VM's real-thread OS-thread engine. `--serial` selects the
+> cooperative single-thread VM (the frozen byte-identical parity oracle); `--parallel` is kept as a
+> no-op alias for the default. `--threads=N` (or env `CHEZZI_THREADS`) sizes the OS-thread engine's
+> worker pool — `0`/omitted = all cores, the flag wins over the env, and it errors with
+> `--serial`/`--interp` (neither is multi-threaded). `--interp` (the frozen sequential reference
+> engine) is mutually exclusive with an explicit `--parallel`, and `--parallel`/`--serial` are
+> mutually exclusive.
 
 ## Conventions
 

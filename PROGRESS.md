@@ -183,12 +183,17 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
 ## Concurrency — feature-complete (confirmed 2026-06-12)
 
 Core feature-complete through **M18**; **concurrency shipped through Tier-D (D0–D6c) + M-C**. The surface —
-`spawn` / `parallel:` nursery / `Channel[T]` / `Shared[T]` / `Executor`, plus `--parallel` (the VM's real
-OS-thread engine) and the netpoller + `std.net` — is complete and stable. **M-C implicit nurseries shipped
+`spawn` / `parallel:` nursery / `Channel[T]` / `Shared[T]` / `Executor`, plus the VM's real OS-thread
+engine and the netpoller + `std.net` — is complete and stable. **M-C implicit nurseries shipped
 (2026-06-12)** — every function body and the module top level is an implicit nursery; a bare `spawn` is
-legal anywhere and joins at `return`/end. ~1592 tests green; the default cooperative engine and `--parallel`
-stay byte-identical on every `examples/parallel*.chz` + `examples/implicit_nursery.chz` golden, and the
-frozen interp is the differential parity oracle for the sequential subset.
+legal anywhere and joins at `return`/end. ~1592 tests green; the cooperative engine (`--serial`) and the
+OS-thread engine stay byte-identical on every `examples/parallel*.chz` + `examples/implicit_nursery.chz`
+golden, and the frozen interp is the differential parity oracle for the sequential subset.
+
+**CLI engine selection.** `chezzi run` now defaults to the OS-thread engine; `--serial` selects the
+cooperative single-thread VM (the frozen parity oracle), `--parallel` is an accepted no-op alias, and
+`--threads=N` (or env `CHEZZI_THREADS`, flag wins; `0`/omitted = all cores) sizes the OS-thread worker
+pool via `vm::worker_count()`. `--threads` errors with `--serial`/`--interp` (neither is multi-threaded).
 
 > **`Channel.recv_timeout(ms)` — attempted then reverted (2026-06-12).** A bounded-wait `recv` was
 > implemented with a **demote-always** shortcut (reuse `demote_recv_block` + a deadline) to avoid the
@@ -327,7 +332,7 @@ drain only its private queue and could never RUN `O` → `deadlock` fault) is **
   ordering follows the parity-preserving per-nursery flush.
 - **Eager nurseries unchanged (OPTION A):** the per-connection eager nursery keeps its OWN sched +
   dedicated drainer (single-scope fast path), untouched.
-- **Cooperative (default `run`) + `--interp`:** still serialize nested nursery levels → the same program
+- **Cooperative (`run --serial`) + `--interp`:** still serialize nested nursery levels → the same program
   **still faults `deadlock`** there. The cooperative-engine flatten is a **separate, later commit**.
   Workaround on `run`: siblings in ONE nursery (doc case C). Golden is M:N-only (no coop/interp leg),
   watchdog-wrapped — mirrors `golden_channel_block`.

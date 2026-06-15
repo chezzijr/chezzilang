@@ -84,8 +84,10 @@ new syntax.
 
 **Concurrency — SHIPPED (Tiers A–D).** No longer deferred: Chezzi has a shared-nothing actor model
 (`spawn` cheap tasks + a `parallel:` structured-concurrency nursery), `Channel[T]` (move-on-send,
-`close`/`for v in ch`/`try_send`), `Shared[T]`, and `Executor`. The cooperative engine is the default
-parity oracle; `--parallel` is a real OS-thread **M:N work-stealing scheduler** (reduction-counting
+`close`/`for v in ch`/`try_send`), `Shared[T]`, and `Executor`. `chezzi run` defaults to the real
+OS-thread engine (size its worker pool with `--threads=N` / `CHEZZI_THREADS`, `0` = all cores);
+`--serial` selects the cooperative engine (kept as the byte-identical parity oracle). The OS-thread
+engine is a **M:N work-stealing scheduler** (reduction-counting
 preemption, a dirty/blocking pool for opaque blocking natives, and an epoll/kqueue netpoller backing
 non-blocking `std.net` TCP). **M-C implicit nurseries shipped** — every function body and the module
 top level is an implicit nursery that joins at its `return`/end, so a bare `spawn` is legal anywhere

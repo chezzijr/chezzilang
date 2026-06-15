@@ -78,7 +78,8 @@ ship behind unchanged behavior.
 ### B. Bounded work pool, not thread-per-task
 
 `parallel:` with N spawns must **not** be N OS threads (nested `parallel:` would explode N×M). **Decision:
-a bounded pool sized to `available_parallelism()`; the thread that hits `JoinNursery` participates as a
+a bounded pool sized to `vm::worker_count()` (the `--threads=N` / `CHEZZI_THREADS` override, or
+`available_parallelism()` when unset/`0`); the thread that hits `JoinNursery` participates as a
 worker.** Known v1 hazard: bounded pool + blocking tasks can starve. v1 mitigation: parent-participates +
 a documented "tasks should not out-block the pool" rule; work-stealing / grow-on-stall deferred.
 
@@ -207,7 +208,8 @@ smuggle a parent `GcRef`). (d) Method tasks lower to `Lowered::Method` dispatche
 
 **B3.3-threads.** `Vm.parallel` selects the engine: `join_nursery` branches to `run_parallel_nursery`, which
 `prepare_worker`s each task, farms `tasks[1..]` to the bounded pool (`src/vm/pool.rs` — one process-wide
-`OnceLock<Pool>` of `available_parallelism()` threads), runs `tasks[0]` inline (decision B), then flushes
+`OnceLock<Pool>` of `vm::worker_count()` threads — `--threads=N` / `CHEZZI_THREADS`, else
+`available_parallelism()`), runs `tasks[0]` inline (decision B), then flushes
 output in **task order** (decision F) and propagates the lowest-index fault. `run_task_isolated` split into
 `prepare_worker` (parent-heap) + `ReadyWorker::run` (thread-side; `Vm` is `Send`); blocking `recv` waits on
 `ChannelCore.cv`; `Shared.update` takes a per-core `update_lock` **only under `--parallel`** so concurrent

@@ -1006,8 +1006,10 @@ result := [1, 2, 3, 4]
 
 ## 11b. Concurrency — `spawn` / `parallel:`  (see [`concurrency.md`](concurrency.md))
 
-> **Implemented — shipped through Tier-D.** The cooperative engine is the default; `--parallel` is a
-> real OS-thread M:N scheduler (`Channel`/`Shared`/`Executor`, netpoller-backed `std.net`). Full
+> **Implemented — shipped through Tier-D.** `chezzi run` defaults to the real OS-thread M:N scheduler
+> (`Channel`/`Shared`/`Executor`, netpoller-backed `std.net`); size its worker pool with
+> `--threads=N` / `CHEZZI_THREADS` (`0` = all cores). `--serial` selects the cooperative
+> engine (the byte-identical parity oracle). Full
 > design in [`concurrency.md`](concurrency.md); phase history in
 > [`concurrency-tier-d.md`](concurrency-tier-d.md).
 

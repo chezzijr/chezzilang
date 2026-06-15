@@ -1,7 +1,7 @@
 //! D5 — the growable "dirty" / blocking pool for opaque blocking native calls (`std.io.read_file` /
 //! `write_file`, `std.fs.*`, `std.time.sleep_ms`).
 //!
-//! The core `--parallel` pool ([`super::pool`]) is bounded to `available_parallelism()`: a blocking
+//! The core `--parallel` pool ([`super::pool`]) is bounded to [`super::worker_count`]: a blocking
 //! native run inline on a core worker pins it for the whole call, so enough concurrent blocking calls
 //! starve the scheduler (the live G3 hazard). D5 offloads a blocking native here instead: the fiber
 //! parks, the core worker is freed, and a *blocking-pool* thread runs the call and re-enqueues the
