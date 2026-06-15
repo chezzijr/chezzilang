@@ -1611,10 +1611,15 @@ impl MnSched {
             let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
             (!g.queue.is_empty(), g.closed)
         };
+        // A concurrent `trip()` (between `recv`'s empty-check and here) sets `done_latch` then runs
+        // `close_wake`, which finds no parked fiber yet — so close the gap by re-checking the latch too
+        // (a tripped done() channel is "ready", like `closed`), else a `wait:`/`recv` on a manually
+        // cancelled token's `done()` strands forever under the OS-thread engine.
+        let latched = core.done_latch.load(Ordering::Relaxed);
         // Cross-nursery flat scheduler — read the PARKING fiber's SCOPE cancel (not the sched's global
         // `cancel`), so an inner fault that tripped only its scope re-checks the right flag here.
         let cancelled = c.scopes[fiber.scope_id].cancel.load(Ordering::Relaxed);
-        if message_waiting || closed || cancelled {
+        if message_waiting || closed || latched || cancelled {
             fiber.state = FiberState::Ready;
             c.global.push_back(fiber);
             self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued)
@@ -1646,8 +1651,13 @@ impl MnSched {
         let mut ready_now = c.scopes[fiber.scope_id].cancel.load(Ordering::Relaxed);
         if !ready_now {
             for (_, core) in &arms {
-                let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                if !g.queue.is_empty() || g.closed {
+                let ready = {
+                    let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                    !g.queue.is_empty() || g.closed
+                };
+                // A tripped `done_latch` (a concurrent `trip()`) makes this arm ready, same as a queued
+                // value or a close — re-check it in the gap or a `wait: tok.done()` strands forever.
+                if ready || core.done_latch.load(Ordering::Relaxed) {
                     ready_now = true;
                     break;
                 }
@@ -6593,6 +6603,17 @@ impl Vm {
                     drop(c);
                     return Ok(RecvStep::Got(w));
                 }
+                // A tripped latch (`trip()`) delivers `true` like a passed timer — ranks below a real
+                // queued value, above closed/terminate/deadlock (a `done().recv()` on a cancelled token
+                // reached inside a native callback must not false-deadlock).
+                if core.done_latch.load(Ordering::Relaxed) {
+                    c.running += 1;
+                    sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+                    c.unregister_demoted(ptr);
+                    drop(qg);
+                    drop(c);
+                    return Ok(RecvStep::Got(WireValue::Bool(true)));
+                }
                 // Closed-and-drained: the queue is empty here (pop-first) and the channel is closed, so
                 // no value will ever arrive — signal `ClosedEmpty` (the caller faults "receive on a
                 // closed channel"). Read while still holding the queue lock so it is atomic with the
@@ -6719,6 +6740,13 @@ impl Vm {
                         un_account(&mut c);
                         drop(c);
                         return Ok((idx, w));
+                    }
+                    // A tripped latch (`trip()`) makes this arm ready with `true` (after the value scan).
+                    if core.done_latch.load(Ordering::Relaxed) {
+                        drop(qg);
+                        un_account(&mut c);
+                        drop(c);
+                        return Ok((idx, WireValue::Bool(true)));
                     }
                     if !qg.closed {
                         all_closed = false;
@@ -8662,7 +8690,11 @@ impl Vm {
                 // with nothing queued — the level-triggered, non-blocking poll (used by `wait`'s
                 // source-order scan and the `else` arm). `--parallel` may also have a real `true`
                 // queued by the background send; either way `Some(true)`.
+                // A tripped latch (`trip()`) reports ready forever, like a passed timer deadline.
                 let popped = popped.or_else(|| {
+                    if core.done_latch.load(Ordering::Relaxed) {
+                        return Some(WireValue::Bool(true));
+                    }
                     core.timer.filter(|d| std::time::Instant::now() >= *d).map(|_| WireValue::Bool(true))
                 });
                 Ok(match popped {
@@ -8690,6 +8722,24 @@ impl Vm {
                     // Wake any demoted OS thread blocked on this core's condvar (in-callback recv).
                     core.cv.notify_all();
                     // Cooperative engine: re-add every sibling fiber parked on this channel's `recv`.
+                    self.wake_on_send(h);
+                }
+                Ok(Value::Nil)
+            }
+            // `trip()` flips the manual level-trigger latch (the primitive behind `std.cancel`'s
+            // `done()`): the channel is then permanently ready (`recv`/`try_recv`/`wait` yield `true`).
+            // Idempotent. Reuses `close()`'s exact wake fan-out so a parked `recv`/`wait` re-runs and
+            // observes the latch — but does NOT set `closed` (a closed+empty `wait` arm is *skipped*;
+            // we need it *ready*).
+            "trip" => {
+                self.arity_err("trip", args, 0, span)?;
+                let core = self.channel_core(h);
+                core.done_latch.store(true, Ordering::Relaxed);
+                if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
+                    let key = self.channel_core_ptr(h);
+                    sched.close_wake(key, &core);
+                } else {
+                    core.cv.notify_all();
                     self.wake_on_send(h);
                 }
                 Ok(Value::Nil)
@@ -8733,6 +8783,18 @@ impl Vm {
     /// the receiver + rewinding `ip` so the calling op re-runs on resume, setting `suspend`). Shared
     /// by `recv` (`CallMethod`) and the `ChanRecvOrClosed` op (`for v in ch:`).
     fn chan_recv_step(&mut self, h: GcRef, span: Span) -> Result<RecvStep, RuntimeError> {
+        // A tripped latch (`trip()`) delivers `true` immediately and forever, on every engine — a
+        // pending queued value (if any) still wins first. Checked before the timer/park logic so a
+        // `done().recv()` on a manually-cancelled token never parks.
+        {
+            let core = self.channel_core(h);
+            if core.done_latch.load(Ordering::Relaxed) {
+                if let Some(w) = core.q.lock().unwrap().queue.pop_front() {
+                    return Ok(RecvStep::Got(w));
+                }
+                return Ok(RecvStep::Got(WireValue::Bool(true)));
+            }
+        }
         // A `timer(ms)` channel delivers `true` once its deadline passes. Handled here (uniformly,
         // before the ordinary park logic) so it works regardless of the engine the receiver runs in
         // and where the timer was created. Delivery is scheduled at RECV time, in the recv's own
@@ -8863,6 +8925,11 @@ impl Vm {
             if let Some(w) = popped {
                 let v = self.from_wire(w);
                 self.take_wait_arm(base, v, meta.arm_targets[i]);
+                return Ok(());
+            }
+            // A tripped latch (`trip()`) is ready like a fired timer — take the arm with `true`.
+            if core.done_latch.load(Ordering::Relaxed) {
+                self.take_wait_arm(base, Value::Bool(true), meta.arm_targets[i]);
                 return Ok(());
             }
             if let Some(deadline) = core.timer {
@@ -19435,6 +19502,42 @@ main()";
         assert!(err.message.contains("deadlock"), "got: {}", err.message);
     }
 
+    /// `std.cancel` wakeup regression — a sibling's `cancel()` (which `trip()`s the token's `done()`
+    /// channel) must wake a fiber **parked** in `wait: tok.done().recv()` under the OS-thread engine.
+    /// The canceller sleeps first so the waiter reliably reaches `park_wait` and blocks; the `trip()`
+    /// then routes through `close_wake`, which must reach the parked `WaitPark` token and re-poll it to
+    /// observe the latch. (The *narrower* park-decision-vs-`trip` race is closed by adding `done_latch`
+    /// to `MnSched::park`/`park_wait`'s gap re-check — correct by construction, mirroring how `closed`
+    /// is handled; not deterministically forceable from source.) All rounds must complete.
+    #[test]
+    fn cancel_trip_wakes_parked_wait_under_parallel() {
+        let src = "import std.cancel\n\
+                   import std.time\n\
+                   fn waiter(tok: Token, out: Channel[bool]):\n\
+                   \x20   wait:\n\
+                   \x20       _ := tok.done().recv(): out.send(true)\n\
+                   fn canceller(tok: Token):\n\
+                   \x20   time.sleep_ms(5)\n\
+                   \x20   tok.cancel()\n\
+                   fn main():\n\
+                   \x20   out := Channel[bool]()\n\
+                   \x20   n := 30\n\
+                   \x20   for i in 0..n:\n\
+                   \x20       tok := cancel.manual()\n\
+                   \x20       parallel:\n\
+                   \x20           spawn waiter(tok, out)\n\
+                   \x20           spawn canceller(tok)\n\
+                   \x20   c := 0\n\
+                   \x20   for _ in 0..n:\n\
+                   \x20       out.recv()\n\
+                   \x20       c = c + 1\n\
+                   \x20   print(c)\n\
+                   main()\n";
+        let (out, _e, res, _c) = run_parallel_watchdog(src);
+        assert!(res.is_ok(), "cancel→wait must not fault/strand: {res:?}");
+        assert_eq!(out, "30\n", "every parked waiter must be woken by the sibling's cancel");
+    }
+
     /// B3.5 — the named anti-false-positive case: one sibling `send`s the very channel the other
     /// `recv`s, so the nursery genuinely progresses. The barrier-confirm detector must NOT report a
     /// deadlock (a real send aborts any half-built all-blocked confirmation).
@@ -20616,6 +20719,58 @@ main()
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/math_more.chz");
+    }
+
+    /// `Channel.trip()` — the manual level-trigger latch (behind `std.cancel`'s `done()`). Tripping
+    /// makes the channel permanently ready (`recv`/`try_recv` yield `true`, fanning out). Deterministic
+    /// on every engine → golden + parity.
+    #[test]
+    fn golden_channel_trip_via_run_file() {
+        let path = fixture("examples/channel_trip.chz");
+        let expected = std::fs::read_to_string(fixture("examples/channel_trip.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/channel_trip.chz");
+    }
+
+    /// `std.cancel` — a manual token: `cancelled()`/`reason()` before/after `cancel()`, `done()`
+    /// readiness, idempotent re-cancel. Pure `Shared`/latch, no timing → golden + parity on every engine.
+    #[test]
+    fn golden_cancel_manual_via_run_file() {
+        let path = fixture("examples/cancel_manual.chz");
+        let expected = std::fs::read_to_string(fixture("examples/cancel_manual.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/cancel_manual.chz");
+    }
+
+    /// `std.cancel` — timeouts + `wait:` integration (`done()` as a wait arm). All cases deterministic
+    /// (pre-loaded channels / already-elapsed deadline) → golden + parity.
+    #[test]
+    fn golden_cancel_timeout_wait_via_run_file() {
+        let path = fixture("examples/cancel_timeout_wait.chz");
+        let expected = std::fs::read_to_string(fixture("examples/cancel_timeout_wait.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/cancel_timeout_wait.chz");
+    }
+
+    /// `std.cancel` — cooperative CPU-loop cancellation DIVERGES by engine, so it has no `.expected`
+    /// (cf. `examples/parallel_cancel.chz`). A sibling's manual `cancel()` aborts the polling worker
+    /// early on the default OS-thread engine (preemption); the single-threaded cooperative oracle runs
+    /// the worker to completion first (the canceller only runs at the sequential join). Asserts both.
+    #[test]
+    fn cancel_cpu_diverges_by_engine() {
+        let path = fixture("examples/cancel_cpu.chz");
+        let (par_out, _e, par_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+        assert!(par_res.is_ok(), "{par_res:?}");
+        assert_eq!(par_out, "worker aborted early\n", "default OS-thread engine should preempt + abort");
+        let (coop_out, _e, coop_res, _) = run_file(&path);
+        assert!(coop_res.is_ok(), "{coop_res:?}");
+        assert_eq!(coop_out, "worker ran to completion\n", "cooperative oracle should run to completion");
     }
 
     /// C-ABI FFI golden (VM twin of `interp::golden_ffi_chz`): the `extern "lib":` block calls

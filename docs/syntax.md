@@ -1081,9 +1081,17 @@ fn fetch_all(urls: list[str]):
   engines** — the cooperative default, the interpreter, and `--parallel` (the M:N multi-channel blocking
   park, including `timer` arms, has landed). See
   [`concurrency.md §6d`](concurrency.md) and `examples/wait_select.chz`.
+- **`std.cancel` (cancellation token)** — `import std.cancel`; `cancel.manual()` / `cancel.timeout(ms)`
+  build a `Token` you thread down a call tree (sendable). Poll `tok.cancelled() -> bool` in CPU loops,
+  race `tok.done() -> Channel[bool]` in a `wait:` for IO loops, `tok.cancel()` from anywhere; also
+  `reason() -> str?` (`"cancelled"`/`"timeout"`/`None`), `deadline_at()`. Tokens are flat in v1 (no
+  parent/child derivation). Cooperative (signals, doesn't forcibly interrupt — poll in CPU loops). See
+  [`concurrency.md §6e`](concurrency.md) and `examples/cancel_*.chz`.
+- **`Channel.trip()`** — flip a permanent level-trigger latch: the channel is then ready (`recv`/
+  `try_recv`/`wait` → `true`) for every receiver (the manual fan-out behind `std.cancel`'s `done()`).
 - **Sendability:** captures are copies, **read-only** inside a task (reassign = error); only sendable
-  types (scalars/str/containers+structs of sendable/`Channel`/`Shared`) cross — not closures, native
-  handles, or `Ref`.
+  types (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`Shared`/a `std.cancel` `Token`)
+  cross — not closures, native handles, or `Ref`.
 
 ## 12. Imports & modules  (M4.5)
 

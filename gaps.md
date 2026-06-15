@@ -259,23 +259,25 @@ thread-demotion landed (attempt)** for the native islands — see the residuals 
   - **(cost, by design)** one raw OS thread per fiber *actually* blocked in a callback (Go's `handoffp`
     cost), faulted cleanly if the OS refuses the thread.
 
-- **🟡 No first-class task cancellation / timeout API** — cancellation *plumbing* exists (a per-scope
-  `cancel: Arc<AtomicBool>` polled at safepoints: the `run_until` back-edge `src/vm/mod.rs:2862` + a
-  blocking `recv`'s re-check loop `:6585`/`:6708`/`:8769`) but it is tripped by **only two things** —
-  a **sibling fault** (`:6391`) or **`std.os.exit`** (`:10642`, halts the whole process). There is no
-  `task.cancel()` handle, no pollable cancellation token (Go's `context.Context` / `ctx.Done()`), and
-  no `with_timeout:` scope. **Blocks:** any "cancel a specific task" or "bound a task's latency"
-  use-case — e.g. a test-runner per-test timeout. **The naive timeout is wrong** because structured
-  concurrency joins at scope exit (a task can't outlive its nursery), so the obvious `wait:`/`timer`
-  pattern returns `Err("timeout")` *logically* but still **blocks for the full work** — measured 2.50s
-  for a 0.5s timeout over 2s work, identical on coop/interp/`--parallel`. A *true* cancel-and-continue
-  timeout IS expressible today only as a workaround — race a `timer`, deliberately fault to trip the
-  scope cancel, wrap in `recover:` (verified ~0.3s, work aborted, `Shared` stays 0 on `--parallel`) —
-  but it is a hack riding fault-propagation, not an API, and the cancel unwind bypasses `recover:`
-  inside the cancelled task (`:2856-2858`). **Fix sketch:** a first-class cancel token + `with_timeout:`
-  (or `spawn`-returns-a-handle with `.cancel()`), lowering to a scope-cancel trip that does NOT require
-  a synthetic fault; needs a serial-oracle analogue for two-engine parity. Cross-ref gap below — on the
-  default engine it only works for non-CPU-bound tasks anyway.
+- **✅ SHIPPED — first-class task cancellation / timeout API (`std.cancel`).** A user-level
+  cooperative cancellation **`Token`** (`std/cancel.chz`, Go-`context`-inspired): `cancel.manual()` /
+  `cancel.timeout(ms)`, methods `cancelled() -> bool`,
+  `reason() -> str?` (`"cancelled"`/`"timeout"`), `done() -> Channel[bool]` (a `wait:` arm), `cancel()`
+  (anytime, any task), `deadline_at()`. Tokens are **flat** in v1 (no parent/child derivation — tree
+  propagation is a documented follow-up). Built over `Shared[bool]` + `monotonic()` (deadline checked
+  **at poll time**, so the timeout case is deterministic across engines — no background canceller) + the
+  one new native primitive **`Channel.trip()`** (a permanent level-trigger latch, the manual-cancel
+  fan-out a move-on-send `Channel` can't give). **Deliberately decoupled** from the internal nursery
+  `cancel: Arc<AtomicBool>` (which is still tripped only by a sibling fault `src/vm/mod.rs:6391` or
+  `std.os.exit` `:10642`) — a user `cancelled()`-driven `return` runs `defer`/`recover:` normally,
+  unlike the internal scope-cancel unwind that bypasses them (`:2856-2858`). The old naive `wait:`/
+  `timer` "timeout" remains wrong (it returns `Err("timeout")` logically but runs the full work — a
+  task can't outlive its nursery); `std.cancel` is the supported answer for timeouts + manual cancel.
+  **Test-authoring rule (parity):** a cancellation example is golden only if it asserts
+  *that* cancellation happened (which outcome / which `wait:` arm) at a fixed point — never iteration
+  count or *when* a CPU loop was interrupted. Manual cancel of a running CPU sibling diverges by engine
+  (see below), so `examples/cancel_cpu.chz` carries no `.expected` (joins `examples/parallel_cancel.chz`)
+  and is covered by a Rust `#[test]` instead. See `docs/concurrency.md` §6e / §6c'.
 
 - **🟡 The cooperative (default) + `--interp` engines cannot preempt CPU-bound tasks** — cooperative
   engines switch fibers only at yield points (channel ops, blocking `recv`, the back-edge *when it

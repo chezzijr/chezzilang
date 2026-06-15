@@ -1,0 +1,30 @@
+# std.cancel — timeouts and `wait:` integration. All cases are deterministic (pre-loaded channels /
+# already-elapsed deadlines), so this is golden on every engine.
+import std.cancel
+
+fn main():
+    # 1. An already-elapsed timeout: cancelled() is true and reason() is "timeout".
+    t := cancel.timeout(0)
+    print("expired? {t.cancelled()}")
+    match t.reason():
+        Some(r): print("reason: {r}")
+        None:    print("reason: none")
+
+    # 2. `wait:` racing real work vs the token's done(). The work channel is pre-loaded, so the work
+    #    arm wins by source order — no race, deterministic.
+    tok := cancel.manual()
+    work := Channel[str]()
+    work.send("payload")
+    wait:
+        v := work.recv():        print("got work: {v}")
+        _ := tok.done().recv():  print("cancelled before work")
+
+    # 3. `wait:` where the token is already cancelled and the work channel is empty → done() wins.
+    tok2 := cancel.manual()
+    tok2.cancel()
+    empty := Channel[str]()
+    wait:
+        v := empty.recv():        print("got work: {v}")
+        _ := tok2.done().recv():  print("token done")
+
+main()

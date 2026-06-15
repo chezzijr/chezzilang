@@ -1,0 +1,18 @@
+# `Channel.trip()` — the manual level-trigger latch behind `std.cancel`'s `done()`.
+# Once tripped, a channel is permanently ready (recv yields `true`, try_recv yields Some(true)),
+# fanning out to any number of receivers — unlike a normal move-on-send value. Deterministic on
+# every engine (no timing), so this is a golden example.
+fn main():
+    c := Channel[bool]()
+    match c.try_recv():
+        Some(v): print("before: ready {v}")
+        None:    print("before: not ready")
+    c.trip()
+    print("recv: {c.recv()}")
+    match c.try_recv():
+        Some(v): print("after: ready {v}")
+        None:    print("after: not ready")
+    # level-triggered: still ready on a second recv
+    print("recv again: {c.recv()}")
+
+main()

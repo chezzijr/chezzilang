@@ -256,6 +256,10 @@ pub struct ChanState {
     /// so blocking is fine); `try_recv` reports `Some(true)` once the deadline passes. `None` for an
     /// ordinary channel. Mirrors `vm::core::ChannelCore::timer`.
     pub timer: Option<std::time::Instant>,
+    /// `trip()` manual level-trigger latch: once `true`, `recv`/`try_recv`/`wait` report ready
+    /// (`true`) forever. The primitive behind `std.cancel`'s `done()`. Mirrors
+    /// `vm::core::ChannelCore::done_latch`.
+    pub done_latch: bool,
 }
 
 impl ChanState {

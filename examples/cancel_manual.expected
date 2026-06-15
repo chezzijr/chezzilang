@@ -1,0 +1,6 @@
+before: cancelled=false
+before reason: none
+after: cancelled=true
+after reason: cancelled
+done recv: true
+after second cancel: cancelled=true

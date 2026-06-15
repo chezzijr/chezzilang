@@ -47,6 +47,12 @@ pub struct ChannelCore {
     /// timer handle is still served by its single job (it wakes whatever token sits in this bucket at
     /// the deadline). Only the snapshot-park path arms a job; the single-`recv` and demote paths don't.
     pub timer_armed: AtomicBool,
+    /// `trip()` manual level-trigger latch (the primitive behind `std.cancel`'s `done()`). Once set
+    /// true it is permanent: `recv`/`try_recv`/`wait` report ready (`true`) on every call thereafter,
+    /// for any number of receivers — exactly like a passed `timer` deadline, but flipped on demand
+    /// instead of by the clock. `false` for an ordinary `Channel[T]`. A `trip()` reuses `close()`'s
+    /// wake fan-out (minus the `closed` flag) so a parked `recv`/`wait` re-runs and observes it.
+    pub done_latch: AtomicBool,
 }
 
 /// The locked interior of a [`ChannelCore`]: the message FIFO plus a `closed` flag. Folding `closed`

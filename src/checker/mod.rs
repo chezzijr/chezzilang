@@ -5982,6 +5982,10 @@ fn channel_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
         // `close()` marks the channel closed (idempotent); a later `send` faults, `recv` drains then
         // faults, and `for v in ch:` ends cleanly once drained.
         "close" => (vec![], Ty::Nil),
+        // `trip()` flips a permanent level-trigger latch: the channel then reports ready (`true`) on
+        // every `recv`/`try_recv`/`wait`, fanning out to any number of receivers (the primitive behind
+        // `std.cancel`'s `done()`). Idempotent; takes no args.
+        "trip" => (vec![], Ty::Nil),
         "len" => (vec![], Ty::Int),
         _ => return None,
     };

@@ -195,6 +195,24 @@ cooperative single-thread VM (the frozen parity oracle), `--parallel` is an acce
 `--threads=N` (or env `CHEZZI_THREADS`, flag wins; `0`/omitted = all cores) sizes the OS-thread worker
 pool via `vm::worker_count()`. `--threads` errors with `--serial`/`--interp` (neither is multi-threaded).
 
+**`std.cancel` — cancellation tokens + `Channel.trip()` SHIPPED (2026-06-15).** A user-level
+cooperative cancellation **`Token`** (Go-`context`-inspired, adapted): `cancel.manual()` /
+`cancel.timeout(ms)`; methods `cancelled()`, `reason()` (`"cancelled"`/`"timeout"`), `done() ->
+Channel[bool]` (a `wait:` arm), `cancel()` (anytime/any task), `deadline_at()`. Tokens are **flat** in
+v1 (no parent/child derivation — tree propagation is a documented follow-up). Pure Chezzi
+(`std/cancel.chz`) over `Shared[bool]` +
+`monotonic()` (deadline checked **at poll time** → timeout is deterministic across engines, no
+background canceller) + ONE new native primitive **`Channel.trip()`** — a permanent level-trigger
+latch (the manual-cancel fan-out a move-on-send `Channel` lacks; reuses `close()`'s wake fan-out
+minus `closed`). Decoupled from the internal nursery cancel flag (so a user `cancelled()`-return runs
+`defer`/`recover:` normally). Goldens: `examples/channel_trip.chz`, `cancel_manual.chz`,
+`cancel_timeout_wait.chz` (byte-identical on cooperative-VM + interp); `examples/cancel_cpu.chz`
+carries **no `.expected`** (manual cancel of a CPU sibling diverges by engine — default preempts,
+`--serial`/`--interp` run to completion) and is covered by a Rust `#[test]`. A cross-task
+cancel→`wait:` lost-wakeup regression (`MnSched::park`/`park_wait` gap re-check now includes
+`done_latch`) is guarded by `cancel_trip_wakes_parked_wait_under_parallel`. Closes the `gaps.md`
+cancellation gap (timeouts + manual cancel). See `docs/concurrency.md` §6e/§6c'.
+
 > **`Channel.recv_timeout(ms)` — attempted then reverted (2026-06-12).** A bounded-wait `recv` was
 > implemented with a **demote-always** shortcut (reuse `demote_recv_block` + a deadline) to avoid the
 > heavier park+timer machinery. The review panel found it **unsound at `native_reentry == 0`**: (1) a
