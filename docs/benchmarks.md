@@ -160,8 +160,9 @@ untouched.
 > **~neutral to −3%**. When field access is a small fraction of the loop (method dispatch dominates)
 > and fields are shallow, the IC's cold `field_ic` indirection isn't amortized. The IC wins where
 > field resolution is actually the bottleneck (wider structs, deeper fields); it is not a free win on
-> every struct. A struct **type-id guard** (pure-int compare, no name re-verify) is the logged
-> follow-up if this caveat needs closing — see `future.md §4`.
+> every struct. A struct **type-id guard** (pure-int compare, no name re-verify) landed as Phase 5b
+> (`bbdcb38`, below) — measured **neutral**: it tightened the hit path but did **not** close this
+> caveat (the cost is the cold-IC indirection, not the name re-verify). Kept anyway (cheaper, parity-clean).
 
 ## After M19 Phase 5a — FxHash map/set index — 2026-06-12 (same machine)
 
@@ -312,8 +313,12 @@ next session doesn't re-discover these:
   inline the monomorphic int path (`loop`/`primes`); `CallFrame`'s `Vec`s are alloc-free, so there's
   no per-call frame alloc to pool. Both ✅/✗ in `future.md §4`.
 
-**Real next levers** (contained, parity-safe, bench-moving): struct **type-id guard** for the field
-IC (P4 follow-up), **small-string optimization**, faster `usize` hasher — see `future.md §4`.
+**All three "real next levers" have since landed** (struct **type-id guard** Phase 5b `bbdcb38`,
+measured neutral, kept; **small-string optimization** SSO; faster `usize` hasher → in-tree FxHash
+Phase 5a `2603fef`). The contained, parity-safe interpreter backlog is **spent**. What remains is
+Tier-3 (`future.md §4`): **#6 Cranelift JIT** (end-game, runs on the current 16 B `Value`), **#7
+NaN-box** (BLOCKED — full i64, see above), **#8 register VM / gen-GC** (low ROI). Per the diagnosis,
+interpreter levers can only *narrow* the gap — JIT is the only path to *match/beat* CPython on compute.
 
 ## Hoist the per-entry `Arc::clone` out of `run_until` (2026-06-12)
 
