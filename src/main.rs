@@ -20,6 +20,7 @@ mod parser;
 mod resolver;
 mod runtime;
 mod slice;
+mod test_runner;
 mod vm;
 
 #[cfg(test)]
@@ -35,6 +36,7 @@ USAGE:
 
 COMMANDS:
     run     <file>   Type-check, then run on the bytecode VM  (M5)
+    test    [path]   Run every `test fn` in *_test.chz files  (M20)
     check   <file>   Type-check only; report errors          (M4)
     tokens  <file>   Print the token stream                  (M1)
     ast     <file>   Print the parsed AST                    (M2)
@@ -63,6 +65,7 @@ fn main() -> ExitCode {
         "ast" => cmd_ast(args.get(1)),
         "check" => cmd_check(&args[1..]),
         "run" => cmd_run(&args[1..]),
+        "test" => cmd_test(&args[1..]),
         "repl" => {
             eprintln!("chezzi: 'repl' is not implemented yet.");
             eprintln!("        see the roadmap in docs/spec.md");
@@ -252,6 +255,34 @@ fn cmd_run(args: &[String]) -> ExitCode {
             eprintln!("{msg}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `chezzi test [path]` — discover + run every `test fn` in `*_test.chz` files under `path` (default
+/// cwd; a single `*_test.chz` file runs that file; a directory is walked recursively). Reports
+/// `PASS/FAIL name (file:line) msg` per test, a summary, and a non-zero exit if anything failed.
+fn cmd_test(args: &[String]) -> ExitCode {
+    let mut path: Option<String> = None;
+    for arg in args {
+        match arg.as_str() {
+            other if other.starts_with("--") => {
+                eprintln!("chezzi test: unknown flag '{other}'");
+                return ExitCode::FAILURE;
+            }
+            other if path.is_none() => path = Some(other.to_string()),
+            _ => {
+                eprintln!("chezzi test: unexpected extra argument");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let root = path.unwrap_or_else(|| ".".to_string());
+    let report = test_runner::run_tests(std::path::Path::new(&root));
+    print!("{}", report.text);
+    if report.passed {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

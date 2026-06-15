@@ -1,0 +1,9 @@
+# rule: testFnDecl, assertStmt
+test fn parses_int():
+    assert 1 + 1 == 2
+
+struct Suite:
+    test fn empty(self):
+        assert true
+    fn before_each(self):
+        return

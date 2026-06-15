@@ -1,0 +1,32 @@
+# examples/operators_test.chz — operator overloading via the numeric protocols, dogfooded with
+# `assert` (the print-and-golden twin is examples/operators.chz).
+
+struct Vec2:
+    x: int
+    y: int
+    fn add(self, o: Vec2) -> Vec2:
+        return Vec2(self.x + o.x, self.y + o.y)
+    fn sub(self, o: Vec2) -> Vec2:
+        return Vec2(self.x - o.x, self.y - o.y)
+    fn mul(self, o: Vec2) -> Vec2:
+        return Vec2(self.x * o.x, self.y * o.y)
+    fn eq(self, o: Vec2) -> bool:
+        return self.x == o.x and self.y == o.y
+
+test fn vec_add():
+    a := Vec2(1, 2)
+    b := Vec2(3, 4)
+    sum := a + b
+    assert sum.x == 4 and sum.y == 6, "componentwise add"
+
+test fn vec_sub():
+    a := Vec2(5, 7)
+    b := Vec2(1, 2)
+    d := a - b
+    assert d.x == 4 and d.y == 5
+
+test fn vec_mul():
+    a := Vec2(2, 3)
+    b := Vec2(4, 5)
+    p := a * b
+    assert p.x == 8 and p.y == 15

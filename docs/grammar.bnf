@@ -41,10 +41,10 @@
 <stmts>         ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
-<compoundStmt> ::= <fnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
+<compoundStmt> ::= <fnDecl> | <testFnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
-<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <exprStmt>
+<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <assertStmt> | <exprStmt>
 
 # ===== simple statements =====
 # The third form is a destructuring let: `a, b, … := expr` binds a tuple's elements positionally.
@@ -102,6 +102,10 @@
 <importName>  ::= "IDENT" | "IDENT" "AS" "IDENT"
 <dottedPath>  ::= "IDENT" | "IDENT" "DOT" <dottedPath>
 
+# `assert <cond>` faults with its source span when `cond` is false; the optional second operand is
+# a custom str message. `cond` must be bool and `msg` (if given) str — enforced by the checker.
+<assertStmt> ::= "ASSERT" <expr> "NEWLINE" | "ASSERT" <expr> "COMMA" <expr> "NEWLINE"
+
 <exprStmt> ::= <expr> "NEWLINE"
 
 # ===== blocks =====
@@ -124,6 +128,11 @@
            | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" <block>
            | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> <block>
            | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <block>
+# A `test` modifier before `fn` marks a test (`chezzi test` discovers it). A free `test fn` is an
+# independent test (no params, returns nothing); a `test fn name(self)` in a struct is a suite test.
+# The no-params/only-self + returns-nothing shape is enforced by the checker, not the grammar.
+<testFnDecl> ::= "TEST" <fnDecl>
+
 # A parameter may carry a default value (`x: int = expr`). Free `fn` declarations and struct methods
 # accept it; closures and protocol signatures reject it. The default may be any expression that does
 # not reference another parameter (a desugar-pass rule). These are rules the permissive grammar does
@@ -144,7 +153,7 @@
 <structDecl>    ::= "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <structMembers> "DEDENT"
                   | "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <structMembers> "DEDENT"
 <structMembers> ::= <structMember> | <structMember> <structMembers>
-<structMember>  ::= <field> | <fnDecl>
+<structMember>  ::= <field> | <fnDecl> | <testFnDecl>
 # A field may carry a constant-literal default (`port: int = 8080`), used to fill omitted args in a
 # constructor call. Const-ness and the "no required field after a default" rule are parser-level.
 <field>         ::= "IDENT" "COLON" <type> "NEWLINE"

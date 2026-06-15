@@ -19,8 +19,8 @@ use crate::ast::{
 use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ResolvedImport};
 use crate::vm::op::{
-    CapEntry, CapSrc, CffiDef, ModuleProto, Op, Program, Proto, ProtoId, StructDef, VariantDef,
-    WaitMeta, NO_IC,
+    CapEntry, CapSrc, CffiDef, ModuleProto, Op, Program, Proto, ProtoId, StructDef, SuiteInfo,
+    VariantDef, WaitMeta, LIFECYCLE_HOOKS, NO_IC,
 };
 use crate::{lexer, parser};
 use std::collections::HashMap;
@@ -49,9 +49,11 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
         c.hoist_types(&lm.ast.stmts)?;
         c.gather_aliases(&lm.ast.stmts);
     }
-    // Pass 2: compile each module's toplevel + functions.
+    // Pass 2: compile each module's toplevel + functions. The entry module is last (deps first);
+    // only its `test fn`s / suites are recorded for `chezzi test` discovery.
+    let entry_idx = graph.modules.len().saturating_sub(1);
     for (idx, lm) in graph.modules.iter().enumerate() {
-        let toplevel = c.compile_module(idx, &lm.ast, &lm.imports)?;
+        let toplevel = c.compile_module(idx, &lm.ast, &lm.imports, idx == entry_idx)?;
         let global_slots = std::mem::take(&mut c.global_slots);
         c.program.modules.push(ModuleProto {
             id: lm.id.clone(),
@@ -78,7 +80,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     let mut c = Compiler::new();
     c.hoist_types(&module.stmts)?;
     c.gather_aliases(&module.stmts);
-    let toplevel = c.compile_module(0, module, &[])?;
+    let toplevel = c.compile_module(0, module, &[], true)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
@@ -131,6 +133,8 @@ impl Compiler {
             field_ic_sites: 0,
             method_ic_sites: 0,
             cffi_defs: Vec::new(),
+            tests: Vec::new(),
+            suites: Vec::new(),
         };
         // Built-in Result / Option variants, available without declaration.
         for (v, e, arity) in [("Ok", "Result", 1), ("Err", "Result", 1), ("Some", "Option", 1), ("None", "Option", 0)] {
@@ -254,6 +258,7 @@ impl Compiler {
                             methods: HashMap::new(),
                             module_idx: 0, // filled in pass 2
                             tid,
+                            test_methods: Vec::new(), // filled in pass 2
                         },
                     );
                     self.struct_fields.insert(name.clone(), fields.clone());
@@ -275,18 +280,44 @@ impl Compiler {
     }
 
     /// Pass 2: compile one module to a toplevel proto; record method protos into the type table.
-    fn compile_module(&mut self, module_idx: usize, module: &Module, imports: &[ResolvedImport]) -> Result<ProtoId, CompileError> {
+    fn compile_module(&mut self, module_idx: usize, module: &Module, imports: &[ResolvedImport], is_entry: bool) -> Result<ProtoId, CompileError> {
         // M19 Phase 2b: assign a stable slot to every module global before emitting any code, so
         // forward references (method/fn bodies, imports used before their line) resolve to a slot.
         self.collect_globals(imports, &module.stmts);
         // Compile struct methods first, recording their proto ids + this module as their home.
         for stmt in &module.stmts {
-            if let StmtKind::Struct { name, methods, .. } = &stmt.kind {
+            if let StmtKind::Struct { name, methods, fields, .. } = &stmt.kind {
+                let mut test_methods: Vec<String> = Vec::new();
+                let mut suite_tests: Vec<(String, ProtoId)> = Vec::new();
+                let mut hooks: HashMap<String, ProtoId> = HashMap::new();
                 for m in methods {
                     let pid = self.compile_fn(m, false)?;
                     let def = self.program.structs.get_mut(name).expect("hoisted");
                     def.module_idx = module_idx;
                     def.methods.insert(m.name.clone(), pid);
+                    if m.is_test {
+                        test_methods.push(m.name.clone());
+                        suite_tests.push((m.name.clone(), pid));
+                    } else if LIFECYCLE_HOOKS.contains(&m.name.as_str()) {
+                        hooks.insert(m.name.clone(), pid);
+                    }
+                }
+                if !test_methods.is_empty() {
+                    let def = self.program.structs.get_mut(name).expect("hoisted");
+                    def.test_methods = test_methods;
+                    // A struct with ≥1 `test fn` method is a suite. Emit a zero-arg constructor thunk
+                    // (returns `Suite(<each field default>)`) so the runner builds the instance via
+                    // `run_proto`, then record discovery metadata — entry module only.
+                    if is_entry {
+                        let new_thunk = self.compile_suite_new_thunk(name, fields, stmt.span)?;
+                        // Only retain hooks that are actually lifecycle methods (already filtered above).
+                        self.program.suites.push(SuiteInfo {
+                            name: name.clone(),
+                            new_thunk,
+                            tests: suite_tests,
+                            hooks,
+                        });
+                    }
                 }
             }
         }
@@ -297,6 +328,10 @@ impl Compiler {
                 let pid = self.compile_fn(decl, false)?;
                 fc.emit(Op::MakeFunc(pid), stmt.span);
                 fc.emit(Op::DefineGlobalSlot(self.global_slot(&decl.name)), stmt.span);
+                // `chezzi test` discovery — a free `test fn` (entry module only).
+                if decl.is_test && is_entry {
+                    self.program.tests.push((decl.name.clone(), pid));
+                }
             }
             // extern C fns: register a CffiDef and bind the name to a `Cffi` value at module init,
             // exactly like a top-level `fn`. The checker has already verified marshallability, so the
@@ -345,10 +380,41 @@ impl Compiler {
         Ok(self.finish(fc))
     }
 
+    /// Emit a synthetic zero-arg constructor thunk for a test suite: `return Suite(<field defaults>)`.
+    /// Reuses the ordinary struct-construction op (`NewStruct`) over each field's already-desugared
+    /// default expr, so the runner can build the instance via `run_proto` without Rust knowing the
+    /// field values. Every suite field must carry a default (a zero-arg suite cannot be built otherwise).
+    fn compile_suite_new_thunk(
+        &mut self,
+        name: &str,
+        fields: &[crate::ast::Field],
+        span: Span,
+    ) -> Result<ProtoId, CompileError> {
+        let mut fc = FnComp::new(format!("__new_{name}"), 0, false);
+        for f in fields {
+            match &f.default {
+                Some(d) => self.compile_expr(&mut fc, d)?,
+                None => {
+                    return Err(CompileError {
+                        message: format!(
+                            "test suite '{name}' field '{}' must have a default value (suites are constructed with no arguments)",
+                            f.name
+                        ),
+                        span,
+                    })
+                }
+            }
+        }
+        fc.emit(Op::NewStruct(name.to_string(), fields.len()), span);
+        fc.emit(Op::Return, span);
+        Ok(self.finish(fc))
+    }
+
     /// Compile a named function / method to its own proto. `params` occupy slots `0..arity`.
     fn compile_fn(&mut self, decl: &FnDecl, _is_method: bool) -> Result<ProtoId, CompileError> {
         let mut fc = FnComp::new(decl.name.clone(), decl.params.len(), false);
         fc.is_generator = decl.is_generator;
+        fc.is_test = decl.is_test;
         for p in &decl.params {
             fc.add_local(p.name.clone());
         }
@@ -383,6 +449,7 @@ impl Compiler {
             lines,
             has_implicit_nursery: fc.has_implicit_nursery,
             is_generator: fc.is_generator,
+            is_test: fc.is_test,
         });
         pid
     }
@@ -555,6 +622,16 @@ impl Compiler {
                         span: stmt.span,
                     }),
                 }
+                Ok(())
+            }
+            StmtKind::Assert { cond, msg } => {
+                // Emit cond, then (optional) msg, then `Op::Assert` carrying `stmt.span` so the
+                // fault location matches the interpreter (which faults with `stmt.span`) exactly.
+                self.compile_expr(fc, cond)?;
+                if let Some(m) = msg {
+                    self.compile_expr(fc, m)?;
+                }
+                fc.emit(Op::Assert { has_msg: msg.is_some() }, stmt.span);
                 Ok(())
             }
             StmtKind::Defer(target) => self.compile_defer(fc, target, stmt.span),
@@ -2352,6 +2429,9 @@ struct FnComp {
     has_implicit_nursery: bool,
     /// Experimental — this proto is a generator body (its `Op::Yield`s suspend the generator).
     is_generator: bool,
+    /// This proto is a `test fn` body (free test or suite method). Stamped onto the [`Proto`] in
+    /// `finish`; used only by `chezzi test` discovery.
+    is_test: bool,
 }
 
 impl FnComp {
@@ -2372,6 +2452,7 @@ impl FnComp {
             nursery_scopes: 0,
             has_implicit_nursery: false,
             is_generator: false,
+            is_test: false,
         }
     }
 

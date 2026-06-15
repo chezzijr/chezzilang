@@ -11,6 +11,35 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ M20 — In-language test framework (`assert` + `test fn` + `chezzi test`).** Chezzi now has a real
+test facility. Three layers, all TDD'd:
+
+- **`assert <cond>` / `assert <cond>, "<msg>"`** — a statement primitive that *faults with its source
+  span* when `cond` is false (the headline need: which line failed). `cond` must be `bool`, `msg`
+  (optional) `str` — checker-enforced. **Lands in BOTH engines** (parity discipline): the VM op
+  `Op::Assert { has_msg }` and the interp `exec_stmt` arm produce a byte-identical message + span
+  (default `"assertion failed"`); `examples/assert.chz` goldens this on both engines. Usable in plain
+  `chezzi run`, independent of the runner.
+- **`test fn` marker** — a `test` modifier before `fn`. A free `test fn` is an independent test; a
+  `test fn name(self)` method makes its struct a **suite**. Compiler-*tagged* (`Proto::is_test`,
+  `Program::tests`, `StructDef::test_methods`), so discovery is by tag, not a name scan (no
+  silent-typo risk). Checker validates the shape: no params (free) / only `self` (method), returns
+  nothing; a suite's name-matched lifecycle hook must be `fn name(self)` returning nothing.
+- **`chezzi test [path]`** — a **Rust-side**, VM-only runner (forced: `recover:` only hands Chezzi the
+  message, not the span, so only Rust catching `RuntimeError` gets `.span` for `file:line`). Collects
+  `*_test.chz` files (single file or recursive dir walk; default cwd), compiles each as its own entry
+  graph, runs the module top-level once, then invokes each tagged test on a reusable VM. Reports
+  `PASS/FAIL name (file:line) msg` + a summary; non-zero exit on any failure. **Suites**: a synthetic
+  `__new_<Suite>` thunk builds the instance once (reusing the struct-ctor compile path + default field
+  exprs), then `before_all? → [before_each? → test → after_each?(always, like defer)]* → after_all?`,
+  with a shared typed fixture (a default-initialized field mutated by hooks via mutable `self`).
+
+Dogfood: `examples/{membership,operators,match_or,suite}_test.chz` author real tests with `assert`
+(alongside the existing print-and-golden twins). Out of scope (deferred): `Span` file-id (an assert
+faulting inside *imported* code reports the test file, not the library file — a documented MVP limit),
+`assert_eq`/value-diff messages, parametrized-test sugar, a Chezzi-side runner, running the runner on
+the interp engine. Grammar (`assertStmt`, `testFnDecl`) + corpus + `cargo test conformance` green.
+
 **🟦 M19 — Perf track (in progress).** The language is frozen feature-wise; this milestone is pure
 optimization, so the bar is **behavior-preserving + two-engine parity** on every change. Measure first
 (`cargo run --release -- run benches/run.chz`), land behind a failing-then-green correctness test, keep

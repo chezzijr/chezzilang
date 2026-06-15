@@ -1,0 +1,22 @@
+# examples/membership_test.chz — the `in` operator, dogfooded as real `test fn`s with `assert`
+# (the print-and-golden twin lives in examples/membership.chz). Run with: `chezzi test examples/`.
+
+test fn list_membership():
+    xs := [1, 2, 3, 4, 5]
+    assert 3 in xs
+    assert not (9 in xs), "9 is not in xs"
+
+test fn set_membership():
+    s := {10, 20, 30}
+    assert 20 in s
+    assert not (25 in s)
+
+test fn map_key_membership():
+    m := {"a": 1, "b": 2, "c": 3}
+    assert "b" in m, "in tests keys"
+    assert not ("z" in m)
+
+test fn string_substring():
+    assert "ell" in "hello"
+    assert "" in "hello", "empty string is a substring of everything"
+    assert not ("xyz" in "hello")

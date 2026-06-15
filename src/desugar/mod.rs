@@ -596,6 +596,12 @@ impl Walker<'_> {
                 DeferTarget::Block(body) => self.walk_block(body)?,
             },
             StmtKind::Expr(e) => self.walk_expr(e)?,
+            StmtKind::Assert { cond, msg } => {
+                self.walk_expr(cond)?;
+                if let Some(m) = msg {
+                    self.walk_expr(m)?;
+                }
+            }
             StmtKind::Parallel { body } => self.walk_block(body)?,
             StmtKind::Spawn(target) => match target {
                 SpawnTarget::Call(e) => self.walk_expr(e)?,

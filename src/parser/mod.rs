@@ -261,6 +261,8 @@ impl Parser {
         // (let/assign/expr/return/import) must be followed by a line terminator.
         let kind = match self.peek() {
             Token::Fn => StmtKind::Fn(self.parse_fn(true)?),
+            // `test fn …` — a `test` modifier before `fn` marks an independent test.
+            Token::Test => StmtKind::Fn(self.parse_test_fn(true)?),
             Token::Struct => self.parse_struct()?,
             Token::Enum => self.parse_enum()?,
             Token::Protocol => self.parse_protocol()?,
@@ -288,6 +290,11 @@ impl Parser {
                 k
             }
             Token::Defer => self.parse_defer()?,
+            Token::Assert => {
+                let k = self.parse_assert()?;
+                self.expect_stmt_end()?;
+                k
+            }
             Token::Break => {
                 self.advance();
                 self.expect_stmt_end()?;
@@ -463,6 +470,18 @@ impl Parser {
         })
     }
 
+    /// `test fn …` — consume the `test` modifier, parse the following `fn`, and tag it `is_test`.
+    /// Shared by the free-fn site (`parse_stmt`) and the struct-method site (`parse_struct`).
+    fn parse_test_fn(&mut self, allow_defaults: bool) -> PResult<FnDecl> {
+        self.expect(&Token::Test)?;
+        if !self.check(&Token::Fn) {
+            return Err(self.err("`test` must be followed by `fn`".to_string()));
+        }
+        let mut decl = self.parse_fn(allow_defaults)?;
+        decl.is_test = true;
+        Ok(decl)
+    }
+
     fn parse_fn(&mut self, allow_defaults: bool) -> PResult<FnDecl> {
         self.expect(&Token::Fn)?;
         let name = self.expect_ident()?;
@@ -484,6 +503,7 @@ impl Parser {
             ret,
             body,
             is_generator,
+            is_test: false,
         })
     }
 
@@ -663,6 +683,9 @@ impl Parser {
                 // Methods accept default params (like free fns); the desugar pass fills omitted args
                 // / reorders named args at method call sites and rejects param-referencing defaults.
                 methods.push(self.parse_fn(true)?);
+            } else if self.check(&Token::Test) {
+                // `test fn name(self)` — a suite test method.
+                methods.push(self.parse_test_fn(true)?);
             } else {
                 let fname = self.expect_ident()?;
                 self.expect(&Token::Colon)?;
@@ -1009,8 +1032,18 @@ impl Parser {
         Ok(StmtKind::Yield(self.parse_expr()?))
     }
 
-    /// `defer <expr>` — the expression must be a call; the checker enforces that (the parser keeps
-    /// the arm uniform with the other line-oriented statements).
+    /// `assert <cond>` or `assert <cond>, <msg>` — line-oriented (the caller requires a stmt end).
+    fn parse_assert(&mut self) -> PResult<StmtKind> {
+        self.expect(&Token::Assert)?;
+        let cond = self.parse_expr()?;
+        let msg = if self.eat(&Token::Comma) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        Ok(StmtKind::Assert { cond, msg })
+    }
+
     /// `defer:` block (form 2) or `defer <call>` (form 1). Mirrors `parse_spawn`: form 1 is
     /// line-oriented (terminated here); form 2 is compound (its block ends at its own `Dedent`). The
     /// call-only restriction on form 1 is enforced by the checker (context-sensitive).
@@ -2015,6 +2048,60 @@ mod tests {
         let mut m = parse_ok(src);
         assert_eq!(m.stmts.len(), 1, "expected exactly one statement");
         m.stmts.remove(0).kind
+    }
+
+    #[test]
+    fn assert_no_msg_parses() {
+        match only("assert x == 1\n") {
+            StmtKind::Assert { cond, msg } => {
+                assert!(matches!(cond.kind, ExprKind::Binary { .. }));
+                assert!(msg.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn assert_with_msg_parses() {
+        match only("assert x, \"boom\"\n") {
+            StmtKind::Assert { cond, msg } => {
+                assert!(matches!(cond.kind, ExprKind::Ident(_)));
+                assert!(matches!(msg.unwrap().kind, ExprKind::Str(_)));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn free_test_fn_parses_with_is_test() {
+        match only("test fn t():\n    assert true\n") {
+            StmtKind::Fn(decl) => {
+                assert!(decl.is_test, "free `test fn` should set is_test");
+                assert_eq!(decl.name, "t");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_fn_is_not_test() {
+        match only("fn t():\n    assert true\n") {
+            StmtKind::Fn(decl) => assert!(!decl.is_test),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn struct_test_method_parses_with_is_test() {
+        match only("struct S:\n    test fn t(self):\n        assert true\n    fn helper(self):\n        return\n") {
+            StmtKind::Struct { methods, .. } => {
+                let t = methods.iter().find(|m| m.name == "t").unwrap();
+                assert!(t.is_test, "struct `test fn` should set is_test");
+                let h = methods.iter().find(|m| m.name == "helper").unwrap();
+                assert!(!h.is_test);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

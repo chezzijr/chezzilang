@@ -38,6 +38,8 @@ pub enum Token {
     Match,
     Recover,
     Defer,
+    Assert,
+    Test,
     Spawn,
     Parallel,
     Wait,
@@ -162,6 +164,8 @@ fn keyword(word: &str) -> Option<Token> {
         "match" => Token::Match,
         "recover" => Token::Recover,
         "defer" => Token::Defer,
+        "assert" => Token::Assert,
+        "test" => Token::Test,
         "spawn" => Token::Spawn,
         "parallel" => Token::Parallel,
         "wait" => Token::Wait,
@@ -1527,6 +1531,22 @@ mod tests {
                 Token::Newline,
                 Token::Eof,
             ]
+        );
+    }
+
+    #[test]
+    fn lexes_assert_keyword() {
+        assert_eq!(
+            kinds("assert x"),
+            vec![Token::Assert, Token::Ident("x".into()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lexes_test_keyword() {
+        assert_eq!(
+            kinds("test fn"),
+            vec![Token::Test, Token::Fn, Token::Newline, Token::Eof]
         );
     }
 }

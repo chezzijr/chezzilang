@@ -135,6 +135,13 @@ pub enum StmtKind {
         lib: String,
         fns: Vec<ExternFn>,
     },
+    /// `assert <cond>` or `assert <cond>, <msg>` — fault with the assertion's source span if `cond`
+    /// is false. `cond` must be `Bool`; `msg` (if present) must be `str`. The fault message is the
+    /// custom `msg` if given, else `"assertion failed"`. Lands in both engines (parity discipline).
+    Assert {
+        cond: Expr,
+        msg: Option<Expr>,
+    },
     /// A bare expression used as a statement, e.g. `print(x)`.
     Expr(Expr),
 }
@@ -240,6 +247,10 @@ pub struct FnDecl {
     /// True if the body contains a `yield` (computed by the parser). A generator function is not
     /// run on call — it allocates a suspendable generator object. Experimental, VM-only.
     pub is_generator: bool,
+    /// True if declared with a `test` modifier (`test fn …`). A free `test fn` is an independent
+    /// test; a `test fn name(self)` method makes its struct a test suite. `chezzi test` discovers
+    /// these by this compiler-set tag (no name-prefix scan). Default `false` everywhere else.
+    pub is_test: bool,
 }
 
 /// A generic type parameter declaration: `T`, `T: Comparable`, `T: Add + Mul`, or a parameterized

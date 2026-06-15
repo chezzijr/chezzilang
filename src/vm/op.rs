@@ -75,6 +75,10 @@ pub enum Op {
     /// level and the value is an unhandled `Err`/`None`, the program exits with that error;
     /// otherwise it is discarded like `Pop`. (Emitted for expression statements.)
     PopExprStmt,
+    /// `assert cond[, msg]` — pop `msg` (a str, if `has_msg`) then `cond`; if `cond` is false,
+    /// fault at this op's span with the custom `msg` (or `"assertion failed"`). Both engines share
+    /// the message + span so a failed assert is byte-identical across VM and interpreter.
+    Assert { has_msg: bool },
 
     // ----- variables -----
     GetLocal(usize),
@@ -360,6 +364,10 @@ pub struct Proto {
     /// True if this proto is a generator body (its source fn uses `yield`). Calling it does not run
     /// the body — the VM allocates a suspendable `Obj::Generator` instead. Experimental, VM-only.
     pub is_generator: bool,
+    /// True if this proto is a `test fn` body (free test or suite method). `chezzi test` discovers
+    /// runnable tests by this tag (set by the compiler from `FnDecl::is_test`); ordinary `run` never
+    /// inspects it.
+    pub is_test: bool,
 }
 
 /// A struct type's runtime shape (program-global). `module_idx` identifies the module that defined
@@ -374,6 +382,10 @@ pub struct StructDef {
     /// pure-int `tid` compare instead of re-verifying the field-name string. See [`super::mod`]'s
     /// `field_ic` / `IcCell`.
     pub tid: u32,
+    /// Names of this struct's `test fn` methods (declaration order). Non-empty ⇒ this struct is a
+    /// test suite (`chezzi test`); empty for ordinary structs. Set by the compiler from
+    /// `FnDecl::is_test`.
+    pub test_methods: Vec<String>,
 }
 
 /// An enum variant's runtime shape: which enum it belongs to and how many payload values it holds.
@@ -420,7 +432,33 @@ pub struct Program {
     /// resolved symbol address is *not* stored here (it is per-process, resolved at `MakeCffi` via
     /// `dlopen`+`dlsym`); only the library path, name, and marshalling signature are.
     pub cffi_defs: Vec<CffiDef>,
+    /// `chezzi test` discovery — free (top-level) `test fn`s in the entry module, as `(name, proto)`
+    /// in declaration order. Empty for an ordinary `run`. Populated only for the entry module.
+    pub tests: Vec<(String, ProtoId)>,
+    /// `chezzi test` discovery — every test suite (a struct with ≥1 `test fn` method) in the entry
+    /// module, with its zero-arg constructor thunk + test methods + present lifecycle hooks.
+    pub suites: Vec<SuiteInfo>,
 }
+
+/// Discovery metadata for one test suite (a struct containing `test fn` methods). The runner builds
+/// the instance once via `new_thunk`, then drives each test method with the present lifecycle hooks.
+#[derive(Debug, Clone)]
+pub struct SuiteInfo {
+    /// The suite struct's name (for the report).
+    pub name: String,
+    /// A synthetic zero-arg constructor proto that returns `Suite()` (default field exprs applied),
+    /// so the runner builds the instance without Rust knowing the field values.
+    pub new_thunk: ProtoId,
+    /// Test methods, as `(method_name, proto)` in declaration order.
+    pub tests: Vec<(String, ProtoId)>,
+    /// Present lifecycle hooks, by canonical name → its proto (subset of `LIFECYCLE_HOOKS`).
+    pub hooks: HashMap<String, ProtoId>,
+}
+
+/// The four recognized suite lifecycle hook names (detected by exact name on a suite struct). A
+/// name-matched method is signature-validated by the checker (`fn name(self)` returning nothing).
+pub const LIFECYCLE_HOOKS: [&str; 4] =
+    ["before_all", "after_all", "before_each", "after_each"];
 
 /// A compile-time description of one `extern` C function: enough to `dlopen`+`dlsym` and build the
 /// runtime [`crate::native::cffi::Cffi`] at module init. The symbol address is resolved at runtime

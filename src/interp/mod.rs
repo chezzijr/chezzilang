@@ -3189,6 +3189,22 @@ impl Interp {
                 }
                 Ok(Flow::Normal)
             }
+            StmtKind::Assert { cond, msg } => {
+                // Mirror the VM (`Op::Assert`): fault with `stmt.span` and the custom message (or
+                // `"assertion failed"`) when `cond` is false. Both engines must be byte-identical.
+                let c = self.eval(cond)?;
+                if matches!(c, Value::Bool(false)) {
+                    let message = match msg {
+                        Some(m) => match self.eval(m)? {
+                            Value::Str(s) => s.to_string(),
+                            _ => "assertion failed".to_string(),
+                        },
+                        None => "assertion failed".to_string(),
+                    };
+                    return Err(RuntimeError { message, span: stmt.span });
+                }
+                Ok(Flow::Normal)
+            }
             StmtKind::Fn(decl) => {
                 let home = self.env.globals_rc();
                 self.env
@@ -4698,6 +4714,38 @@ mod tests {
 
     fn run(src: &str) -> String {
         run_capture(src).expect("run should succeed")
+    }
+
+    // ---- assert (Phase A) — interp half + cross-engine parity ----
+
+    #[test]
+    fn interp_assert_true_does_not_fault() {
+        assert_eq!(run("assert true\nprint(\"ok\")\n"), "ok\n");
+    }
+
+    #[test]
+    fn interp_assert_false_faults_with_msg_and_line() {
+        let err = run_capture("print(\"a\")\nassert false, \"boom\"\n").unwrap_err();
+        assert_eq!(err.message, "boom");
+        assert_eq!(err.span.line, 2);
+    }
+
+    #[test]
+    fn assert_fault_is_byte_identical_across_engines() {
+        // The headline parity guarantee: VM and interp produce the SAME message + span for a
+        // failed assert (both default and custom-message paths).
+        for src in [
+            "print(\"a\")\nassert false\n",
+            "print(\"a\")\nassert 1 == 2, \"mismatch\"\n",
+        ] {
+            let vm_err = crate::vm::run_capture(src).unwrap_err();
+            let interp_err = run_capture(src).unwrap_err();
+            assert_eq!(vm_err.message, interp_err.message, "message parity for {src:?}");
+            assert_eq!(
+                vm_err.span.line, interp_err.span.line,
+                "line parity for {src:?}"
+            );
+        }
     }
 
     /// `InterpHost::arg_str_map` reads a `map[str, str]` Value in insertion order; a non-map arg

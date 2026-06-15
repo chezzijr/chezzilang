@@ -71,6 +71,7 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 - **M14** — method-level type params (`fn map_to[U](self, …)`) + **user-defined parameterized protocols** (`protocol Container[T]`, concrete-arg bounds `[X: Container[int]]`) — generalizing the special-cased `Iterator[T]`.
 - **M15** — slicing + indexing protocols (Python-style `xs[a:b:c]` + negative indexing; `Index`/`IndexSet`/`Slice` structural protocols, built-ins intrinsic + user structs via `index`/`set_index`/`slice`).
 - **M16–M18** — **concurrency** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, real OS-thread M:N engine via `--parallel`, netpoller + `std.net`) and the **`defer`** statement (call + block forms, `recover:`-integrated). See [`docs/concurrency.md`](concurrency.md).
+- **M20** — **in-language test framework**: `assert <cond>[, "<msg>"]` (a both-engine statement primitive that faults with its source line), the `test fn` marker (free tests + struct **suites** with `before_all`/`after_all`/`before_each`/`after_each` lifecycle hooks + a shared typed fixture), and `chezzi test [path]` — a Rust-side, VM-only runner over `*_test.chz` files reporting `PASS/FAIL name (file:line) msg` with a non-zero exit on failure. See [`docs/syntax.md §9c`](syntax.md).
 
 **Non-goals (by design, never):** classes & inheritance — Chezzi is composition-only with
 structural `protocol`s, like Rust/Go (see *Locked decisions*). (**`yield`/generators** were once
@@ -300,7 +301,8 @@ src/
   gc/           # mark-sweep
   runtime/      # builtins + native std modules
   resolver/     # module path resolution
-  main.rs       # `chezzi run/repl/tokens/ast`
+  test_runner   # `chezzi test` — discovers + runs `test fn`s in `*_test.chz`
+  main.rs       # `chezzi run/test/repl/tokens/ast`
 std/            # std modules written in Chezzi
 examples/*.chz  # golden-test corpus + LLM eval material
 tests/          # Rust unit + golden tests
@@ -328,6 +330,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M15** | Slicing + indexing protocols | Python-style `xs[a:b:c]` / `s[0:2]` / `xs[::-1]` (open bounds, step, reverse, bounds-clamped) + negative indexing `xs[-1]` (plain index faults out of range, slice bounds clamp — Python's asymmetry); the `..` operator stays the for-loop/match range. Prebuilt **`Index[K, V]` + `IndexSet[K, V]` + `Slice[R]`** structural protocols — built-in `list`/`map`/`str` conform intrinsically, user structs via `index`/`set_index`/`slice(self, start: int?=None, end: int?=None, step: int?=None)`, so `custom[k]`/`custom[k]=v`/`custom[a:b:c]` work and a generic can be bounded by `Index[int, V]`. Both engines parity-tested |
 | ✅ **M16–M18** | Concurrency + `defer` | `spawn` / `parallel:` nursery, `Channel`/`Shared`/`Executor`, real OS-thread M:N engine (`--parallel`) with work-stealing + reduction-counting preemption + netpoller + `std.net`; `defer` (call + block forms). Design in [`docs/concurrency.md`](concurrency.md), phases in [`docs/concurrency-tier-d.md`](concurrency-tier-d.md) |
 | 🟦 **M19** | Perf track (in progress) | Landed: peephole + const-fold, superinstructions, global-slotting, struct-field inline cache, FxHash, `ConstStr` interning, call-loop flatten, small-string optimization. Behavior-preserving + two-engine parity on every change. Backlog ranked in [`docs/future.md §4`](future.md); measured deltas in [`docs/benchmarks.md`](benchmarks.md) |
+| ✅ **M20** | In-language tests | `assert <cond>[, "<msg>"]` (both-engine statement primitive, faults with its source line), the `test fn` marker (free tests + struct **suites** with `before_all`/`after_all`/`before_each`/`after_each` hooks + a shared typed fixture), and `chezzi test [path]` — a Rust-side VM-only runner over `*_test.chz` files (`PASS/FAIL name (file:line) msg`, non-zero exit on failure). Surface in [`docs/syntax.md §9c`](syntax.md) |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional; only once the language has truly stopped moving) |
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c**; **Level-3 dynamic C-ABI FFI v1

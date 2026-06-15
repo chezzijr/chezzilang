@@ -100,6 +100,11 @@ fn is_reserved_protocol(name: &str) -> bool {
     )
 }
 
+/// True if `name` is one of the four recognized suite lifecycle hooks.
+fn is_lifecycle_hook(name: &str) -> bool {
+    crate::vm::op::LIFECYCLE_HOOKS.contains(&name)
+}
+
 /// A function (or method) signature: parameter types and return type. `type_params` is non-empty
 /// only for generic functions (`fn max[T: Comparable]`), where `params`/`ret` contain `Ty::Param`s.
 #[derive(Clone)]
@@ -1331,6 +1336,9 @@ impl Checker {
                 self.check_assign(target, *op, val_ty, span);
             }
             StmtKind::Fn(decl) => {
+                if decl.is_test {
+                    self.validate_test_fn_shape(decl, false);
+                }
                 // `.get` (not index) is panic-safe even when a redeclaration left a different sig.
                 if let Some(sig) = self.functions.get(&decl.name).cloned() {
                     self.check_fn_body(decl, None, sig);
@@ -1357,7 +1365,16 @@ impl Checker {
                         }
                     }
                 }
+                // A struct with ≥1 `test fn` method is a test suite. Its lifecycle hooks
+                // (before_all/after_all/before_each/after_each), when present, must be `fn name(self)`
+                // returning nothing — validated here so the runner can trust the shape.
+                let is_suite = methods.iter().any(|m| m.is_test);
                 for m in methods {
+                    if m.is_test {
+                        self.validate_test_fn_shape(m, true);
+                    } else if is_suite && is_lifecycle_hook(&m.name) {
+                        self.validate_lifecycle_hook(m);
+                    }
                     // Panic-safe: a redeclared struct name means `structs[name]` is a *different*
                     // struct whose method table may not contain `m.name`.
                     if let Some(sig) =
@@ -1545,6 +1562,58 @@ impl Checker {
             StmtKind::Expr(e) => {
                 self.infer(e);
             }
+            StmtKind::Assert { cond, msg } => {
+                self.expect_bool(cond, "assert condition");
+                if let Some(m) = msg {
+                    let t = self.infer(m);
+                    if t != Ty::Str && !t.is_unknown() {
+                        self.error(m.span, format!("assert message must be str, found {t}"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Best-effort source span for a function declaration (FnDecl has no span of its own): the first
+    /// body statement, since a test fn / lifecycle hook always has a non-empty body.
+    fn fn_span(decl: &FnDecl) -> Span {
+        decl.body.first().map(|s| s.span).unwrap_or(Span { line: 0, col: 0 })
+    }
+
+    /// A `test fn` takes no parameters (free) or only `self` (method) and returns nothing. Hard
+    /// errors here keep the runner's contract simple (it invokes tests with no args / only the
+    /// instance). The body is still checked normally by the caller.
+    fn validate_test_fn_shape(&mut self, decl: &FnDecl, is_method: bool) {
+        let span = Self::fn_span(decl);
+        if is_method {
+            let ok = decl.params.len() == 1 && decl.params[0].name == "self";
+            if !ok {
+                self.error(span, "test method must take only self".to_string());
+            }
+        } else if !decl.params.is_empty() {
+            self.error(span, "test function must take no parameters".to_string());
+        }
+        if decl.ret.is_some() {
+            self.error(span, "test function must not return a value".to_string());
+        }
+    }
+
+    /// A suite lifecycle hook (`before_all`/`after_all`/`before_each`/`after_each`) must be
+    /// `fn name(self)` returning nothing — the runner invokes it with only the instance.
+    fn validate_lifecycle_hook(&mut self, decl: &FnDecl) {
+        let span = Self::fn_span(decl);
+        let ok = decl.params.len() == 1 && decl.params[0].name == "self";
+        if !ok {
+            self.error(
+                span,
+                format!("lifecycle hook '{}' must take only self", decl.name),
+            );
+        }
+        if decl.ret.is_some() {
+            self.error(
+                span,
+                format!("lifecycle hook '{}' must not return a value", decl.name),
+            );
         }
     }
 

@@ -363,7 +363,7 @@ impl MethodIcSite {
     const EMPTY: MethodIcSite = MethodIcSite { ways: [MethodIcCell::EMPTY; METHOD_IC_WAYS], sticky: false };
 }
 
-struct Vm {
+pub struct Vm {
     program: Arc<Program>,
     heap: Heap,
     stack: Vec<Value>,
@@ -2633,6 +2633,64 @@ impl Vm {
         Ok(())
     }
 
+    /// The entry module's runtime object (its globals/home), valid after `run()` has initialized the
+    /// modules. The entry is the last module in dependency order. The `chezzi test` runner uses it as
+    /// the home for free `test fn`s and suite construction thunks.
+    fn entry_home(&self) -> GcRef {
+        *self.module_objs.last().expect("modules initialized before invoking tests")
+    }
+
+    /// `chezzi test` — invoke one zero-arg test proto (a free `test fn` or a suite construction
+    /// thunk) on this already-initialized VM, returning its result. The VM stays reusable after a
+    /// fault, so the runner keeps going after a failing test. `Err` carries the fault's `span` (the
+    /// `assert`'s line) for `file:line` reporting.
+    pub fn invoke_test(&mut self, proto: ProtoId) -> Result<(), RuntimeError> {
+        debug_assert!(
+            self.program.protos[proto].is_test,
+            "invoke_test called on a non-test proto"
+        );
+        let home = self.entry_home();
+        self.run_proto(proto, home, None, Vec::new(), true, false, Span { line: 1, col: 1 })?;
+        Ok(())
+    }
+
+    /// `chezzi test` — invoke a suite method/lifecycle hook proto with `self` bound to `recv` (a
+    /// suite instance). Returns the method's value (ignored by the runner) or its fault.
+    pub fn invoke_suite_method(&mut self, proto: ProtoId, recv: Value) -> Result<Value, RuntimeError> {
+        let home = self.entry_home();
+        self.run_proto(proto, home, None, vec![recv], true, false, Span { line: 1, col: 1 })
+    }
+
+    /// `chezzi test` — construct a suite instance via its synthetic zero-arg `__new_<Suite>` thunk.
+    pub fn build_suite_instance(&mut self, new_thunk: ProtoId) -> Result<Value, RuntimeError> {
+        let home = self.entry_home();
+        self.run_proto(new_thunk, home, None, Vec::new(), true, false, Span { line: 1, col: 1 })
+    }
+
+    /// `chezzi test` — initialize all modules (run top-levels once) so globals/functions exist before
+    /// tests are invoked. A thin public wrapper over `run` for the runner.
+    pub fn init_for_tests(&mut self) -> Result<(), RuntimeError> {
+        self.run()
+    }
+
+    /// `chezzi test` — construct a fresh VM over a compiled program (the runner owns the lifecycle).
+    pub fn for_program(program: Arc<Program>) -> Self {
+        Vm::new(program)
+    }
+
+    /// `chezzi test` — take + clear whatever a test printed to stdout, resetting the buffer so the
+    /// next test starts clean (the runner currently discards it; the report is Rust-formatted).
+    pub fn take_out(&mut self) -> String {
+        std::mem::take(&mut self.out)
+    }
+
+    /// `chezzi test` — drain anything the program left running (e.g. an Executor a test forgot to
+    /// shut down), mirroring the ordinary run's graceful reap. Best-effort: ignore drain faults so a
+    /// stray resource doesn't mask the test verdict.
+    pub fn reap_after_tests(&mut self) {
+        let _ = self.drain_live_executors(Span { line: 1, col: 1 });
+    }
+
     fn run_module(&mut self, idx: usize) -> Result<(), RuntimeError> {
         let m = self.program.modules[idx].clone();
         // M19 Phase 2b: pre-size the namespace to the compiler's slot count and build its name→slot
@@ -3216,6 +3274,18 @@ impl Vm {
                     && let Some(e) = self.top_level_error(v, span)
                 {
                     return Err(e);
+                }
+            }
+            Op::Assert { has_msg } => {
+                // Pop in reverse push order: msg (if any) was pushed after cond.
+                let msg = if *has_msg { Some(self.pop()) } else { None };
+                let cond = self.pop();
+                if matches!(cond, Value::Bool(false)) {
+                    let message = match msg {
+                        Some(m) => self.val_str(m).unwrap_or_else(|| "assertion failed".to_string()),
+                        None => "assertion failed".to_string(),
+                    };
+                    return Err(self.err(message, span));
                 }
             }
             Op::GetLocal(slot) => {
@@ -11169,6 +11239,29 @@ mod tests {
         }
     }
 
+    // ---- assert (Phase A) ----
+
+    #[test]
+    fn assert_true_does_not_fault() {
+        assert_eq!(run("assert true\nprint(\"ok\")\n"), "ok\n");
+        assert_eq!(run("assert 1 == 1, \"never\"\nprint(\"ok\")\n"), "ok\n");
+    }
+
+    #[test]
+    fn assert_false_faults_with_custom_msg_and_line() {
+        // The assert is on line 2; the fault must carry that line and the custom message.
+        let err = run_capture("print(\"a\")\nassert false, \"boom\"\n").unwrap_err();
+        assert_eq!(err.message, "boom");
+        assert_eq!(err.span.line, 2);
+    }
+
+    #[test]
+    fn assert_false_default_message() {
+        let err = run_capture("assert false\n").unwrap_err();
+        assert_eq!(err.message, "assertion failed");
+        assert_eq!(err.span.line, 1);
+    }
+
     // ---- M19 Phase 3: ConstStr interning + per-char alloc (correctness guards) ----
 
     #[test]
@@ -11465,6 +11558,40 @@ mod tests {
     // side table holds only state bytes (no `GcRef`), so it is heap-independent — never swapped in
     // `swap_ctx`, like `field_ic`/`method_ic`. Behaviour is byte-identical to the generic path; the
     // interpreter is untouched, so two-engine parity holds by construction. These guard the gotchas.
+
+    #[test]
+    fn free_test_fn_is_tagged_and_recorded() {
+        // A free `test fn` is recorded in `program.tests` and its proto is tagged `is_test`; an
+        // ordinary `fn` is neither.
+        let src = "test fn t():\n    assert true\nfn helper():\n    return\n";
+        let module = parser::parse(lexer::tokenize(src).unwrap()).unwrap();
+        let program = crate::compiler::compile_module_standalone(&module).unwrap();
+        assert_eq!(program.tests.len(), 1, "exactly one free test recorded");
+        let (name, pid) = &program.tests[0];
+        assert_eq!(name, "t");
+        assert!(program.protos[*pid].is_test, "the test proto is tagged is_test");
+        // The `helper` proto is not a test.
+        assert!(
+            program.protos.iter().filter(|p| p.is_test).count() == 1,
+            "only the test fn is tagged"
+        );
+    }
+
+    #[test]
+    fn suite_is_discovered_with_thunk_and_methods() {
+        // A struct with a `test fn` method is a suite with a `__new_` thunk + recorded test methods.
+        let src = "struct S:\n    n: int = 7\n    test fn a(self):\n        assert self.n == 7\n    fn before_each(self):\n        return\n";
+        let module = parser::parse(lexer::tokenize(src).unwrap()).unwrap();
+        let program = crate::compiler::compile_module_standalone(&module).unwrap();
+        assert_eq!(program.suites.len(), 1, "one suite discovered");
+        let s = &program.suites[0];
+        assert_eq!(s.name, "S");
+        assert_eq!(s.tests.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        assert!(s.hooks.contains_key("before_each"), "before_each hook recorded");
+        // The thunk proto exists and the struct records its test methods.
+        assert!(s.new_thunk < program.protos.len());
+        assert_eq!(program.structs["S"].test_methods, vec!["a".to_string()]);
+    }
 
     #[test]
     fn quicken_table_presized_and_based() {
@@ -11915,6 +12042,8 @@ mod tests {
             field_ic_sites: 0,
             method_ic_sites: 0,
             cffi_defs: vec![],
+            tests: vec![],
+            suites: vec![],
         }
     }
 
@@ -14430,7 +14559,7 @@ main()
     /// home module (the test protos never read globals). Mirrors how `do_spawn_block` shapes a task.
     fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         let sp = Span { line: 1, col: 1 };
-        let proto = op::Proto { name: "task".into(), arity: 0, n_slots: 0, lines: vec![sp; code.len()], code, has_implicit_nursery: false, is_generator: false };
+        let proto = op::Proto { name: "task".into(), arity: 0, n_slots: 0, lines: vec![sp; code.len()], code, has_implicit_nursery: false, is_generator: false, is_test: false };
         let program = Program { protos: vec![proto], ..empty_program() };
         let mut vm = Vm::new(Arc::new(program));
         let home = vm.heap.alloc(Obj::Module { name: "<test>".into(), slots: Vec::new(), index: Default::default() });
@@ -15717,6 +15846,17 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
     fn golden_slicing_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/slicing.chz");
         let expected = include_str!("../../examples/slicing.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `assert` golden: `examples/assert.chz` (bare + message forms, all passing) byte-identical on
+    /// the VM, the interpreter, and `.expected` — the two-engine parity guard for the primitive.
+    #[test]
+    fn golden_assert_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/assert.chz");
+        let expected = include_str!("../../examples/assert.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));

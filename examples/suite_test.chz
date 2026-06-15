@@ -1,0 +1,30 @@
+# examples/suite_test.chz — a test SUITE: a struct with `test fn` methods, lifecycle hooks, and a
+# shared, typed fixture (a `Counter` built once for the suite). Lifecycle order:
+#   construct once -> before_all -> [before_each -> test -> after_each]* -> after_all
+# after_each runs even when a test fails (like `defer`). Run with: `chezzi test examples/`.
+
+struct Counter:
+    n: int = 0
+    fn bump(self):
+        self.n = self.n + 1
+    fn reset(self):
+        self.n = 0
+
+struct CounterTests:
+    counter: Counter = Counter()      # shared fixture, built ONCE for the suite
+
+    fn before_each(self):
+        self.counter.reset()          # each test starts from a clean fixture
+
+    test fn starts_at_zero(self):
+        assert self.counter.n == 0, "before_each reset the counter"
+
+    test fn bump_increments(self):
+        self.counter.bump()
+        self.counter.bump()
+        assert self.counter.n == 2, "two bumps -> 2"
+
+    test fn isolated_from_previous(self):
+        # If before_each did NOT run, n would still be 2 from the previous test.
+        self.counter.bump()
+        assert self.counter.n == 1, "fixture is reset between tests"

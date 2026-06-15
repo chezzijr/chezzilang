@@ -1,0 +1,5 @@
+# rule: assertStmt
+fn main():
+    x := 1
+    assert x == 1
+    assert x == 1, "x should be one"

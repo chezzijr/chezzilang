@@ -4794,3 +4794,74 @@ fn generator_bare_return_ok() {
     // A bare `return` inside a generator stops it early — legal.
     ok("fn g() -> Iterator[int]:\n    yield 1\n    return\n    yield 2\n");
 }
+
+// ===== assert =====
+
+#[test]
+fn assert_non_bool_cond_rejected() {
+    rejects("assert 1\n", "assert condition must be bool");
+}
+
+#[test]
+fn assert_non_str_msg_rejected() {
+    rejects("assert true, 5\n", "assert message must be str");
+}
+
+#[test]
+fn assert_ok() {
+    ok("x := 1\nassert x == 1\n");
+    ok("assert true, \"m\"\n");
+}
+
+// ===== test fn =====
+
+#[test]
+fn free_test_fn_with_params_rejected() {
+    rejects("test fn t(x: int):\n    assert true\n", "test function must take no parameters");
+}
+
+#[test]
+fn free_test_fn_with_return_rejected() {
+    rejects("test fn t() -> int:\n    return 1\n", "test function must not return a value");
+}
+
+#[test]
+fn method_test_fn_with_extra_param_rejected() {
+    rejects(
+        "struct S:\n    test fn t(self, x: int):\n        assert true\n",
+        "test method must take only self",
+    );
+}
+
+#[test]
+fn test_fn_valid_forms_ok() {
+    ok("test fn t():\n    assert true\n");
+    ok("struct S:\n    test fn t(self):\n        assert true\n");
+}
+
+#[test]
+fn test_fn_body_is_still_checked() {
+    // A type error inside a valid-shaped test fn is still reported.
+    rejects("test fn t():\n    assert 1\n", "assert condition must be bool");
+}
+
+#[test]
+fn suite_lifecycle_hook_wrong_shape_rejected() {
+    // In a suite, a lifecycle-named method with the wrong signature is a hard error.
+    rejects(
+        "struct S:\n    test fn t(self):\n        assert true\n    fn before_each(self, x: int):\n        return\n",
+        "lifecycle hook 'before_each' must take only self",
+    );
+}
+
+#[test]
+fn suite_lifecycle_hook_valid_ok() {
+    ok("struct S:\n    test fn t(self):\n        assert true\n    fn before_each(self):\n        return\n");
+}
+
+#[test]
+fn lifecycle_name_in_non_suite_struct_not_validated() {
+    // A `before_each` method in a struct that is NOT a suite (no test fn) is an ordinary method —
+    // no special signature rule applies.
+    ok("struct S:\n    fn before_each(self, x: int):\n        return\n");
+}

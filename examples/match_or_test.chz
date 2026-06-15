@@ -1,0 +1,26 @@
+# examples/match_or_test.chz — or-patterns in `match`, dogfooded with `assert` (the print-and-golden
+# twin is examples/match_or.chz).
+
+fn size(n: int) -> str:
+    return match n:
+        0 | 1 | 2: "small"
+        3 | 4 | 5: "medium"
+        _: "large"
+
+enum Color:
+    Red
+    Green
+    Blue
+
+fn is_primary(c: Color) -> bool:
+    return match c:
+        Red | Green | Blue: true
+
+test fn or_pattern_literals():
+    assert size(1) == "small"
+    assert size(4) == "medium"
+    assert size(9) == "large", "9 falls to the catch-all"
+
+test fn or_pattern_variants_exhaustive():
+    assert is_primary(Red)
+    assert is_primary(Blue)

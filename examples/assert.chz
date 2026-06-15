@@ -1,0 +1,20 @@
+# `assert` — a language primitive that faults (with source line) when a condition is false.
+# A passing assert is a silent no-op, so this program proves the happy path: every assert below
+# holds, and the prints at the end run. (A *failing* assert is exercised by the runtime tests + the
+# `chezzi test` runner, where it reports `file:line`.)
+
+fn double(n: int) -> int:
+    return n * 2
+
+# bare form: `assert <cond>`
+assert 1 + 1 == 2
+assert double(21) == 42
+assert "ab" + "cd" == "abcd"
+
+# message form: `assert <cond>, "<msg>"` — the message is only used on failure
+xs := [1, 2, 3]
+assert len(xs) == 3, "list should have three items"
+assert 2 in xs, "2 should be a member"
+
+print("all asserts passed")
+print(double(5))

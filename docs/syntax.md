@@ -857,6 +857,58 @@ fn handle(conn: Conn):
     x = 2
 ```
 
+## 9c. Testing — `assert`, `test fn`, `chezzi test`  (M20)
+
+Chezzi has a built-in test facility. Three pieces:
+
+**`assert`** — a statement that **faults with its source line** when its condition is false:
+
+```chezzi
+assert x == 1                       # bare form
+assert even_sum(10) == 20, "0..10"  # with a custom message
+```
+
+`cond` must be `bool`; the optional `msg` must be `str` (both checker-enforced). A passing assert is
+a silent no-op; a failing one faults like any runtime error — the message is the custom `msg`, or
+`"assertion failed"` — carrying the line you can see in `chezzi run` and in the test report. `assert`
+works anywhere, not just in tests.
+
+**`test fn`** — a `test` modifier before `fn` marks a test. A free `test fn` is an **independent**
+test (no parameters, returns nothing); a `test fn name(self)` **method** turns its struct into a
+**suite**:
+
+```chezzi
+# math_test.chz — independent tests
+test fn parses_int():
+    assert to_int("42") == 42
+
+# a suite — a struct with test methods, optional lifecycle hooks, and a shared fixture
+struct DbTests:
+    db: Db = connect()              # built ONCE for the suite (a default field expr)
+    fn before_each(self): self.db.begin()
+    fn after_each(self): self.db.rollback()
+    fn after_all(self): self.db.close()
+
+    test fn empty(self):
+        assert self.db.count() == 0
+    test fn insert(self):
+        self.db.insert("x")
+        assert self.db.count() == 1
+```
+
+The four lifecycle hooks — `before_all`, `after_all`, `before_each`, `after_each` — are recognized by
+name and optional (omit any you don't need). Each, if present, must be `fn name(self)` returning
+nothing. The shared fixture is just a default-initialized field, mutated through `self`.
+
+**`chezzi test [path]`** — discovers and runs every `test fn` in `*_test.chz` files. `path` defaults to
+the current directory; a single `*_test.chz` file runs that file, a directory is walked recursively.
+Each test runs in isolation (one failure doesn't abort the rest); the report is
+`PASS/FAIL name (file:line) msg` plus a summary, and the exit code is non-zero if anything failed. A
+suite runs `before_all? → [before_each? → test → after_each? (always, even on failure)]* → after_all?`,
+constructing the suite instance once. (The runner is VM-only; only the `assert` primitive runs on both
+engines.) Known limit: an assert that faults inside *imported* (non-test) code reports the test file's
+path, not the library file's.
+
 ## 9b. Program entry — there is no automatic `main`
 
 Chezzi is a scripting language: a program runs **top-to-bottom**. There is **no automatic entry
