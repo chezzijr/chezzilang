@@ -102,6 +102,36 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 11. ~~**Runtime stack traces**~~ — **DONE.** Error + call chain + line numbers, both engines
     (`37f374a`).
 
+12. **`ref T` — transparent reference bindings (DX sugar over `Ref[T]`) — PARKED behind the JIT.**
+    Motivation: `Ref[T]` already does everything (mutate, whole-value *replace* via `.set`, escape-safe
+    capture — all verified 2026-06-16), but it is a **viral wrapper**: it infects every signature
+    (`x: Ref[int]`, not `int`) and forces `.get()`/`.set()` ceremony instead of `x` / `x += 1`. The itch
+    is ergonomics, **not** capability. `ref T` would let a binding be spelled and used as a plain `T`
+    while carrying reference semantics:
+    ```chezzi
+    fn foo(x: ref int):
+        x += 1
+    n := 0
+    foo(ref n)        # explicit `ref` at the call site — see footgun #1
+    print(n)          # 1
+    ```
+    **Only ONE sound version exists in a GC'd, borrow-checker-less language — Version A: pure desugar
+    to a heap `Ref` cell + auto-deref.** The compiler boxes the binding into the existing `Ref`
+    (`Rc<RefCell>`) and inserts the get/set. **No new VM op, no engine change, parity by construction**
+    (same desugar path optional-chaining / `??` took). Because the cell is **heap/GC'd**, it is
+    escape-safe: a closure or nested fn that captures a `ref` and outlives the frame cannot dangle —
+    this is the *deref-over-heap* layer, the thing that makes it sound. (**Version B — real stack-slot
+    aliasing, true C++ `&` / Rust `&mut`** — is **rejected**: frames are popped `Vec<Value>` slots, so an
+    escaping ref dangles; soundness would need a borrow checker + lifetimes Chezzi will not grow.)
+    **Two design constraints if ever built:** (1) **explicit `ref` at the call site** (`foo(ref n)`, not
+    bare `foo(n)`) — silent mutation-through-args is un-Pythonic, à la Rust `&mut` / C# `ref`;
+    (2) **restrict `ref` to fn params + local bindings only** — no `ref` struct fields / collection
+    elements (a `ref` stored in a heap structure re-opens the escape problem); those keep explicit
+    `Ref[T]`. **Smaller first step (also parked):** the `r^ += 1` / `print(r^)` deref-sugar over `Ref`
+    (no new VM op) — ~80% of the win for ~5% of the cost. **Timing:** this reopens the frozen front-end
+    (lexer→parser→checker→desugar), and the JIT bakes in the language — so it stays **parked behind the
+    JIT** with NaN-box et al. Sugar, not capability; wrong time; revisit post-JIT.
+
 **Ecosystem (Tier 4, separate track):** REPL (huge for scripting iteration), formatter, `assert` +
 built-in test runner, LSP.
 
@@ -144,10 +174,11 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   under any future polymorphism. **Reality vs prediction:** −13% on a field-access-bound bench
   (`struct`, 3.32×→2.89× CPython), but **~neutral to −3% on a method-bound shallow-field bench** — the
   cold `field_ic` indirection only pays off when field resolution is the actual bottleneck (wider /
-  deeper structs), not when method dispatch dominates. **Open follow-up:** a struct **type-id guard**
-  (stamp a numeric type id on `Obj::Struct`; guard on `obj.tid == cell.tid` — a pure-int compare with
-  no name re-verify) would tighten the hot path and could close the shallow-struct caveat; it costs a
-  `tid` field + the struct construction / snapshot / wire sites, so it was deferred out of P4.
+  deeper structs), not when method dispatch dominates. **Follow-up — landed M19 Phase 5b (`bbdcb38`),
+  measured neutral:** a struct **type-id guard** (stamp a numeric type id on `Obj::Struct`; guard on
+  `obj.tid == cell.tid` — a pure-int compare with no name re-verify) replaced P4's name re-verify on a
+  hit. It did *not* close the shallow-struct caveat (the cold-IC indirection, not the re-verify, is the
+  cost), but was kept: cheaper hot path, VM-only ⇒ parity-clean.
 - ✅ **Kill per-call clones in `invoke_value`** — *landed M19 Phase 1*: matches on `&Obj` (no whole-
   `Obj` / closure-`HashMap` clone) and drops the arity-check `name.clone()`. Cut `fib` −17%, `list`
   −22%.
@@ -247,6 +278,62 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   Generational cuts pause + rescan cost on allocation-heavy scripts.
 - **Cranelift AOT/JIT** — already the stretch goal. Near-native, but a whole backend. Only after the
   language stops moving.
+
+### Memory layout & access patterns (cache levers — diagnosed 2026-06-16)
+
+> **Caveat first (measure, don't guess):** the bench bottleneck is **dispatch + calls + a few alloc
+> paths, NOT the value/heap layout** — `loop` is at the match-dispatch floor, and the `struct` bench is
+> *method-dispatch*-bound (the field IC already serves hot reads; the type-id guard was measured
+> **neutral**). So these are **not** reliable standalone bench-movers. But #1 and #3 below double as
+> **JIT-prep**: a method-JIT compiles a field/capture read to a **constant offset**, so it needs a
+> canonical *positional* layout — landing them is groundwork for the JIT, not (necessarily) a speedup
+> on its own.
+
+**Compact aggregate representation — drop per-instance redundancy (the real layout lever):**
+
+1. **Shared per-type struct layout (hidden-class / `__slots__`) — biggest redundancy + JIT-prep.**
+   `Obj::Struct { name: Box<str>, tid, fields: Vec<(Box<str>, Value)> }` (`heap.rs:162`) stores the type
+   name **and every field name** as a `Box<str>` **per instance**, though both are static and already in
+   `StructDef { fields: Vec<String>, tid }` (`op.rs:378`), keyed by `tid`. Cost: N+1 `Box<str>` allocs
+   per instance **plus an `==`-name-clone** (`mod.rs:4483` — `fa.iter().map(|(k,v)| (k.clone(), *v))`).
+   Fix: store `fields: Vec<Value>` (positional); resolve names from the program by `tid` on the cold
+   path only (the field IC already guards on `tid`, so the hot read never touches names). Shrinks every
+   instance, kills the clone, hands the JIT a constant field offset.
+2. **Enum variant id instead of names.** `Obj::Enum { ty: Box<str>, variant: Box<str>, payload }`
+   (`heap.rs:167`) — two `Box<str>` per instance, both global (`Program::variants`). Fix:
+   `variant_id: u32` (the enum analogue of `tid`); names looked up for Display only. Saves 2 allocs/inst.
+3. **Closure captures: positional `Vec`, not a per-closure `HashMap`.** `Obj::Closure { captured:
+   HashMap<String, Value>, .. }` (`heap.rs:178`) allocates a `HashMap` (~48 B + string keys) **per
+   closure**, and every `GetCaptured` does a string hash + probe (`mod.rs:3354`). The capture set is
+   **static per proto** (the compiler knows the `CapSrc` order at `MakeClosure`). Fix: store captures
+   positionally (`SmallVec<[Value; N]>`) indexed by a per-proto capture-layout slot — `GetCaptured(idx)`
+   becomes a `Vec` index. Kills the HashMap alloc + string hashing on the hot captured-read path, and
+   speeds the per-spawn deep-clone.
+
+**Heap-slot layout (GC-side; principled, low priority — GC moves no bench):**
+
+4. **Separate the mark bit from the object.** `Slot { obj: Option<Obj>, mark: bool }` (`heap.rs:234`)
+   interleaves a 1-byte mark with the 88-byte `Obj`, so the sweep walks 88 B+ slots to read 1 bit and
+   scans the whole `slots` Vec even on a sparse heap. A packed mark **bitvec** (1 bit/obj, 64/word) makes
+   the sweep a dense sequential bitscan. Only worth it if GC becomes hot (generational/incremental
+   territory — already #8, low-ROI).
+5. **Shrink `Obj` below 88 B.** `size_of::<Obj>()==88` (guard, `chzstr.rs:205`), forced by the largest
+   variants (Module ~80 B). Boxing the rare big ones densifies the heap — **but SSO deliberately sized
+   strings to fill 88 B inline**, so shrinking un-inlines them. Net is a trade-off → measure first.
+
+**Hot-loop access (mostly already addressed or parity-blocked — cross-ref):**
+
+6. **HOF borrow-release clone (new finding).** List `map`/`filter`/`fold` do `self.heap.get(h).clone()`
+   to release the heap borrow before `invoke_value(&mut self, …)` — an N×16 B copy per HOF call. A `Vm`
+   split (`&mut ExecState` + `&Heap`) lets the borrow coexist. Structural refactor, not a one-session lever.
+7. **`for`-loop snapshot (`ListClone`) + per-char alloc** — mandated by the interp's snapshot parity;
+   `alloc_char` (Phase 3) already halved the string case. Parity-blocked.
+8. **Operand-stack 16 B/Value traffic** → NaN-box (blocked, full i64) / register VM (#8, low-ROI) — above.
+
+**Land order if pursued:** **#1 → #3 → #2** as **JIT groundwork** (the positional layouts the JIT codegen
+wants), measuring each against `struct`/`hof` (may read neutral — they're dispatch-bound, see caveat).
+#4/#5/#6 are principled cleanups, post-JIT. Same discipline throughout: failing-then-green parity test →
+keep two-engine parity → measure (`benches/run.chz`) → record the delta in `docs/benchmarks.md`.
 
 **Highest payoff-per-effort (original M19 batch, all landed):** superinstructions + inline caching +
 peephole/const-fold. They attacked dispatch count and name lookup — the two actual costs — without
