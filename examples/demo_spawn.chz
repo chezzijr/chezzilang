@@ -1,0 +1,22 @@
+# `spawn` + `parallel:` nursery — SCOPED concurrency.
+# Each worker squares its number and drops it in the shared channel. The nursery joins
+# automatically at the dedent: reaching the line after the block means all 5 tasks finished.
+
+fn square_into(n: int, out: Channel[int]):
+    out.send(n * n)
+
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn square_into(1, ch)     # args copied at the spawn point; ch is the shared handle
+        spawn square_into(2, ch)
+        spawn square_into(3, ch)
+        spawn square_into(4, ch)
+        spawn square_into(5, ch)
+    # join happened here — all 5 results are queued FIFO
+    total := 0
+    for _ in 0..5:
+        total += ch.recv()
+    print("spawn: sum of squares 1..5 = {total}")
+
+main()

@@ -25,7 +25,9 @@ fn main():
 
 - **Host:** Rust — no GC, max perf, real memory learning.
 - **Execution:** bytecode stack VM (default engine) + a frozen tree-walk interpreter kept as the
-  byte-for-byte parity oracle. Real-thread multicore via `--parallel`.
+  byte-for-byte parity oracle. `chezzi run` defaults to the real-thread multicore engine (size its
+  worker pool with `--threads=N` / `CHEZZI_THREADS`, `0` = all cores); `--serial` selects the
+  cooperative single-thread VM (the parity oracle).
 - **Types:** static with local inference — explicit function signatures, inferred locals (`x := 5`).
 - **Syntax:** indentation blocks (Python-feel).
 - **Errors:** `Result`/`Option` + `?` — errors as values, no hidden control flow.

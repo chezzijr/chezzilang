@@ -433,13 +433,81 @@ buckets on resume; the M:N park (below) does the same with an `Arc<WaitPark>` to
 
 ---
 
+## 6e. `std.cancel` — cooperative cancellation & timeouts
+
+`std.cancel` is a Go-`context`-inspired **cancellation token**, adapted to Chezzi. A `Token` is an
+explicit, sendable handle you thread down a call tree (like `Channel`/`Shared`): poll `cancelled()` in
+CPU loops, race `done()` in a `wait:` for IO loops, and `cancel()` it from anywhere. It is written
+entirely in Chezzi (`std/cancel.chz`) over existing primitives, plus the one native `Channel.trip()`
+latch (§6c').
+
+```chezzi
+import std.cancel
+
+c := cancel.manual()             # manually-cancellable token, no deadline
+t := cancel.timeout(500)         # auto-cancels 500ms after creation; also manually cancellable
+```
+
+> **v1 is flat.** Tokens are independent — there is no parent/child derivation; cancelling one never
+> affects another. Tree-structured propagation is a deliberate follow-up (it needs `done()`-vs-poll
+> consistency across a whole subtree, including ancestor *timeouts*, which the v1 channel model can't
+> express — so shipping it half-working would be worse than not shipping it).
+
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `cancelled()` | `bool` | `flag` OR (deadline passed). **Polls; never blocks.** |
+| `reason()` | `str?` | `"cancelled"` (manual) \| `"timeout"` (deadline) \| `None` (live). |
+| `done()` | `Channel[bool]` | ready (recv → `true`) when done — for a `wait:` arm. Same handle every call. |
+| `cancel()` | `nil` | manual cancel, anytime, any task; idempotent; wakes `done()` waiters. |
+| `deadline_at()` | `float` | absolute monotonic secs, or `0.0` if none. |
+
+```chezzi
+# CPU-bound: poll cancelled() at the loop back-edge.
+fn crunch(tok: Token, out: Shared[int]):
+    i := 0
+    while i < 100000000:
+        if tok.cancelled(): return     # ordinary return → defer/recover still run
+        i = i + 1
+    out.set(i)
+
+# IO-bound: race done() against the work channel in a wait:.
+fn serve(tok: Token, io: Channel[str]):
+    wait:
+        v := io.recv():        handle(v)
+        _ := tok.done().recv(): cleanup()   # cancelled (timeout or manual) → take this arm
+```
+
+**Parity-safe deadline.** A timeout's deadline is checked via `monotonic()` *at poll time* — no
+background canceller task — so a self-polling timeout loop stops on time identically on **every**
+engine. (`done()`'s deadline delivery rides the proven `timer(ms)` path, §6c.)
+
+**Cooperative contract (by design).** A token *signals* cancellation; it cannot forcibly interrupt.
+On the single-threaded `--serial`/`--interp` oracles, a pure-CPU loop that never polls `cancelled()`
+and never yields runs to completion — a sibling's manual `cancel()` only lands when that sibling gets
+the thread. The default OS-thread engine preempts such a loop. So a *manual* cancel of a non-polling
+CPU sibling **diverges by engine** (this is why `examples/cancel_cpu.chz` carries no golden
+`.expected`, like `examples/parallel_cancel.chz`); a self-polling *timeout* does not. Guidance: **poll
+`cancelled()` in CPU loops; `wait:` on `done()` in IO loops** — exactly Go's `ctx.Done()` contract.
+
+### 6c'. `Channel.trip()` — the manual level-trigger latch
+
+`trip()` is the one native primitive `std.cancel` needs. It flips a permanent latch on a channel: the
+channel then reports ready (`recv`/`try_recv`/`wait` → `true`) on **every** call thereafter, fanning
+out to any number of receivers — like a passed `timer` deadline, but flipped on demand. (An ordinary
+`Channel[bool]` can't be a fan-out `done()`: it is move-on-send, so a value reaches one receiver
+once.) `trip()` is idempotent and reuses `close()`'s wake fan-out (minus the `closed` flag, so a
+`wait:` arm stays *ready* rather than *skipped*). See `examples/channel_trip.chz`.
+
+---
+
 ## 7. Sendability
 
 Crossing a task boundary (a `spawn` capture or a `Channel.send`) is gated on **sendability**, and
 captured bindings are **read-only inside the task**.
 
 - **Sendable:** scalars (`int`/`float`/`bool`), `str`, containers + structs whose contents are all
-  sendable, **`Channel`** itself (reply channels), and a **`Shared[T]`** handle.
+  sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, a **`Shared[T]`** handle,
+  and a **`std.cancel` `Token`** (a struct over the above, so it flows down the call tree).
 - **Not sendable:** closures (bound to a heap), native handles (file/regex/HTTP `Response`/etc.), and
   **`Ref[T]`** (an in-task-only box — copied on spawn, so each task gets its own independent box).
 - **Read-only captures:** reassigning a captured binding inside a task body is a **compile error** —

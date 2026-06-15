@@ -1,0 +1,65 @@
+# std.cancel — cooperative task cancellation & timeouts (a Go `context`-inspired token, adapted to
+# Chezzi). A `Token` is an explicit, sendable handle you thread down a call tree: poll `cancelled()`
+# in CPU loops, race `done()` in a `wait:` for IO loops, and `cancel()` it from anywhere.
+#
+# Written entirely in Chezzi over existing primitives: `Shared[bool]` (the manual-cancel bit),
+# `monotonic()` (the deadline, checked AT POLL TIME so it is deterministic on every engine — no
+# background canceller task), and a level-triggered channel for `done()` (`timer(ms)` for a timeout,
+# a `trip()`-able `Channel[bool]` for manual cancel). See docs/concurrency.md §6e.
+#
+# Cooperative contract: a token SIGNALS cancellation; it cannot forcibly interrupt. A CPU loop must
+# poll `cancelled()`; an IO loop must `wait:` on `done()`. A self-polling timeout loop stops on time
+# on every engine; a manual cancel of a non-polling pure-CPU sibling is only preempted on the default
+# OS-thread engine (the `--serial`/`--interp` oracles run it to completion).
+#
+# v1 is FLAT — tokens are independent (no parent/child derivation). Cancelling one token never affects
+# another. Tree-structured propagation is a deliberate follow-up (it needs done()-vs-poll consistency
+# across the whole subtree, including ancestor *timeouts*, which the v1 channel model can't express).
+import std.time
+
+struct Token:
+    flag: Shared[bool]     # manual-cancel bit (sendable, owner-serialized)
+    deadline: float        # absolute monotonic() secs; 0.0 == no deadline; checked at POLL TIME
+    dl: Channel[bool]      # done(): a timer channel (timeout) or a trip()-able latch channel (manual)
+
+    # True once this token is cancelled (manually) or its deadline has passed. Never blocks.
+    fn cancelled(self) -> bool:
+        if self.flag.get():
+            return true
+        return self.deadline > 0.0 and time.monotonic() >= self.deadline
+
+    # Why this token is done: "cancelled" (manual), "timeout" (deadline), or None (still live).
+    # Agrees with cancelled(): None iff cancelled() is false.
+    fn reason(self) -> str?:
+        if self.flag.get():
+            return Some("cancelled")
+        if self.deadline > 0.0 and time.monotonic() >= self.deadline:
+            return Some("timeout")
+        return None
+
+    # Manual cancel, callable anytime, from any task (the handle is shared). Idempotent. Trips the
+    # done() channel so a sibling parked in `wait:` wakes.
+    fn cancel(self):
+        self.flag.set(true)
+        self.dl.trip()
+
+    # A channel that becomes ready (recv -> true) when this token is done. Use in a `wait:` arm.
+    # Same handle every call, so re-polling in a loop is stable and a later cancel() reaches a waiter.
+    fn done(self) -> Channel[bool]:
+        return self.dl
+
+    # Absolute deadline (monotonic seconds), or 0.0 if none.
+    fn deadline_at(self) -> float:
+        return self.deadline
+
+# A manually-cancellable token with no deadline. `cancel()` is the only thing that trips it.
+fn manual() -> Token:
+    return Token(flag=Shared(false), deadline=0.0, dl=Channel[bool]())
+
+# A token that auto-cancels `ms` milliseconds after creation, and is also manually cancellable. A
+# non-positive `ms` means "already expired" (cancelled() is true at once, done() fires immediately).
+fn timeout(ms: int) -> Token:
+    m := ms
+    if m < 0:
+        m = 0
+    return Token(flag=Shared(false), deadline=time.monotonic() + float(m) / 1000.0, dl=timer(m))

@@ -1,8 +1,9 @@
 //! B3.3-threads — the bounded OS-thread work pool that runs `--parallel` task bodies (decision B).
 //!
 //! A `parallel:` with N spawns must **not** become N OS threads: nested `parallel:` would explode
-//! N×M. Instead there is **one** process-wide pool sized to [`available_parallelism`], created
-//! lazily on first use and living for the process lifetime. A `parallel:` join farms its tasks here
+//! N×M. Instead there is **one** process-wide pool sized to [`super::worker_count`] (the configured
+//! `--threads=N` / `CHEZZI_THREADS`, or [`available_parallelism`] when unset), created lazily on
+//! first use and living for the process lifetime. A `parallel:` join farms its tasks here
 //! and the joining thread itself runs one inline (decision B: the parent participates), so total
 //! live threads stay bounded at `N + (joining threads)` regardless of `parallel:` nesting depth.
 //!
@@ -36,7 +37,7 @@ static POOL: OnceLock<Pool> = OnceLock::new();
 /// threads (min 1); subsequent calls return the same pool.
 fn pool() -> &'static Pool {
     POOL.get_or_init(|| {
-        let n = thread::available_parallelism().map(|x| x.get()).unwrap_or(1).max(1);
+        let n = super::worker_count();
         let queue: Queue = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
         for _ in 0..n {
             let q = Arc::clone(&queue);

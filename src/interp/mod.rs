@@ -1028,12 +1028,16 @@ impl Interp {
         let mut soonest_timer: Option<(usize, std::time::Instant)> = None;
         let mut all_closed = true;
         for (i, q) in chans.iter().enumerate() {
-            let (popped, closed, timer) = {
+            let (popped, closed, timer, latch) = {
                 let mut s = q.borrow_mut();
-                (s.queue.pop_front(), s.closed, s.timer)
+                (s.queue.pop_front(), s.closed, s.timer, s.done_latch)
             };
             if let Some(v) = popped {
                 return self.run_wait_arm(&arms[i], v, span);
+            }
+            // A tripped latch (`trip()`) is ready like a fired timer — take the arm with `true`.
+            if latch {
+                return self.run_wait_arm(&arms[i], Value::Bool(true), span);
             }
             if let Some(deadline) = timer {
                 // A timer channel is never closed and always eventually ready: fired now, or a live
@@ -2291,12 +2295,16 @@ impl Interp {
             }
             "recv" => {
                 builtins::arity("recv", &args, 0, span)?;
-                let (popped, closed, timer) = {
+                let (popped, closed, timer, latch) = {
                     let mut s = q.borrow_mut();
-                    (s.queue.pop_front(), s.closed, s.timer)
+                    (s.queue.pop_front(), s.closed, s.timer, s.done_latch)
                 };
                 if let Some(v) = popped {
                     return Ok(v);
+                }
+                // A tripped latch (`trip()`) delivers `true` immediately and forever.
+                if latch {
+                    return Ok(Value::Bool(true));
                 }
                 // A `timer(ms)` channel synthesises its one-shot `true` once the deadline passes:
                 // inline-sleep to it (single-threaded interp), then yield. Checked before the closed /
@@ -2331,6 +2339,9 @@ impl Interp {
                     // A `timer(ms)` channel reports ready (`Some(true)`) once its deadline passes, even
                     // with nothing queued — the level-triggered, non-blocking poll.
                     s.queue.pop_front().or_else(|| {
+                        if s.done_latch {
+                            return Some(Value::Bool(true));
+                        }
                         s.timer.filter(|d| std::time::Instant::now() >= *d).map(|_| Value::Bool(true))
                     })
                 };
@@ -2344,6 +2355,14 @@ impl Interp {
             "close" => {
                 builtins::arity("close", &args, 0, span)?;
                 q.borrow_mut().closed = true;
+                Ok(Value::Nil)
+            }
+            // `trip()` flips the manual level-trigger latch: the channel is then permanently ready
+            // (`recv`/`try_recv`/`wait` yield `true`). Idempotent. In the sequential oracle there are no
+            // parked receivers to wake — a later `recv`/`wait` observes the latch directly.
+            "trip" => {
+                builtins::arity("trip", &args, 0, span)?;
+                q.borrow_mut().done_latch = true;
                 Ok(Value::Nil)
             }
             "len" => {
@@ -5742,6 +5761,44 @@ b := Buf([10, 20, 30])
         .unwrap();
         let (out, _err, res, _) = run_file(&path);
         res.expect("math_more.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
+    /// `Channel.trip()` latch + `std.cancel` (interp twins of the VM `*_via_run_file` goldens). Each
+    /// imports a std module, so they drive `run_file` (the module-graph path) and byte-match `.expected`.
+    #[test]
+    fn golden_channel_trip_chz() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/channel_trip.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/channel_trip.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("channel_trip.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn golden_cancel_manual_chz() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_manual.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_manual.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("cancel_manual.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn golden_cancel_timeout_wait_chz() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_timeout_wait.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_timeout_wait.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("cancel_timeout_wait.chz should run on the interp");
         assert_eq!(out, expected);
     }
 

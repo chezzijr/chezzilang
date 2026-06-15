@@ -1,0 +1,47 @@
+# CPU-bound speedup demo: W independent workers each count primes up to `limit` (trial division —
+# pure, shared-nothing CPU work), results collected over a channel. The whole nursery is timed with
+# std.time.monotonic(). Run the SAME file under different engines to see the wall-clock difference:
+#
+#   chezzi run --serial      examples/demo_speedup.chz   # cooperative VM, 1 thread
+#   chezzi run --threads=1   examples/demo_speedup.chz   # M:N engine, 1 worker
+#   chezzi run --threads=4   examples/demo_speedup.chz   # M:N engine, 4 workers
+#   chezzi run               examples/demo_speedup.chz   # M:N engine, all cores
+
+import std.time
+
+fn count_primes(limit: int) -> int:
+    count := 0
+    n := 2
+    while n < limit:
+        is_p := true
+        d := 2
+        while d * d <= n:
+            if n % d == 0:
+                is_p = false
+                break
+            d += 1
+        if is_p:
+            count += 1
+        n += 1
+    return count
+
+fn task(limit: int, out: Channel[int]):
+    out.send(count_primes(limit))
+
+fn main():
+    workers := 12
+    limit := 100000
+    ch := Channel[int]()
+
+    t0 := time.monotonic()
+    parallel:
+        for _ in 0..workers:
+            spawn task(limit, ch)
+    total := 0
+    for _ in 0..workers:
+        total += ch.recv()
+    dt := time.monotonic() - t0
+
+    print("workers={workers}  primes<{limit} per worker={total / workers}  elapsed={dt}s")
+
+main()

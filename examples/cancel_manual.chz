@@ -1,0 +1,24 @@
+# std.cancel — a manual token: cancelled()/reason() before and after cancel(), done() readiness, and
+# idempotent re-cancel. Pure `Shared`/latch, no timing → deterministic on every engine (golden).
+import std.cancel
+
+fn main():
+    t := cancel.manual()
+    print("before: cancelled={t.cancelled()}")
+    match t.reason():
+        Some(r): print("before reason: {r}")
+        None:    print("before reason: none")
+
+    t.cancel()
+    print("after: cancelled={t.cancelled()}")
+    match t.reason():
+        Some(r): print("after reason: {r}")
+        None:    print("after reason: none")
+
+    # done() is now tripped → recv returns immediately (same task, deterministic).
+    print("done recv: {t.done().recv()}")
+
+    t.cancel()   # idempotent — second cancel is a no-op
+    print("after second cancel: cancelled={t.cancelled()}")
+
+main()

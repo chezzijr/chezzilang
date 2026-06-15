@@ -212,12 +212,35 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
 ## Concurrency — feature-complete (confirmed 2026-06-12)
 
 Core feature-complete through **M18**; **concurrency shipped through Tier-D (D0–D6c) + M-C**. The surface —
-`spawn` / `parallel:` nursery / `Channel[T]` / `Shared[T]` / `Executor`, plus `--parallel` (the VM's real
-OS-thread engine) and the netpoller + `std.net` — is complete and stable. **M-C implicit nurseries shipped
+`spawn` / `parallel:` nursery / `Channel[T]` / `Shared[T]` / `Executor`, plus the VM's real OS-thread
+engine and the netpoller + `std.net` — is complete and stable. **M-C implicit nurseries shipped
 (2026-06-12)** — every function body and the module top level is an implicit nursery; a bare `spawn` is
-legal anywhere and joins at `return`/end. ~1592 tests green; the default cooperative engine and `--parallel`
-stay byte-identical on every `examples/parallel*.chz` + `examples/implicit_nursery.chz` golden, and the
-frozen interp is the differential parity oracle for the sequential subset.
+legal anywhere and joins at `return`/end. ~1592 tests green; the cooperative engine (`--serial`) and the
+OS-thread engine stay byte-identical on every `examples/parallel*.chz` + `examples/implicit_nursery.chz`
+golden, and the frozen interp is the differential parity oracle for the sequential subset.
+
+**CLI engine selection.** `chezzi run` now defaults to the OS-thread engine; `--serial` selects the
+cooperative single-thread VM (the frozen parity oracle), `--parallel` is an accepted no-op alias, and
+`--threads=N` (or env `CHEZZI_THREADS`, flag wins; `0`/omitted = all cores) sizes the OS-thread worker
+pool via `vm::worker_count()`. `--threads` errors with `--serial`/`--interp` (neither is multi-threaded).
+
+**`std.cancel` — cancellation tokens + `Channel.trip()` SHIPPED (2026-06-15).** A user-level
+cooperative cancellation **`Token`** (Go-`context`-inspired, adapted): `cancel.manual()` /
+`cancel.timeout(ms)`; methods `cancelled()`, `reason()` (`"cancelled"`/`"timeout"`), `done() ->
+Channel[bool]` (a `wait:` arm), `cancel()` (anytime/any task), `deadline_at()`. Tokens are **flat** in
+v1 (no parent/child derivation — tree propagation is a documented follow-up). Pure Chezzi
+(`std/cancel.chz`) over `Shared[bool]` +
+`monotonic()` (deadline checked **at poll time** → timeout is deterministic across engines, no
+background canceller) + ONE new native primitive **`Channel.trip()`** — a permanent level-trigger
+latch (the manual-cancel fan-out a move-on-send `Channel` lacks; reuses `close()`'s wake fan-out
+minus `closed`). Decoupled from the internal nursery cancel flag (so a user `cancelled()`-return runs
+`defer`/`recover:` normally). Goldens: `examples/channel_trip.chz`, `cancel_manual.chz`,
+`cancel_timeout_wait.chz` (byte-identical on cooperative-VM + interp); `examples/cancel_cpu.chz`
+carries **no `.expected`** (manual cancel of a CPU sibling diverges by engine — default preempts,
+`--serial`/`--interp` run to completion) and is covered by a Rust `#[test]`. A cross-task
+cancel→`wait:` lost-wakeup regression (`MnSched::park`/`park_wait` gap re-check now includes
+`done_latch`) is guarded by `cancel_trip_wakes_parked_wait_under_parallel`. Closes the `gaps.md`
+cancellation gap (timeouts + manual cancel). See `docs/concurrency.md` §6e/§6c'.
 
 > **`Channel.recv_timeout(ms)` — attempted then reverted (2026-06-12).** A bounded-wait `recv` was
 > implemented with a **demote-always** shortcut (reuse `demote_recv_block` + a deadline) to avoid the
@@ -356,7 +379,7 @@ drain only its private queue and could never RUN `O` → `deadlock` fault) is **
   ordering follows the parity-preserving per-nursery flush.
 - **Eager nurseries unchanged (OPTION A):** the per-connection eager nursery keeps its OWN sched +
   dedicated drainer (single-scope fast path), untouched.
-- **Cooperative (default `run`) + `--interp`:** still serialize nested nursery levels → the same program
+- **Cooperative (`run --serial`) + `--interp`:** still serialize nested nursery levels → the same program
   **still faults `deadlock`** there. The cooperative-engine flatten is a **separate, later commit**.
   Workaround on `run`: siblings in ONE nursery (doc case C). Golden is M:N-only (no coop/interp leg),
   watchdog-wrapped — mirrors `golden_channel_block`.

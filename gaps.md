@@ -10,7 +10,7 @@ in `PROGRESS.md` + the cited `examples/*.chz`.
 
 Legend: 🔴 blocks real apps · 🟡 notable friction · 🟢 works (recorded so we don't re-flag it).
 
-Last updated: 2026-06-11. Baseline: post-M18 (`defer` → block-scoped) + concurrency D6 complete; gaps pass II in progress.
+Last updated: 2026-06-15. Baseline: post-M18 (`defer` → block-scoped) + concurrency D6 complete; gaps pass II in progress.
 
 > **Forward-looking brainstorm** (a non-Go concurrency model, VM/GC optimizations, far-out ideas)
 > lives in **[`docs/future.md`](docs/future.md)** — speculative, NOT scheduled. Concrete near-term
@@ -258,6 +258,41 @@ thread-demotion landed (attempt)** for the native islands — see the residuals 
     needs the same `Shared` box.* Future: a lint/warning when the tooling track lands.
   - **(cost, by design)** one raw OS thread per fiber *actually* blocked in a callback (Go's `handoffp`
     cost), faulted cleanly if the OS refuses the thread.
+
+- **✅ SHIPPED — first-class task cancellation / timeout API (`std.cancel`).** A user-level
+  cooperative cancellation **`Token`** (`std/cancel.chz`, Go-`context`-inspired): `cancel.manual()` /
+  `cancel.timeout(ms)`, methods `cancelled() -> bool`,
+  `reason() -> str?` (`"cancelled"`/`"timeout"`), `done() -> Channel[bool]` (a `wait:` arm), `cancel()`
+  (anytime, any task), `deadline_at()`. Tokens are **flat** in v1 (no parent/child derivation — tree
+  propagation is a documented follow-up). Built over `Shared[bool]` + `monotonic()` (deadline checked
+  **at poll time**, so the timeout case is deterministic across engines — no background canceller) + the
+  one new native primitive **`Channel.trip()`** (a permanent level-trigger latch, the manual-cancel
+  fan-out a move-on-send `Channel` can't give). **Deliberately decoupled** from the internal nursery
+  `cancel: Arc<AtomicBool>` (which is still tripped only by a sibling fault `src/vm/mod.rs:6391` or
+  `std.os.exit` `:10642`) — a user `cancelled()`-driven `return` runs `defer`/`recover:` normally,
+  unlike the internal scope-cancel unwind that bypasses them (`:2856-2858`). The old naive `wait:`/
+  `timer` "timeout" remains wrong (it returns `Err("timeout")` logically but runs the full work — a
+  task can't outlive its nursery); `std.cancel` is the supported answer for timeouts + manual cancel.
+  **Test-authoring rule (parity):** a cancellation example is golden only if it asserts
+  *that* cancellation happened (which outcome / which `wait:` arm) at a fixed point — never iteration
+  count or *when* a CPU loop was interrupted. Manual cancel of a running CPU sibling diverges by engine
+  (see below), so `examples/cancel_cpu.chz` carries no `.expected` (joins `examples/parallel_cancel.chz`)
+  and is covered by a Rust `#[test]` instead. See `docs/concurrency.md` §6e / §6c'.
+
+- **🟡 The cooperative (default) + `--interp` engines cannot preempt CPU-bound tasks** — cooperative
+  engines switch fibers only at yield points (channel ops, blocking `recv`, the back-edge *when it
+  returns to the scheduler*). A pure-CPU loop with no channel op never yields → it **monopolizes the
+  single thread**, so sibling tasks (a canceller/timeout) never run and the cancel flag is never polled
+  mid-loop. **Consequence:** the *same source* diverges by engine — the cancel-and-continue workaround
+  above, with a 2e9-iteration CPU worker: `--parallel` aborts it mid-flight (`s == 0`, ~0.5s);
+  cooperative + `--interp` run it to completion (`s == 2000000000`, **~69s**). IO/channel-bound tasks
+  *can* be cancelled cooperatively (they hit yield points); pure-CPU tasks cannot. This is why
+  cancellation examples carry **no golden `.expected`** — their output diverges by engine, so they'd
+  fail two-engine parity by construction (`examples/parallel_cancel.chz` has none). **Implication:** any
+  per-task timeout would only catch a runaway task under `--parallel`, never a CPU-spinning one on the
+  default engine. **Fix sketch:** reduction-counting preemption already exists on the M:N engine (D3,
+  `:2871`); the cooperative engine would need a back-edge yield budget for CPU loops to be interruptible
+  — a behavior change weighed against the frozen cooperative oracle's determinism.
 
 ### 🟡 Stdlib breadth (low priority — language is feature-complete; this is library fill)
 

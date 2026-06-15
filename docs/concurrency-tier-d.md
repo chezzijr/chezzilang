@@ -56,7 +56,7 @@ share-nothing, strictly simpler for a bytecode VM).
 
 | Mechanism | Source | Decision | Why this source (not the other) |
 |---|---|---|---|
-| **G/M/P split**, bounded P = `available_parallelism()` | **Go** | Adopt (D2) | Cleanest decoupling of runnable work from threads; caps real parallelism; enables handoff + stealing |
+| **G/M/P split**, bounded P = `vm::worker_count()` (`--threads=N`/`CHEZZI_THREADS`, else `available_parallelism()`) | **Go** | Adopt (D2) | Cleanest decoupling of runnable work from threads; caps real parallelism; enables handoff + stealing |
 | **Per-P local run queue** (bounded ring + `runnext`) + global overflow | **Go** | Adopt (D2) | The scalability core — common case touches only per-worker state, no global lock |
 | **Work-stealing** (random victim, steal half) + periodic global check (`schedtick % 61`) | **Go** | Adopt (D4) | Provably good load balance, low contention. BEAM's AMQL periodic-migration is heavier; Go's reactive steal is simpler to land first |
 | **`wakep` / spinning-worker + StoreLoad barrier** | **Go** | Adopt (D4) | Avoids both idle cores and busy-wait; the barrier is the documented correctness lynchpin |
@@ -76,7 +76,7 @@ share-nothing, strictly simpler for a bytecode VM).
 |---|---|---|
 | **G** goroutine | **Fiber** = `FiberCtx` (frames / stack / handlers / nurseries) **+ own `Heap` + Arc'd module snapshot** | `FiberCtx` `src/vm/mod.rs` |
 | **M** OS thread | Pool worker thread (hosts a thin `Vm` shell = the execution engine) | `src/vm/pool.rs` |
-| **P** processor | Per-worker **run queue** (bounded ring + `runnext`) + the run-license, count = `available_parallelism()` | D2/D4 |
+| **P** processor | Per-worker **run queue** (bounded ring + `runnext`) + the run-license, count = `vm::worker_count()` (`--threads=N`/`CHEZZI_THREADS`, else `available_parallelism()`) | D2/D4 |
 | LRQ / GRQ | Per-worker local queue + global overflow queue | D2/D4 |
 | `runqsteal` | Steal half from a random victim | D4 |
 | `gopark` / `goready` | Existing `self.suspend = Some(h)` park + `send`-side wake | `src/vm/mod.rs` recv arm |
