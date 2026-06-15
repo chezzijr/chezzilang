@@ -3809,7 +3809,7 @@ impl Interp {
                     });
                 }
                 let items: Vec<Value> = items.iter().cloned().collect();
-                for (t, v) in targets.iter().zip(items.into_iter()) {
+                for (t, v) in targets.iter().zip(items) {
                     self.store_plain(t, v, span)?;
                 }
                 Ok(())

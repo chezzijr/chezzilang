@@ -1790,7 +1790,7 @@ impl Checker {
                     return;
                 }
                 let elems = elems.clone();
-                for (t, ety) in targets.iter().zip(elems.into_iter()) {
+                for (t, ety) in targets.iter().zip(elems) {
                     self.check_assign(t, AssignOp::Eq, ety, span);
                 }
             }
