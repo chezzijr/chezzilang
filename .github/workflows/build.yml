@@ -27,8 +27,9 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             linker: gcc-aarch64-linux-gnu
-          - target: aarch64-apple-darwin
-            os: macos-latest
+          # macOS (aarch64-apple-darwin) dropped: libffi-sys fails to build against the
+          # macos-latest runner's clang (`-print-multi-os-directory` / CFI errors). Re-add once
+          # libffi-sys is bumped or the runner toolchain is fixed. Linux is the supported target.
     steps:
       - uses: actions/checkout@v4
 
