@@ -3277,16 +3277,17 @@ impl Vm {
                 }
             }
             Op::Assert { has_msg } => {
-                // Pop in reverse push order: msg (if any) was pushed after cond.
-                let msg = if *has_msg { Some(self.pop()) } else { None };
-                let cond = self.pop();
-                if matches!(cond, Value::Bool(false)) {
-                    let message = match msg {
-                        Some(m) => self.val_str(m).unwrap_or_else(|| "assertion failed".to_string()),
-                        None => "assertion failed".to_string(),
-                    };
-                    return Err(self.err(message, span));
-                }
+                // Reached only on the failing path: the compiler emits `Op::Assert` after a
+                // `JumpIfFalse` that already consumed (and tested) `cond`, so this op always faults.
+                // `msg` (if present) was evaluated lazily just before us — matching the interpreter,
+                // which only evaluates `msg` when the assertion fails.
+                let message = if *has_msg {
+                    let m = self.pop();
+                    self.val_str(m).unwrap_or_else(|| "assertion failed".to_string())
+                } else {
+                    "assertion failed".to_string()
+                };
+                return Err(self.err(message, span));
             }
             Op::GetLocal(slot) => {
                 let v = self.stack[self.base() + slot];

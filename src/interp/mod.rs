@@ -4748,6 +4748,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn assert_passing_msg_is_lazy_and_byte_identical_across_engines() {
+        // Regression (eager-vs-lazy parity): the message of a *passing* assert must NOT be evaluated
+        // by either engine. The VM used to compile `msg` unconditionally before the check, so a
+        // passing `assert true, loud()` printed in the VM but stayed silent in the interp, and a
+        // passing `assert true, xs[5]` faulted in the VM but passed in the interp. Both forms must
+        // now produce identical stdout and neither evaluate the message.
+        let side_effect =
+            "fn loud() -> str:\n    print(\"msg-evaluated\")\n    return \"m\"\nprint(\"a\")\nassert true, loud()\nprint(\"b\")\n";
+        let vm_out = crate::vm::run_capture(side_effect).expect("vm: passing assert must not fault");
+        let interp_out = run_capture(side_effect).expect("interp: passing assert must not fault");
+        assert_eq!(vm_out, interp_out, "stdout parity for a passing assert with a side-effecting msg");
+        assert_eq!(vm_out, "a\nb\n", "a passing assert must not evaluate its message");
+
+        // A passing assert whose message expression would FAULT must not fault in either engine.
+        let faulting = "xs := [\"only\"]\nprint(\"a\")\nassert true, xs[5]\nprint(\"b\")\n";
+        let vm_out = crate::vm::run_capture(faulting).expect("vm: faulting msg must not be evaluated");
+        let interp_out = run_capture(faulting).expect("interp: faulting msg must not be evaluated");
+        assert_eq!(vm_out, interp_out, "stdout parity for a passing assert with a faulting msg expr");
+        assert_eq!(vm_out, "a\nb\n");
+    }
+
     /// `InterpHost::arg_str_map` reads a `map[str, str]` Value in insertion order; a non-map arg
     /// errors. Parity twin of `vm::tests::vm_host_arg_str_map_reads_live_map` — both iterate
     /// `MapData.entries` so header order is identical across engines.

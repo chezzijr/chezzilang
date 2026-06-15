@@ -625,13 +625,20 @@ impl Compiler {
                 Ok(())
             }
             StmtKind::Assert { cond, msg } => {
-                // Emit cond, then (optional) msg, then `Op::Assert` carrying `stmt.span` so the
-                // fault location matches the interpreter (which faults with `stmt.span`) exactly.
+                // Lazy message evaluation, byte-identical to the interpreter (which evaluates `msg`
+                // only on failure): compile `cond`, and only on the false path compile `msg` then
+                // `Op::Assert` (which always faults). A passing assert never touches `msg`, so a
+                // side-effecting/faulting message expression behaves identically across both engines.
+                // `Op::Assert` carries `stmt.span` so the fault location matches the interpreter.
                 self.compile_expr(fc, cond)?;
+                let to_fail = fc.emit_jump(Op::JumpIfFalse(0), stmt.span);
+                let to_end = fc.emit_jump(Op::Jump(0), stmt.span);
+                fc.patch_jump(to_fail);
                 if let Some(m) = msg {
                     self.compile_expr(fc, m)?;
                 }
                 fc.emit(Op::Assert { has_msg: msg.is_some() }, stmt.span);
+                fc.patch_jump(to_end);
                 Ok(())
             }
             StmtKind::Defer(target) => self.compile_defer(fc, target, stmt.span),

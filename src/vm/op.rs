@@ -75,9 +75,11 @@ pub enum Op {
     /// level and the value is an unhandled `Err`/`None`, the program exits with that error;
     /// otherwise it is discarded like `Pop`. (Emitted for expression statements.)
     PopExprStmt,
-    /// `assert cond[, msg]` — pop `msg` (a str, if `has_msg`) then `cond`; if `cond` is false,
-    /// fault at this op's span with the custom `msg` (or `"assertion failed"`). Both engines share
-    /// the message + span so a failed assert is byte-identical across VM and interpreter.
+    /// The failing tail of `assert cond[, msg]`. The compiler tests `cond` with a preceding
+    /// `JumpIfFalse` and only reaches this op when `cond` was false, so it *always* faults: pop
+    /// `msg` (a str, if `has_msg`) and fault at this op's span with that message (or
+    /// `"assertion failed"`). `msg` is evaluated lazily on the failing path only — byte-identical to
+    /// the interpreter, which likewise evaluates `msg` solely when the assertion fails.
     Assert { has_msg: bool },
 
     // ----- variables -----

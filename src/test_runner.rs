@@ -79,9 +79,16 @@ pub fn run_tests(root: &Path) -> TestReport {
     if file_errors > 0 {
         report.push_str(&format!(", {file_errors} file error(s)"));
     }
+    // Zero discovered tests with no file errors is a failure, mirroring the "no *_test.chz files
+    // found" exit code above: an accidentally-empty test file (every `test` keyword forgotten) must
+    // not pass silently and read as a green run to a CI gate.
+    let no_tests_discovered = total == 0 && file_errors == 0;
+    if no_tests_discovered {
+        report.push_str(" — no tests discovered");
+    }
     report.push('\n');
 
-    TestReport { text: report, passed: failed == 0 && file_errors == 0 }
+    TestReport { text: report, passed: failed == 0 && file_errors == 0 && !no_tests_discovered }
 }
 
 /// Compile + run one `*_test.chz` file, returning a per-test outcome list (or a compile-error
@@ -329,6 +336,17 @@ mod tests {
         assert!(!report.text.contains(":0)"), "no phantom :0 line; report:\n{}", report.text);
         assert!(report.text.contains("0 test(s)"), "report:\n{}", report.text);
         assert!(report.text.contains("file error(s)"), "report:\n{}", report.text);
+    }
+
+    #[test]
+    fn clean_test_file_with_zero_tests_fails() {
+        // A `*_test.chz` that compiles cleanly but declares no `test fn` (e.g. the `test` keyword was
+        // forgotten) must NOT pass with exit 0 — that would be indistinguishable from a green run.
+        let d = TmpDir::new();
+        let f = d.write("empty_test.chz", "fn helper():\n    print(\"not a test\")\n");
+        let report = run_tests(&f);
+        assert!(!report.passed, "zero discovered tests must fail; report:\n{}", report.text);
+        assert!(report.text.contains("no tests discovered"), "report:\n{}", report.text);
     }
 
     #[test]
