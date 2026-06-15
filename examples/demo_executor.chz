@@ -1,0 +1,22 @@
+# `Executor` — DETACHED work queue (the escape hatch when work outlives a `parallel:` scope).
+# Same task as demo_spawn.chz. `submit` enqueues a detached job; nothing runs until the queue is
+# drained by `shutdown()` (FIFO). No lexical scope ties the tasks — you own the reap point.
+
+fn square_into(n: int, out: Channel[int]):
+    out.send(n * n)
+
+fn main():
+    ch := Channel[int]()
+    ex := Executor()
+    ex.submit(fn(): square_into(1, ch))   # enqueued, not yet run
+    ex.submit(fn(): square_into(2, ch))
+    ex.submit(fn(): square_into(3, ch))
+    ex.submit(fn(): square_into(4, ch))
+    ex.submit(fn(): square_into(5, ch))
+    ex.shutdown()                          # drains: every submitted job runs here
+    total := 0
+    for _ in 0..5:
+        total += ch.recv()
+    print("executor: sum of squares 1..5 = {total}")
+
+main()
