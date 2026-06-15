@@ -121,15 +121,28 @@ is **~70% stdlib/scripting breadth, ~30% type-system + runtime depth**, ordered 
   `defer:`). **Fix sketch:** treat a `spawn:`/`defer:` block as a control-flow boundary in the
   checker — save/zero `loop_depth` across `check_block` for these arms (`checker/mod.rs:1092`) so the
   `loop_depth == 0` guard at `StmtKind::Break` fires, rejecting `break`/`continue` at check time on
-  both engines. One shared fix for both forms.
-- **🟡 Checker silently allows `=` to a by-value captured local (soundness gap)** — `infer_closure`
+  both engines. One shared fix for both forms. **Confirmed on HEAD (2026-06-16):** `for i in 0..3:`
+  wrapping a `defer:` block with `break` (and a `spawn:` block with `continue`) — `check` → `ok`,
+  VM `run` → `break`/`continue outside loop`, `--interp` → prints `0 1 2`. Three-way divergence
+  reproduced; repros at `/tmp/brk_defer.chz` / `/tmp/brk_spawn.chz`.
+- **⚪ Checker `=` to a by-value captured local — UNREACHABLE on HEAD (verified 2026-06-16; latent, not a live soundness gap)** — `infer_closure`
   pushes **no** capture floor (`checker/mod.rs:2841`), so an inner fn/closure that writes an
-  **enclosing fn's local** (`x = 6`) type-checks fine, but the compiler can't resolve the local and
-  misroutes the store to `SetGlobalSlot` (`compiler/mod.rs:564`) → it writes a phantom global and the
-  outer local is **unchanged** (silent no-op). `docs/syntax.md:828` already promises "captures are
+  **enclosing fn's local** (`x = 6`) *would* type-check (no capture floor), and the compiler can't
+  resolve the local, so it *would* misroute the store to `SetGlobalSlot` (`emit_store`, `compiler/mod.rs:932` — there is no
+  `SetCaptured` arm; loads have `GetCaptured` at `:943`, stores don't) → it would write a phantom
+  global and leave the outer local **unchanged** (silent no-op). **Verdict (2026-06-16): UNREACHABLE
+  — no surface syntax drives a closure/inner-fn capture-write that the checker accepts.** Closures
+  parse a single expression (`parser/mod.rs:1873`) and assignment is a *statement*, not an expression,
+  so `inner := fn(): x = 6` is a parse error ("expected end of line, found '='"); a statement-bearing
+  nested named `fn` *can* hold `x = 6`, but the checker rejects the nested fn name outright (`unknown
+  name 'inner'`, even for a benign body) so it never type-checks; and the `spawn:`/`defer:` block forms
+  are already guarded (`capture_floors`) and correctly error. The `emit_store` misroute is therefore
+  **latent** — it would surface only if block-bodied closures (or a checker that accepts nested-fn
+  names) ever land; re-open then. `docs/syntax.md:828` already promises "captures are
   copies, **read-only** inside a task (reassign = error)" — but that rule is enforced **only** across
   `spawn`/`submit` (the only `capture_floors` push sites, `checker/mod.rs:1306`/`:3355`), not plain
-  closures. **Blocks:** the docs' own guarantee; quietly-wrong programs. **Fix sketch:** generalize
+  closures. **Blocks:** nothing today (unreachable); the latent risk is the docs' own read-only
+  guarantee, should a future syntax (block-bodied closures / nested-fn names) expose it. **Fix sketch (pre-emptive):** generalize
   the spawn read-only check to all closure bodies — push a capture floor at the closure's scope depth
   in `infer_closure` — turning the silent misroute into the documented `cannot reassign captured
   binding` error, with a "use `:=` to shadow, or `Ref[T]` (in-task) / `Shared[T]` (cross-task) to
