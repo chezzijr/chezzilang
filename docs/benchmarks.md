@@ -241,7 +241,7 @@ The win is modest because flattening removes only the *per-call Rust recursion +
 per-op dispatch of the call body (still ~7 ops/call) or the frame-setup cost — those are the next
 walls. **Robustness bonus (not a bench number):** deep *plain* recursion no longer consumes host
 stack (frames live in the heap `frames` `Vec`), so it runs bounded only by `MAX_CALL_DEPTH` (10_000),
-not the 256 MiB `VM_STACK_BYTES` thread — a recursion that SIGABRT'd a 1 MiB stack pre-change now
+not the 384 MiB `VM_STACK_BYTES` thread — a recursion that SIGABRT'd a 1 MiB stack pre-change now
 completes (regression-guarded by `deep_plain_recursion_runs_on_small_host_stack`). **Follow-up:**
 flatten `do_method_call` (still `run_proto`) for the `struct`/method benches; `VM_STACK_BYTES` could
 shrink once method/HOF re-entry is the only host-stack recursor.
