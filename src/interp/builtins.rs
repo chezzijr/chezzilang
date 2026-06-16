@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 /// The names handled here. Used so the interpreter can tell a builtin call from a user call.
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name, "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set" | "bytes" | "bytearray")
+    matches!(name, "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set" | "list" | "map" | "bytes" | "bytearray")
 }
 
 /// Dispatch a builtin by name. Caller guarantees `is_builtin(name)`.
@@ -94,6 +94,12 @@ fn str_method(s: &Rc<str>, method: &str, args: &[Value], span: Span) -> Result<V
         "contains" => {
             arity("contains", args, 1, span)?;
             Ok(Value::Bool(s.contains(str_arg(0)?.as_ref())))
+        }
+        // `encode() -> bytes`: UTF-8 encode (str is UTF-8 internally; copy the bytes out into a new
+        // immutable `bytes`). Always succeeds — no fault path. UTF-8 only.
+        "encode" => {
+            arity("encode", args, 0, span)?;
+            Ok(Value::Bytes(s.as_bytes().into()))
         }
         "join" => {
             arity("join", args, 1, span)?;

@@ -899,10 +899,18 @@ impl Interp {
                 let s = self.stringify(&arg_vals[0], span, 0)?;
                 return Ok(Value::Str(s.into()));
             }
-            // `set(list)` can take a list of structs whose `hash()` re-enters the engine, so it can't
-            // live in the pure `builtins` table — route it here. Other builtins stay pure.
+            // `set(it)` can take an iterable of structs whose `hash()` re-enters the engine (and may
+            // drain a user iterator's `next()`), so it can't live in the pure `builtins` table — route
+            // it here. `list(it)` / `map(it)` likewise drain any for-iterable (re-entrant). Other
+            // builtins stay pure.
             if name == "set" {
                 return self.builtin_set(arg_vals, span);
+            }
+            if name == "list" {
+                return self.builtin_list(arg_vals, span);
+            }
+            if name == "map" {
+                return self.builtin_map(arg_vals, span);
             }
             // `bytearray(...)` / `bytes(...)` — constructors + conversion bridge. Routed on `Interp`
             // (not the pure `builtins` table) so the result shares the engine's value model.
@@ -1711,8 +1719,15 @@ impl Interp {
             let ex = std::rc::Rc::clone(ex);
             return self.eval_executor_method(&ex, method, arg_vals, span);
         }
-        // `bytearray` methods (mutable buffer): `len`/`push`/`pop`/`extend`. Mutate in place via the
-        // shared `Rc<RefCell>` (`borrow_mut`), so a second binding observes the change (like `list`).
+        // `bytes` methods (immutable byte sequence): only `decode() -> str` (UTF-8). Mirrors the VM's
+        // `bytes_method` and the checker's `bytes_method_sig`.
+        if let Value::Bytes(b) = &receiver {
+            let b = b.clone();
+            return self.eval_bytes_method(&b, method, arg_vals, span);
+        }
+        // `bytearray` methods (mutable buffer): `len`/`push`/`pop`/`extend`/`decode`. Mutate in place
+        // via the shared `Rc<RefCell>` (`borrow_mut`), so a second binding observes the change (like
+        // `list`).
         if let Value::ByteArray(buf) = &receiver {
             let buf = std::rc::Rc::clone(buf);
             return self.eval_bytearray_method(&buf, method, arg_vals, span);
@@ -2150,25 +2165,16 @@ impl Interp {
         }
     }
 
-    /// `set()` → empty set; `set(list)` → a deduped hash set of the list's elements. On `Interp`
-    /// (not `builtins`) because a struct element's `hash()` re-enters the engine. Mirrors
-    /// `vm::Vm::builtin_set`.
+    /// `set()` → empty set; `set(it)` → a deduped hash set drained from ANY for-iterable
+    /// (list/set/str/bytes/bytearray/map-keys/range/user-iterator). On `Interp` (not `builtins`)
+    /// because a struct element's `hash()` and a user iterator's `next()` re-enter the engine.
+    /// Mirrors `vm::Vm::builtin_set`.
     fn builtin_set(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
-        let src: Vec<Value> = match args.as_slice() {
-            [] => Vec::new(),
-            [Value::List(items)] => items.borrow().clone(),
-            [other] => {
-                return Err(RuntimeError {
-                    message: format!("set() expects a list, got {}", other.type_name()),
-                    span,
-                });
-            }
-            _ => {
-                return Err(RuntimeError {
-                    message: format!("set() expects 0 or 1 argument(s), got {}", args.len()),
-                    span,
-                });
-            }
+        let src: Vec<Value> = match args.into_iter().next() {
+            // The checker guarantees ≤1 arg; `set()` (0 args) is the empty set.
+            None => Vec::new(),
+            // Drain any for-iterable into single-element rows, then flatten to elements.
+            Some(it) => self.drain_value_to_rows(it, 1, span)?.into_iter().flatten().collect(),
         };
         let mut set = SetData::default();
         for v in src {
@@ -2178,6 +2184,46 @@ impl Interp {
             }
         }
         Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(set))))
+    }
+
+    /// `list(it)` → a list drained from ANY for-iterable. On `Interp` because a user iterator's
+    /// `next()` re-enters the engine. Mirrors `vm::Vm::builtin_list`.
+    fn builtin_list(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+        let it = args.into_iter().next().ok_or_else(|| RuntimeError {
+            message: "list() takes exactly one iterable argument — use [] for an empty list".to_string(),
+            span,
+        })?;
+        let items: Vec<Value> = self.drain_value_to_rows(it, 1, span)?.into_iter().flatten().collect();
+        Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(items))))
+    }
+
+    /// `map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on duplicate keys, like the
+    /// `{k: v}` literal). On `Interp` because a struct key's `hash()` and a user iterator's `next()`
+    /// re-enter the engine. Mirrors `vm::Vm::builtin_map`.
+    fn builtin_map(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+        let it = args.into_iter().next().ok_or_else(|| RuntimeError {
+            message: "map() takes exactly one iterable argument — use {} for an empty map".to_string(),
+            span,
+        })?;
+        let rows = self.drain_value_to_rows(it, 1, span)?;
+        let mut out = MapData::default();
+        for row in rows {
+            // Each drained element must be a 2-tuple (the checker enforces this statically; this guards
+            // the `Unknown`-typed escape so a bad runtime shape faults recoverably, not panics).
+            let (k, v) = match row.into_iter().next() {
+                Some(Value::Tuple(parts)) if parts.len() == 2 => (parts[0].clone(), parts[1].clone()),
+                Some(other) => {
+                    return Err(RuntimeError {
+                        message: format!("map() expects an iterable of (key, value) 2-tuples, got {}", other.type_name()),
+                        span,
+                    });
+                }
+                None => unreachable!("drain_value_to_rows yields non-empty single-var rows"),
+            };
+            let hk = self.hash_value(&k, span)?;
+            map_upsert(&mut out, hk, k, v);
+        }
+        Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(out))))
     }
 
     /// Collect raw bytes from a byte-sequence-shaped argument (a `bytes`, a `bytearray`, or a
@@ -2288,7 +2334,32 @@ impl Interp {
                 buf.borrow_mut().extend_from_slice(&appended);
                 Ok(Value::Nil)
             }
+            // `decode() -> str`: UTF-8 decode the current buffer. Invalid UTF-8 is a RECOVERABLE
+            // fault (catchable by `recover:`), never a panic — mirrors the bytes path + the VM.
+            "decode" => {
+                builtins::arity("decode", &args, 0, span)?;
+                let bytes = buf.borrow().clone();
+                decode_utf8(&bytes, span)
+            }
             _ => Err(RuntimeError { message: format!("type bytearray has no method '{method}'"), span }),
+        }
+    }
+
+    /// Built-in methods on `bytes` (immutable byte sequence): only `decode() -> str` (UTF-8). Mirrors
+    /// the VM's `bytes_method` and the checker's `bytes_method_sig`.
+    fn eval_bytes_method(
+        &mut self,
+        b: &std::rc::Rc<[u8]>,
+        method: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            "decode" => {
+                builtins::arity("decode", &args, 0, span)?;
+                decode_utf8(b, span)
+            }
+            _ => Err(RuntimeError { message: format!("type bytes has no method '{method}'"), span }),
         }
     }
 
@@ -3752,6 +3823,21 @@ impl Interp {
             return Ok((lo..hi).map(|i| vec![Value::Int(i)]).collect());
         }
         let iter_val = self.eval(iter)?;
+        self.drain_value_to_rows(iter_val, vars.len(), span)
+    }
+
+    /// Materialize an already-evaluated iterable VALUE into per-iteration rows (the post-eval body of
+    /// `collect_iter_rows`, factored out so the `list()`/`set()`/`map()` builtin constructors reuse the
+    /// SAME "drain any for-iterable" logic — no duplicated iteration semantics). Handles (a) a user
+    /// struct with `next(self) -> Option[T]` (call lazily until `None`, may run user code) and (b) the
+    /// built-in collections via `iter_rows_from_value`. `vars` is the loop-variable count (1 for the
+    /// constructors; map() post-processes the single-element rows into (k, v) pairs itself).
+    fn drain_value_to_rows(
+        &mut self,
+        iter_val: Value,
+        vars: usize,
+        span: Span,
+    ) -> Result<Vec<Vec<Value>>, RuntimeError> {
         if let Value::Struct { name, .. } = &iter_val
             && self.structs.get(name.as_ref()).is_some_and(|d| d.methods.contains_key("next"))
         {
@@ -3786,7 +3872,7 @@ impl Interp {
             }
             return Ok(rows);
         }
-        iter_rows_from_value(&iter_val, vars.len(), span)
+        iter_rows_from_value(&iter_val, vars, span)
     }
 
     /// Evaluate an expression expected to be an integer (range bounds, list index).
@@ -4406,6 +4492,16 @@ fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec
             })
         }
     })
+}
+
+/// UTF-8 decode a byte slice into a new `str` value. Invalid UTF-8 maps to a RECOVERABLE
+/// RuntimeError (catchable by `recover:`), not a panic — the message is byte-identical to the VM's
+/// `decode_utf8` so the two engines stay parity-equal. UTF-8 only (no encoding-name argument).
+fn decode_utf8(bytes: &[u8], span: Span) -> Result<Value, RuntimeError> {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => Ok(Value::Str(s.into())),
+        Err(_) => Err(RuntimeError { message: "invalid UTF-8 in decode()".to_string(), span }),
+    }
 }
 
 /// Map an extern fn's surface [`crate::ast::Type`] to its runtime [`crate::native::cffi::CType`],
@@ -7200,6 +7296,18 @@ mod module_tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/bytearray.expected"),
         )
         .expect("bytearray.expected should exist");
+        assert_eq!(run_ok(&entry), expected);
+    }
+
+    // conversions golden (interp side): `examples/conversions.chz` (str<->bytes UTF-8 methods +
+    // list()/set()/map() constructors over any for-iterable) must produce exactly `.expected`.
+    #[test]
+    fn golden_conversions_chz() {
+        let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/conversions.chz");
+        let expected = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/conversions.expected"),
+        )
+        .expect("conversions.expected should exist");
         assert_eq!(run_ok(&entry), expected);
     }
 }

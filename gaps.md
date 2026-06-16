@@ -105,8 +105,13 @@ scalars) are **SHIPPED**: the immutable **`bytes`** (`b"..."` literal w/ `\xHH`,
 **`bytearray`** (constructor-only — `bytearray()`/`(N)`/`(b)`/`([ints])`, no literal; `ba[i]`→int,
 `ba[i]=x` IndexSet, slice→bytearray, `for`→int, `len`, `push`/`pop`/`extend`, `==` incl. cross-type
 content-equality, `bytearray(b'...')` repr; NOT `Hashable` — mutable, like `list`; deep-copied across
-the airlock). Conversion bridge: `bytes(ba)` / `bytearray(b)`. Remaining: no `byte`/`u8` scalar, no
-codecs (base64/hex remain a separate `std.*` gap). `bignum` and `yield`/generators are non-goals.
+the airlock). Conversion bridge: `bytes(ba)` / `bytearray(b)`. **str ↔ bytes (UTF-8) — SHIPPED:**
+`str.encode() -> bytes`, `bytes.decode()`/`bytearray.decode() -> str` (UTF-8 only; invalid UTF-8 is a
+recoverable fault). **`list()`/`set()`/`map()` constructors — SHIPPED:** `list(it)`/`set(it)` over any
+for-iterable, `map(it)` from 2-tuples (element types via the for-loop iterable union; no formal
+`Iterable[T]` protocol — that is a decoupled future milestone). Remaining: no `byte`/`u8` scalar, no
+non-UTF-8 codecs (latin1/utf16) and no base64/hex/sha (separate `std.*` gap), no `tuple()`/`bool()`
+constructors. `bignum` and `yield`/generators are non-goals.
 
 ### Tier 4 — ecosystem (toolchain, not the language)
 REPL (huge for scripting iteration), formatter, LSP, package manager / registry, debugger, doc

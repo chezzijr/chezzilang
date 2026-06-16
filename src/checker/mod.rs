@@ -74,7 +74,7 @@ fn is_reserved_name(name: &str) -> bool {
     matches!(
         name,
         // builtins (mirrors compiler::is_builtin / interp::builtins::is_builtin)
-        "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set" | "bytes" | "bytearray"
+        "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set" | "list" | "map" | "bytes" | "bytearray"
         // the special print op
         | "print"
         // runtime constructors the backends special-case before a plain call
@@ -3761,17 +3761,39 @@ impl Checker {
                 }
                 Some(Ty::Str)
             }
+            // `list(it)` → a list from ANY for-iterable (list/set/str/bytes/bytearray/map-keys/range/
+            // Iterator). The element type flows through `iter_elem` — the single source of truth for
+            // "what `for x in X` accepts". The argument is REQUIRED: an empty list is the `[]` literal
+            // (zero args can't infer T).
+            "list" => {
+                if args.len() != 1 {
+                    self.error(span, "list() takes exactly one iterable argument — use [] for an empty list");
+                    return Some(Ty::list(Ty::Unknown));
+                }
+                let it = self.infer(&args[0]);
+                let elem = match self.iter_elem(&it) {
+                    Some(e) => e,
+                    None if it.is_unknown() => Ty::Unknown,
+                    None => {
+                        self.error(args[0].span, format!("list() expects an iterable, got {it}"));
+                        Ty::Unknown
+                    }
+                };
+                Some(Ty::list(elem))
+            }
             "set" => {
                 // `set()` → empty set (element inferred from later use, like `{}` for maps);
-                // `set(xs)` → a set from a list, deduped.
+                // `set(it)` → a set from ANY for-iterable (broadened from list-only), deduped.
+                // The element type flows through `iter_elem`; it must be Hashable.
                 match args.len() {
                     0 => Some(Ty::set(Ty::Unknown)),
                     1 => {
-                        let elem = match self.infer(&args[0]) {
-                            Ty::List(inner) => *inner,
-                            Ty::Unknown => Ty::Unknown,
-                            other => {
-                                self.error(args[0].span, format!("set() expects a list, got {other}"));
+                        let it = self.infer(&args[0]);
+                        let elem = match self.iter_elem(&it) {
+                            Some(e) => e,
+                            None if it.is_unknown() => Ty::Unknown,
+                            None => {
+                                self.error(args[0].span, format!("set() expects an iterable, got {it}"));
                                 Ty::Unknown
                             }
                         };
@@ -3784,10 +3806,47 @@ impl Checker {
                         Some(Ty::set(elem))
                     }
                     _ => {
-                        self.error(span, "set() expects set() or set(list)");
+                        self.error(span, "set() expects set() or set(iterable)");
                         Some(Ty::set(Ty::Unknown))
                     }
                 }
+            }
+            // `map(it)` → a map from an iterable of EXACTLY 2-tuples `(K, V)`. A non-2-tuple element is
+            // a STATIC error here (not a runtime surprise). K must be Hashable. Last-wins on duplicate
+            // keys (like the `{k: v}` literal). The argument is REQUIRED: an empty map is the `{}`
+            // literal. (Free-call `map(it)` is a distinct namespace from the `xs.map(f)` list HOF.)
+            "map" => {
+                if args.len() != 1 {
+                    self.error(span, "map() takes exactly one iterable argument — use {} for an empty map");
+                    return Some(Ty::map(Ty::Unknown, Ty::Unknown));
+                }
+                let it = self.infer(&args[0]);
+                let elem = match self.iter_elem(&it) {
+                    Some(e) => e,
+                    None if it.is_unknown() => return Some(Ty::map(Ty::Unknown, Ty::Unknown)),
+                    None => {
+                        self.error(args[0].span, format!("map() expects an iterable, got {it}"));
+                        return Some(Ty::map(Ty::Unknown, Ty::Unknown));
+                    }
+                };
+                let (k, v) = match elem {
+                    Ty::Tuple(ref parts) if parts.len() == 2 => (parts[0].clone(), parts[1].clone()),
+                    Ty::Unknown => (Ty::Unknown, Ty::Unknown),
+                    other => {
+                        self.error(
+                            args[0].span,
+                            format!("map() expects an iterable of (key, value) 2-tuples, found element {other}"),
+                        );
+                        (Ty::Unknown, Ty::Unknown)
+                    }
+                };
+                if !k.is_unknown() && !self.is_hashable_key(&k) {
+                    self.error(
+                        span,
+                        format!("map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {k}"),
+                    );
+                }
+                Some(Ty::map(k, v))
             }
             // `bytearray(...)` — the MUTABLE byte buffer (constructor-only, no literal). Four forms:
             // `bytearray()` (empty), `bytearray(N)` (N zero bytes), `bytearray(b)` (from a `bytes`,
@@ -4119,6 +4178,16 @@ impl Checker {
                 } else {
                     self.error(span, format!("type {obj_ty} has no method '{method}'"));
                 }
+                Ty::Unknown
+            }
+            // `bytes` core methods (immutable byte sequence): only `decode() -> str` (UTF-8).
+            Ty::Bytes => {
+                if let Some(sig) = bytes_method_sig(method) {
+                    self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type bytes has no method '{method}'"));
                 Ty::Unknown
             }
             // `bytearray` core methods (mutable buffer): `len`, `push(int)`, `pop() -> Option[int]`,
@@ -6171,6 +6240,9 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
         "chars" => (vec![], Ty::list(Ty::Str)),
         "join" => (vec![Ty::list(Ty::Str)], Ty::Str),
         "starts_with" | "contains" => (vec![Ty::Str], Ty::Bool),
+        // `encode()` -> `bytes`: UTF-8 encode (str is UTF-8 internally; copies the bytes out).
+        // No encoding-name argument — UTF-8 only (other codecs are an explicit future non-goal).
+        "encode" => (vec![], Ty::Bytes),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))
@@ -6329,6 +6401,19 @@ fn bytearray_method_sig(method: &str) -> Option<FnSig> {
         "len" => (vec![], Ty::Int),
         "push" => (vec![Ty::Int], Ty::Nil),
         "pop" => (vec![], Ty::option(Ty::Int)),
+        // `decode()` -> `str`: UTF-8 decode the current buffer (recoverable fault on invalid UTF-8).
+        "decode" => (vec![], Ty::Str),
+        _ => return None,
+    };
+    Some(FnSig::plain(params, ret))
+}
+
+/// Built-in method signatures on `bytes` (the immutable byte sequence). Mirrors the VM's
+/// `bytes_method` and the interp's bytes-method arm — keep all three in lockstep. Only `decode()`
+/// (UTF-8 → str, recoverable fault on invalid UTF-8); `len` is reached via `len(b)` not a method.
+fn bytes_method_sig(method: &str) -> Option<FnSig> {
+    let (params, ret) = match method {
+        "decode" => (vec![], Ty::Str),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))

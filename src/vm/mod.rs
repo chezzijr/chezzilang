@@ -5269,8 +5269,15 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
-        // `bytearray` methods (mutable buffer): `len`/`push`/`pop`/`extend`. Routed separately (not
-        // `core_method`) but with the same in-place-via-`get_mut` discipline as `list`.
+        // `bytes` methods (immutable byte sequence): only `decode() -> str` (UTF-8). Routed off the
+        // handle like the other core-type methods.
+        if matches!(self.heap.get(h), Obj::Bytes(_)) {
+            let result = self.bytes_method(h, method, &args, span)?;
+            self.push(result);
+            return Ok(());
+        }
+        // `bytearray` methods (mutable buffer): `len`/`push`/`pop`/`extend`/`decode`. Routed separately
+        // (not `core_method`) but with the same in-place-via-`get_mut` discipline as `list`.
         if matches!(self.heap.get(h), Obj::ByteArray(_)) {
             let result = self.bytearray_method(h, method, &args, span)?;
             self.push(result);
@@ -5751,6 +5758,13 @@ impl Vm {
                         self.arity_err("contains", args, 1, span)?;
                         Ok(Value::Bool(s.contains(str_arg(self, 0)?.as_str())))
                     }
+                    // `encode() -> bytes`: UTF-8 encode (str is UTF-8 internally; copy the bytes out
+                    // into a new immutable `bytes`). Always succeeds — no fault path. UTF-8 only.
+                    "encode" => {
+                        self.arity_err("encode", args, 0, span)?;
+                        let bytes = s.as_bytes().to_vec().into_boxed_slice();
+                        Ok(Value::Obj(self.heap.alloc(Obj::Bytes(bytes))))
+                    }
                     "join" => {
                         self.arity_err("join", args, 1, span)?;
                         let Value::Obj(lh) = args[0] else {
@@ -6088,7 +6102,39 @@ impl Vm {
                 b.extend_from_slice(&appended);
                 Ok(Value::Nil)
             }
+            // `decode() -> str`: UTF-8 decode the current buffer. Invalid UTF-8 is a RECOVERABLE
+            // fault (catchable by `recover:`), never a panic — mirrors the bytes path + the interp.
+            "decode" => {
+                self.arity_err("decode", args, 0, span)?;
+                let Obj::ByteArray(b) = self.heap.get(h) else { unreachable!() };
+                let bytes = b.clone();
+                self.decode_utf8(&bytes, span)
+            }
             _ => Err(self.err(format!("type bytearray has no method '{method}'"), span)),
+        }
+    }
+
+    /// `bytes` methods (immutable byte sequence): only `decode() -> str` (UTF-8). Mirrors the interp's
+    /// bytes-method arm and the checker's `bytes_method_sig` — keep all three in lockstep.
+    fn bytes_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        match method {
+            "decode" => {
+                self.arity_err("decode", args, 0, span)?;
+                let Obj::Bytes(b) = self.heap.get(h) else { unreachable!() };
+                let bytes = b.clone();
+                self.decode_utf8(&bytes, span)
+            }
+            _ => Err(self.err(format!("type bytes has no method '{method}'"), span)),
+        }
+    }
+
+    /// UTF-8 decode a byte slice into a new heap `str`. Invalid UTF-8 maps to a RECOVERABLE
+    /// RuntimeError (catchable by `recover:`), not a panic — the error message is byte-identical to
+    /// the interp's so the two engines stay parity-equal.
+    fn decode_utf8(&mut self, bytes: &[u8], span: Span) -> Result<Value, RuntimeError> {
+        match std::str::from_utf8(bytes) {
+            Ok(s) => Ok(self.alloc_str(s.to_string())),
+            Err(_) => Err(self.err("invalid UTF-8 in decode()".to_string(), span)),
         }
     }
 
@@ -10351,6 +10397,8 @@ impl Vm {
             "ord" => self.builtin_ord(&args, span)?,
             "chr" => self.builtin_chr(&args, span)?,
             "set" => self.builtin_set(&args, span)?,
+            "list" => self.builtin_list(&args, span)?,
+            "map" => self.builtin_map(&args, span)?,
             "bytearray" => self.builtin_bytearray(&args, span)?,
             "bytes" => self.builtin_bytes(&args, span)?,
             _ => unreachable!("unknown builtin {name}"),
@@ -10399,21 +10447,115 @@ impl Vm {
         }
     }
 
-    /// `set()` → empty set; `set(list)` → a deduped hash set of the list's elements.
+    /// Drain ANY for-iterable into a `Vec<Value>` of its elements — the runtime peer of the checker's
+    /// `iter_elem` (the single source of truth for "what `for x in X` accepts"). Built-in collections
+    /// copy their elements directly (list/set elems, str→per-char str, bytes/bytearray→per-byte int,
+    /// map→keys, range is already materialized to a list); a `Generator` is driven via `generator_next`
+    /// until `None`; a user struct with `next(self) -> Option[T]` re-enters the VM (`run_proto`) per
+    /// step until `None`. Both re-entrant paths run user code that can GC, so the growing accumulator
+    /// is built into a heap `Obj::List` ROOTED on the operand stack across every `.next()` (mirrors
+    /// `builtin_set`/`list_hof`/`struct_hash`). The source handle is rooted too. Returns the collected
+    /// elements (cloned out of the rooted list after the loop, GC-safe).
+    fn drain_iterable(&mut self, v: Value, span: Span) -> Result<Vec<Value>, RuntimeError> {
+        // Built-in collections: copy directly, no re-entry.
+        if let Value::Obj(h) = v {
+            match self.heap.get(h) {
+                Obj::List(items) => return Ok(items.clone()),
+                Obj::Set(s) => return Ok(s.entries.iter().map(|(_, e)| *e).collect()),
+                Obj::Map(m) => return Ok(m.entries.iter().map(|(_, k, _)| *k).collect()),
+                Obj::Bytes(b) => {
+                    let bytes = b.clone();
+                    return Ok(bytes.iter().map(|&x| Value::Int(x as i64)).collect());
+                }
+                Obj::ByteArray(b) => {
+                    let bytes = b.clone();
+                    return Ok(bytes.iter().map(|&x| Value::Int(x as i64)).collect());
+                }
+                Obj::Str(s) => {
+                    let chars: Vec<char> = s.chars().collect();
+                    return Ok(chars.into_iter().map(|c| self.alloc_char(c)).collect());
+                }
+                _ => {}
+            }
+        }
+        // Re-entrant paths (generator / user struct iterator): run user `.next()` until `None`, rooting
+        // the source + a heap accumulator list on the operand stack across each call.
+        let Value::Obj(h) = v else {
+            return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span));
+        };
+        // Resolve the iteration step: a generator resumes; a user struct dispatches its `next` proto.
+        enum Step {
+            Generator,
+            StructNext { proto: ProtoId, home: GcRef },
+        }
+        let step = match self.heap.get(h) {
+            Obj::Generator(_) => Step::Generator,
+            Obj::Struct { name, .. } => {
+                let name = name.clone();
+                let def = self
+                    .program
+                    .structs
+                    .get(name.as_ref())
+                    .cloned()
+                    .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
+                let proto = *def.methods.get("next").ok_or_else(|| {
+                    self.err(format!("cannot iterate over {} (no `next` method)", self.type_name(v)), span)
+                })?;
+                Step::StructNext { proto, home: self.module_objs[def.module_idx] }
+            }
+            _ => return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span)),
+        };
+        // Root the source + the growing accumulator list across the re-entrant calls.
+        let acc = self.heap.alloc(Obj::List(Vec::new()));
+        self.push(v);
+        self.push(Value::Obj(acc));
+        let result = (|| {
+            loop {
+                let res = match step {
+                    Step::Generator => self.generator_next(h, span)?,
+                    Step::StructNext { proto, home } => {
+                        self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?
+                    }
+                };
+                let Value::Obj(rh) = res else {
+                    return Err(self.err(format!("iterator next() must return Option, found {}", self.type_name(res)), span));
+                };
+                let Obj::Enum { variant_id, payload } = self.heap.get(rh) else {
+                    return Err(self.err(format!("iterator next() must return Option, found {}", self.type_name(res)), span));
+                };
+                match *variant_id {
+                    crate::vm::op::VID_SOME => {
+                        let item = *payload.first().ok_or_else(|| {
+                            self.err("iterator next() returned Some with no payload".to_string(), span)
+                        })?;
+                        let Obj::List(buf) = self.heap.get_mut(acc) else { unreachable!() };
+                        buf.push(item);
+                    }
+                    crate::vm::op::VID_NONE_VARIANT => break,
+                    _ => return Err(self.err(format!("iterator next() must return Option, found {}", self.type_name(res)), span)),
+                }
+            }
+            Ok(())
+        })();
+        result?;
+        // Clone the collected elements out of the rooted list before unrooting.
+        let Obj::List(buf) = self.heap.get(acc) else { unreachable!() };
+        let out = buf.clone();
+        self.pop(); // unroot accumulator
+        self.pop(); // unroot source
+        Ok(out)
+    }
+
+    /// `set()` → empty set; `set(it)` → a deduped hash set drained from ANY for-iterable.
     fn builtin_set(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-        let (list_obj, src): (Value, Vec<Value>) = match args {
-            [] => (Value::Nil, Vec::new()),
-            [one] => match one {
-                Value::Obj(h) => match self.heap.get(*h) {
-                    Obj::List(items) => (*one, items.clone()),
-                    _ => return Err(self.err(format!("set() expects a list, got {}", self.type_name(*one)), span)),
-                },
-                other => return Err(self.err(format!("set() expects a list, got {}", self.type_name(*other)), span)),
-            },
+        let src: Vec<Value> = match args {
+            [] => Vec::new(),
+            [one] => self.drain_iterable(*one, span)?,
             _ => return Err(self.err(format!("set() expects 0 or 1 argument(s), got {}", args.len()), span)),
         };
-        // Root the source list so its elements survive a struct element's re-entrant hash() GC; hash
-        // every element first (phase 1, rooted), then build the set GC-free (phase 2).
+        // Root the source elements (as a fresh heap list) so they survive a struct element's
+        // re-entrant hash() GC; hash every element first (phase 1, rooted), then build GC-free.
+        let list_obj = Value::Obj(self.heap.alloc(Obj::List(src.clone())));
         self.push(list_obj);
         let built = (|| {
             let mut hashes = Vec::with_capacity(src.len());
@@ -10431,6 +10573,50 @@ impl Vm {
         })();
         self.pop(); // unroot the source list
         Ok(Value::Obj(self.heap.alloc(Obj::Set(built?))))
+    }
+
+    /// `list(it)` → a list drained from ANY for-iterable. Mirrors `interp::Interp::builtin_list`.
+    fn builtin_list(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        let [one] = args else {
+            return Err(self.err("list() takes exactly one iterable argument — use [] for an empty list".to_string(), span));
+        };
+        let items = self.drain_iterable(*one, span)?;
+        Ok(Value::Obj(self.heap.alloc(Obj::List(items))))
+    }
+
+    /// `map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on dup keys, like the
+    /// `{k: v}` literal). Mirrors `interp::Interp::builtin_map`. A struct key's `hash()` re-enters the
+    /// VM, so the in-flight key/value are rooted via `hash_key_rooted` while the building map is rooted.
+    fn builtin_map(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        let [one] = args else {
+            return Err(self.err("map() takes exactly one iterable argument — use {} for an empty map".to_string(), span));
+        };
+        let drained = self.drain_iterable(*one, span)?;
+        // Root the drained elements (as a fresh heap list) across the re-entrant hash() calls.
+        let src_obj = Value::Obj(self.heap.alloc(Obj::List(drained.clone())));
+        self.push(src_obj);
+        let built = (|| {
+            let mut map = MapData::default();
+            for elem in &drained {
+                let (k, v) = match elem {
+                    Value::Obj(eh) => match self.heap.get(*eh) {
+                        Obj::Tuple(parts) if parts.len() == 2 => (parts[0], parts[1]),
+                        _ => return Err(self.err(format!("map() expects an iterable of (key, value) 2-tuples, got {}", self.type_name(*elem)), span)),
+                    },
+                    other => return Err(self.err(format!("map() expects an iterable of (key, value) 2-tuples, got {}", self.type_name(*other)), span)),
+                };
+                let hk = self.hash_key_rooted(k, &[v], span)?;
+                // last-wins upsert (mirrors the map literal + interp `map_upsert`).
+                let pos = map.candidates(hk).iter().copied().find(|&p| self.values_equal(map.entries[p].1, k));
+                match pos {
+                    Some(p) => map.entries[p].2 = v,
+                    None => map.push(hk, k, v),
+                }
+            }
+            Ok(map)
+        })();
+        self.pop(); // unroot the source list
+        Ok(Value::Obj(self.heap.alloc(Obj::Map(built?))))
     }
 
     /// Collect raw bytes from a byte-sequence-shaped argument for the `bytes`/`bytearray`
@@ -16316,6 +16502,65 @@ main()";
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// conversions golden: `examples/conversions.chz` (str.encode()/bytes.decode()/bytearray.decode()
+    /// UTF-8 round-trip incl. a multi-byte char, an invalid-UTF-8 decode under `recover:`, list() over
+    /// every for-iterable shape — list/set/str/bytes/bytearray/range/user-iterator — set() dedup, and
+    /// map() from 2-tuples with a last-wins dup key) byte-identical on the VM, the interpreter, and its
+    /// `.expected` (three-engine parity gate).
+    #[test]
+    fn golden_conversions_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/conversions.chz");
+        let expected = include_str!("../../examples/conversions.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// encode/decode UTF-8 round-trip (multi-byte char): `str.encode()` then `bytes.decode()` returns
+    /// the original string, byte-identical on the VM + interp.
+    #[test]
+    fn encode_decode_roundtrip_multibyte() {
+        let src = "fn main():\n    s := \"héllo\"\n    print(s.encode().decode())\n    print(s.encode().decode() == s)\nmain()\n";
+        let out = run(src);
+        assert_eq!(out, "héllo\ntrue\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `bytearray.decode()` mirrors `bytes.decode()` exactly (decode the current buffer).
+    #[test]
+    fn bytearray_decode_matches_bytes() {
+        let src = "fn main():\n    print(bytearray([104, 105]).decode())\n    print(b\"hi\".decode())\nmain()\n";
+        let out = run(src);
+        assert_eq!(out, "hi\nhi\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Invalid UTF-8 `decode()` is a RECOVERABLE fault (catchable by `recover:`), not a panic — and the
+    /// error message is byte-identical between the engines (parity).
+    #[test]
+    fn invalid_utf8_decode_recoverable() {
+        let src = "fn main():\n    r := recover:\n        b\"\\xff\\xfe\".decode()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"caught\")\nmain()\n";
+        let out = run(src);
+        assert_eq!(out, "caught\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp run"));
+        // Uncaught, the same fault propagates as a recoverable RuntimeError with the same message.
+        let bare = "fn main():\n    print(b\"\\xff\".decode())\nmain()\n";
+        let (_, vm_res) = run_program(bare);
+        let (_, it_res) = crate::interp::run_program(bare);
+        assert_eq!(vm_res.unwrap_err().message, "invalid UTF-8 in decode()");
+        assert_eq!(it_res.unwrap_err().message, "invalid UTF-8 in decode()");
+    }
+
+    /// `list()`/`set()`/`map()` over a user `.next()` iterator + dedup + last-wins, byte-identical
+    /// VM/interp. The map last-wins on a duplicate key mirrors the `{k: v}` literal.
+    #[test]
+    fn constructors_over_user_iterator_and_dupkey() {
+        let src = "struct C:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    print(list(C(0, 4)).sum())\n    print(set(C(0, 4)).len())\n    m := map([(1, \"a\"), (1, \"b\")])\n    print(m.len())\n    print(m[1])\nmain()\n";
+        let out = run(src);
+        assert_eq!(out, "6\n4\n1\nb\n");
+        assert_eq!(out, crate::interp::run_capture(src).expect("interp run"));
     }
 
     /// bytearray golden: `examples/bytearray.chz` (the full mutable-buffer table — all 4 constructor

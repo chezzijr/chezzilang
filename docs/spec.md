@@ -209,8 +209,11 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
   `bytearray` is **NOT** `Hashable` (mutable ⇒ not a map/set key, like `list`); its repr is
   `bytearray(b'...')`. The conversion bridge moves between the forms: `bytes(ba)` snapshots,
   `bytearray(b)` copies. Crosses the `--parallel` airlock by value (deep copy, like `list`).
-  Remaining non-goals: a `byte`/`u8` scalar, encode/decode codecs (base64/hex are a separate `std.*`
-  gap), and byte-sequence methods beyond the tables + Display.
+  **str ↔ bytes (UTF-8), shipped:** `str.encode() -> bytes` UTF-8-encodes (always succeeds — `str` is
+  UTF-8 internally); `bytes.decode() -> str` / `bytearray.decode() -> str` UTF-8-decode, faulting
+  **recoverably** (catchable by `recover:`) on invalid UTF-8 (never a panic). UTF-8 **only** — no
+  encoding-name argument. Remaining non-goals: a `byte`/`u8` scalar, non-UTF-8 codecs (latin1/utf16)
+  and base64/hex/sha (a separate `std.*` gap), and byte-sequence methods beyond the tables + Display.
 - **Std modules — M8 (shipped):** `std.json` (pure-Chezzi `Json` enum + `parse`/`stringify`/
   accessors **and** type-directed `json.decode[T](s)` into a struct/map/list/scalar);
   `std.process` (`cmd(s) -> Result[str]`); `std.fs` (`list_dir`/`exists`/`is_file`/`is_dir`/

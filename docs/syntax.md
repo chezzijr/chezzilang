@@ -64,7 +64,37 @@ new capability `bytes` lacks), `ba[a:b:c]` → a NEW `bytearray` (mutable copy, 
 use the Python `bytearray(b'...')` repr (the wrapper distinguishes it from `bytes`' bare `b'...'`).
 **Conversion bridge:** `bytes(ba)` → an immutable snapshot, `bytearray(b)` → a mutable copy. Crosses
 the `--parallel` airlock by value (deep copy — a fresh independent buffer, like `list`). Not yet: a
-`byte`/`u8` scalar, or encode/decode codecs (base64/hex).
+`byte`/`u8` scalar, or non-UTF-8 codecs (latin1/utf16) / base64/hex.
+
+**Built-in conversions.** Two conversion surfaces bridge the core types — see the table below.
+
+| Conversion | Form | Result | Notes |
+| --- | --- | --- | --- |
+| str → bytes (UTF-8) | `s.encode()` | `bytes` | method on `str`; always succeeds (str is UTF-8 internally) |
+| bytes → str (UTF-8) | `b.decode()` | `str` | method on `bytes`; **recoverable** fault on invalid UTF-8 |
+| bytearray → str (UTF-8) | `ba.decode()` | `str` | identical to `bytes.decode()` (decodes the current buffer) |
+| any iterable → list | `list(it)` | `list[T]` | `it` is any **for-iterable**; `T` is the element type |
+| any iterable → set | `set(it)` | `set[T]` | dedup; `T` must be `Hashable`; `set()` (0 args) is the empty set |
+| iterable of 2-tuples → map | `map(it)` | `map[K, V]` | `it` yields `(K, V)` pairs; last-wins on dup keys; `K` `Hashable` |
+
+`.encode()`/`.decode()` are **UTF-8 only** — there is no encoding-name argument (latin1/utf16 are an
+explicit future non-goal). `"héllo".encode().decode() == "héllo"` round-trips through a multi-byte
+char; `b"\xff\xfe".decode()` faults **recoverably** (catchable by `recover:`), never a panic.
+
+`list(it)` / `set(it)` / `map(it)` accept **any for-iterable** — exactly what `for x in it` accepts:
+`list`, `set`, `str` (per-char `str`), `bytes`/`bytearray` (per-byte `int`), `map` (its keys),
+`range`, and a user struct with `next(self) -> Option[T]`. They do **not** require a formal
+`Iterable[T]` bound — they reuse the same internal iterable union as the `for` loop. The argument is
+**required** (no zero-arg form): an empty `list`/`map` is the `[]`/`{}` literal, so `list()` / `map()`
+are checker errors directing you there (`set()` keeps its empty-set 0-arg form). `map(it)`'s element
+must be **exactly a 2-tuple** `(K, V)` — a non-2-tuple is a **static** type error (caught by the
+checker, not at runtime).
+
+> **`map(it)` vs `xs.map(f)` — these do NOT clash.** `map(pairs)` is the free-function **constructor**
+> (a bare-name call). `xs.map(f)` is the `list` higher-order **method** (a field/method call on a
+> receiver). They live in separate namespaces — the parser routes a bare `map(...)` as a builtin call
+> and a `obj.map(...)` as a method dispatch — so `map([(1, "a")])` builds a `map[int, str]` while
+> `[1, 2].map(double)` transforms a list.
 
 **Multi-line literals & trailing commas.** Inside `[]`, `{}`, and `()` the layout (newlines /
 indentation) is suppressed, so a collection literal, a call's arguments, or a function's parameter
