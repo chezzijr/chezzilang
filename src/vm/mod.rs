@@ -3351,18 +3351,38 @@ impl Vm {
                 let home = self.frames.last().unwrap().home;
                 self.set_global_slot(home, *slot, v);
             }
-            Op::GetCaptured(name) => {
-                let clo = self.frames.last().unwrap().closure;
-                let home = self.frames.last().unwrap().home;
-                self.ensure_module_faulted(home); // D1: home-global fallback may hit a not-yet-faulted module
-                let v = clo
-                    .and_then(|h| match self.heap.get(h) {
-                        Obj::Closure { captured, .. } => captured.get(name).copied(),
-                        _ => None,
-                    })
-                    .or_else(|| self.module_global(home, name))
-                    .ok_or_else(|| self.err(format!("undefined name '{name}'"), span))?;
-                self.push(v);
+            Op::GetCaptured(slot) => {
+                // Lever #3: hot path is a pure `captured[slot]` index — no string hash. The slot is
+                // always in range (one capture per snapshot entry, populated at MakeClosure), and a
+                // nested missing parent capture is stored as `Value::Nil` (byte-identical to the old
+                // `get(name) -> Some(Nil)`).
+                let frame = self.frames.last().unwrap();
+                let (clo, home) = (frame.closure, frame.home);
+                let v = clo.and_then(|h| match self.heap.get(h) {
+                    Obj::Closure { captured, .. } => captured.get(*slot as usize).copied(),
+                    _ => None,
+                });
+                match v {
+                    Some(v) => self.push(v),
+                    None => {
+                        // Cold path: not a closure frame, or slot out of range. Recover the name from
+                        // the proto's capture_names and fall back to a home global (D1 lazy fault).
+                        self.ensure_module_faulted(home);
+                        let proto = self.frames.last().unwrap().proto;
+                        let name = self.program.protos[proto]
+                            .capture_names
+                            .get(*slot as usize)
+                            .cloned();
+                        let v = name
+                            .as_deref()
+                            .and_then(|n| self.module_global(home, n))
+                            .ok_or_else(|| {
+                                let label = name.unwrap_or_else(|| format!("capture#{slot}"));
+                                self.err(format!("undefined name '{label}'"), span)
+                            })?;
+                        self.push(v);
+                    }
+                }
             }
             Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => self.arith(op, span)?,
             Op::Neg => {
@@ -3547,20 +3567,23 @@ impl Vm {
             // depth-guard test overflows in debug if `step` grows — same discipline as `ToStrFmt`).
             Op::MakeCffi(id) => self.op_make_cffi(*id, span)?,
             Op::MakeClosure(proto, entries) => {
+                // Lever #3: build the captured env *positionally* — slot i is the i-th entry (the
+                // snapshot order the child proto's `capture_names` mirrors). A nested capture reads
+                // the enclosing closure's value by its positional `parent_slot`.
                 let frame = self.frames.last().unwrap();
                 let (base, home, enclosing) = (frame.base, frame.home, frame.closure);
-                let mut captured = std::collections::HashMap::new();
+                let mut captured = Vec::with_capacity(entries.len());
                 for e in entries {
                     let v = match e.src {
                         CapSrc::Slot(i) => self.stack[base + i],
-                        CapSrc::Captured => enclosing
+                        CapSrc::Captured(parent_slot) => enclosing
                             .and_then(|h| match self.heap.get(h) {
-                                Obj::Closure { captured, .. } => captured.get(&e.name).copied(),
+                                Obj::Closure { captured, .. } => captured.get(parent_slot as usize).copied(),
                                 _ => None,
                             })
                             .unwrap_or(Value::Nil),
                     };
-                    captured.insert(e.name.clone(), v);
+                    captured.push(v);
                 }
                 let h = self.heap.alloc(Obj::Closure { proto: *proto, captured, home });
                 self.push(Value::Obj(h));
@@ -6116,19 +6139,20 @@ impl Vm {
     fn do_spawn_block(&mut self, proto: ProtoId, entries: &[CapEntry], span: Span) -> Result<(), RuntimeError> {
         let frame = self.frames.last().unwrap();
         let (base, home, enclosing) = (frame.base, frame.home, frame.closure);
-        let mut captured = std::collections::HashMap::new();
+        let mut captured = Vec::with_capacity(entries.len());
         for e in entries {
             let v = match e.src {
                 CapSrc::Slot(i) => self.stack[base + i],
-                CapSrc::Captured => enclosing
+                CapSrc::Captured(parent_slot) => enclosing
                     .and_then(|h| match self.heap.get(h) {
-                        Obj::Closure { captured, .. } => captured.get(&e.name).copied(),
+                        Obj::Closure { captured, .. } => captured.get(parent_slot as usize).copied(),
                         _ => None,
                     })
                     .unwrap_or(Value::Nil),
             };
             // Deep-copy across the airlock: the task can't share mutable state with the parent.
-            captured.insert(e.name.clone(), self.deep_clone(v));
+            // Positional (lever #3): slot order matches the synthetic block proto's `capture_names`.
+            captured.push(self.deep_clone(v));
         }
         let h = self.heap.alloc(Obj::Closure { proto, captured, home });
         self.register_task(PendingCall::Call { callee: Value::Obj(h), args: Vec::new(), span }, span)
@@ -7755,8 +7779,9 @@ impl Vm {
             // `worker_home` resolves the home index against this VM's `module_objs` (the rebuilt graph
             // in a pool worker, or the live graph in a cooperative same-heap drain).
             WireValue::Closure { proto, captured, home } => {
-                let cap: std::collections::HashMap<String, Value> =
-                    captured.into_iter().map(|(k, w)| (String::from(k), self.from_wire(w))).collect();
+                // Lever #3: rebuild positionally — push values in wire (slot) order, discard the
+                // carried names (they live in `proto.capture_names`). `to_wire` emits in slot order.
+                let cap: Vec<Value> = captured.into_iter().map(|(_k, w)| self.from_wire(w)).collect();
                 let home = self.worker_home(home);
                 Value::Obj(self.heap.alloc(Obj::Closure { proto, captured: cap, home }))
             }
@@ -7835,11 +7860,15 @@ impl Vm {
                 match callee {
                     Value::Obj(h) => match self.heap.get(h).clone() {
                         Obj::Closure { proto, captured, home } => {
+                            // Lever #3: captures are positional; carry names from the proto in slot
+                            // order so the wire format (Vec<(name, value)>) is unchanged.
+                            let names = self.program.protos[proto].capture_names.clone();
                             let mut wcap = Vec::with_capacity(captured.len());
-                            for (k, v) in captured {
+                            for (i, v) in captured.into_iter().enumerate() {
                                 let w = self.to_wire(v)?;
                                 self.ensure_crossable(&w, span)?;
-                                wcap.push((k, w));
+                                let name = names.get(i).cloned().unwrap_or_default();
+                                wcap.push((name, w));
                             }
                             Lowered::Closure { proto, captured: wcap, args: wargs, home: self.home_index(home), span }
                         }
@@ -7878,7 +7907,8 @@ impl Vm {
         let (call, span) = match lowered {
             Lowered::Closure { proto, captured, args, home, span } => {
                 let home = worker.worker_home(home);
-                let cap = captured.into_iter().map(|(k, w)| (k, worker.from_wire(w))).collect();
+                // Lever #3: rebuild positionally (slot order), discarding the carried names.
+                let cap: Vec<Value> = captured.into_iter().map(|(_k, w)| worker.from_wire(w)).collect();
                 let callee = Value::Obj(worker.heap.alloc(Obj::Closure { proto, captured: cap, home }));
                 let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
                 (ReadyCall::Invoke { callee, args }, span)
@@ -7969,11 +7999,14 @@ impl Vm {
         if let Value::Obj(h) = v {
             match self.heap.get(h) {
                 Obj::Closure { proto, captured, home } => {
+                    // Lever #3: positional captures — carry names from the proto in slot order.
+                    let names = &self.program.protos[*proto].capture_names;
                     let mut wcap = Vec::with_capacity(captured.len());
-                    for (k, cv) in captured {
+                    for (i, cv) in captured.iter().enumerate() {
                         let w = self.to_wire(*cv)?;
                         self.ensure_crossable(&w, span)?;
-                        wcap.push((k.clone().into_boxed_str(), w));
+                        let name = names.get(i).cloned().unwrap_or_default();
+                        wcap.push((name.into_boxed_str(), w));
                     }
                     return Ok(WireValue::Closure { proto: *proto, captured: wcap, home: self.home_index(*home) });
                 }
@@ -8073,7 +8106,13 @@ impl Vm {
         match self.heap.get(h).clone() {
             Obj::Func { proto, home } => SnapValue::Func { proto, home: self.home_index(home) },
             Obj::Closure { proto, captured, home } => {
-                let captured = captured.iter().map(|(k, cv)| (k.clone(), self.to_snap(*cv))).collect();
+                // Lever #3: positional captures — carry names from the proto in slot order.
+                let names = &self.program.protos[proto].capture_names;
+                let captured = captured
+                    .iter()
+                    .enumerate()
+                    .map(|(i, cv)| (names.get(i).cloned().unwrap_or_default(), self.to_snap(*cv)))
+                    .collect();
                 SnapValue::Closure { proto, captured, home: self.home_index(home) }
             }
             // An import alias bound to another module obj.
@@ -8199,7 +8238,8 @@ impl Vm {
             }
             SnapValue::Closure { proto, captured, home } => {
                 let whome = self.worker_home(*home);
-                let cap = captured.iter().map(|(k, cv)| (k.clone(), self.replay_snap(cv))).collect();
+                // Lever #3: rebuild positionally (slot order), discarding the carried names.
+                let cap: Vec<Value> = captured.iter().map(|(_k, cv)| self.replay_snap(cv)).collect();
                 Value::Obj(self.heap.alloc(Obj::Closure { proto: *proto, captured: cap, home: whome }))
             }
             SnapValue::ModuleAlias(idx) => Value::Obj(self.module_objs[*idx]),
@@ -14724,7 +14764,7 @@ main()
     /// home module (the test protos never read globals). Mirrors how `do_spawn_block` shapes a task.
     fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         let sp = Span { line: 1, col: 1 };
-        let proto = op::Proto { name: "task".into(), arity: 0, n_slots: 0, lines: vec![sp; code.len()], code, has_implicit_nursery: false, is_generator: false, is_test: false };
+        let proto = op::Proto { name: "task".into(), arity: 0, n_slots: 0, lines: vec![sp; code.len()], code, has_implicit_nursery: false, is_generator: false, is_test: false, capture_names: Vec::new() };
         let program = Program { protos: vec![proto], ..empty_program() };
         let mut vm = Vm::new(Arc::new(program));
         let home = vm.heap.alloc(Obj::Module { name: "<test>".into(), slots: Vec::new(), index: Default::default() });
@@ -21780,5 +21820,158 @@ main()";
         let src = "print([1, 2, 3, 4, 5][1:4])\n";
         assert_parity(src);
         assert_eq!(run_capture_stress(src), "[2, 3, 4]\n", "slice elements not GC-rooted?");
+    }
+
+    // ----- M19 lever #3: positional closure captures (HashMap → Vec<Value> by compile-time slot).
+    // Characterization net: these pin observable behavior across BOTH engines so the HashMap→Vec
+    // refactor cannot silently diverge. They pass on the pre-refactor (HashMap) code too. -----
+
+    /// Closure-capture golden: `examples/closure_capture.chz` (one var, several vars, nested
+    /// capture, a shared mutable box, HOF callbacks, and a hot-loop capture read) byte-identical on
+    /// the VM, the interpreter, the `--parallel` engine, and its `.expected`. The two-engine parity
+    /// is the oracle for M19 lever #3 (positional captures, HashMap → Vec<Value> by compile-time slot).
+    #[test]
+    fn golden_closure_capture_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/closure_capture.chz");
+        let expected = include_str!("../../examples/closure_capture.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    }
+
+    #[test]
+    fn capture_single_var_parity() {
+        // 1-var capture: the single slot read via GetCaptured.
+        let src = "\
+fn make():
+    n := 7
+    return fn(x: int) -> int: x + n
+fn main():
+    f := make()
+    print(f(3))
+main()";
+        assert_parity_out(src, "10\n");
+    }
+
+    #[test]
+    fn capture_multi_var_parity() {
+        // Multiple captured vars get distinct slots (snapshot order); all read positionally.
+        let src = "\
+fn make():
+    a := 1
+    b := 2
+    c := 3
+    return fn(x: int) -> int: x + a + b + c
+fn main():
+    f := make()
+    print(f(10))
+main()";
+        assert_parity_out(src, "16\n");
+    }
+
+    #[test]
+    fn capture_nested_closure_parity() {
+        // Inner closure captures the ENCLOSING closure's captured var (CapSrc::Captured) —
+        // the nested-slot-mapping path. `n` must reach the innermost body positionally.
+        let src = "\
+fn make():
+    n := 100
+    return fn(a: int): fn(b: int) -> int: a + b + n
+fn main():
+    outer := make()
+    inner := outer(20)
+    print(inner(3))
+main()";
+        assert_parity_out(src, "123\n");
+    }
+
+    #[test]
+    fn capture_deep_nested_three_levels_parity() {
+        // Three levels of capture chaining — each level forwards an enclosing capture by slot.
+        let src = "\
+fn make():
+    base := 1000
+    return fn(a: int): fn(b: int): fn(c: int) -> int: base + a + b + c
+fn main():
+    f := make()(200)(30)
+    print(f(4))
+main()";
+        assert_parity_out(src, "1234\n");
+    }
+
+    #[test]
+    fn capture_mutable_box_mutation_parity() {
+        // A captured mutable heap box (a list), mutated after capture — the handle is captured by
+        // value, mutation flows through the shared object. Two closures capture the SAME list at
+        // distinct slots; the writer's append is visible through the reader's slot. (Mirrors the
+        // Ref[T] box pattern without needing a file-path module import.)
+        let src = "\
+fn main():
+    box := [0]
+    bump := fn(): box.push(box.len())
+    rd := fn() -> int: box.len()
+    bump()
+    bump()
+    bump()
+    print(rd())
+    print(box)
+main()";
+        assert_parity_out(src, "4\n[0, 1, 2, 3]\n");
+    }
+
+    #[test]
+    fn capture_hof_callbacks_parity() {
+        // Closures-with-captures as map/filter/fold callbacks (the HOF hot path for GetCaptured).
+        let src = "\
+fn main():
+    base := 10
+    xs := [1, 2, 3, 4]
+    doubled := xs.map(fn(x: int) -> int: x * base)
+    print(doubled)
+    threshold := 2
+    kept := xs.filter(fn(x: int) -> bool: x > threshold)
+    print(kept)
+    seed := 100
+    total := xs.fold(seed, fn(acc: int, x: int) -> int: acc + x)
+    print(total)
+main()";
+        assert_parity_out(src, "[10, 20, 30, 40]\n[3, 4]\n110\n");
+    }
+
+    #[test]
+    fn capture_hot_read_loop_parity() {
+        // GetCaptured executed many times in a loop (the hot path post-refactor: pure index).
+        let src = "\
+fn make():
+    step := 2
+    return fn(x: int) -> int: x + step
+fn main():
+    f := make()
+    total := 0
+    i := 0
+    while i < 1000:
+        total = total + f(i)
+        i = i + 1
+    print(total)
+main()";
+        assert_parity_out(src, "501500\n");
+    }
+
+    #[test]
+    fn capture_closure_across_spawn_parity() {
+        // A capturing closure sent across spawn/channel — exercises the --parallel deep-clone +
+        // wire/snap rebuild of positional captures. VM (serial), interp, and --parallel must agree.
+        let src = "\
+fn main():
+    base := 41
+    ch := Channel[int]()
+    parallel:
+        spawn:
+            ch.send(base + 1)
+    print(ch.recv())
+main()";
+        assert_parity_out(src, "42\n");
+        assert_eq!(run_capture_parallel(src).expect("parallel"), "42\n", "--parallel capture wire");
     }
 }

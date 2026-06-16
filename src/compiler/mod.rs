@@ -471,6 +471,8 @@ impl Compiler {
             has_implicit_nursery: fc.has_implicit_nursery,
             is_generator: fc.is_generator,
             is_test: fc.is_test,
+            // Lever #3: cold-path capture-name metadata in slot order (empty for non-closures).
+            capture_names: fc.captured_names,
         });
         pid
     }
@@ -961,7 +963,17 @@ impl Compiler {
     fn emit_load(&mut self, fc: &mut FnComp, name: &str, span: Span) {
         match fc.resolve_local(name) {
             Some(slot) => fc.emit(Op::GetLocal(slot), span),
-            None if fc.captures(name) => fc.emit(Op::GetCaptured(name.to_string()), span),
+            None if fc.captures(name) => {
+                // Positional capture (lever #3): the slot is the name's index in this closure's
+                // `captured_names` (the snapshot order `MakeClosure` populated). `captures` just
+                // confirmed membership, so `position` always finds it.
+                let slot = fc
+                    .captured_names
+                    .iter()
+                    .position(|n| n == name)
+                    .expect("captures() implies a capture slot") as u32;
+                fc.emit(Op::GetCaptured(slot), span);
+            }
             None => fc.emit(Op::GetGlobalSlot(self.global_slot(name)), span),
         }
     }
@@ -2635,9 +2647,12 @@ impl FnComp {
             }
             entries.push(CapEntry { name: l.name.clone(), src: CapSrc::Slot(slot) });
         }
-        for name in &self.captured_names {
+        // A name not bound as a local here resolves against *this* frame's captured env (this frame
+        // is itself a closure). Its enclosing-proto slot is its position in `self.captured_names`
+        // (positional captures, lever #3) — stamp it so `MakeClosure` reads `captured[parent_slot]`.
+        for (parent_slot, name) in self.captured_names.iter().enumerate() {
             if seen.insert(name.clone()) {
-                entries.push(CapEntry { name: name.clone(), src: CapSrc::Captured });
+                entries.push(CapEntry { name: name.clone(), src: CapSrc::Captured(parent_slot as u32) });
             }
         }
         entries
@@ -2687,5 +2702,80 @@ mod interp_tests {
         // And with no trailing spec, the inner `:` stays part of the expression.
         let chunks = parse_interpolation("{m[\"a:b\"]}", sp()).unwrap();
         assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
+    }
+}
+
+#[cfg(test)]
+mod capture_layout_tests {
+    //! M19 lever #3: captures are positional. `GetCaptured` carries a compile-time slot (u32), and
+    //! each closure proto records its capture names in slot order (`Proto.capture_names`).
+    use super::*;
+    use crate::vm::op::Op;
+
+    fn compile(src: &str) -> crate::vm::op::Program {
+        let tokens = crate::lexer::tokenize(src).expect("lex");
+        let module = crate::parser::parse(tokens).expect("parse");
+        compile_module_standalone(&module).expect("compile")
+    }
+
+    /// Find the first proto that reads a capture, returning its (proto, GetCaptured slots in code order).
+    fn captured_slots(prog: &crate::vm::op::Program) -> Vec<u32> {
+        for p in &prog.protos {
+            let slots: Vec<u32> = p
+                .code
+                .iter()
+                .filter_map(|op| match op {
+                    Op::GetCaptured(slot) => Some(*slot),
+                    _ => None,
+                })
+                .collect();
+            if !slots.is_empty() {
+                return slots;
+            }
+        }
+        panic!("no GetCaptured op emitted");
+    }
+
+    #[test]
+    fn get_captured_carries_a_u32_slot() {
+        // A closure reading one captured var emits GetCaptured(0) (a numeric slot, not a string).
+        let prog = compile("fn make(n: int):\n    return fn(x: int) -> int: x + n\nmake(1)\n");
+        assert_eq!(captured_slots(&prog), vec![0], "single capture → slot 0");
+    }
+
+    #[test]
+    fn two_captures_get_distinct_slots_in_snapshot_order() {
+        // `a` then `b` referenced; snapshot_entries orders innermost locals first (reverse decl).
+        // Whatever the order, the two captures must occupy distinct, stable slots 0 and 1.
+        let prog = compile("fn make(a: int, b: int):\n    return fn(x: int) -> int: x + a + b\nmake(1, 2)\n");
+        let mut slots = captured_slots(&prog);
+        slots.sort_unstable();
+        assert_eq!(slots, vec![0, 1], "two captures → slots 0 and 1");
+    }
+
+    #[test]
+    fn proto_records_capture_names_in_slot_order() {
+        // The closure proto carries the captured names in slot order (cold-path metadata, mirrors
+        // StructDef.fields). Slot i of capture_names is the name read by GetCaptured(i).
+        let prog = compile("fn make(a: int, b: int):\n    return fn(x: int) -> int: x + a + b\nmake(1, 2)\n");
+        let clo = prog
+            .protos
+            .iter()
+            .find(|p| !p.capture_names.is_empty())
+            .expect("a closure proto with captures");
+        assert_eq!(clo.capture_names.len(), 2, "two captured names recorded");
+        let mut names = clo.capture_names.clone();
+        names.sort();
+        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn non_closure_proto_has_no_capture_names() {
+        // A plain top-level fn captures nothing; its proto's capture_names is empty.
+        let prog = compile("fn plain(x: int) -> int:\n    return x + 1\nplain(1)\n");
+        for p in &prog.protos {
+            // Only the closure proto (none here) would be non-empty.
+            assert!(p.capture_names.is_empty(), "plain fn proto has no capture names");
+        }
     }
 }

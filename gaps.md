@@ -115,7 +115,8 @@ the dispatch floor), startup ~11× **faster**. Discipline per item: failing-then
 keep parity → measure `benches/run.chz` → record the delta in `docs/benchmarks.md`. **Already landed**
 (don't re-flag): peephole/const-fold, superinstructions, global-slotting, `ConstStr` interning,
 struct-field IC, FxHash, SSO, method-call IC, inline-hot-ops, adaptive quickening (PEP 659),
-map/list-index specialization — all in `docs/benchmarks.md`.
+map/list-index specialization, **positional closure captures (memory lever #3)** — all in
+`docs/benchmarks.md`.
 
 > **Sequencing by JIT-coupling, not perf payoff (added 2026-06-16).** The Cranelift method-JIT
 > (end-game, below) hardcodes its codegen against **value representation, memory layout, calling
@@ -151,9 +152,12 @@ map/list-index specialization — all in `docs/benchmarks.md`.
      path (Display/probe/wire). Kept the single top-level `name` (8 dispatch/display/arith paths).
   2. **Enum `variant_id: u32`** — `Obj::Enum` (`heap.rs:167`) holds two `Box<str>` per instance, both
      global. → id + names for Display only. Saves 2 allocs/inst.
-  3. **Closure captures positional** — `Obj::Closure.captured: HashMap<String,Value>` (`heap.rs:178`)
-     = HashMap alloc + string-hash per `GetCaptured` (`mod.rs:3354`). → `SmallVec<[Value;N]>` by
-     per-proto slot (static per proto). Also speeds the per-spawn deep-clone.
+  3. **✅ Closure captures positional** — LANDED (`auto-task/positional-closure-captures`). Was
+     `Obj::Closure.captured: HashMap<String,Value>` (HashMap alloc/inst + string-hash per
+     `GetCaptured`). → `captured: Vec<Value>` indexed by a compile-time slot; `Op::GetCaptured(u32)`;
+     names live in `Proto.capture_names` (cold path only). **−45% (1.83×) on a closure
+     construct+capture-read micro**; suite-neutral (no closure bench). `Obj::Closure` shrank 88→64B
+     (Module still caps `Obj` at 88B). See resolved log + `docs/benchmarks.md`.
   4. **GC mark-bit bitvec** — `Slot{obj,mark:bool}` (`heap.rs:234`) interleaves 1 B in 88 B; packed
      bitvec = dense sweep scan. Only if GC becomes hot (post-JIT).
   5. **Shrink `Obj` <88 B** — guard `chzstr.rs:205`; box rare big variants. **Trades against SSO** (sized
@@ -275,3 +279,11 @@ user parameterized protocols, method defaults) · M15 slicing + `Index`/`IndexSe
 **std.math fill** (`5a25a5c`: trig/exp/log + `pi`/`e`) · **std.request verbs** (put/patch/delete/head +
 header map). **Tech debt:** parser `MAX_DEPTH` 128→64, dup type-param rejected, nested-`set` equality,
 call-site type args, `?`-in-closure return checking.
+
+**Perf — M19 memory layout ✅** · **Closure captures positional (lever #3)** — `Obj::Closure.captured`
+`HashMap<String,Value>` → `Vec<Value>` indexed by a compile-time slot; `Op::GetCaptured(String)` →
+`GetCaptured(u32)` (hash-free `captured[slot]` hot read); capture names moved to `Proto.capture_names`
+(cold path: error fallback + wire/snap). Nested captures map by `CapSrc::Captured(parent_slot)`.
+Behavior-preserving + three-engine parity (`examples/closure_capture.chz`); **−45% (1.83×)** on a
+closure construct+capture-read micro, suite-neutral; `Obj::Closure` 88→64B (Module still caps `Obj` at
+88B). JIT groundwork: positional captures → constant offsets for Cranelift codegen.
