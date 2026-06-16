@@ -1,0 +1,16 @@
+1
+2
+10
+Point(x=3, y=4)
+q is Point(x=3, y=4)
+true
+false
+8
+Line(start=Point(x=0, y=0), end=Point(x=8, y=9))
+42
+HI
+Box(item=42)
+Box(item=hi)
+1
+2
+Point(x=1, y=2)

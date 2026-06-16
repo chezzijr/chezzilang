@@ -156,13 +156,17 @@ pub enum Obj {
     /// `{a, b, …}` — an insertion-ordered hash set (see [`SetData`]). Elements may be heap objects,
     /// so they are traced as GC children.
     Set(SetData),
-    /// Fields in declaration order (deterministic `Display` / iteration). `tid` is the struct type's
-    /// dense layout id (`StructDef::tid`), stamped at construction so the field IC can guard on a
-    /// pure-int compare; `TID_NONE` for a struct whose name isn't a registered type (never IC-cached).
+    /// Fields stored POSITIONALLY in declaration order (hidden-class / `__slots__` layout — M19
+    /// memory-layout lever #1). No per-instance field-name strings: names are resolved on the cold
+    /// path (Display / error / probe miss) from `StructDef::fields` via `tid`/`name`, which is the
+    /// JIT groundwork — a flat `Vec<Value>` with constant, declaration-order field offsets. `tid` is
+    /// the struct type's dense layout id (`StructDef::tid`), stamped at construction so the field IC
+    /// can guard on a pure-int compare; `TID_NONE` for a struct whose name isn't a registered type
+    /// (never IC-cached). `name` is kept (consumed by method-dispatch / Display / arith / hash).
     Struct {
         name: Box<str>,
         tid: u32,
-        fields: Vec<(Box<str>, Value)>,
+        fields: Vec<Value>,
     },
     Enum {
         ty: Box<str>,
@@ -349,7 +353,7 @@ impl Heap {
                 push(v);
             }),
             Obj::Set(s) => s.entries.iter().for_each(|(_, e)| push(e)),
-            Obj::Struct { fields, .. } => fields.iter().for_each(|(_, v)| push(v)),
+            Obj::Struct { fields, .. } => fields.iter().for_each(&mut push),
             Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
             Obj::Func { home, .. } => out.push(*home),
             Obj::Closure { captured, home, .. } => {

@@ -672,3 +672,44 @@ clean. Cross-nursery goldens looped 10–12× under a 30s watchdog (no lost-wake
 parked set; the multi-task case shook out an early-enlist-vs-deadlock-predicate race, since fixed by
 enlisting outer scopes BEFORE farming any helper — see
 `examples/parallel_cross_nursery_fanout.chz`).
+
+## After M19 memory-layout lever #1 — positional struct layout — 2026-06-16 (same machine)
+
+`Obj::Struct` instance fields changed from `Vec<(Box<str>, Value)>` to a flat positional `Vec<Value>`
+(hidden-class / `__slots__` layout). Field names now live only in `StructDef` (resolved on the cold
+Display/probe-miss/wire/snap path); the hot field read/write (IC-guarded on `tid`) is a pure
+`fields[idx]`. This kills the **N per-field `Box<str>` allocations per struct instantiation** plus the
+per-field name-clone on `==`. The synthetic native structs `Match`/`Response` are now registered in
+`Program.structs` so the runtime can recover their declaration-order field names.
+
+**Caveat (predicted in `gaps.md`):** the bench suite is **dispatch/call/alloc-bound, NOT layout-bound**,
+and the `struct` bench reuses a small fixed set of instances rather than constructing in a hot loop, so
+the suite reads perf-neutral — as expected. The value is the alloc reduction + JIT groundwork
+(positional storage → constant field offsets the Cranelift codegen needs).
+
+| bench    | before (CPython×) | after (CPython×) | delta |
+|----------|-------------------|------------------|-------|
+| fib      | 3.14× | 3.23× | within noise |
+| str      | 2.07× | 2.12× | within noise |
+| primes   | 2.24× | 2.33× | within noise |
+| loop     | 1.11× | 1.16× | within noise |
+| list     | 2.67× | 2.60× | within noise |
+| struct   | 2.80× | 2.65× | within noise (slightly closer to CPython) |
+| poly_method | 4.29× | 4.42× | within noise |
+| map      | 1.83× | 1.83× | flat |
+| empty    | 10.37× faster | 10.26× faster | flat |
+
+**Alloc win (the real payoff), measured directly.** A struct-construction-heavy micro
+(`P(a,b,c,d)` built 2,000,000× in a `while` loop, 4 fields) was timed before vs after with `hyperfine`
+(8 runs, 2 warmup):
+
+| micro                         | before (Vec of tuples) | after (positional) | delta |
+|-------------------------------|------------------------|--------------------|-------|
+| 2M × 4-field struct construct | 826.9 ms ± 21.0 ms     | 510.2 ms ± 16.3 ms | **−38%** |
+
+That's the 4 fewer `Box<str>` allocs per instantiation (one per field) made visible. Full suite
+**1968 green** (+2: the positional-layout type guard + the two-engine `struct_layout.chz` golden),
+conformance **7/7**, clippy `--all-targets -D warnings` clean. Two-engine parity preserved (the interp
+is the frozen oracle and was left untouched — both engines iterate fields in declaration order, so
+Display/`==`/interpolation stay byte-identical); wire (default) + snap (`--parallel`) struct
+round-trips verified to preserve field names + Display.

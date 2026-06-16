@@ -291,14 +291,19 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
 
 **Compact aggregate representation — drop per-instance redundancy (the real layout lever):**
 
-1. **Shared per-type struct layout (hidden-class / `__slots__`) — biggest redundancy + JIT-prep.**
-   `Obj::Struct { name: Box<str>, tid, fields: Vec<(Box<str>, Value)> }` (`heap.rs:162`) stores the type
-   name **and every field name** as a `Box<str>` **per instance**, though both are static and already in
-   `StructDef { fields: Vec<String>, tid }` (`op.rs:378`), keyed by `tid`. Cost: N+1 `Box<str>` allocs
-   per instance **plus an `==`-name-clone** (`mod.rs:4483` — `fa.iter().map(|(k,v)| (k.clone(), *v))`).
-   Fix: store `fields: Vec<Value>` (positional); resolve names from the program by `tid` on the cold
-   path only (the field IC already guards on `tid`, so the hot read never touches names). Shrinks every
-   instance, kills the clone, hands the JIT a constant field offset.
+1. ✅ **Shared per-type struct layout (hidden-class / `__slots__`) — DONE (2026-06-16).**
+   `Obj::Struct { name: Box<str>, tid, fields: Vec<Value> }` (`heap.rs:162`) now stores fields
+   **positionally** (a flat `Vec<Value>`, declaration-order offsets) — no per-instance field-name
+   strings. Names live only in `StructDef { fields: Vec<String>, tid }` (`op.rs:378`), resolved on the
+   cold path (Display/stringify/probe-miss/wire/snap) by `name`→`StructDef`. Killed the N per-field
+   `Box<str>` allocs/instance + the `==`-name-clone (`mod.rs` struct-eq is now a by-position value
+   compare guarded by `na != nb`). The single top-level `name` is **kept** (consumed by ~8
+   dispatch/Display/arith/hash paths — dropping it would need a `tid`→name map everywhere; out of
+   scope for the primary win). The synthetic native structs `Match`/`Response` are now registered in
+   `Program.structs` (`compiler/mod.rs` `Compiler::new`) so the runtime can recover their field names.
+   Perf: bench-neutral (struct bench reuses instances, dispatch/alloc-bound) but a 4-field
+   struct-construction micro went **827 ms → 510 ms (−38%)**. Hands the JIT a constant field offset.
+   Interp left untouched (frozen oracle; parity by declaration order).
 2. **Enum variant id instead of names.** `Obj::Enum { ty: Box<str>, variant: Box<str>, payload }`
    (`heap.rs:167`) — two `Box<str>` per instance, both global (`Program::variants`). Fix:
    `variant_id: u32` (the enum analogue of `tid`); names looked up for Display only. Saves 2 allocs/inst.
@@ -330,8 +335,8 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
    `alloc_char` (Phase 3) already halved the string case. Parity-blocked.
 8. **Operand-stack 16 B/Value traffic** → NaN-box (blocked, full i64) / register VM (#8, low-ROI) — above.
 
-**Land order if pursued:** **#1 → #3 → #2** as **JIT groundwork** (the positional layouts the JIT codegen
-wants), measuring each against `struct`/`hof` (may read neutral — they're dispatch-bound, see caveat).
+**Land order if pursued:** **#1 ✅ done → #3 → #2** as **JIT groundwork** (the positional layouts the JIT
+codegen wants), measuring each against `struct`/`hof` (may read neutral — they're dispatch-bound, see caveat).
 #4/#5/#6 are principled cleanups, post-JIT. Same discipline throughout: failing-then-green parity test →
 keep two-engine parity → measure (`benches/run.chz`) → record the delta in `docs/benchmarks.md`.
 

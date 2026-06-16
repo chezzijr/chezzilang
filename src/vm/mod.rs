@@ -4477,13 +4477,16 @@ impl Vm {
                         Ok(true)
                     }
                     (Obj::Struct { name: na, fields: fa, .. }, Obj::Struct { name: nb, fields: fb, .. }) => {
+                        // Positional structural compare: the `na != nb` guard preserves type
+                        // distinction (same name ⇒ same StructDef ⇒ identical field order), so a
+                        // by-position value compare suffices — no per-field name clone needed.
                         if na != nb || fa.len() != fb.len() {
                             return Ok(false);
                         }
-                        let fa: Vec<(Box<str>, Value)> = fa.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                        let fb: Vec<(Box<str>, Value)> = fb.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                        for ((ka, va), (kb, vb)) in fa.iter().zip(&fb) {
-                            if ka != kb || !self.values_equal_guarded(*va, *vb, depth + 1, span)? {
+                        let fa: Vec<Value> = fa.clone();
+                        let fb: Vec<Value> = fb.clone();
+                        for (va, vb) in fa.iter().zip(&fb) {
+                            if !self.values_equal_guarded(*va, *vb, depth + 1, span)? {
                                 return Ok(false);
                             }
                         }
@@ -4774,14 +4777,26 @@ impl Vm {
                 Value::Obj(self.heap.alloc(Obj::List(vs)))
             }
             N::Struct { name, fields } => {
-                // Lower fields first (each may allocate), then allocate the struct itself — keeps
-                // every allocation at this instruction boundary, preserving the GC invariant.
-                let mut fs = Vec::with_capacity(fields.len());
+                // Positional layout: lower the named native fields, then place them into a flat Vec
+                // at the StructDef's declaration-order index (native emit order already matches, but
+                // resolving by name keeps it robust to drift). Lower first (each may allocate), then
+                // allocate the struct — keeps every allocation at this boundary (GC invariant).
+                let tid = self.struct_tid(&name);
+                let order: Option<Vec<String>> = self.program.structs.get(&name).map(|d| d.fields.clone());
+                let mut lowered: Vec<(Box<str>, Value)> = Vec::with_capacity(fields.len());
                 for (k, v) in fields {
                     let lv = self.lower_native(v);
-                    fs.push((k.into_boxed_str(), lv));
+                    lowered.push((k.into_boxed_str(), lv));
                 }
-                let tid = self.struct_tid(&name);
+                let fs: Vec<Value> = match order {
+                    // Registered type: place each lowered value at its declaration-order slot.
+                    Some(order) => order
+                        .iter()
+                        .map(|fname| lowered.iter().find(|(k, _)| k.as_ref() == fname.as_str()).map(|(_, v)| *v).unwrap_or(Value::Nil))
+                        .collect(),
+                    // Ad-hoc / unregistered (TID_NONE): keep native emit order positionally.
+                    None => lowered.into_iter().map(|(_, v)| v).collect(),
+                };
                 Value::Obj(self.heap.alloc(Obj::Struct { name: name.into_boxed_str(), tid, fields: fs }))
             }
             N::Map(entries) => {
@@ -4950,7 +4965,9 @@ impl Vm {
                     Obj::Map(m) => m.entries.clone(),
                     _ => return Err(mismatch("object")),
                 };
-                let mut field_vals: Vec<(Box<str>, Value)> = Vec::with_capacity(fields.len());
+                // Positional layout: `fields` (the type descriptor) is already in the struct's
+                // declaration order (see `json_decode::struct_descriptor`), so push values in order.
+                let mut field_vals: Vec<Value> = Vec::with_capacity(fields.len());
                 for (fname, fdesc) in fields {
                     let found = entries.iter().find(|(_, k, _)| {
                         self.val_str(*k).as_deref() == Some(fname.as_str())
@@ -4964,7 +4981,7 @@ impl Vm {
                             _ => return Err(format!("decode: missing key '{fname}' at {path}")),
                         },
                     };
-                    field_vals.push((fname.clone().into_boxed_str(), v));
+                    field_vals.push(v);
                 }
                 let tid = self.struct_tid(name);
                 let h = self.heap.alloc(Obj::Struct { name: name.clone().into_boxed_str(), tid, fields: field_vals });
@@ -5177,7 +5194,7 @@ impl Vm {
                 self.stack.extend(args);
                 self.do_call(argc, span)
             }
-            Obj::Struct { name, fields, tid, .. } => {
+            Obj::Struct { name, tid, fields, .. } => {
                 // Fix A — resolve `(proto, module_idx)` WITHOUT cloning the whole StructDef (its
                 // `fields` Vec + `methods` HashMap). On a megamorphic / sticky-generic site this slow
                 // path runs per call, so the per-miss StructDef clone dwarfed the dispatch itself. We
@@ -5241,9 +5258,11 @@ impl Vm {
                 }
                 // No method named `method`: fall back to a function-typed *field* — `recv.f(args)`
                 // where `f` holds a function value (the checker verified `f: fn(...) -> ...`).
-                // Invoked as a value (no `self` bound — it's not a method).
-                if let Some((_, fval)) = fields.iter().find(|(k, _)| k.as_ref() == method) {
-                    let v = self.invoke_value(*fval, args, span)?;
+                // Invoked as a value (no `self` bound — it's not a method). Positional layout:
+                // resolve the field name->index from the StructDef, then index the flat `fields`.
+                let fidx = self.program.structs.get(name.as_ref()).and_then(|d| d.fields.iter().position(|f| f == method));
+                if let Some(fval) = fidx.and_then(|i| fields.get(i).copied()) {
+                    let v = self.invoke_value(fval, args, span)?;
                     if self.paused() {
                         return Ok(()); // B1/D3: the function-field call parked on `recv` or yielded.
                     }
@@ -7632,11 +7651,22 @@ impl Vm {
                     WireValue::Set(out)
                 }
                 Obj::Struct { name, fields, .. } => {
-                    let mut out = Vec::with_capacity(fields.len());
-                    for (k, val) in fields {
-                        out.push((k.clone(), self.to_wire(*val)?));
+                    // Positional layout: recover the declaration-order field names from the
+                    // StructDef (cold cross-task path) so the WireValue encoding is unchanged.
+                    let name = name.clone();
+                    let names: Vec<Box<str>> = self
+                        .program
+                        .structs
+                        .get(name.as_ref())
+                        .map(|d| d.fields.iter().map(|f| f.clone().into_boxed_str()).collect())
+                        .unwrap_or_default();
+                    let vals: Vec<Value> = fields.clone();
+                    let mut out = Vec::with_capacity(vals.len());
+                    for (i, val) in vals.iter().enumerate() {
+                        let k = names.get(i).cloned().unwrap_or_else(|| i.to_string().into_boxed_str());
+                        out.push((k, self.to_wire(*val)?));
                     }
-                    WireValue::Struct { name: name.clone(), fields: out }
+                    WireValue::Struct { name, fields: out }
                 }
                 Obj::Enum { ty, variant, payload } => {
                     let mut out = Vec::with_capacity(payload.len());
@@ -7709,8 +7739,10 @@ impl Vm {
                 Value::Obj(self.heap.alloc(Obj::Set(out)))
             }
             WireValue::Struct { name, fields } => {
-                let cloned: Vec<(Box<str>, Value)> =
-                    fields.into_iter().map(|(k, val)| (k, self.from_wire(val))).collect();
+                // Positional layout: the wire fields arrive in declaration order (to_wire emits
+                // them so), so rebuild positionally — the carried names are discarded.
+                let cloned: Vec<Value> =
+                    fields.into_iter().map(|(_, val)| self.from_wire(val)).collect();
                 let tid = self.struct_tid(&name);
                 Value::Obj(self.heap.alloc(Obj::Struct { name, tid, fields: cloned }))
             }
@@ -8066,7 +8098,22 @@ impl Vm {
             Obj::List(items) => SnapValue::List(items.iter().map(|x| self.to_snap(*x)).collect()),
             Obj::Tuple(items) => SnapValue::Tuple(items.iter().map(|x| self.to_snap(*x)).collect()),
             Obj::Struct { name, fields, .. } => {
-                let fields = fields.iter().map(|(k, fv)| (k.clone(), self.to_snap(*fv))).collect();
+                // Positional layout: recover declaration-order field names from the StructDef so
+                // the SnapValue encoding (which carries names) is unchanged (cold cross-task path).
+                let names: Vec<Box<str>> = self
+                    .program
+                    .structs
+                    .get(name.as_ref())
+                    .map(|d| d.fields.iter().map(|f| f.clone().into_boxed_str()).collect())
+                    .unwrap_or_default();
+                let fields = fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, fv)| {
+                        let k = names.get(i).cloned().unwrap_or_else(|| i.to_string().into_boxed_str());
+                        (k, self.to_snap(*fv))
+                    })
+                    .collect();
                 SnapValue::Struct { name, fields }
             }
             Obj::Enum { ty, variant, payload } => {
@@ -8176,7 +8223,9 @@ impl Vm {
                 Value::Obj(self.heap.alloc(Obj::Tuple(v)))
             }
             SnapValue::Struct { name, fields } => {
-                let f = fields.iter().map(|(k, fv)| (k.clone(), self.replay_snap(fv))).collect();
+                // Positional layout: the snap fields are in declaration order (to_snap emits them
+                // so), so rebuild positionally — the carried names are discarded.
+                let f = fields.iter().map(|(_, fv)| self.replay_snap(fv)).collect();
                 let tid = self.struct_tid(name);
                 Value::Obj(self.heap.alloc(Obj::Struct { name: name.clone(), tid, fields: f }))
             }
@@ -9574,8 +9623,10 @@ impl Vm {
             return Err(self.err(format!("struct '{name}' expects {} field(s), got {argc}", def.fields.len()), span));
         }
         let at = self.stack.len() - argc;
-        let vals: Vec<Value> = self.stack.split_off(at);
-        let fields: Vec<(Box<str>, Value)> = def.fields.iter().cloned().map(|f| f.into_boxed_str()).zip(vals).collect();
+        // Positional layout: the args already arrive in declaration order (desugar reorders any
+        // named-field constructor before codegen), so split them straight in — no per-field name
+        // strings, no zip with `def.fields`. `argc == def.fields.len()` is checked above.
+        let fields: Vec<Value> = self.stack.split_off(at);
         let h = self.heap.alloc(Obj::Struct { name: name.into(), tid: def.tid, fields });
         self.push(Value::Obj(h));
         Ok(())
@@ -9616,7 +9667,7 @@ impl Vm {
             if cell.tid != TID_NONE
                 && let Obj::Struct { tid, fields, .. } = self.heap.get(h)
                 && *tid == cell.tid
-                && let Some((_, v)) = fields.get(cell.idx as usize)
+                && let Some(v) = fields.get(cell.idx as usize)
             {
                 let v = *v;
                 self.push(v);
@@ -9638,16 +9689,14 @@ impl Vm {
                     )),
                 }
             }
-            Obj::Struct { tid, fields, .. } => {
-                // Probe + capture the index (and the layout `tid`) so the IC can cache both (Value is
-                // Copy and `tid` is a `u32`, so `found` owns its data and the heap borrow ends here,
-                // freeing `self` for the field_ic write below).
+            Obj::Struct { name: sname, tid, fields, .. } => {
+                // Positional layout: the field name->index map lives in the StructDef (declaration
+                // order), not the instance. Resolve the slot there, then index the flat `fields`
+                // Vec. Capture both index + layout `tid` so the IC can cache them (Value is Copy,
+                // `tid` is a `u32`, so the heap borrow ends here, freeing `self` for the write).
                 let tid = *tid;
-                let found = fields
-                    .iter()
-                    .enumerate()
-                    .find(|(_, (k, _))| k.as_ref() == name)
-                    .map(|(i, (_, v))| (i, *v));
+                let idx = self.program.structs.get(sname.as_ref()).and_then(|d| d.fields.iter().position(|f| f == name));
+                let found = idx.and_then(|i| fields.get(i).map(|v| (i, *v)));
                 match found {
                     Some((i, v)) => {
                         if ic != NO_IC {
@@ -9882,18 +9931,25 @@ impl Vm {
             if cell.tid != TID_NONE
                 && let Obj::Struct { tid, fields, .. } = self.heap.get_mut(h)
                 && *tid == cell.tid
-                && let Some((_, slot)) = fields.get_mut(cell.idx as usize)
+                && let Some(slot) = fields.get_mut(cell.idx as usize)
             {
                 *slot = val;
                 return Ok(());
             }
         }
+        // Positional layout: resolve the field name->index from the StructDef (declaration order)
+        // BEFORE the mutable heap borrow, then write the flat `fields` slot by index.
+        let sname = match self.heap.get(h) {
+            Obj::Struct { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+        let idx = sname.as_ref().and_then(|n| self.program.structs.get(n.as_ref())).and_then(|d| d.fields.iter().position(|f| f == name));
         let found;
         match self.heap.get_mut(h) {
             Obj::Struct { tid, fields, .. } => {
                 let tid = *tid;
-                match fields.iter_mut().enumerate().find(|(_, (k, _))| k.as_ref() == name) {
-                    Some((i, (_, slot))) => {
+                match idx.and_then(|i| fields.get_mut(i).map(|slot| (i, slot))) {
+                    Some((i, slot)) => {
                         *slot = val;
                         found = (i as u32, tid);
                     }
@@ -10344,8 +10400,14 @@ impl Vm {
                     }
                 }
                 Obj::Struct { name, fields, .. } => {
-                    let mut parts = Vec::with_capacity(fields.len());
-                    for (k, v) in fields {
+                    // Positional layout: recover declaration-order field names from the StructDef
+                    // (cold display path). Snapshot name + values first to drop the heap borrow.
+                    let name = name.clone();
+                    let vals: Vec<Value> = fields.clone();
+                    let names: Vec<String> = self.program.structs.get(name.as_ref()).map(|d| d.fields.clone()).unwrap_or_default();
+                    let mut parts = Vec::with_capacity(vals.len());
+                    for (i, v) in vals.iter().enumerate() {
+                        let k = names.get(i).cloned().unwrap_or_else(|| i.to_string());
                         parts.push(format!("{k}={}", self.display_guarded(*v, depth + 1)?));
                     }
                     Ok(format!("{name}({})", parts.join(", ")))
@@ -10572,7 +10634,8 @@ impl Vm {
             }
             Obj::Struct { name, fields, .. } => {
                 // `str(self) -> str` overrides the default repr. Only a self-only method is the hook.
-                if let Some(def) = self.program.structs.get(name.as_ref()).cloned()
+                let def = self.program.structs.get(name.as_ref()).cloned();
+                if let Some(def) = &def
                     && let Some(&proto) = def.methods.get("str")
                     && self.program.protos[proto].arity == 1
                 {
@@ -10580,12 +10643,21 @@ impl Vm {
                     let res = self.guarded(|vm| vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span))?;
                     return self.stringify_into(out, res, span, depth);
                 }
+                // Positional layout: recover declaration-order field names from the StructDef (the
+                // same `def` already cloned for the `str` hook) — no per-instance name strings.
                 let _ = write!(out, "{name}(");
-                for (i, (k, fv)) in fields.iter().enumerate() {
+                for (i, fv) in fields.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    let _ = write!(out, "{k}=");
+                    match def.as_ref().and_then(|d| d.fields.get(i)) {
+                        Some(k) => {
+                            let _ = write!(out, "{k}=");
+                        }
+                        None => {
+                            let _ = write!(out, "{i}=");
+                        }
+                    }
                     self.stringify_into(out, *fv, span, depth + 1)?;
                 }
                 out.push(')');
@@ -12185,7 +12257,7 @@ mod tests {
         let st = vm.heap.alloc(Obj::Struct {
             name: "P".into(),
             tid: TID_NONE,
-            fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Obj(s))],
+            fields: vec![Value::Int(1), Value::Obj(s)],
         });
         let en = vm.heap.alloc(Obj::Enum {
             ty: "Option".into(),
@@ -15706,6 +15778,51 @@ main()";
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
         assert_eq!(vm_out, interp_out);
+    }
+
+    /// M19 memory-layout lever #1 golden: `examples/struct_layout.chz` exercises the positional
+    /// struct-field storage across every observable surface the layout change touches — field
+    /// read/write, struct `==` (equal / unequal-by-value / unequal-by-type), Display + `{}`
+    /// interpolation (names recovered from the type in declaration order), nested structs, a generic
+    /// `Box[T]` with two monomorphs sharing ONE type-erased layout, and a reordered named-field
+    /// constructor. Byte-identical on the VM, interp, and the checked-in `.expected` is the parity
+    /// gate: the layout change is behavior-preserving, so any divergence turns this RED.
+    #[test]
+    fn golden_struct_layout_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/struct_layout.chz");
+        let expected = include_str!("../../examples/struct_layout.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(vm_out, expected, "vm output drifted from struct_layout.expected");
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on struct_layout (layout must be behavior-preserving)");
+    }
+
+    /// M19 memory-layout lever #1 — assert the VM stores struct fields POSITIONALLY (a flat
+    /// `Vec<Value>`, hidden-class / `__slots__` layout) with NO per-instance field-name strings.
+    /// Compiles a program with `struct Point(x, y)`, drives the real `new_struct` construction path
+    /// (push args, call `new_struct`), then pattern-matches the heap object and verifies the field
+    /// Vec is `[Value::Int(1), Value::Int(2)]` in declaration order — names live only in the
+    /// StructDef. This is the type-level guard the layout change is built around (the destructure of
+    /// `fields` as `&Vec<Value>` would not compile against the old `Vec<(Box<str>,Value)>`).
+    #[test]
+    fn struct_positional_layout_no_per_instance_names() {
+        let tokens = lexer::tokenize("struct Point:\n    x: int\n    y: int\nfn main():\n    print(0)\nmain()\n").expect("lex");
+        let module = parser::parse(tokens).expect("parse");
+        let program = crate::compiler::compile_module_standalone(&module).expect("compile");
+        let mut vm = Vm::new(Arc::new(program));
+        let span = Span { line: 1, col: 1 };
+        vm.push(Value::Int(1));
+        vm.push(Value::Int(2));
+        vm.new_struct("Point", 2, span).expect("new_struct");
+        let Value::Obj(h) = vm.pop() else { panic!("expected struct obj") };
+        match vm.heap.get(h) {
+            Obj::Struct { name, fields, .. } => {
+                assert_eq!(name.as_ref(), "Point");
+                let fields: &Vec<Value> = fields; // positional: NOT Vec<(Box<str>, Value)>
+                assert_eq!(*fields, vec![Value::Int(1), Value::Int(2)], "fields must be positional in declaration order, no per-instance names");
+            }
+            _ => panic!("expected Obj::Struct"),
+        }
     }
 
     /// Literals golden: `examples/literals.chz` (scientific-notation floats, `\u{…}` unicode
