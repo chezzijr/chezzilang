@@ -128,6 +128,17 @@ conformance` green.
   frame-setup in `finish_frame`, which a dispatch cache doesn't touch. A correct call-IC also can't avoid
   a heap-specific callee handle ⇒ `swap_ctx` hazard for ~0 gain. fib's real lever is Tier 2 (PEP 659) /
   Tier 3 (JIT). Full rationale in [`docs/benchmarks.md`](docs/benchmarks.md).
+- **Memory layout #3 — positional closure captures.** `Obj::Closure.captured` moved from a per-closure
+  `HashMap<String, Value>` to a positional `Vec<Value>` indexed by a compile-time slot; `Op::GetCaptured`
+  carries a `u32` slot (hash-free `captured[slot]` hot read, no string hash) instead of a name; capture
+  names live in `Proto.capture_names` (cold path only: the home-global fallback, error messages, and
+  wire/snap name carrying). Nested captures (a closure capturing an enclosing closure's capture) map by
+  `CapSrc::Captured(parent_slot)` stamped at compile time. Behavior-preserving + **three-engine parity**
+  (`examples/closure_capture.chz` on VM/interp/--parallel). **−45% (1.83×)** on a closure
+  construct+capture-read micro (`benches/chz/closure.chz`); standard suite neutral (no closure-heavy
+  bench). `Obj::Closure` shrank 88→64 B (Module still caps `Obj` at 88 B, guard intact). JIT groundwork:
+  constant capture offsets for the future Cranelift codegen. (Memory layout land order **#1 ✅ → #3 ✅ →
+  #2**; see `docs/future.md` §4.)
 
 **Remaining / blocked levers:**
 

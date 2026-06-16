@@ -1,0 +1,18 @@
+# Bench: closure construction + captured-var reads. Each iteration builds a fresh closure that
+# captures 3 vars (MakeClosure → a positional Vec<Value>), then calls it (GetCaptured ×3, the
+# hash-free positional read). Isolates lever #3: per-instance alloc + per-read capture access.
+# Prints the accumulated total.
+
+fn make(a: int, b: int, c: int) -> fn(int) -> int:
+    return fn(x: int) -> int: x + a + b + c
+
+fn main():
+    total := 0
+    i := 0
+    while i < 3000000:
+        f := make(i, 1, 2)
+        total += f(i)
+        i += 1
+    print(total)
+
+main()

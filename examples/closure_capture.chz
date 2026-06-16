@@ -1,0 +1,64 @@
+# examples/closure_capture.chz — closure capture showcase (M19 lever #3: positional captures).
+#
+# Captures are snapshot-by-value at closure creation and read positionally (a compile-time slot
+# per captured name, resolved like struct fields). This file exercises every capture shape so the
+# VM, the interpreter, and `--parallel` stay byte-identical:
+#   - one captured var
+#   - several captured vars (distinct slots, snapshot order)
+#   - a nested closure capturing an enclosing closure's capture (CapSrc::Captured)
+#   - a captured mutable heap box (list) mutated through two closures sharing the same handle
+#   - capturing closures as map / filter / fold callbacks
+#   - a capture read many times in a hot loop
+
+# --- one captured var ---
+fn make_adder(n: int) -> fn(int) -> int:
+    return fn(x: int) -> int: x + n
+
+# --- several captured vars ---
+fn make_combo(a: int, b: int, c: int) -> fn(int) -> int:
+    return fn(x: int) -> int: x + a + b + c
+
+# --- nested closure: inner captures the enclosing closure's `base` ---
+fn make_nested(base: int):
+    return fn(a: int): fn(b: int) -> int: base + a + b
+
+fn main():
+    add10 := make_adder(10)
+    print(add10(5))            # 15
+
+    combo := make_combo(1, 2, 3)
+    print(combo(100))          # 106
+
+    nested := make_nested(1000)(20)
+    print(nested(3))           # 1023
+
+    # captured mutable box: two closures share the SAME list handle (distinct slots)
+    box := [0]
+    bump := fn(): box.push(box.len())
+    rd := fn() -> int: box.len()
+    bump()
+    bump()
+    bump()
+    print(rd())                # 4
+    print(box)                 # [0, 1, 2, 3]
+
+    # capturing closures as HOF callbacks
+    base := 10
+    xs := [1, 2, 3, 4]
+    print(xs.map(fn(x: int) -> int: x * base))      # [10, 20, 30, 40]
+    threshold := 2
+    print(xs.filter(fn(x: int) -> bool: x > threshold))  # [3, 4]
+    seed := 100
+    print(xs.fold(seed, fn(acc: int, x: int) -> int: acc + x))  # 110
+
+    # hot read: GetCaptured executed many times
+    step := 2
+    f := fn(x: int) -> int: x + step
+    total := 0
+    i := 0
+    while i < 1000:
+        total = total + f(i)
+        i = i + 1
+    print(total)               # 501500
+
+main()

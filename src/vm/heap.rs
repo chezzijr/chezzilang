@@ -174,10 +174,13 @@ pub enum Obj {
         proto: ProtoId,
         home: GcRef,
     },
-    /// An anonymous function + its snapshot-captured environment (name → value) + home globals.
+    /// An anonymous function + its snapshot-captured environment + home globals. M19 lever #3 —
+    /// captures are *positional*: `captured[slot]` for the compile-time slot in `Op::GetCaptured`,
+    /// populated in the snapshot order recorded by the proto's `capture_names`. No per-instance
+    /// names and no per-read string hash (mirrors positional struct fields, lever #1).
     Closure {
         proto: ProtoId,
-        captured: HashMap<String, Value>,
+        captured: Vec<Value>,
         home: GcRef,
     },
     /// A module namespace: its name + top-level bindings. M19 Phase 2b — globals are stored
@@ -353,7 +356,7 @@ impl Heap {
             Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
             Obj::Func { home, .. } => out.push(*home),
             Obj::Closure { captured, home, .. } => {
-                captured.values().for_each(&mut push);
+                captured.iter().for_each(&mut push);
                 out.push(*home);
             }
             Obj::Module { slots, .. } => slots.iter().for_each(&mut push),

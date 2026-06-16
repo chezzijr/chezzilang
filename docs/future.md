@@ -302,13 +302,14 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
 2. **Enum variant id instead of names.** `Obj::Enum { ty: Box<str>, variant: Box<str>, payload }`
    (`heap.rs:167`) — two `Box<str>` per instance, both global (`Program::variants`). Fix:
    `variant_id: u32` (the enum analogue of `tid`); names looked up for Display only. Saves 2 allocs/inst.
-3. **Closure captures: positional `Vec`, not a per-closure `HashMap`.** `Obj::Closure { captured:
-   HashMap<String, Value>, .. }` (`heap.rs:178`) allocates a `HashMap` (~48 B + string keys) **per
-   closure**, and every `GetCaptured` does a string hash + probe (`mod.rs:3354`). The capture set is
-   **static per proto** (the compiler knows the `CapSrc` order at `MakeClosure`). Fix: store captures
-   positionally (`SmallVec<[Value; N]>`) indexed by a per-proto capture-layout slot — `GetCaptured(idx)`
-   becomes a `Vec` index. Kills the HashMap alloc + string hashing on the hot captured-read path, and
-   speeds the per-spawn deep-clone.
+3. **✅ DONE — Closure captures: positional `Vec`, not a per-closure `HashMap`.** Was `Obj::Closure
+   { captured: HashMap<String, Value>, .. }` (a `HashMap` ~48 B + string keys **per closure** + a
+   string hash on every `GetCaptured`). Now `captured: Vec<Value>` indexed by a compile-time slot;
+   `Op::GetCaptured(u32)` is a hash-free `captured[slot]` read; capture names live in
+   `Proto.capture_names` (cold path: error fallback + wire/snap name carrying). Nested captures map by
+   `CapSrc::Captured(parent_slot)`. **−45% (1.83×)** on a closure construct+capture-read micro
+   (`benches/chz/closure.chz`), suite-neutral; `Obj::Closure` shrank 88→64 B (Module still caps `Obj`
+   at 88 B). Hands the JIT a constant capture offset. See `docs/benchmarks.md`.
 
 **Heap-slot layout (GC-side; principled, low priority — GC moves no bench):**
 
@@ -330,8 +331,10 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
    `alloc_char` (Phase 3) already halved the string case. Parity-blocked.
 8. **Operand-stack 16 B/Value traffic** → NaN-box (blocked, full i64) / register VM (#8, low-ROI) — above.
 
-**Land order if pursued:** **#1 → #3 → #2** as **JIT groundwork** (the positional layouts the JIT codegen
+**Land order:** **#1 ✅ → #3 ✅ → #2** as **JIT groundwork** (the positional layouts the JIT codegen
 wants), measuring each against `struct`/`hof` (may read neutral — they're dispatch-bound, see caveat).
+**#3 landed** (positional closure captures, `auto-task/positional-closure-captures`); **#2** (enum
+variant id) is next.
 #4/#5/#6 are principled cleanups, post-JIT. Same discipline throughout: failing-then-green parity test →
 keep two-engine parity → measure (`benches/run.chz`) → record the delta in `docs/benchmarks.md`.
 

@@ -268,7 +268,7 @@ item in `future.md §4`.
 
 | bench   | dominant cost | concrete hot spot | fix (future.md §4) |
 |---------|---------------|-------------------|--------------------|
-| fib     | recursive call overhead | per-call `Vec<Value>` arg alloc (`mod.rs:3181`); full `Obj` enum clone incl. captured `HashMap` in `invoke_value` (`:3198`); `name.clone()` for the arity check (`:3200`); per-call slot pre-fill (`push_frame`) | frame pooling; pass args as a stack slice; match on `&Obj` (no clone); kill `name.clone()` |
+| fib     | recursive call overhead | per-call `Vec<Value>` arg alloc (`mod.rs:3181`); full `Obj` enum clone incl. the captured env in `invoke_value` (`:3198`; the env is now a positional `Vec<Value>`, not a `HashMap`, since the 2026-06-16 captures lever); `name.clone()` for the arity check (`:3200`); per-call slot pre-fill (`push_frame`) | frame pooling; pass args as a stack slice; match on `&Obj` (no clone); kill `name.clone()` |
 | str     | f-string build + join | ✅ per-element `Box<str>` heap alloc for each `"item-N"` — **killed by SSO** (inline ≤22-byte strings, `ChzStr`, 2026-06-12; `str` −20%). NOT concat/split builder — `join` already buffers (`:4377`), `+`/`split` aren't benched |
 | primes  | `while` + `%` | binary ops re-dispatch on operand type every iteration; per-access name lookup for globals/locals | specialize arithmetic (monomorphic int guard); inline caching; superinstructions |
 | loop    | 20M int adds | raw dispatch count (arith re-dispatch already killed by P1 superinstructions) | ✅ superinstructions (fuse `GetLocal+GetLocal+BinOp`) + arith specialize landed. NaN-box `Value` (16→8 B) would help but is BLOCKED by full i64 — see reality-check below. Floor likely needs register VM / JIT |
@@ -361,7 +361,8 @@ GC pressure. (SSO therefore helps any string-*retaining* loop most; a string-chu
 frees immediately benefits less.) `Deref<str>` +
 `From<&str>/<String>/<Box<str>>` kept all ~100 `Obj::Str` match arms + `"x".into()` test
 constructors compiling unchanged; `size_of::<Obj>()` stayed **88 B** (pinned by a guard test —
-`Module`/`Closure` still dominate, the `Str` variant went 16→24 B, well under).
+`Module` dominates, the `Str` variant went 16→24 B, well under; `Closure` later shrank to 64 B under
+the positional-captures lever below, so `Module` is now the sole cap).
 
 | bench  | before (ms) | after (ms) | vs CPython | result |
 |--------|------------:|-----------:|-----------:|--------|
@@ -672,3 +673,48 @@ clean. Cross-nursery goldens looped 10–12× under a 30s watchdog (no lost-wake
 parked set; the multi-task case shook out an early-enlist-vs-deadlock-predicate race, since fixed by
 enlisting outer scopes BEFORE farming any helper — see
 `examples/parallel_cross_nursery_fanout.chz`).
+
+## M19 memory layout #3 — positional closure captures — 2026-06-16
+
+`Obj::Closure { captured: HashMap<String, Value>, .. }` → `captured: Vec<Value>` indexed by a
+compile-time slot. Was: a `HashMap` (~48 B + interned string keys) allocated **per closure
+instantiation**, plus a **string hash + probe on every `GetCaptured`**. Now: `Op::GetCaptured(String)`
+→ `GetCaptured(u32)` is a pure `captured[slot]` index (no hashing); the capture set is static per proto
+(the compiler already knew the `CapSrc` order at `MakeClosure`), so slots are assigned in snapshot
+order in the compiler. Capture names moved off every instance into `Proto.capture_names` (cold-path
+only: the home-global fallback, error messages, and the wire/snap name carrying that crosses
+`spawn`/`Channel`). Nested captures (an inner closure capturing an enclosing closure's capture) map by
+`CapSrc::Captured(parent_slot)` stamped at compile time, so `MakeClosure`/`do_spawn_block` read the
+parent's `captured[parent_slot]` with no name. This also speeds the per-`spawn` deep-clone (a `Vec`
+walk, no `HashMap` rebuild). JIT groundwork: positional captures → constant capture offsets for the
+future Cranelift codegen.
+
+**Standard suite reads NEUTRAL** (it has no closure-construction-heavy bench; `hof`'s callbacks are
+top-level fns that capture nothing). Re-measured the hot benches before/after to confirm no regression:
+
+| bench  | before/after | result |
+|--------|-------------:|--------|
+| `fib`  | 1.00× | within noise |
+| `loop` | 1.02× | within noise |
+| `hof`  | 1.01× | within noise |
+| `struct` | 1.04× | within noise (faster) |
+
+**Micro (the real delta).** Like the lever-#1 struct micro (flat suite, −38% on a construction micro),
+the win shows on a closure-construction + capture-read micro — `benches/chz/closure.chz`: 3M iterations
+each building a closure that captures 3 vars (`MakeClosure` → a 3-slot `Vec`) then calling it
+(`GetCaptured` ×3). `hyperfine -N --warmup 3 --min-runs 12`, serial, same machine:
+
+| micro | before (HashMap) | after (Vec slot) | delta |
+|-------|-----------------:|-----------------:|-------|
+| `closure.chz` | 1.671 s ±0.057 | 0.914 s ±0.034 | **−45% (1.83× faster)** (output identical: `9000006000000`) |
+
+`size_of::<Obj>()` stayed **88 B** (guard `chzstr.rs:205`): `Closure` shrank from 88 B to **64 B**
+(HashMap 48 B → Vec 24 B), and `Module` (Box<str> 16 + Vec 24 + HashMap 48 = 88) is now the sole cap.
+
+**Guarded by:** characterization parity tests (1-var, multi-var, nested, deep 3-level, shared-mutable-
+box, HOF callbacks, hot-loop read, closure-across-`spawn`) + the `examples/closure_capture.chz` golden
+(byte-identical on VM / interp / `--parallel`) + compiler op-shape tests (`GetCaptured(u32)`, distinct
+slots, `Proto.capture_names` in slot order). Full suite **1979 green**, conformance **7/7**, clippy
+`--all-targets -D warnings` clean. VM-only; the frozen interp (whose `Closure.captured` stays a
+`Vec<HashMap<…>>`) is untouched — parity holds because `GetCaptured` is pure compute and iteration
+order (which determines observable output) is unchanged.

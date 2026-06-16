@@ -23,8 +23,11 @@ pub type ProtoId = usize;
 pub enum CapSrc {
     /// Read the enclosing frame's local slot.
     Slot(usize),
-    /// Read the enclosing closure's captured value for this same name (closure nested in closure).
-    Captured,
+    /// Read the enclosing closure's captured value at the given positional slot (closure nested in
+    /// closure). The slot is the index of this same name in the *enclosing* proto's `capture_names`,
+    /// stamped at compile time so `MakeClosure`/`do_spawn_block` read `captured[parent_slot]` with no
+    /// string hash. (M19 lever #3: positional captures.)
+    Captured(u32),
 }
 
 /// One entry of a closure's captured environment: a name + where to snapshot its value from.
@@ -93,8 +96,12 @@ pub enum Op {
     DefineGlobalSlot(u32),
     /// Assign (`=`/`+=`/`-=`) the current module's global `slot` (checker guarantees it is defined).
     SetGlobalSlot(u32),
-    /// Resolve a name against the current closure's captured env, falling back to globals.
-    GetCaptured(String),
+    /// Read the current closure's captured value at compile-time `slot` (M19 lever #3: positional
+    /// captures — `captured[slot]`, no string hash on the hot path). The slot indexes the closure's
+    /// `captured` Vec, which is populated in the same snapshot order as the proto's `capture_names`.
+    /// On the cold path (a missing/Nil slot, e.g. the home-global fallback) the name is recovered
+    /// from `Proto::capture_names[slot]`.
+    GetCaptured(u32),
 
     // ----- arithmetic / logic (dispatch on runtime types, mirroring the interpreter) -----
     Add,
@@ -370,6 +377,11 @@ pub struct Proto {
     /// runnable tests by this tag (set by the compiler from `FnDecl::is_test`); ordinary `run` never
     /// inspects it.
     pub is_test: bool,
+    /// M19 lever #3 — for a closure proto, the names of its captured environment in slot order
+    /// (`capture_names[i]` is the name read by `Op::GetCaptured(i)`). Cold-path metadata only (the
+    /// `GetCaptured` home-global fallback + closure error messages); the hot read is a pure
+    /// `captured[slot]` index. Empty for non-closure protos. Mirrors [`StructDef::fields`].
+    pub capture_names: Vec<String>,
 }
 
 /// A struct type's runtime shape (program-global). `module_idx` identifies the module that defined
