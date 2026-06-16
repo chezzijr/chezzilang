@@ -16,8 +16,10 @@ std.math trig + request verbs landed; concurrency D6 complete (Path C resolved).
 > two backends, interpolation, pipe, `recover:`, `defer` (block-scoped), default + named args,
 > comprehensions, optional-chaining/`??`. What remains is **stdlib breadth + a few runtime-depth nits**.
 >
-> **Forward-looking brainstorm** (BEAM concurrency, JIT, register VM, NaN-boxing) lives in
-> [`docs/future.md`](docs/future.md) — speculative, NOT scheduled.
+> **This doc is the unified actionable backlog** — open language/stdlib gaps *and* the M19 perf +
+> runtime track (memory layout, JIT, GC, NaN-box) with `file:line` anchors. Full design detail +
+> the purely-speculative tracks (BEAM shared-nothing concurrency, far-out ideas) live in
+> [`docs/future.md`](docs/future.md); live perf numbers in [`docs/benchmarks.md`](docs/benchmarks.md).
 
 ---
 
@@ -50,21 +52,37 @@ std.math trig + request verbs landed; concurrency D6 complete (Path C resolved).
 The `--parallel` engine is a true M:N scheduler through D6 (fibers, work-stealing, dirty pool,
 netpoller + `std.net`). Remaining items are correctness/semantics nits, not missing breadth.
 
-- **🟡 Cross-nursery wakeups — cooperative-engine flatten pending.** RESOLVED under `--parallel` (M:N
-  flat scheduler — multi-level nesting + late-spawn, `examples/parallel_cross_nursery_circular.chz`);
-  the **cooperative** engine still can't flatten a fiber in an outer nursery woken by an inner one
-  (`docs/concurrency-tier-d.md:342`). Output correct under `--parallel`; the gap is coop-only liveness.
-- **🟡 Cooperative + `--interp` engines cannot preempt CPU-bound tasks.** They switch fibers only at
-  yield points (channel ops, blocking `recv`, back-edge-to-scheduler). A pure-CPU loop with no channel
-  op monopolizes the single thread → a sibling canceller/timeout never runs. **Same source diverges by
-  engine:** a 2e9-iter CPU worker under manual-cancel aborts mid-flight on `--parallel` (~0.5s) but runs
-  to completion on coop/`--interp` (~69s). This is why cancellation examples carry no golden `.expected`
-  (`examples/parallel_cancel.chz`). **Fix:** reduction-counting preemption exists on M:N (D3, `vm:2871`);
-  coop would need a back-edge yield budget — weighed against the frozen oracle's determinism.
-- **🟡 `Shared.update` same-box hold-and-wait — WON'T FIX by design.** A `recv` blocking inside
-  `update(f)` holds `update_lock` while parked → a sender needing the *same* box deadlocks. The universal
-  hold-and-wait class (Go #13759 global-only; Rust `clippy::await_holding_lock`; BEAM no shared locks).
-  Rule: don't block on a value needing the same `Shared` box. Future: a lint when the tooling track lands.
+> **Planned engine consolidation (mooting note).** The intent is to **remove `--interp` (frozen
+> tree-walk) and `--serial` (cooperative single-thread VM) later, leaving M:N `--parallel` as the sole
+> engine.** Both items marked **[mooted-by-removal]** below are *cooperative-engine-only* limitations
+> that M:N already handles — once the cooperative engines are gone they aren't gaps, so they're
+> effectively **WON'T FIX pending consolidation** (don't invest in a coop fix). **Tradeoff to weigh
+> first:** `--interp`/`--serial` are the **parity oracles** — the "two engines asserted equal"
+> differential testing that caught most of the resolved-log bugs. Removing the oracle ends that net.
+> `--serial` is the cheap one to keep (shares the VM compiler/opcodes, still byte-identical); consider
+> dropping only `--interp` and giving `--serial` the D3 back-edge yield budget so it keeps the oracle
+> *and* closes CPU-preempt.
+
+- **🟡 [mooted-by-removal] Cross-nursery wakeups — cooperative-engine flatten pending.** RESOLVED under
+  `--parallel` (M:N flat scheduler — multi-level nesting + late-spawn,
+  `examples/parallel_cross_nursery_circular.chz`); the **cooperative** engine still can't flatten a fiber
+  in an outer nursery woken by an inner one (`docs/concurrency-tier-d.md:342`). Output correct under
+  `--parallel`; the gap is coop-only liveness → vanishes when the cooperative engines are removed.
+- **🟡 [mooted-by-removal] Cooperative + `--interp` engines cannot preempt CPU-bound tasks.** They
+  switch fibers only at yield points (channel ops, blocking `recv`, back-edge-to-scheduler). A pure-CPU
+  loop with no channel op monopolizes the single thread → a sibling canceller/timeout never runs.
+  **Same source diverges by engine:** a 2e9-iter CPU worker under manual-cancel aborts mid-flight on
+  `--parallel` (~0.5s) but runs to completion on coop/`--interp` (~69s). This is why cancellation
+  examples carry no golden `.expected` (`examples/parallel_cancel.chz`) — single-engine would unblock
+  goldens. **M:N already preempts** (reduction-counting, D3, `vm:2871`), so removing the cooperative
+  engines closes this for free; the only coop-side fix worth considering is the back-edge yield budget
+  *if* `--serial` is kept as the oracle.
+- **🟡 `Shared.update` same-box hold-and-wait — WON'T FIX by design.** Path C resolved the *general*
+  case (a `recv` inside `update(f)` waiting on a **different** box thread-demotes + resumes). The
+  carve-out: `update(f)` holds `update_lock` across `f`, so a `recv` needing the **same** box deadlocks
+  any sender for it. The universal hold-and-wait class (Go #13759 global-only; Rust
+  `clippy::await_holding_lock`; BEAM no shared locks). Rule: don't block on a value needing the same
+  `Shared` box. Future: a lint when the tooling track lands.
 - **🟡 (residual) `break`/`continue` out of `parallel:` inside a loop reclaims its nursery only at fn
   return**, not block-scoped like interp's `exec_parallel` pop — bounded to frame lifetime, output always
   correct. Closing it needs loop-exit-jump codegen to emit a nursery-drain across a nursery boundary.
@@ -97,6 +115,82 @@ automation, randomness, binary/crypto, CLI tooling. Ranked by leverage.
 ### Tier 4 — ecosystem (toolchain, not the language)
 REPL (huge for scripting iteration), formatter, LSP, package manager / registry, debugger, doc
 comments + docgen. (`assert` + test runner shipped M20.)
+
+### ⚙️ Performance + runtime backlog (M19 perf track — detail in [`docs/future.md` §4](docs/future.md) + [`docs/benchmarks.md`](docs/benchmarks.md))
+
+Language is **frozen feature-wise**; M19 is pure optimization, so every item here is
+**behavior-preserving + two-engine parity** (a VM speedup that diverges from the interp is a bug).
+Current gap to CPython 3.14: **~1.3×–3.5×** slower (worst on call-bound `fib` 3.54×; `loop` 1.32× is at
+the dispatch floor), startup ~11× **faster**. Discipline per item: failing-then-green parity test →
+keep parity → measure `benches/run.chz` → record the delta in `docs/benchmarks.md`. **Already landed**
+(don't re-flag): peephole/const-fold, superinstructions, global-slotting, `ConstStr` interning,
+struct-field IC, FxHash, SSO, method-call IC, inline-hot-ops, adaptive quickening (PEP 659),
+map/list-index specialization — all in `docs/benchmarks.md`.
+
+- **🟡 Memory layout & access levers** *(diagnosed 2026-06-16, `7e4fc42`; `docs/future.md` §4 "Memory
+  layout & access patterns")* — **caveat: bench is dispatch/call/alloc-bound, NOT layout, so these read
+  mostly neutral as speedups; their real value is JIT groundwork** (positional layouts → constant
+  offsets the JIT codegen needs). Land order **#1 → #3 → #2**.
+  1. **Shared per-type struct layout** (hidden-class/`__slots__`) — `Obj::Struct` (`heap.rs:162`) stores
+     type name + every field name as `Box<str>` *per instance*, both static in `StructDef` (`op.rs:378`).
+     → `fields: Vec<Value>` positional, names by `tid` on cold path. Kills N+1 allocs/inst + the
+     `==`-name-clone (`mod.rs:4483`). **Biggest redundancy; land first.**
+  2. **Enum `variant_id: u32`** — `Obj::Enum` (`heap.rs:167`) holds two `Box<str>` per instance, both
+     global. → id + names for Display only. Saves 2 allocs/inst.
+  3. **Closure captures positional** — `Obj::Closure.captured: HashMap<String,Value>` (`heap.rs:178`)
+     = HashMap alloc + string-hash per `GetCaptured` (`mod.rs:3354`). → `SmallVec<[Value;N]>` by
+     per-proto slot (static per proto). Also speeds the per-spawn deep-clone.
+  4. **GC mark-bit bitvec** — `Slot{obj,mark:bool}` (`heap.rs:234`) interleaves 1 B in 88 B; packed
+     bitvec = dense sweep scan. Only if GC becomes hot (post-JIT).
+  5. **Shrink `Obj` <88 B** — guard `chzstr.rs:205`; box rare big variants. **Trades against SSO** (sized
+     to fill 88 B inline) → measure first.
+  6. **HOF borrow-release clone** — `map`/`filter`/`fold` clone the list to release the heap borrow
+     before `invoke_value`. A `Vm` split (`&mut ExecState` + `&Heap`) fixes it. Structural refactor.
+  7. **`for`-loop snapshot (`ListClone`) + per-char alloc** — parity-blocked by interp snapshot semantics.
+  8. **Operand-stack 16 B/Value traffic** → NaN-box (blocked) / register VM (low-ROI) — below.
+
+- **🔵 Big / separate end-game tracks** (only once the language has truly stopped moving):
+  - **Cranelift method-JIT** *(`future.md` §4 #6)* — the only path to *match/beat* CPython 3.14 on
+    compute; counter-triggered, a whole backend. The stretch end-game. #1/#3/#2 above are its groundwork.
+  - **NaN-boxing the `Value` (16 B → 8 B) — ⛔ BLOCKED by full `i64`** (`future.md:264`, `value.rs:18`):
+    a full i64 + a type tag don't fit in 8 B (NaN payload ~48–51 bits). Was billed the biggest remaining
+    lever; the i64 model rules it out without a tagged-small-int compromise.
+  - **Register VM** — low ROI (dispatch already near the match floor).
+  - **Generational / incremental GC** — low ROI (GC currently moves no bench).
+  - **String concat/`split` builder** — medium lever; `join` already buffers (`mod.rs:4377`), `+`/`split`
+    aren't benched yet.
+
+- **⚪ `ref T` — transparent reference bindings** (DX sugar over `Ref[T]`, `r^ += 1` deref) — **PARKED
+  behind the JIT** (`future.md:105`). Sugar, not capability; revisit post-JIT.
+
+### 🟠 Deferred — will resolve later (real work, lower urgency)
+
+Tracked in other docs; surfaced here so they aren't lost. None scheduled, but each is genuine backlog.
+
+- **FFI surface expansion** (`std.cffi`, `src/native/cffi.rs`; spec.md §FFI, syntax.md:1232) — v1 is
+  **scalars only**. Deferred: structs-by-value, callbacks / function pointers, varargs, opaque pointers /
+  **userdata** (`Box<dyn Any>` for opaque `File`/`Regex` handles — io is whole-string today), `char*`
+  ownership transfer / `free`. Needed for richer C interop / any future self-host.
+- **Comprehension nested clauses** — `[x for x in xs for y in ys]` deferred (syntax.md:358); single-clause
+  + guard shipped.
+- **`std.cancel` tree propagation** — tokens are **flat** in v1; parent/child derivation (cancel a parent
+  → cancel its children) is a documented follow-up (PROGRESS.md:244).
+- **Graceful shutdown of accept loops** + a per-connection handler→acceptor signal channel — future work
+  for long-running servers (concurrency-tier-d.md:297).
+- **Reduction-constant tuning** (D3) — pick `CONTEXT_REDS` + per-op vs per-back-edge accounting
+  (concurrency-tier-d.md:363).
+
+### ⚫ May-or-may-not consider (revisit only if it bites; mostly by-design non-goals)
+
+Recorded for completeness — likely stay as-is unless a real program forces the issue.
+
+- **Concurrency, BEAM-flavored:** priority classes; restart/supervision policies (Elixir-style, out of
+  scope C5). Narrow cross-nursery M:N limits beyond the coop-flatten above: contended shared channel
+  (2+ receivers racing one channel — concurrent-divergent **by design**, never panics/hangs), inline-body
+  *blocking* recv (case B — put it in a `spawn:`), eager-nursery cross-wake (concurrency.md §11).
+- **`int32` / unsigned C ints** — no such scalar (feature-frozen by design; FFI widens at the boundary).
+- **Defaults / named args on built-in methods** (`map`/`push`/`len`/…) — unsupported by design
+  (syntax.md:216); user methods + free fns + ctors have them.
 
 ---
 
