@@ -144,10 +144,17 @@ conformance` green.
   `variant_id: u32` — the enum analogue of struct `tid`. Match-arm dispatch, `==`, and `?` are now
   pure-int compares (was variant-name string compares / `ty==ty && variant==variant`); the type + variant
   names resolve from a new `Program::variants_by_id` table on the cold path only (Display/stringify/
-  error/wire/snap). Native `Ok`/`Err`/`Some`/`None` hold the fixed ids
-  `VID_OK`(0)/`VID_ERR`(1)/`VID_SOME`(2)/`VID_NONE_VARIANT`(3) so `?`/top-level-error gate on
-  compile-time constants; user variants follow at `4..`. `Op::NewEnum`/`Op::MatchArm` carry the
-  compile-time id; wire/snap carry only the (globally unique) variant name and rebuild the id on receive.
+  error/wire/snap). Native `Ok`/`Err`/`Some`/`None` hold the **reserved** fixed ids
+  `VID_OK`(0)/`VID_ERR`(1)/`VID_SOME`(2)/`VID_NONE_VARIANT`(3); user variants follow at `4..`, so the
+  reserved range is **disjoint** from every user id. `?`/top-level-error gate on the constants, and the
+  native construction path (`alloc_enum`) stamps the constant **directly** (never a `variants[name]`
+  lookup) — so a user enum may shadow a native name (`enum Foo: Some(int)`, allowed) without a genuine
+  native Option/Result being stamped with the user's id. `Op::NewEnum`/`Op::MatchArm` carry the
+  compile-time id; wire/snap carry the dense `variant_id` **directly** (shared `Arc<Program>` ⇒ meaningful
+  both sides; preserves identity under shadowing). *(Parity bug fixed 2026-06-16: the first cut
+  name-resolved native construction, so a user enum shadowing `Some`/`Ok`/… collapsed native-vs-user `==`
+  and broke `?` — a VM-vs-interp divergence. Now guarded by two shadow regression tests + a shadowing
+  section in the golden example.)*
   Behavior-preserving + **three-engine parity** (`examples/enum_layout.chz` on VM/interp/--parallel).
   **−20% (1.25×)** on an enum construct+match-dispatch micro (`benches/chz/enum.chz`); standard suite
   neutral. `Obj::Enum` shrank 56→32 B (Module still caps `Obj` at 88 B, guard intact). JIT groundwork:

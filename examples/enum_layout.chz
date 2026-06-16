@@ -2,9 +2,10 @@
 # observable surface the per-instance variant/type-name → dense `variant_id: u32` change touches:
 # nullary + payload variants, a generic Option[T]/Result[T,E], exhaustive match, match-with-binding,
 # a guard, enum == (equal / unequal-by-variant / unequal-by-enum-type), Display + `{}` interpolation,
-# nested enums, Result/Option + the `?` operator, and an enum crossing a spawn+Channel (wire/snap
-# variant-id rebuild). Byte-identical on the VM, interp, and --parallel — variant_id is behavior-
-# preserving, so any divergence turns the golden RED.
+# nested enums, Result/Option + the `?` operator, variant-name SHADOWING (a user enum reusing the
+# native `Some` name — native vs user identity + `?` on a genuine native), and an enum crossing a
+# spawn+Channel (wire/snap carry the dense variant_id directly). Byte-identical on the VM, interp, and
+# --parallel — variant_id is behavior-preserving, so any divergence turns the golden RED.
 
 enum Color:
     Red
@@ -19,6 +20,21 @@ enum Shape:
 enum Tree[T]:
     Leaf
     Node(T, Tree[T], Tree[T])
+
+# Variant-name SHADOWING: a user enum may name its variants `Some`/`None` (main allows this). The
+# reserved native ids `VID_SOME`/`VID_NONE_VARIANT` must stay DISJOINT from this user enum's ids, so a
+# native Option value never compares equal to a `Shadow` value and `?` still recognises genuine
+# natives. Native construction (pop) stamps the fixed constant directly; bare `Some(..)` here resolves
+# to this user enum (it shadows the name) and stamps the user id — the two ids never collide.
+enum Shadow:
+    Some(int)
+    Bar
+
+# `?` on a GENUINE native Option (xs.pop()) must still work even though `Some` is shadowed —
+# pop() stamps VID_SOME/VID_NONE_VARIANT directly, which `?`'s gate recognises.
+fn first_native(xs: list[int]) -> int?:
+    v := xs.pop()?
+    return Some(v)
 
 # Exhaustive match (no `_`) selecting an arm by variant id.
 fn color_name(c: Color) -> str:
@@ -119,6 +135,16 @@ fn main():
     match first_even([1, 3, 5]):
         Some(v): print("first even {v}")
         None: print("no even")
+
+    # Variant-name shadowing: native Option/Result identity must survive a user enum reusing the
+    # names. `Shadow.Some(5)` is the user variant; a native Option::Some(5) from pop() is NOT equal
+    # to it, and `?` still unwraps a genuine native Option.
+    sh := Shadow.Some(5)
+    print(sh)
+    nat := [5].pop()              # native int? == Some(5)
+    print("native Some == user Shadow.Some:", nat == sh)
+    print("first_native:", first_native([10, 20]))
+    print("first_native empty:", first_native([]))
 
     # Enum across spawn + Channel.
     ch := Channel[int?]()

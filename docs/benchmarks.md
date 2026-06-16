@@ -768,13 +768,29 @@ the enum analogue of struct `tid` (lever #1). Was: **two `Box<str>` allocated pe
 string compare**, and on `==` an `ty==ty && variant==variant` string compare. Now: a single dense
 `variant_id: u32` stamped at construction; match-arm dispatch, equality, and `?` are **pure-int
 compares**; the type + variant names resolve from a new `Program::variants_by_id` table on the **cold
-path only** (Display/stringify/error/wire/snap). Native `Ok`/`Err`/`Some`/`None` get the fixed ids
-`VID_OK`(0)/`VID_ERR`(1)/`VID_SOME`(2)/`VID_NONE_VARIANT`(3), so `?` (`do_try`) and top-level-error
-gating compare against compile-time constants (a user enum shadowing `Ok`/`Err` gets a distinct id ⇒
-correctly NOT treated as a Result — *more* precise than the old name compare). `Op::NewEnum` and
-`Op::MatchArm` carry the compile-time id; wire/snap carry only the (globally unique) variant name and
-rebuild the id on receive (single shared `Arc<Program>` ⇒ always resolvable). JIT groundwork: numeric
-variant id → constant / jump-table dispatch for the future Cranelift codegen + match-on-enum.
+path only** (Display/stringify/error/wire/snap). Native `Ok`/`Err`/`Some`/`None` get the **reserved**
+fixed ids `VID_OK`(0)/`VID_ERR`(1)/`VID_SOME`(2)/`VID_NONE_VARIANT`(3) (registered first; user variants
+follow at `4..`, so the native range is **disjoint** from every user id), so `?` (`do_try`) and
+top-level-error gating compare against compile-time constants. A user enum is allowed to **shadow** a
+native name (`enum Foo: Some(int)` — `main` permits this); the native construction path
+(`alloc_enum` — list `pop`, regex/json/fs, `?`-desugar) stamps the **fixed `VID_*` constant directly**,
+never a `variants[name]` lookup (which the user variant shadows), so a genuine native Option/Result is
+never given the user's id — equality and `?` stay correct. `Op::NewEnum` and `Op::MatchArm` carry the
+compile-time id; wire/snap carry the dense `variant_id` **directly** (single shared `Arc<Program>` ⇒
+meaningful on both sides — carrying the id, not the name, preserves native-vs-user identity under name
+shadowing). JIT groundwork: numeric variant id → constant / jump-table dispatch for the future
+Cranelift codegen + match-on-enum.
+
+> **Parity fix (2026-06-16).** The first cut of this lever resolved native Option/Result construction
+> through `Vm::variant_id("Some")`, a name lookup the `variants` map shadows. A user enum declaring
+> `Some`/`None`/`Ok`/`Err` therefore stamped its own id onto genuine native values, collapsing
+> native-vs-user identity (`==` wrongly `true`) and missing `?`'s `variant_id == VID_SOME` gate (`'?'
+> expects Result or Option, found enum`) — a VM-vs-interp divergence on well-typed programs. Fixed by
+> stamping the reserved `VID_*` constant directly in `alloc_enum` and carrying the `variant_id` (not the
+> name) on the wire/snap paths. No perf change (the enum micro doesn't touch these paths; re-measured
+> A/B = 1.04× ± 0.05, within noise). Guarded by `user_variant_shadow_does_not_collapse_native_option_equality`,
+> `try_operator_works_on_native_option_under_variant_shadow`, and a shadowing section in
+> `examples/enum_layout.chz`.
 
 **Standard suite reads NEUTRAL** (it has no enum-construction-heavy bench; the alloc/dispatch saving
 isn't on the hot suite paths). Re-measured `fib` before/after to confirm no regression: **1.00×** (within

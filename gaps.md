@@ -299,10 +299,15 @@ held two per-instance `Box<str>` (type + variant name, both global) → a single
 (the enum analogue of struct `tid`). Match-arm dispatch, equality, and `?` are now pure-int compares
 (was variant-name string compares / `ty==ty && variant==variant`); names resolve from a new
 `Program::variants_by_id` table on the cold path only (Display/stringify/error/wire/snap). Native
-`Ok`/`Err`/`Some`/`None` get the FIXED ids `VID_OK`(0)/`VID_ERR`(1)/`VID_SOME`(2)/`VID_NONE_VARIANT`(3)
-so `?`/top-level-error gate on compile-time constants; user variants follow at `4..`. `Op::NewEnum` /
-`Op::MatchArm` carry the compile-time id. Wire/snap carry only the variant name (globally unique) and
-rebuild the id on receive (single shared `Arc<Program>` ⇒ always resolvable). Behavior-preserving +
-three-engine parity (`examples/enum_layout.chz`); **−20% (1.25×)** on an enum construct+match-dispatch
-micro, suite-neutral; `Obj::Enum` 56→32B (Module still caps `Obj` at 88B). JIT groundwork: numeric
-variant id → constant / jump-table dispatch for Cranelift codegen + match-on-enum.
+`Ok`/`Err`/`Some`/`None` get the RESERVED fixed ids `VID_OK`(0)/`VID_ERR`(1)/`VID_SOME`(2)/`VID_NONE_VARIANT`(3);
+user variants follow at `4..`, so the reserved range is **disjoint** from every user id. `?`/top-level-error
+gate on the constants, and native construction (`alloc_enum`) stamps the constant **directly** (never a
+`variants[name]` lookup the user shadows) — so a user enum may reuse a native name (`enum Foo: Some(int)`,
+allowed) without a genuine native Option/Result being stamped with the user's id. (Parity bug fixed
+2026-06-16: the first cut name-resolved native construction, collapsing native-vs-user `==` and breaking
+`?` under shadowing.) `Op::NewEnum` / `Op::MatchArm` carry the compile-time id. Wire/snap carry the dense
+`variant_id` **directly** (shared `Arc<Program>` ⇒ meaningful both sides; preserves identity under
+shadowing). Behavior-preserving + three-engine parity (`examples/enum_layout.chz`, incl. a shadowing
+section); **−20% (1.25×)** on an enum construct+match-dispatch micro, suite-neutral; `Obj::Enum` 56→32B
+(Module still caps `Obj` at 88B). JIT groundwork: numeric variant id → constant / jump-table dispatch for
+Cranelift codegen + match-on-enum.

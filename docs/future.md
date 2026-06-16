@@ -309,11 +309,16 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
    variant_id: u32, payload }` (the enum analogue of `tid`); the type + variant names resolve from the
    new `Program::variants_by_id` table on the cold path only (Display/stringify/error/wire/snap).
    Match-arm dispatch, equality, and `?` are pure-int compares (was variant-name string compares /
-   `ty==ty && variant==variant`). Native `Ok`/`Err`/`Some`/`None` hold the fixed ids
-   `VID_OK`(0)/`VID_ERR`(1)/`VID_SOME`(2)/`VID_NONE_VARIANT`(3) so `?`/top-level-error gate on
-   compile-time constants; user variants follow at `4..`. `Op::NewEnum`/`Op::MatchArm` carry the
-   compile-time id; wire/snap carry only the (globally unique) variant name and rebuild the id on
-   receive. **−20% (1.25×)** on an enum construct+match-dispatch micro (`benches/chz/enum.chz`),
+   `ty==ty && variant==variant`). Native `Ok`/`Err`/`Some`/`None` hold the **reserved** fixed ids
+   `VID_OK`(0)/`VID_ERR`(1)/`VID_SOME`(2)/`VID_NONE_VARIANT`(3); user variants follow at `4..`, so the
+   reserved range is **disjoint** from every user id. `?`/top-level-error gate on the constants, and the
+   native construction path (`alloc_enum`) stamps the constant **directly** (never a `variants[name]`
+   lookup) — so a user enum may shadow a native name (`enum Foo: Some(int)`) without a genuine native
+   Option/Result ever being stamped with the user's id (was a parity bug: name-resolved native
+   construction collapsed identity + broke `?`; fixed 2026-06-16). `Op::NewEnum`/`Op::MatchArm` carry the
+   compile-time id; wire/snap carry the dense `variant_id` **directly** (shared `Arc<Program>` ⇒
+   meaningful both sides; preserves identity under shadowing). **−20% (1.25×)** on an enum
+   construct+match-dispatch micro (`benches/chz/enum.chz`),
    suite-neutral; `Obj::Enum` shrank 56→32 B (Module still caps `Obj` at 88 B). Hands the JIT a numeric
    variant id → constant/jump-table dispatch. See `docs/benchmarks.md`.
 3. **✅ DONE — Closure captures: positional `Vec`, not a per-closure `HashMap`.** Was `Obj::Closure

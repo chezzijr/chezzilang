@@ -928,8 +928,9 @@ enum SnapValue {
     Cffi(Arc<crate::native::cffi::Cffi>),
     List(Vec<SnapValue>),
     Tuple(Vec<SnapValue>),
-    /// M19 lever #2 — only the variant NAME is carried (globally unique ⇒ rebuilds the `variant_id`).
-    Enum { variant: Box<str>, payload: Vec<SnapValue> },
+    /// M19 lever #2 — the dense `variant_id` is carried directly (the same shared `Arc<Program>` makes
+    /// it meaningful on replay; carrying the id, not the name, preserves identity under name shadowing).
+    Enum { variant_id: u32, payload: Vec<SnapValue> },
     Struct { name: Box<str>, fields: Vec<(Box<str>, SnapValue)> },
     /// `(cached hash, key, value)` triples — hashes are value-derived, so they carry over unchanged.
     Map(Vec<(u64, SnapValue, SnapValue)>),
@@ -4855,13 +4856,27 @@ impl Vm {
         }
     }
 
-    /// Build an enum instance by variant NAME (the native / std construction path: `Ok`/`Err`/`Some`/
-    /// `None`, list `pop`, regex/request/json/fs returns). M19 lever #2 — resolves the variant's dense
-    /// `variant_id` once (replacing the two per-instance `Box<str>` allocs) and stamps it. `ty` is
+    /// Build a NATIVE `Result`/`Option` enum instance (the native / std construction path: `Ok`/`Err`/
+    /// `Some`/`None`, list `pop`, regex/request/json/fs returns). M19 lever #2 — stamps the FIXED native
+    /// `VID_OK`/`VID_ERR`/`VID_SOME`/`VID_NONE_VARIANT` constant DIRECTLY, never a name lookup through
+    /// `Program::variants`: a user enum declaring a variant named `Ok`/`Err`/`Some`/`None` SHADOWS that
+    /// name in the `variants` map (its own dense id at `4..`), so resolving by name here would stamp the
+    /// user's id onto a genuine native value — collapsing native-vs-user identity (broken `==`) and
+    /// missing `?`'s `variant_id == VID_SOME`/`VID_OK` gate. The reserved 0..=3 ids are disjoint from
+    /// every user id, so stamping the constant keeps native and user variants distinguishable. `ty` is
     /// retained in the signature so call sites read self-documentingly, but it is not stored.
     fn alloc_enum(&mut self, ty: &str, variant: &str, payload: Vec<Value>) -> Value {
         let _ = ty;
-        let variant_id = self.variant_id(variant);
+        use crate::vm::op::{VID_ERR, VID_NONE, VID_NONE_VARIANT, VID_OK, VID_SOME};
+        let variant_id = match variant {
+            "Ok" => VID_OK,
+            "Err" => VID_ERR,
+            "Some" => VID_SOME,
+            "None" => VID_NONE_VARIANT,
+            // `alloc_enum` is the NATIVE construction path; it is only ever called with the four
+            // reserved names above. The fallback is defensive only.
+            _ => VID_NONE,
+        };
         Value::Obj(self.heap.alloc(Obj::Enum { variant_id, payload }))
     }
 
@@ -7695,12 +7710,10 @@ impl Vm {
                     for x in payload {
                         out.push(self.to_wire(*x)?);
                     }
-                    // M19 lever #2 — carry the variant NAME on the COLD wire path (the instance no longer
-                    // holds it); `from_wire` rebuilds the `variant_id` from it against the receiver's
-                    // program. For a single program run (Arc<Program> shared across workers) every
-                    // variant is known, so the id always rebuilds.
-                    let evar = self.enum_names(*variant_id).1;
-                    WireValue::Enum { variant: evar.into(), payload: out }
+                    // M19 lever #2 — carry the dense `variant_id` directly on the COLD wire path. All
+                    // workers share one `Arc<Program>`, so the id is meaningful on both sides; carrying
+                    // it (not the name) preserves native-vs-user identity under variant-name shadowing.
+                    WireValue::Enum { variant_id: *variant_id, payload: out }
                 }
                 // Experimental generators cannot cross an OS-thread heap boundary — their parked
                 // frames reference this heap. The checker marks them non-sendable, so this is a
@@ -7773,12 +7786,10 @@ impl Vm {
                 let tid = self.struct_tid(&name);
                 Value::Obj(self.heap.alloc(Obj::Struct { name, tid, fields: cloned }))
             }
-            WireValue::Enum { variant, payload } => {
+            WireValue::Enum { variant_id, payload } => {
                 let cloned: Vec<Value> = payload.into_iter().map(|x| self.from_wire(x)).collect();
-                // M19 lever #2 — rebuild the dense `variant_id` from the carried name against this VM's
-                // program (`VID_NONE` if the receiver doesn't know the variant — defensive only; a
-                // single shared `Arc<Program>` makes every variant resolvable).
-                let variant_id = self.variant_id(&variant);
+                // M19 lever #2 — the dense `variant_id` crossed the airlock directly (shared
+                // `Arc<Program>`), so it is replayed as-is — no lossy name re-resolution.
                 Value::Obj(self.heap.alloc(Obj::Enum { variant_id, payload: cloned }))
             }
             // B3.6: rebuild a submitted closure by value over the worker's reconstructed home module
@@ -8164,9 +8175,9 @@ impl Vm {
             }
             Obj::Enum { variant_id, payload } => {
                 let payload = payload.iter().map(|x| self.to_snap(*x)).collect();
-                // M19 lever #2 — carry the variant name on the cold snap path (mirrors `to_wire`).
-                let evar = self.enum_names(variant_id).1;
-                SnapValue::Enum { variant: evar.into(), payload }
+                // M19 lever #2 — carry the dense `variant_id` directly on the cold snap path (mirrors
+                // `to_wire`); replay reuses it as-is against the shared program.
+                SnapValue::Enum { variant_id, payload }
             }
             Obj::Map(m) => SnapValue::Map(
                 m.entries.iter().map(|(hash, k, val)| (*hash, self.to_snap(*k), self.to_snap(*val))).collect(),
@@ -8278,11 +8289,11 @@ impl Vm {
                 let tid = self.struct_tid(name);
                 Value::Obj(self.heap.alloc(Obj::Struct { name: name.clone(), tid, fields: f }))
             }
-            SnapValue::Enum { variant, payload } => {
+            SnapValue::Enum { variant_id, payload } => {
                 let p = payload.iter().map(|x| self.replay_snap(x)).collect();
-                // M19 lever #2 — rebuild the dense `variant_id` from the carried name (mirrors `from_wire`).
-                let variant_id = self.variant_id(variant);
-                Value::Obj(self.heap.alloc(Obj::Enum { variant_id, payload: p }))
+                // M19 lever #2 — the dense `variant_id` was carried directly (mirrors `from_wire`);
+                // replay it as-is against the shared program — no lossy name re-resolution.
+                Value::Obj(self.heap.alloc(Obj::Enum { variant_id: *variant_id, payload: p }))
             }
             SnapValue::Map(entries) => {
                 let mut out = MapData::default();
@@ -9691,13 +9702,6 @@ impl Vm {
         self.program.structs.get(name).map_or(TID_NONE, |d| d.tid)
     }
 
-    /// M19 lever #2 — the dense `variant_id` for variant `variant`, or [`crate::vm::op::VID_NONE`] if
-    /// it isn't a registered variant. The enum analogue of [`Self::struct_tid`]; used by the native /
-    /// wire / snap construction paths that hold the variant *name* (not the compiler-baked id).
-    fn variant_id(&self, variant: &str) -> u32 {
-        self.program.variants.get(variant).map_or(crate::vm::op::VID_NONE, |d| d.variant_id)
-    }
-
     /// M19 lever #2 — resolve a `variant_id` back to its `(enum-type, variant)` names on the COLD path
     /// (Display / stringify / error / wire / snap), where the instance no longer carries the strings.
     /// O(1) via `Program::variants_by_id`. Returns `("?", "?")` for [`crate::vm::op::VID_NONE`] / an
@@ -10567,7 +10571,10 @@ impl Vm {
                 let inner = fields.iter().map(|(k, v)| format!("{k}={}", self.display_wire(v))).collect::<Vec<_>>().join(", ");
                 format!("{name}({inner})")
             }
-            WireValue::Enum { variant, payload, .. } => {
+            WireValue::Enum { variant_id, payload } => {
+                // M19 lever #2 — the wire form carries the id; resolve the variant name on this cold
+                // display path via the shared program's `variants_by_id`.
+                let variant = self.enum_names(*variant_id).1;
                 if payload.is_empty() {
                     variant.to_string()
                 } else {
@@ -15955,6 +15962,33 @@ main()";
         let Value::Obj(h) = v else { panic!() };
         let Obj::Enum { variant_id, .. } = vm.heap.get(h) else { panic!("expected enum") };
         assert_eq!(*variant_id, VID_SOME, "native alloc_enum must stamp the fixed Some id");
+    }
+
+    /// M19 lever #2 regression guard — a user enum declaring a variant named `Some` must NOT collapse
+    /// native Option identity. A native Option::Some (from `pop()`) and a user `Foo::Some` carry
+    /// DISJOINT ids (native VID_SOME=2 stamped directly by `alloc_enum`; user id at 4..), so `==` is
+    /// `false` — byte-matching the interp oracle. Before the reserved-id fix the VM printed `true`
+    /// (user variant shadowed `variants["Some"]`, so native construction stamped the user's id).
+    #[test]
+    fn user_variant_shadow_does_not_collapse_native_option_equality() {
+        let src = "enum Foo:\n    Some(int)\n    Bar\nfn opt() -> int?:\n    return [5].pop()\nfn main():\n    a := opt()\n    b := Some(5)\n    print(a == b)\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(vm_out, "false\n", "native Option::Some must not equal user Foo::Some under name shadowing");
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on shadowed-Some equality");
+    }
+
+    /// M19 lever #2 regression guard — `?` on a GENUINE native Option must still work when a user enum
+    /// shadows the `Some` name. `pop()` stamps the fixed VID_SOME directly, so `?`'s `variant_id ==
+    /// VID_SOME` gate hits even though `variants["Some"]` now resolves to the user variant. Before the
+    /// fix the VM faulted with `'?' expects Result or Option, found enum`.
+    #[test]
+    fn try_operator_works_on_native_option_under_variant_shadow() {
+        let src = "enum Foo:\n    Some(int)\n    Bar\nfn first(xs: list[int]) -> int?:\n    v := xs.pop()?\n    return Some(v)\nfn main():\n    print(\"first\", first([10, 20]))\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(vm_out, "first Some(20)\n", "? must unwrap a genuine native Option even under Some shadowing");
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on ? under shadowed Some");
     }
 
     /// M19 lever #2 — `Op::MatchArm` carries a compile-time `variant_id: u32` so match dispatch is a
