@@ -1,0 +1,56 @@
+# M19 memory-layout lever #1 — positional struct field storage (hidden-class / __slots__).
+# Exercises every observable struct surface that the layout change touches: field read/write,
+# struct == (equal, unequal-by-value, unequal-by-type), Display/interpolation, nested structs,
+# a generic struct with two monomorphs sharing one layout, and a named-field constructor.
+
+struct Point:
+    x: int
+    y: int
+
+struct Line:
+    start: Point
+    end: Point
+
+struct Box[T]:
+    item: T
+
+fn main():
+    # field read + write (positional indices must be stable in declaration order)
+    p := Point(1, 2)
+    print(p.x)                 # 1
+    print(p.y)                 # 2
+    p.x = 10
+    print(p.x)                 # 10
+
+    # Display / interpolation: names recovered from the type, in declaration order
+    q := Point(3, 4)
+    print(q)                   # Point(x=3, y=4)
+    print("q is {q}")          # q is Point(x=3, y=4)
+
+    # struct == : equal, unequal-by-value, unequal-by-type
+    a := Point(5, 6)
+    b := Point(5, 6)
+    c := Point(5, 7)
+    print(a == b)              # true
+    print(a == c)              # false
+
+    # nested struct: positional read through two levels + nested Display
+    ln := Line(Point(0, 0), Point(8, 9))
+    print(ln.end.x)            # 8
+    print(ln)                  # Line(start=Point(x=0, y=0), end=Point(x=8, y=9))
+
+    # generic struct: two monomorphs (int, str) share ONE type-erased layout
+    bi := Box(42)
+    bs := Box("hi")
+    print(bi.item)             # 42
+    print(bs.item.upper())     # HI
+    print(bi)                  # Box(item=42)
+    print(bs)                  # Box(item=hi)
+
+    # named-field constructor, reordered — desugar reorders to declaration order
+    r := Point(y=2, x=1)
+    print(r.x)                 # 1
+    print(r.y)                 # 2
+    print(r)                   # Point(x=1, y=2)
+
+main()

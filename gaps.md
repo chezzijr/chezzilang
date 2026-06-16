@@ -146,10 +146,9 @@ map/list-index specialization — all in `docs/benchmarks.md`.
   layout & access patterns")* — **caveat: bench is dispatch/call/alloc-bound, NOT layout, so these read
   mostly neutral as speedups; their real value is JIT groundwork** (positional layouts → constant
   offsets the JIT codegen needs). Land order **#1 → #3 → #2**.
-  1. **Shared per-type struct layout** (hidden-class/`__slots__`) — `Obj::Struct` (`heap.rs:162`) stores
-     type name + every field name as `Box<str>` *per instance*, both static in `StructDef` (`op.rs:378`).
-     → `fields: Vec<Value>` positional, names by `tid` on cold path. Kills N+1 allocs/inst + the
-     `==`-name-clone (`mod.rs:4483`). **Biggest redundancy; land first.**
+  1. ✅ **Shared per-type struct layout** (hidden-class/`__slots__`) — **DONE** (see resolved log). VM
+     `Obj::Struct.fields` is now positional `Vec<Value>`; names resolve from `StructDef` on the cold
+     path (Display/probe/wire). Kept the single top-level `name` (8 dispatch/display/arith paths).
   2. **Enum `variant_id: u32`** — `Obj::Enum` (`heap.rs:167`) holds two `Box<str>` per instance, both
      global. → id + names for Display only. Saves 2 allocs/inst.
   3. **Closure captures positional** — `Obj::Closure.captured: HashMap<String,Value>` (`heap.rs:178`)
@@ -257,6 +256,15 @@ WON'T-FIX carve-out above); **`std.cancel`** task cancellation/timeout `Token` +
 
 **Round 2 (#10–15) ✅** · `ord`/`chr`, `sort_by`, int `abs`/`min`/`max` (→ `std.cmp`), bitwise ops,
 map iteration, nested/tuple match patterns.
+
+**Memory-layout levers ✅** · **#1 positional struct layout** (hidden-class/`__slots__`, 2026-06-16) —
+VM `Obj::Struct.fields` is now a flat `Vec<Value>` (declaration-order offsets); field names live only
+in `StructDef`, resolved on the cold path (Display/probe-miss/wire/snap). Kills the N per-field
+`Box<str>` allocs/instance + the `==`-name-clone. Synthetic native structs (`Match`/`Response`) are
+now registered in `Program.structs` so the runtime can resolve their names. Perf: bench-neutral
+(dispatch/alloc-bound), but a 4-field struct-construction micro went **827 ms → 510 ms (−38%)**; JIT
+groundwork (constant field offsets). Interp left untouched (frozen oracle; parity by declaration order).
+`examples/struct_layout.chz`; `docs/benchmarks.md`.
 
 **Milestones ✅** · M7 generics (fns/structs/protocols/enums, multi-bound) · M8 Tier-1 stdlib
 (`json`/`time`/`fs`/`process`, `set`) · M9 Tier-2 (`regex`/`request`) · M10 type-depth

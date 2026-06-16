@@ -143,6 +143,27 @@ impl Compiler {
                 VariantDef { enum_name: e.to_string(), arity },
             );
         }
+        // M19 memory-layout lever #1 — register the synthetic native std structs (`Match` from
+        // `std.regex`, `Response` from `std.request`). They have no AST (the checker seeds their
+        // shapes in `seed_stdlib_structs`), so with the positional struct layout the runtime must
+        // know their declaration-order field names HERE to resolve field reads + Display. Order must
+        // match the native builders (`match_to_ret` / `response_ret`) and the checker's seed.
+        for (name, fields) in [
+            ("Match", &["text", "start", "end", "groups"][..]),
+            ("Response", &["status", "body", "headers"][..]),
+        ] {
+            let tid = program.structs.len() as u32;
+            program.structs.insert(
+                name.to_string(),
+                StructDef {
+                    fields: fields.iter().map(|f| f.to_string()).collect(),
+                    methods: HashMap::new(),
+                    module_idx: 0,
+                    tid,
+                    test_methods: Vec::new(),
+                },
+            );
+        }
         Compiler { program, struct_fields: HashMap::new(), globals: HashMap::new(), global_slots: Vec::new(), field_ic_next: 0, method_ic_next: 0, aliases: HashMap::new() }
     }
 

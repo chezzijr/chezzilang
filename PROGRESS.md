@@ -170,6 +170,24 @@ map/set). 2 new collision-upgrade guards (RED on a `One`-only stub, GREEN with `
 conformance green, clippy clean. **Next `map` suspect:** `values_equal` per-probe cost + `FxHashMap`
 lookup/rehash (no longer the `Vec` alloc). See `docs/benchmarks.md` "M19 — denser int-keyed map/set".
 
+**Positional struct layout landed (memory-layout lever #1, 2026-06-16):** `Obj::Struct` instance
+fields went from `Vec<(Box<str>, Value)>` to a flat positional `Vec<Value>` (hidden-class / `__slots__`
+layout, `src/vm/heap.rs`). Field names now live only in `StructDef`; the runtime resolves them on the
+**cold path** (Display/stringify/probe-miss/wire/snap) via `name`→`StructDef`, while the hot field
+read/write (IC-guarded on `tid`) is a pure `fields[idx]`. This kills the **N per-field `Box<str>`
+allocations per struct instantiation** + the per-field name-clone on `==` (now a by-position value
+compare). The synthetic native structs `Match`/`Response` are registered in `Program.structs`
+(`src/compiler/mod.rs`) so the runtime can recover their declaration-order names. The interp (frozen
+oracle) keeps `Vec<(String, Value)>` per instance — **untouched**; both engines iterate fields in
+declaration order, so Display/`==`/interpolation stay byte-identical (two-engine parity by
+construction). **Bench-neutral** (the suite is dispatch/alloc-bound and the `struct` bench reuses
+instances — predicted in `gaps.md`), but a 4-field struct-construction micro went **827 ms → 510 ms
+(−38%)**; primary value is the alloc reduction + **JIT groundwork** (positional storage → constant
+field offsets Cranelift codegen needs). 1968 green (+2: positional-layout type guard +
+`struct_layout.chz` two-engine golden), conformance 7/7, clippy clean. See `docs/benchmarks.md` "M19
+memory-layout lever #1" + `docs/future.md §4`. **Land order #1 ✅ → #3 (closure captures) → #2 (enum
+variant id).**
+
 **▶ Next perf batch (Tier 1 DONE — Phases 6+7 landed, 8 deferred; Tier 2 is next; full detail +
 `file:line`s in [`docs/future.md §4` "Post-M19 next levers"](docs/future.md)).** Diagnosis: the
 remaining gap is **call frame-setup + the alloc/hash paths**, not per-op dispatch (Phase 7 took `loop`
