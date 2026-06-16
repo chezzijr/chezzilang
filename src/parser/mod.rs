@@ -1964,6 +1964,7 @@ fn describe(tok: &Token) -> String {
         Int(n) => return format!("integer {n}"),
         Float(f) => return format!("float {f}"),
         Str(_) => "a string literal",
+        Bytes(_) => "a byte-string literal",
         // keywords print as their lowercase source spelling
         other => return format!("'{}'", format!("{other:?}").to_lowercase()),
     };
