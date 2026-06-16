@@ -138,7 +138,20 @@ conformance` green.
   construct+capture-read micro (`benches/chz/closure.chz`); standard suite neutral (no closure-heavy
   bench). `Obj::Closure` shrank 88→64 B (Module still caps `Obj` at 88 B, guard intact). JIT groundwork:
   constant capture offsets for the future Cranelift codegen. (Memory layout land order **#1 ✅ → #3 ✅ →
-  #2**; see `docs/future.md` §4.)
+  #2 ✅**; see `docs/future.md` §4.)
+- **Memory layout #2 — enum `variant_id` (completes the #1→#3→#2 sequence).** `Obj::Enum` dropped its two
+  per-instance `Box<str>` (the type name + variant name, both program-global) for a single dense
+  `variant_id: u32` — the enum analogue of struct `tid`. Match-arm dispatch, `==`, and `?` are now
+  pure-int compares (was variant-name string compares / `ty==ty && variant==variant`); the type + variant
+  names resolve from a new `Program::variants_by_id` table on the cold path only (Display/stringify/
+  error/wire/snap). Native `Ok`/`Err`/`Some`/`None` hold the fixed ids
+  `VID_OK`(0)/`VID_ERR`(1)/`VID_SOME`(2)/`VID_NONE_VARIANT`(3) so `?`/top-level-error gate on
+  compile-time constants; user variants follow at `4..`. `Op::NewEnum`/`Op::MatchArm` carry the
+  compile-time id; wire/snap carry only the (globally unique) variant name and rebuild the id on receive.
+  Behavior-preserving + **three-engine parity** (`examples/enum_layout.chz` on VM/interp/--parallel).
+  **−20% (1.25×)** on an enum construct+match-dispatch micro (`benches/chz/enum.chz`); standard suite
+  neutral. `Obj::Enum` shrank 56→32 B (Module still caps `Obj` at 88 B, guard intact). JIT groundwork:
+  numeric variant id → constant/jump-table dispatch for the future Cranelift codegen + match-on-enum.
 
 **Remaining / blocked levers:**
 
@@ -196,8 +209,8 @@ instances — predicted in `gaps.md`), but a 4-field struct-construction micro w
 (−38%)**; primary value is the alloc reduction + **JIT groundwork** (positional storage → constant
 field offsets Cranelift codegen needs). 1968 green (+2: positional-layout type guard +
 `struct_layout.chz` two-engine golden), conformance 7/7, clippy clean. See `docs/benchmarks.md` "M19
-memory-layout lever #1" + `docs/future.md §4`. **Land order #1 ✅ → #3 (closure captures) → #2 (enum
-variant id).**
+memory-layout lever #1" + `docs/future.md §4`. **Land order #1 ✅ → #3 (closure captures) ✅ → #2 (enum
+variant id) ✅ — sequence complete.**
 
 **▶ Next perf batch (Tier 1 DONE — Phases 6+7 landed, 8 deferred; Tier 2 is next; full detail +
 `file:line`s in [`docs/future.md §4` "Post-M19 next levers"](docs/future.md)).** Diagnosis: the

@@ -304,9 +304,18 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
    Perf: bench-neutral (struct bench reuses instances, dispatch/alloc-bound) but a 4-field
    struct-construction micro went **827 ms → 510 ms (−38%)**. Hands the JIT a constant field offset.
    Interp left untouched (frozen oracle; parity by declaration order).
-2. **Enum variant id instead of names.** `Obj::Enum { ty: Box<str>, variant: Box<str>, payload }`
-   (`heap.rs:167`) — two `Box<str>` per instance, both global (`Program::variants`). Fix:
-   `variant_id: u32` (the enum analogue of `tid`); names looked up for Display only. Saves 2 allocs/inst.
+2. **✅ DONE — Enum variant id instead of names.** Was `Obj::Enum { ty: Box<str>, variant: Box<str>,
+   payload }` — two `Box<str>` per instance, both global (`Program::variants`). Now `Obj::Enum {
+   variant_id: u32, payload }` (the enum analogue of `tid`); the type + variant names resolve from the
+   new `Program::variants_by_id` table on the cold path only (Display/stringify/error/wire/snap).
+   Match-arm dispatch, equality, and `?` are pure-int compares (was variant-name string compares /
+   `ty==ty && variant==variant`). Native `Ok`/`Err`/`Some`/`None` hold the fixed ids
+   `VID_OK`(0)/`VID_ERR`(1)/`VID_SOME`(2)/`VID_NONE_VARIANT`(3) so `?`/top-level-error gate on
+   compile-time constants; user variants follow at `4..`. `Op::NewEnum`/`Op::MatchArm` carry the
+   compile-time id; wire/snap carry only the (globally unique) variant name and rebuild the id on
+   receive. **−20% (1.25×)** on an enum construct+match-dispatch micro (`benches/chz/enum.chz`),
+   suite-neutral; `Obj::Enum` shrank 56→32 B (Module still caps `Obj` at 88 B). Hands the JIT a numeric
+   variant id → constant/jump-table dispatch. See `docs/benchmarks.md`.
 3. **✅ DONE — Closure captures: positional `Vec`, not a per-closure `HashMap`.** Was `Obj::Closure
    { captured: HashMap<String, Value>, .. }` (a `HashMap` ~48 B + string keys **per closure** + a
    string hash on every `GetCaptured`). Now `captured: Vec<Value>` indexed by a compile-time slot;
@@ -336,9 +345,9 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
    `alloc_char` (Phase 3) already halved the string case. Parity-blocked.
 8. **Operand-stack 16 B/Value traffic** → NaN-box (blocked, full i64) / register VM (#8, low-ROI) — above.
 
-**Land order:** **#1 ✅ → #3 ✅ → #2** as **JIT groundwork** (the positional layouts the JIT codegen
-wants), measuring each against `struct`/`hof` (may read neutral — they're dispatch-bound, see caveat).
-**#3 landed** (positional closure captures); **#2** (enum variant id) is next.
+**Land order:** **#1 ✅ → #3 ✅ → #2 ✅ — sequence complete** as **JIT groundwork** (the positional
+layouts the JIT codegen wants), each measured against `struct`/`hof`/`enum` (read suite-neutral — they're
+dispatch-bound, see caveat — with strong micro deltas: #1 −38%, #3 −45%, #2 −20%).
 #4/#5/#6 are principled cleanups, post-JIT. Same discipline throughout: failing-then-green parity test →
 keep two-engine parity → measure (`benches/run.chz`) → record the delta in `docs/benchmarks.md`.
 

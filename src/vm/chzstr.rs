@@ -203,7 +203,8 @@ mod tests {
         // SSO must not grow `Obj` (the heap-slot footprint). `Box<str>`→`ChzStr` adds 8 bytes to
         // the `Str` variant, but `Module` dominates at 88B (Box<str>16 + Vec24 + HashMap48), so the
         // total is unchanged. (M19 lever #3 shrank `Closure` from 88B to 64B — captures moved from a
-        // `HashMap<String,Value>`(48) to a positional `Vec<Value>`(24); `Module` still sets the cap.)
+        // `HashMap<String,Value>`(48) to a positional `Vec<Value>`(24); lever #2 shrank `Enum` — two
+        // per-instance `Box<str>`(32) replaced by one `variant_id: u32`; `Module` still sets the cap.)
         assert_eq!(std::mem::size_of::<crate::vm::heap::Obj>(), 88);
     }
 

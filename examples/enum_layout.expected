@@ -1,0 +1,27 @@
+Red
+Circle(5)
+Rect(3, 4)
+green
+36
+12
+0
+big circle
+other
+square
+other
+other
+6
+true
+false
+true
+false
+true
+false
+shape is Circle(8), area 64
+opt is Some(42)
+chained ok 10
+chained err divide by zero
+first even 4
+no even
+recv Some 99
+recv None

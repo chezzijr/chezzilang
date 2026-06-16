@@ -1,0 +1,30 @@
+# Bench: enum construction + match dispatch throughput. Each iteration builds a fresh enum instance
+# (NewEnum — M19 lever #2 stamps a `variant_id: u32`, no per-instance type/variant Box<str> alloc)
+# and matches on it (MatchArm — a pure-int id compare, no variant-name string compare). Isolates
+# lever #2: per-instance alloc + per-match dispatch. Prints the accumulated total.
+
+enum Shape:
+    Circle(int)
+    Rect(int, int)
+    Dot
+
+fn area(s: Shape) -> int:
+    return match s:
+        Circle(r): r * r
+        Rect(w, h): w * h
+        Dot: 0
+
+fn main():
+    total := 0
+    i := 0
+    while i < 3000000:
+        s := Circle(i)
+        total += area(s)
+        s2 := Rect(i, 2)
+        total += area(s2)
+        s3 := Dot
+        total += area(s3)
+        i += 1
+    print(total)
+
+main()

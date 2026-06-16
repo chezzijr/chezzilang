@@ -46,7 +46,8 @@ pub enum WireValue {
         fields: Vec<(Box<str>, WireValue)>,
     },
     Enum {
-        ty: Box<str>,
+        /// M19 lever #2 — only the variant NAME crosses the airlock (variant names are globally
+        /// unique, so `from_wire` rebuilds the dense `variant_id` from it; the enum type is implied).
         variant: Box<str>,
         payload: Vec<WireValue>,
     },

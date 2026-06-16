@@ -123,12 +123,30 @@ struct Compiler {
     aliases: HashMap<String, Type>,
 }
 
+/// M19 lever #2 — register an enum variant into BOTH program tables, assigning it the next dense
+/// `variant_id` (`variants_by_id.len()`, a global gap-free counter — the analogue of how `StructDef`
+/// gets its `tid` from `structs.len()`). Keeps `variants` (name→def) and `variants_by_id` (id→def) in
+/// lockstep so cold-path id→names resolution is O(1). Variant names are globally unique today (the
+/// `variants` map is keyed by variant name only), so the id is unique per (enum-type, variant) pair.
+fn register_variant(program: &mut Program, enum_name: &str, variant: &str, arity: usize) {
+    let variant_id = program.variants_by_id.len() as u32;
+    let def = VariantDef {
+        enum_name: enum_name.to_string(),
+        name: variant.to_string(),
+        arity,
+        variant_id,
+    };
+    program.variants_by_id.push(def.clone());
+    program.variants.insert(variant.to_string(), def);
+}
+
 impl Compiler {
     fn new() -> Self {
         let mut program = Program {
             protos: Vec::new(),
             structs: HashMap::new(),
             variants: HashMap::new(),
+            variants_by_id: Vec::new(),
             modules: Vec::new(),
             field_ic_sites: 0,
             method_ic_sites: 0,
@@ -136,13 +154,17 @@ impl Compiler {
             tests: Vec::new(),
             suites: Vec::new(),
         };
-        // Built-in Result / Option variants, available without declaration.
+        // Built-in Result / Option variants, available without declaration. M19 lever #2 — these are
+        // registered FIRST so they get the fixed dense ids `Ok`=VID_OK(0), `Err`=VID_ERR(1),
+        // `Some`=VID_SOME(2), `None`=VID_NONE_VARIANT(3) that `?`/error-gating compare against (the
+        // order of this array IS the id assignment; assert it matches the op.rs constants below).
         for (v, e, arity) in [("Ok", "Result", 1), ("Err", "Result", 1), ("Some", "Option", 1), ("None", "Option", 0)] {
-            program.variants.insert(
-                v.to_string(),
-                VariantDef { enum_name: e.to_string(), arity },
-            );
+            register_variant(&mut program, e, v, arity);
         }
+        debug_assert_eq!(program.variants["Ok"].variant_id, crate::vm::op::VID_OK);
+        debug_assert_eq!(program.variants["Err"].variant_id, crate::vm::op::VID_ERR);
+        debug_assert_eq!(program.variants["Some"].variant_id, crate::vm::op::VID_SOME);
+        debug_assert_eq!(program.variants["None"].variant_id, crate::vm::op::VID_NONE_VARIANT);
         // M19 memory-layout lever #1 — register the synthetic native std structs (`Match` from
         // `std.regex`, `Response` from `std.request`). They have no AST (the checker seeds their
         // shapes in `seed_stdlib_structs`), so with the positional struct layout the runtime must
@@ -287,11 +309,10 @@ impl Compiler {
                 // Type-erased: type parameters are checker-only, the runtime is identical for
                 // `Tree[int]` and `Tree[str]`.
                 StmtKind::Enum { name, variants, .. } => {
+                    // M19 lever #2 — assign each variant the next dense `variant_id` (user variants
+                    // follow the fixed native ids at `4..`, in declaration order).
                     for v in variants {
-                        self.program.variants.insert(
-                            v.name.clone(),
-                            VariantDef { enum_name: name.clone(), arity: v.payload.len() },
-                        );
+                        register_variant(&mut self.program, name, &v.name, v.payload.len());
                     }
                 }
                 _ => {}
@@ -1129,7 +1150,7 @@ impl Compiler {
             fc.emit(Op::EnsureEnum(opt_slot), iter.span);
             // Test `None` first: a match falls through to the exit jump; a mismatch goes to `to_some`.
             let none_arm = fc.emit_jump(
-                Op::MatchArm { scrut: opt_slot, variant: "None".to_string(), nbind: 0, bind_start: 0, next: 0 },
+                Op::MatchArm { scrut: opt_slot, variant: "None".to_string(), variant_id: crate::vm::op::VID_NONE_VARIANT, nbind: 0, bind_start: 0, next: 0 },
                 iter.span,
             );
             let lazy_exit = fc.emit_jump(Op::Jump(0), span); // None matched ⇒ leave the loop
@@ -1137,7 +1158,7 @@ impl Compiler {
             // `Some(v)`: a match binds the payload into the loop variable's slot and falls through to
             // the body jump; a non-Some jumps to the trap below.
             let some_arm = fc.emit_jump(
-                Op::MatchArm { scrut: opt_slot, variant: "Some".to_string(), nbind: 1, bind_start: item_slot, next: 0 },
+                Op::MatchArm { scrut: opt_slot, variant: "Some".to_string(), variant_id: crate::vm::op::VID_SOME, nbind: 1, bind_start: item_slot, next: 0 },
                 iter.span,
             );
             let to_body = fc.emit_jump(Op::Jump(0), span); // Some matched ⇒ run the body
@@ -1363,6 +1384,13 @@ impl Compiler {
         self.program.variants.get(name).is_some_and(|v| v.arity == 0)
     }
 
+    /// M19 lever #2 — the dense `variant_id` of variant `name`, baked into `Op::NewEnum`/`Op::MatchArm`
+    /// so the VM stamps / compares it without a runtime hash lookup. `VID_NONE` if unregistered (the
+    /// compiler always emits these for known variants, so the fallback is defensive).
+    fn variant_id_of(&self, name: &str) -> u32 {
+        self.program.variants.get(name).map_or(crate::vm::op::VID_NONE, |v| v.variant_id)
+    }
+
     /// The sorted, de-duplicated *binding* names introduced by an or-pattern's first alternative
     /// (the checker has verified every alternative binds the same set, so the first is canonical).
     /// A nested bare `Ident` naming a nullary variant is a variant match, NOT a binding, so it is
@@ -1492,8 +1520,9 @@ impl Compiler {
                 // binding capturing the whole sub-value.
                 if self.is_nullary_variant(name) {
                     let bind_start = fc.next_slot();
+                    let variant_id = self.variant_id_of(name);
                     let arm_op = fc.emit_jump(
-                        Op::MatchArm { scrut, variant: name.clone(), nbind: 0, bind_start, next: 0 },
+                        Op::MatchArm { scrut, variant: name.clone(), variant_id, nbind: 0, bind_start, next: 0 },
                         span,
                     );
                     fails.push(arm_op);
@@ -1537,8 +1566,9 @@ impl Compiler {
                         }
                     }
                 }
+                let variant_id = self.variant_id_of(name);
                 let arm_op = fc.emit_jump(
-                    Op::MatchArm { scrut, variant: name.clone(), nbind: bindings.len(), bind_start, next: 0 },
+                    Op::MatchArm { scrut, variant: name.clone(), variant_id, nbind: bindings.len(), bind_start, next: 0 },
                     span,
                 );
                 fails.push(arm_op);
@@ -1847,7 +1877,8 @@ impl Compiler {
                         .get(name)
                         .is_some_and(|d| &d.enum_name == ename && d.arity == 0)
                 {
-                    fc.emit(Op::NewEnum(ename.clone(), name.clone(), 0), expr.span);
+                    let variant_id = self.variant_id_of(name);
+                    fc.emit(Op::NewEnum { variant: name.clone(), variant_id, argc: 0 }, expr.span);
                 } else {
                     self.compile_expr(fc, obj)?;
                     let ic = self.next_field_ic(name);
@@ -1939,7 +1970,7 @@ impl Compiler {
         if block_has_defer(block) {
             fc.emit(Op::DrainHandlerDefers, span);
         }
-        fc.emit(Op::NewEnum("Result".to_string(), "Ok".to_string(), 1), span);
+        fc.emit(Op::NewEnum { variant: "Ok".to_string(), variant_id: crate::vm::op::VID_OK, argc: 1 }, span);
         fc.emit(Op::PopHandler, span);
         let done = fc.here();
         fc.patch_jump_to(push, done);
@@ -1979,8 +2010,8 @@ impl Compiler {
         if let Some(def) = self.program.variants.get(name)
             && def.arity == 0
         {
-            let ty = def.enum_name.clone();
-            fc.emit(Op::NewEnum(ty, name.to_string(), 0), span);
+            let variant_id = def.variant_id;
+            fc.emit(Op::NewEnum { variant: name.to_string(), variant_id, argc: 0 }, span);
             return;
         }
         self.emit_load(fc, name, span);
@@ -2057,7 +2088,8 @@ impl Compiler {
                 for a in args {
                     self.compile_expr(fc, a)?;
                 }
-                fc.emit(Op::NewEnum(ename.clone(), name.clone(), args.len()), span);
+                let variant_id = self.variant_id_of(name);
+                fc.emit(Op::NewEnum { variant: name.clone(), variant_id, argc: args.len() }, span);
                 return Ok(());
             }
             self.compile_expr(fc, obj)?;
@@ -2127,11 +2159,11 @@ impl Compiler {
                 return Ok(());
             }
             if let Some(def) = self.program.variants.get(name) {
-                let ty = def.enum_name.clone();
+                let variant_id = def.variant_id;
                 for a in args {
                     self.compile_expr(fc, a)?;
                 }
-                fc.emit(Op::NewEnum(ty, name.clone(), args.len()), span);
+                fc.emit(Op::NewEnum { variant: name.clone(), variant_id, argc: args.len() }, span);
                 return Ok(());
             }
         }

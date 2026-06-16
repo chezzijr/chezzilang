@@ -759,3 +759,43 @@ slots, `Proto.capture_names` in slot order). Full suite **1979 green**, conforma
 `--all-targets -D warnings` clean. VM-only; the frozen interp (whose `Closure.captured` stays a
 `Vec<HashMap<…>>`) is untouched — parity holds because `GetCaptured` is pure compute and iteration
 order (which determines observable output) is unchanged.
+
+## M19 memory layout #2 — enum variant_id — 2026-06-16 (completes the #1→#3→#2 sequence)
+
+`Obj::Enum { ty: Box<str>, variant: Box<str>, payload }` → `Obj::Enum { variant_id: u32, payload }`,
+the enum analogue of struct `tid` (lever #1). Was: **two `Box<str>` allocated per enum instantiation**
+(the type name + variant name, both program-global static) plus, on every `match` arm, a **variant-name
+string compare**, and on `==` an `ty==ty && variant==variant` string compare. Now: a single dense
+`variant_id: u32` stamped at construction; match-arm dispatch, equality, and `?` are **pure-int
+compares**; the type + variant names resolve from a new `Program::variants_by_id` table on the **cold
+path only** (Display/stringify/error/wire/snap). Native `Ok`/`Err`/`Some`/`None` get the fixed ids
+`VID_OK`(0)/`VID_ERR`(1)/`VID_SOME`(2)/`VID_NONE_VARIANT`(3), so `?` (`do_try`) and top-level-error
+gating compare against compile-time constants (a user enum shadowing `Ok`/`Err` gets a distinct id ⇒
+correctly NOT treated as a Result — *more* precise than the old name compare). `Op::NewEnum` and
+`Op::MatchArm` carry the compile-time id; wire/snap carry only the (globally unique) variant name and
+rebuild the id on receive (single shared `Arc<Program>` ⇒ always resolvable). JIT groundwork: numeric
+variant id → constant / jump-table dispatch for the future Cranelift codegen + match-on-enum.
+
+**Standard suite reads NEUTRAL** (it has no enum-construction-heavy bench; the alloc/dispatch saving
+isn't on the hot suite paths). Re-measured `fib` before/after to confirm no regression: **1.00×** (within
+noise).
+
+**Micro (the real delta).** `benches/chz/enum.chz`: 3M iterations each building three enum instances
+(`Circle(i)`, `Rect(i,2)`, `Dot` — `NewEnum`) and matching each (`MatchArm` dispatch).
+`hyperfine -w 2 -r 8`, serial, same machine:
+
+| micro | before (two `Box<str>`) | after (`variant_id: u32`) | delta |
+|-------|------------------------:|--------------------------:|-------|
+| `enum.chz` | 2.688 s ±0.060 | 2.155 s ±0.094 | **−20% (1.25× faster)** (output identical: `9000004499997500000`) |
+
+`size_of::<Obj>()` stayed **88 B** (guard `chzstr.rs:205`): `Enum` shrank from 56 B to **32 B** (two
+`Box<str>` 32 B → one `u32`), and `Module` remains the sole cap.
+
+**Guarded by:** the `enum_variant_id_stamped_at_construction` type-level guard (the new `Obj::Enum`
+shape won't destructure the old way), `native_result_option_have_fixed_variant_ids`,
+`match_arm_dispatches_by_variant_id` (asserts the emitted op carries the dense id), and the
+`examples/enum_layout.chz` golden (nullary + payload + generic `Option`/`Result`, exhaustive match,
+match-with-binding, guard, `==` equal/ne-by-variant/ne-by-enum-type, Display + interpolation, nested
+enums, `?`, and an enum crossing `spawn`+`Channel`) byte-identical on VM / interp / `--parallel`. Full
+suite **1985 green**, conformance **7/7**, clippy `--all-targets -D warnings` clean. VM-only; the frozen
+interp (name-keyed enums) is untouched — parity holds by identical observable output.

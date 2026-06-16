@@ -125,9 +125,10 @@ map/list-index specialization, **positional closure captures (memory lever #3)**
 > An item that doesn't touch those costs the same before or after. This is orthogonal to a lever's
 > bench payoff — several Tier-A items read perf-neutral *today* (the bench is dispatch/call/alloc-bound,
 > not layout) yet are still must-do-first because they're cheap now, expensive post-JIT.
-> - **Tier A — MUST precede JIT (defer = codegen rewrite):** (1) **positional struct/enum/closure
->   layout** (the memory levers #1→#3→#2 below) — JIT emits **constant field offsets**; today's
->   name-keyed `Box<str>`/`HashMap` layout makes that impossible. *Doc-stated JIT groundwork.* (2) the
+> - **Tier A — MUST precede JIT (defer = codegen rewrite):** (1) ✅ **positional struct/enum/closure
+>   layout** (the memory levers #1→#3→#2 below — ALL LANDED) — JIT emits **constant field offsets** /
+>   numeric variant-id jump tables; the old name-keyed `Box<str>`/`HashMap` layout made that impossible.
+>   *Doc-stated JIT groundwork, now in place.* (2) the
 >   **GC invariant** — gen/incremental GC needs write barriers the JIT must emit at every store, and
 >   even stop-the-world needs safepoint placement baked into codegen; lock the GC contract before
 >   codegen even if gen-GC is never built. *(coupling inferred — design pass to confirm.)* (3) any new
@@ -146,12 +147,17 @@ map/list-index specialization, **positional closure captures (memory lever #3)**
 - **🟡 Memory layout & access levers** *(diagnosed 2026-06-16, `7e4fc42`; `docs/future.md` §4 "Memory
   layout & access patterns")* — **caveat: bench is dispatch/call/alloc-bound, NOT layout, so these read
   mostly neutral as speedups; their real value is JIT groundwork** (positional layouts → constant
-  offsets the JIT codegen needs). Land order **#1 → #3 → #2**.
+  offsets the JIT codegen needs). Land order **#1 ✅ → #3 ✅ → #2 ✅ — sequence complete**.
   1. ✅ **Shared per-type struct layout** (hidden-class/`__slots__`) — **DONE** (see resolved log). VM
      `Obj::Struct.fields` is now positional `Vec<Value>`; names resolve from `StructDef` on the cold
      path (Display/probe/wire). Kept the single top-level `name` (8 dispatch/display/arith paths).
-  2. **Enum `variant_id: u32`** — `Obj::Enum` (`heap.rs:167`) holds two `Box<str>` per instance, both
-     global. → id + names for Display only. Saves 2 allocs/inst.
+  2. **✅ Enum `variant_id: u32`** — LANDED (`auto-task/enum-variant-id`). Was `Obj::Enum` holding two
+     `Box<str>` per instance (type + variant name, both global). → a single dense `variant_id: u32`
+     (the enum analogue of struct `tid`); names resolve from `Program::variants_by_id` on the cold path
+     (Display/stringify/error/wire/snap). Match dispatch + equality + `?` are now pure-int compares;
+     native `Ok`/`Err`/`Some`/`None` hold the fixed ids `VID_OK..VID_NONE_VARIANT`. **−20% (1.25×) on
+     an enum construct+match-dispatch micro**; suite-neutral. `Obj::Enum` shrank 56→32B (Module still
+     caps `Obj` at 88B). See resolved log + `docs/benchmarks.md`. **Completes the #1→#3→#2 sequence.**
   3. **✅ Closure captures positional** — LANDED (`auto-task/positional-closure-captures`). Was
      `Obj::Closure.captured: HashMap<String,Value>` (HashMap alloc/inst + string-hash per
      `GetCaptured`). → `captured: Vec<Value>` indexed by a compile-time slot; `Op::GetCaptured(u32)`;
@@ -287,3 +293,16 @@ call-site type args, `?`-in-closure return checking.
 Behavior-preserving + three-engine parity (`examples/closure_capture.chz`); **−45% (1.83×)** on a
 closure construct+capture-read micro, suite-neutral; `Obj::Closure` 88→64B (Module still caps `Obj` at
 88B). JIT groundwork: positional captures → constant offsets for Cranelift codegen.
+
+**Perf — M19 memory layout ✅** · **Enum `variant_id` (lever #2 — completes #1→#3→#2)** — `Obj::Enum`
+held two per-instance `Box<str>` (type + variant name, both global) → a single dense `variant_id: u32`
+(the enum analogue of struct `tid`). Match-arm dispatch, equality, and `?` are now pure-int compares
+(was variant-name string compares / `ty==ty && variant==variant`); names resolve from a new
+`Program::variants_by_id` table on the cold path only (Display/stringify/error/wire/snap). Native
+`Ok`/`Err`/`Some`/`None` get the FIXED ids `VID_OK`(0)/`VID_ERR`(1)/`VID_SOME`(2)/`VID_NONE_VARIANT`(3)
+so `?`/top-level-error gate on compile-time constants; user variants follow at `4..`. `Op::NewEnum` /
+`Op::MatchArm` carry the compile-time id. Wire/snap carry only the variant name (globally unique) and
+rebuild the id on receive (single shared `Arc<Program>` ⇒ always resolvable). Behavior-preserving +
+three-engine parity (`examples/enum_layout.chz`); **−20% (1.25×)** on an enum construct+match-dispatch
+micro, suite-neutral; `Obj::Enum` 56→32B (Module still caps `Obj` at 88B). JIT groundwork: numeric
+variant id → constant / jump-table dispatch for Cranelift codegen + match-on-enum.
