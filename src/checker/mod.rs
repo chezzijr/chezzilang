@@ -74,7 +74,7 @@ fn is_reserved_name(name: &str) -> bool {
     matches!(
         name,
         // builtins (mirrors compiler::is_builtin / interp::builtins::is_builtin)
-        "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set"
+        "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set" | "bytes" | "bytearray"
         // the special print op
         | "print"
         // runtime constructors the backends special-case before a plain call
@@ -761,7 +761,7 @@ impl Checker {
                     self.enum_names.insert(name.clone());
                 }
                 StmtKind::TypeAlias { name, ty } => {
-                    if matches!(name.as_str(), "int" | "float" | "bool" | "str" | "bytes" | "nil")
+                    if matches!(name.as_str(), "int" | "float" | "bool" | "str" | "bytes" | "bytearray" | "nil")
                         || is_reserved_type(name)
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
@@ -1126,6 +1126,7 @@ impl Checker {
                 "bool" => Ty::Bool,
                 "str" => Ty::Str,
                 "bytes" => Ty::Bytes,
+                "bytearray" => Ty::ByteArray,
                 "nil" => Ty::Nil,
                 // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation).
                 "Executor" => Ty::Executor,
@@ -1724,6 +1725,12 @@ impl Checker {
                         self.expect_int(index, "index");
                         self.check_assign_value(&elem, op, &val_ty, target.span);
                     }
+                    // `ba[i] = x` — the MUTABLE sibling of bytes. Int index, int value (0–255
+                    // validated at runtime). Bytes has NO arm here (immutable); bytearray adds one.
+                    Ty::ByteArray => {
+                        self.expect_int(index, "index");
+                        self.check_assign_value(&Ty::Int, op, &val_ty, target.span);
+                    }
                     Ty::Str => {
                         self.expect_int(index, "index");
                         self.error(
@@ -2067,8 +2074,8 @@ impl Checker {
         match ty {
             Ty::List(e) | Ty::Set(e) => Some((**e).clone()),
             Ty::Str => Some(Ty::Str),
-            // `bytes` iterates to `int` (0–255), like Python.
-            Ty::Bytes => Some(Ty::Int),
+            // `bytes`/`bytearray` iterate to `int` (0–255), like Python.
+            Ty::Bytes | Ty::ByteArray => Some(Ty::Int),
             Ty::Map(k, _) => Some((**k).clone()),
             // `Iterator[T]` value (a generator result): element type is its single type argument.
             Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => Some(args[0].clone()),
@@ -2084,8 +2091,8 @@ impl Checker {
         match ty {
             Ty::List(e) => Some((Ty::Int, (**e).clone())),
             Ty::Str => Some((Ty::Int, Ty::Str)),
-            // `bytes[i]` yields an `int` (0–255).
-            Ty::Bytes => Some((Ty::Int, Ty::Int)),
+            // `bytes[i]`/`bytearray[i]` yield an `int` (0–255).
+            Ty::Bytes | Ty::ByteArray => Some((Ty::Int, Ty::Int)),
             Ty::Map(k, v) => Some(((**k).clone(), (**v).clone())),
             Ty::Struct(name, targs) => {
                 let info = self.structs.get(name)?;
@@ -2125,8 +2132,9 @@ impl Checker {
     /// a user struct via `slice(self, int, int) -> R`. `None` ⇒ not sliceable.
     fn slice_result(&self, ty: &Ty) -> Option<Ty> {
         match ty {
-            // `bytes[a:b:c]` yields a new `bytes`; `list`/`str` slice to themselves.
-            Ty::List(_) | Ty::Str | Ty::Bytes => Some(ty.clone()),
+            // `bytes[a:b:c]` yields a new `bytes`; `bytearray` slices to a new `bytearray`;
+            // `list`/`str` slice to themselves.
+            Ty::List(_) | Ty::Str | Ty::Bytes | Ty::ByteArray => Some(ty.clone()),
             Ty::Struct(name, targs) => {
                 let info = self.structs.get(name)?;
                 let sig = info.methods.get("slice")?;
@@ -2197,7 +2205,7 @@ impl Checker {
                     unknowns(vars)
                 }
             },
-            Ty::Str | Ty::Bytes | Ty::Set(_) | Ty::Channel(_) if vars.len() != 1 => {
+            Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Set(_) | Ty::Channel(_) if vars.len() != 1 => {
                 if matches!(it, Ty::Channel(_)) {
                     self.error(iter.span, "a channel iterator binds a single loop variable");
                 } else {
@@ -2208,8 +2216,8 @@ impl Checker {
             Ty::List(inner) => vec![(vars[0].clone(), (**inner).clone())],
             Ty::Set(elem) => vec![(vars[0].clone(), (**elem).clone())],
             Ty::Str => vec![(vars[0].clone(), Ty::Str)],
-            // `for x in bytes:` binds a single `int` (0–255).
-            Ty::Bytes => vec![(vars[0].clone(), Ty::Int)],
+            // `for x in bytes:`/`for x in bytearray:` bind a single `int` (0–255).
+            Ty::Bytes | Ty::ByteArray => vec![(vars[0].clone(), Ty::Int)],
             // `for v in ch:` over a `Channel[T]` blocks for each value and ends when the channel is
             // closed-and-drained (Go's `for v := range ch`). Binds a single element of type `T`.
             Ty::Channel(elem) => vec![(vars[0].clone(), (**elem).clone())],
@@ -3703,7 +3711,7 @@ impl Checker {
                 self.check_arity("len", 1, args, span);
                 if let Some(a) = args.first() {
                     match self.infer(a) {
-                        Ty::List(_) | Ty::Str | Ty::Bytes | Ty::Unknown => {}
+                        Ty::List(_) | Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
                         other => self.error(a.span, format!("len() expects a list, str, or bytes, got {other}")),
                     }
                 }
@@ -3780,6 +3788,42 @@ impl Checker {
                         Some(Ty::set(Ty::Unknown))
                     }
                 }
+            }
+            // `bytearray(...)` — the MUTABLE byte buffer (constructor-only, no literal). Four forms:
+            // `bytearray()` (empty), `bytearray(N)` (N zero bytes), `bytearray(b)` (from a `bytes`,
+            // mutable copy), `bytearray([ints])` (from a `list[int]`, each 0–255 validated at runtime),
+            // and `bytearray(ba)` (copy). Always infers `bytearray`.
+            "bytearray" => {
+                match args.len() {
+                    0 => {}
+                    1 => match self.infer(&args[0]) {
+                        Ty::Int | Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
+                        Ty::List(elem) if matches!(*elem, Ty::Int | Ty::Unknown) => {}
+                        other => self.error(
+                            args[0].span,
+                            format!("bytearray() expects an int size, a bytes, a bytearray, or a list[int], got {other}"),
+                        ),
+                    },
+                    _ => self.error(span, "bytearray() expects bytearray(), bytearray(int), bytearray(bytes|bytearray), or bytearray(list[int])"),
+                }
+                Some(Ty::ByteArray)
+            }
+            // `bytes(...)` — the conversion bridge to the IMMUTABLE form (also constructor-only; the
+            // `b"..."` literal is the other way to make a `bytes`). `bytes(ba)` snapshots a `bytearray`,
+            // `bytes(b)` copies a `bytes`, `bytes([ints])` builds from a `list[int]`. Infers `bytes`.
+            "bytes" => {
+                match args.len() {
+                    1 => match self.infer(&args[0]) {
+                        Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
+                        Ty::List(elem) if matches!(*elem, Ty::Int | Ty::Unknown) => {}
+                        other => self.error(
+                            args[0].span,
+                            format!("bytes() expects a bytes, a bytearray, or a list[int], got {other}"),
+                        ),
+                    },
+                    _ => self.error(span, "bytes() expects bytes(bytes|bytearray) or bytes(list[int])"),
+                }
+                Some(Ty::Bytes)
             }
             "Channel" => {
                 // `Channel[T]()` — a fresh empty mailbox. The element type comes from the explicit
@@ -4075,6 +4119,32 @@ impl Checker {
                 } else {
                     self.error(span, format!("type {obj_ty} has no method '{method}'"));
                 }
+                Ty::Unknown
+            }
+            // `bytearray` core methods (mutable buffer): `len`, `push(int)`, `pop() -> Option[int]`,
+            // `extend(bytes|bytearray|list[int])`. `extend` is handled here (not the fixed sig table)
+            // because its argument may be any of the three byte-sequence shapes.
+            Ty::ByteArray => {
+                if method == "extend" {
+                    self.check_arity("extend", 1, args, span);
+                    if let Some(a) = args.first() {
+                        match self.infer(a) {
+                            Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
+                            Ty::List(elem) if matches!(*elem, Ty::Int | Ty::Unknown) => {}
+                            other => self.error(
+                                a.span,
+                                format!("extend() expects a bytes, a bytearray, or a list[int], got {other}"),
+                            ),
+                        }
+                    }
+                    return Ty::Nil;
+                }
+                if let Some(sig) = bytearray_method_sig(method) {
+                    self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type bytearray has no method '{method}'"));
                 Ty::Unknown
             }
             Ty::Map(k, v) => {
@@ -4693,6 +4763,7 @@ impl Checker {
                 "bool" => Ty::Bool,
                 "str" => Ty::Str,
                 "bytes" => Ty::Bytes,
+                "bytearray" => Ty::ByteArray,
                 "nil" => Ty::Nil,
                 "Executor" => Ty::Executor,
                 "Socket" => Ty::Socket,
@@ -4777,7 +4848,7 @@ impl Checker {
                     None => return Err(format!("type {ty} does not satisfy Slice")),
                 },
                 _ => {
-                    if protocol == "IndexSet" && !matches!(ty, Ty::List(_) | Ty::Map(_, _)) {
+                    if protocol == "IndexSet" && !matches!(ty, Ty::List(_) | Ty::Map(_, _) | Ty::ByteArray) {
                         return Err(format!("type {ty} does not satisfy IndexSet"));
                     }
                     match self.index_kv(ty) {
@@ -4912,7 +4983,9 @@ impl Checker {
     /// so a recursive type like `Node { next: Option[Node] }` terminates).
     fn sendable_rec(&self, ty: &Ty, stack: &mut Vec<String>) -> bool {
         match ty {
-            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Nil | Ty::Unknown | Ty::Param(_) => true,
+            // `bytearray` crosses by deep copy (a fresh independent buffer on the other side, like
+            // `list`) — always sendable (its elements are always `int`).
+            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Nil | Ty::Unknown | Ty::Param(_) => true,
             // A `Shared[T]` handle always crosses — that's its whole point (one box, many tasks);
             // its element type is *not* a constraint (the value never crosses, only the handle).
             Ty::Shared(_) => true,
@@ -6247,6 +6320,20 @@ fn executor_method_sig(method: &str) -> Option<FnSig> {
 }
 
 /// Built-in method signatures on `set[T]`. `elem` is the set's element type.
+/// Built-in method signatures on `bytearray` (the mutable byte buffer). Mirrors the VM's
+/// `core_method` ByteArray arm and the interp's `eval_bytearray_method` — keep all three in lockstep.
+/// `push(int)` appends one byte (0–255 validated at runtime); `pop() -> Option[int]` removes the last.
+/// `extend` is NOT here — it takes any byte-sequence shape and is handled in `infer_method_call`.
+fn bytearray_method_sig(method: &str) -> Option<FnSig> {
+    let (params, ret) = match method {
+        "len" => (vec![], Ty::Int),
+        "push" => (vec![Ty::Int], Ty::Nil),
+        "pop" => (vec![], Ty::option(Ty::Int)),
+        _ => return None,
+    };
+    Some(FnSig::plain(params, ret))
+}
+
 fn set_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
     let set = Ty::set(elem.clone());
     let (params, ret) = match method {

@@ -190,6 +190,12 @@ pub enum Value {
     /// `RefCell`: bytes never mutate), like `Str`. Indexes/iterates to `int` (0–255); slices to
     /// `bytes`. Value-compared structurally; `Display` is the Python `b'...'` repr.
     Bytes(Rc<[u8]>),
+    /// `bytearray` — the MUTABLE sibling of `bytes` (Python `bytearray` model). Interior-mutable via
+    /// `Rc<RefCell<Vec<u8>>>` exactly like [`List`](Value::List), so two bindings to the same
+    /// `bytearray` (a shared `Rc`) observe each other's writes; deep-copied ONLY across the airlock
+    /// (a fresh `Rc<RefCell>` — see `deep_clone`), NOT cloned-`Rc` like `Bytes`. Indexes/iterates to
+    /// `int` (0–255), supports `ba[i] = x`; NOT `Hashable` (mutable ⇒ not a map/set key, like `list`).
+    ByteArray(Rc<RefCell<Vec<u8>>>),
     /// `[a, b, c]` — growable, shared by reference.
     List(Rc<RefCell<Vec<Value>>>),
     /// `(a, b, …)` — a fixed-arity, immutable tuple. Shared by `Rc` (no `RefCell`: tuples never
@@ -295,6 +301,7 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Str(_) => "str",
             Value::Bytes(_) => "bytes",
+            Value::ByteArray(_) => "bytearray",
             Value::List(_) => "list",
             Value::Tuple(_) => "tuple",
             Value::Map(_) => "map",
@@ -324,6 +331,8 @@ impl std::fmt::Display for Value {
             Value::Str(s) => write!(f, "{s}"),
             // Python `bytes` repr `b'...'` — shared with the VM via `slice::bytes_repr` for parity.
             Value::Bytes(b) => write!(f, "{}", crate::slice::bytes_repr(b)),
+            // Python `bytearray` repr `bytearray(b'...')` — shared via `slice::bytearray_repr`.
+            Value::ByteArray(b) => write!(f, "{}", crate::slice::bytearray_repr(&b.borrow())),
             Value::List(items) => {
                 let inner = items
                     .borrow()

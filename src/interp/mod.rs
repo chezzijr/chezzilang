@@ -123,6 +123,10 @@ fn deep_clone(v: &Value) -> Value {
             let cloned = items.borrow().iter().map(deep_clone).collect::<Vec<_>>();
             Value::List(Rc::new(RefCell::new(cloned)))
         }
+        // `bytearray` is MUTABLE: deep-copy into a FRESH `Rc<RefCell>` (a new independent buffer, like
+        // `List`) — UNLIKE `Bytes`, which clones its `Rc`. This is what makes a `bytearray` cross the
+        // `--parallel` airlock by value (no shared mutable view across tasks).
+        Value::ByteArray(b) => Value::ByteArray(Rc::new(RefCell::new(b.borrow().clone()))),
         Value::Tuple(items) => Value::Tuple(Rc::new(items.iter().map(deep_clone).collect())),
         Value::Map(m) => {
             let src = m.borrow();
@@ -545,6 +549,17 @@ impl Interp {
                                 span: expr.span,
                             })
                     }
+                    // `bytearray[i]` → `int` (0–255); same out-of-range behavior as `bytes`.
+                    Value::ByteArray(b) => {
+                        let idx = want_int(self.eval(index)?)?;
+                        let b = b.borrow();
+                        crate::slice::norm_index(idx, b.len())
+                            .map(|i| Value::Int(b[i] as i64))
+                            .ok_or_else(|| RuntimeError {
+                                message: format!("index {idx} out of bounds (len {})", b.len()),
+                                span: expr.span,
+                            })
+                    }
                     // A struct satisfying `Index` dispatches `obj[k]` to `index(self, k)`.
                     Value::Struct { .. } => {
                         let key = self.eval(index)?;
@@ -888,6 +903,14 @@ impl Interp {
             // live in the pure `builtins` table — route it here. Other builtins stay pure.
             if name == "set" {
                 return self.builtin_set(arg_vals, span);
+            }
+            // `bytearray(...)` / `bytes(...)` — constructors + conversion bridge. Routed on `Interp`
+            // (not the pure `builtins` table) so the result shares the engine's value model.
+            if name == "bytearray" {
+                return self.builtin_bytearray(arg_vals, span);
+            }
+            if name == "bytes" {
+                return self.builtin_bytes(arg_vals, span);
             }
             // `Channel[T]()` (C2) — a fresh empty mailbox (type arg erased at runtime).
             if name == "Channel" {
@@ -1688,6 +1711,12 @@ impl Interp {
             let ex = std::rc::Rc::clone(ex);
             return self.eval_executor_method(&ex, method, arg_vals, span);
         }
+        // `bytearray` methods (mutable buffer): `len`/`push`/`pop`/`extend`. Mutate in place via the
+        // shared `Rc<RefCell>` (`borrow_mut`), so a second binding observes the change (like `list`).
+        if let Value::ByteArray(buf) = &receiver {
+            let buf = std::rc::Rc::clone(buf);
+            return self.eval_bytearray_method(&buf, method, arg_vals, span);
+        }
         // Core-type methods (M6): built-in methods on `str` and `list` dispatch on the value.
         if matches!(receiver, Value::Str(_) | Value::List(_)) {
             return builtins::call_method(&receiver, method, arg_vals, span);
@@ -1747,6 +1776,14 @@ impl Interp {
                     .map_err(|m| RuntimeError { message: m.to_string(), span })?;
                 let sub: Vec<u8> = idxs.iter().map(|&i| b[i]).collect();
                 Ok(Value::Bytes(sub.into()))
+            }
+            // `bytearray[a:b:c]` yields a NEW `bytearray` (a fresh `Rc<RefCell>`, mutable copy).
+            Value::ByteArray(b) => {
+                let b = b.borrow();
+                let idxs = crate::slice::slice_indices(s, e, st, b.len())
+                    .map_err(|m| RuntimeError { message: m.to_string(), span })?;
+                let sub: Vec<u8> = idxs.iter().map(|&i| b[i]).collect();
+                Ok(Value::ByteArray(std::rc::Rc::new(std::cell::RefCell::new(sub))))
             }
             // A struct satisfying `Slice` dispatches `obj[a:b:c]` to `slice(self, start?, end?, step?)`,
             // passing real `Option[int]` components (`None`/`Some(n)`) the user body can match/`??`.
@@ -2141,6 +2178,109 @@ impl Interp {
             }
         }
         Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(set))))
+    }
+
+    /// Collect raw bytes from a byte-sequence-shaped argument (a `bytes`, a `bytearray`, or a
+    /// `list[int]` with each element 0..=255). Mirrors the VM's `collect_bytes_arg`. `what` names the
+    /// constructor/method in error messages.
+    fn collect_bytes_arg(&self, what: &str, v: &Value, span: Span) -> Result<Vec<u8>, RuntimeError> {
+        match v {
+            Value::Bytes(b) => Ok(b.to_vec()),
+            Value::ByteArray(b) => Ok(b.borrow().clone()),
+            Value::List(items) => {
+                let mut out = Vec::with_capacity(items.borrow().len());
+                for e in items.borrow().iter() {
+                    match e {
+                        Value::Int(n) if (0..=255).contains(n) => out.push(*n as u8),
+                        Value::Int(n) => return Err(RuntimeError {
+                            message: format!("{what}() list element {n} out of range (must be 0..=255)"),
+                            span,
+                        }),
+                        other => return Err(RuntimeError {
+                            message: format!("{what}() expects a list of int, got an element of type {}", other.type_name()),
+                            span,
+                        }),
+                    }
+                }
+                Ok(out)
+            }
+            other => Err(RuntimeError {
+                message: format!("{what}() expects a bytes, a bytearray, or a list[int], got {}", other.type_name()),
+                span,
+            }),
+        }
+    }
+
+    /// `bytearray()` → empty; `bytearray(N)` → N zero bytes; `bytearray(b)`/`bytearray(ba)` → mutable
+    /// copy; `bytearray([ints])` → from a list of ints (each 0..=255). Mirrors the VM's
+    /// `builtin_bytearray` — the MUTABLE buffer (`Rc<RefCell<Vec<u8>>>`).
+    fn builtin_bytearray(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+        let bytes: Vec<u8> = match args.as_slice() {
+            [] => Vec::new(),
+            [Value::Int(n)] => {
+                if *n < 0 {
+                    return Err(RuntimeError { message: format!("bytearray() size {n} must be non-negative"), span });
+                }
+                vec![0u8; *n as usize]
+            }
+            [one] => self.collect_bytes_arg("bytearray", one, span)?,
+            _ => return Err(RuntimeError { message: format!("bytearray() expects 0 or 1 argument(s), got {}", args.len()), span }),
+        };
+        Ok(Value::ByteArray(std::rc::Rc::new(std::cell::RefCell::new(bytes))))
+    }
+
+    /// `bytes(b)` → copy; `bytes(ba)` → immutable snapshot of a `bytearray`; `bytes([ints])` → from a
+    /// list of ints. The conversion bridge to the IMMUTABLE form. Mirrors the VM's `builtin_bytes`.
+    fn builtin_bytes(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+        let bytes: Vec<u8> = match args.as_slice() {
+            [one] => self.collect_bytes_arg("bytes", one, span)?,
+            _ => return Err(RuntimeError { message: format!("bytes() expects 1 argument, got {}", args.len()), span }),
+        };
+        Ok(Value::Bytes(bytes.into()))
+    }
+
+    /// Built-in methods on a `bytearray`: `len`, `push(int 0..=255)`, `pop() -> Option[int]`,
+    /// `extend(bytes|bytearray|list[int])`. Mirrors the VM's `bytearray_method` and the checker's
+    /// `bytearray_method_sig`. Mutators write IN PLACE via the shared `Rc<RefCell>` (`borrow_mut`).
+    fn eval_bytearray_method(
+        &mut self,
+        buf: &std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+        method: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            "len" => {
+                builtins::arity("len", &args, 0, span)?;
+                Ok(Value::Int(buf.borrow().len() as i64))
+            }
+            "push" => {
+                builtins::arity("push", &args, 1, span)?;
+                let byte = match args[0] {
+                    Value::Int(n) if (0..=255).contains(&n) => n as u8,
+                    Value::Int(n) => return Err(RuntimeError { message: format!("byte value {n} out of range (must be 0..=255)"), span }),
+                    ref other => return Err(RuntimeError { message: format!("push() expects an int, got {}", other.type_name()), span }),
+                };
+                buf.borrow_mut().push(byte);
+                Ok(Value::Nil)
+            }
+            "pop" => {
+                builtins::arity("pop", &args, 0, span)?;
+                let popped = buf.borrow_mut().pop();
+                Ok(match popped {
+                    Some(x) => enum_val("Option", "Some", vec![Value::Int(x as i64)]),
+                    None => enum_val("Option", "None", vec![]),
+                })
+            }
+            "extend" => {
+                builtins::arity("extend", &args, 1, span)?;
+                // Snapshot/validate the other side first (so `ba.extend(ba)` terminates).
+                let appended = self.collect_bytes_arg("extend", &args[0], span)?;
+                buf.borrow_mut().extend_from_slice(&appended);
+                Ok(Value::Nil)
+            }
+            _ => Err(RuntimeError { message: format!("type bytearray has no method '{method}'"), span }),
+        }
     }
 
     /// Built-in methods on `map[K, V]`. Mirrors the VM's `core_method` Map arm and the checker's
@@ -3751,6 +3891,40 @@ impl Interp {
                         });
                     }
                 };
+                // `ba[i] = x` — the mutable byte buffer. Value must be an int 0..=255 (else a
+                // recoverable fault); index must be in range. Mutation flows through the shared
+                // `Rc<RefCell>` so a second binding observes it. Mirrors the VM's `set_index` arm.
+                if let Value::ByteArray(buf) = &target_val {
+                    let bounds_check = |idx: i64, len: usize| {
+                        crate::slice::norm_index(idx, len).ok_or_else(|| RuntimeError {
+                            message: format!("index {idx} out of bounds (len {len})"),
+                            span,
+                        })
+                    };
+                    let new_val = match op.to_binop() {
+                        None => self.eval(value)?,
+                        Some(bin) => {
+                            let i = bounds_check(idx, buf.borrow().len())?;
+                            let cur = Value::Int(buf.borrow()[i] as i64);
+                            let rhs = self.eval(value)?;
+                            eval_binary(bin, cur, rhs, span)?
+                        }
+                    };
+                    let byte = match new_val {
+                        Value::Int(n) if (0..=255).contains(&n) => n as u8,
+                        Value::Int(n) => return Err(RuntimeError {
+                            message: format!("byte value {n} out of range (must be 0..=255)"),
+                            span,
+                        }),
+                        other => return Err(RuntimeError {
+                            message: format!("expected int, found {}", other.type_name()),
+                            span,
+                        }),
+                    };
+                    let i = bounds_check(idx, buf.borrow().len())?;
+                    buf.borrow_mut()[i] = byte;
+                    return Ok(());
+                }
                 let Value::List(items) = &target_val else {
                     return Err(RuntimeError {
                         message: format!("cannot index {}", target_val.type_name()),
@@ -4212,8 +4386,10 @@ fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec
         Value::Set(s) => s.borrow().entries.iter().map(|(_, e)| vec![e.clone()]).collect(),
         // Strings iterate as 1-char strings (Python-style; the checker binds a single str var).
         Value::Str(s) => s.chars().map(|c| vec![Value::Str(c.to_string().into())]).collect(),
-        // `bytes` iterates as `int`s (0–255).
+        // `bytes`/`bytearray` iterate as `int`s (0–255). The `bytearray` snapshots its bytes so a
+        // mutation during the loop does not change the iteration sequence (matches the VM).
         Value::Bytes(b) => b.iter().map(|&x| vec![Value::Int(x as i64)]).collect(),
+        Value::ByteArray(b) => b.borrow().iter().map(|&x| vec![Value::Int(x as i64)]).collect(),
         other => {
             return Err(RuntimeError {
                 message: format!("cannot iterate over {}", other.type_name()),
@@ -4497,8 +4673,11 @@ fn compare(l: &Value, r: &Value) -> Option<std::cmp::Ordering> {
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
         (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
-        // `bytes` order lexicographically by byte (Python parity).
+        // `bytes`/`bytearray` order lexicographically by byte (Python parity), incl. cross-type.
         (Value::Bytes(a), Value::Bytes(b)) => Some(a.cmp(b)),
+        (Value::ByteArray(a), Value::ByteArray(b)) => Some(a.borrow().cmp(&b.borrow())),
+        (Value::Bytes(a), Value::ByteArray(b)) => Some(a.as_ref().cmp(b.borrow().as_slice())),
+        (Value::ByteArray(a), Value::Bytes(b)) => Some(a.borrow().as_slice().cmp(b.as_ref())),
         (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
             as_f64(l).partial_cmp(&as_f64(r))
         }
@@ -4690,6 +4869,11 @@ pub(super) fn values_equal_guarded(
             }
             Ok(true)
         }
+        // Cross-type `bytes == bytearray` is content-equal (Python parity: `b"a" == bytearray(b"a")`
+        // is true). Same-type `Bytes`/`ByteArray` equality falls through to the derived `PartialEq`
+        // in the default arm (which compares contents).
+        (Value::Bytes(a), Value::ByteArray(b)) => Ok(a.as_ref() == b.borrow().as_slice()),
+        (Value::ByteArray(a), Value::Bytes(b)) => Ok(a.borrow().as_slice() == b.as_ref()),
         // Non-recursive kinds (Bool, Str, Nil, Func, Closure, Module, Native, Channel/Shared/Executor
         // handles) — derived `PartialEq` does not recurse through user data here.
         _ => Ok(l == r),
@@ -6946,5 +7130,67 @@ mod module_tests {
             "main()\n"
         );
         assert_eq!(run_capture(src).expect("interp"), "b'hi\\n'\nb'\\xff'\n1\n2\n");
+    }
+
+    // ===== bytearray type (interp side — must match the VM byte-for-byte) =====
+
+    #[test]
+    fn interp_bytearray_ops() {
+        let src = concat!(
+            "fn main():\n",
+            "    print(bytearray())\n",
+            "    print(bytearray(3))\n",
+            "    print(bytearray(b\"\\x01\\x02\"))\n",
+            "    ba := bytearray([1, 2, 3])\n",
+            "    print(ba)\n",
+            "    print(ba[0])\n",
+            "    print(ba[-1])\n",
+            "    print(ba[::-1])\n",
+            "    s := 0\n",
+            "    for x in ba:\n",
+            "        s = s + x\n",
+            "    print(s)\n",
+            "    print(len(ba))\n",
+            "    ba.push(4)\n",
+            "    print(ba)\n",
+            "    print(ba.pop())\n",
+            "    ba.extend(b\"\\xFF\")\n",
+            "    ba.extend([7, 8])\n",
+            "    print(ba)\n",
+            "    print(bytearray([1]) == bytearray([1]))\n",
+            "    print(bytearray([1]) != bytearray([2]))\n",
+            "main()\n"
+        );
+        assert_eq!(
+            run_capture(src).expect("interp"),
+            "bytearray(b'')\nbytearray(b'\\x00\\x00\\x00')\nbytearray(b'\\x01\\x02')\nbytearray(b'\\x01\\x02\\x03')\n1\n3\nbytearray(b'\\x03\\x02\\x01')\n6\n3\nbytearray(b'\\x01\\x02\\x03\\x04')\nSome(4)\nbytearray(b'\\x01\\x02\\x03\\xff\\x07\\x08')\ntrue\ntrue\n"
+        );
+    }
+
+    #[test]
+    fn interp_bytearray_shared_mutation() {
+        // Two bindings to the same bytearray observe each other's in-place writes (Rc<RefCell>).
+        let src = concat!(
+            "fn main():\n",
+            "    ba := bytearray([1, 2, 3])\n",
+            "    ba2 := ba\n",
+            "    ba[0] = 65\n",
+            "    print(ba2[0])\n",
+            "    ba2[1] = 66\n",
+            "    print(ba[1])\n",
+            "main()\n"
+        );
+        assert_eq!(run_capture(src).expect("interp"), "65\n66\n");
+    }
+
+    // bytearray golden (interp side): `examples/bytearray.chz` must produce exactly `.expected`.
+    #[test]
+    fn golden_bytearray_chz() {
+        let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/bytearray.chz");
+        let expected = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/bytearray.expected"),
+        )
+        .expect("bytearray.expected should exist");
+        assert_eq!(run_ok(&entry), expected);
     }
 }

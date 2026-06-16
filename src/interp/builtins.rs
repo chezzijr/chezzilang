@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 /// The names handled here. Used so the interpreter can tell a builtin call from a user call.
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name, "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set")
+    matches!(name, "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set" | "bytes" | "bytearray")
 }
 
 /// Dispatch a builtin by name. Caller guarantees `is_builtin(name)`.
@@ -292,6 +292,7 @@ fn len(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         Value::List(items) => Ok(Value::Int(items.borrow().len() as i64)),
         Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
         Value::Bytes(b) => Ok(Value::Int(b.len() as i64)),
+        Value::ByteArray(b) => Ok(Value::Int(b.borrow().len() as i64)),
         other => Err(RuntimeError {
             message: format!("len() expects a list, str, or bytes, got {}", other.type_name()),
             span,

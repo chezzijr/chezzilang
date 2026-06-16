@@ -1,0 +1,26 @@
+bytearray(b'')
+bytearray(b'\x00\x00\x00')
+bytearray(b'\x01\x02')
+bytearray(b'\x01\x02\x03\xff')
+bytearray(b'\x01\x02\x03\xff')
+interp: bytearray(b'\x01\x02\x03\xff')
+1
+255
+65
+66
+bytearray(b'\xff\x03BA')
+bytearray(b'A\x03')
+389
+4
+bytearray(b'AB\x03\xff\n')
+Some(10)
+bytearray(b'AB\x03\xff\xaa\x07\x08')
+true
+true
+true
+true
+b'\x01\x02\x03'
+bytearray(b'c\x02\x03')
+b'\x01\x02\x03'
+caught oob write
+caught bad value

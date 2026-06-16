@@ -200,8 +200,17 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
   `\xHH` escapes): `b[i]` -> `int` 0-255 (Index protocol), `b[a:b:c]` -> `bytes` (Slice protocol, byte
   offsets), `for x in b` yields `int`, `len(b)` is the byte count, `==`/`!=` are structural, and
   `bytes` is `Hashable` (valid map/set key). `str(b)` / `print(b)` / interpolation use the Python
-  `b'...'` repr. Immutable (no `b[i] = x`); non-goals: a mutable `bytearray`, encode/decode codecs
-  (base64/hex are a separate `std.*` gap), and methods beyond the table + Display.
+  `b'...'` repr. Immutable (no `b[i] = x`). **`bytearray`** is the **mutable sibling** (Python
+  `bytearray` model), **shipped**: constructor-only (`bytearray()` empty, `bytearray(N)` N zero bytes,
+  `bytearray(b)`/`bytearray([ints])` from a bytes/list[int]) — no `ba"..."` literal. `ba[i]` -> `int`,
+  `ba[i] = x` mutates in place (`IndexSet`; value 0–255), `ba[a:b:c]` -> a new `bytearray`,
+  `for x in ba` yields `int`, `len`, `.push(int)` / `.pop() -> Option[int]` / `.extend(bytes|bytearray|
+  list[int])`, `==` structural (incl. cross-type `bytes == bytearray` content-equal, Python parity).
+  `bytearray` is **NOT** `Hashable` (mutable ⇒ not a map/set key, like `list`); its repr is
+  `bytearray(b'...')`. The conversion bridge moves between the forms: `bytes(ba)` snapshots,
+  `bytearray(b)` copies. Crosses the `--parallel` airlock by value (deep copy, like `list`).
+  Remaining non-goals: a `byte`/`u8` scalar, encode/decode codecs (base64/hex are a separate `std.*`
+  gap), and byte-sequence methods beyond the tables + Display.
 - **Std modules — M8 (shipped):** `std.json` (pure-Chezzi `Json` enum + `parse`/`stringify`/
   accessors **and** type-directed `json.decode[T](s)` into a struct/map/list/scalar);
   `std.process` (`cmd(s) -> Result[str]`); `std.fs` (`list_dir`/`exists`/`is_file`/`is_dir`/
