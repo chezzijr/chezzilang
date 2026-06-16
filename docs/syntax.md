@@ -34,9 +34,22 @@ true  false   # bool
 '''it's "ok"'''  # str — triple single-quote, equivalent
 "hi {name}"   # str with interpolation — see §10
 "emoji \u{1F600}, A=\u{41}"   # str — \u{HEX} unicode escape (1-6 hex digits)
+b"\x01\x02AB"  # bytes — byte-string literal; \xHH hex byte + \n \t \r \\ \" \' \0; no \u, no interp
+b'\xff'       # bytes — single quotes / uppercase B'…' both work; raw byte >=0x80 must use \xHH
 [1, 2, 3]     # list[int]
 {"a": 1}      # map[str, int]
 ```
+
+**`bytes` — immutable byte sequence (Python `bytes` model).** A `b"..."` / `b'...'` literal holds raw
+bytes (the lexer applies escapes + strips the `b` prefix). Accepted escapes: `\xHH` (exactly two hex
+digits → one byte `0x00`–`0xFF`, the only way to write a byte ≥ 0x80) plus `\n \t \r \\ \" \' \0`.
+`\u{…}` is **rejected** (a byte literal is byte-exact, not UTF-8), as is a raw non-ASCII source char.
+No interpolation. Operations: `b[i]` → `int` 0–255 (Index protocol; out-of-range is a recoverable
+panic), `b[a:b:c]` → `bytes` (Slice protocol over byte offsets — open bounds / step / reverse /
+negative), `for x in b` yields `int`, `len(b)` is the byte count, `==`/`!=` are structural, and `bytes`
+is `Hashable` (valid `map`/`set` key). `str(b)` / `print(b)` / interpolation use the Python `b'...'`
+repr (printable ASCII literal, others `\xHH`). `bytes` is immutable — `b[i] = x` is a type error. Not
+yet: a mutable `bytearray`, a `byte`/`u8` scalar, or encode/decode codecs (base64/hex).
 
 **Multi-line literals & trailing commas.** Inside `[]`, `{}`, and `()` the layout (newlines /
 indentation) is suppressed, so a collection literal, a call's arguments, or a function's parameter
@@ -108,6 +121,7 @@ a, b = compute()                         # compute() returns (int, int)
 | `float` | `3.14` | 64-bit |
 | `bool` | `true` | |
 | `str` | `"hi"` | UTF-8 |
+| `bytes` | `b"\x01AB"` | immutable byte sequence; `b[i]`→int, `b[a:b:c]`→bytes, iterates int; `Hashable` |
 | `list[T]` | `[1, 2]` | growable |
 | `map[K, V]` | `{"a": 1}` | insertion-ordered hash map; `K` is any `Hashable` type |
 | `set[T]` | `{1, 2, 3}` | deduped, insertion-ordered hash set; `T` any `Hashable` type; empty is `set()` |

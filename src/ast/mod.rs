@@ -402,6 +402,8 @@ pub enum ExprKind {
     Int(i64),
     Float(f64),
     Str(String), // raw contents; interpolation parsing deferred
+    /// `b"..."` — a byte-string literal: the resolved raw bytes. No interpolation (unlike `Str`).
+    Bytes(Vec<u8>),
     Bool(bool),
     Ident(String),
     /// `[a, b, c]`
@@ -593,6 +595,7 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
         ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::Str(_)
+        | ExprKind::Bytes(_)
         | ExprKind::Bool(_)
         | ExprKind::Ident(_) => {}
         ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => es.iter().for_each(go),

@@ -3301,6 +3301,12 @@ impl Vm {
                 };
                 self.push(Value::Obj(h));
             }
+            Op::ConstBytes(b) => {
+                // Not interned in v1 (unlike `ConstStr`): allocate a fresh `bytes` heap object per
+                // push, like a list literal. Bytes literals are not a hot path.
+                let h = self.heap.alloc(Obj::Bytes(b.clone()));
+                self.push(Value::Obj(h));
+            }
             Op::True => self.push(Value::Bool(true)),
             Op::False => self.push(Value::Bool(false)),
             Op::Nil => self.push(Value::Nil),
@@ -3657,6 +3663,12 @@ impl Vm {
                             let chars: Vec<char> = s.chars().collect();
                             let items: Vec<Value> =
                                 chars.into_iter().map(|c| self.alloc_char(c)).collect();
+                            let nh = self.heap.alloc(Obj::List(items));
+                            self.push(Value::Obj(nh));
+                        }
+                        // `bytes` iterates as `int`s (0–255).
+                        Obj::Bytes(b) => {
+                            let items: Vec<Value> = b.iter().map(|&x| Value::Int(x as i64)).collect();
                             let nh = self.heap.alloc(Obj::List(items));
                             self.push(Value::Obj(nh));
                         }
@@ -4248,7 +4260,7 @@ impl Vm {
             // A struct key dispatches its user `hash()` (re-entrant). Everything else is scalar.
             Value::Obj(h) => match self.heap.get(h) {
                 Obj::Struct { .. } => self.struct_hash(v, span),
-                Obj::Str(_) => Ok(self.scalar_hash(v)),
+                Obj::Str(_) | Obj::Bytes(_) => Ok(self.scalar_hash(v)),
                 _ => Err(self.err(format!("{} is not hashable (cannot be a map/set key)", self.type_name(v)), span)),
             },
             _ => Ok(self.scalar_hash(v)),
@@ -4271,6 +4283,13 @@ impl Vm {
                 Obj::Str(s) => {
                     let mut hr = std::collections::hash_map::DefaultHasher::new();
                     s.as_bytes().hash(&mut hr);
+                    hr.finish()
+                }
+                // `bytes` is Hashable (immutable, value-compared). Hash the raw slice — mandatory so
+                // `map[bytes, T]`/`set[bytes]` keys distribute instead of all colliding on `0`.
+                Obj::Bytes(b) => {
+                    let mut hr = std::collections::hash_map::DefaultHasher::new();
+                    b.as_ref().hash(&mut hr);
                     hr.finish()
                 }
                 _ => 0,
@@ -4401,6 +4420,8 @@ impl Vm {
             (a, b) if is_numeric(a) && is_numeric(b) => as_f64(a).partial_cmp(&as_f64(b)),
             (Value::Obj(ha), Value::Obj(hb)) => match (self.heap.get(ha), self.heap.get(hb)) {
                 (Obj::Str(a), Obj::Str(b)) => Some(a.cmp(b)),
+                // `bytes` order lexicographically by byte (Python parity).
+                (Obj::Bytes(a), Obj::Bytes(b)) => Some(a.cmp(b)),
                 _ => None,
             },
             _ => None,
@@ -4433,6 +4454,7 @@ impl Vm {
                 // recursing through `&self` methods (mirrors the borrow discipline of the seq paths).
                 match (self.heap.get(ha), self.heap.get(hb)) {
                     (Obj::Str(a), Obj::Str(b)) => Ok(a == b),
+                    (Obj::Bytes(a), Obj::Bytes(b)) => Ok(a == b),
                     (Obj::List(a), Obj::List(b)) => {
                         if a.len() != b.len() {
                             return Ok(false);
@@ -7641,6 +7663,9 @@ impl Vm {
                 // boundary; immutable + value-compared, so a fresh handle on reconstruction is
                 // observationally identical to sharing this one.
                 Obj::Str(s) => WireValue::Str(s.as_str().into()),
+                // `bytes` crosses by value (owned raw bytes), exactly like `str` — immutable +
+                // value-compared, so a fresh handle on reconstruction is observationally identical.
+                Obj::Bytes(b) => WireValue::Bytes(b.clone()),
                 // By-reference callables: cross as the existing handle (matches the old deep_clone arm).
                 Obj::Func { .. }
                 | Obj::Closure { .. }
@@ -7742,6 +7767,8 @@ impl Vm {
             WireValue::Nil => Value::Nil,
             // B3.3a: rebuild a fresh heap `str` from the owned bytes (by value, not the old handle).
             WireValue::Str(s) => Value::Obj(self.heap.alloc(Obj::Str(s.into()))),
+            // Rebuild a fresh heap `bytes` from the owned raw bytes (by value, like `str`).
+            WireValue::Bytes(b) => Value::Obj(self.heap.alloc(Obj::Bytes(b))),
             WireValue::Handle(h) => Value::Obj(h),
             // B3.1: rebuild a fresh heap handle onto the SAME shared core (`Arc` already cloned in
             // `to_wire`). Not registered in `self.executors` — the original `NewExecutor` handle there
@@ -8186,13 +8213,14 @@ impl Vm {
             // Leaf data / cores are handled by the fast path; if `to_wire` ever errored above we land
             // here for a `str`/core (always sendable) — encode its wire form.
             Obj::Str(_)
+            | Obj::Bytes(_)
             | Obj::Channel(_)
             | Obj::Shared(_)
             | Obj::Atomic(_)
             | Obj::Executor(_)
             | Obj::Socket(_)
             | Obj::Listener(_) => {
-                SnapValue::Wire(self.to_wire(v).expect("str / channel / shared / atomic / executor / socket is always sendable"))
+                SnapValue::Wire(self.to_wire(v).expect("str / bytes / channel / shared / atomic / executor / socket is always sendable"))
             }
             // Experimental generators are not sendable and are never legal as a module global crossing
             // to an M:N worker — reaching here means one was smuggled past the checker.
@@ -9826,6 +9854,7 @@ impl Vm {
         enum Sliced {
             List(Vec<Value>),
             Str(String),
+            Bytes(Vec<u8>),
             Struct,
         }
         let sliced = match self.heap.get(h) {
@@ -9837,6 +9866,12 @@ impl Vm {
                 let chars: Vec<char> = string.chars().collect();
                 let idxs = crate::slice::slice_indices(s, e, st, chars.len()).map_err(|m| self.err(m.to_string(), span))?;
                 Sliced::Str(idxs.iter().map(|&i| chars[i]).collect())
+            }
+            // `bytes[a:b:c]` slices over BYTE offsets and yields a new `bytes` (open bounds / step /
+            // reverse / negative all via the shared `slice_indices`, exactly like list/str).
+            Obj::Bytes(b) => {
+                let idxs = crate::slice::slice_indices(s, e, st, b.len()).map_err(|m| self.err(m.to_string(), span))?;
+                Sliced::Bytes(idxs.iter().map(|&i| b[i]).collect())
             }
             Obj::Struct { .. } => Sliced::Struct,
             _ => return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span)),
@@ -9852,6 +9887,10 @@ impl Vm {
             }
             Sliced::Str(sub) => {
                 let nh = self.heap.alloc(Obj::Str(sub.into()));
+                self.push(Value::Obj(nh));
+            }
+            Sliced::Bytes(sub) => {
+                let nh = self.heap.alloc(Obj::Bytes(sub.into_boxed_slice()));
                 self.push(Value::Obj(nh));
             }
             Sliced::Struct => {
@@ -9928,6 +9967,16 @@ impl Vm {
                         None => Err(self.err(format!("index {n} out of bounds (len {})", items.len()), span)),
                     };
                 }
+                // `bytes[i]` → `int` (0–255); out-of-range faults recoverably (like list/str).
+                Obj::Bytes(b) => {
+                    return match crate::slice::norm_index(n, b.len()).map(|i| b[i] as i64) {
+                        Some(v) => {
+                            self.push(Value::Int(v));
+                            Ok(())
+                        }
+                        None => Err(self.err(format!("index {n} out of bounds (len {})", b.len()), span)),
+                    };
+                }
                 Obj::Map(_) => {
                     let hk = self.scalar_hash(key);
                     let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
@@ -9972,6 +10021,16 @@ impl Vm {
                         Ok(())
                     }
                     None => Err(self.err(format!("index {idx} out of bounds (len {})", chars.len()), span)),
+                }
+            }
+            Obj::Bytes(b) => {
+                let idx = int_idx(self)?;
+                match crate::slice::norm_index(idx, b.len()).map(|i| b[i] as i64) {
+                    Some(v) => {
+                        self.push(Value::Int(v));
+                        Ok(())
+                    }
+                    None => Err(self.err(format!("index {idx} out of bounds (len {})", b.len()), span)),
                 }
             }
             Obj::Map(_) => {
@@ -10251,9 +10310,10 @@ impl Vm {
             Value::Obj(h) => match self.heap.get(h) {
                 Obj::List(items) => Ok(Value::Int(items.len() as i64)),
                 Obj::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
-                _ => Err(self.err(format!("len() expects a list or str, got {}", self.type_name(args[0])), span)),
+                Obj::Bytes(b) => Ok(Value::Int(b.len() as i64)),
+                _ => Err(self.err(format!("len() expects a list, str, or bytes, got {}", self.type_name(args[0])), span)),
             },
-            other => Err(self.err(format!("len() expects a list or str, got {}", self.type_name(other)), span)),
+            other => Err(self.err(format!("len() expects a list, str, or bytes, got {}", self.type_name(other)), span)),
         }
     }
 
@@ -10404,6 +10464,7 @@ impl Vm {
             Value::Nil => "nil",
             Value::Obj(h) => match self.heap.get(h) {
                 Obj::Str(_) => "str",
+                Obj::Bytes(_) => "bytes",
                 Obj::List(_) => "list",
                 Obj::Tuple(_) => "tuple",
                 Obj::Map(_) => "map",
@@ -10448,6 +10509,8 @@ impl Vm {
             Value::Nil => Ok("nil".to_string()),
             Value::Obj(h) => match self.heap.get(h) {
                 Obj::Str(s) => Ok(s.to_string()),
+                // Python `bytes` repr `b'...'` — shared with the interp via `slice::bytes_repr`.
+                Obj::Bytes(b) => Ok(crate::slice::bytes_repr(b)),
                 Obj::List(items) => {
                     let mut parts = Vec::with_capacity(items.len());
                     for v in items {
@@ -10542,6 +10605,7 @@ impl Vm {
             WireValue::Bool(b) => b.to_string(),
             WireValue::Nil => "nil".to_string(),
             WireValue::Str(s) => s.to_string(),
+            WireValue::Bytes(b) => crate::slice::bytes_repr(b),
             WireValue::Handle(h) => self.display(Value::Obj(*h)),
             WireValue::List(items) => {
                 let inner = items.iter().map(|v| self.display_wire(v)).collect::<Vec<_>>().join(", ");
@@ -10683,6 +10747,8 @@ impl Vm {
         // Clone the object's shape out so no heap borrow is held across the nested `&mut self` calls.
         match self.heap.get(h).clone() {
             Obj::Str(s) => out.push_str(&s),
+            // `bytes` interpolates/prints as its Python `b'...'` repr (shared helper, engine-parity).
+            Obj::Bytes(b) => out.push_str(&crate::slice::bytes_repr(&b)),
             Obj::List(items) => {
                 out.push('[');
                 self.stringify_seq_into(out, &items, span, depth + 1)?;
@@ -16035,6 +16101,19 @@ main()";
     fn golden_literals_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/literals.chz");
         let expected = include_str!("../../examples/literals.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// bytes golden: `examples/bytes.chz` (the full operation table — `b"..."` literal with `\xHH`
+    /// escapes, index→int, slice→bytes incl. reverse/step/negative, for-loop→int, len, ==/!=, a map
+    /// key, an out-of-range index under `recover:`, and the `b'...'` Display/str()/interp repr)
+    /// byte-identical on the VM, the interpreter, and its `.expected` (three-engine parity gate).
+    #[test]
+    fn golden_bytes_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/bytes.chz");
+        let expected = include_str!("../../examples/bytes.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
@@ -22136,5 +22215,89 @@ fn main():
 main()";
         assert_parity_out(src, "42\n");
         assert_eq!(run_capture_parallel(src).expect("parallel"), "42\n", "--parallel capture wire");
+    }
+
+    // ===== bytes type =====
+
+    #[test]
+    fn vm_bytes_ops() {
+        // Index → int, negative index, reverse slice → bytes (repr), for-loop sum, len, ==/!=.
+        let src = concat!(
+            "fn main():\n",
+            "    b := b\"\\x01\\x02\\x03\"\n",
+            "    print(b[0])\n",          // 1
+            "    print(b[-1])\n",         // 3
+            "    print(b[::-1])\n",       // b'\x03\x02\x01'
+            "    s := 0\n",
+            "    for x in b:\n",
+            "        s = s + x\n",
+            "    print(s)\n",             // 6
+            "    print(len(b))\n",        // 3
+            "    print(b\"ab\" == b\"ab\")\n",  // true
+            "    print(b\"ab\" == b\"ac\")\n",  // false
+            "    print(b\"ab\" != b\"ac\")\n",  // true
+            "main()\n"
+        );
+        assert_parity(src);
+        assert_eq!(run_capture(src).expect("vm"), "1\n3\nb'\\x03\\x02\\x01'\n6\n3\ntrue\nfalse\ntrue\n");
+    }
+
+    #[test]
+    fn vm_bytes_index_out_of_range_recoverable() {
+        // An out-of-range index faults recoverably (catchable by `recover:`), like list/str.
+        let src = concat!(
+            "fn main():\n",
+            "    b := b\"\\x01\\x02\"\n",
+            "    x := recover:\n",
+            "        b[9]\n",
+            "    match x:\n",
+            "        Ok(v): print(v)\n",
+            "        Err(e): print(\"caught\")\n",
+            "main()\n"
+        );
+        assert_parity(src);
+        assert_eq!(run_capture(src).expect("vm"), "caught\n");
+    }
+
+    #[test]
+    fn vm_bytes_repr_and_map_key() {
+        // Display/str repr is Python b'...'; bytes works as a map key (Hashable).
+        let src = concat!(
+            "fn main():\n",
+            "    print(b\"hi\\n\")\n",          // b'hi\n'
+            "    print(str(b\"\\xFF\"))\n",      // b'\xff'
+            "    m := {b\"a\": 1, b\"b\": 2}\n",
+            "    print(m[b\"a\"])\n",            // 1
+            "    print(m[b\"b\"])\n",            // 2
+            "main()\n"
+        );
+        assert_parity(src);
+        assert_eq!(run_capture(src).expect("vm"), "b'hi\\n'\nb'\\xff'\n1\n2\n");
+    }
+
+    #[test]
+    fn vm_bytes_slice_step_parity() {
+        let src = "print(b\"\\x00\\x01\\x02\\x03\\x04\"[1:4:2])\nprint(b\"abc\"[1:])\n";
+        assert_parity(src);
+    }
+
+    #[test]
+    fn bytes_crosses_channel() {
+        // `bytes` is fully value-typed and sendable — it crosses the --parallel airlock via
+        // WireValue::Bytes and reconstructs as a fresh heap `bytes` (Python b'...' repr preserved).
+        // Buffer-then-drain (send before recv) so all THREE engines agree — the sequential interp
+        // cannot block a consumer mid-flight on a live producer (a C5 limitation, not bytes-specific).
+        let src = concat!(
+            "fn main():\n",
+            "    ch := Channel[bytes]()\n",
+            "    parallel:\n",
+            "        spawn ch.send(b\"\\x01\\x02\")\n",
+            "    print(ch.recv())\n",
+            "main()\n"
+        );
+        // Three-engine parity: cooperative VM, --parallel M:N, and interp all agree.
+        assert_parity(src);
+        assert_eq!(run_capture(src).expect("vm"), "b'\\x01\\x02'\n");
+        assert_eq!(run_capture_parallel(src).expect("parallel"), "b'\\x01\\x02'\n");
     }
 }

@@ -186,6 +186,10 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Str(Rc<str>),
+    /// `bytes` — an immutable heap byte sequence (Python `bytes` model). Shared by `Rc` (no
+    /// `RefCell`: bytes never mutate), like `Str`. Indexes/iterates to `int` (0–255); slices to
+    /// `bytes`. Value-compared structurally; `Display` is the Python `b'...'` repr.
+    Bytes(Rc<[u8]>),
     /// `[a, b, c]` — growable, shared by reference.
     List(Rc<RefCell<Vec<Value>>>),
     /// `(a, b, …)` — a fixed-arity, immutable tuple. Shared by `Rc` (no `RefCell`: tuples never
@@ -290,6 +294,7 @@ impl Value {
             Value::Float(_) => "float",
             Value::Bool(_) => "bool",
             Value::Str(_) => "str",
+            Value::Bytes(_) => "bytes",
             Value::List(_) => "list",
             Value::Tuple(_) => "tuple",
             Value::Map(_) => "map",
@@ -317,6 +322,8 @@ impl std::fmt::Display for Value {
             Value::Float(x) => write!(f, "{}", format_float(*x)),
             Value::Bool(b) => write!(f, "{b}"),
             Value::Str(s) => write!(f, "{s}"),
+            // Python `bytes` repr `b'...'` — shared with the VM via `slice::bytes_repr` for parity.
+            Value::Bytes(b) => write!(f, "{}", crate::slice::bytes_repr(b)),
             Value::List(items) => {
                 let inner = items
                     .borrow()

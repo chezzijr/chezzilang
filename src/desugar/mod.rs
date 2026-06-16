@@ -291,7 +291,7 @@ fn default_referenced_name(e: &Expr, names: &HashSet<&str>) -> Option<String> {
 fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
     match &e.kind {
         ExprKind::Ident(n) => f(n),
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {}
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bytes(_) | ExprKind::Bool(_) => {}
         ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
             xs.iter().for_each(|x| walk_idents(x, f))
         }
@@ -738,6 +738,7 @@ impl Walker<'_> {
             ExprKind::Int(_)
             | ExprKind::Float(_)
             | ExprKind::Str(_)
+            | ExprKind::Bytes(_)
             | ExprKind::Bool(_)
             | ExprKind::Ident(_) => {}
         }

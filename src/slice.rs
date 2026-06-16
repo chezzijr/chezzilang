@@ -74,9 +74,47 @@ pub fn slice_indices(
     Ok(out)
 }
 
+/// Python `bytes` `repr`: `b'...'` with printable ASCII shown literally, `\n \t \r \\ \'` escaped,
+/// and every other byte as `\xHH` (lowercase hex). Shared by BOTH engines (VM `display_guarded` and
+/// interp `display_value`) so the `b'...'` representation is byte-identical across the engines —
+/// `str(bytes)`, interpolation, and bare `print(bytes)` all route through this one function.
+pub fn bytes_repr(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() + 3);
+    out.push('b');
+    out.push('\'');
+    for &b in bytes {
+        match b {
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            b'\r' => out.push_str("\\r"),
+            b'\\' => out.push_str("\\\\"),
+            b'\'' => out.push_str("\\'"),
+            // Printable ASCII (space..=~, the escapes above already handled) prints literally.
+            0x20..=0x7E => out.push(b as char),
+            // Everything else (control chars, ≥0x80) as `\xHH`.
+            _ => {
+                let _ = write!(out, "\\x{b:02x}");
+            }
+        }
+    }
+    out.push('\'');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_repr_python_style() {
+        assert_eq!(bytes_repr(b""), "b''");
+        assert_eq!(bytes_repr(b"hi"), "b'hi'");
+        assert_eq!(bytes_repr(b"hi\n"), "b'hi\\n'");
+        assert_eq!(bytes_repr(&[0xFF]), "b'\\xff'");
+        assert_eq!(bytes_repr(&[0x00, 0x01]), "b'\\x00\\x01'");
+        assert_eq!(bytes_repr(b"a'b"), "b'a\\'b'");
+    }
 
     fn idx(start: Option<i64>, end: Option<i64>, step: Option<i64>, len: usize) -> Vec<usize> {
         slice_indices(start, end, step, len).unwrap()

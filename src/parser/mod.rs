@@ -1716,6 +1716,7 @@ impl Parser {
             Token::Int(n) => ExprKind::Int(n),
             Token::Float(f) => ExprKind::Float(f),
             Token::Str(s) => ExprKind::Str(s),
+            Token::Bytes(b) => ExprKind::Bytes(b),
             Token::True => ExprKind::Bool(true),
             Token::False => ExprKind::Bool(false),
             Token::Ident(name) => ExprKind::Ident(name),
@@ -1963,6 +1964,7 @@ fn describe(tok: &Token) -> String {
         Int(n) => return format!("integer {n}"),
         Float(f) => return format!("float {f}"),
         Str(_) => "a string literal",
+        Bytes(_) => "a byte-string literal",
         // keywords print as their lowercase source spelling
         other => return format!("'{}'", format!("{other:?}").to_lowercase()),
     };

@@ -86,6 +86,9 @@ pub enum Op {
     ConstInt(i64),
     ConstFloat(f64),
     ConstStr(String),
+    /// Push a fresh `bytes` heap object from a `b"..."` literal's raw bytes. Parallel to
+    /// `ConstStr`; not interned in v1 (allocates per execution, like a list literal).
+    ConstBytes(Box<[u8]>),
     True,
     False,
     Nil,

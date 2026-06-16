@@ -1,0 +1,18 @@
+b'\x01\x02\x03\xff'
+b'hi\n'
+interp: b'AB'
+1
+255
+255
+b'\x02\x03'
+b'\xff\x03\x02\x01'
+b'\x01\x03'
+b'\x03\xff'
+261
+4
+true
+false
+true
+10
+20
+caught out-of-range
