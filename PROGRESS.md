@@ -11,6 +11,38 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ `bytes` — immutable byte-sequence type (owner-requested; the Tier-A pre-JIT `Value`/`Obj`-variant
+must-do from `gaps.md`, Python `bytes` model — NOT a new scalar).** A heap byte sequence threaded
+through the existing `str`-shaped paths, reusing every protocol mechanism (no new ops/abstractions
+beyond a `b"..."` literal + the const op):
+
+- **Literal `b"..."` / `b'...'` (lexer-only, like the radix int literals).** `Token::Bytes(Vec<u8>)`;
+  prefix fires ONLY when `b`/`B` is immediately followed by a quote (`b + 1` and `by` stay
+  identifiers). Escapes: `\xHH` (exactly two hex digits → one byte 0x00–0xFF, the only way to write a
+  byte ≥0x80) + `\n \t \r \\ \" \' \0`. **Rejects** `\u{…}` ("\\u not allowed in a byte literal") and a
+  raw non-ASCII source char ("non-ASCII byte in byte literal"). Triple-quoted `b"""…"""` supported.
+- **Type `bytes`** (`Ty::Bytes`): literal infers `bytes`; `b[i]`→`int` (Index protocol, M15), `b[a:b:c]`
+  →`bytes` (Slice protocol over BYTE offsets, `src/slice.rs`), `for x in b` yields `int`, `len(b)` = byte
+  count, `==`/`!=` structural, `Hashable` (valid `map`/`set` key). Immutable — `b[i]=x` is a type error
+  (no `IndexSet`). Sendable (crosses the `--parallel` airlock by value, `WireValue::Bytes`).
+- **Runtime, BOTH engines (three-engine parity is mandatory — this is a new feature landing on both,
+  the sanctioned exception to "don't touch interp").** VM `Obj::Bytes(Box<[u8]>)` + `Op::ConstBytes`;
+  interp `Value::Bytes(Rc<[u8]>)`. Index/slice/for/len/eq/ordering/hash/Display all reuse the existing
+  dispatch with a Bytes arm next to the Str arm. **Display/`str()`/interp = Python `b'...'` repr** via
+  ONE shared helper `slice::bytes_repr(&[u8])` called by both engines (parity by construction).
+- **GC:** `Obj::Bytes` is a **LEAF** — it holds only raw `u8` (no `GcRef`), so `Heap::children()`
+  returns nothing for it (marked reachable, traces no children, like `Str`/`Native`); the generic
+  `alloc` path allocates it and `sweep` frees it via `Box<[u8]>`'s `Drop`. `Box<[u8]>` is 16B, so the
+  `Obj` size-cap (`size_of::<Obj>() == 88`, `chzstr.rs` guard) is unchanged.
+- **Tests/golden:** `byte_string_*` (lexer), `bytes_*` (checker), `vm_bytes_*` + `bytes_crosses_channel`
+  (VM, incl. recover: + map key + `--parallel`), `interp_bytes_*`, `bytes_repr_python_style` (slice),
+  and `examples/bytes.chz` + `.expected` goldened on **VM + `--serial` + `--interp`** (byte-identical).
+  `docs/grammar.bnf` gained the `BYTES` primary terminal (`cargo test conformance` executes it; corpus
+  `bytes_literal.chz`). +16 tests (1984 green); clippy clean.
+- **Non-goals (v1):** mutable `bytearray`, `byte`/`u8` scalar, bignum, encode/decode codecs
+  (base64/hex are a separate `std.*` gap), `bytes` methods beyond the 5 table rows + Display, a
+  `{b:spec}` format-spec, and `ConstBytes` interning (allocs per push, like a list literal).
+
 **✅ Qualified enum-variant access `Enum.Variant` (owner-requested, explicit exception to the M19/M18
 feature freeze).** Variants can now be written **qualified** (`Color.Red`, `Shape.Circle(2)`,
 `case Shape.Circle(r):`) as an optional, equivalent spelling of the bare form — `Shape.Circle(7) ==
@@ -559,7 +591,7 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
   native `xs.map(f)` is the faster non-blocking path (and demotes via Path C if a `recv` blocks in it).
 
 **Permanent non-goals:** interp B1/B2 (above); variadic args, bignum (`i64`-only — every overflow is a
-recoverable fault; binary work → a future `bytes` *sequence*, no `byte`/`u8` scalar). **Level-3 dynamic
+recoverable fault; binary work → the immutable `bytes` *sequence*, **shipped** — no `byte`/`u8` scalar). **Level-3 dynamic
 C-ABI FFI is NO LONGER a non-goal — v1 shipped** (`extern "lib":` scalar calls via dlopen+libffi;
 structs/callbacks/varargs/userdata still deferred — see "Done" below). **`yield`/generators are likewise
 no longer a non-goal — complete VM-only support shipped** (see below).

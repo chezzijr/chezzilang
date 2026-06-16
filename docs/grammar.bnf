@@ -353,7 +353,9 @@
 # mini-language after a `:` (see syntax.md §10, implemented in src/fmtspec.rs) — are parsed in a
 # SEPARATE post-lexer pass over the STR token's contents (compiler::parse_interpolation /
 # interp::interpolate), so they need NO production here.
-<primary> ::= "INT" | "FLOAT" | "STR" | "TRUE" | "FALSE" | "IDENT"
+# A "BYTES" token is a whole `b"..."` / `b'...'` byte-string literal (the lexer stripped the `b`
+# prefix + quotes and resolved escapes, incl. `\xHH`; no `\u`, no interpolation — see syntax.md).
+<primary> ::= "INT" | "FLOAT" | "STR" | "BYTES" | "TRUE" | "FALSE" | "IDENT"
             | "LPAREN" <expr> "RPAREN"
             | "LPAREN" <expr> "COMMA" "RPAREN"
             | "LPAREN" <expr> "COMMA" <exprList> "RPAREN"

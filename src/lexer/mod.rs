@@ -19,6 +19,9 @@ pub enum Token {
     Int(i64),
     Float(f64),
     Str(String), // contents only, quotes stripped. Interpolation handled later, not in M1.
+    /// A `b"..."` byte-string literal: the resolved raw bytes (escapes applied, quotes stripped).
+    /// Lexer-only, like the radix-prefixed int literals — no interpolation, no `\u`.
+    Bytes(Vec<u8>),
     Ident(String),
 
     // --- keywords ---
@@ -475,6 +478,19 @@ impl Lexer {
             }
             '"' => self.string('"')?,
             '\'' => self.string('\'')?,
+            // `b"..."` / `b'...'` byte-string literal — fire ONLY when the `b`/`B` is immediately
+            // followed by a quote (mirrors how `number()` detects the `0x` radix prefix). A bare
+            // `b` (e.g. `b + 1`, `by = 2`) falls through to `identifier()` unchanged.
+            'b' | 'B' if matches!(self.peek(), '"' | '\'') => {
+                let quote = self.advance(); // consume the opening quote
+                if self.peek() == quote && self.peek_next() == quote {
+                    self.advance(); // second quote
+                    self.advance(); // third quote
+                    self.byte_triple_string(quote)?
+                } else {
+                    self.byte_string(quote)?
+                }
+            }
             c if c.is_ascii_digit() => self.number(start)?,
             c if c.is_alphabetic() || c == '_' => self.identifier(start),
 
@@ -806,6 +822,121 @@ impl Lexer {
         Ok(Token::Str(text))
     }
 
+    /// Scan a `b"..."` / `b'...'` byte-string literal. The `b`/`B` prefix and the opening `quote`
+    /// are already consumed. Produces a [`Token::Bytes`] holding the resolved raw bytes.
+    ///
+    /// Escapes mirror [`string`] but push BYTES, not chars: `\n \t \r \\ \" \' \0` push their ASCII
+    /// byte, and `\xHH` (exactly two hex digits) pushes one byte `0x00..=0xFF` (Python parity — this
+    /// is the only way to encode a byte ≥ 0x80). A `\u{...}` escape and any raw non-ASCII source
+    /// char (a code point > 0x7F) are REJECTED — a byte literal is byte-exact, never UTF-8 text.
+    fn byte_string(&mut self, quote: char) -> Result<Token, LexError> {
+        let mut bytes = Vec::new();
+        while !self.is_at_end() && self.peek() != quote {
+            if self.peek() == '\\' {
+                self.byte_escape(&mut bytes)?;
+            } else {
+                let c = self.advance();
+                if c == '\n' {
+                    self.line += 1;
+                    self.line_start = self.pos;
+                }
+                self.push_raw_byte(&mut bytes, c)?;
+            }
+        }
+        if self.is_at_end() {
+            return Err(self.error("unterminated byte-string literal"));
+        }
+        self.advance(); // closing quote
+        Ok(Token::Bytes(bytes))
+    }
+
+    /// Triple-quoted byte literal (`b"""…"""` / `b'''…'''`). Same escapes as [`byte_string`]; closes
+    /// only on a triple of `quote`, so a lone quote inside is an ordinary byte.
+    fn byte_triple_string(&mut self, quote: char) -> Result<Token, LexError> {
+        let mut bytes = Vec::new();
+        while !(self.peek() == quote
+            && self.peek_next() == quote
+            && self.chars.get(self.pos + 2) == Some(&quote))
+        {
+            if self.is_at_end() {
+                return Err(self.error("unterminated triple-quoted byte-string literal"));
+            }
+            if self.peek() == '\\' {
+                self.byte_escape(&mut bytes)?;
+            } else {
+                let c = self.advance();
+                if c == '\n' {
+                    self.line += 1;
+                    self.line_start = self.pos;
+                }
+                self.push_raw_byte(&mut bytes, c)?;
+            }
+        }
+        self.advance();
+        self.advance();
+        self.advance();
+        Ok(Token::Bytes(bytes))
+    }
+
+    /// Push a *raw* (unescaped) source char into a byte literal. ASCII (≤ 0x7F) → its byte; a
+    /// non-ASCII code point is rejected (CPython 3 parity — use `\xHH`).
+    fn push_raw_byte(&self, bytes: &mut Vec<u8>, c: char) -> Result<(), LexError> {
+        if (c as u32) <= 0x7F {
+            bytes.push(c as u8);
+            Ok(())
+        } else {
+            Err(self.error("non-ASCII byte in byte literal; use \\xHH escape"))
+        }
+    }
+
+    /// Process one backslash escape inside a byte literal. The cursor sits on the `\`.
+    fn byte_escape(&mut self, bytes: &mut Vec<u8>) -> Result<(), LexError> {
+        self.advance(); // consume the backslash
+        if self.is_at_end() {
+            return Err(self.error("unterminated byte-string literal (trailing '\\')"));
+        }
+        let esc = self.advance();
+        let byte = match esc {
+            'n' => b'\n',
+            't' => b'\t',
+            'r' => b'\r',
+            '\\' => b'\\',
+            '"' => b'"',
+            '\'' => b'\'',
+            '0' => 0,
+            // `\xHH` — exactly two hex digits → one byte 0x00..=0xFF.
+            'x' => {
+                let hi = self.hex_digit("\\x")?;
+                let lo = self.hex_digit("\\x")?;
+                bytes.push((hi << 4) | lo);
+                return Ok(());
+            }
+            'u' => {
+                return Err(self.error("\\u not allowed in a byte literal; use \\xHH"));
+            }
+            '\n' | '\r' => {
+                return Err(self.error(
+                    "line continuations are not supported; close the literal or use \\n",
+                ));
+            }
+            other => return Err(self.error(&format!("unknown escape '\\{other}'"))),
+        };
+        bytes.push(byte);
+        Ok(())
+    }
+
+    /// Read exactly one hex digit (for `\xHH`), returning its 0..=15 value. Errors on EOF or a
+    /// non-hex char (`who` names the escape for the message).
+    fn hex_digit(&mut self, who: &str) -> Result<u8, LexError> {
+        if self.is_at_end() {
+            return Err(self.error(&format!("{who} escape needs two hex digits")));
+        }
+        let c = self.advance();
+        c.to_digit(16)
+            .map(|d| d as u8)
+            .ok_or_else(|| self.error(&format!("invalid hex digit '{c}' in {who} escape")))
+    }
+
     /// Scan the body of a `\u{HEX}` escape. The `\u` is already consumed; the cursor sits on
     /// what must be `{`. Reads 1-6 hex digits naming a Unicode scalar value and returns it.
     /// Rejects a missing `{`, an empty `{}`, more than 6 hex digits, any non-hex char, an
@@ -1134,6 +1265,81 @@ mod tests {
     fn trailing_backslash_is_unterminated() {
         // "abc\  with no closing quote
         assert!(tokenize("\"abc\\").is_err());
+    }
+
+    // ----- b"..." byte-string literals (bytes type) -----
+
+    #[test]
+    fn byte_string_literal_and_escapes() {
+        // plain ASCII -> bytes
+        assert_eq!(
+            kinds(r#"b"AB""#),
+            vec![Token::Bytes(vec![65, 66]), Token::Newline, Token::Eof]
+        );
+        // \xHH hex byte escapes (out-of-ASCII range OK: 0..=255)
+        assert_eq!(
+            kinds(r#"b"\xFF\x00""#),
+            vec![Token::Bytes(vec![255, 0]), Token::Newline, Token::Eof]
+        );
+        // standard escapes push their ASCII byte
+        assert_eq!(
+            kinds(r#"b"\n\t""#),
+            vec![Token::Bytes(vec![10, 9]), Token::Newline, Token::Eof]
+        );
+        // uppercase prefix and single quotes both work
+        assert_eq!(
+            kinds(r#"B'A'"#),
+            vec![Token::Bytes(vec![65]), Token::Newline, Token::Eof]
+        );
+        // empty byte literal
+        assert_eq!(
+            kinds(r#"b"""#),
+            vec![Token::Bytes(vec![]), Token::Newline, Token::Eof]
+        );
+        // triple-quoted byte literal
+        assert_eq!(
+            kinds("b\"\"\"AB\"\"\""),
+            vec![Token::Bytes(vec![65, 66]), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn byte_string_rejects_unicode_and_non_ascii() {
+        // \u{...} is not valid in a byte literal
+        let e = tokenize(r#"b"\u{41}""#).unwrap_err();
+        assert!(e.message.contains("\\u not allowed in a byte literal"), "{}", e.message);
+        // a raw non-ASCII char (byte >= 0x80) must be rejected
+        let e = tokenize("b\"é\"").unwrap_err();
+        assert!(e.message.contains("non-ASCII byte in byte literal"), "{}", e.message);
+        // a malformed \x (not two hex digits) errors
+        assert!(tokenize(r#"b"\xG0""#).is_err(), "non-hex \\x");
+        assert!(tokenize(r#"b"\x""#).is_err(), "\\x at end");
+        assert!(tokenize(r#"b"\q""#).is_err(), "unknown escape");
+    }
+
+    #[test]
+    fn bare_b_is_identifier() {
+        // `b` not followed by a quote is an ordinary identifier, never a byte-string prefix.
+        assert_eq!(
+            kinds("b + 1"),
+            vec![
+                Token::Ident("b".to_string()),
+                Token::Plus,
+                Token::Int(1),
+                Token::Newline,
+                Token::Eof
+            ]
+        );
+        assert_eq!(
+            kinds("by = 2"),
+            vec![
+                Token::Ident("by".to_string()),
+                Token::Assign,
+                Token::Int(2),
+                Token::Newline,
+                Token::Eof
+            ]
+        );
     }
 
     #[test]

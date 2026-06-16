@@ -195,8 +195,13 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
   `std.cmp`; `abs` stays native.) **Integer overflow policy:** the one integer type is `i64`; every
   overflow — arithmetic (`+ - * / %`), negation, `MIN / -1`, and `math.abs(MIN)` — is a *recoverable
   panic* (`"integer overflow in <op>"`, catchable by `recover:`), never a silent wrap and never a host
-  crash. No `byte`/`u8` scalar (Python model — binary data is a future `bytes` *sequence*, not a
-  scalar) and no bignum (a non-goal).
+  crash. No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
+  scalar) and no bignum (a non-goal). **`bytes`** is a heap byte sequence (`b"..."` literal with
+  `\xHH` escapes): `b[i]` -> `int` 0-255 (Index protocol), `b[a:b:c]` -> `bytes` (Slice protocol, byte
+  offsets), `for x in b` yields `int`, `len(b)` is the byte count, `==`/`!=` are structural, and
+  `bytes` is `Hashable` (valid map/set key). `str(b)` / `print(b)` / interpolation use the Python
+  `b'...'` repr. Immutable (no `b[i] = x`); non-goals: a mutable `bytearray`, encode/decode codecs
+  (base64/hex are a separate `std.*` gap), and methods beyond the table + Display.
 - **Std modules — M8 (shipped):** `std.json` (pure-Chezzi `Json` enum + `parse`/`stringify`/
   accessors **and** type-directed `json.decode[T](s)` into a struct/map/list/scalar);
   `std.process` (`cmd(s) -> Result[str]`); `std.fs` (`list_dir`/`exists`/`is_file`/`is_dir`/

@@ -761,7 +761,7 @@ impl Checker {
                     self.enum_names.insert(name.clone());
                 }
                 StmtKind::TypeAlias { name, ty } => {
-                    if matches!(name.as_str(), "int" | "float" | "bool" | "str" | "nil")
+                    if matches!(name.as_str(), "int" | "float" | "bool" | "str" | "bytes" | "nil")
                         || is_reserved_type(name)
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
@@ -1125,6 +1125,7 @@ impl Checker {
                 "float" => Ty::Float,
                 "bool" => Ty::Bool,
                 "str" => Ty::Str,
+                "bytes" => Ty::Bytes,
                 "nil" => Ty::Nil,
                 // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation).
                 "Executor" => Ty::Executor,
@@ -2066,6 +2067,8 @@ impl Checker {
         match ty {
             Ty::List(e) | Ty::Set(e) => Some((**e).clone()),
             Ty::Str => Some(Ty::Str),
+            // `bytes` iterates to `int` (0–255), like Python.
+            Ty::Bytes => Some(Ty::Int),
             Ty::Map(k, _) => Some((**k).clone()),
             // `Iterator[T]` value (a generator result): element type is its single type argument.
             Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => Some(args[0].clone()),
@@ -2081,6 +2084,8 @@ impl Checker {
         match ty {
             Ty::List(e) => Some((Ty::Int, (**e).clone())),
             Ty::Str => Some((Ty::Int, Ty::Str)),
+            // `bytes[i]` yields an `int` (0–255).
+            Ty::Bytes => Some((Ty::Int, Ty::Int)),
             Ty::Map(k, v) => Some(((**k).clone(), (**v).clone())),
             Ty::Struct(name, targs) => {
                 let info = self.structs.get(name)?;
@@ -2120,7 +2125,8 @@ impl Checker {
     /// a user struct via `slice(self, int, int) -> R`. `None` ⇒ not sliceable.
     fn slice_result(&self, ty: &Ty) -> Option<Ty> {
         match ty {
-            Ty::List(_) | Ty::Str => Some(ty.clone()),
+            // `bytes[a:b:c]` yields a new `bytes`; `list`/`str` slice to themselves.
+            Ty::List(_) | Ty::Str | Ty::Bytes => Some(ty.clone()),
             Ty::Struct(name, targs) => {
                 let info = self.structs.get(name)?;
                 let sig = info.methods.get("slice")?;
@@ -2191,7 +2197,7 @@ impl Checker {
                     unknowns(vars)
                 }
             },
-            Ty::Str | Ty::Set(_) | Ty::Channel(_) if vars.len() != 1 => {
+            Ty::Str | Ty::Bytes | Ty::Set(_) | Ty::Channel(_) if vars.len() != 1 => {
                 if matches!(it, Ty::Channel(_)) {
                     self.error(iter.span, "a channel iterator binds a single loop variable");
                 } else {
@@ -2202,6 +2208,8 @@ impl Checker {
             Ty::List(inner) => vec![(vars[0].clone(), (**inner).clone())],
             Ty::Set(elem) => vec![(vars[0].clone(), (**elem).clone())],
             Ty::Str => vec![(vars[0].clone(), Ty::Str)],
+            // `for x in bytes:` binds a single `int` (0–255).
+            Ty::Bytes => vec![(vars[0].clone(), Ty::Int)],
             // `for v in ch:` over a `Channel[T]` blocks for each value and ends when the channel is
             // closed-and-drained (Go's `for v := range ch`). Binds a single element of type `T`.
             Ty::Channel(elem) => vec![(vars[0].clone(), (**elem).clone())],
@@ -2859,6 +2867,7 @@ impl Checker {
             ExprKind::Int(_) => Ty::Int,
             ExprKind::Float(_) => Ty::Float,
             ExprKind::Str(_) => Ty::Str, // opaque; interpolation contents are not checked (M2 defer)
+            ExprKind::Bytes(_) => Ty::Bytes,
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Ident(name) => self.infer_ident(name, expr.span),
             ExprKind::List(items) => self.infer_list(items),
@@ -3694,8 +3703,8 @@ impl Checker {
                 self.check_arity("len", 1, args, span);
                 if let Some(a) = args.first() {
                     match self.infer(a) {
-                        Ty::List(_) | Ty::Str | Ty::Unknown => {}
-                        other => self.error(a.span, format!("len() expects a list or str, got {other}")),
+                        Ty::List(_) | Ty::Str | Ty::Bytes | Ty::Unknown => {}
+                        other => self.error(a.span, format!("len() expects a list, str, or bytes, got {other}")),
                     }
                 }
                 Some(Ty::Int)
@@ -4683,6 +4692,7 @@ impl Checker {
                 "float" => Ty::Float,
                 "bool" => Ty::Bool,
                 "str" => Ty::Str,
+                "bytes" => Ty::Bytes,
                 "nil" => Ty::Nil,
                 "Executor" => Ty::Executor,
                 "Socket" => Ty::Socket,
@@ -4736,7 +4746,7 @@ impl Checker {
         // `Hashable` is satisfied intrinsically by the scalar key types (mirrors the map/set key
         // restriction; float is excluded — its equality is a hazard). Struct conformance falls
         // through to the structural check (needs a `hash(self) -> int` method).
-        if protocol == "Hashable" && matches!(ty, Ty::Int | Ty::Str | Ty::Bool) {
+        if protocol == "Hashable" && matches!(ty, Ty::Int | Ty::Str | Ty::Bytes | Ty::Bool) {
             return Ok(());
         }
         // `str` conforms to `Error` intrinsically (Go-style: its message is itself).
@@ -4902,7 +4912,7 @@ impl Checker {
     /// so a recursive type like `Node { next: Option[Node] }` terminates).
     fn sendable_rec(&self, ty: &Ty, stack: &mut Vec<String>) -> bool {
         match ty {
-            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Nil | Ty::Unknown | Ty::Param(_) => true,
+            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Nil | Ty::Unknown | Ty::Param(_) => true,
             // A `Shared[T]` handle always crosses — that's its whole point (one box, many tasks);
             // its element type is *not* a constraint (the value never crosses, only the handle).
             Ty::Shared(_) => true,
@@ -5534,6 +5544,7 @@ fn collect_free_calls_expr(
         ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::Str(_)
+        | ExprKind::Bytes(_)
         | ExprKind::Bool(_)
         | ExprKind::Ident(_) => {}
     }
@@ -5737,6 +5748,7 @@ fn find_mutations_in_expr(
         ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::Str(_)
+        | ExprKind::Bytes(_)
         | ExprKind::Bool(_)
         | ExprKind::Ident(_) => {}
     }

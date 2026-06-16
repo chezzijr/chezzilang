@@ -30,6 +30,7 @@ fn symbol(tok: &Token) -> &'static str {
         Token::Int(_) => "INT",
         Token::Float(_) => "FLOAT",
         Token::Str(_) => "STR",
+        Token::Bytes(_) => "BYTES",
         Token::Ident(_) => "IDENT",
         Token::Fn => "FN",
         Token::Return => "RETURN",

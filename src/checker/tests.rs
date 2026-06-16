@@ -4920,3 +4920,39 @@ fn lifecycle_name_in_non_suite_struct_not_validated() {
     // no special signature rule applies.
     ok("struct S:\n    fn before_each(self, x: int):\n        return\n");
 }
+
+// ===== bytes type (b"..." literal + Index/Slice/Iterator protocols) =====
+
+#[test]
+fn bytes_literal_infers_bytes_and_protocols() {
+    // literal infers `bytes`; b[i] -> int; b[a:b] -> bytes; for c in b -> int; len -> int
+    ok("fn main():\n    b := b\"hi\"\n    x: int = b[0]\n    s: bytes = b[0:1]\n    for c in b:\n        print(c)\n    n: int = len(b)\n    print(x + n)\nmain()\n");
+}
+
+#[test]
+fn bytes_annotation_and_equality_ok() {
+    ok("fn main():\n    a: bytes = b\"\\x01\\x02\"\n    eq := a == b\"\\x01\\x02\"\n    print(eq)\nmain()\n");
+}
+
+#[test]
+fn bytes_is_immutable_index_set_rejected() {
+    // bytes is immutable — `b[i] = x` must be a type error (no IndexSet conformance).
+    rejects(
+        "fn main():\n    b := b\"hi\"\n    b[0] = 1\nmain()\n",
+        "",
+    );
+}
+
+#[test]
+fn bytes_not_assignable_to_str() {
+    rejects(
+        "fn main():\n    b := b\"hi\"\n    s: str = b\nmain()\n",
+        "",
+    );
+}
+
+#[test]
+fn bytes_key_in_map_ok() {
+    // bytes is Hashable — valid map key.
+    ok("fn main():\n    m: map[bytes, int] = {b\"a\": 1}\n    print(m[b\"a\"])\nmain()\n");
+}

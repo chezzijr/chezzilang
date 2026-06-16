@@ -1,0 +1,6 @@
+# rule: primary
+fn main():
+    b := b"\x01\x02ABC"
+    print(b[0])
+    print(b[1:])
+    print(len(b))

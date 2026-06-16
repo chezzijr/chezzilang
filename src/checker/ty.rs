@@ -12,6 +12,9 @@ pub enum Ty {
     Float,
     Bool,
     Str,
+    /// `bytes` — an immutable heap byte sequence (Python `bytes` model). Indexes/iterates to `int`
+    /// (0–255), slices to `bytes`. Not a scalar; there is no `byte`/`u8` scalar type.
+    Bytes,
     Nil,
     List(Box<Ty>),
     /// `map[K, V]` — insertion-ordered hash map. `K` is any `Hashable` type (int/str/bool or a
@@ -123,7 +126,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
     use Ty::*;
     match (expected, actual) {
         (Unknown, _) | (_, Unknown) => true,
-        (Int, Int) | (Float, Float) | (Bool, Bool) | (Str, Str) | (Nil, Nil) => true,
+        (Int, Int) | (Float, Float) | (Bool, Bool) | (Str, Str) | (Bytes, Bytes) | (Nil, Nil) => true,
         (List(a), List(b)) | (Option(a), Option(b)) | (Channel(a), Channel(b)) | (Shared(a), Shared(b))
         | (Atomic(a), Atomic(b)) => {
             compatible(a, b)
@@ -157,6 +160,7 @@ impl fmt::Display for Ty {
             Ty::Float => write!(f, "float"),
             Ty::Bool => write!(f, "bool"),
             Ty::Str => write!(f, "str"),
+            Ty::Bytes => write!(f, "bytes"),
             Ty::Nil => write!(f, "nil"),
             Ty::List(t) => write!(f, "list[{t}]"),
             Ty::Map(k, v) => write!(f, "map[{k}, {v}]"),

@@ -146,6 +146,10 @@ impl SetData {
 #[derive(Debug, Clone)]
 pub enum Obj {
     Str(ChzStr),
+    /// `bytes` — an immutable heap byte sequence (Python `bytes` model). A GC LEAF: it holds only
+    /// raw `u8`s (no `GcRef`s), so `children()` returns nothing — it is marked reachable but traces
+    /// no children, exactly like `Str`/`Native`. `Box<[u8]>` is 16B, well within the 88B `Obj` cap.
+    Bytes(Box<[u8]>),
     List(Vec<Value>),
     /// `(a, b, …)` — a fixed-arity, immutable tuple. Elements may be heap objects, so they are
     /// traced as GC children (same as `List`).
@@ -342,6 +346,8 @@ impl Heap {
         };
         match self.get(h) {
             Obj::Str(_) => {}
+            // A GC leaf: raw bytes, no embedded `GcRef`s, so nothing to trace (like `Str`).
+            Obj::Bytes(_) => {}
             Obj::List(items) => items.iter().for_each(&mut push),
             Obj::Tuple(items) => items.iter().for_each(&mut push),
             Obj::Map(m) => m.entries.iter().for_each(|(_, k, v)| {

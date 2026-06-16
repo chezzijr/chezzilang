@@ -1727,6 +1727,7 @@ impl Compiler {
             ExprKind::Float(x) => fc.emit(Op::ConstFloat(*x), expr.span),
             ExprKind::Bool(b) => fc.emit(if *b { Op::True } else { Op::False }, expr.span),
             ExprKind::Str(raw) => self.compile_str(fc, raw, expr.span)?,
+            ExprKind::Bytes(b) => fc.emit(Op::ConstBytes(b.clone().into_boxed_slice()), expr.span),
             ExprKind::Ident(name) => self.compile_ident(fc, name, expr.span),
             ExprKind::List(items) => {
                 for it in items {

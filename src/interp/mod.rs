@@ -102,6 +102,8 @@ fn deep_clone(v: &Value) -> Value {
         | Value::Float(_)
         | Value::Bool(_)
         | Value::Str(_)
+        // `bytes` is immutable: clone the `Rc` (sendable, like `Str`) — never deep-copied.
+        | Value::Bytes(_)
         | Value::Nil
         | Value::Func(_, _)
         | Value::Closure(_)
@@ -312,6 +314,7 @@ impl Interp {
             ExprKind::Float(f) => Ok(Value::Float(*f)),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
             ExprKind::Str(s) => Ok(Value::Str(self.interpolate(s, expr.span)?.into())),
+            ExprKind::Bytes(b) => Ok(Value::Bytes(b.as_slice().into())),
             ExprKind::Ident(name) => {
                 // A nullary enum variant used as a value (e.g. `None`, `Red`).
                 if let Some(def) = self.variants.get(name).filter(|d| d.arity == 0) {
@@ -529,6 +532,16 @@ impl Interp {
                             .map(|i| Value::Str(chars[i].to_string().into()))
                             .ok_or_else(|| RuntimeError {
                                 message: format!("index {idx} out of bounds (len {})", chars.len()),
+                                span: expr.span,
+                            })
+                    }
+                    // `bytes[i]` → `int` (0–255); out-of-range faults recoverably (like list/str).
+                    Value::Bytes(b) => {
+                        let idx = want_int(self.eval(index)?)?;
+                        crate::slice::norm_index(idx, b.len())
+                            .map(|i| Value::Int(b[i] as i64))
+                            .ok_or_else(|| RuntimeError {
+                                message: format!("index {idx} out of bounds (len {})", b.len()),
                                 span: expr.span,
                             })
                     }
@@ -1728,6 +1741,13 @@ impl Interp {
                     .map_err(|m| RuntimeError { message: m.to_string(), span })?;
                 Ok(Value::Str(idxs.iter().map(|&i| chars[i]).collect::<String>().into()))
             }
+            // `bytes[a:b:c]` slices over BYTE offsets and yields a new `bytes` (shared `slice_indices`).
+            Value::Bytes(b) => {
+                let idxs = crate::slice::slice_indices(s, e, st, b.len())
+                    .map_err(|m| RuntimeError { message: m.to_string(), span })?;
+                let sub: Vec<u8> = idxs.iter().map(|&i| b[i]).collect();
+                Ok(Value::Bytes(sub.into()))
+            }
             // A struct satisfying `Slice` dispatches `obj[a:b:c]` to `slice(self, start?, end?, step?)`,
             // passing real `Option[int]` components (`None`/`Some(n)`) the user body can match/`??`.
             Value::Struct { .. } => {
@@ -1946,7 +1966,7 @@ impl Interp {
     fn hash_value(&mut self, v: &Value, span: Span) -> Result<u64, RuntimeError> {
         match v {
             Value::Struct { .. } => self.struct_hash(v, span),
-            Value::Str(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Nil => {
+            Value::Str(_) | Value::Bytes(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Nil => {
                 Ok(scalar_hash(v))
             }
             other => Err(RuntimeError {
@@ -4192,6 +4212,8 @@ fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec
         Value::Set(s) => s.borrow().entries.iter().map(|(_, e)| vec![e.clone()]).collect(),
         // Strings iterate as 1-char strings (Python-style; the checker binds a single str var).
         Value::Str(s) => s.chars().map(|c| vec![Value::Str(c.to_string().into())]).collect(),
+        // `bytes` iterates as `int`s (0–255).
+        Value::Bytes(b) => b.iter().map(|&x| vec![Value::Int(x as i64)]).collect(),
         other => {
             return Err(RuntimeError {
                 message: format!("cannot iterate over {}", other.type_name()),
@@ -4475,6 +4497,8 @@ fn compare(l: &Value, r: &Value) -> Option<std::cmp::Ordering> {
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
         (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
+        // `bytes` order lexicographically by byte (Python parity).
+        (Value::Bytes(a), Value::Bytes(b)) => Some(a.cmp(b)),
         (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
             as_f64(l).partial_cmp(&as_f64(r))
         }
@@ -4499,6 +4523,12 @@ pub(super) fn scalar_hash(v: &Value) -> u64 {
         Value::Str(s) => {
             let mut hr = std::collections::hash_map::DefaultHasher::new();
             s.as_bytes().hash(&mut hr);
+            hr.finish()
+        }
+        // `bytes` is Hashable (immutable, value-compared). Hash the raw slice.
+        Value::Bytes(b) => {
+            let mut hr = std::collections::hash_map::DefaultHasher::new();
+            b.as_ref().hash(&mut hr);
             hr.finish()
         }
         _ => 0,
@@ -6867,5 +6897,54 @@ mod module_tests {
         )
         .expect("iter_more.expected should exist");
         assert_eq!(run_ok(&entry), expected);
+    }
+
+    // bytes golden (interp side): `examples/bytes.chz` — the frozen interpreter must produce exactly
+    // the captured `.expected` (so VM==expected==interp, the three-engine parity gate).
+    #[test]
+    fn golden_bytes_chz() {
+        let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/bytes.chz");
+        let expected = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/bytes.expected"),
+        )
+        .expect("bytes.expected should exist");
+        assert_eq!(run_ok(&entry), expected);
+    }
+
+    // ===== bytes type (interp side — must match the VM byte-for-byte) =====
+
+    #[test]
+    fn interp_bytes_ops() {
+        let src = concat!(
+            "fn main():\n",
+            "    b := b\"\\x01\\x02\\x03\"\n",
+            "    print(b[0])\n",
+            "    print(b[-1])\n",
+            "    print(b[::-1])\n",
+            "    s := 0\n",
+            "    for x in b:\n",
+            "        s = s + x\n",
+            "    print(s)\n",
+            "    print(len(b))\n",
+            "    print(b\"ab\" == b\"ab\")\n",
+            "    print(b\"ab\" == b\"ac\")\n",
+            "    print(b\"ab\" != b\"ac\")\n",
+            "main()\n"
+        );
+        assert_eq!(run_capture(src).expect("interp"), "1\n3\nb'\\x03\\x02\\x01'\n6\n3\ntrue\nfalse\ntrue\n");
+    }
+
+    #[test]
+    fn interp_bytes_repr_and_map_key() {
+        let src = concat!(
+            "fn main():\n",
+            "    print(b\"hi\\n\")\n",
+            "    print(str(b\"\\xFF\"))\n",
+            "    m := {b\"a\": 1, b\"b\": 2}\n",
+            "    print(m[b\"a\"])\n",
+            "    print(m[b\"b\"])\n",
+            "main()\n"
+        );
+        assert_eq!(run_capture(src).expect("interp"), "b'hi\\n'\nb'\\xff'\n1\n2\n");
     }
 }

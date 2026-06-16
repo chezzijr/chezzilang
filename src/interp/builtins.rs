@@ -291,8 +291,9 @@ fn len(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
     match &args[0] {
         Value::List(items) => Ok(Value::Int(items.borrow().len() as i64)),
         Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
+        Value::Bytes(b) => Ok(Value::Int(b.len() as i64)),
         other => Err(RuntimeError {
-            message: format!("len() expects a list or str, got {}", other.type_name()),
+            message: format!("len() expects a list, str, or bytes, got {}", other.type_name()),
             span,
         }),
     }

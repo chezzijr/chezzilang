@@ -1716,6 +1716,7 @@ impl Parser {
             Token::Int(n) => ExprKind::Int(n),
             Token::Float(f) => ExprKind::Float(f),
             Token::Str(s) => ExprKind::Str(s),
+            Token::Bytes(b) => ExprKind::Bytes(b),
             Token::True => ExprKind::Bool(true),
             Token::False => ExprKind::Bool(false),
             Token::Ident(name) => ExprKind::Ident(name),

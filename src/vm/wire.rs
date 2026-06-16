@@ -41,6 +41,10 @@ pub enum WireValue {
     /// is observationally identical to sharing the original handle — and unlike a `Handle(GcRef)`,
     /// owned bytes are meaningful across an OS-thread heap boundary (B3.3).
     Str(Box<str>),
+    /// `bytes` carried across the airlock **by value** (owned raw bytes). Like [`Str`](WireValue::Str):
+    /// immutable + value-compared, holds no `GcRef`, so a fresh heap `bytes` on `from_wire` is
+    /// observationally identical to the original — cross-safe (`has_handle` leaves it `false`).
+    Bytes(Box<[u8]>),
     Struct {
         name: Box<str>,
         fields: Vec<(Box<str>, WireValue)>,

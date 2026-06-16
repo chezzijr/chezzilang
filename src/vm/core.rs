@@ -203,7 +203,9 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         }
         // B3.3a: `Str` crosses by value (owned bytes in the core) — it roots no heap object.
         // D6: a `Socket`/`Listener` core holds an OS fd + a poll key — no `WireValue`s, no `GcRef`s.
+        // `bytes` crosses by value (owned raw bytes), like `Str` — roots no heap object.
         WireValue::Str(_)
+        | WireValue::Bytes(_)
         | WireValue::Int(_)
         | WireValue::Float(_)
         | WireValue::Bool(_)
