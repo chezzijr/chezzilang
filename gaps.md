@@ -117,6 +117,31 @@ keep parity → measure `benches/run.chz` → record the delta in `docs/benchmar
 struct-field IC, FxHash, SSO, method-call IC, inline-hot-ops, adaptive quickening (PEP 659),
 map/list-index specialization — all in `docs/benchmarks.md`.
 
+> **Sequencing by JIT-coupling, not perf payoff (added 2026-06-16).** The Cranelift method-JIT
+> (end-game, below) hardcodes its codegen against **value representation, memory layout, calling
+> convention, opcode set, and the GC invariant**. So rank the remaining items by *lock-in cost*: an
+> item the JIT bakes in must land **before** codegen exists, or adding it later forces a JIT rewrite.
+> An item that doesn't touch those costs the same before or after. This is orthogonal to a lever's
+> bench payoff — several Tier-A items read perf-neutral *today* (the bench is dispatch/call/alloc-bound,
+> not layout) yet are still must-do-first because they're cheap now, expensive post-JIT.
+> - **Tier A — MUST precede JIT (defer = codegen rewrite):** (1) **positional struct/enum/closure
+>   layout** (the memory levers #1→#3→#2 below) — JIT emits **constant field offsets**; today's
+>   name-keyed `Box<str>`/`HashMap` layout makes that impossible. *Doc-stated JIT groundwork.* (2) the
+>   **GC invariant** — gen/incremental GC needs write barriers the JIT must emit at every store, and
+>   even stop-the-world needs safepoint placement baked into codegen; lock the GC contract before
+>   codegen even if gen-GC is never built. *(coupling inferred — design pass to confirm.)* (3) any new
+>   **`Value` variant** (`bytes`, §"Language-level" above) — codegen enumerates value types for typed
+>   fast paths; a new scalar added later touches every one. *(inferred.)* (4) **NaN-box** — highest
+>   coupling but ⛔ blocked by full i64; pin only as "if the i64 model is ever revisited, it MUST be
+>   pre-JIT."
+> - **Tier B — JIT-neutral (equal cost before/after):** all **stdlib breadth** (native or pure-Chezzi
+>   — same call path regardless), the **string concat/split builder**, **`ref T` deref sugar** (lowers
+>   to existing get/set ops; already parked post-JIT), and the **ecosystem/tooling** track. These belong
+>   to the feature-freeze phase (which itself gates JIT) but carry **no** JIT-rewrite risk.
+> - **Tier C — superseded / non-work:** **register VM** (JIT is built on the bytecode it would rewrite
+>   → pre-JIT-or-never, but JIT supersedes it → don't); the mooted/won't-fix concurrency items and the
+>   unreachable type-system latent.
+
 - **🟡 Memory layout & access levers** *(diagnosed 2026-06-16, `7e4fc42`; `docs/future.md` §4 "Memory
   layout & access patterns")* — **caveat: bench is dispatch/call/alloc-bound, NOT layout, so these read
   mostly neutral as speedups; their real value is JIT groundwork** (positional layouts → constant
