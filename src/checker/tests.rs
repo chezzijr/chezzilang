@@ -4956,3 +4956,55 @@ fn bytes_key_in_map_ok() {
     // bytes is Hashable — valid map key.
     ok("fn main():\n    m: map[bytes, int] = {b\"a\": 1}\n    print(m[b\"a\"])\nmain()\n");
 }
+
+// ===== bytearray type (mutable sibling of bytes — constructor-only, Index/IndexSet/Slice/Iterator) =====
+
+#[test]
+fn bytearray_constructor_and_ty() {
+    // `bytearray([..])` infers `bytearray`; ba[i] -> int; ba[i] = int ok; ba[a:b] -> bytearray;
+    // for x in ba -> int; len ok.
+    ok("fn main():\n    ba := bytearray([1, 2, 3])\n    x: int = ba[0]\n    ba[0] = 5\n    s: bytearray = ba[0:1]\n    for c in ba:\n        print(c)\n    n: int = len(ba)\n    print(x + n)\nmain()\n");
+}
+
+#[test]
+fn bytearray_constructor_overloads_infer_bytearray() {
+    // All four constructor forms infer `bytearray`.
+    ok("fn main():\n    a: bytearray = bytearray()\n    b: bytearray = bytearray(4)\n    c: bytearray = bytearray(b\"x\")\n    d: bytearray = bytearray([1, 2])\n    print(len(a) + len(b) + len(c) + len(d))\nmain()\n");
+}
+
+#[test]
+fn bytearray_conversion_bridge_typechecks() {
+    // bytes(ba) -> bytes; bytearray(b) -> bytearray.
+    ok("fn main():\n    ba := bytearray([1, 2])\n    b: bytes = bytes(ba)\n    ba2: bytearray = bytearray(b)\n    print(len(b) + len(ba2))\nmain()\n");
+}
+
+#[test]
+fn bytearray_index_set_typechecks() {
+    // The NEW capability bytes lacks: `ba[i] = x` is a valid IndexSet assignment.
+    ok("fn main():\n    ba := bytearray([1, 2])\n    ba[0] = 200\n    print(ba[0])\nmain()\n");
+}
+
+#[test]
+fn bytearray_constructor_rejects_str_arg() {
+    rejects(
+        "fn main():\n    ba := bytearray(\"s\")\nmain()\n",
+        "",
+    );
+}
+
+#[test]
+fn bytearray_not_hashable_map_key_rejected() {
+    // bytearray is MUTABLE -> NOT Hashable -> not a valid map key (like list).
+    rejects(
+        "fn main():\n    m: map[bytearray, int] = {bytearray(): 1}\nmain()\n",
+        "",
+    );
+}
+
+#[test]
+fn bytearray_not_assignable_to_bytes() {
+    rejects(
+        "fn main():\n    ba := bytearray([1])\n    b: bytes = ba\nmain()\n",
+        "",
+    );
+}

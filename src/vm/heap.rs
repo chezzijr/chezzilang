@@ -150,6 +150,12 @@ pub enum Obj {
     /// raw `u8`s (no `GcRef`s), so `children()` returns nothing — it is marked reachable but traces
     /// no children, exactly like `Str`/`Native`. `Box<[u8]>` is 16B, well within the 88B `Obj` cap.
     Bytes(Box<[u8]>),
+    /// `bytearray` — the MUTABLE sibling of `bytes` (Python `bytearray` model). Storage is a `Vec<u8>`
+    /// mutated IN PLACE through the `GcRef` heap slot (`heap.get_mut`), exactly like [`List`](Obj::List),
+    /// so two bindings to the same `bytearray` observe each other's writes. Still a GC LEAF — raw `u8`s,
+    /// no `GcRef`s — so `children()` traces nothing (the difference vs `Bytes` is the mutability of the
+    /// slot, not GC reachability). `Vec<u8>` is 24B (= `List`'s `Vec<Value>`), within the 88B `Obj` cap.
+    ByteArray(Vec<u8>),
     List(Vec<Value>),
     /// `(a, b, …)` — a fixed-arity, immutable tuple. Elements may be heap objects, so they are
     /// traced as GC children (same as `List`).
@@ -361,6 +367,8 @@ impl Heap {
             Obj::Str(_) => {}
             // A GC leaf: raw bytes, no embedded `GcRef`s, so nothing to trace (like `Str`).
             Obj::Bytes(_) => {}
+            // Also a GC leaf — the mutable `bytearray` still holds only raw `u8`s, never a `GcRef`.
+            Obj::ByteArray(_) => {}
             Obj::List(items) => items.iter().for_each(&mut push),
             Obj::Tuple(items) => items.iter().for_each(&mut push),
             Obj::Map(m) => m.entries.iter().for_each(|(_, k, v)| {

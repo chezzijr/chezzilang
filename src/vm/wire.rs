@@ -45,6 +45,11 @@ pub enum WireValue {
     /// immutable + value-compared, holds no `GcRef`, so a fresh heap `bytes` on `from_wire` is
     /// observationally identical to the original — cross-safe (`has_handle` leaves it `false`).
     Bytes(Box<[u8]>),
+    /// `bytearray` carried across the airlock **by value** as a DEEP COPY (owned raw bytes), like
+    /// [`List`](WireValue::List): `from_wire` rebuilds a FRESH independent `bytearray` on the other
+    /// side — never a shared mutable view (a shared mutable buffer across OS threads is a data race).
+    /// Holds no `GcRef`, so it is cross-safe (`has_handle` leaves it `false`).
+    ByteArray(Box<[u8]>),
     Struct {
         name: Box<str>,
         fields: Vec<(Box<str>, WireValue)>,

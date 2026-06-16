@@ -1304,6 +1304,28 @@ mod tests {
     }
 
     #[test]
+    fn bare_bytearray_is_identifier_not_literal() {
+        // `bytearray` is a CONSTRUCTOR (a builtin call), NOT a literal — there is no `ba"..."` lexer
+        // form (bytes already owns the `b"..."` literal). So `bytearray` lexes as a plain identifier,
+        // and the `b` prefix only fires when immediately followed by a quote (documents the design).
+        assert_eq!(
+            kinds("bytearray"),
+            vec![Token::Ident("bytearray".to_string()), Token::Newline, Token::Eof]
+        );
+        // `bytearray(...)` is just IDENT LPAREN ... RPAREN — the existing call production.
+        assert_eq!(
+            kinds("bytearray()"),
+            vec![
+                Token::Ident("bytearray".to_string()),
+                Token::LParen,
+                Token::RParen,
+                Token::Newline,
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
     fn byte_string_rejects_unicode_and_non_ascii() {
         // \u{...} is not valid in a byte literal
         let e = tokenize(r#"b"\u{41}""#).unwrap_err();

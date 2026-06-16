@@ -11,6 +11,44 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ `bytearray` — mutable byte buffer (owner-requested; the second half of binary support — the
+mutable sibling of `bytes`, Python `bytearray` / Go `[]byte` model — still a sequence, NOT a scalar).**
+A heap byte buffer modeled on `list` (mutation flows through shared references), constructor-only
+(no literal), mirroring the just-landed `bytes` variant-for-variant across the whole pipeline:
+
+- **Constructor-only — no `ba"..."` literal** (the `b"..."` literal already owns `bytes`, so no lexer/
+  parser/grammar change; `docs/grammar.bnf` is intentionally unchanged — a `bytearray(...)` call is the
+  existing IDENT-LPAREN production). `bytearray` lexes as a plain identifier (guarded test). Four forms:
+  `bytearray()` (empty), `bytearray(N)` (N zero bytes, Python; an absurd N faults **recoverably** via
+  `try_reserve`, never a SIGABRT — same recoverable-fault invariant as `range()`/format-width), `bytearray(b)`/`bytearray(ba)` (mutable
+  copy), `bytearray([ints])` (each 0–255). Both `bytes(...)` and `bytearray(...)` are NEW builtins (the
+  `bytes` commit shipped no `bytes(...)` constructor — it was literal-only) — the **conversion bridge**:
+  `bytes(ba)` snapshots, `bytearray(b)` copies.
+- **Type `bytearray`** (`Ty::ByteArray`): `ba[i]`→`int`, **`ba[i] = x`** (`IndexSet`, M15 — the new
+  capability `bytes` lacks; value 0–255 + index in range, else a recoverable fault), `ba[a:b:c]`→a new
+  `bytearray`, `for x in ba`→`int`, `len`, `.push(int)` / `.pop()->Option[int]` / `.extend(bytes|
+  bytearray|list[int])`, `==`/`!=` structural (incl. cross-type `bytes == bytearray` content-equal,
+  Python parity). **NOT `Hashable`** (mutable ⇒ not a `map`/`set` key, the deliberate divergence from
+  `bytes`, consistent with `list`). Sendable across the `--parallel` airlock by **deep copy** (like
+  `list` — `WireValue::ByteArray` rebuilds a fresh independent buffer; no shared mutable view).
+- **Runtime, BOTH engines (three-engine parity).** VM `Obj::ByteArray(Vec<u8>)` mutated IN PLACE
+  through the `GcRef` heap slot (`heap.get_mut`), exactly like `Obj::List` — two bindings to the same
+  `bytearray` observe each other's writes; interp `Value::ByteArray(Rc<RefCell<Vec<u8>>>)` interior-
+  mutable like `Value::List` (deep-cloned ONLY across the airlock — a fresh `Rc<RefCell>`, NOT a cloned
+  `Rc` like `Bytes`). Display/`str()`/interp = Python `bytearray(b'...')` repr via the shared helper
+  `slice::bytearray_repr` (wraps `bytes_repr`), so all three engines are byte-identical by construction.
+- **GC:** `Obj::ByteArray(Vec<u8>)` is a **LEAF** — raw `u8`, holds zero `GcRef`, so `children()` traces
+  nothing (the difference vs `bytes` is the mutability of the slot, not GC reachability). `Vec<u8>` is
+  24B (= `Obj::List`'s `Vec<Value>`), so the `Obj` size-cap (`size_of::<Obj>() == 88`) is unchanged.
+- **Tests/golden:** `bare_bytearray_is_identifier` (lexer), `bytearray_*` (checker — incl. unhashable
+  map/set-key rejection + conversion bridge), `vm_bytearray_*` + `bytearray_crosses_channel_deep_copy`
+  (VM — incl. index WRITE, OOB/bad-value under `recover:`, shared mutation through two bindings,
+  `--parallel` deep-copy independence), `interp_bytearray_*`, `bytearray_repr_wraps_bytes_repr` (slice),
+  and `examples/bytearray.chz` + `.expected` goldened on **VM + `--serial` + `--interp` + `--parallel`**
+  (byte-identical). +18 tests (2023 green); clippy clean. Remaining non-goals: a `byte`/`u8` scalar,
+  encode/decode codecs (base64/hex — a separate `std.*` gap), and methods beyond push/pop/extend + the
+  protocol ops.
+
 **✅ `bytes` — immutable byte-sequence type (owner-requested; the Tier-A pre-JIT `Value`/`Obj`-variant
 must-do from `gaps.md`, Python `bytes` model — NOT a new scalar).** A heap byte sequence threaded
 through the existing `str`-shaped paths, reusing every protocol mechanism (no new ops/abstractions
@@ -39,9 +77,11 @@ beyond a `b"..."` literal + the const op):
   and `examples/bytes.chz` + `.expected` goldened on **VM + `--serial` + `--interp`** (byte-identical).
   `docs/grammar.bnf` gained the `BYTES` primary terminal (`cargo test conformance` executes it; corpus
   `bytes_literal.chz`). +16 tests (1984 green); clippy clean.
-- **Non-goals (v1):** mutable `bytearray`, `byte`/`u8` scalar, bignum, encode/decode codecs
+- **Non-goals (v1):** `byte`/`u8` scalar, bignum, encode/decode codecs
   (base64/hex are a separate `std.*` gap), `bytes` methods beyond the 5 table rows + Display, a
-  `{b:spec}` format-spec, and `ConstBytes` interning (allocs per push, like a list literal).
+  `{b:spec}` format-spec, and `ConstBytes` interning (allocs per push, like a list literal). (The
+  mutable `bytearray` was once listed here as a non-goal — it has since **shipped**; see the
+  `bytearray` section above.)
 
 **✅ Qualified enum-variant access `Enum.Variant` (owner-requested, explicit exception to the M19/M18
 feature freeze).** Variants can now be written **qualified** (`Color.Red`, `Shape.Circle(2)`,
@@ -640,7 +680,7 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
   native `xs.map(f)` is the faster non-blocking path (and demotes via Path C if a `recv` blocks in it).
 
 **Permanent non-goals:** interp B1/B2 (above); variadic args, bignum (`i64`-only — every overflow is a
-recoverable fault; binary work → the immutable `bytes` *sequence*, **shipped** — no `byte`/`u8` scalar). **Level-3 dynamic
+recoverable fault; binary work → the `bytes` (immutable) + `bytearray` (mutable) *sequence* types, both **shipped** — no `byte`/`u8` scalar). **Level-3 dynamic
 C-ABI FFI is NO LONGER a non-goal — v1 shipped** (`extern "lib":` scalar calls via dlopen+libffi;
 structs/callbacks/varargs/userdata still deferred — see "Done" below). **`yield`/generators are likewise
 no longer a non-goal — complete VM-only support shipped** (see below).

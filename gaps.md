@@ -99,10 +99,14 @@ automation, randomness, binary/crypto, CLI tooling. Ranked by leverage.
   **CSV**, **duration / date decomposition** (timestamps only — no y/m/d/parse/duration math),
   **data structures** (heap/priority-queue, deque, counter, ordered map).
 
-**Language-level:** `i64`-only (no `byte`/`u8` scalar). The immutable **`bytes`** *sequence* type
-(Python model, not a scalar) is **SHIPPED** — `b"..."` literal w/ `\xHH`, `b[i]`→int, `b[a:b:c]`→bytes
-(byte offsets), `for`→int, `len`, `==`/`!=`, `Hashable`, `b'...'` repr; immutable, no `bytearray`,
-no codecs (base64/hex remain a separate `std.*` gap). `bignum` and `yield`/generators are non-goals.
+**Language-level:** `i64`-only (no `byte`/`u8` scalar). Both byte-sequence types (Python model, not
+scalars) are **SHIPPED**: the immutable **`bytes`** (`b"..."` literal w/ `\xHH`, `b[i]`→int,
+`b[a:b:c]`→bytes, `for`→int, `len`, `==`/`!=`, `Hashable`, `b'...'` repr) AND the mutable
+**`bytearray`** (constructor-only — `bytearray()`/`(N)`/`(b)`/`([ints])`, no literal; `ba[i]`→int,
+`ba[i]=x` IndexSet, slice→bytearray, `for`→int, `len`, `push`/`pop`/`extend`, `==` incl. cross-type
+content-equality, `bytearray(b'...')` repr; NOT `Hashable` — mutable, like `list`; deep-copied across
+the airlock). Conversion bridge: `bytes(ba)` / `bytearray(b)`. Remaining: no `byte`/`u8` scalar, no
+codecs (base64/hex remain a separate `std.*` gap). `bignum` and `yield`/generators are non-goals.
 
 ### Tier 4 — ecosystem (toolchain, not the language)
 REPL (huge for scripting iteration), formatter, LSP, package manager / registry, debugger, doc
@@ -134,9 +138,12 @@ map/list-index specialization, **positional closure captures (memory lever #3)**
 >   **GC invariant** — gen/incremental GC needs write barriers the JIT must emit at every store, and
 >   even stop-the-world needs safepoint placement baked into codegen; lock the GC contract before
 >   codegen even if gen-GC is never built. *(coupling inferred — design pass to confirm.)* (3) any new
->   **`Value`/`Obj` variant** (`bytes` — **LANDED**: `Obj::Bytes(Box<[u8]>)` VM / `Value::Bytes(Rc<[u8]>)`
->   interp / `WireValue::Bytes`, a GC leaf; codegen enumerates value types for typed fast paths, so this
->   was the pre-JIT must-do — done) — a new scalar added later touches every one. *(inferred.)* (4) **NaN-box** — highest
+>   **`Value`/`Obj` variant** (`bytes` AND `bytearray` — **LANDED**: `Obj::Bytes(Box<[u8]>)` +
+>   `Obj::ByteArray(Vec<u8>)` VM / `Value::Bytes(Rc<[u8]>)` + `Value::ByteArray(Rc<RefCell<Vec<u8>>>)`
+>   interp / `WireValue::Bytes` + `WireValue::ByteArray`, both GC leaves; `bytes` immutable + hashable,
+>   `bytearray` in-place-mutable via the heap slot + NOT hashable + deep-copied across the airlock;
+>   codegen enumerates value types for typed fast paths, so this was the pre-JIT must-do — done) — a
+>   new scalar added later touches every one. *(inferred.)* (4) **NaN-box** — highest
 >   coupling but ⛔ blocked by full i64; pin only as "if the i64 model is ever revisited, it MUST be
 >   pre-JIT."
 > - **Tier B — JIT-neutral (equal cost before/after):** all **stdlib breadth** (native or pure-Chezzi

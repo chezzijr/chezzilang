@@ -3666,8 +3666,14 @@ impl Vm {
                             let nh = self.heap.alloc(Obj::List(items));
                             self.push(Value::Obj(nh));
                         }
-                        // `bytes` iterates as `int`s (0–255).
+                        // `bytes`/`bytearray` iterate as `int`s (0–255). Snapshots to a list of ints —
+                        // mutating the `bytearray` during iteration does not change the loop sequence.
                         Obj::Bytes(b) => {
+                            let items: Vec<Value> = b.iter().map(|&x| Value::Int(x as i64)).collect();
+                            let nh = self.heap.alloc(Obj::List(items));
+                            self.push(Value::Obj(nh));
+                        }
+                        Obj::ByteArray(b) => {
                             let items: Vec<Value> = b.iter().map(|&x| Value::Int(x as i64)).collect();
                             let nh = self.heap.alloc(Obj::List(items));
                             self.push(Value::Obj(nh));
@@ -4420,8 +4426,12 @@ impl Vm {
             (a, b) if is_numeric(a) && is_numeric(b) => as_f64(a).partial_cmp(&as_f64(b)),
             (Value::Obj(ha), Value::Obj(hb)) => match (self.heap.get(ha), self.heap.get(hb)) {
                 (Obj::Str(a), Obj::Str(b)) => Some(a.cmp(b)),
-                // `bytes` order lexicographically by byte (Python parity).
+                // `bytes`/`bytearray` order lexicographically by byte (Python parity), including
+                // cross-type (Python `b"a" < bytearray(b"b")` compares by content).
                 (Obj::Bytes(a), Obj::Bytes(b)) => Some(a.cmp(b)),
+                (Obj::ByteArray(a), Obj::ByteArray(b)) => Some(a.cmp(b)),
+                (Obj::Bytes(a), Obj::ByteArray(b)) => Some(a.as_ref().cmp(b.as_slice())),
+                (Obj::ByteArray(a), Obj::Bytes(b)) => Some(a.as_slice().cmp(b.as_ref())),
                 _ => None,
             },
             _ => None,
@@ -4455,6 +4465,11 @@ impl Vm {
                 match (self.heap.get(ha), self.heap.get(hb)) {
                     (Obj::Str(a), Obj::Str(b)) => Ok(a == b),
                     (Obj::Bytes(a), Obj::Bytes(b)) => Ok(a == b),
+                    // `bytearray` equality is structural byte-equality. Cross-type `bytes ==
+                    // bytearray` is content-equal (Python parity: `b"a" == bytearray(b"a")` is true).
+                    (Obj::ByteArray(a), Obj::ByteArray(b)) => Ok(a == b),
+                    (Obj::Bytes(a), Obj::ByteArray(b)) => Ok(a.as_ref() == b.as_slice()),
+                    (Obj::ByteArray(a), Obj::Bytes(b)) => Ok(a.as_slice() == b.as_ref()),
                     (Obj::List(a), Obj::List(b)) => {
                         if a.len() != b.len() {
                             return Ok(false);
@@ -5254,6 +5269,13 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
+        // `bytearray` methods (mutable buffer): `len`/`push`/`pop`/`extend`. Routed separately (not
+        // `core_method`) but with the same in-place-via-`get_mut` discipline as `list`.
+        if matches!(self.heap.get(h), Obj::ByteArray(_)) {
+            let result = self.bytearray_method(h, method, &args, span)?;
+            self.push(result);
+            return Ok(());
+        }
         self.ensure_module_faulted(h); // D1: `module.fn(...)` on a not-yet-faulted worker module
         match self.heap.get(h).clone() {
             // `module.fn(args)` — plain call on the looked-up member, no `self`.
@@ -6022,6 +6044,51 @@ impl Vm {
                 _ => Err(self.err(format!("type set has no method '{method}'"), span)),
             },
             _ => unreachable!("core_method dispatched a non-str/list/map/set receiver"),
+        }
+    }
+
+    /// Built-in methods on a `bytearray` receiver (`h` is the heap handle): `len`, `push(int 0..=255)`,
+    /// `pop() -> Option[int]`, `extend(bytes|bytearray|list[int])`. Mirrors the interp's
+    /// `eval_bytearray_method` and the checker's `bytearray_method_sig` — keep all three in lockstep.
+    /// Mutators write IN PLACE through the heap slot (`get_mut`), exactly like the `list` methods, so a
+    /// second binding to the same `bytearray` observes the change.
+    fn bytearray_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        match method {
+            "len" => {
+                self.arity_err("len", args, 0, span)?;
+                let Obj::ByteArray(b) = self.heap.get(h) else { unreachable!() };
+                Ok(Value::Int(b.len() as i64))
+            }
+            "push" => {
+                self.arity_err("push", args, 1, span)?;
+                let byte = match args[0] {
+                    Value::Int(n) if (0..=255).contains(&n) => n as u8,
+                    Value::Int(n) => return Err(self.err(format!("byte value {n} out of range (must be 0..=255)"), span)),
+                    other => return Err(self.err(format!("push() expects an int, got {}", self.type_name(other)), span)),
+                };
+                let Obj::ByteArray(b) = self.heap.get_mut(h) else { unreachable!() };
+                b.push(byte);
+                Ok(Value::Nil)
+            }
+            "pop" => {
+                self.arity_err("pop", args, 0, span)?;
+                let Obj::ByteArray(b) = self.heap.get_mut(h) else { unreachable!() };
+                let popped = b.pop();
+                Ok(match popped {
+                    Some(x) => self.alloc_enum("Option", "Some", vec![Value::Int(x as i64)]),
+                    None => self.alloc_enum("Option", "None", vec![]),
+                })
+            }
+            "extend" => {
+                self.arity_err("extend", args, 1, span)?;
+                // Snapshot the other side first (so `ba.extend(ba)` terminates) — also validates
+                // ints 0..=255 / element types up front, mirroring the constructor.
+                let appended = self.collect_bytes_arg("extend", args[0], span)?;
+                let Obj::ByteArray(b) = self.heap.get_mut(h) else { unreachable!() };
+                b.extend_from_slice(&appended);
+                Ok(Value::Nil)
+            }
+            _ => Err(self.err(format!("type bytearray has no method '{method}'"), span)),
         }
     }
 
@@ -7666,6 +7733,10 @@ impl Vm {
                 // `bytes` crosses by value (owned raw bytes), exactly like `str` — immutable +
                 // value-compared, so a fresh handle on reconstruction is observationally identical.
                 Obj::Bytes(b) => WireValue::Bytes(b.clone()),
+                // `bytearray` crosses by value as a DEEP COPY (a fresh independent buffer on the other
+                // side, like `list`) — never a shared mutable view. `from_wire` rebuilds a new heap
+                // `bytearray`, so cross-thread mutation never aliases.
+                Obj::ByteArray(b) => WireValue::ByteArray(b.clone().into_boxed_slice()),
                 // By-reference callables: cross as the existing handle (matches the old deep_clone arm).
                 Obj::Func { .. }
                 | Obj::Closure { .. }
@@ -7769,6 +7840,9 @@ impl Vm {
             WireValue::Str(s) => Value::Obj(self.heap.alloc(Obj::Str(s.into()))),
             // Rebuild a fresh heap `bytes` from the owned raw bytes (by value, like `str`).
             WireValue::Bytes(b) => Value::Obj(self.heap.alloc(Obj::Bytes(b))),
+            // Rebuild a FRESH, independent heap `bytearray` from the owned raw bytes (deep copy across
+            // the airlock, like `list`) — the other side never shares this VM's buffer.
+            WireValue::ByteArray(b) => Value::Obj(self.heap.alloc(Obj::ByteArray(b.into_vec()))),
             WireValue::Handle(h) => Value::Obj(h),
             // B3.1: rebuild a fresh heap handle onto the SAME shared core (`Arc` already cloned in
             // `to_wire`). Not registered in `self.executors` — the original `NewExecutor` handle there
@@ -8214,13 +8288,14 @@ impl Vm {
             // here for a `str`/core (always sendable) — encode its wire form.
             Obj::Str(_)
             | Obj::Bytes(_)
+            | Obj::ByteArray(_)
             | Obj::Channel(_)
             | Obj::Shared(_)
             | Obj::Atomic(_)
             | Obj::Executor(_)
             | Obj::Socket(_)
             | Obj::Listener(_) => {
-                SnapValue::Wire(self.to_wire(v).expect("str / bytes / channel / shared / atomic / executor / socket is always sendable"))
+                SnapValue::Wire(self.to_wire(v).expect("str / bytes / bytearray / channel / shared / atomic / executor / socket is always sendable"))
             }
             // Experimental generators are not sendable and are never legal as a module global crossing
             // to an M:N worker — reaching here means one was smuggled past the checker.
@@ -9855,6 +9930,7 @@ impl Vm {
             List(Vec<Value>),
             Str(String),
             Bytes(Vec<u8>),
+            ByteArray(Vec<u8>),
             Struct,
         }
         let sliced = match self.heap.get(h) {
@@ -9872,6 +9948,11 @@ impl Vm {
             Obj::Bytes(b) => {
                 let idxs = crate::slice::slice_indices(s, e, st, b.len()).map_err(|m| self.err(m.to_string(), span))?;
                 Sliced::Bytes(idxs.iter().map(|&i| b[i]).collect())
+            }
+            // `bytearray[a:b:c]` slices over BYTE offsets and yields a NEW `bytearray` (mutable copy).
+            Obj::ByteArray(b) => {
+                let idxs = crate::slice::slice_indices(s, e, st, b.len()).map_err(|m| self.err(m.to_string(), span))?;
+                Sliced::ByteArray(idxs.iter().map(|&i| b[i]).collect())
             }
             Obj::Struct { .. } => Sliced::Struct,
             _ => return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span)),
@@ -9891,6 +9972,10 @@ impl Vm {
             }
             Sliced::Bytes(sub) => {
                 let nh = self.heap.alloc(Obj::Bytes(sub.into_boxed_slice()));
+                self.push(Value::Obj(nh));
+            }
+            Sliced::ByteArray(sub) => {
+                let nh = self.heap.alloc(Obj::ByteArray(sub));
                 self.push(Value::Obj(nh));
             }
             Sliced::Struct => {
@@ -9967,8 +10052,17 @@ impl Vm {
                         None => Err(self.err(format!("index {n} out of bounds (len {})", items.len()), span)),
                     };
                 }
-                // `bytes[i]` → `int` (0–255); out-of-range faults recoverably (like list/str).
+                // `bytes[i]`/`bytearray[i]` → `int` (0–255); out-of-range faults recoverably.
                 Obj::Bytes(b) => {
+                    return match crate::slice::norm_index(n, b.len()).map(|i| b[i] as i64) {
+                        Some(v) => {
+                            self.push(Value::Int(v));
+                            Ok(())
+                        }
+                        None => Err(self.err(format!("index {n} out of bounds (len {})", b.len()), span)),
+                    };
+                }
+                Obj::ByteArray(b) => {
                     return match crate::slice::norm_index(n, b.len()).map(|i| b[i] as i64) {
                         Some(v) => {
                             self.push(Value::Int(v));
@@ -10024,6 +10118,16 @@ impl Vm {
                 }
             }
             Obj::Bytes(b) => {
+                let idx = int_idx(self)?;
+                match crate::slice::norm_index(idx, b.len()).map(|i| b[i] as i64) {
+                    Some(v) => {
+                        self.push(Value::Int(v));
+                        Ok(())
+                    }
+                    None => Err(self.err(format!("index {idx} out of bounds (len {})", b.len()), span)),
+                }
+            }
+            Obj::ByteArray(b) => {
                 let idx = int_idx(self)?;
                 match crate::slice::norm_index(idx, b.len()).map(|i| b[i] as i64) {
                     Some(v) => {
@@ -10151,6 +10255,29 @@ impl Vm {
             Value::Int(n) => n,
             other => return Err(self.err(format!("expected int, found {}", self.type_name(other)), span)),
         };
+        // `bytearray[i] = x` — the NEW mutable capability `bytes` lacks. The value must be an `int`
+        // in 0..=255 (validated BEFORE the in-place write); the index must be in range. Both are
+        // distinct recoverable faults. Mutation flows through the heap slot, so two bindings to the
+        // same `bytearray` observe it (like `list`). Validate the value up front (`&self` borrow)
+        // before the `&mut self` `get_mut` below.
+        if matches!(self.heap.get(h), Obj::ByteArray(_)) {
+            let byte = match val {
+                Value::Int(n) if (0..=255).contains(&n) => n as u8,
+                Value::Int(n) => return Err(self.err(format!("byte value {n} out of range (must be 0..=255)"), span)),
+                other => return Err(self.err(format!("expected int, found {}", self.type_name(other)), span)),
+            };
+            let Obj::ByteArray(b) = self.heap.get_mut(h) else { unreachable!() };
+            return match crate::slice::norm_index(idx, b.len()) {
+                Some(i) => {
+                    b[i] = byte;
+                    Ok(())
+                }
+                None => {
+                    let len = b.len();
+                    Err(self.err(format!("index {idx} out of bounds (len {len})"), span))
+                }
+            };
+        }
         match self.heap.get_mut(h) {
             Obj::List(items) => match crate::slice::norm_index(idx, items.len()) {
                 Some(i) => {
@@ -10224,6 +10351,8 @@ impl Vm {
             "ord" => self.builtin_ord(&args, span)?,
             "chr" => self.builtin_chr(&args, span)?,
             "set" => self.builtin_set(&args, span)?,
+            "bytearray" => self.builtin_bytearray(&args, span)?,
+            "bytes" => self.builtin_bytes(&args, span)?,
             _ => unreachable!("unknown builtin {name}"),
         };
         self.push(result);
@@ -10304,6 +10433,69 @@ impl Vm {
         Ok(Value::Obj(self.heap.alloc(Obj::Set(built?))))
     }
 
+    /// Collect raw bytes from a byte-sequence-shaped argument for the `bytes`/`bytearray`
+    /// constructors: a `bytes`, a `bytearray` (copy), or a `list[int]` (each element 0..=255, else a
+    /// recoverable fault). The `what` label names the constructor in error messages.
+    fn collect_bytes_arg(&self, what: &str, v: Value, span: Span) -> Result<Vec<u8>, RuntimeError> {
+        match v {
+            Value::Obj(h) => match self.heap.get(h) {
+                Obj::Bytes(b) => Ok(b.to_vec()),
+                Obj::ByteArray(b) => Ok(b.clone()),
+                Obj::List(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for e in items {
+                        match e {
+                            Value::Int(n) if (0..=255).contains(n) => out.push(*n as u8),
+                            Value::Int(n) => return Err(self.err(format!("{what}() list element {n} out of range (must be 0..=255)"), span)),
+                            other => return Err(self.err(format!("{what}() expects a list of int, got an element of type {}", self.type_name(*other)), span)),
+                        }
+                    }
+                    Ok(out)
+                }
+                _ => Err(self.err(format!("{what}() expects a bytes, a bytearray, or a list[int], got {}", self.type_name(v)), span)),
+            },
+            other => Err(self.err(format!("{what}() expects a bytes, a bytearray, or a list[int], got {}", self.type_name(other)), span)),
+        }
+    }
+
+    /// `bytearray()` → empty; `bytearray(N)` → N zero bytes (Python); `bytearray(b)` → mutable copy of
+    /// a `bytes`; `bytearray(ba)` → copy of another `bytearray`; `bytearray([ints])` → from a list of
+    /// ints (each 0..=255). The MUTABLE buffer (`Obj::ByteArray`, in-place-mutated via the heap slot).
+    fn builtin_bytearray(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        let bytes: Vec<u8> = match args {
+            [] => Vec::new(),
+            [Value::Int(n)] => {
+                if *n < 0 {
+                    return Err(self.err(format!("bytearray() size {n} must be non-negative"), span));
+                }
+                // Bound the eager zero-fill: an unguarded `vec![0u8; n]` for a huge n aborts the
+                // process (SIGABRT), uncatchable by `recover:`. `try_reserve` turns OOM into a
+                // recoverable fault, matching range()/format-width's "never a giant abort" rule —
+                // without a hard cap, so legitimately large buffers still work.
+                let n = *n as usize;
+                let mut buf: Vec<u8> = Vec::new();
+                if buf.try_reserve_exact(n).is_err() {
+                    return Err(self.err(format!("bytearray() size {n} is too large to allocate"), span));
+                }
+                buf.resize(n, 0u8);
+                buf
+            }
+            [one] => self.collect_bytes_arg("bytearray", *one, span)?,
+            _ => return Err(self.err(format!("bytearray() expects 0 or 1 argument(s), got {}", args.len()), span)),
+        };
+        Ok(Value::Obj(self.heap.alloc(Obj::ByteArray(bytes))))
+    }
+
+    /// `bytes(b)` → copy; `bytes(ba)` → immutable SNAPSHOT of a `bytearray`; `bytes([ints])` → from a
+    /// list of ints. The conversion bridge to the IMMUTABLE form (the other being the `b"..."` literal).
+    fn builtin_bytes(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        let bytes: Vec<u8> = match args {
+            [one] => self.collect_bytes_arg("bytes", *one, span)?,
+            _ => return Err(self.err(format!("bytes() expects 1 argument, got {}", args.len()), span)),
+        };
+        Ok(Value::Obj(self.heap.alloc(Obj::Bytes(bytes.into_boxed_slice()))))
+    }
+
     fn builtin_len(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         self.arity_err("len", args, 1, span)?;
         match args[0] {
@@ -10311,6 +10503,7 @@ impl Vm {
                 Obj::List(items) => Ok(Value::Int(items.len() as i64)),
                 Obj::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
                 Obj::Bytes(b) => Ok(Value::Int(b.len() as i64)),
+                Obj::ByteArray(b) => Ok(Value::Int(b.len() as i64)),
                 _ => Err(self.err(format!("len() expects a list, str, or bytes, got {}", self.type_name(args[0])), span)),
             },
             other => Err(self.err(format!("len() expects a list, str, or bytes, got {}", self.type_name(other)), span)),
@@ -10465,6 +10658,7 @@ impl Vm {
             Value::Obj(h) => match self.heap.get(h) {
                 Obj::Str(_) => "str",
                 Obj::Bytes(_) => "bytes",
+                Obj::ByteArray(_) => "bytearray",
                 Obj::List(_) => "list",
                 Obj::Tuple(_) => "tuple",
                 Obj::Map(_) => "map",
@@ -10511,6 +10705,8 @@ impl Vm {
                 Obj::Str(s) => Ok(s.to_string()),
                 // Python `bytes` repr `b'...'` — shared with the interp via `slice::bytes_repr`.
                 Obj::Bytes(b) => Ok(crate::slice::bytes_repr(b)),
+                // Python `bytearray` repr `bytearray(b'...')` — shared via `slice::bytearray_repr`.
+                Obj::ByteArray(b) => Ok(crate::slice::bytearray_repr(b)),
                 Obj::List(items) => {
                     let mut parts = Vec::with_capacity(items.len());
                     for v in items {
@@ -10606,6 +10802,7 @@ impl Vm {
             WireValue::Nil => "nil".to_string(),
             WireValue::Str(s) => s.to_string(),
             WireValue::Bytes(b) => crate::slice::bytes_repr(b),
+            WireValue::ByteArray(b) => crate::slice::bytearray_repr(b),
             WireValue::Handle(h) => self.display(Value::Obj(*h)),
             WireValue::List(items) => {
                 let inner = items.iter().map(|v| self.display_wire(v)).collect::<Vec<_>>().join(", ");
@@ -10749,6 +10946,8 @@ impl Vm {
             Obj::Str(s) => out.push_str(&s),
             // `bytes` interpolates/prints as its Python `b'...'` repr (shared helper, engine-parity).
             Obj::Bytes(b) => out.push_str(&crate::slice::bytes_repr(&b)),
+            // `bytearray` interpolates/prints as `bytearray(b'...')` (shared helper, engine-parity).
+            Obj::ByteArray(b) => out.push_str(&crate::slice::bytearray_repr(&b)),
             Obj::List(items) => {
                 out.push('[');
                 self.stringify_seq_into(out, &items, span, depth + 1)?;
@@ -16114,6 +16313,20 @@ main()";
     fn golden_bytes_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/bytes.chz");
         let expected = include_str!("../../examples/bytes.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// bytearray golden: `examples/bytearray.chz` (the full mutable-buffer table — all 4 constructor
+    /// forms, index read + WRITE, out-of-range write under `recover:`, slice→bytearray incl.
+    /// reverse/step, for-loop→int, push/pop/extend, len, ==/cross bytes==bytearray, shared-mutation
+    /// through two bindings, the bytes<->bytearray conversion round-trip, and the `bytearray(b'...')`
+    /// repr) byte-identical on the VM, the interpreter, and its `.expected` (three-engine parity gate).
+    #[test]
+    fn golden_bytearray_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/bytearray.chz");
+        let expected = include_str!("../../examples/bytearray.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
@@ -22299,5 +22512,137 @@ main()";
         assert_parity(src);
         assert_eq!(run_capture(src).expect("vm"), "b'\\x01\\x02'\n");
         assert_eq!(run_capture_parallel(src).expect("parallel"), "b'\\x01\\x02'\n");
+    }
+
+    // ===== bytearray type (mutable sibling of bytes) =====
+
+    #[test]
+    fn vm_bytearray_ops() {
+        // Constructors (all 4 forms), index read, slice -> bytearray (incl. reverse), for-loop sum,
+        // len, push, pop, extend, ==/!=, and Display bytearray(b'...').
+        let src = concat!(
+            "fn main():\n",
+            "    print(bytearray())\n",                 // bytearray(b'')
+            "    print(bytearray(3))\n",                // bytearray(b'\x00\x00\x00')
+            "    print(bytearray(b\"\\x01\\x02\"))\n",  // bytearray(b'\x01\x02')
+            "    ba := bytearray([1, 2, 3])\n",
+            "    print(ba)\n",                          // bytearray(b'\x01\x02\x03')
+            "    print(ba[0])\n",                       // 1
+            "    print(ba[-1])\n",                      // 3
+            "    print(ba[::-1])\n",                    // bytearray(b'\x03\x02\x01')
+            "    s := 0\n",
+            "    for x in ba:\n",
+            "        s = s + x\n",
+            "    print(s)\n",                           // 6
+            "    print(len(ba))\n",                     // 3
+            "    ba.push(4)\n",
+            "    print(ba)\n",                          // bytearray(b'\x01\x02\x03\x04')
+            "    print(ba.pop())\n",                    // Some(4)
+            "    ba.extend(b\"\\xFF\")\n",
+            "    ba.extend([7, 8])\n",
+            "    print(ba)\n",                          // bytearray(b'\x01\x02\x03\xff\x07\x08')
+            "    print(bytearray([1]) == bytearray([1]))\n", // true
+            "    print(bytearray([1]) != bytearray([2]))\n", // true
+            "main()\n"
+        );
+        assert_parity(src);
+        assert_eq!(
+            run_capture(src).expect("vm"),
+            "bytearray(b'')\nbytearray(b'\\x00\\x00\\x00')\nbytearray(b'\\x01\\x02')\nbytearray(b'\\x01\\x02\\x03')\n1\n3\nbytearray(b'\\x03\\x02\\x01')\n6\n3\nbytearray(b'\\x01\\x02\\x03\\x04')\nSome(4)\nbytearray(b'\\x01\\x02\\x03\\xff\\x07\\x08')\ntrue\ntrue\n"
+        );
+    }
+
+    #[test]
+    fn vm_bytearray_index_write_and_shared_mutation() {
+        // ba[i] = x mutates in place; a second binding observes it (proves in-place, not copy).
+        let src = concat!(
+            "fn main():\n",
+            "    ba := bytearray([1, 2, 3])\n",
+            "    ba2 := ba\n",
+            "    ba[0] = 65\n",
+            "    print(ba2[0])\n",      // 65 — same buffer
+            "    ba2[1] = 66\n",
+            "    print(ba[1])\n",       // 66 — observed through the other binding
+            "main()\n"
+        );
+        assert_parity(src);
+        assert_eq!(run_capture(src).expect("vm"), "65\n66\n");
+    }
+
+    #[test]
+    fn vm_bytearray_oob_and_value_range_recoverable() {
+        // An out-of-range index OR an out-of-range value (not 0..=255) is a recoverable fault.
+        let src = concat!(
+            "fn main():\n",
+            "    ba := bytearray([1, 2])\n",
+            "    r1 := recover:\n",
+            "        ba[9] = 1\n",
+            "    match r1:\n",
+            "        Ok(v): print(\"ok\")\n",
+            "        Err(e): print(\"caught oob index\")\n",
+            "    r2 := recover:\n",
+            "        ba[0] = 999\n",
+            "    match r2:\n",
+            "        Ok(v): print(\"ok\")\n",
+            "        Err(e): print(\"caught bad value\")\n",
+            "main()\n"
+        );
+        assert_parity(src);
+        assert_eq!(run_capture(src).expect("vm"), "caught oob index\ncaught bad value\n");
+    }
+
+    #[test]
+    fn vm_bytearray_huge_size_is_recoverable_not_abort() {
+        // `bytearray(N)` for an absurd N must fault recoverably (try_reserve), NOT abort the process
+        // (SIGABRT) uncatchably — the language's recoverable-fault invariant (cf. range()'s cap).
+        let src = concat!(
+            "fn main():\n",
+            "    r := recover:\n",
+            "        bytearray(9999999999999)\n",
+            "    match r:\n",
+            "        Ok(v): print(\"ok\")\n",
+            "        Err(e): print(\"caught huge\")\n",
+            "main()\n"
+        );
+        assert_parity(src);
+        assert_eq!(run_capture(src).expect("vm"), "caught huge\n");
+    }
+
+    #[test]
+    fn vm_bytearray_conversion_bridge() {
+        // bytes(ba) -> immutable snapshot; bytearray(b) -> mutable copy; round-trip + independence.
+        let src = concat!(
+            "fn main():\n",
+            "    ba := bytearray([1, 2, 3])\n",
+            "    b := bytes(ba)\n",
+            "    print(b)\n",                  // b'\x01\x02\x03'
+            "    ba[0] = 99\n",
+            "    print(b)\n",                  // b'\x01\x02\x03' — snapshot unaffected
+            "    ba2 := bytearray(b\"\\x07\\x08\")\n",
+            "    ba2[0] = 10\n",
+            "    print(ba2)\n",                // bytearray(b'\n\x08') — 0x0a renders as \n
+            "    print(bytearray(b))\n",       // bytearray(b'\x01\x02\x03')
+            "main()\n"
+        );
+        assert_parity(src);
+        assert_eq!(run_capture(src).expect("vm"), "b'\\x01\\x02\\x03'\nb'\\x01\\x02\\x03'\nbytearray(b'\\n\\x08')\nbytearray(b'\\x01\\x02\\x03')\n");
+    }
+
+    #[test]
+    fn bytearray_crosses_channel_deep_copy() {
+        // `bytearray` crosses the --parallel airlock by VALUE (deep copy): the other side gets a
+        // fresh independent buffer. Buffer-then-drain (send before recv) so the sequential interp
+        // agrees, exactly like bytes_crosses_channel (a C5 limitation, not bytearray-specific).
+        let src = concat!(
+            "fn main():\n",
+            "    ch := Channel[bytearray]()\n",
+            "    parallel:\n",
+            "        spawn ch.send(bytearray([1, 2]))\n",
+            "    print(ch.recv())\n",
+            "main()\n"
+        );
+        assert_parity(src);
+        assert_eq!(run_capture(src).expect("vm"), "bytearray(b'\\x01\\x02')\n");
+        assert_eq!(run_capture_parallel(src).expect("parallel"), "bytearray(b'\\x01\\x02')\n");
     }
 }

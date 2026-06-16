@@ -102,6 +102,13 @@ pub fn bytes_repr(bytes: &[u8]) -> String {
     out
 }
 
+/// Python `bytearray` `repr`: `bytearray(b'...')` — the bare `b'...'` of [`bytes_repr`] wrapped in
+/// `bytearray(...)`. Shared by BOTH engines (VM + interp) so the mutable buffer's `Display`/`str()`/
+/// interpolation are byte-identical, distinct from `bytes`' bare `b'...'`.
+pub fn bytearray_repr(bytes: &[u8]) -> String {
+    format!("bytearray({})", bytes_repr(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +121,13 @@ mod tests {
         assert_eq!(bytes_repr(&[0xFF]), "b'\\xff'");
         assert_eq!(bytes_repr(&[0x00, 0x01]), "b'\\x00\\x01'");
         assert_eq!(bytes_repr(b"a'b"), "b'a\\'b'");
+    }
+
+    #[test]
+    fn bytearray_repr_wraps_bytes_repr() {
+        assert_eq!(bytearray_repr(b""), "bytearray(b'')");
+        assert_eq!(bytearray_repr(b"hi"), "bytearray(b'hi')");
+        assert_eq!(bytearray_repr(&[0x00, 0xFF]), "bytearray(b'\\x00\\xff')");
     }
 
     fn idx(start: Option<i64>, end: Option<i64>, step: Option<i64>, len: usize) -> Vec<usize> {

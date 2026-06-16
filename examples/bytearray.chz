@@ -1,0 +1,79 @@
+# bytearray — the MUTABLE sibling of `bytes` (Python `bytearray` model). Constructor-only (no
+# literal). Exercises the whole operation table: all 4 constructor forms, index read + WRITE, an
+# out-of-range write under recover:, slice -> bytearray (reverse / step), for-loop -> int, push /
+# pop / extend, len, == (incl. cross bytes==bytearray), shared mutation through two bindings, the
+# bytes <-> bytearray conversion round-trip, and the bytearray(b'...') Display / str() / interp repr.
+
+fn main():
+    # Four constructor forms.
+    print(bytearray())                 # bytearray(b'')
+    print(bytearray(3))                # bytearray(b'\x00\x00\x00') — N zero bytes
+    print(bytearray(b"\x01\x02"))      # bytearray(b'\x01\x02') — from a bytes
+    ba := bytearray([1, 2, 3, 255])    # from a list[int]
+    print(ba)                          # bytearray(b'\x01\x02\x03\xff')
+
+    # Display / str() / interpolation — the bytearray(b'...') repr (distinct from bytes' bare b'...').
+    print(str(ba))
+    print("interp: {ba}")
+
+    # ba[i] -> int (0..255), including a negative index.
+    print(ba[0])
+    print(ba[-1])
+
+    # ba[i] = x — the NEW mutable capability bytes lacks.
+    ba[0] = 65
+    print(ba[0])                       # 65
+
+    # Shared mutation through two bindings: ba2 aliases the same buffer (in-place, not a copy).
+    ba2 := ba
+    ba2[1] = 66
+    print(ba[1])                       # 66 — observed through the other binding
+
+    # ba[a:b:c] -> a NEW bytearray (mutable copy): reverse, step.
+    print(ba[::-1])
+    print(ba[::2])
+
+    # for x in ba -> int: sum the bytes.
+    total := 0
+    for x in ba:
+        total = total + x
+    print(total)
+
+    # len.
+    print(len(ba))
+
+    # Mutating methods: push (one byte), pop (-> Option[int]), extend (bytes / bytearray / list[int]).
+    ba.push(10)
+    print(ba)
+    print(ba.pop())                    # Some(10)
+    ba.extend(b"\xAA")
+    ba.extend([7, 8])
+    print(ba)
+
+    # Equality: structural, and cross-type bytes == bytearray is content-equal (Python parity).
+    print(bytearray([1, 2]) == bytearray([1, 2]))
+    print(bytearray([1, 2]) != bytearray([1, 3]))
+    print(bytearray([97, 98]) == b"ab")
+    print(b"ab" == bytearray([97, 98]))
+
+    # Conversion bridge: bytes(ba) -> immutable snapshot; bytearray(b) -> mutable copy.
+    snap := bytes(bytearray([1, 2, 3]))
+    print(snap)                        # b'\x01\x02\x03'
+    back := bytearray(snap)
+    back[0] = 99
+    print(back)                        # bytearray(b'\x63\x02\x03')
+    print(snap)                        # b'\x01\x02\x03' — snapshot unaffected
+
+    # An out-of-range index write OR an out-of-range value (not 0..255) faults recoverably.
+    r1 := recover:
+        back[99] = 1
+    match r1:
+        Ok(v): print("ok")
+        Err(e): print("caught oob write")
+    r2 := recover:
+        back[0] = 999
+    match r2:
+        Ok(v): print("ok")
+        Err(e): print("caught bad value")
+
+main()
