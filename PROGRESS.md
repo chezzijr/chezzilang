@@ -581,6 +581,14 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **Checker control-flow boundary for `spawn:`/`defer:` blocks** (2026-06-16) — fixes a three-way
+  divergence where `break`/`continue` lexically nested in an enclosing loop but placed inside a `spawn:`
+  or `defer:` block passed `check`, raised `break outside loop` at runtime on the VM, and was silently
+  treated as a block exit by the interp. Both block arms now save-zero-restore `loop_depth` around the
+  body check (mirroring `check_fn_body`/`infer_closure`), so the existing `loop_depth == 0` guard rejects
+  at check time with the uniform diagnostic; a legitimate loop INSIDE the block stays legal. Checker-only
+  (no VM/interp/compiler edits); two-engine parity restored (runtime paths now unreachable from checked
+  source). 4 rejection + 3 positive-guard tests in `src/checker/tests.rs`.
 - ✅ **Adversarial-review remediation — `wait`/timer + C-ABI FFI** (2026-06-13, merges `b697ce0` (wait) +
   `e9dc3c1` (ffi)) — fixes the 8 findings from an adversarial review of the freshly-merged `wait`/`select`
   and FFI features, run as two file-disjoint auto-task worktrees (post-merge-gated, both `ship`; 1801 tests).

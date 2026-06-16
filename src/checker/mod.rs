@@ -1469,7 +1469,14 @@ impl Checker {
                 // copy), so allowing it would crash the VM and silently no-op the interp.
                 let floor = self.scopes.len();
                 self.defer_floors.push(floor);
+                // A `defer:` block compiles to a fresh child proto with an empty loop stack, so a
+                // `break`/`continue` lexically nested in an enclosing loop but placed here is illegal
+                // in both engines. Save-zero-restore `loop_depth` (mirroring `check_fn_body`) so the
+                // `loop_depth == 0` guard at `StmtKind::Break`/`Continue` fires at check time; a
+                // legitimate loop INSIDE the block re-increments from 0, keeping its own break legal.
+                let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
                 self.check_block(body);
+                self.loop_depth = saved_loop_depth;
                 self.defer_floors.pop();
             }
             StmtKind::Parallel { body } => {
@@ -1548,11 +1555,19 @@ impl Checker {
                         // are task-local. `enter`/`leave` is balanced even if checking errors.
                         let floor = self.scopes.len();
                         self.capture_floors.push(floor);
+                        // A `spawn:` block compiles to a fresh child proto with an empty loop stack,
+                        // so a `break`/`continue` lexically nested in an enclosing loop but placed
+                        // here is illegal in both engines. Save-zero-restore `loop_depth` (mirroring
+                        // `infer_closure`) so the `loop_depth == 0` guard at `StmtKind::Break`/
+                        // `Continue` fires at check time; a legitimate loop INSIDE the block
+                        // re-increments from 0, keeping its own break/continue legal.
+                        let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
                         self.push_scope();
                         for stmt in body {
                             self.check_stmt(stmt);
                         }
                         self.pop_scope();
+                        self.loop_depth = saved_loop_depth;
                         self.capture_floors.pop();
                     }
                 }

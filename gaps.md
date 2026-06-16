@@ -27,16 +27,6 @@ std.math trig + request verbs landed; concurrency D6 complete (Path C resolved).
 
 ### 🟡 Type-system + runtime depth
 
-- **🟡 `break`/`continue` inside a `spawn:` / `defer:` block — three-way divergence (the one real bug).**
-  These blocks compile to a fresh child proto with an empty loop stack, so a `break`/`continue`
-  lexically nested in an enclosing loop diverges: `check` → `ok`, VM → runtime `break/continue outside
-  loop`, `--interp` → silently treats it as a block exit. A clean `check` must guarantee the program
-  runs and both engines must agree. Affects both block forms. **Confirmed HEAD 2026-06-16**
-  (`/tmp/brk_defer.chz`, `/tmp/brk_spawn.chz`). **Fix:** make the block a control-flow boundary in the
-  checker — save/zero `loop_depth` across `check_block` for these arms (`checker/mod.rs:1092`) so the
-  `loop_depth == 0` guard at `StmtKind::Break` fires, rejecting at check time on both engines. One
-  shared fix.
-
 - **⚪ Checker `=` to a by-value captured local — latent, UNREACHABLE on HEAD** (verified 2026-06-16).
   `infer_closure` pushes no capture floor (`checker/mod.rs:2841`); an inner fn/closure writing an
   enclosing local *would* type-check then misroute the store to `SetGlobalSlot` (`emit_store`,
@@ -225,7 +215,10 @@ hex/bin/oct literals (`hex.chz`); tuple-`for` + `enumerate`/`zip` (`for_tuple.ch
 **Type-system + runtime depth ✅** · non-const default exprs (relaxed; param-ref defaults still out);
 calling a `fn`-typed field (`fn_field.chz`); `sort_by_key` (`sort_by_key.chz`); `Ref[T]` mutable box
 (`std/ref.chz`, `ref.chz`); runtime stack traces (both engines identical, `stack_trace.chz`); integer
-overflow policy (every `i64` overflow recoverable, `overflow.chz`); loop-var reassignment rejected.
+overflow policy (every `i64` overflow recoverable, `overflow.chz`); loop-var reassignment rejected;
+`break`/`continue` in a `spawn:`/`defer:` block nested in an outer loop now rejected at check time
+(`checker/mod.rs` save-zero-restore `loop_depth` across both block arms, ending a three-way `check`/VM/
+interp divergence; 2026-06-16).
 
 **Concurrency ✅** · pending-`spawn` drop on early `parallel:` escape → cancel-and-report (both engines);
 VM nursery-leak on `?`/return escape (truncate to frame depth); **Path C** recv-in-native-callback
