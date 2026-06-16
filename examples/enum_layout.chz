@@ -1,0 +1,162 @@
+# examples/enum_layout.chz — M19 memory-layout lever #2 (enum variant_id). Exercises every
+# observable surface the per-instance variant/type-name → dense `variant_id: u32` change touches:
+# nullary + payload variants, a generic Option[T]/Result[T,E], exhaustive match, match-with-binding,
+# a guard, enum == (equal / unequal-by-variant / unequal-by-enum-type), Display + `{}` interpolation,
+# nested enums, Result/Option + the `?` operator, variant-name SHADOWING (a user enum reusing the
+# native `Some` name — native vs user identity + `?` on a genuine native), and an enum crossing a
+# spawn+Channel (wire/snap carry the dense variant_id directly). Byte-identical on the VM, interp, and
+# --parallel — variant_id is behavior-preserving, so any divergence turns the golden RED.
+
+enum Color:
+    Red
+    Green
+    Blue
+
+enum Shape:
+    Circle(int)
+    Rect(int, int)
+    Dot
+
+enum Tree[T]:
+    Leaf
+    Node(T, Tree[T], Tree[T])
+
+# Variant-name SHADOWING: a user enum may name its variants `Some`/`None` (main allows this). The
+# reserved native ids `VID_SOME`/`VID_NONE_VARIANT` must stay DISJOINT from this user enum's ids, so a
+# native Option value never compares equal to a `Shadow` value and `?` still recognises genuine
+# natives. Native construction (pop) stamps the fixed constant directly; bare `Some(..)` here resolves
+# to this user enum (it shadows the name) and stamps the user id — the two ids never collide.
+enum Shadow:
+    Some(int)
+    Bar
+
+# `?` on a GENUINE native Option (xs.pop()) must still work even though `Some` is shadowed —
+# pop() stamps VID_SOME/VID_NONE_VARIANT directly, which `?`'s gate recognises.
+fn first_native(xs: list[int]) -> int?:
+    v := xs.pop()?
+    return Some(v)
+
+# Exhaustive match (no `_`) selecting an arm by variant id.
+fn color_name(c: Color) -> str:
+    return match c:
+        Red: "red"
+        Green: "green"
+        Blue: "blue"
+
+# Match with payload binding.
+fn shape_area(s: Shape) -> int:
+    return match s:
+        Circle(r): r * r
+        Rect(w, h): w * h
+        Dot: 0
+
+# Match guard: an arm matches only when its pattern binds AND the guard is true; else it falls
+# through. Each variant appears once; the guard is on the bound payload.
+fn shape_kind(s: Shape) -> str:
+    return match s:
+        Circle(r) if r > 10: "big circle"
+        Rect(w, h) if w == h: "square"
+        _: "other"
+
+# Nested enums in a generic Tree[int].
+fn tree_sum(t: Tree[int]) -> int:
+    return match t:
+        Leaf: 0
+        Node(v, l, r): tree_sum(l) + v + tree_sum(r)
+
+# Result/Option + the `?` operator (gated on the fixed native variant ids).
+fn safe_div(a: int, b: int) -> int!:
+    if b == 0:
+        return Err("divide by zero")
+    return Ok(a / b)
+
+fn chained(a: int, b: int, c: int) -> int!:
+    x := safe_div(a, b)?
+    y := safe_div(x, c)?
+    return Ok(y)
+
+fn first_even(xs: list[int]) -> int?:
+    for x in xs:
+        if x % 2 == 0:
+            return Some(x)
+    return None
+
+# An enum value crossing a spawn + Channel: the worker sends an Option[int] back; the receiver
+# matches it. Exercises wire/snap variant-id rebuild on the --parallel path.
+fn producer(out: Channel[int?]):
+    out.send(Some(99))
+    out.send(None)
+
+fn main():
+    # Nullary + payload variants, Display.
+    print(Red)
+    print(Circle(5))
+    print(Rect(3, 4))
+    print(color_name(Green))
+    print(shape_area(Circle(6)))
+    print(shape_area(Rect(3, 4)))
+    print(shape_area(Dot))
+
+    # Match guards (guard fails ⇒ falls through to the wildcard).
+    print(shape_kind(Circle(20)))
+    print(shape_kind(Circle(2)))
+    print(shape_kind(Rect(5, 5)))
+    print(shape_kind(Rect(2, 7)))
+    print(shape_kind(Dot))
+
+    # Nested generic enum.
+    t: Tree[int] = Node(2, Node(1, Leaf, Leaf), Node(3, Leaf, Leaf))
+    print(tree_sum(t))
+
+    # enum == : equal, unequal-by-variant, unequal-by-enum-type, payload-aware.
+    print(Red == Red)
+    print(Red == Green)
+    print(Circle(5) == Circle(5))
+    print(Circle(5) == Circle(6))
+    print(Some(1) == Some(1))
+    print(Some(1) == None)
+
+    # Interpolation of an enum value.
+    s := Circle(8)
+    print("shape is {s}, area {shape_area(s)}")
+    o := Some(42)
+    print("opt is {o}")
+
+    # Result/Option + `?`.
+    match chained(100, 5, 2):
+        Ok(v): print("chained ok {v}")
+        Err(e): print("chained err {e}")
+    match chained(100, 0, 2):
+        Ok(v): print("chained ok {v}")
+        Err(e): print("chained err {e}")
+    match first_even([1, 3, 4, 7]):
+        Some(v): print("first even {v}")
+        None: print("no even")
+    match first_even([1, 3, 5]):
+        Some(v): print("first even {v}")
+        None: print("no even")
+
+    # Variant-name shadowing: native Option/Result identity must survive a user enum reusing the
+    # names. `Shadow.Some(5)` is the user variant; a native Option::Some(5) from pop() is NOT equal
+    # to it, and `?` still unwraps a genuine native Option.
+    sh := Shadow.Some(5)
+    print(sh)
+    nat := [5].pop()              # native int? == Some(5)
+    print("native Some == user Shadow.Some:", nat == sh)
+    print("first_native:", first_native([10, 20]))
+    print("first_native empty:", first_native([]))
+
+    # Enum across spawn + Channel.
+    ch := Channel[int?]()
+    parallel:
+        spawn producer(ch)
+    a := ch.recv()
+    b := ch.recv()
+    match a:
+        Some(v): print("recv Some {v}")
+        None: print("recv None")
+    match b:
+        Some(v): print("recv Some {v}")
+        None: print("recv None")
+
+main()

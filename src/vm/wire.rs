@@ -46,8 +46,12 @@ pub enum WireValue {
         fields: Vec<(Box<str>, WireValue)>,
     },
     Enum {
-        ty: Box<str>,
-        variant: Box<str>,
+        /// M19 lever #2 — the dense `variant_id` crosses the airlock DIRECTLY (not the name). All
+        /// workers share one `Arc<Program>`, so the id is identical on both sides and needs no
+        /// re-resolution. Carrying the id (not the name) is also correct under variant-name shadowing:
+        /// a user enum declaring `Some`/`Ok`/… reuses the name but has its own id, so a name round-trip
+        /// (`enum_names` → `variant_id`) would collapse a native `Some` (`VID_SOME`) into the user's id.
+        variant_id: u32,
         payload: Vec<WireValue>,
     },
     /// A by-reference object carried across the airlock as its existing heap handle (single-thread /

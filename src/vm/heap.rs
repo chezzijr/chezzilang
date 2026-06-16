@@ -168,9 +168,15 @@ pub enum Obj {
         tid: u32,
         fields: Vec<Value>,
     },
+    /// An enum variant instance. M19 memory-layout lever #2 — identified by a dense numeric
+    /// `variant_id` (`VariantDef::variant_id`), NOT by per-instance type/variant-name `Box<str>`s:
+    /// match dispatch / equality / `?` are pure-int compares on this id (the JIT jump-table
+    /// groundwork), and the type + variant names resolve from `Program::variants_by_id` on the cold
+    /// path only (Display / stringify / error / wire / snap). The enum analogue of `Struct.tid`. Saves
+    /// two string allocs per instantiation. `VID_NONE` for an unregistered variant (defensive only —
+    /// not constructible from source). `payload` holds the variant's values (GC-traced as children).
     Enum {
-        ty: Box<str>,
-        variant: Box<str>,
+        variant_id: u32,
         payload: Vec<Value>,
     },
     /// A named function (top-level `fn` / method) + the module globals it resolves against.

@@ -62,6 +62,22 @@ pub const NO_IC: u32 = u32::MAX;
 /// otherwise share it), so such a struct always falls to the name-probe. Real tids are dense `0..n`.
 pub const TID_NONE: u32 = u32::MAX;
 
+/// M19 memory-layout lever #2 — sentinel enum variant id (`VariantDef::variant_id` /
+/// `Obj::Enum.variant_id`) for an enum whose variant is not a registered variant. `match_arm` never
+/// matches it (no real arm id equals it) and the cold-path name resolver falls back to a placeholder.
+/// The language cannot construct an unregistered variant (enums are program-global, compiler- /
+/// native-registered), so this is a defensive fallback. Real ids are dense `0..n`.
+pub const VID_NONE: u32 = u32::MAX;
+
+/// M19 lever #2 — the FIXED low variant ids of the built-in `Result`/`Option` variants, assigned
+/// first in `Compiler::new()` so `?` (`do_try`) and top-level-error gating compare against these
+/// compile-time constants (the constant / jump-table dispatch the future Cranelift codegen + match-
+/// on-enum reuse). User variants follow at `4..` in declaration order.
+pub const VID_OK: u32 = 0;
+pub const VID_ERR: u32 = 1;
+pub const VID_SOME: u32 = 2;
+pub const VID_NONE_VARIANT: u32 = 3;
+
 /// A single VM instruction. Operands are inline (typed), so there is no separate constant pool —
 /// strings and numbers live in the op. Jump targets are absolute indices into the proto's `code`.
 #[derive(Debug, Clone)]
@@ -215,8 +231,11 @@ pub enum Op {
     /// Build a set from the top `n` values (deduped, insertion order kept). Mirrors `NewList`.
     NewSet(usize),
     NewStruct(String, usize),
-    /// `ty`, `variant`, `argc`.
-    NewEnum(String, String, usize),
+    /// Construct an enum variant from the top `argc` stack values. `variant_id` (M19 lever #2) is the
+    /// dense, compile-time id stamped onto the instance — the enum analogue of `NewStruct`'s `tid`;
+    /// `variant` is kept only for the cold arity-mismatch error message. `VID_NONE` for an
+    /// unregistered variant (never constructible from source).
+    NewEnum { variant: String, variant_id: u32, argc: usize },
     /// Build a `Func` value over `ProtoId`, capturing the current frame's home module.
     MakeFunc(ProtoId),
     /// Build a `Cffi` value from `Program.cffi_defs[id]`: `dlopen` the library + resolve the symbol
@@ -291,6 +310,11 @@ pub enum Op {
     MatchArm {
         scrut: usize,
         variant: String,
+        /// M19 lever #2 — the dense, compile-time id of `variant`. Match dispatch compares the
+        /// scrutinee's stamped `Obj::Enum.variant_id` against this u32 (no per-arm variant-name string
+        /// compare — the JIT jump-table groundwork). `variant` is kept only for the cold error message
+        /// ("pattern '…' binds …"). `VID_NONE` for an unregistered variant (never matches).
+        variant_id: u32,
         nbind: usize,
         bind_start: usize,
         next: usize,
@@ -406,7 +430,17 @@ pub struct StructDef {
 #[derive(Debug, Clone)]
 pub struct VariantDef {
     pub enum_name: String,
+    /// This variant's own name (also the `Program::variants` map key — kept here so the cold path can
+    /// recover it from a `variant_id` via `Program::variants_by_id` without re-scanning the map).
+    pub name: String,
     pub arity: usize,
+    /// M19 memory-layout lever #2 — a dense, global variant id (`0..n`, one namespace across all
+    /// enums) stamped onto every `Obj::Enum` instance so match dispatch / equality / `?` are pure-int
+    /// compares (the JIT jump-table groundwork). Globally unique per (enum-type, variant) pair, which
+    /// holds because variant names are globally unique today (`Program::variants` is keyed by variant
+    /// name only). Native `Result`/`Option` variants get the fixed ids `VID_OK`/`VID_ERR`/`VID_SOME`/
+    /// `VID_NONE_VARIANT`; user variants follow in declaration order.
+    pub variant_id: u32,
 }
 
 /// Per-module metadata the run driver consumes: its label, toplevel proto, resolved imports, and
@@ -432,6 +466,11 @@ pub struct Program {
     pub protos: Vec<Proto>,
     pub structs: HashMap<String, StructDef>,
     pub variants: HashMap<String, VariantDef>,
+    /// M19 lever #2 — variants indexed by their dense `variant_id` (`variants_by_id[id]` ⇒ that
+    /// variant's `VariantDef`, carrying its `enum_name` + `name`). The reverse of `variants`: O(1)
+    /// cold-path id→names resolution for Display / stringify / error / wire / snap, where the instance
+    /// no longer carries the strings. Dense and gap-free (ids are assigned `0..n`).
+    pub variants_by_id: Vec<VariantDef>,
     /// Modules in dependency order (deps first, entry last) — the run order.
     pub modules: Vec<ModuleProto>,
     /// M19 Phase 4 — number of struct-field inline-cache sites (dense ids `0..field_ic_sites`
