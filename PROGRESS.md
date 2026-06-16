@@ -11,6 +11,59 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Built-in conversions — str ↔ bytes (UTF-8) methods + `list()`/`set()`/`map()` constructors
+(owner-requested; the natural follow-on to the just-landed `bytes`/`bytearray` types).** Two
+conversion surfaces, mirroring the `bytes`/`bytearray` builtin-wiring exactly (3-engine parity), with
+**no new syntax** — every form is an existing call/method production, so **`docs/grammar.bnf` is
+intentionally UNCHANGED** (`cargo test conformance` stays green, proving no new terminal):
+
+- **str ↔ bytes (UTF-8), as METHODS (not constructors — `bytes(x)`/`str(b)` names are already taken):**
+  `str.encode() -> bytes` UTF-8-encodes (always succeeds — `str` is UTF-8 internally; copies the bytes
+  out into a new immutable `bytes`). `bytes.decode() -> str` and `bytearray.decode() -> str` UTF-8-decode
+  via `std::str::from_utf8`, mapping invalid UTF-8 to a **recoverable** `RuntimeError`
+  (`"invalid UTF-8 in decode()"`, catchable by `recover:`, **never** a panic — same fault policy as the
+  index/overflow faults). `"héllo".encode().decode() == "héllo"` round-trips a multi-byte char;
+  `b"\xff\xfe".decode()` faults recoverably. **UTF-8 only** — no encoding-name argument (latin1/utf16 are
+  an explicit future non-goal). Only `str` gets `.encode()`; only `bytes`/`bytearray` get `.decode()`.
+  Wired through the method-dispatch path: checker `str_method_sig`/`bytearray_method_sig` + a new
+  `bytes_method_sig` and a `Ty::Bytes` arm in `infer_method_call`; VM `core_method` Str arm +
+  `bytearray_method` + a new `bytes_method` + an `Obj::Bytes` route in `do_method_call`, both decode
+  paths sharing `Vm::decode_utf8`; interp `str_method` + `eval_bytearray_method` + a new
+  `eval_bytes_method`, both sharing the free `decode_utf8` (error string byte-identical between engines).
+- **`list(it)` / `set(it)` / `map(it)` constructors over ANY for-iterable** (NOT the narrow
+  `Iterator[T]` protocol). Element types resolve through the checker's **`iter_elem`** — the single
+  source of truth for "what `for x in X` accepts" — so `list([1,2])`, `list(myset)`, `list(b"hi")`,
+  `list("ab")`, `list(range(3))`, `list(bytearray(..))`, and `list(myUserIterator)` all typecheck with no
+  new protocol bound. `list(it) -> list[T]`; `set(it) -> set[T]` (the EXISTING `set` broadened from
+  list-only to any for-iterable, keeping the 0-arg empty-set form + the `Hashable` gate); `map(it) ->
+  map[K, V]` where the element is **exactly a 2-tuple** `(K, V)` (a non-2-tuple is a **static** checker
+  error), `K` `Hashable`, last-wins on dup keys (like the `{k: v}` literal). `list`/`map` are NEW reserved
+  builtin names (added to `is_reserved_name` + both `is_builtin` sites + per-engine dispatch). The
+  argument is **required** — an empty `list`/`map` is the `[]`/`{}` literal, so `list()`/`map()` are
+  checker errors pointing there. `map(pairs)` (free call) and `xs.map(f)` (list HOF method) are separate
+  namespaces — verified the parser routes them distinctly; documented in `docs/syntax.md`.
+- **Runtime drain helper (the one genuinely new runtime piece).** Built-in collections copy elements
+  directly (list/set elems, str→per-char `str`, bytes/bytearray→per-byte `int`, map→keys, range is
+  already a materialized list). A user `next(self) -> Option[T]` struct (or a VM generator) is drained by
+  looping its `next()` until `None`. **Interp:** extracted `drain_value_to_rows` from the post-eval body
+  of `collect_iter_rows` (the for-loop's own materializer) — no duplicated iteration semantics; `set`
+  rerouted through it, `list`/`map` added on `Interp::call`. **VM:** new `Vm::drain_iterable` (no runtime
+  for-loop exists — it's fully compiled), driving user `.next()` via `run_proto`/`generator_next` with the
+  growing accumulator + source **rooted on the operand stack** across every re-entrant call (GC-safe,
+  copying the `builtin_set`/`list_hof`/`struct_hash` rooting pattern); `builtin_set` rerouted through it,
+  `builtin_list`/`builtin_map` added to `do_builtin`.
+- **Tests/golden:** checker `encode_decode_types` / `encode_only_on_str_decode_only_on_bytes` /
+  `constructor_iter_types` / `list_zero_arg_rejected` / `map_requires_two_tuple` /
+  `set_map_hashable_key_gate_preserved`; VM/interp parity `encode_decode_roundtrip_multibyte` /
+  `bytearray_decode_matches_bytes` / `invalid_utf8_decode_recoverable` /
+  `constructors_over_user_iterator_and_dupkey`; and `examples/conversions.chz` + `.expected` goldened on
+  **VM + `--serial` + `--interp`** (byte-identical; uses a user `.next()` struct, NOT a generator, so all
+  three engines agree). +7 tests (2036 green); `cargo test conformance` green (grammar unchanged); clippy
+  clean. **Non-goals (stated):** non-UTF-8 codecs (latin1/utf16), base64/hex/sha (separate `std.*` gap),
+  `tuple()` constructor (fixed-arity tuples can't be typed from a runtime-length iterable), `bool()`/
+  truthiness (`if` stays strict-bool), and a formal user-visible `Iterable[T]` protocol (decoupled into
+  its own future milestone — the constructors reuse the internal `iter_elem` union, not a new bound).
+
 **✅ `bytearray` — mutable byte buffer (owner-requested; the second half of binary support — the
 mutable sibling of `bytes`, Python `bytearray` / Go `[]byte` model — still a sequence, NOT a scalar).**
 A heap byte buffer modeled on `list` (mutation flows through shared references), constructor-only
@@ -46,8 +99,9 @@ A heap byte buffer modeled on `list` (mutation flows through shared references),
   `--parallel` deep-copy independence), `interp_bytearray_*`, `bytearray_repr_wraps_bytes_repr` (slice),
   and `examples/bytearray.chz` + `.expected` goldened on **VM + `--serial` + `--interp` + `--parallel`**
   (byte-identical). +18 tests (2023 green); clippy clean. Remaining non-goals: a `byte`/`u8` scalar,
-  encode/decode codecs (base64/hex — a separate `std.*` gap), and methods beyond push/pop/extend + the
-  protocol ops.
+  non-UTF-8 codecs (latin1/utf16) + base64/hex/sha (a separate `std.*` gap), and byte-sequence methods
+  beyond push/pop/extend/`decode` + the protocol ops. (UTF-8 `.decode()` has since **shipped** — see the
+  conversions section above.)
 
 **✅ `bytes` — immutable byte-sequence type (owner-requested; the Tier-A pre-JIT `Value`/`Obj`-variant
 must-do from `gaps.md`, Python `bytes` model — NOT a new scalar).** A heap byte sequence threaded
@@ -77,11 +131,11 @@ beyond a `b"..."` literal + the const op):
   and `examples/bytes.chz` + `.expected` goldened on **VM + `--serial` + `--interp`** (byte-identical).
   `docs/grammar.bnf` gained the `BYTES` primary terminal (`cargo test conformance` executes it; corpus
   `bytes_literal.chz`). +16 tests (1984 green); clippy clean.
-- **Non-goals (v1):** `byte`/`u8` scalar, bignum, encode/decode codecs
-  (base64/hex are a separate `std.*` gap), `bytes` methods beyond the 5 table rows + Display, a
-  `{b:spec}` format-spec, and `ConstBytes` interning (allocs per push, like a list literal). (The
-  mutable `bytearray` was once listed here as a non-goal — it has since **shipped**; see the
-  `bytearray` section above.)
+- **Non-goals (v1):** `byte`/`u8` scalar, bignum, non-UTF-8 codecs (latin1/utf16) + base64/hex/sha
+  (a separate `std.*` gap), a `{b:spec}` format-spec, and `ConstBytes` interning (allocs per push, like
+  a list literal). (Two items once listed here as non-goals have since **shipped**: the mutable
+  `bytearray` — see the `bytearray` section above — and UTF-8 `encode`/`decode` — see the conversions
+  section above.)
 
 **✅ Qualified enum-variant access `Enum.Variant` (owner-requested, explicit exception to the M19/M18
 feature freeze).** Variants can now be written **qualified** (`Color.Red`, `Shape.Circle(2)`,

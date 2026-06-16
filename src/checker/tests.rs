@@ -5008,3 +5008,61 @@ fn bytearray_not_assignable_to_bytes() {
         "",
     );
 }
+
+// ===== conversions: str.encode()/bytes.decode()/bytearray.decode() (UTF-8) =====
+
+#[test]
+fn encode_decode_types() {
+    // str.encode() -> bytes; bytes.decode() -> str; bytearray.decode() -> str.
+    ok("fn main():\n    b: bytes = \"x\".encode()\n    s1: str = b\"x\".decode()\n    s2: str = bytearray([120]).decode()\n    print(s1 + s2 + str(len(b)))\nmain()\n");
+}
+
+#[test]
+fn encode_only_on_str_decode_only_on_bytes() {
+    // encode is str-only: bytes/bytearray have no encode.
+    rejects("fn main():\n    x := b\"x\".encode()\nmain()\n", "");
+    rejects("fn main():\n    x := bytearray([1]).encode()\nmain()\n", "");
+    // decode is bytes/bytearray-only: str has no decode.
+    rejects("fn main():\n    x := \"x\".decode()\nmain()\n", "");
+}
+
+// ===== conversions: list()/set()/map() constructors over any for-iterable =====
+
+#[test]
+fn constructor_iter_types() {
+    // list() over every for-iterable shape; element type flows through iter_elem.
+    ok("fn main():\n    a: list[int] = list([1, 2])\n    print(len(a))\nmain()\n");
+    ok("fn main():\n    s := {1, 2}\n    a: list[int] = list(s)\n    print(len(a))\nmain()\n");
+    ok("fn main():\n    a: list[int] = list(b\"hi\")\n    print(len(a))\nmain()\n");
+    ok("fn main():\n    a: list[str] = list(\"ab\")\n    print(len(a))\nmain()\n");
+    ok("fn main():\n    a: list[int] = list(range(3))\n    print(len(a))\nmain()\n");
+    ok("fn main():\n    a: list[int] = list(bytearray([1, 2]))\n    print(len(a))\nmain()\n");
+    // set() broadened from list-only to any for-iterable.
+    ok("fn main():\n    s: set[str] = set(\"abc\")\n    print(s.len())\nmain()\n");
+    ok("fn main():\n    s: set[int] = set(range(3))\n    print(s.len())\nmain()\n");
+    ok("fn main():\n    s: set[int] = set([1, 1, 2])\n    print(s.len())\nmain()\n");
+    // map() from a list of 2-tuples.
+    ok("fn main():\n    m: map[int, str] = map([(1, \"a\"), (2, \"b\")])\n    print(m.len())\nmain()\n");
+}
+
+#[test]
+fn list_zero_arg_rejected() {
+    rejects("fn main():\n    a := list()\nmain()\n", "[]");
+}
+
+#[test]
+fn map_requires_two_tuple() {
+    // element not a 2-tuple is a static error.
+    rejects("fn main():\n    m := map([1, 2])\nmain()\n", "");
+    // a map's element is its key (not a 2-tuple) -> static error.
+    rejects("fn main():\n    src := {1: \"a\"}\n    m := map(src)\nmain()\n", "");
+    // a 3-tuple is not a 2-tuple.
+    rejects("fn main():\n    m := map([(1, 2, 3)])\nmain()\n", "");
+}
+
+#[test]
+fn set_map_hashable_key_gate_preserved() {
+    // float is not Hashable -> set/map key must reject it.
+    rejects("fn main():\n    s := set([3.0])\nmain()\n", "Hashable");
+    rejects("fn main():\n    m := map([(3.0, \"a\")])\nmain()\n", "Hashable");
+}
