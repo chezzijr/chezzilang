@@ -10468,7 +10468,17 @@ impl Vm {
                 if *n < 0 {
                     return Err(self.err(format!("bytearray() size {n} must be non-negative"), span));
                 }
-                vec![0u8; *n as usize]
+                // Bound the eager zero-fill: an unguarded `vec![0u8; n]` for a huge n aborts the
+                // process (SIGABRT), uncatchable by `recover:`. `try_reserve` turns OOM into a
+                // recoverable fault, matching range()/format-width's "never a giant abort" rule —
+                // without a hard cap, so legitimately large buffers still work.
+                let n = *n as usize;
+                let mut buf: Vec<u8> = Vec::new();
+                if buf.try_reserve_exact(n).is_err() {
+                    return Err(self.err(format!("bytearray() size {n} is too large to allocate"), span));
+                }
+                buf.resize(n, 0u8);
+                buf
             }
             [one] => self.collect_bytes_arg("bytearray", *one, span)?,
             _ => return Err(self.err(format!("bytearray() expects 0 or 1 argument(s), got {}", args.len()), span)),
@@ -22579,6 +22589,23 @@ main()";
         );
         assert_parity(src);
         assert_eq!(run_capture(src).expect("vm"), "caught oob index\ncaught bad value\n");
+    }
+
+    #[test]
+    fn vm_bytearray_huge_size_is_recoverable_not_abort() {
+        // `bytearray(N)` for an absurd N must fault recoverably (try_reserve), NOT abort the process
+        // (SIGABRT) uncatchably — the language's recoverable-fault invariant (cf. range()'s cap).
+        let src = concat!(
+            "fn main():\n",
+            "    r := recover:\n",
+            "        bytearray(9999999999999)\n",
+            "    match r:\n",
+            "        Ok(v): print(\"ok\")\n",
+            "        Err(e): print(\"caught huge\")\n",
+            "main()\n"
+        );
+        assert_parity(src);
+        assert_eq!(run_capture(src).expect("vm"), "caught huge\n");
     }
 
     #[test]

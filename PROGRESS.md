@@ -19,7 +19,8 @@ A heap byte buffer modeled on `list` (mutation flows through shared references),
 - **Constructor-only — no `ba"..."` literal** (the `b"..."` literal already owns `bytes`, so no lexer/
   parser/grammar change; `docs/grammar.bnf` is intentionally unchanged — a `bytearray(...)` call is the
   existing IDENT-LPAREN production). `bytearray` lexes as a plain identifier (guarded test). Four forms:
-  `bytearray()` (empty), `bytearray(N)` (N zero bytes, Python), `bytearray(b)`/`bytearray(ba)` (mutable
+  `bytearray()` (empty), `bytearray(N)` (N zero bytes, Python; an absurd N faults **recoverably** via
+  `try_reserve`, never a SIGABRT — same recoverable-fault invariant as `range()`/format-width), `bytearray(b)`/`bytearray(ba)` (mutable
   copy), `bytearray([ints])` (each 0–255). Both `bytes(...)` and `bytearray(...)` are NEW builtins (the
   `bytes` commit shipped no `bytes(...)` constructor — it was literal-only) — the **conversion bridge**:
   `bytes(ba)` snapshots, `bytearray(b)` copies.

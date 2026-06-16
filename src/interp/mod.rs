@@ -2221,7 +2221,16 @@ impl Interp {
                 if *n < 0 {
                     return Err(RuntimeError { message: format!("bytearray() size {n} must be non-negative"), span });
                 }
-                vec![0u8; *n as usize]
+                // Bound the eager zero-fill: an unguarded `vec![0u8; n]` for a huge n aborts the
+                // process (SIGABRT), uncatchable by `recover:`. `try_reserve` turns OOM into a
+                // recoverable fault, matching the VM + range()/format-width "never a giant abort" rule.
+                let n = *n as usize;
+                let mut buf: Vec<u8> = Vec::new();
+                if buf.try_reserve_exact(n).is_err() {
+                    return Err(RuntimeError { message: format!("bytearray() size {n} is too large to allocate"), span });
+                }
+                buf.resize(n, 0u8);
+                buf
             }
             [one] => self.collect_bytes_arg("bytearray", one, span)?,
             _ => return Err(RuntimeError { message: format!("bytearray() expects 0 or 1 argument(s), got {}", args.len()), span }),
