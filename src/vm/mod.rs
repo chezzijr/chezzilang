@@ -22092,6 +22092,20 @@ main()
         assert_file_parity("examples/ref_binding.chz");
     }
 
+    /// `ref T` indirect-callee golden: `examples/ref_indirect.chz` — the type-directed arg coercion
+    /// (alias / deref / by receiver type) reached through a LOCAL fn-value, a closure, and a method
+    /// name shared across structs that disagree on ref-ness. All lower to the same `Ref[T]` box, so
+    /// the VM and interp are byte-identical by construction.
+    #[test]
+    fn golden_ref_indirect_via_run_file() {
+        let path = fixture("examples/ref_indirect.chz");
+        let expected = std::fs::read_to_string(fixture("examples/ref_indirect.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/ref_indirect.chz");
+    }
+
     /// `ref T` airlock golden: `examples/ref_airlock.chz` — the concurrency boundary (spec §7). A
     /// `ref T` box is non-sendable, so its VALUE must be copied across the airlock; the child mutates
     /// only its copy and the parent's binding is untouched. Byte-identical on interp + VM.

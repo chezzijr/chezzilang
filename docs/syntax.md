@@ -193,6 +193,10 @@ print(r + 100)     # 106 — usable anywhere its value is
   A `ref T` argument into a plain `T` param **auto-derefs to a copy** (a ref is usable as its value).
   The reverse — a by-value local or a literal into a `ref T` param — is a **type error** (you can't
   take a reference to a by-value local or a temporary; declare the local `ref` to pass by reference).
+  The alias-vs-deref-vs-error decision is **type-directed**: it follows the *resolved* callee's
+  parameter, so it works uniformly through a local fn-value (`g := bump; g(r)`), a **closure** `ref`
+  param (`fn(x: ref int)` — a `ref` arg aliases, a by-value arg is the same error as a named fn), and
+  a method name shared by structs that disagree on ref-ness (the receiver's type picks the method).
 - **Capture.** An inner fn / closure that closes over a `ref` local shares the box, so mutations
   through it persist (a plain non-`ref` local is still captured by value).
 - **One transparency gap — string interpolation.** Inside a `"{ ... }"` interpolation, a bare `ref`

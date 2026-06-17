@@ -4122,5 +4122,18 @@ mod tests {
         // `ref` is a single-name binding modifier; a destructuring let cannot carry it.
         let _ = parse_err("a, b: ref int := (0, 1)\n");
     }
+
+    #[test]
+    fn parses_closure_ref_param() {
+        // A `ref` modifier is legal on a closure param (`fn(x: ref int)`), parsed like any param.
+        match only("g := fn(x: ref int) -> int: x + 1\n") {
+            StmtKind::Let { value, .. } => {
+                let ExprKind::Closure { params, .. } = &value.kind else { panic!("closure") };
+                assert!(params[0].is_ref, "closure param `ref` modifier should set is_ref");
+                assert_eq!(params[0].ty, Some(Type::Named("int".to_string())));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 }
 

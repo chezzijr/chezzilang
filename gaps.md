@@ -210,12 +210,14 @@ map/list-index specialization, **positional closure captures (memory lever #3)**
     generic args, collection elements, struct fields, tuple elements, and destructuring lets.
   - **`Ref[T]`** (`r: Ref[T] = Ref(0)`, explicit `.get()/.set()/.update()`) — UNCHANGED, the
     first-class box usable anywhere a type goes. ≈ Rust `Rc<RefCell>`.
-  Coercion: `ref→ref` param aliases the box; `ref→T` param auto-derefs to a copy; a by-value local
-  or a literal into a `ref` param is a type error. Concurrency: a `ref T` is a `Ref[T]`, which is
+  Coercion (type-directed — follows the resolved callee, including a local fn-value, a closure `ref`
+  param, and a method resolved by receiver type): `ref→ref` param aliases the box; `ref→T` param
+  auto-derefs to a copy; a by-value local or a literal into a `ref` param is a type error. Closure and
+  protocol `ref` params are honored identically. Concurrency: a `ref T` is a `Ref[T]`, which is
   **non-sendable** — capturing/passing the box across the spawn/`parallel:`/`Channel` airlock is
-  rejected (use `Shared[T]`); deref to a value first to send a copy. (The old `r^` deref idea is
-  superseded by auto-deref.) See `docs/syntax.md` (`ref T` section), examples `ref_binding.chz` /
-  `ref_airlock.chz`.
+  rejected (use `Shared[T]`); deref to a value first to send a copy. Diagnostics about a `ref` binding
+  render `ref T`, not the lowered `Ref[T]`. (The old `r^` deref idea is superseded by auto-deref.) See
+  `docs/syntax.md` (`ref T` section), examples `ref_binding.chz` / `ref_indirect.chz` / `ref_airlock.chz`.
 
 ### 🟠 Deferred — will resolve later (real work, lower urgency)
 

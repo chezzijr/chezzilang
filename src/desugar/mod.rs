@@ -73,6 +73,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
     }
     let regs = build_registries(graph);
     let methods = collect_methods(graph);
+    let methods_by_struct = collect_methods_by_struct(graph);
     let fn_fields = collect_fn_fields(graph);
     // Index modules by id so we can resolve each module's imports against the others' registries.
     let mut module_index: HashMap<ModuleId, usize> = HashMap::new();
@@ -117,12 +118,15 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             bare_from: &bare_from,
             aliases: &aliases,
             methods: &methods,
+            methods_by_struct: &methods_by_struct,
             fn_fields: &fn_fields,
         };
         let mut walker = Walker {
             ctx,
             scopes: Vec::new(),
             ref_names: Vec::new(),
+            local_fn: Vec::new(),
+            local_struct: Vec::new(),
             next_tmp: 0,
             skip_normalize: false,
             lower_refs: pass == 0,
@@ -146,6 +150,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
     regs.insert(id.clone(), collect_module_reg(&module.stmts));
     let mut methods = HashMap::new();
     collect_methods_into(&module.stmts, &mut methods);
+    let methods_by_struct = collect_methods_by_struct_into_standalone(&module.stmts);
     let mut fn_fields = HashSet::new();
     collect_fn_fields_into(&module.stmts, &mut fn_fields);
     let bare_from = HashMap::new();
@@ -158,9 +163,10 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
             bare_from: &bare_from,
             aliases: &aliases,
             methods: &methods,
+            methods_by_struct: &methods_by_struct,
             fn_fields: &fn_fields,
         };
-        let mut walker = Walker { ctx, scopes: Vec::new(), ref_names: Vec::new(), next_tmp: 0, skip_normalize: false, lower_refs: pass == 0 };
+        let mut walker = Walker { ctx, scopes: Vec::new(), ref_names: Vec::new(), local_fn: Vec::new(), local_struct: Vec::new(), next_tmp: 0, skip_normalize: false, lower_refs: pass == 0 };
         walker.walk_block(&mut module.stmts)?;
     }
     Ok(())
@@ -178,6 +184,7 @@ pub fn lower_carriers(expr: &mut Expr) {
     let bare_from: HashMap<String, ModuleId> = HashMap::new();
     let aliases: HashMap<String, ModuleId> = HashMap::new();
     let methods: HashMap<String, Vec<Vec<PSpec>>> = HashMap::new();
+    let methods_by_struct: HashMap<(String, String), Vec<PSpec>> = HashMap::new();
     let fn_fields: HashSet<String> = HashSet::new();
     let ctx = Ctx {
         regs: &regs,
@@ -185,11 +192,12 @@ pub fn lower_carriers(expr: &mut Expr) {
         bare_from: &bare_from,
         aliases: &aliases,
         methods: &methods,
+        methods_by_struct: &methods_by_struct,
         fn_fields: &fn_fields,
     };
     // Interpolation fragments never contain `ref` bindings (they are sub-expressions), so ref-
     // lowering is inert here; leave it off to keep the fragment path minimal.
-    let mut walker = Walker { ctx, scopes: Vec::new(), ref_names: Vec::new(), next_tmp: 0, skip_normalize: true, lower_refs: false };
+    let mut walker = Walker { ctx, scopes: Vec::new(), ref_names: Vec::new(), local_fn: Vec::new(), local_struct: Vec::new(), next_tmp: 0, skip_normalize: true, lower_refs: false };
     // Infallible: `skip_normalize` suppresses the only error path (`normalize_call`).
     let _ = walker.walk_expr(expr);
 }
@@ -231,6 +239,66 @@ fn collect_methods_into(stmts: &[Stmt], map: &mut HashMap<String, Vec<Vec<PSpec>
             }
         }
     }
+}
+
+/// Program-wide struct-method specs keyed by `(struct_name, method_name)` — the receiver-type-aware
+/// sibling of [`collect_methods`]. Used to resolve a method call's `ref` param flags when the
+/// receiver's struct type is known locally (so `a.apply(r)` picks `A`'s `apply`, not a sibling
+/// struct's same-named method). The receiver (`self`, params[0]) is dropped, like `collect_methods`.
+fn collect_methods_by_struct(graph: &ModuleGraph) -> HashMap<(String, String), Vec<PSpec>> {
+    // Value `None` marks a key whose per-module specs DISAGREE (a struct-name collision): dropped at
+    // the end so the conflicting entry never drives a coercion decision.
+    let mut map: HashMap<(String, String), Option<Vec<PSpec>>> = HashMap::new();
+    for m in &graph.modules {
+        for stmt in &m.ast.stmts {
+            if let StmtKind::Struct { name, methods, .. } = &stmt.kind {
+                for method in methods {
+                    let spec: Vec<PSpec> = method
+                        .params
+                        .iter()
+                        .skip(1)
+                        .map(|p| PSpec { name: p.name.clone(), default: p.default.clone(), is_ref: p.is_ref })
+                        .collect();
+                    let key = (name.clone(), method.name.clone());
+                    // Struct names are program-global (a reused name is a hard collision error in the
+                    // checker), but two modules CAN parse a same-named struct. If their specs for the
+                    // same method disagree we must NOT pick one by collection order — null the entry so
+                    // resolution falls back to the name-keyed agreement check (which won't mis-coerce).
+                    match map.entry(key) {
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            v.insert(Some(spec));
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut o) => {
+                            if o.get().as_ref() != Some(&spec) {
+                                o.insert(None);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    map.into_iter().filter_map(|(k, v)| v.map(|spec| (k, spec))).collect()
+}
+
+/// Single-module [`collect_methods_by_struct`] for the standalone (test/compiler/interp) path.
+#[cfg(test)]
+fn collect_methods_by_struct_into_standalone(stmts: &[Stmt]) -> HashMap<(String, String), Vec<PSpec>> {
+    let mut map: HashMap<(String, String), Vec<PSpec>> = HashMap::new();
+    for stmt in stmts {
+        if let StmtKind::Struct { name, methods, .. } = &stmt.kind {
+            for method in methods {
+                let spec: Vec<PSpec> = method
+                    .params
+                    .iter()
+                    .skip(1)
+                    .map(|p| PSpec { name: p.name.clone(), default: p.default.clone(), is_ref: p.is_ref })
+                    .collect();
+                map.insert((name.clone(), method.name.clone()), spec);
+            }
+        }
+    }
+    map
 }
 
 /// Reject any parameter/field default that references another parameter/field in the same signature.
@@ -440,6 +508,10 @@ struct Ctx<'a> {
     aliases: &'a HashMap<String, ModuleId>,
     /// Program-wide struct-method specs (see [`collect_methods`]).
     methods: &'a HashMap<String, Vec<Vec<PSpec>>>,
+    /// Receiver-type-keyed struct-method specs (see [`collect_methods_by_struct`]). Lets a method
+    /// call resolve its `ref` param flags from the receiver's struct type when that type is known
+    /// locally — the precise sibling of `methods` (which is keyed by name only).
+    methods_by_struct: &'a HashMap<(String, String), Vec<PSpec>>,
     /// Program-wide function-typed field names (see [`collect_fn_fields`]).
     fn_fields: &'a HashSet<String>,
 }
@@ -470,6 +542,16 @@ struct Walker<'a> {
     /// arg destined for a `ref` param stays the bare box ident (alias). Plain (non-ref) locals are
     /// never in this set, so they keep today's by-value semantics.
     ref_names: Vec<HashSet<String>>,
+    /// Per-scope map of a LOCAL fn-value name to its parameters' `is_ref` flags (parallel to
+    /// `scopes`). Populated when a local is bound to a bare named-fn (`g := bump`) or a closure
+    /// literal (`g := fn(x: ref int): ...`). Lets `callee_param_is_ref` resolve a call through an
+    /// indirect callee — the type-directed coercion decision the syntactic name lookup cannot make.
+    local_fn: Vec<HashMap<String, Vec<bool>>>,
+    /// Per-scope map of a LOCAL name to the struct type it was constructed/annotated as (parallel to
+    /// `scopes`). Populated by `x := StructName(...)` and `x: StructName = ...`. Lets a method call
+    /// `recv.m(args)` resolve `m`'s `ref` flags against the receiver's *actual* struct (so a sibling
+    /// struct's same-named method with different ref-ness does not derail the decision — charge 2).
+    local_struct: Vec<HashMap<String, String>>,
     /// Counter for fresh temp names minted when lowering `?.`/`??` to `match` (`__opt0`, `__opt1`, …).
     /// `__`-prefixed names can't be written by user code, so they never collide with a real binding.
     next_tmp: usize,
@@ -498,11 +580,15 @@ impl Walker<'_> {
     fn push_scope(&mut self) {
         self.scopes.push(HashSet::new());
         self.ref_names.push(HashSet::new());
+        self.local_fn.push(HashMap::new());
+        self.local_struct.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.ref_names.pop();
+        self.local_fn.pop();
+        self.local_struct.pop();
     }
 
     /// Record `name` as a `ref T` binding in the current (innermost) scope.
@@ -531,6 +617,70 @@ impl Walker<'_> {
         matches!(&e.kind, ExprKind::Ident(n) if self.is_ref(n))
     }
 
+    /// Record a LOCAL fn-value binding `name` carrying the given per-param `is_ref` flags, in the
+    /// innermost scope (lockstep with `bind`). Looked up by `callee_param_is_ref` for an indirect call.
+    fn bind_local_fn(&mut self, name: &str, flags: Vec<bool>) {
+        if let Some(top) = self.local_fn.last_mut() {
+            top.insert(name.to_string(), flags);
+        }
+    }
+
+    /// Record that LOCAL `name` holds a value of struct type `sname`, in the innermost scope.
+    fn bind_local_struct(&mut self, name: &str, sname: &str) {
+        if let Some(top) = self.local_struct.last_mut() {
+            top.insert(name.to_string(), sname.to_string());
+        }
+    }
+
+    /// The `is_ref` flags of a local fn-value `name` (innermost binding wins, shadowing-aware).
+    fn local_fn_flags(&self, name: &str) -> Option<&Vec<bool>> {
+        for (vars, fns) in self.scopes.iter().zip(self.local_fn.iter()).rev() {
+            if vars.contains(name) {
+                return fns.get(name);
+            }
+        }
+        None
+    }
+
+    /// The struct type a local receiver `name` was constructed/annotated as (innermost wins).
+    fn local_struct_ty(&self, name: &str) -> Option<&String> {
+        for (vars, sts) in self.scopes.iter().zip(self.local_struct.iter()).rev() {
+            if vars.contains(name) {
+                return sts.get(name);
+            }
+        }
+        None
+    }
+
+    /// If `value` is a bare named-fn / closure literal whose callee param `is_ref` flags are knowable
+    /// pre-type, return them — so a `g := <callee>` binding can be resolved at an indirect call site.
+    /// `None` for any RHS we cannot type locally (a method value, a returned fn, etc.).
+    fn fn_value_flags(&self, value: &Expr) -> Option<Vec<bool>> {
+        match &value.kind {
+            // `g := fn(x: ref int): ...` — the closure's own param ref-flags.
+            ExprKind::Closure { params, .. } => Some(params.iter().map(|p| p.is_ref).collect()),
+            // `g := bump` (a bare free-fn / ctor name, or a fn-value local being re-aliased).
+            ExprKind::Ident(n) if !self.is_local(n) => {
+                self.ctx.resolve_bare(n).map(|s| s.iter().map(|p| p.is_ref).collect())
+            }
+            ExprKind::Ident(n) => self.local_fn_flags(n).cloned(),
+            _ => None,
+        }
+    }
+
+    /// If `value` is a bare struct-constructor call (`StructName(...)`), the struct's name — so a
+    /// `x := StructName(...)` binding can later resolve a method call on `x` by receiver type.
+    fn struct_value_ty(&self, value: &Expr) -> Option<String> {
+        if let ExprKind::Call { callee, .. } = &value.kind
+            && let ExprKind::Ident(n) = &callee.kind
+            && !self.is_local(n)
+            && self.ctx.regs.get(self.ctx.own_id).is_some_and(|r| r.structs.contains_key(n))
+        {
+            return Some(n.clone());
+        }
+        None
+    }
+
     /// Walk a block in its own lexical scope (sequential `let`s bind into this scope).
     fn walk_block(&mut self, stmts: &mut Block) -> Result<(), ResolveError> {
         self.push_scope();
@@ -543,7 +693,7 @@ impl Walker<'_> {
 
     fn walk_stmt(&mut self, stmt: &mut Stmt) -> Result<(), ResolveError> {
         match &mut stmt.kind {
-            StmtKind::Let { names, value, is_ref, .. } => {
+            StmtKind::Let { names, ty, value, is_ref } => {
                 if *is_ref && self.lower_refs {
                     // `r: ref T = RHS`. The parser guarantees a single name here. CREATE-vs-ALIAS is
                     // driven by the RHS: a bare in-scope `ref` ident aliases the same box (share),
@@ -563,9 +713,29 @@ impl Walker<'_> {
                         self.bind_ref(n);
                     }
                 } else {
+                    // Snapshot the RHS shape for indirect-callee resolution BEFORE walking (walking a
+                    // bare `ref` ident would rewrite it to `.get()`). Only meaningful on the ref-
+                    // lowering pass — that is the only pass that consults these maps for arg coercion.
+                    let fn_flags =
+                        if self.lower_refs && names.len() == 1 { self.fn_value_flags(value) } else { None };
+                    let struct_ty = if self.lower_refs && names.len() == 1 {
+                        // A `x: StructName = ...` annotation, or a `x := StructName(...)` ctor call.
+                        match ty {
+                            Some(Type::Named(n)) => Some(n.clone()),
+                            _ => self.struct_value_ty(value),
+                        }
+                    } else {
+                        None
+                    };
                     self.walk_expr(value)?;
                     for n in names.iter() {
                         self.bind(n);
+                    }
+                    if let Some(flags) = fn_flags {
+                        self.bind_local_fn(&names[0], flags);
+                    }
+                    if let Some(sname) = struct_ty {
+                        self.bind_local_struct(&names[0], &sname);
                     }
                 }
             }
@@ -773,6 +943,12 @@ impl Walker<'_> {
                 self.push_scope();
                 for p in params.iter() {
                     self.bind(&p.name);
+                    // A closure `ref` param is a `Ref[T]` box just like a named-fn `ref` param, so
+                    // its body reads/writes lower to `.get()`/`.set()` (charge 3). The checker's
+                    // `infer_closure` validates the pointee type; here we only drive the lowering.
+                    if p.is_ref && self.lower_refs {
+                        self.bind_ref(&p.name);
+                    }
                 }
                 self.walk_expr(body)?;
                 self.pop_scope();
@@ -970,18 +1146,33 @@ impl Walker<'_> {
     /// checker's coercion check. `None` for closures, builtins, fn-fields, or unknown callees (no
     /// `ref` param info available — the args then walk normally / auto-deref).
     fn callee_param_is_ref(&self, callee: &Expr) -> Option<Vec<bool>> {
-        let spec: Option<&Vec<PSpec>> = match &callee.kind {
-            ExprKind::Ident(name) if !self.is_local(name) => self.ctx.resolve_bare(name),
+        match &callee.kind {
+            // A bare callee: a registered free fn / ctor (non-local), OR a LOCAL fn-value bound to a
+            // named fn / closure (charges 1 & 3). The local case is resolved through `local_fn`, the
+            // type-directed link the syntactic name lookup alone cannot see.
+            ExprKind::Ident(name) if !self.is_local(name) => {
+                self.ctx.resolve_bare(name).map(|s| s.iter().map(|p| p.is_ref).collect())
+            }
+            ExprKind::Ident(name) => self.local_fn_flags(name).cloned(),
             ExprKind::Field { obj, name } => match &obj.kind {
-                ExprKind::Ident(alias) if !self.is_local(alias) => {
-                    self.ctx.resolve_qualified(alias, name)
+                // `module.f(...)` — a qualified free fn.
+                ExprKind::Ident(alias) if !self.is_local(alias) && self.ctx.aliases.contains_key(alias) => {
+                    self.ctx.resolve_qualified(alias, name).map(|s| s.iter().map(|p| p.is_ref).collect())
                 }
-                // A method call `recv.m(...)`: resolve `m` across user structs by name (pre-type), the
-                // same as `normalize_call`. Only an unambiguous (single distinct shape) match is used.
                 _ if !is_builtin_method(name) && !self.ctx.fn_fields.contains(name) => {
+                    // A method call `recv.m(...)`. If the receiver's struct type is known locally,
+                    // resolve `m` against THAT struct (charge 2 — sibling structs may disagree on a
+                    // param's ref-ness). Otherwise fall back to the name-keyed table, using it only
+                    // when every defining struct agrees (an unambiguous pre-type shape).
+                    if let ExprKind::Ident(recv) = &obj.kind
+                        && let Some(sname) = self.local_struct_ty(recv)
+                        && let Some(spec) = self.ctx.methods_by_struct.get(&(sname.clone(), name.clone()))
+                    {
+                        return Some(spec.iter().map(|p| p.is_ref).collect());
+                    }
                     match self.ctx.methods.get(name.as_str()) {
                         Some(cands) if !cands.is_empty() && cands.iter().all(|c| *c == cands[0]) => {
-                            Some(&cands[0])
+                            Some(cands[0].iter().map(|p| p.is_ref).collect())
                         }
                         _ => None,
                     }
@@ -989,8 +1180,7 @@ impl Walker<'_> {
                 _ => None,
             },
             _ => None,
-        };
-        spec.map(|s| s.iter().map(|p| p.is_ref).collect())
+        }
     }
 
     /// Resolve `expr` (a `Call`) to a callable and rewrite named/omitted args into positional. Leaves
@@ -1593,5 +1783,53 @@ mod tests {
         let ExprKind::Call { args, .. } = &e.kind else { panic!("call") };
         assert!(is_get_call(&args[0]),
             "non-ref param arg should auto-deref to r.get(), got {:?}", args[0].kind);
+    }
+
+    #[test]
+    fn lowers_ref_arg_through_local_fn_value() {
+        // Charge 1: `g := bump; g(r)` resolves through the LOCAL fn-value to bump's `ref` param, so
+        // the box aliases (the arg stays the bare ident, not `.get()`).
+        let src = "fn bump(x: ref int):\n    x = 1\nr: ref int = 0\ng := bump\ng(r)\n";
+        let s = desugar_ok(src);
+        let StmtKind::Expr(e) = &s[s.len() - 1].kind else { panic!("g(r) call stmt") };
+        let ExprKind::Call { args, .. } = &e.kind else { panic!("call") };
+        assert!(matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
+            "indirect ref param arg should alias (bare ident), got {:?}", args[0].kind);
+    }
+
+    #[test]
+    fn lowers_ref_arg_through_receiver_typed_method() {
+        // Charge 2: two structs share `apply` with DIFFERENT ref-ness; `a.apply(r)` resolves to A's
+        // (ref) signature via the receiver type, so the box aliases — and `b.apply(r)` resolves to
+        // B's (by-value) signature, so the arg auto-derefs.
+        let src = "struct A:\n    t: int\n    fn apply(self, x: ref int):\n        x = 1\nstruct B:\n    t: int\n    fn apply(self, x: int):\n        print(x)\nr: ref int = 0\na := A(0)\nb := B(0)\na.apply(r)\nb.apply(r)\n";
+        let s = desugar_ok(src);
+        let StmtKind::Expr(e) = &s[s.len() - 2].kind else { panic!("a.apply stmt") };
+        let ExprKind::Call { args, .. } = &e.kind else { panic!("call") };
+        assert!(matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
+            "A.apply (ref) arg should alias (bare ident), got {:?}", args[0].kind);
+        let StmtKind::Expr(e) = &s[s.len() - 1].kind else { panic!("b.apply stmt") };
+        let ExprKind::Call { args, .. } = &e.kind else { panic!("call") };
+        assert!(is_get_call(&args[0]),
+            "B.apply (by-value) arg should auto-deref to r.get(), got {:?}", args[0].kind);
+    }
+
+    #[test]
+    fn closure_ref_param_lowers_body_read() {
+        // Charge 3: a closure `ref` param drives body read/write lowering like a named-fn ref param.
+        // The body `x + 1` lowers to `x.get() + 1`.
+        let s = desugar_ok("g := fn(x: ref int) -> int: x + 1\n");
+        let StmtKind::Let { value, .. } = &s[0].kind else { panic!("let") };
+        let ExprKind::Closure { body, .. } = &value.kind else { panic!("closure") };
+        let ExprKind::Binary { lhs, .. } = &body.kind else { panic!("binary body") };
+        assert!(is_get_call(lhs), "closure ref read should lower to x.get(), got {:?}", lhs.kind);
+    }
+
+    #[test]
+    fn closure_byval_arg_into_ref_param_errors() {
+        // Charge 3: a by-value local into a closure `ref` param is the same row-3 error as a named fn.
+        let e = desugar_err("g := fn(x: ref int) -> int: x + 1\nn := 5\ng(n)\n");
+        assert!(e.message.contains("by-reference") && e.message.contains("declare"),
+            "expected the by-value->ref error, got: {:?}", e.message);
     }
 }

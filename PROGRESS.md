@@ -772,6 +772,24 @@ branch names) is in the git log.
   run/--serial/--interp); parser/desugar/checker unit tests + grammar.bnf REF terminal + corpus
   accept/reject fixtures. Docs: `docs/syntax.md` §3, `gaps.md` (RESOLVED), `docs/future.md` (item 12
   landed), `docs/concurrency.md`. `cargo test` green (2052+), `cargo test conformance` green, clippy clean.
+- ✅ **`ref T` arg coercion is type-directed (indirect callees + closures + protocols)** (2026-06-17) —
+  follow-up hardening the `ref` arg alias/deref/error decision so it follows the *resolved* callee, not a
+  purely-syntactic name lookup. The decision still lives in `src/desugar/mod.rs` (it must — desugar runs
+  inside `build_graph`, the one pass the checker and both engines share), but `callee_param_is_ref` now
+  resolves indirect callees through local binding tracking: a LOCAL fn-value (`g := bump`/closure literal
+  → `local_fn` flags) and a method call whose receiver's struct type is known locally (`x := S(...)` /
+  `x: S = ...` → `local_struct`, looked up in a new `(struct, method)`-keyed spec map). Fixes (1) calling
+  a `ref`-fn through a local fn-value (was a false `expected Ref[int], found int`), (2) a method name
+  shared by structs that disagree on ref-ness (resolved by receiver type), (3) **closure `ref` params**
+  (were silently inert) — now `bind_ref`'d in desugar and typed `Ref[T]` in `infer_closure`, so a `ref`
+  arg aliases and a by-value arg is the same row-3 error as a named fn. (4) **Protocol `ref` params** are
+  now honored (`Ref[T]`) in the protocol method sig so a conforming `ref` method matches. (5) Diagnostics
+  for `ref` bindings render the `ref T` surface the user wrote (`ty::ref_display`), never leaking the
+  lowered `Ref[T]`. Golden `examples/ref_indirect.chz` (byte-identical run/--serial/--interp); 13 new
+  parser/desugar/checker tests. Known boundary: a method whose receiver's struct type is NOT statically
+  known locally (e.g. `foo().apply(r)`) still resolves only when all same-named methods agree on ref-ness
+  — otherwise it falls back to deref (the checker then gives a transparent `ref T` error). Docs:
+  `docs/syntax.md` §3. `cargo test` green (2068), conformance green, clippy clean.
 - ✅ **Checker control-flow boundary for `spawn:`/`defer:` blocks** (2026-06-16) — fixes a three-way
   divergence where `break`/`continue` lexically nested in an enclosing loop but placed inside a `spawn:`
   or `defer:` block passed `check`, raised `break outside loop` at runtime on the VM, and was silently

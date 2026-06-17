@@ -4264,6 +4264,127 @@ fn ref_is_not_sendable() {
     );
 }
 
+#[test]
+fn ref_through_local_fn_value_aliases_ok() {
+    // Charge 1: a `ref T` arg into a `ref T` param reached through a LOCAL fn-value (`g := bump`)
+    // must alias (pass the box), not auto-deref. The callee's ref-ness is resolved through the
+    // local binding, so the type-check is clean (no false `expected Ref[int], found int`).
+    entry_ok(
+        "import std.ref\nfn bump(x: ref int):\n    x = 99\nfn main():\n    r: ref int = 7\n    g := bump\n    g(r)\n    print(r)\nmain()\n",
+    );
+}
+
+#[test]
+fn ref_through_shared_method_name_aliases_ok() {
+    // Charge 2: two structs share a method name `apply` with DIFFERENT param ref-ness (A: ref,
+    // B: by-value). `a.apply(r)` must resolve to A's signature via the receiver type and alias the
+    // box — no false `expected Ref[int], found int` from a syntactic cross-struct disagreement.
+    entry_ok(
+        "import std.ref\nstruct A:\n    dummy: int\n    fn apply(self, x: ref int):\n        x = 42\nstruct B:\n    dummy: int\n    fn apply(self, x: int):\n        print(x)\nfn main():\n    a := A(0)\n    r: ref int = 1\n    a.apply(r)\n    print(r)\nmain()\n",
+    );
+}
+
+#[test]
+fn ref_shared_method_byval_sibling_ok() {
+    // Charge 2 sibling: the by-value `B.apply` must still accept a `ref` arg by auto-deref (row 2).
+    entry_ok(
+        "import std.ref\nstruct A:\n    dummy: int\n    fn apply(self, x: ref int):\n        x = 42\nstruct B:\n    dummy: int\n    fn apply(self, x: int):\n        print(x)\nfn main():\n    b := B(0)\n    r: ref int = 1\n    b.apply(r)\nmain()\n",
+    );
+}
+
+#[test]
+fn closure_ref_param_aliases_ok() {
+    // Charge 3: a closure `ref` param is typed as `Ref[T]` (its body reads auto-deref via `.get()`),
+    // and a `ref` arg is accepted by passing the box (alias), exactly like a named-fn `ref` param.
+    // Closures are expression-bodied, so the body reads the ref; the full mutate-alias path is in
+    // the `ref_binding` golden. Both forms type-check clean here.
+    entry_ok(
+        "import std.ref\nfn main():\n    g := fn(x: ref int) -> int: x + 1\n    r: ref int = 5\n    print(g(r))\nmain()\n",
+    );
+}
+
+#[test]
+fn closure_byval_into_ref_param_is_error() {
+    // Charge 3: a closure `ref` param must REJECT a by-value `T` argument, exactly like the named-fn
+    // `ref_to_byval_param_is_error` row 3. Today the closure `ref` is silently inert (no error).
+    let msg = resolve_err_msg(
+        "import std.ref\nfn main():\n    g := fn(x: ref int) -> int: x + 1\n    n := 5\n    print(g(n))\nmain()\n",
+    );
+    assert!(msg.contains("by-reference") && msg.contains("declare"),
+        "expected the by-value->ref error for a closure ref param, got: {msg:?}");
+}
+
+#[test]
+fn protocol_ref_param_is_honored() {
+    // Charge 4: a `ref` param in a protocol signature must be honored as `Ref[T]` (consistent with
+    // named-fn/method ref params), so a struct method with a `ref` param satisfies it and a `ref`
+    // arg through the existential aliases.
+    entry_ok(
+        "import std.ref\nprotocol Bumper:\n    fn bump(self, x: ref int)\nstruct Counter:\n    dummy: int\n    fn bump(self, x: ref int):\n        x = 7\nfn use(b: Bumper, r: ref int):\n    b.bump(r)\nfn main():\n    c := Counter(0)\n    r: ref int = 1\n    use(c, r)\n    print(r)\nmain()\n",
+    );
+}
+
+#[test]
+fn ref_arg_mismatch_message_is_transparent() {
+    // Charge 5: a diagnostic about a `ref` binding must say `ref T`, not the lowered `Ref[T]`.
+    // A `ref str` arg into a `ref int` param mismatches; the rendered types must use the `ref T`
+    // spelling the user wrote, never leaking `Ref[...]`.
+    let errs = check_entry(
+        "import std.ref\nfn byref(x: ref int):\n    x = 1\nfn main():\n    r: ref str = \"hi\"\n    byref(r)\nmain()\n",
+    );
+    assert!(
+        errs.iter().any(|e| e.message.contains("ref int") || e.message.contains("ref str")),
+        "expected a transparent `ref T` rendering, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("Ref[")),
+        "diagnostics for ref bindings must not leak Ref[T], got: {errs:?}"
+    );
+}
+
+#[test]
+fn ref_capture_message_is_transparent() {
+    // Charge 5: the non-sendable capture message for a `ref` binding must say `ref int`, not
+    // `Ref[int]` (the user never wrote `Ref`).
+    let errs = check_entry(
+        "import std.ref\nfn main():\n    total: ref int = 100\n    parallel:\n        spawn:\n            total = total + 1\n    print(total)\nmain()\n",
+    );
+    assert!(
+        errs.iter().any(|e| e.message.contains("ref int")),
+        "expected `ref int` in the capture message, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("Ref[int]")),
+        "capture message for a ref binding must not leak Ref[int], got: {errs:?}"
+    );
+}
+
+#[test]
+fn explicit_ref_box_keeps_ref_bracket_in_messages() {
+    // Charge-5 must NOT lie in reverse: a GENUINE first-class `Ref[T]` (the user wrote `Ref`, not a
+    // `ref` binding) keeps its `Ref[T]` spelling in arg-mismatch + capture diagnostics. Transparency
+    // is for `ref` bindings only — an explicit box is not transparent.
+    let errs = check_entry(
+        "import std.ref\nfn f(x: Ref[int]):\n    print(x.get())\nfn main():\n    f(\"hi\")\nmain()\n",
+    );
+    assert!(
+        errs.iter().any(|e| e.message.contains("Ref[int]")),
+        "explicit Ref[int] param must render Ref[int], got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("ref int")),
+        "explicit Ref[int] must NOT be rewritten to `ref int`, got: {errs:?}"
+    );
+    // And the non-sendable capture of an explicit box also keeps `Ref[int]`.
+    let errs = check_entry(
+        "import std.ref\nfn main():\n    box: Ref[int] = Ref(0)\n    parallel:\n        spawn:\n            box.set(box.get() + 1)\n    print(box.get())\nmain()\n",
+    );
+    assert!(
+        errs.iter().any(|e| e.message.contains("Ref[int]")) && !errs.iter().any(|e| e.message.contains("ref int")),
+        "explicit Ref[int] capture must keep Ref[int], got: {errs:?}"
+    );
+}
+
 // ----- Atomic[T]: the generic atomic box -----
 
 #[test]
