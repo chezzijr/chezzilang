@@ -414,18 +414,17 @@ pub enum ExprKind {
     Map(Vec<(Expr, Expr)>),
     /// `{a, b, c}` — set literal (≥1 element; empty `{}` is a map, empty set is `set()`).
     Set(Vec<Expr>),
-    /// A comprehension: `[elem for vars in iter if guard]` (list), `{elem for …}` (set), or
-    /// `{key: elem for …}` (map). One `for` clause, optional `if` guard. `vars` is one binding, or
-    /// two for `for k, v in m`. `key` is `Some` only for the map form. Evaluates by iterating
-    /// `iter` (any iterable — like a `for` loop), binding `vars`, and collecting `elem` (skipping
-    /// rows where `guard` is false) into a fresh list / set / map.
+    /// A comprehension: `[elem for vars in iter if guard …]` (list), `{elem for …}` (set), or
+    /// `{key: elem for …}` (map). One or more `for` clauses (cartesian/nested iteration — first
+    /// clause outermost, later clauses see earlier clauses' bindings), each with zero or more
+    /// trailing `if` guards. `key` is `Some` only for the map form. Evaluates by nesting the clauses
+    /// (like nested `for` loops), binding each clause's `vars`, and collecting `elem` (skipping rows
+    /// where any guard is false) into a fresh list / set / map.
     Comprehension {
         kind: CompKind,
         key: Option<Box<Expr>>,
         elem: Box<Expr>,
-        vars: Vec<String>,
-        iter: Box<Expr>,
-        guard: Option<Box<Expr>>,
+        clauses: Vec<CompClause>,
     },
     Unary {
         op: UnaryOp,
@@ -552,6 +551,18 @@ pub enum CompKind {
     Map,
 }
 
+/// One `for` clause of a comprehension: `for <vars> in <iter> [if <guard>]…`. `vars` is one binding
+/// (or two for `for k, v in m` over a map's entries). `guards` holds zero or more `if` filters that
+/// follow this clause (Python allows an `if` after any clause, and even a chain — all must pass).
+/// The clause's `vars` are in scope for every later clause's `iter`/`guards` and for the
+/// element/key expressions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompClause {
+    pub vars: Vec<String>,
+    pub iter: Box<Expr>,
+    pub guards: Vec<Expr>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnaryOp {
     Neg, // -x
@@ -603,14 +614,16 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
             expr_recover_blocks(k, out);
             expr_recover_blocks(v, out);
         }),
-        ExprKind::Comprehension { key, elem, iter, guard, .. } => {
+        ExprKind::Comprehension { key, elem, clauses, .. } => {
             if let Some(k) = key {
                 expr_recover_blocks(k, out);
             }
             expr_recover_blocks(elem, out);
-            expr_recover_blocks(iter, out);
-            if let Some(g) = guard {
-                expr_recover_blocks(g, out);
+            for clause in clauses {
+                expr_recover_blocks(&clause.iter, out);
+                for g in &clause.guards {
+                    expr_recover_blocks(g, out);
+                }
             }
         }
         ExprKind::Unary { expr, .. } => go(expr),

@@ -1,0 +1,5 @@
+# rule: primary, compClauses, compClause, compGuards
+xs := [x for x in [1, 2] for y in [3, 4]]
+ys := [x for x in [1, 2] if x > 0 for y in [3, 4] if y < x]
+zs := {x + y for x in [1, 2] for y in [3, 4]}
+ms := {x: y for x in [1, 2] for y in [3, 4]}

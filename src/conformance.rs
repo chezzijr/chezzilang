@@ -305,6 +305,7 @@ fn parser_rules_match_fns() {
         ("ifStmt", "parse_if"),
         ("forStmt", "parse_for"),
         ("compClause", "parse_comp_clause"),
+        ("compClauses", "parse_comp_clauses"),
         ("whileStmt", "parse_while"),
         ("matchStmt", "parse_match"),
         ("pattern", "parse_pattern"),

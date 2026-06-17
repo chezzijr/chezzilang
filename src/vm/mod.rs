@@ -12879,6 +12879,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn vm_two_clause_list_comprehension() {
+        // ys iterate inner-most for each x (Python order): (1,10),(1,20),(2,10),(2,20).
+        assert_eq!(
+            run("print([x + y for x in [1, 2] for y in [10, 20]])\n"),
+            "[11, 21, 12, 22]\n"
+        );
+    }
+
+    #[test]
+    fn vm_three_clause_list_comprehension() {
+        assert_eq!(
+            run("print([a * 100 + b * 10 + c for a in [1, 2] for b in [3] for c in [4, 5]])\n"),
+            "[134, 135, 234, 235]\n"
+        );
+    }
+
+    #[test]
+    fn vm_guard_after_nonfinal_clause() {
+        // Only odd x survive (1, 3); each pairs with y in [10, 20].
+        assert_eq!(
+            run("print([x * y for x in 1..4 if x % 2 == 1 for y in [10, 20]])\n"),
+            "[10, 20, 30, 60]\n"
+        );
+    }
+
+    #[test]
+    fn vm_later_clause_references_earlier_var() {
+        // Flatten a list-of-lists: second clause iterates the first clause's binding.
+        assert_eq!(
+            run("print([y for xs in [[1, 2], [3], [4, 5]] for y in xs])\n"),
+            "[1, 2, 3, 4, 5]\n"
+        );
+    }
+
+    #[test]
+    fn vm_nested_set_and_map_comprehension() {
+        assert_eq!(
+            run("print({x + y for x in [0, 3] for y in [0, 3]})\n"),
+            "{0, 3, 6}\n"
+        );
+        assert_eq!(
+            run("print({x * 10 + y: x + y for x in [1, 2] for y in [3]})\n"),
+            "{13: 4, 23: 5}\n"
+        );
+    }
+
+    /// A comprehension over a STATEFUL struct iterator must drive `next()` LAZILY — the element/guard
+    /// see the iterator's per-step state, exactly like a `for` statement and like the VM's
+    /// `compile_for`. The old interp eagerly drained the iterator to `None` before evaluating any
+    /// element (so `c.n` read the fully-advanced field), diverging from the VM. This asserts both
+    /// engines agree, for the single-clause AND the nested-clause shape, AND that they match the
+    /// lazy/interleaved result the VM produces.
+    #[test]
+    fn comprehension_stateful_struct_iterator_lazy_parity() {
+        let src = "\
+struct Counter:
+    n: int
+    fn next(self) -> Option[int]:
+        v := self.n
+        self.n = self.n + 1
+        if v >= 3:
+            return None
+        return Some(v)
+
+fn main():
+    c := Counter(0)
+    print([x * 100 + c.n for x in c])
+    c2 := Counter(0)
+    print([x * 100 + c2.n for x in c2 for y in [0, 1]])
+
+main()
+";
+        let vm = run_capture(src).expect("vm run");
+        let interp = crate::interp::run_capture(src).expect("interp run");
+        // Two-engine parity (the hard rule).
+        assert_eq!(vm, interp, "VM vs interp divergence on stateful-iterator comprehension");
+        // And the canonical (lazy/interleaved) result: each element reads the just-advanced `n`.
+        assert_eq!(
+            vm,
+            "[1, 102, 203]\n[1, 1, 102, 102, 203, 203]\n",
+            "lazy interleaved iteration expected"
+        );
+    }
+
     // ----- M6c: native function values -----
 
     fn empty_program() -> Program {
@@ -22227,6 +22312,35 @@ main()
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/comprehensions.chz");
+    }
+
+    /// Nested-clause comprehensions golden: `examples/comprehensions_nested.chz` — 2- and 3-clause
+    /// list comps, a guard after a non-final clause, a later clause referencing an earlier variable,
+    /// and nested set + map forms. Byte-matches `.expected` and stays identical on interp + VM.
+    #[test]
+    fn golden_comprehensions_nested_via_run_file() {
+        let path = fixture("examples/comprehensions_nested.chz");
+        let expected =
+            std::fs::read_to_string(fixture("examples/comprehensions_nested.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/comprehensions_nested.chz");
+    }
+
+    /// Stateful-iterator comprehension golden: `examples/comprehension_iter_state.chz` — a
+    /// comprehension whose element/guard read a struct iterator's LIVE, per-`next()` state. The
+    /// iterator must be driven lazily (interleaved with the body), so this byte-matches `.expected`
+    /// and stays identical on interp + VM (regression for the eager-drain parity bug).
+    #[test]
+    fn golden_comprehension_iter_state_via_run_file() {
+        let path = fixture("examples/comprehension_iter_state.chz");
+        let expected =
+            std::fs::read_to_string(fixture("examples/comprehension_iter_state.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/comprehension_iter_state.chz");
     }
 
     /// Radix-literal golden: `examples/hex.chz` — hex/binary/octal literals feeding bitwise +

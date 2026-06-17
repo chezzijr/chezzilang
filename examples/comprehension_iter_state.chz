@@ -1,0 +1,32 @@
+# A comprehension that reads the LIVE state of a stateful struct iterator. The iterator advances its
+# own field on each `next()`, and the element expression reads that field — so the result depends on
+# `next()` being driven LAZILY (one step, then the body, then the next step), exactly like a `for`
+# statement and like the bytecode VM's `compile_for`. Eagerly draining the iterator first would let
+# every element see the fully-advanced field (a VM/interp divergence). This example pins the lazy,
+# interleaved behavior across both engines.
+
+struct Counter:
+    n: int
+    fn next(self) -> Option[int]:
+        v := self.n
+        self.n = self.n + 1
+        if v >= 3:
+            return None
+        return Some(v)
+
+fn main():
+    # Single clause: the element reads `c.n` after each step advanced it. With lazy iteration the
+    # element for x=0 sees n=1, for x=1 sees n=2, for x=2 sees n=3 → [1, 102, 203].
+    c := Counter(0)
+    print([x * 100 + c.n for x in c])
+
+    # Nested: the outer struct iterator advances once per outer element; the inner [0, 1] runs twice
+    # per outer step, both seeing the same just-advanced `c2.n`.
+    c2 := Counter(0)
+    print([x * 100 + c2.n for x in c2 for y in [0, 1]])
+
+    # A guard that reads the live state still sees the per-step value (keep elements where n is odd).
+    c3 := Counter(0)
+    print([x for x in c3 if c3.n % 2 == 1])
+
+main()

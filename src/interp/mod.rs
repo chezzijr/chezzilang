@@ -2,8 +2,8 @@
 //! Chezzi before the bytecode VM (M5). Single-file programs run here.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern, MatchArm,
-    MatchExprArm, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp, WaitArm, WaitTarget,
+    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern,
+    MatchArm, MatchExprArm, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp, WaitArm, WaitTarget,
 };
 use crate::{lexer, parser};
 
@@ -81,6 +81,14 @@ enum Flow {
     Break,
     /// `continue` — unwind to the innermost enclosing loop's next iteration.
     Continue,
+}
+
+/// The accumulator a comprehension builds, threaded through the clause recursion so the innermost
+/// clause can append/insert directly (with the same dedup/upsert as a set/map literal).
+enum CompAcc {
+    List(Vec<Value>),
+    Set(SetData),
+    Map(MapData),
 }
 
 /// Whether a block directly contains a `defer` statement (so it is a defer scope). Nested blocks
@@ -425,16 +433,9 @@ impl Interp {
                 }
                 Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map))))
             }
-            ExprKind::Comprehension { kind, key, elem, vars, iter, guard } => self
-                .eval_comprehension(
-                    *kind,
-                    key.as_deref(),
-                    elem,
-                    vars,
-                    iter,
-                    guard.as_deref(),
-                    expr.span,
-                ),
+            ExprKind::Comprehension { kind, key, elem, clauses } => {
+                self.eval_comprehension(*kind, key.as_deref(), elem, clauses, expr.span)
+            }
             ExprKind::Set(elems) => {
                 let mut set = SetData::default();
                 for e in elems {
@@ -3769,94 +3770,166 @@ impl Interp {
         flow
     }
 
-    /// Evaluate a comprehension into a fresh list / set / map. Iteration reuses the same paths as a
-    /// `for` loop (range, struct iterator, or materialized list/map/set/str — see
-    /// `collect_iter_rows`); each row binds `vars` in a fresh scope, the guard (if any) is tested,
-    /// and the element (plus key, for maps) is collected. Set elements and map keys dedupe exactly
-    /// like their literals.
-    #[allow(clippy::too_many_arguments)]
+    /// Evaluate a comprehension into a fresh list / set / map. Iteration reuses the same lazy paths
+    /// as a `for` loop (range, struct iterator via `next()`, or materialized list/map/set/str — see
+    /// `eval_comp_clauses`). Multiple `for` clauses nest (first clause outermost, last innermost):
+    /// `eval_comp_clauses` recurses left-to-right, binding each clause's vars in a fresh scope so a
+    /// later clause's `iter`/guards see earlier bindings — exactly the order the compiler's nested
+    /// `compile_for` produces (parity). Each clause's guards are tested in turn; at the innermost
+    /// clause the element (plus key, for maps) is collected into the accumulator. Set elements and
+    /// map keys dedupe exactly like their literals.
     fn eval_comprehension(
         &mut self,
         kind: CompKind,
         key: Option<&Expr>,
         elem: &Expr,
-        vars: &[String],
-        iter: &Expr,
-        guard: Option<&Expr>,
+        clauses: &[CompClause],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let rows = self.collect_iter_rows(vars, iter, span)?;
-        match kind {
-            CompKind::List => {
-                let mut out = Vec::with_capacity(rows.len());
-                for row in rows {
-                    if let Some((_, v)) = self.eval_comp_row(vars, row, None, elem, guard, span)? {
-                        out.push(v);
-                    }
-                }
-                Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(out))))
-            }
-            CompKind::Set => {
-                let mut set = SetData::default();
-                for row in rows {
-                    if let Some((_, v)) = self.eval_comp_row(vars, row, None, elem, guard, span)? {
-                        let hx = self.hash_value(&v, span)?;
-                        if !set.candidates(hx).iter().any(|&p| values_equal(&set.entries[p].1, &v)) {
-                            set.push(hx, v);
-                        }
-                    }
-                }
-                Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(set))))
-            }
-            CompKind::Map => {
-                let mut map = MapData::default();
-                for row in rows {
-                    if let Some((k, v)) = self.eval_comp_row(vars, row, key, elem, guard, span)? {
-                        let k = k.expect("a map comprehension evaluates a key per row");
-                        let hk = self.hash_value(&k, span)?;
-                        match map.candidates(hk).iter().copied().find(|&p| values_equal(&map.entries[p].1, &k)) {
-                            Some(i) => map.entries[i].2 = v,
-                            None => map.push(hk, k, v),
-                        }
-                    }
-                }
-                Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map))))
-            }
-        }
+        let mut acc = match kind {
+            CompKind::List => CompAcc::List(Vec::new()),
+            CompKind::Set => CompAcc::Set(SetData::default()),
+            CompKind::Map => CompAcc::Map(MapData::default()),
+        };
+        self.eval_comp_clauses(clauses, 0, key, elem, span, &mut acc)?;
+        Ok(match acc {
+            CompAcc::List(out) => Value::List(std::rc::Rc::new(std::cell::RefCell::new(out))),
+            CompAcc::Set(set) => Value::Set(std::rc::Rc::new(std::cell::RefCell::new(set))),
+            CompAcc::Map(map) => Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map))),
+        })
     }
 
-    /// Evaluate one comprehension row: bind `vars` in a fresh scope, test the guard, and (if it
-    /// passes) evaluate the key (map only) and element. Returns `None` when the guard fails. The
-    /// scope is popped even on error.
-    fn eval_comp_row(
+    /// Recurse over comprehension clauses starting at `idx`. At `clauses[idx]`, drive that clause's
+    /// iterable LAZILY (one element at a time, in the CURRENT env, which already has earlier clauses'
+    /// vars bound), and for each element push a scope, bind the vars, test the clause's guards (skip
+    /// the element if any is false), and either recurse to `idx+1` or — if this is the last clause —
+    /// evaluate the key/element into `acc`. Each element's scope is popped even on error.
+    ///
+    /// Laziness matters for parity: a stateful struct iterator advances its fields with each `next()`,
+    /// and the VM (`compile_for`) interleaves `next()` with the element/guard evaluation. So the
+    /// element/guard must run BEFORE the next `next()`, never after the whole iterator is drained.
+    /// `for x in struct_iter` (the statement) is already lazy this way; this mirrors it exactly so a
+    /// comprehension over the same iterator agrees byte-for-byte. List/map/set/str/range iterables are
+    /// stateless, so materializing-then-iterating them is observationally identical to driving them
+    /// one element at a time — order and semantics are unchanged.
+    fn eval_comp_clauses(
         &mut self,
-        vars: &[String],
-        row: Vec<Value>,
+        clauses: &[CompClause],
+        idx: usize,
         key: Option<&Expr>,
         elem: &Expr,
-        guard: Option<&Expr>,
         span: Span,
-    ) -> Result<Option<(Option<Value>, Value)>, RuntimeError> {
+        acc: &mut CompAcc,
+    ) -> Result<(), RuntimeError> {
+        let iter = &clauses[idx].iter;
+        // Lazy range: never materialized (mirrors `exec_for`).
+        if let ExprKind::Range { start, end } = &iter.kind {
+            let lo = self.eval_int(start)?;
+            let hi = self.eval_int(end)?;
+            let mut i = lo;
+            while i < hi {
+                self.run_comp_element(clauses, idx, key, elem, span, acc, vec![Value::Int(i)])?;
+                i += 1;
+            }
+            return Ok(());
+        }
+        let iter_val = self.eval(iter)?;
+        // PURE-`Iterable` struct (has `iter`, lacks `next`): convert to its cursor via a one-time
+        // `.iter()`, then drive the cursor's `next()` below — identical to `exec_for`.
+        let iter_val = match &iter_val {
+            Value::Struct { name, .. }
+                if self.structs.get(name.as_ref()).is_some_and(|d| {
+                    !d.methods.contains_key("next") && d.methods.contains_key("iter")
+                }) =>
+            {
+                self.dispatch_method(iter_val.clone(), "iter", Vec::new(), span)?
+            }
+            _ => iter_val,
+        };
+        // Struct iterator protocol: drive `next(self) -> Option[T]` LAZILY — call it, run the body
+        // (which reads the iterator's just-advanced state), then call it again. This is the path the
+        // eager `collect_iter_rows` used to break: it drained to `None` before any body ran, so the
+        // element saw the fully-advanced state instead of the per-step state the VM observes.
+        if let Value::Struct { name, .. } = &iter_val
+            && self.structs.get(name.as_ref()).is_some_and(|d| d.methods.contains_key("next"))
+        {
+            let name = name.clone();
+            let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
+                message: format!("unknown struct type '{name}'"),
+                span,
+            })?;
+            let decl = def.methods.get("next").cloned().ok_or_else(|| RuntimeError {
+                message: format!("struct '{name}' has no method 'next'"),
+                span,
+            })?;
+            loop {
+                let result = self.call(&decl, &def.home, vec![iter_val.clone()], span)?;
+                match result {
+                    Value::Enum { variant, payload, .. } if variant.as_ref() == "Some" => {
+                        let item = payload.into_iter().next().ok_or_else(|| RuntimeError {
+                            message: "iterator next() returned Some with no payload".to_string(),
+                            span,
+                        })?;
+                        self.run_comp_element(clauses, idx, key, elem, span, acc, vec![item])?;
+                    }
+                    Value::Enum { variant, .. } if variant.as_ref() == "None" => break,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!("iterator next() must return Option, found {}", other.type_name()),
+                            span,
+                        })
+                    }
+                }
+            }
+            return Ok(());
+        }
+        // Stateless built-in iterables (list/map/set/str): materialize rows then drive them one at a
+        // time — order/semantics unchanged vs. the old eager path.
+        let rows = iter_rows_from_value(&iter_val, clauses[idx].vars.len(), span)?;
+        for row in rows {
+            self.run_comp_element(clauses, idx, key, elem, span, acc, row)?;
+        }
+        Ok(())
+    }
+
+    /// Run one comprehension element for `clauses[idx]`: push a scope, bind the clause's vars to
+    /// `row`, run the guard/recurse/collect step, and pop the scope (even on error).
+    #[allow(clippy::too_many_arguments)]
+    fn run_comp_element(
+        &mut self,
+        clauses: &[CompClause],
+        idx: usize,
+        key: Option<&Expr>,
+        elem: &Expr,
+        span: Span,
+        acc: &mut CompAcc,
+        row: Vec<Value>,
+    ) -> Result<(), RuntimeError> {
         self.env.push();
-        for (name, val) in vars.iter().zip(row) {
+        for (name, val) in clauses[idx].vars.iter().zip(row) {
             self.env.define(name, val);
         }
-        let result = self.eval_comp_row_inner(key, elem, guard, span);
+        let r = self.eval_comp_row_step(clauses, idx, key, elem, span, acc);
         self.env.pop();
-        result
+        r
     }
 
-    fn eval_comp_row_inner(
+    /// Body of one comprehension row (scope already pushed/bound): test this clause's guards, then
+    /// recurse to the next clause or collect the element. Split out so the caller can always pop the
+    /// scope, even on error.
+    fn eval_comp_row_step(
         &mut self,
+        clauses: &[CompClause],
+        idx: usize,
         key: Option<&Expr>,
         elem: &Expr,
-        guard: Option<&Expr>,
         span: Span,
-    ) -> Result<Option<(Option<Value>, Value)>, RuntimeError> {
-        if let Some(g) = guard {
+        acc: &mut CompAcc,
+    ) -> Result<(), RuntimeError> {
+        for g in &clauses[idx].guards {
             match self.eval(g)? {
                 Value::Bool(true) => {}
-                Value::Bool(false) => return Ok(None),
+                Value::Bool(false) => return Ok(()),
                 // The checker guarantees a bool guard; this is a defensive fallback.
                 other => {
                     return Err(RuntimeError {
@@ -3866,35 +3939,37 @@ impl Interp {
                 }
             }
         }
+        if idx + 1 < clauses.len() {
+            return self.eval_comp_clauses(clauses, idx + 1, key, elem, span, acc);
+        }
+        // Innermost clause: evaluate the key (map only) then the element, and collect.
         let k = match key {
             Some(k) => Some(self.eval(k)?),
             None => None,
         };
         let v = self.eval(elem)?;
-        Ok(Some((k, v)))
-    }
-
-    /// Collect every row of an iterable for a comprehension (eager: comprehensions have no `break`,
-    /// so unlike `exec_for`'s lazy paths there is nothing to stop early for). Ranges expand to ints,
-    /// a struct iterator's `next(self) -> Option` is driven to `None`, and list/map/set/str reuse
-    /// `iter_rows_from_value` (shared with `exec_for`).
-    fn collect_iter_rows(
-        &mut self,
-        vars: &[String],
-        iter: &Expr,
-        span: Span,
-    ) -> Result<Vec<Vec<Value>>, RuntimeError> {
-        if let ExprKind::Range { start, end } = &iter.kind {
-            let lo = self.eval_int(start)?;
-            let hi = self.eval_int(end)?;
-            return Ok((lo..hi).map(|i| vec![Value::Int(i)]).collect());
+        match acc {
+            CompAcc::List(out) => out.push(v),
+            CompAcc::Set(set) => {
+                let hx = self.hash_value(&v, span)?;
+                if !set.candidates(hx).iter().any(|&p| values_equal(&set.entries[p].1, &v)) {
+                    set.push(hx, v);
+                }
+            }
+            CompAcc::Map(map) => {
+                let k = k.expect("a map comprehension evaluates a key per row");
+                let hk = self.hash_value(&k, span)?;
+                match map.candidates(hk).iter().copied().find(|&p| values_equal(&map.entries[p].1, &k)) {
+                    Some(i) => map.entries[i].2 = v,
+                    None => map.push(hk, k, v),
+                }
+            }
         }
-        let iter_val = self.eval(iter)?;
-        self.drain_value_to_rows(iter_val, vars.len(), span)
+        Ok(())
     }
 
     /// Materialize an already-evaluated iterable VALUE into per-iteration rows (the post-eval body of
-    /// `collect_iter_rows`, factored out so the `list()`/`set()`/`map()` builtin constructors reuse the
+    /// `eval_comp_clauses`' struct-iterator path, factored out so the `list()`/`set()`/`map()` builtin constructors reuse the
     /// SAME "drain any for-iterable" logic — no duplicated iteration semantics). Handles (a) a user
     /// struct with `next(self) -> Option[T]` (call lazily until `None`, may run user code) and (b) the
     /// built-in collections via `iter_rows_from_value`. `vars` is the loop-variable count (1 for the
@@ -4525,7 +4600,8 @@ impl crate::native::Host for InterpHost<'_> {
 
 /// Materialize a (non-range, non-struct-iterator) iterable into per-row binding tuples: one value
 /// per row for list/set/str, and `[k]` or `[k, v]` for a map depending on the loop-variable count.
-/// Shared by `exec_for` and `collect_iter_rows` so both iterate every collection identically.
+/// Shared by `exec_for`, the comprehension driver, and the collection constructors so all iterate
+/// every collection identically.
 fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec<Vec<Value>>, RuntimeError> {
     Ok(match iter_val {
         // Over a list with >1 loop var, each element is a tuple to destructure into a row (the
@@ -5351,6 +5427,65 @@ mod tests {
             run("m := {\"a\": 1, \"b\": 2}\nprint({k: v * 10 for k, v in m})\n"),
             "{a: 10, b: 20}\n"
         );
+    }
+
+    #[test]
+    fn interp_two_clause_list_comprehension() {
+        assert_eq!(
+            run("print([x + y for x in [1, 2] for y in [10, 20]])\n"),
+            "[11, 21, 12, 22]\n"
+        );
+    }
+
+    #[test]
+    fn interp_nested_comp_guard_and_later_var() {
+        assert_eq!(
+            run("print([x * y for x in 1..4 if x % 2 == 1 for y in [10, 20]])\n"),
+            "[10, 20, 30, 60]\n"
+        );
+        assert_eq!(
+            run("print([y for xs in [[1, 2], [3], [4, 5]] for y in xs])\n"),
+            "[1, 2, 3, 4, 5]\n"
+        );
+    }
+
+    #[test]
+    fn interp_nested_set_and_map_comprehension() {
+        assert_eq!(
+            run("print({x + y for x in [0, 3] for y in [0, 3]})\n"),
+            "{0, 3, 6}\n"
+        );
+        assert_eq!(
+            run("print({x * 10 + y: x + y for x in [1, 2] for y in [3]})\n"),
+            "{13: 4, 23: 5}\n"
+        );
+    }
+
+    /// A comprehension over a STATEFUL struct iterator drives `next()` lazily (interleaved with the
+    /// element/guard), so the element reads the iterator's just-advanced field — NOT the value after
+    /// the whole iterator is drained. This matches the `for`-statement and the VM (regression for the
+    /// eager-drain divergence). Both single-clause and nested forms are checked.
+    #[test]
+    fn interp_comprehension_stateful_iterator_is_lazy() {
+        let src = "\
+struct Counter:
+    n: int
+    fn next(self) -> Option[int]:
+        v := self.n
+        self.n = self.n + 1
+        if v >= 3:
+            return None
+        return Some(v)
+
+fn main():
+    c := Counter(0)
+    print([x * 100 + c.n for x in c])
+    c2 := Counter(0)
+    print([x * 100 + c2.n for x in c2 for y in [0, 1]])
+
+main()
+";
+        assert_eq!(run(src), "[1, 102, 203]\n[1, 1, 102, 102, 203, 203]\n");
     }
 
     // ----- M6c: native function values -----

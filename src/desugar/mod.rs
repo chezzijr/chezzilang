@@ -299,14 +299,16 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
             walk_idents(k, f);
             walk_idents(v, f);
         }),
-        ExprKind::Comprehension { key, elem, iter, guard, .. } => {
+        ExprKind::Comprehension { key, elem, clauses, .. } => {
             if let Some(k) = key {
                 walk_idents(k, f);
             }
             walk_idents(elem, f);
-            walk_idents(iter, f);
-            if let Some(g) = guard {
-                walk_idents(g, f);
+            for clause in clauses {
+                walk_idents(&clause.iter, f);
+                for g in &clause.guards {
+                    walk_idents(g, f);
+                }
             }
         }
         ExprKind::Unary { expr, .. } => walk_idents(expr, f),
@@ -701,22 +703,28 @@ impl Walker<'_> {
                 self.walk_expr(els)?;
             }
             ExprKind::Recover(block) => self.walk_block(block)?,
-            ExprKind::Comprehension { key, elem, vars, iter, guard, .. } => {
-                // `iter` is evaluated in the outer scope; `vars` are bound only for the element,
-                // key, and guard expressions.
-                self.walk_expr(iter)?;
-                self.push_scope();
-                for v in vars.iter() {
-                    self.bind(v);
-                }
-                if let Some(g) = guard {
-                    self.walk_expr(g)?;
+            ExprKind::Comprehension { key, elem, clauses, .. } => {
+                // Clauses nest (first outermost): each clause's `iter` is walked in the scope of the
+                // earlier clauses' vars, then that clause's vars are bound for everything after it
+                // (later clauses' iters/guards, this clause's guards, and the key/element). One
+                // cumulative scope per clause; pop them all at the end.
+                for clause in clauses.iter_mut() {
+                    self.walk_expr(&mut clause.iter)?;
+                    self.push_scope();
+                    for v in clause.vars.iter() {
+                        self.bind(v);
+                    }
+                    for g in clause.guards.iter_mut() {
+                        self.walk_expr(g)?;
+                    }
                 }
                 if let Some(k) = key {
                     self.walk_expr(k)?;
                 }
                 self.walk_expr(elem)?;
-                self.pop_scope();
+                for _ in clauses.iter() {
+                    self.pop_scope();
+                }
             }
             ExprKind::Call { callee, args, named, .. } => {
                 self.walk_expr(callee)?;
