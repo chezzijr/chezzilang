@@ -156,6 +156,14 @@ pub enum Obj {
     /// no `GcRef`s — so `children()` traces nothing (the difference vs `Bytes` is the mutability of the
     /// slot, not GC reachability). `Vec<u8>` is 24B (= `List`'s `Vec<Value>`), within the 88B `Obj` cap.
     ByteArray(Vec<u8>),
+    /// `Iter` — a composable cursor (the `Iterable[T]` `.iter()` result), the heap payload behind the
+    /// existential `Iterator[T]` type. A frozen SNAPSHOT (`items`) of a collection's contents at the
+    /// instant `.iter()` was called, plus a read `pos`. `.next()` returns `Some(items[pos])` and
+    /// advances; `None` (idempotent) past the end. NON-LEAF (unlike `Bytes`/`ByteArray`): `items` may
+    /// hold heap `GcRef`s (a list of structs, a set of strings, …), so `children()` MUST trace them
+    /// or the snapshot's elements get collected out from under a live cursor. `Vec<Value>`(24) +
+    /// `usize`(8) = 32B, within the 88B `Obj` cap (`Module` still dominates).
+    Iter { items: Vec<Value>, pos: usize },
     List(Vec<Value>),
     /// `(a, b, …)` — a fixed-arity, immutable tuple. Elements may be heap objects, so they are
     /// traced as GC children (same as `List`).
@@ -369,6 +377,9 @@ impl Heap {
             Obj::Bytes(_) => {}
             // Also a GC leaf — the mutable `bytearray` still holds only raw `u8`s, never a `GcRef`.
             Obj::ByteArray(_) => {}
+            // NON-LEAF: the cursor's snapshot may hold heap `GcRef`s, which must stay alive while the
+            // cursor is reachable (a not-yet-consumed element is still owned by the cursor).
+            Obj::Iter { items, .. } => items.iter().for_each(&mut push),
             Obj::List(items) => items.iter().for_each(&mut push),
             Obj::Tuple(items) => items.iter().for_each(&mut push),
             Obj::Map(m) => m.entries.iter().for_each(|(_, k, v)| {
@@ -437,5 +448,35 @@ impl Heap {
         }
         self.since_gc = 0;
         self.next_gc = (self.live * 2).max(MIN_GC_THRESHOLD);
+    }
+}
+
+#[cfg(test)]
+mod iter_obj_tests {
+    use super::*;
+
+    /// `Obj::Iter` must stay within the 88B cap (Vec 24B + usize 8B = 32B, `Module` still dominates).
+    #[test]
+    fn obj_iter_within_size_cap() {
+        assert_eq!(std::mem::size_of::<Obj>(), 88);
+    }
+
+    /// A cursor is NON-LEAF: `children()` must yield its snapshot's heap refs so a not-yet-consumed
+    /// element survives a GC pass (contrast `Bytes`/`ByteArray`, which trace nothing).
+    #[test]
+    fn obj_iter_traces_items_as_gc_children() {
+        let mut heap = Heap::new();
+        // A heap element the cursor must keep alive.
+        let elem = heap.alloc(Obj::Str("kept".into()));
+        let cursor = heap.alloc(Obj::Iter { items: vec![Value::Obj(elem), Value::Int(7)], pos: 0 });
+        let kids = heap.children(cursor);
+        assert!(kids.contains(&elem), "cursor must trace its heap-ref items, got {kids:?}");
+        // Mark only the cursor as a root, trace, sweep — the element must survive.
+        heap.mark(cursor);
+        for c in heap.children(cursor) {
+            heap.mark(c);
+        }
+        heap.sweep();
+        assert!(matches!(heap.get(elem), Obj::Str(s) if &**s == "kept"));
     }
 }

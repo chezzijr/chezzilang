@@ -292,6 +292,12 @@ pub enum Op {
     /// g():` to route a generator result into the same lazy `next()` step as a struct iterator
     /// (type-erased: the compiler can't tell a generator result from a struct statically).
     IsGenerator,
+    /// `for`-loop one-time conversion for a PURE-`Iterable` struct (one with `iter(self)` but NO
+    /// `next`). Pop a value: if it is a struct that has `iter` but not `next`, call `iter()` once and
+    /// push the resulting cursor (an `Obj::Iter`, which the seq path then drains like any sequence);
+    /// otherwise push the value back UNCHANGED. Emitted once before the loop so a struct-with-`next`
+    /// and a generator stay on their existing fast paths byte-for-byte (this op is a no-op for them).
+    IterableToCursor,
     /// Pop a value; push `true` if it is a map, else `false`. Used by the multi-name `for` to pick
     /// the map (key, value) path vs the list-of-tuples destructuring path at runtime, since the
     /// compiler is type-erased and can't decide statically.

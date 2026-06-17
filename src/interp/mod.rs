@@ -127,6 +127,17 @@ fn deep_clone(v: &Value) -> Value {
         // `List`) — UNLIKE `Bytes`, which clones its `Rc`. This is what makes a `bytearray` cross the
         // `--parallel` airlock by value (no shared mutable view across tasks).
         Value::ByteArray(b) => Value::ByteArray(Rc::new(RefCell::new(b.borrow().clone()))),
+        // A cursor deep-copies into a FRESH `Rc<RefCell>` (an independent in-task copy, like `List`)
+        // — its elements are deep-cloned too. (A cursor is also runtime-gated non-sendable for
+        // generator parity, so a cross-airlock deep_clone of one never actually fires; this arm keeps
+        // an in-task `deep_clone` — e.g. inside `set()`/`map()` building — correct and total.)
+        Value::Iter(c) => {
+            let src = c.borrow();
+            Value::Iter(Rc::new(RefCell::new(value::IterCursor {
+                items: src.items.iter().map(deep_clone).collect(),
+                pos: src.pos,
+            })))
+        }
         Value::Tuple(items) => Value::Tuple(Rc::new(items.iter().map(deep_clone).collect())),
         Value::Map(m) => {
             let src = m.borrow();
@@ -1662,6 +1673,41 @@ impl Interp {
         {
             return Ok(Value::Int(ord as i64));
         }
+        // A cursor (`Value::Iter`, the `Iterable` `.iter()` result): `.next()` advances the snapshot
+        // (idempotent `None` past the end) and `.iter()` returns self. Interior-mutable via `borrow_mut`.
+        if let Value::Iter(cur) = &receiver {
+            if !arg_vals.is_empty() {
+                return Err(RuntimeError { message: format!("a cursor's '{method}' takes no arguments"), span });
+            }
+            return match method {
+                "iter" => Ok(receiver.clone()), // idempotent
+                "next" => {
+                    let mut c = cur.borrow_mut();
+                    if c.pos < c.items.len() {
+                        let item = c.items[c.pos].clone();
+                        c.pos += 1;
+                        Ok(enum_val("Option", "Some", vec![item]))
+                    } else {
+                        Ok(enum_val("Option", "None", vec![]))
+                    }
+                }
+                _ => Err(RuntimeError { message: format!("a cursor has no method '{method}' (only `next()`/`iter()`)"), span }),
+            };
+        }
+        // `.iter()` on a built-in collection → a FRESH cursor SNAPSHOTTING current contents in the
+        // SAME order/elements as `for x in X` (reusing `iter_rows_from_value`, the for-loop's single
+        // source of truth: list/set elems, map → keys, str → per-char str, bytes/bytearray → int).
+        if method == "iter"
+            && arg_vals.is_empty()
+            && matches!(
+                receiver,
+                Value::List(_) | Value::Set(_) | Value::Map(_) | Value::Str(_) | Value::Bytes(_) | Value::ByteArray(_)
+            )
+        {
+            let rows = iter_rows_from_value(&receiver, 1, span)?;
+            let items: Vec<Value> = rows.into_iter().map(|mut r| r.remove(0)).collect();
+            return Ok(Value::Iter(std::rc::Rc::new(std::cell::RefCell::new(value::IterCursor { items, pos: 0 }))));
+        }
         // Higher-order list methods call a Chezzi function value per element, so they need the
         // interpreter handle (`self.call_value`) and can't live in the pure `builtins` table.
         if let Value::List(items) = &receiver
@@ -1846,6 +1892,12 @@ impl Interp {
         // value directly (no `self` is bound — it's not a method).
         if let Some(f) = fields.borrow().iter().find(|(k, _)| k == method).map(|(_, v)| v.clone()) {
             return self.call_value(f, arg_vals, span);
+        }
+        // A user iterator struct (one with `next`, no explicit `iter`) IS Iterable — `.iter()` on it
+        // returns self (idempotent). Lets a struct-with-`next` flow into an `[S: Iterable[T]]` body
+        // that calls `s.iter()`. A struct that defines its own `iter` resolved above.
+        if method == "iter" && arg_vals.is_empty() && def.methods.contains_key("next") {
+            return Ok(receiver.clone());
         }
         Err(RuntimeError {
             message: format!("struct '{name}' has no method '{method}'"),
@@ -3593,6 +3645,20 @@ impl Interp {
             return Ok(Flow::Normal);
         }
         let iter_val = self.eval(iter)?;
+        // PURE-`Iterable` struct (has `iter`, lacks `next`): drive it through a ONE-TIME `.iter()`
+        // call to get the cursor, which `iter_rows_from_value` then drains. A struct with BOTH `iter`
+        // and `next` is NOT converted here — it keeps the `next()` fast path below (back-compat
+        // precedence). Checked first so the rest of `exec_for` sees a cursor, not the struct.
+        let iter_val = match &iter_val {
+            Value::Struct { name, .. }
+                if self.structs.get(name.as_ref()).is_some_and(|d| {
+                    !d.methods.contains_key("next") && d.methods.contains_key("iter")
+                }) =>
+            {
+                self.dispatch_method(iter_val.clone(), "iter", Vec::new(), iter.span)?
+            }
+            _ => iter_val,
+        };
         // Struct iterator protocol: a struct with `next(self) -> Option[T]` is iterated LAZILY —
         // call `next()` each step until it returns `None`, so an infinite iterator with an early
         // `break` terminates. The struct advances by mutating its own fields in place (its fields
@@ -3838,6 +3904,18 @@ impl Interp {
         vars: usize,
         span: Span,
     ) -> Result<Vec<Vec<Value>>, RuntimeError> {
+        // PURE-`Iterable` struct (has `iter`, lacks `next`): convert to its cursor via a one-time
+        // `.iter()`, then drain the cursor below. Mirrors `exec_for` (so `list(w)`/`for x in w` agree).
+        let iter_val = match &iter_val {
+            Value::Struct { name, .. }
+                if self.structs.get(name.as_ref()).is_some_and(|d| {
+                    !d.methods.contains_key("next") && d.methods.contains_key("iter")
+                }) =>
+            {
+                self.dispatch_method(iter_val.clone(), "iter", Vec::new(), span)?
+            }
+            _ => iter_val,
+        };
         if let Value::Struct { name, .. } = &iter_val
             && self.structs.get(name.as_ref()).is_some_and(|d| d.methods.contains_key("next"))
         {
@@ -4485,6 +4563,12 @@ fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec
         // mutation during the loop does not change the iteration sequence (matches the VM).
         Value::Bytes(b) => b.iter().map(|&x| vec![Value::Int(x as i64)]).collect(),
         Value::ByteArray(b) => b.borrow().iter().map(|&x| vec![Value::Int(x as i64)]).collect(),
+        // A cursor yields its REMAINING snapshot (`items[pos..]`) as single-var rows — drains a
+        // `for x in pure_iterable_struct` (lowered to a cursor) and `list(xs.iter())`.
+        Value::Iter(c) => {
+            let c = c.borrow();
+            c.items[c.pos.min(c.items.len())..].iter().map(|v| vec![v.clone()]).collect()
+        }
         other => {
             return Err(RuntimeError {
                 message: format!("cannot iterate over {}", other.type_name()),

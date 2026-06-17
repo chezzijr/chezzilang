@@ -3678,6 +3678,13 @@ impl Vm {
                             let nh = self.heap.alloc(Obj::List(items));
                             self.push(Value::Obj(nh));
                         }
+                        // A cursor (`for x in pure_iterable_struct` lowered via `IterableToCursor`)
+                        // snapshots its REMAINING items to the index-iterable list.
+                        Obj::Iter { items, pos } => {
+                            let cloned = items[(*pos).min(items.len())..].to_vec();
+                            let nh = self.heap.alloc(Obj::List(cloned));
+                            self.push(Value::Obj(nh));
+                        }
                         _ => return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span)),
                     },
                     other => return Err(self.err(format!("cannot iterate over {}", self.type_name(other)), span)),
@@ -3705,6 +3712,37 @@ impl Vm {
                 let is_gen =
                     matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Generator(_)));
                 self.push(Value::Bool(is_gen));
+            }
+            Op::IterableToCursor => {
+                // One-time `for`-entry conversion: a PURE-`Iterable` struct (has `iter`, lacks `next`)
+                // becomes its cursor (so the seq path drains it); everything else passes through.
+                let v = self.pop();
+                let convert = if let Value::Obj(h) = v
+                    && let Obj::Struct { name, .. } = self.heap.get(h)
+                {
+                    let name = name.clone();
+                    self.program.structs.get(name.as_ref()).map(|d| {
+                        (!d.methods.contains_key("next") && d.methods.contains_key("iter"), d.methods.get("iter").copied(), d.module_idx)
+                    })
+                } else {
+                    None
+                };
+                match convert {
+                    Some((true, Some(proto), module_idx)) => {
+                        let home = self.module_objs[module_idx];
+                        // Re-enter the VM to run `iter(self)`; it returns the cursor (the body calls
+                        // `self.xs.iter()`). Root the receiver across the call (guarded GC).
+                        self.push(v);
+                        let cursor =
+                            self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
+                        self.pop(); // unroot receiver
+                        self.push(cursor);
+                    }
+                    // Not a pure-Iterable struct (a struct with `next`, a generator, a collection, …):
+                    // unchanged. (A pure-Iterable struct whose `iter` is somehow missing is impossible
+                    // — the checker bound it via `struct_iterable_elem`, which requires `iter`.)
+                    _ => self.push(v),
+                }
             }
             Op::Yield => {
                 // Experimental generator suspend. The yielded value is already on the stack top; flag
@@ -5216,9 +5254,42 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
+        // A cursor (`Obj::Iter`, the `Iterable` `.iter()` result) exposes `.next()` (advance the
+        // snapshot, idempotent `None` past the end) and `.iter()` (returns self — every Iterator IS
+        // Iterable, idempotently). Intrinsic, like the generator arm just below.
+        if matches!(self.heap.get(h), Obj::Iter { .. }) {
+            if !args.is_empty() {
+                return Err(self.err(format!("a cursor's '{method}' takes no arguments"), span));
+            }
+            match method {
+                "iter" => self.push(recv), // idempotent: iter() on a cursor returns self
+                "next" => {
+                    let Obj::Iter { items, pos } = self.heap.get_mut(h) else { unreachable!() };
+                    let item = if *pos < items.len() {
+                        let item = items[*pos];
+                        *pos += 1;
+                        Some(item)
+                    } else {
+                        None
+                    };
+                    let result = match item {
+                        Some(v) => self.alloc_enum("Option", "Some", vec![v]),
+                        None => self.alloc_enum("Option", "None", Vec::new()),
+                    };
+                    self.push(result);
+                }
+                _ => return Err(self.err(format!("a cursor has no method '{method}' (only `next()`/`iter()`)"), span)),
+            }
+            return Ok(());
+        }
         // Experimental generators — `.next()` is intrinsic (resumes the coroutine), so a generator
         // result drives `for x in g():` through the same lazy `next()` step as a struct iterator.
+        // `.iter()` on a generator returns self (a generator IS an Iterator, hence Iterable).
         if matches!(self.heap.get(h), Obj::Generator(_)) {
+            if method == "iter" && args.is_empty() {
+                self.push(recv); // idempotent: a generator's iter() is itself
+                return Ok(());
+            }
             if method != "next" || !args.is_empty() {
                 return Err(self.err(format!("a generator has no method '{method}' (only `next()`)"), span));
             }
@@ -5259,6 +5330,27 @@ impl Vm {
                 return Ok(());
             }
             self.push(result);
+            return Ok(());
+        }
+        // `.iter()` on a built-in collection (str/list/map/set/bytes/bytearray) → a FRESH cursor that
+        // SNAPSHOTS the current contents in the SAME order/elements as `for x in X` (list/set elems,
+        // map → keys, str → per-char str, bytes/bytearray → per-byte int). Reuses `drain_iterable`
+        // (the for-loop's single source of truth), then wraps the snapshot in an `Obj::Iter`. Placed
+        // BEFORE the per-type dispatch so it intercepts `iter` for every collection in one spot; a
+        // collection has no user-defined `iter`, so there is no precedence concern.
+        if method == "iter"
+            && args.is_empty()
+            && matches!(
+                self.heap.get(h),
+                Obj::Str(_) | Obj::List(_) | Obj::Map(_) | Obj::Set(_) | Obj::Bytes(_) | Obj::ByteArray(_)
+            )
+        {
+            // `drain_iterable` may alloc (str per-char); root the receiver across the call.
+            self.push(recv);
+            let items = self.drain_iterable(recv, span)?;
+            self.pop(); // unroot receiver
+            let cursor = self.heap.alloc(Obj::Iter { items, pos: 0 });
+            self.push(Value::Obj(cursor));
             return Ok(());
         }
         // Core-type methods (M6): built-in methods on `str` / `list`. Handled before the clone-match
@@ -5365,6 +5457,15 @@ impl Vm {
                         return Ok(()); // B1/D3: the function-field call parked on `recv` or yielded.
                     }
                     self.push(v);
+                    return Ok(());
+                }
+                // A user iterator struct (`next`, no explicit `iter`) IS Iterable — `.iter()` returns
+                // self (idempotent), letting it flow into an `[S: Iterable[T]]` body. Mirrors interp.
+                if method == "iter"
+                    && args.is_empty()
+                    && self.program.structs.get(name.as_ref()).is_some_and(|d| d.methods.contains_key("next"))
+                {
+                    self.push(recv);
                     return Ok(());
                 }
                 Err(self.err(format!("struct '{name}' has no method '{method}'"), span))
@@ -7863,6 +7964,13 @@ impl Vm {
                 Obj::Generator(_) => {
                     return Err(self.err("a generator cannot be sent across tasks".to_string(), Span { line: 0, col: 0 }));
                 }
+                // A cursor is NON-SENDABLE — it reuses `Iterator[T]`'s type (indistinguishable from a
+                // generator result, which the checker treats as sendable), so we gate it at RUNTIME
+                // exactly like a generator (parity), rather than weakening `sendable_rec` (which would
+                // regress the frozen generator typing).
+                Obj::Iter { .. } => {
+                    return Err(self.err("a cursor cannot be sent across tasks".to_string(), Span { line: 0, col: 0 }));
+                }
             },
         })
     }
@@ -8346,6 +8454,8 @@ impl Vm {
             // Experimental generators are not sendable and are never legal as a module global crossing
             // to an M:N worker — reaching here means one was smuggled past the checker.
             Obj::Generator(_) => unreachable!("a generator cannot be snapshotted (not sendable)"),
+            // A cursor is non-sendable (gated in `to_wire`), so it never reaches the snapshot path.
+            Obj::Iter { .. } => unreachable!("a cursor cannot be snapshotted (not sendable)"),
         }
     }
 
@@ -10475,6 +10585,11 @@ impl Vm {
                     let chars: Vec<char> = s.chars().collect();
                     return Ok(chars.into_iter().map(|c| self.alloc_char(c)).collect());
                 }
+                // A cursor drains its REMAINING snapshot (`items[pos..]`) directly — it IS an
+                // `Iterator[T]`, so `list(xs.iter())`/`set(...)` round-trip for free.
+                Obj::Iter { items, pos } => {
+                    return Ok(items[(*pos).min(items.len())..].to_vec());
+                }
                 _ => {}
             }
         }
@@ -10862,6 +10977,7 @@ impl Vm {
                 Obj::Socket(_) => "Socket",
                 Obj::Listener(_) => "Listener",
                 Obj::Generator(_) => "generator",
+                Obj::Iter { .. } => "iterator",
             },
         }
     }
@@ -10972,6 +11088,7 @@ impl Vm {
                     Ok(format!("Listener({})", if core.listener.lock().unwrap().is_some() { "open" } else { "closed" }))
                 }
                 Obj::Generator(_) => Ok("<generator>".to_string()),
+                Obj::Iter { .. } => Ok("<iterator>".to_string()),
             },
         }
     }
@@ -11229,6 +11346,7 @@ impl Vm {
             }
             // Experimental generators stringify opaquely (no protocol hook).
             Obj::Generator(_) => out.push_str("<generator>"),
+            Obj::Iter { .. } => out.push_str("<iterator>"),
         }
         Ok(())
     }
@@ -12766,6 +12884,20 @@ mod tests {
         vm.push(Value::Int(2));
         vm.do_call(2, Span { line: 1, col: 1 }).unwrap();
         assert_eq!(vm.pop(), Value::Int(42));
+    }
+
+    #[test]
+    fn cursor_to_wire_is_non_sendable_err() {
+        // A cursor (`Obj::Iter`) is NON-SENDABLE: `to_wire` returns the cursor-specific `Err` (mirrors
+        // the generator arm — runtime-gated parity, no `sendable_rec` change). The real OS-thread
+        // engine surfaces this `Err` recoverably; the cooperative engine `.expect`s it (like a generator).
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        let cursor = Value::Obj(vm.heap.alloc(Obj::Iter { items: vec![Value::Int(1)], pos: 0 }));
+        let err = vm.to_wire(cursor).expect_err("a cursor is not sendable");
+        assert!(
+            err.to_string().contains("a cursor cannot be sent across tasks"),
+            "expected the cursor non-sendable message, got: {err}"
+        );
     }
 
     #[test]
@@ -22167,6 +22299,20 @@ main()
         assert_file_parity("examples/iter_adapters.chz");
     }
 
+    /// `Iterable[T]` + `.iter()` — a list flows into the Take/Mapped adapter pipeline, `.iter()`+manual
+    /// `.next()` on every collection, a pure-`Iterable` struct drives `for`, an `[S: Iterable[T]]` fn
+    /// over a list AND a struct iterator, empty/idempotent cursors, `list(xs.iter())` round-trip. Byte-
+    /// identical on VM + interp (the `--serial` third engine is asserted in the regression script).
+    #[test]
+    fn golden_iterable_via_run_file() {
+        let path = fixture("examples/iterable.chz");
+        let expected = std::fs::read_to_string(fixture("examples/iterable.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/iterable.chz");
+    }
+
     #[test]
     fn golden_multi_file_project_via_vm() {
         let expected = std::fs::read_to_string(fixture("tests/fixtures/proj/main.expected")).unwrap();
@@ -22889,5 +23035,157 @@ main()";
         assert_parity(src);
         assert_eq!(run_capture(src).expect("vm"), "bytearray(b'\\x01\\x02')\n");
         assert_eq!(run_capture_parallel(src).expect("parallel"), "bytearray(b'\\x01\\x02')\n");
+    }
+
+    // ===== Iterable[T] / `.iter()` cursor =====
+
+    #[test]
+    fn iter_next_idempotent_both_engines() {
+        // next() yields Some(10), Some(20), then None forever (idempotent past exhaustion).
+        let src = "fn main():\n    it := [10, 20].iter()\n    print(it.next())\n    print(it.next())\n    print(it.next())\n    print(it.next())\nmain()\n";
+        assert_parity_out(src, "Some(10)\nSome(20)\nNone\nNone\n");
+    }
+
+    #[test]
+    fn iter_empty_collection_none_immediately() {
+        let src = "fn main():\n    xs: list[int] = []\n    it := xs.iter()\n    print(it.next())\nmain()\n";
+        assert_parity_out(src, "None\n");
+    }
+
+    #[test]
+    fn iter_snapshot_order_matches_for() {
+        // For each collection, the cursor's element sequence must equal `for x in X`.
+        for coll in [
+            "[1, 2, 3]",
+            "{1, 2, 3}",
+            "{1: \"a\", 2: \"b\"}", // map → keys
+            "\"abc\"",
+            "b\"hi\"",
+            "bytearray([7, 8])",
+        ] {
+            let via_for = format!(
+                "fn main():\n    for x in {coll}:\n        print(x)\nmain()\n"
+            );
+            let via_iter = format!(
+                "fn main():\n    it := ({coll}).iter()\n    while true:\n        match it.next():\n            Some(x):\n                print(x)\n            None:\n                break\nmain()\n"
+            );
+            assert_parity(&via_for);
+            assert_parity(&via_iter);
+            let for_out = vm_outcome(&via_for);
+            let iter_out = vm_outcome(&via_iter);
+            assert_eq!(for_out, iter_out, "cursor order must match `for` for {coll}");
+        }
+    }
+
+    #[test]
+    fn iter_self_on_iterator_value() {
+        // iter() on a cursor returns self (idempotent); driving the result still works.
+        let src = "fn main():\n    it := [1, 2].iter().iter()\n    print(it.next())\nmain()\n";
+        assert_parity_out(src, "Some(1)\n");
+    }
+
+    #[test]
+    fn list_of_cursor_roundtrip_both_engines() {
+        assert_parity_out("fn main():\n    print(list([5, 6, 7].iter()))\nmain()\n", "[5, 6, 7]\n");
+        assert_parity_out("fn main():\n    print(set({1, 2}.iter()).len())\nmain()\n", "2\n");
+    }
+
+    #[test]
+    fn cursor_composes_into_adapter() {
+        // The headline win: a list cursor flows into a `[I: Iterator[T]]` adapter.
+        let src = concat!(
+            "struct Take[I: Iterator[T], T]:\n",
+            "    inner: I\n",
+            "    left: int\n",
+            "    fn next(self) -> Option[T]:\n",
+            "        if self.left <= 0:\n",
+            "            return None\n",
+            "        self.left = self.left - 1\n",
+            "        return self.inner.next()\n",
+            "fn main():\n",
+            "    for v in Take([10, 20, 30, 40].iter(), 2):\n",
+            "        print(v)\n",
+            "main()\n"
+        );
+        assert_parity_out(src, "10\n20\n");
+    }
+
+    #[test]
+    fn for_over_pure_iterable_struct() {
+        // A struct with ONLY iter() drives `for`; one with BOTH still uses next() (sentinel).
+        let only_iter = concat!(
+            "struct Wrap:\n",
+            "    xs: list[int]\n",
+            "    fn iter(self) -> Iterator[int]:\n",
+            "        return self.xs.iter()\n",
+            "fn main():\n",
+            "    for x in Wrap([1, 2, 3]):\n",
+            "        print(x)\n",
+            "main()\n"
+        );
+        assert_parity_out(only_iter, "1\n2\n3\n");
+        // Both iter() and next(): next() wins (iter() would print a different sentinel).
+        let both = concat!(
+            "struct Two:\n",
+            "    n: int\n",
+            "    fn next(self) -> Option[int]:\n",
+            "        if self.n >= 2:\n",
+            "            return None\n",
+            "        v := self.n\n",
+            "        self.n = self.n + 1\n",
+            "        return Some(v + 100)\n",
+            "    fn iter(self) -> Iterator[int]:\n",
+            "        return [999].iter()\n",
+            "fn main():\n",
+            "    for x in Two(0):\n",
+            "        print(x)\n",
+            "main()\n"
+        );
+        assert_parity_out(both, "100\n101\n");
+    }
+
+    #[test]
+    fn cursor_not_sendable_at_runtime() {
+        // A cursor is type-indistinguishable from a generator result (both `Iterator[T]`), which the
+        // checker treats as statically sendable, so smuggling one across the spawn airlock is gated at
+        // RUNTIME — EXACTLY like a generator. The cooperative airlock's `to_wire` returns the cursor
+        // fault (`.expect`-surfaced on this engine, identical to the generator path), so the program
+        // does not silently share a mutable cursor across tasks. Asserts the cursor's behaviour
+        // matches the generator's (the parity discipline), surfacing the cursor-specific message.
+        let cursor_src = concat!(
+            "fn main():\n",
+            "    ch := Channel[Iterator[int]]()\n",
+            "    parallel:\n",
+            "        spawn ch.send([1, 2].iter())\n",
+            "    print(ch.recv().next())\n",
+            "main()\n"
+        );
+        // The runtime cursor gate fires inside the spawned VM thread (`to_wire` returns the cursor
+        // fault, surfaced via the cooperative airlock's `.expect`, exactly like a generator). The
+        // worker thread's panic propagates out as a join failure — the airlock REJECTS the cursor
+        // rather than silently sharing a mutable cursor across tasks. (We hush the default panic hook
+        // so the expected inner-thread message doesn't spam the test log.)
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let res = std::panic::catch_unwind(|| run_capture_parallel(cursor_src));
+        std::panic::set_hook(prev);
+        assert!(res.is_err(), "a cursor must NOT cross the spawn airlock (parity with generators)");
+    }
+
+    #[test]
+    fn generator_iter_returns_self_vm() {
+        // VM-only (interp has no generators): a generator's iter() returns self and drives.
+        let src = concat!(
+            "fn gen() -> Iterator[int]:\n",
+            "    yield 1\n",
+            "    yield 2\n",
+            "fn main():\n",
+            "    it := gen().iter()\n",
+            "    print(it.next())\n",
+            "    print(it.next())\n",
+            "    print(it.next())\n",
+            "main()\n"
+        );
+        assert_eq!(run_capture(src).expect("vm"), "Some(1)\nSome(2)\nNone\n");
     }
 }
