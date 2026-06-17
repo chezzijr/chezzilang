@@ -158,6 +158,27 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
     }
 }
 
+/// Render a `Ty` for a user-facing diagnostic about a **ref binding/param**, mapping the lowered
+/// `Ref[T]` box back to the `ref T` surface the user actually wrote (spec item 8 — `ref` is
+/// transparent; the user never typed `Ref`). Recurses so a nested box (`list[Ref[int]]`) also reads
+/// `ref` (`list[ref int]`). Plain types are unchanged. Use this only where the type originates from a
+/// `ref` binding — ordinary diagnostics keep the literal `Ty` `Display`.
+pub fn ref_display(ty: &Ty) -> String {
+    match ty {
+        Ty::Struct(n, args) if n == "Ref" && args.len() == 1 => format!("ref {}", ref_display(&args[0])),
+        Ty::List(t) => format!("list[{}]", ref_display(t)),
+        Ty::Set(t) => format!("set[{}]", ref_display(t)),
+        Ty::Option(t) => format!("Option[{}]", ref_display(t)),
+        Ty::Map(k, v) => format!("map[{}, {}]", ref_display(k), ref_display(v)),
+        Ty::Tuple(elems) => {
+            let parts: Vec<String> = elems.iter().map(ref_display).collect();
+            format!("({})", parts.join(", "))
+        }
+        // Anything without a `Ref[T]` to unwrap renders exactly as its normal `Display`.
+        other => other.to_string(),
+    }
+}
+
 impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

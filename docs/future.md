@@ -102,35 +102,30 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 11. ~~**Runtime stack traces**~~ — **DONE.** Error + call chain + line numbers, both engines
     (`37f374a`).
 
-12. **`ref T` — transparent reference bindings (DX sugar over `Ref[T]`) — PARKED behind the JIT.**
-    Motivation: `Ref[T]` already does everything (mutate, whole-value *replace* via `.set`, escape-safe
-    capture — all verified 2026-06-16), but it is a **viral wrapper**: it infects every signature
-    (`x: Ref[int]`, not `int`) and forces `.get()`/`.set()` ceremony instead of `x` / `x += 1`. The itch
-    is ergonomics, **not** capability. `ref T` would let a binding be spelled and used as a plain `T`
-    while carrying reference semantics:
+12. **`ref T` — transparent reference bindings (DX sugar over `Ref[T]`) — ✅ LANDED.**
+    Motivation was ergonomics: `Ref[T]` does everything but is a **viral wrapper** (`x: Ref[int]`, not
+    `int`; `.get()`/`.set()` ceremony). `ref T` is the **binding MODIFIER** that lets a local/param be
+    spelled and used as a plain `T` while carrying reference semantics:
     ```chezzi
     fn foo(x: ref int):
-        x += 1
-    n := 0
-    foo(ref n)        # explicit `ref` at the call site — see footgun #1
+        x += 1        # auto-deref write — lowers to x.set(x.get() + 1)
+    n: ref int = 0
+    foo(n)            # alias the box (the design chose AUTO-DEREF: no `ref n` / `^` operator)
     print(n)          # 1
     ```
-    **Only ONE sound version exists in a GC'd, borrow-checker-less language — Version A: pure desugar
-    to a heap `Ref` cell + auto-deref.** The compiler boxes the binding into the existing `Ref`
-    (`Rc<RefCell>`) and inserts the get/set. **No new VM op, no engine change, parity by construction**
-    (same desugar path optional-chaining / `??` took). Because the cell is **heap/GC'd**, it is
-    escape-safe: a closure or nested fn that captures a `ref` and outlives the frame cannot dangle —
-    this is the *deref-over-heap* layer, the thing that makes it sound. (**Version B — real stack-slot
-    aliasing, true C++ `&` / Rust `&mut`** — is **rejected**: frames are popped `Vec<Value>` slots, so an
-    escaping ref dangles; soundness would need a borrow checker + lifetimes Chezzi will not grow.)
-    **Two design constraints if ever built:** (1) **explicit `ref` at the call site** (`foo(ref n)`, not
-    bare `foo(n)`) — silent mutation-through-args is un-Pythonic, à la Rust `&mut` / C# `ref`;
-    (2) **restrict `ref` to fn params + local bindings only** — no `ref` struct fields / collection
-    elements (a `ref` stored in a heap structure re-opens the escape problem); those keep explicit
-    `Ref[T]`. **Smaller first step (also parked):** the `r^ += 1` / `print(r^)` deref-sugar over `Ref`
-    (no new VM op) — ~80% of the win for ~5% of the cost. **Timing:** this reopens the frozen front-end
-    (lexer→parser→checker→desugar), and the JIT bakes in the language — so it stays **parked behind the
-    JIT** with NaN-box et al. Sugar, not capability; wrong time; revisit post-JIT.
+    **Shipped as Version A: pure desugar to a heap `Ref` cell + auto-deref.** Reads lower to `.get()`,
+    writes to `.set()`, init to a fresh `Ref(v)` (or an alias when the RHS is already a `ref` binding).
+    **No new VM op, no engine change, parity by construction** (the same desugar path optional-chaining /
+    `??` took — all lowering lives in `src/desugar/mod.rs`, run inside `resolver::build_graph`, which
+    both engines + the checker consume). Because the cell is heap/GC'd it is escape-safe: an inner fn /
+    closure that captures a `ref` and outlives the frame shares the box (no dangle). **Design choices as
+    built:** (a) **AUTO-DEREF, no call-site `ref` marker and no `^` deref operator** — the read/write
+    site is inferred from the param/binding ref-ness (the earlier "explicit `ref` at the call site" /
+    `r^` notes are superseded); (b) **`ref` restricted to locals + params only** — the parser bars it
+    from return types, generic args, collection elements, struct fields, tuple elements, and
+    destructuring lets (those keep first-class `Ref[T]`); (c) coercion table + the non-sendable airlock
+    boundary (a `ref`/`Ref` box can't cross a task — use `Shared[T]`). See `docs/syntax.md` (`ref T`),
+    `gaps.md`, and examples `ref_binding.chz` / `ref_airlock.chz`.
 
 **Ecosystem (Tier 4, separate track):** REPL (huge for scripting iteration), formatter, `assert` +
 built-in test runner, LSP.

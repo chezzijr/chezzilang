@@ -908,6 +908,40 @@ branch names) is in the git log.
   for the single-clause form on `main`** (same eager `collect_iter_rows`); the nested form inherited
   it. List/map/set/str/range iterables are stateless, so their order/semantics are unchanged.
   `examples/comprehension_iter_state.chz` + interp/VM/golden parity tests.
+- ✅ **`ref T` — transparent by-reference bindings** (2026-06-17) — a binding MODIFIER (locals + params
+  only) that lowers to the existing `std.ref` `Ref[T]` box, **entirely in parser → checker → desugar**
+  (no new runtime/VM op, so two-engine parity is by construction — all read/write/init lowering lives in
+  `src/desugar/mod.rs`, run inside `resolver::build_graph`, which both engines + the checker consume).
+  AUTO-DEREF (the user-approved design — no `^` operator, no call-site `ref` marker): a read `r` lowers
+  to `r.get()`, `r = v` to `r.set(v)`, `r += 1` to `r.set(r.get()+1)`; init creates a fresh `Ref(v)` or
+  ALIASES the same box when the RHS is already a `ref` binding. Coercion table enforced: `ref→ref` param
+  aliases the box, `ref→T` param auto-derefs to a copy, a by-value local or a literal into a `ref` param
+  is an error. `ref` is barred (parse error) from return types, generic args, collection elements, tuple
+  elements, struct fields, and destructuring lets; a `ref`-over-generic-param is a type error. Concurrency:
+  a `ref T` is a `Ref[T]` → non-sendable, so crossing the airlock is rejected (matches `Ref[T]`; use
+  `Shared[T]`). `ref` is now a keyword (corpus-safe; `import std.ref` paths still parse via a path-segment
+  exception). Goldens `examples/ref_binding.chz` + `examples/ref_airlock.chz` (byte-identical on
+  run/--serial/--interp); parser/desugar/checker unit tests + grammar.bnf REF terminal + corpus
+  accept/reject fixtures. Docs: `docs/syntax.md` §3, `gaps.md` (RESOLVED), `docs/future.md` (item 12
+  landed), `docs/concurrency.md`. `cargo test` green (2052+), `cargo test conformance` green, clippy clean.
+- ✅ **`ref T` arg coercion is type-directed (indirect callees + closures + protocols)** (2026-06-17) —
+  follow-up hardening the `ref` arg alias/deref/error decision so it follows the *resolved* callee, not a
+  purely-syntactic name lookup. The decision still lives in `src/desugar/mod.rs` (it must — desugar runs
+  inside `build_graph`, the one pass the checker and both engines share), but `callee_param_is_ref` now
+  resolves indirect callees through local binding tracking: a LOCAL fn-value (`g := bump`/closure literal
+  → `local_fn` flags) and a method call whose receiver's struct type is known locally (`x := S(...)` /
+  `x: S = ...` → `local_struct`, looked up in a new `(struct, method)`-keyed spec map). Fixes (1) calling
+  a `ref`-fn through a local fn-value (was a false `expected Ref[int], found int`), (2) a method name
+  shared by structs that disagree on ref-ness (resolved by receiver type), (3) **closure `ref` params**
+  (were silently inert) — now `bind_ref`'d in desugar and typed `Ref[T]` in `infer_closure`, so a `ref`
+  arg aliases and a by-value arg is the same row-3 error as a named fn. (4) **Protocol `ref` params** are
+  now honored (`Ref[T]`) in the protocol method sig so a conforming `ref` method matches. (5) Diagnostics
+  for `ref` bindings render the `ref T` surface the user wrote (`ty::ref_display`), never leaking the
+  lowered `Ref[T]`. Golden `examples/ref_indirect.chz` (byte-identical run/--serial/--interp); 13 new
+  parser/desugar/checker tests. Known boundary: a method whose receiver's struct type is NOT statically
+  known locally (e.g. `foo().apply(r)`) still resolves only when all same-named methods agree on ref-ness
+  — otherwise it falls back to deref (the checker then gives a transparent `ref T` error). Docs:
+  `docs/syntax.md` §3. `cargo test` green (2068), conformance green, clippy clean.
 - ✅ **Checker control-flow boundary for `spawn:`/`defer:` blocks** (2026-06-16) — fixes a three-way
   divergence where `break`/`continue` lexically nested in an enclosing loop but placed inside a `spawn:`
   or `defer:` block passed `check`, raised `break outside loop` at runtime on the VM, and was silently

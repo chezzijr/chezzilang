@@ -186,9 +186,10 @@ map/list-index specialization, **positional closure captures (memory lever #3)**
 >   coupling but ⛔ blocked by full i64; pin only as "if the i64 model is ever revisited, it MUST be
 >   pre-JIT."
 > - **Tier B — JIT-neutral (equal cost before/after):** all **stdlib breadth** (native or pure-Chezzi
->   — same call path regardless), the **string concat/split builder**, **`ref T` deref sugar** (lowers
->   to existing get/set ops; already parked post-JIT), and the **ecosystem/tooling** track. These belong
->   to the feature-freeze phase (which itself gates JIT) but carry **no** JIT-rewrite risk.
+>   — same call path regardless), the **string concat/split builder**, and the **ecosystem/tooling**
+>   track. (**`ref T` sugar has LANDED** — auto-deref lowering to `Ref[T]` get/set, parser+checker+
+>   desugar only, JIT-neutral.) These belong to the feature-freeze phase (which itself gates JIT) but
+>   carry **no** JIT-rewrite risk.
 > - **Tier C — superseded / non-work:** **register VM** (JIT is built on the bytecode it would rewrite
 >   → pre-JIT-or-never, but JIT supersedes it → don't); the mooted/won't-fix concurrency items and the
 >   unreachable type-system latent.
@@ -233,8 +234,24 @@ map/list-index specialization, **positional closure captures (memory lever #3)**
   - **String concat/`split` builder** — medium lever; `join` already buffers (`mod.rs:4377`), `+`/`split`
     aren't benched yet.
 
-- **⚪ `ref T` — transparent reference bindings** (DX sugar over `Ref[T]`, `r^ += 1` deref) — **PARKED
-  behind the JIT** (`future.md:105`). Sugar, not capability; revisit post-JIT.
+- **✅ `ref T` — transparent reference bindings** — **RESOLVED** (landed). A binding MODIFIER (locals
+  + params only) that lowers to the existing `std.ref` `Ref[T]` box, entirely in
+  parser→checker→desugar (no new runtime). Two coexisting surfaces:
+  - **`ref T`** (`r: ref int = 0`, `fn f(x: ref int)`) — the new modifier. **Auto-deref** (no `^`
+    operator): a read `r` lowers to `r.get()`, a write `r = v` to `r.set(v)`, `r += 1` to
+    `r.set(r.get()+1)`. Init creates a fresh box `Ref(v)` unless the RHS is already a `ref` binding
+    (then it **aliases** the same box). ≈ C++ `int&`. Barred (parse/type error) from return types,
+    generic args, collection elements, struct fields, tuple elements, and destructuring lets.
+  - **`Ref[T]`** (`r: Ref[T] = Ref(0)`, explicit `.get()/.set()/.update()`) — UNCHANGED, the
+    first-class box usable anywhere a type goes. ≈ Rust `Rc<RefCell>`.
+  Coercion (type-directed — follows the resolved callee, including a local fn-value, a closure `ref`
+  param, and a method resolved by receiver type): `ref→ref` param aliases the box; `ref→T` param
+  auto-derefs to a copy; a by-value local or a literal into a `ref` param is a type error. Closure and
+  protocol `ref` params are honored identically. Concurrency: a `ref T` is a `Ref[T]`, which is
+  **non-sendable** — capturing/passing the box across the spawn/`parallel:`/`Channel` airlock is
+  rejected (use `Shared[T]`); deref to a value first to send a copy. Diagnostics about a `ref` binding
+  render `ref T`, not the lowered `Ref[T]`. (The old `r^` deref idea is superseded by auto-deref.) See
+  `docs/syntax.md` (`ref T` section), examples `ref_binding.chz` / `ref_indirect.chz` / `ref_airlock.chz`.
 
 ### 🟠 Deferred — will resolve later (real work, lower urgency)
 

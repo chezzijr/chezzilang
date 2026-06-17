@@ -58,6 +58,7 @@ fn symbol(tok: &Token) -> &'static str {
         Token::Extern => "EXTERN",
         Token::From => "FROM",
         Token::As => "AS",
+        Token::Ref => "REF",
         Token::And => "AND",
         Token::Or => "OR",
         Token::Not => "NOT",

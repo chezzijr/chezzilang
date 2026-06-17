@@ -1,0 +1,4 @@
+# rule: letStmt, fnDecl, params
+fn bump(x: ref int):
+    x = x + 1
+r: ref int = 0

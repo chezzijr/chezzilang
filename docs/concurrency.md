@@ -271,6 +271,9 @@ fn bump(s: Shared[int]):
 box). One `get`/`set`/`update` API across the two boxes; the **type names the scope**. `Ref[T]` is
 **not** sendable (copy-on-spawn gives each task its own box); `Shared[T]` **is** (the handle is
 copied, the value isn't). Naming: `Ref` (a box *here*) ↔ `Shared` (a box other tasks can reach too).
+The `ref T` binding modifier (syntax.md §3) is sugar over `Ref[T]`, so it sits at the same rung:
+**same-task only** — capturing/passing a `ref` across the airlock is rejected exactly like a `Ref[T]`
+(deref to a value to send a copy; use `Shared[T]` for cross-task mutation).
 
 Under the sequential executor a single thread already serialises every write, so `Shared` is correct
 from C3 with no locking; under C5 it becomes a real owner-task + channel, same API.
@@ -525,7 +528,9 @@ captured bindings are **read-only inside the task**.
   sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, a **`Shared[T]`** handle,
   and a **`std.cancel` `Token`** (a struct over the above, so it flows down the call tree).
 - **Not sendable:** closures (bound to a heap), native handles (file/regex/HTTP `Response`/etc.), and
-  **`Ref[T]`** (an in-task-only box — copied on spawn, so each task gets its own independent box).
+  **`Ref[T]`** — and therefore the **`ref T`** binding modifier, which is sugar over it (an
+  in-task-only box; capturing/passing it across the airlock is a **compile error**, not a silent copy
+  — deref to a value first, or use `Shared[T]` for cross-task mutation).
 - **Read-only captures:** reassigning a captured binding inside a task body is a **compile error** —
   so the copy semantics are obvious: read captured config freely, but produce output only via a
   `Channel` or a `Shared`. The checker gates capture and `send`, **with the fix in the error message**.

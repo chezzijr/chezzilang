@@ -1,0 +1,3 @@
+# rule: letStmt
+# expect: expected '=' after a multi-target assignment list
+a, b: ref int := (0, 1)

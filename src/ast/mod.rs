@@ -33,6 +33,12 @@ pub enum StmtKind {
         names: Vec<String>,
         ty: Option<Type>,
         value: Expr,
+        /// True for a `ref T` binding (`r: ref int = 0`) — a transparent by-reference local that
+        /// lowers to a `Ref[T]` box in the desugar pass. Only ever set on a single-name typed let
+        /// (the parser rejects `ref` on a destructuring/`:=` let). Read by the checker (coercion +
+        /// rejection) and consumed by desugar (read/write/init lowering); both engines see only the
+        /// already-lowered `Ref`/`.get()`/`.set()` forms, so they ignore this flag.
+        is_ref: bool,
     },
     /// `target op value`, e.g. `count += 1`, `x = 3`.
     Assign {
@@ -296,6 +302,10 @@ pub struct Param {
     pub name: String,
     pub ty: Option<Type>,
     pub default: Option<Expr>,
+    /// True for a `ref T` parameter (`fn f(x: ref int)`) — a transparent by-reference param that
+    /// lowers to a `Ref[T]` box. The caller must pass a `ref`-bound argument (alias) — see the
+    /// coercion table in the checker. Both engines see only lowered forms and ignore this flag.
+    pub is_ref: bool,
 }
 
 /// A struct field: `name: Type`, optionally with a default (`name: Type = expr`). A defaulted field

@@ -158,6 +158,60 @@ p, q, r = r, p, q                        # three-way rotation (RHS evaluated fir
 a, b = compute()                         # compute() returns (int, int)
 ```
 
+### `ref T` — transparent by-reference bindings
+
+`ref T` is a **binding modifier** (on **locals and params only**) that makes a binding carry
+*reference* semantics while still being spelled and used as a plain `T`. It is pure sugar over the
+`std.ref` `Ref[T]` box (`import std.ref` to use it). Roughly C++'s `int&`, where the explicit
+`Ref[T]` (`r.get()/.set()/.update()`) is closer to Rust's `Rc`.
+
+```chezzi
+import std.ref
+
+r: ref int = 0     # a fresh box holding 0
+r = 5              # WRITE mutates the pointee (never rebinds the box)
+r += 1             # compound works too → 6
+print(r)           # 6   — a READ auto-derefs (no `.get()`, no `^` operator)
+print(r + 100)     # 106 — usable anywhere its value is
+```
+
+- **Read / write lowering (automatic).** A read of `r` lowers to `r.get()`; `r = v` to `r.set(v)`;
+  `r += 1` to `r.set(r.get() + 1)`. There is **no deref operator** and **no `ref` marker at the call
+  site** — it is all inferred from the binding/param.
+- **Create vs alias (driven by the RHS).** `r: ref int = 0` creates a **fresh** box. `r2: ref int = r`
+  (RHS already a `ref`) **aliases** the same box — a write through either is visible through both.
+  A plain `y := r` (no annotation) **auto-derefs to a copy** (`y: int`), which does *not* share.
+- **Pass by reference.** A `ref T` argument into a `ref T` param **aliases** the caller's box, so the
+  callee's writes persist:
+
+  ```chezzi
+  fn bump(x: ref int):
+      x += 1
+  bump(r)            # mutates the caller's binding
+  ```
+
+  A `ref T` argument into a plain `T` param **auto-derefs to a copy** (a ref is usable as its value).
+  The reverse — a by-value local or a literal into a `ref T` param — is a **type error** (you can't
+  take a reference to a by-value local or a temporary; declare the local `ref` to pass by reference).
+  The alias-vs-deref-vs-error decision is **type-directed**: it follows the *resolved* callee's
+  parameter, so it works uniformly through a local fn-value (`g := bump; g(r)`), a **closure** `ref`
+  param (`fn(x: ref int)` — a `ref` arg aliases, a by-value arg is the same error as a named fn), and
+  a method name shared by structs that disagree on ref-ness (the receiver's type picks the method).
+- **Capture.** An inner fn / closure that closes over a `ref` local shares the box, so mutations
+  through it persist (a plain non-`ref` local is still captured by value).
+- **One transparency gap — string interpolation.** Inside a `"{ ... }"` interpolation, a bare `ref`
+  binding is **not** auto-dereferenced (interpolation fragments are parsed out-of-band, after the
+  desugar pass), so `"{r}"` prints the underlying box (`Ref(value=…)`), exactly as an explicit
+  `Ref[T]` would. Write `"{r + 0}"` or bind a copy (`v := r`) first if you need the value in a string.
+  Everywhere else (`print(r)`, arithmetic, args, indexing) `r` reads as its value.
+- **Where it's allowed.** Locals + params **only**. `ref` is a **parse error** as a return type, a
+  generic argument, a collection element, a tuple element, a struct field, or on a destructuring let
+  — use a first-class `Ref[T]` there.
+- **Concurrency (important).** `ref`/`Ref` are **same-task** aliasing only. A `ref T` is a `Ref[T]`
+  box, which is **non-sendable**: capturing or passing the box across the `spawn` / `parallel:` /
+  `Channel` airlock is **rejected** by the checker. To move a value across, deref the ref into a plain
+  copy first; for genuine cross-task shared mutation use `Shared[T]`, never `ref`.
+
 ### Built-in types
 
 | Type | Example | Notes |

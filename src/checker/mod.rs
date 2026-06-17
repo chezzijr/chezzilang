@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 pub use ty::Ty;
-use ty::compatible;
+use ty::{compatible, ref_display};
 
 /// What a `match` scrutinee is being matched against, threaded through the match-checking helpers.
 enum MatchKind {
@@ -336,6 +336,12 @@ struct Checker {
     /// loop var is immutable — rebound fresh each iteration — so assigning to it is rejected; this
     /// sidesteps a VM/interp divergence where the VM's counter slot IS the loop var).
     loop_vars: Vec<std::collections::HashSet<String>>,
+    /// Per-scope set of names declared as `ref T` bindings/params (mirrors `scopes` index-for-index).
+    /// A `ref T` and an explicit first-class `Ref[T]` are the same `Ty::Struct("Ref", _)` after
+    /// lowering, so this is the ONLY way to tell them apart for transparency: a diagnostic about a
+    /// `ref` binding renders `ref T` (via `ref_display`), but one about an explicit `Ref[T]` keeps
+    /// `Ref[T]` (the user wrote `Ref`). Charge-5 transparency without lying in the other direction.
+    ref_decls: Vec<std::collections::HashSet<String>>,
     functions: HashMap<String, FnSig>,
     structs: HashMap<String, StructInfo>,
     /// Structural protocols by name. Program-global (like structs). Pre-seeded with `Comparable`.
@@ -406,6 +412,7 @@ impl Checker {
         let mut c = Checker {
             errors: Vec::new(),
             scopes: Vec::new(),
+            ref_decls: Vec::new(),
             loop_vars: Vec::new(),
             functions: HashMap::new(),
             structs: HashMap::new(),
@@ -651,10 +658,27 @@ impl Checker {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.loop_vars.push(std::collections::HashSet::new());
+        self.ref_decls.push(std::collections::HashSet::new());
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.loop_vars.pop();
+        self.ref_decls.pop();
+    }
+    /// Record `name` (already declared in the current scope) as a `ref T` binding/param.
+    fn declare_ref(&mut self, name: &str) {
+        if let Some(set) = self.ref_decls.last_mut() {
+            set.insert(name.to_string());
+        }
+    }
+    /// Is `name` an in-scope `ref T` binding/param (innermost binding wins, shadowing-aware)?
+    fn is_ref_decl(&self, name: &str) -> bool {
+        for (vars, refs) in self.scopes.iter().zip(self.ref_decls.iter()).rev() {
+            if vars.contains_key(name) {
+                return refs.contains(name);
+            }
+        }
+        false
     }
     fn declare(&mut self, name: &str, ty: Ty) {
         self.scopes.last_mut().unwrap().insert(name.to_string(), ty);
@@ -1016,6 +1040,12 @@ impl Checker {
             .params
             .iter()
             .map(|p| match &p.ty {
+                // A `ref T` param is a `Ref[T]` box (its reads/writes were lowered to `.get()`/`.set()`
+                // by desugar). `check_ref_ty` rejects a non-boxable pointee (e.g. a bare generic).
+                Some(t) if p.is_ref => {
+                    self.check_ref_ty(t, span);
+                    self.resolve_type(&Type::Generic("Ref".to_string(), vec![t.clone()]), span)
+                }
                 Some(t) => self.resolve_type(t, span),
                 None if p.name == "self" => Ty::Unknown, // bound in check_fn_body
                 None => {
@@ -1098,6 +1128,9 @@ impl Checker {
                 params.get(i).cloned().unwrap_or(Ty::Unknown)
             };
             self.declare(&param.name, ty);
+            if param.is_ref {
+                self.declare_ref(&param.name);
+            }
         }
         // An inline-expr body (`fn a(): <expr>`) implicitly returns its single expression, so its
         // type IS the inferred return (mirroring a closure body) — there is no `return` to collect.
@@ -1126,6 +1159,23 @@ impl Checker {
             Ty::Unknown
         } else {
             Ty::Nil
+        }
+    }
+
+    /// Validate the pointee type of a `ref T` binding/param. `ref` lowers to a `Ref[T]` box, so the
+    /// pointee must be a concrete (monomorphic) type: a bare in-scope generic parameter is rejected
+    /// (use a first-class `Ref[T]` field/param for a generic box). Other unboxable shapes do not arise
+    /// — the parser already bars `ref` from collection-element / return / field positions.
+    fn check_ref_ty(&mut self, t: &Type, span: Span) {
+        if let Type::Named(n) = t
+            && self.type_params.contains_key(n)
+        {
+            self.error(
+                span,
+                format!(
+                    "`ref {n}` is not allowed: a `ref` binding cannot point at the generic type parameter '{n}' — use a first-class `Ref[{n}]` instead"
+                ),
+            );
         }
     }
 
@@ -1331,7 +1381,8 @@ impl Checker {
     fn check_stmt(&mut self, stmt: &Stmt) {
         let span = stmt.span;
         match &stmt.kind {
-            StmtKind::Let { names, ty, value } => {
+            StmtKind::Let { names, ty, value, is_ref } => {
+                let is_ref = *is_ref;
                 let val_ty = self.infer_value(value);
                 if names.len() > 1 {
                     // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
@@ -1341,11 +1392,22 @@ impl Checker {
                 let name = &names[0];
                 let declared = match ty {
                     Some(t) => {
-                        let expected = self.resolve_type(t, span);
+                        // A `ref T` binding is, at runtime, a `Ref[T]` box (the desugar pass lowered
+                        // the init to `Ref(v)`/alias and every read to `.get()`); so the binding's
+                        // checker type is `Ref[T]`, not `T`. The pointee element type `T` is rejected
+                        // if it is not boxable (e.g. a bare unconstrained generic) by `check_ref_ty`.
+                        let expected = if is_ref {
+                            self.check_ref_ty(t, span);
+                            self.resolve_type(&Type::Generic("Ref".to_string(), vec![t.clone()]), span)
+                        } else {
+                            self.resolve_type(t, span)
+                        };
                         if !self.assignable(&expected, &val_ty) {
+                            // Transparency: a `ref T` binding's mismatch renders `ref T`, not `Ref[T]`.
+                            let exp = if is_ref { ref_display(&expected) } else { expected.to_string() };
                             self.error(
                                 value.span,
-                                format!("cannot assign {val_ty} to variable of type {expected}"),
+                                format!("cannot assign {val_ty} to variable of type {exp}"),
                             );
                         }
                         expected
@@ -1353,6 +1415,9 @@ impl Checker {
                     None => val_ty,
                 };
                 self.declare(name, declared);
+                if is_ref {
+                    self.declare_ref(name);
+                }
             }
             StmtKind::Assign { target, op, value } => {
                 let val_ty = self.infer_value(value);
@@ -3155,8 +3220,9 @@ impl Checker {
                 self.error(
                     span,
                     format!(
-                        "cannot use non-sendable captured binding '{name}' of type {ty} inside a \
-                         spawned task (captures cross the airlock — communicate via a Channel or Shared)"
+                        "cannot use non-sendable captured binding '{name}' of type {disp} inside a \
+                         spawned task (captures cross the airlock — communicate via a Channel or Shared)",
+                        disp = if self.is_ref_decl(name) { ref_display(&ty) } else { ty.to_string() }
                     ),
                 );
             }
@@ -3796,8 +3862,22 @@ impl Checker {
         let param_tys: Vec<Ty> = params
             .iter()
             .map(|p| {
-                let ty = p.ty.as_ref().map(|t| self.resolve_type(t, body.span)).unwrap_or(Ty::Unknown);
+                // A closure `ref T` param is a `Ref[T]` box, exactly like a named-fn `ref` param
+                // (charge 3): the body's reads/writes were lowered to `.get()`/`.set()` by desugar,
+                // and a `ref` arg aliases at the call site. `check_ref_ty` rejects a non-boxable
+                // pointee. Without a `ref`, the param keeps its by-value type (or `Unknown`).
+                let ty = match &p.ty {
+                    Some(t) if p.is_ref => {
+                        self.check_ref_ty(t, body.span);
+                        self.resolve_type(&Type::Generic("Ref".to_string(), vec![t.clone()]), body.span)
+                    }
+                    Some(t) => self.resolve_type(t, body.span),
+                    None => Ty::Unknown,
+                };
                 self.declare(&p.name, ty.clone());
+                if p.is_ref {
+                    self.declare_ref(&p.name);
+                }
                 ty
             })
             .collect();
@@ -4838,9 +4918,17 @@ impl Checker {
             if let Some(pt) = params.get(i)
                 && !self.assignable(pt, &at)
             {
+                // Transparency: render `ref T` (not the lowered `Ref[T]`) ONLY when the argument is
+                // a `ref` binding — an explicit first-class `Ref[T]` arg keeps its `Ref[T]` spelling.
+                let is_ref_arg = matches!(&arg.kind, ExprKind::Ident(n) if self.is_ref_decl(n));
+                let (expected, actual) = if is_ref_arg {
+                    (ref_display(pt), ref_display(&at))
+                } else {
+                    (pt.to_string(), at.to_string())
+                };
                 self.error(
                     arg.span,
-                    format!("argument {} of '{name}': expected {pt}, found {at}", i + 1),
+                    format!("argument {} of '{name}': expected {expected}, found {actual}", i + 1),
                 );
             }
         }
@@ -4969,6 +5057,13 @@ impl Checker {
                     .params
                     .iter()
                     .map(|p| match &p.ty {
+                        // A `ref T` protocol-method param is a `Ref[T]` box, exactly like a `ref`
+                        // param on a concrete fn/method (charge 4) — so a conforming struct's `ref`
+                        // method matches it, and a `ref` arg through the existential aliases.
+                        Some(t) if p.is_ref => {
+                            self.check_ref_ty(t, span);
+                            self.resolve_type(&Type::Generic("Ref".to_string(), vec![t.clone()]), span)
+                        }
                         Some(t) => self.resolve_type(t, span),
                         None if p.name == "self" => Ty::Unknown,
                         None => {
