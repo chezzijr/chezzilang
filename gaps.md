@@ -174,7 +174,12 @@ map/list-index specialization, **positional closure captures (memory lever #3)**
 >   `Obj::ByteArray(Vec<u8>)` VM / `Value::Bytes(Rc<[u8]>)` + `Value::ByteArray(Rc<RefCell<Vec<u8>>>)`
 >   interp / `WireValue::Bytes` + `WireValue::ByteArray`, both GC leaves; `bytes` immutable + hashable,
 >   `bytearray` in-place-mutable via the heap slot + NOT hashable + deep-copied across the airlock;
->   codegen enumerates value types for typed fast paths, so this was the pre-JIT must-do — done) — a
+>   **plus the `Iterable[T]` cursor — LANDED**: `Obj::Iter { items: Vec<Value>, pos }` VM /
+>   `Value::Iter(Rc<RefCell<IterCursor>>)` interp / `WireValue::Iter` + `SnapValue::Iter`, the first GC
+>   **NON-LEAF** addition (`children()` traces `items` so the snapshot's elements stay alive — contrast
+>   the bytes/bytearray leaves), sendable by deep-copy like a `list`; all within the 88B `Obj` cap
+>   (Module still dominates), so the SSO/Obj-size calculus (#5 below) is unchanged. Codegen enumerates
+>   value types for typed fast paths, so these were the pre-JIT must-do — done) — a
 >   new scalar added later touches every one. *(inferred.)* (4) **NaN-box** — highest
 >   coupling but ⛔ blocked by full i64; pin only as "if the i64 model is ever revisited, it MUST be
 >   pre-JIT."
