@@ -1274,10 +1274,11 @@ fn inferred_return_from_expression() {
 
 #[test]
 fn void_preserved_when_no_value_return() {
-    // No value-return → infers `nil`; using the result as a number is rejected.
+    // No value-return → infers `nil`; binding the void result to a value (`x := log(...)`) is now
+    // rejected up-front (Part 2: nil in value position), before it can flow into an arithmetic op.
     rejects(
         "fn log(m: str):\n    print(m)\nx := log(\"h\")\ny := x + 1\n",
-        "cannot apply + to nil and int",
+        "no value (nil)",
     );
 }
 
@@ -1790,8 +1791,9 @@ fn list_sort_float_ok() {
 
 #[test]
 fn list_sort_returns_nil_rejected_as_value() {
-    // sort() mutates in place and yields nil — using its result as a number is rejected.
-    rejects("xs := [3, 1, 2]\nn := xs.sort() + 1\n", "cannot apply + to nil and int");
+    // sort() mutates in place and yields nil — using its result as a value (a binary operand) is
+    // now rejected up-front (Part 2: nil in value position).
+    rejects("xs := [3, 1, 2]\nn := xs.sort() + 1\n", "no value (nil)");
 }
 
 #[test]
@@ -5152,9 +5154,10 @@ fn iterator_bound_forwards_into_iterable_bound() {
 
 #[test]
 fn non_void_fn_must_return() {
-    // (a) inline-body declared non-void fn whose `10` is a discarded expr-statement -> must reject.
+    // (a) inline-body declared non-void fn whose only statement is a NON-expr (assignment) ->
+    // does not implicitly return -> must reject (it falls off the end).
     rejects(
-        "fn a() -> int: 10\nfn main():\n    print(a())\nmain()\n",
+        "fn a() -> int:\n    x := 1\nfn main():\n    print(a())\nmain()\n",
         "fall off the end",
     );
     // (b) multiline declared non-void fn whose only statement is a `print` -> must reject.
@@ -5202,4 +5205,94 @@ fn non_void_fn_unannotated_conditional_return_not_rejected() {
     ok("fn a(x: bool):\n    if x:\n        return helper()\nfn helper() -> int:\n    return 5\nfn main():\n    a(true)\nmain()\n");
     // (b) `find`-style early-return-in-loop, no annotation.
     ok("fn find(xs: list[int], t: int):\n    for x in xs:\n        if x == t:\n            return x\nfn main():\n    find([1, 2, 3], 2)\nmain()\n");
+}
+
+// ===== inline-expr fn body implicitly returns its expression (Option A, inline-only) =====
+
+#[test]
+fn inline_expr_body_returns_value() {
+    // `fn a(): 10` — inline bare-expr body implicitly returns; inferred `-> int`. Binding the
+    // result to a typed `int` slot proves the inferred return is int (would be nil before).
+    ok("fn a(): 10\nfn main():\n    x: int = a()\n    print(x)\nmain()\n");
+    // an inline-expr body used in a value position (the whole point of Option A inline).
+    ok("fn dbl(x: int): x * 2\nfn main():\n    print([1, 2, 3].map(dbl))\nmain()\n");
+}
+
+#[test]
+fn inline_annotated_ret_ok() {
+    // `fn a() -> int: 10` is now VALID — the inline expr is the implicit return; Option B must NOT
+    // fire on it (the expr terminates the body).
+    ok("fn a() -> int: 10\nfn main():\n    print(a())\nmain()\n");
+}
+
+#[test]
+fn multiline_nonvoid_still_required() {
+    // A 1-statement MULTILINE body does NOT implicitly return — Option B still requires an explicit
+    // `return` for a declared non-void fn.
+    rejects(
+        "fn a() -> int:\n    10\nfn main():\n    print(a())\nmain()\n",
+        "fall off the end",
+    );
+}
+
+#[test]
+fn inline_non_expr_body_stays_nil() {
+    // An inline NON-expression statement (assignment) does NOT implicitly return; it stays void.
+    // Using the void result as a value is then rejected (Part 2).
+    rejects(
+        "fn a():\n    x := 5\nfn main():\n    y := a()\nmain()\n",
+        "no value (nil)",
+    );
+}
+
+// ===== nil used as a value is rejected (Part 2) =====
+
+#[test]
+fn nil_in_value_position_rejected() {
+    // assignment RHS
+    rejects(
+        "fn main():\n    x := print(\"hi\")\nmain()\n",
+        "no value (nil)",
+    );
+    // function/call argument
+    rejects(
+        "fn main():\n    print(print(\"hi\"))\nmain()\n",
+        "no value (nil)",
+    );
+    // collection-literal element
+    rejects(
+        "fn main():\n    xs := [print(\"hi\")]\nmain()\n",
+        "no value (nil)",
+    );
+    // binary operand
+    rejects(
+        "fn main():\n    x := 1 + print(\"hi\")\nmain()\n",
+        "no value (nil)",
+    );
+}
+
+#[test]
+fn bare_void_call_statement_ok() {
+    // A void call AS A STATEMENT is legal — statement position, not value position.
+    ok("fn main():\n    print(\"hi\")\nmain()\n");
+}
+
+#[test]
+fn void_fn_then_used_as_value() {
+    // `fn a(): print("x")` infers `-> nil` (a void fn) — the declaration itself is fine.
+    ok("fn a(): print(\"x\")\nfn main():\n    a()\nmain()\n");
+    // but using its void result as a value is rejected.
+    rejects(
+        "fn a(): print(\"x\")\nfn main():\n    y := a()\nmain()\n",
+        "no value (nil)",
+    );
+}
+
+#[test]
+fn user_fn_arg_nil_rejected() {
+    // a void result passed as a USER function's argument (not a builtin).
+    rejects(
+        "fn takes(n: int):\n    print(\"{n}\")\nfn main():\n    takes(print(\"hi\"))\nmain()\n",
+        "no value (nil)",
+    );
 }

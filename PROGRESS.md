@@ -74,6 +74,40 @@ inline non-void fns rewritten to multiline `return <expr>` (two-engine golden by
 full `cargo test` (2040) + `cargo test conformance` green, `cargo clippy --all-targets -- -D warnings`
 clean.
 
+**✅ Checker/semantics — inline-expr fn body implicitly returns + `nil` rejected in value position
+(amends Option B).** Two coordinated changes, both two-engine (VM == interp) parity:
+- **PART 1 — inline-expr body implicit return (Option A, inline-only).** A named fn written in the
+  **inline** form (`fn a(): <expr>` on one line) whose single statement is a **bare expression** now
+  **implicitly returns** that expression — exactly like a closure `fn(x): expr`. `fn a(): 10` returns
+  `10` (inferred `-> int`); `fn dbl(x): x*2` works as a value / `.map` arg; `fn a() -> int: 10` is now
+  **valid** (Option B's fall-off check is exempted for inline-expr bodies). A **multiline** 1-stmt body
+  still does **not** implicitly return, and a declared-non-void multiline body still needs an explicit
+  `return`. An inline **non-expression** statement (`fn a(): x = 5`) stays as-is (nil). The parser
+  distinguishes the inline-expr body from a 1-stmt indented block (which `Block = Vec<Stmt>` otherwise
+  erases) via a new `FnDecl.inline_expr_body` flag (`peek_at(1) != Newline` after the body colon +
+  single `StmtKind::Expr`). The compiler (`compile_fn`) and interp (`call`) mirror `compile_closure`/
+  `call_closure`: compile/eval the expr and Return its value. Return-type inference (`infer_fn_ret`) uses
+  the inline expr's type as the inferred return.
+- **PART 2 — `nil` used as a value is a type error.** A `Ty::Nil` (void) expression in **value
+  position** — assignment RHS, a call/collection/tuple argument, a binary/unary operand, an index/range
+  bound — now errors *"expression returns no value (nil) and cannot be used as a value"*, instead of
+  silently propagating (`x := print(...)`, `print(log(...))`, `[log(...)]`, `1 + sort()`). A bare void
+  call **as a statement** (`print("hi")` on its own line) stays legal, and returning `nil` from a fn
+  (making it void) is **not** "using nil". Implemented as one `Checker::infer_value` helper routed
+  through every value-position site (Let/Assign RHS, list/set/map/tuple/comprehension elements,
+  `infer_binary`/`infer_unary`, `infer_index`/`infer_slice`, `expect_int`/`expect_bool`,
+  `check_args_range`/`infer_all`/`one_arg`, and the builtin/constructor arg paths) — statement-position
+  `infer` (`StmtKind::Expr`) and return-position `infer` (the inline-expr body, closure body) are left
+  unchanged by design.
+- Composition: `fn a(): print("x")` infers `-> nil` (a void fn, OK), but `y := a()` is then rejected.
+  No grammar change (both reuse existing productions) → `cargo test conformance` stays green.
+  `examples/inline_fn.chz` + `.expected` goldened (VM == interp). Docs: `docs/syntax.md §5`,
+  `docs/grammar.bnf` (`<fnDecl>` comment), `gaps.md` (void-discard footgun → RESOLVED, cross-ref the
+  bare-fn entry). NOTE: string-interpolation operands are NOT nil-checked — the checker treats `Str` as
+  opaque (interpolation contents unparsed), so that one listed site is out of scope here. All cargo
+  wrapped at MemoryMax=6G; full `cargo test` (2104) + `cargo test conformance` green,
+  `cargo clippy --all-targets -- -D warnings` clean.
+
 **✅ Built-in conversions — str ↔ bytes (UTF-8) methods + `list()`/`set()`/`map()` constructors
 (owner-requested; the natural follow-on to the just-landed `bytes`/`bytearray` types).** Two
 conversion surfaces, mirroring the `bytes`/`bytearray` builtin-wiring exactly (3-engine parity), with

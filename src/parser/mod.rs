@@ -491,8 +491,17 @@ impl Parser {
         } else {
             None
         };
+        // The body opens with a `:`; an INLINE body (`: <stmt>` on the same line) has a non-`Newline`
+        // token immediately after that colon (an indented block is `Colon Newline Indent …`). `peek`
+        // is the body `Colon` here, so `peek_at(1)` is the token right after it.
+        let inline = self.peek() == &Token::Colon && self.peek_at(1) != &Token::Newline;
         let body = self.parse_block()?;
         let is_generator = body_contains_yield(&body);
+        // An inline body whose single statement is a bare expression implicitly returns that
+        // expression (mirroring a closure `fn(x): expr`). Inline non-expr statements (`: x = 5`,
+        // `: return e`) stay as-is; a generator never implicitly returns its expr.
+        let inline_expr_body =
+            inline && !is_generator && matches!(body.as_slice(), [s] if matches!(s.kind, StmtKind::Expr(_)));
         Ok(FnDecl {
             name,
             type_params,
@@ -501,6 +510,7 @@ impl Parser {
             body,
             is_generator,
             is_test: false,
+            inline_expr_body,
         })
     }
 
@@ -3219,6 +3229,30 @@ mod tests {
     // ===== regression tests for the review-panel findings =====
 
     /// An inline `if` body must still allow an `else` on the next line (was misparsed).
+    #[test]
+    fn inline_expr_body_flag_set() {
+        // `fn a(): 10` — inline bare-expr body -> inline_expr_body marker set (implicit return).
+        let StmtKind::Fn(f) = only("fn a(): 10\n") else { panic!() };
+        assert!(f.inline_expr_body, "inline bare-expr body should set the marker");
+        // annotated inline-expr body too.
+        let StmtKind::Fn(f) = only("fn a() -> int: 10\n") else { panic!() };
+        assert!(f.inline_expr_body);
+    }
+
+    #[test]
+    fn inline_non_expr_and_multiline_bodies_not_marked() {
+        // inline NON-expr stmt (assignment) -> not an implicit return.
+        let StmtKind::Fn(f) = only("fn a(): x = 5\n") else { panic!() };
+        assert!(!f.inline_expr_body, "inline assignment must not set the marker");
+        // inline explicit `return` -> not the implicit-return form.
+        let StmtKind::Fn(f) = only("fn a(): return 10\n") else { panic!() };
+        assert!(!f.inline_expr_body);
+        // a 1-statement MULTILINE expr body -> NOT inline (the Block shape is identical, the marker
+        // is what disambiguates).
+        let StmtKind::Fn(f) = only("fn a():\n    10\n") else { panic!() };
+        assert!(!f.inline_expr_body, "a multiline 1-stmt body must not set the marker");
+    }
+
     #[test]
     fn inline_if_then_else() {
         let StmtKind::Fn(f) = only("fn m():\n    if x: y = 1\n    else: z = 2\n") else {

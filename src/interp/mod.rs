@@ -3102,12 +3102,22 @@ impl Interp {
         // `finish_frame`); nested blocks open their own defer scopes via `exec_block`.
         // M-C: if the body has a bare `spawn` (not inside an explicit `parallel:`), it is an implicit
         // nursery — push a task list now and JOIN it at the body's `return`/`?`/end (before defers).
-        let implicit = crate::compiler::block_has_bare_spawn(&decl.body);
-        if implicit {
-            self.nurseries.push(Vec::new());
-        }
-        let result = self.exec_block_inner(&decl.body);
-        let result = if implicit { self.leave_implicit_nursery(result) } else { result };
+        // An inline-expr body (`fn a(): <expr>`) implicitly returns its single expression — exactly
+        // like a closure `fn(x): expr` (see `call_closure`): evaluate the expr and treat its value as
+        // the return. An inline body cannot hold a bare `spawn` (spawn is a statement), so the
+        // implicit-nursery dance never applies. Mirrors the VM's `compile_fn` inline-expr branch.
+        let result = if decl.inline_expr_body
+            && let [Stmt { kind: StmtKind::Expr(e), .. }] = decl.body.as_slice()
+        {
+            self.eval(e).map(Flow::Return)
+        } else {
+            let implicit = crate::compiler::block_has_bare_spawn(&decl.body);
+            if implicit {
+                self.nurseries.push(Vec::new());
+            }
+            let result = self.exec_block_inner(&decl.body);
+            if implicit { self.leave_implicit_nursery(result) } else { result }
+        };
         // Teardown (defer drain + scope restore + `?`/defer-fault selection) is a separate,
         // non-inlined frame so its locals don't enlarge `call`'s frame on the deep-recursion path.
         let outcome = match self.finish_frame(saved, saved_globals) {
@@ -5252,6 +5262,17 @@ mod tests {
 
     fn run(src: &str) -> String {
         run_capture(src).expect("run should succeed")
+    }
+
+    #[test]
+    fn interp_inline_expr_body_implicitly_returns() {
+        // `fn a(): 10` returns 10 (not nil) on the interpreter — mirrors the VM's compile_fn branch.
+        assert_eq!(run("fn ten(): 10\nprint(ten())\n"), "10\n");
+        // an inline-expr body used as a `.map` argument.
+        assert_eq!(
+            run("fn dbl(x: int): x * 2\nprint([1, 2, 3].map(dbl))\n"),
+            "[2, 4, 6]\n"
+        );
     }
 
     // ---- assert (Phase A) — interp half + cross-engine parity ----
