@@ -50,6 +50,13 @@ pub enum WireValue {
     /// side — never a shared mutable view (a shared mutable buffer across OS threads is a data race).
     /// Holds no `GcRef`, so it is cross-safe (`has_handle` leaves it `false`).
     ByteArray(Box<[u8]>),
+    /// An `Iterable.iter()` cursor carried across the airlock **by value** as a DEEP COPY, like
+    /// [`List`](WireValue::List): `from_wire` rebuilds a FRESH independent cursor (its own snapshot
+    /// `items` + `pos`) on the other side. A cursor is just a snapshot `Vec` + index — plain data,
+    /// unlike a generator (which holds parked frames into this heap and stays non-sendable). Its
+    /// items are recursively wired, so a cursor over a non-sendable element (e.g. a `Channel`) faults
+    /// recoverably exactly as a `list` of that element would.
+    Iter { items: Vec<WireValue>, pos: usize },
     Struct {
         name: Box<str>,
         fields: Vec<(Box<str>, WireValue)>,
@@ -115,6 +122,9 @@ impl WireValue {
             WireValue::Map(es) => es.iter().any(|(_, k, v)| k.has_handle() || v.has_handle()),
             WireValue::Set(es) => es.iter().any(|(_, e)| e.has_handle()),
             WireValue::Struct { fields, .. } => fields.iter().any(|(_, v)| v.has_handle()),
+            // A cursor's snapshot items could themselves embed a `Handle` (e.g. a cursor over a list
+            // of closures) — recurse so the snapshot fast-path stays honest.
+            WireValue::Iter { items, .. } => items.iter().any(WireValue::has_handle),
             // B3.6: a closure crosses by value, but a *captured* value could itself embed a `Handle`
             // (e.g. a captured closure crossing as a nested `Closure` whose own captures aren't
             // cross-safe) — recurse so the invariant stays honest.

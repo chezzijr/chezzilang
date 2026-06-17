@@ -118,8 +118,8 @@ plain `list` now composes into the same Take/Mapped adapter pipeline as a hand-w
 `next` structs flow into `[S: Iterable[T]]` bounds); a struct with only `iter(self) -> Iterator[E]`
 (no `next`) is for-iterable via a one-time `.iter()`. NON-GOAL (unfixable without move/ownership):
 multi-pass/single-pass TYPE SAFETY — `count_twice([list]) == 6` (two independent `.iter()` cursors) but
-`count_twice(generator) == 3` (a generator is consumed once); the cursor is also NON-SENDABLE,
-runtime-gated like a generator. Remaining: no `byte`/`u8` scalar, no
+`count_twice(generator) == 3` (a generator is consumed once). The cursor itself IS sendable — it
+crosses the `spawn`/channel airlock as a deep copy, like a `list`. Remaining: no `byte`/`u8` scalar, no
 non-UTF-8 codecs (latin1/utf16) and no base64/hex/sha (separate `std.*` gap), no `tuple()`/`bool()`
 constructors. `bignum` and `yield`/generators are non-goals.
 

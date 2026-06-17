@@ -928,6 +928,10 @@ enum SnapValue {
     Cffi(Arc<crate::native::cffi::Cffi>),
     List(Vec<SnapValue>),
     Tuple(Vec<SnapValue>),
+    /// An `Iterable.iter()` cursor snapshot — its items (each a `SnapValue`) plus the cursor `pos`.
+    /// Rebuilt as a fresh independent cursor on replay. Reached only for a handle-bearing cursor (a
+    /// cursor over closures/modules); a pure-data cursor takes the `to_wire` fast path above.
+    Iter { items: Vec<SnapValue>, pos: usize },
     /// M19 lever #2 — the dense `variant_id` is carried directly (the same shared `Arc<Program>` makes
     /// it meaningful on replay; carrying the id, not the name, preserves identity under name shadowing).
     Enum { variant_id: u32, payload: Vec<SnapValue> },
@@ -7964,12 +7968,21 @@ impl Vm {
                 Obj::Generator(_) => {
                     return Err(self.err("a generator cannot be sent across tasks".to_string(), Span { line: 0, col: 0 }));
                 }
-                // A cursor is NON-SENDABLE — it reuses `Iterator[T]`'s type (indistinguishable from a
-                // generator result, which the checker treats as sendable), so we gate it at RUNTIME
-                // exactly like a generator (parity), rather than weakening `sendable_rec` (which would
-                // regress the frozen generator typing).
-                Obj::Iter { .. } => {
-                    return Err(self.err("a cursor cannot be sent across tasks".to_string(), Span { line: 0, col: 0 }));
+                // A cursor crosses by value as a DEEP COPY (like `List`): wire each snapshot item and
+                // carry `pos`. It is plain data (a `Vec` + index), so — unlike a generator — it is
+                // genuinely sendable, and `from_wire` rebuilds an independent cursor on the other side.
+                // This matches the interpreter, whose `deep_clone` already deep-copies a cursor across
+                // the airlock; gating it here (the old behavior) diverged VM from interp. Recursing
+                // through items means a cursor over a non-sendable element faults recoverably, like a
+                // `list` of that element would.
+                Obj::Iter { items, pos } => {
+                    let pos = *pos;
+                    let items = items.clone();
+                    let mut out = Vec::with_capacity(items.len());
+                    for x in items {
+                        out.push(self.to_wire(x)?);
+                    }
+                    WireValue::Iter { items: out, pos }
                 }
             },
         })
@@ -8016,6 +8029,10 @@ impl Vm {
             WireValue::Tuple(items) => {
                 let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::Tuple(cloned)))
+            }
+            WireValue::Iter { items, pos } => {
+                let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire(x)).collect();
+                Value::Obj(self.heap.alloc(Obj::Iter { items: cloned, pos }))
             }
             WireValue::Map(entries) => {
                 let mut out = MapData::default();
@@ -8454,8 +8471,11 @@ impl Vm {
             // Experimental generators are not sendable and are never legal as a module global crossing
             // to an M:N worker — reaching here means one was smuggled past the checker.
             Obj::Generator(_) => unreachable!("a generator cannot be snapshotted (not sendable)"),
-            // A cursor is non-sendable (gated in `to_wire`), so it never reaches the snapshot path.
-            Obj::Iter { .. } => unreachable!("a cursor cannot be snapshotted (not sendable)"),
+            // A cursor snapshots like a `List`: its items (recursively snapped) + `pos`. Only a
+            // handle-bearing cursor reaches here; a pure-data cursor took the `to_wire` fast path.
+            Obj::Iter { items, pos } => {
+                SnapValue::Iter { items: items.iter().map(|x| self.to_snap(*x)).collect(), pos }
+            }
         }
     }
 
@@ -8536,6 +8556,10 @@ impl Vm {
             SnapValue::List(xs) => {
                 let v = xs.iter().map(|x| self.replay_snap(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::List(v)))
+            }
+            SnapValue::Iter { items, pos } => {
+                let v = items.iter().map(|x| self.replay_snap(x)).collect();
+                Value::Obj(self.heap.alloc(Obj::Iter { items: v, pos: *pos }))
             }
             SnapValue::Tuple(xs) => {
                 let v = xs.iter().map(|x| self.replay_snap(x)).collect();
@@ -11159,6 +11183,8 @@ impl Vm {
             }
             // B3.6: a wired closure renders like its heap counterpart (`Obj::Closure` → "<closure>").
             WireValue::Closure { .. } => "<closure>".to_string(),
+            // A wired cursor renders like its heap counterpart (`Obj::Iter` → "<iterator>").
+            WireValue::Iter { .. } => "<iterator>".to_string(),
         }
     }
 
@@ -12887,17 +12913,33 @@ mod tests {
     }
 
     #[test]
-    fn cursor_to_wire_is_non_sendable_err() {
-        // A cursor (`Obj::Iter`) is NON-SENDABLE: `to_wire` returns the cursor-specific `Err` (mirrors
-        // the generator arm — runtime-gated parity, no `sendable_rec` change). The real OS-thread
-        // engine surfaces this `Err` recoverably; the cooperative engine `.expect`s it (like a generator).
+    fn cursor_crosses_airlock_by_deep_copy() {
+        // A cursor (`Obj::Iter`) IS sendable: `to_wire` deep-copies it (recursively wiring items +
+        // carrying `pos`) into a `WireValue::Iter`, and `from_wire` rebuilds an INDEPENDENT cursor —
+        // exactly how a `List` crosses, and matching the interpreter's `deep_clone`. (Earlier this was
+        // gated non-sendable like a generator, which panicked `deep_clone`'s `.expect` and diverged VM
+        // from interp; a cursor is plain data — a snapshot Vec + index — so it crosses by value.)
         let mut vm = Vm::new(Arc::new(empty_program()));
-        let cursor = Value::Obj(vm.heap.alloc(Obj::Iter { items: vec![Value::Int(1)], pos: 0 }));
-        let err = vm.to_wire(cursor).expect_err("a cursor is not sendable");
-        assert!(
-            err.to_string().contains("a cursor cannot be sent across tasks"),
-            "expected the cursor non-sendable message, got: {err}"
-        );
+        let cursor = Value::Obj(vm.heap.alloc(Obj::Iter { items: vec![Value::Int(7), Value::Int(8)], pos: 1 }));
+        let wire = vm.to_wire(cursor).expect("a cursor is sendable by deep copy");
+        assert!(!wire.has_handle(), "a cursor of scalars carries no handle");
+        match &wire {
+            WireValue::Iter { items, pos } => {
+                assert_eq!(*pos, 1, "pos carried across the wire");
+                assert_eq!(items.len(), 2, "both snapshot items wired");
+            }
+            other => panic!("expected WireValue::Iter, got {other:?}"),
+        }
+        // Rebuild on the heap: an independent cursor with the same items + pos.
+        let rebuilt = vm.from_wire(wire);
+        let Value::Obj(h) = rebuilt else { panic!("from_wire(cursor) must be a heap obj") };
+        match vm.heap.get(h) {
+            Obj::Iter { items, pos } => {
+                assert_eq!(*pos, 1);
+                assert_eq!(items, &vec![Value::Int(7), Value::Int(8)]);
+            }
+            _ => panic!("expected a rebuilt Obj::Iter"),
+        }
     }
 
     #[test]
@@ -23145,14 +23187,14 @@ main()";
     }
 
     #[test]
-    fn cursor_not_sendable_at_runtime() {
-        // A cursor is type-indistinguishable from a generator result (both `Iterator[T]`), which the
-        // checker treats as statically sendable, so smuggling one across the spawn airlock is gated at
-        // RUNTIME — EXACTLY like a generator. The cooperative airlock's `to_wire` returns the cursor
-        // fault (`.expect`-surfaced on this engine, identical to the generator path), so the program
-        // does not silently share a mutable cursor across tasks. Asserts the cursor's behaviour
-        // matches the generator's (the parity discipline), surfacing the cursor-specific message.
-        let cursor_src = concat!(
+    fn cursor_crosses_spawn_airlock_three_engine_parity() {
+        // A cursor IS sendable: it crosses the spawn/channel airlock as a DEEP COPY (independent
+        // snapshot + pos on the receiver), like a `list`. The receiver drives it and gets `Some(1)`.
+        // This must hold byte-identically on ALL THREE engines — the cooperative VM, the M:N
+        // `--parallel` engine, and the interpreter (whose `deep_clone` already deep-copies a cursor).
+        // (Regression guard: an earlier cut gated the cursor non-sendable like a generator, which
+        // panicked the spawned worker on the VM while the interp succeeded — a parity divergence.)
+        let src = concat!(
             "fn main():\n",
             "    ch := Channel[Iterator[int]]()\n",
             "    parallel:\n",
@@ -23160,16 +23202,8 @@ main()";
             "    print(ch.recv().next())\n",
             "main()\n"
         );
-        // The runtime cursor gate fires inside the spawned VM thread (`to_wire` returns the cursor
-        // fault, surfaced via the cooperative airlock's `.expect`, exactly like a generator). The
-        // worker thread's panic propagates out as a join failure — the airlock REJECTS the cursor
-        // rather than silently sharing a mutable cursor across tasks. (We hush the default panic hook
-        // so the expected inner-thread message doesn't spam the test log.)
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let res = std::panic::catch_unwind(|| run_capture_parallel(cursor_src));
-        std::panic::set_hook(prev);
-        assert!(res.is_err(), "a cursor must NOT cross the spawn airlock (parity with generators)");
+        assert_parity_out(src, "Some(1)\n");
+        assert_eq!(run_capture_parallel(src).expect("--parallel"), "Some(1)\n", "cursor crosses the M:N airlock");
     }
 
     #[test]

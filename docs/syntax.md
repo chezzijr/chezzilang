@@ -361,8 +361,8 @@ total([1, 2, 3])           # 6   (a list)  — also accepts a generator or a `ne
 list([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so list()/set() drain it)
 # A cursor SNAPSHOTS the collection at `.iter()` (later mutation doesn't change the sequence). NOTE
 # (no compile-time multi-pass safety, unfixable without ownership): each `.iter()` is a fresh cursor,
-# but reusing one exhausted cursor yields nothing on a second pass. A cursor is NOT sendable across
-# `spawn` (runtime-gated, like a generator). `Iterable` / `Iterator` are reserved type names.
+# but reusing one exhausted cursor yields nothing on a second pass. A cursor IS sendable across
+# `spawn` — it crosses the airlock as a deep copy, like a `list`. `Iterable` / `Iterator` are reserved type names.
 
 # `yield` / generators (VM-only — the frozen interpreter rejects `yield`, so parity is waived). A fn that declares
 # `-> Iterator[T]` and uses `yield` is a generator: calling it returns a suspendable iterator, not a

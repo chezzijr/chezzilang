@@ -35,15 +35,19 @@ you can't call `.next()` on a `list`. Wired (mirroring the `bytes`/`bytearray` O
   the `next()` fast path — back-compat precedence); VM `Op::IterableToCursor` (one-time, before the
   per-iteration loop — structs-with-`next`/generators pass through byte-identical); interp `exec_for` /
   `drain_value_to_rows` sibling branch. The hot collection / `next`-struct paths are untouched.
-- **Sendability** — a cursor reuses `Iterator[T]`'s type (which the checker treats as sendable for
-  generators), so `sendable_rec` is UNCHANGED (touching it would regress frozen generator typing).
-  Instead the cursor is gated at RUNTIME exactly like a generator: `to_wire` returns "a cursor cannot be
-  sent across tasks", `to_snap` is `unreachable!`.
+- **Sendability** — a cursor IS sendable: it crosses the `spawn`/channel airlock as a DEEP COPY, like a
+  `list`. `to_wire`/`from_wire` carry a `WireValue::Iter { items, pos }` (items recursively wired, `pos`
+  carried) and `to_snap`/`replay_snap` a `SnapValue::Iter`; the interp's `deep_clone` already deep-copies
+  the cursor identically, so all three engines agree. A cursor over a non-sendable element (e.g. a
+  generator) faults recoverably via the recursion, exactly as a `list` of that element would. (`sendable_rec`
+  is UNCHANGED — a cursor reuses `Iterator[T]`'s type, already sendable; no static change was needed. An
+  earlier cut gated the cursor non-sendable like a generator, which panicked the spawned VM worker while
+  the interp succeeded — a parity divergence, now fixed.)
 - **NON-GOALS (documented, not built):** multi-pass/single-pass TYPE SAFETY (unfixable without
   move/ownership — `count_twice([list]) == 6` via two independent cursors vs `count_twice(generator) ==
   3` consumed once; each `.iter()` is fresh, but reusing an exhausted cursor yields nothing); auto-
   `.iter()` inside adapters (v1 requires explicit `xs.iter()`); routing builtin for-loops through
-  `.iter()` (the fast path stays); cursor `.reset()`/`.peek()`/`.rev()`/`size_hint`; sendable cursors.
+  `.iter()` (the fast path stays); cursor `.reset()`/`.peek()`/`.rev()`/`size_hint`.
 - **grammar.bnf intentionally UNCHANGED** — `.iter()` is the existing method-call production, no new
   syntax (`cargo test conformance` green).
 - **Tests/golden:** checker `iter_method_on_collections_types_as_iterator` /
@@ -51,7 +55,7 @@ you can't call `.next()` on a `list`. Wired (mirroring the `bytes`/`bytearray` O
   `iterable_struct_with_only_iter` / `iter_cursor_drives_existing_adapters`; VM/interp parity
   `iter_next_idempotent_both_engines` / `iter_snapshot_order_matches_for` / `cursor_composes_into_adapter`
   / `for_over_pure_iterable_struct` / `list_of_cursor_roundtrip_both_engines` /
-  `cursor_not_sendable_at_runtime` / `cursor_to_wire_is_non_sendable_err` / `generator_iter_returns_self_vm`;
+  `cursor_crosses_spawn_airlock_three_engine_parity` / `cursor_crosses_airlock_by_deep_copy` / `generator_iter_returns_self_vm`;
   GC `obj_iter_traces_items_as_gc_children`; `examples/iterable.chz` + `.expected` goldened 3-engine.
 
 **✅ Built-in conversions — str ↔ bytes (UTF-8) methods + `list()`/`set()`/`map()` constructors

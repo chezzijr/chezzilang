@@ -1,0 +1,13 @@
+struct Counter:
+    n: int
+    fn next(self) -> Option[int]:
+        if self.n >= 2:
+            return None
+        v := self.n
+        self.n = self.n + 1
+        return Some(v)
+fn main():
+    c := Counter(0)
+    it := c.iter()
+    print(it.next())
+main()

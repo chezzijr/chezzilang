@@ -127,10 +127,11 @@ fn deep_clone(v: &Value) -> Value {
         // `List`) — UNLIKE `Bytes`, which clones its `Rc`. This is what makes a `bytearray` cross the
         // `--parallel` airlock by value (no shared mutable view across tasks).
         Value::ByteArray(b) => Value::ByteArray(Rc::new(RefCell::new(b.borrow().clone()))),
-        // A cursor deep-copies into a FRESH `Rc<RefCell>` (an independent in-task copy, like `List`)
-        // — its elements are deep-cloned too. (A cursor is also runtime-gated non-sendable for
-        // generator parity, so a cross-airlock deep_clone of one never actually fires; this arm keeps
-        // an in-task `deep_clone` — e.g. inside `set()`/`map()` building — correct and total.)
+        // A cursor deep-copies into a FRESH `Rc<RefCell>` (an independent copy, like `List`) — its
+        // elements are deep-cloned too. This is also the airlock copy: a cursor IS sendable (it is a
+        // snapshot `Vec` + index, plain data), so this arm fires both for in-task `deep_clone` (e.g.
+        // inside `set()`/`map()` building) AND when a cursor crosses a `spawn`/channel boundary. The
+        // VM's `to_wire`/`from_wire` deep-copy a cursor identically, keeping VM↔interp parity.
         Value::Iter(c) => {
             let src = c.borrow();
             Value::Iter(Rc::new(RefCell::new(value::IterCursor {

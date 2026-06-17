@@ -122,7 +122,8 @@ typed as the existing `Iterator[T]` existential (no new value type), with `.next
 then idempotent None). This lets a plain `list` flow into the same Take/Mapped adapter pipeline as a
 hand-written struct iterator (`examples/iterable.chz`). A generator, a user `next`-struct, and a struct
 with only `iter(self) -> Iterator[E]` (driven by a one-time `.iter()`) all satisfy `[S: Iterable[T]]`.
-The cursor is non-sendable (runtime-gated like a generator), and there is **no** compile-time
+The cursor is **sendable** — it crosses the `spawn`/channel airlock as a deep copy (an independent
+snapshot + position on the receiver), exactly like a `list`. There is **no** compile-time
 multi-pass/single-pass safety (unfixable without move/ownership): each `.iter()` is a fresh cursor, but
 reusing an exhausted one yields nothing.
 
