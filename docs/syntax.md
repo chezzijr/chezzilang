@@ -234,27 +234,60 @@ twice := fn(x: int) -> int: x * 2
 nums.map(fn(x): x * 2)             # param/return types inferred in closures
 ```
 
-**Return type inference.** Omitting `-> T` infers the return type from the function's
-`return` statements: the first concrete return wins, conflicting returns are a type error,
-and a body with no value-returning `return` infers `nil`. Param types stay required.
-
-**Returns on every path (enforced).** A function with a **declared non-void return type**
-(`-> int`, `-> str`, …) must return a value on *every* control-flow path. The function body is a
-sequence of **statements**, not an expression, so an inline body like `fn a() -> int: 10` does **not**
-implicitly return `10` — the `10` is a discarded expression-statement and the body would silently fall
-off the end to `nil`. The checker rejects this:
+**Inline-expr body implicitly returns (Option A, inline-only).** A named function written in the
+**inline** form (`fn a(): <stmt>` — the body on the *same line* after `:`) whose single statement is a
+**bare expression** implicitly **returns that expression's value** — exactly like a closure
+`fn(x): expr`. This is the only place a function body returns implicitly:
 
 ```chezzi
-fn a() -> int: 10          # ERROR: 'a' can fall off the end without returning a value
+fn ten(): 10               # inferred '-> int'; ten() == 10
+fn dbl(x: int): x * 2      # usable as a value / .map argument: [1,2,3].map(dbl) == [2, 4, 6]
+fn answer() -> int: 42     # annotated inline-expr body is valid (the expr is the implicit return)
+```
+
+Only a *bare expression* inline body returns implicitly. An inline **non-expression** statement does
+not: `fn a(): x = 5` (an assignment) returns `nil`, and `fn a(): return 10` is an explicit return as
+written. An inline **call** returns the call's value (it is an expression-statement): `fn a(): foo()`
+returns `foo()`'s value — which is `nil` if `foo` is void (that just makes `a` a void fn). An
+annotated inline-expr body is checked against its return type exactly like `return <expr>` would be:
+`fn a() -> int: "x"` is a type error, and a **non-nil** expr against an explicit `-> nil`
+(`fn a() -> nil: 10`) is rejected with *"function returns nothing, cannot return a value"* (a nil-typed
+inline expr against `-> nil`, e.g. a bare void call, stays legal).
+
+**Multiline bodies are statement sequences (no implicit return).** A multiline body — even a
+1-statement one — does **not** implicitly return: `fn a():\n    10` evaluates `10` and falls through to
+`nil`. Multiline functions return via an explicit `return`.
+
+**Return type inference.** Omitting `-> T` infers the return type: for an inline-expr body it is the
+expression's type (`fn ten(): 10` infers `-> int`); otherwise it is inferred from the body's `return`
+statements — the first concrete return wins, conflicting returns are a type error, and a body with no
+value-returning `return` infers `nil`. Param types stay required.
+
+**Returns on every path (enforced).** A **multiline** function with a **declared non-void return
+type** (`-> int`, `-> str`, …) must return a value on *every* control-flow path. The checker rejects a
+body that can fall off the end:
+
+```chezzi
+fn a() -> int:             # ERROR: 'a' can fall off the end without returning a value
+    10                     #   (a multiline 1-stmt body does NOT implicitly return)
 fn a() -> int:
     return 10              # fix: an explicit `return`
-twice := fn() -> int: 10   # OR: a closure body IS an expression — implicitly returns 10
+fn a() -> int: 10          # OK: an inline-expr body implicitly returns its expression
 ```
 
 The check is path-aware and conservative: an `if`/`else` where every branch returns, an exhaustive
 `match` where every arm returns, a `while true:` with no `break`, and a tail call to `exit` all count
-as terminating. A bare `fn a(): 10` with **no** return annotation infers `nil` (returns nothing) and is
-unaffected — only a *declared* non-void return type is enforced.
+as terminating. An inline-expr body is exempt (it implicitly returns). A bare `fn a(): 10` with **no**
+return annotation infers `int` from the inline expr and is unaffected — the enforcement only fires on a
+multiline body whose *declared* non-void return can be reached by falling off the end.
+
+**`nil` is not a value.** `nil` is a return-only / void type: a void function's result (e.g.
+`print(...)`, `list.push(...)`, `list.sort()`) may **not** be used in value position. Binding it
+(`x := print("hi")`), passing it as an argument (`print(print("hi"))`), putting it in a collection
+(`[print("hi")]`), or using it as an operand (`1 + print("hi")`) is a type error: *"expression returns
+no value (nil) and cannot be used as a value"*. A bare void call **as a statement** (`print("hi")` on
+its own line) is the normal use and stays legal. Returning `nil` from a function (making it void) is
+*not* "using nil as a value" — that is how you write a void fn.
 
 **Default + named arguments.** A free function (or a struct constructor) may give trailing
 parameters a **default** — any expression that does **not** reference another parameter (`= 10`,
@@ -838,8 +871,10 @@ sign := if n > 0: "pos" else: "neg"
 ```
 
 All arms (and both `if` branches) must agree on a type. The statement forms — `match s:` /
-`if c:` with indented blocks and `return`/assignments inside — are unchanged; only loops and
-function bodies stay statement-only (functions still return via explicit `return`).
+`if c:` with indented blocks and `return`/assignments inside — are unchanged; loops and
+**multiline** function bodies are statement sequences (they return via explicit `return`). The one
+exception is the **inline-expr function body** (`fn a(): <expr>`, §5), whose single bare expression is
+an implicit return — exactly like a closure.
 
 ## 9. Errors — Result / Option + `?`  (M3)
 

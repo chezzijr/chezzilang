@@ -1099,16 +1099,27 @@ impl Checker {
             };
             self.declare(&param.name, ty);
         }
-        for stmt in &decl.body {
-            self.check_stmt(stmt);
-        }
+        // An inline-expr body (`fn a(): <expr>`) implicitly returns its single expression, so its
+        // type IS the inferred return (mirroring a closure body) — there is no `return` to collect.
+        let inline_ret = if decl.inline_expr_body
+            && let [Stmt { kind: StmtKind::Expr(e), .. }] = decl.body.as_slice()
+        {
+            Some(self.infer(e))
+        } else {
+            for stmt in &decl.body {
+                self.check_stmt(stmt);
+            }
+            None
+        };
         self.pop_scope();
         let found = std::mem::replace(&mut self.collected_rets, saved_rets);
         self.inferring_ret = saved_flag;
         self.current_ret = saved_ret;
         self.exit_type_params(saved_tps);
         self.errors.truncate(mark); // discard inference-time errors; pass 2 re-reports them for real
-        if let Some(t) = found.iter().find(|t| !t.is_unknown() && **t != Ty::Nil) {
+        if let Some(t) = inline_ret {
+            t
+        } else if let Some(t) = found.iter().find(|t| !t.is_unknown() && **t != Ty::Nil) {
             t.clone()
         } else if found.iter().any(|t| t.is_unknown()) {
             // A value-return we couldn't pin (forward ref / recursion): stay permissive, not `nil`.
@@ -1321,7 +1332,7 @@ impl Checker {
         let span = stmt.span;
         match &stmt.kind {
             StmtKind::Let { names, ty, value } => {
-                let val_ty = self.infer(value);
+                let val_ty = self.infer_value(value);
                 if names.len() > 1 {
                     // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
                     self.check_destructure(names, &val_ty, value.span);
@@ -1344,7 +1355,7 @@ impl Checker {
                 self.declare(name, declared);
             }
             StmtKind::Assign { target, op, value } => {
-                let val_ty = self.infer(value);
+                let val_ty = self.infer_value(value);
                 self.check_assign(target, *op, val_ty, span);
             }
             StmtKind::Fn(decl) => {
@@ -1592,7 +1603,7 @@ impl Checker {
             StmtKind::Assert { cond, msg } => {
                 self.expect_bool(cond, "assert condition");
                 if let Some(m) = msg {
-                    let t = self.infer(m);
+                    let t = self.infer_value(m);
                     if t != Ty::Str && !t.is_unknown() {
                         self.error(m.span, format!("assert message must be str, found {t}"));
                     }
@@ -2108,8 +2119,31 @@ impl Checker {
             }
             self.declare(&param.name, ty);
         }
-        for stmt in &decl.body {
-            self.check_stmt(stmt);
+        // An inline-expr body (`fn a() -> T: <expr>`) implicitly returns its single expression,
+        // exactly as a `return <expr>` would. We infer that expr ONCE here and validate it against
+        // the declared return type with the same diagnostics `check_return` uses — so we must NOT
+        // also run the statement-position `check_stmt` on it (that would infer it a second time and
+        // double every error inside the expression). Any other body is checked statement-by-
+        // statement as usual.
+        if decl.inline_expr_body
+            && let [Stmt { kind: StmtKind::Expr(e), .. }] = decl.body.as_slice()
+        {
+            let ret = sig.ret.clone();
+            let ty = self.infer(e);
+            if ret == Ty::Nil {
+                // A NON-nil expr against `-> nil` is a void fn that actually returns a value —
+                // reject it, mirroring the multiline `return <expr>` path. A nil-typed inline expr
+                // (e.g. a bare void call) implicitly returns nil and stays legal.
+                if ty != Ty::Nil && !ty.is_unknown() {
+                    self.error(e.span, "function returns nothing, cannot return a value");
+                }
+            } else if !self.assignable(&ret, &ty) {
+                self.error(e.span, format!("expected return type {ret}, found {ty}"));
+            }
+        } else {
+            for stmt in &decl.body {
+                self.check_stmt(stmt);
+            }
         }
         // Option B: a function with a *declared* non-void return type must return a value on every
         // control-flow path. The gate is the user's *annotation* (`decl.ret.is_some()`), NOT the
@@ -2120,6 +2154,7 @@ impl Checker {
         // the body can fall off the end, that silently yields nil at runtime — turn it into a loud
         // static error.
         if !decl.is_generator
+            && !decl.inline_expr_body
             && decl.ret.is_some()
             && sig.ret != Ty::Nil
             && !Self::block_terminates(&decl.body)
@@ -3016,6 +3051,24 @@ impl Checker {
 
     // ===== expression inference =====
 
+    /// Infer an expression that is used in **value position** (assignment RHS, a call/collection
+    /// argument, a binary/unary operand, an index/range bound, …). `nil` is a return-only / void
+    /// type, never a writable value: a void call's result must not silently propagate into a binding
+    /// or another expression. So if the expr is exactly `Ty::Nil`, report it and degrade to `Unknown`
+    /// (suppressing the cascade). A bare void call AS A STATEMENT keeps using plain `infer` (legal),
+    /// as does a fn/closure RETURN expr (returning nil just makes a void fn — not "using nil").
+    fn infer_value(&mut self, expr: &Expr) -> Ty {
+        let ty = self.infer(expr);
+        if ty == Ty::Nil {
+            self.error(
+                expr.span,
+                "expression returns no value (nil) and cannot be used as a value".to_string(),
+            );
+            return Ty::Unknown;
+        }
+        ty
+    }
+
     fn infer(&mut self, expr: &Expr) -> Ty {
         match &expr.kind {
             ExprKind::Int(_) => Ty::Int,
@@ -3025,7 +3078,7 @@ impl Checker {
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Ident(name) => self.infer_ident(name, expr.span),
             ExprKind::List(items) => self.infer_list(items),
-            ExprKind::Tuple(items) => Ty::Tuple(items.iter().map(|e| self.infer(e)).collect()),
+            ExprKind::Tuple(items) => Ty::Tuple(items.iter().map(|e| self.infer_value(e)).collect()),
             ExprKind::Map(entries) => self.infer_map(entries),
             ExprKind::Set(elems) => self.infer_set(elems),
             ExprKind::Comprehension { kind, key, elem, clauses } => {
@@ -3131,7 +3184,7 @@ impl Checker {
     fn infer_list(&mut self, items: &[Expr]) -> Ty {
         let mut elem = Ty::Unknown;
         for item in items {
-            let t = self.infer(item);
+            let t = self.infer_value(item);
             if elem.is_unknown() {
                 elem = t;
             } else if !t.is_unknown() && !compatible(&elem, &t) {
@@ -3146,7 +3199,7 @@ impl Checker {
     fn infer_set(&mut self, elems: &[Expr]) -> Ty {
         let mut elem = Ty::Unknown;
         for e in elems {
-            let et = self.infer(e);
+            let et = self.infer_value(e);
             if !et.is_unknown() && !self.is_hashable_key(&et) {
                 self.error(
                     e.span,
@@ -3166,8 +3219,8 @@ impl Checker {
         let mut key = Ty::Unknown;
         let mut value = Ty::Unknown;
         for (k_expr, v_expr) in entries {
-            let kt = self.infer(k_expr);
-            let vt = self.infer(v_expr);
+            let kt = self.infer_value(k_expr);
+            let vt = self.infer_value(v_expr);
             if !kt.is_unknown() && !self.is_hashable_key(&kt) {
                 self.error(
                     k_expr.span,
@@ -3229,9 +3282,9 @@ impl Checker {
             }
         }
         let result = match kind {
-            CompKind::List => Ty::list(self.infer(elem)),
+            CompKind::List => Ty::list(self.infer_value(elem)),
             CompKind::Set => {
-                let et = self.infer(elem);
+                let et = self.infer_value(elem);
                 if !et.is_unknown() && !self.is_hashable_key(&et) {
                     self.error(
                         elem.span,
@@ -3242,8 +3295,8 @@ impl Checker {
             }
             CompKind::Map => {
                 let key = key.expect("a map comprehension always carries a key expression");
-                let kt = self.infer(key);
-                let vt = self.infer(elem);
+                let kt = self.infer_value(key);
+                let vt = self.infer_value(elem);
                 if !kt.is_unknown() && !self.is_hashable_key(&kt) {
                     self.error(
                         key.span,
@@ -3258,7 +3311,7 @@ impl Checker {
     }
 
     fn infer_unary(&mut self, op: UnaryOp, inner: &Expr) -> Ty {
-        let t = self.infer(inner);
+        let t = self.infer_value(inner);
         match op {
             UnaryOp::Neg => {
                 if !t.is_numeric() && !t.is_unknown() {
@@ -3278,8 +3331,8 @@ impl Checker {
 
     fn infer_binary(&mut self, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Ty {
         use BinaryOp::*;
-        let l = self.infer(lhs);
-        let r = self.infer(rhs);
+        let l = self.infer_value(lhs);
+        let r = self.infer_value(rhs);
         let either_unknown = l.is_unknown() || r.is_unknown();
         match op {
             And | Or => {
@@ -3495,9 +3548,9 @@ impl Checker {
 
     fn infer_index(&mut self, obj: &Expr, index: &Expr) -> Ty {
         // Map keys are NOT int — infer the object first and check the index against the key type.
-        match self.infer(obj) {
+        match self.infer_value(obj) {
             Ty::Map(k, v) => {
-                let idx_ty = self.infer(index);
+                let idx_ty = self.infer_value(index);
                 if !compatible(&k, &idx_ty) {
                     self.error(index.span, format!("map key must be {k}, found {idx_ty}"));
                 }
@@ -3519,7 +3572,7 @@ impl Checker {
             // value type is the bound's `V` arg (resolved with sibling params in scope).
             Ty::Param(name) => {
                 if let Some((k, v)) = self.param_index_kv(&name, obj.span) {
-                    let idx_ty = self.infer(index);
+                    let idx_ty = self.infer_value(index);
                     if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
                         self.error(index.span, format!("index must be {k}, found {idx_ty}"));
                     }
@@ -3532,7 +3585,7 @@ impl Checker {
             other => {
                 // A user struct satisfying `Index` (has `index(self, K) -> V`) is indexable by `K`.
                 if let Some((k, v)) = self.index_kv(&other) {
-                    let idx_ty = self.infer(index);
+                    let idx_ty = self.infer_value(index);
                     if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
                         self.error(index.span, format!("index must be {k}, found {idx_ty}"));
                     }
@@ -3583,7 +3636,7 @@ impl Checker {
         for comp in [start, end, step].into_iter().flatten() {
             self.expect_int(comp, "slice bound");
         }
-        let obj_ty = self.infer(obj);
+        let obj_ty = self.infer_value(obj);
         if obj_ty.is_unknown() {
             return Ty::Unknown;
         }
@@ -3675,7 +3728,7 @@ impl Checker {
     /// error, but place no constraint on it — any module exposing `parse` works at runtime.)
     fn infer_decode(&mut self, obj: &Expr, ty: &Type, arg: &Expr, span: Span) -> Ty {
         let _ = self.infer(obj);
-        let arg_ty = self.infer(arg);
+        let arg_ty = self.infer_value(arg);
         if !compatible(&Ty::Str, &arg_ty) {
             self.error(span, format!("decode source must be str, found {arg_ty}"));
         }
@@ -3853,14 +3906,14 @@ impl Checker {
         match name {
             "print" => {
                 for a in args {
-                    self.infer(a);
+                    self.infer_value(a);
                 }
                 Some(Ty::Nil)
             }
             "len" => {
                 self.check_arity("len", 1, args, span);
                 if let Some(a) = args.first() {
-                    match self.infer(a) {
+                    match self.infer_value(a) {
                         Ty::List(_) | Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
                         other => self.error(a.span, format!("len() expects a list, str, or bytes, got {other}")),
                     }
@@ -3894,7 +3947,7 @@ impl Checker {
             "ord" => {
                 self.check_arity("ord", 1, args, span);
                 if let Some(a) = args.first() {
-                    match self.infer(a) {
+                    match self.infer_value(a) {
                         Ty::Str | Ty::Unknown => {}
                         other => self.error(a.span, format!("ord() expects a str, got {other}")),
                     }
@@ -3904,7 +3957,7 @@ impl Checker {
             "chr" => {
                 self.check_arity("chr", 1, args, span);
                 if let Some(a) = args.first() {
-                    match self.infer(a) {
+                    match self.infer_value(a) {
                         Ty::Int | Ty::Unknown => {}
                         other => self.error(a.span, format!("chr() expects an int, got {other}")),
                     }
@@ -3920,7 +3973,7 @@ impl Checker {
                     self.error(span, "list() takes exactly one iterable argument — use [] for an empty list");
                     return Some(Ty::list(Ty::Unknown));
                 }
-                let it = self.infer(&args[0]);
+                let it = self.infer_value(&args[0]);
                 let elem = match self.iter_elem(&it) {
                     Some(e) => e,
                     None if it.is_unknown() => Ty::Unknown,
@@ -3938,7 +3991,7 @@ impl Checker {
                 match args.len() {
                     0 => Some(Ty::set(Ty::Unknown)),
                     1 => {
-                        let it = self.infer(&args[0]);
+                        let it = self.infer_value(&args[0]);
                         let elem = match self.iter_elem(&it) {
                             Some(e) => e,
                             None if it.is_unknown() => Ty::Unknown,
@@ -3970,7 +4023,7 @@ impl Checker {
                     self.error(span, "map() takes exactly one iterable argument — use {} for an empty map");
                     return Some(Ty::map(Ty::Unknown, Ty::Unknown));
                 }
-                let it = self.infer(&args[0]);
+                let it = self.infer_value(&args[0]);
                 let elem = match self.iter_elem(&it) {
                     Some(e) => e,
                     None if it.is_unknown() => return Some(Ty::map(Ty::Unknown, Ty::Unknown)),
@@ -4005,7 +4058,7 @@ impl Checker {
             "bytearray" => {
                 match args.len() {
                     0 => {}
-                    1 => match self.infer(&args[0]) {
+                    1 => match self.infer_value(&args[0]) {
                         Ty::Int | Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
                         Ty::List(elem) if matches!(*elem, Ty::Int | Ty::Unknown) => {}
                         other => self.error(
@@ -4022,7 +4075,7 @@ impl Checker {
             // `bytes(b)` copies a `bytes`, `bytes([ints])` builds from a `list[int]`. Infers `bytes`.
             "bytes" => {
                 match args.len() {
-                    1 => match self.infer(&args[0]) {
+                    1 => match self.infer_value(&args[0]) {
                         Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
                         Ty::List(elem) if matches!(*elem, Ty::Int | Ty::Unknown) => {}
                         other => self.error(
@@ -4099,7 +4152,7 @@ impl Checker {
                     // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
                     // when given, else are inferred by unifying the declared field types (which
                     // contain the struct's `Ty::Param`s) against the argument types.
-                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
                     if arg_tys.len() != field_tys.len() {
                         self.check_arity(name, field_tys.len(), args, span);
                     }
@@ -4134,7 +4187,7 @@ impl Checker {
                     // (`Node[int](…)`) when given, else are inferred by unifying the variant's
                     // declared payload types (which contain the enum's `Ty::Param`s) against the
                     // argument types, then check each argument against the substituted payload.
-                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
                     if arg_tys.len() != v.payload.len() {
                         self.check_arity(name, v.payload.len(), args, span);
                     }
@@ -4360,7 +4413,7 @@ impl Checker {
                 if method == "extend" {
                     self.check_arity("extend", 1, args, span);
                     if let Some(a) = args.first() {
-                        match self.infer(a) {
+                        match self.infer_value(a) {
                             Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
                             Ty::List(elem) if matches!(*elem, Ty::Int | Ty::Unknown) => {}
                             other => self.error(
@@ -4753,12 +4806,12 @@ impl Checker {
 
     fn one_arg(&mut self, name: &str, args: &[Expr], span: Span) -> Ty {
         self.check_arity(name, 1, args, span);
-        args.first().map(|a| self.infer(a)).unwrap_or(Ty::Unknown)
+        args.first().map(|a| self.infer_value(a)).unwrap_or(Ty::Unknown)
     }
 
     fn infer_all(&mut self, args: &[Expr]) {
         for a in args {
-            self.infer(a);
+            self.infer_value(a);
         }
     }
 
@@ -4781,7 +4834,7 @@ impl Checker {
             self.error(span, format!("'{name}' expects {want} argument(s), got {}", args.len()));
         }
         for (i, arg) in args.iter().enumerate() {
-            let at = self.infer(arg);
+            let at = self.infer_value(arg);
             if let Some(pt) = params.get(i)
                 && !self.assignable(pt, &at)
             {
@@ -4800,14 +4853,14 @@ impl Checker {
     }
 
     fn expect_bool(&mut self, e: &Expr, ctx: &str) {
-        let t = self.infer(e);
+        let t = self.infer_value(e);
         if t != Ty::Bool && !t.is_unknown() {
             self.error(e.span, format!("{ctx} must be bool, found {t}"));
         }
     }
 
     fn expect_int(&mut self, e: &Expr, ctx: &str) {
-        let t = self.infer(e);
+        let t = self.infer_value(e);
         if t != Ty::Int && !t.is_unknown() {
             self.error(e.span, format!("{ctx} must be int, found {t}"));
         }
@@ -5506,7 +5559,7 @@ impl Checker {
         if args.len() != sig.params.len() {
             self.check_arity(name, sig.params.len(), args, span);
         }
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
         // Explicit call-site type arguments (`max[int](…)`) seed the substitution; remaining (or
         // all, when none given) parameters are inferred from positional arguments. `unify` only
         // binds a parameter that isn't already in the map, so explicit args take precedence and a
@@ -5566,7 +5619,7 @@ impl Checker {
                 format!("'{method}' expects {} argument(s), got {}", expected.len(), args.len()),
             );
         }
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
         let mut mmap: HashMap<String, Ty> = HashMap::new();
         // A method type param may appear in the receiver position (`fn f[U](u: U)`); bind it from the
         // actual receiver type so it isn't left unresolved.

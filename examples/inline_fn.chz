@@ -1,0 +1,20 @@
+# Inline-expr function bodies implicitly return their expression (Option A, inline-only) —
+# exactly like a closure `fn(x): expr`. A multiline body still falls through to nil unless it
+# `return`s, and `nil` (a void result) may never be used as a value.
+
+# Inferred `-> int`: the inline expr IS the return.
+fn ten(): 10
+
+# Annotated inline-expr body is valid (Option B does not fire — the expr terminates the body).
+fn answer() -> int: 42
+
+# Usable as a value / a `.map` argument (the whole point of inline-only Option A).
+fn dbl(x: int): x * 2
+
+fn main():
+    print(ten())
+    print(answer())
+    print([1, 2, 3].map(dbl))
+    x: int = ten()
+    print(x + answer())
+main()

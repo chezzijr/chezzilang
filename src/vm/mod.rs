@@ -16572,6 +16572,20 @@ main()";
         assert_eq!(run(include_str!("../../examples/hello.chz")), expected);
     }
 
+    /// Inline-expr fn body golden: `examples/inline_fn.chz` exercises Option A (inline-only) — a
+    /// `fn a(): <expr>` (and the annotated `fn a() -> int: <expr>`) implicitly returns its single
+    /// expression, usable as a value and a `.map` argument. Byte-identical on VM, interp, and the
+    /// checked-in `.expected` is the parity gate.
+    #[test]
+    fn golden_inline_fn_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/inline_fn.chz");
+        let expected = include_str!("../../examples/inline_fn.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(vm_out, expected, "vm output drifted from inline_fn.expected");
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on inline_fn");
+    }
+
     #[test]
     fn golden_hello_chz_matches_interpreter() {
         let src = include_str!("../../examples/hello.chz");

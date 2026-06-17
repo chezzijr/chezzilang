@@ -117,12 +117,15 @@
 
 # ===== declarations =====
 # An omitted "ARROW" <type> is not "returns nothing": the checker infers the return type from
-# the body's `return`s (nil only when no value is returned). Param types remain required.
-# The body is a sequence of STATEMENTS (not an expression), so an inline body `fn a() -> int: 10`
-# does not implicitly return `10` — `10` is a discarded expr-statement. The checker therefore
-# rejects a function with a DECLARED non-void "ARROW" <type> whose body can fall off the end
-# without a value `return` (add a `return`, or use a closure `fn() -> T: <expr>` whose body IS an
-# expression). A declaration with no "ARROW" infers `nil` and is exempt.
+# the body. Param types remain required.
+# A MULTILINE body is a sequence of STATEMENTS: its return type comes from the body's `return`s
+# (nil when no value is returned), and a DECLARED non-void "ARROW" <type> whose multiline body can
+# fall off the end without a value `return` is rejected (add a `return`).
+# The INLINE-expr body (`<block> ::= COLON <simpleStmt>` where the simpleStmt is a bare exprStmt)
+# IMPLICITLY RETURNS that expression — exactly like a closure `fn(x): expr`. So `fn a(): 10` infers
+# `-> int`, and `fn a() -> int: 10` is valid (the expr is the implicit return, so the fall-off check
+# does not fire). An inline NON-expr statement (`fn a(): x = 5`, `fn a(): return e`) is not an
+# implicit return. A declaration with no "ARROW" infers its type and is exempt from the fall-off check.
 # A function may carry generic type parameters after its name: `fn max[T: Comparable](…)`. The
 # optional bound names a protocol the instantiating type must structurally satisfy.
 <fnDecl> ::= "FN" "IDENT" "LPAREN" "RPAREN" <block>

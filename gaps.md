@@ -35,9 +35,16 @@ std.math trig + request verbs landed; concurrency D6 complete (Path C resolved).
   to `nil`. Fixed via **Option B** (see "declared-non-void fn must return on every path" below): the checker
   now rejects a fn with a *declared* non-void return type that can fall off the end without a value
   `return`, with a hint to add `return` or use a closure `fn() -> T: <expr>` (whose body IS an expression,
-  so it implicitly returns). The silent-wrong-`nil` is now a loud type error. (Open, separate, deferred by
-  owner: a bare `fn a(): 10` with *no* return annotation infers void and still discards `10` silently —
-  the void-discard footgun, to be addressed later.)
+  so it implicitly returns). The silent-wrong-`nil` is now a loud type error.
+  - **✅ FOLLOW-UP RESOLVED (2026-06-17) — inline-expr body now implicitly returns + nil rejected in
+    value position** (Option A inline-only; `parser/mod.rs` `inline_expr_body` marker on `FnDecl`,
+    `compiler/mod.rs` + `interp/mod.rs` `compile_fn`/`call`, `checker/mod.rs` `infer_fn_ret`/`check_fn_body`
+    + `infer_value`). The void-discard footgun is gone two ways: (1) a bare `fn a(): 10` (inline-expr body)
+    now **implicitly returns** `10` — like a closure — so `10` is no longer discarded; `fn a() -> int: 10`
+    is valid (Option B's fall-off check is exempted for inline-expr bodies). (2) Using a void result as a
+    value (`x := print(...)`, `[log(...)]`, `1 + sort()`) is now a loud type error *"expression returns no
+    value (nil) and cannot be used as a value"*. A multiline 1-stmt body still does not implicitly return.
+    `examples/inline_fn.chz`; two-engine golden byte-identical. `docs/syntax.md` §5.
 
 - **⚪ Checker `=` to a by-value captured local — latent, UNREACHABLE on HEAD** (verified 2026-06-16).
   `infer_closure` pushes no capture floor (`checker/mod.rs:2841`); an inner fn/closure writing an
@@ -296,9 +303,12 @@ Recorded for completeness — likely stay as-is unless a real program forces the
   (`compiler/mod.rs` emits Nil+Return on fall-off) — dispatch was always correct (works via `.map`/HOFs).
   The checker now rejects a fn with a *declared* non-void return type whose body can fall off the end
   without a value `return` (sound, path-aware: if/else-all-return, exhaustive-match-all-return,
-  `while true`-no-break, `exit` tail all terminate). A bare `fn a(): 10` (no annotation, infers `nil`) and
-  closures (`fn() -> T: <expr>`, body is an expression) are exempt. `examples/edge_cases.chz` rewritten to
-  multiline `return <expr>`; two-engine golden byte-identical. `docs/syntax.md` §5.
+  `while true`-no-break, `exit` tail all terminate). Closures (`fn() -> T: <expr>`) and — since the
+  2026-06-17 follow-up (Option A inline-only) — **inline-expr fn bodies** (`fn a(): <expr>` /
+  `fn a() -> int: <expr>`) are exempt: their single bare expression is an implicit return. Only a
+  multiline body whose declared non-void return can fall off the end is rejected.
+  `examples/edge_cases.chz` rewritten to multiline `return <expr>`; two-engine golden byte-identical.
+  `docs/syntax.md` §5. (See the bare-fn entry above for the inline-return + nil-in-value-position follow-up.)
 
 ---
 

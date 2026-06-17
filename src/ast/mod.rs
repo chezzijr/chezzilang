@@ -251,6 +251,13 @@ pub struct FnDecl {
     /// test; a `test fn name(self)` method makes its struct a test suite. `chezzi test` discovers
     /// these by this compiler-set tag (no name-prefix scan). Default `false` everywhere else.
     pub is_test: bool,
+    /// True iff the body is the INLINE form (`: <stmt>` on the same line) AND that single statement
+    /// is a bare expression. Such a body IMPLICITLY RETURNS the expression's value — exactly like a
+    /// closure `fn(x): expr` — instead of evaluating it and falling through to nil. Computed by the
+    /// parser (it alone knows the body was written inline vs. a 1-statement indented block, which the
+    /// `Block = Vec<Stmt>` shape otherwise erases). `false` for multiline bodies, non-expr inline
+    /// bodies (`: x = 5`, `: return e`), and generators.
+    pub inline_expr_body: bool,
 }
 
 /// A generic type parameter declaration: `T`, `T: Comparable`, `T: Add + Mul`, or a parameterized

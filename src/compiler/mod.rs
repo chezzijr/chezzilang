@@ -460,6 +460,18 @@ impl Compiler {
         for p in &decl.params {
             fc.add_local(p.name.clone());
         }
+        // An inline-expr body (`fn a(): <expr>`) implicitly returns its single expression — exactly
+        // like a closure `fn(x): expr` (see `compile_closure`): compile the expr and emit `Return`
+        // instead of evaluating-then-discarding it and falling through to `Nil`/`Return`. An inline
+        // body cannot hold a bare `spawn` (spawn is a statement, not an expression), so the implicit-
+        // nursery dance below never applies to it.
+        if decl.inline_expr_body
+            && let [Stmt { kind: StmtKind::Expr(e), .. }] = decl.body.as_slice()
+        {
+            self.compile_expr(&mut fc, e)?;
+            fc.emit(Op::Return, e.span);
+            return Ok(self.finish(fc));
+        }
         // M-C: if the body has a bare `spawn` (not inside an explicit `parallel:`), open an implicit
         // nursery at entry. It is NOT joined here — `do_return` joins it at every `return`/`?`/end (a
         // single join site), so we only emit the opening `EnterNursery` and flag the proto.
