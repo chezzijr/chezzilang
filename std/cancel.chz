@@ -12,36 +12,52 @@
 # on every engine; a manual cancel of a non-polling pure-CPU sibling is only preempted on the default
 # OS-thread engine (the `--serial`/`--interp` oracles run it to completion).
 #
-# v1 is FLAT — tokens are independent (no parent/child derivation). Cancelling one token never affects
-# another. Tree-structured propagation is a deliberate follow-up (it needs done()-vs-poll consistency
-# across the whole subtree, including ancestor *timeouts*, which the v1 channel model can't express).
+# TREE-STRUCTURED. A child token is `derive()`d from a parent (Go `context.WithCancel`): cancelling
+# or timing out the parent cancels every transitively-derived child, recursively down the tree, while
+# cancelling a child never touches the parent (one-directional, root-to-leaves). The link is LIVE — a
+# parent flip is observed by an already-derived child, including one that crossed the `spawn`/
+# `parallel:`/`Channel` airlock — because the link is the parent's `Shared` flag + `Shared` registry,
+# which cross as live cores (exactly like the flat token's `flag`). Deadlines inherit TIGHTEST-WINS:
+# a child clamps to the soonest absolute deadline of itself and its ancestors. See docs/concurrency.md §6e.
 import std.time
 
 struct Token:
     flag: Shared[bool]     # manual-cancel bit (sendable, owner-serialized)
     deadline: float        # absolute monotonic() secs; 0.0 == no deadline; checked at POLL TIME
     dl: Channel[bool]      # done(): a timer channel (timeout) or a trip()-able latch channel (manual)
+    parent: Token?         # the live derivation link (None for a root); cancelled()/reason() recurse it
+    kids: Shared[list[Channel[bool]]]  # done()-channels of derived children — cancel() trips each (fan-out)
 
-    # True once this token is cancelled (manually) or its deadline has passed. Never blocks.
+    # True once this token is cancelled (manually) or its deadline has passed, OR any ancestor is —
+    # the cascade is transitive up the parent chain and one-directional (an ancestor never reads us).
+    # Never blocks.
     fn cancelled(self) -> bool:
         if self.flag.get():
             return true
-        return self.deadline > 0.0 and time.monotonic() >= self.deadline
+        if self.deadline > 0.0 and time.monotonic() >= self.deadline:
+            return true
+        match self.parent:
+            Some(p): return p.cancelled()
+            None:    return false
 
-    # Why this token is done: "cancelled" (manual), "timeout" (deadline), or None (still live).
-    # Agrees with cancelled(): None iff cancelled() is false.
+    # Why this token is done: "cancelled" (manual), "timeout" (deadline), or None (still live). Nearest
+    # cause wins — self's own cause first, else the inherited ancestor's. Agrees with cancelled().
     fn reason(self) -> str?:
         if self.flag.get():
             return Some("cancelled")
         if self.deadline > 0.0 and time.monotonic() >= self.deadline:
             return Some("timeout")
-        return None
+        match self.parent:
+            Some(p): return p.reason()
+            None:    return None
 
     # Manual cancel, callable anytime, from any task (the handle is shared). Idempotent. Trips the
-    # done() channel so a sibling parked in `wait:` wakes.
+    # done() channel so a sibling parked in `wait:` wakes, and fans out to every derived child's done().
     fn cancel(self):
         self.flag.set(true)
         self.dl.trip()
+        for ch in self.kids.get():
+            ch.trip()
 
     # A channel that becomes ready (recv -> true) when this token is done. Use in a `wait:` arm.
     # Same handle every call, so re-polling in a loop is stable and a later cancel() reaches a waiter.
@@ -52,9 +68,37 @@ struct Token:
     fn deadline_at(self) -> float:
         return self.deadline
 
+    # Derive a CHILD token linked to this one (Go `context.WithCancel`). The child is cancelled when
+    # IT is cancelled OR when this token (or any ancestor) is — but cancelling the child never touches
+    # this token. The child inherits the TIGHTEST deadline (the soonest of its own — none here — and
+    # this token's). Its done() fires on an ancestor timeout via its own deterministic timer (armed to
+    # the remaining deadline at derive time), and on a manual ancestor cancel via the registry fan-out.
+    fn derive(self) -> Token:
+        # Tightest deadline = this token's (the child has none of its own).
+        d := self.deadline
+        # Arm the child's done() channel: a timer to the remaining deadline (timeout inheritance), or
+        # a trip()-able latch (manual). A non-positive remaining ms means "already expired" (timer(0)).
+        cdl := Channel[bool]()
+        if d > 0.0:
+            rem_ms := int((d - time.monotonic()) * 1000.0)
+            if rem_ms < 0:
+                rem_ms = 0
+            cdl = timer(rem_ms)
+        child := Token(flag=Shared(false), deadline=d, dl=cdl, parent=Some(self),
+                       kids=Shared([]))
+        # Register the child's done() for manual fan-out, and if this token is ALREADY cancelled at
+        # derive time, trip the child's done() now so it is ready immediately.
+        ks := self.kids.get()
+        ks.push(cdl)
+        self.kids.set(ks)
+        if self.cancelled():
+            cdl.trip()
+        return child
+
 # A manually-cancellable token with no deadline. `cancel()` is the only thing that trips it.
 fn manual() -> Token:
-    return Token(flag=Shared(false), deadline=0.0, dl=Channel[bool]())
+    return Token(flag=Shared(false), deadline=0.0, dl=Channel[bool](), parent=None,
+                 kids=Shared([]))
 
 # A token that auto-cancels `ms` milliseconds after creation, and is also manually cancellable. A
 # non-positive `ms` means "already expired" (cancelled() is true at once, done() fires immediately).
@@ -62,4 +106,10 @@ fn timeout(ms: int) -> Token:
     m := ms
     if m < 0:
         m = 0
-    return Token(flag=Shared(false), deadline=time.monotonic() + float(m) / 1000.0, dl=timer(m))
+    return Token(flag=Shared(false), deadline=time.monotonic() + float(m) / 1000.0, dl=timer(m),
+                 parent=None, kids=Shared([]))
+
+# Derive a child token from `parent` (the free-function form of `parent.derive()`, for a pipe / when
+# the parent is the obvious subject). Identical semantics: tightest deadline, live link, one-directional.
+fn derive(parent: Token) -> Token:
+    return parent.derive()

@@ -1,0 +1,56 @@
+# std.cancel — TREE PROPAGATION (parent/child derivation). A child `derive()`d from a parent is
+# cancelled when the parent (or any ancestor) is — recursively, root-to-leaves — while cancelling a
+# child never touches the parent. The link is LIVE (Shared flag + Shared registry). All cases here are
+# deterministic (manual cancel + already-elapsed timeout, same task), so this is golden on every engine.
+import std.cancel
+
+fn main():
+    # 1. Parent cancel cascades to a derived child (live link, transitive reason).
+    p := cancel.manual()
+    c := p.derive()
+    print("child before: {c.cancelled()}")
+    p.cancel()
+    print("child after parent cancel: {c.cancelled()}")
+    match c.reason():
+        Some(r): print("child reason: {r}")
+        None:    print("child reason: none")
+
+    # 2. A manual ancestor cancel makes the child's done() ready (registry fan-out).
+    match c.done().try_recv():
+        Some(v): print("child done ready: {v}")
+        None:    print("child done not ready")
+
+    # 3. Cancelling a child is one-directional — the parent stays live.
+    p2 := cancel.manual()
+    c2 := p2.derive()
+    c2.cancel()
+    print("child2 cancelled: {c2.cancelled()}")
+    print("parent2 cancelled: {p2.cancelled()}")
+    match p2.reason():
+        Some(r): print("parent2 reason: {r}")
+        None:    print("parent2 reason: none")
+
+    # 4. Transitive: cancelling the root cancels a grandchild.
+    root := cancel.manual()
+    mid := root.derive()
+    leaf := mid.derive()
+    root.cancel()
+    print("grandchild cancelled: {leaf.cancelled()}")
+    match leaf.reason():
+        Some(r): print("grandchild reason: {r}")
+        None:    print("grandchild reason: none")
+
+    # 5. An already-elapsed-timeout parent: a derived child inherits the tightest deadline, so it is
+    #    cancelled at once, reports "timeout", and its done() is ready (its own timer armed to 0 ms).
+    tp := cancel.timeout(0)
+    tc := tp.derive()
+    print("timeout-child cancelled: {tc.cancelled()}")
+    match tc.reason():
+        Some(r): print("timeout-child reason: {r}")
+        None:    print("timeout-child reason: none")
+    match tc.done().try_recv():
+        Some(v): print("timeout-child done ready: {v}")
+        None:    print("timeout-child done not ready")
+    print("inherited deadline: {tc.deadline_at() == tp.deadline_at()}")
+
+main()

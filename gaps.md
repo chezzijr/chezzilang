@@ -212,8 +212,14 @@ Tracked in other docs; surfaced here so they aren't lost. None scheduled, but ea
   ownership transfer / `free`. Needed for richer C interop / any future self-host.
 - **Comprehension nested clauses** — `[x for x in xs for y in ys]` deferred (syntax.md:358); single-clause
   + guard shipped.
-- **`std.cancel` tree propagation** — tokens are **flat** in v1; parent/child derivation (cancel a parent
-  → cancel its children) is a documented follow-up (PROGRESS.md:244).
+- **✅ RESOLVED — `std.cancel` tree propagation.** `Token.derive()` (and `cancel.derive(parent)`)
+  builds a CHILD token: cancelling/timing-out a parent cancels every transitively-derived child
+  (root-to-leaves), while cancelling a child never touches the parent (one-directional). Live link
+  (parent `Shared` flag + `Shared` child-`done()` registry cross the airlock as live cores, so a parent
+  flip is seen by an already-spawned child), tightest-deadline inheritance, nearest-cause-wins
+  `reason()`. Pure Chezzi (`std/cancel.chz`) → three-engine identical. Goldens `examples/cancel_tree.chz`
+  + `*.expected`. See PROGRESS.md + docs/concurrency.md §6e. (Known limit: the child registry only
+  grows — no token-drop hook; tokens are request-scoped, a future prune-on-cancel could clear it.)
 - **Graceful shutdown of accept loops** + a per-connection handler→acceptor signal channel — future work
   for long-running servers (concurrency-tier-d.md:297).
 - **Reduction-constant tuning** (D3) — pick `CONTEXT_REDS` + per-op vs per-back-edge accounting

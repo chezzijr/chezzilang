@@ -21802,6 +21802,123 @@ main()
         assert_eq!(coop_out, "worker ran to completion\n", "cooperative oracle should run to completion");
     }
 
+    // ===== std.cancel TREE PROPAGATION (parent/child derivation) =====
+    //
+    // A child token derived from a parent observes the parent's cancellation/timeout transitively
+    // (root-to-leaves, one-directional). The link is LIVE (Shared flag + Shared kids registry cross
+    // the airlock as live cores), so a parent flip is seen by already-derived children — including
+    // children that crossed `spawn`/`parallel:`. Cancelling a child never touches the parent.
+    //
+    // Each test runs an inline Chezzi snippet through the real module graph (`import std.cancel`
+    // needs `run_file`, not the standalone compile path). The `print`s are the assertion surface.
+
+    /// Wrap a `main()` body in `import std.cancel` + run it through the module graph, return stdout.
+    fn run_cancel_snippet(tag: &str, body: &str) -> String {
+        let src = format!("import std.cancel\n\nfn main():\n{body}\nmain()\n");
+        run_cancel_src(tag, &src)
+    }
+
+    /// Run a full `std.cancel`-importing source through the module graph, return stdout.
+    fn run_cancel_src(tag: &str, src: &str) -> String {
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let entry =
+            std::env::temp_dir().join(format!("chezzi_{tag}_{}_{seq}.chz", std::process::id()));
+        std::fs::write(&entry, src).expect("write temp .chz");
+        let (out, _err, res, _) = run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(res.is_ok(), "snippet faulted: {res:?}");
+        out
+    }
+
+    /// A derived child observes a manual parent cancel (transitive, live link). Child starts live.
+    #[test]
+    fn cancel_child_polls_parent_cancel() {
+        let out = run_cancel_snippet(
+            "cancel_child_polls_parent",
+            "    p := cancel.manual()\n    c := p.derive()\n    print(\"c before: {c.cancelled()}\")\n    p.cancel()\n    print(\"c after: {c.cancelled()}\")\n    match c.reason():\n        Some(r): print(\"c reason: {r}\")\n        None:    print(\"c reason: none\")\n",
+        );
+        assert_eq!(out, "c before: false\nc after: true\nc reason: cancelled\n");
+    }
+
+    /// Cancelling a child is one-directional: the parent is untouched (flag + reason stay clear).
+    #[test]
+    fn cancel_child_cancel_does_not_touch_parent() {
+        let out = run_cancel_snippet(
+            "cancel_child_one_directional",
+            "    p := cancel.manual()\n    c := p.derive()\n    c.cancel()\n    print(\"c: {c.cancelled()}\")\n    print(\"p: {p.cancelled()}\")\n    match p.reason():\n        Some(r): print(\"p reason: {r}\")\n        None:    print(\"p reason: none\")\n",
+        );
+        assert_eq!(out, "c: true\np: false\np reason: none\n");
+    }
+
+    /// Cascade is transitive: cancelling the root cancels a grandchild with the inherited reason.
+    #[test]
+    fn cancel_transitive_grandchild() {
+        let out = run_cancel_snippet(
+            "cancel_transitive_grandchild",
+            "    p := cancel.manual()\n    c := p.derive()\n    g := c.derive()\n    p.cancel()\n    print(\"g: {g.cancelled()}\")\n    match g.reason():\n        Some(r): print(\"g reason: {r}\")\n        None:    print(\"g reason: none\")\n",
+        );
+        assert_eq!(out, "g: true\ng reason: cancelled\n");
+    }
+
+    /// A manual parent cancel makes a derived child's `done()` channel ready (registry fan-out).
+    #[test]
+    fn cancel_child_done_ready_after_parent_cancel() {
+        let out = run_cancel_snippet(
+            "cancel_child_done_fanout",
+            "    p := cancel.manual()\n    c := p.derive()\n    p.cancel()\n    match c.done().try_recv():\n        Some(v): print(\"done: {v}\")\n        None:    print(\"not done\")\n",
+        );
+        assert_eq!(out, "done: true\n");
+    }
+
+    /// A child of an already-elapsed timeout parent inherits the tightest deadline: it is cancelled
+    /// at once, its reason is "timeout", its done() is ready, and its deadline equals the parent's.
+    #[test]
+    fn cancel_child_inherits_tightest_deadline() {
+        let out = run_cancel_snippet(
+            "cancel_child_tightest_deadline",
+            "    p := cancel.timeout(0)\n    c := p.derive()\n    print(\"c cancelled: {c.cancelled()}\")\n    match c.reason():\n        Some(r): print(\"c reason: {r}\")\n        None:    print(\"c reason: none\")\n    match c.done().try_recv():\n        Some(v): print(\"c done: {v}\")\n        None:    print(\"c not done\")\n    print(\"deadline match: {c.deadline_at() == p.deadline_at()}\")\n",
+        );
+        assert_eq!(
+            out,
+            "c cancelled: true\nc reason: timeout\nc done: true\ndeadline match: true\n"
+        );
+    }
+
+    /// The live link survives the concurrency airlock: a derived child crosses `spawn`/`parallel:`,
+    /// and a parent cancel done in the parent task BEFORE the nursery is observed by the spawned task
+    /// (Shared cores cross as LIVE handles, not snapshots). Deterministic on all engines: the parent
+    /// already cancelled before the spawn, so the worker only polls the already-flipped flag.
+    #[test]
+    fn cancel_token_sendable_with_parent() {
+        let src = "import std.cancel\n\nfn watch(c: Token, seen: Shared[bool]):\n    if c.cancelled():\n        seen.set(true)\n\nfn main():\n    p := cancel.manual()\n    c := p.derive()\n    seen := Shared(false)\n    p.cancel()\n    parallel:\n        spawn watch(c, seen)\n    print(\"observed cancel: {seen.get()}\")\n\nmain()\n";
+        let out = run_cancel_src("cancel_token_sendable_parent", src);
+        assert_eq!(out, "observed cancel: true\n");
+    }
+
+    /// The free-function form `cancel.derive(parent)` is equivalent to `parent.derive()`.
+    #[test]
+    fn cancel_derive_free_fn_form() {
+        let out = run_cancel_snippet(
+            "cancel_derive_free_fn",
+            "    p := cancel.manual()\n    c := cancel.derive(p)\n    print(\"before: {c.cancelled()}\")\n    p.cancel()\n    print(\"after: {c.cancelled()}\")\n",
+        );
+        assert_eq!(out, "before: false\nafter: true\n");
+    }
+
+    /// `std.cancel` tree-propagation golden (VM): `examples/cancel_tree.chz` byte-matches `.expected`
+    /// and stays identical to the interpreter (`assert_file_parity`). Deterministic (manual cancel +
+    /// pre-ready/zero timers, same task) → golden on every engine.
+    #[test]
+    fn golden_cancel_tree_via_run_file() {
+        let path = fixture("examples/cancel_tree.chz");
+        let expected = std::fs::read_to_string(fixture("examples/cancel_tree.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/cancel_tree.chz");
+    }
+
     /// C-ABI FFI golden (VM twin of `interp::golden_ffi_chz`): the `extern "lib":` block calls
     /// `cos`/`sqrt` (libm) and `strlen` (libc) via dlopen+libffi on the VM, byte-matches `.expected`,
     /// and stays identical to the interpreter (`assert_file_parity`). Linux-only (needs libm/libc).
