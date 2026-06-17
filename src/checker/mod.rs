@@ -2119,21 +2119,30 @@ impl Checker {
             }
             self.declare(&param.name, ty);
         }
-        for stmt in &decl.body {
-            self.check_stmt(stmt);
-        }
-        // An inline-expr body (`fn a() -> T: <expr>`) implicitly returns its expression: its type
-        // must be assignable to the declared return type, exactly as a `return <expr>` would be
-        // checked. (The body-walk above infers the expr; this validates it against `-> T`.)
+        // An inline-expr body (`fn a() -> T: <expr>`) implicitly returns its single expression,
+        // exactly as a `return <expr>` would. We infer that expr ONCE here and validate it against
+        // the declared return type with the same diagnostics `check_return` uses — so we must NOT
+        // also run the statement-position `check_stmt` on it (that would infer it a second time and
+        // double every error inside the expression). Any other body is checked statement-by-
+        // statement as usual.
         if decl.inline_expr_body
             && let [Stmt { kind: StmtKind::Expr(e), .. }] = decl.body.as_slice()
         {
             let ret = sig.ret.clone();
-            if ret != Ty::Nil {
-                let ty = self.infer(e);
-                if !self.assignable(&ret, &ty) {
-                    self.error(e.span, format!("expected return type {ret}, found {ty}"));
+            let ty = self.infer(e);
+            if ret == Ty::Nil {
+                // A NON-nil expr against `-> nil` is a void fn that actually returns a value —
+                // reject it, mirroring the multiline `return <expr>` path. A nil-typed inline expr
+                // (e.g. a bare void call) implicitly returns nil and stays legal.
+                if ty != Ty::Nil && !ty.is_unknown() {
+                    self.error(e.span, "function returns nothing, cannot return a value");
                 }
+            } else if !self.assignable(&ret, &ty) {
+                self.error(e.span, format!("expected return type {ret}, found {ty}"));
+            }
+        } else {
+            for stmt in &decl.body {
+                self.check_stmt(stmt);
             }
         }
         // Option B: a function with a *declared* non-void return type must return a value on every

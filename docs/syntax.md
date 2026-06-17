@@ -248,7 +248,11 @@ fn answer() -> int: 42     # annotated inline-expr body is valid (the expr is th
 Only a *bare expression* inline body returns implicitly. An inline **non-expression** statement does
 not: `fn a(): x = 5` (an assignment) returns `nil`, and `fn a(): return 10` is an explicit return as
 written. An inline **call** returns the call's value (it is an expression-statement): `fn a(): foo()`
-returns `foo()`'s value — which is `nil` if `foo` is void (that just makes `a` a void fn).
+returns `foo()`'s value — which is `nil` if `foo` is void (that just makes `a` a void fn). An
+annotated inline-expr body is checked against its return type exactly like `return <expr>` would be:
+`fn a() -> int: "x"` is a type error, and a **non-nil** expr against an explicit `-> nil`
+(`fn a() -> nil: 10`) is rejected with *"function returns nothing, cannot return a value"* (a nil-typed
+inline expr against `-> nil`, e.g. a bare void call, stays legal).
 
 **Multiline bodies are statement sequences (no implicit return).** A multiline body — even a
 1-statement one — does **not** implicitly return: `fn a():\n    10` evaluates `10` and falls through to

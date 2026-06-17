@@ -107,6 +107,16 @@ clean.
   opaque (interpolation contents unparsed), so that one listed site is out of scope here. All cargo
   wrapped at MemoryMax=6G; full `cargo test` (2104) + `cargo test conformance` green,
   `cargo clippy --all-targets -- -D warnings` clean.
+- **Follow-up fixes (2026-06-17).** Two checker bugs in the inline-expr return path, both fixed:
+  (1) an inline-expr body with a declared return type was type-inferred TWICE (statement-walk +
+  return-assignability check), doubling every error inside the expr — `fn a() -> int: nope(5)` now
+  reports exactly ONE diagnostic. The inline-expr stmt is now inferred once (the statement-walk is
+  skipped for it). (2) the return-type assignability check was gated `if ret != Ty::Nil`, so a
+  **non-nil** inline expr against an explicit `-> nil` was never validated — `fn a() -> nil: 10`
+  type-checked clean but emitted `Return(10)` (a void fn returning an int). It is now rejected with the
+  multiline path's wording *"function returns nothing, cannot return a value"*; a nil-typed inline expr
+  against `-> nil` (a bare void call) stays legal. Tests: `inline_expr_error_reported_once`,
+  `inline_nonnil_expr_against_nil_ret_rejected`.
 
 **✅ Built-in conversions — str ↔ bytes (UTF-8) methods + `list()`/`set()`/`map()` constructors
 (owner-requested; the natural follow-on to the just-landed `bytes`/`bytearray` types).** Two

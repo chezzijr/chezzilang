@@ -5296,3 +5296,34 @@ fn user_fn_arg_nil_rejected() {
         "no value (nil)",
     );
 }
+
+#[test]
+fn inline_expr_error_reported_once() {
+    // An error inside an inline-expr body with a declared return type must be reported EXACTLY
+    // ONCE, not twice. Before the fix the body-statement walk inferred the expr (reporting the
+    // error) and the return-assignability check re-inferred it (reporting it again).
+    let errs = check_src("fn a() -> int: nope(5)\nfn main():\n    print(a())\nmain()\n");
+    let n = errs.iter().filter(|e| e.message.contains("unknown name 'nope'")).count();
+    assert_eq!(n, 1, "expected exactly one 'unknown name' error, got: {errs:?}");
+    // A type mismatch inside the inline expr is likewise reported once.
+    let errs = check_src("fn a() -> int: \"x\" + 1\nfn main():\n    print(a())\nmain()\n");
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected exactly one type error for the inline expr, got: {errs:?}"
+    );
+}
+
+#[test]
+fn inline_nonnil_expr_against_nil_ret_rejected() {
+    // A NON-nil inline expr against an explicit `-> nil` is a soundness hole if accepted: the
+    // engines emit Return(10) for a void-typed fn. Reject it with the same diagnostic the
+    // multiline path uses.
+    rejects(
+        "fn a() -> nil: 10\nfn main():\n    a()\nmain()\n",
+        "function returns nothing, cannot return a value",
+    );
+    // A void fn whose inline expr is itself nil-typed stays legal (implicitly returns nil).
+    ok("fn a(): print(\"x\")\nfn main():\n    a()\nmain()\n");
+    ok("fn a() -> nil: print(\"x\")\nfn main():\n    a()\nmain()\n");
+}
