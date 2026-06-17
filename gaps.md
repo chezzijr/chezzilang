@@ -280,6 +280,16 @@ Recorded for completeness — likely stay as-is unless a real program forces the
 - **Python-colon slicing** `xs[a:b:c]` — open bounds / step / reverse / negative index, on `list`/`str`,
   as assignment target. **Comprehensions** (list/set/dict + guard). **Tuple-destructuring `for`** +
   `enumerate`/`zip`. **Optional chaining `x?.f` + `??`**.
+- **✅ RESOLVED — declared-non-void fn must return on every path** (Option B; `checker/mod.rs`
+  `block_terminates`/`block_has_break`). Originally mis-sketched as a "bare fn name not callable /
+  dispatch bug"; the true root cause was a **missing-return check**: a fn body is statements, so an inline
+  `fn a() -> int: 10` parses `10` as a discarded expr-statement and silently falls off the end to `nil`
+  (`compiler/mod.rs` emits Nil+Return on fall-off) — dispatch was always correct (works via `.map`/HOFs).
+  The checker now rejects a fn with a *declared* non-void return type whose body can fall off the end
+  without a value `return` (sound, path-aware: if/else-all-return, exhaustive-match-all-return,
+  `while true`-no-break, `exit` tail all terminate). A bare `fn a(): 10` (no annotation, infers `nil`) and
+  closures (`fn() -> T: <expr>`, body is an expression) are exempt. `examples/edge_cases.chz` rewritten to
+  multiline `return <expr>`; two-engine golden byte-identical. `docs/syntax.md` §5.
 
 ---
 

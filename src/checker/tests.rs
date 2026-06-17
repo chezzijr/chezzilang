@@ -5116,3 +5116,59 @@ fn iterator_bound_forwards_into_iterable_bound() {
     // bound it is forwarded into (the cross-protocol relationship the spec promises).
     ok("fn use_iterable[U: Iterable[int]](xs: U) -> int:\n    n := 0\n    for x in xs.iter():\n        n = n + 1\n    return n\nfn pass_through[S: Iterator[int]](xs: S) -> int:\n    return use_iterable(xs)\nfn main():\n    print(pass_through([1, 2, 3]))\nmain()\n");
 }
+
+// ===== non-void fn must return a value on every path (Option B) =====
+
+#[test]
+fn non_void_fn_must_return() {
+    // (a) inline-body declared non-void fn whose `10` is a discarded expr-statement -> must reject.
+    rejects(
+        "fn a() -> int: 10\nfn main():\n    print(a())\nmain()\n",
+        "fall off the end",
+    );
+    // (b) multiline declared non-void fn whose only statement is a `print` -> must reject.
+    rejects(
+        "fn a() -> int:\n    print(\"hi\")\nfn main():\n    a()\nmain()\n",
+        "fall off the end",
+    );
+    // NEGATIVE: no return annotation infers void (nil) -> must NOT be rejected.
+    ok("fn a(): 10\nfn main():\n    a()\nmain()\n");
+    // NEGATIVE: explicit value `return` on the only path -> ok.
+    ok("fn a() -> int:\n    return 10\nfn main():\n    print(a())\nmain()\n");
+}
+
+#[test]
+fn non_void_fn_termination_no_false_positive() {
+    // if/else where BOTH arms return a value -> terminates.
+    ok("fn a(x: int) -> int:\n    if x > 0:\n        return 1\n    else:\n        return 2\nfn main():\n    print(a(1))\nmain()\n");
+    // exhaustive statement-match where every arm returns -> terminates.
+    ok("fn a(x: int) -> int:\n    match x:\n        0: return 1\n        _: return 2\nfn main():\n    print(a(0))\nmain()\n");
+    // fn ending in `while true:` with no break never falls off the end -> terminates.
+    ok("fn a() -> int:\n    while true:\n        return 1\nfn main():\n    print(a())\nmain()\n");
+}
+
+#[test]
+fn non_void_fn_exit_terminates() {
+    // fn ending in `os.exit(1)` (std.os.exit never returns) -> terminates, not a fall-through.
+    entry_ok("import std.os\nfn a() -> int:\n    os.exit(1)\nfn main():\n    print(a())\nmain()\n");
+}
+
+#[test]
+fn non_void_fn_while_true_with_break_still_rejected() {
+    // a `while true:` that CAN break does fall through -> must reject (soundness guard).
+    rejects(
+        "fn a() -> int:\n    while true:\n        break\nfn main():\n    print(a())\nmain()\n",
+        "fall off the end",
+    );
+}
+
+#[test]
+fn non_void_fn_unannotated_conditional_return_not_rejected() {
+    // REGRESSION: Option B must fire only for a DECLARED (`-> T`) non-void return. An UN-annotated
+    // fn that returns a value on *some* path (the common early-return / `find` idiom) infers a
+    // non-nil `sig.ret`, but the user declared no annotation, so it must stay legal.
+    // (a) conditional value-return, no `-> T` annotation.
+    ok("fn a(x: bool):\n    if x:\n        return helper()\nfn helper() -> int:\n    return 5\nfn main():\n    a(true)\nmain()\n");
+    // (b) `find`-style early-return-in-loop, no annotation.
+    ok("fn find(xs: list[int], t: int):\n    for x in xs:\n        if x == t:\n            return x\nfn main():\n    find([1, 2, 3], 2)\nmain()\n");
+}

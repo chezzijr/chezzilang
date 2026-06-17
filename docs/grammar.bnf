@@ -118,6 +118,11 @@
 # ===== declarations =====
 # An omitted "ARROW" <type> is not "returns nothing": the checker infers the return type from
 # the body's `return`s (nil only when no value is returned). Param types remain required.
+# The body is a sequence of STATEMENTS (not an expression), so an inline body `fn a() -> int: 10`
+# does not implicitly return `10` — `10` is a discarded expr-statement. The checker therefore
+# rejects a function with a DECLARED non-void "ARROW" <type> whose body can fall off the end
+# without a value `return` (add a `return`, or use a closure `fn() -> T: <expr>` whose body IS an
+# expression). A declaration with no "ARROW" infers `nil` and is exempt.
 # A function may carry generic type parameters after its name: `fn max[T: Comparable](…)`. The
 # optional bound names a protocol the instantiating type must structurally satisfy.
 <fnDecl> ::= "FN" "IDENT" "LPAREN" "RPAREN" <block>

@@ -58,6 +58,22 @@ you can't call `.next()` on a `list`. Wired (mirroring the `bytes`/`bytearray` O
   `cursor_crosses_spawn_airlock_three_engine_parity` / `cursor_crosses_airlock_by_deep_copy` / `generator_iter_returns_self_vm`;
   GC `obj_iter_traces_items_as_gc_children`; `examples/iterable.chz` + `.expected` goldened 3-engine.
 
+**✅ Checker — declared-non-void fn must return a value on every path (Option B).** A function body is a
+sequence of **statements**, not an expression, so an inline body `fn a() -> int: 10` parses `10` as a
+discarded expr-statement and silently falls off the end to `nil` (this was mis-filed in `gaps.md` as a
+"bare fn name not callable / dispatch bug"; the real root cause is a **missing-return check** — dispatch
+was always correct). The checker now rejects a function with a **declared non-void return type** whose
+body can fall off the end without a value `return`, with a hint to add `return` or use a closure
+`fn() -> T: <expr>` (whose body IS an expression and implicitly returns). The analysis
+(`checker/mod.rs` `block_terminates`/`block_has_break`) is **sound/conservative** — never false-positives
+on valid code: an `if`/`else` where every branch returns, an exhaustive `match` where every arm returns, a
+`while true:` with no reachable `break`, and an `exit(...)` tail all count as terminating. A bare
+`fn a(): 10` (no annotation → infers `nil`) and closures are **exempt**. `examples/edge_cases.chz`'s 6
+inline non-void fns rewritten to multiline `return <expr>` (two-engine golden byte-identical). Docs:
+`docs/syntax.md §5`, `docs/grammar.bnf` (comment), `gaps.md` (RESOLVED). All cargo wrapped at MemoryMax=6G;
+full `cargo test` (2040) + `cargo test conformance` green, `cargo clippy --all-targets -- -D warnings`
+clean.
+
 **✅ Built-in conversions — str ↔ bytes (UTF-8) methods + `list()`/`set()`/`map()` constructors
 (owner-requested; the natural follow-on to the just-landed `bytes`/`bytearray` types).** Two
 conversion surfaces, mirroring the `bytes`/`bytearray` builtin-wiring exactly (3-engine parity), with
