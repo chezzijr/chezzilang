@@ -27,6 +27,23 @@ std.math trig + request verbs landed; concurrency D6 complete (Path C resolved).
 
 ### 🟡 Type-system + runtime depth
 
+- **🔴 Bare top-level `fn` name as a first-class value is not callable — returns `nil` silently** (found
+  2026-06-17). A bare `fn` name used as a value type-checks (as `fn(...) -> ...`) and reifies to a value
+  that prints `<fn a>`, but **invoking that value yields `nil` instead of running the function** — no
+  error, no panic, a silently wrong result (worse than a type error, since the program type-checks).
+  Repro (all three engines agree, so not a parity bug): `fn a() -> int: 10` then `g := a; print(g())` →
+  `nil`; also `[1,2,3].map(dbl)` with a named `dbl` → `[nil, nil, nil]`; also an HOF
+  `call(f: fn() -> int)` invoked with a bare name `call(a)` → `nil`. **Closures/lambdas are unaffected**
+  and are the workaround: `g := fn() -> int: 10; g()` → `10`, and `.map(fn(x: int) -> int: dbl(x))`
+  works — so wrap a named fn in a lambda to pass it. Blocks: function tables / dispatch maps, passing
+  named functions to HOFs, any "first-class named function" pattern. Independent of the bytes/bytearray/
+  conversions/`Iterable` work (none touch fn invocation). **Fix sketch (root cause TBD):** the bare-`Ident`-
+  of-a-`fn` load path compiles/reifies a function value that the call path (`invoke_value` / `do_call`)
+  does not actually dispatch to — trace how a bare fn-name `Ident` lowers vs how a lambda lowers
+  (`compiler/mod.rs`), and either make the reified named-fn value invocable on the same path as a closure,
+  or — if first-class named-fn values are out of scope — make the checker REJECT a bare fn name in value
+  position (turn the silent `nil` into a type error, directing users to a lambda wrapper).
+
 - **⚪ Checker `=` to a by-value captured local — latent, UNREACHABLE on HEAD** (verified 2026-06-16).
   `infer_closure` pushes no capture floor (`checker/mod.rs:2841`); an inner fn/closure writing an
   enclosing local *would* type-check then misroute the store to `SetGlobalSlot` (`emit_store`,
