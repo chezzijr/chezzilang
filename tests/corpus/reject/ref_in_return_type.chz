@@ -1,0 +1,4 @@
+# rule: type
+# expect: expected identifier, found 'ref'
+fn f() -> ref int:
+    return 0

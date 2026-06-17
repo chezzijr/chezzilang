@@ -756,6 +756,22 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **`ref T` — transparent by-reference bindings** (2026-06-17) — a binding MODIFIER (locals + params
+  only) that lowers to the existing `std.ref` `Ref[T]` box, **entirely in parser → checker → desugar**
+  (no new runtime/VM op, so two-engine parity is by construction — all read/write/init lowering lives in
+  `src/desugar/mod.rs`, run inside `resolver::build_graph`, which both engines + the checker consume).
+  AUTO-DEREF (the user-approved design — no `^` operator, no call-site `ref` marker): a read `r` lowers
+  to `r.get()`, `r = v` to `r.set(v)`, `r += 1` to `r.set(r.get()+1)`; init creates a fresh `Ref(v)` or
+  ALIASES the same box when the RHS is already a `ref` binding. Coercion table enforced: `ref→ref` param
+  aliases the box, `ref→T` param auto-derefs to a copy, a by-value local or a literal into a `ref` param
+  is an error. `ref` is barred (parse error) from return types, generic args, collection elements, tuple
+  elements, struct fields, and destructuring lets; a `ref`-over-generic-param is a type error. Concurrency:
+  a `ref T` is a `Ref[T]` → non-sendable, so crossing the airlock is rejected (matches `Ref[T]`; use
+  `Shared[T]`). `ref` is now a keyword (corpus-safe; `import std.ref` paths still parse via a path-segment
+  exception). Goldens `examples/ref_binding.chz` + `examples/ref_airlock.chz` (byte-identical on
+  run/--serial/--interp); parser/desugar/checker unit tests + grammar.bnf REF terminal + corpus
+  accept/reject fixtures. Docs: `docs/syntax.md` §3, `gaps.md` (RESOLVED), `docs/future.md` (item 12
+  landed), `docs/concurrency.md`. `cargo test` green (2052+), `cargo test conformance` green, clippy clean.
 - ✅ **Checker control-flow boundary for `spawn:`/`defer:` blocks** (2026-06-16) — fixes a three-way
   divergence where `break`/`continue` lexically nested in an enclosing loop but placed inside a `spawn:`
   or `defer:` block passed `check`, raised `break outside loop` at runtime on the VM, and was silently

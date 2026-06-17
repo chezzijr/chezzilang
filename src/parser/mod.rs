@@ -326,6 +326,10 @@ impl Parser {
         if matches!(self.peek(), Token::Ident(_)) && self.peek_at(1) == &Token::Colon {
             let name = self.expect_ident()?;
             self.expect(&Token::Colon)?;
+            // `r: ref T = …` — a by-reference binding. `ref` is consumed only here (a binding
+            // position); `parse_type` never eats it, so it is a parse error in any other type
+            // position (return type, generic arg, collection element, struct field, tuple element).
+            let is_ref = self.eat(&Token::Ref);
             let ty = self.parse_type()?;
             self.expect(&Token::Assign)?;
             let value = self.parse_expr()?;
@@ -333,6 +337,7 @@ impl Parser {
                 names: vec![name],
                 ty: Some(ty),
                 value,
+                is_ref,
             });
         }
 
@@ -365,7 +370,7 @@ impl Parser {
                         }
                     }
                 }
-                return Ok(StmtKind::Let { names, ty: None, value });
+                return Ok(StmtKind::Let { names, ty: None, value, is_ref: false });
             }
             // `a, b = b, a` — tuple assignment. Only `=` is allowed (compound `+=`, … with multiple
             // targets is rejected); the RHS must be a value list of equal arity.
@@ -436,6 +441,7 @@ impl Parser {
                     names: vec![name],
                     ty: None,
                     value,
+                    is_ref: false,
                 });
             }
             Token::Assign => AssignOp::Eq,
@@ -631,7 +637,12 @@ impl Parser {
         if !self.check(&Token::RParen) {
             loop {
                 let name = self.expect_ident()?;
+                // A `ref` modifier is legal only directly after the `:` of a param annotation
+                // (`x: ref int`). `parse_type` never consumes `ref`, so it is a parse error in any
+                // nested type position (`x: list[ref int]`, `x: (ref int, int)`).
+                let mut is_ref = false;
                 let ty = if self.eat(&Token::Colon) {
+                    is_ref = self.eat(&Token::Ref);
                     Some(self.parse_type()?)
                 } else {
                     None
@@ -656,7 +667,7 @@ impl Parser {
                         "required parameter '{name}' cannot follow a default parameter"
                     )));
                 }
-                params.push(Param { name, ty, default });
+                params.push(Param { name, ty, default, is_ref });
                 if !self.eat(&Token::Comma) {
                     break;
                 }
@@ -1217,11 +1228,21 @@ impl Parser {
     }
 
     fn parse_dotted_path(&mut self) -> PResult<Vec<String>> {
-        let mut path = vec![self.expect_ident()?];
+        let mut path = vec![self.expect_path_segment()?];
         while self.eat(&Token::Dot) {
-            path.push(self.expect_ident()?);
+            path.push(self.expect_path_segment()?);
         }
         Ok(path)
+    }
+
+    /// A module-path segment: an identifier, or the `ref` keyword spelled as a path component (the
+    /// `std.ref` module / `ref.chz` filename). `ref` is a binding-modifier keyword, but a module
+    /// path is not a type position, so accepting it here keeps `import std.ref` working.
+    fn expect_path_segment(&mut self) -> PResult<String> {
+        if self.eat(&Token::Ref) {
+            return Ok("ref".to_string());
+        }
+        self.expect_ident()
     }
 
     // ----- blocks -----
@@ -2589,7 +2610,7 @@ mod tests {
     #[test]
     fn walrus_let() {
         match only("x := 5\n") {
-            StmtKind::Let { names, ty, value } => {
+            StmtKind::Let { names, ty, value, .. } => {
                 assert_eq!(names, vec!["x".to_string()]);
                 assert!(ty.is_none());
                 assert_eq!(value.kind, ExprKind::Int(5));
@@ -2618,7 +2639,7 @@ mod tests {
     #[test]
     fn typed_let() {
         match only("name: str = \"thuan\"\n") {
-            StmtKind::Let { names, ty, value } => {
+            StmtKind::Let { names, ty, value, .. } => {
                 assert_eq!(names, vec!["name".to_string()]);
                 assert_eq!(ty, Some(Type::Named("str".into())));
                 assert_eq!(value.kind, ExprKind::Str("thuan".into()));
@@ -3753,7 +3774,7 @@ mod tests {
     #[test]
     fn destructuring_let_parses() {
         match only("a, b := pair()\n") {
-            StmtKind::Let { names, ty, value } => {
+            StmtKind::Let { names, ty, value, .. } => {
                 assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
                 assert!(ty.is_none());
                 assert!(matches!(value.kind, ExprKind::Call { .. }));
@@ -4043,6 +4064,63 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    // ===== `ref T` binding modifier (ref T) =====
+
+    #[test]
+    fn parses_ref_local_and_param() {
+        match only("r: ref int = 0\n") {
+            StmtKind::Let { is_ref, ty, names, .. } => {
+                assert!(is_ref, "typed-let `ref` modifier should set is_ref");
+                assert_eq!(names, vec!["r".to_string()]);
+                assert_eq!(ty, Some(Type::Named("int".to_string())));
+            }
+            other => panic!("{other:?}"),
+        }
+        match only("fn f(x: ref int):\n    return\n") {
+            StmtKind::Fn(decl) => {
+                let p = &decl.params[0];
+                assert!(p.is_ref, "param `ref` modifier should set is_ref");
+                assert_eq!(p.ty, Some(Type::Named("int".to_string())));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_local_and_param_are_not_ref() {
+        match only("x: int = 0\n") {
+            StmtKind::Let { is_ref, .. } => assert!(!is_ref),
+            other => panic!("{other:?}"),
+        }
+        match only("fn f(x: int):\n    return\n") {
+            StmtKind::Fn(decl) => assert!(!decl.params[0].is_ref),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_ref_in_type_positions() {
+        // `ref` is consumed only in the two binding positions; `parse_type` never eats it, so it is a
+        // parse error in any other type position (the lexer keyword can't start a <type>).
+        for src in [
+            "fn f() -> ref int:\n    return 0\n", // return type
+            "xs: list[ref int] = []\n",           // generic arg / collection element
+            "struct S:\n    count: ref int\n",   // struct field
+            "p: (ref int, int) = (0, 1)\n",      // tuple element
+        ] {
+            assert!(
+                parse_err(src).message.contains("found 'ref'"),
+                "expected a `ref` placement error for: {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_ref_destructuring() {
+        // `ref` is a single-name binding modifier; a destructuring let cannot carry it.
+        let _ = parse_err("a, b: ref int := (0, 1)\n");
     }
 }
 

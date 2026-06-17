@@ -1015,6 +1015,12 @@ impl Checker {
             .params
             .iter()
             .map(|p| match &p.ty {
+                // A `ref T` param is a `Ref[T]` box (its reads/writes were lowered to `.get()`/`.set()`
+                // by desugar). `check_ref_ty` rejects a non-boxable pointee (e.g. a bare generic).
+                Some(t) if p.is_ref => {
+                    self.check_ref_ty(t, span);
+                    self.resolve_type(&Type::Generic("Ref".to_string(), vec![t.clone()]), span)
+                }
                 Some(t) => self.resolve_type(t, span),
                 None if p.name == "self" => Ty::Unknown, // bound in check_fn_body
                 None => {
@@ -1114,6 +1120,23 @@ impl Checker {
             Ty::Unknown
         } else {
             Ty::Nil
+        }
+    }
+
+    /// Validate the pointee type of a `ref T` binding/param. `ref` lowers to a `Ref[T]` box, so the
+    /// pointee must be a concrete (monomorphic) type: a bare in-scope generic parameter is rejected
+    /// (use a first-class `Ref[T]` field/param for a generic box). Other unboxable shapes do not arise
+    /// — the parser already bars `ref` from collection-element / return / field positions.
+    fn check_ref_ty(&mut self, t: &Type, span: Span) {
+        if let Type::Named(n) = t
+            && self.type_params.contains_key(n)
+        {
+            self.error(
+                span,
+                format!(
+                    "`ref {n}` is not allowed: a `ref` binding cannot point at the generic type parameter '{n}' — use a first-class `Ref[{n}]` instead"
+                ),
+            );
         }
     }
 
@@ -1319,7 +1342,8 @@ impl Checker {
     fn check_stmt(&mut self, stmt: &Stmt) {
         let span = stmt.span;
         match &stmt.kind {
-            StmtKind::Let { names, ty, value } => {
+            StmtKind::Let { names, ty, value, is_ref } => {
+                let is_ref = *is_ref;
                 let val_ty = self.infer(value);
                 if names.len() > 1 {
                     // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
@@ -1329,7 +1353,16 @@ impl Checker {
                 let name = &names[0];
                 let declared = match ty {
                     Some(t) => {
-                        let expected = self.resolve_type(t, span);
+                        // A `ref T` binding is, at runtime, a `Ref[T]` box (the desugar pass lowered
+                        // the init to `Ref(v)`/alias and every read to `.get()`); so the binding's
+                        // checker type is `Ref[T]`, not `T`. The pointee element type `T` is rejected
+                        // if it is not boxable (e.g. a bare unconstrained generic) by `check_ref_ty`.
+                        let expected = if is_ref {
+                            self.check_ref_ty(t, span);
+                            self.resolve_type(&Type::Generic("Ref".to_string(), vec![t.clone()]), span)
+                        } else {
+                            self.resolve_type(t, span)
+                        };
                         if !self.assignable(&expected, &val_ty) {
                             self.error(
                                 value.span,

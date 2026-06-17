@@ -22077,6 +22077,34 @@ main()
         assert_file_parity("examples/ref.chz");
     }
 
+    /// `ref T` golden: `examples/ref_binding.chz` — the transparent by-reference binding modifier
+    /// (sugar over `std.ref` `Ref[T]`): create + read/write auto-deref, alias-shares-box, a plain
+    /// `:=` copy that does NOT share, pass-by-ref mutating the caller's binding, a `ref -> T` param
+    /// auto-deref copy, and inner-fn capture-by-ref persisting through the shared box. All lowering
+    /// lives in desugar, so the VM and interp are byte-identical by construction.
+    #[test]
+    fn golden_ref_binding_via_run_file() {
+        let path = fixture("examples/ref_binding.chz");
+        let expected = std::fs::read_to_string(fixture("examples/ref_binding.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/ref_binding.chz");
+    }
+
+    /// `ref T` airlock golden: `examples/ref_airlock.chz` — the concurrency boundary (spec §7). A
+    /// `ref T` box is non-sendable, so its VALUE must be copied across the airlock; the child mutates
+    /// only its copy and the parent's binding is untouched. Byte-identical on interp + VM.
+    #[test]
+    fn golden_ref_airlock_via_run_file() {
+        let path = fixture("examples/ref_airlock.chz");
+        let expected = std::fs::read_to_string(fixture("examples/ref_airlock.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/ref_airlock.chz");
+    }
+
     /// Tuple destructuring + match-on-tuple + guards golden: `examples/tuple_match.chz` — `a, b :=
     /// fn()`, typed tuple value + `.0`/`.1`, `match` literal/binding/guard arms, `Some((a, b))`.
     /// Coverage for behavior that already worked. Byte-matches `.expected`, identical on interp + VM.

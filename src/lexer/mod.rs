@@ -51,6 +51,10 @@ pub enum Token {
     Extern,
     From,
     As,
+    /// `ref` — the by-reference binding modifier (`r: ref int = 0`, `fn f(x: ref int)`).
+    /// A full keyword (corpus-safe: no `.chz` uses `ref` as a bare identifier). Legal only as a
+    /// type prefix in the two binding positions; the parser rejects it everywhere else.
+    Ref,
     And,
     Or,
     Not,
@@ -177,6 +181,7 @@ fn keyword(word: &str) -> Option<Token> {
         "extern" => Token::Extern,
         "from" => Token::From,
         "as" => Token::As,
+        "ref" => Token::Ref,
         "and" => Token::And,
         "or" => Token::Or,
         "not" => Token::Not,
