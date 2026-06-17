@@ -2111,10 +2111,15 @@ impl Checker {
             self.check_stmt(stmt);
         }
         // Option B: a function with a *declared* non-void return type must return a value on every
-        // control-flow path. A bare `fn a(): 10` (no annotation) infers `Ty::Nil` and is exempt;
-        // generators (`-> Iterator[T]`, value-produced via `yield`) are exempt too. If the body can
-        // fall off the end, that silently yields nil at runtime — turn it into a loud static error.
+        // control-flow path. The gate is the user's *annotation* (`decl.ret.is_some()`), NOT the
+        // resolved `sig.ret`: an UN-annotated fn that returns a value on some path (the common
+        // early-return / `find` idiom) infers a non-nil `sig.ret`, but with no `-> T` it stays
+        // legal — gating on `sig.ret` alone would wrongly reject it. A bare `fn a(): 10` (no
+        // annotation) is exempt; generators (`-> Iterator[T]`, value-produced via `yield`) too. If
+        // the body can fall off the end, that silently yields nil at runtime — turn it into a loud
+        // static error.
         if !decl.is_generator
+            && decl.ret.is_some()
             && sig.ret != Ty::Nil
             && !Self::block_terminates(&decl.body)
             && let Some(span) = decl.body.first().map(|s| s.span)

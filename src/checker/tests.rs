@@ -5111,3 +5111,14 @@ fn non_void_fn_while_true_with_break_still_rejected() {
         "fall off the end",
     );
 }
+
+#[test]
+fn non_void_fn_unannotated_conditional_return_not_rejected() {
+    // REGRESSION: Option B must fire only for a DECLARED (`-> T`) non-void return. An UN-annotated
+    // fn that returns a value on *some* path (the common early-return / `find` idiom) infers a
+    // non-nil `sig.ret`, but the user declared no annotation, so it must stay legal.
+    // (a) conditional value-return, no `-> T` annotation.
+    ok("fn a(x: bool):\n    if x:\n        return helper()\nfn helper() -> int:\n    return 5\nfn main():\n    a(true)\nmain()\n");
+    // (b) `find`-style early-return-in-loop, no annotation.
+    ok("fn find(xs: list[int], t: int):\n    for x in xs:\n        if x == t:\n            return x\nfn main():\n    find([1, 2, 3], 2)\nmain()\n");
+}
