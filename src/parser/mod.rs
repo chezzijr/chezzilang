@@ -13,9 +13,6 @@ use crate::ast::*;
 use crate::lexer::{Span, Tok, Token};
 use std::fmt;
 
-/// A parsed comprehension clause: `(loop vars, iterable, optional guard)`.
-type CompClause = (Vec<String>, Box<Expr>, Option<Box<Expr>>);
-
 /// Parsed call arguments: the positional args, then the named (`name = expr`) args, in source order.
 type CallArgs = (Vec<Expr>, Vec<(String, Expr)>);
 
@@ -807,9 +804,10 @@ impl Parser {
         Ok(StmtKind::For { vars, iter, body })
     }
 
-    /// Parse a comprehension's trailing clause: `for <ident>[, <ident>] in <iter> [if <guard>]`.
-    /// The caller has already parsed the element (and confirmed the next token is `for`) and
-    /// consumes the closing bracket/brace afterward. Mirrors `parse_for`'s var/`in`/iter parsing.
+    /// Parse one comprehension `for` clause: `for <ident>[, <ident>] in <iter> [if <guard>]…`.
+    /// Zero or more `if` guards may follow (Python allows an `if` after any clause, even a chain).
+    /// The caller loops this while the next token is `for`, then consumes the closing bracket/brace.
+    /// Mirrors `parse_for`'s var/`in`/iter parsing.
     fn parse_comp_clause(&mut self) -> PResult<CompClause> {
         self.expect(&Token::For)?;
         let mut vars = vec![self.expect_ident()?];
@@ -818,12 +816,21 @@ impl Parser {
         }
         self.expect(&Token::In)?;
         let iter = Box::new(self.parse_expr()?);
-        let guard = if self.eat(&Token::If) {
-            Some(Box::new(self.parse_expr()?))
-        } else {
-            None
-        };
-        Ok((vars, iter, guard))
+        let mut guards = Vec::new();
+        while self.eat(&Token::If) {
+            guards.push(self.parse_expr()?);
+        }
+        Ok(CompClause { vars, iter, guards })
+    }
+
+    /// Parse one or more comprehension `for` clauses (the caller has already parsed the element and
+    /// confirmed the next token is `for`). Returns clauses in source order (first = outermost loop).
+    fn parse_comp_clauses(&mut self) -> PResult<Vec<CompClause>> {
+        let mut clauses = vec![self.parse_comp_clause()?];
+        while self.check(&Token::For) {
+            clauses.push(self.parse_comp_clause()?);
+        }
+        Ok(clauses)
     }
 
     fn parse_while(&mut self) -> PResult<StmtKind> {
@@ -1754,15 +1761,13 @@ impl Parser {
                 } else {
                     let first = self.parse_expr()?;
                     if self.check(&Token::For) {
-                        let (vars, iter, guard) = self.parse_comp_clause()?;
+                        let clauses = self.parse_comp_clauses()?;
                         self.expect(&Token::RBracket)?;
                         ExprKind::Comprehension {
                             kind: CompKind::List,
                             key: None,
                             elem: Box::new(first),
-                            vars,
-                            iter,
-                            guard,
+                            clauses,
                         }
                     } else {
                         let mut elems = vec![first];
@@ -1791,15 +1796,13 @@ impl Parser {
                         let value = self.parse_expr()?;
                         if self.check(&Token::For) {
                             // Map comprehension: `{k: v for k, v in m}`.
-                            let (vars, iter, guard) = self.parse_comp_clause()?;
+                            let clauses = self.parse_comp_clauses()?;
                             self.expect(&Token::RBrace)?;
                             ExprKind::Comprehension {
                                 kind: CompKind::Map,
                                 key: Some(Box::new(first)),
                                 elem: Box::new(value),
-                                vars,
-                                iter,
-                                guard,
+                                clauses,
                             }
                         } else {
                             // Map literal: finish the first pair, then the rest.
@@ -1819,15 +1822,13 @@ impl Parser {
                         }
                     } else if self.check(&Token::For) {
                         // Set comprehension: `{x for x in xs}`.
-                        let (vars, iter, guard) = self.parse_comp_clause()?;
+                        let clauses = self.parse_comp_clauses()?;
                         self.expect(&Token::RBrace)?;
                         ExprKind::Comprehension {
                             kind: CompKind::Set,
                             key: None,
                             elem: Box::new(first),
-                            vars,
-                            iter,
-                            guard,
+                            clauses,
                         }
                     } else {
                         // Set literal: a comma-separated list of elements.
@@ -3081,13 +3082,14 @@ mod tests {
             panic!()
         };
         match e.kind {
-            ExprKind::Comprehension { kind, key, elem, vars, iter, guard } => {
+            ExprKind::Comprehension { kind, key, elem, clauses } => {
                 assert_eq!(kind, CompKind::List);
                 assert!(key.is_none());
                 assert!(matches!(elem.kind, ExprKind::Binary { .. }));
-                assert_eq!(vars, vec!["x".to_string()]);
-                assert!(matches!(iter.kind, ExprKind::Ident(_)));
-                assert!(guard.is_some());
+                assert_eq!(clauses.len(), 1);
+                assert_eq!(clauses[0].vars, vec!["x".to_string()]);
+                assert!(matches!(clauses[0].iter.kind, ExprKind::Ident(_)));
+                assert_eq!(clauses[0].guards.len(), 1);
             }
             other => panic!("{other:?}"),
         }
@@ -3099,10 +3101,11 @@ mod tests {
             panic!()
         };
         match e.kind {
-            ExprKind::Comprehension { kind, iter, guard, .. } => {
+            ExprKind::Comprehension { kind, clauses, .. } => {
                 assert_eq!(kind, CompKind::List);
-                assert!(matches!(iter.kind, ExprKind::Range { .. }));
-                assert!(guard.is_none());
+                assert_eq!(clauses.len(), 1);
+                assert!(matches!(clauses[0].iter.kind, ExprKind::Range { .. }));
+                assert!(clauses[0].guards.is_empty());
             }
             other => panic!("{other:?}"),
         }
@@ -3128,11 +3131,60 @@ mod tests {
             panic!()
         };
         match e.kind {
-            ExprKind::Comprehension { kind, key, elem, vars, .. } => {
+            ExprKind::Comprehension { kind, key, elem, clauses } => {
                 assert_eq!(kind, CompKind::Map);
                 assert!(matches!(key.unwrap().kind, ExprKind::Ident(_)));
                 assert!(matches!(elem.kind, ExprKind::Ident(_)));
-                assert_eq!(vars, vec!["k".to_string(), "v".to_string()]);
+                assert_eq!(clauses.len(), 1);
+                assert_eq!(clauses[0].vars, vec!["k".to_string(), "v".to_string()]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_for_clauses_parse() {
+        let StmtKind::Expr(e) = only("[x for x in xs for y in ys]\n") else {
+            panic!()
+        };
+        match e.kind {
+            ExprKind::Comprehension { kind, clauses, .. } => {
+                assert_eq!(kind, CompKind::List);
+                assert_eq!(clauses.len(), 2);
+                assert_eq!(clauses[0].vars, vec!["x".to_string()]);
+                assert!(clauses[0].guards.is_empty());
+                assert_eq!(clauses[1].vars, vec!["y".to_string()]);
+                assert!(clauses[1].guards.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn guard_after_nonfinal_clause_parses() {
+        // The `if x > 0` binds to the FIRST clause (the one it follows), not globally.
+        let StmtKind::Expr(e) = only("[x for x in xs if x > 0 for y in ys]\n") else {
+            panic!()
+        };
+        match e.kind {
+            ExprKind::Comprehension { clauses, .. } => {
+                assert_eq!(clauses.len(), 2);
+                assert_eq!(clauses[0].guards.len(), 1);
+                assert!(clauses[1].guards.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn chained_guards_on_one_clause_parse() {
+        let StmtKind::Expr(e) = only("[x for x in xs if x > 0 if x < 10]\n") else {
+            panic!()
+        };
+        match e.kind {
+            ExprKind::Comprehension { clauses, .. } => {
+                assert_eq!(clauses.len(), 1);
+                assert_eq!(clauses[0].guards.len(), 2);
             }
             other => panic!("{other:?}"),
         }

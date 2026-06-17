@@ -210,8 +210,10 @@ Tracked in other docs; surfaced here so they aren't lost. None scheduled, but ea
   **scalars only**. Deferred: structs-by-value, callbacks / function pointers, varargs, opaque pointers /
   **userdata** (`Box<dyn Any>` for opaque `File`/`Regex` handles — io is whole-string today), `char*`
   ownership transfer / `free`. Needed for richer C interop / any future self-host.
-- **Comprehension nested clauses** — `[x for x in xs for y in ys]` deferred (syntax.md:358); single-clause
-  + guard shipped.
+- **✅ [RESOLVED] Comprehension nested clauses** — `[x for x in xs for y in ys]` now shipped
+  (`auto-task/comprehension-nested-clauses`): 2+ `for` clauses (cartesian/nested, first outermost,
+  later clauses see earlier bindings), `if` guards after any clause, across list/set/map. Both engines
+  + grammar (`<compClauses>`/`<compGuards>`). `examples/comprehensions_nested.chz`.
 - **`std.cancel` tree propagation** — tokens are **flat** in v1; parent/child derivation (cancel a parent
   → cancel its children) is a documented follow-up (PROGRESS.md:244).
 - **Graceful shutdown of accept loops** + a per-connection handler→acceptor signal channel — future work

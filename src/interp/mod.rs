@@ -2,8 +2,8 @@
 //! Chezzi before the bytecode VM (M5). Single-file programs run here.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern, MatchArm,
-    MatchExprArm, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp, WaitArm, WaitTarget,
+    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern,
+    MatchArm, MatchExprArm, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp, WaitArm, WaitTarget,
 };
 use crate::{lexer, parser};
 
@@ -81,6 +81,14 @@ enum Flow {
     Break,
     /// `continue` — unwind to the innermost enclosing loop's next iteration.
     Continue,
+}
+
+/// The accumulator a comprehension builds, threaded through the clause recursion so the innermost
+/// clause can append/insert directly (with the same dedup/upsert as a set/map literal).
+enum CompAcc {
+    List(Vec<Value>),
+    Set(SetData),
+    Map(MapData),
 }
 
 /// Whether a block directly contains a `defer` statement (so it is a defer scope). Nested blocks
@@ -413,16 +421,9 @@ impl Interp {
                 }
                 Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map))))
             }
-            ExprKind::Comprehension { kind, key, elem, vars, iter, guard } => self
-                .eval_comprehension(
-                    *kind,
-                    key.as_deref(),
-                    elem,
-                    vars,
-                    iter,
-                    guard.as_deref(),
-                    expr.span,
-                ),
+            ExprKind::Comprehension { kind, key, elem, clauses } => {
+                self.eval_comprehension(*kind, key.as_deref(), elem, clauses, expr.span)
+            }
             ExprKind::Set(elems) => {
                 let mut set = SetData::default();
                 for e in elems {
@@ -3704,92 +3705,77 @@ impl Interp {
 
     /// Evaluate a comprehension into a fresh list / set / map. Iteration reuses the same paths as a
     /// `for` loop (range, struct iterator, or materialized list/map/set/str — see
-    /// `collect_iter_rows`); each row binds `vars` in a fresh scope, the guard (if any) is tested,
-    /// and the element (plus key, for maps) is collected. Set elements and map keys dedupe exactly
-    /// like their literals.
-    #[allow(clippy::too_many_arguments)]
+    /// `collect_iter_rows`). Multiple `for` clauses nest (first clause outermost, last innermost):
+    /// `eval_comp_clauses` recurses left-to-right, binding each clause's vars in a fresh scope so a
+    /// later clause's `iter`/guards see earlier bindings — exactly the order the compiler's nested
+    /// `compile_for` produces (parity). Each clause's guards are tested in turn; at the innermost
+    /// clause the element (plus key, for maps) is collected into the accumulator. Set elements and
+    /// map keys dedupe exactly like their literals.
     fn eval_comprehension(
         &mut self,
         kind: CompKind,
         key: Option<&Expr>,
         elem: &Expr,
-        vars: &[String],
-        iter: &Expr,
-        guard: Option<&Expr>,
+        clauses: &[CompClause],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let rows = self.collect_iter_rows(vars, iter, span)?;
-        match kind {
-            CompKind::List => {
-                let mut out = Vec::with_capacity(rows.len());
-                for row in rows {
-                    if let Some((_, v)) = self.eval_comp_row(vars, row, None, elem, guard, span)? {
-                        out.push(v);
-                    }
-                }
-                Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(out))))
-            }
-            CompKind::Set => {
-                let mut set = SetData::default();
-                for row in rows {
-                    if let Some((_, v)) = self.eval_comp_row(vars, row, None, elem, guard, span)? {
-                        let hx = self.hash_value(&v, span)?;
-                        if !set.candidates(hx).iter().any(|&p| values_equal(&set.entries[p].1, &v)) {
-                            set.push(hx, v);
-                        }
-                    }
-                }
-                Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(set))))
-            }
-            CompKind::Map => {
-                let mut map = MapData::default();
-                for row in rows {
-                    if let Some((k, v)) = self.eval_comp_row(vars, row, key, elem, guard, span)? {
-                        let k = k.expect("a map comprehension evaluates a key per row");
-                        let hk = self.hash_value(&k, span)?;
-                        match map.candidates(hk).iter().copied().find(|&p| values_equal(&map.entries[p].1, &k)) {
-                            Some(i) => map.entries[i].2 = v,
-                            None => map.push(hk, k, v),
-                        }
-                    }
-                }
-                Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map))))
-            }
-        }
+        let mut acc = match kind {
+            CompKind::List => CompAcc::List(Vec::new()),
+            CompKind::Set => CompAcc::Set(SetData::default()),
+            CompKind::Map => CompAcc::Map(MapData::default()),
+        };
+        self.eval_comp_clauses(clauses, 0, key, elem, span, &mut acc)?;
+        Ok(match acc {
+            CompAcc::List(out) => Value::List(std::rc::Rc::new(std::cell::RefCell::new(out))),
+            CompAcc::Set(set) => Value::Set(std::rc::Rc::new(std::cell::RefCell::new(set))),
+            CompAcc::Map(map) => Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map))),
+        })
     }
 
-    /// Evaluate one comprehension row: bind `vars` in a fresh scope, test the guard, and (if it
-    /// passes) evaluate the key (map only) and element. Returns `None` when the guard fails. The
-    /// scope is popped even on error.
-    fn eval_comp_row(
+    /// Recurse over comprehension clauses starting at `idx`. At `clauses[idx]`, collect that clause's
+    /// rows (in the CURRENT env, which already has earlier clauses' vars bound), then for each row
+    /// push a scope, bind the vars, test the clause's guards (skip the row if any is false), and
+    /// either recurse to `idx+1` or — if this is the last clause — evaluate the key/element into
+    /// `acc`. Each row's scope is popped even on error.
+    fn eval_comp_clauses(
         &mut self,
-        vars: &[String],
-        row: Vec<Value>,
+        clauses: &[CompClause],
+        idx: usize,
         key: Option<&Expr>,
         elem: &Expr,
-        guard: Option<&Expr>,
         span: Span,
-    ) -> Result<Option<(Option<Value>, Value)>, RuntimeError> {
-        self.env.push();
-        for (name, val) in vars.iter().zip(row) {
-            self.env.define(name, val);
+        acc: &mut CompAcc,
+    ) -> Result<(), RuntimeError> {
+        let clause = &clauses[idx];
+        let rows = self.collect_iter_rows(&clause.vars, &clause.iter, span)?;
+        for row in rows {
+            self.env.push();
+            for (name, val) in clause.vars.iter().zip(row) {
+                self.env.define(name, val);
+            }
+            let r = self.eval_comp_row_step(clauses, idx, key, elem, span, acc);
+            self.env.pop();
+            r?;
         }
-        let result = self.eval_comp_row_inner(key, elem, guard, span);
-        self.env.pop();
-        result
+        Ok(())
     }
 
-    fn eval_comp_row_inner(
+    /// Body of one comprehension row (scope already pushed/bound): test this clause's guards, then
+    /// recurse to the next clause or collect the element. Split out so the caller can always pop the
+    /// scope, even on error.
+    fn eval_comp_row_step(
         &mut self,
+        clauses: &[CompClause],
+        idx: usize,
         key: Option<&Expr>,
         elem: &Expr,
-        guard: Option<&Expr>,
         span: Span,
-    ) -> Result<Option<(Option<Value>, Value)>, RuntimeError> {
-        if let Some(g) = guard {
+        acc: &mut CompAcc,
+    ) -> Result<(), RuntimeError> {
+        for g in &clauses[idx].guards {
             match self.eval(g)? {
                 Value::Bool(true) => {}
-                Value::Bool(false) => return Ok(None),
+                Value::Bool(false) => return Ok(()),
                 // The checker guarantees a bool guard; this is a defensive fallback.
                 other => {
                     return Err(RuntimeError {
@@ -3799,12 +3785,33 @@ impl Interp {
                 }
             }
         }
+        if idx + 1 < clauses.len() {
+            return self.eval_comp_clauses(clauses, idx + 1, key, elem, span, acc);
+        }
+        // Innermost clause: evaluate the key (map only) then the element, and collect.
         let k = match key {
             Some(k) => Some(self.eval(k)?),
             None => None,
         };
         let v = self.eval(elem)?;
-        Ok(Some((k, v)))
+        match acc {
+            CompAcc::List(out) => out.push(v),
+            CompAcc::Set(set) => {
+                let hx = self.hash_value(&v, span)?;
+                if !set.candidates(hx).iter().any(|&p| values_equal(&set.entries[p].1, &v)) {
+                    set.push(hx, v);
+                }
+            }
+            CompAcc::Map(map) => {
+                let k = k.expect("a map comprehension evaluates a key per row");
+                let hk = self.hash_value(&k, span)?;
+                match map.candidates(hk).iter().copied().find(|&p| values_equal(&map.entries[p].1, &k)) {
+                    Some(i) => map.entries[i].2 = v,
+                    None => map.push(hk, k, v),
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Collect every row of an iterable for a comprehension (eager: comprehensions have no `break`,
@@ -5265,6 +5272,38 @@ mod tests {
         assert_eq!(
             run("m := {\"a\": 1, \"b\": 2}\nprint({k: v * 10 for k, v in m})\n"),
             "{a: 10, b: 20}\n"
+        );
+    }
+
+    #[test]
+    fn interp_two_clause_list_comprehension() {
+        assert_eq!(
+            run("print([x + y for x in [1, 2] for y in [10, 20]])\n"),
+            "[11, 21, 12, 22]\n"
+        );
+    }
+
+    #[test]
+    fn interp_nested_comp_guard_and_later_var() {
+        assert_eq!(
+            run("print([x * y for x in 1..4 if x % 2 == 1 for y in [10, 20]])\n"),
+            "[10, 20, 30, 60]\n"
+        );
+        assert_eq!(
+            run("print([y for xs in [[1, 2], [3], [4, 5]] for y in xs])\n"),
+            "[1, 2, 3, 4, 5]\n"
+        );
+    }
+
+    #[test]
+    fn interp_nested_set_and_map_comprehension() {
+        assert_eq!(
+            run("print({x + y for x in [0, 3] for y in [0, 3]})\n"),
+            "{0, 3, 6}\n"
+        );
+        assert_eq!(
+            run("print({x * 10 + y: x + y for x in [1, 2] for y in [3]})\n"),
+            "{13: 4, 23: 5}\n"
         );
     }
 

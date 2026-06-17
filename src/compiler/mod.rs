@@ -12,9 +12,9 @@
 //!      forward references resolve) and one proto per `fn` / method / closure.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern, MatchArm,
-    MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, UnaryOp, WaitArm,
-    WaitTarget,
+    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern,
+    MatchArm, MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, UnaryOp,
+    WaitArm, WaitTarget,
 };
 use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ResolvedImport};
@@ -1293,18 +1293,19 @@ impl Compiler {
     /// Compile a comprehension by reusing `compile_for`: seed a hidden accumulator, then run a
     /// synthesized loop body that appends the element (`push`/`add`) or inserts the key→value pair.
     /// This means comprehensions iterate every collection — and the struct-iterator protocol —
-    /// exactly like a `for` loop, with no duplicated iteration logic. The finished accumulator is
-    /// left on the stack as the expression's value.
-    #[allow(clippy::too_many_arguments)]
+    /// exactly like a `for` loop, with no duplicated iteration logic. Multiple `for` clauses nest
+    /// (first clause outermost, last innermost) by folding the clauses RIGHT-TO-LEFT: the innermost
+    /// body is the accumulator append; each clause wraps it in that clause's guards (an `if`) and
+    /// then in a `compile_for`. `compile_for` opens a scope and binds the clause's vars, so a later
+    /// clause's `iter`/guards (which sit inside an earlier `compile_for`'s body) see the earlier
+    /// bindings. The finished accumulator is left on the stack as the expression's value.
     fn compile_comprehension(
         &mut self,
         fc: &mut FnComp,
         kind: CompKind,
         key: Option<&Expr>,
         elem: &Expr,
-        vars: &[String],
-        iter: &Expr,
-        guard: Option<&Expr>,
+        clauses: &[CompClause],
         span: Span,
     ) -> Result<(), CompileError> {
         fc.begin_scope();
@@ -1320,7 +1321,7 @@ impl Compiler {
         fc.emit(Op::SetLocal(acc_slot), span);
 
         let acc = Expr { kind: ExprKind::Ident(acc_name), span };
-        let body_stmt = match kind {
+        let innermost_stmt = match kind {
             CompKind::List => method_call_stmt(acc, "push", vec![elem.clone()], span),
             CompKind::Set => method_call_stmt(acc, "add", vec![elem.clone()], span),
             CompKind::Map => {
@@ -1338,18 +1339,38 @@ impl Compiler {
                 }
             }
         };
-        let body = match guard {
-            Some(g) => vec![Stmt {
-                kind: StmtKind::If {
-                    branches: vec![(g.clone(), vec![body_stmt])],
-                    else_block: None,
+
+        // Build the synthesized nested-loop body from the inside out, then compile only the
+        // outermost `for` (which contains all the inner ones). Folding right-to-left makes clause 0
+        // the outermost loop, matching the interp's left-to-right recursion (parity).
+        let mut body: Vec<Stmt> = vec![innermost_stmt];
+        for clause in clauses.iter().rev() {
+            // Wrap in this clause's guards (each `if` filters the body; chained guards nest).
+            for g in clause.guards.iter().rev() {
+                body = vec![Stmt {
+                    kind: StmtKind::If {
+                        branches: vec![(g.clone(), body)],
+                        else_block: None,
+                    },
+                    span,
+                }];
+            }
+            // Wrap in this clause's `for`. The first clause is compiled last (outermost).
+            body = vec![Stmt {
+                kind: StmtKind::For {
+                    vars: clause.vars.clone(),
+                    iter: (*clause.iter).clone(),
+                    body,
                 },
                 span,
-            }],
-            None => vec![body_stmt],
-        };
+            }];
+        }
 
-        self.compile_for(fc, vars, iter, &body, span)?;
+        // `body` is now a single outermost `for` statement. Compile it via `compile_for`.
+        let Stmt { kind: StmtKind::For { vars, iter, body: inner }, .. } = &body[0] else {
+            unreachable!("a comprehension always has at least one for clause")
+        };
+        self.compile_for(fc, vars, iter, inner, span)?;
         // The comprehension's value is the finished accumulator.
         fc.emit(Op::GetLocal(acc_slot), span);
         fc.end_scope();
@@ -1818,17 +1839,9 @@ impl Compiler {
                 }
                 fc.emit(Op::NewSet(elems.len()), expr.span);
             }
-            ExprKind::Comprehension { kind, key, elem, vars, iter, guard } => self
-                .compile_comprehension(
-                    fc,
-                    *kind,
-                    key.as_deref(),
-                    elem,
-                    vars,
-                    iter,
-                    guard.as_deref(),
-                    expr.span,
-                )?,
+            ExprKind::Comprehension { kind, key, elem, clauses } => {
+                self.compile_comprehension(fc, *kind, key.as_deref(), elem, clauses, expr.span)?
+            }
             ExprKind::Unary { op, expr: inner } => {
                 self.compile_expr(fc, inner)?;
                 match op {

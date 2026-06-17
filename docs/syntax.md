@@ -410,12 +410,18 @@ surface via default parameters: `slice(self, start: int? = None, end: int? = Non
 [i for i in 0..10]               # over a range (any iterable works)
 {x % 3 for x in xs}              # set: duplicates collapse
 {k: v * 10 for k, v in scores}   # map: `for k, v` binds a map's entries
+[x + y for x in xs for y in ys]  # nested: cartesian product (ys inner-most, like nested for-loops)
+[y for xs in xss for y in xs]    # nested: a later clause references an earlier clause's variable
+[x for x in xs if x > 0 for y in ys]   # a guard may follow ANY clause (filters that clause)
 ```
 
-One `for` clause (binds one name, or two — `for k, v in m` — over a map's entries) and an optional
-`if` guard. The loop variable is scoped to the comprehension. The iterable is anything a `for` loop
-accepts (list/map/set/str/range and struct iterators); set elements and map keys must be `Hashable`.
-(Deferred: nested clauses, e.g. `[x for x in xs for y in ys]`.)
+One or more `for` clauses, each binding one name (or two — `for k, v in m` — over a map's entries)
+and optionally followed by one or more `if` guards. With multiple clauses the iteration nests like
+nested `for` loops — the first clause is outermost, the last innermost — so a later clause may
+reference an earlier clause's binding (`for xs in xss for y in xs`), and a guard after a non-final
+clause filters at that level (Python semantics). The loop variables are scoped to the comprehension.
+The iterable is anything a `for` loop accepts (list/map/set/str/range and struct iterators); set
+elements and map keys must be `Hashable`.
 
 ## 7. Structs  (M3)
 

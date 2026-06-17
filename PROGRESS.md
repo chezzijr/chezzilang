@@ -756,6 +756,16 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **Comprehension nested clauses** (2026-06-17, `auto-task/comprehension-nested-clauses`) — a
+  comprehension may now have 2+ `for` clauses (cartesian/nested iteration, first clause outermost,
+  later clauses see earlier clauses' bindings), with one or more `if` guards allowed after ANY clause,
+  across list/set/map forms (Python semantics). The `Comprehension` AST node now carries
+  `clauses: Vec<CompClause>` (each `{ vars, iter, guards }`). VM folds the clauses right-to-left into
+  nested `compile_for`s (reusing the for-loop lowering verbatim — no new bytecode); interp recurses
+  left-to-right (`eval_comp_clauses`) for byte-identical iteration order + guard placement. Checker
+  scopes progressively (per-clause `for_bindings`/`declare`, channel-drain rejection per clause).
+  Grammar gains `<compClauses>`/`<compGuards>` (conformance green). `examples/comprehensions_nested.chz`
+  + 5 cases asserted byte-identical on VM/`--serial`/`--interp`. Single-clause path unchanged.
 - ✅ **Checker control-flow boundary for `spawn:`/`defer:` blocks** (2026-06-16) — fixes a three-way
   divergence where `break`/`continue` lexically nested in an enclosing loop but placed inside a `spawn:`
   or `defer:` block passed `check`, raised `break outside loop` at runtime on the VM, and was silently

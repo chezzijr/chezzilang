@@ -1,0 +1,24 @@
+# Nested comprehension clauses: a comprehension may have two or more `for` clauses (cartesian /
+# nested iteration, like nested `for` loops — the first clause is outermost). Later clauses see the
+# bindings of earlier ones, and an `if` guard may follow any clause. Works for list, set, and map.
+
+fn main():
+    # two clauses: the second iterates inner-most for each value of the first (Python order)
+    print([x + y for x in [1, 2] for y in [10, 20]])
+
+    # three clauses: full cartesian product, first clause outermost
+    print([a * 100 + b * 10 + c for a in [1, 2] for b in [3] for c in [4, 5]])
+
+    # a guard after a NON-final clause: it filters the clause it follows (keep odd x), then pairs
+    print([x * y for x in 1..4 if x % 2 == 1 for y in [10, 20]])
+
+    # a later clause references an earlier clause's variable: flatten a list-of-lists
+    print([y for xs in [[1, 2], [3], [4, 5]] for y in xs])
+
+    # nested set comprehension: duplicate sums collapse
+    print({x + y for x in [0, 3] for y in [0, 3]})
+
+    # nested map comprehension: the key/value see all clause variables
+    print({x * 10 + y: x + y for x in [1, 2] for y in [3, 4]})
+
+main()

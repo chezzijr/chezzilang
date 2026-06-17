@@ -9,7 +9,7 @@
 mod ty;
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, Bound, CompKind, DeferTarget, Expr, ExprKind, FnDecl, Import,
+    AssignOp, BinaryOp, Block, Bound, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl, Import,
     LitPattern, MethodSig, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, TypeParam,
     UnaryOp, WaitArm, WaitTarget,
 };
@@ -2882,8 +2882,8 @@ impl Checker {
             ExprKind::Tuple(items) => Ty::Tuple(items.iter().map(|e| self.infer(e)).collect()),
             ExprKind::Map(entries) => self.infer_map(entries),
             ExprKind::Set(elems) => self.infer_set(elems),
-            ExprKind::Comprehension { kind, key, elem, vars, iter, guard } => {
-                self.infer_comprehension(*kind, key.as_deref(), elem, vars, iter, guard.as_deref())
+            ExprKind::Comprehension { kind, key, elem, clauses } => {
+                self.infer_comprehension(*kind, key.as_deref(), elem, clauses)
             }
             ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner),
             ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
@@ -3042,41 +3042,45 @@ impl Checker {
         Ty::map(key, value)
     }
 
-    /// Infer a comprehension's type. Binds the loop variable(s) to the iterand's element type(s)
-    /// via `for_bindings` (the exact path a `for` loop uses, so every iterable behaves the same),
-    /// checks the optional guard is `Bool`, then infers the element (and key) in that scope. The
-    /// result mirrors `infer_list`/`infer_set`/`infer_map`, including the Hashable check on set
-    /// elements and map keys.
+    /// Infer a comprehension's type. Walks each `for` clause in order (first outermost): binds the
+    /// clause's loop variable(s) to the iterand's element type(s) via `for_bindings` (the exact path
+    /// a `for` loop uses, so every iterable behaves the same) — inferred in the scope of the earlier
+    /// clauses so a later clause can reference an earlier binding — and checks each guard is `Bool`.
+    /// Then it infers the element (and key) in the cumulative scope. The result mirrors
+    /// `infer_list`/`infer_set`/`infer_map`, including the Hashable check on set elements and map keys.
     fn infer_comprehension(
         &mut self,
         kind: CompKind,
         key: Option<&Expr>,
         elem: &Expr,
-        vars: &[String],
-        iter: &Expr,
-        guard: Option<&Expr>,
+        clauses: &[CompClause],
     ) -> Ty {
-        let bindings = self.for_bindings(vars, iter);
-        // A comprehension materializes eagerly, but a `Channel` is a blocking iteration form whose
-        // termination depends on `close()`. Draining it into a list/set/map is out of scope and would
-        // DIVERGE between engines (the VM's `compile_comprehension` reuses the channel-aware
-        // `compile_for`, but the interp oracle's comprehension path can't iterate a channel). Reject on
-        // both engines instead — the `for v in ch:` statement form is the way to drain a channel.
-        if matches!(self.infer(iter), Ty::Channel(_)) {
-            self.error(
-                iter.span,
-                "a channel cannot be drained in a comprehension; use the `for v in ch:` statement form",
-            );
-        }
         self.push_scope();
-        for (name, ty) in bindings {
-            // Intentionally NOT `mark_loop_var`: a comprehension body is an expression, so its
-            // binding can't be assigned to — no divergence to guard against. If a statement-bearing
-            // comprehension is ever added, mark these too (see `check_assign` / for-loop handling).
-            self.declare(&name, ty);
-        }
-        if let Some(g) = guard {
-            self.expect_bool(g, "comprehension guard");
+        for clause in clauses {
+            // `for_bindings` infers the iter IN the current scope, so later clauses see earlier
+            // bindings (the whole point of nesting). Compute before declaring this clause's vars.
+            let bindings = self.for_bindings(&clause.vars, &clause.iter);
+            // A comprehension materializes eagerly, but a `Channel` is a blocking iteration form whose
+            // termination depends on `close()`. Draining it into a list/set/map is out of scope and would
+            // DIVERGE between engines (the VM's `compile_comprehension` reuses the channel-aware
+            // `compile_for`, but the interp oracle's comprehension path can't iterate a channel). Reject
+            // on both engines instead — the `for v in ch:` statement form is the way to drain a channel.
+            // Checked per clause so a channel in ANY clause is rejected.
+            if matches!(self.infer(&clause.iter), Ty::Channel(_)) {
+                self.error(
+                    clause.iter.span,
+                    "a channel cannot be drained in a comprehension; use the `for v in ch:` statement form",
+                );
+            }
+            for (name, ty) in bindings {
+                // Intentionally NOT `mark_loop_var`: a comprehension body is an expression, so its
+                // binding can't be assigned to — no divergence to guard against. If a statement-bearing
+                // comprehension is ever added, mark these too (see `check_assign` / for-loop handling).
+                self.declare(&name, ty);
+            }
+            for g in &clause.guards {
+                self.expect_bool(g, "comprehension guard");
+            }
         }
         let result = match kind {
             CompKind::List => Ty::list(self.infer(elem)),
@@ -5619,17 +5623,23 @@ fn collect_free_calls_expr(
             collect_free_calls_expr(k, fns, scopes, out);
             collect_free_calls_expr(v, fns, scopes, out);
         }),
-        ExprKind::Comprehension { key, elem, iter, guard, vars, .. } => {
-            collect_free_calls_expr(iter, fns, scopes, out); // iter binds in the OUTER scope
-            scopes.push(vars.iter().cloned().collect());
+        ExprKind::Comprehension { key, elem, clauses, .. } => {
+            // Clauses nest: each clause's iter is in the scope of earlier clauses; its vars then
+            // bind for everything after. Push one scope per clause and pop them all at the end.
+            for clause in clauses {
+                collect_free_calls_expr(&clause.iter, fns, scopes, out);
+                scopes.push(clause.vars.iter().cloned().collect());
+                for g in &clause.guards {
+                    collect_free_calls_expr(g, fns, scopes, out);
+                }
+            }
             if let Some(k) = key {
                 collect_free_calls_expr(k, fns, scopes, out);
             }
             collect_free_calls_expr(elem, fns, scopes, out);
-            if let Some(g) = guard {
-                collect_free_calls_expr(g, fns, scopes, out);
+            for _ in clauses {
+                scopes.pop();
             }
-            scopes.pop();
         }
         ExprKind::Unary { expr, .. } => collect_free_calls_expr(expr, fns, scopes, out),
         ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
@@ -5813,17 +5823,23 @@ fn find_mutations_in_expr(
             find_mutations_in_expr(body, globals, scopes, out);
             scopes.pop();
         }
-        ExprKind::Comprehension { key, elem, iter, guard, vars, .. } => {
-            find_mutations_in_expr(iter, globals, scopes, out);
-            scopes.push(vars.iter().cloned().collect());
+        ExprKind::Comprehension { key, elem, clauses, .. } => {
+            // Clauses nest: each clause's iter is in the scope of earlier clauses; its vars then
+            // bind for everything after. Push one scope per clause and pop them all at the end.
+            for clause in clauses {
+                find_mutations_in_expr(&clause.iter, globals, scopes, out);
+                scopes.push(clause.vars.iter().cloned().collect());
+                for g in &clause.guards {
+                    find_mutations_in_expr(g, globals, scopes, out);
+                }
+            }
             if let Some(k) = key {
                 find_mutations_in_expr(k, globals, scopes, out);
             }
             find_mutations_in_expr(elem, globals, scopes, out);
-            if let Some(g) = guard {
-                find_mutations_in_expr(g, globals, scopes, out);
+            for _ in clauses {
+                scopes.pop();
             }
-            scopes.pop();
         }
         ExprKind::Call { callee, args, named, .. } => {
             find_mutations_in_expr(callee, globals, scopes, out);

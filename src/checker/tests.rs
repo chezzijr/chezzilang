@@ -2818,6 +2818,37 @@ fn comprehension_var_out_of_scope_after() {
 }
 
 #[test]
+fn nested_comp_later_clause_sees_earlier_var_typechecks() {
+    // The second clause's iterable references the first clause's binding (a list-of-lists flatten).
+    ok("ys: list[int] = [y for xs in [[1, 2], [3]] for y in xs]\n");
+}
+
+#[test]
+fn nested_comp_two_clause_element_type() {
+    ok("ps: list[int] = [x + y for x in [1, 2] for y in [10, 20]]\n");
+}
+
+#[test]
+fn nested_comp_unbound_in_later_clause_errors() {
+    // `zzz` is bound nowhere; a later clause's iterable must still resolve names normally.
+    rejects("ys := [y for x in [1, 2] for y in zzz]\n", "unknown name 'zzz'");
+}
+
+#[test]
+fn nested_comp_guard_after_nonfinal_clause_typechecks() {
+    ok("ps: list[int] = [x * y for x in [1, 2, 3] if x > 0 for y in [10, 20]]\n");
+}
+
+#[test]
+fn nested_comp_channel_in_later_clause_rejected() {
+    // The channel-drain rejection must run per clause, not just the first.
+    entry_rejects(
+        "fn main():\n    ch := Channel[int]()\n    xs := [c for x in [1, 2] for c in ch]\n",
+        "a channel cannot be drained in a comprehension",
+    );
+}
+
+#[test]
 fn native_os_exit_takes_int() {
     entry_ok("import std.os\nfn main():\n    os.exit(1)\n");
 }

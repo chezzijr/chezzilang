@@ -363,14 +363,14 @@
             | "LBRACKET" "RBRACKET"
             | "LBRACKET" <exprList> "RBRACKET"
             | "LBRACKET" <exprList> "COMMA" "RBRACKET"
-            | "LBRACKET" <expr> <compClause> "RBRACKET"
+            | "LBRACKET" <expr> <compClauses> "RBRACKET"
             | "LBRACE" "RBRACE"
             | "LBRACE" <mapEntries> "RBRACE"
             | "LBRACE" <mapEntries> "COMMA" "RBRACE"
             | "LBRACE" <exprList> "RBRACE"
             | "LBRACE" <exprList> "COMMA" "RBRACE"
-            | "LBRACE" <expr> <compClause> "RBRACE"
-            | "LBRACE" <mapEntry> <compClause> "RBRACE"
+            | "LBRACE" <expr> <compClauses> "RBRACE"
+            | "LBRACE" <mapEntry> <compClauses> "RBRACE"
             | <closure>
             | <matchExpr>
             | <ifExpr>
@@ -382,11 +382,15 @@
 <mapEntry>   ::= <expr> "COLON" <expr>
 
 # Comprehensions: `[elem for x in it]` (list), `{elem for x in it}` (set), `{k: v for x in it}`
-# (map). One `for` clause binding one name (or two, for `for k, v in m`), an optional `if` guard.
-<compClause> ::= "FOR" "IDENT" "IN" <expr>
-               | "FOR" "IDENT" "IN" <expr> "IF" <expr>
-               | "FOR" <identList> "IN" <expr>
-               | "FOR" <identList> "IN" <expr> "IF" <expr>
+# (map). One or more `for` clauses (nested/cartesian iteration, first clause outermost — later
+# clauses see earlier clauses' bindings); each clause binds one name (or two, for `for k, v in m`)
+# and may be followed by zero or more `if` guards (an `if` may follow any clause, even a chain).
+<compClauses> ::= <compClause> | <compClause> <compClauses>
+<compClause>  ::= "FOR" "IDENT" "IN" <expr>
+                | "FOR" "IDENT" "IN" <expr> <compGuards>
+                | "FOR" <identList> "IN" <expr>
+                | "FOR" <identList> "IN" <expr> <compGuards>
+<compGuards>  ::= "IF" <expr> | "IF" <expr> <compGuards>
 
 # Expression-position `match`/`if` (value-producing, distinct from the statement forms above).
 # `matchExpr` arms are value-expressions (not blocks); it is multiline + exhaustive. A simple
