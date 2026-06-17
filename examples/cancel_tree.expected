@@ -1,0 +1,14 @@
+child before: false
+child after parent cancel: true
+child reason: cancelled
+child done ready: true
+child2 cancelled: true
+parent2 cancelled: false
+parent2 reason: none
+grandchild cancelled: true
+grandchild reason: cancelled
+grandchild done ready: true
+timeout-child cancelled: true
+timeout-child reason: timeout
+timeout-child done ready: true
+inherited deadline: true

@@ -478,8 +478,8 @@ pool via `vm::worker_count()`. `--threads` errors with `--serial`/`--interp` (ne
 **`std.cancel` — cancellation tokens + `Channel.trip()` SHIPPED (2026-06-15).** A user-level
 cooperative cancellation **`Token`** (Go-`context`-inspired, adapted): `cancel.manual()` /
 `cancel.timeout(ms)`; methods `cancelled()`, `reason()` (`"cancelled"`/`"timeout"`), `done() ->
-Channel[bool]` (a `wait:` arm), `cancel()` (anytime/any task), `deadline_at()`. Tokens are **flat** in
-v1 (no parent/child derivation — tree propagation is a documented follow-up). Pure Chezzi
+Channel[bool]` (a `wait:` arm), `cancel()` (anytime/any task), `deadline_at()`. **Tree propagation
+landed** (see the next note). Pure Chezzi
 (`std/cancel.chz`) over `Shared[bool]` +
 `monotonic()` (deadline checked **at poll time** → timeout is deterministic across engines, no
 background canceller) + ONE new native primitive **`Channel.trip()`** — a permanent level-trigger
@@ -492,6 +492,31 @@ carries **no `.expected`** (manual cancel of a CPU sibling diverges by engine �
 cancel→`wait:` lost-wakeup regression (`MnSched::park`/`park_wait` gap re-check now includes
 `done_latch`) is guarded by `cancel_trip_wakes_parked_wait_under_parallel`. Closes the `gaps.md`
 cancellation gap (timeouts + manual cancel). See `docs/concurrency.md` §6e/§6c'.
+
+**`std.cancel` TREE PROPAGATION — parent/child derivation SHIPPED (2026-06-17).** `Token.derive()`
+(and the free-fn `cancel.derive(parent)`) builds a **child** token (Go `context.WithCancel`):
+cancelling or timing-out a parent cancels every transitively-derived child, recursively root-to-leaves,
+while cancelling a child **never** touches the parent (one-directional). The link is **live** — a
+parent flip is observed by an already-derived child, *including one that crossed the
+`spawn`/`parallel:`/`Channel` airlock* — because the link is the parent's `Shared` flag plus a `Shared`
+registry of descendant `done()` channels, which cross as live cores exactly like the flat token's `flag`
+(so the feature is automatically three-engine consistent — **zero Rust changes**, no checker change:
+`sendable_rec` already permits the self-referential `parent: Token?` field + `Shared`/`Channel`/`Option`
+arms). A child inherits the **tightest** deadline (soonest absolute of itself + ancestors; an
+already-elapsed-timeout parent yields a child cancelled at once with reason `"timeout"`, its `done()`
+ready via its own timer armed to 0 ms). `done()` cascades **transitively**: `derive()` registers a
+child's `done()` channel into **every ancestor's** registry (walking the parent chain to the root, each
+insert an atomic `Shared.update()` so concurrent siblings don't lose updates), so a manual `cancel()` at
+ANY depth above trips the descendant's `done()` directly — a grandchild parked in `wait: leaf.done()`
+wakes on a grandparent cancel, not just on its immediate parent. `reason()` is nearest-cause-wins
+(self's own cause, else inherited). Goldens: `examples/cancel_tree.chz` + `.expected` (byte-identical on
+`run`/`--serial`/`--interp`; `golden_cancel_tree_via_run_file` VM + `golden_cancel_tree_chz` interp
+twin), plus eight VM unit tests (`cancel_child_*`, `cancel_transitive_grandchild`,
+`cancel_grandchild_done_ready_after_grandparent_cancel` + `cancel_great_grandchild_done_ready_after_root_cancel`
+— the transitive-`done()` guards, `cancel_token_sendable_with_parent` — the cross-airlock live-link
+guard). **Known v1 limit:** the per-ancestor registry only **grows** (no token-drop hook); tokens are
+request-scoped/short-lived, a future prune-on-cancel could clear it. Closes the `gaps.md`
+tree-propagation gap. See `docs/concurrency.md` §6e.
 
 > **`Channel.recv_timeout(ms)` — attempted then reverted (2026-06-12).** A bounded-wait `recv` was
 > implemented with a **demote-always** shortcut (reuse `demote_recv_block` + a deadline) to avoid the

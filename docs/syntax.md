@@ -1264,9 +1264,11 @@ fn fetch_all(urls: list[str]):
 - **`std.cancel` (cancellation token)** — `import std.cancel`; `cancel.manual()` / `cancel.timeout(ms)`
   build a `Token` you thread down a call tree (sendable). Poll `tok.cancelled() -> bool` in CPU loops,
   race `tok.done() -> Channel[bool]` in a `wait:` for IO loops, `tok.cancel()` from anywhere; also
-  `reason() -> str?` (`"cancelled"`/`"timeout"`/`None`), `deadline_at()`. Tokens are flat in v1 (no
-  parent/child derivation). Cooperative (signals, doesn't forcibly interrupt — poll in CPU loops). See
-  [`concurrency.md §6e`](concurrency.md) and `examples/cancel_*.chz`.
+  `reason() -> str?` (`"cancelled"`/`"timeout"`/`None`), `deadline_at()`. **Tree-structured:**
+  `tok.derive() -> Token` (or `cancel.derive(parent)`) builds a child — cancelling/timing-out a parent
+  cancels every transitively-derived child (live link, tightest-deadline inheritance), while cancelling
+  a child never touches the parent. Cooperative (signals, doesn't forcibly interrupt — poll in CPU
+  loops). See [`concurrency.md §6e`](concurrency.md) and `examples/cancel_*.chz`.
 - **`Channel.trip()`** — flip a permanent level-trigger latch: the channel is then ready (`recv`/
   `try_recv`/`wait` → `true`) for every receiver (the manual fan-out behind `std.cancel`'s `done()`).
 - **Sendability:** captures are copies, **read-only** inside a task (reassign = error); only sendable

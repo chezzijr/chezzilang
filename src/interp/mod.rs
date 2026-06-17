@@ -6245,6 +6245,21 @@ b := Buf([10, 20, 30])
         assert_eq!(out, expected);
     }
 
+    /// `std.cancel` tree propagation (interp twin of the VM `golden_cancel_tree_via_run_file`): the
+    /// parent/child `derive()` cascade runs as pure Chezzi on the interp and byte-matches the SAME
+    /// `.expected` the VM produces — proving the feature is two-engine identical (no interp change).
+    #[test]
+    fn golden_cancel_tree_chz() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_tree.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_tree.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("cancel_tree.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
     /// C-ABI FFI golden (interp side): an `extern "lib":` block calls `cos`/`sqrt` (libm) and
     /// `strlen` (libc) via dlopen+libffi. Deterministic by design (cos(0.0)=1.0, sqrt(4.0)=2.0,
     /// strlen("hello")=5 — no ULP drift). Drives `run_file` (extern decls need the module-graph +
