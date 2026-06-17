@@ -213,7 +213,10 @@ Tracked in other docs; surfaced here so they aren't lost. None scheduled, but ea
 - **✅ [RESOLVED] Comprehension nested clauses** — `[x for x in xs for y in ys]` now shipped
   (`auto-task/comprehension-nested-clauses`): 2+ `for` clauses (cartesian/nested, first outermost,
   later clauses see earlier bindings), `if` guards after any clause, across list/set/map. Both engines
-  + grammar (`<compClauses>`/`<compGuards>`). `examples/comprehensions_nested.chz`.
+  + grammar (`<compClauses>`/`<compGuards>`). `examples/comprehensions_nested.chz`. Also fixed a
+  pre-existing interp/VM divergence: a comprehension over a STATEFUL struct iterator now drives
+  `next()` lazily on the interp (was eager-drain), so the element/guard see per-step state byte-for-
+  byte with the VM (`examples/comprehension_iter_state.chz`).
 - **`std.cancel` tree propagation** — tokens are **flat** in v1; parent/child derivation (cancel a parent
   → cancel its children) is a documented follow-up (PROGRESS.md:244).
 - **Graceful shutdown of accept loops** + a per-connection handler→acceptor signal channel — future work

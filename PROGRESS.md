@@ -765,7 +765,17 @@ branch names) is in the git log.
   left-to-right (`eval_comp_clauses`) for byte-identical iteration order + guard placement. Checker
   scopes progressively (per-clause `for_bindings`/`declare`, channel-drain rejection per clause).
   Grammar gains `<compClauses>`/`<compGuards>` (conformance green). `examples/comprehensions_nested.chz`
-  + 5 cases asserted byte-identical on VM/`--serial`/`--interp`. Single-clause path unchanged.
+  + 5 cases asserted byte-identical on VM/`--serial`/`--interp`.
+- ✅ **Comprehension stateful-iterator parity fix** (2026-06-17, same branch) — the interp now drives
+  a comprehension's iterable LAZILY (`eval_comp_clauses` pulls one element, binds it, tests guards,
+  then recurses/collects, then pulls the next), reusing the same per-element struct-`next()` loop as
+  the `for` statement and the VM's `compile_for`. Previously it eagerly drained the iterator into a
+  `Vec` first (via `collect_iter_rows`, now removed), so a comprehension whose element/guard read a
+  stateful struct iterator's live field (`[x*100 + c.n for x in c]`) saw the fully-advanced state on
+  the interp but the per-step state on the VM — a real two-engine divergence. This was **pre-existing
+  for the single-clause form on `main`** (same eager `collect_iter_rows`); the nested form inherited
+  it. List/map/set/str/range iterables are stateless, so their order/semantics are unchanged.
+  `examples/comprehension_iter_state.chz` + interp/VM/golden parity tests.
 - ✅ **Checker control-flow boundary for `spawn:`/`defer:` blocks** (2026-06-16) — fixes a three-way
   divergence where `break`/`continue` lexically nested in an enclosing loop but placed inside a `spawn:`
   or `defer:` block passed `check`, raised `break outside loop` at runtime on the VM, and was silently

@@ -3703,9 +3703,9 @@ impl Interp {
         flow
     }
 
-    /// Evaluate a comprehension into a fresh list / set / map. Iteration reuses the same paths as a
-    /// `for` loop (range, struct iterator, or materialized list/map/set/str — see
-    /// `collect_iter_rows`). Multiple `for` clauses nest (first clause outermost, last innermost):
+    /// Evaluate a comprehension into a fresh list / set / map. Iteration reuses the same lazy paths
+    /// as a `for` loop (range, struct iterator via `next()`, or materialized list/map/set/str — see
+    /// `eval_comp_clauses`). Multiple `for` clauses nest (first clause outermost, last innermost):
     /// `eval_comp_clauses` recurses left-to-right, binding each clause's vars in a fresh scope so a
     /// later clause's `iter`/guards see earlier bindings — exactly the order the compiler's nested
     /// `compile_for` produces (parity). Each clause's guards are tested in turn; at the innermost
@@ -3732,11 +3732,19 @@ impl Interp {
         })
     }
 
-    /// Recurse over comprehension clauses starting at `idx`. At `clauses[idx]`, collect that clause's
-    /// rows (in the CURRENT env, which already has earlier clauses' vars bound), then for each row
-    /// push a scope, bind the vars, test the clause's guards (skip the row if any is false), and
-    /// either recurse to `idx+1` or — if this is the last clause — evaluate the key/element into
-    /// `acc`. Each row's scope is popped even on error.
+    /// Recurse over comprehension clauses starting at `idx`. At `clauses[idx]`, drive that clause's
+    /// iterable LAZILY (one element at a time, in the CURRENT env, which already has earlier clauses'
+    /// vars bound), and for each element push a scope, bind the vars, test the clause's guards (skip
+    /// the element if any is false), and either recurse to `idx+1` or — if this is the last clause —
+    /// evaluate the key/element into `acc`. Each element's scope is popped even on error.
+    ///
+    /// Laziness matters for parity: a stateful struct iterator advances its fields with each `next()`,
+    /// and the VM (`compile_for`) interleaves `next()` with the element/guard evaluation. So the
+    /// element/guard must run BEFORE the next `next()`, never after the whole iterator is drained.
+    /// `for x in struct_iter` (the statement) is already lazy this way; this mirrors it exactly so a
+    /// comprehension over the same iterator agrees byte-for-byte. List/map/set/str/range iterables are
+    /// stateless, so materializing-then-iterating them is observationally identical to driving them
+    /// one element at a time — order and semantics are unchanged.
     fn eval_comp_clauses(
         &mut self,
         clauses: &[CompClause],
@@ -3746,18 +3754,97 @@ impl Interp {
         span: Span,
         acc: &mut CompAcc,
     ) -> Result<(), RuntimeError> {
-        let clause = &clauses[idx];
-        let rows = self.collect_iter_rows(&clause.vars, &clause.iter, span)?;
-        for row in rows {
-            self.env.push();
-            for (name, val) in clause.vars.iter().zip(row) {
-                self.env.define(name, val);
+        let iter = &clauses[idx].iter;
+        // Lazy range: never materialized (mirrors `exec_for`).
+        if let ExprKind::Range { start, end } = &iter.kind {
+            let lo = self.eval_int(start)?;
+            let hi = self.eval_int(end)?;
+            let mut i = lo;
+            while i < hi {
+                self.run_comp_element(clauses, idx, key, elem, span, acc, vec![Value::Int(i)])?;
+                i += 1;
             }
-            let r = self.eval_comp_row_step(clauses, idx, key, elem, span, acc);
-            self.env.pop();
-            r?;
+            return Ok(());
+        }
+        let iter_val = self.eval(iter)?;
+        // PURE-`Iterable` struct (has `iter`, lacks `next`): convert to its cursor via a one-time
+        // `.iter()`, then drive the cursor's `next()` below — identical to `exec_for`.
+        let iter_val = match &iter_val {
+            Value::Struct { name, .. }
+                if self.structs.get(name.as_ref()).is_some_and(|d| {
+                    !d.methods.contains_key("next") && d.methods.contains_key("iter")
+                }) =>
+            {
+                self.dispatch_method(iter_val.clone(), "iter", Vec::new(), span)?
+            }
+            _ => iter_val,
+        };
+        // Struct iterator protocol: drive `next(self) -> Option[T]` LAZILY — call it, run the body
+        // (which reads the iterator's just-advanced state), then call it again. This is the path the
+        // eager `collect_iter_rows` used to break: it drained to `None` before any body ran, so the
+        // element saw the fully-advanced state instead of the per-step state the VM observes.
+        if let Value::Struct { name, .. } = &iter_val
+            && self.structs.get(name.as_ref()).is_some_and(|d| d.methods.contains_key("next"))
+        {
+            let name = name.clone();
+            let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
+                message: format!("unknown struct type '{name}'"),
+                span,
+            })?;
+            let decl = def.methods.get("next").cloned().ok_or_else(|| RuntimeError {
+                message: format!("struct '{name}' has no method 'next'"),
+                span,
+            })?;
+            loop {
+                let result = self.call(&decl, &def.home, vec![iter_val.clone()], span)?;
+                match result {
+                    Value::Enum { variant, payload, .. } if variant.as_ref() == "Some" => {
+                        let item = payload.into_iter().next().ok_or_else(|| RuntimeError {
+                            message: "iterator next() returned Some with no payload".to_string(),
+                            span,
+                        })?;
+                        self.run_comp_element(clauses, idx, key, elem, span, acc, vec![item])?;
+                    }
+                    Value::Enum { variant, .. } if variant.as_ref() == "None" => break,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!("iterator next() must return Option, found {}", other.type_name()),
+                            span,
+                        })
+                    }
+                }
+            }
+            return Ok(());
+        }
+        // Stateless built-in iterables (list/map/set/str): materialize rows then drive them one at a
+        // time — order/semantics unchanged vs. the old eager path.
+        let rows = iter_rows_from_value(&iter_val, clauses[idx].vars.len(), span)?;
+        for row in rows {
+            self.run_comp_element(clauses, idx, key, elem, span, acc, row)?;
         }
         Ok(())
+    }
+
+    /// Run one comprehension element for `clauses[idx]`: push a scope, bind the clause's vars to
+    /// `row`, run the guard/recurse/collect step, and pop the scope (even on error).
+    #[allow(clippy::too_many_arguments)]
+    fn run_comp_element(
+        &mut self,
+        clauses: &[CompClause],
+        idx: usize,
+        key: Option<&Expr>,
+        elem: &Expr,
+        span: Span,
+        acc: &mut CompAcc,
+        row: Vec<Value>,
+    ) -> Result<(), RuntimeError> {
+        self.env.push();
+        for (name, val) in clauses[idx].vars.iter().zip(row) {
+            self.env.define(name, val);
+        }
+        let r = self.eval_comp_row_step(clauses, idx, key, elem, span, acc);
+        self.env.pop();
+        r
     }
 
     /// Body of one comprehension row (scope already pushed/bound): test this clause's guards, then
@@ -3814,27 +3901,8 @@ impl Interp {
         Ok(())
     }
 
-    /// Collect every row of an iterable for a comprehension (eager: comprehensions have no `break`,
-    /// so unlike `exec_for`'s lazy paths there is nothing to stop early for). Ranges expand to ints,
-    /// a struct iterator's `next(self) -> Option` is driven to `None`, and list/map/set/str reuse
-    /// `iter_rows_from_value` (shared with `exec_for`).
-    fn collect_iter_rows(
-        &mut self,
-        vars: &[String],
-        iter: &Expr,
-        span: Span,
-    ) -> Result<Vec<Vec<Value>>, RuntimeError> {
-        if let ExprKind::Range { start, end } = &iter.kind {
-            let lo = self.eval_int(start)?;
-            let hi = self.eval_int(end)?;
-            return Ok((lo..hi).map(|i| vec![Value::Int(i)]).collect());
-        }
-        let iter_val = self.eval(iter)?;
-        self.drain_value_to_rows(iter_val, vars.len(), span)
-    }
-
     /// Materialize an already-evaluated iterable VALUE into per-iteration rows (the post-eval body of
-    /// `collect_iter_rows`, factored out so the `list()`/`set()`/`map()` builtin constructors reuse the
+    /// `eval_comp_clauses`' struct-iterator path, factored out so the `list()`/`set()`/`map()` builtin constructors reuse the
     /// SAME "drain any for-iterable" logic — no duplicated iteration semantics). Handles (a) a user
     /// struct with `next(self) -> Option[T]` (call lazily until `None`, may run user code) and (b) the
     /// built-in collections via `iter_rows_from_value`. `vars` is the loop-variable count (1 for the
@@ -4453,7 +4521,8 @@ impl crate::native::Host for InterpHost<'_> {
 
 /// Materialize a (non-range, non-struct-iterator) iterable into per-row binding tuples: one value
 /// per row for list/set/str, and `[k]` or `[k, v]` for a map depending on the loop-variable count.
-/// Shared by `exec_for` and `collect_iter_rows` so both iterate every collection identically.
+/// Shared by `exec_for`, the comprehension driver, and the collection constructors so all iterate
+/// every collection identically.
 fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec<Vec<Value>>, RuntimeError> {
     Ok(match iter_val {
         // Over a list with >1 loop var, each element is a tuple to destructure into a row (the
@@ -5305,6 +5374,33 @@ mod tests {
             run("print({x * 10 + y: x + y for x in [1, 2] for y in [3]})\n"),
             "{13: 4, 23: 5}\n"
         );
+    }
+
+    /// A comprehension over a STATEFUL struct iterator drives `next()` lazily (interleaved with the
+    /// element/guard), so the element reads the iterator's just-advanced field — NOT the value after
+    /// the whole iterator is drained. This matches the `for`-statement and the VM (regression for the
+    /// eager-drain divergence). Both single-clause and nested forms are checked.
+    #[test]
+    fn interp_comprehension_stateful_iterator_is_lazy() {
+        let src = "\
+struct Counter:
+    n: int
+    fn next(self) -> Option[int]:
+        v := self.n
+        self.n = self.n + 1
+        if v >= 3:
+            return None
+        return Some(v)
+
+fn main():
+    c := Counter(0)
+    print([x * 100 + c.n for x in c])
+    c2 := Counter(0)
+    print([x * 100 + c2.n for x in c2 for y in [0, 1]])
+
+main()
+";
+        assert_eq!(run(src), "[1, 102, 203]\n[1, 1, 102, 102, 203, 203]\n");
     }
 
     // ----- M6c: native function values -----
