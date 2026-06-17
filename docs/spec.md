@@ -113,6 +113,20 @@ so two-engine parity is **waived** for generators. The adapter-struct model rema
 parity-clean, recommended way to write lazy sequences. Live status is tracked in
 [`PROGRESS.md`](../PROGRESS.md).
 
+**`Iterable[T]` protocol + `.iter()`** (additive over the `Iterator[T]` iteration model, all three
+engines parity-clean). `Iterable[T]` promises `.iter() -> Iterator[T]` (a fresh COMPOSABLE cursor);
+`Iterator[T]` additionally promises `.next()`, so every `Iterator` IS `Iterable` (its `iter()` returns
+self). Every built-in collection (`list`/`set`/`map`→keys/`str`→char/`bytes`/`bytearray`→int) now
+exposes `.iter()`, returning a cursor — a frozen snapshot of the collection plus a read position,
+typed as the existing `Iterator[T]` existential (no new value type), with `.next() -> Option[T]` (Some,
+then idempotent None). This lets a plain `list` flow into the same Take/Mapped adapter pipeline as a
+hand-written struct iterator (`examples/iterable.chz`). A generator, a user `next`-struct, and a struct
+with only `iter(self) -> Iterator[E]` (driven by a one-time `.iter()`) all satisfy `[S: Iterable[T]]`.
+The cursor is **sendable** — it crosses the `spawn`/channel airlock as a deep copy (an independent
+snapshot + position on the receiver), exactly like a `list`. There is **no** compile-time
+multi-pass/single-pass safety (unfixable without move/ownership): each `.iter()` is a fresh cursor, but
+reusing an exhausted one yields nothing.
+
 ### Syntax sketch
 
 ```chezzi

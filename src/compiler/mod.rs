@@ -1082,6 +1082,12 @@ impl Compiler {
             self.compile_expr(fc, iter)?;
             let iter_slot = fc.add_hidden();
             fc.emit(Op::SetLocal(iter_slot), span);
+            // ONE-TIME pure-`Iterable` conversion: a struct with `iter()` but no `next()` becomes its
+            // cursor here (then drives via the seq path); every other iterand (struct-with-`next`,
+            // generator, collection) passes through unchanged, so their fast paths are byte-identical.
+            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit(Op::IterableToCursor, iter.span);
+            fc.emit(Op::SetLocal(iter_slot), span);
             fc.emit(Op::GetLocal(iter_slot), span);
             fc.emit(Op::IsChannel, span);
             let chan_mode_slot = fc.add_hidden(); // true ⇒ channel path (ChanRecvOrClosed)

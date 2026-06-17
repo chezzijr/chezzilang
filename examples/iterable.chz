@@ -1,0 +1,108 @@
+# `Iterable[T]` + `.iter()` — a formal "can produce a cursor" protocol.
+#
+# Every collection now exposes `.iter()`, returning a COMPOSABLE cursor typed as the existing
+# `Iterator[T]` existential. A cursor has `.next() -> Option[T]` (Some, then None forever), so a
+# plain `list`/`set`/`map`/`str`/`bytes`/`bytearray` can flow into the SAME lazy adapter pipeline as
+# a hand-written struct iterator — something that was impossible before (you can't call `.next()` on
+# a `list`). `Iterable` is the looser sibling of `Iterator`: an `Iterable` only promises a cursor; an
+# `Iterator` also has `next`, so every `Iterator` IS `Iterable` (its `iter()` returns self).
+
+# The classic lazy adapters (see iter_adapters.chz) — bounded over ANY inner `Iterator[T]`.
+struct Take[I: Iterator[T], T]:
+    inner: I
+    left: int
+    fn next(self) -> Option[T]:
+        if self.left <= 0:
+            return None
+        self.left = self.left - 1
+        return self.inner.next()
+
+struct Mapped[I: Iterator[T], T, U]:
+    inner: I
+    f: fn(T) -> U
+    fn next(self) -> Option[U]:
+        match self.inner.next():
+            Some(x):
+                return Some(self.f(x))
+            None:
+                return None
+
+# A finite struct iterator (has `next`) — itself `Iterable` (iter() == self).
+struct Counter:
+    n: int
+    limit: int
+    fn next(self) -> Option[int]:
+        if self.n >= self.limit:
+            return None
+        v := self.n
+        self.n = self.n + 1
+        return Some(v)
+
+# A PURE-`Iterable` struct: it has `iter()` but NO `next()`. It is for-iterable via a one-time
+# `.iter()` that hands back a cursor.
+struct Wrap:
+    xs: list[int]
+    fn iter(self) -> Iterator[int]:
+        return self.xs.iter()
+
+# `[S: Iterable[T]]` accepts BOTH a built-in collection AND a user iterator — it drains via `.iter()`.
+fn total[S: Iterable[int]](src: S) -> int:
+    sum := 0
+    for x in src.iter():
+        sum = sum + x
+    return sum
+
+fn main():
+    # --- THE HEADLINE: a plain list composes into the adapter pipeline ---
+    # Take 2 from the list cursor:
+    for v in Take([10, 20, 30, 40].iter(), 2):
+        print(v)                          # 10, 20
+    # Map (double) over a list cursor:
+    doubled := Mapped([1, 2, 3].iter(), fn(x): x * 2)
+    for v in doubled:
+        print(v)                          # 2, 4, 6
+
+    # --- `.iter()` + manual `.next()` on every collection (Some… then None) ---
+    li := [1, 2].iter()
+    print(li.next())                      # Some(1)
+    print(li.next())                      # Some(2)
+    print(li.next())                      # None
+    print(li.next())                      # None  (idempotent past exhaustion)
+
+    si := {7}.iter()
+    print(si.next())                      # Some(7)
+
+    mi := {1: "a", 2: "b"}.iter()
+    print(mi.next())                      # Some(1)  (map iterates KEYS)
+    print(mi.next())                      # Some(2)
+
+    ci := "hi".iter()
+    print(ci.next())                      # Some(h)
+
+    bi := b"AB".iter()
+    print(bi.next())                      # Some(65)
+
+    bai := bytearray([9]).iter()
+    print(bai.next())                     # Some(9)
+
+    # --- empty-collection cursor → None immediately ---
+    empty: list[int] = []
+    print(empty.iter().next())            # None
+
+    # --- iter() is idempotent on an Iterator value (returns self) ---
+    again := [5, 6].iter().iter()
+    print(again.next())                   # Some(5)
+
+    # --- an [S: Iterable[T]] fn over a list AND a struct iterator ---
+    print(total([1, 2, 3, 4]))            # 10
+    print(total(Counter(0, 5)))           # 0+1+2+3+4 = 10
+
+    # --- a pure-Iterable struct drives a `for` loop ---
+    for x in Wrap([100, 200]):
+        print(x)                          # 100, 200
+
+    # --- list(xs.iter()) round-trips (a cursor IS an Iterator[T], drained for free) ---
+    print(list([5, 6, 7].iter()))         # [5, 6, 7]
+    print(set({2, 2, 3}.iter()).len())    # 2  (deduped)
+
+main()

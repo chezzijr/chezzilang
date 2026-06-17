@@ -11,7 +11,7 @@ std.math trig + request verbs landed; concurrency D6 complete (Path C resolved).
 
 > **Core language is feature-complete:** scalars, `list`/`map`/`set`/`tuple`, generic structs + enums,
 > `Result`/`Option` + `?`, generics + structural protocols
-> (`Comparable`/`Add`/`Sub`/`Mul`/`Hashable`/`Stringable`/`Error`/`Iterator[T]`/`Index[K,V]`/`IndexSet[K,V]`/`Slice[R]`),
+> (`Comparable`/`Add`/`Sub`/`Mul`/`Hashable`/`Stringable`/`Error`/`Iterator[T]`/`Iterable[T]`/`Index[K,V]`/`IndexSet[K,V]`/`Slice[R]`),
 > exhaustive `match` (literals/wildcard/nested/tuple/guards/ranges), closures/HOF, methods, modules, GC,
 > two backends, interpolation, pipe, `recover:`, `defer` (block-scoped), default + named args,
 > comprehensions, optional-chaining/`??`. What remains is **stdlib breadth + a few runtime-depth nits**.
@@ -108,8 +108,18 @@ content-equality, `bytearray(b'...')` repr; NOT `Hashable` — mutable, like `li
 the airlock). Conversion bridge: `bytes(ba)` / `bytearray(b)`. **str ↔ bytes (UTF-8) — SHIPPED:**
 `str.encode() -> bytes`, `bytes.decode()`/`bytearray.decode() -> str` (UTF-8 only; invalid UTF-8 is a
 recoverable fault). **`list()`/`set()`/`map()` constructors — SHIPPED:** `list(it)`/`set(it)` over any
-for-iterable, `map(it)` from 2-tuples (element types via the for-loop iterable union; no formal
-`Iterable[T]` protocol — that is a decoupled future milestone). Remaining: no `byte`/`u8` scalar, no
+for-iterable, `map(it)` from 2-tuples (element types via the for-loop iterable union). **Formal
+`Iterable[T]` protocol + `.iter()` — SHIPPED:** every collection (`list`/`set`/`map`→keys/`str`→char/
+`bytes`/`bytearray`→int) exposes `.iter()`, returning a COMPOSABLE cursor (`Obj::Iter` / interp
+`Value::Iter` — a `Vec<Value>` snapshot + a `pos`, typed as the existing `Iterator[T]` existential,
+GC-NON-LEAF so its snapshot stays alive) with `.next() -> Option[T]` (Some… then idempotent None). So a
+plain `list` now composes into the same Take/Mapped adapter pipeline as a hand-written struct iterator
+(`examples/iterable.chz`). Every `Iterator` IS `Iterable` (`iter()` returns self — generators + user
+`next` structs flow into `[S: Iterable[T]]` bounds); a struct with only `iter(self) -> Iterator[E]`
+(no `next`) is for-iterable via a one-time `.iter()`. NON-GOAL (unfixable without move/ownership):
+multi-pass/single-pass TYPE SAFETY — `count_twice([list]) == 6` (two independent `.iter()` cursors) but
+`count_twice(generator) == 3` (a generator is consumed once). The cursor itself IS sendable — it
+crosses the `spawn`/channel airlock as a deep copy, like a `list`. Remaining: no `byte`/`u8` scalar, no
 non-UTF-8 codecs (latin1/utf16) and no base64/hex/sha (separate `std.*` gap), no `tuple()`/`bool()`
 constructors. `bignum` and `yield`/generators are non-goals.
 

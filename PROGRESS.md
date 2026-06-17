@@ -11,6 +11,53 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Formal `Iterable[T]` protocol + `.iter()` cursor (owner-requested; the decoupled follow-on the
+constructors work flagged).** Additive — nothing existing changes behavior; 3-engine parity throughout.
+The win: a plain collection now composes into the SAME lazy adapter pipeline as a hand-written struct
+iterator (`Take([10,20,30,40].iter(), 2)`, `Mapped([1,2,3].iter(), fn)`) — impossible before, since
+you can't call `.next()` on a `list`. Wired (mirroring the `bytes`/`bytearray` Obj/Value pattern):
+
+- **`Iterable[T]` prebuilt protocol** `{ iter() -> Iterator[T] }` — reserved + registered next to
+  `Iterator[T]` (unchanged). The looser sibling: `Iterable` promises only a cursor; `Iterator` also has
+  `next`, so every `Iterator` IS `Iterable` (`iter()` returns self). Conformance via `iterable_elem`
+  (collections + any `Iterator` intrinsically via `iter_elem`, + a struct with structural `iter`).
+- **Cursor heap object** — VM `Obj::Iter { items: Vec<Value>, pos }` (32B, 88B-guard green) and interp
+  `Value::Iter(Rc<RefCell<IterCursor>>)`. The TYPE is the existing `Iterator[T]` existential — NO new
+  `Ty`. GC-**NON-LEAF**: `children()` traces `items` (contrast `Bytes`/`ByteArray` leaves) so a
+  not-yet-consumed snapshot element survives a collection. `.next()` → `Some(items[pos])` + advance,
+  idempotent `None` past the end. deep_clone → a fresh in-task copy (airlock).
+- **`.iter()` dispatch** — on `list`/`set`/`map`(→keys)/`str`(→char)/`bytes`/`bytearray`(→int): a FRESH
+  cursor SNAPSHOTTING current contents in EXACTLY `for x in X` order (reuses `drain_iterable` /
+  `iter_rows_from_value`, the for-loop's single source of truth). On any `Iterator[T]` value (cursor,
+  generator, `next`-struct): returns SELF (idempotent). `list(xs.iter())`/`set(...)` drain for free.
+- **For-loop additive case** — a struct with `iter()` but NO `next()` is for-iterable via a one-time
+  `.iter()` then the cursor drains: checker for-bind arm AFTER the `next` arm (a struct with BOTH keeps
+  the `next()` fast path — back-compat precedence); VM `Op::IterableToCursor` (one-time, before the
+  per-iteration loop — structs-with-`next`/generators pass through byte-identical); interp `exec_for` /
+  `drain_value_to_rows` sibling branch. The hot collection / `next`-struct paths are untouched.
+- **Sendability** — a cursor IS sendable: it crosses the `spawn`/channel airlock as a DEEP COPY, like a
+  `list`. `to_wire`/`from_wire` carry a `WireValue::Iter { items, pos }` (items recursively wired, `pos`
+  carried) and `to_snap`/`replay_snap` a `SnapValue::Iter`; the interp's `deep_clone` already deep-copies
+  the cursor identically, so all three engines agree. A cursor over a non-sendable element (e.g. a
+  generator) faults recoverably via the recursion, exactly as a `list` of that element would. (`sendable_rec`
+  is UNCHANGED — a cursor reuses `Iterator[T]`'s type, already sendable; no static change was needed. An
+  earlier cut gated the cursor non-sendable like a generator, which panicked the spawned VM worker while
+  the interp succeeded — a parity divergence, now fixed.)
+- **NON-GOALS (documented, not built):** multi-pass/single-pass TYPE SAFETY (unfixable without
+  move/ownership — `count_twice([list]) == 6` via two independent cursors vs `count_twice(generator) ==
+  3` consumed once; each `.iter()` is fresh, but reusing an exhausted cursor yields nothing); auto-
+  `.iter()` inside adapters (v1 requires explicit `xs.iter()`); routing builtin for-loops through
+  `.iter()` (the fast path stays); cursor `.reset()`/`.peek()`/`.rev()`/`size_hint`.
+- **grammar.bnf intentionally UNCHANGED** — `.iter()` is the existing method-call production, no new
+  syntax (`cargo test conformance` green).
+- **Tests/golden:** checker `iter_method_on_collections_types_as_iterator` /
+  `iterable_bound_accepts_list_and_generator` / `iter_idempotent_on_generator_and_cursor` /
+  `iterable_struct_with_only_iter` / `iter_cursor_drives_existing_adapters`; VM/interp parity
+  `iter_next_idempotent_both_engines` / `iter_snapshot_order_matches_for` / `cursor_composes_into_adapter`
+  / `for_over_pure_iterable_struct` / `list_of_cursor_roundtrip_both_engines` /
+  `cursor_crosses_spawn_airlock_three_engine_parity` / `cursor_crosses_airlock_by_deep_copy` / `generator_iter_returns_self_vm`;
+  GC `obj_iter_traces_items_as_gc_children`; `examples/iterable.chz` + `.expected` goldened 3-engine.
+
 **✅ Built-in conversions — str ↔ bytes (UTF-8) methods + `list()`/`set()`/`map()` constructors
 (owner-requested; the natural follow-on to the just-landed `bytes`/`bytearray` types).** Two
 conversion surfaces, mirroring the `bytes`/`bytearray` builtin-wiring exactly (3-engine parity), with

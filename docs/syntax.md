@@ -339,6 +339,31 @@ first_or("hi", "?")        # "h"  (T = str)
 # Lazy sequences are normally built as adapter structs over this protocol (Rust-style; see
 # examples/iter_adapters.chz for Take/Mapped) — the parity-clean, recommended form.
 
+# `Iterable[T]` + `.iter()` — "can produce a cursor". Every collection now has `.iter()`, returning a
+# COMPOSABLE cursor typed as the existing `Iterator[T]` existential, with `.next() -> Option[T]`
+# (Some… then idempotent None). This lets a PLAIN collection flow into the same adapter pipeline as a
+# hand-written struct iterator (you can't call `.next()` on a `list` directly — `.iter()` bridges it):
+pipe := Mapped(Take([10, 20, 30, 40].iter(), 2), fn(x): x * 2)   # a list → Take → Mapped
+for v in pipe:             # 20, 40
+    print(v)
+it := {1: "a", 2: "b"}.iter()   # map iterates KEYS; str → 1-char str; bytes/bytearray → int 0..=255
+print(it.next())           # Some(1)
+# `Iterable` is the LOOSER sibling of `Iterator`: an `Iterable` only promises `iter()`; an `Iterator`
+# also has `next`. So every `Iterator` IS `Iterable` — `iter()` on a cursor / generator / `next`-struct
+# returns SELF (idempotent), and all three flow into an `[S: Iterable[T]]` bound. A user struct with
+# ONLY `iter(self) -> Iterator[E]` (no `next`) is for-iterable too (driven by a one-time `.iter()`):
+fn total[S: Iterable[int]](src: S) -> int:
+    sum := 0
+    for x in src.iter():
+        sum = sum + x
+    return sum
+total([1, 2, 3])           # 6   (a list)  — also accepts a generator or a `next`-struct
+list([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so list()/set() drain it)
+# A cursor SNAPSHOTS the collection at `.iter()` (later mutation doesn't change the sequence). NOTE
+# (no compile-time multi-pass safety, unfixable without ownership): each `.iter()` is a fresh cursor,
+# but reusing one exhausted cursor yields nothing on a second pass. A cursor IS sendable across
+# `spawn` — it crosses the airlock as a deep copy, like a `list`. `Iterable` / `Iterator` are reserved type names.
+
 # `yield` / generators (VM-only — the frozen interpreter rejects `yield`, so parity is waived). A fn that declares
 # `-> Iterator[T]` and uses `yield` is a generator: calling it returns a suspendable iterator, not a
 # value. It runs lazily, suspending at each `yield` and resuming on the next `.next()`.
@@ -560,6 +585,13 @@ fn to_list[S: Iterator[T], T](xs: S) -> list[T]:
     return out
 to_list("ab")              # ["a", "b"]   (T = str)
 ```
+
+The prebuilt **`Iterable[T]`** is the looser sibling: it promises only `.iter() -> Iterator[T]` (a
+fresh cursor), where `Iterator[T]` additionally promises `.next()`. Every `Iterator` IS `Iterable`
+(its `iter()` returns self), so a generator and a user `next`-struct both satisfy `[S: Iterable[T]]`;
+a struct with only `iter(self) -> Iterator[E]` (no `next`) satisfies it too and is for-iterable via a
+one-time `.iter()`. Like `Iterator[T]`, `T` is recovered from the iterand's element. The cursor's type
+is the existing `Iterator[T]` existential — there is no new value type.
 
 **Type aliases** name an existing type transparently — `type Name =
 <type>` makes `Name` interchangeable with the aliased type everywhere (structural, not a distinct

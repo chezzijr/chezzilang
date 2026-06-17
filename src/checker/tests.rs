@@ -5066,3 +5066,53 @@ fn set_map_hashable_key_gate_preserved() {
     rejects("fn main():\n    s := set([3.0])\nmain()\n", "Hashable");
     rejects("fn main():\n    m := map([(3.0, \"a\")])\nmain()\n", "Hashable");
 }
+
+// ===== Iterable[T] protocol + `.iter()` cursor =====
+
+#[test]
+fn iter_method_on_collections_types_as_iterator() {
+    // `.iter()` on each collection types as Iterator[elem] (the existing existential cursor type).
+    ok("fn main():\n    it := [1, 2, 3].iter()\n    print(it.next())\nmain()\n");
+    ok("fn main():\n    it := {1, 2}.iter()\n    x: Option[int] = it.next()\n    print(x)\nmain()\n");
+    ok("fn main():\n    it := {1: \"a\"}.iter()\n    k: Option[int] = it.next()\n    print(k)\nmain()\n");
+    ok("fn main():\n    it := \"ab\".iter()\n    c: Option[str] = it.next()\n    print(c)\nmain()\n");
+    ok("fn main():\n    it := b\"hi\".iter()\n    b: Option[int] = it.next()\n    print(b)\nmain()\n");
+    ok("fn main():\n    it := bytearray([1, 2]).iter()\n    b: Option[int] = it.next()\n    print(b)\nmain()\n");
+}
+
+#[test]
+fn iter_cursor_drives_existing_adapters() {
+    // The headline win: a list cursor composes into a struct adapter bounded `[I: Iterator[T]]`.
+    ok("struct Take[I: Iterator[T], T]:\n    inner: I\n    left: int\n    fn next(self) -> Option[T]:\n        if self.left <= 0:\n            return None\n        self.left = self.left - 1\n        return self.inner.next()\nfn main():\n    t := Take([10, 20, 30].iter(), 2)\n    for v in t:\n        print(v)\nmain()\n");
+}
+
+#[test]
+fn iterable_bound_accepts_list_and_generator() {
+    // `[S: Iterable[int]]` accepts a list[int] AND a generator (Iterator[int]).
+    ok("fn count[S: Iterable[int]](s: S) -> int:\n    n := 0\n    for x in s.iter():\n        n = n + 1\n    return n\nfn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn main():\n    print(count([1, 2, 3]))\n    print(count(gen()))\nmain()\n");
+}
+
+#[test]
+fn iter_idempotent_on_generator_and_cursor() {
+    // Every Iterator IS Iterable: iter() returns self, idempotently.
+    ok("fn gen() -> Iterator[int]:\n    yield 1\nfn main():\n    it := gen().iter()\n    print(it.next())\nmain()\n");
+    ok("fn main():\n    it := [1, 2, 3].iter().iter()\n    print(it.next())\nmain()\n");
+}
+
+#[test]
+fn iterable_struct_with_only_iter() {
+    // A user struct with iter(self) -> Iterator[E] (but no next) satisfies Iterable and is for-iterable.
+    ok("struct Wrap:\n    xs: list[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn main():\n    w := Wrap([1, 2, 3])\n    for x in w:\n        print(x)\nmain()\n");
+}
+
+#[test]
+fn iter_no_method_on_non_iterable() {
+    rejects("fn main():\n    x := 5.iter()\nmain()\n", "iter");
+}
+
+#[test]
+fn iterator_bound_forwards_into_iterable_bound() {
+    // Every Iterator IS Iterable: an `[S: Iterator[T]]` value must satisfy an `[U: Iterable[T]]`
+    // bound it is forwarded into (the cross-protocol relationship the spec promises).
+    ok("fn use_iterable[U: Iterable[int]](xs: U) -> int:\n    n := 0\n    for x in xs.iter():\n        n = n + 1\n    return n\nfn pass_through[S: Iterator[int]](xs: S) -> int:\n    return use_iterable(xs)\nfn main():\n    print(pass_through([1, 2, 3]))\nmain()\n");
+}

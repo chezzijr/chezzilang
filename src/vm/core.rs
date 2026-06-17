@@ -183,6 +183,8 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
             fields.iter().for_each(|(_, v)| collect_core_gcrefs(v, out, seen))
         }
         WireValue::Enum { payload, .. } => payload.iter().for_each(|x| collect_core_gcrefs(x, out, seen)),
+        // A cursor queued in a channel/executor roots its snapshot items' handles (like `List`).
+        WireValue::Iter { items, .. } => items.iter().for_each(|x| collect_core_gcrefs(x, out, seen)),
         WireValue::Channel(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
             core.q.lock().unwrap().queue.iter().for_each(|w| collect_core_gcrefs(w, out, s))
         }),

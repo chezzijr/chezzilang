@@ -249,9 +249,23 @@ pub enum Value {
     /// `shutdown()` (graceful) and are discarded by `shutdown_now()`. Under the sequential executor
     /// submitted work runs at the reap point, not in the background.
     Executor(Rc<RefCell<ExecState>>),
+    /// A composable cursor — the `Iterable[T]` `.iter()` result, typed as the existential
+    /// `Iterator[T]`. A frozen SNAPSHOT of a collection's contents (taken at `.iter()`) plus a read
+    /// cursor; interior-mutable (`.next()` advances `pos`) like the VM's `Obj::Iter`. Deep-cloned into
+    /// a FRESH `Rc<RefCell>` across the airlock (like `List`/`ByteArray`) — but it is also runtime-
+    /// gated as NON-SENDABLE (parity with generators), so a deep_clone only happens in-task.
+    Iter(Rc<RefCell<IterCursor>>),
     /// The result of a statement-like expression (e.g. `print(...)`) or a function with no
     /// `return`. Not directly constructible in source.
     Nil,
+}
+
+/// The interior of a [`Value::Iter`] — the snapshot plus the read position. `.next()` yields
+/// `Some(items[pos])` and advances `pos`; `None` (idempotent) past the end.
+#[derive(Debug, PartialEq, Clone)]
+pub struct IterCursor {
+    pub items: Vec<Value>,
+    pub pos: usize,
 }
 
 /// The mutable interior of a [`Value::Channel`]: the unbounded FIFO of messages and a `closed` flag.
@@ -317,6 +331,7 @@ impl Value {
             Value::Shared(_) => "Shared",
             Value::Atomic(_) => "Atomic",
             Value::Executor(_) => "Executor",
+            Value::Iter(_) => "iterator",
             Value::Nil => "nil",
         }
     }
@@ -401,6 +416,8 @@ impl std::fmt::Display for Value {
             Value::Shared(cell) => write!(f, "Shared({})", cell.borrow()),
             Value::Atomic(cell) => write!(f, "Atomic({})", cell.borrow()),
             Value::Executor(ex) => write!(f, "Executor(pending={})", ex.borrow().queue.len()),
+            // A cursor prints as `<iterator>` — byte-identical to the VM's `Obj::Iter` stringify.
+            Value::Iter(_) => write!(f, "<iterator>"),
             Value::Nil => write!(f, "nil"),
         }
     }

@@ -94,6 +94,7 @@ fn is_reserved_protocol(name: &str) -> bool {
             | "Sub"
             | "Mul"
             | "Iterator"
+            | "Iterable"
             | "Index"
             | "IndexSet"
             | "Slice"
@@ -2065,6 +2066,37 @@ impl Checker {
         Some(subst(inner, &map))
     }
 
+    /// The element type a user struct's structural `iter(self) -> Iterator[E]` produces, or `None`.
+    /// Sibling of [`struct_iter_elem`](Self::struct_iter_elem); used so a struct with `iter` but no
+    /// `next` is recognised as `Iterable` and bound in `for`. `Iterator` is not a registered struct,
+    /// so this only matches real user structs.
+    fn struct_iterable_elem(&self, ty: &Ty) -> Option<Ty> {
+        let Ty::Struct(name, targs) = ty else { return None };
+        if name == "Iterator" {
+            return None; // the existential cursor — handled by `iter_elem`, not as a user struct
+        }
+        let info = self.structs.get(name)?;
+        let sig = info.methods.get("iter")?;
+        if sig.params.len() != 1 {
+            return None; // (self) only
+        }
+        let Ty::Struct(rname, rargs) = &sig.ret else { return None };
+        if rname != "Iterator" || rargs.len() != 1 {
+            return None; // must declare `-> Iterator[E]`
+        }
+        let map = struct_param_map(info, targs);
+        Some(subst(&rargs[0], &map))
+    }
+
+    /// The element type of ANY `Iterable` value — the single source of truth for `Iterable`
+    /// conformance and the `Iterable`-driven `for`. A built-in collection, an `Iterator[T]`
+    /// existential, or a struct with structural `next` all flow through [`iter_elem`](Self::iter_elem)
+    /// (every `Iterator` is `Iterable` via `iter() == self`); a struct with only `iter` flows through
+    /// [`struct_iterable_elem`](Self::struct_iterable_elem). `None` ⇒ not iterable.
+    fn iterable_elem(&self, ty: &Ty) -> Option<Ty> {
+        self.iter_elem(ty).or_else(|| self.struct_iterable_elem(ty))
+    }
+
     /// What iterating `ty` yields per step — the `Iterator` element type. Built-in collections yield
     /// intrinsically (list/set → element, str → str, map → key, matching the single-variable `for`);
     /// a user struct yields via its structural `next(self) -> Option[E]`. `None` ⇒ not iterable. This
@@ -2226,7 +2258,11 @@ impl Checker {
                 // A type parameter bounded `S: Iterator[T]` is iterable; bind the loop var to its
                 // declared element type `T` (resolved with the surrounding params in scope).
                 let arg = self.type_params.get(name).and_then(|bs| {
-                    bs.iter().find(|b| b.name == "Iterator").and_then(|b| b.args.first().cloned())
+                    // `S: Iterator[T]` OR `S: Iterable[T]` is for-iterable; both carry the element as
+                    // their single bound arg (an `Iterable` is driven through a one-time `.iter()`).
+                    bs.iter()
+                        .find(|b| b.name == "Iterator" || b.name == "Iterable")
+                        .and_then(|b| b.args.first().cloned())
                 });
                 match arg {
                     Some(_) if vars.len() != 1 => {
@@ -2250,7 +2286,19 @@ impl Checker {
             }
             _ if self.struct_iter_elem(&it).is_some() => {
                 // A user struct with `next(self) -> Option[E]` is iterable; it binds a single element.
+                // Checked FIRST so a struct with BOTH `next` and `iter` keeps the existing `next()`
+                // fast path (back-compat precedence).
                 let elem = self.struct_iter_elem(&it).expect("guarded by the match arm");
+                if vars.len() != 1 {
+                    self.error(iter.span, "a struct iterator binds a single loop variable");
+                    return unknowns(vars);
+                }
+                vec![(vars[0].clone(), elem)]
+            }
+            _ if self.struct_iterable_elem(&it).is_some() => {
+                // A pure-`Iterable` struct: `iter(self) -> Iterator[E]` but NO `next`. Driven by a
+                // one-time `.iter()` then the cursor's `next()` (the additive `Iterable` for-case).
+                let elem = self.struct_iterable_elem(&it).expect("guarded by the match arm");
                 if vars.len() != 1 {
                     self.error(iter.span, "a struct iterator binds a single loop variable");
                     return unknowns(vars);
@@ -4029,6 +4077,19 @@ impl Checker {
 
     fn infer_method_call(&mut self, obj: &Expr, method: &str, args: &[Expr], span: Span) -> Ty {
         let obj_ty = self.infer(obj);
+        // `.iter()` — the formal `Iterable[T]` entry point. Returns a fresh cursor typed as the
+        // existing `Iterator[T]` existential (no new `Ty`), `T = iter_elem`. Handled here, BEFORE the
+        // per-type dispatch, for every built-in iterable AND for an `Iterator[T]` value (a generator
+        // result or another cursor) where `iter()` is idempotent (returns self). A user STRUCT is
+        // excluded so a struct that declares its own `iter` (the pure-`Iterable` producer) resolves
+        // through the normal struct-method path below — its `iter` return type IS `Iterator[E]`.
+        if method == "iter"
+            && args.is_empty()
+            && !matches!(&obj_ty, Ty::Struct(n, _) if n != "Iterator")
+            && let Some(elem) = self.iter_elem(&obj_ty)
+        {
+            return Ty::Struct("Iterator".to_string(), vec![elem]);
+        }
         match &obj_ty {
             // `module.fn(args)` is a plain call on the member — no `self`.
             Ty::Module(mname) => {
@@ -4351,6 +4412,17 @@ impl Checker {
                         && let Some(arg) = proto.args.first()
                     {
                         return Ty::Option(Box::new(self.resolve_type(arg, span)));
+                    }
+                    // `Iterable[T].iter()` yields the existential cursor `Iterator[T]` — the bound's
+                    // element arg, not `Iterator[Self]` (the registered placeholder return).
+                    if proto.name == "Iterable"
+                        && method == "iter"
+                        && let Some(arg) = proto.args.first()
+                    {
+                        return Ty::Struct(
+                            "Iterator".to_string(),
+                            vec![self.resolve_type(arg, span)],
+                        );
                     }
                     return subst(&msig.ret, &map);
                 }
@@ -4905,6 +4977,26 @@ impl Checker {
                 Err(format!("type {ty} does not satisfy Iterator"))
             };
         }
+        // `Iterable` conformance is "can produce a fresh cursor". Built-in collections satisfy it
+        // intrinsically; ANY `Iterator[T]`-satisfying type satisfies it too (every Iterator IS
+        // Iterable — `iter()` returns self), so `iter_elem` (which already covers both) is reused as
+        // the predicate. A user struct with a structural `iter(self) -> Iterator[E]` (but no `next`)
+        // is caught by the `iterable_elem` helper. The bound's `[T]` arg, if supplied and concrete,
+        // must match the element type (mirrors the parameterized-`Index` arg check). A `Ty::Param`
+        // falls through to the declared-bounds check below (so `[S: Iterable[T]]` forwards).
+        if protocol == "Iterable" && !matches!(ty, Ty::Param(_)) {
+            let Some(elem) = self.iterable_elem(ty) else {
+                return Err(format!("type {ty} does not satisfy Iterable"));
+            };
+            if let Some(want) = args.first()
+                && !want.is_unknown()
+                && !elem.is_unknown()
+                && !compatible(want, &elem)
+            {
+                return Err(format!("type {ty} does not satisfy Iterable"));
+            }
+            return Ok(());
+        }
         // `Index`/`IndexSet`/`Slice` — built-in `list`/`map`/`str` conform intrinsically (a struct
         // conforms structurally, falling through to the matcher below; a `Ty::Param` forwards to its
         // declared bounds). `str` is immutable, so it satisfies `Index`/`Slice` but NOT `IndexSet`.
@@ -4953,7 +5045,13 @@ impl Checker {
         // `Container[str]` value is NOT accepted where `Container[int]` is required (forwarding hole).
         if let Ty::Param(name) = ty {
             let matched = self.type_params.get(name).is_some_and(|bs| {
-                bs.iter().any(|b| b.name == protocol && self.bound_args_match(&b.args, args))
+                bs.iter().any(|b| {
+                    // Direct: the bound names the required protocol with matching args.
+                    (b.name == protocol && self.bound_args_match(&b.args, args))
+                    // Subsumption: every `Iterator[T]` IS `Iterable[T]` (its `iter()` returns self),
+                    // so an `Iterator`-bound param forwards into an `Iterable` bound (same element).
+                    || (protocol == "Iterable" && b.name == "Iterator" && self.bound_args_match(&b.args, args))
+                })
             });
             return if matched {
                 Ok(())
@@ -5989,6 +6087,25 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             methods: vec![(
                 "next".to_string(),
                 FnSig::plain(vec![Ty::Unknown], Ty::Option(Box::new(Ty::Param("Self".into())))),
+            )],
+        },
+    );
+    // `Iterable[T]` — "can produce a fresh cursor". The method shape mirrors the structural detection
+    // (`iter(self) -> Iterator[T]`); conformance is decided in `satisfies_args` (built-in collections
+    // + any `Iterator[T]` intrinsically — every Iterator IS Iterable via `iter() == self` — plus a
+    // user struct with a structural `iter`), NOT the generic structural loop, and the bound's `[T]`
+    // recovers the element type at call sites (`infer_method_call`'s `Iterable.iter` special-case).
+    // Distinct from `Iterator[T]`: an `Iterable` only promises a cursor; an `Iterator` also has `next`.
+    m.insert(
+        "Iterable".to_string(),
+        ProtocolInfo {
+            type_params: vec!["Elem".to_string()],
+            methods: vec![(
+                "iter".to_string(),
+                FnSig::plain(
+                    vec![Ty::Unknown],
+                    Ty::Struct("Iterator".to_string(), vec![Ty::Param("Elem".into())]),
+                ),
             )],
         },
     );
