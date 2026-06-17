@@ -7,6 +7,7 @@ parent2 cancelled: false
 parent2 reason: none
 grandchild cancelled: true
 grandchild reason: cancelled
+grandchild done ready: true
 timeout-child cancelled: true
 timeout-child reason: timeout
 timeout-child done ready: true

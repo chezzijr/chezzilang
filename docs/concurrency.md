@@ -454,14 +454,19 @@ child := c.derive()              # a CHILD token — cancelled when c (or any an
 > root-to-leaves, while cancelling a child **never** touches the parent (one-directional). The link is
 > **live** — a parent flip is observed by an already-derived child, *including a child that crossed the
 > `spawn`/`parallel:`/`Channel` airlock* — because the link is the parent's `Shared` flag plus a
-> `Shared` registry of child `done()` channels, which cross as live cores exactly like the flat token's
-> `flag`. A child inherits the **tightest** deadline (the soonest absolute deadline of itself and its
-> ancestors); a derived child of an already-elapsed timeout is cancelled at once with reason
-> `"timeout"`. `reason()` is **nearest-cause-wins**: the child's own cause if it has one, else the
-> inherited ancestor's. (Known v1 limit: the per-parent child registry only **grows** — there is no
-> token-drop hook, so a long-lived parent that derives many short-lived children retains their
-> `done()`-channel handles until the parent itself is dropped. Tokens are request-scoped and
-> short-lived in practice; a future prune-on-cancel could clear the list.)
+> `Shared` registry of descendant `done()` channels, which cross as live cores exactly like the flat
+> token's `flag`. **`done()` cascades transitively too:** `derive()` registers a child's `done()`
+> channel into **every ancestor's** registry (walking the parent chain to the root, each insert an
+> atomic `update()` so concurrent siblings don't race-lose), so a manual `cancel()` at *any* depth
+> above trips the child's `done()` directly — a grandchild parked in `wait: leaf.done()` wakes on a
+> grandparent cancel, not just on its immediate parent. A child inherits the **tightest** deadline
+> (the soonest absolute deadline of itself and its ancestors); a derived child of an already-elapsed
+> timeout is cancelled at once with reason `"timeout"`. `reason()` is **nearest-cause-wins**: the
+> child's own cause if it has one, else the inherited ancestor's. (Known v1 limit: the per-ancestor
+> registry only **grows** — there is no token-drop hook, so a long-lived ancestor that has many
+> short-lived descendants derived under it retains their `done()`-channel handles until it is itself
+> dropped. Tokens are request-scoped and short-lived in practice; a future prune-on-cancel could clear
+> the list.)
 
 | Method | Returns | Notes |
 |--------|---------|-------|

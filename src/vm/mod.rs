@@ -21871,6 +21871,29 @@ main()
         assert_eq!(out, "done: true\n");
     }
 
+    /// `done()` cascades TRANSITIVELY: a manual GRANDPARENT cancel makes a grandchild's `done()`
+    /// channel ready, not just `cancelled()`. The grandchild's done-channel is registered into every
+    /// ancestor's `kids`, so the grandparent's fan-out reaches it directly (a `wait:` waiter wakes).
+    #[test]
+    fn cancel_grandchild_done_ready_after_grandparent_cancel() {
+        let out = run_cancel_snippet(
+            "cancel_grandchild_done_fanout",
+            "    gp := cancel.manual()\n    mid := gp.derive()\n    leaf := mid.derive()\n    gp.cancel()\n    match leaf.done().try_recv():\n        Some(v): print(\"done: {v}\")\n        None:    print(\"not done\")\n",
+        );
+        assert_eq!(out, "done: true\n");
+    }
+
+    /// `done()` cascade reaches any depth: a manual ROOT cancel makes a great-grandchild's (depth 3)
+    /// `done()` channel ready, proving the per-ancestor registration walks the whole chain to the root.
+    #[test]
+    fn cancel_great_grandchild_done_ready_after_root_cancel() {
+        let out = run_cancel_snippet(
+            "cancel_ggchild_done_fanout",
+            "    root := cancel.manual()\n    a := root.derive()\n    b := a.derive()\n    leaf := b.derive()\n    root.cancel()\n    match leaf.done().try_recv():\n        Some(v): print(\"done: {v}\")\n        None:    print(\"not done\")\n",
+        );
+        assert_eq!(out, "done: true\n");
+    }
+
     /// A child of an already-elapsed timeout parent inherits the tightest deadline: it is cancelled
     /// at once, its reason is "timeout", its done() is ready, and its deadline equals the parent's.
     #[test]

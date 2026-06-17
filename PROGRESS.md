@@ -436,20 +436,24 @@ cancelling or timing-out a parent cancels every transitively-derived child, recu
 while cancelling a child **never** touches the parent (one-directional). The link is **live** — a
 parent flip is observed by an already-derived child, *including one that crossed the
 `spawn`/`parallel:`/`Channel` airlock* — because the link is the parent's `Shared` flag plus a `Shared`
-registry of child `done()` channels, which cross as live cores exactly like the flat token's `flag` (so
-the feature is automatically three-engine consistent — **zero Rust changes**, no checker change:
+registry of descendant `done()` channels, which cross as live cores exactly like the flat token's `flag`
+(so the feature is automatically three-engine consistent — **zero Rust changes**, no checker change:
 `sendable_rec` already permits the self-referential `parent: Token?` field + `Shared`/`Channel`/`Option`
 arms). A child inherits the **tightest** deadline (soonest absolute of itself + ancestors; an
 already-elapsed-timeout parent yields a child cancelled at once with reason `"timeout"`, its `done()`
-ready via its own timer armed to 0 ms). A manual ancestor cancel reaches a child's `done()` via the
-registry fan-out (`cancel()` trips each registered child channel). `reason()` is nearest-cause-wins
+ready via its own timer armed to 0 ms). `done()` cascades **transitively**: `derive()` registers a
+child's `done()` channel into **every ancestor's** registry (walking the parent chain to the root, each
+insert an atomic `Shared.update()` so concurrent siblings don't lose updates), so a manual `cancel()` at
+ANY depth above trips the descendant's `done()` directly — a grandchild parked in `wait: leaf.done()`
+wakes on a grandparent cancel, not just on its immediate parent. `reason()` is nearest-cause-wins
 (self's own cause, else inherited). Goldens: `examples/cancel_tree.chz` + `.expected` (byte-identical on
 `run`/`--serial`/`--interp`; `golden_cancel_tree_via_run_file` VM + `golden_cancel_tree_chz` interp
-twin), plus six VM unit tests (`cancel_child_*`, `cancel_transitive_grandchild`,
-`cancel_token_sendable_with_parent` — the cross-airlock live-link guard). **Known v1 limit:** the
-per-parent child registry only **grows** (no token-drop hook); tokens are request-scoped/short-lived, a
-future prune-on-cancel could clear it. Closes the `gaps.md` tree-propagation gap. See
-`docs/concurrency.md` §6e.
+twin), plus eight VM unit tests (`cancel_child_*`, `cancel_transitive_grandchild`,
+`cancel_grandchild_done_ready_after_grandparent_cancel` + `cancel_great_grandchild_done_ready_after_root_cancel`
+— the transitive-`done()` guards, `cancel_token_sendable_with_parent` — the cross-airlock live-link
+guard). **Known v1 limit:** the per-ancestor registry only **grows** (no token-drop hook); tokens are
+request-scoped/short-lived, a future prune-on-cancel could clear it. Closes the `gaps.md`
+tree-propagation gap. See `docs/concurrency.md` §6e.
 
 > **`Channel.recv_timeout(ms)` — attempted then reverted (2026-06-12).** A bounded-wait `recv` was
 > implemented with a **demote-always** shortcut (reuse `demote_recv_block` + a deadline) to avoid the

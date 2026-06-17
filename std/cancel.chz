@@ -26,7 +26,8 @@ struct Token:
     deadline: float        # absolute monotonic() secs; 0.0 == no deadline; checked at POLL TIME
     dl: Channel[bool]      # done(): a timer channel (timeout) or a trip()-able latch channel (manual)
     parent: Token?         # the live derivation link (None for a root); cancelled()/reason() recurse it
-    kids: Shared[list[Channel[bool]]]  # done()-channels of derived children — cancel() trips each (fan-out)
+    kids: Shared[list[Channel[bool]]]  # done()-channels of ALL transitive descendants (each derive()
+                                       # registers into every ancestor) — cancel() trips each (fan-out)
 
     # True once this token is cancelled (manually) or its deadline has passed, OR any ancestor is —
     # the cascade is transitive up the parent chain and one-directional (an ancestor never reads us).
@@ -52,7 +53,9 @@ struct Token:
             None:    return None
 
     # Manual cancel, callable anytime, from any task (the handle is shared). Idempotent. Trips the
-    # done() channel so a sibling parked in `wait:` wakes, and fans out to every derived child's done().
+    # done() channel so a sibling parked in `wait:` wakes, and fans out to EVERY transitive descendant's
+    # done() — derive() registers each descendant's done() into all of its ancestors' kids, so this one
+    # fan-out reaches grandchildren and below directly (the cascade is transitive, not immediate-only).
     fn cancel(self):
         self.flag.set(true)
         self.dl.trip()
@@ -86,11 +89,21 @@ struct Token:
             cdl = timer(rem_ms)
         child := Token(flag=Shared(false), deadline=d, dl=cdl, parent=Some(self),
                        kids=Shared([]))
-        # Register the child's done() for manual fan-out, and if this token is ALREADY cancelled at
-        # derive time, trip the child's done() now so it is ready immediately.
-        ks := self.kids.get()
-        ks.push(cdl)
-        self.kids.set(ks)
+        # Register the child's done() into EVERY ancestor's kids registry — walk the parent chain up
+        # from self to the root — so a manual cancel() at ANY depth above trips this child's done()
+        # directly (the cascade is transitive, not just immediate-parent). Each registration is an
+        # ATOMIC read-modify-write via update(): two tasks deriving from the same ancestor concurrently
+        # (a shared handle across the spawn/parallel airlock) both append without a lost-update race.
+        anc := Some(self)
+        while true:
+            match anc:
+                Some(a):
+                    a.kids.update(fn(xs): xs.concat([cdl]))
+                    anc = a.parent
+                None:
+                    break
+        # If any ancestor is ALREADY cancelled at derive time, trip the child's done() now so it is
+        # ready immediately (cancelled() polls the whole parent chain).
         if self.cancelled():
             cdl.trip()
         return child
