@@ -103,6 +103,10 @@ the stretch end-game). **Level-3 dynamic C-ABI FFI is now partially shipped** (`
 calling C functions via dlopen+libffi) — v1 marshals scalars only (int/float/bool/str→`char*`);
 structs-by-value, callbacks, varargs, opaque pointers / userdata, and `char*` ownership transfer are
 still deferred. See the FFI subsection below + [`docs/syntax.md`](syntax.md).
+**Forward design** for deepening FFI (the opaque-handle "userdata" Value that unlocks handle-based
+Rust/C libraries like Burn) and the package registry (pure-Chezzi vs native packages; the
+recompile-the-world / dynamic-plugin / C-ABI-wrapper models; the Rust-has-no-stable-ABI tax vs Python's
+pip/wheels) is captured in [`docs/ffi-and-packaging.md`](ffi-and-packaging.md).
 
 **`yield`/generators** were originally a deliberate non-goal (lazy sequences are written as adapter
 structs over `Iterator[T]`, Rust's `Map`/`Take` model). They are now a **complete, VM-only**

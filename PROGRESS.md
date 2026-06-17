@@ -868,7 +868,9 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
 **Permanent non-goals:** interp B1/B2 (above); variadic args, bignum (`i64`-only — every overflow is a
 recoverable fault; binary work → the `bytes` (immutable) + `bytearray` (mutable) *sequence* types, both **shipped** — no `byte`/`u8` scalar). **Level-3 dynamic
 C-ABI FFI is NO LONGER a non-goal — v1 shipped** (`extern "lib":` scalar calls via dlopen+libffi;
-structs/callbacks/varargs/userdata still deferred — see "Done" below). **`yield`/generators are likewise
+structs/callbacks/varargs/userdata still deferred — see "Done" below; forward design for the
+opaque-handle "userdata" Value + the package registry is in
+[`docs/ffi-and-packaging.md`](docs/ffi-and-packaging.md)). **`yield`/generators are likewise
 no longer a non-goal — complete VM-only support shipped** (see below).
 
 > **`yield`/generators — complete, VM-only (landed on `feat/yield-generators`).** No longer a
