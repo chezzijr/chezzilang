@@ -1957,6 +1957,81 @@ impl Checker {
         }
     }
 
+    /// Sound "this block provably cannot fall off its end" analysis, used to enforce that a function
+    /// with a *declared* non-void return type returns a value on every control-flow path (Option B).
+    /// Conservative by design: returns `true` only when a path PROVABLY diverges or returns a value,
+    /// so it can never false-positive on valid code (which would break the build). A genuine
+    /// fall-through that this misses is an acceptable false-negative (misses the error), not a hazard.
+    ///
+    /// A block terminates iff ANY statement in it terminates (the first terminator dominates; no
+    /// dead-code diagnosis — out of scope).
+    fn block_terminates(body: &[Stmt]) -> bool {
+        body.iter().any(Self::stmt_terminates)
+    }
+
+    fn stmt_terminates(s: &Stmt) -> bool {
+        match &s.kind {
+            // `return <expr>` and bare `return` both leave the function (a bare `return` under a
+            // non-nil signature is already its own error in `check_return`; don't double-report).
+            StmtKind::Return(_) => true,
+            // An `if` terminates only with an `else` AND every branch body + the else body terminate.
+            StmtKind::If { branches, else_block: Some(eb) } => {
+                branches.iter().all(|(_, b)| Self::block_terminates(b)) && Self::block_terminates(eb)
+            }
+            // No `else` -> the all-conditions-false path falls through.
+            StmtKind::If { else_block: None, .. } => false,
+            // A `match` terminates iff every arm body terminates. Exhaustiveness (coverage by the
+            // unguarded arms) is enforced separately by the match checker, so once every arm
+            // terminates the eventually-chosen arm terminates too.
+            StmtKind::Match { arms, .. } => arms.iter().all(|a| Self::block_terminates(&a.body)),
+            // `while true:` with no reachable `break` loops forever (never falls through).
+            StmtKind::While { cond, body } => {
+                matches!(cond.kind, ExprKind::Bool(true)) && !Self::block_has_break(body)
+            }
+            // `exit(...)` (the one builtin typed `nil` that never returns) diverges. A narrow,
+            // syntactic special-case on the callee name; a user shadowing `exit` only causes an
+            // acceptable false-negative (missed error), never a false-positive.
+            StmtKind::Expr(e) => Self::expr_is_exit_call(e),
+            _ => false,
+        }
+    }
+
+    /// Whether `e` is a call to `exit` — the one builtin (`std.os.exit`, typed `nil`) that never
+    /// returns. Matches both a bare `exit(...)` and the module-qualified `os.exit(...)` form. A
+    /// narrow, syntactic special-case: a user shadowing the name only causes an acceptable
+    /// false-negative (a missed error), never a false-positive that breaks a valid build.
+    fn expr_is_exit_call(e: &Expr) -> bool {
+        if let ExprKind::Call { callee, .. } = &e.kind {
+            match &callee.kind {
+                ExprKind::Ident(name) => name == "exit",
+                ExprKind::Field { name, .. } => name == "exit",
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Whether `body` contains a `break` that targets THIS loop level — descends into `if`/`match`
+    /// arms (a `break` there exits the enclosing loop) but NOT into nested `while`/`for` loops (their
+    /// `break` is theirs) nor into closures/nested fns (those open a fresh loop context).
+    fn block_has_break(body: &[Stmt]) -> bool {
+        body.iter().any(Self::stmt_has_break)
+    }
+
+    fn stmt_has_break(s: &Stmt) -> bool {
+        match &s.kind {
+            StmtKind::Break => true,
+            StmtKind::If { branches, else_block } => {
+                branches.iter().any(|(_, b)| Self::block_has_break(b))
+                    || else_block.as_deref().is_some_and(Self::block_has_break)
+            }
+            StmtKind::Match { arms, .. } => arms.iter().any(|a| Self::block_has_break(&a.body)),
+            // A nested `while`/`for` owns its own `break`; do not descend.
+            _ => false,
+        }
+    }
+
     /// `yield <expr>` — legal only inside a generator function (one whose return type is
     /// `Iterator[T]`); the operand must be assignable to the element type `T`.
     fn check_yield(&mut self, e: &Expr, span: Span) {
@@ -2034,6 +2109,24 @@ impl Checker {
         }
         for stmt in &decl.body {
             self.check_stmt(stmt);
+        }
+        // Option B: a function with a *declared* non-void return type must return a value on every
+        // control-flow path. A bare `fn a(): 10` (no annotation) infers `Ty::Nil` and is exempt;
+        // generators (`-> Iterator[T]`, value-produced via `yield`) are exempt too. If the body can
+        // fall off the end, that silently yields nil at runtime — turn it into a loud static error.
+        if !decl.is_generator
+            && sig.ret != Ty::Nil
+            && !Self::block_terminates(&decl.body)
+            && let Some(span) = decl.body.first().map(|s| s.span)
+        {
+            let ret = &sig.ret;
+            self.error(
+                span,
+                format!(
+                    "function '{}' has return type {ret} but can fall off the end without returning a value; add an explicit `return`, or use a closure `fn() -> {ret}: <expr>` which implicitly returns its expression body",
+                    decl.name
+                ),
+            );
         }
         self.pop_scope();
         self.current_ret = saved_ret;

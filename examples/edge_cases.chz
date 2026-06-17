@@ -15,12 +15,18 @@ fn probe(label: str, f: fn() -> int):
 
 # ---- arithmetic faults (all caught) --------------------------------------------------------------
 
-fn f_div0() -> int: 1 / 0
-fn f_mod0() -> int: 7 % 0
-fn f_overflow() -> int: 9223372036854775807 + 1
-fn f_underflow() -> int: 0 - 9223372036854775807 - 2
-fn f_shift_hi() -> int: 1 << 99
-fn f_shift_neg() -> int: 1 << (0 - 1)
+fn f_div0() -> int:
+    return 1 / 0
+fn f_mod0() -> int:
+    return 7 % 0
+fn f_overflow() -> int:
+    return 9223372036854775807 + 1
+fn f_underflow() -> int:
+    return 0 - 9223372036854775807 - 2
+fn f_shift_hi() -> int:
+    return 1 << 99
+fn f_shift_neg() -> int:
+    return 1 << (0 - 1)
 fn f_fdiv0() -> int:
     x := 1.0 / 0.0
     return int(x)

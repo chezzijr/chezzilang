@@ -238,6 +238,24 @@ nums.map(fn(x): x * 2)             # param/return types inferred in closures
 `return` statements: the first concrete return wins, conflicting returns are a type error,
 and a body with no value-returning `return` infers `nil`. Param types stay required.
 
+**Returns on every path (enforced).** A function with a **declared non-void return type**
+(`-> int`, `-> str`, …) must return a value on *every* control-flow path. The function body is a
+sequence of **statements**, not an expression, so an inline body like `fn a() -> int: 10` does **not**
+implicitly return `10` — the `10` is a discarded expression-statement and the body would silently fall
+off the end to `nil`. The checker rejects this:
+
+```chezzi
+fn a() -> int: 10          # ERROR: 'a' can fall off the end without returning a value
+fn a() -> int:
+    return 10              # fix: an explicit `return`
+twice := fn() -> int: 10   # OR: a closure body IS an expression — implicitly returns 10
+```
+
+The check is path-aware and conservative: an `if`/`else` where every branch returns, an exhaustive
+`match` where every arm returns, a `while true:` with no `break`, and a tail call to `exit` all count
+as terminating. A bare `fn a(): 10` with **no** return annotation infers `nil` (returns nothing) and is
+unaffected — only a *declared* non-void return type is enforced.
+
 **Default + named arguments.** A free function (or a struct constructor) may give trailing
 parameters a **default** — any expression that does **not** reference another parameter (`= 10`,
 `= 1 + 2`, `= GLOBAL * 2`, `= compute()`; a call runs once per omitting call). Defaults are evaluated
