@@ -1,0 +1,14 @@
+# C struct passed/returned BY VALUE through the C-ABI FFI.
+# `div_t div(int numer, int denom)` returns a small POD struct by value:
+#   struct div_t { int quot; int rem; }   (two C `int` = int32).
+# The Chezzi struct's field order + types define the C layout; libffi computes the offsets.
+struct DivT:
+    quot: int32
+    rem: int32
+
+extern "libc.so.6":
+    fn div(numer: int32, denom: int32) -> DivT
+
+r: DivT = div(17, 5)
+print(r.quot)
+print(r.rem)

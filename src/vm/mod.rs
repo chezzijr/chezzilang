@@ -13730,6 +13730,58 @@ impl crate::native::Host for VmHost<'_> {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
+    fn arg_struct_fields(
+        &mut self,
+        i: usize,
+    ) -> Result<Vec<crate::native::NativeRet>, crate::native::HostError> {
+        use crate::native::NativeRet as N;
+        match self.args.get(i) {
+            Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
+                // Positional, declaration-order fields (the same order the StructDef declares them).
+                // Map each scalar field value to a NativeRet so the cffi layer casts it to its C
+                // field width. The checker guarantees flat scalar fields.
+                Obj::Struct { fields, .. } => {
+                    let mut out = Vec::with_capacity(fields.len());
+                    for v in fields {
+                        let n = match v {
+                            Value::Int(n) => N::Int(*n),
+                            Value::Float(f) => N::Float(*f),
+                            Value::Bool(b) => N::Bool(*b),
+                            Value::Obj(fh) => match self.vm.heap.get(*fh) {
+                                Obj::Ptr(a) => N::Ptr(*a),
+                                _ => {
+                                    return Err(crate::native::HostError::arg_type(
+                                        i,
+                                        "struct scalar field",
+                                        "other",
+                                    ));
+                                }
+                            },
+                            _ => {
+                                return Err(crate::native::HostError::arg_type(
+                                    i,
+                                    "struct scalar field",
+                                    "other",
+                                ));
+                            }
+                        };
+                        out.push(n);
+                    }
+                    Ok(out)
+                }
+                _ => {
+                    let got = self.vm.type_name(self.args[i]);
+                    Err(crate::native::HostError::arg_type(i, "struct", got))
+                }
+            },
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "struct",
+                self.vm.type_name(*other),
+            )),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
     fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
@@ -26071,6 +26123,23 @@ main()
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/ffi_ptr.chz");
+    }
+
+    /// C struct BY VALUE golden (VM twin of `interp::golden_ffi_struct_chz`): the `extern "lib":`
+    /// block binds `div_t div(int, int)` — a libc fn taking two scalars and returning a small POD
+    /// struct BY VALUE — to a Chezzi `struct DivT{quot, rem}`. `div(17, 5) == {3, 2}` (pure, always
+    /// present). Byte-matches `.expected` and stays identical to the interpreter (`assert_file_parity`),
+    /// which under `--parallel` also proves the struct return crosses the M:N airlock via the existing
+    /// `NativeRet::Struct` deep-copy. Linux-only.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_struct_chz_via_run_file() {
+        let path = fixture("examples/ffi_struct.chz");
+        let expected = std::fs::read_to_string(fixture("examples/ffi_struct.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/ffi_struct.chz");
     }
 
     /// C-ABI deeper `str` returns golden (VM twin of `interp::golden_ffi_str_chz`): `strdup -> owned_str`

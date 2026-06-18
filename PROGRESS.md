@@ -883,7 +883,9 @@ C-ABI FFI is NO LONGER a non-goal — v1 shipped** (`extern "lib":` scalar calls
 `owned_str`** (copy + libc `free`, no leak) **and `str?`** (`NULL` → `None`, `examples/ffi_str.chz`);
 **plus bidirectional fixed-width integers `int8`..`uint64`** (bind C `int32_t`/`uint32_t`/…;
 truncate-on-param / sign-or-zero-extend-on-return, `examples/ffi_int.chz`);
-structs/callbacks/varargs, a custom user-named deallocator, C-spelling int aliases (`c_int`), and the rich Rust
+**plus flat-scalar structs by value** (a Chezzi `struct` of scalar fields ↔ a C struct passed/returned
+by value, `examples/ffi_struct.chz`);
+nested structs / `str` struct fields / callbacks / varargs, a custom user-named deallocator, C-spelling int aliases (`c_int`), and the rich Rust
 `Box<dyn Any>` userdata handle still deferred — see "Done" below; forward design for the Rust
 userdata Value + the package registry is in
 [`docs/ffi-and-packaging.md`](docs/ffi-and-packaging.md)). **`yield`/generators are likewise
@@ -906,6 +908,27 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **C-ABI FFI structs by value (flat scalar fields)** (2026-06-18, `auto-task/ffi-struct-by-value`)
+  — an extern fn can take and/or return a C struct **by value** (not by pointer): name a Chezzi `struct`
+  as a param/return type and its fields marshal in declaration order into a C-ABI struct layout. New
+  `CType::Struct{name, field_names, fields}` in `src/native/cffi.rs` carries **only owned data** (no
+  libffi `Type`, which is `!Send`/`!Sync`/`!Clone`) — the libffi structure type + per-field offsets are
+  rebuilt per call via `ffi_get_struct_offsets` (platform ABI — small-struct-in-registers vs by-hidden-
+  pointer — is libffi's, never hand-rolled), keeping `Cffi` `Send + Sync` for `--parallel`/M:N (made
+  `CType` non-`Copy`; by-ref matching). A struct **param** writes its fields into a per-arg buffer at the
+  libffi offsets (reusing the scalar `as`-casts incl. the fixed-width widths) via a new
+  `Host::arg_struct_fields`; a struct **return** drops to the raw `ffi_call` with an own rvalue buffer
+  sized `max(struct_size, sizeof(ffi_arg))` (the register-width floor from the narrow-int-return fix) and
+  reads each field at its libffi offset into a `NativeRet::Struct` both engines already lower. `ctype_of`
+  (compiler + interp, byte-identical) maps a struct `Named` to `CType::Struct` recursively with a shared
+  visited-set (cyclic alias/struct ⇒ `None`, no overflow); interp pre-gathers a program-global
+  `extern_struct_fields` like `extern_aliases`. **v1 = flat scalar fields only** — the checker rejects a
+  struct with a `str`/nested-struct field (error naming the struct + field) and a generic struct; a
+  `type P = Point` alias works like the bare struct. Golden `examples/ffi_struct.chz` binds
+  `div_t div(int, int)` (pure libc; `{3, 2}`, byte-identical VM/`--interp`/`--parallel`); cffi round-trip
+  unit tests (struct return + mixed long/double/long + fixed-width-field layout), checker + ctype_of
+  parity tests. Docs: `syntax.md` §12b, `spec.md` §Level-3, `grammar.bnf`, `ffi-and-packaging.md`. Nested
+  structs / `str` struct fields stay deferred.
 - ✅ **C-ABI FFI fixed-width integers — `int8`..`uint64`** (2026-06-18, `auto-task/ffi-fixed-width-ints`)
   — eight bidirectional integer marshalling type names (`int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/
   `uint32`/`uint64`) on the `extern "lib":` surface, siblings of `ptr`/`owned_str` (builtin names

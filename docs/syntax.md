@@ -1409,10 +1409,37 @@ C `int32_t`/`uint32_t`/… use the dedicated `int8`..`uint64` names below — th
 `str`; **return-only** `owned_str` also frees it, `str?` makes a `NULL` return `None` — see below), and
 `ptr` ↔ C `void*` (an **opaque handle** — see below). No implicit `int`→`float` (`cos(2)`
 is a type error — pass `2.0`). A no-return signature (`fn srand(seed: int)`) — or an explicit
-`-> nil` — maps to C `void`; `nil` is a **return-only** type (it is rejected as a parameter). The
-checker rejects any other non-scalar param/return (list/map/set/tuple/struct/enum/…) with a *not
-C-marshallable* error. Calls run inline (a slow C call pins its worker under `--parallel`) and produce
-identical output on all three engines (VM / `--interp` / `--parallel`).
+`-> nil` — maps to C `void`; `nil` is a **return-only** type (it is rejected as a parameter). A
+**flat-scalar `struct`** marshals **by value** as a C struct (see below). The checker rejects any
+other non-marshallable param/return (list/map/set/tuple/enum/generic struct/struct-with-non-scalar-
+field/…) with a *not C-marshallable* error. Calls run inline (a slow C call pins its worker under
+`--parallel`) and produce identical output on all three engines (VM / `--interp` / `--parallel`).
+
+**Structs by value.** Name a Chezzi `struct` as an extern param and/or return type to pass/return a C
+struct **by value** (not by pointer). The struct's **field order + types define the C layout** — libffi
+computes size/alignment/offsets from the platform ABI (small-struct-in-registers vs by-hidden-pointer
+is handled for you), so it works as both a by-value param and a by-value return:
+
+```chezzi
+# div_t div(int numer, int denom) — returns a small POD struct BY VALUE.
+struct DivT:
+    quot: int32
+    rem: int32
+
+extern "libc.so.6":
+    fn div(numer: int32, denom: int32) -> DivT
+
+r := div(17, 5)
+print(r.quot)   # 3
+print(r.rem)    # 2
+```
+
+**v1 limit — flat scalar fields only.** Every field must itself be an already-marshallable **scalar**
+(`int`/`float`/`bool`/`ptr`/the `int8`..`uint64` widths). A struct with a **`str` field** or a **nested
+struct** field is rejected with an error naming the struct *and* the offending field; **generic
+structs** (`Pair[int]`) have no fixed C layout and are rejected. (A transparent `type P = Point` alias
+to a flat struct works exactly like the bare struct.) Nested structs-by-value and string fields are
+deferred to a later version.
 
 **Opaque handles (`ptr`).** A C library built around a handle (`FILE*`, `sqlite3*`, a
 `create`/`use`/`destroy` context) returns a `void*` you hold and pass back. Declare it as `ptr` — a
@@ -1535,10 +1562,11 @@ rejects the collision (*'…' is a builtin/reserved name*).
   `sqlite3*` checking — passing the wrong handle is C-level UB, the author's assertion) and is **never
   auto-freed** (call the library's own destroy; forgetting **leaks**).
 
-**Deferred (v1 limits):** structs-by-value, callbacks / function pointers, varargs, the rich Rust
-`Box<dyn Any>` userdata handle (for compiled-in Rust libraries), and a **custom user-named deallocator**
-(only libc `free` backs `owned_str`). (Opaque C `void*` handles — `ptr` — **shipped**; nullable `str?`
-returns and `char*` ownership transfer via `owned_str` — **shipped**, see above.)
+**Deferred (v1 limits):** callbacks / function pointers, varargs, the rich Rust `Box<dyn Any>` userdata
+handle (for compiled-in Rust libraries), a **custom user-named deallocator** (only libc `free` backs
+`owned_str`), and — within structs-by-value — **nested structs** and **`str`/`owned_str` fields**.
+(Opaque C `void*` handles — `ptr` — **shipped**; nullable `str?` returns and `char*` ownership transfer
+via `owned_str` — **shipped**; **flat-scalar structs by value** — **shipped**, see above.)
 
 ## 13. Standard library (v1)
 

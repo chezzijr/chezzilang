@@ -1178,21 +1178,85 @@ impl Checker {
     /// plain `Str` and so needs no special case here — its return-only-ness is guarded on the surface
     /// `Type` in the extern param loop, before `resolve_type` collapses it.)
     fn assert_marshallable(&mut self, ty: &Ty, fn_name: &str, span: Span, allow_void: bool) {
-        let ok = matches!(
+        let scalar = matches!(
             ty,
             Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Ptr | Ty::Unknown
-        ) || (allow_void
-            && (matches!(ty, Ty::Nil)
-                || matches!(ty, Ty::Option(inner) if matches!(**inner, Ty::Str))));
-        if !ok {
+        );
+        let ok = scalar
+            || (allow_void
+                && (matches!(ty, Ty::Nil)
+                    || matches!(ty, Ty::Option(inner) if matches!(**inner, Ty::Str))));
+        if ok {
+            return;
+        }
+        // A flat-scalar struct BY VALUE: every field must itself be a marshallable C *scalar* (no
+        // nested struct, no str/owned_str). Generic structs (non-empty type args) have no fixed C
+        // layout — reject them. `visited` guards a struct cycling back through a field (defensive; a
+        // struct field that is itself a struct is already rejected as nested). `Iterator` is a
+        // built-in existential `Struct`, not a real POD — never marshallable.
+        if let Ty::Struct(name, args) = ty
+            && args.is_empty()
+            && name != "Iterator"
+            && self.structs.contains_key(name)
+        {
+            let mut visited = std::collections::HashSet::new();
+            // The recursion emits field-level errors itself; either way return (no generic error).
+            self.struct_fields_marshallable(name, fn_name, span, &mut visited);
+            return;
+        }
+        self.error(
+            span,
+            format!(
+                "type '{ty}' is not C-marshallable in extern fn '{fn_name}' \
+                 (v1 supports only int, float, bool, str, ptr, and a flat struct of those)"
+            ),
+        );
+    }
+
+    /// Whether every field of struct `name` is a marshallable C *scalar* — the v1 by-value-struct
+    /// rule (flat scalar fields only). On a non-scalar field (str/owned_str, a nested struct, a
+    /// generic `Ty::Param`, a list/map/…) emits a clear error naming the struct AND the offending
+    /// field, and returns `false`. `visited` breaks a (defensive) field-type cycle without overflow.
+    fn struct_fields_marshallable(
+        &mut self,
+        name: &str,
+        fn_name: &str,
+        span: Span,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if !visited.insert(name.to_string()) {
             self.error(
                 span,
                 format!(
-                    "type '{ty}' is not C-marshallable in extern fn '{fn_name}' \
-                     (v1 supports only int, float, bool, str, ptr)"
+                    "struct '{name}' is recursively defined and cannot be C-marshallable in extern \
+                     fn '{fn_name}'"
                 ),
             );
+            return false;
         }
+        // Clone the field list to drop the immutable borrow on `self` before emitting errors.
+        let fields = match self.structs.get(name) {
+            Some(info) => info.fields.clone(),
+            None => return false,
+        };
+        let mut all_ok = true;
+        for (fname, fty) in &fields {
+            // Only true C *scalars* are valid struct fields (NOT `Str` — str by value is deferred).
+            let ok = matches!(fty, Ty::Int | Ty::Float | Ty::Bool | Ty::Ptr | Ty::Unknown);
+            if !ok {
+                all_ok = false;
+                self.error(
+                    span,
+                    format!(
+                        "struct '{name}' field '{fname}' of type '{fty}' is not C-marshallable \
+                         (extern structs require flat scalar fields; nested structs and str are not \
+                         supported in v1) in extern fn '{fn_name}'"
+                    ),
+                );
+            }
+        }
+        visited.remove(name);
+        all_ok
     }
 
     /// Build a function's signature, resolving param/return annotations. `self` (an un-annotated

@@ -267,6 +267,13 @@ struct Interp {
     /// declared in one module and used bare in another's `extern` signature resolves here exactly as
     /// the checker accepted it. Empty for a single-source run (the module's own aliases suffice).
     extern_aliases: std::collections::HashMap<String, crate::ast::Type>,
+    /// Program-global struct-field table (struct name → declared fields), gathered across EVERY module
+    /// before evaluation begins — the interp twin of the compiler's pass-1 `struct_fields`. Used only
+    /// to lower an extern fn's by-value struct param/return types to `CType::Struct` in
+    /// `hoist_declarations`, so an extern naming a struct declared in another module resolves here
+    /// exactly as the compiler does (two-engine parity). Empty for a single-source run (the module's
+    /// own struct decls suffice).
+    extern_struct_fields: std::collections::HashMap<String, Vec<crate::ast::Field>>,
 }
 
 /// A task registered by `spawn`, awaiting its nursery's join barrier. The callee/receiver and
@@ -353,6 +360,7 @@ impl Interp {
             nurseries: Vec::new(),
             executors: Vec::new(),
             extern_aliases: std::collections::HashMap::new(),
+            extern_struct_fields: std::collections::HashMap::new(),
         };
         // Built-in Result / Option variants — available without any declaration.
         interp.register_variant("Ok", "Result", 1);
@@ -3897,19 +3905,31 @@ impl Interp {
                             aliases.insert(name.clone(), ty.clone());
                         }
                     }
+                    // Program-global struct fields (cross-module, populated by the run driver) plus
+                    // this module's own — so an extern can name a by-value struct declared anywhere
+                    // (matching the compiler's pass-1 `struct_fields`, which spans every module).
+                    let mut struct_fields = self.extern_struct_fields.clone();
+                    for s in stmts {
+                        if let StmtKind::Struct { name, fields, .. } = &s.kind {
+                            struct_fields.insert(name.clone(), fields.clone());
+                        }
+                    }
                     for ef in fns {
                         let params: Vec<crate::native::cffi::CType> = ef
                             .params
                             .iter()
                             .map(|p| {
-                                ctype_of(p.ty.as_ref(), &aliases)
+                                ctype_of(p.ty.as_ref(), &aliases, &struct_fields)
                                     .expect("checker verified marshallable param")
                             })
                             .collect();
                         // `None` ⇒ void: no annotation, or one resolving to `nil` (incl. an alias to
                         // `nil`). The checker guarantees a non-void return is a scalar, so `and_then`
                         // (never `.expect`) — a non-scalar resolution can only mean void.
-                        let ret = ef.ret.as_ref().and_then(|t| ctype_of(Some(t), &aliases));
+                        let ret = ef
+                            .ret
+                            .as_ref()
+                            .and_then(|t| ctype_of(Some(t), &aliases, &struct_fields));
                         let cffi = crate::native::cffi::Cffi::new(lib, &ef.name, params, ret)
                             .map_err(|e| RuntimeError {
                                 message: e.message,
@@ -5132,6 +5152,18 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
             }
         }
     }
+    // Likewise gather every module's struct fields up front (load order, deps first) so an `extern`
+    // signature can name a by-value struct declared in any module — mirroring the compiler's pass-1
+    // `struct_fields` (which spans every module before any extern compiles).
+    for lm in &graph.modules {
+        for s in &lm.ast.stmts {
+            if let StmtKind::Struct { name, fields, .. } = &s.kind {
+                interp
+                    .extern_struct_fields
+                    .insert(name.clone(), fields.clone());
+            }
+        }
+    }
     // Modules are in load order: dependencies first, entry last.
     for lm in &graph.modules {
         if let Err(e) = interp.eval_module(lm) {
@@ -5210,6 +5242,27 @@ struct InterpHost<'a> {
     exit: &'a mut Option<i32>,
 }
 
+/// Map a scalar [`Value`] to an engine-neutral [`crate::native::NativeRet`] scalar — the field
+/// values of a by-value struct extern arg. Only the C-marshallable scalar variants are reachable
+/// (the checker rejects str/nested-struct fields), so a non-scalar is a defended type error.
+fn value_to_native_scalar(
+    v: &Value,
+    i: usize,
+) -> Result<crate::native::NativeRet, crate::native::HostError> {
+    use crate::native::NativeRet as N;
+    match v {
+        Value::Int(n) => Ok(N::Int(*n)),
+        Value::Float(f) => Ok(N::Float(*f)),
+        Value::Bool(b) => Ok(N::Bool(*b)),
+        Value::Ptr(a) => Ok(N::Ptr(*a)),
+        other => Err(crate::native::HostError::arg_type(
+            i,
+            "struct scalar field",
+            other.type_name(),
+        )),
+    }
+}
+
 impl crate::native::Host for InterpHost<'_> {
     fn arg_count(&self) -> usize {
         self.args.len()
@@ -5257,6 +5310,29 @@ impl crate::native::Host for InterpHost<'_> {
             Some(other) => Err(crate::native::HostError::arg_type(
                 i,
                 "ptr",
+                other.type_name(),
+            )),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_struct_fields(
+        &mut self,
+        i: usize,
+    ) -> Result<Vec<crate::native::NativeRet>, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Struct { fields, .. }) => {
+                // Fields are in declaration order; map each scalar field value to a NativeRet so the
+                // cffi layer can cast it to its C field width. (The checker guarantees flat scalars.)
+                let fields = fields.borrow();
+                let mut out = Vec::with_capacity(fields.len());
+                for (_, v) in fields.iter() {
+                    out.push(value_to_native_scalar(v, i)?);
+                }
+                Ok(out)
+            }
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "struct",
                 other.type_name(),
             )),
             None => Err(crate::native::HostError::missing_arg(i)),
@@ -5422,6 +5498,18 @@ fn decode_utf8(bytes: &[u8], span: Span) -> Result<Value, RuntimeError> {
 fn ctype_of(
     ty: Option<&crate::ast::Type>,
     aliases: &std::collections::HashMap<String, crate::ast::Type>,
+    struct_fields: &std::collections::HashMap<String, Vec<crate::ast::Field>>,
+) -> Option<crate::native::cffi::CType> {
+    ctype_of_visiting(ty, aliases, struct_fields, &mut Vec::new())
+}
+
+/// BYTE-IDENTICAL twin of `compiler::ctype_of_visiting` — a shared visited-name stack guards a
+/// (checker-rejected, defended-against) cyclic alias/struct from overflowing the host stack.
+fn ctype_of_visiting(
+    ty: Option<&crate::ast::Type>,
+    aliases: &std::collections::HashMap<String, crate::ast::Type>,
+    struct_fields: &std::collections::HashMap<String, Vec<crate::ast::Field>>,
+    visited: &mut Vec<String>,
 ) -> Option<crate::native::cffi::CType> {
     use crate::native::cffi::CType;
     match ty {
@@ -5446,11 +5534,36 @@ fn ctype_of(
             "uint16" => Some(CType::UInt16),
             "uint32" => Some(CType::UInt32),
             "uint64" => Some(CType::UInt64),
-            other => aliases.get(other).and_then(|t| ctype_of(Some(t), aliases)),
+            other => {
+                if visited.iter().any(|v| v == other) {
+                    return None;
+                }
+                visited.push(other.to_string());
+                let r = if let Some(t) = aliases.get(other) {
+                    ctype_of_visiting(Some(t), aliases, struct_fields, visited)
+                } else if let Some(fields) = struct_fields.get(other) {
+                    let mut cfields = Vec::with_capacity(fields.len());
+                    let mut field_names = Vec::with_capacity(fields.len());
+                    for f in fields {
+                        let ct = ctype_of_visiting(Some(&f.ty), aliases, struct_fields, visited)?;
+                        cfields.push(ct);
+                        field_names.push(f.name.clone());
+                    }
+                    Some(CType::Struct {
+                        name: other.to_string(),
+                        field_names,
+                        fields: cfields,
+                    })
+                } else {
+                    None
+                };
+                visited.pop();
+                r
+            }
         },
         // A RETURN-ONLY nullable `char*` (surface `str?` / `owned_str?`): NULL → None at runtime.
         Some(crate::ast::Type::Generic(n, args)) if n == "Option" && args.len() == 1 => {
-            match ctype_of(args.first(), aliases) {
+            match ctype_of_visiting(args.first(), aliases, struct_fields, visited) {
                 Some(CType::Str) => Some(CType::OptStr),
                 Some(CType::OwnedStr) => Some(CType::OptOwnedStr),
                 _ => None,
@@ -7398,6 +7511,8 @@ b := Buf([10, 20, 30])
         use crate::native::cffi::CType;
         let aliases: std::collections::HashMap<String, crate::ast::Type> =
             std::collections::HashMap::new();
+        let sf: std::collections::HashMap<String, Vec<crate::ast::Field>> =
+            std::collections::HashMap::new();
         let named = |s: &str| crate::ast::Type::Named(s.to_string());
         for (name, want) in [
             ("int8", CType::Int8),
@@ -7410,14 +7525,14 @@ b := Buf([10, 20, 30])
             ("uint64", CType::UInt64),
         ] {
             assert_eq!(
-                super::ctype_of(Some(&named(name)), &aliases),
+                super::ctype_of(Some(&named(name)), &aliases, &sf),
                 Some(want),
                 "{name}"
             );
         }
         // Bare `int` is still C long (back-compat), distinct from int64.
         assert_eq!(
-            super::ctype_of(Some(&named("int")), &aliases),
+            super::ctype_of(Some(&named("int")), &aliases, &sf),
             Some(CType::Int)
         );
         // Alias trap: `type Len = int32` resolves to the WIDTH, not CType::Int.
@@ -7425,8 +7540,51 @@ b := Buf([10, 20, 30])
             std::collections::HashMap::new();
         aliased.insert("Len".to_string(), named("int32"));
         assert_eq!(
-            super::ctype_of(Some(&named("Len")), &aliased),
+            super::ctype_of(Some(&named("Len")), &aliased, &sf),
             Some(CType::Int32)
+        );
+    }
+
+    /// BYTE-IDENTICAL twin of `compiler::interp_tests::ctype_of_maps_flat_struct`: interp's
+    /// `ctype_of` must map a flat-scalar struct + an alias to it to the SAME `CType::Struct` the
+    /// compiler does (two-engine parity of the extern type lowering). Unknown name ⇒ `None`.
+    #[test]
+    fn ctype_of_maps_flat_struct() {
+        use crate::ast::{Field, Type};
+        use crate::native::cffi::CType;
+        let field = |name: &str, ty: &str| Field {
+            name: name.to_string(),
+            ty: Type::Named(ty.to_string()),
+            default: None,
+        };
+        let mut sf: std::collections::HashMap<String, Vec<Field>> =
+            std::collections::HashMap::new();
+        sf.insert(
+            "Point".to_string(),
+            vec![field("x", "int32"), field("y", "int32")],
+        );
+        let aliases: std::collections::HashMap<String, Type> = std::collections::HashMap::new();
+
+        let want = CType::Struct {
+            name: "Point".to_string(),
+            field_names: vec!["x".to_string(), "y".to_string()],
+            fields: vec![CType::Int32, CType::Int32],
+        };
+        assert_eq!(
+            super::ctype_of(Some(&Type::Named("Point".to_string())), &aliases, &sf),
+            Some(want.clone())
+        );
+
+        let mut aliased = aliases.clone();
+        aliased.insert("P".to_string(), Type::Named("Point".to_string()));
+        assert_eq!(
+            super::ctype_of(Some(&Type::Named("P".to_string())), &aliased, &sf),
+            Some(want)
+        );
+
+        assert_eq!(
+            super::ctype_of(Some(&Type::Named("Nope".to_string())), &aliases, &sf),
+            None
         );
     }
 
@@ -7497,6 +7655,25 @@ b := Buf([10, 20, 30])
         .unwrap();
         let (out, _err, res, _) = run_file(&path);
         res.expect("ffi_int.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
+    /// C struct BY VALUE golden (interp side): an `extern "lib":` block binds `div_t div(int, int)` —
+    /// a libc fn taking two scalars and returning a small POD struct BY VALUE — to a Chezzi
+    /// `struct DivT{quot, rem}` (two int32 fields). Deterministic on any Linux (`div(17, 5) == {3, 2}`,
+    /// pure + always present). The VM twin asserts parity.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_struct_chz() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi_struct.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/ffi_struct.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("ffi_struct.chz should run on the interp");
         assert_eq!(out, expected);
     }
 

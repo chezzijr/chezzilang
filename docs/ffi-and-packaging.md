@@ -16,8 +16,8 @@
 ## TL;DR
 
 - **Today's FFI has two seams.** Level-2 (compiled-in Rust bindings via `NativeFn`/`Host`/`NativeRet`)
-  and Level-3 (`extern "lib":` dynamic C-ABI via dlopen+libffi, scalars only). Both are *stateless,
-  value-in / value-out*.
+  and Level-3 (`extern "lib":` dynamic C-ABI via dlopen+libffi — scalars, opaque `void*` handles, and
+  flat-scalar structs by value). Both are *stateless, value-in / value-out*.
 - **Strong libraries (Burn, torch-class) are blocked**, even Rust ones, even though Chezzi is Rust.
   The blocker is the **value model**, not linking: there is no opaque-handle `Value`, so a stateful
   `Tensor`/`Model` has nowhere to live.
@@ -38,7 +38,7 @@
 | Mechanism | Rust `fn` compiled **into** the `chezzi` binary, registered in `native_members` | `dlopen`+`dlsym`+`libffi` at module init |
 | Lives in | `src/native/` (`Host`/`NativeRet`/`NativeFn`) | `src/native/cffi.rs` |
 | Used by | `std.math`/`io`/`os`/`fs`/`time`/`regex`/`request`/`net` | user `extern "lib":` blocks |
-| Crosses the airlock | `NativeRet`/`NativeArg` (primitives, list, struct, map, Result/Option) | scalars (int↔long, fixed-width int8..uint64, float↔double, bool↔int, str→`char*`, opaque `ptr`↔void*) |
+| Crosses the airlock | `NativeRet`/`NativeArg` (primitives, list, struct, map, Result/Option) | scalars (int↔long, fixed-width int8..uint64, float↔double, bool↔int, str→`char*`, opaque `ptr`↔void*) + a flat-scalar struct by value |
 | State | **none** — `NativeFn` is a bare `fn` pointer, no captured state | **none** |
 | Recompile to add? | **yes** — statically linked | **no** — dlopen at runtime |
 

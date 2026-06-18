@@ -440,7 +440,7 @@ impl Compiler {
                         .params
                         .iter()
                         .map(|p| {
-                            ctype_of(p.ty.as_ref(), &self.aliases)
+                            ctype_of(p.ty.as_ref(), &self.aliases, &self.struct_fields)
                                 .expect("checker verified marshallable param")
                         })
                         .collect();
@@ -450,7 +450,7 @@ impl Compiler {
                     let ret = ef
                         .ret
                         .as_ref()
-                        .and_then(|t| ctype_of(Some(t), &self.aliases));
+                        .and_then(|t| ctype_of(Some(t), &self.aliases, &self.struct_fields));
                     let id = self.program.cffi_defs.len() as u32;
                     self.program.cffi_defs.push(CffiDef {
                         lib: lib.clone(),
@@ -2943,7 +2943,24 @@ fn block_has_defer(stmts: &[Stmt]) -> bool {
 /// through `aliases` first. Everything else (incl. a `None` annotation) returns `None`. The checker
 /// has already rejected non-marshallable types, so a `None` here is unreachable for a well-typed
 /// program (the call sites `.expect(...)` on it).
-fn ctype_of(ty: Option<&Type>, aliases: &HashMap<String, Type>) -> Option<CType> {
+fn ctype_of(
+    ty: Option<&Type>,
+    aliases: &HashMap<String, Type>,
+    struct_fields: &HashMap<String, Vec<crate::ast::Field>>,
+) -> Option<CType> {
+    ctype_of_visiting(ty, aliases, struct_fields, &mut Vec::new())
+}
+
+/// `ctype_of` with a shared visited-name stack threaded through the alias + struct-field recursion,
+/// so a (checker-rejected, but defended-against) cyclic alias/struct can't overflow the stack — it
+/// resolves to `None` instead. The checker has already accepted only marshallable scalars + flat-
+/// scalar structs, so `None` is unreachable for a well-typed program (the call sites `.expect`).
+fn ctype_of_visiting(
+    ty: Option<&Type>,
+    aliases: &HashMap<String, Type>,
+    struct_fields: &HashMap<String, Vec<crate::ast::Field>>,
+    visited: &mut Vec<String>,
+) -> Option<CType> {
     match ty {
         Some(Type::Named(n)) => match n.as_str() {
             "int" => Some(CType::Int),
@@ -2965,13 +2982,41 @@ fn ctype_of(ty: Option<&Type>, aliases: &HashMap<String, Type>) -> Option<CType>
             "uint16" => Some(CType::UInt16),
             "uint32" => Some(CType::UInt32),
             "uint64" => Some(CType::UInt64),
-            // A transparent alias to a scalar (resolve once; the checker rejected cyclic/non-scalar).
-            other => aliases.get(other).and_then(|t| ctype_of(Some(t), aliases)),
+            other => {
+                if visited.iter().any(|v| v == other) {
+                    return None; // cycle — defended against (checker rejected it already).
+                }
+                visited.push(other.to_string());
+                // A transparent alias to a scalar/struct (resolve once; checker rejected cyclic).
+                let r = if let Some(t) = aliases.get(other) {
+                    ctype_of_visiting(Some(t), aliases, struct_fields, visited)
+                } else if let Some(fields) = struct_fields.get(other) {
+                    // A flat-scalar struct BY VALUE: map each field recursively to its CType. The
+                    // checker guarantees every field is a scalar leaf, so a `None` field means a
+                    // cyclic/non-scalar (defended) — propagate it as a whole-struct `None`.
+                    let mut cfields = Vec::with_capacity(fields.len());
+                    let mut field_names = Vec::with_capacity(fields.len());
+                    for f in fields {
+                        let ct = ctype_of_visiting(Some(&f.ty), aliases, struct_fields, visited)?;
+                        cfields.push(ct);
+                        field_names.push(f.name.clone());
+                    }
+                    Some(CType::Struct {
+                        name: other.to_string(),
+                        field_names,
+                        fields: cfields,
+                    })
+                } else {
+                    None
+                };
+                visited.pop();
+                r
+            }
         },
         // A RETURN-ONLY nullable `char*` (surface `str?` / `owned_str?`). NULL → None at runtime.
         // The inner type decides borrowed (`str` → OptStr) vs owned (`owned_str` → OptOwnedStr).
         Some(Type::Generic(n, args)) if n == "Option" && args.len() == 1 => {
-            match ctype_of(args.first(), aliases) {
+            match ctype_of_visiting(args.first(), aliases, struct_fields, visited) {
                 Some(CType::Str) => Some(CType::OptStr),
                 Some(CType::OwnedStr) => Some(CType::OptOwnedStr),
                 _ => None,
@@ -3219,32 +3264,41 @@ mod interp_tests {
         Span { line: 1, col: 1 }
     }
 
+    /// An empty struct-field table for the `ctype_of` tests that don't exercise structs.
+    fn no_structs() -> HashMap<String, Vec<crate::ast::Field>> {
+        HashMap::new()
+    }
+
     #[test]
     fn ctype_of_maps_owned_and_nullable_str_returns() {
         let aliases: HashMap<String, Type> = HashMap::new();
+        let sf = no_structs();
         let named = |s: &str| Type::Named(s.to_string());
         let opt = |inner: Type| Type::Generic("Option".to_string(), vec![inner]);
         // owned_str -> OwnedStr; str? -> OptStr; owned_str? -> OptOwnedStr.
         assert_eq!(
-            ctype_of(Some(&named("owned_str")), &aliases),
+            ctype_of(Some(&named("owned_str")), &aliases, &sf),
             Some(CType::OwnedStr)
         );
         assert_eq!(
-            ctype_of(Some(&opt(named("str"))), &aliases),
+            ctype_of(Some(&opt(named("str"))), &aliases, &sf),
             Some(CType::OptStr)
         );
         assert_eq!(
-            ctype_of(Some(&opt(named("owned_str"))), &aliases),
+            ctype_of(Some(&opt(named("owned_str"))), &aliases, &sf),
             Some(CType::OptOwnedStr)
         );
         // Plain str unchanged; a non-str Option return is not marshallable (-> None).
-        assert_eq!(ctype_of(Some(&named("str")), &aliases), Some(CType::Str));
-        assert_eq!(ctype_of(Some(&opt(named("int"))), &aliases), None);
+        assert_eq!(
+            ctype_of(Some(&named("str")), &aliases, &sf),
+            Some(CType::Str)
+        );
+        assert_eq!(ctype_of(Some(&opt(named("int"))), &aliases, &sf), None);
         // Aliases resolve transparently: `type T = owned_str?` -> OptOwnedStr.
         let mut aliased: HashMap<String, Type> = HashMap::new();
         aliased.insert("T".to_string(), opt(named("owned_str")));
         assert_eq!(
-            ctype_of(Some(&named("T")), &aliased),
+            ctype_of(Some(&named("T")), &aliased, &sf),
             Some(CType::OptOwnedStr)
         );
     }
@@ -3252,6 +3306,7 @@ mod interp_tests {
     #[test]
     fn ctype_of_maps_fixed_width_ints() {
         let aliases: HashMap<String, Type> = HashMap::new();
+        let sf = no_structs();
         let named = |s: &str| Type::Named(s.to_string());
         // Each fixed-width name maps to its distinct CType — NOT collapsed to CType::Int (which stays
         // C long). int64/uint64 are also distinct from CType::Int.
@@ -3265,15 +3320,75 @@ mod interp_tests {
             ("uint32", CType::UInt32),
             ("uint64", CType::UInt64),
         ] {
-            assert_eq!(ctype_of(Some(&named(name)), &aliases), Some(want), "{name}");
+            assert_eq!(
+                ctype_of(Some(&named(name)), &aliases, &sf),
+                Some(want),
+                "{name}"
+            );
         }
         // Bare `int` is still C long (back-compat), distinct from int64.
-        assert_eq!(ctype_of(Some(&named("int")), &aliases), Some(CType::Int));
+        assert_eq!(
+            ctype_of(Some(&named("int")), &aliases, &sf),
+            Some(CType::Int)
+        );
         // Alias trap: `type Len = int32` must resolve to the WIDTH (CType::Int32), not collapse to
         // CType::Int — the alias arm recurses one hop into the int32 leaf.
         let mut aliased: HashMap<String, Type> = HashMap::new();
         aliased.insert("Len".to_string(), named("int32"));
-        assert_eq!(ctype_of(Some(&named("Len")), &aliased), Some(CType::Int32));
+        assert_eq!(
+            ctype_of(Some(&named("Len")), &aliased, &sf),
+            Some(CType::Int32)
+        );
+    }
+
+    #[test]
+    fn ctype_of_maps_flat_struct() {
+        use crate::ast::Field;
+        let field = |name: &str, ty: &str| Field {
+            name: name.to_string(),
+            ty: Type::Named(ty.to_string()),
+            default: None,
+        };
+        let mut sf: HashMap<String, Vec<Field>> = HashMap::new();
+        sf.insert(
+            "Point".to_string(),
+            vec![field("x", "int32"), field("y", "int32")],
+        );
+        let aliases: HashMap<String, Type> = HashMap::new();
+
+        let want = CType::Struct {
+            name: "Point".to_string(),
+            field_names: vec!["x".to_string(), "y".to_string()],
+            fields: vec![CType::Int32, CType::Int32],
+        };
+        assert_eq!(
+            ctype_of(Some(&Type::Named("Point".to_string())), &aliases, &sf),
+            Some(want.clone())
+        );
+        // `type P = Point` resolves identically to bare `Point` (the struct keeps its OWN name).
+        let mut aliased = aliases.clone();
+        aliased.insert("P".to_string(), Type::Named("Point".to_string()));
+        assert_eq!(
+            ctype_of(Some(&Type::Named("P".to_string())), &aliased, &sf),
+            Some(want)
+        );
+        // An unknown name is `None`.
+        assert_eq!(
+            ctype_of(Some(&Type::Named("Nope".to_string())), &aliases, &sf),
+            None
+        );
+    }
+
+    #[test]
+    fn ctype_of_struct_cyclic_alias_no_overflow() {
+        let sf = no_structs();
+        let mut aliases: HashMap<String, Type> = HashMap::new();
+        aliases.insert("A".to_string(), Type::Named("B".to_string()));
+        aliases.insert("B".to_string(), Type::Named("A".to_string()));
+        assert_eq!(
+            ctype_of(Some(&Type::Named("A".to_string())), &aliases, &sf),
+            None
+        );
     }
 
     #[test]

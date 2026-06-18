@@ -5518,6 +5518,69 @@ fn extern_cyclic_int_alias_no_overflow() {
 }
 
 #[test]
+fn extern_struct_param_and_return_typecheck() {
+    // A flat-scalar struct is C-marshallable BY VALUE as both a param and a return. `Point` (two
+    // int fields) and `Mixed` (an int32 + a float field) both type-check in an extern signature.
+    ok("struct Point:\n    x: int\n    y: int\n\
+         \nstruct Mixed:\n    a: int32\n    b: float\n\
+         \nextern \"libc.so.6\":\n    fn id_point(p: Point) -> Point\n    fn id_mixed(m: Mixed) -> Mixed\n");
+}
+
+#[test]
+fn extern_struct_with_str_field_is_rejected() {
+    // A struct with a `str` field is NOT C-marshallable by value (v1 flat-scalar limit) — reject it
+    // with a message naming the struct AND the offending field.
+    rejects(
+        "struct Bad:\n    name: str\n    age: int\n\
+         \nextern \"libc.so.6\":\n    fn f(b: Bad) -> int\n",
+        "field 'name'",
+    );
+}
+
+#[test]
+fn extern_struct_with_nested_struct_field_is_rejected() {
+    // A struct field that is itself a struct (nested by value) is deferred in v1 — reject with the
+    // struct + field named.
+    rejects(
+        "struct Inner:\n    x: int\n\
+         \nstruct Outer:\n    inner: Inner\n    y: int\n\
+         \nextern \"libc.so.6\":\n    fn f(o: Outer) -> int\n",
+        "field 'inner'",
+    );
+}
+
+#[test]
+fn extern_struct_alias_behaves_like_bare() {
+    // `type P = Point` used as an extern param/return type behaves identically to bare `Point` — a
+    // transparent alias to a flat-scalar struct is C-marshallable.
+    ok("struct Point:\n    x: int\n    y: int\n\
+         \ntype P = Point\n\
+         \nextern \"libc.so.6\":\n    fn id_point(p: P) -> P\n");
+}
+
+#[test]
+fn extern_cyclic_alias_struct_no_overflow() {
+    // A cyclic alias used as an extern type must report a clean error (no stack overflow). The
+    // alias-resolution cycle guard catches it before marshallability recursion.
+    rejects(
+        "type A = B\ntype B = A\n\
+         \nextern \"libc.so.6\":\n    fn f(x: A) -> int\n",
+        "recursive type alias",
+    );
+}
+
+#[test]
+fn extern_generic_struct_by_value_rejected() {
+    // A generic struct has no fixed C layout — instantiated `Pair[int]` is rejected as
+    // non-marshallable (generic structs are out of v1 scope).
+    rejects(
+        "struct Pair[T]:\n    a: T\n    b: T\n\
+         \nextern \"libc.so.6\":\n    fn f(p: Pair[int]) -> int\n",
+        "not C-marshallable",
+    );
+}
+
+#[test]
 fn ffi_null_and_is_null_typecheck() {
     // `std.ffi.null()` is `ptr`; `is_null(p)` is `bool`; `ptr == ptr` (incl. vs `null()`) type-checks.
     entry_ok(

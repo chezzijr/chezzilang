@@ -108,8 +108,10 @@ truncate-on-param, sign-or-zero-extend-on-return), plus an
 opaque `ptr` (↔ C `void*`, an untyped never-auto-freed handle for `FILE*`/`sqlite3*`-style APIs; the
 `std.ffi` module adds `null()`/`is_null`), plus two return-only `str` opt-ins — **`owned_str`** (an
 owned `malloc`'d `char*` copied **and** freed, no leak) and **`str?`** (a nullable `char*`, `NULL` →
-`None` instead of a fault). Structs-by-value, callbacks, varargs, the rich Rust `Box<dyn Any>` userdata
-handle, and a custom user-named deallocator (only libc `free` backs `owned_str`) are still deferred. See
+`None` instead of a fault), plus **flat-scalar structs by value** (a Chezzi `struct` of scalar fields ↔
+a C struct passed/returned by value, layout via libffi). Nested structs-by-value, `str` struct fields,
+callbacks, varargs, the rich Rust `Box<dyn Any>` userdata handle, and a custom user-named deallocator
+(only libc `free` backs `owned_str`) are still deferred. See
 the FFI subsection below + [`docs/syntax.md`](syntax.md).
 **Forward design** for the remaining FFI deepening (the C `void*` `ptr` handle has **shipped**; the
 rich Rust `Box<dyn Any>` "userdata" Value that unlocks compiled-in handle-based Rust libraries like
@@ -285,12 +287,23 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >   the SAME `Host`/`NativeRet` seam (so VM + interp + `--parallel` produce identical output).
 >   `extern` fns become ordinary module globals (`vm::Obj::Cffi(Arc<Cffi>)` / `interp::Value::Cffi`),
 >   so the normal call-dispatch and `infer_named_call` type-check paths work with zero special-casing.
->   The checker enforces **C-marshallability** (only int/float/bool/str params + returns, void return)
->   on the resolved type, so a non-scalar param is a compile error. The `Cffi` keeps its `Library`
+>   The checker enforces **C-marshallability** (int/float/bool/str/ptr params + returns, void return,
+>   the fixed-width ints, and a flat-scalar struct by value) on the resolved type, so a non-marshallable
+>   param is a compile error. The `Cffi` keeps its `Library`
 >   alive + stores the resolved symbol as a `usize` (libloading `Symbol` is `!Send`) and rebuilds the
 >   `Cif` per call (libffi `Cif` is `!Send`), so it is `Send + Sync` for `--parallel`; the M:N
 >   snapshot path shares the `Arc<Cffi>` (same address space — no re-`dlopen`). See `src/native/cffi.rs`
->   + `examples/ffi.chz`. **v1 limits:** scalars only — structs-by-value, callbacks/function pointers,
+>   + `examples/ffi.chz`. **Structs by value shipped (flat scalar fields):** name a Chezzi `struct` of
+>   scalar fields (`int`/`float`/`bool`/`ptr`/`int8`..`uint64`) as an extern param and/or return type to
+>   pass/return a C struct **by value** — `CType::Struct{name, field_names, fields}` carries only owned
+>   data (no libffi `Type`, which is `!Send`/`!Sync`/`!Clone`), and the libffi structure type + per-field
+>   offsets are rebuilt per call via `ffi_get_struct_offsets` (so the platform ABI — small-struct-in-
+>   registers vs by-hidden-pointer — is libffi's, never hand-rolled), keeping `Cffi` `Send + Sync`. A
+>   struct return uses the raw `ffi_call` with an own rvalue buffer sized `max(struct_size,
+>   sizeof(ffi_arg))` (the register-width floor the narrow-int-return fix established), reading each field
+>   at its libffi offset into a `NativeRet::Struct` both engines already lower. See `examples/ffi_struct.chz`.
+>   **v1 limits:** nested structs, `str`/`owned_str` struct fields, and generic structs are rejected (a
+>   struct with a non-scalar field errors naming the struct + field); callbacks/function pointers,
 >   varargs, the rich Rust `Box<dyn Any>` userdata handle, and a custom user-named deallocator are
 >   deferred. **Fixed-width integers shipped:** beyond bare `int` (↔ C `long`), the marshalling type
 >   names `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` bind C `int32_t`/`uint32_t`/…
@@ -356,10 +369,17 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >     calls the library's own destroy (`fclose(f)`); forgetting **leaks** (same stance as a borrowed
 >     `str` return). NULL is allowed (a `ptr` return of NULL is `<ptr null>`, not a fault — unlike a
 >     non-nullable `str`/`owned_str` return; use `str?` for a nullable `char*`).
+>   - **Flat-scalar structs only (FFI-`struct`):** a struct passed/returned by value must have **only
+>     scalar fields** (`int`/`float`/`bool`/`ptr`/`int8`..`uint64`) in v1. A **nested struct** field or a
+>     **`str`/`owned_str`** field is rejected at the checker with an error naming the struct + offending
+>     field; a **generic struct** (`Pair[int]`) has no fixed C layout and is rejected. A transparent
+>     `type P = Point` alias to a flat struct is accepted identically to the bare struct. The struct's
+>     field order + types define the C layout (libffi computes size/alignment/offsets); valid as both a
+>     param and a return. See `CType::Struct` + `examples/ffi_struct.chz`.
 > - **Still deferred (Level-3):** the rich **Rust `Box<dyn Any>` userdata handle** (for compiled-in
 >   Rust libraries like Burn — distinct from the C `void*` `ptr` above, which shipped), a **custom
 >   user-named deallocator** (only libc `free` backs `owned_str`), and the deferred FFI features above
->   (structs-by-value / callbacks / varargs). See
+>   (nested structs-by-value / `str` struct fields / callbacks / varargs). See
 >   `docs/ffi-and-packaging.md`. (`std.os.exit` with a real exit-code channel through the run drivers
 >   has since **shipped** — see `examples/exit.chz`.)
 
@@ -427,10 +447,10 @@ tests/          # Rust unit + golden tests
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c**; **Level-3 dynamic C-ABI FFI v1
 > shipped** (`extern "lib":` scalar calls via dlopen+libffi, **plus opaque `void*` handles** via the
-> `ptr` type + `std.ffi`, and the return-only `str` opt-ins **`owned_str`** (copy + libc `free`) and
-> **`str?`** (`NULL` → `None`)) — see the *Standard library* note above. The remaining Level-3 surface
-> (structs-by-value, callbacks, varargs, a custom user-named deallocator, and the rich Rust
-> `Box<dyn Any>` userdata handle) is still a future idea.
+> `ptr` type + `std.ffi`, the return-only `str` opt-ins **`owned_str`** (copy + libc `free`) and
+> **`str?`** (`NULL` → `None`), **plus flat-scalar structs by value**) — see the *Standard library* note
+> above. The remaining Level-3 surface (nested structs-by-value, `str` struct fields, callbacks, varargs,
+> a custom user-named deallocator, and the rich Rust `Box<dyn Any>` userdata handle) is still a future idea.
 
 ## Verification
 
