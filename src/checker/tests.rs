@@ -5463,6 +5463,18 @@ fn extern_owned_str_param_via_alias_rejected() {
 }
 
 #[test]
+fn extern_cyclic_option_alias_param_no_overflow() {
+    // A cyclic alias routed through an `Option`/`?` form (`type A = A?`) must be diagnosed as a
+    // recursive alias, NOT overflow the stack: the return-only guard's `seen` set has to span the
+    // `Named`→`Option`→`Named` recursion boundary. (Regression: an earlier per-loop guard restarted
+    // empty across that boundary and recursed forever.)
+    rejects(
+        "type A = A?\nextern \"libc.so.6\":\n    fn foo(x: A) -> int\n",
+        "recursive type alias",
+    );
+}
+
+#[test]
 fn extern_owned_nullable_str_return_marshallable() {
     // `owned_str?` composes owned + nullable: program sees `Option[str]`, runtime frees + nulls.
     ok(

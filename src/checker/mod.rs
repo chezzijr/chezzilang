@@ -1132,32 +1132,34 @@ impl Checker {
     /// `ctype_of` is `CType::OwnedStr` — without alias resolution it would slip past this guard,
     /// type-check as a plain `Str`, then hit the return-only `unreachable!` param arm at runtime.
     fn is_return_only_extern_type(&self, t: &Type) -> bool {
+        self.is_return_only_extern_type_seen(t, &mut Vec::new())
+    }
+
+    /// `is_return_only_extern_type` with a shared `seen` set of alias names that spans the WHOLE
+    /// recursion — including the `Named`→`Option`→`Named` re-entry. A single per-loop guard is not
+    /// enough: a cyclic alias routed through an `Option`/`?` form (e.g. `type A = A?`) crosses the
+    /// arm boundary, and without shared state each frame restarts with an empty set and recurses
+    /// forever (stack overflow). The cycle itself is reported separately by `resolve_type`; here we
+    /// just terminate cleanly and report "not return-only".
+    fn is_return_only_extern_type_seen(&self, t: &Type, seen: &mut Vec<String>) -> bool {
         match t {
             Type::Named(n) => {
                 if n == "owned_str" {
                     return true;
                 }
-                // Follow the alias chain (with a visited guard; cycles are reported by `resolve_type`).
-                let mut name = n;
-                let mut seen: Vec<&String> = Vec::new();
-                while let Some(aliased) = self.aliases.get(name) {
-                    if seen.contains(&name) {
-                        return false;
-                    }
-                    seen.push(name);
-                    match aliased {
-                        Type::Named(m) if m == "owned_str" => return true,
-                        Type::Named(m) => name = m,
-                        // An alias to `str?`/`owned_str?` — re-check the underlying surface form.
-                        other => return self.is_return_only_extern_type(other),
-                    }
+                if seen.iter().any(|s| s == n) {
+                    return false; // cycle — terminate; `resolve_type` diagnoses it
+                }
+                if let Some(aliased) = self.aliases.get(n) {
+                    seen.push(n.clone());
+                    return self.is_return_only_extern_type_seen(aliased, seen);
                 }
                 false
             }
             // `str?` / `owned_str?` parse to `Option[inner]`; the inner may itself be an alias.
             Type::Generic(n, args) if n == "Option" => args.first().is_some_and(|inner| {
                 matches!(inner, Type::Named(s) if s == "str" || s == "owned_str")
-                    || self.is_return_only_extern_type(inner)
+                    || self.is_return_only_extern_type_seen(inner, seen)
             }),
             _ => false,
         }
