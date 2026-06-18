@@ -39,30 +39,30 @@ fn first_native(xs: list[int]) -> int?:
 # Exhaustive match (no `_`) selecting an arm by variant id.
 fn color_name(c: Color) -> str:
     return match c:
-        Red: "red"
-        Green: "green"
-        Blue: "blue"
+        Color.Red: "red"
+        Color.Green: "green"
+        Color.Blue: "blue"
 
 # Match with payload binding.
 fn shape_area(s: Shape) -> int:
     return match s:
-        Circle(r): r * r
-        Rect(w, h): w * h
-        Dot: 0
+        Shape.Circle(r): r * r
+        Shape.Rect(w, h): w * h
+        Shape.Dot: 0
 
 # Match guard: an arm matches only when its pattern binds AND the guard is true; else it falls
 # through. Each variant appears once; the guard is on the bound payload.
 fn shape_kind(s: Shape) -> str:
     return match s:
-        Circle(r) if r > 10: "big circle"
-        Rect(w, h) if w == h: "square"
+        Shape.Circle(r) if r > 10: "big circle"
+        Shape.Rect(w, h) if w == h: "square"
         _: "other"
 
 # Nested enums in a generic Tree[int].
 fn tree_sum(t: Tree[int]) -> int:
     return match t:
-        Leaf: 0
-        Node(v, l, r): tree_sum(l) + v + tree_sum(r)
+        Tree.Leaf: 0
+        Tree.Node(v, l, r): tree_sum(l) + v + tree_sum(r)
 
 # Result/Option + the `?` operator (gated on the fixed native variant ids).
 fn safe_div(a: int, b: int) -> int!:
@@ -89,35 +89,35 @@ fn producer(out: Channel[int?]):
 
 fn main():
     # Nullary + payload variants, Display.
-    print(Red)
-    print(Circle(5))
-    print(Rect(3, 4))
-    print(color_name(Green))
-    print(shape_area(Circle(6)))
-    print(shape_area(Rect(3, 4)))
-    print(shape_area(Dot))
+    print(Color.Red)
+    print(Shape.Circle(5))
+    print(Shape.Rect(3, 4))
+    print(color_name(Color.Green))
+    print(shape_area(Shape.Circle(6)))
+    print(shape_area(Shape.Rect(3, 4)))
+    print(shape_area(Shape.Dot))
 
     # Match guards (guard fails ⇒ falls through to the wildcard).
-    print(shape_kind(Circle(20)))
-    print(shape_kind(Circle(2)))
-    print(shape_kind(Rect(5, 5)))
-    print(shape_kind(Rect(2, 7)))
-    print(shape_kind(Dot))
+    print(shape_kind(Shape.Circle(20)))
+    print(shape_kind(Shape.Circle(2)))
+    print(shape_kind(Shape.Rect(5, 5)))
+    print(shape_kind(Shape.Rect(2, 7)))
+    print(shape_kind(Shape.Dot))
 
     # Nested generic enum.
-    t: Tree[int] = Node(2, Node(1, Leaf, Leaf), Node(3, Leaf, Leaf))
+    t: Tree[int] = Tree.Node(2, Tree.Node(1, Tree.Leaf, Tree.Leaf), Tree.Node(3, Tree.Leaf, Tree.Leaf))
     print(tree_sum(t))
 
     # enum == : equal, unequal-by-variant, unequal-by-enum-type, payload-aware.
-    print(Red == Red)
-    print(Red == Green)
-    print(Circle(5) == Circle(5))
-    print(Circle(5) == Circle(6))
+    print(Color.Red == Color.Red)
+    print(Color.Red == Color.Green)
+    print(Shape.Circle(5) == Shape.Circle(5))
+    print(Shape.Circle(5) == Shape.Circle(6))
     print(Some(1) == Some(1))
     print(Some(1) == None)
 
     # Interpolation of an enum value.
-    s := Circle(8)
+    s := Shape.Circle(8)
     print("shape is {s}, area {shape_area(s)}")
     o := Some(42)
     print("opt is {o}")
@@ -130,10 +130,10 @@ fn main():
         Ok(v): print("chained ok {v}")
         Err(e): print("chained err {e}")
     match first_even([1, 3, 4, 7]):
-        Some(v): print("first even {v}")
+        Option.Some(v): print("first even {v}")
         None: print("no even")
     match first_even([1, 3, 5]):
-        Some(v): print("first even {v}")
+        Option.Some(v): print("first even {v}")
         None: print("no even")
 
     # Variant-name shadowing: native Option/Result identity must survive a user enum reusing the
@@ -153,10 +153,10 @@ fn main():
     a := ch.recv()
     b := ch.recv()
     match a:
-        Some(v): print("recv Some {v}")
+        Option.Some(v): print("recv Some {v}")
         None: print("recv None")
     match b:
-        Some(v): print("recv Some {v}")
+        Option.Some(v): print("recv Some {v}")
         None: print("recv None")
 
 main()

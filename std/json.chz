@@ -50,13 +50,13 @@ struct Parser:
             return self.parse_array()
         if c == "\"":
             s := self.parse_string()?
-            return Ok(Str(s))
+            return Ok(Json.Str(s))
         if c == "t":
-            return self.parse_lit("true", Bool(true))
+            return self.parse_lit("true", Json.Bool(true))
         if c == "f":
-            return self.parse_lit("false", Bool(false))
+            return self.parse_lit("false", Json.Bool(false))
         if c == "n":
-            return self.parse_lit("null", Null)
+            return self.parse_lit("null", Json.Null)
         if c == "-" or (c >= "0" and c <= "9"):
             return self.parse_number()
         return Err("unexpected character '" + c + "'")
@@ -165,7 +165,7 @@ struct Parser:
         raw := ""
         for i in start..self.pos:
             raw = raw + self.src[i]
-        return Ok(Num(float(raw)))
+        return Ok(Json.Num(float(raw)))
 
     fn parse_array(self) -> Result[Json]:
         self.pos += 1                       # consume '['
@@ -173,14 +173,14 @@ struct Parser:
         self.skip_ws()
         if self.peek() == "]":
             self.pos += 1
-            return Ok(Arr(items))
+            return Ok(Json.Arr(items))
         while true:
             v := self.parse_value()?
             items.push(v)
             self.skip_ws()
             c := self.bump()
             if c == "]":
-                return Ok(Arr(items))
+                return Ok(Json.Arr(items))
             if c != ",":
                 return Err("expected ',' or ']' in array")
 
@@ -190,7 +190,7 @@ struct Parser:
         self.skip_ws()
         if self.peek() == "}}":
             self.pos += 1
-            return Ok(Obj(obj))
+            return Ok(Json.Obj(obj))
         while true:
             self.skip_ws()
             if self.peek() != "\"":
@@ -204,7 +204,7 @@ struct Parser:
             self.skip_ws()
             c := self.bump()
             if c == "}}":
-                return Ok(Obj(obj))
+                return Ok(Json.Obj(obj))
             if c != ",":
                 return Err("expected ',' or '}}' in object")
 
@@ -271,14 +271,14 @@ fn num_str(f: float) -> str:
 
 fn stringify(j: Json) -> str:
     match j:
-        Null: return "null"
-        Bool(b):
+        Json.Null: return "null"
+        Json.Bool(b):
             if b:
                 return "true"
             return "false"
-        Num(n): return num_str(n)
-        Str(s): return escape(s)
-        Arr(xs):
+        Json.Num(n): return num_str(n)
+        Json.Str(s): return escape(s)
+        Json.Arr(xs):
             out := "["
             first := true
             for x in xs:
@@ -287,7 +287,7 @@ fn stringify(j: Json) -> str:
                 out = out + stringify(x)
                 first = false
             return out + "]"
-        Obj(m):
+        Json.Obj(m):
             out := "{{"
             first := true
             for k in m.keys():
@@ -302,51 +302,51 @@ fn stringify(j: Json) -> str:
 
 fn is_null(j: Json) -> bool:
     match j:
-        Null: return true
+        Json.Null: return true
         _: return false
 
 fn as_bool(j: Json) -> Option[bool]:
     match j:
-        Bool(b): return Some(b)
+        Json.Bool(b): return Some(b)
         _: return None
 
 fn as_float(j: Json) -> Option[float]:
     match j:
-        Num(n): return Some(n)
+        Json.Num(n): return Some(n)
         _: return None
 
 fn as_int(j: Json) -> Option[int]:
     match j:
-        Num(n): return Some(int(n))
+        Json.Num(n): return Some(int(n))
         _: return None
 
 fn as_str(j: Json) -> Option[str]:
     match j:
-        Str(s): return Some(s)
+        Json.Str(s): return Some(s)
         _: return None
 
 # The object's underlying `map[str, Json]` (None if `j` is not an object).
 fn as_object(j: Json) -> Option[map[str, Json]]:
     match j:
-        Obj(m): return Some(m)
+        Json.Obj(m): return Some(m)
         _: return None
 
 # The array's underlying `list[Json]` (None if `j` is not an array).
 fn as_array(j: Json) -> Option[list[Json]]:
     match j:
-        Arr(xs): return Some(xs)
+        Json.Arr(xs): return Some(xs)
         _: return None
 
 # Look up a key in an object (None if not an object or key is absent).
 fn get(j: Json, key: str) -> Option[Json]:
     match j:
-        Obj(m): return m.get(key)
+        Json.Obj(m): return m.get(key)
         _: return None
 
 # Index into an array (None if not an array or out of bounds).
 fn at(j: Json, i: int) -> Option[Json]:
     match j:
-        Arr(xs):
+        Json.Arr(xs):
             if i < 0 or i >= xs.len():
                 return None
             return Some(xs[i])
@@ -355,7 +355,7 @@ fn at(j: Json, i: int) -> Option[Json]:
 # Element count: array length, object size, or string length; 0 for scalars.
 fn len(j: Json) -> int:
     match j:
-        Arr(xs): return xs.len()
-        Obj(m): return m.len()
-        Str(s): return s.len()
+        Json.Arr(xs): return xs.len()
+        Json.Obj(m): return m.len()
+        Json.Str(s): return s.len()
         _: return 0

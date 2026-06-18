@@ -17,8 +17,8 @@ enum Shape:
 
 fn area(s: Shape) -> float:
     match s:
-        Circle(r): return 3.14 * float(r * r)
-        Square(n): return float(n * n)
+        Shape.Circle(r): return 3.14 * float(r * r)
+        Shape.Square(n): return float(n * n)
 
 fn safe_div(a: int, b: int) -> Result[int]:
     if b == 0:
@@ -37,7 +37,7 @@ fn main():
     p := Point(3, 4)
     print("mag_sq: {p.mag_sq()}")
 
-    print("area: {area(Circle(2))}")
+    print("area: {area(Shape.Circle(2))}")
 
     r := safe_div(10, 2)?
     print("div: {r}")

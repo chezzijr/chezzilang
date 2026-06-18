@@ -445,9 +445,9 @@ pub struct VariantDef {
     pub arity: usize,
     /// M19 memory-layout lever #2 — a dense, global variant id (`0..n`, one namespace across all
     /// enums) stamped onto every `Obj::Enum` instance so match dispatch / equality / `?` are pure-int
-    /// compares (the JIT jump-table groundwork). Globally unique per (enum-type, variant) pair, which
-    /// holds because variant names are globally unique today (`Program::variants` is keyed by variant
-    /// name only). Native `Result`/`Option` variants get the fixed ids `VID_OK`/`VID_ERR`/`VID_SOME`/
+    /// compares (the JIT jump-table groundwork). Unique per `(enum-type, variant)` pair — `Program::
+    /// variants` is keyed by that pair, so two enums may share a variant name yet still get distinct
+    /// ids. Native `Result`/`Option` variants get the fixed ids `VID_OK`/`VID_ERR`/`VID_SOME`/
     /// `VID_NONE_VARIANT`; user variants follow in declaration order.
     pub variant_id: u32,
 }
@@ -474,7 +474,7 @@ pub struct ModuleProto {
 pub struct Program {
     pub protos: Vec<Proto>,
     pub structs: HashMap<String, StructDef>,
-    pub variants: HashMap<String, VariantDef>,
+    pub variants: HashMap<(String, String), VariantDef>,
     /// M19 lever #2 — variants indexed by their dense `variant_id` (`variants_by_id[id]` ⇒ that
     /// variant's `VariantDef`, carrying its `enum_name` + `name`). The reverse of `variants`: O(1)
     /// cold-path id→names resolution for Display / stringify / error / wire / snap, where the instance

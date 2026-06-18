@@ -210,7 +210,9 @@ struct Interp {
     structs: std::collections::HashMap<String, std::rc::Rc<StructDef>>,
     /// Struct name → declared fields (with types), for building `json.decode` descriptors.
     struct_fields: std::collections::HashMap<String, Vec<crate::ast::Field>>,
-    variants: std::collections::HashMap<String, VariantDef>,
+    /// Keyed by `(enum_name, variant_name)`: variants are scoped under their enum, so two enums may
+    /// share a variant name. Built-in `Result`/`Option` variants register under those enum names.
+    variants: std::collections::HashMap<(String, String), VariantDef>,
     /// Evaluated module namespaces, keyed by module id (run-once cache for a multi-file program).
     namespaces: std::collections::HashMap<crate::resolver::ModuleId, std::rc::Rc<value::ModuleNamespace>>,
     /// Set by the `?` operator when it hits `Err`/`None`: the value to early-return from the
@@ -326,7 +328,7 @@ impl Interp {
 
     fn register_variant(&mut self, variant: &str, enum_name: &str, arity: usize) {
         self.variants.insert(
-            variant.to_string(),
+            (enum_name.to_string(), variant.to_string()),
             VariantDef {
                 enum_name: enum_name.into(),
                 arity,
@@ -343,8 +345,11 @@ impl Interp {
             ExprKind::Str(s) => Ok(Value::Str(self.interpolate(s, expr.span)?.into())),
             ExprKind::Bytes(b) => Ok(Value::Bytes(b.as_slice().into())),
             ExprKind::Ident(name) => {
-                // A nullary enum variant used as a value (e.g. `None`, `Red`).
-                if let Some(def) = self.variants.get(name).filter(|d| d.arity == 0) {
+                // A bare nullary *built-in* variant used as a value (`None`). User variants are
+                // qualified (the `Field` arm), so only built-ins resolve bare here.
+                if let Some(def) =
+                    variant_pair(None, name).and_then(|k| self.variants.get(&k)).filter(|d| d.arity == 0)
+                {
                     return Ok(Value::Enum {
                         ty: def.enum_name.clone(),
                         variant: name.as_str().into(),
@@ -463,8 +468,7 @@ impl Interp {
                 // binding named like the enum wins, matching the checker/compiler.
                 if let ExprKind::Ident(ename) = &obj.kind
                     && self.env.get_local(ename).is_none()
-                    && let Some(def) = self.variants.get(name)
-                    && def.enum_name.as_ref() == ename.as_str()
+                    && let Some(def) = self.variants.get(&(ename.clone(), name.clone()))
                     && def.arity == 0
                 {
                     return Ok(Value::Enum {
@@ -868,11 +872,11 @@ impl Interp {
         if let ExprKind::Field { obj, name } = &callee.kind {
             if let ExprKind::Ident(ename) = &obj.kind
                 && self.env.get_local(ename).is_none()
-                && self.variants.get(name).map(|d| d.enum_name.as_ref()) == Some(ename.as_str())
+                && self.variants.contains_key(&(ename.clone(), name.clone()))
             {
                 let arg_vals =
                     args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
-                let def = self.variants.get(name).cloned().unwrap();
+                let def = self.variants.get(&(ename.clone(), name.clone())).cloned().unwrap();
                 if arg_vals.len() != def.arity {
                     return Err(RuntimeError {
                         message: format!(
@@ -1015,7 +1019,9 @@ impl Interp {
             if let Some(def) = self.structs.get(name).cloned() {
                 return self.construct_struct(name, &def, arg_vals, span);
             }
-            if let Some(def) = self.variants.get(name).cloned() {
+            // A bare *built-in* variant constructor (`Ok(x)`, `Some(x)`) — user variants are qualified
+            // (the `Field` arm above), so only built-ins resolve bare here.
+            if let Some(def) = variant_pair(None, name).and_then(|k| self.variants.get(&k)).cloned() {
                 if arg_vals.len() != def.arity {
                     return Err(RuntimeError {
                         message: format!(
@@ -5203,21 +5209,40 @@ fn pattern_needs_enum(pattern: &Pattern) -> bool {
 /// or `None` on a mismatch. Recurses through nested tuple/variant patterns (gap #15). The program is
 /// type-checked, so a shape mismatch here is a genuine value mismatch (a different variant / a
 /// non-matching literal / a different tuple shape), not a type error.
+/// Resolve a variant reference to its `(enum, variant)` registry key. The enum is the explicit
+/// qualifier when present (user variants are always qualified post-check); a bare name resolves only
+/// as a built-in (`Ok`/`Err`→`Result`, `Some`/`None`→`Option`). `None` for any other bare name.
+fn variant_pair(enum_name: Option<&str>, name: &str) -> Option<(String, String)> {
+    let en = match enum_name {
+        Some(en) => en,
+        None => match name {
+            "Ok" | "Err" => "Result",
+            "Some" | "None" => "Option",
+            _ => return None,
+        },
+    };
+    Some((en.to_string(), name.to_string()))
+}
+
 fn try_bind(
     pattern: &Pattern,
     value: &Value,
-    variants: &std::collections::HashMap<String, VariantDef>,
+    variants: &std::collections::HashMap<(String, String), VariantDef>,
 ) -> Option<Vec<(String, Value)>> {
     match pattern {
         Pattern::Wildcard => Some(Vec::new()),
         Pattern::Ident(name) => {
-            // A bare nested identifier naming a known NULLARY variant is a refutable variant match
-            // (`Some(None)`, `Ok(Err(e))` — the checker has promoted it), binding nothing: it
-            // matches iff the value IS that variant (mirrors the VM's variant-registry routing). A
-            // non-variant name is a binding capturing the whole sub-value.
-            if variants.get(name).is_some_and(|d| d.arity == 0) {
+            // A bare nested identifier naming a *built-in* NULLARY variant (`None`) is a refutable
+            // variant match, binding nothing: it matches iff the value IS that variant of that
+            // built-in enum (mirrors the VM's pure-int variant_id routing, which keys on the
+            // enum-scoped id). A non-variant name is a binding capturing the whole sub-value.
+            if let Some((en, _)) =
+                variant_pair(None, name).filter(|k| variants.get(k).is_some_and(|d| d.arity == 0))
+            {
                 return match value {
-                    Value::Enum { variant, payload, .. } if variant.as_ref() == name && payload.is_empty() => {
+                    Value::Enum { ty, variant, payload }
+                        if ty.as_ref() == en && variant.as_ref() == name && payload.is_empty() =>
+                    {
                         Some(Vec::new())
                     }
                     _ => None,
@@ -5243,8 +5268,8 @@ fn try_bind(
             }
             Some(out)
         }
-        Pattern::Variant { name, bindings, .. } => {
-            let Value::Enum { variant, payload, .. } = value else {
+        Pattern::Variant { name, bindings, enum_name } => {
+            let Value::Enum { ty, variant, payload } = value else {
                 // A bare top-level identifier (no payload) against a non-enum value is a binding
                 // capturing the whole value — the checker permits this only for literal scrutinees.
                 if bindings.is_empty() {
@@ -5253,6 +5278,14 @@ fn try_bind(
                 return None;
             };
             if name != variant.as_ref() || bindings.len() != payload.len() {
+                return None;
+            }
+            // A *qualified* pattern only matches a value of that same enum — two enums may share a
+            // variant name, so the variant string alone is not enough (mirrors the VM's enum-scoped
+            // variant_id compare). The bare built-in form keys on the variant name only.
+            if let Some(en) = enum_name
+                && ty.as_ref() != en.as_str()
+            {
                 return None;
             }
             let mut out = Vec::new();
@@ -5422,7 +5455,7 @@ mod tests {
             "low\nhigh\n"
         );
         assert_eq!(
-            run("enum E:\n    A(int)\n    B(int)\nfn v(e: E) -> int:\n    return match e:\n        A(a) | B(a): a\nprint(v(A(4)))\nprint(v(B(6)))\n"),
+            run("enum E:\n    A(int)\n    B(int)\nfn v(e: E) -> int:\n    return match e:\n        E.A(a) | E.B(a): a\nprint(v(E.A(4)))\nprint(v(E.B(6)))\n"),
             "4\n6\n"
         );
     }
@@ -5774,31 +5807,31 @@ enum Shape:
 
 fn area(s: Shape) -> int:
     match s:
-        Circle(r): return r * r
-        Square(n): return n * n
+        Shape.Circle(r): return r * r
+        Shape.Square(n): return n * n
 ";
 
     #[test]
     fn enum_variant_with_payload_and_match() {
-        let src = format!("{SHAPE}print(area(Circle(3)))\nprint(area(Square(4)))\n");
+        let src = format!("{SHAPE}print(area(Shape.Circle(3)))\nprint(area(Shape.Square(4)))\n");
         assert_eq!(run(&src), "9\n16\n");
     }
 
     #[test]
-    fn enum_bare_variant_and_match() {
-        let src = "enum Color:\n    Red\n    Green\nfn name(c: Color) -> str:\n    match c:\n        Red: return \"r\"\n        Green: return \"g\"\nprint(name(Red))\nprint(name(Green))\n";
+    fn enum_variant_and_match() {
+        let src = "enum Color:\n    Red\n    Green\nfn name(c: Color) -> str:\n    match c:\n        Color.Red: return \"r\"\n        Color.Green: return \"g\"\nprint(name(Color.Red))\nprint(name(Color.Green))\n";
         assert_eq!(run(src), "r\ng\n");
     }
 
     #[test]
     fn match_without_matching_arm_errors() {
-        let src = format!("{SHAPE}fn f(s: Shape):\n    match s:\n        Circle(r): print(r)\nf(Square(2))\n");
+        let src = format!("{SHAPE}fn f(s: Shape):\n    match s:\n        Shape.Circle(r): print(r)\nf(Shape.Square(2))\n");
         assert!(run_capture(&src).is_err());
     }
 
     #[test]
     fn enum_variant_arity_mismatch_errors() {
-        assert!(run_capture(&format!("{SHAPE}print(area(Circle(1, 2)))\n")).is_err());
+        assert!(run_capture(&format!("{SHAPE}print(area(Shape.Circle(1, 2)))\n")).is_err());
     }
 
     const SAFE_DIV: &str = "\
@@ -7170,16 +7203,16 @@ print(P(5) >= P(5))
 
     #[test]
     fn user_enum_named_err_is_not_a_top_level_error() {
-        // A user enum that shadows `Err` is a normal value — a bare one must NOT exit (only the
-        // builtin Result's Err does). Gating is on the type, not the bare variant name.
-        assert_eq!(run("enum Signal:\n    Err(int)\n    Quiet\nErr(5)\nprint(\"made it\")\n"), "made it\n");
+        // A user enum that reuses the `Err` name is a normal value — its qualified `Signal.Err` must
+        // NOT exit at top level (only the builtin Result's `Err` does). Gating is on the type.
+        assert_eq!(run("enum Signal:\n    Err(int)\n    Quiet\nSignal.Err(5)\nprint(\"made it\")\n"), "made it\n");
     }
 
     #[test]
     fn try_on_user_enum_named_err_is_type_error_not_propagation() {
-        // `?` must reject a user `Err` (not of type Result/Option), not silently propagate it.
+        // `?` must reject a user `Signal.Err` (not of type Result/Option), not silently propagate it.
         let e = run_capture(
-            "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := Err(5)?\n    return x\nf()\n",
+            "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := Signal.Err(5)?\n    return x\nf()\n",
         )
         .unwrap_err();
         assert!(e.message.contains("expects Result or Option"), "{}", e.message);

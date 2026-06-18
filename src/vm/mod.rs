@@ -10014,7 +10014,7 @@ impl Vm {
     /// at compile time (no runtime hash lookup); it is stamped onto the instance instead of the two
     /// per-instance type/variant `Box<str>`s. `variant` is used only for the arity-mismatch message.
     fn new_enum(&mut self, variant: &str, variant_id: u32, argc: usize, span: Span) -> Result<(), RuntimeError> {
-        if let Some(def) = self.program.variants.get(variant)
+        if let Some(def) = self.program.variants_by_id.get(variant_id as usize)
             && argc != def.arity
         {
             return Err(self.err(format!("variant '{variant}' expects {} value(s), got {argc}", def.arity), span));
@@ -12880,7 +12880,7 @@ mod tests {
         );
         // Enum nullary + payload variants.
         assert_eq!(
-            run("enum E:\n    A\n    B(int, int)\nprint(\"{A} {B(1, 2)}\")\n"),
+            run("enum E:\n    A\n    B(int, int)\nprint(\"{E.A} {E.B(1, 2)}\")\n"),
             "A B(1, 2)\n"
         );
     }
@@ -15948,8 +15948,8 @@ print(Point(3, 4))";
 enum Shape:
     Circle(int)
     Dot
-print(Circle(2))
-print(Dot)";
+print(Shape.Circle(2))
+print(Shape.Dot)";
         assert_eq!(run(src), "Circle(2)\nDot\n");
     }
 
@@ -16187,11 +16187,11 @@ enum Shape:
     Square(int)
 fn area(s: Shape) -> int:
     match s:
-        Circle(r): return r * r * 3
-        Square(n): return n * n
+        Shape.Circle(r): return r * r * 3
+        Shape.Square(n): return n * n
 fn main():
-    print(area(Circle(2)))
-    print(area(Square(3)))
+    print(area(Shape.Circle(2)))
+    print(area(Shape.Square(3)))
 main()";
         assert_eq!(run(src), "12\n9\n");
     }
@@ -16205,10 +16205,10 @@ enum Color:
     Blue
 fn name(c: Color) -> str:
     match c:
-        Red: return \"r\"
-        Green: return \"g\"
+        Color.Red: return \"r\"
+        Color.Green: return \"g\"
 fn main():
-    print(name(Blue))
+    print(name(Color.Blue))
 main()";
         assert_eq!(run_err(src), "no match arm for variant 'Blue'");
     }
@@ -16460,7 +16460,7 @@ enum Light:
     On
     Off
 fn main():
-    print(Off)
+    print(Light.Off)
 main()";
         assert_eq!(run(src), "Off\n");
     }
@@ -16491,7 +16491,7 @@ main()";
     /// A 3-variant enum or-pattern is exhaustive and matches each alternative; the interp agrees.
     #[test]
     fn vm_or_pattern_enum_variants() {
-        let src = "enum Color:\n    Red\n    Green\n    Blue\nfn name(c: Color) -> str:\n    return match c:\n        Red | Green | Blue: \"primary\"\nprint(name(Green))\nprint(name(Blue))\n";
+        let src = "enum Color:\n    Red\n    Green\n    Blue\nfn name(c: Color) -> str:\n    return match c:\n        Color.Red | Color.Green | Color.Blue: \"primary\"\nprint(name(Color.Green))\nprint(name(Color.Blue))\n";
         let out = run(src);
         assert_eq!(out, "primary\nprimary\n");
         assert_eq!(out, crate::interp::run_capture(src).expect("interp"));
@@ -16500,7 +16500,7 @@ main()";
     /// A binding or-pattern (`A(a) | B(a)`) writes `a` into the same slot regardless of alternative.
     #[test]
     fn vm_or_pattern_binding() {
-        let src = "enum E:\n    A(int)\n    B(int)\nfn val(e: E) -> int:\n    return match e:\n        A(a) | B(a): a\nprint(val(A(7)))\nprint(val(B(9)))\n";
+        let src = "enum E:\n    A(int)\n    B(int)\nfn val(e: E) -> int:\n    return match e:\n        E.A(a) | E.B(a): a\nprint(val(E.A(7)))\nprint(val(E.B(9)))\n";
         let out = run(src);
         assert_eq!(out, "7\n9\n");
         assert_eq!(out, crate::interp::run_capture(src).expect("interp"));
@@ -16687,7 +16687,11 @@ main()";
         let module = parser::parse(tokens).expect("parse");
         let program = crate::compiler::compile_module_standalone(&module).expect("compile");
         // `Green`'s dense id from the program table (resolved on the cold path).
-        let green_id = program.variants.get("Green").expect("Green registered").variant_id;
+        let green_id = program
+            .variants
+            .get(&("Color".to_string(), "Green".to_string()))
+            .expect("Green registered")
+            .variant_id;
         let mut vm = Vm::new(Arc::new(program));
         let span = Span { line: 1, col: 1 };
         vm.new_enum("Green", green_id, 0, span).expect("new_enum");
@@ -16711,10 +16715,13 @@ main()";
         let tokens = lexer::tokenize("fn main():\n    print(0)\nmain()\n").expect("lex");
         let module = parser::parse(tokens).expect("parse");
         let program = crate::compiler::compile_module_standalone(&module).expect("compile");
-        assert_eq!(program.variants.get("Ok").unwrap().variant_id, VID_OK);
-        assert_eq!(program.variants.get("Err").unwrap().variant_id, VID_ERR);
-        assert_eq!(program.variants.get("Some").unwrap().variant_id, VID_SOME);
-        assert_eq!(program.variants.get("None").unwrap().variant_id, VID_NONE_VARIANT);
+        let vid = |e: &str, v: &str| {
+            program.variants.get(&(e.to_string(), v.to_string())).unwrap().variant_id
+        };
+        assert_eq!(vid("Result", "Ok"), VID_OK);
+        assert_eq!(vid("Result", "Err"), VID_ERR);
+        assert_eq!(vid("Option", "Some"), VID_SOME);
+        assert_eq!(vid("Option", "None"), VID_NONE_VARIANT);
         // A native-built enum (alloc_enum ⇒ Option::Some) must carry the right id.
         let mut vm = Vm::new(Arc::new(program));
         let v = vm.alloc_enum("Option", "Some", vec![Value::Int(7)]);
@@ -16730,11 +16737,23 @@ main()";
     /// (user variant shadowed `variants["Some"]`, so native construction stamped the user's id).
     #[test]
     fn user_variant_shadow_does_not_collapse_native_option_equality() {
-        let src = "enum Foo:\n    Some(int)\n    Bar\nfn opt() -> int?:\n    return [5].pop()\nfn main():\n    a := opt()\n    b := Some(5)\n    print(a == b)\nmain()\n";
+        let src = "enum Foo:\n    Some(int)\n    Bar\nfn opt() -> int?:\n    return [5].pop()\nfn main():\n    a := opt()\n    b := Foo.Some(5)\n    print(a == b)\nmain()\n";
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
-        assert_eq!(vm_out, "false\n", "native Option::Some must not equal user Foo::Some under name shadowing");
+        assert_eq!(vm_out, "false\n", "native Option::Some must not equal user Foo::Some (distinct enums)");
         assert_eq!(vm_out, interp_out, "vm/interp divergence on shadowed-Some equality");
+    }
+
+    /// Scoped variants — two enums may now reuse a variant name (`Color.Red` / `Light.Red`). Each
+    /// qualified constructor and match arm must dispatch to the right enum's variant (distinct dense
+    /// `variant_id`s); the interp's `try_bind` enum check must agree with the VM's int compare.
+    #[test]
+    fn shared_variant_name_dispatches_per_enum() {
+        let src = "enum Color:\n    Red\n    Blue\nenum Light:\n    Red\n    Green\nfn cname(c: Color) -> str:\n    return match c:\n        Color.Red: \"c-red\"\n        Color.Blue: \"c-blue\"\nfn lname(l: Light) -> str:\n    return match l:\n        Light.Red: \"l-red\"\n        Light.Green: \"l-green\"\nfn main():\n    print(cname(Color.Red))\n    print(lname(Light.Red))\n    print(cname(Color.Blue))\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(vm_out, "c-red\nl-red\nc-blue\n");
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on shared variant name dispatch");
     }
 
     /// M19 lever #2 regression guard — `?` on a GENUINE native Option must still work when a user enum
@@ -16755,11 +16774,15 @@ main()";
     /// the emitted op for a `match` on a user enum carries the dense id, not VID_NONE.
     #[test]
     fn match_arm_dispatches_by_variant_id() {
-        let src = "enum Color:\n    Red\n    Green\n    Blue\nfn pick(c: Color) -> int:\n    match c:\n        Red: return 0\n        Green: return 1\n        Blue: return 2\nfn main():\n    print(pick(Green))\nmain()\n";
+        let src = "enum Color:\n    Red\n    Green\n    Blue\nfn pick(c: Color) -> int:\n    match c:\n        Color.Red: return 0\n        Color.Green: return 1\n        Color.Blue: return 2\nfn main():\n    print(pick(Color.Green))\nmain()\n";
         let tokens = lexer::tokenize(src).expect("lex");
         let module = parser::parse(tokens).expect("parse");
         let program = crate::compiler::compile_module_standalone(&module).expect("compile");
-        let green_id = program.variants.get("Green").expect("Green registered").variant_id;
+        let green_id = program
+            .variants
+            .get(&("Color".to_string(), "Green".to_string()))
+            .expect("Green registered")
+            .variant_id;
         // The emitted MatchArm for the `Green` arm must carry Green's dense id.
         let found = program.protos.iter().flat_map(|p| p.code.iter()).any(|op| {
             matches!(op, Op::MatchArm { variant, variant_id, .. } if variant == "Green" && *variant_id == green_id)
@@ -19802,14 +19825,14 @@ enum Opt:
     Nope
 fn pick(o: Opt) -> int:
     match o:
-        Has(n): return n
-        Nope: return -1
+        Opt.Has(n): return n
+        Opt.Nope: return -1
 fn main():
     b := Box(7)
     add := fn(x: int) -> int: x + b.get()
     print(add(3))
-    print(pick(Has(9)))
-    print(pick(Nope))
+    print(pick(Opt.Has(9)))
+    print(pick(Opt.Nope))
     items := [str(1), str(2), str(3)]
     for s in items:
         print(s)
@@ -21700,9 +21723,9 @@ main()
         // structs + methods
         "struct P:\n    x: int\n    y: int\n    fn sum(self) -> int:\n        return self.x + self.y\nfn main():\n    p := P(3, 4)\n    print(p)\n    print(p.sum())\nmain()",
         // enums + match + payload binding
-        "enum S:\n    C(int)\n    Sq(int)\nfn a(s: S) -> int:\n    match s:\n        C(r): return r * r\n        Sq(n): return n * n\nfn main():\n    print(a(C(3)))\n    print(a(Sq(4)))\nmain()",
+        "enum S:\n    C(int)\n    Sq(int)\nfn a(s: S) -> int:\n    match s:\n        S.C(r): return r * r\n        S.Sq(n): return n * n\nfn main():\n    print(a(S.C(3)))\n    print(a(S.Sq(4)))\nmain()",
         // generic enum (type-erased): same enum at two element types + match payload substitution
-        "enum Tree[T]:\n    Leaf\n    Node(T, Tree[T], Tree[T])\nfn sum(t: Tree[int]) -> int:\n    match t:\n        Leaf: return 0\n        Node(v, l, r): return sum(l) + v + sum(r)\nfn main():\n    t: Tree[int] = Node(2, Node(1, Leaf, Leaf), Node(3, Leaf, Leaf))\n    print(sum(t))\nmain()",
+        "enum Tree[T]:\n    Leaf\n    Node(T, Tree[T], Tree[T])\nfn sum(t: Tree[int]) -> int:\n    match t:\n        Tree.Leaf: return 0\n        Tree.Node(v, l, r): return sum(l) + v + sum(r)\nfn main():\n    t: Tree[int] = Tree.Node(2, Tree.Node(1, Tree.Leaf, Tree.Leaf), Tree.Node(3, Tree.Leaf, Tree.Leaf))\n    print(sum(t))\nmain()",
         // closures
         "fn adder(n: int):\n    return fn(x: int) -> int: x + n\nfn main():\n    f := adder(10)\n    print(f(5))\nmain()",
         // ? operator (Ok + Err propagation)

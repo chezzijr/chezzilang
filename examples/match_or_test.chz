@@ -14,7 +14,7 @@ enum Color:
 
 fn is_primary(c: Color) -> bool:
     return match c:
-        Red | Green | Blue: true
+        Color.Red | Color.Green | Color.Blue: true
 
 test fn or_pattern_literals():
     assert size(1) == "small"
@@ -22,5 +22,5 @@ test fn or_pattern_literals():
     assert size(9) == "large", "9 falls to the catch-all"
 
 test fn or_pattern_variants_exhaustive():
-    assert is_primary(Red)
-    assert is_primary(Blue)
+    assert is_primary(Color.Red)
+    assert is_primary(Color.Blue)

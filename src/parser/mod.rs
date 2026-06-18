@@ -1546,12 +1546,15 @@ impl Parser {
                     }
                 }
                 Token::LBracket => {
-                    // `name[Type, …](args)` — explicit call-site type arguments. Only a bare name
-                    // can be a generic fn / struct / variant, so only try the steal there; anything
-                    // else (`arr[i]`, `obj.f[i]`) is a plain index. SPECULATIVE: if the `[types](`
-                    // shape isn't present we backtrack and parse an index instead, so a numeric or
-                    // non-type subscript (`fns[0](x)`) keeps its index+call meaning.
-                    let type_call = if matches!(e.kind, ExprKind::Ident(_)) {
+                    // `name[Type, …](args)` — explicit call-site type arguments. A bare name can be a
+                    // generic fn / struct / variant; a qualified `Enum.Variant` (a `Field` over a bare
+                    // ident) can be a generic variant constructor (`Tree.Node[int](…)`). Only try the
+                    // steal there; anything else (`arr[i]`, `obj.f[i]`) is a plain index. SPECULATIVE:
+                    // if the `[types](` shape isn't present we backtrack and parse an index instead, so
+                    // a numeric or non-type subscript (`fns[0](x)`) keeps its index+call meaning.
+                    let steal = matches!(e.kind, ExprKind::Ident(_))
+                        || matches!(&e.kind, ExprKind::Field { obj, .. } if matches!(obj.kind, ExprKind::Ident(_)));
+                    let type_call = if steal {
                         self.try_parse_type_arg_call(&e, span)?
                     } else {
                         None
@@ -3641,7 +3644,7 @@ mod tests {
             Pattern::Variant {
                 name: "Circle".into(),
                 bindings: vec![Pattern::Ident("r".into())],
-                enum_name: None,
+                enum_name: Some("Shape".into()),
             }
         );
     }

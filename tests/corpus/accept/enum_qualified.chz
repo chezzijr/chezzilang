@@ -1,0 +1,8 @@
+# rule: enumDecl, matchStmt, patternPrimary
+enum Shape:
+    Circle(int)
+    Dot
+s := Shape.Circle(2)
+match s:
+    Shape.Circle(r): print(r)
+    Shape.Dot: print(0)

@@ -941,26 +941,26 @@ enum Tree[T]:
 #[test]
 fn generic_enum_construction_infers_type_arg_ok() {
     // Node(1, Leaf, Leaf) infers T=int; the value flows into a `Tree[int]` slot.
-    ok(&format!("{TREE}t: Tree[int] = Node(1, Leaf, Leaf)\n"));
+    ok(&format!("{TREE}t: Tree[int] = Tree.Node(1, Tree.Leaf, Tree.Leaf)\n"));
 }
 
 #[test]
 fn generic_enum_construction_type_mismatch_rejected() {
     // First payload is T; an int and a str in the two Node arms can't both be T.
-    rejects(&format!("{TREE}t := Node(1, Node(\"x\", Leaf, Leaf), Leaf)\n"), "expected");
+    rejects(&format!("{TREE}t := Tree.Node(1, Tree.Node(\"x\", Tree.Leaf, Tree.Leaf), Tree.Leaf)\n"), "expected");
 }
 
 #[test]
 fn generic_enum_annotation_arg_mismatch_rejected() {
     // A Tree[str] slot can't hold a Node whose payload infers T=int.
-    rejects(&format!("{TREE}t: Tree[str] = Node(1, Leaf, Leaf)\n"), "cannot assign");
+    rejects(&format!("{TREE}t: Tree[str] = Tree.Node(1, Tree.Leaf, Tree.Leaf)\n"), "cannot assign");
 }
 
 #[test]
 fn generic_enum_match_substitutes_payload_ok() {
     // The `v` bound by `Node(v, ...)` of a `Tree[int]` is int.
     let src = format!(
-        "{TREE}fn first(t: Tree[int]) -> int:\n    match t:\n        Leaf: return 0\n        Node(v, l, r): return v\n"
+        "{TREE}fn first(t: Tree[int]) -> int:\n    match t:\n        Tree.Leaf: return 0\n        Tree.Node(v, l, r): return v\n"
     );
     ok(&src);
 }
@@ -969,14 +969,14 @@ fn generic_enum_match_substitutes_payload_ok() {
 fn generic_enum_match_payload_type_enforced() {
     // The `v` bound by `Node(v, ...)` of a `Tree[int]` is int, not str.
     let src = format!(
-        "{TREE}fn bad(t: Tree[int]):\n    match t:\n        Leaf: print(\"l\")\n        Node(v, l, r):\n            s: str = v\n"
+        "{TREE}fn bad(t: Tree[int]):\n    match t:\n        Tree.Leaf: print(\"l\")\n        Tree.Node(v, l, r):\n            s: str = v\n"
     );
     rejects(&src, "cannot assign int");
 }
 
 #[test]
 fn generic_enum_wrong_arity_rejected() {
-    rejects(&format!("{TREE}t: Tree[int, str] = Leaf\n"), "expects 1 type argument(s)");
+    rejects(&format!("{TREE}t: Tree[int, str] = Tree.Leaf\n"), "expects 1 type argument(s)");
 }
 
 #[test]
@@ -992,8 +992,8 @@ enum Either[A, B]:
     Right(B)
 fn fst(e: Either[int, str]) -> int:
     match e:
-        Left(a): return a
-        Right(b): return 0
+        Either.Left(a): return a
+        Either.Right(b): return 0
 ";
     ok(src);
 }
@@ -1007,8 +1007,8 @@ enum LinkedList[T]:
     Cons(T, LinkedList[T]?)
 fn len(l: LinkedList[int]) -> int:
     match l:
-        Nil: return 0
-        Cons(h, t): return 1
+        LinkedList.Nil: return 0
+        LinkedList.Cons(h, t): return 1
 ";
     ok(src);
 }
@@ -1021,7 +1021,7 @@ struct Plain:
 enum Box[T: Comparable]:
     Empty
     Has(T)
-b := Has(Plain(1))
+b := Box.Has(Plain(1))
 ";
     rejects(src, "does not satisfy Comparable");
 }
@@ -1032,7 +1032,7 @@ fn generic_enum_bound_satisfied_ok() {
 enum Box[T: Comparable]:
     Empty
     Has(T)
-b: Box[int] = Has(5)
+b: Box[int] = Box.Has(5)
 ";
     ok(src);
 }
@@ -1585,7 +1585,7 @@ fn method_assign_rejected() {
 #[test]
 fn non_exhaustive_match_rejected() {
     let src = "enum Shape:\n    Circle(int)\n    Square(int)\n\
-               fn area(s: Shape) -> int:\n    match s:\n        Circle(r): return r\n";
+               fn area(s: Shape) -> int:\n    match s:\n        Shape.Circle(r): return r\n";
     rejects(src, "non-exhaustive match on Shape: missing Square");
 }
 
@@ -1599,7 +1599,7 @@ fn unknown_variant_in_match_rejected() {
 #[test]
 fn wrong_binding_arity_rejected() {
     let src = "enum Shape:\n    Circle(int)\n\
-               fn f(s: Shape) -> int:\n    match s:\n        Circle(r, extra): return r\n";
+               fn f(s: Shape) -> int:\n    match s:\n        Shape.Circle(r, extra): return r\n";
     rejects(src, "binds 1 value");
 }
 
@@ -1612,7 +1612,7 @@ fn match_variant_against_int_rejected() {
 #[test]
 fn exhaustive_match_ok() {
     let src = "enum Shape:\n    Circle(int)\n    Square(int)\n\
-               fn area(s: Shape) -> int:\n    match s:\n        Circle(r): return r * r\n        Square(n): return n * n\n";
+               fn area(s: Shape) -> int:\n    match s:\n        Shape.Circle(r): return r * r\n        Shape.Square(n): return n * n\n";
     ok(src);
 }
 
@@ -1669,7 +1669,7 @@ fn match_on_float_rejected() {
 fn match_int_with_wildcard_in_enum_match_ok() {
     // Wildcard makes an enum match exhaustive even with a missing variant.
     let src = "enum Shape:\n    Circle(int)\n    Square(int)\n\
-               fn f(s: Shape):\n    match s:\n        Circle(r): print(\"c\")\n        _: print(\"other\")\n";
+               fn f(s: Shape):\n    match s:\n        Shape.Circle(r): print(\"c\")\n        _: print(\"other\")\n";
     ok(src);
 }
 
@@ -1757,9 +1757,62 @@ fn duplicate_function_is_reported() {
 }
 
 #[test]
-fn variant_name_shared_across_enums_is_reported() {
-    // `variants` is keyed by bare name; a collision would otherwise silently mis-type.
-    rejects("enum A:\n    X(int)\nenum B:\n    X(str)\n", "variant 'X' is already defined");
+fn variant_name_shared_across_enums_is_allowed() {
+    // Variants are scoped under their enum (keyed by `(enum, variant)`), so two enums may share a
+    // variant name. Each is reached via its qualified form (`A.X` / `B.X`).
+    ok("enum A:\n    X(int)\nenum B:\n    X(str)\nfn f() -> A:\n    return A.X(1)\nfn g() -> B:\n    return B.X(\"s\")\n");
+}
+
+#[test]
+fn duplicate_variant_within_one_enum_is_reported() {
+    // A repeat of a variant name *within the same* enum is still a collision.
+    rejects("enum A:\n    X(int)\n    X(str)\n", "variant 'X' is already defined in enum 'A'");
+}
+
+#[test]
+fn bare_variant_value_is_rejected_with_qualify_hint() {
+    // A user variant used bare as a value must be qualified — the error names the enum.
+    rejects(
+        "enum Color:\n    Red\n    Blue\nc := Red\n",
+        "'Red' is a variant of enum 'Color'; write it qualified as 'Color.Red'",
+    );
+}
+
+#[test]
+fn bare_variant_constructor_is_rejected_with_qualify_hint() {
+    // A bare payload-variant constructor must be qualified.
+    rejects(
+        "enum Shape:\n    Circle(int)\n    Dot\ns := Circle(5)\n",
+        "write it qualified as 'Shape.Circle'",
+    );
+}
+
+#[test]
+fn bare_variant_match_arm_is_rejected_not_a_silent_binding() {
+    // The bare→binding trap: a bare known-variant arm must be a hard error, never silently a
+    // catch-all binding that swallows the match.
+    rejects(
+        "enum Color:\n    Red\n    Blue\nfn f(c: Color) -> int:\n    return match c:\n        Red: 0\n        Blue: 1\n",
+        "write it qualified as 'Color.Red'",
+    );
+}
+
+#[test]
+fn shared_variant_name_is_qualified_to_distinct_enums() {
+    // Two enums may reuse a variant name; each qualified form resolves to its own enum.
+    ok("enum Color:\n    Red\nenum Light:\n    Red\nfn f() -> Color:\n    return Color.Red\nfn g() -> Light:\n    return Light.Red\n");
+}
+
+#[test]
+fn foreign_enum_qualifier_in_match_arm_is_rejected() {
+    // A `case Light.Red:` arm against a `Color` scrutinee must be a checker error — owning the name
+    // `Red` is not enough; the qualifier must name the scrutinee's enum. Otherwise it type-checks
+    // clean, is miscounted toward exhaustiveness, and the genuine `Color.Red` value traps at runtime
+    // (the arm carries Light's distinct variant_id). Regression guard for that soundness hole.
+    rejects(
+        "enum Color:\n    Red\n    Blue\nenum Light:\n    Red\n    Green\nfn f(c: Color) -> str:\n    return match c:\n        Light.Red: \"red\"\n        Color.Blue: \"blue\"\n",
+        "variant 'Light.Red' cannot match a value of enum 'Color'",
+    );
 }
 
 #[test]
@@ -2363,7 +2416,7 @@ fn match_nested_nullary_variant_ok() {
     // `Cons(h, Nil)`: a nested nullary variant is now a refutable variant match (the checker
     // promotes the bare `Nil`). Previously rejected (gap #15 limit); now supported.
     let src = "enum L:\n    Nil\n    Cons(int, L)\n\
-               fn f(x: L):\n    match x:\n        Cons(h, Nil): print(h)\n        _: print(\"e\")\n";
+               fn f(x: L):\n    match x:\n        L.Cons(h, L.Nil): print(h)\n        _: print(\"e\")\n";
     ok(src);
 }
 
@@ -4806,7 +4859,7 @@ fn or_pattern_mismatched_bindings_rejected() {
 fn or_pattern_consistent_bindings_ok() {
     // Two enum variants whose single payload is the same type both bind `a`.
     ok(
-        "enum E:\n    A(int)\n    B(int)\ne := A(1)\nmatch e:\n    A(a) | B(a): print(a)\n",
+        "enum E:\n    A(int)\n    B(int)\ne := E.A(1)\nmatch e:\n    E.A(a) | E.B(a): print(a)\n",
     );
 }
 
@@ -4814,7 +4867,7 @@ fn or_pattern_consistent_bindings_ok() {
 fn enum_or_pattern_exhaustive_without_wildcard() {
     // A 3-variant enum covered by a single or-pattern is exhaustive WITHOUT a `_`.
     ok(
-        "enum Color:\n    Red\n    Green\n    Blue\nc := Red\nmatch c:\n    Red | Green | Blue: print(\"c\")\n",
+        "enum Color:\n    Red\n    Green\n    Blue\nc := Color.Red\nmatch c:\n    Color.Red | Color.Green | Color.Blue: print(\"c\")\n",
     );
 }
 

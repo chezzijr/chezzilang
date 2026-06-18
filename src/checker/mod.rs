@@ -361,7 +361,14 @@ struct Checker {
     /// enum name → its generic type parameters (empty for a non-generic enum). Used to build the
     /// substitution from `Tree[int]`'s args onto each variant's payload (which may name `T`).
     enum_type_params: HashMap<String, Vec<TypeParam>>,
-    variants: HashMap<String, VariantInfo>,
+    /// Keyed by `(enum_name, variant_name)`: variants are scoped under their enum, so two enums may
+    /// declare the same variant name. Resolution always carries the enum (a qualified `Enum.Variant`
+    /// or, in a pattern slot, the scrutinee's enum) — there is no bare-name lookup.
+    variants: HashMap<(String, String), VariantInfo>,
+    /// variant name → the enum(s) that declare it. A pure-diagnostic reverse index: lets a bare
+    /// variant use (illegal now) report "write it qualified as `Enum.Variant`" and keeps a bare
+    /// known-variant from silently becoming a pattern binding (the bare→binding trap).
+    variant_owners: HashMap<String, Vec<String>>,
     struct_names: std::collections::HashSet<String>,
     enum_names: std::collections::HashSet<String>,
     /// Transparent type aliases (`type UserId = int`): name → the aliased AST type, resolved on
@@ -427,6 +434,7 @@ impl Checker {
             enums: HashMap::new(),
             enum_type_params: HashMap::new(),
             variants: HashMap::new(),
+            variant_owners: HashMap::new(),
             struct_names: std::collections::HashSet::new(),
             enum_names: std::collections::HashSet::new(),
             aliases: HashMap::new(),
@@ -880,18 +888,22 @@ impl Checker {
                     }
                     let mut names = Vec::new();
                     for v in variants {
-                        // Variants are keyed globally by bare name; a name shared across two enums
-                        // would otherwise collapse and mis-type. Reject the collision outright.
-                        if self.variants.contains_key(&v.name) {
-                            self.error(s.span, format!("variant '{}' is already defined", v.name));
+                        // Variants are scoped under their enum, so two *different* enums may share a
+                        // variant name. A repeat *within the same* enum is still a collision.
+                        if self.variants.contains_key(&(name.clone(), v.name.clone())) {
+                            self.error(
+                                s.span,
+                                format!("variant '{}' is already defined in enum '{name}'", v.name),
+                            );
                         }
                         names.push(v.name.clone());
                         let payload =
                             v.payload.iter().map(|t| self.resolve_type(t, s.span)).collect();
                         self.variants.insert(
-                            v.name.clone(),
+                            (name.clone(), v.name.clone()),
                             VariantInfo { enum_name: name.clone(), payload },
                         );
+                        self.variant_owners.entry(v.name.clone()).or_default().push(name.clone());
                     }
                     self.exit_type_params(saved);
                     self.enums.insert(name.clone(), names);
@@ -989,7 +1001,7 @@ impl Checker {
             // enum *type* name does not (it is not callable in either engine), so it is NOT a
             // collision — `extern fn Foo` alongside `enum Foo` resolves to the extern, exactly as
             // a plain `fn Foo` alongside `enum Foo` does.
-            if self.structs.contains_key(name) || self.variants.contains_key(name) {
+            if self.structs.contains_key(name) || self.variant_owners.contains_key(name) {
                 self.error(
                     *span,
                     format!("'{name}' is a builtin/reserved name and cannot be an extern fn"),
@@ -2533,8 +2545,11 @@ impl Checker {
                     .unwrap_or_default()
                     .into_iter()
                     .map(|v| {
-                        let payload =
-                            self.variants[&v].payload.iter().map(|p| subst(p, &map)).collect();
+                        let payload = self.variants[&(name.clone(), v.clone())]
+                            .payload
+                            .iter()
+                            .map(|p| subst(p, &map))
+                            .collect();
                         (v, payload)
                     })
                     .collect();
@@ -2586,8 +2601,11 @@ impl Checker {
                 Some(
                     vs.iter()
                         .map(|v| {
-                            let payload =
-                                self.variants[v].payload.iter().map(|p| subst(p, &map)).collect();
+                            let payload = self.variants[&(name.clone(), v.clone())]
+                                .payload
+                                .iter()
+                                .map(|p| subst(p, &map))
+                                .collect();
                             (v.clone(), payload)
                         })
                         .collect(),
@@ -2613,30 +2631,38 @@ impl Checker {
         match pattern {
             Pattern::Wildcard => true,
             Pattern::Ident(name) => {
-                // A nested bare identifier names either a nullary variant of the matched type (a
-                // refutable variant match — `Some(None)`, `Ok(Err(e))`) or a fresh binding.
-                if let Some(vmap) = self.variants_of(ty)
-                    && let Some(payload) = vmap.get(name)
-                {
-                    if payload.is_empty() {
-                        // A nullary variant of `ty`: a refutable variant match, binds nothing.
+                // A nested bare identifier names a *built-in* nullary variant of the matched type (a
+                // refutable variant match — `Some(None)`, `Ok(Err(e))`), or a fresh binding. User
+                // variants must be written qualified (handled below), never resolved bare here.
+                let is_builtin_variant = matches!(name.as_str(), "Ok" | "Err" | "Some" | "None");
+                if is_builtin_variant {
+                    if let Some(vmap) = self.variants_of(ty)
+                        && let Some(payload) = vmap.get(name)
+                    {
+                        if payload.is_empty() {
+                            // A nullary built-in variant of `ty`: a refutable match, binds nothing.
+                            return false;
+                        }
+                        // A non-nullary variant used without its payload — needs `Name(...)`.
+                        self.error(
+                            span,
+                            format!("variant '{name}' of {ty} requires its payload — write '{name}(...)'"),
+                        );
                         return false;
                     }
-                    // A non-nullary variant used without its payload — needs `Name(...)`.
-                    self.error(
-                        span,
-                        format!("variant '{name}' of {ty} requires its payload — write '{name}(...)'"),
-                    );
-                    return false;
+                    // A built-in variant name that ISN'T a variant of `ty` cannot be a binding: the
+                    // compiler routes it by the variant registry (a `MatchArm` test), so it would trap
+                    // on the VM while the interp binds. Reject it so all engines agree.
+                    if !ty.is_unknown() {
+                        self.error(span, format!("'{name}' is not a variant of {ty}"));
+                        return false;
+                    }
                 }
-                // A globally-known variant name that ISN'T a variant of `ty` cannot be a binding: the
-                // compiler routes it by the variant registry (a `MatchArm` test), so it would trap on
-                // the VM while the interp binds. Reject it so all engines agree (rename to bind).
-                if !ty.is_unknown()
-                    && (self.variants.contains_key(name)
-                        || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None"))
-                {
-                    self.error(span, format!("'{name}' is not a variant of {ty}"));
+                // A *user* variant must be written qualified — never resolved bare, never silently a
+                // binding (the bare→binding trap). Reject with a hint to the qualified form.
+                if self.variant_owners.contains_key(name) {
+                    let hint = self.qualify_hint(name);
+                    self.error(span, hint);
                     return false;
                 }
                 self.declare(name, ty.clone());
@@ -2689,7 +2715,7 @@ impl Checker {
                 }
             }
             Pattern::Variant { name, bindings, enum_name } => {
-                self.check_pattern_qualifier(enum_name, name, span);
+                self.check_pattern_qualifier(enum_name, name, Self::scrutinee_enum(ty), span);
                 match self.variants_of(ty) {
                     Some(vmap) => match vmap.get(name) {
                         Some(payload) => {
@@ -2838,7 +2864,8 @@ impl Checker {
                 self.push_scope();
                 match pattern {
                     Pattern::Variant { name, bindings, enum_name } => {
-                        self.check_pattern_qualifier(enum_name, name, span);
+                        // Un-inferable scrutinee (Skip): no enum to validate the qualifier against.
+                        self.check_pattern_qualifier(enum_name, name, None, span);
                         covered.insert(name.clone());
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
@@ -2856,7 +2883,7 @@ impl Checker {
                 self.push_scope();
                 match pattern {
                     Pattern::Variant { name, bindings, enum_name } => {
-                        self.check_pattern_qualifier(enum_name, name, span);
+                        self.check_pattern_qualifier(enum_name, name, Some(label.as_str()), span);
                         let payload = variants.get(name).cloned();
                         if payload.is_none() {
                             self.error(span, format!("'{name}' is not a variant of {label}"));
@@ -2921,13 +2948,15 @@ impl Checker {
                         // variant cannot match a literal-typed value). Falls through the bare path
                         // below otherwise.
                         if enum_name.is_some() {
-                            self.check_pattern_qualifier(enum_name, name, span);
+                            // int/str/bool scrutinee: no enum to validate against (the variant is
+                            // rejected below regardless).
+                            self.check_pattern_qualifier(enum_name, name, None, span);
                             self.error(span, format!("cannot match a variant against {ty}"));
                             return false;
                         }
                         // Match the compiler's variant registry: user enums PLUS the built-in
                         // Result/Option variants (which the checker special-cases elsewhere).
-                        if self.variants.contains_key(name)
+                        if self.variant_owners.contains_key(name)
                             || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
                         {
                             self.error(
@@ -2942,7 +2971,7 @@ impl Checker {
                         return true;
                     }
                     Pattern::Variant { bindings, enum_name, name } => {
-                        self.check_pattern_qualifier(enum_name, name, span);
+                        self.check_pattern_qualifier(enum_name, name, None, span);
                         self.error(span, format!("cannot match a variant against {ty}"));
                         // Still bind the payload sub-patterns (as Unknown) so the arm body doesn't
                         // cascade into spurious "unknown name" errors — notably the desugared `?.`
@@ -3244,14 +3273,12 @@ impl Checker {
         if name == "None" {
             return Ty::option(Ty::Unknown);
         }
-        // A nullary user variant used as a value (e.g. `Red`, or `Leaf` of a generic `Tree[T]`).
-        // A nullary variant carries no payload to infer type arguments from, so a generic enum's
-        // args are left `Unknown` (e.g. `Leaf` is `Tree[?]`), unified later against a typed slot.
-        if let Some(v) = self.variants.get(name)
-            && v.payload.is_empty()
-        {
-            let nparams = self.enum_type_params.get(&v.enum_name).map_or(0, |tps| tps.len());
-            return Ty::Enum(v.enum_name.clone(), vec![Ty::Unknown; nparams]);
+        // A bare user-variant name used as a value (`Red`, `Leaf`) is no longer allowed — variants are
+        // scoped under their enum and must be written qualified (`Color.Red`, `Tree.Leaf`).
+        if self.variant_owners.contains_key(name) {
+            let hint = self.qualify_hint(name);
+            self.error(span, hint);
+            return Ty::Unknown;
         }
         self.error(span, format!("unknown name '{name}'"));
         Ty::Unknown
@@ -3522,19 +3549,77 @@ impl Checker {
         }
     }
 
-    /// Validate the optional `Enum.` qualifier on a `case Enum.Variant:` pattern: the named variant
-    /// must belong to `enum_name`. A no-op when unqualified. The qualifier is a pure spelling aid —
-    /// variant names are globally unique, so resolution still keys on `name` alone.
-    fn check_pattern_qualifier(&mut self, enum_name: &Option<String>, name: &str, span: Span) {
-        if let Some(en) = enum_name {
-            // User variants live in `self.variants`; the built-in Result/Option variants don't, so
-            // accept their canonical enums explicitly.
-            let builtin_ok = matches!(
-                (en.as_str(), name),
-                ("Result", "Ok") | ("Result", "Err") | ("Option", "Some") | ("Option", "None")
-            );
-            if !builtin_ok && self.variants.get(name).is_none_or(|v| &v.enum_name != en) {
-                self.error(span, format!("enum '{en}' has no variant '{name}'"));
+    /// A "this name is a variant — write it qualified" diagnostic, naming the owning enum(s).
+    /// Falls back to "unknown name" if the name isn't a known variant (shouldn't normally happen at
+    /// the call sites, which guard on `variant_owners` first).
+    fn qualify_hint(&self, name: &str) -> String {
+        match self.variant_owners.get(name).map(Vec::as_slice) {
+            Some([en]) => {
+                format!("'{name}' is a variant of enum '{en}'; write it qualified as '{en}.{name}'")
+            }
+            Some(ens @ [_, _, ..]) => {
+                let opts = ens.iter().map(|e| format!("'{e}.{name}'")).collect::<Vec<_>>().join(", ");
+                format!("'{name}' is a variant of several enums; write it qualified (one of {opts})")
+            }
+            _ => format!("unknown name '{name}'"),
+        }
+    }
+
+    /// The enum a scrutinee/slot type belongs to (`Color`, or `Result`/`Option` for the built-ins),
+    /// or `None` for a non-enum / un-inferable type. Used to validate a pattern's `Enum.` qualifier
+    /// against the value being matched.
+    fn scrutinee_enum(ty: &Ty) -> Option<&str> {
+        match ty {
+            Ty::Enum(name, _) => Some(name),
+            Ty::Result(..) => Some("Result"),
+            Ty::Option(_) => Some("Option"),
+            _ => None,
+        }
+    }
+
+    /// Validate the `Enum.` qualifier on a `case Enum.Variant:` pattern. The named variant must (a)
+    /// belong to `enum_name`, and (b) — since variant names may now be shared across enums — name the
+    /// **scrutinee's** enum (`scrut_enum`): owning the name isn't enough, because a foreign qualifier
+    /// resolves to a different `variant_id` (a dead arm that would still be miscounted toward
+    /// exhaustiveness → a "checked-OK" match that traps at runtime). When *unqualified*, a user variant
+    /// name is an error — variants must be written qualified (built-in Ok/Err/Some/None stay bare).
+    fn check_pattern_qualifier(
+        &mut self,
+        enum_name: &Option<String>,
+        name: &str,
+        scrut_enum: Option<&str>,
+        span: Span,
+    ) {
+        match enum_name {
+            Some(en) => {
+                // User variants live in `self.variants` keyed by `(enum, variant)`; the built-in
+                // Result/Option variants don't, so accept their canonical enums explicitly.
+                let builtin_ok = matches!(
+                    (en.as_str(), name),
+                    ("Result", "Ok") | ("Result", "Err") | ("Option", "Some") | ("Option", "None")
+                );
+                if !builtin_ok && !self.variants.contains_key(&(en.clone(), name.to_string())) {
+                    self.error(span, format!("enum '{en}' has no variant '{name}'"));
+                    return;
+                }
+                // The qualifier must name the scrutinee's own enum. (Skipped when the scrutinee enum
+                // is unknown — an int/str/bool or un-inferable scrutinee, handled by the caller.)
+                if let Some(s) = scrut_enum
+                    && en != s
+                {
+                    self.error(
+                        span,
+                        format!("variant '{en}.{name}' cannot match a value of enum '{s}'"),
+                    );
+                }
+            }
+            None => {
+                // A bare user-variant name in a pattern must be qualified. (Built-ins are not in
+                // `variant_owners`, so they pass through untouched.)
+                if self.variant_owners.contains_key(name) {
+                    let hint = self.qualify_hint(name);
+                    self.error(span, hint);
+                }
             }
         }
     }
@@ -3547,7 +3632,7 @@ impl Checker {
             && !self.is_local_binding(ename)
             && self.enums.contains_key(ename)
         {
-            let resolved = self.variants.get(name).filter(|v| &v.enum_name == ename).cloned();
+            let resolved = self.variants.get(&(ename.clone(), name.to_string())).cloned();
             match resolved {
                 Some(v) if v.payload.is_empty() => {
                     let nparams = self.enum_type_params.get(ename).map_or(0, |t| t.len());
@@ -3927,8 +4012,8 @@ impl Checker {
                 && !self.is_local_binding(ename)
                 && self.enums.contains_key(ename)
             {
-                if self.variants.get(name).is_some_and(|v| &v.enum_name == ename) {
-                    if let Some(ty) = self.infer_named_call(name, args, &targs, span) {
+                if self.variants.contains_key(&(ename.clone(), name.to_string())) {
+                    if let Some(ty) = self.infer_named_call(name, args, &targs, span, Some(ename)) {
                         return ty;
                     }
                 } else {
@@ -3944,7 +4029,7 @@ impl Checker {
         if let ExprKind::Ident(name) = &callee.kind {
             // Shadowing local (e.g. a closure bound to a variable) wins over a global of the same name.
             if self.lookup(name).is_none()
-                && let Some(ty) = self.infer_named_call(name, args, &targs, span)
+                && let Some(ty) = self.infer_named_call(name, args, &targs, span, None)
             {
                 return ty;
             }
@@ -3982,7 +4067,69 @@ impl Checker {
 
     /// Resolve a by-name call (builtin / constructor / variant / global fn). Returns `None` if
     /// `name` is none of those, so the caller can treat it as a value-call.
-    fn infer_named_call(&mut self, name: &str, args: &[Expr], targs: &[Ty], span: Span) -> Option<Ty> {
+    /// Type-check an enum-variant constructor `Enum.Variant(args)` given its resolved `VariantInfo`.
+    /// Handles both non-generic and generic enums (type args from explicit `[T]` or inferred from the
+    /// payload). Shared by the qualified-call fast path and reachable only once the `(enum, variant)`
+    /// pair is known.
+    fn infer_variant_call(
+        &mut self,
+        v: &VariantInfo,
+        name: &str,
+        args: &[Expr],
+        targs: &[Ty],
+        span: Span,
+    ) -> Ty {
+        let tps = self.enum_type_params.get(&v.enum_name).cloned().unwrap_or_default();
+        if tps.is_empty() {
+            if !targs.is_empty() {
+                self.error(span, format!("'{name}' takes no type arguments"));
+            }
+            self.check_args(name, &v.payload, args, span);
+            return Ty::Enum(v.enum_name.clone(), Vec::new());
+        }
+        // Generic enum: type arguments come from explicit call-site args (`Tree.Node[int](…)`) when
+        // given, else are inferred by unifying the variant's declared payload types (which contain
+        // the enum's `Ty::Param`s) against the argument types, then check each argument against the
+        // substituted payload.
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        if arg_tys.len() != v.payload.len() {
+            self.check_arity(name, v.payload.len(), args, span);
+        }
+        let mut sub = self.seed_targs(name, &tps, targs, span);
+        for (decl, actual) in v.payload.iter().zip(&arg_tys) {
+            unify(decl, actual, &mut sub);
+        }
+        self.recover_iter_elems(&tps, &mut sub, span);
+        for (decl, (actual, arg)) in v.payload.iter().zip(arg_tys.iter().zip(args)) {
+            let expected = subst(decl, &sub);
+            if !self.assignable(&expected, actual) {
+                self.error(
+                    arg.span,
+                    format!("argument to '{name}' has type {actual}, expected {expected}"),
+                );
+            }
+        }
+        self.enforce_bounds(&tps, &sub, span);
+        let targs_out =
+            tps.iter().map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown)).collect();
+        Ty::Enum(v.enum_name.clone(), targs_out)
+    }
+
+    fn infer_named_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        targs: &[Ty],
+        span: Span,
+        enum_qual: Option<&str>,
+    ) -> Option<Ty> {
+        // Qualified `Enum.Variant(args)`: resolve strictly within the named enum, bypassing the bare
+        // dispatch below — so a variant named like a built-in (`enum E: Ok(int)`) or a struct can't be
+        // hijacked by that branch. The caller has already verified `(enum, variant)` exists.
+        if let Some(en) = enum_qual {
+            let v = self.variants.get(&(en.to_string(), name.to_string())).cloned()?;
+            return Some(self.infer_variant_call(&v, name, args, targs, span));
+        }
         // Explicit call-site type arguments are only meaningful on a *generic* user fn / struct /
         // enum-variant constructor. Reject them on anything else (builtins, non-generic decls)
         // before the dispatch below, so the seeding logic only has to handle the generic paths.
@@ -4265,40 +4412,15 @@ impl Checker {
                         tps.iter().map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown)).collect();
                     return Some(Ty::Struct(name.to_string(), targs));
                 }
-                // User enum variant constructor?
-                if let Some(v) = self.variants.get(name).cloned() {
-                    let tps =
-                        self.enum_type_params.get(&v.enum_name).cloned().unwrap_or_default();
-                    if tps.is_empty() {
-                        self.check_args(name, &v.payload, args, span);
-                        return Some(Ty::Enum(v.enum_name, Vec::new()));
+                // A bare user-variant constructor (`Circle(5)`) is no longer allowed — variants are
+                // scoped under their enum and must be written qualified (`Shape.Circle(5)`).
+                if self.variant_owners.contains_key(name) {
+                    let hint = self.qualify_hint(name);
+                    self.error(span, hint);
+                    for a in args {
+                        self.infer_value(a);
                     }
-                    // Generic enum: type arguments come from explicit call-site args
-                    // (`Node[int](…)`) when given, else are inferred by unifying the variant's
-                    // declared payload types (which contain the enum's `Ty::Param`s) against the
-                    // argument types, then check each argument against the substituted payload.
-                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
-                    if arg_tys.len() != v.payload.len() {
-                        self.check_arity(name, v.payload.len(), args, span);
-                    }
-                    let mut sub = self.seed_targs(name, &tps, targs, span);
-                    for (decl, actual) in v.payload.iter().zip(&arg_tys) {
-                        unify(decl, actual, &mut sub);
-                    }
-                    self.recover_iter_elems(&tps, &mut sub, span);
-                    for (decl, (actual, arg)) in v.payload.iter().zip(arg_tys.iter().zip(args)) {
-                        let expected = subst(decl, &sub);
-                        if !self.assignable(&expected, actual) {
-                            self.error(
-                                arg.span,
-                                format!("argument to '{name}' has type {actual}, expected {expected}"),
-                            );
-                        }
-                    }
-                    self.enforce_bounds(&tps, &sub, span);
-                    let targs =
-                        tps.iter().map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown)).collect();
-                    return Some(Ty::Enum(v.enum_name, targs));
+                    return Some(Ty::Unknown);
                 }
                 // Global function?
                 if let Some(sig) = self.functions.get(name).cloned() {
@@ -5492,8 +5614,12 @@ impl Checker {
         if let Some(i) = self.structs.get(name) {
             return !i.type_params.is_empty();
         }
-        if let Some(v) = self.variants.get(name) {
-            return self.enum_type_params.get(&v.enum_name).is_some_and(|t| !t.is_empty());
+        // Bare-name query (the qualified path resolves genericity directly). A variant name may now
+        // belong to several enums; treat it as generic if any owner enum is generic.
+        if let Some(owners) = self.variant_owners.get(name) {
+            return owners
+                .iter()
+                .any(|en| self.enum_type_params.get(en).is_some_and(|t| !t.is_empty()));
         }
         if let Some(s) = self.functions.get(name) {
             return !s.type_params.is_empty();
@@ -7028,13 +7154,13 @@ mod graph_tests {
         let t = TmpDir::new();
         let ok = t.write(
             "ok.chz",
-            "enum Color:\n    Red\n    Green\nfn f(c: Color) -> str:\n    return match c:\n        Color.Red: \"r\"\n        Green: \"g\"\nfn main(): print(f(Red))\n",
+            "enum Color:\n    Red\n    Green\nfn f(c: Color) -> str:\n    return match c:\n        Color.Red: \"r\"\n        Color.Green: \"g\"\nfn main(): print(f(Color.Red))\n",
         );
         assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
 
         let bad = t.write(
             "bad.chz",
-            "enum Color:\n    Red\n    Green\nenum Shape:\n    Circle(int)\nfn f(c: Color) -> str:\n    return match c:\n        Color.Circle: \"c\"\n        _: \"x\"\nfn main(): print(f(Red))\n",
+            "enum Color:\n    Red\n    Green\nenum Shape:\n    Circle(int)\nfn f(c: Color) -> str:\n    return match c:\n        Color.Circle: \"c\"\n        _: \"x\"\nfn main(): print(f(Color.Red))\n",
         );
         let errs = errors(&bad);
         assert!(

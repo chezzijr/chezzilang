@@ -125,9 +125,9 @@ struct Compiler {
 
 /// M19 lever #2 — register an enum variant into BOTH program tables, assigning it the next dense
 /// `variant_id` (`variants_by_id.len()`, a global gap-free counter — the analogue of how `StructDef`
-/// gets its `tid` from `structs.len()`). Keeps `variants` (name→def) and `variants_by_id` (id→def) in
-/// lockstep so cold-path id→names resolution is O(1). Variant names are globally unique today (the
-/// `variants` map is keyed by variant name only), so the id is unique per (enum-type, variant) pair.
+/// gets its `tid` from `structs.len()`). Keeps `variants` (`(enum, variant)`→def) and `variants_by_id`
+/// (id→def) in lockstep so cold-path id→names resolution is O(1). The map is keyed by the
+/// `(enum, variant)` pair, so two enums may share a variant name yet get distinct ids.
 fn register_variant(program: &mut Program, enum_name: &str, variant: &str, arity: usize) {
     let variant_id = program.variants_by_id.len() as u32;
     let def = VariantDef {
@@ -137,7 +137,7 @@ fn register_variant(program: &mut Program, enum_name: &str, variant: &str, arity
         variant_id,
     };
     program.variants_by_id.push(def.clone());
-    program.variants.insert(variant.to_string(), def);
+    program.variants.insert((enum_name.to_string(), variant.to_string()), def);
 }
 
 impl Compiler {
@@ -161,10 +161,11 @@ impl Compiler {
         for (v, e, arity) in [("Ok", "Result", 1), ("Err", "Result", 1), ("Some", "Option", 1), ("None", "Option", 0)] {
             register_variant(&mut program, e, v, arity);
         }
-        debug_assert_eq!(program.variants["Ok"].variant_id, crate::vm::op::VID_OK);
-        debug_assert_eq!(program.variants["Err"].variant_id, crate::vm::op::VID_ERR);
-        debug_assert_eq!(program.variants["Some"].variant_id, crate::vm::op::VID_SOME);
-        debug_assert_eq!(program.variants["None"].variant_id, crate::vm::op::VID_NONE_VARIANT);
+        let vid = |p: &Program, e: &str, v: &str| p.variants[&(e.to_string(), v.to_string())].variant_id;
+        debug_assert_eq!(vid(&program, "Result", "Ok"), crate::vm::op::VID_OK);
+        debug_assert_eq!(vid(&program, "Result", "Err"), crate::vm::op::VID_ERR);
+        debug_assert_eq!(vid(&program, "Option", "Some"), crate::vm::op::VID_SOME);
+        debug_assert_eq!(vid(&program, "Option", "None"), crate::vm::op::VID_NONE_VARIANT);
         // M19 memory-layout lever #1 — register the synthetic native std structs (`Match` from
         // `std.regex`, `Response` from `std.request`). They have no AST (the checker seeds their
         // shapes in `seed_stdlib_structs`), so with the positional struct layout the runtime must
@@ -1416,18 +1417,39 @@ impl Compiler {
         patterns.into_iter().all(|p| self.pattern_is_literal(p))
     }
 
-    /// Whether `name` is a registered NULLARY variant (`None`, a user enum's empty-payload
-    /// variant). A nested bare `Ident` naming one is a refutable variant match (the checker has
-    /// promoted it), not a binding — routed by the same registry the runtime uses.
-    fn is_nullary_variant(&self, name: &str) -> bool {
-        self.program.variants.get(name).is_some_and(|v| v.arity == 0)
+    /// Resolve a variant reference to its `(enum, variant)` registry key. The enum is the explicit
+    /// qualifier when present (user variants are always qualified post-check); a bare name resolves
+    /// only as a built-in (`Ok`/`Err`→`Result`, `Some`/`None`→`Option`). `None` for any other bare
+    /// name (a binding, not a variant).
+    fn variant_pair(&self, enum_name: Option<&str>, name: &str) -> Option<(String, String)> {
+        let en = match enum_name {
+            Some(en) => en,
+            None => match name {
+                "Ok" | "Err" => "Result",
+                "Some" | "None" => "Option",
+                _ => return None,
+            },
+        };
+        Some((en.to_string(), name.to_string()))
     }
 
-    /// M19 lever #2 — the dense `variant_id` of variant `name`, baked into `Op::NewEnum`/`Op::MatchArm`
-    /// so the VM stamps / compares it without a runtime hash lookup. `VID_NONE` if unregistered (the
-    /// compiler always emits these for known variants, so the fallback is defensive).
-    fn variant_id_of(&self, name: &str) -> u32 {
-        self.program.variants.get(name).map_or(crate::vm::op::VID_NONE, |v| v.variant_id)
+    /// Whether `(enum_name, name)` is a registered NULLARY variant (`None`, a user enum's
+    /// empty-payload variant). A nested bare `Ident` naming a built-in nullary variant is a refutable
+    /// variant match (the checker has promoted it), not a binding — routed by the same registry the
+    /// runtime uses.
+    fn is_nullary_variant(&self, enum_name: Option<&str>, name: &str) -> bool {
+        self.variant_pair(enum_name, name)
+            .and_then(|k| self.program.variants.get(&k))
+            .is_some_and(|v| v.arity == 0)
+    }
+
+    /// M19 lever #2 — the dense `variant_id` of `(enum_name, name)`, baked into `Op::NewEnum`/
+    /// `Op::MatchArm` so the VM stamps / compares it without a runtime hash lookup. `VID_NONE` if
+    /// unregistered (the compiler always emits these for known variants, so the fallback is defensive).
+    fn variant_id_of(&self, enum_name: Option<&str>, name: &str) -> u32 {
+        self.variant_pair(enum_name, name)
+            .and_then(|k| self.program.variants.get(&k))
+            .map_or(crate::vm::op::VID_NONE, |v| v.variant_id)
     }
 
     /// The sorted, de-duplicated *binding* names introduced by an or-pattern's first alternative
@@ -1444,7 +1466,7 @@ impl Compiler {
 
     fn collect_binding_names(&self, p: &Pattern, out: &mut std::collections::BTreeSet<String>) {
         match p {
-            Pattern::Ident(n) if !self.is_nullary_variant(n) => {
+            Pattern::Ident(n) if !self.is_nullary_variant(None, n) => {
                 out.insert(n.clone());
             }
             Pattern::Ident(_) => {}
@@ -1463,8 +1485,9 @@ impl Compiler {
         match p {
             Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => true,
             // empty-binding `Name`: a binding unless it's a real variant.
-            Pattern::Variant { name, bindings, .. } if bindings.is_empty() => {
-                !self.program.variants.contains_key(name)
+            Pattern::Variant { name, bindings, enum_name } if bindings.is_empty() => {
+                self.variant_pair(enum_name.as_deref(), name)
+                    .is_none_or(|k| !self.program.variants.contains_key(&k))
             }
             Pattern::Or(alts) => alts.iter().all(|a| self.pattern_is_literal(a)),
             _ => false,
@@ -1557,9 +1580,9 @@ impl Compiler {
                 // variant match (`Some(None)`, `Ok(Err(e))` — the checker has promoted it); it
                 // binds nothing and is tested like a top-level nullary variant. Otherwise it is a
                 // binding capturing the whole sub-value.
-                if self.is_nullary_variant(name) {
+                if self.is_nullary_variant(None, name) {
                     let bind_start = fc.next_slot();
-                    let variant_id = self.variant_id_of(name);
+                    let variant_id = self.variant_id_of(None, name);
                     let arm_op = fc.emit_jump(
                         Op::MatchArm { scrut, variant: name.clone(), variant_id, nbind: 0, bind_start, next: 0 },
                         span,
@@ -1589,7 +1612,7 @@ impl Compiler {
                     self.emit_pattern(fc, sub, elem, fails, span)?;
                 }
             }
-            Pattern::Variant { name, bindings, .. } => {
+            Pattern::Variant { name, bindings, enum_name } => {
                 // One slot per payload element. A plain `Ident` *binding* names its slot directly (so
                 // `Some(c)` binds `c` with no copy); a nested nullary-variant `Ident` (e.g. the
                 // `None` in `Some(None)`) and any other sub-pattern get a hidden slot to test/
@@ -1597,7 +1620,7 @@ impl Compiler {
                 let bind_start = fc.next_slot();
                 for b in bindings {
                     match b {
-                        Pattern::Ident(n) if !self.is_nullary_variant(n) => {
+                        Pattern::Ident(n) if !self.is_nullary_variant(None, n) => {
                             fc.add_local(n.clone());
                         }
                         _ => {
@@ -1605,7 +1628,7 @@ impl Compiler {
                         }
                     }
                 }
-                let variant_id = self.variant_id_of(name);
+                let variant_id = self.variant_id_of(enum_name.as_deref(), name);
                 let arm_op = fc.emit_jump(
                     Op::MatchArm { scrut, variant: name.clone(), variant_id, nbind: bindings.len(), bind_start, next: 0 },
                     span,
@@ -1613,7 +1636,7 @@ impl Compiler {
                 fails.push(arm_op);
                 for (i, b) in bindings.iter().enumerate() {
                     let is_plain_binding =
-                        matches!(b, Pattern::Ident(n) if !self.is_nullary_variant(n));
+                        matches!(b, Pattern::Ident(n) if !self.is_nullary_variant(None, n));
                     if !is_plain_binding {
                         self.emit_pattern(fc, b, bind_start + i, fails, span)?;
                     }
@@ -1906,10 +1929,10 @@ impl Compiler {
                     && self
                         .program
                         .variants
-                        .get(name)
-                        .is_some_and(|d| &d.enum_name == ename && d.arity == 0)
+                        .get(&(ename.clone(), name.clone()))
+                        .is_some_and(|d| d.arity == 0)
                 {
-                    let variant_id = self.variant_id_of(name);
+                    let variant_id = self.variant_id_of(Some(ename), name);
                     fc.emit(Op::NewEnum { variant: name.clone(), variant_id, argc: 0 }, expr.span);
                 } else {
                     self.compile_expr(fc, obj)?;
@@ -2037,9 +2060,11 @@ impl Compiler {
     }
 
     fn compile_ident(&mut self, fc: &mut FnComp, name: &str, span: Span) {
-        // A nullary enum variant used as a value (e.g. `None`, `Red`) — resolved before any
-        // env lookup, exactly like the interpreter.
-        if let Some(def) = self.program.variants.get(name)
+        // A bare nullary *built-in* variant used as a value (`None`) — resolved before any env
+        // lookup, exactly like the interpreter. User variants are qualified (handled in the `Field`
+        // arm), so only built-ins resolve bare here.
+        if let Some(def) =
+            self.variant_pair(None, name).and_then(|k| self.program.variants.get(&k))
             && def.arity == 0
         {
             let variant_id = def.variant_id;
@@ -2115,12 +2140,12 @@ impl Compiler {
             if let ExprKind::Ident(ename) = &obj.kind
                 && fc.resolve_local(ename).is_none()
                 && !fc.captures(ename)
-                && self.program.variants.get(name).is_some_and(|d| &d.enum_name == ename)
+                && self.program.variants.contains_key(&(ename.clone(), name.clone()))
             {
                 for a in args {
                     self.compile_expr(fc, a)?;
                 }
-                let variant_id = self.variant_id_of(name);
+                let variant_id = self.variant_id_of(Some(ename), name);
                 fc.emit(Op::NewEnum { variant: name.clone(), variant_id, argc: args.len() }, span);
                 return Ok(());
             }
@@ -2190,7 +2215,9 @@ impl Compiler {
                 fc.emit(Op::NewStruct(name.clone(), args.len()), span);
                 return Ok(());
             }
-            if let Some(def) = self.program.variants.get(name) {
+            // A bare *built-in* variant constructor (`Ok(x)`, `Some(x)`) — user variants are qualified
+            // (handled in the `Field` arm above), so only built-ins resolve bare here.
+            if let Some(def) = self.variant_pair(None, name).and_then(|k| self.program.variants.get(&k)) {
                 let variant_id = def.variant_id;
                 for a in args {
                     self.compile_expr(fc, a)?;

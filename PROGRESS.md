@@ -244,18 +244,28 @@ beyond a `b"..."` literal + the const op):
   `bytearray` — see the `bytearray` section above — and UTF-8 `encode`/`decode` — see the conversions
   section above.)
 
-**✅ Qualified enum-variant access `Enum.Variant` (owner-requested, explicit exception to the M19/M18
-feature freeze).** Variants can now be written **qualified** (`Color.Red`, `Shape.Circle(2)`,
-`case Shape.Circle(r):`) as an optional, equivalent spelling of the bare form — `Shape.Circle(7) ==
-Circle(7)`. It is a pure readability aid: variant names stay program-global (the cross-enum collision
-rule is **unchanged** — two enums still can't share a variant name), so the qualifier validates and
-then resolves to the same variant. **Both engines + parity** (VM/`--serial`/interp byte-identical via
-`examples/enum_qualified.chz` + golden). Implemented by intercepting `Field{Ident(enum), variant}`
-(value/pattern) and `Call{callee: Field{…}}` (payload constructor) in the checker, compiler, and
-interp, gated so a real binding named like the enum wins; the parser gained an optional `enum_name`
-qualifier on `Pattern::Variant` (validated by the checker, ignored at runtime). Out of scope: letting
-two enums share a variant name (would need enum-scoped variant lookup — a separate, larger change);
-qualified **built-in** variants (`Option.Some`) are accepted in patterns but bare stays canonical.
+**✅ Scoped enum variants — qualified-only `Enum.Variant` (owner-requested, explicit exception to the
+M19/M18 feature freeze).** User-enum variants are now **scoped under their enum** and must be written
+**qualified** (`Color.Red`, `Shape.Circle(2)`, `case Shape.Circle(r):`) in every position — value,
+constructor, and `match` arm. A **bare** user-variant name is a hard compile error (the message names
+the enum: *"'Red' is a variant of enum 'Color'; write it qualified as 'Color.Red'"*). Crucially, the
+bare→binding trap is closed: a bare known-variant in a pattern errors instead of silently becoming a
+catch-all binding. Because variants are keyed per-enum (`(enum, variant)`), **two enums may now share
+a variant name** (`Color.Red` / `Light.Red` are distinct, with distinct dense `variant_id`s). The
+**built-in** `Ok`/`Err`/`Some`/`None` (Result/Option) stay **bare** (they're special-cased, not in the
+user registry); a user enum that reuses one of those names must qualify its own (`Signal.Err`), and a
+bare `Err`/`Some` is always the built-in. The variant registry was re-keyed to `(enum, variant)` in
+all three of checker / compiler / interp; the runtime layout is unchanged (the VM already matched on
+the dense int `variant_id`). The interp's `try_bind` gained an enum check so a qualified pattern only
+matches a value of that same enum (parity with the VM's int compare). `check_pattern_qualifier` also
+rejects a qualifier that names the *wrong* enum (`case Light.Red:` over a `Color` scrutinee) — owning
+the variant name isn't enough now that names are shared, else the dead arm would be miscounted toward
+exhaustiveness and the real value would trap at runtime (regression test
+`foreign_enum_qualifier_in_match_arm_is_rejected`). The parser's `[T](…)` type-arg
+steal now also fires after `Enum.Variant`, so `Tree.Node[int](…)` works. **Both engines + parity**
+(VM/`--serial`/interp byte-identical) via `examples/enum_qualified.chz`/`enum_layout.chz` + goldens +
+`shared_variant_name_dispatches_per_enum`; conformance unchanged (semantics-only) plus a new
+`tests/corpus/accept/enum_qualified.chz`.
 
 **✅ M20 — In-language test framework (`assert` + `test fn` + `chezzi test`).** Chezzi now has a real
 test facility. Three layers, all TDD'd:

@@ -823,25 +823,24 @@ fn sum(t: Tree[int]) -> int:
 ```
 
 A **payload-carrying** variant's type args are inferred from the payload, but may be pinned
-explicitly — `Node[int](1, Leaf, Leaf)` — the same `name[Type, …](…)` form as generic fns and
-structs (§7b).
+explicitly — `Tree.Node[int](1, Tree.Leaf, Tree.Leaf)` — the same `name[Type, …](…)` form as generic
+fns and structs (§7b).
 
-Variant names are **bare** by default (`Circle`, `Leaf`) — they're program-global, so two enums may
-not share a variant name. As an **optional spelling**, a variant may also be written **qualified**
-with its enum, `Enum.Variant`, anywhere the bare form works: as a value (`Shape.Point`), a
-constructor (`Shape.Circle(2)`), and in a `match` arm (`case Shape.Circle(r):`). Bare and qualified
-are exactly equivalent — `Shape.Circle(7) == Circle(7)` — so the qualifier is purely a readability
-aid; it does **not** create a per-enum namespace (the cross-enum collision rule above is unchanged).
-A real binding named like the enum wins, so qualified access only resolves when the name on the left
-isn't a local/parameter.
+Variants are **scoped under their enum** and must be written **qualified** as `Enum.Variant`
+everywhere they're used: as a value (`Shape.Point`), a constructor (`Shape.Circle(2)`), and in a
+`match` arm (`case Shape.Circle(r):`). A bare user-variant name is a compile error (the error names
+the enum so you can fix it). Because variants are per-enum, **two enums may share a variant name**
+(`Color.Red` and `Light.Red` are distinct values). A real binding named like the enum wins, so
+qualified access only resolves when the name on the left isn't a local/parameter. (The built-in
+`Ok`/`Err`/`Some`/`None` for Result/Option stay **bare** — see below.)
 
 ```chezzi
-p: Shape = Shape.Point          # qualified value; same as bare `Point`
-c: Shape = Shape.Circle(2)      # qualified constructor; same as bare `Circle(2)`
+p: Shape = Shape.Point          # qualified value
+c: Shape = Shape.Circle(2)      # qualified constructor
 match s:
-    Shape.Circle(r): r * r      # qualified arm; mixes freely with bare arms
-    Square(n):       n * n
-    Point:           0
+    Shape.Circle(r): r * r
+    Shape.Square(n): n * n
+    Shape.Point:     0
 ```
 
 `match` also works on `Result`/`Option` (they're enums under the hood):

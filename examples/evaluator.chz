@@ -33,29 +33,29 @@ fn tokenize(src: str) -> list[Tok]!:
         if c == " ":
             i += 1
         else if c == "+":
-            toks.push(Plus)
+            toks.push(Tok.Plus)
             i += 1
         else if c == "-":
-            toks.push(Minus)
+            toks.push(Tok.Minus)
             i += 1
         else if c == "*":
-            toks.push(Star)
+            toks.push(Tok.Star)
             i += 1
         else if c == "/":
-            toks.push(Slash)
+            toks.push(Tok.Slash)
             i += 1
         else if c == "(":
-            toks.push(LParen)
+            toks.push(Tok.LParen)
             i += 1
         else if c == ")":
-            toks.push(RParen)
+            toks.push(Tok.RParen)
             i += 1
         else if is_digit(c):
             val := 0
             while i < n and is_digit(src[i]):
                 val = val * 10 + digit_val(src[i])
                 i += 1
-            toks.push(Num(val))
+            toks.push(Tok.Num(val))
         else:
             return Err("bad character '{c}' at {i}")
     return Ok(toks)
@@ -92,14 +92,14 @@ struct Parser:
                 None: return Ok(left)
                 Some(t):
                     match t:
-                        Plus:
+                        Tok.Plus:
                             self.advance()
                             right := self.parse_term()?
-                            left = Bin("+", left, right)
-                        Minus:
+                            left = Ast.Bin("+", left, right)
+                        Tok.Minus:
                             self.advance()
                             right := self.parse_term()?
-                            left = Bin("-", left, right)
+                            left = Ast.Bin("-", left, right)
                         _: return Ok(left)
         return Ok(left)
 
@@ -110,14 +110,14 @@ struct Parser:
                 None: return Ok(left)
                 Some(t):
                     match t:
-                        Star:
+                        Tok.Star:
                             self.advance()
                             right := self.parse_factor()?
-                            left = Bin("*", left, right)
-                        Slash:
+                            left = Ast.Bin("*", left, right)
+                        Tok.Slash:
                             self.advance()
                             right := self.parse_factor()?
-                            left = Bin("/", left, right)
+                            left = Ast.Bin("/", left, right)
                         _: return Ok(left)
         return Ok(left)
 
@@ -126,17 +126,17 @@ struct Parser:
             None: return Err("expected a number or '('")
             Some(t):
                 match t:
-                    Num(v):
+                    Tok.Num(v):
                         self.advance()
-                        return Ok(Lit(v))
-                    LParen:
+                        return Ok(Ast.Lit(v))
+                    Tok.LParen:
                         self.advance()
                         inner := self.parse_expr()?
                         match self.peek():
                             None: return Err("expected ')'")
                             Some(rt):
                                 match rt:
-                                    RParen:
+                                    Tok.RParen:
                                         self.advance()
                                         return Ok(inner)
                                     _: return Err("expected ')'")
@@ -146,9 +146,9 @@ struct Parser:
 
 fn eval(node: Ast) -> int!:
     match node:
-        Lit(v):
+        Ast.Lit(v):
             return Ok(v)
-        Bin(op, l, r):
+        Ast.Bin(op, l, r):
             a := eval(l)?
             b := eval(r)?
             match op:

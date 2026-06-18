@@ -10,19 +10,19 @@ enum Shape:
 
 fn area(s: Shape) -> int:
     return match s:
-        Circle(r): r * r
-        Rect(w, h): w * h
-        Dot: 0
+        Shape.Circle(r): r * r
+        Shape.Rect(w, h): w * h
+        Shape.Dot: 0
 
 fn main():
     total := 0
     i := 0
     while i < 3000000:
-        s := Circle(i)
+        s := Shape.Circle(i)
         total += area(s)
-        s2 := Rect(i, 2)
+        s2 := Shape.Rect(i, 2)
         total += area(s2)
-        s3 := Dot
+        s3 := Shape.Dot
         total += area(s3)
         i += 1
     print(total)

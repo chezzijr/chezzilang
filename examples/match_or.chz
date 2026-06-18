@@ -23,11 +23,11 @@ enum Color:
 
 fn is_primary(c: Color) -> str:
     return match c:
-        Red | Green | Blue: "primary"
+        Color.Red | Color.Green | Color.Blue: "primary"
 
-print(is_primary(Red))
-print(is_primary(Green))
-print(is_primary(Blue))
+print(is_primary(Color.Red))
+print(is_primary(Color.Green))
+print(is_primary(Color.Blue))
 
 # --- or-pattern WITH bindings: both alternatives bind `a` (same type) ---
 enum Shape:
@@ -36,10 +36,10 @@ enum Shape:
 
 fn measure(s: Shape) -> int:
     return match s:
-        Circle(a) | Square(a): a
+        Shape.Circle(a) | Shape.Square(a): a
 
-print(measure(Circle(7)))
-print(measure(Square(11)))
+print(measure(Shape.Circle(7)))
+print(measure(Shape.Square(11)))
 
 # --- a guard on an or-pattern: the guard runs with the bindings in scope ---
 fn classify(n: int) -> str:

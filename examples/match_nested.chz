@@ -9,10 +9,10 @@ enum Tree:
 
 fn sum(t: Tree) -> int:
     match t:
-        Leaf: return 0
-        Node(v, l, r): return v + sum(l) + sum(r)
+        Tree.Leaf: return 0
+        Tree.Node(v, l, r): return v + sum(l) + sum(r)
 
-t := Node(1, Node(2, Leaf, Leaf), Node(3, Leaf, Leaf))
+t := Tree.Node(1, Tree.Node(2, Tree.Leaf, Tree.Leaf), Tree.Node(3, Tree.Leaf, Tree.Leaf))
 print(sum(t))
 
 # Tuple pattern with a literal-guarded first arm.

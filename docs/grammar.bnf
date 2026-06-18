@@ -242,15 +242,17 @@
                 | <pattern> "IF" <expr> <block>
 # A top-level arm pattern: one-or-more primaries joined by "|" (BITOR) — an or-pattern matches if
 # ANY alternative matches (first match wins). A single primary parses unchanged. Every alternative
-# must bind the same variables (checker-enforced). A primary: a bare "IDENT" names a (nullary)
-# variant; "IDENT" "(" … ")" a variant with sub-patterns; "(" … ")" a tuple pattern; an int/str/bool
+# must bind the same variables (checker-enforced). A primary: a bare "IDENT" is a BINDING (or, for the
+# built-in Ok/Err/Some/None, a variant); a QUALIFIED "IDENT" "DOT" "IDENT" names a user variant
+# (nullary, or with "LPAREN" a payload-carrying one); "(" … ")" a tuple pattern; an int/str/bool
 # literal; or a half-open integer range "INT" ".." "INT" (matches `start <= v < end`). Sub-patterns
 # nest (gap #15): a variant payload slot or tuple element is itself a <subpattern>.
 <pattern>     ::= <patternPrimary>
                 | <patternPrimary> "BITOR" <pattern>
-# A leading "IDENT" "DOT" "IDENT" is a QUALIFIED variant `Enum.Variant` — the enum-qualified spelling
-# of a bare variant (nullary or, with "LPAREN", payload-carrying). Equivalent to the bare form; the
-# checker validates the qualifier and resolution still keys on the variant name (program-global).
+# A leading "IDENT" "DOT" "IDENT" is a QUALIFIED variant `Enum.Variant`. User variants are scoped
+# under their enum (two enums may share a variant name) and MUST be written qualified; the checker
+# rejects a bare user-variant name. Resolution keys on the `(enum, variant)` pair. (Built-in
+# Result/Option variants Ok/Err/Some/None stay bare.)
 <patternPrimary> ::= "IDENT"
                 | "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "LPAREN" <subpatterns> "RPAREN"
@@ -318,9 +320,10 @@
 <unary>    ::= <postfix> | "NOT" <unary> | "MINUS" <unary>
 
 # postfix chain: calls, field access, indexing, the `?` try operator, explicit call-site type
-# arguments `name[Type, …](args)` on a (generic) name, and the scoped `.decode[Type](arg)` form
-# (JSON decode). The `name[types](` form is parsed speculatively — only when the callee is a bare
-# IDENT and the `[types](` shape is present; otherwise `LBRACKET … RBRACKET` is plain indexing.
+# arguments `name[Type, …](args)`, and the scoped `.decode[Type](arg)` form (JSON decode). The
+# `[types](` form is parsed speculatively — only when the callee is a bare IDENT or a qualified
+# `Enum.Variant` (a `DOT IDENT` over a bare ident, for `Tree.Node[int](…)`) and the `[types](` shape
+# is present; otherwise `LBRACKET … RBRACKET` is plain indexing.
 <postfix> ::= <primary>
             | <postfix> "LPAREN" "RPAREN"
             | <postfix> "LPAREN" <argList> "RPAREN"

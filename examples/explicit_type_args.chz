@@ -32,7 +32,7 @@ print(p.a)                    # 1
 print(p.b)                    # one
 
 # Generic enum-variant constructor: pin the enum's type arg on the payload-carrying variant.
-b := Full[int](9)
+b := Box.Full[int](9)
 match b:
-    Empty: print("empty")
-    Full(n): print(n)         # 9
+    Box.Empty: print("empty")
+    Box.Full(n): print(n)     # 9

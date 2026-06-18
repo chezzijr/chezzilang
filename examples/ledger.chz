@@ -20,13 +20,13 @@ struct Account:
 # Apply one transaction, mutating the account in place. Overdrafts and unknown accounts are Err.
 fn apply(accounts: map[str, Account], t: Txn) -> str!:
     match t:
-        Deposit(who, amt):
+        Txn.Deposit(who, amt):
             match accounts.get(who):
                 None: return Err("no account '{who}'")
                 Some(acc):
                     acc.balance += amt
                     return Ok("{who} +{amt} -> {acc.balance}")
-        Withdraw(who, amt):
+        Txn.Withdraw(who, amt):
             match accounts.get(who):
                 None: return Err("no account '{who}'")
                 Some(acc):
@@ -60,7 +60,7 @@ fn report(accounts: map[str, Account]):
 
 fn main():
     accounts := {"alice": Account("alice", 100), "bob": Account("bob", 50), "carol": Account("carol", 0)}
-    txns := [Deposit("alice", 50), Withdraw("bob", 20), Withdraw("carol", 10), Deposit("carol", 200), Withdraw("alice", 999), Deposit("dave", 5)]
+    txns := [Txn.Deposit("alice", 50), Txn.Withdraw("bob", 20), Txn.Withdraw("carol", 10), Txn.Deposit("carol", 200), Txn.Withdraw("alice", 999), Txn.Deposit("dave", 5)]
     run(accounts, txns)
     report(accounts)
 

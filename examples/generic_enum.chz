@@ -11,17 +11,17 @@ enum Tree[T]:
 # Sum an int tree (in-order recursion; the `v` bound by Node is int here).
 fn sum(t: Tree[int]) -> int:
     match t:
-        Leaf:
+        Tree.Leaf:
             return 0
-        Node(v, l, r):
+        Tree.Node(v, l, r):
             return sum(l) + v + sum(r)
 
 # Flatten a str tree in order (same enum, T = str — only the checker sees the difference).
 fn flatten(t: Tree[str]) -> str:
     match t:
-        Leaf:
+        Tree.Leaf:
             return ""
-        Node(v, l, r):
+        Tree.Node(v, l, r):
             return flatten(l) + v + flatten(r)
 
 enum Either[A, B]:
@@ -30,17 +30,17 @@ enum Either[A, B]:
 
 fn describe(e: Either[int, str]) -> str:
     match e:
-        Left(n):
+        Either.Left(n):
             return "int {n}"
-        Right(s):
+        Either.Right(s):
             return "str {s}"
 
 fn main():
-    it: Tree[int] = Node(2, Node(1, Leaf, Leaf), Node(3, Leaf, Leaf))
+    it: Tree[int] = Tree.Node(2, Tree.Node(1, Tree.Leaf, Tree.Leaf), Tree.Node(3, Tree.Leaf, Tree.Leaf))
     print("sum: {sum(it)}")
-    st: Tree[str] = Node("b", Node("a", Leaf, Leaf), Node("c", Leaf, Leaf))
+    st: Tree[str] = Tree.Node("b", Tree.Node("a", Tree.Leaf, Tree.Leaf), Tree.Node("c", Tree.Leaf, Tree.Leaf))
     print("flatten: {flatten(st)}")
-    print(describe(Left(7)))
-    print(describe(Right("hi")))
+    print(describe(Either.Left(7)))
+    print(describe(Either.Right("hi")))
 
 main()
