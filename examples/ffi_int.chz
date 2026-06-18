@@ -1,8 +1,11 @@
 # Fixed-width integer C-ABI marshalling through `extern "lib":` — int8..uint64 marshalling type
-# names (siblings of `ptr`/`owned_str`). To the program each is a plain `int`; the width/signedness
-# is a runtime-only marshalling distinction. Unlike `owned_str`, these are BIDIRECTIONAL (param AND
-# return). A param TRUNCATES the Chezzi i64 to the C width (wrapping, C-cast); a return SIGN-extends
-# (signed) or ZERO-extends (unsigned) the C value back to i64. No overflow trap — it wraps like a cast.
+# names. They are NOT global builtins: a module that names a width type must import it per-name from
+# `std.ffi` (Chezzi's first type imports), exactly like `null`/`is_null`. To the program each is a
+# plain `int`; the width/signedness is a runtime-only marshalling distinction. Unlike `owned_str`,
+# these are BIDIRECTIONAL (param AND return). A param TRUNCATES the Chezzi i64 to the C width
+# (wrapping, C-cast); a return SIGN-extends (signed) or ZERO-extends (unsigned) the C value back to
+# i64. No overflow trap — it wraps like a cast.
+import int8, int32, uint32 from std.ffi
 
 extern "libc.so.6":
     # `atoi(const char*)->int`: parses a decimal string to a C int; declared int32 it sign-extends a

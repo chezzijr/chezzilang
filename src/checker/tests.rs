@@ -5486,12 +5486,13 @@ fn extern_owned_nullable_str_return_marshallable() {
 fn extern_fixed_width_int_param_and_return_ok() {
     // Each fixed-width int marshalling name (int8..uint64) resolves to a plain `int` (`Ty::Int`) and
     // is BIDIRECTIONAL — valid as BOTH a param and a return. abs/atoi are stand-ins; the point is the
-    // type-checker accepts the name in both positions and the program sees an `int`.
+    // type-checker accepts the name in both positions and the program sees an `int`. The width names
+    // are NOT global builtins — each module that names one must `import <name> from std.ffi` first.
     for name in [
         "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
     ] {
-        ok(&format!(
-            "extern \"libc.so.6\":\n    fn f(x: {name}) -> {name}\n\nn: int = f(5)\nprint(n)\n"
+        entry_ok(&format!(
+            "import {name} from std.ffi\nextern \"libc.so.6\":\n    fn f(x: {name}) -> {name}\n\nn: int = f(5)\nprint(n)\n"
         ));
     }
 }
@@ -5500,9 +5501,11 @@ fn extern_fixed_width_int_param_and_return_ok() {
 fn extern_fixed_width_int_via_alias_ok() {
     // A transparent `type Len = int32` used in an extern sig must behave identically to bare `int32`
     // (the alias trap from the prior FFI task): resolve_type maps Len -> int32 -> Ty::Int (program
-    // sees a plain int), and the backends' ctype_of resolves the alias one hop to the int32 leaf.
-    ok(
-        "type Len = int32\nextern \"libc.so.6\":\n    fn f(x: Len) -> Len\n\nn: int = f(5)\nprint(n)\n",
+    // sees a plain int), and the backends' ctype_of resolves the alias one hop to the int32 leaf. The
+    // alias's target `int32` is resolved in THIS module, so it only works because int32 is imported
+    // here — alias coherence (hazard a): a width alias resolves iff the width name is visible.
+    entry_ok(
+        "import int32 from std.ffi\ntype Len = int32\nextern \"libc.so.6\":\n    fn f(x: Len) -> Len\n\nn: int = f(5)\nprint(n)\n",
     );
 }
 
@@ -5520,10 +5523,13 @@ fn extern_cyclic_int_alias_no_overflow() {
 #[test]
 fn extern_struct_param_and_return_typecheck() {
     // A flat-scalar struct is C-marshallable BY VALUE as both a param and a return. `Point` (two
-    // int fields) and `Mixed` (an int32 + a float field) both type-check in an extern signature.
-    ok("struct Point:\n    x: int\n    y: int\n\
+    // int fields) and `Mixed` (an int32 + a float field) both type-check in an extern signature. The
+    // int32 field name requires this module to `import int32 from std.ffi`.
+    entry_ok(
+        "import int32 from std.ffi\nstruct Point:\n    x: int\n    y: int\n\
          \nstruct Mixed:\n    a: int32\n    b: float\n\
-         \nextern \"libc.so.6\":\n    fn id_point(p: Point) -> Point\n    fn id_mixed(m: Mixed) -> Mixed\n");
+         \nextern \"libc.so.6\":\n    fn id_point(p: Point) -> Point\n    fn id_mixed(m: Mixed) -> Mixed\n",
+    );
 }
 
 #[test]
@@ -5578,6 +5584,88 @@ fn extern_cyclic_alias_struct_no_overflow() {
         "type A = B\ntype B = A\n\
          \nextern \"libc.so.6\":\n    fn f(x: A) -> int\n",
         "recursive type alias",
+    );
+}
+
+#[test]
+fn width_name_without_import_rejected() {
+    // The eight fixed-width C-ABI integer type names are NOT global builtins — they only resolve in a
+    // module that imports them per-name from `std.ffi`. A bare `int32` annotation with no import is an
+    // UNKNOWN type. (Failing-then-green: before gating, resolve_type mapped int32 -> Ty::Int
+    // unconditionally so this compiled clean.) `check_src` is a lone module with no imports possible.
+    rejects("x: int32 = 5\nprint(x)\n", "unknown type 'int32'");
+}
+
+#[test]
+fn ffi_type_import_then_extern_and_struct_ok() {
+    // `import int8, int32, uint32 from std.ffi` makes the width names resolvable in THIS module — as an
+    // extern param/return AND as a struct field type. They resolve to a plain `int` (the program sees
+    // an `int`); the width is a runtime-only marshalling distinction.
+    entry_ok(
+        "import int8, int32, uint32 from std.ffi\n\
+         struct Mixed:\n    a: int32\n    b: float\n\
+         extern \"libc.so.6\":\n    fn f(x: int8) -> uint32\n    fn id(m: Mixed) -> Mixed\n\
+         \nfn main():\n    n: int = f(5)\n    print(n)\n",
+    );
+}
+
+#[test]
+fn ffi_bogus_type_import_rejected() {
+    // Importing a name that is neither a callable member nor one of the eight exported width TYPE names
+    // errors like any bad import — `std.ffi` has no member `int99`.
+    entry_rejects(
+        "import int99 from std.ffi\nfn main():\n    print(1)\n",
+        "has no member 'int99'",
+    );
+}
+
+#[test]
+fn width_name_not_leaked_across_modules() {
+    // A width name imported by module A does NOT become visible in module B's own source: B writing a
+    // bare `int32` annotation without its own import is an unknown type, even though it imports A.
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "import int32 from std.ffi\nfn id32(x: int32) -> int32:\n    return x\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import id32 from lib\nfn main():\n    x: int32 = 5\n    print(id32(x))\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown type 'int32'")),
+        "expected B to be rejected for using int32 without its own import, got: {errs:?}"
+    );
+}
+
+#[test]
+fn cross_module_struct_with_width_field_usable_without_import() {
+    // A struct declared in module A (which imports int32) with int32 fields is usable from module B
+    // WITHOUT B importing int32 — the field types were resolved to `Ty::Int` during A's checking, so B
+    // never re-resolves the width NAME. B reads `.x` as a plain int.
+    let t = TmpDir::new();
+    t.write(
+        "geo.chz",
+        "import int32 from std.ffi\nstruct Pt:\n    x: int32\n    y: int32\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import Pt from geo\nfn main():\n    p := Pt(3, 4)\n    n: int = p.x\n    print(n)\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(
+        errs.is_empty(),
+        "expected B to use A's struct without importing int32, got: {errs:?}"
     );
 }
 

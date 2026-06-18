@@ -882,7 +882,8 @@ C-ABI FFI is NO LONGER a non-goal — v1 shipped** (`extern "lib":` scalar calls
 `is_null`, untyped + manual-free, `examples/ffi_ptr.chz`; **plus the return-only `str` opt-ins
 `owned_str`** (copy + libc `free`, no leak) **and `str?`** (`NULL` → `None`, `examples/ffi_str.chz`);
 **plus bidirectional fixed-width integers `int8`..`uint64`** (bind C `int32_t`/`uint32_t`/…;
-truncate-on-param / sign-or-zero-extend-on-return, `examples/ffi_int.chz`);
+truncate-on-param / sign-or-zero-extend-on-return, **imported per-name from `std.ffi`** — Chezzi's
+first type imports, `examples/ffi_int.chz`);
 **plus flat-scalar structs by value** (a Chezzi `struct` of scalar fields ↔ a C struct passed/returned
 by value, `examples/ffi_struct.chz`);
 nested structs / `str` struct fields / callbacks / varargs, a custom user-named deallocator, C-spelling int aliases (`c_int`), and the rich Rust
@@ -929,10 +930,26 @@ branch names) is in the git log.
   unit tests (struct return + mixed long/double/long + fixed-width-field layout), checker + ctype_of
   parity tests. Docs: `syntax.md` §12b, `spec.md` §Level-3, `grammar.bnf`, `ffi-and-packaging.md`. Nested
   structs / `str` struct fields stay deferred.
+- ✅ **C-ABI FFI width type names moved to `std.ffi` type imports** (2026-06-18,
+  `auto-task/ffi-width-type-imports`) — the eight fixed-width integer TYPE names (`int8`..`uint64`) are
+  **no longer global builtins**: they are now **imported per-name from `std.ffi`** (`import int32, uint32
+  from std.ffi`) — **Chezzi's first type import**. `native::ffi::TYPE_NAMES` is the single declaring
+  authority; `std.ffi`'s `ModuleSig.types` carries them, `bind_import` records each into a per-module
+  `imported_ffi_types` set, and `resolve_type` maps a width name to `Ty::Int` **only** in a module that
+  imported it (else *unknown type 'int32' (import it from std.ffi …)*). A bogus `import int99 from
+  std.ffi` errors like any bad import. Both runtime engines' `from`-import binders **skip** the value-less
+  width imports (parity by construction). Per-module: A's int32 struct field is usable from B with no B
+  import; a width name written in B's own source needs B's import. **No runtime/marshalling change** —
+  `cffi.rs` `CType` + both `ctype_of` untouched, the same C calls run, goldens byte-identical. FFI-special
+  + minimal: NOT a general user type-export mechanism; `ptr`/`owned_str` stay bare builtins. Five new
+  checker tests (no-import-rejected, import-then-extern+struct-ok, bogus-import, cross-module isolation
+  ±), three existing FFI checker tests converted to `entry_ok` + import line, both goldens
+  (`examples/ffi_int.chz` + `ffi_struct.chz`) gained the import line (`.expected` unchanged). 2202 tests
+  green. Docs: `syntax.md` §FFI + §std.ffi, `spec.md` §Level-3, `PROGRESS.md`.
 - ✅ **C-ABI FFI fixed-width integers — `int8`..`uint64`** (2026-06-18, `auto-task/ffi-fixed-width-ints`)
   — eight bidirectional integer marshalling type names (`int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/
-  `uint32`/`uint64`) on the `extern "lib":` surface, siblings of `ptr`/`owned_str` (builtin names
-  recognized only inside an extern sig — **zero grammar/lexer/parser change**). Resolves the FFI-2 known
+  `uint32`/`uint64`) on the `extern "lib":` surface (later moved to per-name `std.ffi` type imports — see
+  the entry above; **zero grammar/lexer/parser change**). Resolves the FFI-2 known
   limit (prior: *"scalars only — int ↔ long, no fixed-width int type"*). Each resolves to a plain `int`
   (`Ty::Int`) for the program; the width/signedness is a runtime-only marshalling distinction the backends
   recover via `ctype_of` (the platform-exact libffi `Type::i8()`/`u8()`/…/`i64()`/`u64()`; bare `int`

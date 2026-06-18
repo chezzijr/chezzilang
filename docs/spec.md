@@ -104,7 +104,7 @@ in [`docs/concurrency.md`](concurrency.md); phase history in
 the stretch end-game). **Level-3 dynamic C-ABI FFI is now partially shipped** (`extern "lib":` blocks
 calling C functions via dlopen+libffi) — v1 marshals scalars (int/float/bool/str→`char*`), the
 bidirectional **fixed-width integer** marshalling names `int8`..`uint64` (bind C `int32_t`/`uint32_t`/…;
-truncate-on-param, sign-or-zero-extend-on-return), plus an
+truncate-on-param, sign-or-zero-extend-on-return; imported per-name from `std.ffi`), plus an
 opaque `ptr` (↔ C `void*`, an untyped never-auto-freed handle for `FILE*`/`sqlite3*`-style APIs; the
 `std.ffi` module adds `null()`/`is_null`), plus two return-only `str` opt-ins — **`owned_str`** (an
 owned `malloc`'d `char*` copied **and** freed, no leak) and **`str?`** (a nullable `char*`, `NULL` →
@@ -307,7 +307,8 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >   varargs, the rich Rust `Box<dyn Any>` userdata handle, and a custom user-named deallocator are
 >   deferred. **Fixed-width integers shipped:** beyond bare `int` (↔ C `long`), the marshalling type
 >   names `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` bind C `int32_t`/`uint32_t`/…
->   (bidirectional, truncate-on-param / sign-or-zero-extend-on-return; `examples/ffi_int.chz`).
+>   (bidirectional, truncate-on-param / sign-or-zero-extend-on-return; `examples/ffi_int.chz`). They are
+>   **imported per-name from `std.ffi`** (Chezzi's first type imports), not global builtins.
 >   **`char*` ownership + nullable returns shipped:** a plain `str` return is borrowed (copied,
 >   never freed); declare it **`owned_str`** (a return-only marshalling type) to copy **and** free a
 >   `malloc`'d buffer with libc `free` (no leak), or **`str?`** (`Option[str]`) to make a `NULL` return
@@ -324,8 +325,15 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >     limit was *"scalars only: int ↔ long, no fixed-width int type"*). To bind a C function taking or
 >     returning a fixed-width integer (`int32_t`, `uint32_t`, …), declare the parameter/return with one
 >     of the **fixed-width marshalling type names** — `int8`, `int16`, `int32`, `int64`, `uint8`,
->     `uint16`, `uint32`, `uint64` (siblings of `ptr`/`owned_str`: builtin names recognized only inside
->     `extern` sigs, no grammar change). To the program each is a plain `int` (`Ty::Int`); the
+>     `uint16`, `uint32`, `uint64`. Unlike `ptr`/`owned_str` (bare builtins), these are **not global**:
+>     each is a **type imported per-name from `std.ffi`** — Chezzi's first type imports — with the same
+>     `import int32, uint32 from std.ffi` form as the `null`/`is_null` value members (`std.ffi` exports
+>     both callable members and these eight TYPE names; the declaring list is `native::ffi::TYPE_NAMES`,
+>     no grammar change). A module that names a width type without importing it gets *unknown type
+>     'int32' (import it from std.ffi …)*; a bogus name (`import int99 from std.ffi`) errors like any bad
+>     import. The import is **per-module**: a struct's int32 field resolved in module A is usable from
+>     module B with no import in B, but a bare `int32` written in B's own source needs B's own import. To
+>     the program each is a plain `int` (`Ty::Int`); the
 >     width/signedness is a **runtime-only** marshalling distinction the backends recover via `ctype_of`
 >     (the platform-exact libffi `sint8`/`uint8`/…/`sint64`/`uint64` types). Unlike `owned_str`
 >     (return-only), these are **bidirectional** — valid as both param and return. **Boundary semantics
@@ -335,7 +343,8 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >     `4294967295`). `uint64` above `i64::MAX` is not representable in Chezzi's i64 `int` and wraps
 >     negative (a documented v1 limit; the other seven widths fit i64 losslessly). **Aliases:** a
 >     `type Len = int32` used in an `extern` sig behaves identically to bare `int32` (`ctype_of`
->     resolves the alias one hop to the width). **No C-spelling aliases** (`c_int`/`c_short`/…) yet —
+>     resolves the alias one hop to the width) — but the alias resolves only if its target `int32` is
+>     imported in the same module that declares the alias. **No C-spelling aliases** (`c_int`/`c_short`/…) yet —
 >     their width is platform-dependent (LP64 vs LLP64); deferred to a future task. See
 >     `src/native/cffi.rs` (`CType::Int8`..`CType::UInt64`) + `examples/ffi_int.chz`. **Non-unix is
 >     unsupported:** on an LLP64 target (Windows x64) C `long` is 32-bit and would truncate bare `int`,

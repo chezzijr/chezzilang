@@ -2,6 +2,9 @@
 # `div_t div(int numer, int denom)` returns a small POD struct by value:
 #   struct div_t { int quot; int rem; }   (two C `int` = int32).
 # The Chezzi struct's field order + types define the C layout; libffi computes the offsets.
+# The width type `int32` is imported per-name from `std.ffi` (Chezzi's first type imports).
+import int32 from std.ffi
+
 struct DivT:
     quot: int32
     rem: int32

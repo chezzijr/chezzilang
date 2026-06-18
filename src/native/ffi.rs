@@ -30,6 +30,16 @@ fn is_null(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// The callable members of `std.ffi`.
 pub const MEMBERS: &[(&str, NativeFn)] = &[("null", null), ("is_null", is_null)];
 
+/// The fixed-width C-ABI integer *type* names that `std.ffi` exports (Chezzi's first type imports).
+/// Each maps 1:1 to a C `int{N}_t`/`uint{N}_t` and is recognized by the checker (resolving to a plain
+/// `Ty::Int`) ONLY in a module that imports it per-name (`import int32, uint32 from std.ffi`), exactly
+/// like the callable `MEMBERS` above. The width/signedness is a runtime-only marshalling distinction
+/// the backends recover via `ctype_of` — these names are NOT bound as callable values. This list is
+/// the single declaring authority; the checker reads it (see `native_module_sig` + `resolve_type`).
+pub const TYPE_NAMES: &[&str] = &[
+    "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;

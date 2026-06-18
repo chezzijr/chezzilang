@@ -378,6 +378,13 @@ fn native_module_sig(name: &str) -> ModuleSig {
             // `null()` is the NULL sentinel; `is_null(p)` tests it. The `ptr` *type* is builtin.
             func("null", vec![], Ty::Ptr);
             func("is_null", vec![Ty::Ptr], Ty::Bool);
+            // `std.ffi` ALSO exports the eight fixed-width C-ABI integer TYPE names (Chezzi's first
+            // type imports). They live in `sig.types` so `import int32 from std.ffi` validates; the
+            // checker's `bind_import` records the import into `imported_ffi_types` and `resolve_type`
+            // then resolves the name to `Ty::Int` only in modules that imported it.
+            for tn in crate::native::ffi::TYPE_NAMES {
+                sig.types.insert((*tn).to_string());
+            }
         }
         _ => {}
     }
@@ -446,6 +453,11 @@ struct Checker {
     /// `from`-imported names that are numeric-polymorphic native fns (`abs`/`min`/`max`), so a bare
     /// call resolves their result type by argument type instead of the float-only `FnSig` (gap #12).
     imported_poly: std::collections::HashSet<String>,
+    /// Fixed-width C-ABI integer TYPE names (`int8`..`uint64`) imported into the *current* module from
+    /// `std.ffi` (`import int32 from std.ffi`). These are NOT callable values — they only gate
+    /// `resolve_type`, which maps a width name to `Ty::Int` iff it's in this set (else an unknown-type
+    /// error). Per-module: cleared in `begin_module` so module B can't use a name module A imported.
+    imported_ffi_types: std::collections::HashSet<String>,
     /// Label of the module currently being checked (`None` = entry); prefixes its error messages.
     current_module_label: Option<String>,
     /// How many enclosing `for`/`while` loops we're inside *within the current function body*.
@@ -496,6 +508,7 @@ impl Checker {
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
             imported_poly: std::collections::HashSet::new(),
+            imported_ffi_types: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
             capture_floors: Vec::new(),
@@ -560,6 +573,7 @@ impl Checker {
         self.type_params.clear();
         self.imported_modules.clear();
         self.imported_poly.clear();
+        self.imported_ffi_types.clear();
         self.current_ret = Ty::Nil;
         self.inferring_ret = false;
         self.collected_rets.clear();
@@ -619,7 +633,14 @@ impl Checker {
                     } else if let Some(vty) = sig.values.get(member) {
                         self.declare(bind, vty.clone());
                     } else if sig.types.contains(member) {
-                        // A type name is program-global already; nothing to inject.
+                        // A type name imported from a module. For `std.ffi`'s exported fixed-width
+                        // integer TYPE names this is Chezzi's only type import: record it into the
+                        // per-module `imported_ffi_types` set so `resolve_type` will accept the bare
+                        // width name in THIS module (it's a type, not a callable value). Other
+                        // (user-struct/enum) type names are program-global already — nothing to inject.
+                        if crate::native::ffi::TYPE_NAMES.contains(&member.as_str()) {
+                            self.imported_ffi_types.insert(bind.clone());
+                        }
                     } else {
                         self.error(
                             imp.span,
@@ -1501,14 +1522,6 @@ impl Checker {
                 // `ctype_of`); the return-only-ness is enforced by a surface guard in the extern
                 // param loop (an `owned_str` parameter is rejected before this collapses to `Str`).
                 "owned_str" => Ty::Str,
-                // Fixed-width C integer marshalling type names (siblings of `ptr`/`owned_str`): each
-                // resolves to a plain `int` (`Ty::Int`) — the width/signedness is a runtime-only
-                // marshalling distinction the backends recover via `ctype_of`. Unlike `owned_str`
-                // (return-only), these are BIDIRECTIONAL (valid as both param and return), so they
-                // need no return-only guard. `assert_marshallable` already accepts `Ty::Int`.
-                "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64" => {
-                    Ty::Int
-                }
                 // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation).
                 "Executor" => Ty::Executor,
                 // D6 — the std.net TCP handles, non-generic (bare `Socket` / `Listener` annotations).
@@ -1530,6 +1543,26 @@ impl Checker {
                         let ty = self.resolve_type(&aliased, span);
                         self.alias_resolving.pop();
                         ty
+                    }
+                }
+                // Fixed-width C-ABI integer marshalling type names (`int8`..`uint64`) — Chezzi's first
+                // type imports. Each resolves to a plain `int` (`Ty::Int`) — the width/signedness is a
+                // runtime-only marshalling distinction the backends recover via `ctype_of`, and they're
+                // BIDIRECTIONAL (valid as both param and return). But they are NOT global builtins: a
+                // width name resolves only in a module that imported it per-name from `std.ffi`
+                // (`import int32 from std.ffi` → `imported_ffi_types`). Otherwise it's an unknown type
+                // with an FFI-specific hint (matches the qualified-variant "write it qualified" style).
+                _ if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) => {
+                    if self.imported_ffi_types.contains(n) {
+                        Ty::Int
+                    } else {
+                        self.error(
+                            span,
+                            format!(
+                                "unknown type '{n}' (import it from std.ffi: `import {n} from std.ffi`)"
+                            ),
+                        );
+                        Ty::Unknown
                     }
                 }
                 _ if self.struct_names.contains(n) => {

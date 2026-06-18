@@ -1471,6 +1471,12 @@ A `ptr` prints as `<ptr null>` / `<ptr>` — never the raw address (it is non-de
 runs/engines, so printing it would break two-engine parity). A `ptr` is **sendable** (a plain
 address) — it crosses a `spawn`/channel airlock by value.
 
+`std.ffi` exports both **value members** — `null()` / `is_null(p)` (above) — and **eight fixed-width
+integer TYPE names** — `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64`. The TYPE names
+are Chezzi's first **type imports**: like the value members they are brought in per-name with
+`import int32, uint32 from std.ffi`, and a module that does not import a width name cannot use it (see
+*Fixed-width integers* below). The opaque `ptr` type itself stays a bare builtin (no import).
+
 **`str` returns — owned + nullable (return-only opt-ins).** A plain `str` return is **borrowed**: the
 `char*` is copied into a Chezzi string and never `free`d (a `malloc`'d return would **leak**), and a
 `NULL` is a recoverable **fault** (it would break the static non-null `str` guarantee). Two return-only
@@ -1503,11 +1509,23 @@ user-named deallocator is **not** supported. **Caveat (C trust boundary):** `own
 returned buffer is genuinely `malloc`'d — declaring a **static / string-literal** return `owned_str`
 frees memory you don't own and corrupts the heap, exactly like a non-NUL-terminated return over-reads.
 
-**Fixed-width integers (`int8`..`uint64`) — bidirectional.** Bare `int` marshals as C `long`; to bind a
-C function taking or returning a **fixed-width** integer, declare it with one of eight marshalling type
-names (siblings of `ptr`/`owned_str`: builtin, recognized only inside an `extern` sig, no `import`, no
-grammar change). To your program each is a plain **`int`** — the width/signedness is a runtime-only
-marshalling distinction. Unlike `owned_str`, these are **bidirectional** (valid as both param and return):
+**Fixed-width integers (`int8`..`uint64`) — bidirectional, imported from `std.ffi`.** Bare `int` marshals
+as C `long`; to bind a C function taking or returning a **fixed-width** integer, declare it with one of
+eight marshalling type names. These are **not global builtins** (unlike `ptr`/`owned_str`): a module that
+names a width type must **import it per-name from `std.ffi`** — Chezzi's first **type imports**, with the
+same `import <name>, … from std.ffi` form as the `null`/`is_null` value members:
+
+```chezzi
+import int32, uint32 from std.ffi   # bring the width TYPE names into this module
+```
+
+A module that uses a width name without importing it gets *unknown type 'int32' (import it from std.ffi:
+`import int32 from std.ffi`)*. Importing a non-existent width name errors like any bad import (*module
+'std.ffi' has no member 'int99'*). The import is per-module: a struct's int32 field declared (and resolved)
+in module A is usable from module B with **no** import in B, but a bare `int32` *written in B's own source*
+needs B's own import. To your program each width name is a plain **`int`** — the width/signedness is a
+runtime-only marshalling distinction. Unlike `owned_str`, these are **bidirectional** (valid as both param
+and return):
 
 | name | C type | libffi type | as a parameter | as a return |
 |------|--------|-------------|----------------|-------------|
@@ -1524,9 +1542,11 @@ A **param truncates** the Chezzi i64 to the C width with **C-cast (wrapping) sem
 overflow trap**: `255` passed to `int8` becomes `-1`, `300` becomes `44`. A **return sign-extends**
 (signed) or **zero-extends** (unsigned) the C value back to i64: `int32` returning `-1` is `-1`,
 `uint32` returning `0xFFFFFFFF` is `4294967295` (stays positive). A `type Len = int32` alias used in an
-`extern` sig behaves identically to bare `int32`.
+`extern` sig behaves identically to bare `int32` — but the alias only resolves if its target `int32` is
+imported in the **same** module as the alias declaration.
 
 ```chezzi
+import int32, uint32, int8 from std.ffi
 extern "libc.so.6":
     fn atoi(s: str) -> int32      # parse to a C int; -1 sign-extends back to i64 -1
     fn htonl(x: uint32) -> uint32 # unsigned in+out; a high-bit result stays positive
