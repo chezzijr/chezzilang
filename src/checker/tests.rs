@@ -5452,6 +5452,17 @@ fn extern_owned_str_param_rejected() {
 }
 
 #[test]
+fn extern_owned_str_param_via_alias_rejected() {
+    // A transparent alias to `owned_str` must be rejected as a PARAM too — the surface guard has to
+    // resolve alias chains, because the backends' `ctype_of` does and would otherwise emit
+    // `CType::OwnedStr` for a param (a return-only CType), which the param loop cannot lower.
+    rejects(
+        "type O = owned_str\nextern \"libc.so.6\":\n    fn f(s: O) -> int\n",
+        "not C-marshallable",
+    );
+}
+
+#[test]
 fn extern_owned_nullable_str_return_marshallable() {
     // `owned_str?` composes owned + nullable: program sees `Option[str]`, runtime frees + nulls.
     ok(

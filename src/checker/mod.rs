@@ -1056,7 +1056,7 @@ impl Checker {
                                     // must be rejected as PARAMS on the SURFACE Type, before
                                     // `resolve_type` collapses `owned_str` to a plain `Str` (which
                                     // would otherwise sail past `assert_marshallable`).
-                                    if Self::is_return_only_extern_type(t) {
+                                    if self.is_return_only_extern_type(t) {
                                         self.error(
                                             ef.span,
                                             format!(
@@ -1126,13 +1126,39 @@ impl Checker {
     /// `owned_str?`)? Checked on the SURFACE `Type` (pre-`resolve_type`) because `owned_str` collapses
     /// to a plain `Str` once resolved, losing its return-only-ness. (A plain `str?` param is also
     /// caught by `assert_marshallable`, but this gives it a clearer "return-only" message.)
-    fn is_return_only_extern_type(t: &Type) -> bool {
+    ///
+    /// Transparent type aliases are resolved here, mirroring the backends' alias-resolving `ctype_of`:
+    /// `type O = owned_str` makes a param `s: O` whose surface name is `O` (not `owned_str`) yet whose
+    /// `ctype_of` is `CType::OwnedStr` — without alias resolution it would slip past this guard,
+    /// type-check as a plain `Str`, then hit the return-only `unreachable!` param arm at runtime.
+    fn is_return_only_extern_type(&self, t: &Type) -> bool {
         match t {
-            Type::Named(n) => n == "owned_str",
-            // `str?` / `owned_str?` parse to `Option[inner]`.
-            Type::Generic(n, args) if n == "Option" => args.first().is_some_and(
-                |inner| matches!(inner, Type::Named(s) if s == "str" || s == "owned_str"),
-            ),
+            Type::Named(n) => {
+                if n == "owned_str" {
+                    return true;
+                }
+                // Follow the alias chain (with a visited guard; cycles are reported by `resolve_type`).
+                let mut name = n;
+                let mut seen: Vec<&String> = Vec::new();
+                while let Some(aliased) = self.aliases.get(name) {
+                    if seen.contains(&name) {
+                        return false;
+                    }
+                    seen.push(name);
+                    match aliased {
+                        Type::Named(m) if m == "owned_str" => return true,
+                        Type::Named(m) => name = m,
+                        // An alias to `str?`/`owned_str?` — re-check the underlying surface form.
+                        other => return self.is_return_only_extern_type(other),
+                    }
+                }
+                false
+            }
+            // `str?` / `owned_str?` parse to `Option[inner]`; the inner may itself be an alias.
+            Type::Generic(n, args) if n == "Option" => args.first().is_some_and(|inner| {
+                matches!(inner, Type::Named(s) if s == "str" || s == "owned_str")
+                    || self.is_return_only_extern_type(inner)
+            }),
             _ => false,
         }
     }

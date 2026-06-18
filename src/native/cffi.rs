@@ -245,9 +245,17 @@ impl Cffi {
                     slots.push(Slot::RawPtr(void_args.len() - 1));
                 }
                 // `OwnedStr`/`OptStr`/`OptOwnedStr` are RETURN-ONLY (the checker rejects them as
-                // params before this point), so they can never appear in `self.params`.
+                // params, resolving alias chains first). This arm should be unreachable, but we
+                // return a recoverable fault rather than `unreachable!` so a checker gap can never
+                // abort the process.
                 CType::OwnedStr | CType::OptStr | CType::OptOwnedStr => {
-                    unreachable!("owned/nullable str CTypes are return-only and rejected as params")
+                    return Err(HostError {
+                        message: format!(
+                            "argument {i} to '{}' uses a return-only C type \
+                             (owned_str / str? cannot be a parameter)",
+                            self.name
+                        ),
+                    });
                 }
             }
         }
