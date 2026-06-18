@@ -5636,6 +5636,45 @@ fn alias_to_width_resolves_without_bare_import() {
 }
 
 #[test]
+fn width_alias_without_any_import_rejected() {
+    // The alias opt-in is PRECISE, not a blanket gate bypass: `type Len = int32` only lets a width
+    // name resolve through it if the alias's DEFINING module imported the width. With NO module
+    // importing int32 at all, the alias must NOT launder the width name — it stays an unknown type.
+    // (Failing-then-green: before the precise gate, resolve_type accepted any width body while
+    // `alias_resolving` was non-empty, so this compiled clean — the gate hole.)
+    rejects(
+        "type Len = int32\nextern \"libc.so.6\":\n    fn f(x: Len) -> int\n",
+        "unknown type 'int32'",
+    );
+}
+
+#[test]
+fn width_alias_defined_with_import_resolves_in_extern() {
+    // PRECISE rule (the licensing half): an alias whose DEFINING module imported the width resolves
+    // through the alias wherever the alias is used — including inside an extern signature. This is the
+    // documented opt-in (`alias_to_width_resolves_without_bare_import`), now licensed by the defining
+    // module's import rather than by a blanket `alias_resolving`-non-empty bypass. (Type aliases are
+    // not exportable across modules — the alias is program-global but the import licence is what is
+    // recorded per-alias at definition time, so any later use, even after the import set is cleared
+    // for another module, still resolves.)
+    entry_ok(
+        "import int32 from std.ffi\ntype Len = int32\n\
+         extern \"libc.so.6\":\n    fn f(x: Len) -> Len\n\
+         \nfn main():\n    n: int = f(5)\n    print(n)\n",
+    );
+}
+
+#[test]
+fn width_import_redundant_self_rename_ok() {
+    // `import int32 as int32` is a redundant but harmless self-rename — the as-name is identical to
+    // the member, so it carries no wrong-width risk and must be accepted (it just imports int32). A
+    // true rename (`as W`) or a wrong-width trap (`int8 as int32`) still rejects — see
+    // `ffi_type_import_cannot_be_renamed`. (Failing-then-green: before, `alias.is_some()` rejected any
+    // as-clause, so even the identical name errored "cannot be renamed".)
+    entry_ok("import int32 as int32 from std.ffi\nfn main():\n    x: int32 = 5\n    print(x)\n");
+}
+
+#[test]
 fn ffi_type_import_then_extern_and_struct_ok() {
     // `import int8, int32, uint32 from std.ffi` makes the width names resolvable in THIS module — as an
     // extern param/return AND as a struct field type. They resolve to a plain `int` (the program sees

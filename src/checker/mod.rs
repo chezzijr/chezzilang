@@ -431,6 +431,13 @@ struct Checker {
     /// demand in `resolve_type`. `alias_resolving` is the active resolution stack (cycle guard).
     aliases: HashMap<String, Type>,
     alias_resolving: Vec<String>,
+    /// Alias names whose body is a fixed-width FFI type name (`type Len = int32`) that the alias's
+    /// DEFINING module imported per-name from `std.ffi`. Program-global like `aliases` (NOT cleared
+    /// in `begin_module`), and the precise opt-in for the width-import gate: a width name resolves
+    /// through an alias only if the alias is in this set — i.e. its defining module imported the
+    /// width. This closes the gate hole where any `type Len = int32` (even with no module importing
+    /// int32 anywhere) laundered the bare width name past the per-module import requirement.
+    ffi_alias_ok: std::collections::HashSet<String>,
     /// Declared return type of the function body currently being checked (`Nil` at top level).
     current_ret: Ty,
     /// `Some(T)` while checking a generator function body whose declared return is `Iterator[T]` —
@@ -500,6 +507,7 @@ impl Checker {
             enum_names: std::collections::HashSet::new(),
             aliases: HashMap::new(),
             alias_resolving: Vec::new(),
+            ffi_alias_ok: std::collections::HashSet::new(),
             current_ret: Ty::Nil,
             yield_ty: None,
             recover_depth: 0,
@@ -639,11 +647,14 @@ impl Checker {
                         // width name in THIS module (it's a type, not a callable value). Other
                         // (user-struct/enum) type names are program-global already — nothing to inject.
                         if crate::native::ffi::TYPE_NAMES.contains(&member.as_str()) {
-                            // An FFI width type CANNOT be renamed on import: the backends' `ctype_of`
+                            // An FFI width type CANNOT be RENAMED on import: the backends' `ctype_of`
                             // keys off the literal surface name (`int32`), so an alias would resolve to
-                            // a type the marshaller can't lower. Reject `import int32 as W` (and
-                            // `import int8 as int32`, which would silently bind the wrong width).
-                            if alias.is_some() {
+                            // a type the marshaller can't lower. Reject `import int32 as W` (name
+                            // unusable) and `import int8 as int32` (silently the wrong width). A
+                            // redundant identical self-rename (`import int32 as int32`) is harmless —
+                            // the as-name equals the member, carries no wrong-width risk — so it falls
+                            // through to the normal no-op import of `int32`.
+                            if alias.as_ref().is_some_and(|a| a != member) {
                                 self.error(
                                     imp.span,
                                     format!(
@@ -911,6 +922,19 @@ impl Checker {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     } else {
                         self.aliases.insert(name.clone(), ty.clone());
+                        // PRECISE width-alias opt-in: if this alias's body is a fixed-width FFI type
+                        // name that THIS (the defining) module imported per-name from `std.ffi`,
+                        // record the alias as licensed. `resolve_type` then lets the width name
+                        // resolve through the alias anywhere — but a `type Len = int32` whose module
+                        // never imported int32 is NOT licensed, so it can't launder the bare width
+                        // name past the import gate. `collect_names` runs after `bind_import`, so
+                        // `imported_ffi_types` is already populated here.
+                        if let Type::Named(body) = ty
+                            && crate::native::ffi::TYPE_NAMES.contains(&body.as_str())
+                            && self.imported_ffi_types.contains(body)
+                        {
+                            self.ffi_alias_ok.insert(name.clone());
+                        }
                     }
                 }
                 _ => {}
@@ -1569,12 +1593,19 @@ impl Checker {
                 // with an FFI-specific hint (matches the qualified-variant "write it qualified" style).
                 _ if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) => {
                     // Accept the width name if THIS module imported it, OR if we reached it by
-                    // expanding a transparent alias body (`alias_resolving` non-empty): a
-                    // `type Len = int32` is a deliberate definition that stays valid wherever the
-                    // alias is used, including cross-module (the alias is program-global but the
-                    // per-module import set is not). A bare width name in ordinary code still needs
-                    // the import — only an alias indirection (an explicit opt-in) bypasses it.
-                    if self.imported_ffi_types.contains(n) || !self.alias_resolving.is_empty() {
+                    // expanding a LICENSED transparent alias body — one whose defining module
+                    // imported the width (`ffi_alias_ok`). A `type Len = int32` is a deliberate
+                    // opt-in that stays valid wherever the alias is used, including cross-module
+                    // (the alias is program-global but the per-module import set is not). A bare
+                    // width name in ordinary code still needs the import — and crucially an alias
+                    // whose module never imported the width does NOT launder it (the closed gate
+                    // hole): only a licensed alias indirection bypasses the per-module requirement.
+                    if self.imported_ffi_types.contains(n)
+                        || self
+                            .alias_resolving
+                            .last()
+                            .is_some_and(|a| self.ffi_alias_ok.contains(a))
+                    {
                         Ty::Int
                     } else {
                         self.error(

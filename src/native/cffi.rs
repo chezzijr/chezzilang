@@ -4,7 +4,7 @@
 //! seam (`src/native/mod.rs`) so the VM and the frozen interpreter produce identical output.
 //!
 //! v1 marshals scalars: `int` (i64 ↔ C `long`), `float` (f64 ↔ C `double`), `bool`
-//! (↔ C `int` 0/1), and `str` (Chezzi str → null-terminated `const char*`; a borrowed `char*` return
+//! (↔ C `_Bool`, 1 byte 0/1), and `str` (Chezzi str → null-terminated `const char*`; a borrowed `char*` return
 //! is copied immediately into an owned Chezzi str, never freed). Plus the bidirectional fixed-width
 //! integers `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` ([`CType::Int8`]..
 //! [`CType::UInt64`]) for C `int32_t`/`uint32_t`/… — distinct from `int` (C `long`); a param truncates
@@ -43,7 +43,7 @@ use libloading::Library;
 use super::{Host, HostError, NativeRet};
 
 /// A C-marshallable type — the v1 FFI surface. `int`→C `long`, `float`→C `double`,
-/// `bool`→C `int`, `str`→C `const char*`, `ptr`→C `void*` (an opaque handle), the fixed-width
+/// `bool`→C `_Bool` (1 byte), `str`→C `const char*`, `ptr`→C `void*` (an opaque handle), the fixed-width
 /// integers (`int8`..`uint64`), and a flat struct-by-value (`Struct`) of those scalar variants.
 ///
 /// Not `Copy`: the `Struct` variant carries owned data (`String`/`Vec`). It carries **only** owned
@@ -104,10 +104,11 @@ impl CType {
     /// structure type from the field types (libffi computes size/alignment/offsets from the ABI).
     fn ffi_type(&self) -> Type {
         match self {
-            // int ↔ C `long` (i64 on LP64 Linux); bool marshals through C `int`.
+            // int ↔ C `long` (i64 on LP64 Linux); bool ↔ C `_Bool` (1 byte, the SysV `_Bool`
+            // stand-in libffi-rs itself uses).
             CType::Int => Type::c_long(),
             CType::Float => Type::f64(),
-            CType::Bool => Type::c_int(),
+            CType::Bool => Type::u8(),
             // str → `const char*`, ptr → `void*`, and every char*-returning variant — all
             // pointers to libffi (the owned/nullable distinction is a Chezzi-side lowering choice,
             // not an ABI one: the C signature is the same `char*`).
@@ -168,8 +169,8 @@ fn struct_layout(fields: &[CType]) -> (Type, usize, usize, Vec<usize>) {
 
 /// Write one scalar field into a C-struct byte buffer at `offset`, casting the engine-neutral
 /// [`NativeRet`] to the field's C width — reusing the SAME scalar marshalling rules as a top-level
-/// arg (`int`→C `long`, the fixed widths truncate/wrap via `as`, `float`→C `double`, `bool`→C `int`,
-/// `ptr`→C `void*`). Errors on a non-scalar field value (a checker-prevented case, guarded
+/// arg (`int`→C `long`, the fixed widths truncate/wrap via `as`, `float`→C `double`, `bool`→C `_Bool`
+/// 1 byte, `ptr`→C `void*`). Errors on a non-scalar field value (a checker-prevented case, guarded
 /// defensively). `Str`/owned/opt/nested `Struct` fields are rejected by the checker, so they are
 /// not reachable here.
 fn write_field(buf: &mut [u8], offset: usize, ct: &CType, v: &NativeRet) -> Result<(), HostError> {
@@ -216,7 +217,8 @@ fn write_field(buf: &mut [u8], offset: usize, ct: &CType, v: &NativeRet) -> Resu
                     });
                 }
             };
-            put!((if b { 1 } else { 0 } as std::os::raw::c_int));
+            // C `_Bool` is one byte (0/1).
+            put!((if b { 1u8 } else { 0u8 }));
         }
         CType::Ptr => {
             let a = match v {
@@ -273,7 +275,8 @@ fn read_field(buf: &[u8], offset: usize, ct: &CType) -> NativeRet {
         CType::UInt64 => NativeRet::Int(get!(u64) as i64),
         CType::Float => NativeRet::Float(get!(f64)),
         CType::Bool => {
-            let c: std::os::raw::c_int = get!(std::os::raw::c_int);
+            // C `_Bool` is one byte at its real offset; any nonzero byte is true.
+            let c: u8 = get!(u8);
             NativeRet::Bool(c != 0)
         }
         CType::Ptr => NativeRet::Ptr(get!(usize)),
@@ -399,7 +402,8 @@ impl Cffi {
         // stay valid for the whole call).
         let mut int_args: Vec<std::os::raw::c_long> = Vec::new();
         let mut float_args: Vec<f64> = Vec::new();
-        let mut bool_args: Vec<std::os::raw::c_int> = Vec::new();
+        // C `_Bool` args are one byte (0/1); the `u8` backing matches the `_Bool` ffi_type.
+        let mut bool_args: Vec<u8> = Vec::new();
         let mut cstrings: Vec<CString> = Vec::new();
         let mut ptr_args: Vec<*const std::os::raw::c_char> = Vec::new();
         // Raw `void*` handles (Chezzi `ptr` args) — plain addresses, stable once pushed.
@@ -456,7 +460,8 @@ impl Cffi {
                     slots.push(Slot::Float(float_args.len() - 1));
                 }
                 CType::Bool => {
-                    // Marshal a Chezzi `bool` into a C `int` (0/1) via the host's typed bool reader.
+                    // Marshal a Chezzi `bool` into a C `_Bool` (1 byte, 0/1) via the host's typed
+                    // bool reader.
                     let b = host.arg_bool(i)?;
                     bool_args.push(if b { 1 } else { 0 });
                     slots.push(Slot::Bool(bool_args.len() - 1));
@@ -624,8 +629,13 @@ impl Cffi {
                     NativeRet::Float(r)
                 }
                 Some(CType::Bool) => {
-                    let r: std::os::raw::c_int = cif.call(code, &ffi_args);
-                    NativeRet::Bool(r != 0)
+                    // A C `_Bool` return is one byte, but libffi rvalue-widens any sub-register
+                    // integral return to a full `ffi_arg` (register word) — the same rule the
+                    // narrow-int arms below follow. Read the register width, then narrow to a byte
+                    // and test `!= 0`. Reading through a 1-byte buffer would let `ffi_call` stomp
+                    // 7 bytes past it (the stack OOB the narrow-int-return fix documents).
+                    let r: std::os::raw::c_ulong = cif.call(code, &ffi_args);
+                    NativeRet::Bool((r as u8) != 0)
                 }
                 Some(CType::Str) => {
                     let p: *const std::os::raw::c_char = cif.call(code, &ffi_args);
@@ -1264,5 +1274,42 @@ mod tests {
         let mut host = MockHost::default().strukt(vec![NativeRet::Int(3), NativeRet::Int(2)]);
         let fields = host.arg_struct_fields(0).unwrap();
         assert_eq!(fields, vec![NativeRet::Int(3), NativeRet::Int(2)]);
+    }
+
+    /// `bool` now means C `_Bool` (1 byte), not C `int` (4 bytes). Pin the libffi layout: a struct
+    /// `[bool, int8]` must place the int8 at offset 1 (right after the 1-byte bool) and have total
+    /// size 2 — not offset 4 / size 8, which is what the old `bool == c_int` lowering produced.
+    /// (Failing-then-green: before the re-map, ffi_type(Bool) was Type::c_int() — offs[1]==4, size==8.)
+    #[test]
+    fn bool_marshals_as_one_byte_cbool() {
+        let (_t, size, _a, offs) = struct_layout(&[CType::Bool, CType::Int8]);
+        assert_eq!(offs[0], 0, "bool field at offset 0");
+        assert_eq!(offs[1], 1, "int8 field directly after the 1-byte _Bool");
+        assert_eq!(
+            size, 2,
+            "two 1-byte fields pack into 2 bytes (C _Bool, not int)"
+        );
+    }
+
+    /// A struct `[bool, int8]` round-trips through the C-ABI buffer at the now-1-byte-bool offsets:
+    /// write a `true` bool at offset 0 and a `7` int8 at offset 1, read both back. Before the re-map
+    /// `write_field` wrote a 4-byte c_int for the bool, stomping the int8 that the new layout puts at
+    /// offset 1 — so the round-trip read of the int8 (and the bool's stored width) diverged.
+    #[test]
+    fn struct_bool_field_marshals_one_byte() {
+        let fields = vec![CType::Bool, CType::Int8];
+        let (_ty, size, _align, offsets) = struct_layout(&fields);
+        assert_eq!(offsets[1], 1, "int8 must sit at offset 1 (bool is 1 byte)");
+        let mut buf = vec![0u8; size];
+        write_field(&mut buf, offsets[0], &CType::Bool, &NativeRet::Bool(true)).unwrap();
+        write_field(&mut buf, offsets[1], &CType::Int8, &NativeRet::Int(7)).unwrap();
+        assert_eq!(
+            read_field(&buf, offsets[0], &CType::Bool),
+            NativeRet::Bool(true)
+        );
+        assert_eq!(
+            read_field(&buf, offsets[1], &CType::Int8),
+            NativeRet::Int(7)
+        );
     }
 }

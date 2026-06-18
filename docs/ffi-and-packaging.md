@@ -38,7 +38,7 @@
 | Mechanism | Rust `fn` compiled **into** the `chezzi` binary, registered in `native_members` | `dlopen`+`dlsym`+`libffi` at module init |
 | Lives in | `src/native/` (`Host`/`NativeRet`/`NativeFn`) | `src/native/cffi.rs` |
 | Used by | `std.math`/`io`/`os`/`fs`/`time`/`regex`/`request`/`net` | user `extern "lib":` blocks |
-| Crosses the airlock | `NativeRet`/`NativeArg` (primitives, list, struct, map, Result/Option) | scalars (int↔long, fixed-width int8..uint64, float↔double, bool↔int, str→`char*`, opaque `ptr`↔void*) + a flat-scalar struct by value |
+| Crosses the airlock | `NativeRet`/`NativeArg` (primitives, list, struct, map, Result/Option) | scalars (int↔long, fixed-width int8..uint64, float↔double, bool↔`_Bool` 1 byte, str→`char*`, opaque `ptr`↔void*) + a flat-scalar struct by value |
 | State | **none** — `NativeFn` is a bare `fn` pointer, no captured state | **none** |
 | Recompile to add? | **yes** — statically linked | **no** — dlopen at runtime |
 
@@ -48,10 +48,11 @@ can hold a live foreign object across calls.
 ## 1b. Deferred FFI-deepening features — design notes (revisit-in-future)
 
 The v1 `extern "lib":` surface ships: scalars, fixed-width ints (`int8`..`uint64`, `std.ffi`-imported),
-`float`/`bool`, `str` (+ return-only `owned_str`/`str?`/`owned_str?`), opaque `ptr` handles, and
-flat-scalar **structs by value**. Three deepenings stay deferred. They're captured here so a revisit
-starts from a plan, not a blank page. None is blocking — the v1 surface binds the large majority of
-system/compute C libraries (numbers, strings, handles, small structs) with **no `chezzi` rebuild**.
+`float`/`bool` (`bool` ↔ C `_Bool`, 1 byte), `str` (+ return-only `owned_str`/`str?`/`owned_str?`),
+opaque `ptr` handles, and flat-scalar **structs by value**. Two deepenings stay deferred. They're
+captured here so a revisit starts from a plan, not a blank page. None is blocking — the v1 surface binds
+the large majority of system/compute C libraries (numbers, strings, handles, small structs) with **no
+`chezzi` rebuild**.
 
 ### #4 Callbacks / C function pointers
 **Unlocks:** passing a Chezzi function to C as a C function pointer so C calls *back* into Chezzi —
@@ -102,20 +103,23 @@ blast radius) feeding `ffi_prep_cif_var`; or (b) an FFI-only typed-arg-list esca
 `printf(fmt, ffi.args([ffi.int(3), ffi.str("x")]))` — that sidesteps the language gap with an explicit
 per-arg-type list. (b) is the lower-risk, FFI-contained option.
 
-### `bool8` — exact 1-byte C `_Bool` (small, planned)
-**Why:** Chezzi `bool` marshals as C `int` (4 bytes), deliberately — it matches K&R/C89 and the entire
-pre-C99 standard library, where a boolean *was* `int` and `<ctype.h>` predicates (`isdigit`, …) return
-an *arbitrary nonzero* `int` for true. The `bool` return reads a full `c_int` then `!= 0`, which is
-correct for those. **Do not change that default** — flipping `bool` to 1 byte would misread a `0x100`
-predicate return as `false`.
+### `bool` ↔ C `_Bool` — RESOLVED (`bool` means bool)
+**Decision (shipped):** Chezzi `bool` marshals as C `_Bool` (1 byte, 0/1) — params, returns, **and**
+struct fields. "bool means bool." A struct `_Bool` field now has the correct 1-byte size/offset
+(closing the prior footgun where a 4-byte `bool` field mis-sized/offset-shifted a real `_Bool`); no
+`int8`/`uint8` workaround is needed for a `_Bool` field anymore. There is **no separate `bool8` type** —
+the earlier plan for one is mooted by this re-map.
 
-C99 added `_Bool` (1 byte). To bind a struct whose field (or an arg) is a real `_Bool`, the 4-byte
-`bool` mis-sizes/offset-shifts it. **Today's workaround:** declare that field `int8`/`uint8` (a `_Bool`
-*is* a 1-byte int) — you get `0`/`1` back as an `int`, correct layout. **Planned:** add a `bool8`
-marshalling type (1-byte, `std.ffi`-imported like the width ints) that comes back as a Chezzi `bool` —
-pure ergonomics over `int8`, leaving the predicate-safe `bool` default untouched. Implementation note:
-its **return must read register-width then narrow to a byte + `!= 0`** (the same libffi rvalue-widening
-rule the narrow-int returns follow — a 1-byte return read through a 1-byte buffer is a stack OOB write).
+**Predicates use `int`, not `bool`.** A C function using the pre-C99 int-as-bool idiom — `<ctype.h>`
+predicates (`isdigit`, …) return an *arbitrary nonzero* `int` for true, **not** a clean 0/1 `_Bool` —
+must be bound `-> int` and tested `!= 0` at the Chezzi call site. Binding such a predicate `-> bool`
+would misread (the 1-byte `_Bool` narrowing keeps only the low byte: a `0x100` return reads `false`).
+That's the deliberate trade of "bool means C `_Bool`": predicates are an `int` return.
+
+**Implementation note (landed):** the 1-byte `_Bool` return **reads register-width then narrows to a
+byte + `!= 0`** (the same libffi rvalue-widening rule the narrow-int returns follow — a 1-byte return
+read through a 1-byte buffer is a stack OOB write). See `src/native/cffi.rs` (`ffi_type`/param/return/
+`write_field`/`read_field` for `CType::Bool`).
 
 ## 2. Why strong libraries are blocked (value model, not linking)
 

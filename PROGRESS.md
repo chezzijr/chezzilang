@@ -886,10 +886,11 @@ truncate-on-param / sign-or-zero-extend-on-return, **imported per-name from `std
 first type imports, `examples/ffi_int.chz`);
 **plus flat-scalar structs by value** (a Chezzi `struct` of scalar fields ↔ a C struct passed/returned
 by value, `examples/ffi_struct.chz`);
+**plus `bool` ↔ C `_Bool`** (1 byte — params/returns/struct fields; int-returning predicates like
+`isdigit` bind `-> int` + test `!= 0`);
 nested structs / `str` struct fields / **callbacks (#4)** / **varargs (#5)** (both with design notes +
-a varargs fixed-arity workaround in `docs/ffi-and-packaging.md §1b`), an exact 1-byte **`bool8`** (C99
-`_Bool`; `bool` stays C `int` for the pre-C99 int-returning predicate idiom — use `int8` for a 1-byte
-field today), a custom user-named deallocator, C-spelling int aliases (`c_int`), and the rich Rust
+a varargs fixed-arity workaround in `docs/ffi-and-packaging.md §1b`),
+a custom user-named deallocator, C-spelling int aliases (`c_int`), and the rich Rust
 `Box<dyn Any>` userdata handle still deferred — see "Done" below; forward design for the Rust
 userdata Value + the package registry is in
 [`docs/ffi-and-packaging.md`](docs/ffi-and-packaging.md)). **`yield`/generators are likewise
@@ -911,6 +912,28 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
+
+- ✅ **C-ABI FFI follow-ups: `bool`=C `_Bool`, precise width-alias gate, redundant self-rename allowed**
+  (2026-06-18, `auto-task/ffi-bool-cbool-alias-gate`) — three FFI loose ends from the prior reviews.
+  (1) **`bool` now means C `_Bool` (1 byte)**, not C `int` (4 bytes): re-mapped `CType::Bool`'s libffi
+  lowering in `src/native/cffi.rs` only — `ffi_type` → `Type::u8()`, param `Vec<u8>`, `write_field`/
+  `read_field` 1 byte, and a `_Bool` **return reads register-width then narrows to a byte + `!= 0`** (the
+  libffi rvalue-widening rule, same as the narrow-int OOB fix). `ctype_of` is unchanged in **both**
+  engines (the divergence hazard doesn't apply; both call the shared `Cffi::call`), so parity holds. A
+  struct `_Bool` field now has correct 1-byte size/offset — closing the prior footgun. **Behavior change:**
+  a C function using the int-as-bool idiom (`isdigit`, arbitrary nonzero `int` for true) must be bound
+  `-> int` and tested `!= 0`, **not** `bool`. There is **no separate `bool8` type** (the planned one is
+  mooted). (2) **Closed the width-alias gate hole** (`!alias_resolving.is_empty()` relaxation in
+  `resolve_type`): a `type Len = int32` whose defining module never imported `int32` no longer launders the
+  bare width name. The opt-in is now **precise** — recorded in a program-global `ffi_alias_ok` set at
+  alias-definition time (only when the defining module imported the width); the gate accepts a width name
+  through an alias iff the innermost resolving alias is licensed. (3) **Allow the redundant identical
+  self-rename** `import int32 as int32` (was rejected "cannot be renamed"): the guard now fires only when
+  the as-name differs from the member — a true rename (`as W`) or wrong-width trap (`int8 as int32`) still
+  rejects. Tests: `cffi.rs` `bool_marshals_as_one_byte_cbool` + `struct_bool_field_marshals_one_byte`;
+  `checker/tests.rs` `width_alias_without_any_import_rejected` + `width_alias_defined_with_import_resolves_in_extern`
+  + `width_import_redundant_self_rename_ok` (all RED-first). Docs: `syntax.md` §12b, `spec.md` §Level-3,
+  `ffi-and-packaging.md` §1b (supersedes the `bool8` note). Two-engine parity green on the FFI examples.
 
 - ✅ **C-ABI FFI structs by value (flat scalar fields)** (2026-06-18, `auto-task/ffi-struct-by-value`)
   — an extern fn can take and/or return a C struct **by value** (not by pointer): name a Chezzi `struct`
