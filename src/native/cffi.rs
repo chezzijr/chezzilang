@@ -416,9 +416,12 @@ impl Cffi {
         let mut u32_args: Vec<u32> = Vec::new();
         let mut u64_args: Vec<u64> = Vec::new();
         // By-value struct args: each is a heap byte buffer holding the C-ABI struct image, written at
-        // libffi-computed offsets. `Box<[u8]>` owns its allocation, so the buffer's address stays
-        // stable even when this outer `Vec` grows — the `Arg` points at the first byte for the call.
-        let mut struct_bufs: Vec<Box<[u8]>> = Vec::new();
+        // libffi-computed offsets. Each buffer is a `Vec<u64>` (not `Vec<u8>`): libffi's by-value
+        // struct avalue must satisfy the struct's natural alignment, and a `u64` backing guarantees
+        // 8-byte alignment — `>=` every v1 flat-scalar field's alignment (ptr/double/int64 = 8), where
+        // a plain `Vec<u8>` only guarantees 1. The `Vec<u64>` owns its allocation, so its address is
+        // stable as this outer `Vec` grows; the `Arg` points at the first word (the struct's first byte).
+        let mut struct_bufs: Vec<Vec<u64>> = Vec::new();
 
         // First pass: extract & own every scalar so the `&`-references libffi captures stay valid.
         // Each slot records which storage vec holds it and at what index.
@@ -526,11 +529,21 @@ impl Cffi {
                         });
                     }
                     let (_ty, size, _align, offsets) = struct_layout(fields);
-                    let mut buf = vec![0u8; size];
-                    for ((ct, off), v) in fields.iter().zip(offsets.iter()).zip(field_vals.iter()) {
-                        write_field(&mut buf, *off, ct, v)?;
+                    let words = size.div_ceil(8).max(1);
+                    let mut buf: Vec<u64> = vec![0u64; words];
+                    {
+                        // SAFETY: a byte view over the 8-aligned `u64` storage (same lifetime/owner),
+                        // used only to write each field at its libffi offset (all within `size`).
+                        let bytes = unsafe {
+                            std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, words * 8)
+                        };
+                        for ((ct, off), v) in
+                            fields.iter().zip(offsets.iter()).zip(field_vals.iter())
+                        {
+                            write_field(bytes, *off, ct, v)?;
+                        }
                     }
-                    struct_bufs.push(buf.into_boxed_slice());
+                    struct_bufs.push(buf);
                     slots.push(Slot::Struct(struct_bufs.len() - 1));
                 }
                 // `OwnedStr`/`OptStr`/`OptOwnedStr` are RETURN-ONLY (the checker rejects them as
@@ -761,14 +774,20 @@ impl Cffi {
         if align > 0 {
             rsize = rsize.div_ceil(align) * align;
         }
-        let mut rvalue = vec![0u8; rsize];
+        // `Vec<u64>` (not `Vec<u8>`): libffi writes a small struct result into the rvalue with typed,
+        // alignment-sensitive stores at the libffi-computed field offsets, so the buffer must meet the
+        // struct's natural alignment. A `u64` backing guarantees 8-byte alignment (`>=` every v1
+        // flat-scalar field's alignment); a `Vec<u8>` only guarantees 1.
+        let words = rsize.div_ceil(8).max(1);
+        let mut rvalue: Vec<u64> = vec![0u64; words];
 
         // `Arg` is `#[repr(C)]` over a single `*mut c_void`, so an `&[Arg]` is layout-compatible with
         // the `*mut *mut c_void` avalue array libffi expects (exactly what `middle::Cif::call` does
         // internally before calling `low::call`).
         // SAFETY: `cif` was prepped from this fn's signature (incl. the struct result type, identical
         // to the one whose offsets we computed); `ffi_args` matches the params in order/count and the
-        // backing storage is still alive in the caller; `rvalue` is `>= max(struct_size, reg)` bytes.
+        // backing storage is still alive in the caller; `rvalue` is `words*8 >= max(struct_size, reg)`
+        // bytes and 8-aligned.
         unsafe {
             libffi::raw::ffi_call(
                 cif.as_raw_ptr(),
@@ -780,11 +799,14 @@ impl Cffi {
 
         // Read each field back at its libffi offset and widen to a NativeRet scalar. The name +
         // field_names make this a `NativeRet::Struct` both engines already lower to a native struct.
+        // SAFETY: byte view over the 8-aligned `u64` rvalue (same lifetime/owner); reads stay within
+        // `words*8` bytes (every offset is `< size <= words*8`).
+        let rbytes = unsafe { std::slice::from_raw_parts(rvalue.as_ptr() as *const u8, words * 8) };
         let out_fields: Vec<(String, NativeRet)> = field_names
             .iter()
             .zip(fields.iter())
             .zip(offsets.iter())
-            .map(|((fname, ct), off)| (fname.clone(), read_field(&rvalue, *off, ct)))
+            .map(|((fname, ct), off)| (fname.clone(), read_field(rbytes, *off, ct)))
             .collect();
         Ok(NativeRet::Struct {
             name: name.to_string(),

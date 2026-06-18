@@ -1438,8 +1438,10 @@ print(r.rem)    # 2
 (`int`/`float`/`bool`/`ptr`/the `int8`..`uint64` widths). A struct with a **`str` field** or a **nested
 struct** field is rejected with an error naming the struct *and* the offending field; **generic
 structs** (`Pair[int]`) have no fixed C layout and are rejected. (A transparent `type P = Point` alias
-to a flat struct works exactly like the bare struct.) Nested structs-by-value and string fields are
-deferred to a later version.
+to a flat struct works exactly like the bare struct.) The struct may be declared **before or after** the
+`extern` block. A **`bool` field** marshals as a C `int` (4 bytes) — it matches a C struct field declared
+`int`, **not** a 1-byte `_Bool`/`char`; use `int8`/`uint8` for a byte-width field. Nested structs-by-value
+and string fields are deferred to a later version.
 
 **Opaque handles (`ptr`).** A C library built around a handle (`FILE*`, `sqlite3*`, a
 `create`/`use`/`destroy` context) returns a `void*` you hold and pass back. Declare it as `ptr` — a

@@ -375,7 +375,12 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >     field; a **generic struct** (`Pair[int]`) has no fixed C layout and is rejected. A transparent
 >     `type P = Point` alias to a flat struct is accepted identically to the bare struct. The struct's
 >     field order + types define the C layout (libffi computes size/alignment/offsets); valid as both a
->     param and a return. See `CType::Struct` + `examples/ffi_struct.chz`.
+>     param and a return. The struct may be declared **before or after** the `extern` block (forward
+>     reference is fine). **Field width caveat:** a `bool` field marshals as a C `int` (4 bytes) per the
+>     scalar `bool↔int` convention — it matches a C struct field declared `int`, **not** a 1-byte
+>     `_Bool`/`char`; for a byte-width field use `int8`/`uint8`. (Field types are part of the C-layout
+>     contract the binding author must match, like `int32` vs `int64`.) See `CType::Struct` +
+>     `examples/ffi_struct.chz`.
 > - **Still deferred (Level-3):** the rich **Rust `Box<dyn Any>` userdata handle** (for compiled-in
 >   Rust libraries like Burn — distinct from the C `void*` `ptr` above, which shipped), a **custom
 >   user-named deallocator** (only libc `free` backs `owned_str`), and the deferred FFI features above

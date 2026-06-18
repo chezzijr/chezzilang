@@ -5527,6 +5527,18 @@ fn extern_struct_param_and_return_typecheck() {
 }
 
 #[test]
+fn extern_struct_param_forward_ref_typechecks() {
+    // A by-value struct used in an extern signature may be DECLARED AFTER the extern block — extern
+    // marshallability is validated in a post-hoist sweep, once every struct's field info is
+    // registered. (Regression: it was validated inline in source order, so a forward reference fell
+    // through to a spurious "not C-marshallable" rejection.) Mirrors how a plain `fn` forward-refs.
+    ok(
+        "extern \"libc.so.6\":\n    fn id_point(p: Point) -> Point\n\
+         \nstruct Point:\n    x: int\n    y: int\n",
+    );
+}
+
+#[test]
 fn extern_struct_with_str_field_is_rejected() {
     // A struct with a `str` field is NOT C-marshallable by value (v1 flat-scalar limit) — reject it
     // with a message naming the struct AND the offending field.

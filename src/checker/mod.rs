@@ -904,6 +904,13 @@ impl Checker {
         // targets extern is rejected wholesale, leaving this empty.
         #[cfg_attr(not(unix), allow(unused_mut))]
         let mut extern_names: Vec<(String, Span)> = Vec::new();
+        // Extern param/return marshallability is validated AFTER this loop (collected here), so a
+        // struct passed/returned BY VALUE may be DECLARED AFTER the extern block: `self.structs`
+        // (field info, which `assert_marshallable` inspects for a flat-scalar struct) is only fully
+        // populated once every struct in the module has been hoisted. `collect_names` already
+        // pre-registered struct *names*, so `resolve_type` accepts the forward reference inline.
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut extern_marshal_checks: Vec<(Ty, String, Span, bool)> = Vec::new();
         for s in stmts {
             match &s.kind {
                 StmtKind::Fn(decl) => {
@@ -1070,7 +1077,14 @@ impl Checker {
                                     let ty = self.resolve_type(t, ef.span);
                                     // A parameter must be a real C scalar — `nil` (void) is a
                                     // return-only sentinel and would panic the backend's `ctype_of`.
-                                    self.assert_marshallable(&ty, &ef.name, ef.span, false);
+                                    // Deferred to the post-loop sweep (a by-value struct param may be
+                                    // declared after this extern block).
+                                    extern_marshal_checks.push((
+                                        ty.clone(),
+                                        ef.name.clone(),
+                                        ef.span,
+                                        false,
+                                    ));
                                     ty
                                 }
                                 None => {
@@ -1089,7 +1103,14 @@ impl Checker {
                             Some(t) => {
                                 let ty = self.resolve_type(t, ef.span);
                                 // The return slot may be `nil` (void) in addition to the C scalars.
-                                self.assert_marshallable(&ty, &ef.name, ef.span, true);
+                                // Deferred to the post-loop sweep (a by-value struct return may be
+                                // declared after this extern block).
+                                extern_marshal_checks.push((
+                                    ty.clone(),
+                                    ef.name.clone(),
+                                    ef.span,
+                                    true,
+                                ));
                                 ty
                             }
                             // A void extern returns nothing observable; model it as `Nil`.
@@ -1119,6 +1140,11 @@ impl Checker {
                     format!("'{name}' is a builtin/reserved name and cannot be an extern fn"),
                 );
             }
+        }
+        // Now every struct's field info is registered, so a by-value-struct param/return resolves its
+        // fields regardless of whether the struct was declared before or after the extern block.
+        for (ty, name, span, allow_void) in &extern_marshal_checks {
+            self.assert_marshallable(ty, name, *span, *allow_void);
         }
     }
 

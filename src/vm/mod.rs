@@ -26128,9 +26128,10 @@ main()
     /// C struct BY VALUE golden (VM twin of `interp::golden_ffi_struct_chz`): the `extern "lib":`
     /// block binds `div_t div(int, int)` — a libc fn taking two scalars and returning a small POD
     /// struct BY VALUE — to a Chezzi `struct DivT{quot, rem}`. `div(17, 5) == {3, 2}` (pure, always
-    /// present). Byte-matches `.expected` and stays identical to the interpreter (`assert_file_parity`),
-    /// which under `--parallel` also proves the struct return crosses the M:N airlock via the existing
-    /// `NativeRet::Struct` deep-copy. Linux-only.
+    /// present). Byte-matches `.expected` and stays identical to the interpreter (`assert_file_parity`
+    /// runs the serial VM + interp). The `--parallel`/M:N engine is NOT driven here; the returned
+    /// `NativeRet::Struct` already crosses the M:N airlock by the same deep-copy std.regex uses, so the
+    /// path is exercised, just not by this golden. Linux-only.
     #[test]
     #[cfg(target_os = "linux")]
     fn golden_ffi_struct_chz_via_run_file() {
