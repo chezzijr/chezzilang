@@ -5597,6 +5597,45 @@ fn width_name_without_import_rejected() {
 }
 
 #[test]
+fn ffi_type_import_cannot_be_renamed() {
+    // An FFI width type cannot be aliased on import: the backends' `ctype_of` keys off the literal
+    // surface name, so a renamed import would resolve to a type the marshaller can't lower. Reject
+    // both `import int32 as W` (name unusable) and `import int8 as int32` (silently wrong width).
+    entry_rejects(
+        "import int32 as W from std.ffi\nfn main():\n    x: W = 5\n    print(x)\n",
+        "cannot be renamed on import",
+    );
+    entry_rejects(
+        "import int8 as int32 from std.ffi\nfn main():\n    x: int32 = 5\n    print(x)\n",
+        "cannot be renamed on import",
+    );
+}
+
+#[test]
+fn width_name_cannot_be_redefined_as_alias() {
+    // A user `type int32 = str` must not silently shadow the FFI width name (it would flip int32's
+    // meaning from int to str). The name is reserved.
+    rejects(
+        "type int32 = str\nx: int32 = \"hi\"\nprint(x)\n",
+        "reserved",
+    );
+}
+
+#[test]
+fn alias_to_width_resolves_without_bare_import() {
+    // A transparent alias whose body is a width name resolves wherever the alias is used, even if the
+    // using site did not `import int32` directly — the alias is the explicit opt-in (an alias body is
+    // a deliberate definition, unlike an accidental bare `int32` in ordinary code, which still needs
+    // the import). This keeps a `type Len = int32` usable across modules (alias is program-global; the
+    // per-module import set is not).
+    entry_ok(
+        "import int32 from std.ffi\ntype Len = int32\n\
+         extern \"libc.so.6\":\n    fn f(x: Len) -> Len\n\
+         \nfn main():\n    n: int = f(5)\n    print(n)\n",
+    );
+}
+
+#[test]
 fn ffi_type_import_then_extern_and_struct_ok() {
     // `import int8, int32, uint32 from std.ffi` makes the width names resolvable in THIS module — as an
     // extern param/return AND as a struct field type. They resolve to a plain `int` (the program sees

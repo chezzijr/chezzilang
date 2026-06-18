@@ -639,7 +639,21 @@ impl Checker {
                         // width name in THIS module (it's a type, not a callable value). Other
                         // (user-struct/enum) type names are program-global already — nothing to inject.
                         if crate::native::ffi::TYPE_NAMES.contains(&member.as_str()) {
-                            self.imported_ffi_types.insert(bind.clone());
+                            // An FFI width type CANNOT be renamed on import: the backends' `ctype_of`
+                            // keys off the literal surface name (`int32`), so an alias would resolve to
+                            // a type the marshaller can't lower. Reject `import int32 as W` (and
+                            // `import int8 as int32`, which would silently bind the wrong width).
+                            if alias.is_some() {
+                                self.error(
+                                    imp.span,
+                                    format!(
+                                        "FFI type '{member}' cannot be renamed on import — \
+                                         write `import {member} from std.ffi`"
+                                    ),
+                                );
+                            } else {
+                                self.imported_ffi_types.insert(member.clone());
+                            }
                         }
                     } else {
                         self.error(
@@ -887,6 +901,7 @@ impl Checker {
                         name.as_str(),
                         "int" | "float" | "bool" | "str" | "bytes" | "bytearray" | "nil"
                     ) || is_reserved_type(name)
+                        || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     } else if self.aliases.contains_key(name)
@@ -1553,7 +1568,13 @@ impl Checker {
                 // (`import int32 from std.ffi` → `imported_ffi_types`). Otherwise it's an unknown type
                 // with an FFI-specific hint (matches the qualified-variant "write it qualified" style).
                 _ if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) => {
-                    if self.imported_ffi_types.contains(n) {
+                    // Accept the width name if THIS module imported it, OR if we reached it by
+                    // expanding a transparent alias body (`alias_resolving` non-empty): a
+                    // `type Len = int32` is a deliberate definition that stays valid wherever the
+                    // alias is used, including cross-module (the alias is program-global but the
+                    // per-module import set is not). A bare width name in ordinary code still needs
+                    // the import — only an alias indirection (an explicit opt-in) bypasses it.
+                    if self.imported_ffi_types.contains(n) || !self.alias_resolving.is_empty() {
                         Ty::Int
                     } else {
                         self.error(
