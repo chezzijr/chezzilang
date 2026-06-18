@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Auto-format + lint before each commit.
+# Enable once per clone:  git config core.hooksPath .githooks
+set -euo pipefail
+
+# Only act on staged Rust files; nothing staged -> nothing to do.
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
+[ ${#staged[@]} -eq 0 ] && exit 0
+
+echo "pre-commit: cargo fmt"
+cargo fmt
+
+# Re-stage any staged file that fmt rewrote.
+for f in "${staged[@]}"; do
+  [ -f "$f" ] && git add -- "$f"
+done
+
+echo "pre-commit: cargo clippy -- -D warnings"
+cargo clippy -- -D warnings
+
+echo "pre-commit: ok"
