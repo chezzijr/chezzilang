@@ -13,7 +13,7 @@
 //! A `ptr` is opaque, untyped, and never auto-freed: call the library's own destroy
 //! (e.g. `fclose`) explicitly. See `docs/spec.md` §Level-3 FFI.
 
-use super::{expect_args, Host, HostError, NativeFn, NativeRet};
+use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 
 /// The NULL pointer sentinel (`Ptr(0)`).
 fn null(h: &mut dyn Host) -> Result<NativeRet, HostError> {
@@ -45,22 +45,32 @@ mod tests {
             self.ptrs.len()
         }
         fn arg_int(&mut self, _i: usize) -> Result<i64, HostError> {
-            Err(HostError { message: "no int args".into() })
+            Err(HostError {
+                message: "no int args".into(),
+            })
         }
         fn arg_is_int(&self, _i: usize) -> bool {
             false
         }
         fn arg_float(&mut self, _i: usize) -> Result<f64, HostError> {
-            Err(HostError { message: "no float args".into() })
+            Err(HostError {
+                message: "no float args".into(),
+            })
         }
         fn arg_ptr(&mut self, i: usize) -> Result<usize, HostError> {
-            self.ptrs.get(i).copied().ok_or(HostError { message: "missing ptr arg".into() })
+            self.ptrs.get(i).copied().ok_or(HostError {
+                message: "missing ptr arg".into(),
+            })
         }
         fn arg_str(&mut self, _i: usize) -> Result<String, HostError> {
-            Err(HostError { message: "no str args".into() })
+            Err(HostError {
+                message: "no str args".into(),
+            })
         }
         fn arg_str_map(&mut self, _i: usize) -> Result<Vec<(String, String)>, HostError> {
-            Err(HostError { message: "no map args".into() })
+            Err(HostError {
+                message: "no map args".into(),
+            })
         }
         fn write_stdout(&mut self, _s: &str) {}
         fn write_stderr(&mut self, _s: &str) {}

@@ -8,8 +8,8 @@
 //! Only the `assert` primitive is dual-engine (parity discipline); this orchestration is VM-only —
 //! its output is Rust-formatted `PASS/FAIL`, not Chezzi program stdout, so no golden parity applies.
 
-use crate::vm::op::Program;
 use crate::vm::Vm;
+use crate::vm::op::Program;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -36,7 +36,10 @@ pub fn run_tests(root: &Path) -> TestReport {
     let files = match collect_test_files(root) {
         Ok(f) => f,
         Err(e) => {
-            return TestReport { text: format!("chezzi test: {e}\n"), passed: false };
+            return TestReport {
+                text: format!("chezzi test: {e}\n"),
+                passed: false,
+            };
         }
     };
     if files.is_empty() {
@@ -75,7 +78,9 @@ pub fn run_tests(root: &Path) -> TestReport {
     let total = outcomes.len();
     let failed = outcomes.iter().filter(|o| o.failure.is_some()).count();
     let passed_count = total - failed;
-    report.push_str(&format!("\n{total} test(s): {passed_count} passed, {failed} failed"));
+    report.push_str(&format!(
+        "\n{total} test(s): {passed_count} passed, {failed} failed"
+    ));
     if file_errors > 0 {
         report.push_str(&format!(", {file_errors} file error(s)"));
     }
@@ -88,7 +93,10 @@ pub fn run_tests(root: &Path) -> TestReport {
     }
     report.push('\n');
 
-    TestReport { text: report, passed: failed == 0 && file_errors == 0 && !no_tests_discovered }
+    TestReport {
+        text: report,
+        passed: failed == 0 && file_errors == 0 && !no_tests_discovered,
+    }
 }
 
 /// Compile + run one `*_test.chz` file, returning a per-test outcome list (or a compile-error
@@ -97,7 +105,10 @@ fn run_file(file: &Path) -> Result<Vec<Outcome>, String> {
     let graph = crate::resolver::build_graph(file).map_err(|e| e.to_string())?;
     if let Err(errs) = crate::checker::check_graph(&graph) {
         // Surface the first type error (matches `chezzi check`'s headline).
-        let first = errs.first().map(|e| e.message.clone()).unwrap_or_else(|| "type error".into());
+        let first = errs
+            .first()
+            .map(|e| e.message.clone())
+            .unwrap_or_else(|| "type error".into());
         return Err(first);
     }
     let program = crate::compiler::compile_graph(&graph).map_err(|e| e.message)?;
@@ -106,7 +117,10 @@ fn run_file(file: &Path) -> Result<Vec<Outcome>, String> {
     let mut vm = Vm::for_program(Arc::clone(&program));
     // Initialize the module(s): run top-levels once so globals/functions/structs exist.
     if let Err(e) = vm.init_for_tests() {
-        return Err(format!("error initializing test module: {} (line {})", e.message, e.span.line));
+        return Err(format!(
+            "error initializing test module: {} (line {})",
+            e.message, e.span.line
+        ));
     }
 
     let file_label = file.display().to_string();
@@ -114,7 +128,10 @@ fn run_file(file: &Path) -> Result<Vec<Outcome>, String> {
 
     // Free tests, in declaration order.
     for (name, proto) in program.tests.iter() {
-        let failure = vm.invoke_test(*proto).err().map(|e| (e.span.line, e.message));
+        let failure = vm
+            .invoke_test(*proto)
+            .err()
+            .map(|e| (e.span.line, e.message));
         let _ = vm.take_out(); // discard the test's stdout (kept reusable)
         outcomes.push(Outcome {
             name: name.clone(),
@@ -146,7 +163,10 @@ fn run_suite(vm: &mut Vm, suite: &crate::vm::op::SuiteInfo, file: &str, out: &mu
                 out.push(Outcome {
                     name: format!("{}::{}", suite.name, tname),
                     file: file.to_string(),
-                    failure: Some((e.span.line, format!("suite construction failed: {}", e.message))),
+                    failure: Some((
+                        e.span.line,
+                        format!("suite construction failed: {}", e.message),
+                    )),
                 });
             }
             return;
@@ -231,7 +251,8 @@ fn collect_test_files(root: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// Recursively gather `*_test.chz` files under `dir`.
 fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
@@ -262,7 +283,8 @@ mod tests {
     impl TmpDir {
         fn new() -> Self {
             let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-            let dir = std::env::temp_dir().join(format!("chezzi_test_{}_{}", std::process::id(), n));
+            let dir =
+                std::env::temp_dir().join(format!("chezzi_test_{}_{}", std::process::id(), n));
             std::fs::create_dir_all(&dir).unwrap();
             TmpDir(dir)
         }
@@ -286,10 +308,18 @@ mod tests {
             "test fn one():\n    assert 1 + 1 == 2\ntest fn two():\n    assert \"a\" + \"b\" == \"ab\"\n",
         );
         let report = run_tests(&f);
-        assert!(report.passed, "all tests should pass; report:\n{}", report.text);
+        assert!(
+            report.passed,
+            "all tests should pass; report:\n{}",
+            report.text
+        );
         assert!(report.text.contains("PASS one"), "report:\n{}", report.text);
         assert!(report.text.contains("PASS two"), "report:\n{}", report.text);
-        assert!(report.text.contains("2 test(s): 2 passed, 0 failed"), "report:\n{}", report.text);
+        assert!(
+            report.text.contains("2 test(s): 2 passed, 0 failed"),
+            "report:\n{}",
+            report.text
+        );
     }
 
     #[test]
@@ -301,14 +331,26 @@ mod tests {
             "test fn boom():\n    x := 1\n    assert x == 2, \"x must be two\"\n",
         );
         let report = run_tests(&f);
-        assert!(!report.passed, "the run must fail; report:\n{}", report.text);
-        assert!(report.text.contains("FAIL boom"), "report:\n{}", report.text);
+        assert!(
+            !report.passed,
+            "the run must fail; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("FAIL boom"),
+            "report:\n{}",
+            report.text
+        );
         assert!(
             report.text.contains("fail_test.chz:3"),
             "report must carry file:line; report:\n{}",
             report.text
         );
-        assert!(report.text.contains("x must be two"), "report:\n{}", report.text);
+        assert!(
+            report.text.contains("x must be two"),
+            "report:\n{}",
+            report.text
+        );
     }
 
     #[test]
@@ -321,7 +363,11 @@ mod tests {
         assert!(report.passed, "report:\n{}", report.text);
         assert!(report.text.contains("PASS a"), "report:\n{}", report.text);
         assert!(report.text.contains("PASS b"), "report:\n{}", report.text);
-        assert!(report.text.contains("2 test(s): 2 passed, 0 failed"), "report:\n{}", report.text);
+        assert!(
+            report.text.contains("2 test(s): 2 passed, 0 failed"),
+            "report:\n{}",
+            report.text
+        );
     }
 
     #[test]
@@ -333,9 +379,21 @@ mod tests {
         let report = run_tests(&f);
         assert!(!report.passed, "report:\n{}", report.text);
         assert!(report.text.contains("ERROR"), "report:\n{}", report.text);
-        assert!(!report.text.contains(":0)"), "no phantom :0 line; report:\n{}", report.text);
-        assert!(report.text.contains("0 test(s)"), "report:\n{}", report.text);
-        assert!(report.text.contains("file error(s)"), "report:\n{}", report.text);
+        assert!(
+            !report.text.contains(":0)"),
+            "no phantom :0 line; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("0 test(s)"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("file error(s)"),
+            "report:\n{}",
+            report.text
+        );
     }
 
     #[test]
@@ -343,10 +401,21 @@ mod tests {
         // A `*_test.chz` that compiles cleanly but declares no `test fn` (e.g. the `test` keyword was
         // forgotten) must NOT pass with exit 0 — that would be indistinguishable from a green run.
         let d = TmpDir::new();
-        let f = d.write("empty_test.chz", "fn helper():\n    print(\"not a test\")\n");
+        let f = d.write(
+            "empty_test.chz",
+            "fn helper():\n    print(\"not a test\")\n",
+        );
         let report = run_tests(&f);
-        assert!(!report.passed, "zero discovered tests must fail; report:\n{}", report.text);
-        assert!(report.text.contains("no tests discovered"), "report:\n{}", report.text);
+        assert!(
+            !report.passed,
+            "zero discovered tests must fail; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("no tests discovered"),
+            "report:\n{}",
+            report.text
+        );
     }
 
     #[test]
@@ -355,7 +424,11 @@ mod tests {
         let f = d.write("plain.chz", "print(\"hi\")\n");
         let report = run_tests(&f);
         assert!(!report.passed);
-        assert!(report.text.contains("not a *_test.chz file"), "report:\n{}", report.text);
+        assert!(
+            report.text.contains("not a *_test.chz file"),
+            "report:\n{}",
+            report.text
+        );
     }
 
     #[test]
@@ -385,9 +458,21 @@ struct Suite:
 ";
         let f = d.write("suite_test.chz", src);
         let report = run_tests(&f);
-        assert!(report.passed, "suite ordering should hold; report:\n{}", report.text);
-        assert!(report.text.contains("PASS Suite::first"), "report:\n{}", report.text);
-        assert!(report.text.contains("PASS Suite::second"), "report:\n{}", report.text);
+        assert!(
+            report.passed,
+            "suite ordering should hold; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("PASS Suite::first"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("PASS Suite::second"),
+            "report:\n{}",
+            report.text
+        );
     }
 
     #[test]
@@ -395,10 +480,19 @@ struct Suite:
         // The committed `examples/*_test.chz` files (membership/operators/match_or + the suite) must
         // all pass under the runner — the dogfood guard.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-        for name in ["membership_test.chz", "operators_test.chz", "match_or_test.chz", "suite_test.chz"] {
+        for name in [
+            "membership_test.chz",
+            "operators_test.chz",
+            "match_or_test.chz",
+            "suite_test.chz",
+        ] {
             let f = root.join(name);
             let report = run_tests(&f);
-            assert!(report.passed, "{name} should pass; report:\n{}", report.text);
+            assert!(
+                report.passed,
+                "{name} should pass; report:\n{}",
+                report.text
+            );
         }
     }
 
@@ -423,7 +517,15 @@ struct Suite:
         let f = d.write("ae_test.chz", src);
         let report = run_tests(&f);
         assert!(!report.passed, "first must fail; report:\n{}", report.text);
-        assert!(report.text.contains("FAIL Suite::first"), "report:\n{}", report.text);
-        assert!(report.text.contains("PASS Suite::second"), "report:\n{}", report.text);
+        assert!(
+            report.text.contains("FAIL Suite::first"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("PASS Suite::second"),
+            "report:\n{}",
+            report.text
+        );
     }
 }

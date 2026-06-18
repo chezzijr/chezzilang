@@ -6,7 +6,7 @@
 //! `**`, no brace expansion (a focused, dependency-free matcher). All filesystem access is real
 //! (like `std.io.read_file`).
 
-use super::{expect_args, Host, HostError, NativeFn, NativeRet};
+use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 use std::path::Path;
 
 fn list_dir(h: &mut dyn Host) -> Result<NativeRet, HostError> {

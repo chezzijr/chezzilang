@@ -9,9 +9,9 @@
 mod ty;
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, Bound, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl, Import,
-    LitPattern, MethodSig, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, TypeParam,
-    UnaryOp, WaitArm, WaitTarget,
+    AssignOp, BinaryOp, Block, Bound, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl,
+    Import, LitPattern, MethodSig, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type,
+    TypeParam, UnaryOp, WaitArm, WaitTarget,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
 use std::collections::HashMap;
@@ -23,7 +23,10 @@ use ty::{compatible, ref_display};
 /// What a `match` scrutinee is being matched against, threaded through the match-checking helpers.
 enum MatchKind {
     /// Enum/Result/Option scrutinee — arms are variant patterns.
-    Variants { label: String, variants: HashMap<String, Vec<Ty>> },
+    Variants {
+        label: String,
+        variants: HashMap<String, Vec<Ty>>,
+    },
     /// int/str/bool scrutinee — arms are literal patterns (+ a required `_` wildcard).
     Literal(Ty),
     /// Tuple scrutinee — arms are tuple patterns (gap #15). Carries the element types.
@@ -124,14 +127,24 @@ impl FnSig {
     /// A non-generic signature (the common case): every param is required (`min_params == params.len()`).
     fn plain(params: Vec<Ty>, ret: Ty) -> FnSig {
         let min_params = params.len();
-        FnSig { params, ret, type_params: Vec::new(), min_params }
+        FnSig {
+            params,
+            ret,
+            type_params: Vec::new(),
+            min_params,
+        }
     }
 
     /// D6c — a non-generic signature whose last `optional` params may be omitted (the net socket ops'
     /// optional trailing `timeout_ms`). `check_args` accepts `params.len() - optional ..= params.len()`.
     fn optional_tail(params: Vec<Ty>, ret: Ty, optional: usize) -> FnSig {
         let min_params = params.len() - optional;
-        FnSig { params, ret, type_params: Vec::new(), min_params }
+        FnSig {
+            params,
+            ret,
+            type_params: Vec::new(),
+            min_params,
+        }
     }
 }
 
@@ -209,7 +222,11 @@ pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
             c.module_sigs.insert(lm.id.clone(), native_module_sig(name));
             continue;
         }
-        let label = if lm.id == graph.entry { None } else { Some(lm.label()) };
+        let label = if lm.id == graph.entry {
+            None
+        } else {
+            Some(lm.label())
+        };
         c.begin_module(label);
         c.current_module_is_stdlib = lm.dotted.first().map(String::as_str) == Some("std");
         let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
@@ -229,7 +246,8 @@ pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
 fn native_module_sig(name: &str) -> ModuleSig {
     let mut sig = ModuleSig::default();
     let mut func = |n: &str, params: Vec<Ty>, ret: Ty| {
-        sig.functions.insert(n.to_string(), FnSig::plain(params, ret));
+        sig.functions
+            .insert(n.to_string(), FnSig::plain(params, ret));
     };
     match name {
         "std.math" => {
@@ -304,9 +322,21 @@ fn native_module_sig(name: &str) -> ModuleSig {
             let m = || Ty::Struct("Match".to_string(), vec![]);
             func("is_match", vec![Ty::Str, Ty::Str], Ty::result(Ty::Bool));
             func("find", vec![Ty::Str, Ty::Str], Ty::result(Ty::option(m())));
-            func("find_all", vec![Ty::Str, Ty::Str], Ty::result(Ty::list(m())));
-            func("replace_all", vec![Ty::Str, Ty::Str, Ty::Str], Ty::result(Ty::Str));
-            func("split", vec![Ty::Str, Ty::Str], Ty::result(Ty::list(Ty::Str)));
+            func(
+                "find_all",
+                vec![Ty::Str, Ty::Str],
+                Ty::result(Ty::list(m())),
+            );
+            func(
+                "replace_all",
+                vec![Ty::Str, Ty::Str, Ty::Str],
+                Ty::result(Ty::Str),
+            );
+            func(
+                "split",
+                vec![Ty::Str, Ty::Str],
+                Ty::result(Ty::list(Ty::Str)),
+            );
         }
         "std.request" => {
             // `Response` is the synthetic struct seeded in `seed_stdlib_structs`.
@@ -316,7 +346,12 @@ fn native_module_sig(name: &str) -> ModuleSig {
             // General verb + custom headers; verb wrappers for the common non-GET/POST methods.
             func(
                 "request",
-                vec![Ty::Str, Ty::Str, Ty::Str, Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str))],
+                vec![
+                    Ty::Str,
+                    Ty::Str,
+                    Ty::Str,
+                    Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str)),
+                ],
                 Ty::result(resp()),
             );
             func("put", vec![Ty::Str, Ty::Str], Ty::result(resp()));
@@ -465,7 +500,10 @@ impl Checker {
     fn seed_stdlib_structs(&mut self) {
         let mk = |fields: Vec<(&str, Ty)>| StructInfo {
             type_params: Vec::new(),
-            fields: fields.into_iter().map(|(n, t)| (n.to_string(), t)).collect(),
+            fields: fields
+                .into_iter()
+                .map(|(n, t)| (n.to_string(), t))
+                .collect(),
             methods: HashMap::new(),
             origin: StructOrigin::Builtin,
         };
@@ -543,12 +581,19 @@ impl Checker {
     fn bind_import(&mut self, imp: &ResolvedImport) {
         match &imp.import {
             Import::Module { path, alias } => {
-                let name = alias.clone().unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                self.imported_modules.insert(name.clone(), imp.target.clone());
+                let name = alias
+                    .clone()
+                    .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                self.imported_modules
+                    .insert(name.clone(), imp.target.clone());
                 self.declare(&name, Ty::Module(name.clone()));
             }
             Import::From { path: _, names } => {
-                let sig = self.module_sigs.get(&imp.target).cloned().unwrap_or_default();
+                let sig = self
+                    .module_sigs
+                    .get(&imp.target)
+                    .cloned()
+                    .unwrap_or_default();
                 for (member, alias) in names {
                     let bind = alias.as_ref().unwrap_or(member);
                     if let Some(fsig) = sig.functions.get(member) {
@@ -564,7 +609,10 @@ impl Checker {
                     } else {
                         self.error(
                             imp.span,
-                            format!("module '{}' has no member '{member}'", module_label(&imp.import)),
+                            format!(
+                                "module '{}' has no member '{member}'",
+                                module_label(&imp.import)
+                            ),
                         );
                     }
                 }
@@ -800,8 +848,10 @@ impl Checker {
                     self.enum_names.insert(name.clone());
                 }
                 StmtKind::TypeAlias { name, ty } => {
-                    if matches!(name.as_str(), "int" | "float" | "bool" | "str" | "bytes" | "bytearray" | "nil")
-                        || is_reserved_type(name)
+                    if matches!(
+                        name.as_str(),
+                        "int" | "float" | "bool" | "str" | "bytes" | "bytearray" | "nil"
+                    ) || is_reserved_type(name)
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     } else if self.aliases.contains_key(name)
@@ -824,7 +874,12 @@ impl Checker {
     fn hoist(&mut self, stmts: &[Stmt]) {
         // Protocols first: function/struct signatures may reference them in type-parameter bounds.
         for s in stmts {
-            if let StmtKind::Protocol { name, type_params, methods } = &s.kind {
+            if let StmtKind::Protocol {
+                name,
+                type_params,
+                methods,
+            } = &s.kind
+            {
                 self.hoist_protocol(name, type_params, methods, s.span);
             }
         }
@@ -839,12 +894,20 @@ impl Checker {
             match &s.kind {
                 StmtKind::Fn(decl) => {
                     if self.functions.contains_key(&decl.name) {
-                        self.error(s.span, format!("function '{}' is already defined", decl.name));
+                        self.error(
+                            s.span,
+                            format!("function '{}' is already defined", decl.name),
+                        );
                     }
                     let sig = self.fn_sig(decl, s.span);
                     self.functions.insert(decl.name.clone(), sig);
                 }
-                StmtKind::Struct { name, type_params, fields, methods } => {
+                StmtKind::Struct {
+                    name,
+                    type_params,
+                    fields,
+                    methods,
+                } => {
                     if is_reserved_type(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
@@ -870,10 +933,19 @@ impl Checker {
                     };
                     self.structs.insert(
                         name.clone(),
-                        StructInfo { type_params: type_params.clone(), fields, methods, origin },
+                        StructInfo {
+                            type_params: type_params.clone(),
+                            fields,
+                            methods,
+                            origin,
+                        },
                     );
                 }
-                StmtKind::Enum { name, type_params, variants } => {
+                StmtKind::Enum {
+                    name,
+                    type_params,
+                    variants,
+                } => {
                     if is_reserved_type(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
@@ -897,17 +969,27 @@ impl Checker {
                             );
                         }
                         names.push(v.name.clone());
-                        let payload =
-                            v.payload.iter().map(|t| self.resolve_type(t, s.span)).collect();
+                        let payload = v
+                            .payload
+                            .iter()
+                            .map(|t| self.resolve_type(t, s.span))
+                            .collect();
                         self.variants.insert(
                             (name.clone(), v.name.clone()),
-                            VariantInfo { enum_name: name.clone(), payload },
+                            VariantInfo {
+                                enum_name: name.clone(),
+                                payload,
+                            },
                         );
-                        self.variant_owners.entry(v.name.clone()).or_default().push(name.clone());
+                        self.variant_owners
+                            .entry(v.name.clone())
+                            .or_default()
+                            .push(name.clone());
                     }
                     self.exit_type_params(saved);
                     self.enums.insert(name.clone(), names);
-                    self.enum_type_params.insert(name.clone(), type_params.clone());
+                    self.enum_type_params
+                        .insert(name.clone(), type_params.clone());
                 }
                 StmtKind::Extern { fns, .. } => {
                     // Dynamic C-ABI FFI (`dlopen`/libffi) is unix-only — `int` marshals as C `long`,
@@ -984,7 +1066,8 @@ impl Checker {
                             // A void extern returns nothing observable; model it as `Nil`.
                             None => Ty::Nil,
                         };
-                        self.functions.insert(ef.name.clone(), FnSig::plain(params, ret));
+                        self.functions
+                            .insert(ef.name.clone(), FnSig::plain(params, ret));
                     }
                 }
                 _ => {}
@@ -1018,8 +1101,10 @@ impl Checker {
     /// single uniform error. Called on the **resolved** `Ty` (after `resolve_type`), so a transparent
     /// alias to a scalar is accepted. `Unknown` is already-errored and silently allowed (no cascade).
     fn assert_marshallable(&mut self, ty: &Ty, fn_name: &str, span: Span, allow_void: bool) {
-        let ok = matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Ptr | Ty::Unknown)
-            || (allow_void && matches!(ty, Ty::Nil));
+        let ok = matches!(
+            ty,
+            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Ptr | Ty::Unknown
+        ) || (allow_void && matches!(ty, Ty::Nil));
         if !ok {
             self.error(
                 span,
@@ -1067,7 +1152,10 @@ impl Checker {
                 Some(t) => self.resolve_type(t, span),
                 None if p.name == "self" => Ty::Unknown, // bound in check_fn_body
                 None => {
-                    self.error(span, format!("parameter '{}' needs a type annotation", p.name));
+                    self.error(
+                        span,
+                        format!("parameter '{}' needs a type annotation", p.name),
+                    );
                     Ty::Unknown
                 }
             })
@@ -1076,9 +1164,18 @@ impl Checker {
         // walks the body and replaces it with the inferred type. `Unknown` is the safe placeholder
         // any *other* function's inference sees in the meantime (forward refs degrade silently
         // rather than to a confidently-wrong `Nil`).
-        let ret = decl.ret.as_ref().map(|t| self.resolve_type(t, span)).unwrap_or(Ty::Unknown);
+        let ret = decl
+            .ret
+            .as_ref()
+            .map(|t| self.resolve_type(t, span))
+            .unwrap_or(Ty::Unknown);
         self.exit_type_params(saved);
-        FnSig { min_params: params.len(), params, ret, type_params: decl.type_params.clone() }
+        FnSig {
+            min_params: params.len(),
+            params,
+            ret,
+            type_params: decl.type_params.clone(),
+        }
     }
 
     /// Pass-1.5: for every function/method that omitted `-> T`, infer its return type from the
@@ -1088,27 +1185,39 @@ impl Checker {
         for s in stmts {
             match &s.kind {
                 StmtKind::Fn(decl) if decl.ret.is_none() => {
-                    let Some(sig) = self.functions.get(&decl.name).cloned() else { continue };
+                    let Some(sig) = self.functions.get(&decl.name).cloned() else {
+                        continue;
+                    };
                     let ret = self.infer_fn_ret(decl, None, &sig.params);
                     if let Some(sig) = self.functions.get_mut(&decl.name) {
                         sig.ret = ret;
                     }
                 }
-                StmtKind::Struct { name, type_params, methods, .. } => {
+                StmtKind::Struct {
+                    name,
+                    type_params,
+                    methods,
+                    ..
+                } => {
                     let self_ty = self.struct_self_ty(name);
                     let saved = self.enter_type_params(type_params);
                     for m in methods {
                         if m.ret.is_some() {
                             continue;
                         }
-                        let Some(sig) =
-                            self.structs.get(name).and_then(|s| s.methods.get(&m.name)).cloned()
+                        let Some(sig) = self
+                            .structs
+                            .get(name)
+                            .and_then(|s| s.methods.get(&m.name))
+                            .cloned()
                         else {
                             continue;
                         };
                         let ret = self.infer_fn_ret(m, Some(self_ty.clone()), &sig.params);
-                        if let Some(ms) =
-                            self.structs.get_mut(name).and_then(|s| s.methods.get_mut(&m.name))
+                        if let Some(ms) = self
+                            .structs
+                            .get_mut(name)
+                            .and_then(|s| s.methods.get_mut(&m.name))
                         {
                             ms.ret = ret;
                         }
@@ -1153,7 +1262,12 @@ impl Checker {
         // An inline-expr body (`fn a(): <expr>`) implicitly returns its single expression, so its
         // type IS the inferred return (mirroring a closure body) — there is no `return` to collect.
         let inline_ret = if decl.inline_expr_body
-            && let [Stmt { kind: StmtKind::Expr(e), .. }] = decl.body.as_slice()
+            && let [
+                Stmt {
+                    kind: StmtKind::Expr(e),
+                    ..
+                },
+            ] = decl.body.as_slice()
         {
             Some(self.infer(e))
         } else {
@@ -1239,7 +1353,10 @@ impl Checker {
                     // A generic struct written without type arguments is missing them.
                     let nparams = self.structs.get(n).map_or(0, |i| i.type_params.len());
                     if nparams > 0 {
-                        self.error(span, format!("type '{n}' expects {nparams} type argument(s), got 0"));
+                        self.error(
+                            span,
+                            format!("type '{n}' expects {nparams} type argument(s), got 0"),
+                        );
                     }
                     Ty::strukt(n.clone())
                 }
@@ -1247,7 +1364,10 @@ impl Checker {
                     // A generic enum written without type arguments is missing them.
                     let nparams = self.enum_type_params.get(n).map_or(0, |tps| tps.len());
                     if nparams > 0 {
-                        self.error(span, format!("type '{n}' expects {nparams} type argument(s), got 0"));
+                        self.error(
+                            span,
+                            format!("type '{n}' expects {nparams} type argument(s), got 0"),
+                        );
                     }
                     Ty::Enum(n.clone(), Vec::new())
                 }
@@ -1318,7 +1438,8 @@ impl Checker {
                 }
                 // A user-defined generic struct instantiated with type arguments: `Pair[int, str]`.
                 _ if self.struct_names.contains(n) => {
-                    let resolved: Vec<Ty> = args.iter().map(|a| self.resolve_type(a, span)).collect();
+                    let resolved: Vec<Ty> =
+                        args.iter().map(|a| self.resolve_type(a, span)).collect();
                     // Clone the param list out so the borrow on `self.structs` is dropped before
                     // the `satisfies`/`error` calls below.
                     let tps = self.structs.get(n).map(|i| i.type_params.clone());
@@ -1346,7 +1467,8 @@ impl Checker {
                 }
                 // A user-defined generic enum instantiated with type arguments: `Tree[int]`.
                 _ if self.enum_names.contains(n) => {
-                    let resolved: Vec<Ty> = args.iter().map(|a| self.resolve_type(a, span)).collect();
+                    let resolved: Vec<Ty> =
+                        args.iter().map(|a| self.resolve_type(a, span)).collect();
                     let tps = self.enum_type_params.get(n).cloned();
                     if let Some(tps) = tps {
                         if tps.len() != resolved.len() {
@@ -1403,7 +1525,12 @@ impl Checker {
     fn check_stmt(&mut self, stmt: &Stmt) {
         let span = stmt.span;
         match &stmt.kind {
-            StmtKind::Let { names, ty, value, is_ref } => {
+            StmtKind::Let {
+                names,
+                ty,
+                value,
+                is_ref,
+            } => {
                 let is_ref = *is_ref;
                 let val_ty = self.infer_value(value);
                 if names.len() > 1 {
@@ -1420,13 +1547,20 @@ impl Checker {
                         // if it is not boxable (e.g. a bare unconstrained generic) by `check_ref_ty`.
                         let expected = if is_ref {
                             self.check_ref_ty(t, span);
-                            self.resolve_type(&Type::Generic("Ref".to_string(), vec![t.clone()]), span)
+                            self.resolve_type(
+                                &Type::Generic("Ref".to_string(), vec![t.clone()]),
+                                span,
+                            )
                         } else {
                             self.resolve_type(t, span)
                         };
                         if !self.assignable(&expected, &val_ty) {
                             // Transparency: a `ref T` binding's mismatch renders `ref T`, not `Ref[T]`.
-                            let exp = if is_ref { ref_display(&expected) } else { expected.to_string() };
+                            let exp = if is_ref {
+                                ref_display(&expected)
+                            } else {
+                                expected.to_string()
+                            };
                             self.error(
                                 value.span,
                                 format!("cannot assign {val_ty} to variable of type {exp}"),
@@ -1454,7 +1588,12 @@ impl Checker {
                     self.check_fn_body(decl, None, sig);
                 }
             }
-            StmtKind::Struct { name, type_params, fields, methods } => {
+            StmtKind::Struct {
+                name,
+                type_params,
+                fields,
+                methods,
+            } => {
                 let self_ty = self.struct_self_ty(name);
                 // The struct's type parameters are in scope across its method bodies.
                 let saved = self.enter_type_params(type_params);
@@ -1464,7 +1603,8 @@ impl Checker {
                     if let Some(def) = &field.default {
                         let expected = self.resolve_type(&field.ty, def.span);
                         let actual = self.infer(def);
-                        if !matches!(expected, Ty::Unknown) && !self.assignable(&expected, &actual) {
+                        if !matches!(expected, Ty::Unknown) && !self.assignable(&expected, &actual)
+                        {
                             self.error(
                                 def.span,
                                 format!(
@@ -1487,8 +1627,11 @@ impl Checker {
                     }
                     // Panic-safe: a redeclared struct name means `structs[name]` is a *different*
                     // struct whose method table may not contain `m.name`.
-                    if let Some(sig) =
-                        self.structs.get(name).and_then(|s| s.methods.get(&m.name)).cloned()
+                    if let Some(sig) = self
+                        .structs
+                        .get(name)
+                        .and_then(|s| s.methods.get(&m.name))
+                        .cloned()
                     {
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
@@ -1502,7 +1645,10 @@ impl Checker {
             | StmtKind::Protocol { .. }
             | StmtKind::Extern { .. }
             | StmtKind::TypeAlias { .. } => {}
-            StmtKind::If { branches, else_block } => {
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
                 for (cond, body) in branches {
                     self.expect_bool(cond, "if condition");
                     self.check_block(body);
@@ -1546,7 +1692,8 @@ impl Checker {
                     ExprKind::Call { callee, .. } => match &callee.kind {
                         ExprKind::Field { .. } => {} // method call
                         ExprKind::Ident(name)
-                            if self.lookup(name).is_none() && !self.functions.contains_key(name) =>
+                            if self.lookup(name).is_none()
+                                && !self.functions.contains_key(name) =>
                         {
                             self.error(
                                 e.span,
@@ -1631,7 +1778,9 @@ impl Checker {
                                 if !self.sendable(&rty) {
                                     bad.push((
                                         obj.span,
-                                        format!("cannot spawn on a non-sendable receiver of type {rty}"),
+                                        format!(
+                                            "cannot spawn on a non-sendable receiver of type {rty}"
+                                        ),
                                     ));
                                 }
                             }
@@ -1702,7 +1851,10 @@ impl Checker {
     /// Best-effort source span for a function declaration (FnDecl has no span of its own): the first
     /// body statement, since a test fn / lifecycle hook always has a non-empty body.
     fn fn_span(decl: &FnDecl) -> Span {
-        decl.body.first().map(|s| s.span).unwrap_or(Span { line: 0, col: 0 })
+        decl.body
+            .first()
+            .map(|s| s.span)
+            .unwrap_or(Span { line: 0, col: 0 })
     }
 
     /// A `test fn` takes no parameters (free) or only `self` (method) and returns nothing. Hard
@@ -1771,7 +1923,10 @@ impl Checker {
                 }
             }
             other => {
-                self.error(span, format!("cannot destructure non-tuple value of type {other}"));
+                self.error(
+                    span,
+                    format!("cannot destructure non-tuple value of type {other}"),
+                );
                 for name in names {
                     self.declare(name, Ty::Unknown);
                 }
@@ -1783,7 +1938,10 @@ impl Checker {
         match &target.kind {
             ExprKind::Ident(name) => {
                 let Some(var_ty) = self.lookup(name) else {
-                    self.error(span, format!("cannot assign to undeclared variable '{name}'"));
+                    self.error(
+                        span,
+                        format!("cannot assign to undeclared variable '{name}'"),
+                    );
                     return;
                 };
                 if self.is_loop_var(name) {
@@ -1845,7 +2003,10 @@ impl Checker {
                         if let Some((k, v)) = self.param_indexset_kv(&name, target.span) {
                             let idx_ty = self.infer(index);
                             if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
-                                self.error(index.span, format!("index must be {k}, found {idx_ty}"));
+                                self.error(
+                                    index.span,
+                                    format!("index must be {k}, found {idx_ty}"),
+                                );
                             }
                             self.check_assign_value(&v, op, &val_ty, target.span);
                         } else {
@@ -1857,7 +2018,10 @@ impl Checker {
                         if let Some((k, v)) = self.index_set_kv(&other) {
                             let idx_ty = self.infer(index);
                             if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
-                                self.error(index.span, format!("index must be {k}, found {idx_ty}"));
+                                self.error(
+                                    index.span,
+                                    format!("index must be {k}, found {idx_ty}"),
+                                );
                             }
                             self.check_assign_value(&v, op, &val_ty, target.span);
                         } else {
@@ -1874,15 +2038,18 @@ impl Checker {
                 match &obj_ty {
                     Ty::Struct(sname, targs) => {
                         let field_ty = self.structs.get(sname).and_then(|info| {
-                            info.fields.iter().find(|(f, _)| f == name).map(|(_, ty)| {
-                                subst(ty, &struct_param_map(info, targs))
-                            })
+                            info.fields
+                                .iter()
+                                .find(|(f, _)| f == name)
+                                .map(|(_, ty)| subst(ty, &struct_param_map(info, targs)))
                         });
                         match field_ty {
                             Some(ty) => self.check_assign_value(&ty, op, &val_ty, target.span),
                             None => self.error(
                                 target.span,
-                                format!("cannot assign to '{name}': type {obj_ty} has no field '{name}'"),
+                                format!(
+                                    "cannot assign to '{name}': type {obj_ty} has no field '{name}'"
+                                ),
                             ),
                         }
                     }
@@ -1900,14 +2067,21 @@ impl Checker {
             ExprKind::Tuple(targets) => {
                 let Ty::Tuple(elems) = &val_ty else {
                     if !val_ty.is_unknown() {
-                        self.error(span, format!("cannot assign {val_ty} to {} targets", targets.len()));
+                        self.error(
+                            span,
+                            format!("cannot assign {val_ty} to {} targets", targets.len()),
+                        );
                     }
                     return;
                 };
                 if elems.len() != targets.len() {
                     self.error(
                         span,
-                        format!("assignment has {} target(s) but the value has {} element(s)", targets.len(), elems.len()),
+                        format!(
+                            "assignment has {} target(s) but the value has {} element(s)",
+                            targets.len(),
+                            elems.len()
+                        ),
                     );
                     return;
                 }
@@ -1916,7 +2090,10 @@ impl Checker {
                     self.check_assign(t, AssignOp::Eq, ety, span);
                 }
             }
-            _ => self.error(target.span, "invalid assignment target (only variables can be assigned)"),
+            _ => self.error(
+                target.span,
+                "invalid assignment target (only variables can be assigned)",
+            ),
         }
     }
 
@@ -1948,7 +2125,10 @@ impl Checker {
                         AssignOp::SlashEq => "/=",
                         _ => "%=",
                     };
-                    self.error(span, format!("cannot apply {sym} to {target_ty} and {val_ty}"));
+                    self.error(
+                        span,
+                        format!("cannot apply {sym} to {target_ty} and {val_ty}"),
+                    );
                 }
             }
             // Bitwise/shift compound ops `&= |= ^= <<= >>=` — int-only (mirrors `infer_binary`'s
@@ -1994,7 +2174,10 @@ impl Checker {
         if self.yield_ty.is_some() {
             if let Some(e) = value {
                 let _ = self.infer(e);
-                self.error(e.span, "a generator cannot `return` a value; use a bare `return` to stop early");
+                self.error(
+                    e.span,
+                    "a generator cannot `return` a value; use a bare `return` to stop early",
+                );
             }
             return;
         }
@@ -2031,11 +2214,26 @@ impl Checker {
                 self.check_generator_restrictions(b);
             }
             match &s.kind {
-                StmtKind::Defer(_) => self.error(s.span, "`defer` is not supported inside a generator (experimental)"),
-                StmtKind::Spawn(_) => self.error(s.span, "`spawn` is not supported inside a generator (experimental)"),
-                StmtKind::Parallel { .. } => self.error(s.span, "`parallel:` is not supported inside a generator (experimental)"),
-                StmtKind::Wait { .. } => self.error(s.span, "`wait:` is not supported inside a generator (experimental)"),
-                StmtKind::If { branches, else_block } => {
+                StmtKind::Defer(_) => self.error(
+                    s.span,
+                    "`defer` is not supported inside a generator (experimental)",
+                ),
+                StmtKind::Spawn(_) => self.error(
+                    s.span,
+                    "`spawn` is not supported inside a generator (experimental)",
+                ),
+                StmtKind::Parallel { .. } => self.error(
+                    s.span,
+                    "`parallel:` is not supported inside a generator (experimental)",
+                ),
+                StmtKind::Wait { .. } => self.error(
+                    s.span,
+                    "`wait:` is not supported inside a generator (experimental)",
+                ),
+                StmtKind::If {
+                    branches,
+                    else_block,
+                } => {
                     for (_, b) in branches {
                         self.check_generator_restrictions(b);
                     }
@@ -2074,11 +2272,17 @@ impl Checker {
             // non-nil signature is already its own error in `check_return`; don't double-report).
             StmtKind::Return(_) => true,
             // An `if` terminates only with an `else` AND every branch body + the else body terminate.
-            StmtKind::If { branches, else_block: Some(eb) } => {
-                branches.iter().all(|(_, b)| Self::block_terminates(b)) && Self::block_terminates(eb)
+            StmtKind::If {
+                branches,
+                else_block: Some(eb),
+            } => {
+                branches.iter().all(|(_, b)| Self::block_terminates(b))
+                    && Self::block_terminates(eb)
             }
             // No `else` -> the all-conditions-false path falls through.
-            StmtKind::If { else_block: None, .. } => false,
+            StmtKind::If {
+                else_block: None, ..
+            } => false,
             // A `match` terminates iff every arm body terminates. Exhaustiveness (coverage by the
             // unguarded arms) is enforced separately by the match checker, so once every arm
             // terminates the eventually-chosen arm terminates too.
@@ -2121,7 +2325,10 @@ impl Checker {
     fn stmt_has_break(s: &Stmt) -> bool {
         match &s.kind {
             StmtKind::Break => true,
-            StmtKind::If { branches, else_block } => {
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
                 branches.iter().any(|(_, b)| Self::block_has_break(b))
                     || else_block.as_deref().is_some_and(Self::block_has_break)
             }
@@ -2213,7 +2420,12 @@ impl Checker {
         // double every error inside the expression). Any other body is checked statement-by-
         // statement as usual.
         if decl.inline_expr_body
-            && let [Stmt { kind: StmtKind::Expr(e), .. }] = decl.body.as_slice()
+            && let [
+                Stmt {
+                    kind: StmtKind::Expr(e),
+                    ..
+                },
+            ] = decl.body.as_slice()
         {
             let ret = sig.ret.clone();
             let ty = self.infer(e);
@@ -2275,13 +2487,17 @@ impl Checker {
     /// structural "iterator protocol": such a struct is iterable in a `for`. Mirrors the type-arg
     /// substitution `infer_method_call` does for the `Ty::Struct` arm.
     fn struct_iter_elem(&self, ty: &Ty) -> Option<Ty> {
-        let Ty::Struct(name, targs) = ty else { return None };
+        let Ty::Struct(name, targs) = ty else {
+            return None;
+        };
         let info = self.structs.get(name)?;
         let sig = info.methods.get("next")?;
         if sig.params.len() != 1 {
             return None; // (self) only — no extra args
         }
-        let Ty::Option(inner) = &sig.ret else { return None };
+        let Ty::Option(inner) = &sig.ret else {
+            return None;
+        };
         let map = struct_param_map(info, targs);
         Some(subst(inner, &map))
     }
@@ -2291,7 +2507,9 @@ impl Checker {
     /// `next` is recognised as `Iterable` and bound in `for`. `Iterator` is not a registered struct,
     /// so this only matches real user structs.
     fn struct_iterable_elem(&self, ty: &Ty) -> Option<Ty> {
-        let Ty::Struct(name, targs) = ty else { return None };
+        let Ty::Struct(name, targs) = ty else {
+            return None;
+        };
         if name == "Iterator" {
             return None; // the existential cursor — handled by `iter_elem`, not as a user struct
         }
@@ -2300,7 +2518,9 @@ impl Checker {
         if sig.params.len() != 1 {
             return None; // (self) only
         }
-        let Ty::Struct(rname, rargs) = &sig.ret else { return None };
+        let Ty::Struct(rname, rargs) = &sig.ret else {
+            return None;
+        };
         if rname != "Iterator" || rargs.len() != 1 {
             return None; // must declare `-> Iterator[E]`
         }
@@ -2330,7 +2550,9 @@ impl Checker {
             Ty::Bytes | Ty::ByteArray => Some(Ty::Int),
             Ty::Map(k, _) => Some((**k).clone()),
             // `Iterator[T]` value (a generator result): element type is its single type argument.
-            Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => Some(args[0].clone()),
+            Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
+                Some(args[0].clone())
+            }
             _ => self.struct_iter_elem(ty),
         }
     }
@@ -2365,7 +2587,9 @@ impl Checker {
     /// a plain `=` only calls `set_index`, but a compound `b[k] += v` reads via `index` first, so a
     /// struct missing `index` would type-check then crash. `None` ⇒ not index-assignable.
     fn index_set_kv(&self, ty: &Ty) -> Option<(Ty, Ty)> {
-        let Ty::Struct(name, targs) = ty else { return None };
+        let Ty::Struct(name, targs) = ty else {
+            return None;
+        };
         let info = self.structs.get(name)?;
         let sig = info.methods.get("set_index")?;
         if sig.params.len() != 3 {
@@ -2422,7 +2646,10 @@ impl Checker {
             self.expect_int(start, "range bound");
             self.expect_int(end, "range bound");
             if vars.len() != 1 {
-                self.error(iter.span, "a range binds a single loop variable; `for k, v` needs a map");
+                self.error(
+                    iter.span,
+                    "a range binds a single loop variable; `for k, v` needs a map",
+                );
                 return unknowns(vars);
             }
             return vec![(vars[0].clone(), Ty::Int)];
@@ -2431,9 +2658,15 @@ impl Checker {
         match &it {
             Ty::Map(k, v) => match vars.len() {
                 1 => vec![(vars[0].clone(), (**k).clone())],
-                2 => vec![(vars[0].clone(), (**k).clone()), (vars[1].clone(), (**v).clone())],
+                2 => vec![
+                    (vars[0].clone(), (**k).clone()),
+                    (vars[1].clone(), (**v).clone()),
+                ],
                 _ => {
-                    self.error(iter.span, "a `for` over a map binds one (key) or two (key, value) names");
+                    self.error(
+                        iter.span,
+                        "a `for` over a map binds one (key) or two (key, value) names",
+                    );
                     unknowns(vars)
                 }
             },
@@ -2453,11 +2686,16 @@ impl Checker {
                 }
                 Ty::Unknown => unknowns(vars),
                 _ => {
-                    self.error(iter.span, format!("`for k, v` requires a map or a list of tuples, found {it}"));
+                    self.error(
+                        iter.span,
+                        format!("`for k, v` requires a map or a list of tuples, found {it}"),
+                    );
                     unknowns(vars)
                 }
             },
-            Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Set(_) | Ty::Channel(_) if vars.len() != 1 => {
+            Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Set(_) | Ty::Channel(_)
+                if vars.len() != 1 =>
+            {
                 if matches!(it, Ty::Channel(_)) {
                     self.error(iter.span, "a channel iterator binds a single loop variable");
                 } else {
@@ -2499,7 +2737,10 @@ impl Checker {
             // A generator result `Iterator[T]` (experimental, VM-only) binds a single element of T.
             Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
                 if vars.len() != 1 {
-                    self.error(iter.span, "a generator iterator binds a single loop variable");
+                    self.error(
+                        iter.span,
+                        "a generator iterator binds a single loop variable",
+                    );
                     return unknowns(vars);
                 }
                 vec![(vars[0].clone(), args[0].clone())]
@@ -2508,7 +2749,9 @@ impl Checker {
                 // A user struct with `next(self) -> Option[E]` is iterable; it binds a single element.
                 // Checked FIRST so a struct with BOTH `next` and `iter` keeps the existing `next()`
                 // fast path (back-compat precedence).
-                let elem = self.struct_iter_elem(&it).expect("guarded by the match arm");
+                let elem = self
+                    .struct_iter_elem(&it)
+                    .expect("guarded by the match arm");
                 if vars.len() != 1 {
                     self.error(iter.span, "a struct iterator binds a single loop variable");
                     return unknowns(vars);
@@ -2518,7 +2761,9 @@ impl Checker {
             _ if self.struct_iterable_elem(&it).is_some() => {
                 // A pure-`Iterable` struct: `iter(self) -> Iterator[E]` but NO `next`. Driven by a
                 // one-time `.iter()` then the cursor's `next()` (the additive `Iterable` for-case).
-                let elem = self.struct_iterable_elem(&it).expect("guarded by the match arm");
+                let elem = self
+                    .struct_iterable_elem(&it)
+                    .expect("guarded by the match arm");
                 if vars.len() != 1 {
                     self.error(iter.span, "a struct iterator binds a single loop variable");
                     return unknowns(vars);
@@ -2553,7 +2798,10 @@ impl Checker {
                         (v, payload)
                     })
                     .collect();
-                MatchKind::Variants { label: name.clone(), variants }
+                MatchKind::Variants {
+                    label: name.clone(),
+                    variants,
+                }
             }
             Ty::Result(ok, err) => MatchKind::Variants {
                 label: "Result".into(),
@@ -2576,7 +2824,10 @@ impl Checker {
             Ty::Tuple(tys) => MatchKind::Tuple(tys.clone()),
             Ty::Unknown => MatchKind::Skip, // un-inferable: skip exhaustiveness
             other => {
-                self.error(scrutinee.span, format!("cannot match on non-enum type {other}"));
+                self.error(
+                    scrutinee.span,
+                    format!("cannot match on non-enum type {other}"),
+                );
                 MatchKind::Skip
             }
         }
@@ -2587,7 +2838,12 @@ impl Checker {
     fn enum_param_map(&self, name: &str, targs: &[Ty]) -> HashMap<String, Ty> {
         self.enum_type_params
             .get(name)
-            .map(|tps| tps.iter().map(|tp| tp.name.clone()).zip(targs.iter().cloned()).collect())
+            .map(|tps| {
+                tps.iter()
+                    .map(|tp| tp.name.clone())
+                    .zip(targs.iter().cloned())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -2672,49 +2928,64 @@ impl Checker {
             Pattern::Literal(lit) => {
                 let lit_ty = lit_pattern_ty(lit);
                 if !ty.is_unknown() && &lit_ty != ty {
-                    self.error(span, format!("literal of type {lit_ty} cannot match a value of type {ty}"));
+                    self.error(
+                        span,
+                        format!("literal of type {lit_ty} cannot match a value of type {ty}"),
+                    );
                 }
                 false
             }
             Pattern::Range { .. } => {
                 // A range sub-pattern is int-only and always refutable.
                 if !ty.is_unknown() && ty != &Ty::Int {
-                    self.error(span, format!("range pattern cannot match a value of type {ty}"));
+                    self.error(
+                        span,
+                        format!("range pattern cannot match a value of type {ty}"),
+                    );
                 }
                 false
             }
-            Pattern::Tuple(subs) => {
-                match ty {
-                    Ty::Tuple(tys) => {
-                        if tys.len() != subs.len() {
-                            self.error(
-                                span,
-                                format!("tuple pattern has {} element(s), but the value has {}", subs.len(), tys.len()),
-                            );
-                        }
-                        let mut irref = true;
-                        for (sub, t) in subs.iter().zip(tys.iter()) {
-                            irref &= self.bind_subpattern(sub, t, span);
-                        }
-                        irref
+            Pattern::Tuple(subs) => match ty {
+                Ty::Tuple(tys) => {
+                    if tys.len() != subs.len() {
+                        self.error(
+                            span,
+                            format!(
+                                "tuple pattern has {} element(s), but the value has {}",
+                                subs.len(),
+                                tys.len()
+                            ),
+                        );
                     }
-                    Ty::Unknown => {
-                        let mut irref = true;
-                        for sub in subs {
-                            irref &= self.bind_subpattern(sub, &Ty::Unknown, span);
-                        }
-                        irref
+                    let mut irref = true;
+                    for (sub, t) in subs.iter().zip(tys.iter()) {
+                        irref &= self.bind_subpattern(sub, t, span);
                     }
-                    other => {
-                        self.error(span, format!("tuple pattern cannot match a value of type {other}"));
-                        for sub in subs {
-                            self.bind_subpattern(sub, &Ty::Unknown, span);
-                        }
-                        false
-                    }
+                    irref
                 }
-            }
-            Pattern::Variant { name, bindings, enum_name } => {
+                Ty::Unknown => {
+                    let mut irref = true;
+                    for sub in subs {
+                        irref &= self.bind_subpattern(sub, &Ty::Unknown, span);
+                    }
+                    irref
+                }
+                other => {
+                    self.error(
+                        span,
+                        format!("tuple pattern cannot match a value of type {other}"),
+                    );
+                    for sub in subs {
+                        self.bind_subpattern(sub, &Ty::Unknown, span);
+                    }
+                    false
+                }
+            },
+            Pattern::Variant {
+                name,
+                bindings,
+                enum_name,
+            } => {
                 self.check_pattern_qualifier(enum_name, name, Self::scrutinee_enum(ty), span);
                 match self.variants_of(ty) {
                     Some(vmap) => match vmap.get(name) {
@@ -2722,7 +2993,11 @@ impl Checker {
                             if payload.len() != bindings.len() {
                                 self.error(
                                     span,
-                                    format!("variant '{name}' binds {} value(s), but {} given", payload.len(), bindings.len()),
+                                    format!(
+                                        "variant '{name}' binds {} value(s), but {} given",
+                                        payload.len(),
+                                        bindings.len()
+                                    ),
                                 );
                             }
                             for (b, t) in bindings.iter().zip(payload.iter()) {
@@ -2742,7 +3017,10 @@ impl Checker {
                         }
                     }
                     None => {
-                        self.error(span, format!("variant pattern '{name}' cannot match a value of type {ty}"));
+                        self.error(
+                            span,
+                            format!("variant pattern '{name}' cannot match a value of type {ty}"),
+                        );
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
                         }
@@ -2767,8 +3045,13 @@ impl Checker {
             let alt_irref = self.bind_subpattern(alt, ty, span);
             irref |= alt_irref;
             // Snapshot the names this alternative introduced (its scratch scope's top frame).
-            let snap: std::collections::BTreeMap<String, Ty> =
-                self.scopes.last().cloned().unwrap_or_default().into_iter().collect();
+            let snap: std::collections::BTreeMap<String, Ty> = self
+                .scopes
+                .last()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
             self.pop_scope();
             binders.push((i, snap));
         }
@@ -2848,8 +3131,13 @@ impl Checker {
             for (i, alt) in alts.iter().enumerate() {
                 // Recurse: this pushes a scratch scope, threads `covered`, binds the alternative.
                 let alt_irref = self.bind_match_arm(alt, kind, span, covered);
-                let snap: std::collections::BTreeMap<String, Ty> =
-                    self.scopes.last().cloned().unwrap_or_default().into_iter().collect();
+                let snap: std::collections::BTreeMap<String, Ty> = self
+                    .scopes
+                    .last()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
                 self.pop_scope(); // discard the scratch scope (we re-declare into the arm scope)
                 irref |= alt_irref;
                 binders.push((i, snap));
@@ -2863,7 +3151,11 @@ impl Checker {
                 // as `Unknown`. Still scope so the caller can `pop_scope` uniformly.
                 self.push_scope();
                 match pattern {
-                    Pattern::Variant { name, bindings, enum_name } => {
+                    Pattern::Variant {
+                        name,
+                        bindings,
+                        enum_name,
+                    } => {
                         // Un-inferable scrutinee (Skip): no enum to validate the qualifier against.
                         self.check_pattern_qualifier(enum_name, name, None, span);
                         covered.insert(name.clone());
@@ -2882,7 +3174,11 @@ impl Checker {
             MatchKind::Variants { label, variants } => {
                 self.push_scope();
                 match pattern {
-                    Pattern::Variant { name, bindings, enum_name } => {
+                    Pattern::Variant {
+                        name,
+                        bindings,
+                        enum_name,
+                    } => {
                         self.check_pattern_qualifier(enum_name, name, Some(label.as_str()), span);
                         let payload = variants.get(name).cloned();
                         if payload.is_none() {
@@ -2896,7 +3192,11 @@ impl Checker {
                                 if payload.len() != bindings.len() {
                                     self.error(
                                         span,
-                                        format!("variant '{name}' binds {} value(s), but {} given", payload.len(), bindings.len()),
+                                        format!(
+                                            "variant '{name}' binds {} value(s), but {} given",
+                                            payload.len(),
+                                            bindings.len()
+                                        ),
                                     );
                                 }
                                 for (b, t) in bindings.iter().zip(payload.iter()) {
@@ -2910,9 +3210,15 @@ impl Checker {
                             }
                         }
                     }
-                    Pattern::Literal(_) => self.error(span, format!("cannot match a literal against {label}")),
-                    Pattern::Range { .. } => self.error(span, format!("cannot match a range against {label}")),
-                    Pattern::Tuple(_) => self.error(span, format!("cannot match a tuple against {label}")),
+                    Pattern::Literal(_) => {
+                        self.error(span, format!("cannot match a literal against {label}"))
+                    }
+                    Pattern::Range { .. } => {
+                        self.error(span, format!("cannot match a range against {label}"))
+                    }
+                    Pattern::Tuple(_) => {
+                        self.error(span, format!("cannot match a tuple against {label}"))
+                    }
                     Pattern::Ident(_) | Pattern::Wildcard | Pattern::Or(_) => {
                         unreachable!("ident/wildcard/or handled elsewhere")
                     }
@@ -2926,14 +3232,19 @@ impl Checker {
                         if &lit_ty != ty {
                             self.error(
                                 span,
-                                format!("literal of type {lit_ty} cannot match scrutinee of type {ty}"),
+                                format!(
+                                    "literal of type {lit_ty} cannot match scrutinee of type {ty}"
+                                ),
                             );
                         }
                     }
                     Pattern::Range { .. } => {
                         // A range pattern is int-only; reject against str/bool scrutinees.
                         if ty != &Ty::Int {
-                            self.error(span, format!("range pattern cannot match scrutinee of type {ty}"));
+                            self.error(
+                                span,
+                                format!("range pattern cannot match scrutinee of type {ty}"),
+                            );
                         }
                     }
                     // int/str/bool have no nullary variants, so a bare top-level identifier here is a
@@ -2942,7 +3253,11 @@ impl Checker {
                     // name is a registered variant (e.g. `None`). The compiler routes by the variant
                     // registry, so a colliding name would bind in the interp but trap on the VM; reject
                     // it here so all engines agree. (Rename the binding to fix.)
-                    Pattern::Variant { name, bindings, enum_name } if bindings.is_empty() => {
+                    Pattern::Variant {
+                        name,
+                        bindings,
+                        enum_name,
+                    } if bindings.is_empty() => {
                         // A *qualified* `Enum.Variant` is unambiguously a variant, never a binding —
                         // validate the qualifier and reject it against an int/str/bool scrutinee (a
                         // variant cannot match a literal-typed value). Falls through the bare path
@@ -2970,7 +3285,11 @@ impl Checker {
                         self.declare(name, ty.clone());
                         return true;
                     }
-                    Pattern::Variant { bindings, enum_name, name } => {
+                    Pattern::Variant {
+                        bindings,
+                        enum_name,
+                        name,
+                    } => {
                         self.check_pattern_qualifier(enum_name, name, None, span);
                         self.error(span, format!("cannot match a variant against {ty}"));
                         // Still bind the payload sub-patterns (as Unknown) so the arm body doesn't
@@ -2981,7 +3300,9 @@ impl Checker {
                             self.bind_subpattern(b, &Ty::Unknown, span);
                         }
                     }
-                    Pattern::Tuple(_) => self.error(span, format!("cannot match a tuple against {ty}")),
+                    Pattern::Tuple(_) => {
+                        self.error(span, format!("cannot match a tuple against {ty}"))
+                    }
                     Pattern::Ident(_) | Pattern::Wildcard | Pattern::Or(_) => {
                         unreachable!("ident/wildcard/or handled elsewhere")
                     }
@@ -2993,7 +3314,11 @@ impl Checker {
                     if tys.len() != subs.len() {
                         self.error(
                             span,
-                            format!("tuple pattern has {} element(s), but the value has {}", subs.len(), tys.len()),
+                            format!(
+                                "tuple pattern has {} element(s), but the value has {}",
+                                subs.len(),
+                                tys.len()
+                            ),
                         );
                     }
                     let mut irref = true;
@@ -3002,7 +3327,10 @@ impl Checker {
                     }
                     return irref;
                 }
-                self.error(span, "a tuple scrutinee requires a tuple pattern (or `_`)".to_string());
+                self.error(
+                    span,
+                    "a tuple scrutinee requires a tuple pattern (or `_`)".to_string(),
+                );
             }
         }
         false
@@ -3026,13 +3354,19 @@ impl Checker {
         match kind {
             MatchKind::Skip => {}
             MatchKind::Variants { label, variants } => {
-                let mut missing: Vec<String> =
-                    variants.keys().filter(|v| !covered.contains(*v)).cloned().collect();
+                let mut missing: Vec<String> = variants
+                    .keys()
+                    .filter(|v| !covered.contains(*v))
+                    .cloned()
+                    .collect();
                 if !missing.is_empty() {
                     missing.sort();
                     self.error(
                         span,
-                        format!("non-exhaustive match on {label}: missing {}", missing.join(", ")),
+                        format!(
+                            "non-exhaustive match on {label}: missing {}",
+                            missing.join(", ")
+                        ),
                     );
                 }
             }
@@ -3069,7 +3403,9 @@ impl Checker {
                 WaitTarget::Bind(name) => self.declare(name, elem),
                 // `=` assigns an existing outer lvalue — reuse the ordinary assignment checks
                 // (assignability, type match, read-only/loop-var gates).
-                WaitTarget::Assign(target) => self.check_assign(target, AssignOp::Eq, elem, arm.span),
+                WaitTarget::Assign(target) => {
+                    self.check_assign(target, AssignOp::Eq, elem, arm.span)
+                }
                 WaitTarget::Discard => {}
             }
             for stmt in &arm.body {
@@ -3140,13 +3476,12 @@ impl Checker {
             None => t,
             Some(prev) => {
                 if compatible(&prev, &t) {
-                    if prev.is_unknown() {
-                        t
-                    } else {
-                        prev
-                    }
+                    if prev.is_unknown() { t } else { prev }
                 } else {
-                    self.error(span, format!("branches have incompatible types: {prev} and {t}"));
+                    self.error(
+                        span,
+                        format!("branches have incompatible types: {prev} and {t}"),
+                    );
                     Ty::Unknown
                 }
             }
@@ -3182,15 +3517,25 @@ impl Checker {
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Ident(name) => self.infer_ident(name, expr.span),
             ExprKind::List(items) => self.infer_list(items),
-            ExprKind::Tuple(items) => Ty::Tuple(items.iter().map(|e| self.infer_value(e)).collect()),
+            ExprKind::Tuple(items) => {
+                Ty::Tuple(items.iter().map(|e| self.infer_value(e)).collect())
+            }
             ExprKind::Map(entries) => self.infer_map(entries),
             ExprKind::Set(elems) => self.infer_set(elems),
-            ExprKind::Comprehension { kind, key, elem, clauses } => {
-                self.infer_comprehension(*kind, key.as_deref(), elem, clauses)
-            }
+            ExprKind::Comprehension {
+                kind,
+                key,
+                elem,
+                clauses,
+            } => self.infer_comprehension(*kind, key.as_deref(), elem, clauses),
             ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner),
             ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
-            ExprKind::Slice { obj, start, end, step } => self.infer_slice(
+            ExprKind::Slice {
+                obj,
+                start,
+                end,
+                step,
+            } => self.infer_slice(
                 obj,
                 start.as_deref(),
                 end.as_deref(),
@@ -3202,9 +3547,12 @@ impl Checker {
                 self.expect_int(end, "range bound");
                 Ty::list(Ty::Int)
             }
-            ExprKind::Call { callee, args, type_args, .. } => {
-                self.infer_call(callee, args, type_args, expr.span)
-            }
+            ExprKind::Call {
+                callee,
+                args,
+                type_args,
+                ..
+            } => self.infer_call(callee, args, type_args, expr.span),
             ExprKind::Field { obj, name } => self.infer_field(obj, name),
             ExprKind::Index { obj, index } => self.infer_index(obj, index),
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
@@ -3216,7 +3564,9 @@ impl Checker {
                 unreachable!("`?.`/`??` must be lowered by the desugar pass before checking")
             }
             ExprKind::DecodeCall { obj, ty, arg } => self.infer_decode(obj, ty, arg, expr.span),
-            ExprKind::Closure { params, ret, body } => self.infer_closure(params, ret.as_ref(), body),
+            ExprKind::Closure { params, ret, body } => {
+                self.infer_closure(params, ret.as_ref(), body)
+            }
             ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms),
             ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els),
             ExprKind::Recover(block) => self.infer_recover(block),
@@ -3229,7 +3579,10 @@ impl Checker {
         // A `recover:` block is a value, not a control-flow target: `return`/`break`/`continue` that
         // would escape it are rejected (both engines agree). `?` is fine — it propagates normally.
         if let Some((span, kw)) = recover_escaping_flow(block, false) {
-            self.error(span, format!("'{kw}' is not allowed inside a recover block"));
+            self.error(
+                span,
+                format!("'{kw}' is not allowed inside a recover block"),
+            );
         }
         self.push_scope();
         self.recover_depth += 1;
@@ -3268,7 +3621,10 @@ impl Checker {
             return ty;
         }
         if let Some(sig) = self.functions.get(name) {
-            return Ty::Func { params: sig.params.clone(), ret: Box::new(sig.ret.clone()) };
+            return Ty::Func {
+                params: sig.params.clone(),
+                ret: Box::new(sig.ret.clone()),
+            };
         }
         if name == "None" {
             return Ty::option(Ty::Unknown);
@@ -3440,10 +3796,16 @@ impl Checker {
         match op {
             And | Or => {
                 if l != Ty::Bool && !l.is_unknown() {
-                    self.error(lhs.span, format!("logical operator expects bool, found {l}"));
+                    self.error(
+                        lhs.span,
+                        format!("logical operator expects bool, found {l}"),
+                    );
                 }
                 if r != Ty::Bool && !r.is_unknown() {
-                    self.error(rhs.span, format!("logical operator expects bool, found {r}"));
+                    self.error(
+                        rhs.span,
+                        format!("logical operator expects bool, found {r}"),
+                    );
                 }
                 Ty::Bool
             }
@@ -3472,7 +3834,10 @@ impl Checker {
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
-                    self.error(lhs.span, format!("cannot apply {} to {l} and {r}", op_sym(op)));
+                    self.error(
+                        lhs.span,
+                        format!("cannot apply {} to {l} and {r}", op_sym(op)),
+                    );
                     Ty::Unknown
                 }
             }
@@ -3482,7 +3847,10 @@ impl Checker {
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
-                    self.error(lhs.span, format!("cannot apply {} to {l} and {r}", op_sym(op)));
+                    self.error(
+                        lhs.span,
+                        format!("cannot apply {} to {l} and {r}", op_sym(op)),
+                    );
                     Ty::Unknown
                 }
             }
@@ -3504,7 +3872,10 @@ impl Checker {
                 } else {
                     self.error(
                         lhs.span,
-                        format!("bitwise operator {} requires int operands, found {l} and {r}", op_sym(op)),
+                        format!(
+                            "bitwise operator {} requires int operands, found {l} and {r}",
+                            op_sym(op)
+                        ),
                     );
                     Ty::Unknown
                 }
@@ -3531,17 +3902,30 @@ impl Checker {
                     }
                     Ty::Map(key, _) => {
                         if !either_unknown && !compatible(key, &l) {
-                            self.error(lhs.span, format!("cannot test membership of {l} in {r} (map `in` tests keys)"));
+                            self.error(
+                                lhs.span,
+                                format!(
+                                    "cannot test membership of {l} in {r} (map `in` tests keys)"
+                                ),
+                            );
                         }
                     }
                     Ty::Str => {
                         if l != Ty::Str && !either_unknown {
-                            self.error(lhs.span, format!("substring `in` requires a str on the left, found {l}"));
+                            self.error(
+                                lhs.span,
+                                format!("substring `in` requires a str on the left, found {l}"),
+                            );
                         }
                     }
                     Ty::Unknown => {}
                     other => {
-                        self.error(rhs.span, format!("cannot use `in` on {other} (expected a list, set, map, or str)"));
+                        self.error(
+                            rhs.span,
+                            format!(
+                                "cannot use `in` on {other} (expected a list, set, map, or str)"
+                            ),
+                        );
                     }
                 }
                 Ty::Bool
@@ -3558,8 +3942,14 @@ impl Checker {
                 format!("'{name}' is a variant of enum '{en}'; write it qualified as '{en}.{name}'")
             }
             Some(ens @ [_, _, ..]) => {
-                let opts = ens.iter().map(|e| format!("'{e}.{name}'")).collect::<Vec<_>>().join(", ");
-                format!("'{name}' is a variant of several enums; write it qualified (one of {opts})")
+                let opts = ens
+                    .iter()
+                    .map(|e| format!("'{e}.{name}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "'{name}' is a variant of several enums; write it qualified (one of {opts})"
+                )
             }
             _ => format!("unknown name '{name}'"),
         }
@@ -3632,7 +4022,10 @@ impl Checker {
             && !self.is_local_binding(ename)
             && self.enums.contains_key(ename)
         {
-            let resolved = self.variants.get(&(ename.clone(), name.to_string())).cloned();
+            let resolved = self
+                .variants
+                .get(&(ename.clone(), name.to_string()))
+                .cloned();
             match resolved {
                 Some(v) if v.payload.is_empty() => {
                     let nparams = self.enum_type_params.get(ename).map_or(0, |t| t.len());
@@ -3670,7 +4063,10 @@ impl Checker {
                     }
                     if let Some(sig) = info.methods.get(name) {
                         let params = sig.params.iter().map(|t| subst(t, &map)).collect();
-                        return Ty::Func { params, ret: Box::new(subst(&sig.ret, &map)) };
+                        return Ty::Func {
+                            params,
+                            ret: Box::new(subst(&sig.ret, &map)),
+                        };
                     }
                 }
                 self.error(obj.span, format!("type {obj_ty} has no field '{name}'"));
@@ -3768,17 +4164,38 @@ impl Checker {
             .iter()
             .find(|b| matches!(b.name.as_str(), "Index" | "IndexSet"))
             .cloned()?;
-        let k = bound.args.first().map(|a| self.resolve_type(a, span)).unwrap_or(Ty::Unknown);
-        let v = bound.args.get(1).map(|a| self.resolve_type(a, span)).unwrap_or(Ty::Unknown);
+        let k = bound
+            .args
+            .first()
+            .map(|a| self.resolve_type(a, span))
+            .unwrap_or(Ty::Unknown);
+        let v = bound
+            .args
+            .get(1)
+            .map(|a| self.resolve_type(a, span))
+            .unwrap_or(Ty::Unknown);
         Some((k, v))
     }
 
     /// The `(K, V)` of a bounded type parameter's `IndexSet` bound (write requires `IndexSet`
     /// specifically — a read-only `Index` bound is not assignable). `None` ⇒ no `IndexSet` bound.
     fn param_indexset_kv(&mut self, name: &str, span: Span) -> Option<(Ty, Ty)> {
-        let bound = self.type_params.get(name)?.iter().find(|b| b.name == "IndexSet").cloned()?;
-        let k = bound.args.first().map(|a| self.resolve_type(a, span)).unwrap_or(Ty::Unknown);
-        let v = bound.args.get(1).map(|a| self.resolve_type(a, span)).unwrap_or(Ty::Unknown);
+        let bound = self
+            .type_params
+            .get(name)?
+            .iter()
+            .find(|b| b.name == "IndexSet")
+            .cloned()?;
+        let k = bound
+            .args
+            .first()
+            .map(|a| self.resolve_type(a, span))
+            .unwrap_or(Ty::Unknown);
+        let v = bound
+            .args
+            .get(1)
+            .map(|a| self.resolve_type(a, span))
+            .unwrap_or(Ty::Unknown);
         Some((k, v))
     }
 
@@ -3809,7 +4226,11 @@ impl Checker {
                 .get(name)
                 .and_then(|bs| bs.iter().find(|b| b.name == "Slice").cloned())
         {
-            return bound.args.first().map(|a| self.resolve_type(a, span)).unwrap_or(Ty::Unknown);
+            return bound
+                .args
+                .first()
+                .map(|a| self.resolve_type(a, span))
+                .unwrap_or(Ty::Unknown);
         }
         match self.slice_result(&obj_ty) {
             Some(r) => r,
@@ -3947,7 +4368,9 @@ impl Checker {
         // `?` inside the body targets THIS closure's return, not the enclosing function's. With no
         // annotation there is no Result/Option context, so `?` is rejected (`Unknown` → `infer_try`
         // errors). Mirrors `check_fn_body`'s `current_ret` handling.
-        let declared_ret = ret.map(|t| self.resolve_type(t, body.span)).unwrap_or(Ty::Unknown);
+        let declared_ret = ret
+            .map(|t| self.resolve_type(t, body.span))
+            .unwrap_or(Ty::Unknown);
         let saved_ret = std::mem::replace(&mut self.current_ret, declared_ret);
         // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
         // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
@@ -3964,7 +4387,10 @@ impl Checker {
                 let ty = match &p.ty {
                     Some(t) if p.is_ref => {
                         self.check_ref_ty(t, body.span);
-                        self.resolve_type(&Type::Generic("Ref".to_string(), vec![t.clone()]), body.span)
+                        self.resolve_type(
+                            &Type::Generic("Ref".to_string(), vec![t.clone()]),
+                            body.span,
+                        )
                     }
                     Some(t) => self.resolve_type(t, body.span),
                     None => Ty::Unknown,
@@ -3988,14 +4414,19 @@ impl Checker {
                 if !self.assignable(&declared, &body_ty) {
                     self.error(
                         body.span,
-                        format!("closure body has type {body_ty}, but its return type is {declared}"),
+                        format!(
+                            "closure body has type {body_ty}, but its return type is {declared}"
+                        ),
                     );
                 }
                 declared
             }
             None => body_ty,
         };
-        Ty::Func { params: param_tys, ret: Box::new(ret_ty) }
+        Ty::Func {
+            params: param_tys,
+            ret: Box::new(ret_ty),
+        }
     }
 
     // ===== calls =====
@@ -4003,7 +4434,10 @@ impl Checker {
     fn infer_call(&mut self, callee: &Expr, args: &[Expr], type_args: &[Type], span: Span) -> Ty {
         // Explicit call-site type arguments `name[T, …](…)`. Resolved once here; only generic
         // by-name calls (fn / struct / variant constructors) can consume them.
-        let targs: Vec<Ty> = type_args.iter().map(|t| self.resolve_type(t, span)).collect();
+        let targs: Vec<Ty> = type_args
+            .iter()
+            .map(|t| self.resolve_type(t, span))
+            .collect();
         // Method call: `obj.method(args)`. The parser never attaches type args to a method callee.
         if let ExprKind::Field { obj, name } = &callee.kind {
             // `Enum.Variant(args)` — qualified payload-variant constructor. Same gate as the nullary
@@ -4012,7 +4446,10 @@ impl Checker {
                 && !self.is_local_binding(ename)
                 && self.enums.contains_key(ename)
             {
-                if self.variants.contains_key(&(ename.clone(), name.to_string())) {
+                if self
+                    .variants
+                    .contains_key(&(ename.clone(), name.to_string()))
+                {
                     if let Some(ty) = self.infer_named_call(name, args, &targs, span, Some(ename)) {
                         return ty;
                     }
@@ -4079,7 +4516,11 @@ impl Checker {
         targs: &[Ty],
         span: Span,
     ) -> Ty {
-        let tps = self.enum_type_params.get(&v.enum_name).cloned().unwrap_or_default();
+        let tps = self
+            .enum_type_params
+            .get(&v.enum_name)
+            .cloned()
+            .unwrap_or_default();
         if tps.is_empty() {
             if !targs.is_empty() {
                 self.error(span, format!("'{name}' takes no type arguments"));
@@ -4110,8 +4551,10 @@ impl Checker {
             }
         }
         self.enforce_bounds(&tps, &sub, span);
-        let targs_out =
-            tps.iter().map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown)).collect();
+        let targs_out = tps
+            .iter()
+            .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
+            .collect();
         Ty::Enum(v.enum_name.clone(), targs_out)
     }
 
@@ -4127,7 +4570,10 @@ impl Checker {
         // dispatch below — so a variant named like a built-in (`enum E: Ok(int)`) or a struct can't be
         // hijacked by that branch. The caller has already verified `(enum, variant)` exists.
         if let Some(en) = enum_qual {
-            let v = self.variants.get(&(en.to_string(), name.to_string())).cloned()?;
+            let v = self
+                .variants
+                .get(&(en.to_string(), name.to_string()))
+                .cloned()?;
             return Some(self.infer_variant_call(&v, name, args, targs, span));
         }
         // Explicit call-site type arguments are only meaningful on a *generic* user fn / struct /
@@ -4152,7 +4598,10 @@ impl Checker {
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
                         Ty::List(_) | Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
-                        other => self.error(a.span, format!("len() expects a list, str, or bytes, got {other}")),
+                        other => self.error(
+                            a.span,
+                            format!("len() expects a list, str, or bytes, got {other}"),
+                        ),
                     }
                 }
                 Some(Ty::Int)
@@ -4207,7 +4656,10 @@ impl Checker {
             // (zero args can't infer T).
             "list" => {
                 if args.len() != 1 {
-                    self.error(span, "list() takes exactly one iterable argument — use [] for an empty list");
+                    self.error(
+                        span,
+                        "list() takes exactly one iterable argument — use [] for an empty list",
+                    );
                     return Some(Ty::list(Ty::Unknown));
                 }
                 let it = self.infer_value(&args[0]);
@@ -4215,7 +4667,10 @@ impl Checker {
                     Some(e) => e,
                     None if it.is_unknown() => Ty::Unknown,
                     None => {
-                        self.error(args[0].span, format!("list() expects an iterable, got {it}"));
+                        self.error(
+                            args[0].span,
+                            format!("list() expects an iterable, got {it}"),
+                        );
                         Ty::Unknown
                     }
                 };
@@ -4233,7 +4688,10 @@ impl Checker {
                             Some(e) => e,
                             None if it.is_unknown() => Ty::Unknown,
                             None => {
-                                self.error(args[0].span, format!("set() expects an iterable, got {it}"));
+                                self.error(
+                                    args[0].span,
+                                    format!("set() expects an iterable, got {it}"),
+                                );
                                 Ty::Unknown
                             }
                         };
@@ -4257,7 +4715,10 @@ impl Checker {
             // literal. (Free-call `map(it)` is a distinct namespace from the `xs.map(f)` list HOF.)
             "map" => {
                 if args.len() != 1 {
-                    self.error(span, "map() takes exactly one iterable argument — use {} for an empty map");
+                    self.error(
+                        span,
+                        "map() takes exactly one iterable argument — use {} for an empty map",
+                    );
                     return Some(Ty::map(Ty::Unknown, Ty::Unknown));
                 }
                 let it = self.infer_value(&args[0]);
@@ -4270,7 +4731,9 @@ impl Checker {
                     }
                 };
                 let (k, v) = match elem {
-                    Ty::Tuple(ref parts) if parts.len() == 2 => (parts[0].clone(), parts[1].clone()),
+                    Ty::Tuple(ref parts) if parts.len() == 2 => {
+                        (parts[0].clone(), parts[1].clone())
+                    }
                     Ty::Unknown => (Ty::Unknown, Ty::Unknown),
                     other => {
                         self.error(
@@ -4317,10 +4780,15 @@ impl Checker {
                         Ty::List(elem) if matches!(*elem, Ty::Int | Ty::Unknown) => {}
                         other => self.error(
                             args[0].span,
-                            format!("bytes() expects a bytes, a bytearray, or a list[int], got {other}"),
+                            format!(
+                                "bytes() expects a bytes, a bytearray, or a list[int], got {other}"
+                            ),
                         ),
                     },
-                    _ => self.error(span, "bytes() expects bytes(bytes|bytearray) or bytes(list[int])"),
+                    _ => self.error(
+                        span,
+                        "bytes() expects bytes(bytes|bytearray) or bytes(list[int])",
+                    ),
                 }
                 Some(Ty::Bytes)
             }
@@ -4340,7 +4808,10 @@ impl Checker {
                     }
                 };
                 if !elem.is_unknown() && !self.sendable(&elem) {
-                    self.error(span, format!("Channel element type must be sendable, found {elem}"));
+                    self.error(
+                        span,
+                        format!("Channel element type must be sendable, found {elem}"),
+                    );
                 }
                 Some(Ty::channel(elem))
             }
@@ -4378,8 +4849,10 @@ impl Checker {
             "Err" => Some(Ty::result_e(Ty::Unknown, self.one_arg(name, args, span))),
             _ => {
                 // Struct constructor?
-                if let Some((tps, fields)) =
-                    self.structs.get(name).map(|i| (i.type_params.clone(), i.fields.clone()))
+                if let Some((tps, fields)) = self
+                    .structs
+                    .get(name)
+                    .map(|i| (i.type_params.clone(), i.fields.clone()))
                 {
                     let field_tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();
                     if tps.is_empty() {
@@ -4403,13 +4876,17 @@ impl Checker {
                         if !self.assignable(&expected, actual) {
                             self.error(
                                 arg.span,
-                                format!("argument to '{name}' has type {actual}, expected {expected}"),
+                                format!(
+                                    "argument to '{name}' has type {actual}, expected {expected}"
+                                ),
                             );
                         }
                     }
                     self.enforce_bounds(&tps, &sub, span);
-                    let targs =
-                        tps.iter().map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown)).collect();
+                    let targs = tps
+                        .iter()
+                        .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
+                        .collect();
                     return Some(Ty::Struct(name.to_string(), targs));
                 }
                 // A bare user-variant constructor (`Circle(5)`) is no longer allowed — variants are
@@ -4460,7 +4937,10 @@ impl Checker {
         match &obj_ty {
             // `module.fn(args)` is a plain call on the member — no `self`.
             Ty::Module(mname) => {
-                let sig = self.imported_modules.get(mname).and_then(|id| self.module_sigs.get(id));
+                let sig = self
+                    .imported_modules
+                    .get(mname)
+                    .and_then(|id| self.module_sigs.get(id));
                 let is_poly = sig.is_some_and(|s| s.numeric_poly.contains(method));
                 let fsig = sig.and_then(|s| s.functions.get(method).cloned());
                 // Numeric-polymorphic native fns (gap #12): result type follows the argument type.
@@ -4507,7 +4987,12 @@ impl Checker {
                     return Ty::option(targs[0].clone());
                 }
                 self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}' (an iterator only has `next()`)"));
+                self.error(
+                    span,
+                    format!(
+                        "type {obj_ty} has no method '{method}' (an iterator only has `next()`)"
+                    ),
+                );
                 Ty::Unknown
             }
             Ty::Struct(sname, targs) => {
@@ -4525,14 +5010,18 @@ impl Checker {
                     // `[T]`, already substituted above). Infer them from the call arguments —
                     // mirrors the free generic-fn path (`infer_generic_call`).
                     if !mtps.is_empty() {
-                        return self.infer_generic_method(method, &params, &ret, &mtps, &obj_ty, args, span);
+                        return self.infer_generic_method(
+                            method, &params, &ret, &mtps, &obj_ty, args, span,
+                        );
                     }
                     // The first param is the receiver (bound implicitly from `obj`), so the call's
                     // explicit args correspond to params[1..]. A method with NO params has no
                     // receiver slot — both engines prepend the receiver and would error at runtime,
                     // so reject the call here instead.
                     match params.split_first() {
-                        Some((_receiver, expected)) => self.check_args(method, expected, args, span),
+                        Some((_receiver, expected)) => {
+                            self.check_args(method, expected, args, span)
+                        }
                         None => {
                             self.error(
                                 span,
@@ -4576,7 +5065,10 @@ impl Checker {
                 // Higher-order methods whose result/param types depend on the closure's
                 // `Ty::Func` can't be expressed by the fixed `list_method_sig` table, so handle
                 // them here. `Ty::Unknown` arguments are tolerated permissively (no cascade).
-                if matches!(method, "map" | "filter" | "fold" | "sort_by" | "sort_by_key") {
+                if matches!(
+                    method,
+                    "map" | "filter" | "fold" | "sort_by" | "sort_by_key"
+                ) {
                     let elem = (**elem).clone();
                     return self.infer_list_hof(method, &elem, args, span);
                 }
@@ -4587,7 +5079,10 @@ impl Checker {
                 if method == "sort" {
                     self.check_arity("sort", 0, args, span);
                     let elem = (**elem).clone();
-                    if is_orderable(&elem) || elem.is_unknown() || self.satisfies(&elem, "Comparable").is_ok() {
+                    if is_orderable(&elem)
+                        || elem.is_unknown()
+                        || self.satisfies(&elem, "Comparable").is_ok()
+                    {
                         return Ty::Nil;
                     }
                     self.error(
@@ -4602,7 +5097,10 @@ impl Checker {
                 }
                 self.infer_all(args);
                 if method == "sum" {
-                    self.error(span, format!("sum() requires a numeric list, found list[{elem}]"));
+                    self.error(
+                        span,
+                        format!("sum() requires a numeric list, found list[{elem}]"),
+                    );
                 } else {
                     self.error(span, format!("type {obj_ty} has no method '{method}'"));
                 }
@@ -4794,7 +5292,10 @@ impl Checker {
                     return subst(&msig.ret, &map);
                 }
                 self.infer_all(args);
-                self.error(span, format!("type parameter {pname} has no method '{method}'"));
+                self.error(
+                    span,
+                    format!("type parameter {pname} has no method '{method}'"),
+                );
                 Ty::Unknown
             }
             Ty::Unknown => {
@@ -4818,14 +5319,19 @@ impl Checker {
             // map(f: fn(T) -> U) -> list[U]
             "map" => {
                 if args.len() != 1 {
-                    self.error(span, format!("'map' expects 1 argument(s), got {}", args.len()));
+                    self.error(
+                        span,
+                        format!("'map' expects 1 argument(s), got {}", args.len()),
+                    );
                     self.infer_all(args);
                     return Ty::Unknown;
                 }
                 let ft = self.infer(&args[0]);
                 match ft {
                     Ty::Unknown => Ty::Unknown,
-                    Ty::Func { params, ret } if params.len() == 1 && compatible(&params[0], elem) => {
+                    Ty::Func { params, ret }
+                        if params.len() == 1 && compatible(&params[0], elem) =>
+                    {
                         Ty::list(*ret)
                     }
                     other => {
@@ -4840,7 +5346,10 @@ impl Checker {
             // filter(p: fn(T) -> bool) -> list[T]
             "filter" => {
                 if args.len() != 1 {
-                    self.error(span, format!("'filter' expects 1 argument(s), got {}", args.len()));
+                    self.error(
+                        span,
+                        format!("'filter' expects 1 argument(s), got {}", args.len()),
+                    );
                     self.infer_all(args);
                     return Ty::Unknown;
                 }
@@ -4866,7 +5375,10 @@ impl Checker {
             // fold(init: U, f: fn(U, T) -> U) -> U
             "fold" => {
                 if args.len() != 2 {
-                    self.error(span, format!("'fold' expects 2 argument(s), got {}", args.len()));
+                    self.error(
+                        span,
+                        format!("'fold' expects 2 argument(s), got {}", args.len()),
+                    );
                     self.infer_all(args);
                     return Ty::Unknown;
                 }
@@ -4990,7 +5502,10 @@ impl Checker {
                 Ty::Float => saw_float = true,
                 Ty::Unknown => {}
                 other => {
-                    self.error(a.span, format!("argument of '{method}': expected int or float, found {other}"));
+                    self.error(
+                        a.span,
+                        format!("argument of '{method}': expected int or float, found {other}"),
+                    );
                     bad = true;
                 }
             }
@@ -4998,7 +5513,9 @@ impl Checker {
         if saw_int && saw_float {
             self.error(
                 span,
-                format!("'{method}' arguments must be the same numeric type (no implicit int/float mix)"),
+                format!(
+                    "'{method}' arguments must be the same numeric type (no implicit int/float mix)"
+                ),
             );
             return Ty::Unknown;
         }
@@ -5018,7 +5535,9 @@ impl Checker {
 
     fn one_arg(&mut self, name: &str, args: &[Expr], span: Span) -> Ty {
         self.check_arity(name, 1, args, span);
-        args.first().map(|a| self.infer_value(a)).unwrap_or(Ty::Unknown)
+        args.first()
+            .map(|a| self.infer_value(a))
+            .unwrap_or(Ty::Unknown)
     }
 
     fn infer_all(&mut self, args: &[Expr]) {
@@ -5036,14 +5555,24 @@ impl Checker {
     /// `min_params..=params.len()`, and each supplied arg must match its positional param. Used for the
     /// net socket ops whose `timeout_ms` is optional. `min_params == params.len()` reproduces the
     /// exact-arity behavior of [`Checker::check_args`].
-    fn check_args_range(&mut self, name: &str, params: &[Ty], min_params: usize, args: &[Expr], span: Span) {
+    fn check_args_range(
+        &mut self,
+        name: &str,
+        params: &[Ty],
+        min_params: usize,
+        args: &[Expr],
+        span: Span,
+    ) {
         if !(min_params..=params.len()).contains(&args.len()) {
             let want = if min_params == params.len() {
                 format!("{}", params.len())
             } else {
                 format!("{min_params}–{}", params.len())
             };
-            self.error(span, format!("'{name}' expects {want} argument(s), got {}", args.len()));
+            self.error(
+                span,
+                format!("'{name}' expects {want} argument(s), got {}", args.len()),
+            );
         }
         for (i, arg) in args.iter().enumerate() {
             let at = self.infer_value(arg);
@@ -5060,7 +5589,10 @@ impl Checker {
                 };
                 self.error(
                     arg.span,
-                    format!("argument {} of '{name}': expected {expected}, found {actual}", i + 1),
+                    format!(
+                        "argument {} of '{name}': expected {expected}, found {actual}",
+                        i + 1
+                    ),
                 );
             }
         }
@@ -5068,7 +5600,10 @@ impl Checker {
 
     fn check_arity(&mut self, name: &str, n: usize, args: &[Expr], span: Span) {
         if args.len() != n {
-            self.error(span, format!("{name}() expects {n} argument(s), got {}", args.len()));
+            self.error(
+                span,
+                format!("{name}() expects {n} argument(s), got {}", args.len()),
+            );
         }
     }
 
@@ -5098,7 +5633,12 @@ impl Checker {
         let args = self
             .structs
             .get(name)
-            .map(|i| i.type_params.iter().map(|tp| Ty::Param(tp.name.clone())).collect())
+            .map(|i| {
+                i.type_params
+                    .iter()
+                    .map(|tp| Ty::Param(tp.name.clone()))
+                    .collect()
+            })
             .unwrap_or_default();
         Ty::Struct(name.to_string(), args)
     }
@@ -5124,7 +5664,10 @@ impl Checker {
         let mut seen_iterator = false;
         for b in bounds {
             let Some(arity) = self.protocols.get(&b.name).map(|p| p.type_params.len()) else {
-                self.error(span, format!("unknown protocol '{}' in bound on '{param}'", b.name));
+                self.error(
+                    span,
+                    format!("unknown protocol '{}' in bound on '{param}'", b.name),
+                );
                 continue;
             };
             if b.args.len() != arity {
@@ -5175,7 +5718,10 @@ impl Checker {
         // `fn get(self, i: int) -> T` resolves `T` to `Ty::Param("T")`.
         for tp in type_params {
             if tp.name == "Self" {
-                self.error(span, "protocol type parameter cannot be named 'Self'".to_string());
+                self.error(
+                    span,
+                    "protocol type parameter cannot be named 'Self'".to_string(),
+                );
             }
             self.type_params.insert(tp.name.clone(), tp.bounds.clone());
         }
@@ -5194,17 +5740,27 @@ impl Checker {
                         // method matches it, and a `ref` arg through the existential aliases.
                         Some(t) if p.is_ref => {
                             self.check_ref_ty(t, span);
-                            self.resolve_type(&Type::Generic("Ref".to_string(), vec![t.clone()]), span)
+                            self.resolve_type(
+                                &Type::Generic("Ref".to_string(), vec![t.clone()]),
+                                span,
+                            )
                         }
                         Some(t) => self.resolve_type(t, span),
                         None if p.name == "self" => Ty::Unknown,
                         None => {
-                            self.error(span, format!("protocol method parameter '{}' needs a type", p.name));
+                            self.error(
+                                span,
+                                format!("protocol method parameter '{}' needs a type", p.name),
+                            );
                             Ty::Unknown
                         }
                     })
                     .collect();
-                let ret = m.ret.as_ref().map(|t| self.resolve_type(t, span)).unwrap_or(Ty::Nil);
+                let ret = m
+                    .ret
+                    .as_ref()
+                    .map(|t| self.resolve_type(t, span))
+                    .unwrap_or(Ty::Nil);
                 (m.name.clone(), FnSig::plain(params, ret))
             })
             .collect();
@@ -5238,17 +5794,26 @@ impl Checker {
             (Unknown, _) | (_, Unknown) => true,
             (Protocol(p), a) => self.satisfies(a, p).is_ok(),
             (List(e), List(a)) | (Option(e), Option(a)) | (Set(e), Set(a)) => self.assignable(e, a),
-            (Result(et, ee), Result(at, ae)) => {
-                self.assignable(et, at) && self.assignable(ee, ae)
-            }
+            (Result(et, ee), Result(at, ae)) => self.assignable(et, at) && self.assignable(ee, ae),
             (Map(ek, ev), Map(ak, av)) => self.assignable(ek, ak) && self.assignable(ev, av),
             (Struct(n, ea), Struct(m, aa)) | (Enum(n, ea), Enum(m, aa)) => {
-                n == m && ea.len() == aa.len() && ea.iter().zip(aa).all(|(x, y)| self.assignable(x, y))
+                n == m
+                    && ea.len() == aa.len()
+                    && ea.iter().zip(aa).all(|(x, y)| self.assignable(x, y))
             }
             (Tuple(e), Tuple(a)) => {
                 e.len() == a.len() && e.iter().zip(a).all(|(x, y)| self.assignable(x, y))
             }
-            (Func { params: p1, ret: r1 }, Func { params: p2, ret: r2 }) => {
+            (
+                Func {
+                    params: p1,
+                    ret: r1,
+                },
+                Func {
+                    params: p2,
+                    ret: r2,
+                },
+            ) => {
                 p1.len() == p2.len()
                     && p1.iter().zip(p2).all(|(a, b)| self.assignable(a, b))
                     && self.assignable(r1, r2)
@@ -5307,12 +5872,14 @@ impl Checker {
                 ("Result", [x]) => Ty::result(self.resolve_ty_ro(x)),
                 ("Result", [x, e]) => Ty::result_e(self.resolve_ty_ro(x), self.resolve_ty_ro(e)),
                 ("map", [k, v]) => Ty::map(self.resolve_ty_ro(k), self.resolve_ty_ro(v)),
-                _ if self.struct_names.contains(n) => {
-                    Ty::Struct(n.clone(), args.iter().map(|a| self.resolve_ty_ro(a)).collect())
-                }
-                _ if self.enum_names.contains(n) => {
-                    Ty::Enum(n.clone(), args.iter().map(|a| self.resolve_ty_ro(a)).collect())
-                }
+                _ if self.struct_names.contains(n) => Ty::Struct(
+                    n.clone(),
+                    args.iter().map(|a| self.resolve_ty_ro(a)).collect(),
+                ),
+                _ if self.enum_names.contains(n) => Ty::Enum(
+                    n.clone(),
+                    args.iter().map(|a| self.resolve_ty_ro(a)).collect(),
+                ),
                 _ => Ty::Unknown,
             },
             Type::Func { params, ret } => Ty::Func {
@@ -5391,7 +5958,9 @@ impl Checker {
                     None => return Err(format!("type {ty} does not satisfy Slice")),
                 },
                 _ => {
-                    if protocol == "IndexSet" && !matches!(ty, Ty::List(_) | Ty::Map(_, _) | Ty::ByteArray) {
+                    if protocol == "IndexSet"
+                        && !matches!(ty, Ty::List(_) | Ty::Map(_, _) | Ty::ByteArray)
+                    {
                         return Err(format!("type {ty} does not satisfy IndexSet"));
                     }
                     match self.index_kv(ty) {
@@ -5448,10 +6017,15 @@ impl Checker {
                 };
                 // Substitute the protocol's own type params with the bound's args (`T ↦ int` for
                 // `Container[int]`) before matching; `Self` is handled inside `method_matches`.
-                let pmap: HashMap<String, Ty> =
-                    pinfo.type_params.iter().cloned().zip(args.iter().cloned()).collect();
+                let pmap: HashMap<String, Ty> = pinfo
+                    .type_params
+                    .iter()
+                    .cloned()
+                    .zip(args.iter().cloned())
+                    .collect();
                 for (mname, msig) in &pinfo.methods {
-                    let subst_params: Vec<Ty> = msig.params.iter().map(|t| subst(t, &pmap)).collect();
+                    let subst_params: Vec<Ty> =
+                        msig.params.iter().map(|t| subst(t, &pmap)).collect();
                     let min_params = subst_params.len();
                     let want = FnSig {
                         params: subst_params,
@@ -5500,11 +6074,13 @@ impl Checker {
     /// that satisfy `Comparable` (operator overloading dispatches to their `compare` at runtime).
     fn ordering_allowed(&self, l: &Ty, r: &Ty) -> bool {
         match (l, r) {
-            (Ty::Param(a), Ty::Param(b)) if a == b => self
-                .type_params
-                .get(a)
-                .is_some_and(|bs| bs.iter().any(|proto| self.protocol_has_method(&proto.name, "compare"))),
-            (Ty::Struct(a, _), Ty::Struct(b, _)) if a == b => self.satisfies(l, "Comparable").is_ok(),
+            (Ty::Param(a), Ty::Param(b)) if a == b => self.type_params.get(a).is_some_and(|bs| {
+                bs.iter()
+                    .any(|proto| self.protocol_has_method(&proto.name, "compare"))
+            }),
+            (Ty::Struct(a, _), Ty::Struct(b, _)) if a == b => {
+                self.satisfies(l, "Comparable").is_ok()
+            }
             _ => false,
         }
     }
@@ -5534,7 +6110,15 @@ impl Checker {
         match ty {
             // `bytearray` crosses by deep copy (a fresh independent buffer on the other side, like
             // `list`) — always sendable (its elements are always `int`).
-            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Nil | Ty::Unknown | Ty::Param(_) => true,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::Unknown
+            | Ty::Param(_) => true,
             // A `Shared[T]` handle always crosses — that's its whole point (one box, many tasks);
             // its element type is *not* a constraint (the value never crosses, only the handle).
             Ty::Shared(_) => true,
@@ -5551,7 +6135,9 @@ impl Checker {
             // An opaque `ptr` is a plain raw address (a `usize`) — it crosses the airlock by value,
             // so it is always sendable (its referent, if any, is the foreign library's concern).
             Ty::Ptr => true,
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Channel(t) => self.sendable_rec(t, stack),
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Channel(t) => {
+                self.sendable_rec(t, stack)
+            }
             Ty::Map(k, v) => self.sendable_rec(k, stack) && self.sendable_rec(v, stack),
             Ty::Result(t, e) => self.sendable_rec(t, stack) && self.sendable_rec(e, stack),
             Ty::Tuple(elems) => elems.iter().all(|t| self.sendable_rec(t, stack)),
@@ -5643,7 +6229,11 @@ impl Checker {
             if targs.len() != tps.len() {
                 self.error(
                     span,
-                    format!("'{name}' expects {} type argument(s), found {}", tps.len(), targs.len()),
+                    format!(
+                        "'{name}' expects {} type argument(s), found {}",
+                        tps.len(),
+                        targs.len()
+                    ),
                 );
             }
             for (tp, ta) in tps.iter().zip(targs) {
@@ -5686,9 +6276,7 @@ impl Checker {
                         Ty::Param(n) => sub.get(n).cloned().unwrap_or(Ty::Unknown),
                         other => other.clone(),
                     };
-                    if !pinned.is_unknown()
-                        && !elem.is_unknown()
-                        && !self.assignable(&pinned, elem)
+                    if !pinned.is_unknown() && !elem.is_unknown() && !self.assignable(&pinned, elem)
                     {
                         self.error(
                             span,
@@ -5706,7 +6294,9 @@ impl Checker {
     fn recover_index_args(&mut self, tps: &[TypeParam], sub: &mut HashMap<String, Ty>, span: Span) {
         let mut binds: Vec<(Ty, Ty)> = Vec::new();
         for tp in tps {
-            let Some(concrete) = sub.get(&tp.name).cloned() else { continue };
+            let Some(concrete) = sub.get(&tp.name).cloned() else {
+                continue;
+            };
             for b in &tp.bounds {
                 match b.name.as_str() {
                     "Index" | "IndexSet" => {
@@ -5749,7 +6339,9 @@ impl Checker {
                     {
                         self.error(
                             span,
-                            format!("index type {recovered} does not match the declared type {pinned}"),
+                            format!(
+                                "index type {recovered} does not match the declared type {pinned}"
+                            ),
                         );
                     }
                 }
@@ -5798,7 +6390,8 @@ impl Checker {
         // all, when none given) parameters are inferred from positional arguments. `unify` only
         // binds a parameter that isn't already in the map, so explicit args take precedence and a
         // conflicting argument is caught by the per-argument check below.
-        let mut subst_map: HashMap<String, Ty> = self.seed_targs(name, &sig.type_params, targs, span);
+        let mut subst_map: HashMap<String, Ty> =
+            self.seed_targs(name, &sig.type_params, targs, span);
         for (decl, actual) in sig.params.iter().zip(&arg_tys) {
             unify(decl, actual, &mut subst_map);
         }
@@ -5850,7 +6443,11 @@ impl Checker {
         if args.len() != expected.len() {
             self.error(
                 span,
-                format!("'{method}' expects {} argument(s), got {}", expected.len(), args.len()),
+                format!(
+                    "'{method}' expects {} argument(s), got {}",
+                    expected.len(),
+                    args.len()
+                ),
             );
         }
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
@@ -5931,7 +6528,10 @@ fn walk_spawn_roots(
                 collect_free_calls_block(body, fns, scopes, out);
                 walk_spawn_roots(body, fns, scopes, out); // nested spawns
             }
-            StmtKind::If { branches, else_block } => {
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
                 for (_, b) in branches {
                     walk_spawn_roots(b, fns, scopes, out);
                 }
@@ -6008,13 +6608,14 @@ fn collect_free_calls_block(
             }
             StmtKind::Return(Some(e))
             | StmtKind::Expr(e)
-            | StmtKind::Defer(DeferTarget::Call(e)) => {
-                collect_free_calls_expr(e, fns, scopes, out)
-            }
+            | StmtKind::Defer(DeferTarget::Call(e)) => collect_free_calls_expr(e, fns, scopes, out),
             StmtKind::Defer(DeferTarget::Block(body)) => {
                 collect_free_calls_block(body, fns, scopes, out)
             }
-            StmtKind::If { branches, else_block } => {
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
                 for (c, b) in branches {
                     collect_free_calls_expr(c, fns, scopes, out);
                     collect_free_calls_block(b, fns, scopes, out);
@@ -6084,7 +6685,12 @@ fn collect_free_calls_expr(
     out: &mut Vec<String>,
 ) {
     match &e.kind {
-        ExprKind::Call { callee, args, named, .. } => {
+        ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
             if let ExprKind::Ident(name) = &callee.kind {
                 if fns.contains_key(name.as_str()) && !is_locally_shadowed(name, scopes) {
                     out.push(name.clone());
@@ -6099,14 +6705,16 @@ fn collect_free_calls_expr(
                 collect_free_calls_expr(a, fns, scopes, out);
             }
         }
-        ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
-            xs.iter().for_each(|x| collect_free_calls_expr(x, fns, scopes, out))
-        }
+        ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => xs
+            .iter()
+            .for_each(|x| collect_free_calls_expr(x, fns, scopes, out)),
         ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
             collect_free_calls_expr(k, fns, scopes, out);
             collect_free_calls_expr(v, fns, scopes, out);
         }),
-        ExprKind::Comprehension { key, elem, clauses, .. } => {
+        ExprKind::Comprehension {
+            key, elem, clauses, ..
+        } => {
             // Clauses nest: each clause's iter is in the scope of earlier clauses; its vars then
             // bind for everything after. Push one scope per clause and pop them all at the end.
             for clause in clauses {
@@ -6138,7 +6746,12 @@ fn collect_free_calls_expr(
             collect_free_calls_expr(obj, fns, scopes, out);
             collect_free_calls_expr(index, fns, scopes, out);
         }
-        ExprKind::Slice { obj, start, end, step } => {
+        ExprKind::Slice {
+            obj,
+            start,
+            end,
+            step,
+        } => {
             collect_free_calls_expr(obj, fns, scopes, out);
             for c in [start, end, step].into_iter().flatten() {
                 collect_free_calls_expr(c, fns, scopes, out);
@@ -6148,8 +6761,12 @@ fn collect_free_calls_expr(
         ExprKind::OptChain { obj, call, .. } => {
             collect_free_calls_expr(obj, fns, scopes, out);
             if let Some(c) = call {
-                c.args.iter().for_each(|a| collect_free_calls_expr(a, fns, scopes, out));
-                c.named.iter().for_each(|(_, a)| collect_free_calls_expr(a, fns, scopes, out));
+                c.args
+                    .iter()
+                    .for_each(|a| collect_free_calls_expr(a, fns, scopes, out));
+                c.named
+                    .iter()
+                    .for_each(|(_, a)| collect_free_calls_expr(a, fns, scopes, out));
             }
         }
         ExprKind::DecodeCall { obj, arg, .. } => {
@@ -6207,7 +6824,11 @@ fn find_global_mutations(
                     scopes.last_mut().unwrap().insert(n.clone());
                 }
             }
-            StmtKind::Assign { target, value, op: _ } => {
+            StmtKind::Assign {
+                target,
+                value,
+                op: _,
+            } => {
                 find_mutations_in_expr(value, globals, scopes, out);
                 if let ExprKind::Ident(name) = &target.kind {
                     if !is_locally_shadowed(name, scopes) && globals.contains(name) {
@@ -6225,7 +6846,10 @@ fn find_global_mutations(
             StmtKind::Defer(DeferTarget::Block(body)) => {
                 find_global_mutations(body, globals, scopes, out)
             }
-            StmtKind::If { branches, else_block } => {
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
                 for (c, b) in branches {
                     find_mutations_in_expr(c, globals, scopes, out);
                     find_global_mutations(b, globals, scopes, out);
@@ -6306,7 +6930,9 @@ fn find_mutations_in_expr(
             find_mutations_in_expr(body, globals, scopes, out);
             scopes.pop();
         }
-        ExprKind::Comprehension { key, elem, clauses, .. } => {
+        ExprKind::Comprehension {
+            key, elem, clauses, ..
+        } => {
             // Clauses nest: each clause's iter is in the scope of earlier clauses; its vars then
             // bind for everything after. Push one scope per clause and pop them all at the end.
             for clause in clauses {
@@ -6324,7 +6950,12 @@ fn find_mutations_in_expr(
                 scopes.pop();
             }
         }
-        ExprKind::Call { callee, args, named, .. } => {
+        ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
             find_mutations_in_expr(callee, globals, scopes, out);
             for a in args {
                 find_mutations_in_expr(a, globals, scopes, out);
@@ -6333,9 +6964,9 @@ fn find_mutations_in_expr(
                 find_mutations_in_expr(a, globals, scopes, out);
             }
         }
-        ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
-            xs.iter().for_each(|x| find_mutations_in_expr(x, globals, scopes, out))
-        }
+        ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => xs
+            .iter()
+            .for_each(|x| find_mutations_in_expr(x, globals, scopes, out)),
         ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
             find_mutations_in_expr(k, globals, scopes, out);
             find_mutations_in_expr(v, globals, scopes, out);
@@ -6354,7 +6985,12 @@ fn find_mutations_in_expr(
             find_mutations_in_expr(obj, globals, scopes, out);
             find_mutations_in_expr(index, globals, scopes, out);
         }
-        ExprKind::Slice { obj, start, end, step } => {
+        ExprKind::Slice {
+            obj,
+            start,
+            end,
+            step,
+        } => {
             find_mutations_in_expr(obj, globals, scopes, out);
             for c in [start, end, step].into_iter().flatten() {
                 find_mutations_in_expr(c, globals, scopes, out);
@@ -6364,8 +7000,12 @@ fn find_mutations_in_expr(
         ExprKind::OptChain { obj, call, .. } => {
             find_mutations_in_expr(obj, globals, scopes, out);
             if let Some(c) = call {
-                c.args.iter().for_each(|a| find_mutations_in_expr(a, globals, scopes, out));
-                c.named.iter().for_each(|(_, a)| find_mutations_in_expr(a, globals, scopes, out));
+                c.args
+                    .iter()
+                    .for_each(|a| find_mutations_in_expr(a, globals, scopes, out));
+                c.named
+                    .iter()
+                    .for_each(|(_, a)| find_mutations_in_expr(a, globals, scopes, out));
             }
         }
         ExprKind::DecodeCall { obj, arg, .. } => {
@@ -6403,9 +7043,9 @@ fn pattern_bindings(p: &Pattern) -> std::collections::HashSet<String> {
             Pattern::Ident(n) => {
                 out.insert(n.clone());
             }
-            Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) | Pattern::Or(bindings) => {
-                bindings.iter().for_each(|b| go(b, out))
-            }
+            Pattern::Variant { bindings, .. }
+            | Pattern::Tuple(bindings)
+            | Pattern::Or(bindings) => bindings.iter().for_each(|b| go(b, out)),
             Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
         }
     }
@@ -6443,7 +7083,10 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         "Error".to_string(),
         ProtocolInfo {
             type_params: Vec::new(),
-            methods: vec![("message".to_string(), FnSig::plain(vec![Ty::Unknown], Ty::Str))],
+            methods: vec![(
+                "message".to_string(),
+                FnSig::plain(vec![Ty::Unknown], Ty::Str),
+            )],
         },
     );
     m.insert(
@@ -6470,7 +7113,10 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
                 type_params: Vec::new(),
                 methods: vec![(
                     method.to_string(),
-                    FnSig::plain(vec![Ty::Unknown, Ty::Param("Self".into())], Ty::Param("Self".into())),
+                    FnSig::plain(
+                        vec![Ty::Unknown, Ty::Param("Self".into())],
+                        Ty::Param("Self".into()),
+                    ),
                 )],
             },
         );
@@ -6487,7 +7133,10 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             type_params: vec!["Elem".to_string()],
             methods: vec![(
                 "next".to_string(),
-                FnSig::plain(vec![Ty::Unknown], Ty::Option(Box::new(Ty::Param("Self".into())))),
+                FnSig::plain(
+                    vec![Ty::Unknown],
+                    Ty::Option(Box::new(Ty::Param("Self".into()))),
+                ),
             )],
         },
     );
@@ -6520,7 +7169,10 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             type_params: vec!["K".to_string(), "V".to_string()],
             methods: vec![(
                 "index".to_string(),
-                FnSig::plain(vec![Ty::Unknown, Ty::Param("K".into())], Ty::Param("V".into())),
+                FnSig::plain(
+                    vec![Ty::Unknown, Ty::Param("K".into())],
+                    Ty::Param("V".into()),
+                ),
             )],
         },
     );
@@ -6531,7 +7183,10 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             methods: vec![
                 (
                     "index".to_string(),
-                    FnSig::plain(vec![Ty::Unknown, Ty::Param("K".into())], Ty::Param("V".into())),
+                    FnSig::plain(
+                        vec![Ty::Unknown, Ty::Param("K".into())],
+                        Ty::Param("V".into()),
+                    ),
                 ),
                 (
                     "set_index".to_string(),
@@ -6552,7 +7207,12 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
                 // Python-style: three `Option[int]` components (start/end/step), each `None` when
                 // omitted. Both engines always pass all three explicitly.
                 FnSig::plain(
-                    vec![Ty::Unknown, Ty::option(Ty::Int), Ty::option(Ty::Int), Ty::option(Ty::Int)],
+                    vec![
+                        Ty::Unknown,
+                        Ty::option(Ty::Int),
+                        Ty::option(Ty::Int),
+                        Ty::option(Ty::Int),
+                    ],
                     Ty::Param("R".into()),
                 ),
             )],
@@ -6564,7 +7224,11 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
 /// The substitution from a struct's type parameters to a concrete instantiation's type arguments
 /// (`Stack[int]` ⇒ `{T: int}`). Empty for a non-generic struct.
 fn struct_param_map(info: &StructInfo, targs: &[Ty]) -> HashMap<String, Ty> {
-    info.type_params.iter().map(|tp| tp.name.clone()).zip(targs.iter().cloned()).collect()
+    info.type_params
+        .iter()
+        .map(|tp| tp.name.clone())
+        .zip(targs.iter().cloned())
+        .collect()
 }
 
 /// Is `ty` fully concrete — free of any type parameter or `Unknown`? Used to decide when a forwarded
@@ -6644,9 +7308,16 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
         (Ty::Tuple(ds), Ty::Tuple(as_)) if ds.len() == as_.len() => {
             ds.iter().zip(as_).for_each(|(d, a)| unify(d, a, map));
         }
-        (Ty::Func { params: dp, ret: dr }, Ty::Func { params: ap, ret: ar })
-            if dp.len() == ap.len() =>
-        {
+        (
+            Ty::Func {
+                params: dp,
+                ret: dr,
+            },
+            Ty::Func {
+                params: ap,
+                ret: ar,
+            },
+        ) if dp.len() == ap.len() => {
             dp.iter().zip(ap).for_each(|(d, a)| unify(d, a, map));
             unify(dr, ar, map);
         }
@@ -6703,7 +7374,10 @@ fn recover_escaping_flow(stmts: &[Stmt], in_loop: bool) -> Option<(Span, &'stati
             StmtKind::Break if !in_loop => return Some((s.span, "break")),
             StmtKind::Continue if !in_loop => return Some((s.span, "continue")),
             StmtKind::Break | StmtKind::Continue => {}
-            StmtKind::If { branches, else_block } => {
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
                 for (_, body) in branches {
                     if let Some(x) = recover_escaping_flow(body, in_loop) {
                         return Some(x);
@@ -6805,7 +7479,10 @@ fn map_method_sig(method: &str, k: &Ty, v: &Ty) -> Option<FnSig> {
         "values" => (vec![], Ty::list(v.clone())),
         "remove" => (vec![k.clone()], Ty::option(v.clone())),
         // `merge` returns a NEW map (other wins on key clash); `update` writes into the receiver.
-        "merge" => (vec![Ty::map(k.clone(), v.clone())], Ty::map(k.clone(), v.clone())),
+        "merge" => (
+            vec![Ty::map(k.clone(), v.clone())],
+            Ty::map(k.clone(), v.clone()),
+        ),
         "update" => (vec![Ty::map(k.clone(), v.clone())], Ty::Nil),
         _ => return None,
     };
@@ -6841,7 +7518,10 @@ fn shared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
         "get" => (vec![], elem.clone()),
         "set" => (vec![elem.clone()], Ty::Nil),
         "update" => (
-            vec![Ty::Func { params: vec![elem.clone()], ret: Box::new(elem.clone()) }],
+            vec![Ty::Func {
+                params: vec![elem.clone()],
+                ret: Box::new(elem.clone()),
+            }],
             Ty::Nil,
         ),
         _ => return None,
@@ -6875,8 +7555,16 @@ fn socket_method_sig(method: &str) -> Option<FnSig> {
     match method {
         // D6c — `read`/`write` take an OPTIONAL trailing `timeout_ms: int` (`Err("timeout")` if no
         // data / not writable within it). The required first param (byte count / payload) stays.
-        "read" => Some(FnSig::optional_tail(vec![Ty::Int, Ty::Int], Ty::result(Ty::Str), 1)),
-        "write" => Some(FnSig::optional_tail(vec![Ty::Str, Ty::Int], Ty::result(Ty::Int), 1)),
+        "read" => Some(FnSig::optional_tail(
+            vec![Ty::Int, Ty::Int],
+            Ty::result(Ty::Str),
+            1,
+        )),
+        "write" => Some(FnSig::optional_tail(
+            vec![Ty::Str, Ty::Int],
+            Ty::result(Ty::Int),
+            1,
+        )),
         "close" => Some(FnSig::plain(vec![], Ty::Nil)),
         _ => None,
     }
@@ -6888,7 +7576,11 @@ fn listener_method_sig(method: &str) -> Option<FnSig> {
     match method {
         // D6c — `accept` takes an OPTIONAL `timeout_ms: int` (`Err("timeout")` if no connection
         // arrives within it).
-        "accept" => Some(FnSig::optional_tail(vec![Ty::Int], Ty::result(Ty::Socket), 1)),
+        "accept" => Some(FnSig::optional_tail(
+            vec![Ty::Int],
+            Ty::result(Ty::Socket),
+            1,
+        )),
         // `addr()` reports the bound local address as `"host:port"` — lets a `listen(":0")` caller
         // discover the OS-assigned port.
         "addr" => Some(FnSig::plain(vec![], Ty::result(Ty::Str))),
@@ -6901,7 +7593,13 @@ fn listener_method_sig(method: &str) -> Option<FnSig> {
 /// task closure (its return value is discarded — `Unknown` ret accepts any `fn() -> _`).
 fn executor_method_sig(method: &str) -> Option<FnSig> {
     let (params, ret) = match method {
-        "submit" => (vec![Ty::Func { params: vec![], ret: Box::new(Ty::Unknown) }], Ty::Nil),
+        "submit" => (
+            vec![Ty::Func {
+                params: vec![],
+                ret: Box::new(Ty::Unknown),
+            }],
+            Ty::Nil,
+        ),
         "shutdown" => (vec![], Ty::Nil),
         "shutdown_now" => (vec![], Ty::Nil),
         _ => return None,
@@ -6991,7 +7689,11 @@ mod graph_tests {
     }
 
     fn errors(entry: &Path) -> Vec<String> {
-        check_entry(entry).unwrap_err().into_iter().map(|e| e.message).collect()
+        check_entry(entry)
+            .unwrap_err()
+            .into_iter()
+            .map(|e| e.message)
+            .collect()
     }
 
     // 18. A module member's type resolves: a correct use checks clean, a mismatch is rejected.
@@ -6999,13 +7701,24 @@ mod graph_tests {
     fn module_member_type_resolves() {
         let t = TmpDir::new();
         t.write("a.chz", "fn read() -> int: return 5\n");
-        let ok = t.write("ok.chz", "import a\nx: int = a.read()\nfn main(): print(x)\n");
-        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
+        let ok = t.write(
+            "ok.chz",
+            "import a\nx: int = a.read()\nfn main(): print(x)\n",
+        );
+        assert!(
+            check_entry(&ok).is_ok(),
+            "expected clean: {:?}",
+            errors(&ok)
+        );
 
-        let bad = t.write("bad.chz", "import a\nx: str = a.read()\nfn main(): print(x)\n");
+        let bad = t.write(
+            "bad.chz",
+            "import a\nx: str = a.read()\nfn main(): print(x)\n",
+        );
         let errs = errors(&bad);
         assert!(
-            errs.iter().any(|m| m.contains("cannot assign int to variable of type str")),
+            errs.iter()
+                .any(|m| m.contains("cannot assign int to variable of type str")),
             "got: {errs:?}"
         );
     }
@@ -7028,7 +7741,8 @@ mod graph_tests {
             "imported module error not labeled: {errs:?}"
         );
         assert!(
-            errs.iter().any(|m| m.contains("cannot assign int to variable of type str")),
+            errs.iter()
+                .any(|m| m.contains("cannot assign int to variable of type str")),
             "entry error not collected: {errs:?}"
         );
     }
@@ -7040,7 +7754,10 @@ mod graph_tests {
         t.write("a.chz", "fn f(): print(\"f\")\n");
         let entry = t.write("main.chz", "import nope from a\nfn main(): print(1)\n");
         let errs = errors(&entry);
-        assert!(errs.iter().any(|m| m.contains("has no member 'nope'")), "got: {errs:?}");
+        assert!(
+            errs.iter().any(|m| m.contains("has no member 'nope'")),
+            "got: {errs:?}"
+        );
     }
 
     // 21. Type names are program-global in M4.5: the same struct in two loaded modules collides.
@@ -7052,7 +7769,8 @@ mod graph_tests {
         let entry = t.write("main.chz", "import a\nimport b\nfn main(): print(1)\n");
         let errs = errors(&entry);
         assert!(
-            errs.iter().any(|m| m.contains("'Point' is already defined")),
+            errs.iter()
+                .any(|m| m.contains("'Point' is already defined")),
             "got: {errs:?}"
         );
     }
@@ -7066,14 +7784,21 @@ mod graph_tests {
             "ok.chz",
             "fn f() -> int?:\n    ch := Channel[int]()\n    return ch.try_recv()\nfn main(): print(1)\n",
         );
-        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
+        assert!(
+            check_entry(&ok).is_ok(),
+            "expected clean: {:?}",
+            errors(&ok)
+        );
 
         let bad = t.write(
             "bad.chz",
             "fn f() -> str?:\n    ch := Channel[int]()\n    return ch.try_recv()\nfn main(): print(1)\n",
         );
         let errs = errors(&bad);
-        assert!(errs.iter().any(|m| m.contains("str")), "expected Option type mismatch: {errs:?}");
+        assert!(
+            errs.iter().any(|m| m.contains("str")),
+            "expected Option type mismatch: {errs:?}"
+        );
     }
 
     // 23. A1: `try_recv` takes no arguments — a call with one is rejected on arity.
@@ -7086,7 +7811,8 @@ mod graph_tests {
         );
         let errs = errors(&bad);
         assert!(
-            errs.iter().any(|m| m.contains("try_recv") && m.contains("argument")),
+            errs.iter()
+                .any(|m| m.contains("try_recv") && m.contains("argument")),
             "got: {errs:?}"
         );
     }
@@ -7100,7 +7826,11 @@ mod graph_tests {
             "ok.chz",
             "enum Color:\n    Red\n    Green\nfn f() -> Color:\n    return Color.Red\nfn main(): print(1)\n",
         );
-        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
+        assert!(
+            check_entry(&ok).is_ok(),
+            "expected clean: {:?}",
+            errors(&ok)
+        );
 
         let bad = t.write(
             "bad.chz",
@@ -7108,7 +7838,8 @@ mod graph_tests {
         );
         let errs = errors(&bad);
         assert!(
-            errs.iter().any(|m| m.contains("Color") && m.contains("Bogus")),
+            errs.iter()
+                .any(|m| m.contains("Color") && m.contains("Bogus")),
             "expected 'no variant Bogus' style error: {errs:?}"
         );
     }
@@ -7122,7 +7853,11 @@ mod graph_tests {
             "ok.chz",
             "enum Shape:\n    Circle(int)\n    Dot\nfn f() -> Shape:\n    return Shape.Circle(2)\nfn main(): print(1)\n",
         );
-        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
+        assert!(
+            check_entry(&ok).is_ok(),
+            "expected clean: {:?}",
+            errors(&ok)
+        );
 
         let bad = t.write(
             "bad.chz",
@@ -7130,7 +7865,8 @@ mod graph_tests {
         );
         let errs = errors(&bad);
         assert!(
-            errs.iter().any(|m| m.contains("Circle") && m.contains("int")),
+            errs.iter()
+                .any(|m| m.contains("Circle") && m.contains("int")),
             "expected payload type mismatch: {errs:?}"
         );
     }
@@ -7144,7 +7880,11 @@ mod graph_tests {
             "ok.chz",
             "enum Color:\n    Red\nfn main():\n    pair := (1, 2)\n    print(pair.0)\n",
         );
-        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
+        assert!(
+            check_entry(&ok).is_ok(),
+            "expected clean: {:?}",
+            errors(&ok)
+        );
     }
 
     // 27. Qualified variant patterns `case Color.Red:` check clean (mixed with bare arms); a wrong
@@ -7156,7 +7896,11 @@ mod graph_tests {
             "ok.chz",
             "enum Color:\n    Red\n    Green\nfn f(c: Color) -> str:\n    return match c:\n        Color.Red: \"r\"\n        Color.Green: \"g\"\nfn main(): print(f(Color.Red))\n",
         );
-        assert!(check_entry(&ok).is_ok(), "expected clean: {:?}", errors(&ok));
+        assert!(
+            check_entry(&ok).is_ok(),
+            "expected clean: {:?}",
+            errors(&ok)
+        );
 
         let bad = t.write(
             "bad.chz",
@@ -7164,7 +7908,8 @@ mod graph_tests {
         );
         let errs = errors(&bad);
         assert!(
-            errs.iter().any(|m| m.contains("Color") && m.contains("Circle")),
+            errs.iter()
+                .any(|m| m.contains("Color") && m.contains("Circle")),
             "expected qualifier mismatch error: {errs:?}"
         );
     }

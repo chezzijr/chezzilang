@@ -62,58 +62,58 @@ pub enum Token {
     False,
 
     // --- operators ---
-    Plus,       // +
-    Minus,      // -
-    Star,       // *
-    Slash,      // /
-    Percent,    // %
-    Assign,     // =
-    Walrus,     // :=
-    EqEq,       // ==
-    NotEq,      // !=
-    Lt,         // <
-    LtEq,       // <=
-    Gt,         // >
-    GtEq,       // >=
-    PlusEq,     // +=
-    MinusEq,    // -=
-    StarEq,     // *=
-    SlashEq,    // /=
-    PercentEq,  // %=
-    AmpEq,      // &=
-    PipeEq,     // |=
-    CaretEq,    // ^=
-    ShlEq,      // <<=
-    ShrEq,      // >>=
-    Arrow,      // ->
-    Pipe,       // |>
-    Question,   // ?
-    QuestionDot, // ?.  (optional chaining — only when the chars are adjacent)
+    Plus,             // +
+    Minus,            // -
+    Star,             // *
+    Slash,            // /
+    Percent,          // %
+    Assign,           // =
+    Walrus,           // :=
+    EqEq,             // ==
+    NotEq,            // !=
+    Lt,               // <
+    LtEq,             // <=
+    Gt,               // >
+    GtEq,             // >=
+    PlusEq,           // +=
+    MinusEq,          // -=
+    StarEq,           // *=
+    SlashEq,          // /=
+    PercentEq,        // %=
+    AmpEq,            // &=
+    PipeEq,           // |=
+    CaretEq,          // ^=
+    ShlEq,            // <<=
+    ShrEq,            // >>=
+    Arrow,            // ->
+    Pipe,             // |>
+    Question,         // ?
+    QuestionDot,      // ?.  (optional chaining — only when the chars are adjacent)
     QuestionQuestion, // ??  (null-coalescing — only when the chars are adjacent)
-    Bang,       // !  (used in type position: `T!` = Result[T])
-    Amp,        // &  (bitwise and)
-    Caret,      // ^  (bitwise xor)
-    BitOr,      // |  (bitwise or)
-    Shl,        // << (left shift)
-    Shr,        // >> (right shift)
+    Bang,             // !  (used in type position: `T!` = Result[T])
+    Amp,              // &  (bitwise and)
+    Caret,            // ^  (bitwise xor)
+    BitOr,            // |  (bitwise or)
+    Shl,              // << (left shift)
+    Shr,              // >> (right shift)
 
     // --- delimiters ---
-    LParen,     // (
-    RParen,     // )
-    LBracket,   // [
-    RBracket,   // ]
-    LBrace,     // {  (map literal)
-    RBrace,     // }
-    Comma,      // ,
-    Colon,      // :
-    Dot,        // .
-    DotDot,     // ..  (range, e.g. 0..10)
+    LParen,   // (
+    RParen,   // )
+    LBracket, // [
+    RBracket, // ]
+    LBrace,   // {  (map literal)
+    RBrace,   // }
+    Comma,    // ,
+    Colon,    // :
+    Dot,      // .
+    DotDot,   // ..  (range, e.g. 0..10)
 
     // --- layout (the interesting part) ---
-    Newline,    // end of a logical line
-    Indent,     // increase in indentation
-    Dedent,     // decrease in indentation
-    Eof,        // end of input
+    Newline, // end of a logical line
+    Indent,  // increase in indentation
+    Dedent,  // decrease in indentation
+    Eof,     // end of input
 }
 
 /// Source location of a token: 1-based line and 1-based column (column counts characters
@@ -199,11 +199,11 @@ fn keyword(word: &str) -> Option<Token> {
 /// the simplest correct choice. (A perf-tuned lexer would scan bytes — a later optimization.)
 pub struct Lexer {
     chars: Vec<char>,
-    pos: usize,        // index of the next char to read
-    line: usize,       // current line, 1-based (for error messages)
-    line_start: usize, // char index where the current line begins (for column tracking)
-    indents: Vec<usize>, // the indentation stack. Starts as vec![0].
-    at_line_start: bool, // true when the next char begins a fresh logical line
+    pos: usize,             // index of the next char to read
+    line: usize,            // current line, 1-based (for error messages)
+    line_start: usize,      // char index where the current line begins (for column tracking)
+    indents: Vec<usize>,    // the indentation stack. Starts as vec![0].
+    at_line_start: bool,    // true when the next char begins a fresh logical line
     pending: VecDeque<Tok>, // layout tokens computed together but emitted one-per-call (Dedents)
     bracket_depth: usize, // nesting depth of (), [], {}; >0 suppresses layout (multi-line literals)
 }
@@ -319,189 +319,289 @@ impl Lexer {
         // recursing) so an unbounded run of blank lines inside a literal cannot overflow the
         // stack. Every other path returns, so the loop runs at most once per emitted token.
         'scan: loop {
-        // === STEP A: start-of-line indentation (1h) ===
-        // Inside brackets (multi-line literals) layout is suppressed: skip scan_indentation so
-        // the indent stack stays frozen. We deliberately leave `at_line_start` untouched —
-        // STEP B/C/D/E below still run, and STEP C's EOF guard depends on at_line_start, so
-        // clobbering it here would spin the loop on an unclosed bracket (the OOM tripwire).
-        if self.at_line_start && self.bracket_depth == 0 {
-            match self.scan_indentation()? {
-                Some(layout) => {
-                    // a real content line begins here; emit its Indent/Dedent(s) before its tokens
-                    self.at_line_start = false;
-                    self.pending.extend(layout);
-                    if let Some(tok) = self.pending.pop_front() {
-                        return Ok(tok);
+            // === STEP A: start-of-line indentation (1h) ===
+            // Inside brackets (multi-line literals) layout is suppressed: skip scan_indentation so
+            // the indent stack stays frozen. We deliberately leave `at_line_start` untouched —
+            // STEP B/C/D/E below still run, and STEP C's EOF guard depends on at_line_start, so
+            // clobbering it here would spin the loop on an unclosed bracket (the OOM tripwire).
+            if self.at_line_start && self.bracket_depth == 0 {
+                match self.scan_indentation()? {
+                    Some(layout) => {
+                        // a real content line begins here; emit its Indent/Dedent(s) before its tokens
+                        self.at_line_start = false;
+                        self.pending.extend(layout);
+                        if let Some(tok) = self.pending.pop_front() {
+                            return Ok(tok);
+                        }
+                        // empty layout = same indent level → fall through and scan the first token
                     }
-                    // empty layout = same indent level → fall through and scan the first token
-                }
-                None => {
-                    // only blank/comment lines remain, then EOF. Leave at_line_start = true;
-                    // STEP C closes the file out (trailing Dedents + Eof).
+                    None => {
+                        // only blank/comment lines remain, then EOF. Leave at_line_start = true;
+                        // STEP C closes the file out (trailing Dedents + Eof).
+                    }
                 }
             }
-        }
 
-        // === STEP B: skip inline whitespace and `# comments` (NOT newlines) ===
-        loop {
-            match self.peek() {
-                ' ' | '\t' | '\r' => {
-                    self.advance();
-                }
-                '#' => {
-                    // comment runs to end of line; leave the '\n' for the newline rule below
-                    while !self.is_at_end() && self.peek() != '\n' {
+            // === STEP B: skip inline whitespace and `# comments` (NOT newlines) ===
+            loop {
+                match self.peek() {
+                    ' ' | '\t' | '\r' => {
                         self.advance();
                     }
+                    '#' => {
+                        // comment runs to end of line; leave the '\n' for the newline rule below
+                        while !self.is_at_end() && self.peek() != '\n' {
+                            self.advance();
+                        }
+                    }
+                    _ => break,
                 }
-                _ => break,
             }
-        }
 
-        // === STEP C: end of input ===
-        if self.is_at_end() {
-            let span = self.span_at(self.pos);
-            // 1. close the final logical line with a Newline (once)...
-            if !self.at_line_start {
+            // === STEP C: end of input ===
+            if self.is_at_end() {
+                let span = self.span_at(self.pos);
+                // 1. close the final logical line with a Newline (once)...
+                if !self.at_line_start {
+                    self.at_line_start = true;
+                    return Ok(Tok {
+                        kind: Token::Newline,
+                        span,
+                    });
+                }
+                // 2. ...then emit one Dedent per still-open indent level...
+                if *self.indents.last().unwrap() > 0 {
+                    self.indents.pop();
+                    return Ok(Tok {
+                        kind: Token::Dedent,
+                        span,
+                    });
+                }
+                // 3. ...and finally Eof.
+                return Ok(Tok {
+                    kind: Token::Eof,
+                    span,
+                });
+            }
+
+            // === STEP D: newline ===
+            // (Blank/comment-only lines never reach here — STEP A's scan_indentation skips them,
+            // so when we see '\n' we're always ending a line that had real content.)
+            if self.peek() == '\n' {
+                let span = self.span_at(self.pos);
+                // CRITICAL forward-progress: always advance past '\n' so the loop cannot spin.
+                self.advance();
+                self.line += 1;
+                self.line_start = self.pos;
+                if self.bracket_depth > 0 {
+                    // Inside a multi-line literal: keep spans honest (line/line_start bumped above)
+                    // but suppress the Newline. `continue` (not recurse) so thousands of blank lines
+                    // inside a bracket can't overflow the stack; `at_line_start` stays false so layout
+                    // is frozen. Forward progress is guaranteed: we already advance()d past '\n'.
+                    continue 'scan;
+                }
                 self.at_line_start = true;
-                return Ok(Tok { kind: Token::Newline, span });
+                return Ok(Tok {
+                    kind: Token::Newline,
+                    span,
+                });
             }
-            // 2. ...then emit one Dedent per still-open indent level...
-            if *self.indents.last().unwrap() > 0 {
-                self.indents.pop();
-                return Ok(Tok { kind: Token::Dedent, span });
-            }
-            // 3. ...and finally Eof.
-            return Ok(Tok { kind: Token::Eof, span });
-        }
 
-        // === STEP D: newline ===
-        // (Blank/comment-only lines never reach here — STEP A's scan_indentation skips them,
-        // so when we see '\n' we're always ending a line that had real content.)
-        if self.peek() == '\n' {
-            let span = self.span_at(self.pos);
-            // CRITICAL forward-progress: always advance past '\n' so the loop cannot spin.
-            self.advance();
-            self.line += 1;
-            self.line_start = self.pos;
-            if self.bracket_depth > 0 {
-                // Inside a multi-line literal: keep spans honest (line/line_start bumped above)
-                // but suppress the Newline. `continue` (not recurse) so thousands of blank lines
-                // inside a bracket can't overflow the stack; `at_line_start` stays false so layout
-                // is frozen. Forward progress is guaranteed: we already advance()d past '\n'.
-                continue 'scan;
-            }
-            self.at_line_start = true;
-            return Ok(Tok { kind: Token::Newline, span });
-        }
+            // === STEP E: a real token starts here ===
+            self.at_line_start = false;
+            let start = self.pos; // index of the first char of this lexeme
+            let span = self.span_at(start);
+            let c = self.advance();
+            let kind = match c {
+                // single- and two-char operators (LEARN: match_char does the 2-char lookahead)
+                '+' => {
+                    if self.match_char('=') {
+                        Token::PlusEq
+                    } else {
+                        Token::Plus
+                    }
+                }
+                '-' => {
+                    if self.match_char('>') {
+                        Token::Arrow
+                    } else if self.match_char('=') {
+                        Token::MinusEq
+                    } else {
+                        Token::Minus
+                    }
+                }
+                '*' => {
+                    if self.match_char('=') {
+                        Token::StarEq
+                    } else {
+                        Token::Star
+                    }
+                }
+                '/' => {
+                    if self.match_char('=') {
+                        Token::SlashEq
+                    } else {
+                        Token::Slash
+                    }
+                }
+                '%' => {
+                    if self.match_char('=') {
+                        Token::PercentEq
+                    } else {
+                        Token::Percent
+                    }
+                }
+                ':' => {
+                    if self.match_char('=') {
+                        Token::Walrus
+                    } else {
+                        Token::Colon
+                    }
+                }
+                '=' => {
+                    if self.match_char('=') {
+                        Token::EqEq
+                    } else {
+                        Token::Assign
+                    }
+                }
+                '!' => {
+                    if self.match_char('=') {
+                        Token::NotEq
+                    } else {
+                        Token::Bang
+                    }
+                }
+                '<' => {
+                    if self.match_char('=') {
+                        Token::LtEq
+                    } else if self.match_char('<') {
+                        // `<<` then an optional `=` → `<<=`.
+                        if self.match_char('=') {
+                            Token::ShlEq
+                        } else {
+                            Token::Shl
+                        }
+                    } else {
+                        Token::Lt
+                    }
+                }
+                '>' => {
+                    if self.match_char('=') {
+                        Token::GtEq
+                    } else if self.match_char('>') {
+                        if self.match_char('=') {
+                            Token::ShrEq
+                        } else {
+                            Token::Shr
+                        }
+                    } else {
+                        Token::Gt
+                    }
+                }
+                '|' => {
+                    if self.match_char('>') {
+                        Token::Pipe
+                    } else if self.match_char('=') {
+                        Token::PipeEq
+                    } else {
+                        Token::BitOr
+                    }
+                }
+                '&' => {
+                    if self.match_char('=') {
+                        Token::AmpEq
+                    } else {
+                        Token::Amp
+                    }
+                }
+                '^' => {
+                    if self.match_char('=') {
+                        Token::CaretEq
+                    } else {
+                        Token::Caret
+                    }
+                }
+                // `??` / `?.` are recognized only when adjacent (no whitespace): `match_char` checks the
+                // very next char. `x? .field` (space) stays `Question` + `Dot` (try-then-field).
+                '?' => {
+                    if self.match_char('?') {
+                        Token::QuestionQuestion
+                    } else if self.match_char('.') {
+                        Token::QuestionDot
+                    } else {
+                        Token::Question
+                    }
+                }
+                // Openers/closers also drive `bracket_depth` (multi-line literal layout suppression).
+                '(' => {
+                    self.bracket_depth += 1;
+                    Token::LParen
+                }
+                '[' => {
+                    self.bracket_depth += 1;
+                    Token::LBracket
+                }
+                // `{` in token position is always a map/set literal — Chezzi blocks are
+                // `: NEWLINE INDENT`, never brace-delimited; interpolation `{}` lives inside
+                // Token::Str content and never reaches here.
+                '{' => {
+                    self.bracket_depth += 1;
+                    Token::LBrace
+                }
+                // saturating_sub clamps a stray closer at 0 (no LexError; the parser reports the
+                // unmatched closer).
+                ')' => {
+                    self.bracket_depth = self.bracket_depth.saturating_sub(1);
+                    Token::RParen
+                }
+                ']' => {
+                    self.bracket_depth = self.bracket_depth.saturating_sub(1);
+                    Token::RBracket
+                }
+                '}' => {
+                    self.bracket_depth = self.bracket_depth.saturating_sub(1);
+                    Token::RBrace
+                }
+                ',' => Token::Comma,
+                '.' => {
+                    if self.match_char('.') {
+                        Token::DotDot
+                    } else {
+                        Token::Dot
+                    }
+                }
 
-        // === STEP E: a real token starts here ===
-        self.at_line_start = false;
-        let start = self.pos; // index of the first char of this lexeme
-        let span = self.span_at(start);
-        let c = self.advance();
-        let kind = match c {
-            // single- and two-char operators (LEARN: match_char does the 2-char lookahead)
-            '+' => if self.match_char('=') { Token::PlusEq } else { Token::Plus },
-            '-' => {
-                if self.match_char('>') {
-                    Token::Arrow
-                } else if self.match_char('=') {
-                    Token::MinusEq
-                } else {
-                    Token::Minus
-                }
-            }
-            '*' => if self.match_char('=') { Token::StarEq } else { Token::Star },
-            '/' => if self.match_char('=') { Token::SlashEq } else { Token::Slash },
-            '%' => if self.match_char('=') { Token::PercentEq } else { Token::Percent },
-            ':' => if self.match_char('=') { Token::Walrus } else { Token::Colon },
-            '=' => if self.match_char('=') { Token::EqEq } else { Token::Assign },
-            '!' => if self.match_char('=') { Token::NotEq } else { Token::Bang },
-            '<' => {
-                if self.match_char('=') {
-                    Token::LtEq
-                } else if self.match_char('<') {
-                    // `<<` then an optional `=` → `<<=`.
-                    if self.match_char('=') { Token::ShlEq } else { Token::Shl }
-                } else {
-                    Token::Lt
-                }
-            }
-            '>' => {
-                if self.match_char('=') {
-                    Token::GtEq
-                } else if self.match_char('>') {
-                    if self.match_char('=') { Token::ShrEq } else { Token::Shr }
-                } else {
-                    Token::Gt
-                }
-            }
-            '|' => {
-                if self.match_char('>') {
-                    Token::Pipe
-                } else if self.match_char('=') {
-                    Token::PipeEq
-                } else {
-                    Token::BitOr
-                }
-            }
-            '&' => if self.match_char('=') { Token::AmpEq } else { Token::Amp },
-            '^' => if self.match_char('=') { Token::CaretEq } else { Token::Caret },
-            // `??` / `?.` are recognized only when adjacent (no whitespace): `match_char` checks the
-            // very next char. `x? .field` (space) stays `Question` + `Dot` (try-then-field).
-            '?' => if self.match_char('?') {
-                Token::QuestionQuestion
-            } else if self.match_char('.') {
-                Token::QuestionDot
-            } else {
-                Token::Question
-            },
-            // Openers/closers also drive `bracket_depth` (multi-line literal layout suppression).
-            '(' => { self.bracket_depth += 1; Token::LParen }
-            '[' => { self.bracket_depth += 1; Token::LBracket }
-            // `{` in token position is always a map/set literal — Chezzi blocks are
-            // `: NEWLINE INDENT`, never brace-delimited; interpolation `{}` lives inside
-            // Token::Str content and never reaches here.
-            '{' => { self.bracket_depth += 1; Token::LBrace }
-            // saturating_sub clamps a stray closer at 0 (no LexError; the parser reports the
-            // unmatched closer).
-            ')' => { self.bracket_depth = self.bracket_depth.saturating_sub(1); Token::RParen }
-            ']' => { self.bracket_depth = self.bracket_depth.saturating_sub(1); Token::RBracket }
-            '}' => { self.bracket_depth = self.bracket_depth.saturating_sub(1); Token::RBrace }
-            ',' => Token::Comma,
-            '.' => if self.match_char('.') { Token::DotDot } else { Token::Dot },
-
-            // delegate the "munching" token kinds to the helpers below. A triple of the same
-            // quote char (`"""` / `'''`) opens a *triple-quoted* string in which a lone quote is
-            // an ordinary char (same escapes + interpolation as a regular string; only unescaped
-            // quotes differ). Detect it before the single-quote path by peeking two ahead.
-            '"' | '\'' if self.peek() == c && self.peek_next() == c => {
-                self.advance(); // second quote
-                self.advance(); // third quote
-                self.triple_string(c)?
-            }
-            '"' => self.string('"')?,
-            '\'' => self.string('\'')?,
-            // `b"..."` / `b'...'` byte-string literal — fire ONLY when the `b`/`B` is immediately
-            // followed by a quote (mirrors how `number()` detects the `0x` radix prefix). A bare
-            // `b` (e.g. `b + 1`, `by = 2`) falls through to `identifier()` unchanged.
-            'b' | 'B' if matches!(self.peek(), '"' | '\'') => {
-                let quote = self.advance(); // consume the opening quote
-                if self.peek() == quote && self.peek_next() == quote {
+                // delegate the "munching" token kinds to the helpers below. A triple of the same
+                // quote char (`"""` / `'''`) opens a *triple-quoted* string in which a lone quote is
+                // an ordinary char (same escapes + interpolation as a regular string; only unescaped
+                // quotes differ). Detect it before the single-quote path by peeking two ahead.
+                '"' | '\'' if self.peek() == c && self.peek_next() == c => {
                     self.advance(); // second quote
                     self.advance(); // third quote
-                    self.byte_triple_string(quote)?
-                } else {
-                    self.byte_string(quote)?
+                    self.triple_string(c)?
                 }
-            }
-            c if c.is_ascii_digit() => self.number(start)?,
-            c if c.is_alphabetic() || c == '_' => self.identifier(start),
+                '"' => self.string('"')?,
+                '\'' => self.string('\'')?,
+                // `b"..."` / `b'...'` byte-string literal — fire ONLY when the `b`/`B` is immediately
+                // followed by a quote (mirrors how `number()` detects the `0x` radix prefix). A bare
+                // `b` (e.g. `b + 1`, `by = 2`) falls through to `identifier()` unchanged.
+                'b' | 'B' if matches!(self.peek(), '"' | '\'') => {
+                    let quote = self.advance(); // consume the opening quote
+                    if self.peek() == quote && self.peek_next() == quote {
+                        self.advance(); // second quote
+                        self.advance(); // third quote
+                        self.byte_triple_string(quote)?
+                    } else {
+                        self.byte_string(quote)?
+                    }
+                }
+                c if c.is_ascii_digit() => self.number(start)?,
+                c if c.is_alphabetic() || c == '_' => self.identifier(start),
 
-            other => return Err(self.error(&format!("unexpected character {other:?}"))),
-        };
-        return Ok(Tok { kind, span });
+                other => return Err(self.error(&format!("unexpected character {other:?}"))),
+            };
+            return Ok(Tok { kind, span });
         }
     }
 
@@ -564,13 +664,19 @@ impl Lexer {
             if width > top {
                 // deeper → open one level
                 self.indents.push(width);
-                return Ok(Some(vec![Tok { kind: Token::Indent, span }]));
+                return Ok(Some(vec![Tok {
+                    kind: Token::Indent,
+                    span,
+                }]));
             } else if width < top {
                 // shallower → close as many levels as needed, one Dedent each
                 let mut dedents = Vec::new();
                 while *self.indents.last().unwrap() > width {
                     self.indents.pop();
-                    dedents.push(Tok { kind: Token::Dedent, span });
+                    dedents.push(Tok {
+                        kind: Token::Dedent,
+                        span,
+                    });
                 }
                 // the new width must line up with some outer level we landed on
                 if *self.indents.last().unwrap() != width {
@@ -601,7 +707,7 @@ impl Lexer {
         let identifier: String = self.chars[start..self.pos].iter().collect();
         match keyword(&identifier) {
             Some(tok) => tok,
-            None => Token::Ident(identifier)
+            None => Token::Ident(identifier),
         }
     }
 
@@ -920,9 +1026,8 @@ impl Lexer {
                 return Err(self.error("\\u not allowed in a byte literal; use \\xHH"));
             }
             '\n' | '\r' => {
-                return Err(self.error(
-                    "line continuations are not supported; close the literal or use \\n",
-                ));
+                return Err(self
+                    .error("line continuations are not supported; close the literal or use \\n"));
             }
             other => return Err(self.error(&format!("unknown escape '\\{other}'"))),
         };
@@ -1052,7 +1157,11 @@ mod tests {
     fn triple_single_quote_string() {
         assert_eq!(
             kinds("'''it's \"quoted\"'''"),
-            vec![Token::Str("it's \"quoted\"".into()), Token::Newline, Token::Eof]
+            vec![
+                Token::Str("it's \"quoted\"".into()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 
@@ -1074,7 +1183,12 @@ mod tests {
         // `"" x` — empty string then an ident.
         assert_eq!(
             kinds("\"\" x"),
-            vec![Token::Str("".into()), Token::Ident("x".into()), Token::Newline, Token::Eof]
+            vec![
+                Token::Str("".into()),
+                Token::Ident("x".into()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 
@@ -1159,7 +1273,10 @@ mod tests {
 
     #[test]
     fn comment_is_skipped() {
-        assert_eq!(kinds("1 # this is ignored"), vec![Token::Int(1), Token::Newline, Token::Eof]);
+        assert_eq!(
+            kinds("1 # this is ignored"),
+            vec![Token::Int(1), Token::Newline, Token::Eof]
+        );
     }
 
     #[test]
@@ -1215,7 +1332,11 @@ mod tests {
         // Chezzi source: "a\nb\tc\\d\"e"  (backslashes literal in the raw string below)
         assert_eq!(
             kinds(r#""a\nb\tc\\d\"e""#),
-            vec![Token::Str("a\nb\tc\\d\"e".to_string()), Token::Newline, Token::Eof]
+            vec![
+                Token::Str("a\nb\tc\\d\"e".to_string()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 
@@ -1315,7 +1436,11 @@ mod tests {
         // and the `b` prefix only fires when immediately followed by a quote (documents the design).
         assert_eq!(
             kinds("bytearray"),
-            vec![Token::Ident("bytearray".to_string()), Token::Newline, Token::Eof]
+            vec![
+                Token::Ident("bytearray".to_string()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
         // `bytearray(...)` is just IDENT LPAREN ... RPAREN — the existing call production.
         assert_eq!(
@@ -1334,10 +1459,18 @@ mod tests {
     fn byte_string_rejects_unicode_and_non_ascii() {
         // \u{...} is not valid in a byte literal
         let e = tokenize(r#"b"\u{41}""#).unwrap_err();
-        assert!(e.message.contains("\\u not allowed in a byte literal"), "{}", e.message);
+        assert!(
+            e.message.contains("\\u not allowed in a byte literal"),
+            "{}",
+            e.message
+        );
         // a raw non-ASCII char (byte >= 0x80) must be rejected
         let e = tokenize("b\"é\"").unwrap_err();
-        assert!(e.message.contains("non-ASCII byte in byte literal"), "{}", e.message);
+        assert!(
+            e.message.contains("non-ASCII byte in byte literal"),
+            "{}",
+            e.message
+        );
         // a malformed \x (not two hex digits) errors
         assert!(tokenize(r#"b"\xG0""#).is_err(), "non-hex \\x");
         assert!(tokenize(r#"b"\x""#).is_err(), "\\x at end");
@@ -1396,7 +1529,10 @@ mod tests {
         // Same escape handling: `\n` in a single-quoted string resolves identically.
         assert_eq!(kinds(r"'a\nb'"), kinds(r#""a\nb""#));
         // and the new \u{} escape works in single quotes too
-        assert_eq!(kinds(r"'\u{41}'"), vec![Token::Str("A".to_string()), Token::Newline, Token::Eof]);
+        assert_eq!(
+            kinds(r"'\u{41}'"),
+            vec![Token::Str("A".to_string()), Token::Newline, Token::Eof]
+        );
     }
 
     #[test]
@@ -1404,7 +1540,11 @@ mod tests {
         // A `"` inside a single-quoted string is a literal char (no escape needed).
         assert_eq!(
             kinds(r#"'say "hi"'"#),
-            vec![Token::Str("say \"hi\"".to_string()), Token::Newline, Token::Eof]
+            vec![
+                Token::Str("say \"hi\"".to_string()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 
@@ -1471,7 +1611,13 @@ mod tests {
     fn underscores_do_not_break_range() {
         assert_eq!(
             kinds("0..10"),
-            vec![Token::Int(0), Token::DotDot, Token::Int(10), Token::Newline, Token::Eof]
+            vec![
+                Token::Int(0),
+                Token::DotDot,
+                Token::Int(10),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 
@@ -1479,27 +1625,54 @@ mod tests {
 
     #[test]
     fn lexes_hex_literal() {
-        assert_eq!(kinds("0xFF"), vec![Token::Int(255), Token::Newline, Token::Eof]);
-        assert_eq!(kinds("0x1a"), vec![Token::Int(26), Token::Newline, Token::Eof]);
-        assert_eq!(kinds("0XfF"), vec![Token::Int(255), Token::Newline, Token::Eof]);
+        assert_eq!(
+            kinds("0xFF"),
+            vec![Token::Int(255), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds("0x1a"),
+            vec![Token::Int(26), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds("0XfF"),
+            vec![Token::Int(255), Token::Newline, Token::Eof]
+        );
     }
 
     #[test]
     fn lexes_binary_literal() {
-        assert_eq!(kinds("0b1010"), vec![Token::Int(10), Token::Newline, Token::Eof]);
-        assert_eq!(kinds("0B1111"), vec![Token::Int(15), Token::Newline, Token::Eof]);
+        assert_eq!(
+            kinds("0b1010"),
+            vec![Token::Int(10), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds("0B1111"),
+            vec![Token::Int(15), Token::Newline, Token::Eof]
+        );
     }
 
     #[test]
     fn lexes_octal_literal() {
-        assert_eq!(kinds("0o17"), vec![Token::Int(15), Token::Newline, Token::Eof]);
-        assert_eq!(kinds("0O777"), vec![Token::Int(511), Token::Newline, Token::Eof]);
+        assert_eq!(
+            kinds("0o17"),
+            vec![Token::Int(15), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds("0O777"),
+            vec![Token::Int(511), Token::Newline, Token::Eof]
+        );
     }
 
     #[test]
     fn radix_literals_allow_underscores() {
-        assert_eq!(kinds("0xFF_FF"), vec![Token::Int(65535), Token::Newline, Token::Eof]);
-        assert_eq!(kinds("0b1010_0101"), vec![Token::Int(165), Token::Newline, Token::Eof]);
+        assert_eq!(
+            kinds("0xFF_FF"),
+            vec![Token::Int(65535), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds("0b1010_0101"),
+            vec![Token::Int(165), Token::Newline, Token::Eof]
+        );
     }
 
     #[test]
@@ -1508,18 +1681,27 @@ mod tests {
         assert!(tokenize("0b2").is_err(), "non-binary digit");
         assert!(tokenize("0o8").is_err(), "non-octal digit");
         assert!(tokenize("0x").is_err(), "empty hex body");
-        assert!(tokenize("0x_FF").is_err(), "leading underscore after prefix");
+        assert!(
+            tokenize("0x_FF").is_err(),
+            "leading underscore after prefix"
+        );
     }
 
     #[test]
     fn bare_zero_still_decimal() {
         assert_eq!(kinds("0"), vec![Token::Int(0), Token::Newline, Token::Eof]);
-        assert_eq!(kinds("007"), vec![Token::Int(7), Token::Newline, Token::Eof]);
+        assert_eq!(
+            kinds("007"),
+            vec![Token::Int(7), Token::Newline, Token::Eof]
+        );
     }
 
     #[test]
     fn zero_dot_float_unaffected() {
-        assert_eq!(kinds("0.5"), vec![Token::Float(0.5), Token::Newline, Token::Eof]);
+        assert_eq!(
+            kinds("0.5"),
+            vec![Token::Float(0.5), Token::Newline, Token::Eof]
+        );
     }
 
     // ----- optional chaining `?.` and null-coalescing `??` (adjacency-sensitive) -----
@@ -1528,7 +1710,13 @@ mod tests {
     fn lexes_question_question_adjacent() {
         assert_eq!(
             kinds("a ?? b"),
-            vec![Token::Ident("a".into()), Token::QuestionQuestion, Token::Ident("b".into()), Token::Newline, Token::Eof]
+            vec![
+                Token::Ident("a".into()),
+                Token::QuestionQuestion,
+                Token::Ident("b".into()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 
@@ -1536,7 +1724,13 @@ mod tests {
     fn lexes_question_dot_adjacent() {
         assert_eq!(
             kinds("x?.f"),
-            vec![Token::Ident("x".into()), Token::QuestionDot, Token::Ident("f".into()), Token::Newline, Token::Eof]
+            vec![
+                Token::Ident("x".into()),
+                Token::QuestionDot,
+                Token::Ident("f".into()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 
@@ -1545,7 +1739,14 @@ mod tests {
         // `x? .field` is try-then-field, NOT optional chaining: a bare `?` then a `.`.
         assert_eq!(
             kinds("x? .f"),
-            vec![Token::Ident("x".into()), Token::Question, Token::Dot, Token::Ident("f".into()), Token::Newline, Token::Eof]
+            vec![
+                Token::Ident("x".into()),
+                Token::Question,
+                Token::Dot,
+                Token::Ident("f".into()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 
@@ -1553,7 +1754,12 @@ mod tests {
     fn bare_question_still_try() {
         assert_eq!(
             kinds("x?"),
-            vec![Token::Ident("x".into()), Token::Question, Token::Newline, Token::Eof]
+            vec![
+                Token::Ident("x".into()),
+                Token::Question,
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 
@@ -1561,11 +1767,26 @@ mod tests {
 
     #[test]
     fn lexes_scientific_notation() {
-        assert_eq!(kinds("1e3"), vec![Token::Float(1000.0), Token::Newline, Token::Eof]);
-        assert_eq!(kinds("1.5e-9"), vec![Token::Float(1.5e-9), Token::Newline, Token::Eof]);
-        assert_eq!(kinds("2E10"), vec![Token::Float(2e10), Token::Newline, Token::Eof]);
-        assert_eq!(kinds("1e+5"), vec![Token::Float(1e5), Token::Newline, Token::Eof]);
-        assert_eq!(kinds("6.022e23"), vec![Token::Float(6.022e23), Token::Newline, Token::Eof]);
+        assert_eq!(
+            kinds("1e3"),
+            vec![Token::Float(1000.0), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds("1.5e-9"),
+            vec![Token::Float(1.5e-9), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds("2E10"),
+            vec![Token::Float(2e10), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds("1e+5"),
+            vec![Token::Float(1e5), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds("6.022e23"),
+            vec![Token::Float(6.022e23), Token::Newline, Token::Eof]
+        );
     }
 
     #[test]
@@ -1573,17 +1794,33 @@ mod tests {
         // A bare `e` with no valid exponent must NOT be eaten as part of the number.
         assert_eq!(
             kinds("1e"),
-            vec![Token::Int(1), Token::Ident("e".into()), Token::Newline, Token::Eof]
+            vec![
+                Token::Int(1),
+                Token::Ident("e".into()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
         // `1e+` — the `e` falls to identifier(), the `+` to the operator dispatch.
         assert_eq!(
             kinds("1e+"),
-            vec![Token::Int(1), Token::Ident("e".into()), Token::Plus, Token::Newline, Token::Eof]
+            vec![
+                Token::Int(1),
+                Token::Ident("e".into()),
+                Token::Plus,
+                Token::Newline,
+                Token::Eof
+            ]
         );
         // `1.5e` — float mantissa already committed, then a bare `e`.
         assert_eq!(
             kinds("1.5e"),
-            vec![Token::Float(1.5), Token::Ident("e".into()), Token::Newline, Token::Eof]
+            vec![
+                Token::Float(1.5),
+                Token::Ident("e".into()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 
@@ -1592,10 +1829,18 @@ mod tests {
         // Exponent digit run consumes only ascii digits (no '_'); `1e1_0` -> Float(10.0) then `_0`.
         assert_eq!(
             kinds("1e1_0"),
-            vec![Token::Float(10.0), Token::Ident("_0".into()), Token::Newline, Token::Eof]
+            vec![
+                Token::Float(10.0),
+                Token::Ident("_0".into()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
         // regression: hex literal never reaches the exponent block.
-        assert_eq!(kinds("0xFF"), vec![Token::Int(255), Token::Newline, Token::Eof]);
+        assert_eq!(
+            kinds("0xFF"),
+            vec![Token::Int(255), Token::Newline, Token::Eof]
+        );
     }
 
     #[test]
@@ -1603,7 +1848,13 @@ mod tests {
         // `0xFF.bit_length` style — a `.` after a hex literal is postfix, not a fraction.
         assert_eq!(
             kinds("0xFF..0x2"),
-            vec![Token::Int(255), Token::DotDot, Token::Int(2), Token::Newline, Token::Eof]
+            vec![
+                Token::Int(255),
+                Token::DotDot,
+                Token::Int(2),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 
@@ -1644,7 +1895,11 @@ mod tests {
         let ks: Vec<&Token> = toks.iter().map(|t| &t.kind).collect();
         assert_eq!(
             ks,
-            vec![&Token::Str("x{y}z".to_string()), &Token::Newline, &Token::Eof]
+            vec![
+                &Token::Str("x{y}z".to_string()),
+                &Token::Newline,
+                &Token::Eof
+            ]
         );
         assert!(!ks.contains(&&Token::LBrace) && !ks.contains(&&Token::RBrace));
     }
@@ -1771,7 +2026,12 @@ mod tests {
     fn lexes_assert_keyword() {
         assert_eq!(
             kinds("assert x"),
-            vec![Token::Assert, Token::Ident("x".into()), Token::Newline, Token::Eof]
+            vec![
+                Token::Assert,
+                Token::Ident("x".into()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 

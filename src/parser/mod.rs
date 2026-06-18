@@ -144,7 +144,10 @@ impl Parser {
                     unreachable!()
                 }
             }
-            _ => Err(self.err(format!("expected identifier, found {}", describe(self.peek())))),
+            _ => Err(self.err(format!(
+                "expected identifier, found {}",
+                describe(self.peek())
+            ))),
         }
     }
 
@@ -172,17 +175,17 @@ impl Parser {
                     unreachable!()
                 }
             }
-            _ => Err(self.err(format!("expected string literal, found {}", describe(self.peek())))),
+            _ => Err(self.err(format!(
+                "expected string literal, found {}",
+                describe(self.peek())
+            ))),
         }
     }
 
     /// A simple statement must end the logical line; otherwise trailing tokens are a syntax error
     /// (e.g. `x := 5 y := 6` packed onto one line).
     fn expect_stmt_end(&mut self) -> PResult<()> {
-        if matches!(
-            self.peek(),
-            Token::Newline | Token::Dedent | Token::Eof
-        ) {
+        if matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof) {
             return Ok(());
         }
         // A simple statement whose value is a block-valued expression (`x := match s:` with
@@ -367,7 +370,12 @@ impl Parser {
                         }
                     }
                 }
-                return Ok(StmtKind::Let { names, ty: None, value, is_ref: false });
+                return Ok(StmtKind::Let {
+                    names,
+                    ty: None,
+                    value,
+                    is_ref: false,
+                });
             }
             // `a, b = b, a` — tuple assignment. Only `=` is allowed (compound `+=`, … with multiple
             // targets is rejected); the RHS must be a value list of equal arity.
@@ -377,12 +385,18 @@ impl Parser {
                 } else {
                     "expected '=' after a multi-target assignment list"
                 };
-                return Err(ParseError { message: msg.to_string(), span: self.cur_span() });
+                return Err(ParseError {
+                    message: msg.to_string(),
+                    span: self.cur_span(),
+                });
             }
             let target_span = targets[0].span;
             // Every target must be an assignable place.
             for t in &targets {
-                if !matches!(t.kind, ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { .. }) {
+                if !matches!(
+                    t.kind,
+                    ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { .. }
+                ) {
                     return Err(ParseError {
                         message: "invalid assignment target".to_string(),
                         span: t.span,
@@ -412,10 +426,16 @@ impl Parser {
                         span: target_span,
                     });
                 }
-                Expr { kind: ExprKind::Tuple(values), span: value_span }
+                Expr {
+                    kind: ExprKind::Tuple(values),
+                    span: value_span,
+                }
             };
             return Ok(StmtKind::Assign {
-                target: Expr { kind: ExprKind::Tuple(targets), span: target_span },
+                target: Expr {
+                    kind: ExprKind::Tuple(targets),
+                    span: target_span,
+                },
                 op: AssignOp::Eq,
                 value,
             });
@@ -431,7 +451,7 @@ impl Parser {
                         return Err(ParseError {
                             message: "left side of ':=' must be a name".to_string(),
                             span: expr.span,
-                        })
+                        });
                     }
                 };
                 return Ok(StmtKind::Let {
@@ -506,8 +526,9 @@ impl Parser {
         // An inline body whose single statement is a bare expression implicitly returns that
         // expression (mirroring a closure `fn(x): expr`). Inline non-expr statements (`: x = 5`,
         // `: return e`) stay as-is; a generator never implicitly returns its expr.
-        let inline_expr_body =
-            inline && !is_generator && matches!(body.as_slice(), [s] if matches!(s.kind, StmtKind::Expr(_)));
+        let inline_expr_body = inline
+            && !is_generator
+            && matches!(body.as_slice(), [s] if matches!(s.kind, StmtKind::Expr(_)));
         Ok(FnDecl {
             name,
             type_params,
@@ -594,7 +615,11 @@ impl Parser {
             self.skip_newlines();
         }
         self.expect(&Token::Dedent)?;
-        Ok(StmtKind::Protocol { name, type_params, methods })
+        Ok(StmtKind::Protocol {
+            name,
+            type_params,
+            methods,
+        })
     }
 
     /// A body-less C function signature inside an `extern "lib":` block: `fn name(params) -> ret`
@@ -612,7 +637,12 @@ impl Parser {
         } else {
             None
         };
-        Ok(ExternFn { name, params, ret, span })
+        Ok(ExternFn {
+            name,
+            params,
+            ret,
+            span,
+        })
     }
 
     /// `extern "lib":` then an INDENT block of body-less C function signatures. Mirrors
@@ -656,8 +686,9 @@ impl Parser {
                 };
                 let default = if self.eat(&Token::Assign) {
                     if !allow_defaults {
-                        return Err(self
-                            .err("default arguments are not supported here".to_string()));
+                        return Err(
+                            self.err("default arguments are not supported here".to_string())
+                        );
                     }
                     // Any expression is allowed as a default; the desugar pass rejects one that
                     // references another parameter (it is cloned into the caller's scope at the call
@@ -674,7 +705,12 @@ impl Parser {
                         "required parameter '{name}' cannot follow a default parameter"
                     )));
                 }
-                params.push(Param { name, ty, default, is_ref });
+                params.push(Param {
+                    name,
+                    ty,
+                    default,
+                    is_ref,
+                });
                 if !self.eat(&Token::Comma) {
                     break;
                 }
@@ -723,7 +759,11 @@ impl Parser {
                         "required field '{fname}' cannot follow a default field"
                     )));
                 }
-                fields.push(Field { name: fname, ty, default });
+                fields.push(Field {
+                    name: fname,
+                    ty,
+                    default,
+                });
             }
             self.skip_newlines();
         }
@@ -875,7 +915,11 @@ impl Parser {
                 None
             };
             let body = self.parse_block()?;
-            arms.push(MatchArm { pattern, guard, body });
+            arms.push(MatchArm {
+                pattern,
+                guard,
+                body,
+            });
             self.skip_newlines();
         }
         self.expect(&Token::Dedent)?;
@@ -898,7 +942,11 @@ impl Parser {
             };
             self.expect(&Token::Colon)?;
             let body = self.parse_expr()?;
-            arms.push(MatchExprArm { pattern, guard, body });
+            arms.push(MatchExprArm {
+                pattern,
+                guard,
+                body,
+            });
             self.skip_newlines();
         }
         self.expect(&Token::Dedent)?;
@@ -1026,12 +1074,20 @@ impl Parser {
                 }
             }
             self.expect(&Token::RParen)?;
-            return Ok(Pattern::Variant { name, bindings, enum_name });
+            return Ok(Pattern::Variant {
+                name,
+                bindings,
+                enum_name,
+            });
         }
         // A bare identifier: a nullary variant at the top of an arm, or a binding in a sub-position.
         // A qualified `Enum.Variant` is unambiguously a nullary variant in either position.
         if top || enum_name.is_some() {
-            Ok(Pattern::Variant { name, bindings: Vec::new(), enum_name })
+            Ok(Pattern::Variant {
+                name,
+                bindings: Vec::new(),
+                enum_name,
+            })
         } else {
             Ok(Pattern::Ident(name))
         }
@@ -1153,7 +1209,7 @@ impl Parser {
                         return Err(ParseError {
                             message: "left side of ':=' in a wait arm must be a name".to_string(),
                             span: lhs_span,
-                        })
+                        });
                     }
                 }
             } else if self.eat(&Token::Assign) {
@@ -1171,17 +1227,20 @@ impl Parser {
                     });
                 }
             } else {
-                return Err(self.err(
-                    "a wait arm needs `:=` or `=` before the channel `recv`".to_string(),
-                ));
+                return Err(
+                    self.err("a wait arm needs `:=` or `=` before the channel `recv`".to_string())
+                );
             };
             // The RHS must be a bare `<chan>.recv()` — the thing a wait arm blocks on.
             let rhs = self.parse_expr()?;
             let rhs_span = rhs.span;
             let chan = match rhs.kind {
-                ExprKind::Call { callee, args, named, .. }
-                    if matches!(&callee.kind, ExprKind::Field { name, .. } if name == "recv") =>
-                {
+                ExprKind::Call {
+                    callee,
+                    args,
+                    named,
+                    ..
+                } if matches!(&callee.kind, ExprKind::Field { name, .. } if name == "recv") => {
                     if !args.is_empty() || !named.is_empty() {
                         return Err(ParseError {
                             message: "`recv` in a wait arm takes no arguments".to_string(),
@@ -1198,11 +1257,16 @@ impl Parser {
                         message: "a wait arm must `recv` from a channel (`v := ch.recv():`)"
                             .to_string(),
                         span: rhs_span,
-                    })
+                    });
                 }
             };
             let body = self.parse_block()?;
-            arms.push(WaitArm { target, chan, body, span: arm_span });
+            arms.push(WaitArm {
+                target,
+                chan,
+                body,
+                span: arm_span,
+            });
             self.skip_newlines();
         }
         self.expect(&Token::Dedent)?;
@@ -1433,21 +1497,36 @@ impl Parser {
                 // first argument. The RHS must be a call, so checker/interp/VM see a plain call and
                 // need no pipe-specific code.
                 InfixOp::Pipe => match rhs.kind {
-                    ExprKind::Call { callee, args, named, type_args } => {
+                    ExprKind::Call {
+                        callee,
+                        args,
+                        named,
+                        type_args,
+                    } => {
                         if !named.is_empty() {
                             return Err(self.err(
-                                "named arguments are not supported on the right side of '|>'".to_string(),
+                                "named arguments are not supported on the right side of '|>'"
+                                    .to_string(),
                             ));
                         }
                         let mut new_args = Vec::with_capacity(args.len() + 1);
                         new_args.push(lhs);
                         new_args.extend(args);
                         Expr {
-                            kind: ExprKind::Call { callee, args: new_args, named, type_args },
+                            kind: ExprKind::Call {
+                                callee,
+                                args: new_args,
+                                named,
+                                type_args,
+                            },
                             span,
                         }
                     }
-                    _ => return Err(self.err("right side of '|>' must be a function call".to_string())),
+                    _ => {
+                        return Err(
+                            self.err("right side of '|>' must be a function call".to_string())
+                        );
+                    }
                 },
             };
         }
@@ -1590,12 +1669,20 @@ impl Parser {
                     let call = if is_ident && self.check(&Token::LParen) {
                         self.advance();
                         let (args, named) = self.parse_call_args()?;
-                        Some(OptCall { args, named, type_args: Vec::new() })
+                        Some(OptCall {
+                            args,
+                            named,
+                            type_args: Vec::new(),
+                        })
                     } else {
                         None
                     };
                     Expr {
-                        kind: ExprKind::OptChain { obj: Box::new(e), name, call },
+                        kind: ExprKind::OptChain {
+                            obj: Box::new(e),
+                            name,
+                            call,
+                        },
                         span,
                     }
                 }
@@ -1629,7 +1716,10 @@ impl Parser {
                 span,
             })?;
             return Ok(Expr {
-                kind: ExprKind::Index { obj: Box::new(obj), index },
+                kind: ExprKind::Index {
+                    obj: Box::new(obj),
+                    index,
+                },
                 span,
             });
         }
@@ -1643,7 +1733,12 @@ impl Parser {
         };
         self.expect(&Token::RBracket)?;
         Ok(Expr {
-            kind: ExprKind::Slice { obj: Box::new(obj), start, end, step },
+            kind: ExprKind::Slice {
+                obj: Box::new(obj),
+                start,
+                end,
+                step,
+            },
             span,
         })
     }
@@ -1722,12 +1817,17 @@ impl Parser {
         self.advance(); // '(' — committed to a type-argument call now.
         let (args, named) = self.parse_call_args()?;
         if !named.is_empty() {
-            return Err(
-                self.err("named arguments are not supported with explicit type arguments".to_string())
-            );
+            return Err(self.err(
+                "named arguments are not supported with explicit type arguments".to_string(),
+            ));
         }
         Ok(Some(Expr {
-            kind: ExprKind::Call { callee: Box::new(callee.clone()), args, named, type_args },
+            kind: ExprKind::Call {
+                callee: Box::new(callee.clone()),
+                args,
+                named,
+                type_args,
+            },
             span,
         }))
     }
@@ -1745,7 +1845,11 @@ impl Parser {
             return None;
         }
         Some(Expr {
-            kind: ExprKind::DecodeCall { obj: Box::new(obj), ty, arg: Box::new(arg) },
+            kind: ExprKind::DecodeCall {
+                obj: Box::new(obj),
+                ty,
+                arg: Box::new(arg),
+            },
             span,
         })
     }
@@ -1889,7 +1993,7 @@ impl Parser {
                 return Err(ParseError {
                     message: format!("unexpected {} in expression", describe(&other)),
                     span,
-                })
+                });
             }
         };
         Ok(Expr { kind, span })
@@ -1938,7 +2042,10 @@ fn stmt_contains_yield(s: &Stmt) -> bool {
     }
     match &s.kind {
         StmtKind::Yield(_) => true,
-        StmtKind::If { branches, else_block } => {
+        StmtKind::If {
+            branches,
+            else_block,
+        } => {
             branches.iter().any(|(_, b)| body_contains_yield(b))
                 || else_block.as_ref().is_some_and(body_contains_yield)
         }
@@ -2139,7 +2246,9 @@ mod tests {
 
     #[test]
     fn struct_test_method_parses_with_is_test() {
-        match only("struct S:\n    test fn t(self):\n        assert true\n    fn helper(self):\n        return\n") {
+        match only(
+            "struct S:\n    test fn t(self):\n        assert true\n    fn helper(self):\n        return\n",
+        ) {
             StmtKind::Struct { methods, .. } => {
                 let t = methods.iter().find(|m| m.name == "t").unwrap();
                 assert!(t.is_test, "struct `test fn` should set is_test");
@@ -2193,7 +2302,11 @@ mod tests {
     #[test]
     fn tuple_arity_mismatch_rejected() {
         let e = parse_err("a, b = 1, 2, 3\n");
-        assert!(e.message.contains("target") || e.message.contains("value"), "got: {}", e.message);
+        assert!(
+            e.message.contains("target") || e.message.contains("value"),
+            "got: {}",
+            e.message
+        );
     }
 
     #[test]
@@ -2209,7 +2322,9 @@ mod tests {
     fn in_expr_parses_as_binary() {
         match only("x := 1 in xs\n") {
             StmtKind::Let { value, .. } => match value.kind {
-                ExprKind::Binary { op: BinaryOp::In, .. } => {}
+                ExprKind::Binary {
+                    op: BinaryOp::In, ..
+                } => {}
                 other => panic!("expected Binary(In), got {other:?}"),
             },
             other => panic!("{other:?}"),
@@ -2252,7 +2367,9 @@ mod tests {
 
     #[test]
     fn parses_extern_block() {
-        match only("extern \"libm.so.6\":\n    fn cos(x: float) -> float\n    fn sqrt(x: float) -> float\n") {
+        match only(
+            "extern \"libm.so.6\":\n    fn cos(x: float) -> float\n    fn sqrt(x: float) -> float\n",
+        ) {
             StmtKind::Extern { lib, fns } => {
                 assert_eq!(lib, "libm.so.6");
                 assert_eq!(fns.len(), 2);
@@ -2296,8 +2413,14 @@ mod tests {
         match only("parallel:\n    spawn worker(1)\n    spawn worker(2)\n") {
             StmtKind::Parallel { body } => {
                 assert_eq!(body.len(), 2);
-                assert!(matches!(body[0].kind, StmtKind::Spawn(SpawnTarget::Call(_))));
-                assert!(matches!(body[1].kind, StmtKind::Spawn(SpawnTarget::Call(_))));
+                assert!(matches!(
+                    body[0].kind,
+                    StmtKind::Spawn(SpawnTarget::Call(_))
+                ));
+                assert!(matches!(
+                    body[1].kind,
+                    StmtKind::Spawn(SpawnTarget::Call(_))
+                ));
             }
             other => panic!("{other:?}"),
         }
@@ -2316,9 +2439,11 @@ mod tests {
 
     #[test]
     fn spawn_non_call_form1_rejected() {
-        assert!(parse_err("parallel:\n    spawn x + 1\n")
-            .message
-            .contains("spawn requires a function or method call"));
+        assert!(
+            parse_err("parallel:\n    spawn x + 1\n")
+                .message
+                .contains("spawn requires a function or method call")
+        );
     }
 
     #[test]
@@ -2344,8 +2469,13 @@ mod tests {
     fn yield_inside_recover_block_marks_generator() {
         // A `yield` reachable only through a `recover:` expression block still makes the fn a
         // generator (the detection walk descends into recover blocks).
-        match only("fn g() -> Iterator[int]:\n    x := recover:\n        yield 1\n        1\n    print(x)\n") {
-            StmtKind::Fn(d) => assert!(d.is_generator, "yield in a recover: block must mark the fn a generator"),
+        match only(
+            "fn g() -> Iterator[int]:\n    x := recover:\n        yield 1\n        1\n    print(x)\n",
+        ) {
+            StmtKind::Fn(d) => assert!(
+                d.is_generator,
+                "yield in a recover: block must mark the fn a generator"
+            ),
             other => panic!("{other:?}"),
         }
     }
@@ -2361,7 +2491,8 @@ mod tests {
     #[test]
     fn yield_in_nested_fn_does_not_mark_outer() {
         // The inner `fn` owns its yield; the outer must NOT be flagged a generator.
-        let src = "fn outer() -> int:\n    fn inner() -> Iterator[int]:\n        yield 1\n    return 0\n";
+        let src =
+            "fn outer() -> int:\n    fn inner() -> Iterator[int]:\n        yield 1\n    return 0\n";
         match only(src) {
             StmtKind::Fn(d) => {
                 assert!(!d.is_generator, "outer fn must not be a generator");
@@ -2407,30 +2538,38 @@ mod tests {
 
     #[test]
     fn wait_arm_non_recv_rhs_rejected() {
-        assert!(parse_err("wait:\n    v := f(): g()\n")
-            .message
-            .contains("must `recv` from a channel"));
+        assert!(
+            parse_err("wait:\n    v := f(): g()\n")
+                .message
+                .contains("must `recv` from a channel")
+        );
     }
 
     #[test]
     fn wait_arm_recv_with_args_rejected() {
-        assert!(parse_err("wait:\n    v := ch.recv(5): g()\n")
-            .message
-            .contains("takes no arguments"));
+        assert!(
+            parse_err("wait:\n    v := ch.recv(5): g()\n")
+                .message
+                .contains("takes no arguments")
+        );
     }
 
     #[test]
     fn wait_else_must_be_last() {
-        assert!(parse_err("wait:\n    else: a()\n    v := ch.recv(): b()\n")
-            .message
-            .contains("must be the last arm"));
+        assert!(
+            parse_err("wait:\n    else: a()\n    v := ch.recv(): b()\n")
+                .message
+                .contains("must be the last arm")
+        );
     }
 
     #[test]
     fn wait_requires_at_least_one_arm() {
-        assert!(parse_err("wait:\n    else: a()\n")
-            .message
-            .contains("at least one `recv` arm"));
+        assert!(
+            parse_err("wait:\n    else: a()\n")
+                .message
+                .contains("at least one `recv` arm")
+        );
     }
 
     #[test]
@@ -2439,7 +2578,10 @@ mod tests {
         match let_value("x := a ?? b ?? c\n").kind {
             ExprKind::NullCoalesce { lhs, rhs } => {
                 assert!(matches!(lhs.kind, ExprKind::Ident(ref n) if n == "a"));
-                assert!(matches!(rhs.kind, ExprKind::NullCoalesce { .. }), "rhs must nest");
+                assert!(
+                    matches!(rhs.kind, ExprKind::NullCoalesce { .. }),
+                    "rhs must nest"
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -2474,7 +2616,10 @@ mod tests {
         match let_value("x := y?.a?.b\n").kind {
             ExprKind::OptChain { obj, name, .. } => {
                 assert_eq!(name, "b");
-                assert!(matches!(obj.kind, ExprKind::OptChain { .. }), "obj must be the inner chain");
+                assert!(
+                    matches!(obj.kind, ExprKind::OptChain { .. }),
+                    "obj must be the inner chain"
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -2501,7 +2646,10 @@ mod tests {
                 assert_eq!(f.type_params[0].name, "T");
                 assert_eq!(
                     f.type_params[0].bounds,
-                    vec![Bound { name: "Comparable".into(), args: vec![] }]
+                    vec![Bound {
+                        name: "Comparable".into(),
+                        args: vec![]
+                    }]
                 );
                 assert_eq!(f.params.len(), 2);
                 assert_eq!(f.ret, Some(Type::Named("T".into())));
@@ -2519,7 +2667,10 @@ mod tests {
                 assert_eq!(f.type_params[0].name, "S");
                 assert_eq!(
                     f.type_params[0].bounds,
-                    vec![Bound { name: "Iterator".into(), args: vec![Type::Named("T".into())] }]
+                    vec![Bound {
+                        name: "Iterator".into(),
+                        args: vec![Type::Named("T".into())]
+                    }]
                 );
                 assert_eq!(f.type_params[1].name, "T");
                 assert_eq!(f.type_params[1].bounds, Vec::<Bound>::new());
@@ -2530,15 +2681,21 @@ mod tests {
 
     #[test]
     fn duplicate_type_param_rejected() {
-        assert!(parse_err("fn f[T, T](a: T) -> T:\n    return a\n")
-            .message
-            .contains("duplicate type parameter"));
-        assert!(parse_err("struct S[T, T]:\n    x: T\n")
-            .message
-            .contains("duplicate type parameter"));
-        assert!(parse_err("enum E[T, T]:\n    A(T)\n")
-            .message
-            .contains("duplicate type parameter"));
+        assert!(
+            parse_err("fn f[T, T](a: T) -> T:\n    return a\n")
+                .message
+                .contains("duplicate type parameter")
+        );
+        assert!(
+            parse_err("struct S[T, T]:\n    x: T\n")
+                .message
+                .contains("duplicate type parameter")
+        );
+        assert!(
+            parse_err("enum E[T, T]:\n    A(T)\n")
+                .message
+                .contains("duplicate type parameter")
+        );
         // distinct names still parse fine
         parse_ok("fn f[T, U](a: T, b: U) -> T:\n    return a\n");
     }
@@ -2559,7 +2716,12 @@ mod tests {
     #[test]
     fn generic_struct_decl() {
         match only("struct Pair[A, B]:\n    first: A\n    second: B\n") {
-            StmtKind::Struct { name, type_params, fields, .. } => {
+            StmtKind::Struct {
+                name,
+                type_params,
+                fields,
+                ..
+            } => {
                 assert_eq!(name, "Pair");
                 assert_eq!(type_params.len(), 2);
                 assert_eq!(type_params[0].name, "A");
@@ -2601,7 +2763,11 @@ mod tests {
     #[test]
     fn parameterized_protocol_decl_collects_type_params() {
         match only("protocol Container[T]:\n    fn get(self, i: int) -> T\n") {
-            StmtKind::Protocol { name, type_params, methods } => {
+            StmtKind::Protocol {
+                name,
+                type_params,
+                methods,
+            } => {
                 assert_eq!(name, "Container");
                 assert_eq!(type_params.len(), 1);
                 assert_eq!(type_params[0].name, "T");
@@ -2624,7 +2790,9 @@ mod tests {
     #[test]
     fn walrus_let() {
         match only("x := 5\n") {
-            StmtKind::Let { names, ty, value, .. } => {
+            StmtKind::Let {
+                names, ty, value, ..
+            } => {
                 assert_eq!(names, vec!["x".to_string()]);
                 assert!(ty.is_none());
                 assert_eq!(value.kind, ExprKind::Int(5));
@@ -2653,7 +2821,9 @@ mod tests {
     #[test]
     fn typed_let() {
         match only("name: str = \"thuan\"\n") {
-            StmtKind::Let { names, ty, value, .. } => {
+            StmtKind::Let {
+                names, ty, value, ..
+            } => {
                 assert_eq!(names, vec!["name".to_string()]);
                 assert_eq!(ty, Some(Type::Named("str".into())));
                 assert_eq!(value.kind, ExprKind::Str("thuan".into()));
@@ -2706,8 +2876,15 @@ mod tests {
 
     #[test]
     fn struct_with_field_and_method() {
-        match only("struct Point:\n    x: int\n    y: int\n\n    fn dist(self) -> float:\n        return self.x\n") {
-            StmtKind::Struct { name, fields, methods, .. } => {
+        match only(
+            "struct Point:\n    x: int\n    y: int\n\n    fn dist(self) -> float:\n        return self.x\n",
+        ) {
+            StmtKind::Struct {
+                name,
+                fields,
+                methods,
+                ..
+            } => {
                 assert_eq!(name, "Point");
                 assert_eq!(fields.len(), 2);
                 assert_eq!(methods.len(), 1);
@@ -2722,7 +2899,11 @@ mod tests {
     #[test]
     fn enum_with_and_without_payload() {
         match only("enum Shape:\n    Circle(int)\n    Point\n") {
-            StmtKind::Enum { name, type_params, variants } => {
+            StmtKind::Enum {
+                name,
+                type_params,
+                variants,
+            } => {
                 assert_eq!(name, "Shape");
                 assert!(type_params.is_empty());
                 assert_eq!(variants[0].name, "Circle");
@@ -2737,7 +2918,11 @@ mod tests {
     #[test]
     fn generic_enum_parses_type_params() {
         match only("enum Tree[T]:\n    Leaf\n    Node(T, Tree[T], Tree[T])\n") {
-            StmtKind::Enum { name, type_params, variants } => {
+            StmtKind::Enum {
+                name,
+                type_params,
+                variants,
+            } => {
                 assert_eq!(name, "Tree");
                 assert_eq!(type_params.len(), 1);
                 assert_eq!(type_params[0].name, "T");
@@ -2751,8 +2936,12 @@ mod tests {
 
     #[test]
     fn if_else_if_else() {
-        match only("if x > 0:\n    print(1)\nelse if x == 0:\n    print(2)\nelse:\n    print(3)\n") {
-            StmtKind::If { branches, else_block } => {
+        match only("if x > 0:\n    print(1)\nelse if x == 0:\n    print(2)\nelse:\n    print(3)\n")
+        {
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
                 assert_eq!(branches.len(), 2);
                 assert!(else_block.is_some());
             }
@@ -2797,44 +2986,62 @@ mod tests {
         }
         // xs[1:3] → Slice{Some(1), Some(3), None}
         match let_value("y := xs[1:3]\n").kind {
-            ExprKind::Slice { start, end, step, .. } => {
+            ExprKind::Slice {
+                start, end, step, ..
+            } => {
                 assert!(is_int(&start, 1) && is_int(&end, 3) && step.is_none());
             }
             other => panic!("expected Slice, got {other:?}"),
         }
         // xs[1:] → {Some, None, None}
         match let_value("y := xs[1:]\n").kind {
-            ExprKind::Slice { start, end, step, .. } => {
+            ExprKind::Slice {
+                start, end, step, ..
+            } => {
                 assert!(is_int(&start, 1) && end.is_none() && step.is_none());
             }
             other => panic!("expected Slice, got {other:?}"),
         }
         // xs[:3] → {None, Some, None}
         match let_value("y := xs[:3]\n").kind {
-            ExprKind::Slice { start, end, step, .. } => {
+            ExprKind::Slice {
+                start, end, step, ..
+            } => {
                 assert!(start.is_none() && is_int(&end, 3) && step.is_none());
             }
             other => panic!("expected Slice, got {other:?}"),
         }
         // xs[:] → all None
         match let_value("y := xs[:]\n").kind {
-            ExprKind::Slice { start, end, step, .. } => {
+            ExprKind::Slice {
+                start, end, step, ..
+            } => {
                 assert!(start.is_none() && end.is_none() && step.is_none());
             }
             other => panic!("expected Slice, got {other:?}"),
         }
         // xs[1:5:2] → {Some, Some, Some}
         match let_value("y := xs[1:5:2]\n").kind {
-            ExprKind::Slice { start, end, step, .. } => {
+            ExprKind::Slice {
+                start, end, step, ..
+            } => {
                 assert!(is_int(&start, 1) && is_int(&end, 5) && is_int(&step, 2));
             }
             other => panic!("expected Slice, got {other:?}"),
         }
         // xs[::-1] → {None, None, Some(-1)}  (unary minus on 1)
         match let_value("y := xs[::-1]\n").kind {
-            ExprKind::Slice { start, end, step, .. } => {
+            ExprKind::Slice {
+                start, end, step, ..
+            } => {
                 assert!(start.is_none() && end.is_none());
-                assert!(matches!(step.as_deref(), Some(Expr { kind: ExprKind::Unary { .. }, .. })));
+                assert!(matches!(
+                    step.as_deref(),
+                    Some(Expr {
+                        kind: ExprKind::Unary { .. },
+                        ..
+                    })
+                ));
             }
             other => panic!("expected Slice, got {other:?}"),
         }
@@ -2848,14 +3055,26 @@ mod tests {
             other => panic!("{other:?}"),
         }
         // match range-pattern still parses (0..10 => ...)
-        assert!(parse(lexer::tokenize("fn f(x: int):\n    match x:\n        0..10: print(1)\n        _: print(2)\n").unwrap()).is_ok());
+        assert!(
+            parse(
+                lexer::tokenize(
+                    "fn f(x: int):\n    match x:\n        0..10: print(1)\n        _: print(2)\n"
+                )
+                .unwrap()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn slice_is_not_an_lvalue() {
         // A slice is not in the lvalue grammar — `xs[1:3] = v` must be a parse error.
         let e = parse_err("xs := [1, 2, 3]\nxs[1:3] = [9]\n");
-        assert!(e.message.contains("invalid assignment target"), "got: {}", e.message);
+        assert!(
+            e.message.contains("invalid assignment target"),
+            "got: {}",
+            e.message
+        );
     }
 
     #[test]
@@ -2871,7 +3090,9 @@ mod tests {
 
     #[test]
     fn match_inline_arms() {
-        match only("match s:\n    Circle(r): return r\n    Square(n): return n\n    Point: return 0\n") {
+        match only(
+            "match s:\n    Circle(r): return r\n    Square(n): return n\n    Point: return 0\n",
+        ) {
             StmtKind::Match { arms, .. } => {
                 assert_eq!(arms.len(), 3);
                 match &arms[0].pattern {
@@ -2883,7 +3104,11 @@ mod tests {
                 }
                 assert!(
                     arms[2].pattern
-                        == Pattern::Variant { name: "Point".into(), bindings: vec![], enum_name: None }
+                        == Pattern::Variant {
+                            name: "Point".into(),
+                            bindings: vec![],
+                            enum_name: None
+                        }
                 );
             }
             other => panic!("{other:?}"),
@@ -2892,11 +3117,16 @@ mod tests {
 
     #[test]
     fn match_literal_and_wildcard_patterns() {
-        match only("match n:\n    0: return 1\n    \"a\": return 2\n    true: return 3\n    _: return 4\n") {
+        match only(
+            "match n:\n    0: return 1\n    \"a\": return 2\n    true: return 3\n    _: return 4\n",
+        ) {
             StmtKind::Match { arms, .. } => {
                 assert_eq!(arms.len(), 4);
                 assert_eq!(arms[0].pattern, Pattern::Literal(LitPattern::Int(0)));
-                assert_eq!(arms[1].pattern, Pattern::Literal(LitPattern::Str("a".into())));
+                assert_eq!(
+                    arms[1].pattern,
+                    Pattern::Literal(LitPattern::Str("a".into()))
+                );
                 assert_eq!(arms[2].pattern, Pattern::Literal(LitPattern::Bool(true)));
                 assert_eq!(arms[3].pattern, Pattern::Wildcard);
             }
@@ -2906,10 +3136,7 @@ mod tests {
 
     #[test]
     fn return_with_and_without_value() {
-        assert!(matches!(
-            only("fn f():\n    return\n"),
-            StmtKind::Fn(_)
-        ));
+        assert!(matches!(only("fn f():\n    return\n"), StmtKind::Fn(_)));
         // dig into the body of `fn f(): return`
         let StmtKind::Fn(f) = only("fn f():\n    return\n") else {
             panic!()
@@ -2927,13 +3154,17 @@ mod tests {
             panic!()
         };
         assert!(matches!(f.body[0].kind, StmtKind::Defer(_)));
-        let StmtKind::Defer(DeferTarget::Call(Expr { kind: ExprKind::Call { .. }, .. })) =
-            &f.body[0].kind
+        let StmtKind::Defer(DeferTarget::Call(Expr {
+            kind: ExprKind::Call { .. },
+            ..
+        })) = &f.body[0].kind
         else {
             panic!("first defer not a call")
         };
-        let StmtKind::Defer(DeferTarget::Call(Expr { kind: ExprKind::Call { callee, .. }, .. })) =
-            &f.body[1].kind
+        let StmtKind::Defer(DeferTarget::Call(Expr {
+            kind: ExprKind::Call { callee, .. },
+            ..
+        })) = &f.body[1].kind
         else {
             panic!("second defer not a call")
         };
@@ -2994,7 +3225,13 @@ mod tests {
             ExprKind::Closure { params, ret, body } => {
                 assert_eq!(params.len(), 1);
                 assert_eq!(ret, Some(Type::Named("int".into())));
-                assert!(matches!(body.kind, ExprKind::Binary { op: BinaryOp::Mul, .. }));
+                assert!(matches!(
+                    body.kind,
+                    ExprKind::Binary {
+                        op: BinaryOp::Mul,
+                        ..
+                    }
+                ));
             }
             other => panic!("{other:?}"),
         }
@@ -3011,7 +3248,13 @@ mod tests {
                 op: BinaryOp::Add,
                 rhs,
                 ..
-            } => assert!(matches!(rhs.kind, ExprKind::Binary { op: BinaryOp::Mul, .. })),
+            } => assert!(matches!(
+                rhs.kind,
+                ExprKind::Binary {
+                    op: BinaryOp::Mul,
+                    ..
+                }
+            )),
             other => panic!("{other:?}"),
         }
     }
@@ -3027,7 +3270,13 @@ mod tests {
                 op: BinaryOp::Or,
                 lhs,
                 ..
-            } => assert!(matches!(lhs.kind, ExprKind::Binary { op: BinaryOp::And, .. })),
+            } => assert!(matches!(
+                lhs.kind,
+                ExprKind::Binary {
+                    op: BinaryOp::And,
+                    ..
+                }
+            )),
             other => panic!("{other:?}"),
         }
     }
@@ -3057,20 +3306,28 @@ mod tests {
     #[test]
     fn index_vs_slice() {
         // xs[i] → Index (plain subscript)
-        let StmtKind::Expr(e) = only("xs[i]\n") else { panic!() };
+        let StmtKind::Expr(e) = only("xs[i]\n") else {
+            panic!()
+        };
         assert!(matches!(e.kind, ExprKind::Index { .. }));
         // m["k"] → Index (non-int key still plain index)
-        let StmtKind::Expr(e) = only("m[\"k\"]\n") else { panic!() };
+        let StmtKind::Expr(e) = only("m[\"k\"]\n") else {
+            panic!()
+        };
         assert!(matches!(e.kind, ExprKind::Index { .. }));
         // xs[1:3] → Slice with int bounds
-        let StmtKind::Expr(e) = only("xs[1:3]\n") else { panic!() };
+        let StmtKind::Expr(e) = only("xs[1:3]\n") else {
+            panic!()
+        };
         let ExprKind::Slice { start, end, .. } = e.kind else {
             panic!("expected Slice, got {:?}", e.kind)
         };
         assert!(matches!(start.unwrap().kind, ExprKind::Int(1)));
         assert!(matches!(end.unwrap().kind, ExprKind::Int(3)));
         // nested xs[a:b][0] → Index(Slice)
-        let StmtKind::Expr(e) = only("xs[a:b][0]\n") else { panic!() };
+        let StmtKind::Expr(e) = only("xs[a:b][0]\n") else {
+            panic!()
+        };
         let ExprKind::Index { obj, .. } = e.kind else {
             panic!("expected Index, got {:?}", e.kind)
         };
@@ -3116,7 +3373,12 @@ mod tests {
             panic!()
         };
         match e.kind {
-            ExprKind::Comprehension { kind, key, elem, clauses } => {
+            ExprKind::Comprehension {
+                kind,
+                key,
+                elem,
+                clauses,
+            } => {
                 assert_eq!(kind, CompKind::List);
                 assert!(key.is_none());
                 assert!(matches!(elem.kind, ExprKind::Binary { .. }));
@@ -3165,7 +3427,12 @@ mod tests {
             panic!()
         };
         match e.kind {
-            ExprKind::Comprehension { kind, key, elem, clauses } => {
+            ExprKind::Comprehension {
+                kind,
+                key,
+                elem,
+                clauses,
+            } => {
                 assert_eq!(kind, CompKind::Map);
                 assert!(matches!(key.unwrap().kind, ExprKind::Ident(_)));
                 assert!(matches!(elem.kind, ExprKind::Ident(_)));
@@ -3227,11 +3494,9 @@ mod tests {
     /// The golden target: the whole touchstone program parses, with the expected top-level shape.
     #[test]
     fn parses_hello_example() {
-        let src = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/examples/hello.chz"
-        ))
-        .unwrap();
+        let src =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello.chz"))
+                .unwrap();
         let module = parse(lexer::tokenize(&src).unwrap()).expect("hello.chz should parse");
         // greet, Point, Shape, area, safe_div, main, then the top-level `main()` call
         assert_eq!(module.stmts.len(), 7);
@@ -3256,25 +3521,44 @@ mod tests {
     #[test]
     fn inline_expr_body_flag_set() {
         // `fn a(): 10` — inline bare-expr body -> inline_expr_body marker set (implicit return).
-        let StmtKind::Fn(f) = only("fn a(): 10\n") else { panic!() };
-        assert!(f.inline_expr_body, "inline bare-expr body should set the marker");
+        let StmtKind::Fn(f) = only("fn a(): 10\n") else {
+            panic!()
+        };
+        assert!(
+            f.inline_expr_body,
+            "inline bare-expr body should set the marker"
+        );
         // annotated inline-expr body too.
-        let StmtKind::Fn(f) = only("fn a() -> int: 10\n") else { panic!() };
+        let StmtKind::Fn(f) = only("fn a() -> int: 10\n") else {
+            panic!()
+        };
         assert!(f.inline_expr_body);
     }
 
     #[test]
     fn inline_non_expr_and_multiline_bodies_not_marked() {
         // inline NON-expr stmt (assignment) -> not an implicit return.
-        let StmtKind::Fn(f) = only("fn a(): x = 5\n") else { panic!() };
-        assert!(!f.inline_expr_body, "inline assignment must not set the marker");
+        let StmtKind::Fn(f) = only("fn a(): x = 5\n") else {
+            panic!()
+        };
+        assert!(
+            !f.inline_expr_body,
+            "inline assignment must not set the marker"
+        );
         // inline explicit `return` -> not the implicit-return form.
-        let StmtKind::Fn(f) = only("fn a(): return 10\n") else { panic!() };
+        let StmtKind::Fn(f) = only("fn a(): return 10\n") else {
+            panic!()
+        };
         assert!(!f.inline_expr_body);
         // a 1-statement MULTILINE expr body -> NOT inline (the Block shape is identical, the marker
         // is what disambiguates).
-        let StmtKind::Fn(f) = only("fn a():\n    10\n") else { panic!() };
-        assert!(!f.inline_expr_body, "a multiline 1-stmt body must not set the marker");
+        let StmtKind::Fn(f) = only("fn a():\n    10\n") else {
+            panic!()
+        };
+        assert!(
+            !f.inline_expr_body,
+            "a multiline 1-stmt body must not set the marker"
+        );
     }
 
     #[test]
@@ -3336,7 +3620,11 @@ mod tests {
     fn primary_error_is_readable() {
         let err = parse_err(", 1\n");
         assert!(err.message.contains("unexpected"), "{}", err.message);
-        assert!(err.message.contains("','"), "should name the token: {}", err.message);
+        assert!(
+            err.message.contains("','"),
+            "should name the token: {}",
+            err.message
+        );
     }
 
     /// Error messages render tokens in source form, not Rust enum names.
@@ -3345,7 +3633,11 @@ mod tests {
         // `for in xs:` — missing loop variable; expected identifier, found keyword `in`
         let err = parse_err("for in xs:\n    f()\n");
         assert!(err.message.contains("'in'"), "{}", err.message);
-        assert!(!err.message.contains("In"), "leaked enum name: {}", err.message);
+        assert!(
+            !err.message.contains("In"),
+            "leaked enum name: {}",
+            err.message
+        );
     }
 
     /// Generic types with multiple arguments parse (the comma loop in `parse_type`).
@@ -3359,7 +3651,10 @@ mod tests {
                 assert_eq!(name, "map");
                 assert_eq!(args.len(), 2);
                 assert_eq!(args[0], Type::Named("str".into()));
-                assert_eq!(args[1], Type::Generic("list".into(), vec![Type::Named("int".into())]));
+                assert_eq!(
+                    args[1],
+                    Type::Generic("list".into(), vec![Type::Named("int".into())])
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -3371,9 +3666,23 @@ mod tests {
         let StmtKind::Expr(e) = only("not done\n") else {
             panic!()
         };
-        assert!(matches!(e.kind, ExprKind::Unary { op: UnaryOp::Not, .. }));
-        let StmtKind::Expr(e) = only("-x\n") else { panic!() };
-        assert!(matches!(e.kind, ExprKind::Unary { op: UnaryOp::Neg, .. }));
+        assert!(matches!(
+            e.kind,
+            ExprKind::Unary {
+                op: UnaryOp::Not,
+                ..
+            }
+        ));
+        let StmtKind::Expr(e) = only("-x\n") else {
+            panic!()
+        };
+        assert!(matches!(
+            e.kind,
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                ..
+            }
+        ));
     }
 
     /// A fully-chained postfix expression nests correctly: `a.b()[0]?`.
@@ -3436,7 +3745,10 @@ mod tests {
         };
         assert_eq!(
             decl.params[0].ty,
-            Some(Type::Generic("Option".into(), vec![Type::Named("int".into())]))
+            Some(Type::Generic(
+                "Option".into(),
+                vec![Type::Named("int".into())]
+            ))
         );
     }
 
@@ -3448,7 +3760,10 @@ mod tests {
         };
         assert_eq!(
             decl.ret,
-            Some(Type::Generic("Result".into(), vec![Type::Named("int".into())]))
+            Some(Type::Generic(
+                "Result".into(),
+                vec![Type::Named("int".into())]
+            ))
         );
     }
 
@@ -3462,7 +3777,10 @@ mod tests {
             decl.params[0].ty,
             Some(Type::Generic(
                 "Option".into(),
-                vec![Type::Generic("list".into(), vec![Type::Named("int".into())])]
+                vec![Type::Generic(
+                    "list".into(),
+                    vec![Type::Named("int".into())]
+                )]
             ))
         );
     }
@@ -3542,7 +3860,9 @@ mod tests {
     /// match-expr as the last statement in a block: the arm Dedent and the block Dedent stack.
     #[test]
     fn match_expr_last_in_fn_body() {
-        let m = parse_ok("fn f(s: Color):\n    x := match s:\n        A: 1\n        B: 2\n    print(x)\n");
+        let m = parse_ok(
+            "fn f(s: Color):\n    x := match s:\n        A: 1\n        B: 2\n    print(x)\n",
+        );
         assert_eq!(m.stmts.len(), 1); // just the fn
     }
 
@@ -3579,13 +3899,28 @@ mod tests {
         // (Was 128, which sat at the stack edge and needed a 64 MiB thread to test; the lower bound
         // removed that crutch — runs inline now.) Exercises all four recursive entry points.
         let paren = format!("x := {}1{}\n", "(".repeat(500), ")".repeat(500));
-        assert!(parse(lexer::tokenize(&paren).unwrap()).unwrap_err().message.contains("too deeply"));
+        assert!(
+            parse(lexer::tokenize(&paren).unwrap())
+                .unwrap_err()
+                .message
+                .contains("too deeply")
+        );
 
         let unary = format!("x := {}y\n", "not ".repeat(500));
-        assert!(parse(lexer::tokenize(&unary).unwrap()).unwrap_err().message.contains("too deeply"));
+        assert!(
+            parse(lexer::tokenize(&unary).unwrap())
+                .unwrap_err()
+                .message
+                .contains("too deeply")
+        );
 
         let generic = format!("z: {}int{} = w\n", "list[".repeat(500), "]".repeat(500));
-        assert!(parse(lexer::tokenize(&generic).unwrap()).unwrap_err().message.contains("too deeply"));
+        assert!(
+            parse(lexer::tokenize(&generic).unwrap())
+                .unwrap_err()
+                .message
+                .contains("too deeply")
+        );
 
         let blocks = {
             let mut s = String::new();
@@ -3597,7 +3932,12 @@ mod tests {
             s.push_str("y = 1\n");
             s
         };
-        assert!(parse(lexer::tokenize(&blocks).unwrap()).unwrap_err().message.contains("too deeply"));
+        assert!(
+            parse(lexer::tokenize(&blocks).unwrap())
+                .unwrap_err()
+                .message
+                .contains("too deeply")
+        );
     }
 
     /// A compound statement cannot be the inline body of a block — that would make a trailing
@@ -3611,11 +3951,9 @@ mod tests {
     /// Strengthened golden check: walk into hello.chz bodies, not just top-level shape.
     #[test]
     fn hello_example_inner_structure() {
-        let src = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/examples/hello.chz"
-        ))
-        .unwrap();
+        let src =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello.chz"))
+                .unwrap();
         let module = parse(lexer::tokenize(&src).unwrap()).unwrap();
 
         // index 4 = `fn safe_div(...) -> Result[int]:` — check its return type and `?` usage.
@@ -3625,7 +3963,10 @@ mod tests {
         assert_eq!(safe_div.name, "safe_div");
         assert_eq!(
             safe_div.ret,
-            Some(Type::Generic("Result".into(), vec![Type::Named("int".into())]))
+            Some(Type::Generic(
+                "Result".into(),
+                vec![Type::Named("int".into())]
+            ))
         );
         // body: `if b == 0:` then `return Ok(a / b)`
         assert!(matches!(safe_div.body[0].kind, StmtKind::If { .. }));
@@ -3663,7 +4004,13 @@ mod tests {
     fn explicit_type_args_parse() {
         // `max[int](3, 7)` → a Call carrying one type arg.
         let v = let_value("x := max[int](3, 7)\n");
-        let ExprKind::Call { callee, args, type_args, .. } = v.kind else {
+        let ExprKind::Call {
+            callee,
+            args,
+            type_args,
+            ..
+        } = v.kind
+        else {
             panic!("expected a Call, got {:?}", v.kind)
         };
         assert!(matches!(callee.kind, ExprKind::Ident(ref n) if n == "max"));
@@ -3675,14 +4022,20 @@ mod tests {
         let ExprKind::Call { type_args, .. } = v.kind else {
             panic!("expected a Call, got {:?}", v.kind)
         };
-        assert_eq!(type_args, vec![Type::Named("int".into()), Type::Named("str".into())]);
+        assert_eq!(
+            type_args,
+            vec![Type::Named("int".into()), Type::Named("str".into())]
+        );
     }
 
     #[test]
     fn index_then_call_still_index() {
         // A numeric subscript is NOT stolen — `fns[0](5)` stays index-then-call.
         let v = let_value("x := fns[0](5)\n");
-        let ExprKind::Call { callee, type_args, .. } = v.kind else {
+        let ExprKind::Call {
+            callee, type_args, ..
+        } = v.kind
+        else {
             panic!("expected a Call, got {:?}", v.kind)
         };
         assert!(type_args.is_empty());
@@ -3738,7 +4091,12 @@ mod tests {
         };
         assert!(matches!(callee.kind, ExprKind::Ident(ref n) if n == "dbl"));
         assert_eq!(args.len(), 1);
-        let ExprKind::Call { callee: inner_callee, args: inner_args, .. } = &args[0].kind else {
+        let ExprKind::Call {
+            callee: inner_callee,
+            args: inner_args,
+            ..
+        } = &args[0].kind
+        else {
             panic!("expected inner Call, got {:?}", args[0].kind)
         };
         assert!(matches!(inner_callee.kind, ExprKind::Ident(ref n) if n == "inc"));
@@ -3748,20 +4106,30 @@ mod tests {
     #[test]
     fn pipe_non_call_rhs_rejected() {
         let e = parse_err("x := 5 |> 7\n");
-        assert!(e.to_string().contains("right side of '|>' must be a function call"), "{e}");
+        assert!(
+            e.to_string()
+                .contains("right side of '|>' must be a function call"),
+            "{e}"
+        );
     }
 
     #[test]
     fn pipe_bare_identifier_rhs_rejected() {
         let e = parse_err("x := 5 |> f\n");
-        assert!(e.to_string().contains("right side of '|>' must be a function call"), "{e}");
+        assert!(
+            e.to_string()
+                .contains("right side of '|>' must be a function call"),
+            "{e}"
+        );
     }
 
     // ===== gap #8: tuples + multi-return + destructuring =====
 
     #[test]
     fn tuple_literal_two_elements() {
-        let StmtKind::Expr(e) = only("(1, 2)\n") else { panic!() };
+        let StmtKind::Expr(e) = only("(1, 2)\n") else {
+            panic!()
+        };
         match e.kind {
             ExprKind::Tuple(elems) => {
                 assert_eq!(elems.len(), 2);
@@ -3775,14 +4143,24 @@ mod tests {
     /// `(1 + 2)` is grouping, not a 1-tuple — it stays a `Binary`.
     #[test]
     fn paren_single_expr_is_grouping() {
-        let StmtKind::Expr(e) = only("(1 + 2)\n") else { panic!() };
-        assert!(matches!(e.kind, ExprKind::Binary { op: BinaryOp::Add, .. }));
+        let StmtKind::Expr(e) = only("(1 + 2)\n") else {
+            panic!()
+        };
+        assert!(matches!(
+            e.kind,
+            ExprKind::Binary {
+                op: BinaryOp::Add,
+                ..
+            }
+        ));
     }
 
     /// `(e,)` is a 1-element tuple (distinct from grouping `(e)`).
     #[test]
     fn one_element_tuple_parses() {
-        let StmtKind::Expr(e) = only("(1,)\n") else { panic!() };
+        let StmtKind::Expr(e) = only("(1,)\n") else {
+            panic!()
+        };
         match e.kind {
             ExprKind::Tuple(elems) => {
                 assert_eq!(elems.len(), 1);
@@ -3795,11 +4173,21 @@ mod tests {
     /// `(x,)` is a 1-tuple, `(x)` is grouping (bare expr), `(x, y,)` is a 2-tuple.
     #[test]
     fn tuple_one_two_grouping_trio() {
-        let StmtKind::Expr(e1) = only("(x,)\n") else { panic!() };
+        let StmtKind::Expr(e1) = only("(x,)\n") else {
+            panic!()
+        };
         assert!(matches!(&e1.kind, ExprKind::Tuple(es) if es.len() == 1));
-        let StmtKind::Expr(e2) = only("(x)\n") else { panic!() };
-        assert!(matches!(e2.kind, ExprKind::Ident(_)), "grouping, got {:?}", e2.kind);
-        let StmtKind::Expr(e3) = only("(x, y,)\n") else { panic!() };
+        let StmtKind::Expr(e2) = only("(x)\n") else {
+            panic!()
+        };
+        assert!(
+            matches!(e2.kind, ExprKind::Ident(_)),
+            "grouping, got {:?}",
+            e2.kind
+        );
+        let StmtKind::Expr(e3) = only("(x, y,)\n") else {
+            panic!()
+        };
         assert!(matches!(&e3.kind, ExprKind::Tuple(es) if es.len() == 2));
         // Lone-comma form still errors (parse_err asserts a parse failure occurred).
         parse_err("(,)\n");
@@ -3809,20 +4197,32 @@ mod tests {
     #[test]
     fn collection_trailing_comma_same_ast() {
         // list
-        let StmtKind::Expr(a) = only("[1, 2]\n") else { panic!() };
-        let StmtKind::Expr(b) = only("[1, 2,]\n") else { panic!() };
+        let StmtKind::Expr(a) = only("[1, 2]\n") else {
+            panic!()
+        };
+        let StmtKind::Expr(b) = only("[1, 2,]\n") else {
+            panic!()
+        };
         assert_eq!(a.kind, b.kind);
         assert!(matches!(&b.kind, ExprKind::List(es) if es.len() == 2));
         parse_err("[,]\n");
         // map
-        let StmtKind::Expr(a) = only("{\"a\": 1}\n") else { panic!() };
-        let StmtKind::Expr(b) = only("{\"a\": 1,}\n") else { panic!() };
+        let StmtKind::Expr(a) = only("{\"a\": 1}\n") else {
+            panic!()
+        };
+        let StmtKind::Expr(b) = only("{\"a\": 1,}\n") else {
+            panic!()
+        };
         assert_eq!(a.kind, b.kind);
         assert!(matches!(&b.kind, ExprKind::Map(es) if es.len() == 1));
         parse_err("{,}\n");
         // set
-        let StmtKind::Expr(a) = only("{1, 2}\n") else { panic!() };
-        let StmtKind::Expr(b) = only("{1, 2,}\n") else { panic!() };
+        let StmtKind::Expr(a) = only("{1, 2}\n") else {
+            panic!()
+        };
+        let StmtKind::Expr(b) = only("{1, 2,}\n") else {
+            panic!()
+        };
         assert_eq!(a.kind, b.kind);
         assert!(matches!(&b.kind, ExprKind::Set(es) if es.len() == 2));
     }
@@ -3831,15 +4231,25 @@ mod tests {
     #[test]
     fn call_args_and_params_trailing_comma() {
         // call args
-        let StmtKind::Expr(a) = only("f(1, 2)\n") else { panic!() };
-        let StmtKind::Expr(b) = only("f(1, 2,)\n") else { panic!() };
+        let StmtKind::Expr(a) = only("f(1, 2)\n") else {
+            panic!()
+        };
+        let StmtKind::Expr(b) = only("f(1, 2,)\n") else {
+            panic!()
+        };
         assert_eq!(a.kind, b.kind);
         parse_err("f(,)\n");
         // fn params
         parse_ok("fn g(a, b,):\n    a\n");
         // closure params (closures live in expression position, e.g. a let RHS)
-        let StmtKind::Let { value, .. } = only("c := fn(a, b,): a\n") else { panic!() };
-        assert!(matches!(value.kind, ExprKind::Closure { .. }), "got {:?}", value.kind);
+        let StmtKind::Let { value, .. } = only("c := fn(a, b,): a\n") else {
+            panic!()
+        };
+        assert!(
+            matches!(value.kind, ExprKind::Closure { .. }),
+            "got {:?}",
+            value.kind
+        );
     }
 
     #[test]
@@ -3849,21 +4259,28 @@ mod tests {
         };
         assert_eq!(
             f.ret,
-            Some(Type::Tuple(vec![Type::Named("int".into()), Type::Named("int".into())]))
+            Some(Type::Tuple(vec![
+                Type::Named("int".into()),
+                Type::Named("int".into())
+            ]))
         );
     }
 
     /// `(T)` in type position unwraps to `T` (not a 1-tuple).
     #[test]
     fn paren_single_type_unwraps() {
-        let StmtKind::Fn(f) = only("fn f(x: (int)):\n    return x\n") else { panic!() };
+        let StmtKind::Fn(f) = only("fn f(x: (int)):\n    return x\n") else {
+            panic!()
+        };
         assert_eq!(f.params[0].ty, Some(Type::Named("int".into())));
     }
 
     #[test]
     fn destructuring_let_parses() {
         match only("a, b := pair()\n") {
-            StmtKind::Let { names, ty, value, .. } => {
+            StmtKind::Let {
+                names, ty, value, ..
+            } => {
                 assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
                 assert!(ty.is_none());
                 assert!(matches!(value.kind, ExprKind::Call { .. }));
@@ -3880,12 +4297,16 @@ mod tests {
 
     #[test]
     fn tuple_element_access_parses() {
-        let StmtKind::Expr(e) = only("t.0\n") else { panic!() };
+        let StmtKind::Expr(e) = only("t.0\n") else {
+            panic!()
+        };
         match e.kind {
             ExprKind::Field { name, .. } => assert_eq!(name, "0"),
             other => panic!("{other:?}"),
         }
-        let StmtKind::Expr(e) = only("t.1\n") else { panic!() };
+        let StmtKind::Expr(e) = only("t.1\n") else {
+            panic!()
+        };
         match e.kind {
             ExprKind::Field { name, .. } => assert_eq!(name, "1"),
             other => panic!("{other:?}"),
@@ -3900,7 +4321,13 @@ mod tests {
             panic!("expected a Call, got {:?}", v.kind)
         };
         assert_eq!(args.len(), 1);
-        assert!(matches!(args[0].kind, ExprKind::Binary { op: BinaryOp::Add, .. }));
+        assert!(matches!(
+            args[0].kind,
+            ExprKind::Binary {
+                op: BinaryOp::Add,
+                ..
+            }
+        ));
     }
 
     // ---- default args + named args (parser layer) ----
@@ -3911,7 +4338,13 @@ mod tests {
             StmtKind::Fn(f) => {
                 assert_eq!(f.params.len(), 2);
                 assert!(f.params[0].default.is_none());
-                assert!(matches!(f.params[1].default, Some(Expr { kind: ExprKind::Int(10), .. })));
+                assert!(matches!(
+                    f.params[1].default,
+                    Some(Expr {
+                        kind: ExprKind::Int(10),
+                        ..
+                    })
+                ));
             }
             other => panic!("{other:?}"),
         }
@@ -3935,17 +4368,27 @@ mod tests {
     fn eqeq_arg_is_not_named() {
         // `f(x == 1)` is a positional boolean expression, NOT a named arg.
         let v = let_value("r := f(x == 1)\n");
-        let ExprKind::Call { args, named, .. } = v.kind else { panic!() };
+        let ExprKind::Call { args, named, .. } = v.kind else {
+            panic!()
+        };
         assert_eq!(args.len(), 1);
         assert!(named.is_empty());
-        assert!(matches!(args[0].kind, ExprKind::Binary { op: BinaryOp::Eq, .. }));
+        assert!(matches!(
+            args[0].kind,
+            ExprKind::Binary {
+                op: BinaryOp::Eq,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn positional_after_named_rejected() {
-        assert!(parse_err("r := f(y=2, 1)\n")
-            .message
-            .contains("positional argument after named argument"));
+        assert!(
+            parse_err("r := f(y=2, 1)\n")
+                .message
+                .contains("positional argument after named argument")
+        );
     }
 
     #[test]
@@ -3965,16 +4408,20 @@ mod tests {
 
     #[test]
     fn default_before_required_rejected() {
-        assert!(parse_err("fn f(x: int = 1, y: int):\n    print(x)\n")
-            .message
-            .contains("required parameter"));
+        assert!(
+            parse_err("fn f(x: int = 1, y: int):\n    print(x)\n")
+                .message
+                .contains("required parameter")
+        );
     }
 
     #[test]
     fn closure_default_rejected() {
-        assert!(parse_err("c := fn(x: int = 1): x\n")
-            .message
-            .contains("default"));
+        assert!(
+            parse_err("c := fn(x: int = 1): x\n")
+                .message
+                .contains("default")
+        );
     }
 
     #[test]
@@ -3983,7 +4430,13 @@ mod tests {
             StmtKind::Struct { fields, .. } => {
                 assert_eq!(fields.len(), 2);
                 assert!(fields[0].default.is_none());
-                assert!(matches!(fields[1].default, Some(Expr { kind: ExprKind::Int(0), .. })));
+                assert!(matches!(
+                    fields[1].default,
+                    Some(Expr {
+                        kind: ExprKind::Int(0),
+                        ..
+                    })
+                ));
             }
             other => panic!("{other:?}"),
         }
@@ -3991,15 +4444,19 @@ mod tests {
 
     #[test]
     fn struct_field_default_before_required_rejected() {
-        assert!(parse_err("struct S:\n    x: int = 0\n    y: int\n")
-            .message
-            .contains("required field"));
+        assert!(
+            parse_err("struct S:\n    x: int = 0\n    y: int\n")
+                .message
+                .contains("required field")
+        );
     }
 
     #[test]
     fn method_default_param_allowed() {
         // Methods now accept constant-literal defaults (filled by the desugar pass at call sites).
-        match only("struct S:\n    x: int\n    fn scale(self, k: int = 2) -> int:\n        return self.x * k\n") {
+        match only(
+            "struct S:\n    x: int\n    fn scale(self, k: int = 2) -> int:\n        return self.x * k\n",
+        ) {
             StmtKind::Struct { methods, .. } => {
                 assert!(methods[0].params[1].default.is_some());
             }
@@ -4045,8 +4502,12 @@ mod tests {
         match first_arm_pattern("match c:\n    Red | Green: print(1)\n    _: print(0)\n") {
             Pattern::Or(alts) => {
                 assert_eq!(alts.len(), 2);
-                assert!(matches!(&alts[0], Pattern::Variant { name, bindings, .. } if name == "Red" && bindings.is_empty()));
-                assert!(matches!(&alts[1], Pattern::Variant { name, bindings, .. } if name == "Green" && bindings.is_empty()));
+                assert!(
+                    matches!(&alts[0], Pattern::Variant { name, bindings, .. } if name == "Red" && bindings.is_empty())
+                );
+                assert!(
+                    matches!(&alts[1], Pattern::Variant { name, bindings, .. } if name == "Green" && bindings.is_empty())
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -4069,7 +4530,11 @@ mod tests {
     fn qualified_variant_pattern_parses() {
         // `Color.Red` (nullary) -> Variant{name: "Red", enum_name: Some("Color")}.
         match first_arm_pattern("match c:\n    Color.Red: print(0)\n    _: print(1)\n") {
-            Pattern::Variant { name, bindings, enum_name } => {
+            Pattern::Variant {
+                name,
+                bindings,
+                enum_name,
+            } => {
                 assert_eq!(name, "Red");
                 assert!(bindings.is_empty());
                 assert_eq!(enum_name.as_deref(), Some("Color"));
@@ -4078,7 +4543,11 @@ mod tests {
         }
         // `Shape.Circle(r)` (payload) -> Variant{name: "Circle", enum_name: Some("Shape"), [Ident r]}.
         match first_arm_pattern("match s:\n    Shape.Circle(r): print(r)\n    _: print(0)\n") {
-            Pattern::Variant { name, bindings, enum_name } => {
+            Pattern::Variant {
+                name,
+                bindings,
+                enum_name,
+            } => {
                 assert_eq!(name, "Circle");
                 assert_eq!(enum_name.as_deref(), Some("Shape"));
                 assert!(matches!(&bindings[0], Pattern::Ident(n) if n == "r"));
@@ -4087,7 +4556,9 @@ mod tests {
         }
         // Bare `None` stays unqualified.
         match first_arm_pattern("match o:\n    None: print(0)\n    _: print(1)\n") {
-            Pattern::Variant { name, enum_name, .. } => {
+            Pattern::Variant {
+                name, enum_name, ..
+            } => {
                 assert_eq!(name, "None");
                 assert_eq!(enum_name, None);
             }
@@ -4160,7 +4631,9 @@ mod tests {
     #[test]
     fn parses_ref_local_and_param() {
         match only("r: ref int = 0\n") {
-            StmtKind::Let { is_ref, ty, names, .. } => {
+            StmtKind::Let {
+                is_ref, ty, names, ..
+            } => {
                 assert!(is_ref, "typed-let `ref` modifier should set is_ref");
                 assert_eq!(names, vec!["r".to_string()]);
                 assert_eq!(ty, Some(Type::Named("int".to_string())));
@@ -4196,8 +4669,8 @@ mod tests {
         for src in [
             "fn f() -> ref int:\n    return 0\n", // return type
             "xs: list[ref int] = []\n",           // generic arg / collection element
-            "struct S:\n    count: ref int\n",   // struct field
-            "p: (ref int, int) = (0, 1)\n",      // tuple element
+            "struct S:\n    count: ref int\n",    // struct field
+            "p: (ref int, int) = (0, 1)\n",       // tuple element
         ] {
             assert!(
                 parse_err(src).message.contains("found 'ref'"),
@@ -4217,12 +4690,16 @@ mod tests {
         // A `ref` modifier is legal on a closure param (`fn(x: ref int)`), parsed like any param.
         match only("g := fn(x: ref int) -> int: x + 1\n") {
             StmtKind::Let { value, .. } => {
-                let ExprKind::Closure { params, .. } = &value.kind else { panic!("closure") };
-                assert!(params[0].is_ref, "closure param `ref` modifier should set is_ref");
+                let ExprKind::Closure { params, .. } = &value.kind else {
+                    panic!("closure")
+                };
+                assert!(
+                    params[0].is_ref,
+                    "closure param `ref` modifier should set is_ref"
+                );
                 assert_eq!(params[0].ty, Some(Type::Named("int".to_string())));
             }
             other => panic!("{other:?}"),
         }
     }
 }
-

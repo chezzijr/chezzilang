@@ -180,7 +180,10 @@ mod tests {
 
     #[test]
     fn zero_step_errs() {
-        assert_eq!(slice_indices(None, None, Some(0), 5), Err("slice step cannot be zero"));
+        assert_eq!(
+            slice_indices(None, None, Some(0), 5),
+            Err("slice step cannot be zero")
+        );
     }
 
     #[test]

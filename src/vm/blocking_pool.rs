@@ -28,7 +28,8 @@ static POOL: OnceLock<BlockingPool> = OnceLock::new();
 
 /// Submit `job` to the process-wide blocking pool (lazily created on first use).
 pub fn submit(job: Job) {
-    POOL.get_or_init(|| BlockingPool::new(BLOCKING_POOL_CAP, REAP_AFTER)).submit(job);
+    POOL.get_or_init(|| BlockingPool::new(BLOCKING_POOL_CAP, REAP_AFTER))
+        .submit(job);
 }
 
 /// A unit of blocking work: a self-contained `'static` closure (it owns the offloaded fiber, the
@@ -65,7 +66,14 @@ pub struct BlockingPool {
 impl BlockingPool {
     fn new(cap: usize, reap_after: Duration) -> Self {
         BlockingPool {
-            shared: Arc::new(Shared { state: Mutex::new(State { queue: VecDeque::new(), idle: 0, total: 0 }), cv: Condvar::new() }),
+            shared: Arc::new(Shared {
+                state: Mutex::new(State {
+                    queue: VecDeque::new(),
+                    idle: 0,
+                    total: 0,
+                }),
+                cv: Condvar::new(),
+            }),
             cap: cap.max(1),
             reap_after,
         }
@@ -105,7 +113,11 @@ impl BlockingPool {
 
     #[cfg(test)]
     fn total_threads(&self) -> usize {
-        self.shared.state.lock().unwrap_or_else(|e| e.into_inner()).total
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .total
     }
 }
 
@@ -121,7 +133,10 @@ fn worker_loop(shared: &Shared, reap_after: Duration) {
                     break Some(job);
                 }
                 st.idle += 1;
-                let (g, res) = shared.cv.wait_timeout(st, reap_after).unwrap_or_else(|e| e.into_inner());
+                let (g, res) = shared
+                    .cv
+                    .wait_timeout(st, reap_after)
+                    .unwrap_or_else(|e| e.into_inner());
                 st = g;
                 st.idle -= 1;
                 if res.timed_out() && st.queue.is_empty() {
@@ -153,7 +168,10 @@ mod tests {
         let pool = BlockingPool::new(8, Duration::from_secs(10));
         let (tx, rx) = mpsc::channel();
         pool.submit(Box::new(move || tx.send(42).unwrap()));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).expect("job ran"), 42);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).expect("job ran"),
+            42
+        );
     }
 
     /// When a job arrives and the only thread is busy, the pool spawns a second thread (grow-on-stall)
@@ -191,10 +209,17 @@ mod tests {
         while *n < 2 {
             let (g, res) = c.wait_timeout(n, deadline).unwrap();
             n = g;
-            assert!(!res.timed_out() || *n >= 2, "second concurrent job never started — pool did not grow");
+            assert!(
+                !res.timed_out() || *n >= 2,
+                "second concurrent job never started — pool did not grow"
+            );
         }
         drop(n);
-        assert_eq!(pool.total_threads(), 2, "pool grew a second thread for the second concurrent job");
+        assert_eq!(
+            pool.total_threads(),
+            2,
+            "pool grew a second thread for the second concurrent job"
+        );
 
         // Release both.
         let (l, c) = &*gate;
@@ -213,7 +238,11 @@ mod tests {
 
         // Past the reap timeout the idle thread exits.
         std::thread::sleep(Duration::from_millis(400));
-        assert_eq!(pool.total_threads(), 0, "idle thread reaped after the timeout");
+        assert_eq!(
+            pool.total_threads(),
+            0,
+            "idle thread reaped after the timeout"
+        );
     }
 
     /// The pool never exceeds its cap, even with more concurrent blocking jobs than the cap.
@@ -237,7 +266,11 @@ mod tests {
         }
         // Give any erroneous extra threads a chance to spawn.
         std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(pool.total_threads(), 1, "cap of 1 honored despite 3 concurrent jobs");
+        assert_eq!(
+            pool.total_threads(),
+            1,
+            "cap of 1 honored despite 3 concurrent jobs"
+        );
 
         // Release; all three jobs eventually run on the single capped thread.
         let (l, c) = &*gate;
@@ -248,7 +281,10 @@ mod tests {
             if *ran.lock().unwrap() == 3 {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "all jobs ran on the capped pool");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "all jobs ran on the capped pool"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     }

@@ -178,15 +178,26 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
             collect_core_gcrefs(k, out, seen);
             collect_core_gcrefs(v, out, seen);
         }),
-        WireValue::Set(entries) => entries.iter().for_each(|(_, e)| collect_core_gcrefs(e, out, seen)),
-        WireValue::Struct { fields, .. } => {
-            fields.iter().for_each(|(_, v)| collect_core_gcrefs(v, out, seen))
-        }
-        WireValue::Enum { payload, .. } => payload.iter().for_each(|x| collect_core_gcrefs(x, out, seen)),
+        WireValue::Set(entries) => entries
+            .iter()
+            .for_each(|(_, e)| collect_core_gcrefs(e, out, seen)),
+        WireValue::Struct { fields, .. } => fields
+            .iter()
+            .for_each(|(_, v)| collect_core_gcrefs(v, out, seen)),
+        WireValue::Enum { payload, .. } => payload
+            .iter()
+            .for_each(|x| collect_core_gcrefs(x, out, seen)),
         // A cursor queued in a channel/executor roots its snapshot items' handles (like `List`).
-        WireValue::Iter { items, .. } => items.iter().for_each(|x| collect_core_gcrefs(x, out, seen)),
+        WireValue::Iter { items, .. } => {
+            items.iter().for_each(|x| collect_core_gcrefs(x, out, seen))
+        }
         WireValue::Channel(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
-            core.q.lock().unwrap().queue.iter().for_each(|w| collect_core_gcrefs(w, out, s))
+            core.q
+                .lock()
+                .unwrap()
+                .queue
+                .iter()
+                .for_each(|w| collect_core_gcrefs(w, out, s))
         }),
         WireValue::Shared(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
             collect_core_gcrefs(&core.v.lock().unwrap(), out, s)
@@ -195,14 +206,19 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
             collect_core_gcrefs(&core.v.lock().unwrap(), out, s)
         }),
         WireValue::Executor(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
-            core.inner.lock().unwrap().queue.iter().for_each(|w| collect_core_gcrefs(w, out, s))
+            core.inner
+                .lock()
+                .unwrap()
+                .queue
+                .iter()
+                .for_each(|w| collect_core_gcrefs(w, out, s))
         }),
         // B3.6: a submitted closure queued in an `Executor` crosses by value, but its captures may
         // still embed `Handle`s into the live heap (a captured `Channel[str]`'s bytes root nothing,
         // but a captured callable would) — root them while the task sits in the queue.
-        WireValue::Closure { captured, .. } => {
-            captured.iter().for_each(|(_, v)| collect_core_gcrefs(v, out, seen))
-        }
+        WireValue::Closure { captured, .. } => captured
+            .iter()
+            .for_each(|(_, v)| collect_core_gcrefs(v, out, seen)),
         // B3.3a: `Str` crosses by value (owned bytes in the core) — it roots no heap object.
         // D6: a `Socket`/`Listener` core holds an OS fd + a poll key — no `WireValue`s, no `GcRef`s.
         // `bytes`/`bytearray` cross by value (owned raw bytes) — root no heap object.
@@ -242,10 +258,24 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let stream = TcpStream::connect(addr).unwrap();
-        let s1 = SocketCore { stream: Mutex::new(Some(stream)), key: next_poll_key(), in_flight: new_in_flight() };
-        let s2 = ListenerCore { listener: Mutex::new(Some(listener)), key: next_poll_key(), in_flight: new_in_flight() };
+        let s1 = SocketCore {
+            stream: Mutex::new(Some(stream)),
+            key: next_poll_key(),
+            in_flight: new_in_flight(),
+        };
+        let s2 = ListenerCore {
+            listener: Mutex::new(Some(listener)),
+            key: next_poll_key(),
+            in_flight: new_in_flight(),
+        };
         assert_ne!(s1.key, s2.key, "each core gets a distinct poll key");
-        assert!(s1.stream.lock().unwrap().is_some(), "a fresh socket core is open");
-        assert!(s2.listener.lock().unwrap().is_some(), "a fresh listener core is open");
+        assert!(
+            s1.stream.lock().unwrap().is_some(),
+            "a fresh socket core is open"
+        );
+        assert!(
+            s2.listener.lock().unwrap().is_some(),
+            "a fresh listener core is open"
+        );
     }
 }

@@ -185,9 +185,7 @@ fn bump(acc: usize, c: char, what: &str) -> Result<usize, String> {
         .saturating_mul(10)
         .saturating_add((c as u8 - b'0') as usize);
     if next > MAX_FIELD {
-        return Err(format!(
-            "format spec: {what} exceeds maximum {MAX_FIELD}"
-        ));
+        return Err(format!("format spec: {what} exceeds maximum {MAX_FIELD}"));
     }
     Ok(next)
 }
@@ -243,7 +241,11 @@ pub fn apply(spec: &FormatSpec, arg: FmtArg, out: &mut String) -> Result<(), Str
         return Ok(());
     }
     let pad = spec.width - len;
-    let align = spec.align.unwrap_or(if is_numeric { Align::Right } else { Align::Left });
+    let align = spec.align.unwrap_or(if is_numeric {
+        Align::Right
+    } else {
+        Align::Left
+    });
     match align {
         Align::Left => {
             out.push_str(&full);
@@ -409,10 +411,18 @@ mod tests {
 
     #[test]
     fn parse_width_cap_rejected() {
-        assert!(parse(">100000000").unwrap_err().contains("exceeds maximum 4096"));
+        assert!(
+            parse(">100000000")
+                .unwrap_err()
+                .contains("exceeds maximum 4096")
+        );
         assert!(parse(">4096").is_ok());
         assert!(parse(">4097").unwrap_err().contains("exceeds maximum 4096"));
-        assert!(parse(".99999999").unwrap_err().contains("exceeds maximum 4096"));
+        assert!(
+            parse(".99999999")
+                .unwrap_err()
+                .contains("exceeds maximum 4096")
+        );
     }
 
     #[test]
@@ -491,10 +501,16 @@ mod tests {
         // format-spec separators. A bare top-level ternary therefore carries no spec (regression
         // guard: `{if b: 10 else: 20}` must keep working, not be mis-split into expr `if b`).
         assert_eq!(split_spec("if b: 10 else: 20"), ("if b: 10 else: 20", None));
-        assert_eq!(split_spec("if x > 0: a else: b"), ("if x > 0: a else: b", None));
+        assert_eq!(
+            split_spec("if x > 0: a else: b"),
+            ("if x > 0: a else: b", None)
+        );
         // A parenthesized ternary CAN carry a spec — the inner colons are bracketed (depth > 0),
         // so only the trailing top-level colon splits.
-        assert_eq!(split_spec("(if b: 1 else: 2):>5"), ("(if b: 1 else: 2)", Some(">5")));
+        assert_eq!(
+            split_spec("(if b: 1 else: 2):>5"),
+            ("(if b: 1 else: 2)", Some(">5"))
+        );
         // `if` as a leading substring of an identifier is not the keyword — still splits normally.
         assert_eq!(split_spec("iffy:>5"), ("iffy", Some(">5")));
     }

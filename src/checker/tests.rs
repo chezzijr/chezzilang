@@ -71,7 +71,9 @@ fn compound_bitor_int_only() {
         "fn main():\n    x := 1.0\n    x |= 2\nmain()\n",
         "requires int",
     );
-    ok("fn main():\n    x := 5\n    x |= 2\n    x &= 3\n    x ^= 1\n    x <<= 1\n    x >>= 1\n    print(x)\nmain()\n");
+    ok(
+        "fn main():\n    x := 5\n    x |= 2\n    x &= 3\n    x ^= 1\n    x <<= 1\n    x >>= 1\n    print(x)\nmain()\n",
+    );
 }
 
 #[test]
@@ -100,7 +102,9 @@ fn tuple_swap_checks() {
 
 #[test]
 fn tuple_swap_list_elements_check() {
-    ok("fn main():\n    data := [1, 2, 3]\n    data[0], data[2] = data[2], data[0]\n    print(data)\nmain()\n");
+    ok(
+        "fn main():\n    data := [1, 2, 3]\n    data[0], data[2] = data[2], data[0]\n    print(data)\nmain()\n",
+    );
 }
 
 #[test]
@@ -174,7 +178,9 @@ struct Point:
 
 #[test]
 fn generic_max_over_int_ok() {
-    ok("fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nm := max(3, 7)\n");
+    ok(
+        "fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nm := max(3, 7)\n",
+    );
 }
 
 #[test]
@@ -241,7 +247,10 @@ fn explicit_type_args_fn_ok() {
 #[test]
 fn explicit_type_args_pin_result_type() {
     // `max[int]` returns int → a str binding must be rejected (proves the pin flows to the return).
-    rejects(&format!("{MAX_FN}x: str = max[int](3, 7)\n"), "cannot assign int");
+    rejects(
+        &format!("{MAX_FN}x: str = max[int](3, 7)\n"),
+        "cannot assign int",
+    );
 }
 
 #[test]
@@ -252,7 +261,10 @@ fn explicit_type_args_mismatch_rejected() {
 
 #[test]
 fn explicit_type_args_wrong_count_rejected() {
-    rejects(&format!("{MAX_FN}x := max[int, int](3, 7)\n"), "expects 1 type argument");
+    rejects(
+        &format!("{MAX_FN}x := max[int, int](3, 7)\n"),
+        "expects 1 type argument",
+    );
 }
 
 #[test]
@@ -321,7 +333,10 @@ x := biggest(Circle(2.0))
 
 #[test]
 fn unknown_protocol_bound_rejected() {
-    rejects("fn f[T: Bogus](a: T) -> T:\n    return a\n", "unknown protocol 'Bogus'");
+    rejects(
+        "fn f[T: Bogus](a: T) -> T:\n    return a\n",
+        "unknown protocol 'Bogus'",
+    );
 }
 
 #[test]
@@ -378,7 +393,10 @@ x := show(Bare(1))
 
 #[test]
 fn redeclaring_stringable_rejected() {
-    rejects("protocol Stringable:\n    fn str(self) -> str\n", "reserved");
+    rejects(
+        "protocol Stringable:\n    fn str(self) -> str\n",
+        "reserved",
+    );
 }
 
 // ----- Hashable struct keys for map/set (key restriction lifted) -----
@@ -394,12 +412,16 @@ struct Point:
 
 #[test]
 fn struct_with_hash_is_valid_map_key() {
-    ok(&format!("{POINT_H}m: map[Point, str] = {{}}\nm[Point(1, 2)] = \"a\"\n"));
+    ok(&format!(
+        "{POINT_H}m: map[Point, str] = {{}}\nm[Point(1, 2)] = \"a\"\n"
+    ));
 }
 
 #[test]
 fn set_of_hashable_struct_ok() {
-    ok(&format!("{POINT_H}s: set[Point] = set()\ns.add(Point(1, 2))\n"));
+    ok(&format!(
+        "{POINT_H}s: set[Point] = set()\ns.add(Point(1, 2))\n"
+    ));
 }
 
 #[test]
@@ -416,12 +438,18 @@ fn struct_without_hash_rejected_as_set_element() {
 
 #[test]
 fn float_still_rejected_as_map_key() {
-    rejects("m: map[float, int] = {}\n", "map key type must implement Hashable");
+    rejects(
+        "m: map[float, int] = {}\n",
+        "map key type must implement Hashable",
+    );
 }
 
 #[test]
 fn float_still_rejected_as_set_element() {
-    rejects("s: set[float] = set()\n", "set element type must implement Hashable");
+    rejects(
+        "s: set[float] = set()\n",
+        "set element type must implement Hashable",
+    );
 }
 
 // ----- Hashable protocol (M10-G2: bound; M10 map-model: wired to map/set keys) -----
@@ -443,7 +471,9 @@ x := keyed(Id(7))
 #[test]
 fn hashable_intrinsic_for_scalars_ok() {
     // int/str/bool satisfy Hashable intrinsically, so a `[T: Hashable]` bound accepts them.
-    ok("fn keyed[T: Hashable](v: T) -> T:\n    return v\na := keyed(3)\nb := keyed(\"x\")\nc := keyed(true)\n");
+    ok(
+        "fn keyed[T: Hashable](v: T) -> T:\n    return v\na := keyed(3)\nb := keyed(\"x\")\nc := keyed(true)\n",
+    );
 }
 
 #[test]
@@ -477,13 +507,18 @@ struct Vec2:
 
 #[test]
 fn struct_add_mul_overload_ok() {
-    ok(&format!("{VEC2}v := Vec2(1, 2) + Vec2(3, 4) * Vec2(5, 6)\n"));
+    ok(&format!(
+        "{VEC2}v := Vec2(1, 2) + Vec2(3, 4) * Vec2(5, 6)\n"
+    ));
 }
 
 #[test]
 fn struct_without_sub_rejects_minus() {
     // Vec2 defines add/mul but not sub ⇒ `-` is not overloaded.
-    rejects(&format!("{VEC2}v := Vec2(1, 2) - Vec2(3, 4)\n"), "cannot apply - to Vec2 and Vec2");
+    rejects(
+        &format!("{VEC2}v := Vec2(1, 2) - Vec2(3, 4)\n"),
+        "cannot apply - to Vec2 and Vec2",
+    );
 }
 
 #[test]
@@ -510,7 +545,10 @@ v := fma(PointA(1), PointA(2), PointA(3))
 
 #[test]
 fn redeclaring_add_rejected() {
-    rejects("protocol Add:\n    fn add(self, other: Self) -> Self\n", "reserved");
+    rejects(
+        "protocol Add:\n    fn add(self, other: Self) -> Self\n",
+        "reserved",
+    );
 }
 
 // ----- transparent type aliases (M10-G3) -----
@@ -518,14 +556,19 @@ fn redeclaring_add_rejected() {
 #[test]
 fn type_alias_transparent_ok() {
     // UserId ≡ int: usable interchangeably in annotations and calls.
-    ok("type UserId = int\nfn double(n: int) -> int:\n    return n * 2\nid: UserId = 5\nx: int = id\ny := double(id)\n");
+    ok(
+        "type UserId = int\nfn double(n: int) -> int:\n    return n * 2\nid: UserId = 5\nx: int = id\ny := double(id)\n",
+    );
 }
 
 #[test]
 fn type_alias_mismatch_still_rejected() {
     // The alias is transparent, so a str where the underlying int is expected is still an error
     // (and the message names the resolved type, `int`).
-    rejects("type UserId = int\nid: UserId = \"no\"\n", "cannot assign str to variable of type int");
+    rejects(
+        "type UserId = int\nid: UserId = \"no\"\n",
+        "cannot assign str to variable of type int",
+    );
 }
 
 #[test]
@@ -561,18 +604,26 @@ struct Pair[A, B]:
 #[test]
 fn generic_struct_field_type_substituted() {
     // first is A=int; assigning it to a str binding must be rejected.
-    rejects(&format!("{PAIR}p := Pair(1, \"x\")\nn: str = p.first\n"), "cannot assign int");
+    rejects(
+        &format!("{PAIR}p := Pair(1, \"x\")\nn: str = p.first\n"),
+        "cannot assign int",
+    );
 }
 
 #[test]
 fn generic_struct_construction_and_field_ok() {
-    ok(&format!("{PAIR}p := Pair(1, \"x\")\nn: int = p.first\ns: str = p.second\n"));
+    ok(&format!(
+        "{PAIR}p := Pair(1, \"x\")\nn: int = p.first\ns: str = p.second\n"
+    ));
 }
 
 #[test]
 fn generic_struct_method_return_substituted() {
     ok(&format!("{PAIR}p := Pair(7, \"x\")\nn: int = p.left()\n"));
-    rejects(&format!("{PAIR}p := Pair(7, \"x\")\nn: str = p.left()\n"), "cannot assign int");
+    rejects(
+        &format!("{PAIR}p := Pair(7, \"x\")\nn: str = p.left()\n"),
+        "cannot assign int",
+    );
 }
 
 #[test]
@@ -582,7 +633,10 @@ fn generic_struct_explicit_type_args_ok() {
 
 #[test]
 fn generic_struct_wrong_arity_rejected() {
-    rejects(&format!("{PAIR}p: Pair[int] = Pair(1, 2)\n"), "expects 2 type argument(s)");
+    rejects(
+        &format!("{PAIR}p: Pair[int] = Pair(1, 2)\n"),
+        "expects 2 type argument(s)",
+    );
 }
 
 #[test]
@@ -624,7 +678,9 @@ struct Box[T]:
 #[test]
 fn method_type_param_inferred_from_closure_ok() {
     // U is inferred from the closure's return type (str); the call type-checks and yields str.
-    ok(&format!("{BOXMAP}b := Box(5)\ns: str = b.map_to(fn(x: int) -> str: \"n{{x}}\")\n"));
+    ok(&format!(
+        "{BOXMAP}b := Box(5)\ns: str = b.map_to(fn(x: int) -> str: \"n{{x}}\")\n"
+    ));
 }
 
 #[test]
@@ -726,18 +782,15 @@ fn param_protocol_bound_conformance_ok() {
 #[test]
 fn param_protocol_body_return_substituted() {
     // Inside `first`, `c.get(0)` is `T` = int (from the bound's arg). Returning it as str is wrong.
-    let src = format!(
-        "{CONTAINER}fn first[X: Container[int]](c: X) -> str:\n    return c.get(0)\n"
-    );
+    let src =
+        format!("{CONTAINER}fn first[X: Container[int]](c: X) -> str:\n    return c.get(0)\n");
     rejects(&src, "int");
 }
 
 #[test]
 fn param_protocol_bound_arity_mismatch_rejected() {
     // Container takes one type argument; a bare `Container` bound is an arity error.
-    let src = format!(
-        "{CONTAINER}fn first[X: Container](c: X) -> int:\n    return c.get(0)\n"
-    );
+    let src = format!("{CONTAINER}fn first[X: Container](c: X) -> int:\n    return c.get(0)\n");
     rejects(&src, "type argument");
 }
 
@@ -941,19 +994,27 @@ enum Tree[T]:
 #[test]
 fn generic_enum_construction_infers_type_arg_ok() {
     // Node(1, Leaf, Leaf) infers T=int; the value flows into a `Tree[int]` slot.
-    ok(&format!("{TREE}t: Tree[int] = Tree.Node(1, Tree.Leaf, Tree.Leaf)\n"));
+    ok(&format!(
+        "{TREE}t: Tree[int] = Tree.Node(1, Tree.Leaf, Tree.Leaf)\n"
+    ));
 }
 
 #[test]
 fn generic_enum_construction_type_mismatch_rejected() {
     // First payload is T; an int and a str in the two Node arms can't both be T.
-    rejects(&format!("{TREE}t := Tree.Node(1, Tree.Node(\"x\", Tree.Leaf, Tree.Leaf), Tree.Leaf)\n"), "expected");
+    rejects(
+        &format!("{TREE}t := Tree.Node(1, Tree.Node(\"x\", Tree.Leaf, Tree.Leaf), Tree.Leaf)\n"),
+        "expected",
+    );
 }
 
 #[test]
 fn generic_enum_annotation_arg_mismatch_rejected() {
     // A Tree[str] slot can't hold a Node whose payload infers T=int.
-    rejects(&format!("{TREE}t: Tree[str] = Tree.Node(1, Tree.Leaf, Tree.Leaf)\n"), "cannot assign");
+    rejects(
+        &format!("{TREE}t: Tree[str] = Tree.Node(1, Tree.Leaf, Tree.Leaf)\n"),
+        "cannot assign",
+    );
 }
 
 #[test]
@@ -976,12 +1037,18 @@ fn generic_enum_match_payload_type_enforced() {
 
 #[test]
 fn generic_enum_wrong_arity_rejected() {
-    rejects(&format!("{TREE}t: Tree[int, str] = Tree.Leaf\n"), "expects 1 type argument(s)");
+    rejects(
+        &format!("{TREE}t: Tree[int, str] = Tree.Leaf\n"),
+        "expects 1 type argument(s)",
+    );
 }
 
 #[test]
 fn bare_generic_enum_without_args_rejected() {
-    rejects(&format!("{TREE}fn f(t: Tree) -> int:\n    return 0\n"), "expects 1 type argument(s), got 0");
+    rejects(
+        &format!("{TREE}fn f(t: Tree) -> int:\n    return 0\n"),
+        "expects 1 type argument(s), got 0",
+    );
 }
 
 #[test]
@@ -1039,7 +1106,10 @@ b: Box[int] = Box.Has(5)
 
 #[test]
 fn generic_enum_unknown_bound_rejected() {
-    rejects("enum Box[T: Nope]:\n    Has(T)\n", "unknown protocol 'Nope'");
+    rejects(
+        "enum Box[T: Nope]:\n    Has(T)\n",
+        "unknown protocol 'Nope'",
+    );
 }
 
 #[test]
@@ -1047,8 +1117,14 @@ fn struct_and_enum_sharing_a_name_rejected() {
     // Review (Solidity lens): a struct and enum with the same name both registered silently,
     // the enum shadowed; with the merged `Name[args]` Display this surfaced as a nonsense
     // "cannot assign Foo[int] to … Foo[int]". Must be a clean "already defined" instead.
-    rejects("struct Foo:\n    n: int\nenum Foo:\n    A\n", "type 'Foo' is already defined");
-    rejects("enum Bar:\n    A\nstruct Bar:\n    n: int\n", "type 'Bar' is already defined");
+    rejects(
+        "struct Foo:\n    n: int\nenum Foo:\n    A\n",
+        "type 'Foo' is already defined",
+    );
+    rejects(
+        "enum Bar:\n    A\nstruct Bar:\n    n: int\n",
+        "type 'Bar' is already defined",
+    );
 }
 
 // ----- sort() widened to Comparable (G3) -----
@@ -1096,19 +1172,28 @@ fn unknown_type_annotation_rejected() {
 
 #[test]
 fn unknown_param_type_rejected() {
-    rejects("fn f(a: Widget) -> int:\n    return 1\n", "unknown type 'Widget'");
+    rejects(
+        "fn f(a: Widget) -> int:\n    return 1\n",
+        "unknown type 'Widget'",
+    );
 }
 
 // ===== 3. arity =====
 
 #[test]
 fn too_few_args_rejected() {
-    rejects("fn add(a: int, b: int) -> int:\n    return a + b\nx := add(1)\n", "expects 2 argument");
+    rejects(
+        "fn add(a: int, b: int) -> int:\n    return a + b\nx := add(1)\n",
+        "expects 2 argument",
+    );
 }
 
 #[test]
 fn struct_ctor_arity_rejected() {
-    rejects("struct P:\n    x: int\n    y: int\np := P(1)\n", "expects 2 argument");
+    rejects(
+        "struct P:\n    x: int\n    y: int\np := P(1)\n",
+        "expects 2 argument",
+    );
 }
 
 #[test]
@@ -1183,7 +1268,10 @@ fn and_requires_bool() {
 
 #[test]
 fn typed_let_mismatch_rejected() {
-    rejects("x: int = \"s\"\n", "cannot assign str to variable of type int");
+    rejects(
+        "x: int = \"s\"\n",
+        "cannot assign str to variable of type int",
+    );
 }
 
 #[test]
@@ -1220,7 +1308,10 @@ fn minus_eq_float_into_int_var_rejected() {
 
 #[test]
 fn plus_eq_float_into_int_index_rejected() {
-    rejects("xs := [1, 2, 3]\nxs[0] += 1.5\n", "cannot apply += to int and float");
+    rejects(
+        "xs := [1, 2, 3]\nxs[0] += 1.5\n",
+        "cannot apply += to int and float",
+    );
 }
 
 #[test]
@@ -1246,12 +1337,18 @@ fn plus_eq_float_into_float_ok() {
 
 #[test]
 fn return_wrong_type_rejected() {
-    rejects("fn f() -> int:\n    return \"s\"\n", "expected return type int, found str");
+    rejects(
+        "fn f() -> int:\n    return \"s\"\n",
+        "expected return type int, found str",
+    );
 }
 
 #[test]
 fn missing_return_value_rejected() {
-    rejects("fn f() -> int:\n    return\n", "expected a return value of type int");
+    rejects(
+        "fn f() -> int:\n    return\n",
+        "expected a return value of type int",
+    );
 }
 
 #[test]
@@ -1289,12 +1386,16 @@ fn inferred_return_in_if_branch() {
 
 #[test]
 fn inferred_return_from_accumulator_local() {
-    ok("fn sum(xs: list[int]):\n    total := 0\n    for x in xs:\n        total += x\n    return total\nn := sum([1, 2, 3])\nm := n + 1\n");
+    ok(
+        "fn sum(xs: list[int]):\n    total := 0\n    for x in xs:\n        total += x\n    return total\nn := sum([1, 2, 3])\nm := n + 1\n",
+    );
 }
 
 #[test]
 fn inferred_return_recursive() {
-    ok("fn fib(n: int):\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nx := fib(10)\ny := x + 1\n");
+    ok(
+        "fn fib(n: int):\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nx := fib(10)\ny := x + 1\n",
+    );
 }
 
 #[test]
@@ -1307,7 +1408,9 @@ fn inferred_return_conflict_rejected() {
 
 #[test]
 fn inferred_result_return() {
-    ok("fn d(a: int, b: int):\n    if b == 0:\n        return Err(\"divide by zero\")\n    return Ok(a / b)\nmatch d(10, 2):\n    Ok(v): print(\"got {v}\")\n    Err(e): print(e)\n");
+    ok(
+        "fn d(a: int, b: int):\n    if b == 0:\n        return Err(\"divide by zero\")\n    return Ok(a / b)\nmatch d(10, 2):\n    Ok(v): print(\"got {v}\")\n    Err(e): print(e)\n",
+    );
 }
 
 #[test]
@@ -1332,14 +1435,18 @@ fn inferred_struct_return() {
 #[test]
 fn inferred_forward_ref_callee_first_is_precise() {
     // Callee defined before the caller: the caller infers the precise `int`.
-    ok("fn g(n: int):\n    return n * 2\nfn f(n: int):\n    return g(n) + 1\nx := f(3)\ny := x + 1\n");
+    ok(
+        "fn g(n: int):\n    return n * 2\nfn f(n: int):\n    return g(n) + 1\nx := f(3)\ny := x + 1\n",
+    );
 }
 
 #[test]
 fn inferred_forward_ref_callee_later_is_permissive() {
     // Callee defined *after* the caller (both un-annotated): no fixpoint, so the caller infers
     // `Unknown` and stays permissive — crucially NOT a spurious "returns nothing" error.
-    ok("fn f(n: int):\n    return g(n) + 1\nfn g(n: int):\n    return n * 2\nx := f(3)\ny := x + 1\n");
+    ok(
+        "fn f(n: int):\n    return g(n) + 1\nfn g(n: int):\n    return n * 2\nx := f(3)\ny := x + 1\n",
+    );
 }
 
 #[test]
@@ -1353,7 +1460,9 @@ fn inferred_recursion_only_no_spurious_error() {
 fn inferred_nested_fn_does_not_pollute_outer() {
     // A nested fn whose name collides with a top-level fn must not feed the outer inference:
     // `outer` infers `int` from its OWN `return 42`, so `x + 1` type-checks.
-    ok("fn helper() -> str:\n    return \"top\"\nfn outer(c: bool):\n    fn helper() -> str:\n        return \"nested\"\n    return 42\nx := outer(true)\ny := x + 1\n");
+    ok(
+        "fn helper() -> str:\n    return \"top\"\nfn outer(c: bool):\n    fn helper() -> str:\n        return \"nested\"\n    return 42\nx := outer(true)\ny := x + 1\n",
+    );
 }
 
 #[test]
@@ -1383,17 +1492,26 @@ fn method_call_with_args_ok() {
 
 #[test]
 fn method_call_wrong_arity_rejected() {
-    rejects(&format!("{BOX}b := Box(5)\nx := b.add()\n"), "expects 1 argument");
+    rejects(
+        &format!("{BOX}b := Box(5)\nx := b.add()\n"),
+        "expects 1 argument",
+    );
 }
 
 #[test]
 fn method_call_wrong_arg_type_rejected() {
-    rejects(&format!("{BOX}b := Box(5)\nx := b.add(\"s\")\n"), "expected int");
+    rejects(
+        &format!("{BOX}b := Box(5)\nx := b.add(\"s\")\n"),
+        "expected int",
+    );
 }
 
 #[test]
 fn method_call_too_many_args_rejected() {
-    rejects(&format!("{BOX}b := Box(5)\nx := b.get(1)\n"), "expects 0 argument");
+    rejects(
+        &format!("{BOX}b := Box(5)\nx := b.get(1)\n"),
+        "expects 0 argument",
+    );
 }
 
 #[test]
@@ -1410,20 +1528,27 @@ fn method_without_receiver_param_rejected() {
 #[test]
 fn method_calls_another_method_via_self() {
     // The motivating case: `self.dbl()` inside a method body — a `self`-method call with 0 args.
-    ok("struct Box:\n    v: int\n    fn dbl(self) -> int:\n        return self.v * 2\n    fn quad(self) -> int:\n        return self.dbl() + self.dbl()\n");
+    ok(
+        "struct Box:\n    v: int\n    fn dbl(self) -> int:\n        return self.v * 2\n    fn quad(self) -> int:\n        return self.dbl() + self.dbl()\n",
+    );
 }
 
 #[test]
 fn method_call_multi_arg_arity() {
     let src = "struct C:\n    v: int\n    fn f(self, a: int, b: int) -> int:\n        return self.v + a + b\n";
     ok(&format!("{src}c := C(1)\nx := c.f(2, 3)\n"));
-    rejects(&format!("{src}c := C(1)\nx := c.f(2)\n"), "expects 2 argument");
+    rejects(
+        &format!("{src}c := C(1)\nx := c.f(2)\n"),
+        "expects 2 argument",
+    );
 }
 
 #[test]
 fn method_call_first_param_not_named_self_ok() {
     // The receiver is positional, not keyed on the name `self`.
-    ok("struct Point:\n    x: int\n    fn getx(p: Point) -> int:\n        return p.x\np := Point(7)\nn := p.getx()\nm := n + 1\n");
+    ok(
+        "struct Point:\n    x: int\n    fn getx(p: Point) -> int:\n        return p.x\np := Point(7)\nn := p.getx()\nm := n + 1\n",
+    );
 }
 
 // ===== 9c. T? / T! type shorthand (sugar for Option[T] / Result[T]) =====
@@ -1431,7 +1556,9 @@ fn method_call_first_param_not_named_self_ok() {
 #[test]
 fn type_shorthand_checks_like_long_form() {
     // `int?` (param) and `int!` (return) desugar to Option[int] / Result[int].
-    ok("fn f(x: int?) -> int!:\n    match x:\n        Some(v): return Ok(v)\n        None: return Err(\"none\")\n");
+    ok(
+        "fn f(x: int?) -> int!:\n    match x:\n        Some(v): return Ok(v)\n        None: return Err(\"none\")\n",
+    );
 }
 
 #[test]
@@ -1441,7 +1568,10 @@ fn optional_shorthand_accepts_some_and_none() {
 
 #[test]
 fn optional_shorthand_rejects_bare_value() {
-    rejects("x: int? = 5\n", "cannot assign int to variable of type Option[int]");
+    rejects(
+        "x: int? = 5\n",
+        "cannot assign int to variable of type Option[int]",
+    );
 }
 
 // ===== 9d. expression-valued match / if (Part 3) =====
@@ -1461,7 +1591,10 @@ fn match_expression_incompatible_arms_rejected() {
 
 #[test]
 fn match_expression_nonexhaustive_rejected() {
-    rejects("s := Some(5)\nx := match s:\n    Some(v): v\n", "non-exhaustive");
+    rejects(
+        "s := Some(5)\nx := match s:\n    Some(v): v\n",
+        "non-exhaustive",
+    );
 }
 
 #[test]
@@ -1492,7 +1625,10 @@ fn if_expression_unknown_branch_does_not_poison() {
     // One branch is Unknown (undefined name — reported on its own), the other concrete. The result
     // takes the concrete type, so there's no spurious "incompatible types" error.
     let errs = check_src("x := if true: 1 else: undef\n");
-    assert!(errs.iter().any(|e| e.message.contains("unknown name 'undef'")));
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown name 'undef'"))
+    );
     assert!(!errs.iter().any(|e| e.message.contains("incompatible")));
 }
 
@@ -1505,7 +1641,10 @@ fn field_on_non_struct_rejected() {
 
 #[test]
 fn unknown_struct_field_rejected() {
-    rejects("struct P:\n    x: int\np := P(1)\nq := p.y\n", "has no field 'y'");
+    rejects(
+        "struct P:\n    x: int\np := P(1)\nq := p.y\n",
+        "has no field 'y'",
+    );
 }
 
 #[test]
@@ -1564,12 +1703,18 @@ fn field_compound_assign_ok() {
 
 #[test]
 fn field_assign_type_mismatch_rejected() {
-    rejects("struct P:\n    x: int\np := P(1)\np.x = \"a\"\n", "cannot assign");
+    rejects(
+        "struct P:\n    x: int\np := P(1)\np.x = \"a\"\n",
+        "cannot assign",
+    );
 }
 
 #[test]
 fn unknown_field_assign_rejected() {
-    rejects("struct P:\n    x: int\np := P(1)\np.y = 5\n", "has no field 'y'");
+    rejects(
+        "struct P:\n    x: int\np := P(1)\np.y = 5\n",
+        "has no field 'y'",
+    );
 }
 
 #[test]
@@ -1606,7 +1751,10 @@ fn wrong_binding_arity_rejected() {
 #[test]
 fn match_variant_against_int_rejected() {
     // A *variant* pattern against an int scrutinee is a type error (int is matched by literals).
-    rejects("x := 5\nmatch x:\n    Circle(r): print(r)\n", "cannot match a variant against int");
+    rejects(
+        "x := 5\nmatch x:\n    Circle(r): print(r)\n",
+        "cannot match a variant against int",
+    );
 }
 
 #[test]
@@ -1630,27 +1778,40 @@ fn match_str_literals_with_wildcard_ok() {
 
 #[test]
 fn match_bool_literals_with_wildcard_ok() {
-    ok("b := true\nmatch b:\n    true: print(\"yes\")\n    false: print(\"no\")\n    _: print(\"?\")\n");
+    ok(
+        "b := true\nmatch b:\n    true: print(\"yes\")\n    false: print(\"no\")\n    _: print(\"?\")\n",
+    );
 }
 
 #[test]
 fn match_int_expr_with_wildcard_ok() {
-    ok("code := 200\nlabel := match code:\n    200: \"ok\"\n    404: \"missing\"\n    _: \"other\"\nprint(label)\n");
+    ok(
+        "code := 200\nlabel := match code:\n    200: \"ok\"\n    404: \"missing\"\n    _: \"other\"\nprint(label)\n",
+    );
 }
 
 #[test]
 fn match_int_without_wildcard_rejected() {
-    rejects("n := 2\nmatch n:\n    0: print(\"zero\")\n    1: print(\"one\")\n", "non-exhaustive");
+    rejects(
+        "n := 2\nmatch n:\n    0: print(\"zero\")\n    1: print(\"one\")\n",
+        "non-exhaustive",
+    );
 }
 
 #[test]
 fn match_str_arm_against_int_scrutinee_rejected() {
-    rejects("n := 2\nmatch n:\n    \"a\": print(\"x\")\n    _: print(\"y\")\n", "literal");
+    rejects(
+        "n := 2\nmatch n:\n    \"a\": print(\"x\")\n    _: print(\"y\")\n",
+        "literal",
+    );
 }
 
 #[test]
 fn match_variant_arm_in_int_match_rejected() {
-    rejects("n := 2\nmatch n:\n    Circle(r): print(r)\n    _: print(\"y\")\n", "cannot match a variant against int");
+    rejects(
+        "n := 2\nmatch n:\n    Circle(r): print(r)\n    _: print(\"y\")\n",
+        "cannot match a variant against int",
+    );
 }
 
 #[test]
@@ -1662,7 +1823,10 @@ fn match_literal_arm_in_enum_match_rejected() {
 
 #[test]
 fn match_on_float_rejected() {
-    rejects("x := 1.5\nmatch x:\n    0: print(\"x\")\n    _: print(\"y\")\n", "cannot match on non-enum type float");
+    rejects(
+        "x := 1.5\nmatch x:\n    0: print(\"x\")\n    _: print(\"y\")\n",
+        "cannot match on non-enum type float",
+    );
 }
 
 #[test]
@@ -1717,7 +1881,9 @@ fn result_ok_payload_must_match_return() {
 
 #[test]
 fn result_err_is_generic_ok() {
-    ok("fn f(b: int) -> Result[int]:\n    if b == 0:\n        return Err(\"bad\")\n    return Ok(b)\n");
+    ok(
+        "fn f(b: int) -> Result[int]:\n    if b == 0:\n        return Err(\"bad\")\n    return Ok(b)\n",
+    );
 }
 
 #[test]
@@ -1753,20 +1919,28 @@ fn duplicate_struct_does_not_panic_and_is_reported() {
 
 #[test]
 fn duplicate_function_is_reported() {
-    rejects("fn f() -> int:\n    return 1\nfn f() -> int:\n    return 2\n", "already defined");
+    rejects(
+        "fn f() -> int:\n    return 1\nfn f() -> int:\n    return 2\n",
+        "already defined",
+    );
 }
 
 #[test]
 fn variant_name_shared_across_enums_is_allowed() {
     // Variants are scoped under their enum (keyed by `(enum, variant)`), so two enums may share a
     // variant name. Each is reached via its qualified form (`A.X` / `B.X`).
-    ok("enum A:\n    X(int)\nenum B:\n    X(str)\nfn f() -> A:\n    return A.X(1)\nfn g() -> B:\n    return B.X(\"s\")\n");
+    ok(
+        "enum A:\n    X(int)\nenum B:\n    X(str)\nfn f() -> A:\n    return A.X(1)\nfn g() -> B:\n    return B.X(\"s\")\n",
+    );
 }
 
 #[test]
 fn duplicate_variant_within_one_enum_is_reported() {
     // A repeat of a variant name *within the same* enum is still a collision.
-    rejects("enum A:\n    X(int)\n    X(str)\n", "variant 'X' is already defined in enum 'A'");
+    rejects(
+        "enum A:\n    X(int)\n    X(str)\n",
+        "variant 'X' is already defined in enum 'A'",
+    );
 }
 
 #[test]
@@ -1800,7 +1974,9 @@ fn bare_variant_match_arm_is_rejected_not_a_silent_binding() {
 #[test]
 fn shared_variant_name_is_qualified_to_distinct_enums() {
     // Two enums may reuse a variant name; each qualified form resolves to its own enum.
-    ok("enum Color:\n    Red\nenum Light:\n    Red\nfn f() -> Color:\n    return Color.Red\nfn g() -> Light:\n    return Light.Red\n");
+    ok(
+        "enum Color:\n    Red\nenum Light:\n    Red\nfn f() -> Color:\n    return Color.Red\nfn g() -> Light:\n    return Light.Red\n",
+    );
 }
 
 #[test]
@@ -1817,7 +1993,10 @@ fn foreign_enum_qualifier_in_match_arm_is_rejected() {
 
 #[test]
 fn closure_body_violating_return_annotation_rejected() {
-    rejects("f := fn(x: int) -> int: \"s\"\n", "closure body has type str");
+    rejects(
+        "f := fn(x: int) -> int: \"s\"\n",
+        "closure body has type str",
+    );
 }
 
 #[test]
@@ -1873,7 +2052,10 @@ fn methods_example_type_checks() {
 #[test]
 fn collects_multiple_errors() {
     let errs = check_src("x := a + b\ny := c - d\n");
-    assert!(errs.len() >= 4, "expected >=4 unknown-name errors, got: {errs:?}");
+    assert!(
+        errs.len() >= 4,
+        "expected >=4 unknown-name errors, got: {errs:?}"
+    );
 }
 
 // ===== M6a: core-type methods (str / list) =====
@@ -1904,7 +2086,10 @@ fn str_split_returns_list_of_str() {
 
 #[test]
 fn str_split_element_is_str_not_int() {
-    rejects("parts: list[int] = \"a,b\".split(\",\")\n", "list[str] to variable of type list[int]");
+    rejects(
+        "parts: list[int] = \"a,b\".split(\",\")\n",
+        "list[str] to variable of type list[int]",
+    );
 }
 
 #[test]
@@ -1914,7 +2099,10 @@ fn str_chars_returns_list_of_str() {
 
 #[test]
 fn str_chars_element_is_str_not_int() {
-    rejects("cs: list[int] = \"abc\".chars()\n", "list[str] to variable of type list[int]");
+    rejects(
+        "cs: list[int] = \"abc\".chars()\n",
+        "list[str] to variable of type list[int]",
+    );
 }
 
 #[test]
@@ -1939,7 +2127,10 @@ fn str_starts_with_is_bool() {
 
 #[test]
 fn str_method_wrong_arity_rejected() {
-    rejects("s := \"hi\"\nx := s.upper(\"extra\")\n", "'upper' expects 0 argument(s), got 1");
+    rejects(
+        "s := \"hi\"\nx := s.upper(\"extra\")\n",
+        "'upper' expects 0 argument(s), got 1",
+    );
 }
 
 #[test]
@@ -1949,7 +2140,10 @@ fn str_split_arg_must_be_str() {
 
 #[test]
 fn unknown_str_method_rejected() {
-    rejects("s := \"hi\"\nx := s.frobnicate()\n", "type str has no method 'frobnicate'");
+    rejects(
+        "s := \"hi\"\nx := s.frobnicate()\n",
+        "type str has no method 'frobnicate'",
+    );
 }
 
 #[test]
@@ -1959,7 +2153,10 @@ fn list_push_and_len_ok() {
 
 #[test]
 fn list_push_element_type_checked() {
-    rejects("xs := [1, 2, 3]\nxs.push(\"nope\")\n", "argument 1 of 'push'");
+    rejects(
+        "xs := [1, 2, 3]\nxs.push(\"nope\")\n",
+        "argument 1 of 'push'",
+    );
 }
 
 #[test]
@@ -1969,7 +2166,10 @@ fn list_len_is_int() {
 
 #[test]
 fn unknown_list_method_rejected() {
-    rejects("xs := [1, 2]\nx := xs.frobnicate()\n", "type list[int] has no method 'frobnicate'");
+    rejects(
+        "xs := [1, 2]\nx := xs.frobnicate()\n",
+        "type list[int] has no method 'frobnicate'",
+    );
 }
 
 #[test]
@@ -1994,12 +2194,18 @@ fn list_extend_returns_nil() {
 
 #[test]
 fn list_concat_element_type_checked() {
-    rejects("xs := [1, 2]\nys := xs.concat([\"a\"])\n", "argument 1 of 'concat'");
+    rejects(
+        "xs := [1, 2]\nys := xs.concat([\"a\"])\n",
+        "argument 1 of 'concat'",
+    );
 }
 
 #[test]
 fn list_extend_element_type_checked() {
-    rejects("xs := [1, 2]\nxs.extend([\"a\"])\n", "argument 1 of 'extend'");
+    rejects(
+        "xs := [1, 2]\nxs.extend([\"a\"])\n",
+        "argument 1 of 'extend'",
+    );
 }
 
 #[test]
@@ -2021,12 +2227,18 @@ fn method_on_int_rejected() {
 
 #[test]
 fn user_enum_named_result_rejected() {
-    rejects("enum Result:\n    A\n", "type 'Result' is reserved (builtin)");
+    rejects(
+        "enum Result:\n    A\n",
+        "type 'Result' is reserved (builtin)",
+    );
 }
 
 #[test]
 fn user_struct_named_option_rejected() {
-    rejects("struct Option:\n    x: int\n", "type 'Option' is reserved (builtin)");
+    rejects(
+        "struct Option:\n    x: int\n",
+        "type 'Option' is reserved (builtin)",
+    );
 }
 
 // ===== M6c: native std module signatures =====
@@ -2212,7 +2424,9 @@ fn native_math_floor_still_float_only() {
 
 #[test]
 fn hof_param_type_ok() {
-    ok("fn apply(f: fn(int) -> int, v: int) -> int:\n    return f(v)\ninc := fn(x: int) -> int: x + 1\nn := apply(inc, 4)\n");
+    ok(
+        "fn apply(f: fn(int) -> int, v: int) -> int:\n    return f(v)\ninc := fn(x: int) -> int: x + 1\nn := apply(inc, 4)\n",
+    );
 }
 
 #[test]
@@ -2256,10 +2470,7 @@ fn list_filter_predicate_must_return_bool() {
 
 #[test]
 fn list_map_function_param_must_match_element() {
-    rejects(
-        "xs := [1,2,3]\nys := xs.map(fn(x: str) -> int: 0)\n",
-        "map",
-    );
+    rejects("xs := [1,2,3]\nys := xs.map(fn(x: str) -> int: 0)\n", "map");
 }
 
 #[test]
@@ -2299,7 +2510,6 @@ fn list_sort_by_comparator_must_take_two_args() {
     );
 }
 
-
 // ===== ord / chr builtins (gap #10) =====
 
 #[test]
@@ -2338,7 +2548,6 @@ fn ord_result_is_int_not_str() {
     ok("c := \"7\"\nd: int = ord(c) - ord(\"0\")\n");
 }
 
-
 // ===== bitwise operators (gap #13) =====
 
 #[test]
@@ -2366,7 +2575,6 @@ fn bitwise_on_str_rejected() {
     rejects("x := \"a\" ^ \"b\"\n", "bitwise");
 }
 
-
 // ===== nested / tuple match patterns (gap #15) =====
 
 #[test]
@@ -2382,7 +2590,9 @@ fn match_tuple_binds_element_types() {
 
 #[test]
 fn match_nested_some_tuple_ok() {
-    ok("o: (int, int)? = Some((1, 2))\nmatch o:\n    None: print(\"n\")\n    Some((a, b)): print(a + b)\n");
+    ok(
+        "o: (int, int)? = Some((1, 2))\nmatch o:\n    None: print(\"n\")\n    Some((a, b)): print(a + b)\n",
+    );
 }
 
 #[test]
@@ -2398,12 +2608,18 @@ fn match_single_tuple_arm_is_exhaustive() {
 
 #[test]
 fn match_tuple_with_literal_needs_wildcard() {
-    rejects("t := (1, 2)\nmatch t:\n    (1, n): print(n)\n", "non-exhaustive");
+    rejects(
+        "t := (1, 2)\nmatch t:\n    (1, n): print(n)\n",
+        "non-exhaustive",
+    );
 }
 
 #[test]
 fn match_tuple_wrong_arity_rejected() {
-    rejects("t := (1, 2)\nmatch t:\n    (a, b, c): print(a)\n", "element");
+    rejects(
+        "t := (1, 2)\nmatch t:\n    (a, b, c): print(a)\n",
+        "element",
+    );
 }
 
 #[test]
@@ -2419,7 +2635,6 @@ fn match_nested_nullary_variant_ok() {
                fn f(x: L):\n    match x:\n        L.Cons(h, L.Nil): print(h)\n        _: print(\"e\")\n";
     ok(src);
 }
-
 
 // ===== map iteration in for (gap #14) =====
 
@@ -2442,17 +2657,24 @@ fn for_over_map_value_type_is_v() {
 #[test]
 fn for_kv_over_list_rejected() {
     // A list of plain ints (not tuples) still can't bind two names.
-    rejects("xs := [1,2,3]\nfor a, b in xs:\n    print(a)\n", "requires a map");
+    rejects(
+        "xs := [1,2,3]\nfor a, b in xs:\n    print(a)\n",
+        "requires a map",
+    );
 }
 
 #[test]
 fn for_tuple_list_binds_each_element() {
-    ok("xs := [(1, \"a\"), (2, \"b\")]\nfor n, s in xs:\n    i: int = n\n    t: str = s\n    print(\"{i}{t}\")\n");
+    ok(
+        "xs := [(1, \"a\"), (2, \"b\")]\nfor n, s in xs:\n    i: int = n\n    t: str = s\n    print(\"{i}{t}\")\n",
+    );
 }
 
 #[test]
 fn for_tuple_list_one_var_binds_whole_tuple() {
-    ok("xs := [(1, \"a\")]\nfor p in xs:\n    i: int = p.0\n    s: str = p.1\n    print(\"{i}{s}\")\n");
+    ok(
+        "xs := [(1, \"a\")]\nfor p in xs:\n    i: int = p.0\n    s: str = p.1\n    print(\"{i}{s}\")\n",
+    );
 }
 
 #[test]
@@ -2468,7 +2690,10 @@ fn for_tuple_arity_mismatch_rejected() {
 #[test]
 fn for_tuple_element_types_checked() {
     // `s` is the str element; assigning it to an int slot must fail.
-    rejects("xs := [(1, \"a\")]\nfor n, s in xs:\n    bad: int = s\n", "");
+    rejects(
+        "xs := [(1, \"a\")]\nfor n, s in xs:\n    bad: int = s\n",
+        "",
+    );
 }
 
 #[test]
@@ -2500,12 +2725,18 @@ fn for_list_var_reassign_rejected() {
 
 #[test]
 fn for_map_key_reassign_rejected() {
-    rejects("m := {\"a\": 1}\nfor k, v in m:\n    k = \"z\"\n", "loop variable");
+    rejects(
+        "m := {\"a\": 1}\nfor k, v in m:\n    k = \"z\"\n",
+        "loop variable",
+    );
 }
 
 #[test]
 fn for_map_value_reassign_rejected() {
-    rejects("m := {\"a\": 1}\nfor k, v in m:\n    v = 9\n", "loop variable");
+    rejects(
+        "m := {\"a\": 1}\nfor k, v in m:\n    v = 9\n",
+        "loop variable",
+    );
 }
 
 #[test]
@@ -2533,7 +2764,10 @@ fn for_str_var_reassign_rejected() {
 #[test]
 fn nested_loop_same_name_inner_reassign_rejected() {
     // `is_loop_var` resolves to the inner loop's binding — still a loop var → rejected.
-    rejects("for i in 0..2:\n    for i in 0..2:\n        i = 9\n", "loop variable");
+    rejects(
+        "for i in 0..2:\n    for i in 0..2:\n        i = 9\n",
+        "loop variable",
+    );
 }
 
 #[test]
@@ -2541,7 +2775,8 @@ fn reassign_after_loop_is_undeclared_not_loop_var() {
     // The loop var doesn't leak past the loop; assigning it afterward is plain-undeclared.
     let errs = check_src("for i in 0..3:\n    print(i)\ni = 5\n");
     assert!(
-        errs.iter().any(|e| e.message.contains("undeclared variable")),
+        errs.iter()
+            .any(|e| e.message.contains("undeclared variable")),
         "expected an 'undeclared variable' error, got: {errs:?}"
     );
     assert!(
@@ -2555,7 +2790,6 @@ fn outer_local_shadowed_by_later_loop_var_stays_mutable() {
     // A pre-existing local reused as a later loop's var name stays assignable after the loop.
     ok("i := 5\ni = 7\nfor i in 0..3:\n    print(i)\ni = 9\nprint(i)\n");
 }
-
 
 // ===== break / continue =====
 
@@ -2588,7 +2822,10 @@ fn break_in_if_in_loop_ok() {
 #[test]
 fn break_after_loop_rejected() {
     // `loop_depth` is decremented when the loop body ends, so a `break` *after* the loop is illegal.
-    rejects("for i in 0..3:\n    print(i)\nbreak\n", "break outside loop");
+    rejects(
+        "for i in 0..3:\n    print(i)\nbreak\n",
+        "break outside loop",
+    );
 }
 
 #[test]
@@ -2615,7 +2852,10 @@ fn nested_loops_break_legal_in_both() {
 
 #[test]
 fn break_in_defer_block_in_loop_rejected() {
-    rejects("fn w():\n    for i in 0..3:\n        defer:\n            break\n", "break outside loop");
+    rejects(
+        "fn w():\n    for i in 0..3:\n        defer:\n            break\n",
+        "break outside loop",
+    );
 }
 
 #[test]
@@ -2651,7 +2891,9 @@ fn break_in_loop_inside_defer_block_ok() {
 #[test]
 fn break_continue_in_loop_inside_spawn_block_ok() {
     // A loop INSIDE the spawn block re-opens a loop context; its own break/continue are legal.
-    ok("fn main():\n    parallel:\n        spawn:\n            for j in 0..3:\n                if j == 1: break\n                continue\nmain()\n");
+    ok(
+        "fn main():\n    parallel:\n        spawn:\n            for j in 0..3:\n                if j == 1: break\n                continue\nmain()\n",
+    );
 }
 
 #[test]
@@ -2768,7 +3010,10 @@ fn map_update_returns_nil() {
 
 #[test]
 fn map_merge_value_type_checked() {
-    rejects("a := {\"x\": 1}\nb := {\"y\": \"s\"}\nc := a.merge(b)\n", "argument 1 of 'merge'");
+    rejects(
+        "a := {\"x\": 1}\nb := {\"y\": \"s\"}\nc := a.merge(b)\n",
+        "argument 1 of 'merge'",
+    );
 }
 
 // ===== gap #8: tuples + multi-return + destructuring =====
@@ -2794,7 +3039,9 @@ fn tuple_return_type_mismatch_rejected() {
 #[test]
 fn destructure_binds_element_types() {
     // `a` is int, so `a + 1` type-checks; `b` is str, so `b + \"!\"` does too.
-    ok("fn pair() -> (int, str):\n    return (1, \"x\")\nfn main():\n    a, b := pair()\n    c := a + 1\n    d := b + \"!\"\n");
+    ok(
+        "fn pair() -> (int, str):\n    return (1, \"x\")\nfn main():\n    a, b := pair()\n    c := a + 1\n    d := b + \"!\"\n",
+    );
 }
 
 #[test]
@@ -2807,7 +3054,10 @@ fn destructure_arity_mismatch_rejected() {
 
 #[test]
 fn destructure_non_tuple_rejected() {
-    rejects("fn main():\n    a, b := 5\n", "cannot destructure non-tuple");
+    rejects(
+        "fn main():\n    a, b := 5\n",
+        "cannot destructure non-tuple",
+    );
 }
 
 #[test]
@@ -2824,7 +3074,9 @@ fn tuple_element_out_of_range_rejected() {
 
 #[test]
 fn native_process_cmd_returns_result_str() {
-    entry_ok("import std.process\nfn main():\n    match process.cmd(\"echo hi\"):\n        Ok(s): print(s)\n        Err(e): print(e)\n");
+    entry_ok(
+        "import std.process\nfn main():\n    match process.cmd(\"echo hi\"):\n        Ok(s): print(s)\n        Err(e): print(e)\n",
+    );
 }
 
 #[test]
@@ -2848,7 +3100,10 @@ fn list_comprehension_wrong_element_type_rejected() {
 
 #[test]
 fn comprehension_guard_must_be_bool() {
-    rejects("xs := [x for x in [1, 2, 3] if x]\n", "comprehension guard must be bool");
+    rejects(
+        "xs := [x for x in [1, 2, 3] if x]\n",
+        "comprehension guard must be bool",
+    );
 }
 
 #[test]
@@ -2886,7 +3141,10 @@ fn nested_comp_two_clause_element_type() {
 #[test]
 fn nested_comp_unbound_in_later_clause_errors() {
     // `zzz` is bound nowhere; a later clause's iterable must still resolve names normally.
-    rejects("ys := [y for x in [1, 2] for y in zzz]\n", "unknown name 'zzz'");
+    rejects(
+        "ys := [y for x in [1, 2] for y in zzz]\n",
+        "unknown name 'zzz'",
+    );
 }
 
 #[test]
@@ -2918,12 +3176,16 @@ fn native_os_exit_arg_must_be_int() {
 
 #[test]
 fn native_fs_predicates_are_bool_and_size_is_result_int() {
-    entry_ok("import std.fs\nfn main():\n    b: bool = fs.is_file(\"x\")\n    e: bool = fs.exists(\"x\")\n    match fs.size(\"x\"):\n        Ok(n): print(str(n))\n        Err(m): print(m)\n");
+    entry_ok(
+        "import std.fs\nfn main():\n    b: bool = fs.is_file(\"x\")\n    e: bool = fs.exists(\"x\")\n    match fs.size(\"x\"):\n        Ok(n): print(str(n))\n        Err(m): print(m)\n",
+    );
 }
 
 #[test]
 fn native_fs_list_dir_returns_result_list_str() {
-    entry_ok("import std.fs\nfn main():\n    match fs.list_dir(\".\"):\n        Ok(xs): print(\",\".join(xs))\n        Err(e): print(e)\n");
+    entry_ok(
+        "import std.fs\nfn main():\n    match fs.list_dir(\".\"):\n        Ok(xs): print(\",\".join(xs))\n        Err(e): print(e)\n",
+    );
 }
 
 #[test]
@@ -2938,22 +3200,30 @@ fn native_fs_unknown_member_rejected() {
 
 #[test]
 fn native_regex_is_match_returns_result_bool() {
-    entry_ok("import std.regex\nfn main():\n    match regex.is_match(\"x\", \"xy\"):\n        Ok(b):\n            if b:\n                print(\"yes\")\n        Err(e): print(e)\n");
+    entry_ok(
+        "import std.regex\nfn main():\n    match regex.is_match(\"x\", \"xy\"):\n        Ok(b):\n            if b:\n                print(\"yes\")\n        Err(e): print(e)\n",
+    );
 }
 
 #[test]
 fn native_regex_find_returns_match_with_typed_fields() {
-    entry_ok("import std.regex\nfn main():\n    match regex.find(\"[0-9]+\", \"a12\"):\n        Ok(opt):\n            match opt:\n                Some(m):\n                    t: str = m.text\n                    st: int = m.start\n                    g: list[str] = m.groups\n                    print(t + str(st) + \",\".join(g))\n                None: print(\"none\")\n        Err(e): print(e)\n");
+    entry_ok(
+        "import std.regex\nfn main():\n    match regex.find(\"[0-9]+\", \"a12\"):\n        Ok(opt):\n            match opt:\n                Some(m):\n                    t: str = m.text\n                    st: int = m.start\n                    g: list[str] = m.groups\n                    print(t + str(st) + \",\".join(g))\n                None: print(\"none\")\n        Err(e): print(e)\n",
+    );
 }
 
 #[test]
 fn native_regex_find_all_returns_result_list_match() {
-    entry_ok("import std.regex\nfn main():\n    match regex.find_all(\"[0-9]+\", \"1 2\"):\n        Ok(ms):\n            for m in ms:\n                print(m.text)\n        Err(e): print(e)\n");
+    entry_ok(
+        "import std.regex\nfn main():\n    match regex.find_all(\"[0-9]+\", \"1 2\"):\n        Ok(ms):\n            for m in ms:\n                print(m.text)\n        Err(e): print(e)\n",
+    );
 }
 
 #[test]
 fn native_regex_split_and_replace_all_return_strings() {
-    entry_ok("import std.regex\nfn main():\n    match regex.replace_all(\"a\", \"banana\", \"o\"):\n        Ok(s): print(s)\n        Err(e): print(e)\n    match regex.split(\",\", \"a,b\"):\n        Ok(xs): print(\"|\".join(xs))\n        Err(e): print(e)\n");
+    entry_ok(
+        "import std.regex\nfn main():\n    match regex.replace_all(\"a\", \"banana\", \"o\"):\n        Ok(s): print(s)\n        Err(e): print(e)\n    match regex.split(\",\", \"a,b\"):\n        Ok(xs): print(\"|\".join(xs))\n        Err(e): print(e)\n",
+    );
 }
 
 #[test]
@@ -2976,12 +3246,16 @@ fn native_regex_unknown_member_rejected() {
 
 #[test]
 fn native_request_get_returns_response_with_typed_fields() {
-    entry_ok("import std.request\nfn main():\n    match request.get(\"http://x\"):\n        Ok(resp):\n            st: int = resp.status\n            body: str = resp.body\n            h: map[str, str] = resp.headers\n            print(body + str(st) + h[\"k\"])\n        Err(e): print(e)\n");
+    entry_ok(
+        "import std.request\nfn main():\n    match request.get(\"http://x\"):\n        Ok(resp):\n            st: int = resp.status\n            body: str = resp.body\n            h: map[str, str] = resp.headers\n            print(body + str(st) + h[\"k\"])\n        Err(e): print(e)\n",
+    );
 }
 
 #[test]
 fn native_request_post_takes_url_and_body() {
-    entry_ok("import std.request\nfn main():\n    match request.post(\"http://x\", \"payload\"):\n        Ok(resp): print(str(resp.status))\n        Err(e): print(e)\n");
+    entry_ok(
+        "import std.request\nfn main():\n    match request.post(\"http://x\", \"payload\"):\n        Ok(resp): print(str(resp.status))\n        Err(e): print(e)\n",
+    );
 }
 
 #[test]
@@ -3002,7 +3276,9 @@ fn native_request_response_unknown_field_rejected() {
 
 #[test]
 fn native_time_now_is_int_monotonic_is_float() {
-    entry_ok("import std.time\nfn main():\n    t: int = time.now()\n    m: float = time.monotonic()\n    time.sleep_ms(0)\n    s: str = time.format(t)\n    print(s)\n");
+    entry_ok(
+        "import std.time\nfn main():\n    t: int = time.now()\n    m: float = time.monotonic()\n    time.sleep_ms(0)\n    s: str = time.format(t)\n    print(s)\n",
+    );
 }
 
 #[test]
@@ -3017,17 +3293,23 @@ fn native_time_format_arg_must_be_int() {
 
 #[test]
 fn json_decode_into_struct_is_result_of_struct() {
-    entry_ok("import std.json\nstruct P:\n    x: int\n    y: int\nfn main():\n    match json.decode[P](\"x\"):\n        Ok(p): print(str(p.x))\n        Err(e): print(e)\n");
+    entry_ok(
+        "import std.json\nstruct P:\n    x: int\n    y: int\nfn main():\n    match json.decode[P](\"x\"):\n        Ok(p): print(str(p.x))\n        Err(e): print(e)\n",
+    );
 }
 
 #[test]
 fn json_decode_into_typed_map_and_list() {
-    entry_ok("import std.json\nfn main():\n    a := json.decode[map[str, int]](\"x\")\n    b := json.decode[list[float]](\"y\")\n    print(\"ok\")\n");
+    entry_ok(
+        "import std.json\nfn main():\n    a := json.decode[map[str, int]](\"x\")\n    b := json.decode[list[float]](\"y\")\n    print(\"ok\")\n",
+    );
 }
 
 #[test]
 fn json_decode_scalar_result_type_flows() {
-    entry_ok("import std.json\nfn main():\n    match json.decode[int](\"3\"):\n        Ok(n): print(str(n + 1))\n        Err(e): print(e)\n");
+    entry_ok(
+        "import std.json\nfn main():\n    match json.decode[int](\"3\"):\n        Ok(n): print(str(n + 1))\n        Err(e): print(e)\n",
+    );
 }
 
 #[test]
@@ -3079,7 +3361,9 @@ fn set_literal_infers_set_of_elem() {
 
 #[test]
 fn set_methods_typecheck() {
-    ok("s := {1, 2}\nb: bool = s.has(1)\ns.add(3)\nr: bool = s.remove(1)\nu: set[int] = s.union({4})\nprint(u.len())\n");
+    ok(
+        "s := {1, 2}\nb: bool = s.has(1)\ns.add(3)\nr: bool = s.remove(1)\nu: set[int] = s.union({4})\nprint(u.len())\n",
+    );
 }
 
 #[test]
@@ -3128,37 +3412,51 @@ fn bang_shorthand_with_error_type_ok() {
 #[test]
 fn err_payload_typed_as_concrete_err() {
     // When `E` is `str`, the bound `Err` payload is a `str` — str methods available.
-    ok("fn q() -> Result[int, str]:\n    return Err(\"bad\")\nfn main():\n    match q():\n        Ok(v): print(v)\n        Err(e): print(e.trim())\nmain()\n");
+    ok(
+        "fn q() -> Result[int, str]:\n    return Err(\"bad\")\nfn main():\n    match q():\n        Ok(v): print(v)\n        Err(e): print(e.trim())\nmain()\n",
+    );
 }
 
 #[test]
 fn custom_struct_error_ok() {
-    ok("struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db\"\nfn q() -> int!DbErr:\n    return Err(DbErr(503))\n");
+    ok(
+        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db\"\nfn q() -> int!DbErr:\n    return Err(DbErr(503))\n",
+    );
 }
 
 #[test]
 fn error_protocol_existential_accepts_str() {
     // `Error` used as a value type; `str` conforms; only `message()` is available on it.
-    ok("fn q() -> Result[int, Error]:\n    return Err(\"bad\")\nfn main():\n    match q():\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()\n");
+    ok(
+        "fn q() -> Result[int, Error]:\n    return Err(\"bad\")\nfn main():\n    match q():\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()\n",
+    );
 }
 
 #[test]
 fn bang_default_error_is_error_protocol() {
     // `T!` defaults `E` to the `Error` protocol; the payload supports `.message()`.
-    ok("fn q() -> int!:\n    return Err(\"bad\")\nfn main():\n    match q():\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()\n");
+    ok(
+        "fn q() -> int!:\n    return Err(\"bad\")\nfn main():\n    match q():\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()\n",
+    );
 }
 
 #[test]
 fn default_error_existential_rejects_str_methods() {
     // `Error` existential exposes only `message()` — not `str`'s methods.
-    rejects("fn q() -> int!:\n    return Err(\"x\")\nfn main():\n    match q():\n        Ok(v): print(v)\n        Err(e): print(e.trim())\nmain()\n", "trim");
+    rejects(
+        "fn q() -> int!:\n    return Err(\"x\")\nfn main():\n    match q():\n        Ok(v): print(v)\n        Err(e): print(e.trim())\nmain()\n",
+        "trim",
+    );
 }
 
 #[test]
 fn struct_error_without_message_rejected_as_error() {
     // A struct lacking `message(self) -> str` does not satisfy `Error`, so it can't be the
     // payload where `Error` is expected — the return-type check flags the mismatch.
-    rejects("struct Bad:\n    n: int\nfn q() -> Result[int, Error]:\n    return Err(Bad(1))\n", "Bad");
+    rejects(
+        "struct Bad:\n    n: int\nfn q() -> Result[int, Error]:\n    return Err(Bad(1))\n",
+        "Bad",
+    );
 }
 
 // ===== recover: boundary (M11 Phase B) =====
@@ -3166,7 +3464,9 @@ fn struct_error_without_message_rejected_as_error() {
 #[test]
 fn recover_yields_result_of_block_value() {
     // `recover:` evaluates to Result[T, Error]; matching Ok/Err is well-typed.
-    ok("fn main():\n    r := recover:\n        [1, 2][0]\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()\n");
+    ok(
+        "fn main():\n    r := recover:\n        [1, 2][0]\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()\n",
+    );
 }
 
 #[test]
@@ -3194,13 +3494,17 @@ fn recover_block_rejects_escaping_break() {
 #[test]
 fn recover_allows_inner_loop_break() {
     // A break that targets a loop *inside* the recover block is fine.
-    ok("fn main():\n    r := recover:\n        for i in 0..3:\n            if i == 1: break\n        42\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()\n");
+    ok(
+        "fn main():\n    r := recover:\n        for i in 0..3:\n            if i == 1: break\n        42\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()\n",
+    );
 }
 
 #[test]
 fn recover_question_mark_allowed_in_non_result_fn() {
     // `?` targets the recover boundary, so the enclosing fn need not return Result.
-    ok("fn risky() -> int!:\n    return Err(\"x\")\nfn compute() -> str:\n    r := recover:\n        v := risky()?\n        v\n    match r:\n        Ok(v): return \"ok\"\n        Err(e): return e.message()\n");
+    ok(
+        "fn risky() -> int!:\n    return Err(\"x\")\nfn compute() -> str:\n    r := recover:\n        v := risky()?\n        v\n    match r:\n        Ok(v): return \"ok\"\n        Err(e): return e.message()\n",
+    );
 }
 
 #[test]
@@ -3225,7 +3529,9 @@ fn closure_question_mark_on_nonresult_return_rejected() {
 #[test]
 fn closure_question_mark_on_result_return_ok() {
     // A closure declared to return Result may use `?` (yields the Ok type).
-    ok("fn parse(s: str) -> int!:\n    return Ok(2)\nfn main():\n    rs := [\"2\"].map(fn(s: str) -> int!: Ok(parse(s)? * 2))\n    print(rs)\nmain()\n");
+    ok(
+        "fn parse(s: str) -> int!:\n    return Ok(2)\nfn main():\n    rs := [\"2\"].map(fn(s: str) -> int!: Ok(parse(s)? * 2))\n    print(rs)\nmain()\n",
+    );
 }
 
 #[test]
@@ -3242,7 +3548,9 @@ fn closure_question_mark_inferred_return_rejected() {
 #[test]
 fn iterates_struct_with_next_ok() {
     // A struct with `next(self) -> Option[int]` is iterable; `x` binds the element type (int).
-    ok("struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    for x in Counter(0, 5):\n        print(x)\nmain()\n");
+    ok(
+        "struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    for x in Counter(0, 5):\n        print(x)\nmain()\n",
+    );
 }
 
 #[test]
@@ -3311,7 +3619,9 @@ fn guarded_binding_does_not_make_exhaustive() {
 #[test]
 fn match_guard_ok() {
     // A guard sees the pattern's bindings; with a trailing `_` the match is exhaustive.
-    ok("fn classify(n: int) -> str:\n    return match n:\n        x if x < 0: \"neg\"\n        0: \"zero\"\n        _: \"pos\"\nclassify(1)\n");
+    ok(
+        "fn classify(n: int) -> str:\n    return match n:\n        x if x < 0: \"neg\"\n        0: \"zero\"\n        _: \"pos\"\nclassify(1)\n",
+    );
 }
 
 #[test]
@@ -3350,7 +3660,9 @@ fn range_pattern_non_exhaustive_without_wildcard() {
 
 #[test]
 fn range_pattern_ok() {
-    ok("fn grade(n: int) -> str:\n    return match n:\n        0..60: \"F\"\n        60..90: \"B\"\n        _: \"A\"\ngrade(50)\n");
+    ok(
+        "fn grade(n: int) -> str:\n    return match n:\n        0..60: \"F\"\n        60..90: \"B\"\n        _: \"A\"\ngrade(50)\n",
+    );
 }
 
 // ===== default + named arguments (end-to-end through desugar) =====
@@ -3358,7 +3670,9 @@ fn range_pattern_ok() {
 #[test]
 fn default_arg_typechecks_ok() {
     // The omitted `y` is filled with its default (10:int) before checking.
-    entry_ok("fn f(x: int, y: int = 10) -> int:\n    return x + y\nfn main():\n    print(f(1))\nmain()\n");
+    entry_ok(
+        "fn f(x: int, y: int = 10) -> int:\n    return x + y\nfn main():\n    print(f(1))\nmain()\n",
+    );
 }
 
 #[test]
@@ -3406,7 +3720,9 @@ fn wrong_typed_field_default_rejected() {
 
 #[test]
 fn valid_param_default_ok() {
-    entry_ok("fn f(x: int, y: int = 7, s: str = \"hi\") -> int:\n    return x + y\nfn main():\n    print(f(1))\nmain()\n");
+    entry_ok(
+        "fn f(x: int, y: int = 7, s: str = \"hi\") -> int:\n    return x + y\nfn main():\n    print(f(1))\nmain()\n",
+    );
 }
 
 // ===== Iterator[T] — the parameterized protocol bound =====
@@ -3425,7 +3741,9 @@ struct Counter:
 #[test]
 fn iterator_bound_over_list_ok() {
     // `[S: Iterator[T], T]` accepts a list and recovers its element type.
-    ok("fn first[S: Iterator[T], T](xs: S, d: T) -> T:\n    for x in xs:\n        return x\n    return d\nv := first([1, 2, 3], 0)\n");
+    ok(
+        "fn first[S: Iterator[T], T](xs: S, d: T) -> T:\n    for x in xs:\n        return x\n    return d\nv := first([1, 2, 3], 0)\n",
+    );
 }
 
 #[test]
@@ -3467,7 +3785,10 @@ fn iterator_loop_var_typed_as_element() {
 
 #[test]
 fn iterator_protocol_redeclaration_rejected() {
-    rejects("protocol Iterator:\n    fn next(self) -> int?\n", "reserved");
+    rejects(
+        "protocol Iterator:\n    fn next(self) -> int?\n",
+        "reserved",
+    );
 }
 
 #[test]
@@ -3514,7 +3835,9 @@ fn iterator_bound_forwards_into_another_iterator_call_ok() {
     // A `[S: Iterator[T]]` value must satisfy `Iterator` when forwarded into another iterator-generic
     // (the `Ty::Param` declared-bounds path), not be rejected. Regression for the satisfies/for-loop
     // drift.
-    ok("fn count[S: Iterator[T], T](xs: S) -> int:\n    n := 0\n    for _ in xs:\n        n = n + 1\n    return n\nfn wrap[S: Iterator[T], T](xs: S) -> int:\n    return count(xs)\nv := wrap([1, 2, 3])\n");
+    ok(
+        "fn count[S: Iterator[T], T](xs: S) -> int:\n    n := 0\n    for _ in xs:\n        n = n + 1\n    return n\nfn wrap[S: Iterator[T], T](xs: S) -> int:\n    return count(xs)\nv := wrap([1, 2, 3])\n",
+    );
 }
 
 #[test]
@@ -3531,10 +3854,7 @@ fn iterator_conflicting_explicit_element_arg_rejected() {
 fn iterator_bound_unknown_element_type_rejected() {
     // `Bogus` is neither a declared type param nor a known type — a bound's args are resolved, so
     // this is reported rather than silently accepted.
-    rejects(
-        "fn f[S: Iterator[Bogus]](xs: S):\n    print(1)\n",
-        "Bogus",
-    );
+    rejects("fn f[S: Iterator[Bogus]](xs: S):\n    print(1)\n", "Bogus");
 }
 
 #[test]
@@ -3573,22 +3893,31 @@ fn slice_of_list_types_as_list() {
 #[test]
 fn slice_of_str_types_as_str() {
     ok("s := \"hello\"\nt: str = s[0:2]\n");
-    rejects("s := \"hello\"\nn: int = s[0:2]\n", "cannot assign str to variable of type int");
+    rejects(
+        "s := \"hello\"\nn: int = s[0:2]\n",
+        "cannot assign str to variable of type int",
+    );
 }
 
 #[test]
 fn slice_bounds_must_be_int() {
-    rejects("xs := [1, 2, 3]\nys := xs[\"a\":2]\n", "slice bound must be int, found str");
-    rejects("xs := [1, 2, 3]\nys := xs[0:\"b\"]\n", "slice bound must be int, found str");
-    rejects("xs := [1, 2, 3]\nys := xs[::\"c\"]\n", "slice bound must be int, found str");
+    rejects(
+        "xs := [1, 2, 3]\nys := xs[\"a\":2]\n",
+        "slice bound must be int, found str",
+    );
+    rejects(
+        "xs := [1, 2, 3]\nys := xs[0:\"b\"]\n",
+        "slice bound must be int, found str",
+    );
+    rejects(
+        "xs := [1, 2, 3]\nys := xs[::\"c\"]\n",
+        "slice bound must be int, found str",
+    );
 }
 
 #[test]
 fn map_is_not_sliceable() {
-    rejects(
-        "m: map[int, int] = {}\nx := m[0:2]\n",
-        "cannot slice",
-    );
+    rejects("m: map[int, int] = {}\nx := m[0:2]\n", "cannot slice");
 }
 
 const BUF: &str = "\
@@ -3747,7 +4076,9 @@ fn generic_over_slice_protocol_ok() {
 
 #[test]
 fn defer_method_call_ok() {
-    ok("struct F:\n    n: int\n    fn close(self):\n        print(\"x\")\nfn w():\n    f := F(1)\n    defer f.close()\n");
+    ok(
+        "struct F:\n    n: int\n    fn close(self):\n        print(\"x\")\nfn w():\n    f := F(1)\n    defer f.close()\n",
+    );
 }
 
 #[test]
@@ -3764,13 +4095,19 @@ fn defer_at_top_level_ok() {
 
 #[test]
 fn defer_non_call_rejected() {
-    rejects("fn w():\n    defer 1 + 2\n", "defer requires a function or method call");
+    rejects(
+        "fn w():\n    defer 1 + 2\n",
+        "defer requires a function or method call",
+    );
 }
 
 #[test]
 fn defer_builtin_rejected() {
     // Built-ins are not first-class values — they must be wrapped in a function.
-    rejects("fn w():\n    defer print(\"x\")\n", "built-ins and constructors must be wrapped");
+    rejects(
+        "fn w():\n    defer print(\"x\")\n",
+        "built-ins and constructors must be wrapped",
+    );
 }
 
 #[test]
@@ -3797,7 +4134,10 @@ fn defer_block_reads_outer_local_ok() {
 #[test]
 fn defer_block_type_errors_still_caught() {
     // The block is checked like any nested scope — a use of an unbound name is still an error.
-    rejects("fn w():\n    defer:\n        z := nope + 1\n", "unknown name 'nope'");
+    rejects(
+        "fn w():\n    defer:\n        z := nope + 1\n",
+        "unknown name 'nope'",
+    );
 }
 
 #[test]
@@ -3814,7 +4154,9 @@ fn defer_block_reassign_capture_rejected() {
 fn defer_block_new_binding_and_nonsendable_read_ok() {
     // Reading a capture into a NEW binding is fine, and — unlike a `spawn:` block — reading a
     // non-sendable captured value (a closure) is allowed (same task, no airlock).
-    ok("fn w():\n    x := 1\n    g := fn(): print(\"g\")\n    defer:\n        y := x + 1\n        print(\"{y}\")\n        g()\n");
+    ok(
+        "fn w():\n    x := 1\n    g := fn(): print(\"g\")\n    defer:\n        y := x + 1\n        print(\"{y}\")\n        g()\n",
+    );
 }
 
 // ===== optional chaining `?.` + null-coalescing `??` (desugared to `match`) =====
@@ -3891,7 +4233,9 @@ fn sort_by_key_int_key_ok() {
 #[test]
 fn sort_by_key_struct_key_ok() {
     // A key function returning a Comparable struct is accepted (compared via `compare`).
-    ok("struct M:\n    n: int\n    fn compare(self, o: M) -> int:\n        return self.n - o.n\nxs := [M(2), M(1)]\nxs.sort_by_key(fn(m: M) -> M: m)\n");
+    ok(
+        "struct M:\n    n: int\n    fn compare(self, o: M) -> int:\n        return self.n - o.n\nxs := [M(2), M(1)]\nxs.sort_by_key(fn(m: M) -> M: m)\n",
+    );
 }
 
 #[test]
@@ -3962,12 +4306,16 @@ fn spawn_at_module_toplevel_ok() {
 
 #[test]
 fn spawn_inside_parallel_ok() {
-    ok("fn w():\n    print(1)\nfn main():\n    parallel:\n        spawn w()\n        spawn w()\nmain()\n");
+    ok(
+        "fn w():\n    print(1)\nfn main():\n    parallel:\n        spawn w()\n        spawn w()\nmain()\n",
+    );
 }
 
 #[test]
 fn nested_parallel_ok() {
-    ok("fn w():\n    print(1)\nfn main():\n    parallel:\n        parallel:\n            spawn w()\nmain()\n");
+    ok(
+        "fn w():\n    print(1)\nfn main():\n    parallel:\n        parallel:\n            spawn w()\nmain()\n",
+    );
 }
 
 #[test]
@@ -3979,7 +4327,9 @@ fn spawn_block_form_ok() {
 
 #[test]
 fn channel_construct_and_methods_ok() {
-    ok("fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    x := ch.recv()\n    n := ch.len()\n    print(x + n)\nmain()\n");
+    ok(
+        "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    x := ch.recv()\n    n := ch.len()\n    print(x + n)\nmain()\n",
+    );
 }
 
 #[test]
@@ -4010,17 +4360,23 @@ fn channel_non_sendable_element_rejected() {
 
 #[test]
 fn wait_binds_element_type_in_arm() {
-    ok("fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    wait:\n        v := ch.recv(): print(v + 1)\nmain()\n");
+    ok(
+        "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    wait:\n        v := ch.recv(): print(v + 1)\nmain()\n",
+    );
 }
 
 #[test]
 fn wait_assign_target_typechecks() {
-    ok("fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    n := 0\n    wait:\n        n = ch.recv(): print(n)\nmain()\n");
+    ok(
+        "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    n := 0\n    wait:\n        n = ch.recv(): print(n)\nmain()\n",
+    );
 }
 
 #[test]
 fn wait_discard_and_else_ok() {
-    ok("fn main():\n    ch := Channel[int]()\n    wait:\n        _ := ch.recv(): print(1)\n        else: print(0)\nmain()\n");
+    ok(
+        "fn main():\n    ch := Channel[int]()\n    wait:\n        _ := ch.recv(): print(1)\n        else: print(0)\nmain()\n",
+    );
 }
 
 #[test]
@@ -4072,7 +4428,9 @@ fn channel_close_rejects_args() {
 
 #[test]
 fn channel_try_send_returns_bool() {
-    ok("fn main():\n    ch := Channel[int]()\n    sent: bool = ch.try_send(1)\n    print(sent)\nmain()\n");
+    ok(
+        "fn main():\n    ch := Channel[int]()\n    sent: bool = ch.try_send(1)\n    print(sent)\nmain()\n",
+    );
 }
 
 #[test]
@@ -4085,7 +4443,9 @@ fn channel_try_send_wrong_type_rejected() {
 
 #[test]
 fn for_over_channel_binds_element() {
-    ok("fn main():\n    ch := Channel[int]()\n    ch.close()\n    for v in ch:\n        print(v + 1)\nmain()\n");
+    ok(
+        "fn main():\n    ch := Channel[int]()\n    ch.close()\n    for v in ch:\n        print(v + 1)\nmain()\n",
+    );
 }
 
 #[test]
@@ -4121,7 +4481,9 @@ fn spawn_non_sendable_arg_rejected() {
 
 #[test]
 fn spawn_sendable_args_ok() {
-    ok("fn worker(id: int, prefix: str, out: Channel[str]):\n    out.send(\"{prefix}-{id}\")\nfn main():\n    ch := Channel[str]()\n    parallel:\n        spawn worker(1, \"t\", ch)\nmain()\n");
+    ok(
+        "fn worker(id: int, prefix: str, out: Channel[str]):\n    out.send(\"{prefix}-{id}\")\nfn main():\n    ch := Channel[str]()\n    parallel:\n        spawn worker(1, \"t\", ch)\nmain()\n",
+    );
 }
 
 #[test]
@@ -4135,9 +4497,17 @@ fn spawn_builtin_rejected_like_defer() {
 #[test]
 fn spawn_bad_arg_reports_one_error() {
     // The sendability gate must not double-report a type error already raised by inferring the call.
-    let errs = check_src("fn w(x: int):\n    print(x)\nfn main():\n    parallel:\n        spawn w(nope)\nmain()\n");
-    let dups = errs.iter().filter(|e| e.message.contains("unknown name 'nope'")).count();
-    assert_eq!(dups, 1, "expected exactly one 'unknown name' error, got: {errs:?}");
+    let errs = check_src(
+        "fn w(x: int):\n    print(x)\nfn main():\n    parallel:\n        spawn w(nope)\nmain()\n",
+    );
+    let dups = errs
+        .iter()
+        .filter(|e| e.message.contains("unknown name 'nope'"))
+        .count();
+    assert_eq!(
+        dups, 1,
+        "expected exactly one 'unknown name' error, got: {errs:?}"
+    );
 }
 
 #[test]
@@ -4160,7 +4530,9 @@ fn spawn_non_sendable_struct_field_arg_rejected() {
 #[test]
 fn sendable_recursive_struct_ok() {
     // A self-referential struct of sendable fields must terminate (cycle guard) and be sendable.
-    ok("struct Node:\n    val: int\n    next: Node\nfn use_it(n: Node):\n    print(n.val)\nfn main():\n    parallel:\n        spawn:\n            print(1)\nmain()\n");
+    ok(
+        "struct Node:\n    val: int\n    next: Node\nfn use_it(n: Node):\n    print(n.val)\nfn main():\n    parallel:\n        spawn:\n            print(1)\nmain()\n",
+    );
 }
 
 #[test]
@@ -4174,7 +4546,9 @@ fn reassign_captured_binding_in_spawn_block_rejected() {
 #[test]
 fn task_local_binding_in_spawn_block_assignable() {
     // A binding declared *inside* the task body is task-local, not a capture — assignable.
-    ok("fn main():\n    parallel:\n        spawn:\n            x := 0\n            x = x + 1\n            print(x)\nmain()\n");
+    ok(
+        "fn main():\n    parallel:\n        spawn:\n            x := 0\n            x = x + 1\n            print(x)\nmain()\n",
+    );
 }
 
 #[test]
@@ -4183,7 +4557,9 @@ fn spawn_in_plain_fn_ok() {
     // implicit nursery that joins at the function's end. The function-boundary rule still holds at
     // runtime (the task binds to *this* function's nursery, never the caller's), enforced by the
     // compiler/VM emitting a per-function implicit nursery.
-    ok("fn w():\n    spawn other()\nfn other():\n    print(1)\nfn main():\n    parallel:\n        w()\nmain()\n");
+    ok(
+        "fn w():\n    spawn other()\nfn other():\n    print(1)\nfn main():\n    parallel:\n        w()\nmain()\n",
+    );
 }
 
 // ----- concurrency C3: Shared[T], the cross-task mutable box -----
@@ -4191,7 +4567,9 @@ fn spawn_in_plain_fn_ok() {
 #[test]
 fn shared_construct_and_methods_ok() {
     // `Shared(v)` infers its element type from the value (no `[T]` type arg, unlike Channel).
-    ok("fn main():\n    s := Shared(0)\n    s.set(5)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n");
+    ok(
+        "fn main():\n    s := Shared(0)\n    s.set(5)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n",
+    );
 }
 
 #[test]
@@ -4229,14 +4607,18 @@ fn shared_rejects_type_arg() {
 #[test]
 fn shared_is_sendable() {
     // A `Shared[T]` handle crosses the airlock — both spawned tasks reach the same box.
-    ok("fn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\nfn main():\n    s := Shared(0)\n    parallel:\n        spawn bump(s)\n        spawn bump(s)\n    print(s.get())\nmain()\n");
+    ok(
+        "fn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\nfn main():\n    s := Shared(0)\n    parallel:\n        spawn bump(s)\n        spawn bump(s)\n    print(s.get())\nmain()\n",
+    );
 }
 
 #[test]
 fn shared_handle_sendable_regardless_of_element() {
     // The asymmetry vs Channel: a `Shared` handle is sendable even when its element type isn't
     // (the value never crosses the airlock — only the handle does). Locks in the intent.
-    ok("fn use_it(s: Shared[fn() -> int]):\n    f := s.get()\n    print(f())\nfn main():\n    g := fn() -> int: 1\n    s := Shared(g)\n    parallel:\n        spawn use_it(s)\nmain()\n");
+    ok(
+        "fn use_it(s: Shared[fn() -> int]):\n    f := s.get()\n    print(f())\nfn main():\n    g := fn() -> int: 1\n    s := Shared(g)\n    parallel:\n        spawn use_it(s)\nmain()\n",
+    );
 }
 
 // ===== `ref T` transparent reference bindings (coercion table) =====
@@ -4259,8 +4641,10 @@ fn ref_to_byval_param_is_error() {
     let msg = resolve_err_msg(
         "import std.ref\nfn byref(x: ref int):\n    x = 1\nfn main():\n    n := 0\n    byref(n)\nmain()\n",
     );
-    assert!(msg.contains("by-reference") && msg.contains("declare"),
-        "expected the by-value->ref error, got: {msg:?}");
+    assert!(
+        msg.contains("by-reference") && msg.contains("declare"),
+        "expected the by-value->ref error, got: {msg:?}"
+    );
 }
 
 #[test]
@@ -4270,8 +4654,10 @@ fn literal_to_ref_param_is_error() {
     let msg = resolve_err_msg(
         "import std.ref\nfn byref(x: ref int):\n    x = 1\nfn main():\n    byref(3)\nmain()\n",
     );
-    assert!(msg.contains("literal") && msg.contains("temporary"),
-        "expected the literal->ref error, got: {msg:?}");
+    assert!(
+        msg.contains("literal") && msg.contains("temporary"),
+        "expected the literal->ref error, got: {msg:?}"
+    );
 }
 
 #[test]
@@ -4297,8 +4683,11 @@ fn ref_over_generic_param_rejected() {
     let errs = check_entry(
         "import std.ref\nfn id[T](x: ref T):\n    x = x\nfn main():\n    print(1)\nmain()\n",
     );
-    assert!(errs.iter().any(|e| e.message.contains("generic type parameter")),
-        "expected the ref-over-generic error, got: {errs:?}");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("generic type parameter")),
+        "expected the ref-over-generic error, got: {errs:?}"
+    );
 }
 
 #[test]
@@ -4396,8 +4785,10 @@ fn closure_byval_into_ref_param_is_error() {
     let msg = resolve_err_msg(
         "import std.ref\nfn main():\n    g := fn(x: ref int) -> int: x + 1\n    n := 5\n    print(g(n))\nmain()\n",
     );
-    assert!(msg.contains("by-reference") && msg.contains("declare"),
-        "expected the by-value->ref error for a closure ref param, got: {msg:?}");
+    assert!(
+        msg.contains("by-reference") && msg.contains("declare"),
+        "expected the by-value->ref error for a closure ref param, got: {msg:?}"
+    );
 }
 
 #[test]
@@ -4419,7 +4810,8 @@ fn ref_arg_mismatch_message_is_transparent() {
         "import std.ref\nfn byref(x: ref int):\n    x = 1\nfn main():\n    r: ref str = \"hi\"\n    byref(r)\nmain()\n",
     );
     assert!(
-        errs.iter().any(|e| e.message.contains("ref int") || e.message.contains("ref str")),
+        errs.iter()
+            .any(|e| e.message.contains("ref int") || e.message.contains("ref str")),
         "expected a transparent `ref T` rendering, got: {errs:?}"
     );
     assert!(
@@ -4466,7 +4858,8 @@ fn explicit_ref_box_keeps_ref_bracket_in_messages() {
         "import std.ref\nfn main():\n    box: Ref[int] = Ref(0)\n    parallel:\n        spawn:\n            box.set(box.get() + 1)\n    print(box.get())\nmain()\n",
     );
     assert!(
-        errs.iter().any(|e| e.message.contains("Ref[int]")) && !errs.iter().any(|e| e.message.contains("ref int")),
+        errs.iter().any(|e| e.message.contains("Ref[int]"))
+            && !errs.iter().any(|e| e.message.contains("ref int")),
         "explicit Ref[int] capture must keep Ref[int], got: {errs:?}"
     );
 }
@@ -4476,13 +4869,17 @@ fn explicit_ref_box_keeps_ref_bracket_in_messages() {
 #[test]
 fn atomic_construct_and_methods_ok() {
     // `Atomic(v)` infers its element type from the value (value-first, like `Shared`).
-    ok("fn main():\n    a := Atomic(0)\n    a.store(5)\n    n := a.add(1)\n    m := a.sub(2)\n    old := a.exchange(9)\n    ok := a.cas(9, 10)\n    print(a.load())\nmain()\n");
+    ok(
+        "fn main():\n    a := Atomic(0)\n    a.store(5)\n    n := a.add(1)\n    m := a.sub(2)\n    old := a.exchange(9)\n    ok := a.cas(9, 10)\n    print(a.load())\nmain()\n",
+    );
 }
 
 #[test]
 fn atomic_load_returns_element_type() {
     // `load()` yields `T`, so it composes where a `T` is expected (here, str concat).
-    ok("fn main():\n    a := Atomic(\"hi\")\n    msg := a.load() + \"!\"\n    print(msg)\nmain()\n");
+    ok(
+        "fn main():\n    a := Atomic(\"hi\")\n    msg := a.load() + \"!\"\n    print(msg)\nmain()\n",
+    );
 }
 
 #[test]
@@ -4520,7 +4917,9 @@ fn atomic_rejects_type_arg() {
 #[test]
 fn atomic_is_sendable() {
     // An `Atomic[T]` handle crosses the airlock — both spawned tasks reach the same box.
-    ok("fn bump(a: Atomic[int]):\n    a.add(1)\nfn main():\n    a := Atomic(0)\n    parallel:\n        spawn bump(a)\n        spawn bump(a)\n    print(a.load())\nmain()\n");
+    ok(
+        "fn bump(a: Atomic[int]):\n    a.add(1)\nfn main():\n    a := Atomic(0)\n    parallel:\n        spawn bump(a)\n        spawn bump(a)\n    print(a.load())\nmain()\n",
+    );
 }
 
 // ----- timer(ms): one-shot timeout channel -----
@@ -4543,7 +4942,9 @@ fn timer_arg_must_be_int() {
 
 #[test]
 fn executor_construct_and_methods_ok() {
-    ok("fn job():\n    print(1)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): job())\n    ex.shutdown()\nmain()\n");
+    ok(
+        "fn job():\n    print(1)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): job())\n    ex.shutdown()\nmain()\n",
+    );
 }
 
 #[test]
@@ -4553,7 +4954,9 @@ fn executor_shutdown_now_ok() {
 
 #[test]
 fn executor_defer_shutdown_ok() {
-    ok("fn job():\n    print(1)\nfn main():\n    ex := Executor()\n    defer ex.shutdown()\n    ex.submit(fn(): job())\nmain()\n");
+    ok(
+        "fn job():\n    print(1)\nfn main():\n    ex := Executor()\n    defer ex.shutdown()\n    ex.submit(fn(): job())\nmain()\n",
+    );
 }
 
 #[test]
@@ -4575,7 +4978,9 @@ fn executor_unknown_method_rejected() {
 #[test]
 fn executor_is_sendable() {
     // The handle crosses the airlock like Channel/Shared — submitting from a spawned task is legal.
-    ok("fn use_ex(ex: Executor):\n    ex.submit(fn(): print(1))\nfn main():\n    ex := Executor()\n    parallel:\n        spawn use_ex(ex)\n    ex.shutdown()\nmain()\n");
+    ok(
+        "fn use_ex(ex: Executor):\n    ex.submit(fn(): print(1))\nfn main():\n    ex := Executor()\n    parallel:\n        spawn use_ex(ex)\n    ex.shutdown()\nmain()\n",
+    );
 }
 
 #[test]
@@ -4607,7 +5012,9 @@ fn read_captured_int_in_spawn_block_ok() {
 #[test]
 fn read_captured_channel_in_spawn_block_ok() {
     // A Channel handle is sendable — capturing and using it inside a task is fine.
-    ok("fn main():\n    ch := Channel[int]()\n    parallel:\n        spawn:\n            ch.send(1)\nmain()\n");
+    ok(
+        "fn main():\n    ch := Channel[int]()\n    parallel:\n        spawn:\n            ch.send(1)\nmain()\n",
+    );
 }
 
 #[test]
@@ -4615,14 +5022,18 @@ fn imported_module_used_in_spawn_block_ok() {
     // Regression: a whole-module import is bound at module scope (a global namespace resolvable in
     // every task, like a free function), not a per-task value capture — the read gate must not flag
     // it even though `Ty::Module` is non-sendable.
-    entry_ok("import std.math\nfn main():\n    parallel:\n        spawn:\n            print(math.floor(2.7))\nmain()\n");
+    entry_ok(
+        "import std.math\nfn main():\n    parallel:\n        spawn:\n            print(math.floor(2.7))\nmain()\n",
+    );
 }
 
 #[test]
 fn top_level_closure_used_in_spawn_block_ok() {
     // Regression: a top-level (module-scope) binding is a global, not a per-task capture — reading
     // it inside a `spawn:` block is fine even when it's non-sendable.
-    ok("g := fn() -> int: 7\nfn main():\n    parallel:\n        spawn:\n            print(g())\nmain()\n");
+    ok(
+        "g := fn() -> int: 7\nfn main():\n    parallel:\n        spawn:\n            print(g())\nmain()\n",
+    );
 }
 
 #[test]
@@ -4664,13 +5075,17 @@ fn submit_captured_closure_rejected() {
 #[test]
 fn submit_captured_channel_ok() {
     // A Channel handle is sendable — capturing it in a submitted task is fine.
-    ok("fn main():\n    ch := Channel[int]()\n    ex := Executor()\n    ex.submit(fn(): ch.send(1))\n    ex.shutdown()\nmain()\n");
+    ok(
+        "fn main():\n    ch := Channel[int]()\n    ex := Executor()\n    ex.submit(fn(): ch.send(1))\n    ex.shutdown()\nmain()\n",
+    );
 }
 
 #[test]
 fn submit_captured_int_ok() {
     // A sendable capture (int) gets its own copy — reading it in the task is the whole point.
-    ok("fn main():\n    n := 42\n    ex := Executor()\n    ex.submit(fn(): print(n))\n    ex.shutdown()\nmain()\n");
+    ok(
+        "fn main():\n    n := 42\n    ex := Executor()\n    ex.submit(fn(): print(n))\n    ex.shutdown()\nmain()\n",
+    );
 }
 
 #[test]
@@ -4691,7 +5106,9 @@ fn top_level_closure_submitted_ok() {
     // global, not a per-task capture — submitting a closure that reads it is fine even when it's
     // non-sendable (the `is_local_capture` scope-0 exclusion). Locks the intentional gap so a future
     // tightening of the gate can't silently flip it without a test failing.
-    ok("g := fn() -> int: 7\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n");
+    ok(
+        "g := fn() -> int: 7\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
+    );
 }
 
 // ----- G1 (B3.3b): module globals are read-only across tasks (`--parallel`) -----
@@ -4734,19 +5151,25 @@ fn sequential_global_mutation_ok() {
 fn spawn_local_shadows_global_ok() {
     // A spawn-reachable function whose local shadows the global name mutates the LOCAL, not the
     // global — it must not be flagged.
-    ok("n := 0\nfn work():\n    n := 5\n    n = n + 1\n    print(n)\nfn main():\n    parallel:\n        spawn work()\nmain()\n");
+    ok(
+        "n := 0\nfn work():\n    n := 5\n    n = n + 1\n    print(n)\nfn main():\n    parallel:\n        spawn work()\nmain()\n",
+    );
 }
 
 #[test]
 fn spawn_reads_global_ok() {
     // Reading a (post-init constant) global from a task is fine; only mutation is gated.
-    ok("n := 7\nfn work():\n    print(n)\nfn main():\n    parallel:\n        spawn work()\nmain()\n");
+    ok(
+        "n := 7\nfn work():\n    print(n)\nfn main():\n    parallel:\n        spawn work()\nmain()\n",
+    );
 }
 
 #[test]
 fn shared_update_in_spawn_ok() {
     // The prescribed cross-task mutation path: a global `Shared`, mutated via `update()` in a task.
-    ok("c := Shared(0)\nfn bump():\n    c.update(fn(x): x + 1)\nfn main():\n    parallel:\n        spawn bump()\n    print(c.get())\nmain()\n");
+    ok(
+        "c := Shared(0)\nfn bump():\n    c.update(fn(x): x + 1)\nfn main():\n    parallel:\n        spawn bump()\n    print(c.get())\nmain()\n",
+    );
 }
 
 #[test]
@@ -4780,7 +5203,9 @@ fn spawn_reaches_mutator_through_arg_expr_rejected() {
 fn spawn_callee_shadowed_by_local_ok() {
     // A local binding shadowing a free function's name at the spawn site means `spawn bump()`
     // targets the LOCAL (inert) closure, not the global-mutating free fn — must not be flagged.
-    ok("n := 0\nfn bump():\n    n = n + 1\nfn main():\n    bump := fn(): 1\n    parallel:\n        spawn bump()\nmain()\n");
+    ok(
+        "n := 0\nfn bump():\n    n = n + 1\nfn main():\n    bump := fn(): 1\n    parallel:\n        spawn bump()\nmain()\n",
+    );
 }
 
 #[test]
@@ -4799,7 +5224,9 @@ fn spawn_global_mutation_inside_recover_rejected() {
 fn user_struct_named_ref_is_sendable() {
     // A *user-defined* struct that happens to be named `Ref` (no std.ref import) is an ordinary
     // sendable struct — the non-sendability gate applies only to the builtin std.ref `Ref[T]`.
-    entry_ok("struct Ref:\n    val: int\nfn use_it(r: Ref):\n    print(r.val)\nfn main():\n    r := Ref(1)\n    parallel:\n        spawn use_it(r)\nmain()\n");
+    entry_ok(
+        "struct Ref:\n    val: int\nfn use_it(r: Ref):\n    print(r.val)\nfn main():\n    r := Ref(1)\n    parallel:\n        spawn use_it(r)\nmain()\n",
+    );
 }
 
 // ----- D6c: optional `timeout_ms` on net socket read/accept/write -----
@@ -4807,24 +5234,33 @@ fn user_struct_named_ref_is_sendable() {
 #[test]
 fn socket_read_with_timeout_type_checks() {
     // `read(n)` and `read(n, timeout_ms)` both type-check (the trailing int is optional).
-    ok("fn use_sock(s: Socket) -> str!:\n    a := s.read(64)?\n    b := s.read(64, 100)?\n    return Ok(a + b)\n");
+    ok(
+        "fn use_sock(s: Socket) -> str!:\n    a := s.read(64)?\n    b := s.read(64, 100)?\n    return Ok(a + b)\n",
+    );
 }
 
 #[test]
 fn socket_write_with_timeout_type_checks() {
-    ok("fn use_sock(s: Socket) -> int!:\n    a := s.write(\"x\")?\n    b := s.write(\"x\", 100)?\n    return Ok(a + b)\n");
+    ok(
+        "fn use_sock(s: Socket) -> int!:\n    a := s.write(\"x\")?\n    b := s.write(\"x\", 100)?\n    return Ok(a + b)\n",
+    );
 }
 
 #[test]
 fn listener_accept_with_timeout_type_checks() {
     // `accept()` and `accept(timeout_ms)` both type-check.
-    ok("fn use_listener(l: Listener) -> int!:\n    l.accept()?\n    l.accept(100)?\n    return Ok(0)\n");
+    ok(
+        "fn use_listener(l: Listener) -> int!:\n    l.accept()?\n    l.accept(100)?\n    return Ok(0)\n",
+    );
 }
 
 #[test]
 fn socket_read_with_non_int_timeout_rejected() {
     // A non-int `timeout_ms` is a type error.
-    rejects("fn use_sock(s: Socket):\n    s.read(64, \"x\")\n", "expected int");
+    rejects(
+        "fn use_sock(s: Socket):\n    s.read(64, \"x\")\n",
+        "expected int",
+    );
 }
 
 #[test]
@@ -4836,12 +5272,18 @@ fn socket_read_with_too_few_args_rejected() {
 #[test]
 fn socket_read_with_too_many_args_rejected() {
     // `read(n, t, extra)` exceeds the 1–2 arg range.
-    rejects("fn use_sock(s: Socket):\n    s.read(64, 100, 1)\n", "argument");
+    rejects(
+        "fn use_sock(s: Socket):\n    s.read(64, 100, 1)\n",
+        "argument",
+    );
 }
 
 #[test]
 fn listener_accept_with_too_many_args_rejected() {
-    rejects("fn use_listener(l: Listener):\n    l.accept(100, 1)\n", "argument");
+    rejects(
+        "fn use_listener(l: Listener):\n    l.accept(100, 1)\n",
+        "argument",
+    );
 }
 
 // ===== or-patterns + nested nullary =====
@@ -4858,9 +5300,7 @@ fn or_pattern_mismatched_bindings_rejected() {
 #[test]
 fn or_pattern_consistent_bindings_ok() {
     // Two enum variants whose single payload is the same type both bind `a`.
-    ok(
-        "enum E:\n    A(int)\n    B(int)\ne := E.A(1)\nmatch e:\n    E.A(a) | E.B(a): print(a)\n",
-    );
+    ok("enum E:\n    A(int)\n    B(int)\ne := E.A(1)\nmatch e:\n    E.A(a) | E.B(a): print(a)\n");
 }
 
 #[test]
@@ -4889,7 +5329,10 @@ fn or_pattern_with_wildcard_is_exhaustive() {
     ok("n := 3\nmatch n:\n    1 | _: print(\"x\")\n");
     ok("s := \"hi\"\nmatch s:\n    \"a\" | \"b\" | _: print(\"y\")\n");
     // Soundness guard: without an irrefutable alternative it is still non-exhaustive.
-    rejects("n := 3\nmatch n:\n    1 | 2: print(\"x\")\n", "non-exhaustive");
+    rejects(
+        "n := 3\nmatch n:\n    1 | 2: print(\"x\")\n",
+        "non-exhaustive",
+    );
 }
 
 #[test]
@@ -4938,7 +5381,9 @@ fn extern_call_wrong_arg_type_rejected() {
 
 #[test]
 fn extern_str_param_and_int_return_ok() {
-    ok("extern \"libc.so.6\":\n    fn strlen(s: str) -> int\n\nn: int = strlen(\"hello\")\nprint(n)\n");
+    ok(
+        "extern \"libc.so.6\":\n    fn strlen(s: str) -> int\n\nn: int = strlen(\"hello\")\nprint(n)\n",
+    );
 }
 
 #[test]
@@ -4965,7 +5410,9 @@ fn extern_non_marshallable_return_rejected() {
 #[test]
 fn extern_ptr_param_and_return_ok() {
     // The opaque `ptr` handle is C-marshallable: an extern fn can return one and take one back.
-    ok("extern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n");
+    ok(
+        "extern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n",
+    );
 }
 
 #[test]
@@ -5056,7 +5503,9 @@ fn extern_named_after_enum_type_ok() {
 #[test]
 fn extern_type_alias_param_ok() {
     // A transparent alias resolving to a marshallable scalar is accepted (check runs on resolved Ty).
-    ok("type Len = int\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Len\n\nprint(strlen(\"hi\"))\n");
+    ok(
+        "type Len = int\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Len\n\nprint(strlen(\"hi\"))\n",
+    );
 }
 
 #[test]
@@ -5075,7 +5524,9 @@ fn extern_nil_param_rejected() {
 #[test]
 fn generator_basic_ok() {
     // A generator declares `-> Iterator[T]`, yields T, and its result drives a `for` (x: int).
-    ok("fn count() -> Iterator[int]:\n    yield 1\n    yield 2\n\nfn use() -> int:\n    s := 0\n    for x in count():\n        s = s + x\n    return s\n");
+    ok(
+        "fn count() -> Iterator[int]:\n    yield 1\n    yield 2\n\nfn use() -> int:\n    s := 0\n    for x in count():\n        s = s + x\n    return s\n",
+    );
 }
 
 #[test]
@@ -5122,7 +5573,9 @@ fn generator_return_value_rejected() {
 #[test]
 fn generator_explicit_next_ok() {
     // A generator result is an `Iterator[int]`; `.next()` returns `Option[int]`, drivable explicitly.
-    ok("fn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    g := count()\n    match g.next():\n        Some(v): print(v)\n        None: print(-1)\n");
+    ok(
+        "fn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    g := count()\n    match g.next():\n        Some(v): print(v)\n        None: print(-1)\n",
+    );
 }
 
 #[test]
@@ -5142,7 +5595,10 @@ fn user_struct_named_iterator_rejected() {
 
 #[test]
 fn yield_outside_generator_rejected() {
-    rejects("yield 1\n", "`yield` can only appear inside a generator function");
+    rejects(
+        "yield 1\n",
+        "`yield` can only appear inside a generator function",
+    );
 }
 
 #[test]
@@ -5205,12 +5661,18 @@ fn assert_ok() {
 
 #[test]
 fn free_test_fn_with_params_rejected() {
-    rejects("test fn t(x: int):\n    assert true\n", "test function must take no parameters");
+    rejects(
+        "test fn t(x: int):\n    assert true\n",
+        "test function must take no parameters",
+    );
 }
 
 #[test]
 fn free_test_fn_with_return_rejected() {
-    rejects("test fn t() -> int:\n    return 1\n", "test function must not return a value");
+    rejects(
+        "test fn t() -> int:\n    return 1\n",
+        "test function must not return a value",
+    );
 }
 
 #[test]
@@ -5230,7 +5692,10 @@ fn test_fn_valid_forms_ok() {
 #[test]
 fn test_fn_body_is_still_checked() {
     // A type error inside a valid-shaped test fn is still reported.
-    rejects("test fn t():\n    assert 1\n", "assert condition must be bool");
+    rejects(
+        "test fn t():\n    assert 1\n",
+        "assert condition must be bool",
+    );
 }
 
 #[test]
@@ -5244,7 +5709,9 @@ fn suite_lifecycle_hook_wrong_shape_rejected() {
 
 #[test]
 fn suite_lifecycle_hook_valid_ok() {
-    ok("struct S:\n    test fn t(self):\n        assert true\n    fn before_each(self):\n        return\n");
+    ok(
+        "struct S:\n    test fn t(self):\n        assert true\n    fn before_each(self):\n        return\n",
+    );
 }
 
 #[test]
@@ -5259,29 +5726,27 @@ fn lifecycle_name_in_non_suite_struct_not_validated() {
 #[test]
 fn bytes_literal_infers_bytes_and_protocols() {
     // literal infers `bytes`; b[i] -> int; b[a:b] -> bytes; for c in b -> int; len -> int
-    ok("fn main():\n    b := b\"hi\"\n    x: int = b[0]\n    s: bytes = b[0:1]\n    for c in b:\n        print(c)\n    n: int = len(b)\n    print(x + n)\nmain()\n");
+    ok(
+        "fn main():\n    b := b\"hi\"\n    x: int = b[0]\n    s: bytes = b[0:1]\n    for c in b:\n        print(c)\n    n: int = len(b)\n    print(x + n)\nmain()\n",
+    );
 }
 
 #[test]
 fn bytes_annotation_and_equality_ok() {
-    ok("fn main():\n    a: bytes = b\"\\x01\\x02\"\n    eq := a == b\"\\x01\\x02\"\n    print(eq)\nmain()\n");
+    ok(
+        "fn main():\n    a: bytes = b\"\\x01\\x02\"\n    eq := a == b\"\\x01\\x02\"\n    print(eq)\nmain()\n",
+    );
 }
 
 #[test]
 fn bytes_is_immutable_index_set_rejected() {
     // bytes is immutable — `b[i] = x` must be a type error (no IndexSet conformance).
-    rejects(
-        "fn main():\n    b := b\"hi\"\n    b[0] = 1\nmain()\n",
-        "",
-    );
+    rejects("fn main():\n    b := b\"hi\"\n    b[0] = 1\nmain()\n", "");
 }
 
 #[test]
 fn bytes_not_assignable_to_str() {
-    rejects(
-        "fn main():\n    b := b\"hi\"\n    s: str = b\nmain()\n",
-        "",
-    );
+    rejects("fn main():\n    b := b\"hi\"\n    s: str = b\nmain()\n", "");
 }
 
 #[test]
@@ -5296,19 +5761,25 @@ fn bytes_key_in_map_ok() {
 fn bytearray_constructor_and_ty() {
     // `bytearray([..])` infers `bytearray`; ba[i] -> int; ba[i] = int ok; ba[a:b] -> bytearray;
     // for x in ba -> int; len ok.
-    ok("fn main():\n    ba := bytearray([1, 2, 3])\n    x: int = ba[0]\n    ba[0] = 5\n    s: bytearray = ba[0:1]\n    for c in ba:\n        print(c)\n    n: int = len(ba)\n    print(x + n)\nmain()\n");
+    ok(
+        "fn main():\n    ba := bytearray([1, 2, 3])\n    x: int = ba[0]\n    ba[0] = 5\n    s: bytearray = ba[0:1]\n    for c in ba:\n        print(c)\n    n: int = len(ba)\n    print(x + n)\nmain()\n",
+    );
 }
 
 #[test]
 fn bytearray_constructor_overloads_infer_bytearray() {
     // All four constructor forms infer `bytearray`.
-    ok("fn main():\n    a: bytearray = bytearray()\n    b: bytearray = bytearray(4)\n    c: bytearray = bytearray(b\"x\")\n    d: bytearray = bytearray([1, 2])\n    print(len(a) + len(b) + len(c) + len(d))\nmain()\n");
+    ok(
+        "fn main():\n    a: bytearray = bytearray()\n    b: bytearray = bytearray(4)\n    c: bytearray = bytearray(b\"x\")\n    d: bytearray = bytearray([1, 2])\n    print(len(a) + len(b) + len(c) + len(d))\nmain()\n",
+    );
 }
 
 #[test]
 fn bytearray_conversion_bridge_typechecks() {
     // bytes(ba) -> bytes; bytearray(b) -> bytearray.
-    ok("fn main():\n    ba := bytearray([1, 2])\n    b: bytes = bytes(ba)\n    ba2: bytearray = bytearray(b)\n    print(len(b) + len(ba2))\nmain()\n");
+    ok(
+        "fn main():\n    ba := bytearray([1, 2])\n    b: bytes = bytes(ba)\n    ba2: bytearray = bytearray(b)\n    print(len(b) + len(ba2))\nmain()\n",
+    );
 }
 
 #[test]
@@ -5319,10 +5790,7 @@ fn bytearray_index_set_typechecks() {
 
 #[test]
 fn bytearray_constructor_rejects_str_arg() {
-    rejects(
-        "fn main():\n    ba := bytearray(\"s\")\nmain()\n",
-        "",
-    );
+    rejects("fn main():\n    ba := bytearray(\"s\")\nmain()\n", "");
 }
 
 #[test]
@@ -5347,7 +5815,9 @@ fn bytearray_not_assignable_to_bytes() {
 #[test]
 fn encode_decode_types() {
     // str.encode() -> bytes; bytes.decode() -> str; bytearray.decode() -> str.
-    ok("fn main():\n    b: bytes = \"x\".encode()\n    s1: str = b\"x\".decode()\n    s2: str = bytearray([120]).decode()\n    print(s1 + s2 + str(len(b)))\nmain()\n");
+    ok(
+        "fn main():\n    b: bytes = \"x\".encode()\n    s1: str = b\"x\".decode()\n    s2: str = bytearray([120]).decode()\n    print(s1 + s2 + str(len(b)))\nmain()\n",
+    );
 }
 
 #[test]
@@ -5375,7 +5845,9 @@ fn constructor_iter_types() {
     ok("fn main():\n    s: set[int] = set(range(3))\n    print(s.len())\nmain()\n");
     ok("fn main():\n    s: set[int] = set([1, 1, 2])\n    print(s.len())\nmain()\n");
     // map() from a list of 2-tuples.
-    ok("fn main():\n    m: map[int, str] = map([(1, \"a\"), (2, \"b\")])\n    print(m.len())\nmain()\n");
+    ok(
+        "fn main():\n    m: map[int, str] = map([(1, \"a\"), (2, \"b\")])\n    print(m.len())\nmain()\n",
+    );
 }
 
 #[test]
@@ -5388,7 +5860,10 @@ fn map_requires_two_tuple() {
     // element not a 2-tuple is a static error.
     rejects("fn main():\n    m := map([1, 2])\nmain()\n", "");
     // a map's element is its key (not a 2-tuple) -> static error.
-    rejects("fn main():\n    src := {1: \"a\"}\n    m := map(src)\nmain()\n", "");
+    rejects(
+        "fn main():\n    src := {1: \"a\"}\n    m := map(src)\nmain()\n",
+        "",
+    );
     // a 3-tuple is not a 2-tuple.
     rejects("fn main():\n    m := map([(1, 2, 3)])\nmain()\n", "");
 }
@@ -5397,7 +5872,10 @@ fn map_requires_two_tuple() {
 fn set_map_hashable_key_gate_preserved() {
     // float is not Hashable -> set/map key must reject it.
     rejects("fn main():\n    s := set([3.0])\nmain()\n", "Hashable");
-    rejects("fn main():\n    m := map([(3.0, \"a\")])\nmain()\n", "Hashable");
+    rejects(
+        "fn main():\n    m := map([(3.0, \"a\")])\nmain()\n",
+        "Hashable",
+    );
 }
 
 // ===== Iterable[T] protocol + `.iter()` cursor =====
@@ -5406,36 +5884,54 @@ fn set_map_hashable_key_gate_preserved() {
 fn iter_method_on_collections_types_as_iterator() {
     // `.iter()` on each collection types as Iterator[elem] (the existing existential cursor type).
     ok("fn main():\n    it := [1, 2, 3].iter()\n    print(it.next())\nmain()\n");
-    ok("fn main():\n    it := {1, 2}.iter()\n    x: Option[int] = it.next()\n    print(x)\nmain()\n");
-    ok("fn main():\n    it := {1: \"a\"}.iter()\n    k: Option[int] = it.next()\n    print(k)\nmain()\n");
-    ok("fn main():\n    it := \"ab\".iter()\n    c: Option[str] = it.next()\n    print(c)\nmain()\n");
-    ok("fn main():\n    it := b\"hi\".iter()\n    b: Option[int] = it.next()\n    print(b)\nmain()\n");
-    ok("fn main():\n    it := bytearray([1, 2]).iter()\n    b: Option[int] = it.next()\n    print(b)\nmain()\n");
+    ok(
+        "fn main():\n    it := {1, 2}.iter()\n    x: Option[int] = it.next()\n    print(x)\nmain()\n",
+    );
+    ok(
+        "fn main():\n    it := {1: \"a\"}.iter()\n    k: Option[int] = it.next()\n    print(k)\nmain()\n",
+    );
+    ok(
+        "fn main():\n    it := \"ab\".iter()\n    c: Option[str] = it.next()\n    print(c)\nmain()\n",
+    );
+    ok(
+        "fn main():\n    it := b\"hi\".iter()\n    b: Option[int] = it.next()\n    print(b)\nmain()\n",
+    );
+    ok(
+        "fn main():\n    it := bytearray([1, 2]).iter()\n    b: Option[int] = it.next()\n    print(b)\nmain()\n",
+    );
 }
 
 #[test]
 fn iter_cursor_drives_existing_adapters() {
     // The headline win: a list cursor composes into a struct adapter bounded `[I: Iterator[T]]`.
-    ok("struct Take[I: Iterator[T], T]:\n    inner: I\n    left: int\n    fn next(self) -> Option[T]:\n        if self.left <= 0:\n            return None\n        self.left = self.left - 1\n        return self.inner.next()\nfn main():\n    t := Take([10, 20, 30].iter(), 2)\n    for v in t:\n        print(v)\nmain()\n");
+    ok(
+        "struct Take[I: Iterator[T], T]:\n    inner: I\n    left: int\n    fn next(self) -> Option[T]:\n        if self.left <= 0:\n            return None\n        self.left = self.left - 1\n        return self.inner.next()\nfn main():\n    t := Take([10, 20, 30].iter(), 2)\n    for v in t:\n        print(v)\nmain()\n",
+    );
 }
 
 #[test]
 fn iterable_bound_accepts_list_and_generator() {
     // `[S: Iterable[int]]` accepts a list[int] AND a generator (Iterator[int]).
-    ok("fn count[S: Iterable[int]](s: S) -> int:\n    n := 0\n    for x in s.iter():\n        n = n + 1\n    return n\nfn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn main():\n    print(count([1, 2, 3]))\n    print(count(gen()))\nmain()\n");
+    ok(
+        "fn count[S: Iterable[int]](s: S) -> int:\n    n := 0\n    for x in s.iter():\n        n = n + 1\n    return n\nfn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn main():\n    print(count([1, 2, 3]))\n    print(count(gen()))\nmain()\n",
+    );
 }
 
 #[test]
 fn iter_idempotent_on_generator_and_cursor() {
     // Every Iterator IS Iterable: iter() returns self, idempotently.
-    ok("fn gen() -> Iterator[int]:\n    yield 1\nfn main():\n    it := gen().iter()\n    print(it.next())\nmain()\n");
+    ok(
+        "fn gen() -> Iterator[int]:\n    yield 1\nfn main():\n    it := gen().iter()\n    print(it.next())\nmain()\n",
+    );
     ok("fn main():\n    it := [1, 2, 3].iter().iter()\n    print(it.next())\nmain()\n");
 }
 
 #[test]
 fn iterable_struct_with_only_iter() {
     // A user struct with iter(self) -> Iterator[E] (but no next) satisfies Iterable and is for-iterable.
-    ok("struct Wrap:\n    xs: list[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn main():\n    w := Wrap([1, 2, 3])\n    for x in w:\n        print(x)\nmain()\n");
+    ok(
+        "struct Wrap:\n    xs: list[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn main():\n    w := Wrap([1, 2, 3])\n    for x in w:\n        print(x)\nmain()\n",
+    );
 }
 
 #[test]
@@ -5447,7 +5943,9 @@ fn iter_no_method_on_non_iterable() {
 fn iterator_bound_forwards_into_iterable_bound() {
     // Every Iterator IS Iterable: an `[S: Iterator[T]]` value must satisfy an `[U: Iterable[T]]`
     // bound it is forwarded into (the cross-protocol relationship the spec promises).
-    ok("fn use_iterable[U: Iterable[int]](xs: U) -> int:\n    n := 0\n    for x in xs.iter():\n        n = n + 1\n    return n\nfn pass_through[S: Iterator[int]](xs: S) -> int:\n    return use_iterable(xs)\nfn main():\n    print(pass_through([1, 2, 3]))\nmain()\n");
+    ok(
+        "fn use_iterable[U: Iterable[int]](xs: U) -> int:\n    n := 0\n    for x in xs.iter():\n        n = n + 1\n    return n\nfn pass_through[S: Iterator[int]](xs: S) -> int:\n    return use_iterable(xs)\nfn main():\n    print(pass_through([1, 2, 3]))\nmain()\n",
+    );
 }
 
 // ===== non-void fn must return a value on every path (Option B) =====
@@ -5474,9 +5972,13 @@ fn non_void_fn_must_return() {
 #[test]
 fn non_void_fn_termination_no_false_positive() {
     // if/else where BOTH arms return a value -> terminates.
-    ok("fn a(x: int) -> int:\n    if x > 0:\n        return 1\n    else:\n        return 2\nfn main():\n    print(a(1))\nmain()\n");
+    ok(
+        "fn a(x: int) -> int:\n    if x > 0:\n        return 1\n    else:\n        return 2\nfn main():\n    print(a(1))\nmain()\n",
+    );
     // exhaustive statement-match where every arm returns -> terminates.
-    ok("fn a(x: int) -> int:\n    match x:\n        0: return 1\n        _: return 2\nfn main():\n    print(a(0))\nmain()\n");
+    ok(
+        "fn a(x: int) -> int:\n    match x:\n        0: return 1\n        _: return 2\nfn main():\n    print(a(0))\nmain()\n",
+    );
     // fn ending in `while true:` with no break never falls off the end -> terminates.
     ok("fn a() -> int:\n    while true:\n        return 1\nfn main():\n    print(a())\nmain()\n");
 }
@@ -5502,9 +6004,13 @@ fn non_void_fn_unannotated_conditional_return_not_rejected() {
     // fn that returns a value on *some* path (the common early-return / `find` idiom) infers a
     // non-nil `sig.ret`, but the user declared no annotation, so it must stay legal.
     // (a) conditional value-return, no `-> T` annotation.
-    ok("fn a(x: bool):\n    if x:\n        return helper()\nfn helper() -> int:\n    return 5\nfn main():\n    a(true)\nmain()\n");
+    ok(
+        "fn a(x: bool):\n    if x:\n        return helper()\nfn helper() -> int:\n    return 5\nfn main():\n    a(true)\nmain()\n",
+    );
     // (b) `find`-style early-return-in-loop, no annotation.
-    ok("fn find(xs: list[int], t: int):\n    for x in xs:\n        if x == t:\n            return x\nfn main():\n    find([1, 2, 3], 2)\nmain()\n");
+    ok(
+        "fn find(xs: list[int], t: int):\n    for x in xs:\n        if x == t:\n            return x\nfn main():\n    find([1, 2, 3], 2)\nmain()\n",
+    );
 }
 
 // ===== inline-expr fn body implicitly returns its expression (Option A, inline-only) =====
@@ -5603,8 +6109,14 @@ fn inline_expr_error_reported_once() {
     // ONCE, not twice. Before the fix the body-statement walk inferred the expr (reporting the
     // error) and the return-assignability check re-inferred it (reporting it again).
     let errs = check_src("fn a() -> int: nope(5)\nfn main():\n    print(a())\nmain()\n");
-    let n = errs.iter().filter(|e| e.message.contains("unknown name 'nope'")).count();
-    assert_eq!(n, 1, "expected exactly one 'unknown name' error, got: {errs:?}");
+    let n = errs
+        .iter()
+        .filter(|e| e.message.contains("unknown name 'nope'"))
+        .count();
+    assert_eq!(
+        n, 1,
+        "expected exactly one 'unknown name' error, got: {errs:?}"
+    );
     // A type mismatch inside the inline expr is likewise reported once.
     let errs = check_src("fn a() -> int: \"x\" + 1\nfn main():\n    print(a())\nmain()\n");
     assert_eq!(

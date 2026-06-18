@@ -56,7 +56,10 @@ pub enum WireValue {
     /// unlike a generator (which holds parked frames into this heap and stays non-sendable). Its
     /// items are recursively wired, so a cursor over a non-sendable element (e.g. a `Channel`) faults
     /// recoverably exactly as a `list` of that element would.
-    Iter { items: Vec<WireValue>, pos: usize },
+    Iter {
+        items: Vec<WireValue>,
+        pos: usize,
+    },
     Struct {
         name: Box<str>,
         fields: Vec<(Box<str>, WireValue)>,

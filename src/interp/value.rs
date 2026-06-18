@@ -125,9 +125,9 @@ impl PartialEq for MapData {
     fn eq(&self, o: &Self) -> bool {
         self.entries.len() == o.entries.len()
             && self.entries.iter().all(|(_, ka, va)| {
-                o.entries.iter().any(|(_, kb, vb)| {
-                    super::values_equal(ka, kb) && super::values_equal(va, vb)
-                })
+                o.entries
+                    .iter()
+                    .any(|(_, kb, vb)| super::values_equal(ka, kb) && super::values_equal(va, vb))
             })
     }
 }
@@ -308,7 +308,10 @@ pub struct ExecState {
 
 impl ExecState {
     pub fn new() -> Self {
-        ExecState { queue: std::collections::VecDeque::new(), shut: false }
+        ExecState {
+            queue: std::collections::VecDeque::new(),
+            shut: false,
+        }
     }
 }
 
@@ -387,7 +390,12 @@ impl std::fmt::Display for Value {
                 if s.entries.is_empty() {
                     write!(f, "set()")
                 } else {
-                    let inner = s.entries.iter().map(|(_, v)| v.to_string()).collect::<Vec<_>>().join(", ");
+                    let inner = s
+                        .entries
+                        .iter()
+                        .map(|(_, v)| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     write!(f, "{{{inner}}}")
                 }
             }

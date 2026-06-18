@@ -18,9 +18,9 @@
 //! - libffi's `Cif` is `!Send` (raw pointers, no `unsafe impl Send`), so it is **not** stored;
 //!   the cheap `Cif::new` (`prep_cif`) is rebuilt per call from the `Send` [`CType`] signature.
 
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_void};
 
-use libffi::middle::{arg, Cif, CodePtr, Type};
+use libffi::middle::{Cif, CodePtr, Type, arg};
 use libloading::Library;
 
 use super::{Host, HostError, NativeRet};
@@ -76,8 +76,9 @@ impl Cffi {
     ) -> Result<Self, HostError> {
         // SAFETY: dlopen of an arbitrary shared library. The caller (the `extern "lib":` author)
         // is responsible for naming a real library; we surface any loader error rather than UB.
-        let library = unsafe { Library::new(lib) }
-            .map_err(|e| HostError { message: format!("cannot load library '{lib}': {e}") })?;
+        let library = unsafe { Library::new(lib) }.map_err(|e| HostError {
+            message: format!("cannot load library '{lib}': {e}"),
+        })?;
         let addr = {
             // SAFETY: dlsym of a named symbol in the just-loaded library. We do not deref the
             // pointer here; it is only invoked later via libffi with the checker-verified signature.
@@ -88,12 +89,17 @@ impl Cffi {
             };
             // SAFETY: we relinquish the lifetime tie to `library`, but keep `library` alive for the
             // whole life of this `Cffi`, so the address remains valid until drop.
-            unsafe { symbol.try_as_raw_ptr() }
-                .ok_or_else(|| HostError {
-                    message: format!("symbol '{sym_name}' has no address on this platform"),
-                })? as usize
+            unsafe { symbol.try_as_raw_ptr() }.ok_or_else(|| HostError {
+                message: format!("symbol '{sym_name}' has no address on this platform"),
+            })? as usize
         };
-        Ok(Cffi { _lib: library, sym: addr, params, ret, name: sym_name.to_string() })
+        Ok(Cffi {
+            _lib: library,
+            sym: addr,
+            params,
+            ret,
+            name: sym_name.to_string(),
+        })
     }
 
     /// The declared parameter types (used by the engines to bounds-check arity before the call).
@@ -313,7 +319,9 @@ mod tests {
         fn arg_int(&mut self, i: usize) -> Result<i64, HostError> {
             // not exercised by these tests
             let _ = i;
-            Err(HostError { message: "no int args".into() })
+            Err(HostError {
+                message: "no int args".into(),
+            })
         }
         fn arg_is_int(&self, _i: usize) -> bool {
             false
@@ -331,7 +339,9 @@ mod tests {
             Ok(self.ptrs[idx])
         }
         fn arg_str_map(&mut self, _i: usize) -> Result<Vec<(String, String)>, HostError> {
-            Err(HostError { message: "no map args".into() })
+            Err(HostError {
+                message: "no map args".into(),
+            })
         }
         fn write_stdout(&mut self, _s: &str) {}
         fn write_stderr(&mut self, _s: &str) {}
@@ -351,8 +361,8 @@ mod tests {
 
     #[test]
     fn cos_of_zero_is_one() {
-        let f =
-            Cffi::new("libm.so.6", "cos", vec![CType::Float], Some(CType::Float)).expect("dlopen cos");
+        let f = Cffi::new("libm.so.6", "cos", vec![CType::Float], Some(CType::Float))
+            .expect("dlopen cos");
         let mut host = MockHost::default().float(0.0);
         assert_eq!(f.call(&mut host), Ok(NativeRet::Float(1.0)));
     }
@@ -380,7 +390,9 @@ mod tests {
         let f = Cffi::new("libc.so.6", "getenv", vec![CType::Str], Some(CType::Str))
             .expect("dlopen getenv");
         let mut host = MockHost::default().string("CHEZZI_DEFINITELY_UNSET_VAR_XYZ_42");
-        let err = f.call(&mut host).expect_err("NULL char* for a `str` return must fault");
+        let err = f
+            .call(&mut host)
+            .expect_err("NULL char* for a `str` return must fault");
         assert!(err.message.contains("returned NULL"), "{}", err.message);
     }
 
@@ -388,7 +400,8 @@ mod tests {
     fn tmpfile_then_fclose_roundtrips_an_opaque_handle() {
         // `tmpfile() -> FILE*` produces an opaque `ptr` handle (no args); `fclose(FILE*) -> int`
         // consumes it and returns 0. Exercises ptr-OUT (return) and ptr-IN (arg) in one round-trip.
-        let open = Cffi::new("libc.so.6", "tmpfile", vec![], Some(CType::Ptr)).expect("dlopen tmpfile");
+        let open =
+            Cffi::new("libc.so.6", "tmpfile", vec![], Some(CType::Ptr)).expect("dlopen tmpfile");
         let f = open.call(&mut MockHost::default()).expect("tmpfile call");
         let addr = match f {
             NativeRet::Ptr(a) => a,
@@ -397,7 +410,10 @@ mod tests {
         assert_ne!(addr, 0, "tmpfile should succeed given a writable temp dir");
         let close = Cffi::new("libc.so.6", "fclose", vec![CType::Ptr], Some(CType::Int))
             .expect("dlopen fclose");
-        assert_eq!(close.call(&mut MockHost::default().ptr(addr)), Ok(NativeRet::Int(0)));
+        assert_eq!(
+            close.call(&mut MockHost::default().ptr(addr)),
+            Ok(NativeRet::Int(0))
+        );
     }
 
     #[test]
@@ -405,8 +421,13 @@ mod tests {
         // `fopen` of a non-existent path returns a NULL `FILE*`. Unlike a `str` return (which faults
         // on NULL), a `ptr` return of NULL lowers to `Ptr(0)` — a legitimate "creation failed" signal
         // the program can test with `std.ffi.is_null` / `== std.ffi.null()`.
-        let open = Cffi::new("libc.so.6", "fopen", vec![CType::Str, CType::Str], Some(CType::Ptr))
-            .expect("dlopen fopen");
+        let open = Cffi::new(
+            "libc.so.6",
+            "fopen",
+            vec![CType::Str, CType::Str],
+            Some(CType::Ptr),
+        )
+        .expect("dlopen fopen");
         let mut host = MockHost::default()
             .string("/nonexistent_dir_chezzi_xyz_42/nope")
             .string("r");
@@ -416,7 +437,11 @@ mod tests {
     #[test]
     fn missing_library_is_an_error() {
         let err = Cffi::new("libdoesnotexist.so.999", "cos", vec![], None).unwrap_err();
-        assert!(err.message.contains("cannot load library"), "{}", err.message);
+        assert!(
+            err.message.contains("cannot load library"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

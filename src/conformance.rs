@@ -10,7 +10,7 @@
 //! same char for each terminal name in the grammar — keeping `docs/grammar.bnf` human-readable
 //! while the engine sees an unambiguous symbol stream.
 
-use crate::lexer::{tokenize, Token};
+use crate::lexer::{Token, tokenize};
 use crate::parser::parse;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -186,10 +186,7 @@ fn token_classes_from_source() -> BTreeSet<String> {
         if t.starts_with("//") || t.is_empty() {
             continue;
         }
-        let name: String = t
-            .chars()
-            .take_while(|c| c.is_alphanumeric())
-            .collect();
+        let name: String = t.chars().take_while(|c| c.is_alphanumeric()).collect();
         if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
             out.insert(name.to_uppercase());
         }
@@ -279,10 +276,16 @@ fn terminals_match_token_enum() {
     let terminals = grammar_terminals(&normalize_grammar(&read("docs/grammar.bnf")));
 
     let unknown: Vec<_> = terminals.difference(&classes).collect();
-    assert!(unknown.is_empty(), "grammar terminals not in Token enum: {unknown:?}");
+    assert!(
+        unknown.is_empty(),
+        "grammar terminals not in Token enum: {unknown:?}"
+    );
 
     let missing: Vec<_> = classes.difference(&terminals).collect();
-    assert!(missing.is_empty(), "every token class must appear in the grammar; missing: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "every token class must appear in the grammar; missing: {missing:?}"
+    );
 }
 
 /// Grammar nonterminals correspond to parser functions (and vice versa), within a documented map.
@@ -365,8 +368,14 @@ fn parser_rules_match_fns() {
 
     // every mapping target exists, on both sides
     for (rule, func) in &rule_to_fn {
-        assert!(rules.contains(*rule), "RULE_TO_FN references missing grammar rule '{rule}'");
-        assert!(fns.contains(*func), "RULE_TO_FN references missing parser fn '{func}'");
+        assert!(
+            rules.contains(*rule),
+            "RULE_TO_FN references missing grammar rule '{rule}'"
+        );
+        assert!(
+            fns.contains(*func),
+            "RULE_TO_FN references missing parser fn '{func}'"
+        );
     }
     // every parser fn is either mapped or an allowlisted helper
     let mapped: BTreeSet<&str> = rule_to_fn.values().copied().collect();
@@ -385,13 +394,30 @@ fn corpus_covers_the_grammar() {
     let mut covered = BTreeSet::new();
     for case in load_corpus("accept") {
         for r in case.rules {
-            assert!(rules.contains(&r), "{}: '# rule: {r}' is not a grammar rule", case.name);
+            assert!(
+                rules.contains(&r),
+                "{}: '# rule: {r}' is not a grammar rule",
+                case.name
+            );
             covered.insert(r);
         }
     }
     let required = [
-        "letStmt", "assignStmt", "returnStmt", "importStmt", "fnDecl", "structDecl", "enumDecl",
-        "ifStmt", "forStmt", "whileStmt", "matchStmt", "closure", "type", "postfix", "rangeExpr",
+        "letStmt",
+        "assignStmt",
+        "returnStmt",
+        "importStmt",
+        "fnDecl",
+        "structDecl",
+        "enumDecl",
+        "ifStmt",
+        "forStmt",
+        "whileStmt",
+        "matchStmt",
+        "closure",
+        "type",
+        "postfix",
+        "rangeExpr",
         "bound",
     ];
     for r in required {
@@ -418,14 +444,16 @@ fn grammar_and_parser_agree() {
                 None => false,
             };
             assert_eq!(
-                hand_ok, engine_ok,
+                hand_ok,
+                engine_ok,
                 "{dir}/{}: hand parser {} but grammar {}",
                 case.name,
                 if hand_ok { "accepted" } else { "rejected" },
                 if engine_ok { "accepted" } else { "rejected" },
             );
             assert_eq!(
-                hand_ok, should_accept,
+                hand_ok,
+                should_accept,
                 "{dir}/{}: expected the parser to {} this file",
                 case.name,
                 if should_accept { "accept" } else { "reject" },
@@ -442,7 +470,9 @@ fn grammar_and_parser_agree() {
 #[test]
 fn reject_messages_are_specific() {
     for case in load_corpus("reject") {
-        let want = case.expect.unwrap_or_else(|| panic!("{}: missing '# expect:'", case.name));
+        let want = case
+            .expect
+            .unwrap_or_else(|| panic!("{}: missing '# expect:'", case.name));
         let toks = tokenize(&case.src).expect("reject corpus should still lex");
         let err = parse(toks).expect_err(&format!("{} should fail to parse", case.name));
         assert!(

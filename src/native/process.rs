@@ -11,12 +11,16 @@
 //! `subprocess`), interpolating untrusted input into it is a shell-injection vector. Callers must
 //! sanitize or avoid building `cmd` strings from untrusted data.
 
-use super::{expect_args, Host, HostError, NativeFn, NativeRet};
+use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 
 fn cmd(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "cmd", 1)?;
     let line = h.arg_str(0)?;
-    match std::process::Command::new("sh").arg("-c").arg(&line).output() {
+    match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&line)
+        .output()
+    {
         Ok(out) => {
             if out.status.success() {
                 let stdout = String::from_utf8_lossy(&out.stdout).into_owned();

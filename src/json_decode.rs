@@ -48,16 +48,20 @@ pub fn from_type(
             _ => struct_descriptor(n, structs, visiting),
         },
         Type::Generic(n, args) => match (n.as_str(), args.as_slice()) {
-            ("list", [t]) => Ok(TypeDescriptor::List(Box::new(from_type(t, structs, visiting)?))),
+            ("list", [t]) => Ok(TypeDescriptor::List(Box::new(from_type(
+                t, structs, visiting,
+            )?))),
             ("map", [k, v]) => {
                 if !matches!(k, Type::Named(s) if s == "str") {
                     return Err("decode: map keys must be str, found a non-str key".to_string());
                 }
-                Ok(TypeDescriptor::Map(Box::new(from_type(v, structs, visiting)?)))
+                Ok(TypeDescriptor::Map(Box::new(from_type(
+                    v, structs, visiting,
+                )?)))
             }
-            ("Option", [t]) => {
-                Ok(TypeDescriptor::Option(Box::new(from_type(t, structs, visiting)?)))
-            }
+            ("Option", [t]) => Ok(TypeDescriptor::Option(Box::new(from_type(
+                t, structs, visiting,
+            )?))),
             (other, _) => Err(format!("decode: cannot decode into generic type '{other}'")),
         },
         Type::Func { .. } => Err("decode: cannot decode into a function type".to_string()),
@@ -103,4 +107,3 @@ pub fn json_kind(variant: &str) -> &'static str {
         _ => "value",
     }
 }
-

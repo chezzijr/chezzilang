@@ -74,10 +74,7 @@ pub enum StmtKind {
     },
     /// `type Name = <type>` — a transparent type alias (`Name` is interchangeable with the aliased
     /// type everywhere; structural, not a distinct nominal type).
-    TypeAlias {
-        name: String,
-        ty: Type,
-    },
+    TypeAlias { name: String, ty: Type },
     /// `if` / `else if` / `else`. Each `(cond, body)` is one branch; `else if` adds another
     /// branch; a final bare `else` is `else_block`.
     If {
@@ -92,10 +89,7 @@ pub enum StmtKind {
         body: Block,
     },
     /// `while cond:`.
-    While {
-        cond: Expr,
-        body: Block,
-    },
+    While { cond: Expr, body: Block },
     /// `match scrutinee:` with its arms.
     Match {
         scrutinee: Expr,
@@ -137,17 +131,11 @@ pub enum StmtKind {
     /// `extern "lib":` — a block of body-less C function signatures bound to a shared library.
     /// Each `fn` becomes a module-global callable dispatched at runtime via dlopen + libffi. v1
     /// marshals scalars only (int/float/bool/str→char*).
-    Extern {
-        lib: String,
-        fns: Vec<ExternFn>,
-    },
+    Extern { lib: String, fns: Vec<ExternFn> },
     /// `assert <cond>` or `assert <cond>, <msg>` — fault with the assertion's source span if `cond`
     /// is false. `cond` must be `Bool`; `msg` (if present) must be `str`. The fault message is the
     /// custom `msg` if given, else `"assertion failed"`. Lands in both engines (parity discipline).
-    Assert {
-        cond: Expr,
-        msg: Option<Expr>,
-    },
+    Assert { cond: Expr, msg: Option<Expr> },
     /// A bare expression used as a statement, e.g. `print(x)`.
     Expr(Expr),
 }
@@ -401,7 +389,10 @@ pub enum Import {
 pub enum Type {
     Named(String),
     Generic(String, Vec<Type>),
-    Func { params: Vec<Type>, ret: Box<Type> },
+    Func {
+        params: Vec<Type>,
+        ret: Box<Type>,
+    },
     /// `(T1, T2, …)` — a tuple type (always ≥2 elements; a 1-element `(T)` unwraps to `T`).
     Tuple(Vec<Type>),
 }
@@ -631,7 +622,9 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
             expr_recover_blocks(k, out);
             expr_recover_blocks(v, out);
         }),
-        ExprKind::Comprehension { key, elem, clauses, .. } => {
+        ExprKind::Comprehension {
+            key, elem, clauses, ..
+        } => {
             if let Some(k) = key {
                 expr_recover_blocks(k, out);
             }
@@ -652,7 +645,12 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
             go(start);
             go(end);
         }
-        ExprKind::Call { callee, args, named, .. } => {
+        ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
             go(callee);
             args.iter().for_each(&mut go);
             named.iter().for_each(|(_, v)| expr_recover_blocks(v, out));
@@ -662,7 +660,12 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
             go(obj);
             go(index);
         }
-        ExprKind::Slice { obj, start, end, step } => {
+        ExprKind::Slice {
+            obj,
+            start,
+            end,
+            step,
+        } => {
             go(obj);
             for c in [start, end, step].into_iter().flatten() {
                 expr_recover_blocks(c, out);
@@ -672,7 +675,9 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
             go(obj);
             if let Some(c) = call {
                 c.args.iter().for_each(&mut go);
-                c.named.iter().for_each(|(_, v)| expr_recover_blocks(v, out));
+                c.named
+                    .iter()
+                    .for_each(|(_, v)| expr_recover_blocks(v, out));
             }
         }
         ExprKind::DecodeCall { obj, arg, .. } => {

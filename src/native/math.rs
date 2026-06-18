@@ -6,7 +6,7 @@
 //! NOT here — they live in `std.cmp` as generic `[T: Comparable]` functions, M7-G3.)
 //! Pure Rust `std` — no third-party crates.
 
-use super::{expect_args, Host, HostError, NativeFn, NativeRet};
+use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 
 // `abs` is numeric-polymorphic (gap #12): int args yield an int result, float args a float. The
 // checker (`infer_numeric_poly`) guarantees the arg is present and numeric, so `arg_is_int(0)`
@@ -17,10 +17,9 @@ fn abs(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     if h.arg_is_int(0) {
         // `i64::MIN.abs()` has no representable result (panics in debug, wraps in release). Surface a
         // recoverable overflow instead — matches the engines' checked `"integer overflow in <Op>"`.
-        let v = h
-            .arg_int(0)?
-            .checked_abs()
-            .ok_or(HostError { message: "integer overflow in abs".to_string() })?;
+        let v = h.arg_int(0)?.checked_abs().ok_or(HostError {
+            message: "integer overflow in abs".to_string(),
+        })?;
         Ok(NativeRet::Int(v))
     } else {
         Ok(NativeRet::Float(h.arg_float(0)?.abs()))
@@ -51,7 +50,9 @@ fn sqrt(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "sqrt", 1)?;
     let x = h.arg_float(0)?;
     if x < 0.0 {
-        return Err(HostError { message: format!("sqrt() of a negative number ({x})") });
+        return Err(HostError {
+            message: format!("sqrt() of a negative number ({x})"),
+        });
     }
     Ok(NativeRet::Float(x.sqrt()))
 }
@@ -148,10 +149,7 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
 ];
 
 /// Constant members. `(name, value)`.
-pub const CONSTS: &[(&str, f64)] = &[
-    ("pi", std::f64::consts::PI),
-    ("e", std::f64::consts::E),
-];
+pub const CONSTS: &[(&str, f64)] = &[("pi", std::f64::consts::PI), ("e", std::f64::consts::E)];
 
 #[cfg(test)]
 mod tests {
@@ -167,19 +165,27 @@ mod tests {
             self.floats.len()
         }
         fn arg_int(&mut self, _i: usize) -> Result<i64, HostError> {
-            Err(HostError { message: "no int args".into() })
+            Err(HostError {
+                message: "no int args".into(),
+            })
         }
         fn arg_float(&mut self, i: usize) -> Result<f64, HostError> {
-            self.floats.get(i).copied().ok_or(HostError { message: "missing arg".into() })
+            self.floats.get(i).copied().ok_or(HostError {
+                message: "missing arg".into(),
+            })
         }
         fn arg_is_int(&self, _i: usize) -> bool {
             false
         }
         fn arg_str(&mut self, _i: usize) -> Result<String, HostError> {
-            Err(HostError { message: "no str args".into() })
+            Err(HostError {
+                message: "no str args".into(),
+            })
         }
         fn arg_str_map(&mut self, _i: usize) -> Result<Vec<(String, String)>, HostError> {
-            Err(HostError { message: "no map args".into() })
+            Err(HostError {
+                message: "no map args".into(),
+            })
         }
         fn write_stdout(&mut self, _s: &str) {}
         fn write_stderr(&mut self, _s: &str) {}

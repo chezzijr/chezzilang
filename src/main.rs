@@ -217,7 +217,9 @@ fn cmd_run(args: &[String]) -> ExitCode {
                 match v.parse::<usize>() {
                     Ok(n) => threads_flag = Some(n),
                     Err(_) => {
-                        eprintln!("chezzi run: --threads expects a non-negative integer (0 = all cores), got '{v}'");
+                        eprintln!(
+                            "chezzi run: --threads expects a non-negative integer (0 = all cores), got '{v}'"
+                        );
                         return ExitCode::FAILURE;
                     }
                 }
@@ -230,7 +232,9 @@ fn cmd_run(args: &[String]) -> ExitCode {
         }
     }
     let Some(path) = path else {
-        eprintln!("chezzi run: missing file argument\nusage: chezzi run <file.chz> [--errors=json] [--interp] [--serial] [--parallel] [--threads=N]");
+        eprintln!(
+            "chezzi run: missing file argument\nusage: chezzi run <file.chz> [--errors=json] [--interp] [--serial] [--parallel] [--threads=N]"
+        );
         return ExitCode::FAILURE;
     };
     if saw_parallel && saw_serial {
@@ -238,7 +242,9 @@ fn cmd_run(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     if saw_parallel && !use_vm {
-        eprintln!("chezzi run: --parallel is VM-only and cannot combine with --interp (the interpreter is the frozen sequential engine)");
+        eprintln!(
+            "chezzi run: --parallel is VM-only and cannot combine with --interp (the interpreter is the frozen sequential engine)"
+        );
         return ExitCode::FAILURE;
     }
 
@@ -248,8 +254,14 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let runs_parallel = use_vm && parallel;
     if let Some(n) = threads_flag {
         if !runs_parallel {
-            let conflict = if !use_vm { "--interp (the interpreter is single-threaded)" } else { "--serial (the cooperative single-thread engine)" };
-            eprintln!("chezzi run: --threads sizes the parallel engine and has no effect with {conflict}");
+            let conflict = if !use_vm {
+                "--interp (the interpreter is single-threaded)"
+            } else {
+                "--serial (the cooperative single-thread engine)"
+            };
+            eprintln!(
+                "chezzi run: --threads sizes the parallel engine and has no effect with {conflict}"
+            );
             return ExitCode::FAILURE;
         }
         vm::set_worker_count(n);
@@ -258,7 +270,9 @@ fn cmd_run(args: &[String]) -> ExitCode {
         if !s.is_empty() {
             match s.parse::<usize>() {
                 Ok(n) => vm::set_worker_count(n),
-                Err(_) => eprintln!("chezzi run: ignoring invalid CHEZZI_THREADS='{s}' (expected a non-negative integer; 0 = all cores)"),
+                Err(_) => eprintln!(
+                    "chezzi run: ignoring invalid CHEZZI_THREADS='{s}' (expected a non-negative integer; 0 = all cores)"
+                ),
             }
         }
     }
@@ -290,10 +304,24 @@ fn cmd_run(args: &[String]) -> ExitCode {
         } else {
             vm::run_file_with(p, cfg)
         };
-        (out, err, result.err().map(|e| vm::format_trace(&e.message, e.span, &e.trace)), code)
+        (
+            out,
+            err,
+            result
+                .err()
+                .map(|e| vm::format_trace(&e.message, e.span, &e.trace)),
+            code,
+        )
     } else {
         let (out, err, result, code) = interp::run_file_with(p, cfg);
-        (out, err, result.err().map(|e| interp::format_trace(&e.message, e.span, &e.trace)), code)
+        (
+            out,
+            err,
+            result
+                .err()
+                .map(|e| interp::format_trace(&e.message, e.span, &e.trace)),
+            code,
+        )
     };
     print!("{output}");
     // Flush program stderr (std.io.eprint output) to the real stderr.
@@ -344,7 +372,11 @@ enum CheckOutcome {
     Errors(Vec<checker::CheckError>),
     /// A lex or parse error (the program never reaches the checker). `text` is the full rendered
     /// message; `line`/`col` are carried so `--errors=json` still emits structured output.
-    Fatal { text: String, line: usize, col: usize },
+    Fatal {
+        text: String,
+        line: usize,
+        col: usize,
+    },
 }
 
 /// Resolve the module graph, then type-check it, normalizing each failure mode. A resolve, lex, or
@@ -353,7 +385,11 @@ fn type_check(path: &str) -> CheckOutcome {
     let graph = match resolver::build_graph(std::path::Path::new(path)) {
         Ok(g) => g,
         Err(e) => {
-            return CheckOutcome::Fatal { text: e.to_string(), line: e.span.line, col: e.span.col };
+            return CheckOutcome::Fatal {
+                text: e.to_string(),
+                line: e.span.line,
+                col: e.span.col,
+            };
         }
     };
     match checker::check_graph(&graph) {
@@ -432,7 +468,10 @@ fn report_check_errors(errs: &[checker::CheckError], json: bool) {
 /// Report a fatal lex/parse error, preserving the `--errors=json` contract (valid JSON on stdout).
 fn report_fatal(text: &str, line: usize, col: usize, json: bool) {
     if json {
-        println!("[{{\"line\":{line},\"col\":{col},\"message\":{}}}]", json_string(text));
+        println!(
+            "[{{\"line\":{line},\"col\":{col},\"message\":{}}}]",
+            json_string(text)
+        );
     } else {
         eprintln!("{text}");
     }
@@ -456,4 +495,3 @@ fn json_string(s: &str) -> String {
     out.push('"');
     out
 }
-

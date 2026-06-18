@@ -76,10 +76,7 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
     let m = out.len();
     // ----- binary: [Const, Const, <arith>] -----
     if m >= 3 {
-        let arith = matches!(
-            out[m - 1],
-            Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod
-        );
+        let arith = matches!(out[m - 1], Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod);
         if arith {
             match (&out[m - 3], &out[m - 2]) {
                 (Op::ConstInt(a), Op::ConstInt(b)) => {
@@ -96,7 +93,10 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
                     };
                     // `None` ⇒ overflow or div/mod-by-zero: do NOT fold (leave the runtime error).
                     if let Some(v) = r {
-                        return Some(Fold { op: Op::ConstInt(v), window: 3 });
+                        return Some(Fold {
+                            op: Op::ConstInt(v),
+                            window: 3,
+                        });
                     }
                 }
                 (Op::ConstFloat(a), Op::ConstFloat(b)) => {
@@ -113,7 +113,10 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
                         _ => unreachable!(),
                     };
                     if let Some(v) = r {
-                        return Some(Fold { op: Op::ConstFloat(v), window: 3 });
+                        return Some(Fold {
+                            op: Op::ConstFloat(v),
+                            window: 3,
+                        });
                     }
                 }
                 _ => {}
@@ -126,14 +129,30 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
             (Op::ConstInt(n), Op::Neg) => {
                 // `Vm::Neg` uses `checked_neg`; i64::MIN overflows — leave it for the runtime.
                 if let Some(v) = n.checked_neg() {
-                    return Some(Fold { op: Op::ConstInt(v), window: 2 });
+                    return Some(Fold {
+                        op: Op::ConstInt(v),
+                        window: 2,
+                    });
                 }
             }
             (Op::ConstFloat(x), Op::Neg) => {
-                return Some(Fold { op: Op::ConstFloat(-x), window: 2 });
+                return Some(Fold {
+                    op: Op::ConstFloat(-x),
+                    window: 2,
+                });
             }
-            (Op::True, Op::Not) => return Some(Fold { op: Op::False, window: 2 }),
-            (Op::False, Op::Not) => return Some(Fold { op: Op::True, window: 2 }),
+            (Op::True, Op::Not) => {
+                return Some(Fold {
+                    op: Op::False,
+                    window: 2,
+                });
+            }
+            (Op::False, Op::Not) => {
+                return Some(Fold {
+                    op: Op::True,
+                    window: 2,
+                });
+            }
             _ => {}
         }
     }
@@ -148,10 +167,17 @@ fn try_fuse_tail(out: &[Op]) -> Option<Fold> {
     // ----- IncLocal: [BinLocalConst{slot, val, Add}, SetLocal(slot)] → IncLocal{slot, val} -----
     if m >= 2
         && let Op::SetLocal(s2) = out[m - 1]
-        && let Op::BinLocalConst { slot, val, kind: BinKind::Add } = out[m - 2]
+        && let Op::BinLocalConst {
+            slot,
+            val,
+            kind: BinKind::Add,
+        } = out[m - 2]
         && slot == s2
     {
-        return Some(Fold { op: Op::IncLocal { slot, delta: val }, window: 2 });
+        return Some(Fold {
+            op: Op::IncLocal { slot, delta: val },
+            window: 2,
+        });
     }
     // ----- BinLocalLocal: [GetLocal(a), GetLocal(b), <binop>] -----
     if m >= 3
@@ -159,7 +185,10 @@ fn try_fuse_tail(out: &[Op]) -> Option<Fold> {
         && let Op::GetLocal(a) = out[m - 3]
         && let Op::GetLocal(b) = out[m - 2]
     {
-        return Some(Fold { op: Op::BinLocalLocal { a, b, kind }, window: 3 });
+        return Some(Fold {
+            op: Op::BinLocalLocal { a, b, kind },
+            window: 3,
+        });
     }
     // ----- BinLocalConst: [GetLocal(slot), ConstInt(val), <binop>] -----
     if m >= 3
@@ -167,7 +196,10 @@ fn try_fuse_tail(out: &[Op]) -> Option<Fold> {
         && let Op::GetLocal(slot) = out[m - 3]
         && let Op::ConstInt(val) = out[m - 2]
     {
-        return Some(Fold { op: Op::BinLocalConst { slot, val, kind }, window: 3 });
+        return Some(Fold {
+            op: Op::BinLocalConst { slot, val, kind },
+            window: 3,
+        });
     }
     None
 }
@@ -304,7 +336,11 @@ mod tests {
         ]);
         assert_eq!(out.len(), 4, "fold should drop 2 ops, got {out:?}");
         assert!(matches!(out[0], Op::ConstInt(5)));
-        assert!(matches!(out[1], Op::Jump(3)), "jump must relocate to 3, got {:?}", out[1]);
+        assert!(
+            matches!(out[1], Op::Jump(3)),
+            "jump must relocate to 3, got {:?}",
+            out[1]
+        );
         assert!(matches!(out[3], Op::Return));
     }
 
@@ -314,7 +350,11 @@ mod tests {
     /// arm-body parity bug: VM 65 vs interp 66). `[CI2, CI3, Add, WaitPoll{arms:[5,7]}, body@5..]` —
     /// the fold removes 2 ops so the arm bodies move 5→3 and 7→5.
     fn waitpoll(arm_targets: Vec<usize>, else_target: Option<usize>) -> Op {
-        Op::WaitPoll(Box::new(crate::vm::op::WaitMeta { n: 1, arm_targets, else_target }))
+        Op::WaitPoll(Box::new(crate::vm::op::WaitMeta {
+            n: 1,
+            arm_targets,
+            else_target,
+        }))
     }
 
     #[test]
@@ -335,8 +375,18 @@ mod tests {
         // The fold removes 2 ops, so every index ≥3 shifts down by 2: 5→3, 7→5, 9→7.
         match &out[1] {
             Op::WaitPoll(m) => {
-                assert_eq!(m.arm_targets, vec![3, 5], "arm targets must relocate, got {:?}", m.arm_targets);
-                assert_eq!(m.else_target, Some(7), "else target must relocate, got {:?}", m.else_target);
+                assert_eq!(
+                    m.arm_targets,
+                    vec![3, 5],
+                    "arm targets must relocate, got {:?}",
+                    m.arm_targets
+                );
+                assert_eq!(
+                    m.else_target,
+                    Some(7),
+                    "else target must relocate, got {:?}",
+                    m.else_target
+                );
             }
             other => panic!("expected WaitPoll at out[1], got {other:?}"),
         }
@@ -353,9 +403,17 @@ mod tests {
             Op::Add,                 // [3]
             Op::Return,              // [4]
         ]);
-        assert!(matches!(out[3], Op::Add), "fold must be refused, got {out:?}");
+        assert!(
+            matches!(out[3], Op::Add),
+            "fold must be refused, got {out:?}"
+        );
         match &out[0] {
-            Op::WaitPoll(m) => assert_eq!(m.arm_targets, vec![2], "interior target unchanged, got {:?}", m.arm_targets),
+            Op::WaitPoll(m) => assert_eq!(
+                m.arm_targets,
+                vec![2],
+                "interior target unchanged, got {:?}",
+                m.arm_targets
+            ),
             other => panic!("expected WaitPoll, got {other:?}"),
         }
     }
@@ -366,13 +424,21 @@ mod tests {
         let out = opt(vec![Op::ConstInt(2), Op::ConstInt(3), Op::Add, Op::Jump(1)]);
         assert_eq!(out.len(), 4, "must refuse the fold, got {out:?}");
         assert!(matches!(out[2], Op::Add));
-        assert!(matches!(out[3], Op::Jump(1)), "target unchanged, got {:?}", out[3]);
+        assert!(
+            matches!(out[3], Op::Jump(1)),
+            "target unchanged, got {:?}",
+            out[3]
+        );
     }
 
     #[test]
     fn does_not_fold_on_int_overflow() {
         let out = opt(vec![Op::ConstInt(i64::MAX), Op::ConstInt(1), Op::Add]);
-        assert_eq!(out.len(), 3, "overflow must stay unfolded for the runtime error");
+        assert_eq!(
+            out.len(),
+            3,
+            "overflow must stay unfolded for the runtime error"
+        );
     }
 
     #[test]
@@ -392,19 +458,31 @@ mod tests {
     #[test]
     fn does_not_fold_neg_i64_min() {
         let out = opt(vec![Op::ConstInt(i64::MIN), Op::Neg]);
-        assert_eq!(out.len(), 2, "negating i64::MIN overflows — leave for runtime");
+        assert_eq!(
+            out.len(),
+            2,
+            "negating i64::MIN overflows — leave for runtime"
+        );
     }
 
     #[test]
     fn folds_float_mul() {
         let out = opt(vec![Op::ConstFloat(2.0), Op::ConstFloat(3.0), Op::Mul]);
-        assert!(matches!(out.as_slice(), [Op::ConstFloat(v)] if *v == 6.0), "got {out:?}");
+        assert!(
+            matches!(out.as_slice(), [Op::ConstFloat(v)] if *v == 6.0),
+            "got {out:?}"
+        );
     }
 
     #[test]
     fn fuses_inc_local() {
         // `i += 1` → GetLocal,ConstInt,Add,SetLocal → BinLocalConst then collapse to IncLocal.
-        let out = opt(vec![Op::GetLocal(1), Op::ConstInt(1), Op::Add, Op::SetLocal(1)]);
+        let out = opt(vec![
+            Op::GetLocal(1),
+            Op::ConstInt(1),
+            Op::Add,
+            Op::SetLocal(1),
+        ]);
         assert!(
             matches!(out.as_slice(), [Op::IncLocal { slot: 1, delta: 1 }]),
             "got {out:?}"
@@ -414,11 +492,23 @@ mod tests {
     #[test]
     fn does_not_inc_when_load_store_slots_differ() {
         // `total += i` (load 0, load 1, add, store 0) is NOT an IncLocal — only a BinLocalLocal + store.
-        let out = opt(vec![Op::GetLocal(0), Op::GetLocal(1), Op::Add, Op::SetLocal(0)]);
+        let out = opt(vec![
+            Op::GetLocal(0),
+            Op::GetLocal(1),
+            Op::Add,
+            Op::SetLocal(0),
+        ]);
         assert!(
             matches!(
                 out.as_slice(),
-                [Op::BinLocalLocal { a: 0, b: 1, kind: BinKind::Add }, Op::SetLocal(0)]
+                [
+                    Op::BinLocalLocal {
+                        a: 0,
+                        b: 1,
+                        kind: BinKind::Add
+                    },
+                    Op::SetLocal(0)
+                ]
             ),
             "got {out:?}"
         );
@@ -428,7 +518,14 @@ mod tests {
     fn fuses_bin_local_local() {
         let out = opt(vec![Op::GetLocal(1), Op::GetLocal(1), Op::Mul]);
         assert!(
-            matches!(out.as_slice(), [Op::BinLocalLocal { a: 1, b: 1, kind: BinKind::Mul }]),
+            matches!(
+                out.as_slice(),
+                [Op::BinLocalLocal {
+                    a: 1,
+                    b: 1,
+                    kind: BinKind::Mul
+                }]
+            ),
             "got {out:?}"
         );
     }
@@ -437,7 +534,14 @@ mod tests {
     fn fuses_bin_local_const_compare() {
         let out = opt(vec![Op::GetLocal(0), Op::ConstInt(2), Op::Lt]);
         assert!(
-            matches!(out.as_slice(), [Op::BinLocalConst { slot: 0, val: 2, kind: BinKind::Lt }]),
+            matches!(
+                out.as_slice(),
+                [Op::BinLocalConst {
+                    slot: 0,
+                    val: 2,
+                    kind: BinKind::Lt
+                }]
+            ),
             "got {out:?}"
         );
     }

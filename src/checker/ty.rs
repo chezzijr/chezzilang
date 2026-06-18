@@ -28,7 +28,10 @@ pub enum Ty {
     /// `set[T]` — insertion-ordered hash set. `T` is any `Hashable` type (int/str/bool or a struct
     /// implementing `hash(self) -> int`).
     Set(Box<Ty>),
-    Func { params: Vec<Ty>, ret: Box<Ty> },
+    Func {
+        params: Vec<Ty>,
+        ret: Box<Ty>,
+    },
     /// `(T1, T2, …)` — a fixed-arity tuple (always ≥2 elements).
     Tuple(Vec<Ty>),
     /// A struct type, with its generic type arguments (empty for a non-generic struct). E.g.
@@ -136,11 +139,18 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
     use Ty::*;
     match (expected, actual) {
         (Unknown, _) | (_, Unknown) => true,
-        (Int, Int) | (Float, Float) | (Bool, Bool) | (Str, Str) | (Bytes, Bytes) | (ByteArray, ByteArray) | (Nil, Nil) => true,
-        (List(a), List(b)) | (Option(a), Option(b)) | (Channel(a), Channel(b)) | (Shared(a), Shared(b))
-        | (Atomic(a), Atomic(b)) => {
-            compatible(a, b)
-        }
+        (Int, Int)
+        | (Float, Float)
+        | (Bool, Bool)
+        | (Str, Str)
+        | (Bytes, Bytes)
+        | (ByteArray, ByteArray)
+        | (Nil, Nil) => true,
+        (List(a), List(b))
+        | (Option(a), Option(b))
+        | (Channel(a), Channel(b))
+        | (Shared(a), Shared(b))
+        | (Atomic(a), Atomic(b)) => compatible(a, b),
         (Result(at, ae), Result(bt, be)) => compatible(at, bt) && compatible(ae, be),
         // A protocol existential: identity matches; `str` conforms to `Error` intrinsically.
         // Struct conformance needs the registry — handled by `Checker::assignable`, not here.
@@ -153,12 +163,23 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         }
         (Executor, Executor) | (Socket, Socket) | (Listener, Listener) | (Ptr, Ptr) => true,
         (Module(a), Module(b)) | (Param(a), Param(b)) => a == b,
-        (Func { params: p1, ret: r1 }, Func { params: p2, ret: r2 }) => {
+        (
+            Func {
+                params: p1,
+                ret: r1,
+            },
+            Func {
+                params: p2,
+                ret: r2,
+            },
+        ) => {
             p1.len() == p2.len()
                 && p1.iter().zip(p2).all(|(a, b)| compatible(a, b))
                 && compatible(r1, r2)
         }
-        (Tuple(a), Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| compatible(x, y)),
+        (Tuple(a), Tuple(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| compatible(x, y))
+        }
         _ => false,
     }
 }
@@ -170,7 +191,9 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
 /// `ref` binding — ordinary diagnostics keep the literal `Ty` `Display`.
 pub fn ref_display(ty: &Ty) -> String {
     match ty {
-        Ty::Struct(n, args) if n == "Ref" && args.len() == 1 => format!("ref {}", ref_display(&args[0])),
+        Ty::Struct(n, args) if n == "Ref" && args.len() == 1 => {
+            format!("ref {}", ref_display(&args[0]))
+        }
         Ty::List(t) => format!("list[{}]", ref_display(t)),
         Ty::Set(t) => format!("set[{}]", ref_display(t)),
         Ty::Option(t) => format!("Option[{}]", ref_display(t)),
@@ -277,7 +300,10 @@ mod tests {
     fn nominal_types_compare_by_name() {
         assert!(compatible(&Ty::strukt("Point"), &Ty::strukt("Point")));
         assert!(!compatible(&Ty::strukt("Point"), &Ty::strukt("Vec")));
-        assert!(!compatible(&Ty::strukt("Point"), &Ty::Enum("Point".into(), vec![])));
+        assert!(!compatible(
+            &Ty::strukt("Point"),
+            &Ty::Enum("Point".into(), vec![])
+        ));
         // Generic structs compare by name AND type arguments.
         assert!(compatible(
             &Ty::Struct("Pair".into(), vec![Ty::Int, Ty::Str]),
@@ -294,9 +320,16 @@ mod tests {
         assert_eq!(Ty::list(Ty::Int).to_string(), "list[int]");
         assert_eq!(Ty::result(Ty::Int).to_string(), "Result[int]");
         assert_eq!(Ty::strukt("Point").to_string(), "Point");
-        assert_eq!(Ty::Struct("Pair".into(), vec![Ty::Int, Ty::Str]).to_string(), "Pair[int, str]");
         assert_eq!(
-            Ty::Func { params: vec![Ty::Int, Ty::Str], ret: Box::new(Ty::Bool) }.to_string(),
+            Ty::Struct("Pair".into(), vec![Ty::Int, Ty::Str]).to_string(),
+            "Pair[int, str]"
+        );
+        assert_eq!(
+            Ty::Func {
+                params: vec![Ty::Int, Ty::Str],
+                ret: Box::new(Ty::Bool)
+            }
+            .to_string(),
             "fn(int, str) -> bool"
         );
     }

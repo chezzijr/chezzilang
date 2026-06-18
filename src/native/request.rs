@@ -9,7 +9,7 @@
 //! `map[str, str]` of custom request headers (read in insertion order). Redirect configuration and
 //! streaming bodies are still deferred.
 
-use super::{expect_args, Host, HostError, NativeFn, NativeRet};
+use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 use std::time::Duration;
 
 thread_local! {
@@ -91,7 +91,11 @@ fn do_request(method: &str, url: &str, body: &str, headers: &[(String, String)])
         for (k, v) in headers {
             req = req.set(k, v);
         }
-        lower_result(if body.is_empty() { req.call() } else { req.send_string(body) })
+        lower_result(if body.is_empty() {
+            req.call()
+        } else {
+            req.send_string(body)
+        })
     })
 }
 
@@ -167,7 +171,11 @@ mod tests {
             panic!("expected Struct, got {inner:?}");
         };
         assert_eq!(name, "Response");
-        &fields.iter().find(|(k, _)| k == key).expect("field present").1
+        &fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .expect("field present")
+            .1
     }
 
     #[test]
@@ -183,7 +191,10 @@ mod tests {
             NativeRet::Map(entries) => {
                 assert_eq!(
                     entries[0],
-                    (NativeRet::Str("x-test".into()), NativeRet::Str("yes".into()))
+                    (
+                        NativeRet::Str("x-test".into()),
+                        NativeRet::Str("yes".into())
+                    )
                 );
             }
             other => panic!("expected Map, got {other:?}"),
@@ -249,14 +260,20 @@ mod tests {
         });
         let ret = do_get(&format!("http://{addr}/"));
         handle.join().unwrap();
-        assert!(matches!(ret, NativeRet::Err(_)), "expected Err for truncated body, got {ret:?}");
+        assert!(
+            matches!(ret, NativeRet::Err(_)),
+            "expected Err for truncated body, got {ret:?}"
+        );
     }
 
     #[test]
     fn transport_error_is_err() {
         // Nothing is listening on this port → a transport failure → chezzi Err.
         let ret = do_get("http://127.0.0.1:1/");
-        assert!(matches!(ret, NativeRet::Err(_)), "expected Err, got {ret:?}");
+        assert!(
+            matches!(ret, NativeRet::Err(_)),
+            "expected Err, got {ret:?}"
+        );
     }
 
     use std::sync::{Arc, Mutex};
@@ -292,10 +309,16 @@ mod tests {
         let ret = do_request("PUT", &url, "payload", &[]);
         handle.join().unwrap();
         let req = recorded.lock().unwrap().clone();
-        assert!(req.starts_with("PUT "), "expected PUT request line, got: {req:?}");
+        assert!(
+            req.starts_with("PUT "),
+            "expected PUT request line, got: {req:?}"
+        );
         // The 7-byte body is announced via Content-Length (the body bytes themselves may arrive in a
         // later TCP segment than the headers, so assert on the header rather than the captured body).
-        assert!(req.contains("Content-Length: 7"), "PUT body should be sent: {req:?}");
+        assert!(
+            req.contains("Content-Length: 7"),
+            "PUT body should be sent: {req:?}"
+        );
         assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
     }
 
@@ -305,7 +328,10 @@ mod tests {
         let ret = do_request("DELETE", &url, "", &[]);
         handle.join().unwrap();
         let req = recorded.lock().unwrap().clone();
-        assert!(req.starts_with("DELETE "), "expected DELETE request line, got: {req:?}");
+        assert!(
+            req.starts_with("DELETE "),
+            "expected DELETE request line, got: {req:?}"
+        );
         assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
     }
 
@@ -316,7 +342,10 @@ mod tests {
         let ret = do_request("POST", &url, "", &headers);
         handle.join().unwrap();
         let req = recorded.lock().unwrap().clone();
-        assert!(req.contains("X-Custom: value"), "custom header missing: {req:?}");
+        assert!(
+            req.contains("X-Custom: value"),
+            "custom header missing: {req:?}"
+        );
         assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
     }
 }

@@ -91,7 +91,9 @@ impl PartialOrd for TimerEntry {
 }
 impl Ord for TimerEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.deadline.cmp(&other.deadline).then(self.seq.cmp(&other.seq))
+        self.deadline
+            .cmp(&other.deadline)
+            .then(self.seq.cmp(&other.seq))
     }
 }
 
@@ -132,8 +134,18 @@ static SERVICE: OnceLock<NetPoller> = OnceLock::new();
 /// normal park. The cancel read + the insert happen under the registry lock that `drain_sched` also
 /// holds, so park and drain are serialized: the fiber is either registered-then-drained or rejected.
 #[must_use]
-pub fn register(key: usize, fd: RawFd, interest: Interest, fiber: Fiber, sched: Arc<MnSched>, in_flight: Arc<AtomicBool>, deadline: Option<Instant>) -> Option<Fiber> {
-    SERVICE.get_or_init(NetPoller::new).register(key, fd, interest, fiber, sched, in_flight, deadline)
+pub fn register(
+    key: usize,
+    fd: RawFd,
+    interest: Interest,
+    fiber: Fiber,
+    sched: Arc<MnSched>,
+    in_flight: Arc<AtomicBool>,
+    deadline: Option<Instant>,
+) -> Option<Fiber> {
+    SERVICE
+        .get_or_init(NetPoller::new)
+        .register(key, fd, interest, fiber, sched, in_flight, deadline)
 }
 
 /// De-register a pending park on `key` (a socket `close` racing the park). If a fiber was still
@@ -161,7 +173,9 @@ pub fn drain_sched(sched: &Arc<MnSched>) {
 /// Callable from any thread (the worker draining `MnSched::offload`); a socket-free `--parallel`
 /// program that only sleeps still spins this one thread.
 pub fn submit_timer(deadline: Instant, job: TimerJob) {
-    SERVICE.get_or_init(NetPoller::new).submit_timer(deadline, job);
+    SERVICE
+        .get_or_init(NetPoller::new)
+        .submit_timer(deadline, job);
 }
 
 impl NetPoller {
@@ -169,7 +183,10 @@ impl NetPoller {
         let inner = Arc::new(Inner {
             poller: Poller::new().expect("failed to create the netpoller"),
             registry: Mutex::new(HashMap::new()),
-            timers: Mutex::new(Timers { heap: BinaryHeap::new(), next_seq: 0 }),
+            timers: Mutex::new(Timers {
+                heap: BinaryHeap::new(),
+                next_seq: 0,
+            }),
         });
         let t = Arc::clone(&inner);
         // The poll thread only locks the registry + calls `complete_offload` (which re-enqueues a
@@ -182,7 +199,16 @@ impl NetPoller {
     }
 
     #[allow(clippy::too_many_arguments)] // the park identity (key/fd/interest/fiber/sched/in_flight) + D6c deadline
-    fn register(&self, key: usize, fd: RawFd, interest: Interest, fiber: Fiber, sched: Arc<MnSched>, in_flight: Arc<AtomicBool>, deadline: Option<Instant>) -> Option<Fiber> {
+    fn register(
+        &self,
+        key: usize,
+        fd: RawFd,
+        interest: Interest,
+        fiber: Fiber,
+        sched: Arc<MnSched>,
+        in_flight: Arc<AtomicBool>,
+        deadline: Option<Instant>,
+    ) -> Option<Fiber> {
         // The whole op runs under the registry lock so that registration is atomic w.r.t. `drain_sched`
         // / the fire path / `deregister` (all reg-locked): the cancel check + the insert + the fd `add`
         // never interleave with a sweep that would observe a half-armed entry or delete an fd this is
@@ -198,8 +224,20 @@ impl NetPoller {
         }
         // The key is never a duplicate: a second op on the same socket is rejected by the `in_flight`
         // guard in `park_on_fd` before it reaches here, so neither the `insert` nor the `add` collide.
-        let prev = reg.insert(key, Parked { fiber, sched, fd, in_flight, deadline });
-        debug_assert!(prev.is_none(), "netpoller registry key reused — the in_flight guard was bypassed");
+        let prev = reg.insert(
+            key,
+            Parked {
+                fiber,
+                sched,
+                fd,
+                in_flight,
+                deadline,
+            },
+        );
+        debug_assert!(
+            prev.is_none(),
+            "netpoller registry key reused — the in_flight guard was bypassed"
+        );
         let ev = match interest {
             Interest::Read => Event::readable(key),
             Interest::Write => Event::writable(key),
@@ -228,10 +266,19 @@ impl NetPoller {
             let mut reg = self.lock_registry();
             reg.remove(&key).inspect(|p| {
                 // SAFETY: still in the registry ⇒ never injected ⇒ fd still open (rooted on `fiber`).
-                let _ = self.inner.poller.delete(unsafe { BorrowedFd::borrow_raw(p.fd) });
+                let _ = self
+                    .inner
+                    .poller
+                    .delete(unsafe { BorrowedFd::borrow_raw(p.fd) });
             })
         };
-        if let Some(Parked { fiber, sched, in_flight, .. }) = woken {
+        if let Some(Parked {
+            fiber,
+            sched,
+            in_flight,
+            ..
+        }) = woken
+        {
             in_flight.store(false, Ordering::Release); // the op is no longer parked
             sched.complete_offload(fiber); // inflight→runnable; the re-run faults on the closed socket
             true
@@ -249,18 +296,30 @@ impl NetPoller {
         // never disturbed.
         let drained: Vec<Parked> = {
             let mut reg = self.lock_registry();
-            let keys: Vec<usize> =
-                reg.iter().filter(|(_, p)| Arc::ptr_eq(&p.sched, sched)).map(|(k, _)| *k).collect();
+            let keys: Vec<usize> = reg
+                .iter()
+                .filter(|(_, p)| Arc::ptr_eq(&p.sched, sched))
+                .map(|(k, _)| *k)
+                .collect();
             keys.into_iter()
                 .filter_map(|k| reg.remove(&k))
                 .inspect(|p| {
                     // Disarm UNDER the lock (serialized with `register`'s arm). SAFETY: still in the
                     // registry ⇒ never injected ⇒ fd still open (rooted on `fiber`).
-                    let _ = self.inner.poller.delete(unsafe { BorrowedFd::borrow_raw(p.fd) });
+                    let _ = self
+                        .inner
+                        .poller
+                        .delete(unsafe { BorrowedFd::borrow_raw(p.fd) });
                 })
                 .collect()
         };
-        for Parked { fiber, sched, in_flight, .. } in drained {
+        for Parked {
+            fiber,
+            sched,
+            in_flight,
+            ..
+        } in drained
+        {
             in_flight.store(false, Ordering::Release); // the op is no longer parked
             sched.complete_offload(fiber); // inflight→runnable; the re-run unwinds on the cancel flag
         }
@@ -280,7 +339,10 @@ impl NetPoller {
     }
 
     fn lock_registry(&self) -> std::sync::MutexGuard<'_, HashMap<usize, Parked>> {
-        self.inner.registry.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner
+            .registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn lock_timers(&self) -> std::sync::MutexGuard<'_, Timers> {
@@ -318,7 +380,13 @@ fn poll_loop(inner: &Inner) {
                     let _ = inner.poller.delete(unsafe { BorrowedFd::borrow_raw(p.fd) });
                 })
             };
-            if let Some(Parked { fiber, sched, in_flight, .. }) = woken {
+            if let Some(Parked {
+                fiber,
+                sched,
+                in_flight,
+                ..
+            }) = woken
+            {
                 in_flight.store(false, Ordering::Release); // op no longer parked → the resumed op may re-park
                 // Inject EXACTLY like a blocking-pool / timer completion: inflight→runnable + wakep.
                 // No `resume_native` stash — the socket op re-runs (its `ip` was rewound on park).
@@ -345,8 +413,11 @@ fn fire_due_socket_timeouts(inner: &Inner) {
     let now = Instant::now();
     let timed_out: Vec<Parked> = {
         let mut reg = inner.registry.lock().unwrap_or_else(|e| e.into_inner());
-        let keys: Vec<usize> =
-            reg.iter().filter(|(_, p)| p.deadline.is_some_and(|d| d <= now)).map(|(k, _)| *k).collect();
+        let keys: Vec<usize> = reg
+            .iter()
+            .filter(|(_, p)| p.deadline.is_some_and(|d| d <= now))
+            .map(|(k, _)| *k)
+            .collect();
         keys.into_iter()
             .filter_map(|k| reg.remove(&k))
             .inspect(|p| {
@@ -355,7 +426,13 @@ fn fire_due_socket_timeouts(inner: &Inner) {
             })
             .collect()
     };
-    for Parked { mut fiber, sched, in_flight, .. } in timed_out {
+    for Parked {
+        mut fiber,
+        sched,
+        in_flight,
+        ..
+    } in timed_out
+    {
         in_flight.store(false, Ordering::Release); // the op is no longer parked
         fiber.ctx.poll_timed_out = true; // the rewound op resumes, sees this, returns Err("timeout")
         sched.complete_offload(fiber); // inflight→runnable
@@ -422,11 +499,19 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn dl_err() -> super::super::RuntimeError {
-        super::super::RuntimeError { message: "deadlock".into(), span: Span { line: 1, col: 1 } }
+        super::super::RuntimeError {
+            message: "deadlock".into(),
+            span: Span { line: 1, col: 1 },
+        }
     }
 
     fn mk_sched() -> Arc<MnSched> {
-        Arc::new(MnSched::new(1, 1, Arc::new(AtomicBool::new(false)), dl_err()))
+        Arc::new(MnSched::new(
+            1,
+            1,
+            Arc::new(AtomicBool::new(false)),
+            dl_err(),
+        ))
     }
 
     fn mk_fiber() -> Fiber {
@@ -465,18 +550,42 @@ mod tests {
         let (mut client, server) = loopback_pair();
         let sched = mk_sched();
         sched.inflight.fetch_add(1, Ordering::Relaxed); // simulate poll_park_offload's running→inflight
-        assert!(register(usize::MAX - 1, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), None).is_none(), "a non-cancel park registers (returns None)");
+        assert!(
+            register(
+                usize::MAX - 1,
+                server.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched),
+                new_in_flight(),
+                None
+            )
+            .is_none(),
+            "a non-cancel park registers (returns None)"
+        );
 
         // Nothing written yet → fd not readable → fiber stays parked.
-        assert_eq!(sched.inflight.load(Ordering::Relaxed), 1, "fiber parked before any data");
+        assert_eq!(
+            sched.inflight.load(Ordering::Relaxed),
+            1,
+            "fiber parked before any data"
+        );
 
         client.write_all(b"x").unwrap(); // make the server fd readable
         // Wait on the lock-synchronized global queue, not the bare `inflight` atomic: `complete_offload`
         // drops `inflight` and bumps `runnable` under the core lock, so observing the fiber on `global`
         // (taken under that lock) guarantees both counters have settled.
         wait_until(|| sched.lock().global.len() == 1, "inject");
-        assert_eq!(sched.inflight.load(Ordering::Relaxed), 0, "inflight→runnable on inject");
-        assert_eq!(sched.runnable.load(Ordering::Relaxed), 1, "injected fiber is runnable");
+        assert_eq!(
+            sched.inflight.load(Ordering::Relaxed),
+            0,
+            "inflight→runnable on inject"
+        );
+        assert_eq!(
+            sched.runnable.load(Ordering::Relaxed),
+            1,
+            "injected fiber is runnable"
+        );
         drop(server);
     }
 
@@ -489,19 +598,43 @@ mod tests {
         let sched = mk_sched();
         sched.inflight.fetch_add(1, Ordering::Relaxed);
         let deadline = Instant::now() + Duration::from_millis(80);
-        assert!(register(usize::MAX - 30, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), Some(deadline)).is_none(), "a non-cancel park registers (returns None)");
+        assert!(
+            register(
+                usize::MAX - 30,
+                server.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched),
+                new_in_flight(),
+                Some(deadline)
+            )
+            .is_none(),
+            "a non-cancel park registers (returns None)"
+        );
 
         // Never write → only the deadline can wake it.
         wait_until(|| sched.lock().global.len() == 1, "timeout inject");
-        assert_eq!(sched.inflight.load(Ordering::Relaxed), 0, "inflight→runnable on timeout inject");
+        assert_eq!(
+            sched.inflight.load(Ordering::Relaxed),
+            0,
+            "inflight→runnable on timeout inject"
+        );
         // The injected fiber carries the timeout marker so the rewound op returns Err("timeout").
         let timed_out = sched.lock().global.front().map(|f| f.ctx.poll_timed_out);
-        assert_eq!(timed_out, Some(true), "the timed-out fiber carries poll_timed_out == true");
+        assert_eq!(
+            timed_out,
+            Some(true),
+            "the timed-out fiber carries poll_timed_out == true"
+        );
 
         // The fd was disarmed: making it readable now must NOT inject a second time.
         client.write_all(b"x").unwrap();
         std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(sched.lock().global.len(), 1, "timed-out fd did not double-inject");
+        assert_eq!(
+            sched.lock().global.len(),
+            1,
+            "timed-out fd did not double-inject"
+        );
         drop(server);
     }
 
@@ -513,12 +646,28 @@ mod tests {
         let sched = mk_sched();
         sched.inflight.fetch_add(1, Ordering::Relaxed);
         let deadline = Instant::now() + Duration::from_secs(30); // generous — readiness must win
-        assert!(register(usize::MAX - 31, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), Some(deadline)).is_none(), "a non-cancel park registers (returns None)");
+        assert!(
+            register(
+                usize::MAX - 31,
+                server.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched),
+                new_in_flight(),
+                Some(deadline)
+            )
+            .is_none(),
+            "a non-cancel park registers (returns None)"
+        );
 
         client.write_all(b"x").unwrap(); // fd readable at once
         wait_until(|| sched.lock().global.len() == 1, "readiness inject");
         let timed_out = sched.lock().global.front().map(|f| f.ctx.poll_timed_out);
-        assert_eq!(timed_out, Some(false), "a readiness wake does NOT set poll_timed_out");
+        assert_eq!(
+            timed_out,
+            Some(false),
+            "a readiness wake does NOT set poll_timed_out"
+        );
         drop(server);
     }
 
@@ -531,12 +680,32 @@ mod tests {
         sched.inflight.fetch_add(1, Ordering::Relaxed);
         let deadline = Instant::now(); // already due
         let start = Instant::now();
-        assert!(register(usize::MAX - 32, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), Some(deadline)).is_none(), "a non-cancel park registers (returns None)");
+        assert!(
+            register(
+                usize::MAX - 32,
+                server.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched),
+                new_in_flight(),
+                Some(deadline)
+            )
+            .is_none(),
+            "a non-cancel park registers (returns None)"
+        );
 
         wait_until(|| sched.lock().global.len() == 1, "past-deadline inject");
-        assert!(start.elapsed() < Duration::from_secs(1), "a past deadline fired promptly: {:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "a past deadline fired promptly: {:?}",
+            start.elapsed()
+        );
         let timed_out = sched.lock().global.front().map(|f| f.ctx.poll_timed_out);
-        assert_eq!(timed_out, Some(true), "the past-deadline fiber carries poll_timed_out == true");
+        assert_eq!(
+            timed_out,
+            Some(true),
+            "the past-deadline fiber carries poll_timed_out == true"
+        );
         drop(server);
     }
 
@@ -549,18 +718,41 @@ mod tests {
         let sched = mk_sched();
         sched.inflight.fetch_add(1, Ordering::Relaxed);
         let deadline = Instant::now() + Duration::from_millis(60);
-        assert!(register(usize::MAX - 33, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), Some(deadline)).is_none(), "a non-cancel park registers (returns None)");
+        assert!(
+            register(
+                usize::MAX - 33,
+                server.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched),
+                new_in_flight(),
+                Some(deadline)
+            )
+            .is_none(),
+            "a non-cancel park registers (returns None)"
+        );
 
         let (tx, rx) = std::sync::mpsc::channel();
-        submit_timer(Instant::now() + Duration::from_millis(40), Box::new(move || {
-            let _ = tx.send(());
-        }));
+        submit_timer(
+            Instant::now() + Duration::from_millis(40),
+            Box::new(move || {
+                let _ = tx.send(());
+            }),
+        );
 
         // Both must complete: the timer sends, the socket times out and injects.
-        rx.recv_timeout(Duration::from_secs(5)).expect("the timer fired alongside the socket timeout");
-        wait_until(|| sched.lock().global.len() == 1, "socket timeout inject under timer load");
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the timer fired alongside the socket timeout");
+        wait_until(
+            || sched.lock().global.len() == 1,
+            "socket timeout inject under timer load",
+        );
         let timed_out = sched.lock().global.front().map(|f| f.ctx.poll_timed_out);
-        assert_eq!(timed_out, Some(true), "the socket fiber timed out (marker set)");
+        assert_eq!(
+            timed_out,
+            Some(true),
+            "the socket fiber timed out (marker set)"
+        );
         drop(server);
     }
 
@@ -575,12 +767,30 @@ mod tests {
         let in_flight = new_in_flight();
         in_flight.store(true, Ordering::Release); // simulate park_on_fd's swap(true)
         sched.inflight.fetch_add(1, Ordering::Relaxed);
-        assert!(register(usize::MAX - 4, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), Arc::clone(&in_flight), None).is_none(), "a non-cancel park registers (returns None)");
-        assert!(in_flight.load(Ordering::Acquire), "flag stays set while the op is parked");
+        assert!(
+            register(
+                usize::MAX - 4,
+                server.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched),
+                Arc::clone(&in_flight),
+                None
+            )
+            .is_none(),
+            "a non-cancel park registers (returns None)"
+        );
+        assert!(
+            in_flight.load(Ordering::Acquire),
+            "flag stays set while the op is parked"
+        );
 
         client.write_all(b"x").unwrap();
         wait_until(|| sched.lock().global.len() == 1, "inject");
-        assert!(!in_flight.load(Ordering::Acquire), "inject clears in_flight so the resumed op may re-park");
+        assert!(
+            !in_flight.load(Ordering::Acquire),
+            "inject clears in_flight so the resumed op may re-park"
+        );
         drop(server);
     }
 
@@ -591,14 +801,34 @@ mod tests {
         let key = usize::MAX - 2;
         let sched = mk_sched();
         sched.inflight.fetch_add(1, Ordering::Relaxed);
-        assert!(register(key, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), None).is_none(), "a non-cancel park registers (returns None)");
+        assert!(
+            register(
+                key,
+                server.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched),
+                new_in_flight(),
+                None
+            )
+            .is_none(),
+            "a non-cancel park registers (returns None)"
+        );
 
         // No write → give the poller a chance to (wrongly) fire, then assert it did not. NOTE: this
         // fixed sleep can only mask a real bug (a false inject under load), never flake — do not
         // "tighten" it into a race.
         std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(sched.inflight.load(Ordering::Relaxed), 1, "no data ⇒ fiber stays parked");
-        assert_eq!(sched.runnable.load(Ordering::Relaxed), 0, "no spurious inject");
+        assert_eq!(
+            sched.inflight.load(Ordering::Relaxed),
+            1,
+            "no data ⇒ fiber stays parked"
+        );
+        assert_eq!(
+            sched.runnable.load(Ordering::Relaxed),
+            0,
+            "no spurious inject"
+        );
 
         deregister(key); // clean up the registration (delete-before-drop) before `server` drops
         drop(server);
@@ -622,24 +852,79 @@ mod tests {
         }
         sched_a.inflight.fetch_add(2, Ordering::Relaxed);
         sched_b.inflight.fetch_add(1, Ordering::Relaxed);
-        assert!(register(k_a1, server_a1.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched_a), Arc::clone(&if_a1), None).is_none(), "a non-cancel park registers (returns None)");
-        assert!(register(k_a2, server_a2.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched_a), Arc::clone(&if_a2), None).is_none(), "a non-cancel park registers (returns None)");
-        assert!(register(k_b, server_b.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched_b), Arc::clone(&if_b), None).is_none(), "a non-cancel park registers (returns None)");
+        assert!(
+            register(
+                k_a1,
+                server_a1.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched_a),
+                Arc::clone(&if_a1),
+                None
+            )
+            .is_none(),
+            "a non-cancel park registers (returns None)"
+        );
+        assert!(
+            register(
+                k_a2,
+                server_a2.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched_a),
+                Arc::clone(&if_a2),
+                None
+            )
+            .is_none(),
+            "a non-cancel park registers (returns None)"
+        );
+        assert!(
+            register(
+                k_b,
+                server_b.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched_b),
+                Arc::clone(&if_b),
+                None
+            )
+            .is_none(),
+            "a non-cancel park registers (returns None)"
+        );
 
         drain_sched(&sched_a);
 
         // sched_a's two parked fibers were re-injected (inflight→runnable) and their guards cleared.
-        assert_eq!(sched_a.lock().global.len(), 2, "both sched_a fibers re-injected exactly once");
-        assert_eq!(sched_a.inflight.load(Ordering::Relaxed), 0, "sched_a inflight drained");
-        assert!(!if_a1.load(Ordering::Acquire) && !if_a2.load(Ordering::Acquire), "drain clears in_flight");
+        assert_eq!(
+            sched_a.lock().global.len(),
+            2,
+            "both sched_a fibers re-injected exactly once"
+        );
+        assert_eq!(
+            sched_a.inflight.load(Ordering::Relaxed),
+            0,
+            "sched_a inflight drained"
+        );
+        assert!(
+            !if_a1.load(Ordering::Acquire) && !if_a2.load(Ordering::Acquire),
+            "drain clears in_flight"
+        );
         // sched_b's fiber is a different nursery — left parked.
         assert_eq!(sched_b.lock().global.len(), 0, "sched_b fiber untouched");
-        assert_eq!(sched_b.inflight.load(Ordering::Relaxed), 1, "sched_b still parked");
+        assert_eq!(
+            sched_b.inflight.load(Ordering::Relaxed),
+            1,
+            "sched_b still parked"
+        );
 
         // Disarmed: making a drained fd readable must NOT inject a second time.
         client_a1.write_all(b"x").unwrap();
         std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(sched_a.lock().global.len(), 2, "drained fd did not double-inject");
+        assert_eq!(
+            sched_a.lock().global.len(),
+            2,
+            "drained fd did not double-inject"
+        );
 
         deregister(k_b); // clean up sched_b's registration before its server drops
         drop((server_a1, server_a2, server_b));
@@ -656,17 +941,44 @@ mod tests {
         let in_flight = new_in_flight();
         in_flight.store(true, Ordering::Release);
         sched.inflight.fetch_add(1, Ordering::Relaxed);
-        assert!(register(key, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), Arc::clone(&in_flight), None).is_none(), "a non-cancel park registers (returns None)");
+        assert!(
+            register(
+                key,
+                server.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched),
+                Arc::clone(&in_flight),
+                None
+            )
+            .is_none(),
+            "a non-cancel park registers (returns None)"
+        );
 
         assert!(deregister(key), "deregister found the pending park");
-        assert!(!in_flight.load(Ordering::Acquire), "deregister also clears in_flight");
-        assert_eq!(sched.inflight.load(Ordering::Relaxed), 0, "re-injected (inflight→runnable)");
-        assert_eq!(sched.lock().global.len(), 1, "fiber back on the run queue exactly once");
+        assert!(
+            !in_flight.load(Ordering::Acquire),
+            "deregister also clears in_flight"
+        );
+        assert_eq!(
+            sched.inflight.load(Ordering::Relaxed),
+            0,
+            "re-injected (inflight→runnable)"
+        );
+        assert_eq!(
+            sched.lock().global.len(),
+            1,
+            "fiber back on the run queue exactly once"
+        );
 
         // The fd is now disarmed: making it readable must NOT inject a second fiber.
         client.write_all(b"x").unwrap();
         std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(sched.lock().global.len(), 1, "disarmed fd did not double-inject");
+        assert_eq!(
+            sched.lock().global.len(),
+            1,
+            "disarmed fd did not double-inject"
+        );
         assert!(!deregister(key), "second deregister finds nothing");
         drop(server);
     }
@@ -679,11 +991,19 @@ mod tests {
     fn timer_fires_after_its_deadline() {
         let (tx, rx) = std::sync::mpsc::channel();
         let start = Instant::now();
-        submit_timer(start + Duration::from_millis(80), Box::new(move || {
-            let _ = tx.send(start.elapsed());
-        }));
-        let elapsed = rx.recv_timeout(Duration::from_secs(5)).expect("timer fired within 5s");
-        assert!(elapsed >= Duration::from_millis(60), "timer fired too early: {elapsed:?}");
+        submit_timer(
+            start + Duration::from_millis(80),
+            Box::new(move || {
+                let _ = tx.send(start.elapsed());
+            }),
+        );
+        let elapsed = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("timer fired within 5s");
+        assert!(
+            elapsed >= Duration::from_millis(60),
+            "timer fired too early: {elapsed:?}"
+        );
     }
 
     /// A far-future timer must not delay a nearer one: the heap orders by deadline, so the sooner
@@ -693,13 +1013,21 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let start = Instant::now();
         let tx_far = tx.clone();
-        submit_timer(start + Duration::from_millis(400), Box::new(move || {
-            let _ = tx_far.send("far");
-        }));
-        submit_timer(start + Duration::from_millis(40), Box::new(move || {
-            let _ = tx.send("near");
-        }));
-        let first = rx.recv_timeout(Duration::from_secs(5)).expect("a timer fired");
+        submit_timer(
+            start + Duration::from_millis(400),
+            Box::new(move || {
+                let _ = tx_far.send("far");
+            }),
+        );
+        submit_timer(
+            start + Duration::from_millis(40),
+            Box::new(move || {
+                let _ = tx.send("near");
+            }),
+        );
+        let first = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a timer fired");
         assert_eq!(first, "near", "the sooner deadline must fire first");
     }
 
@@ -711,9 +1039,12 @@ mod tests {
         let start = Instant::now();
         for _ in 0..n {
             let tx = tx.clone();
-            submit_timer(start + Duration::from_millis(50), Box::new(move || {
-                let _ = tx.send(());
-            }));
+            submit_timer(
+                start + Duration::from_millis(50),
+                Box::new(move || {
+                    let _ = tx.send(());
+                }),
+            );
         }
         drop(tx);
         let mut got = 0;
@@ -721,7 +1052,10 @@ mod tests {
             got += 1;
         }
         assert_eq!(got, n, "every concurrent timer fired");
-        assert!(start.elapsed() < Duration::from_secs(2), "200 timers serialized instead of sharing one thread");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "200 timers serialized instead of sharing one thread"
+        );
     }
 
     /// D6b — a parked socket fiber and a batch of timers both complete on the single poll thread: the
@@ -732,26 +1066,47 @@ mod tests {
         let (mut client, server) = loopback_pair();
         let sched = mk_sched();
         sched.inflight.fetch_add(1, Ordering::Relaxed);
-        assert!(register(usize::MAX - 20, server.as_raw_fd(), Interest::Read, mk_fiber(), Arc::clone(&sched), new_in_flight(), None).is_none(), "a non-cancel park registers (returns None)");
+        assert!(
+            register(
+                usize::MAX - 20,
+                server.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched),
+                new_in_flight(),
+                None
+            )
+            .is_none(),
+            "a non-cancel park registers (returns None)"
+        );
 
         let (tx, rx) = std::sync::mpsc::channel();
         let start = Instant::now();
         for _ in 0..5 {
             let tx = tx.clone();
-            submit_timer(start + Duration::from_millis(30), Box::new(move || {
-                let _ = tx.send(());
-            }));
+            submit_timer(
+                start + Duration::from_millis(30),
+                Box::new(move || {
+                    let _ = tx.send(());
+                }),
+            );
         }
         drop(tx);
 
         client.write_all(b"x").unwrap(); // wake the socket fiber
-        wait_until(|| sched.lock().global.len() == 1, "socket inject under timer load");
+        wait_until(
+            || sched.lock().global.len() == 1,
+            "socket inject under timer load",
+        );
 
         let mut got = 0;
         while rx.recv_timeout(Duration::from_secs(5)).is_ok() {
             got += 1;
         }
-        assert_eq!(got, 5, "every timer fired on the same thread that served the socket");
+        assert_eq!(
+            got, 5,
+            "every timer fired on the same thread that served the socket"
+        );
         drop(server);
     }
 }

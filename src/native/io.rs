@@ -4,7 +4,7 @@
 //! read and written as whole strings, which covers the common scripting case. Errors come back as
 //! `Result` values (the engine lowers `NativeRet::Err` to `Err(msg)`), never panics.
 
-use super::{expect_args, Host, HostError, NativeFn, NativeRet};
+use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 use std::io::Read;
 
 /// Upper bound on `read_file` input, so a huge or unbounded file (`/dev/zero`, a multi-GB log)
@@ -45,9 +45,9 @@ fn read_file(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     // Read at most the cap + 1 byte: if we got more than the cap, the file is over-limit.
     let mut buf = String::new();
     match file.take(MAX_READ_FILE_BYTES + 1).read_to_string(&mut buf) {
-        Ok(_) if buf.len() as u64 > MAX_READ_FILE_BYTES => {
-            Ok(NativeRet::Err(format!("{path}: file exceeds the {MAX_READ_FILE_BYTES}-byte read limit")))
-        }
+        Ok(_) if buf.len() as u64 > MAX_READ_FILE_BYTES => Ok(NativeRet::Err(format!(
+            "{path}: file exceeds the {MAX_READ_FILE_BYTES}-byte read limit"
+        ))),
         Ok(_) => Ok(NativeRet::Ok(Box::new(NativeRet::Str(buf)))),
         Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
     }

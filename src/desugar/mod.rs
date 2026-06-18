@@ -17,8 +17,8 @@
 //! (mirroring the checker, which treats a call as a named function only when the name is not a local).
 
 use crate::ast::{
-    Block, DeferTarget, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Param, Pattern, Span,
-    SpawnTarget, Stmt, StmtKind, Type, WaitTarget,
+    Block, DeferTarget, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Param, Pattern,
+    Span, SpawnTarget, Stmt, StmtKind, Type, WaitTarget,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolveError};
 use std::collections::{HashMap, HashSet};
@@ -41,9 +41,35 @@ struct PSpec {
 /// shape we cannot see here. A user struct that happens to reuse one of these names therefore does
 /// not get default/named support on that method (a documented, narrow limitation).
 const BUILTIN_METHODS: &[&str] = &[
-    "len", "upper", "lower", "trim", "message", "split", "chars", "join", "starts_with", "contains",
-    "push", "pop", "reverse", "index_of", "sum", "sort", "map", "filter", "fold", "sort_by",
-    "sort_by_key", "has", "get", "keys", "values", "remove", "add", "union", "intersection",
+    "len",
+    "upper",
+    "lower",
+    "trim",
+    "message",
+    "split",
+    "chars",
+    "join",
+    "starts_with",
+    "contains",
+    "push",
+    "pop",
+    "reverse",
+    "index_of",
+    "sum",
+    "sort",
+    "map",
+    "filter",
+    "fold",
+    "sort_by",
+    "sort_by_key",
+    "has",
+    "get",
+    "keys",
+    "values",
+    "remove",
+    "add",
+    "union",
+    "intersection",
     "difference",
 ];
 
@@ -87,54 +113,54 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
     // re-walks, lowering those spliced default expressions in place. Already-lowered nodes and
     // already-filled calls are no-ops on the second pass, so this is idempotent.
     for pass in 0..2 {
-    for mi in 0..graph.modules.len() {
-        // Build this module's resolution context: own id + bare from-imports + module aliases.
-        let own_id = graph.modules[mi].id.clone();
-        let mut bare_from: HashMap<String, ModuleId> = HashMap::new();
-        let mut aliases: HashMap<String, ModuleId> = HashMap::new();
-        for imp in &graph.modules[mi].imports {
-            match &imp.import {
-                Import::Module { path, alias } => {
-                    let local = alias
-                        .clone()
-                        .or_else(|| path.last().cloned())
-                        .unwrap_or_default();
-                    if !local.is_empty() {
-                        aliases.insert(local, imp.target.clone());
+        for mi in 0..graph.modules.len() {
+            // Build this module's resolution context: own id + bare from-imports + module aliases.
+            let own_id = graph.modules[mi].id.clone();
+            let mut bare_from: HashMap<String, ModuleId> = HashMap::new();
+            let mut aliases: HashMap<String, ModuleId> = HashMap::new();
+            for imp in &graph.modules[mi].imports {
+                match &imp.import {
+                    Import::Module { path, alias } => {
+                        let local = alias
+                            .clone()
+                            .or_else(|| path.last().cloned())
+                            .unwrap_or_default();
+                        if !local.is_empty() {
+                            aliases.insert(local, imp.target.clone());
+                        }
                     }
-                }
-                Import::From { names, .. } => {
-                    for (name, alias) in names {
-                        let local = alias.clone().unwrap_or_else(|| name.clone());
-                        bare_from.insert(local, imp.target.clone());
+                    Import::From { names, .. } => {
+                        for (name, alias) in names {
+                            let local = alias.clone().unwrap_or_else(|| name.clone());
+                            bare_from.insert(local, imp.target.clone());
+                        }
                     }
                 }
             }
-        }
 
-        let ctx = Ctx {
-            regs: &regs,
-            own_id: &own_id,
-            bare_from: &bare_from,
-            aliases: &aliases,
-            methods: &methods,
-            methods_by_struct: &methods_by_struct,
-            fn_fields: &fn_fields,
-        };
-        let mut walker = Walker {
-            ctx,
-            scopes: Vec::new(),
-            ref_names: Vec::new(),
-            local_fn: Vec::new(),
-            local_struct: Vec::new(),
-            next_tmp: 0,
-            skip_normalize: false,
-            lower_refs: pass == 0,
-        };
-        // Borrow the module's AST mutably; everything `walker` reads lives in `regs`/the maps above.
-        let ast: &mut Module = &mut graph.modules[mi].ast;
-        walker.walk_block(&mut ast.stmts)?;
-    }
+            let ctx = Ctx {
+                regs: &regs,
+                own_id: &own_id,
+                bare_from: &bare_from,
+                aliases: &aliases,
+                methods: &methods,
+                methods_by_struct: &methods_by_struct,
+                fn_fields: &fn_fields,
+            };
+            let mut walker = Walker {
+                ctx,
+                scopes: Vec::new(),
+                ref_names: Vec::new(),
+                local_fn: Vec::new(),
+                local_struct: Vec::new(),
+                next_tmp: 0,
+                skip_normalize: false,
+                lower_refs: pass == 0,
+            };
+            // Borrow the module's AST mutably; everything `walker` reads lives in `regs`/the maps above.
+            let ast: &mut Module = &mut graph.modules[mi].ast;
+            walker.walk_block(&mut ast.stmts)?;
+        }
     }
     Ok(())
 }
@@ -166,7 +192,16 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
             methods_by_struct: &methods_by_struct,
             fn_fields: &fn_fields,
         };
-        let mut walker = Walker { ctx, scopes: Vec::new(), ref_names: Vec::new(), local_fn: Vec::new(), local_struct: Vec::new(), next_tmp: 0, skip_normalize: false, lower_refs: pass == 0 };
+        let mut walker = Walker {
+            ctx,
+            scopes: Vec::new(),
+            ref_names: Vec::new(),
+            local_fn: Vec::new(),
+            local_struct: Vec::new(),
+            next_tmp: 0,
+            skip_normalize: false,
+            lower_refs: pass == 0,
+        };
         walker.walk_block(&mut module.stmts)?;
     }
     Ok(())
@@ -197,7 +232,16 @@ pub fn lower_carriers(expr: &mut Expr) {
     };
     // Interpolation fragments never contain `ref` bindings (they are sub-expressions), so ref-
     // lowering is inert here; leave it off to keep the fragment path minimal.
-    let mut walker = Walker { ctx, scopes: Vec::new(), ref_names: Vec::new(), local_fn: Vec::new(), local_struct: Vec::new(), next_tmp: 0, skip_normalize: true, lower_refs: false };
+    let mut walker = Walker {
+        ctx,
+        scopes: Vec::new(),
+        ref_names: Vec::new(),
+        local_fn: Vec::new(),
+        local_struct: Vec::new(),
+        next_tmp: 0,
+        skip_normalize: true,
+        lower_refs: false,
+    };
     // Infallible: `skip_normalize` suppresses the only error path (`normalize_call`).
     let _ = walker.walk_expr(expr);
 }
@@ -233,7 +277,11 @@ fn collect_methods_into(stmts: &[Stmt], map: &mut HashMap<String, Vec<Vec<PSpec>
                     .params
                     .iter()
                     .skip(1)
-                    .map(|p| PSpec { name: p.name.clone(), default: p.default.clone(), is_ref: p.is_ref })
+                    .map(|p| PSpec {
+                        name: p.name.clone(),
+                        default: p.default.clone(),
+                        is_ref: p.is_ref,
+                    })
                     .collect();
                 map.entry(method.name.clone()).or_default().push(spec);
             }
@@ -257,7 +305,11 @@ fn collect_methods_by_struct(graph: &ModuleGraph) -> HashMap<(String, String), V
                         .params
                         .iter()
                         .skip(1)
-                        .map(|p| PSpec { name: p.name.clone(), default: p.default.clone(), is_ref: p.is_ref })
+                        .map(|p| PSpec {
+                            name: p.name.clone(),
+                            default: p.default.clone(),
+                            is_ref: p.is_ref,
+                        })
                         .collect();
                     let key = (name.clone(), method.name.clone());
                     // Struct names are program-global (a reused name is a hard collision error in the
@@ -278,12 +330,16 @@ fn collect_methods_by_struct(graph: &ModuleGraph) -> HashMap<(String, String), V
             }
         }
     }
-    map.into_iter().filter_map(|(k, v)| v.map(|spec| (k, spec))).collect()
+    map.into_iter()
+        .filter_map(|(k, v)| v.map(|spec| (k, spec)))
+        .collect()
 }
 
 /// Single-module [`collect_methods_by_struct`] for the standalone (test/compiler/interp) path.
 #[cfg(test)]
-fn collect_methods_by_struct_into_standalone(stmts: &[Stmt]) -> HashMap<(String, String), Vec<PSpec>> {
+fn collect_methods_by_struct_into_standalone(
+    stmts: &[Stmt],
+) -> HashMap<(String, String), Vec<PSpec>> {
     let mut map: HashMap<(String, String), Vec<PSpec>> = HashMap::new();
     for stmt in stmts {
         if let StmtKind::Struct { name, methods, .. } = &stmt.kind {
@@ -292,7 +348,11 @@ fn collect_methods_by_struct_into_standalone(stmts: &[Stmt]) -> HashMap<(String,
                     .params
                     .iter()
                     .skip(1)
-                    .map(|p| PSpec { name: p.name.clone(), default: p.default.clone(), is_ref: p.is_ref })
+                    .map(|p| PSpec {
+                        name: p.name.clone(),
+                        default: p.default.clone(),
+                        is_ref: p.is_ref,
+                    })
                     .collect();
                 map.insert((name.clone(), method.name.clone()), spec);
             }
@@ -310,7 +370,9 @@ fn validate_defaults(stmts: &[Stmt]) -> Result<(), ResolveError> {
     for stmt in stmts {
         match &stmt.kind {
             StmtKind::Fn(decl) => check_param_defaults(&decl.params)?,
-            StmtKind::Struct { fields, methods, .. } => {
+            StmtKind::Struct {
+                fields, methods, ..
+            } => {
                 let fnames: HashSet<&str> = fields.iter().map(|f| f.name.as_str()).collect();
                 for fld in fields {
                     if let Some(d) = &fld.default
@@ -318,7 +380,9 @@ fn validate_defaults(stmts: &[Stmt]) -> Result<(), ResolveError> {
                     {
                         return Err(err(
                             d.span,
-                            format!("default value cannot reference field '{n}' (defaults are evaluated at the call site, where fields are not in scope)"),
+                            format!(
+                                "default value cannot reference field '{n}' (defaults are evaluated at the call site, where fields are not in scope)"
+                            ),
                         ));
                     }
                 }
@@ -341,7 +405,9 @@ fn check_param_defaults(params: &[Param]) -> Result<(), ResolveError> {
         {
             return Err(err(
                 d.span,
-                format!("default value cannot reference parameter '{n}' (defaults are evaluated at the call site, where parameters are not in scope)"),
+                format!(
+                    "default value cannot reference parameter '{n}' (defaults are evaluated at the call site, where parameters are not in scope)"
+                ),
             ));
         }
     }
@@ -366,7 +432,11 @@ fn default_referenced_name(e: &Expr, names: &HashSet<&str>) -> Option<String> {
 fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
     match &e.kind {
         ExprKind::Ident(n) => f(n),
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bytes(_) | ExprKind::Bool(_) => {}
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::Bool(_) => {}
         ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
             xs.iter().for_each(|x| walk_idents(x, f))
         }
@@ -374,7 +444,9 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
             walk_idents(k, f);
             walk_idents(v, f);
         }),
-        ExprKind::Comprehension { key, elem, clauses, .. } => {
+        ExprKind::Comprehension {
+            key, elem, clauses, ..
+        } => {
             if let Some(k) = key {
                 walk_idents(k, f);
             }
@@ -395,7 +467,12 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
             walk_idents(start, f);
             walk_idents(end, f);
         }
-        ExprKind::Call { callee, args, named, .. } => {
+        ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
             walk_idents(callee, f);
             args.iter().for_each(|a| walk_idents(a, f));
             named.iter().for_each(|(_, a)| walk_idents(a, f));
@@ -405,7 +482,12 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
             walk_idents(obj, f);
             walk_idents(index, f);
         }
-        ExprKind::Slice { obj, start, end, step } => {
+        ExprKind::Slice {
+            obj,
+            start,
+            end,
+            step,
+        } => {
             walk_idents(obj, f);
             for c in [start, end, step].iter().filter_map(|c| c.as_deref()) {
                 walk_idents(c, f);
@@ -483,7 +565,11 @@ fn collect_module_reg(stmts: &[Stmt]) -> ModReg {
                     decl.name.clone(),
                     decl.params
                         .iter()
-                        .map(|p| PSpec { name: p.name.clone(), default: p.default.clone(), is_ref: p.is_ref })
+                        .map(|p| PSpec {
+                            name: p.name.clone(),
+                            default: p.default.clone(),
+                            is_ref: p.is_ref,
+                        })
                         .collect(),
                 );
             }
@@ -492,7 +578,11 @@ fn collect_module_reg(stmts: &[Stmt]) -> ModReg {
                     name.clone(),
                     fields
                         .iter()
-                        .map(|f| PSpec { name: f.name.clone(), default: f.default.clone(), is_ref: false })
+                        .map(|f| PSpec {
+                            name: f.name.clone(),
+                            default: f.default.clone(),
+                            is_ref: false,
+                        })
                         .collect(),
                 );
             }
@@ -662,9 +752,10 @@ impl Walker<'_> {
             // `g := fn(x: ref int): ...` — the closure's own param ref-flags.
             ExprKind::Closure { params, .. } => Some(params.iter().map(|p| p.is_ref).collect()),
             // `g := bump` (a bare free-fn / ctor name, or a fn-value local being re-aliased).
-            ExprKind::Ident(n) if !self.is_local(n) => {
-                self.ctx.resolve_bare(n).map(|s| s.iter().map(|p| p.is_ref).collect())
-            }
+            ExprKind::Ident(n) if !self.is_local(n) => self
+                .ctx
+                .resolve_bare(n)
+                .map(|s| s.iter().map(|p| p.is_ref).collect()),
             ExprKind::Ident(n) => self.local_fn_flags(n).cloned(),
             _ => None,
         }
@@ -676,7 +767,11 @@ impl Walker<'_> {
         if let ExprKind::Call { callee, .. } = &value.kind
             && let ExprKind::Ident(n) = &callee.kind
             && !self.is_local(n)
-            && self.ctx.regs.get(self.ctx.own_id).is_some_and(|r| r.structs.contains_key(n))
+            && self
+                .ctx
+                .regs
+                .get(self.ctx.own_id)
+                .is_some_and(|r| r.structs.contains_key(n))
         {
             return Some(n.clone());
         }
@@ -695,7 +790,12 @@ impl Walker<'_> {
 
     fn walk_stmt(&mut self, stmt: &mut Stmt) -> Result<(), ResolveError> {
         match &mut stmt.kind {
-            StmtKind::Let { names, ty, value, is_ref } => {
+            StmtKind::Let {
+                names,
+                ty,
+                value,
+                is_ref,
+            } => {
                 if *is_ref && self.lower_refs {
                     // `r: ref T = RHS`. The parser guarantees a single name here. CREATE-vs-ALIAS is
                     // driven by the RHS: a bare in-scope `ref` ident aliases the same box (share),
@@ -718,8 +818,11 @@ impl Walker<'_> {
                     // Snapshot the RHS shape for indirect-callee resolution BEFORE walking (walking a
                     // bare `ref` ident would rewrite it to `.get()`). Only meaningful on the ref-
                     // lowering pass — that is the only pass that consults these maps for arg coercion.
-                    let fn_flags =
-                        if self.lower_refs && names.len() == 1 { self.fn_value_flags(value) } else { None };
+                    let fn_flags = if self.lower_refs && names.len() == 1 {
+                        self.fn_value_flags(value)
+                    } else {
+                        None
+                    };
                     let struct_ty = if self.lower_refs && names.len() == 1 {
                         // A `x: StructName = ...` annotation, or a `x := StructName(...)` ctor call.
                         match ty {
@@ -792,7 +895,9 @@ impl Walker<'_> {
                 self.walk_block(&mut decl.body)?;
                 self.pop_scope();
             }
-            StmtKind::Struct { fields, methods, .. } => {
+            StmtKind::Struct {
+                fields, methods, ..
+            } => {
                 // Field defaults are spliced into the constructor call site — normalize them like
                 // param defaults (outside any scope; they reference no field, per `validate_defaults`).
                 for f in fields.iter_mut() {
@@ -817,7 +922,10 @@ impl Walker<'_> {
                     self.pop_scope();
                 }
             }
-            StmtKind::If { branches, else_block } => {
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
                 for (cond, body) in branches.iter_mut() {
                     self.walk_expr(cond)?;
                     self.walk_block(body)?;
@@ -930,7 +1038,12 @@ impl Walker<'_> {
                 self.walk_expr(obj)?;
                 self.walk_expr(index)?;
             }
-            ExprKind::Slice { obj, start, end, step } => {
+            ExprKind::Slice {
+                obj,
+                start,
+                end,
+                step,
+            } => {
                 self.walk_expr(obj)?;
                 for c in [start, end, step].into_iter().flatten() {
                     self.walk_expr(c)?;
@@ -977,7 +1090,9 @@ impl Walker<'_> {
                 self.walk_expr(els)?;
             }
             ExprKind::Recover(block) => self.walk_block(block)?,
-            ExprKind::Comprehension { key, elem, clauses, .. } => {
+            ExprKind::Comprehension {
+                key, elem, clauses, ..
+            } => {
                 // Clauses nest (first outermost): each clause's `iter` is walked in the scope of the
                 // earlier clauses' vars, then that clause's vars are bound for everything after it
                 // (later clauses' iters/guards, this clause's guards, and the key/element). One
@@ -1000,7 +1115,12 @@ impl Walker<'_> {
                     self.pop_scope();
                 }
             }
-            ExprKind::Call { callee, args, named, .. } => {
+            ExprKind::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => {
                 self.walk_expr(callee)?;
                 // A positional arg that is a bare `ref` ident is lowered per the callee's param kind:
                 // into a `ref` param it stays the bare box ident (alias — caller's binding is mutated
@@ -1009,10 +1129,15 @@ impl Walker<'_> {
                 // already derefs a bare `ref` ident to `.get()` via the `Ident` leaf below.
                 // Ref call-arg lowering runs on the first pass only (alongside all other ref-lowering;
                 // see `lower_refs`). On pass 2 the args are already in final form, so walk plainly.
-                let param_ref = if self.lower_refs { self.callee_param_is_ref(callee) } else { None };
+                let param_ref = if self.lower_refs {
+                    self.callee_param_is_ref(callee)
+                } else {
+                    None
+                };
                 for (i, a) in args.iter_mut().enumerate() {
-                    let param_is_ref =
-                        param_ref.as_ref().is_some_and(|f| f.get(i).copied().unwrap_or(false));
+                    let param_is_ref = param_ref
+                        .as_ref()
+                        .is_some_and(|f| f.get(i).copied().unwrap_or(false));
                     if param_is_ref {
                         if self.is_ref_ident(a) {
                             // Row 1: `ref T` arg into a `ref T` param — pass the box (alias). Leave
@@ -1101,21 +1226,37 @@ impl Walker<'_> {
                             guard: None,
                             body: ident_expr(&c, span),
                         },
-                        MatchExprArm { pattern: variant_pat("None", vec![]), guard: None, body: *rhs },
+                        MatchExprArm {
+                            pattern: variant_pat("None", vec![]),
+                            guard: None,
+                            body: *rhs,
+                        },
                     ],
                 }
             }
             ExprKind::OptChain { obj, name, call } => {
                 let c = self.fresh_opt_name();
                 let field = Expr {
-                    kind: ExprKind::Field { obj: Box::new(ident_expr(&c, span)), name },
+                    kind: ExprKind::Field {
+                        obj: Box::new(ident_expr(&c, span)),
+                        name,
+                    },
                     span,
                 };
                 // `__c.field` or `__c.method(args)`, then wrapped in `Some(...)`.
                 let access = match call {
                     None => field,
-                    Some(OptCall { args, named, type_args }) => Expr {
-                        kind: ExprKind::Call { callee: Box::new(field), args, named, type_args },
+                    Some(OptCall {
+                        args,
+                        named,
+                        type_args,
+                    }) => Expr {
+                        kind: ExprKind::Call {
+                            callee: Box::new(field),
+                            args,
+                            named,
+                            type_args,
+                        },
                         span,
                     },
                 };
@@ -1158,14 +1299,19 @@ impl Walker<'_> {
             // A bare callee: a registered free fn / ctor (non-local), OR a LOCAL fn-value bound to a
             // named fn / closure (charges 1 & 3). The local case is resolved through `local_fn`, the
             // type-directed link the syntactic name lookup alone cannot see.
-            ExprKind::Ident(name) if !self.is_local(name) => {
-                self.ctx.resolve_bare(name).map(|s| s.iter().map(|p| p.is_ref).collect())
-            }
+            ExprKind::Ident(name) if !self.is_local(name) => self
+                .ctx
+                .resolve_bare(name)
+                .map(|s| s.iter().map(|p| p.is_ref).collect()),
             ExprKind::Ident(name) => self.local_fn_flags(name).cloned(),
             ExprKind::Field { obj, name } => match &obj.kind {
                 // `module.f(...)` — a qualified free fn.
-                ExprKind::Ident(alias) if !self.is_local(alias) && self.ctx.aliases.contains_key(alias) => {
-                    self.ctx.resolve_qualified(alias, name).map(|s| s.iter().map(|p| p.is_ref).collect())
+                ExprKind::Ident(alias)
+                    if !self.is_local(alias) && self.ctx.aliases.contains_key(alias) =>
+                {
+                    self.ctx
+                        .resolve_qualified(alias, name)
+                        .map(|s| s.iter().map(|p| p.is_ref).collect())
                 }
                 _ if !is_builtin_method(name) && !self.ctx.fn_fields.contains(name) => {
                     // A method call `recv.m(...)`. If the receiver's struct type is known locally,
@@ -1174,12 +1320,17 @@ impl Walker<'_> {
                     // when every defining struct agrees (an unambiguous pre-type shape).
                     if let ExprKind::Ident(recv) = &obj.kind
                         && let Some(sname) = self.local_struct_ty(recv)
-                        && let Some(spec) = self.ctx.methods_by_struct.get(&(sname.clone(), name.clone()))
+                        && let Some(spec) = self
+                            .ctx
+                            .methods_by_struct
+                            .get(&(sname.clone(), name.clone()))
                     {
                         return Some(spec.iter().map(|p| p.is_ref).collect());
                     }
                     match self.ctx.methods.get(name.as_str()) {
-                        Some(cands) if !cands.is_empty() && cands.iter().all(|c| *c == cands[0]) => {
+                        Some(cands)
+                            if !cands.is_empty() && cands.iter().all(|c| *c == cands[0]) =>
+                        {
                             Some(cands[0].iter().map(|p| p.is_ref).collect())
                         }
                         _ => None,
@@ -1196,7 +1347,13 @@ impl Walker<'_> {
     /// which is then an error).
     fn normalize_call(&self, expr: &mut Expr) -> Result<(), ResolveError> {
         let span = expr.span;
-        let ExprKind::Call { callee, args, named, .. } = &expr.kind else {
+        let ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } = &expr.kind
+        else {
             return Ok(());
         };
 
@@ -1233,7 +1390,9 @@ impl Walker<'_> {
                         } else if !named.is_empty() {
                             return Err(err(
                                 span,
-                                format!("cannot bind named arguments for method '{name}': multiple structs define it with different parameters — pass arguments positionally"),
+                                format!(
+                                    "cannot bind named arguments for method '{name}': multiple structs define it with different parameters — pass arguments positionally"
+                                ),
                             ));
                         } else {
                             None
@@ -1270,7 +1429,11 @@ impl Walker<'_> {
         if args.len() > params.len() {
             return Err(err(
                 span,
-                format!("too many arguments: expected at most {}, got {}", params.len(), args.len()),
+                format!(
+                    "too many arguments: expected at most {}, got {}",
+                    params.len(),
+                    args.len()
+                ),
             ));
         }
 
@@ -1312,7 +1475,7 @@ impl Walker<'_> {
                         return Err(err(
                             span,
                             format!("missing required argument '{}'", params[i].name),
-                        ))
+                        ));
                     }
                 },
             }
@@ -1336,17 +1499,28 @@ fn bind_pattern(pat: &Pattern, f: &mut impl FnMut(String)) {
 }
 
 fn err(span: crate::lexer::Span, message: String) -> ResolveError {
-    ResolveError { message, span, module: None }
+    ResolveError {
+        message,
+        span,
+        module: None,
+    }
 }
 
 /// A nullary-or-payload variant pattern (`Some(__c)` / `None`) for desugared opt-chain `match` arms.
 fn variant_pat(name: &str, bindings: Vec<Pattern>) -> Pattern {
-    Pattern::Variant { name: name.to_string(), bindings, enum_name: None }
+    Pattern::Variant {
+        name: name.to_string(),
+        bindings,
+        enum_name: None,
+    }
 }
 
 /// A bare identifier expression at `span`.
 fn ident_expr(name: &str, span: Span) -> Expr {
-    Expr { kind: ExprKind::Ident(name.to_string()), span }
+    Expr {
+        kind: ExprKind::Ident(name.to_string()),
+        span,
+    }
 }
 
 /// `<recv>.<method>(<args>)` — a no-default method call carrying the receiver's span. Used by the
@@ -1354,11 +1528,19 @@ fn ident_expr(name: &str, span: Span) -> Expr {
 fn method_call(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
     let span = recv.span;
     let callee = Expr {
-        kind: ExprKind::Field { obj: Box::new(recv), name: method.to_string() },
+        kind: ExprKind::Field {
+            obj: Box::new(recv),
+            name: method.to_string(),
+        },
         span,
     };
     Expr {
-        kind: ExprKind::Call { callee: Box::new(callee), args, named: vec![], type_args: vec![] },
+        kind: ExprKind::Call {
+            callee: Box::new(callee),
+            args,
+            named: vec![],
+            type_args: vec![],
+        },
         span,
     }
 }
@@ -1409,7 +1591,13 @@ mod tests {
         let id = ModuleId(PathBuf::from("<test>"));
         let mut graph = ModuleGraph {
             entry: id.clone(),
-            modules: vec![LoadedModule { id, dotted: vec![], ast, imports: vec![], native: None }],
+            modules: vec![LoadedModule {
+                id,
+                dotted: vec![],
+                ast,
+                imports: vec![],
+                native: None,
+            }],
         };
         run(&mut graph).expect_err("expected a desugar error")
     }
@@ -1460,17 +1648,13 @@ mod tests {
 
     #[test]
     fn named_fills_remaining_default() {
-        let s = desugar_ok(
-            "fn f(x: int, y: int = 2, z: int = 3):\n    print(x)\nr := f(1, z=9)\n",
-        );
+        let s = desugar_ok("fn f(x: int, y: int = 2, z: int = 3):\n    print(x)\nr := f(1, z=9)\n");
         assert_eq!(call_arg_ints(&s), vec![1, 2, 9]);
     }
 
     #[test]
     fn struct_ctor_named_and_default() {
-        let s = desugar_ok(
-            "struct P:\n    x: int\n    y: int = 0\nr := P(x=5)\n",
-        );
+        let s = desugar_ok("struct P:\n    x: int\n    y: int = 0\nr := P(x=5)\n");
         assert_eq!(call_arg_ints(&s), vec![5, 0]);
     }
 
@@ -1490,31 +1674,39 @@ mod tests {
 
     #[test]
     fn unknown_named_errors() {
-        assert!(desugar_err("fn f(x: int):\n    print(x)\nr := f(z=1)\n")
-            .message
-            .contains("unknown named argument 'z'"));
+        assert!(
+            desugar_err("fn f(x: int):\n    print(x)\nr := f(z=1)\n")
+                .message
+                .contains("unknown named argument 'z'")
+        );
     }
 
     #[test]
     fn duplicate_positional_and_named_errors() {
-        assert!(desugar_err("fn f(x: int, y: int):\n    print(x)\nr := f(1, x=2)\n")
-            .message
-            .contains("both positionally and by name"));
+        assert!(
+            desugar_err("fn f(x: int, y: int):\n    print(x)\nr := f(1, x=2)\n")
+                .message
+                .contains("both positionally and by name")
+        );
     }
 
     #[test]
     fn missing_required_with_named_errors() {
-        assert!(desugar_err("fn f(x: int, y: int):\n    print(x)\nr := f(y=2)\n")
-            .message
-            .contains("missing required argument 'x'"));
+        assert!(
+            desugar_err("fn f(x: int, y: int):\n    print(x)\nr := f(y=2)\n")
+                .message
+                .contains("missing required argument 'x'")
+        );
     }
 
     #[test]
     fn named_on_non_callable_errors() {
         // a local closure called with a named arg is unsupported
-        assert!(desugar_err("g := fn(x: int): x\nr := g(x=1)\n")
-            .message
-            .contains("only supported on functions, struct constructors, and struct methods"));
+        assert!(
+            desugar_err("g := fn(x: int): x\nr := g(x=1)\n")
+                .message
+                .contains("only supported on functions, struct constructors, and struct methods")
+        );
     }
 
     #[test]
@@ -1524,10 +1716,20 @@ mod tests {
             "fn f(x: int, y: int = 9):\n    print(x)\nfn main():\n    f := fn(a: int): a\n    r := f(1)\nmain()\n",
         );
         // find the inner call: in main's body, `r := f(1)` stays a single positional arg.
-        let StmtKind::Fn(decl) = &s[1].kind else { panic!("expected main fn") };
-        let StmtKind::Let { value, .. } = &decl.body[1].kind else { panic!("expected r := f(1)") };
-        let ExprKind::Call { args, .. } = &value.kind else { panic!("expected call") };
-        assert_eq!(args.len(), 1, "shadowed local call must keep its single arg");
+        let StmtKind::Fn(decl) = &s[1].kind else {
+            panic!("expected main fn")
+        };
+        let StmtKind::Let { value, .. } = &decl.body[1].kind else {
+            panic!("expected r := f(1)")
+        };
+        let ExprKind::Call { args, .. } = &value.kind else {
+            panic!("expected call")
+        };
+        assert_eq!(
+            args.len(),
+            1,
+            "shadowed local call must keep its single arg"
+        );
     }
 
     /// Pull positional arg ints out of a method call `recv.m(...)` in the last statement.
@@ -1538,10 +1740,19 @@ mod tests {
             StmtKind::Expr(e) => e,
             other => panic!("expected let/expr, got {other:?}"),
         };
-        let ExprKind::Call { args, named, callee, .. } = &expr.kind else {
+        let ExprKind::Call {
+            args,
+            named,
+            callee,
+            ..
+        } = &expr.kind
+        else {
             panic!("expected a Call, got {:?}", expr.kind)
         };
-        assert!(matches!(callee.kind, ExprKind::Field { .. }), "expected a method call");
+        assert!(
+            matches!(callee.kind, ExprKind::Field { .. }),
+            "expected a method call"
+        );
         assert!(named.is_empty(), "named must be cleared after desugar");
         args.iter()
             .map(|a| match a.kind {
@@ -1612,9 +1823,15 @@ mod tests {
             "fn g(a: int, b: int = 7):\n    print(a)\nfn f(x: int):\n    print(x)\nr := f(g(1))\n",
         );
         let last = s.last().unwrap();
-        let StmtKind::Let { value, .. } = &last.kind else { panic!() };
-        let ExprKind::Call { args, .. } = &value.kind else { panic!() };
-        let ExprKind::Call { args: inner, .. } = &args[0].kind else { panic!("inner call") };
+        let StmtKind::Let { value, .. } = &last.kind else {
+            panic!()
+        };
+        let ExprKind::Call { args, .. } = &value.kind else {
+            panic!()
+        };
+        let ExprKind::Call { args: inner, .. } = &args[0].kind else {
+            panic!("inner call")
+        };
         assert_eq!(inner.len(), 2, "nested g(1) should fill default -> g(1, 7)");
     }
 
@@ -1633,8 +1850,12 @@ mod tests {
             ExprKind::Match { arms, .. } => {
                 assert_eq!(arms.len(), 2);
                 // Some(__optN): __optN ; None: 0
-                assert!(matches!(&arms[0].pattern, Pattern::Variant { name, .. } if name == "Some"));
-                assert!(matches!(&arms[1].pattern, Pattern::Variant { name, bindings, .. } if name == "None" && bindings.is_empty()));
+                assert!(
+                    matches!(&arms[0].pattern, Pattern::Variant { name, .. } if name == "Some")
+                );
+                assert!(
+                    matches!(&arms[1].pattern, Pattern::Variant { name, bindings, .. } if name == "None" && bindings.is_empty())
+                );
             }
             other => panic!("expected a Match, got {other:?}"),
         }
@@ -1662,9 +1883,15 @@ mod tests {
             panic!("expected a Binary");
         };
         let name_of = |e: &Expr| -> String {
-            let ExprKind::Match { arms, .. } = &e.kind else { panic!("expected Match") };
-            let Pattern::Variant { bindings, .. } = &arms[0].pattern else { panic!("variant") };
-            let Pattern::Ident(n) = &bindings[0] else { panic!("ident binding") };
+            let ExprKind::Match { arms, .. } = &e.kind else {
+                panic!("expected Match")
+            };
+            let Pattern::Variant { bindings, .. } = &arms[0].pattern else {
+                panic!("variant")
+            };
+            let Pattern::Ident(n) = &bindings[0] else {
+                panic!("ident binding")
+            };
             n.clone()
         };
         assert_ne!(name_of(&lhs), name_of(&rhs), "temps must be unique");
@@ -1675,54 +1902,96 @@ mod tests {
     #[test]
     fn non_const_default_filled() {
         // A call expression as a default is cloned into the call site (left as a Call to evaluate).
-        let s = desugar_ok("fn g() -> int:\n    return 9\nfn f(x: int = g() + 1):\n    print(x)\nr := f()\n");
+        let s = desugar_ok(
+            "fn g() -> int:\n    return 9\nfn f(x: int = g() + 1):\n    print(x)\nr := f()\n",
+        );
         let last = s.last().unwrap();
-        let StmtKind::Let { value, .. } = &last.kind else { panic!("let") };
-        let ExprKind::Call { args, .. } = &value.kind else { panic!("call") };
+        let StmtKind::Let { value, .. } = &last.kind else {
+            panic!("let")
+        };
+        let ExprKind::Call { args, .. } = &value.kind else {
+            panic!("call")
+        };
         assert_eq!(args.len(), 1, "the omitted default was filled");
-        assert!(matches!(args[0].kind, ExprKind::Binary { .. }), "default is the `g() + 1` expr");
+        assert!(
+            matches!(args[0].kind, ExprKind::Binary { .. }),
+            "default is the `g() + 1` expr"
+        );
     }
 
     #[test]
     fn param_referencing_default_rejected() {
         let e = desugar_err("fn f(x: int, y: int = x + 1):\n    print(y)\n");
-        assert!(e.to_string().contains("cannot reference parameter 'x'"), "got: {e}");
+        assert!(
+            e.to_string().contains("cannot reference parameter 'x'"),
+            "got: {e}"
+        );
     }
 
     #[test]
     fn field_referencing_default_rejected() {
         let e = desugar_err("struct S:\n    a: int = 1\n    b: int = a\n");
-        assert!(e.to_string().contains("cannot reference field 'a'"), "got: {e}");
+        assert!(
+            e.to_string().contains("cannot reference field 'a'"),
+            "got: {e}"
+        );
     }
 
     #[test]
     fn method_param_referencing_default_rejected() {
-        let e = desugar_err("struct S:\n    n: int\n    fn go(self, x: int, y: int = x):\n        return y\n");
-        assert!(e.to_string().contains("cannot reference parameter 'x'"), "got: {e}");
+        let e = desugar_err(
+            "struct S:\n    n: int\n    fn go(self, x: int, y: int = x):\n        return y\n",
+        );
+        assert!(
+            e.to_string().contains("cannot reference parameter 'x'"),
+            "got: {e}"
+        );
     }
 
     #[test]
     fn defaulted_fn_call_in_default_is_normalized() {
         // `f(x = g())` where `g(a = 7)`: the spliced default `g()` must itself be normalized to
         // `g(7)` (second pass), not left under-arity.
-        let s = desugar_ok("fn g(a: int = 7) -> int:\n    return a\nfn f(x: int = g()):\n    print(x)\nr := f()\n");
+        let s = desugar_ok(
+            "fn g(a: int = 7) -> int:\n    return a\nfn f(x: int = g()):\n    print(x)\nr := f()\n",
+        );
         let last = s.last().unwrap();
-        let StmtKind::Let { value, .. } = &last.kind else { panic!("let") };
-        let ExprKind::Call { args, .. } = &value.kind else { panic!("call f") };
+        let StmtKind::Let { value, .. } = &last.kind else {
+            panic!("let")
+        };
+        let ExprKind::Call { args, .. } = &value.kind else {
+            panic!("call f")
+        };
         // f's single arg is the spliced default `g(7)` — a Call with one positional arg.
-        let ExprKind::Call { args: ginner, .. } = &args[0].kind else { panic!("inner call g") };
-        assert_eq!(ginner.len(), 1, "g()'s own default was filled in the spliced default");
+        let ExprKind::Call { args: ginner, .. } = &args[0].kind else {
+            panic!("inner call g")
+        };
+        assert_eq!(
+            ginner.len(),
+            1,
+            "g()'s own default was filled in the spliced default"
+        );
     }
 
     #[test]
     fn carrier_in_default_is_lowered() {
         // A `??` carrier inside a default must be lowered to a `match` (else the checker/VM panics).
-        let s = desugar_ok("fn h() -> int?:\n    return Some(5)\nfn f(x: int = h() ?? 0):\n    print(x)\nr := f()\n");
+        let s = desugar_ok(
+            "fn h() -> int?:\n    return Some(5)\nfn f(x: int = h() ?? 0):\n    print(x)\nr := f()\n",
+        );
         let last = s.last().unwrap();
-        let StmtKind::Let { value, .. } = &last.kind else { panic!("let") };
-        let ExprKind::Call { args, .. } = &value.kind else { panic!("call f") };
+        let StmtKind::Let { value, .. } = &last.kind else {
+            panic!("let")
+        };
+        let ExprKind::Call { args, .. } = &value.kind else {
+            panic!("call f")
+        };
         // The spliced default must be a lowered `match` (NullCoalesce carrier is gone).
-        assert!(matches!(args[0].kind, ExprKind::Match { .. }), "carrier lowered to match, got {:?}", args[0].kind);
+        assert!(
+            matches!(args[0].kind, ExprKind::Match { .. }),
+            "carrier lowered to match, got {:?}",
+            args[0].kind
+        );
     }
 
     // ===== `ref T` binding lowering =====
@@ -1751,29 +2020,68 @@ mod tests {
     fn lowers_ref_read_write() {
         let s = desugar_ok("r: ref int = 0\nprint(r)\nr = 5\nr += 1\n");
         // 1) `r: ref int = 0`  ->  `r := Ref(0)` (create a fresh box)
-        let StmtKind::Let { value, .. } = &s[0].kind else { panic!("let") };
-        assert!(is_ref_create(value), "init should be Ref(0), got {:?}", value.kind);
+        let StmtKind::Let { value, .. } = &s[0].kind else {
+            panic!("let")
+        };
+        assert!(
+            is_ref_create(value),
+            "init should be Ref(0), got {:?}",
+            value.kind
+        );
         // 2) `print(r)`  ->  `print(r.get())`  (rvalue read auto-derefs)
-        let StmtKind::Expr(e) = &s[1].kind else { panic!("expr") };
-        let ExprKind::Call { args, .. } = &e.kind else { panic!("print call") };
-        assert!(is_get_call(&args[0]), "rvalue read should be r.get(), got {:?}", args[0].kind);
+        let StmtKind::Expr(e) = &s[1].kind else {
+            panic!("expr")
+        };
+        let ExprKind::Call { args, .. } = &e.kind else {
+            panic!("print call")
+        };
+        assert!(
+            is_get_call(&args[0]),
+            "rvalue read should be r.get(), got {:?}",
+            args[0].kind
+        );
         // 3) `r = 5`  ->  `r.set(5)`  (assignment lowers to a statement-expr set call)
-        let StmtKind::Expr(e) = &s[2].kind else { panic!("set stmt, got {:?}", s[2].kind) };
-        assert!(is_set_call(e), "assign should lower to r.set(5), got {:?}", e.kind);
+        let StmtKind::Expr(e) = &s[2].kind else {
+            panic!("set stmt, got {:?}", s[2].kind)
+        };
+        assert!(
+            is_set_call(e),
+            "assign should lower to r.set(5), got {:?}",
+            e.kind
+        );
         // 4) `r += 1`  ->  `r.set(r.get() + 1)`
-        let StmtKind::Expr(e) = &s[3].kind else { panic!("compound set stmt") };
-        let ExprKind::Call { args, .. } = &e.kind else { panic!("set call") };
-        let ExprKind::Binary { lhs, .. } = &args[0].kind else { panic!("set arg should be a binary") };
-        assert!(is_get_call(lhs), "compound lhs should be r.get(), got {:?}", lhs.kind);
+        let StmtKind::Expr(e) = &s[3].kind else {
+            panic!("compound set stmt")
+        };
+        let ExprKind::Call { args, .. } = &e.kind else {
+            panic!("set call")
+        };
+        let ExprKind::Binary { lhs, .. } = &args[0].kind else {
+            panic!("set arg should be a binary")
+        };
+        assert!(
+            is_get_call(lhs),
+            "compound lhs should be r.get(), got {:?}",
+            lhs.kind
+        );
     }
 
     #[test]
     fn aliases_ref_ident() {
         // `r2: ref int = r` (RHS is already a ref binding) -> ALIAS: keep `r2 := r`, NOT `Ref(r)`.
         let s = desugar_ok("r: ref int = 0\nr2: ref int = r\n");
-        let StmtKind::Let { value, .. } = &s[1].kind else { panic!("let") };
-        assert!(!is_ref_create(value), "alias must NOT wrap in Ref(), got {:?}", value.kind);
-        assert!(matches!(&value.kind, ExprKind::Ident(n) if n == "r"), "alias keeps the box ident");
+        let StmtKind::Let { value, .. } = &s[1].kind else {
+            panic!("let")
+        };
+        assert!(
+            !is_ref_create(value),
+            "alias must NOT wrap in Ref(), got {:?}",
+            value.kind
+        );
+        assert!(
+            matches!(&value.kind, ExprKind::Ident(n) if n == "r"),
+            "alias keeps the box ident"
+        );
     }
 
     #[test]
@@ -1782,15 +2090,29 @@ mod tests {
         let src = "fn byref(x: ref int):\n    x = 1\nfn byval(x: int):\n    print(x)\nr: ref int = 0\nbyref(r)\nbyval(r)\n";
         let s = desugar_ok(src);
         // byref(r) — last-but-one stmt
-        let StmtKind::Expr(e) = &s[s.len() - 2].kind else { panic!("byref call stmt") };
-        let ExprKind::Call { args, .. } = &e.kind else { panic!("call") };
-        assert!(matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
-            "ref param arg should stay the bare box ident, got {:?}", args[0].kind);
+        let StmtKind::Expr(e) = &s[s.len() - 2].kind else {
+            panic!("byref call stmt")
+        };
+        let ExprKind::Call { args, .. } = &e.kind else {
+            panic!("call")
+        };
+        assert!(
+            matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
+            "ref param arg should stay the bare box ident, got {:?}",
+            args[0].kind
+        );
         // byval(r) — last stmt
-        let StmtKind::Expr(e) = &s[s.len() - 1].kind else { panic!("byval call stmt") };
-        let ExprKind::Call { args, .. } = &e.kind else { panic!("call") };
-        assert!(is_get_call(&args[0]),
-            "non-ref param arg should auto-deref to r.get(), got {:?}", args[0].kind);
+        let StmtKind::Expr(e) = &s[s.len() - 1].kind else {
+            panic!("byval call stmt")
+        };
+        let ExprKind::Call { args, .. } = &e.kind else {
+            panic!("call")
+        };
+        assert!(
+            is_get_call(&args[0]),
+            "non-ref param arg should auto-deref to r.get(), got {:?}",
+            args[0].kind
+        );
     }
 
     #[test]
@@ -1799,10 +2121,17 @@ mod tests {
         // the box aliases (the arg stays the bare ident, not `.get()`).
         let src = "fn bump(x: ref int):\n    x = 1\nr: ref int = 0\ng := bump\ng(r)\n";
         let s = desugar_ok(src);
-        let StmtKind::Expr(e) = &s[s.len() - 1].kind else { panic!("g(r) call stmt") };
-        let ExprKind::Call { args, .. } = &e.kind else { panic!("call") };
-        assert!(matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
-            "indirect ref param arg should alias (bare ident), got {:?}", args[0].kind);
+        let StmtKind::Expr(e) = &s[s.len() - 1].kind else {
+            panic!("g(r) call stmt")
+        };
+        let ExprKind::Call { args, .. } = &e.kind else {
+            panic!("call")
+        };
+        assert!(
+            matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
+            "indirect ref param arg should alias (bare ident), got {:?}",
+            args[0].kind
+        );
     }
 
     #[test]
@@ -1812,14 +2141,28 @@ mod tests {
         // B's (by-value) signature, so the arg auto-derefs.
         let src = "struct A:\n    t: int\n    fn apply(self, x: ref int):\n        x = 1\nstruct B:\n    t: int\n    fn apply(self, x: int):\n        print(x)\nr: ref int = 0\na := A(0)\nb := B(0)\na.apply(r)\nb.apply(r)\n";
         let s = desugar_ok(src);
-        let StmtKind::Expr(e) = &s[s.len() - 2].kind else { panic!("a.apply stmt") };
-        let ExprKind::Call { args, .. } = &e.kind else { panic!("call") };
-        assert!(matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
-            "A.apply (ref) arg should alias (bare ident), got {:?}", args[0].kind);
-        let StmtKind::Expr(e) = &s[s.len() - 1].kind else { panic!("b.apply stmt") };
-        let ExprKind::Call { args, .. } = &e.kind else { panic!("call") };
-        assert!(is_get_call(&args[0]),
-            "B.apply (by-value) arg should auto-deref to r.get(), got {:?}", args[0].kind);
+        let StmtKind::Expr(e) = &s[s.len() - 2].kind else {
+            panic!("a.apply stmt")
+        };
+        let ExprKind::Call { args, .. } = &e.kind else {
+            panic!("call")
+        };
+        assert!(
+            matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
+            "A.apply (ref) arg should alias (bare ident), got {:?}",
+            args[0].kind
+        );
+        let StmtKind::Expr(e) = &s[s.len() - 1].kind else {
+            panic!("b.apply stmt")
+        };
+        let ExprKind::Call { args, .. } = &e.kind else {
+            panic!("call")
+        };
+        assert!(
+            is_get_call(&args[0]),
+            "B.apply (by-value) arg should auto-deref to r.get(), got {:?}",
+            args[0].kind
+        );
     }
 
     #[test]
@@ -1827,17 +2170,30 @@ mod tests {
         // Charge 3: a closure `ref` param drives body read/write lowering like a named-fn ref param.
         // The body `x + 1` lowers to `x.get() + 1`.
         let s = desugar_ok("g := fn(x: ref int) -> int: x + 1\n");
-        let StmtKind::Let { value, .. } = &s[0].kind else { panic!("let") };
-        let ExprKind::Closure { body, .. } = &value.kind else { panic!("closure") };
-        let ExprKind::Binary { lhs, .. } = &body.kind else { panic!("binary body") };
-        assert!(is_get_call(lhs), "closure ref read should lower to x.get(), got {:?}", lhs.kind);
+        let StmtKind::Let { value, .. } = &s[0].kind else {
+            panic!("let")
+        };
+        let ExprKind::Closure { body, .. } = &value.kind else {
+            panic!("closure")
+        };
+        let ExprKind::Binary { lhs, .. } = &body.kind else {
+            panic!("binary body")
+        };
+        assert!(
+            is_get_call(lhs),
+            "closure ref read should lower to x.get(), got {:?}",
+            lhs.kind
+        );
     }
 
     #[test]
     fn closure_byval_arg_into_ref_param_errors() {
         // Charge 3: a by-value local into a closure `ref` param is the same row-3 error as a named fn.
         let e = desugar_err("g := fn(x: ref int) -> int: x + 1\nn := 5\ng(n)\n");
-        assert!(e.message.contains("by-reference") && e.message.contains("declare"),
-            "expected the by-value->ref error, got: {:?}", e.message);
+        assert!(
+            e.message.contains("by-reference") && e.message.contains("declare"),
+            "expected the by-value->ref error, got: {:?}",
+            e.message
+        );
     }
 }

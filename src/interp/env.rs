@@ -12,8 +12,8 @@
 //! `define` writes to the innermost local scope, or to globals when no local scope is open
 //! (i.e. at the top level). `assign` mutates the nearest existing binding, locals before globals.
 
-use super::value::ModEnv;
 use super::Value;
+use super::value::ModEnv;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default)]
@@ -44,7 +44,10 @@ impl Env {
     }
 
     /// Replace the local-scope stack, returning the previous one (used to enter/leave a call).
-    pub fn swap_locals(&mut self, new_locals: Vec<HashMap<String, Value>>) -> Vec<HashMap<String, Value>> {
+    pub fn swap_locals(
+        &mut self,
+        new_locals: Vec<HashMap<String, Value>>,
+    ) -> Vec<HashMap<String, Value>> {
         std::mem::replace(&mut self.locals, new_locals)
     }
 
@@ -85,7 +88,10 @@ impl Env {
     /// real lexical binding shadows a same-named enum in qualified-variant access `Enum.Variant` —
     /// matching the VM's locals/captures-only gate (`resolve_local`), so the two engines agree.
     pub fn get_local(&self, name: &str) -> Option<Value> {
-        self.locals.iter().rev().find_map(|scope| scope.get(name).cloned())
+        self.locals
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
     }
 
     /// Mutate an existing binding (`=`, `+=`, `-=`). Returns `false` if undefined.

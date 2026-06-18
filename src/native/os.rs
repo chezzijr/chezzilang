@@ -8,7 +8,7 @@
 //! sentinel that unwinds past any `recover:` to the top level, where the driver reports it as the
 //! process exit status (clamped to `0..=255`). It is *not* catchable.
 
-use super::{expect_args, Host, HostError, NativeFn, NativeRet};
+use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 
 fn args(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "args", 0)?;
@@ -40,9 +40,15 @@ fn exit(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "exit", 1)?;
     let code = h.arg_int(0)?;
     h.request_exit(code);
-    Err(HostError { message: "exit".into() })
+    Err(HostError {
+        message: "exit".into(),
+    })
 }
 
 /// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] =
-    &[("args", args), ("env", env), ("getcwd", getcwd), ("exit", exit)];
+pub const MEMBERS: &[(&str, NativeFn)] = &[
+    ("args", args),
+    ("env", env),
+    ("getcwd", getcwd),
+    ("exit", exit),
+];

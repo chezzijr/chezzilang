@@ -163,7 +163,10 @@ pub enum Obj {
     /// hold heap `GcRef`s (a list of structs, a set of strings, …), so `children()` MUST trace them
     /// or the snapshot's elements get collected out from under a live cursor. `Vec<Value>`(24) +
     /// `usize`(8) = 32B, within the 88B `Obj` cap (`Module` still dominates).
-    Iter { items: Vec<Value>, pos: usize },
+    Iter {
+        items: Vec<Value>,
+        pos: usize,
+    },
     List(Vec<Value>),
     /// `(a, b, …)` — a fixed-arity, immutable tuple. Elements may be heap objects, so they are
     /// traced as GC children (same as `List`).
@@ -474,9 +477,15 @@ mod iter_obj_tests {
         let mut heap = Heap::new();
         // A heap element the cursor must keep alive.
         let elem = heap.alloc(Obj::Str("kept".into()));
-        let cursor = heap.alloc(Obj::Iter { items: vec![Value::Obj(elem), Value::Int(7)], pos: 0 });
+        let cursor = heap.alloc(Obj::Iter {
+            items: vec![Value::Obj(elem), Value::Int(7)],
+            pos: 0,
+        });
         let kids = heap.children(cursor);
-        assert!(kids.contains(&elem), "cursor must trace its heap-ref items, got {kids:?}");
+        assert!(
+            kids.contains(&elem),
+            "cursor must trace its heap-ref items, got {kids:?}"
+        );
         // Mark only the cursor as a root, trace, sweep — the element must survive.
         heap.mark(cursor);
         for c in heap.children(cursor) {

@@ -9,7 +9,21 @@ use std::rc::Rc;
 
 /// The names handled here. Used so the interpreter can tell a builtin call from a user call.
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name, "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set" | "list" | "map" | "bytes" | "bytearray")
+    matches!(
+        name,
+        "len"
+            | "range"
+            | "int"
+            | "float"
+            | "str"
+            | "ord"
+            | "chr"
+            | "set"
+            | "list"
+            | "map"
+            | "bytes"
+            | "bytearray"
+    )
 }
 
 /// Dispatch a builtin by name. Caller guarantees `is_builtin(name)`.
@@ -44,12 +58,20 @@ pub fn call_method(
     }
 }
 
-fn str_method(s: &Rc<str>, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+fn str_method(
+    s: &Rc<str>,
+    method: &str,
+    args: &[Value],
+    span: Span,
+) -> Result<Value, RuntimeError> {
     let str_arg = |i: usize| -> Result<Rc<str>, RuntimeError> {
         match &args[i] {
             Value::Str(a) => Ok(a.clone()),
             other => Err(RuntimeError {
-                message: format!("{method}() expects a str argument, got {}", other.type_name()),
+                message: format!(
+                    "{method}() expects a str argument, got {}",
+                    other.type_name()
+                ),
                 span,
             }),
         }
@@ -79,12 +101,18 @@ fn str_method(s: &Rc<str>, method: &str, args: &[Value], span: Span) -> Result<V
         "split" => {
             arity("split", args, 1, span)?;
             let sep = str_arg(0)?;
-            let parts: Vec<Value> = s.split(sep.as_ref()).map(|p| Value::Str(p.into())).collect();
+            let parts: Vec<Value> = s
+                .split(sep.as_ref())
+                .map(|p| Value::Str(p.into()))
+                .collect();
             Ok(Value::List(Rc::new(RefCell::new(parts))))
         }
         "chars" => {
             arity("chars", args, 0, span)?;
-            let cs: Vec<Value> = s.chars().map(|c| Value::Str(c.to_string().into())).collect();
+            let cs: Vec<Value> = s
+                .chars()
+                .map(|c| Value::Str(c.to_string().into()))
+                .collect();
             Ok(Value::List(Rc::new(RefCell::new(cs))))
         }
         "starts_with" => {
@@ -105,10 +133,7 @@ fn str_method(s: &Rc<str>, method: &str, args: &[Value], span: Span) -> Result<V
             arity("join", args, 1, span)?;
             let Value::List(items) = &args[0] else {
                 return Err(RuntimeError {
-                    message: format!(
-                        "join() expects a list of str, got {}",
-                        args[0].type_name()
-                    ),
+                    message: format!("join() expects a list of str, got {}", args[0].type_name()),
                     span,
                 });
             };
@@ -199,13 +224,19 @@ fn list_method(
             // `values_equal` (not derived `==`) for numeric/cyclic parity with the VM: it unifies
             // int/float and is depth-guarded, so a cyclic element degrades to "not equal" instead of
             // overflowing the host stack.
-            let found = items.borrow().iter().any(|v| super::values_equal(v, target));
+            let found = items
+                .borrow()
+                .iter()
+                .any(|v| super::values_equal(v, target));
             Ok(Value::Bool(found))
         }
         "index_of" => {
             arity("index_of", &args, 1, span)?;
             let target = &args[0];
-            let idx = items.borrow().iter().position(|v| super::values_equal(v, target));
+            let idx = items
+                .borrow()
+                .iter()
+                .position(|v| super::values_equal(v, target));
             Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
         }
         "concat" => {
@@ -235,9 +266,12 @@ fn list_method(
                         Value::Float(f) => acc += *f,
                         other => {
                             return Err(RuntimeError {
-                                message: format!("sum() expects a numeric list, got an element of type {}", other.type_name()),
+                                message: format!(
+                                    "sum() expects a numeric list, got an element of type {}",
+                                    other.type_name()
+                                ),
                                 span,
-                            })
+                            });
                         }
                     }
                 }
@@ -249,9 +283,12 @@ fn list_method(
                         Value::Int(n) => acc += *n,
                         other => {
                             return Err(RuntimeError {
-                                message: format!("sum() expects a numeric list, got an element of type {}", other.type_name()),
+                                message: format!(
+                                    "sum() expects a numeric list, got an element of type {}",
+                                    other.type_name()
+                                ),
                                 span,
-                            })
+                            });
                         }
                     }
                 }
@@ -275,7 +312,10 @@ fn expect_list_arg<'a>(
     match arg {
         Value::List(items) => Ok(items),
         other => Err(RuntimeError {
-            message: format!("{method}() expects a list argument, got {}", other.type_name()),
+            message: format!(
+                "{method}() expects a list argument, got {}",
+                other.type_name()
+            ),
             span,
         }),
     }
@@ -300,12 +340,14 @@ fn len(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         Value::Bytes(b) => Ok(Value::Int(b.len() as i64)),
         Value::ByteArray(b) => Ok(Value::Int(b.borrow().len() as i64)),
         other => Err(RuntimeError {
-            message: format!("len() expects a list, str, or bytes, got {}", other.type_name()),
+            message: format!(
+                "len() expects a list, str, or bytes, got {}",
+                other.type_name()
+            ),
             span,
         }),
     }
 }
-
 
 /// Upper bound on the length of a list produced by `range()`, to prevent an absurd argument from
 /// exhausting memory. (A `for` loop over a range is lazy and not subject to this; this only caps
@@ -349,10 +391,14 @@ fn cast_int(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
             Ok(Value::Int(*f as i64))
         }
         Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
-        Value::Str(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| RuntimeError {
-            message: format!("int(): cannot parse '{s}' as an integer"),
-            span,
-        }),
+        Value::Str(s) => s
+            .trim()
+            .parse::<i64>()
+            .map(Value::Int)
+            .map_err(|_| RuntimeError {
+                message: format!("int(): cannot parse '{s}' as an integer"),
+                span,
+            }),
         other => Err(RuntimeError {
             message: format!("int() cannot convert {}", other.type_name()),
             span,
@@ -366,10 +412,14 @@ fn cast_float(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         Value::Float(f) => Ok(Value::Float(*f)),
         Value::Int(n) => Ok(Value::Float(*n as f64)),
         Value::Bool(b) => Ok(Value::Float(f64::from(*b))),
-        Value::Str(s) => s.trim().parse::<f64>().map(Value::Float).map_err(|_| RuntimeError {
-            message: format!("float(): cannot parse '{s}' as a float"),
-            span,
-        }),
+        Value::Str(s) => s
+            .trim()
+            .parse::<f64>()
+            .map(Value::Float)
+            .map_err(|_| RuntimeError {
+                message: format!("float(): cannot parse '{s}' as a float"),
+                span,
+            }),
         other => Err(RuntimeError {
             message: format!("float() cannot convert {}", other.type_name()),
             span,

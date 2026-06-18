@@ -10,7 +10,7 @@
 //! native unit). `groups` holds capture groups 1..n as strings; a non-participating optional group
 //! becomes `""`.
 
-use super::{expect_args, Host, HostError, NativeFn, NativeRet};
+use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -60,7 +60,10 @@ fn compiled(pat: &str) -> Result<Rc<regex::Regex>, String> {
 fn match_from_caps(caps: &regex::Captures) -> MatchData {
     let whole = caps.get(0).expect("group 0 always present on a match");
     let groups = (1..caps.len())
-        .map(|i| caps.get(i).map_or(String::new(), |g| g.as_str().to_string()))
+        .map(|i| {
+            caps.get(i)
+                .map_or(String::new(), |g| g.as_str().to_string())
+        })
         .collect();
     MatchData {
         text: whole.as_str().to_string(),
@@ -75,12 +78,17 @@ fn do_is_match(pat: &str, s: &str) -> Result<bool, String> {
 }
 
 fn do_find(pat: &str, s: &str) -> Result<Option<MatchData>, String> {
-    Ok(compiled(pat)?.captures(s).map(|caps| match_from_caps(&caps)))
+    Ok(compiled(pat)?
+        .captures(s)
+        .map(|caps| match_from_caps(&caps)))
 }
 
 fn do_find_all(pat: &str, s: &str) -> Result<Vec<MatchData>, String> {
     let re = compiled(pat)?;
-    Ok(re.captures_iter(s).map(|caps| match_from_caps(&caps)).collect())
+    Ok(re
+        .captures_iter(s)
+        .map(|caps| match_from_caps(&caps))
+        .collect())
 }
 
 fn do_replace_all(pat: &str, s: &str, repl: &str) -> Result<String, String> {
@@ -101,7 +109,10 @@ fn match_to_ret(m: MatchData) -> NativeRet {
             ("text".into(), NativeRet::Str(m.text)),
             ("start".into(), NativeRet::Int(m.start)),
             ("end".into(), NativeRet::Int(m.end)),
-            ("groups".into(), NativeRet::List(m.groups.into_iter().map(NativeRet::Str).collect())),
+            (
+                "groups".into(),
+                NativeRet::List(m.groups.into_iter().map(NativeRet::Str).collect()),
+            ),
         ],
     }
 }
@@ -214,7 +225,10 @@ mod tests {
 
     #[test]
     fn replace_all_substitutes() {
-        assert_eq!(do_replace_all(r"\s+", "a  b   c", "_"), Ok("a_b_c".to_string()));
+        assert_eq!(
+            do_replace_all(r"\s+", "a  b   c", "_"),
+            Ok("a_b_c".to_string())
+        );
     }
 
     #[test]

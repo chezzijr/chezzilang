@@ -12,15 +12,15 @@
 //!      forward references resolve) and one proto per `fn` / method / closure.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern,
-    MatchArm, MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, UnaryOp,
-    WaitArm, WaitTarget,
+    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl,
+    LitPattern, MatchArm, MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type,
+    UnaryOp, WaitArm, WaitTarget,
 };
 use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ResolvedImport};
 use crate::vm::op::{
-    CapEntry, CapSrc, CffiDef, ModuleProto, Op, Program, Proto, ProtoId, StructDef, SuiteInfo,
-    VariantDef, WaitMeta, LIFECYCLE_HOOKS, NO_IC,
+    CapEntry, CapSrc, CffiDef, LIFECYCLE_HOOKS, ModuleProto, NO_IC, Op, Program, Proto, ProtoId,
+    StructDef, SuiteInfo, VariantDef, WaitMeta,
 };
 use crate::{lexer, parser};
 use std::collections::HashMap;
@@ -38,7 +38,21 @@ pub struct CompileError {
 
 /// The name a builtin resolves to (mirrors `interp::builtins::is_builtin` + the special `print`).
 fn is_builtin(name: &str) -> bool {
-    matches!(name, "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set" | "list" | "map" | "bytes" | "bytearray")
+    matches!(
+        name,
+        "len"
+            | "range"
+            | "int"
+            | "float"
+            | "str"
+            | "ord"
+            | "chr"
+            | "set"
+            | "list"
+            | "map"
+            | "bytes"
+            | "bytearray"
+    )
 }
 
 /// Compile a whole resolved module graph in dependency order.
@@ -74,8 +88,10 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
 pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileError> {
     // Mirror the file-backed path: normalize named/default call arguments before compiling.
     let mut module = module.clone();
-    crate::desugar::run_standalone(&mut module)
-        .map_err(|e| CompileError { message: e.message, span: e.span })?;
+    crate::desugar::run_standalone(&mut module).map_err(|e| CompileError {
+        message: e.message,
+        span: e.span,
+    })?;
     let module = &module;
     let mut c = Compiler::new();
     c.hoist_types(&module.stmts)?;
@@ -137,7 +153,9 @@ fn register_variant(program: &mut Program, enum_name: &str, variant: &str, arity
         variant_id,
     };
     program.variants_by_id.push(def.clone());
-    program.variants.insert((enum_name.to_string(), variant.to_string()), def);
+    program
+        .variants
+        .insert((enum_name.to_string(), variant.to_string()), def);
 }
 
 impl Compiler {
@@ -158,14 +176,23 @@ impl Compiler {
         // registered FIRST so they get the fixed dense ids `Ok`=VID_OK(0), `Err`=VID_ERR(1),
         // `Some`=VID_SOME(2), `None`=VID_NONE_VARIANT(3) that `?`/error-gating compare against (the
         // order of this array IS the id assignment; assert it matches the op.rs constants below).
-        for (v, e, arity) in [("Ok", "Result", 1), ("Err", "Result", 1), ("Some", "Option", 1), ("None", "Option", 0)] {
+        for (v, e, arity) in [
+            ("Ok", "Result", 1),
+            ("Err", "Result", 1),
+            ("Some", "Option", 1),
+            ("None", "Option", 0),
+        ] {
             register_variant(&mut program, e, v, arity);
         }
-        let vid = |p: &Program, e: &str, v: &str| p.variants[&(e.to_string(), v.to_string())].variant_id;
+        let vid =
+            |p: &Program, e: &str, v: &str| p.variants[&(e.to_string(), v.to_string())].variant_id;
         debug_assert_eq!(vid(&program, "Result", "Ok"), crate::vm::op::VID_OK);
         debug_assert_eq!(vid(&program, "Result", "Err"), crate::vm::op::VID_ERR);
         debug_assert_eq!(vid(&program, "Option", "Some"), crate::vm::op::VID_SOME);
-        debug_assert_eq!(vid(&program, "Option", "None"), crate::vm::op::VID_NONE_VARIANT);
+        debug_assert_eq!(
+            vid(&program, "Option", "None"),
+            crate::vm::op::VID_NONE_VARIANT
+        );
         // M19 memory-layout lever #1 — register the synthetic native std structs (`Match` from
         // `std.regex`, `Response` from `std.request`). They have no AST (the checker seeds their
         // shapes in `seed_stdlib_structs`), so with the positional struct layout the runtime must
@@ -187,7 +214,15 @@ impl Compiler {
                 },
             );
         }
-        Compiler { program, struct_fields: HashMap::new(), globals: HashMap::new(), global_slots: Vec::new(), field_ic_next: 0, method_ic_next: 0, aliases: HashMap::new() }
+        Compiler {
+            program,
+            struct_fields: HashMap::new(),
+            globals: HashMap::new(),
+            global_slots: Vec::new(),
+            field_ic_next: 0,
+            method_ic_next: 0,
+            aliases: HashMap::new(),
+        }
     }
 
     /// Gather `type Name = T` aliases from a module's statements into `self.aliases`. Called once per
@@ -228,10 +263,9 @@ impl Compiler {
     /// undefined names before compilation, so every name reaching a global load/store/define site is
     /// guaranteed to have been collected by [`Compiler::collect_globals`].
     fn global_slot(&self, name: &str) -> u32 {
-        *self
-            .globals
-            .get(name)
-            .unwrap_or_else(|| panic!("compiler: global '{name}' has no slot (checker should reject undefined names)"))
+        *self.globals.get(name).unwrap_or_else(|| {
+            panic!("compiler: global '{name}' has no slot (checker should reject undefined names)")
+        })
     }
 
     /// M19 Phase 2b — pre-scan a module's globals into `self.globals`/`self.global_slots` before any
@@ -251,12 +285,18 @@ impl Compiler {
         for imp in imports {
             match &imp.import {
                 Import::Module { path, alias } => {
-                    let name = alias.clone().unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                    let name = alias
+                        .clone()
+                        .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
                     add(name, &mut self.globals, &mut self.global_slots);
                 }
                 Import::From { names, .. } => {
                     for (member, alias) in names {
-                        add(alias.clone().unwrap_or_else(|| member.clone()), &mut self.globals, &mut self.global_slots);
+                        add(
+                            alias.clone().unwrap_or_else(|| member.clone()),
+                            &mut self.globals,
+                            &mut self.global_slots,
+                        );
                     }
                 }
             }
@@ -323,13 +363,25 @@ impl Compiler {
     }
 
     /// Pass 2: compile one module to a toplevel proto; record method protos into the type table.
-    fn compile_module(&mut self, module_idx: usize, module: &Module, imports: &[ResolvedImport], is_entry: bool) -> Result<ProtoId, CompileError> {
+    fn compile_module(
+        &mut self,
+        module_idx: usize,
+        module: &Module,
+        imports: &[ResolvedImport],
+        is_entry: bool,
+    ) -> Result<ProtoId, CompileError> {
         // M19 Phase 2b: assign a stable slot to every module global before emitting any code, so
         // forward references (method/fn bodies, imports used before their line) resolve to a slot.
         self.collect_globals(imports, &module.stmts);
         // Compile struct methods first, recording their proto ids + this module as their home.
         for stmt in &module.stmts {
-            if let StmtKind::Struct { name, methods, fields, .. } = &stmt.kind {
+            if let StmtKind::Struct {
+                name,
+                methods,
+                fields,
+                ..
+            } = &stmt.kind
+            {
                 let mut test_methods: Vec<String> = Vec::new();
                 let mut suite_tests: Vec<(String, ProtoId)> = Vec::new();
                 let mut hooks: HashMap<String, ProtoId> = HashMap::new();
@@ -370,7 +422,10 @@ impl Compiler {
             if let StmtKind::Fn(decl) = &stmt.kind {
                 let pid = self.compile_fn(decl, false)?;
                 fc.emit(Op::MakeFunc(pid), stmt.span);
-                fc.emit(Op::DefineGlobalSlot(self.global_slot(&decl.name)), stmt.span);
+                fc.emit(
+                    Op::DefineGlobalSlot(self.global_slot(&decl.name)),
+                    stmt.span,
+                );
                 // `chezzi test` discovery — a free `test fn` (entry module only).
                 if decl.is_test && is_entry {
                     self.program.tests.push((decl.name.clone(), pid));
@@ -392,7 +447,10 @@ impl Compiler {
                     // `None` ⇒ void: either no annotation, or an annotation resolving to `nil`
                     // (incl. an alias to `nil`). The checker guarantees a non-void return is a scalar,
                     // so a non-scalar here can only mean void — use `and_then`, never `.expect`.
-                    let ret = ef.ret.as_ref().and_then(|t| ctype_of(Some(t), &self.aliases));
+                    let ret = ef
+                        .ret
+                        .as_ref()
+                        .and_then(|t| ctype_of(Some(t), &self.aliases));
                     let id = self.program.cffi_defs.len() as u32;
                     self.program.cffi_defs.push(CffiDef {
                         lib: lib.clone(),
@@ -444,7 +502,7 @@ impl Compiler {
                             f.name
                         ),
                         span,
-                    })
+                    });
                 }
             }
         }
@@ -467,7 +525,12 @@ impl Compiler {
         // body cannot hold a bare `spawn` (spawn is a statement, not an expression), so the implicit-
         // nursery dance below never applies to it.
         if decl.inline_expr_body
-            && let [Stmt { kind: StmtKind::Expr(e), .. }] = decl.body.as_slice()
+            && let [
+                Stmt {
+                    kind: StmtKind::Expr(e),
+                    ..
+                },
+            ] = decl.body.as_slice()
         {
             self.compile_expr(&mut fc, e)?;
             fc.emit(Op::Return, e.span);
@@ -523,7 +586,11 @@ impl Compiler {
     }
 
     /// Compile a block in a fresh lexical scope (locals don't leak past the block).
-    fn compile_block_scoped(&mut self, fc: &mut FnComp, stmts: &[Stmt]) -> Result<(), CompileError> {
+    fn compile_block_scoped(
+        &mut self,
+        fc: &mut FnComp,
+        stmts: &[Stmt],
+    ) -> Result<(), CompileError> {
         fc.begin_scope();
         self.compile_block_flat(fc, stmts)?;
         fc.end_scope();
@@ -534,7 +601,11 @@ impl Compiler {
     /// when this block exits, not when the whole frame does. When the block statically holds a
     /// `defer` we bracket it with `EnterDeferScope`/`LeaveDeferScope`; otherwise this is exactly
     /// `compile_block_scoped` and emits nothing extra (defer-free code is byte-identical).
-    fn compile_defer_scoped_block(&mut self, fc: &mut FnComp, stmts: &[Stmt]) -> Result<(), CompileError> {
+    fn compile_defer_scoped_block(
+        &mut self,
+        fc: &mut FnComp,
+        stmts: &[Stmt],
+    ) -> Result<(), CompileError> {
         let has_defer = block_has_defer(stmts);
         if has_defer {
             fc.emit(Op::EnterDeferScope, stmts[0].span);
@@ -551,7 +622,11 @@ impl Compiler {
     /// A statement-form `match` arm body as a defer scope. The arm's lexical scope is already
     /// opened/closed by `compile_match_general`, so this brackets the *flat* body with defer-scope
     /// ops when (and only when) it directly contains a `defer`.
-    fn compile_defer_scoped_arm(&mut self, fc: &mut FnComp, stmts: &[Stmt]) -> Result<(), CompileError> {
+    fn compile_defer_scoped_arm(
+        &mut self,
+        fc: &mut FnComp,
+        stmts: &[Stmt],
+    ) -> Result<(), CompileError> {
         let has_defer = block_has_defer(stmts);
         if has_defer {
             fc.emit(Op::EnterDeferScope, stmts[0].span);
@@ -729,7 +804,11 @@ impl Compiler {
         }
         // Placeholder; back-patched with the arm/else targets once the bodies are laid out.
         let poll_at = fc.emit_jump(
-            Op::WaitPoll(Box::new(WaitMeta { n: arms.len(), arm_targets: Vec::new(), else_target: None })),
+            Op::WaitPoll(Box::new(WaitMeta {
+                n: arms.len(),
+                arm_targets: Vec::new(),
+                else_target: None,
+            })),
             span,
         );
         let mut arm_targets = Vec::with_capacity(arms.len());
@@ -764,7 +843,11 @@ impl Compiler {
         }
         fc.set_code(
             poll_at,
-            Op::WaitPoll(Box::new(WaitMeta { n: arms.len(), arm_targets, else_target })),
+            Op::WaitPoll(Box::new(WaitMeta {
+                n: arms.len(),
+                arm_targets,
+                else_target,
+            })),
         );
         Ok(())
     }
@@ -773,7 +856,12 @@ impl Compiler {
     /// straight into the binding; `Field`/`Index` stash the value in a hidden temp, evaluate the
     /// object (and index), then reload it — so the `[obj, (index,) value]` order `SetField`/`SetIndex`
     /// expect is reconstructed even though the value was produced first by `WaitPoll`.
-    fn emit_wait_assign(&mut self, fc: &mut FnComp, target: &Expr, span: Span) -> Result<(), CompileError> {
+    fn emit_wait_assign(
+        &mut self,
+        fc: &mut FnComp,
+        target: &Expr,
+        span: Span,
+    ) -> Result<(), CompileError> {
         match &target.kind {
             ExprKind::Ident(name) => self.emit_store(fc, name, span),
             ExprKind::Field { obj, name } => {
@@ -782,7 +870,13 @@ impl Compiler {
                 self.compile_expr(fc, obj)?;
                 fc.emit(Op::GetLocal(tmp), span);
                 let ic = self.next_field_ic(name);
-                fc.emit(Op::SetField { name: name.clone(), ic }, span);
+                fc.emit(
+                    Op::SetField {
+                        name: name.clone(),
+                        ic,
+                    },
+                    span,
+                );
             }
             ExprKind::Index { obj, index } => {
                 let tmp = fc.add_hidden();
@@ -792,7 +886,12 @@ impl Compiler {
                 fc.emit(Op::GetLocal(tmp), span);
                 fc.emit(Op::SetIndex, span);
             }
-            _ => return Err(CompileError { message: "invalid wait-arm assignment target".to_string(), span }),
+            _ => {
+                return Err(CompileError {
+                    message: "invalid wait-arm assignment target".to_string(),
+                    span,
+                });
+            }
         }
         Ok(())
     }
@@ -800,7 +899,12 @@ impl Compiler {
     /// `parallel:` — open a nursery, run the body (spawns register tasks; inline statements run
     /// immediately), then join at the dedent. The body is also a defer scope (mirrors the
     /// interpreter's `exec_scoped_block`), so a `defer` directly inside the block runs at the dedent.
-    fn compile_parallel(&mut self, fc: &mut FnComp, body: &[Stmt], span: Span) -> Result<(), CompileError> {
+    fn compile_parallel(
+        &mut self,
+        fc: &mut FnComp,
+        body: &[Stmt],
+        span: Span,
+    ) -> Result<(), CompileError> {
         fc.emit(Op::EnterNursery, span);
         // TASK B — track the open nursery scope so a `break`/`continue` inside `body` knows to emit a
         // `ReclaimNursery` (cancel-and-report) before its loop-exit jump. Mirrors `defer_scopes`.
@@ -830,7 +934,12 @@ impl Compiler {
     /// recv.m(args)`) evaluates the callee/receiver + args here and emits `SpawnCall`/`SpawnMethod`
     /// (mirrors `compile_defer`). Form 2 (`spawn:` block) compiles the block as a synthetic zero-arg
     /// proto and emits `SpawnBlock`, capturing the enclosing bindings (like a closure).
-    fn compile_spawn(&mut self, fc: &mut FnComp, target: &SpawnTarget, span: Span) -> Result<(), CompileError> {
+    fn compile_spawn(
+        &mut self,
+        fc: &mut FnComp,
+        target: &SpawnTarget,
+        span: Span,
+    ) -> Result<(), CompileError> {
         match target {
             SpawnTarget::Call(call) => {
                 let ExprKind::Call { callee, args, .. } = &call.kind else {
@@ -883,7 +992,14 @@ impl Compiler {
         }
     }
 
-    fn compile_assign(&mut self, fc: &mut FnComp, target: &Expr, op: AssignOp, value: &Expr, span: Span) -> Result<(), CompileError> {
+    fn compile_assign(
+        &mut self,
+        fc: &mut FnComp,
+        target: &Expr,
+        op: AssignOp,
+        value: &Expr,
+        span: Span,
+    ) -> Result<(), CompileError> {
         match &target.kind {
             ExprKind::Ident(name) => match op.to_binop() {
                 None => {
@@ -903,14 +1019,26 @@ impl Compiler {
                 if let Some(bin) = op.to_binop() {
                     let ic = self.next_field_ic(name);
                     fc.emit(Op::Dup, span);
-                    fc.emit(Op::GetField { name: name.clone(), ic }, target.span);
+                    fc.emit(
+                        Op::GetField {
+                            name: name.clone(),
+                            ic,
+                        },
+                        target.span,
+                    );
                     self.compile_expr(fc, value)?;
                     fc.emit(binary_op(bin), span);
                 } else {
                     self.compile_expr(fc, value)?;
                 }
                 let ic = self.next_field_ic(name);
-                fc.emit(Op::SetField { name: name.clone(), ic }, span);
+                fc.emit(
+                    Op::SetField {
+                        name: name.clone(),
+                        ic,
+                    },
+                    span,
+                );
             }
             // `obj[i] = v` → [obj, i, v] SetIndex; compound dups `[obj, i]` to read-modify-write.
             ExprKind::Index { obj, index } => {
@@ -943,7 +1071,12 @@ impl Compiler {
                     self.compile_assign_element(fc, t, tuple_slot, i, span)?;
                 }
             }
-            _ => return Err(CompileError { message: "invalid assignment target".to_string(), span }),
+            _ => {
+                return Err(CompileError {
+                    message: "invalid assignment target".to_string(),
+                    span,
+                });
+            }
         }
         Ok(())
     }
@@ -962,24 +1095,53 @@ impl Compiler {
         match &target.kind {
             ExprKind::Ident(name) => {
                 fc.emit(Op::GetLocal(tuple_slot), span);
-                fc.emit(Op::GetField { name: i.to_string(), ic: NO_IC }, span);
+                fc.emit(
+                    Op::GetField {
+                        name: i.to_string(),
+                        ic: NO_IC,
+                    },
+                    span,
+                );
                 self.emit_store(fc, name, span);
             }
             ExprKind::Field { obj, name } => {
                 self.compile_expr(fc, obj)?;
                 fc.emit(Op::GetLocal(tuple_slot), span);
-                fc.emit(Op::GetField { name: i.to_string(), ic: NO_IC }, span);
+                fc.emit(
+                    Op::GetField {
+                        name: i.to_string(),
+                        ic: NO_IC,
+                    },
+                    span,
+                );
                 let ic = self.next_field_ic(name);
-                fc.emit(Op::SetField { name: name.clone(), ic }, span);
+                fc.emit(
+                    Op::SetField {
+                        name: name.clone(),
+                        ic,
+                    },
+                    span,
+                );
             }
             ExprKind::Index { obj, index } => {
                 self.compile_expr(fc, obj)?;
                 self.compile_expr(fc, index)?;
                 fc.emit(Op::GetLocal(tuple_slot), span);
-                fc.emit(Op::GetField { name: i.to_string(), ic: NO_IC }, span);
+                fc.emit(
+                    Op::GetField {
+                        name: i.to_string(),
+                        ic: NO_IC,
+                    },
+                    span,
+                );
                 fc.emit(Op::SetIndex, span);
             }
-            _ => return Err(CompileError { message: "invalid assignment target".to_string(), span }),
+            _ => {
+                return Err(CompileError {
+                    message: "invalid assignment target".to_string(),
+                    span,
+                });
+            }
         }
         Ok(())
     }
@@ -1012,7 +1174,13 @@ impl Compiler {
         }
     }
 
-    fn compile_if(&mut self, fc: &mut FnComp, branches: &[(Expr, Block)], else_block: Option<&[Stmt]>, _span: Span) -> Result<(), CompileError> {
+    fn compile_if(
+        &mut self,
+        fc: &mut FnComp,
+        branches: &[(Expr, Block)],
+        else_block: Option<&[Stmt]>,
+        _span: Span,
+    ) -> Result<(), CompileError> {
         let mut end_jumps = Vec::new();
         for (cond, body) in branches {
             self.compile_expr(fc, cond)?;
@@ -1031,12 +1199,22 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_while(&mut self, fc: &mut FnComp, cond: &Expr, body: &[Stmt]) -> Result<(), CompileError> {
+    fn compile_while(
+        &mut self,
+        fc: &mut FnComp,
+        cond: &Expr,
+        body: &[Stmt],
+    ) -> Result<(), CompileError> {
         let loop_start = fc.here();
         self.compile_expr(fc, cond)?;
         fc.emit(Op::AsBool, cond.span);
         let exit = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
-        fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new(), defer_floor: fc.defer_scopes, nursery_floor: fc.nursery_scopes });
+        fc.loops.push(LoopCtx {
+            continue_jumps: Vec::new(),
+            break_jumps: Vec::new(),
+            defer_floor: fc.defer_scopes,
+            nursery_floor: fc.nursery_scopes,
+        });
         self.compile_defer_scoped_block(fc, body)?;
         fc.emit(Op::Jump(loop_start), cond.span);
         fc.patch_jump(exit);
@@ -1052,9 +1230,21 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_for(&mut self, fc: &mut FnComp, vars: &[String], iter: &Expr, body: &[Stmt], span: Span) -> Result<(), CompileError> {
+    fn compile_for(
+        &mut self,
+        fc: &mut FnComp,
+        vars: &[String],
+        iter: &Expr,
+        body: &[Stmt],
+        span: Span,
+    ) -> Result<(), CompileError> {
         fc.begin_scope();
-        fc.loops.push(LoopCtx { continue_jumps: Vec::new(), break_jumps: Vec::new(), defer_floor: fc.defer_scopes, nursery_floor: fc.nursery_scopes });
+        fc.loops.push(LoopCtx {
+            continue_jumps: Vec::new(),
+            break_jumps: Vec::new(),
+            defer_floor: fc.defer_scopes,
+            nursery_floor: fc.nursery_scopes,
+        });
         if let ExprKind::Range { start, end } = &iter.kind {
             // Lazy counting loop — the range is never materialized. The checker guarantees a single
             // loop variable for a range.
@@ -1162,14 +1352,28 @@ impl Compiler {
             // ----- struct step: call next() → opt_slot -----
             fc.emit(Op::GetLocal(iter_slot), span);
             let ic = self.next_method_ic();
-            fc.emit(Op::CallMethod { name: "next".to_string(), argc: 0, ic }, span);
+            fc.emit(
+                Op::CallMethod {
+                    name: "next".to_string(),
+                    argc: 0,
+                    ic,
+                },
+                span,
+            );
             fc.emit(Op::SetLocal(opt_slot), span);
             // ----- shared Option decoder (channel + struct): None ⇒ exit, Some(v) ⇒ bind v -----
             fc.patch_jump(chan_to_opt);
             fc.emit(Op::EnsureEnum(opt_slot), iter.span);
             // Test `None` first: a match falls through to the exit jump; a mismatch goes to `to_some`.
             let none_arm = fc.emit_jump(
-                Op::MatchArm { scrut: opt_slot, variant: "None".to_string(), variant_id: crate::vm::op::VID_NONE_VARIANT, nbind: 0, bind_start: 0, next: 0 },
+                Op::MatchArm {
+                    scrut: opt_slot,
+                    variant: "None".to_string(),
+                    variant_id: crate::vm::op::VID_NONE_VARIANT,
+                    nbind: 0,
+                    bind_start: 0,
+                    next: 0,
+                },
                 iter.span,
             );
             let lazy_exit = fc.emit_jump(Op::Jump(0), span); // None matched ⇒ leave the loop
@@ -1177,7 +1381,14 @@ impl Compiler {
             // `Some(v)`: a match binds the payload into the loop variable's slot and falls through to
             // the body jump; a non-Some jumps to the trap below.
             let some_arm = fc.emit_jump(
-                Op::MatchArm { scrut: opt_slot, variant: "Some".to_string(), variant_id: crate::vm::op::VID_SOME, nbind: 1, bind_start: item_slot, next: 0 },
+                Op::MatchArm {
+                    scrut: opt_slot,
+                    variant: "Some".to_string(),
+                    variant_id: crate::vm::op::VID_SOME,
+                    nbind: 1,
+                    bind_start: item_slot,
+                    next: 0,
+                },
                 iter.span,
             );
             let to_body = fc.emit_jump(Op::Jump(0), span); // Some matched ⇒ run the body
@@ -1248,7 +1459,14 @@ impl Compiler {
             fc.emit(Op::SetLocal(lst), span);
             fc.emit(Op::GetLocal(src_slot), span);
             let ic = self.next_method_ic();
-            fc.emit(Op::CallMethod { name: "values".to_string(), argc: 0, ic }, span);
+            fc.emit(
+                Op::CallMethod {
+                    name: "values".to_string(),
+                    argc: 0,
+                    ic,
+                },
+                span,
+            );
             fc.emit(Op::SetLocal(vals), span);
             let after_init = fc.emit_jump(Op::Jump(0), span);
             // list init: clone the list of tuples into `lst`
@@ -1289,7 +1507,13 @@ impl Compiler {
             fc.patch_jump(to_list_bind);
             for (j, &vs) in var_slots.iter().enumerate() {
                 fc.emit(Op::GetLocal(elem), span);
-                fc.emit(Op::GetField { name: j.to_string(), ic: NO_IC }, span); // tuple element
+                fc.emit(
+                    Op::GetField {
+                        name: j.to_string(),
+                        ic: NO_IC,
+                    },
+                    span,
+                ); // tuple element
                 fc.emit(Op::SetLocal(vs), span);
             }
             fc.patch_jump(after_bind);
@@ -1339,7 +1563,10 @@ impl Compiler {
         let acc_slot = fc.add_local(acc_name.clone());
         fc.emit(Op::SetLocal(acc_slot), span);
 
-        let acc = Expr { kind: ExprKind::Ident(acc_name), span };
+        let acc = Expr {
+            kind: ExprKind::Ident(acc_name),
+            span,
+        };
         let innermost_stmt = match kind {
             CompKind::List => method_call_stmt(acc, "push", vec![elem.clone()], span),
             CompKind::Set => method_call_stmt(acc, "add", vec![elem.clone()], span),
@@ -1348,7 +1575,10 @@ impl Compiler {
                 Stmt {
                     kind: StmtKind::Assign {
                         target: Expr {
-                            kind: ExprKind::Index { obj: Box::new(acc), index: Box::new(key) },
+                            kind: ExprKind::Index {
+                                obj: Box::new(acc),
+                                index: Box::new(key),
+                            },
                             span,
                         },
                         op: AssignOp::Eq,
@@ -1386,7 +1616,16 @@ impl Compiler {
         }
 
         // `body` is now a single outermost `for` statement. Compile it via `compile_for`.
-        let Stmt { kind: StmtKind::For { vars, iter, body: inner }, .. } = &body[0] else {
+        let Stmt {
+            kind:
+                StmtKind::For {
+                    vars,
+                    iter,
+                    body: inner,
+                },
+            ..
+        } = &body[0]
+        else {
             unreachable!("a comprehension always has at least one for clause")
         };
         self.compile_for(fc, vars, iter, inner, span)?;
@@ -1470,7 +1709,9 @@ impl Compiler {
                 out.insert(n.clone());
             }
             Pattern::Ident(_) => {}
-            Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) | Pattern::Or(bindings) => {
+            Pattern::Variant { bindings, .. }
+            | Pattern::Tuple(bindings)
+            | Pattern::Or(bindings) => {
                 for b in bindings {
                     self.collect_binding_names(b, out);
                 }
@@ -1485,16 +1726,25 @@ impl Compiler {
         match p {
             Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => true,
             // empty-binding `Name`: a binding unless it's a real variant.
-            Pattern::Variant { name, bindings, enum_name } if bindings.is_empty() => {
-                self.variant_pair(enum_name.as_deref(), name)
-                    .is_none_or(|k| !self.program.variants.contains_key(&k))
-            }
+            Pattern::Variant {
+                name,
+                bindings,
+                enum_name,
+            } if bindings.is_empty() => self
+                .variant_pair(enum_name.as_deref(), name)
+                .is_none_or(|k| !self.program.variants.contains_key(&k)),
             Pattern::Or(alts) => alts.iter().all(|a| self.pattern_is_literal(a)),
             _ => false,
         }
     }
 
-    fn compile_match(&mut self, fc: &mut FnComp, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<(), CompileError> {
+    fn compile_match(
+        &mut self,
+        fc: &mut FnComp,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        span: Span,
+    ) -> Result<(), CompileError> {
         if self.arms_are_literal(arms.iter().map(|a| &a.pattern)) {
             return self.compile_match_lit(fc, scrutinee, arms, span, |s, fc, body| {
                 s.compile_defer_scoped_arm(fc, body)
@@ -1528,7 +1778,10 @@ impl Compiler {
         // Variant matches keep the `EnsureEnum` guard so a non-enum scrutinee (possible only when
         // the checker couldn't infer the type) is a clean runtime error, not a panic. Tuple matches
         // need no such guard.
-        if arms.iter().any(|a| matches!(a.pattern(), Pattern::Variant { .. })) {
+        if arms
+            .iter()
+            .any(|a| matches!(a.pattern(), Pattern::Variant { .. }))
+        {
             fc.emit(Op::EnsureEnum(scrut), scrutinee.span);
         }
         let mut end_jumps = Vec::new();
@@ -1559,7 +1812,12 @@ impl Compiler {
     /// Emit an optional arm guard `if <expr>`: compile the bool expr and, on `false`, jump to the
     /// next arm (the jump is pushed onto `fails`, which the caller patches). A `None` guard emits
     /// nothing.
-    fn emit_guard(&mut self, fc: &mut FnComp, guard: Option<&Expr>, fails: &mut Vec<usize>) -> Result<(), CompileError> {
+    fn emit_guard(
+        &mut self,
+        fc: &mut FnComp,
+        guard: Option<&Expr>,
+        fails: &mut Vec<usize>,
+    ) -> Result<(), CompileError> {
         if let Some(g) = guard {
             self.compile_expr(fc, g)?;
             fails.push(fc.emit_jump(Op::JumpIfFalse(0), g.span));
@@ -1572,7 +1830,14 @@ impl Compiler {
     /// the pattern to a fresh local in the current scope. Recurses for nested tuple/variant
     /// patterns. No new opcodes — reuses `MatchArm` (variant), `GetField` (tuple element), and
     /// `Eq`+`JumpIfFalse` (literal).
-    fn emit_pattern(&mut self, fc: &mut FnComp, pattern: &Pattern, scrut: usize, fails: &mut Vec<usize>, span: Span) -> Result<(), CompileError> {
+    fn emit_pattern(
+        &mut self,
+        fc: &mut FnComp,
+        pattern: &Pattern,
+        scrut: usize,
+        fails: &mut Vec<usize>,
+        span: Span,
+    ) -> Result<(), CompileError> {
         match pattern {
             Pattern::Wildcard => {}
             Pattern::Ident(name) => {
@@ -1584,7 +1849,14 @@ impl Compiler {
                     let bind_start = fc.next_slot();
                     let variant_id = self.variant_id_of(None, name);
                     let arm_op = fc.emit_jump(
-                        Op::MatchArm { scrut, variant: name.clone(), variant_id, nbind: 0, bind_start, next: 0 },
+                        Op::MatchArm {
+                            scrut,
+                            variant: name.clone(),
+                            variant_id,
+                            nbind: 0,
+                            bind_start,
+                            next: 0,
+                        },
                         span,
                     );
                     fails.push(arm_op);
@@ -1606,13 +1878,23 @@ impl Compiler {
             Pattern::Tuple(subs) => {
                 for (i, sub) in subs.iter().enumerate() {
                     fc.emit(Op::GetLocal(scrut), span);
-                    fc.emit(Op::GetField { name: i.to_string(), ic: NO_IC }, span); // tuple element `.i`
+                    fc.emit(
+                        Op::GetField {
+                            name: i.to_string(),
+                            ic: NO_IC,
+                        },
+                        span,
+                    ); // tuple element `.i`
                     let elem = fc.add_hidden();
                     fc.emit(Op::SetLocal(elem), span);
                     self.emit_pattern(fc, sub, elem, fails, span)?;
                 }
             }
-            Pattern::Variant { name, bindings, enum_name } => {
+            Pattern::Variant {
+                name,
+                bindings,
+                enum_name,
+            } => {
                 // One slot per payload element. A plain `Ident` *binding* names its slot directly (so
                 // `Some(c)` binds `c` with no copy); a nested nullary-variant `Ident` (e.g. the
                 // `None` in `Some(None)`) and any other sub-pattern get a hidden slot to test/
@@ -1630,7 +1912,14 @@ impl Compiler {
                 }
                 let variant_id = self.variant_id_of(enum_name.as_deref(), name);
                 let arm_op = fc.emit_jump(
-                    Op::MatchArm { scrut, variant: name.clone(), variant_id, nbind: bindings.len(), bind_start, next: 0 },
+                    Op::MatchArm {
+                        scrut,
+                        variant: name.clone(),
+                        variant_id,
+                        nbind: bindings.len(),
+                        bind_start,
+                        next: 0,
+                    },
                     span,
                 );
                 fails.push(arm_op);
@@ -1648,8 +1937,10 @@ impl Compiler {
                 // slots, then copies its values into the canonical slots before jumping to a shared
                 // matched-label; the body reads the canonical slots regardless of which alt matched.
                 let names = self.or_binding_names(alts);
-                let canon: Vec<(String, usize)> =
-                    names.iter().map(|n| (n.clone(), fc.add_local(n.clone()))).collect();
+                let canon: Vec<(String, usize)> = names
+                    .iter()
+                    .map(|n| (n.clone(), fc.add_local(n.clone())))
+                    .collect();
                 let mut matched_jumps = Vec::new();
                 for (idx, alt) in alts.iter().enumerate() {
                     // Scope each alternative's scratch slots so they don't leak between alternatives.
@@ -1816,7 +2107,9 @@ impl Compiler {
                                 // An unconditional catch-all alternative — always hits.
                                 hit_jumps.push(fc.emit_jump(Op::Jump(0), span));
                             }
-                            _ => unreachable!("literal or-pattern has only literal/range/wildcard/binding alternatives"),
+                            _ => unreachable!(
+                                "literal or-pattern has only literal/range/wildcard/binding alternatives"
+                            ),
                         }
                     }
                     // All hit_jumps land here (the body); a last-alt miss in `fails` skips it.
@@ -1833,7 +2126,9 @@ impl Compiler {
                     fc.end_scope();
                 }
                 Pattern::Variant { .. } | Pattern::Tuple(_) | Pattern::Ident(_) => {
-                    unreachable!("literal match has only literal/range/wildcard/binding arms (arms_are_literal)")
+                    unreachable!(
+                        "literal match has only literal/range/wildcard/binding arms (arms_are_literal)"
+                    )
                 }
             }
         }
@@ -1880,9 +2175,12 @@ impl Compiler {
                 }
                 fc.emit(Op::NewSet(elems.len()), expr.span);
             }
-            ExprKind::Comprehension { kind, key, elem, clauses } => {
-                self.compile_comprehension(fc, *kind, key.as_deref(), elem, clauses, expr.span)?
-            }
+            ExprKind::Comprehension {
+                kind,
+                key,
+                elem,
+                clauses,
+            } => self.compile_comprehension(fc, *kind, key.as_deref(), elem, clauses, expr.span)?,
             ExprKind::Unary { op, expr: inner } => {
                 self.compile_expr(fc, inner)?;
                 match op {
@@ -1893,7 +2191,11 @@ impl Compiler {
                     }
                 }
             }
-            ExprKind::Binary { op: op @ (BinaryOp::And | BinaryOp::Or), lhs, rhs } => {
+            ExprKind::Binary {
+                op: op @ (BinaryOp::And | BinaryOp::Or),
+                lhs,
+                rhs,
+            } => {
                 // Short-circuit: lhs is always bool-checked; rhs only when needed; result is bool.
                 self.compile_expr(fc, lhs)?;
                 fc.emit(Op::AsBool, lhs.span);
@@ -1919,7 +2221,9 @@ impl Compiler {
                 });
             }
             // `type_args` are type-erased — the compiler never sees them (checker already used them).
-            ExprKind::Call { callee, args, .. } => self.compile_call(fc, callee, args, expr.span)?,
+            ExprKind::Call { callee, args, .. } => {
+                self.compile_call(fc, callee, args, expr.span)?
+            }
             ExprKind::Field { obj, name } => {
                 // `Enum.Variant` (nullary) → construct the variant, mirroring bare `compile_ident`.
                 // A real binding (local/captured) named like the enum wins, matching the checker.
@@ -1933,11 +2237,24 @@ impl Compiler {
                         .is_some_and(|d| d.arity == 0)
                 {
                     let variant_id = self.variant_id_of(Some(ename), name);
-                    fc.emit(Op::NewEnum { variant: name.clone(), variant_id, argc: 0 }, expr.span);
+                    fc.emit(
+                        Op::NewEnum {
+                            variant: name.clone(),
+                            variant_id,
+                            argc: 0,
+                        },
+                        expr.span,
+                    );
                 } else {
                     self.compile_expr(fc, obj)?;
                     let ic = self.next_field_ic(name);
-                    fc.emit(Op::GetField { name: name.clone(), ic }, expr.span);
+                    fc.emit(
+                        Op::GetField {
+                            name: name.clone(),
+                            ic,
+                        },
+                        expr.span,
+                    );
                 }
             }
             ExprKind::Index { obj, index } => {
@@ -1947,7 +2264,12 @@ impl Compiler {
                 // `GetIndex` validates int-ness in its list/str arm at runtime.
                 fc.emit(Op::GetIndex, expr.span);
             }
-            ExprKind::Slice { obj, start, end, step } => {
+            ExprKind::Slice {
+                obj,
+                start,
+                end,
+                step,
+            } => {
                 self.compile_expr(fc, obj)?;
                 // Each omitted component compiles to `nil` (mapped to `None`/default at runtime).
                 for comp in [start, end, step] {
@@ -1972,7 +2294,10 @@ impl Compiler {
                 let parse_call = Expr {
                     kind: ExprKind::Call {
                         callee: Box::new(Expr {
-                            kind: ExprKind::Field { obj: obj.clone(), name: "parse".to_string() },
+                            kind: ExprKind::Field {
+                                obj: obj.clone(),
+                                name: "parse".to_string(),
+                            },
                             span: expr.span,
                         }),
                         args: vec![(**arg).clone()],
@@ -1983,11 +2308,18 @@ impl Compiler {
                 };
                 self.compile_expr(fc, &parse_call)?;
                 let desc = crate::json_decode::from_type(ty, &self.struct_fields, &mut Vec::new())
-                    .map_err(|message| CompileError { message, span: expr.span })?;
+                    .map_err(|message| CompileError {
+                        message,
+                        span: expr.span,
+                    })?;
                 fc.emit(Op::JsonDecode(desc), expr.span);
             }
-            ExprKind::Closure { params, body, .. } => self.compile_closure(fc, params, body, expr.span)?,
-            ExprKind::Match { scrutinee, arms } => self.compile_match_expr(fc, scrutinee, arms, expr.span)?,
+            ExprKind::Closure { params, body, .. } => {
+                self.compile_closure(fc, params, body, expr.span)?
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.compile_match_expr(fc, scrutinee, arms, expr.span)?
+            }
             ExprKind::IfElse { cond, then, els } => self.compile_if_expr(fc, cond, then, els)?,
             ExprKind::Recover(block) => self.compile_recover(fc, block, expr.span)?,
         }
@@ -1997,7 +2329,12 @@ impl Compiler {
     /// `recover: <block>` — install a handler over the block; on the happy path wrap the block's
     /// trailing-expression value in `Ok`, on a caught fault the VM has pushed the message `str` and
     /// we wrap it in `Err`. Both paths leave exactly one `Result` value on the stack.
-    fn compile_recover(&mut self, fc: &mut FnComp, block: &[Stmt], span: Span) -> Result<(), CompileError> {
+    fn compile_recover(
+        &mut self,
+        fc: &mut FnComp,
+        block: &[Stmt],
+        span: Span,
+    ) -> Result<(), CompileError> {
         // The handler target is `done`. Three paths converge there, each leaving one `Result`:
         //   • normal: wrap the trailing value in `Ok`, drop the handler, fall through;
         //   • panic: the VM unwinds, pushes `Err(message)`, and jumps to `done`;
@@ -2025,7 +2362,14 @@ impl Compiler {
         if block_has_defer(block) {
             fc.emit(Op::DrainHandlerDefers, span);
         }
-        fc.emit(Op::NewEnum { variant: "Ok".to_string(), variant_id: crate::vm::op::VID_OK, argc: 1 }, span);
+        fc.emit(
+            Op::NewEnum {
+                variant: "Ok".to_string(),
+                variant_id: crate::vm::op::VID_OK,
+                argc: 1,
+            },
+            span,
+        );
         fc.emit(Op::PopHandler, span);
         let done = fc.here();
         fc.patch_jump_to(push, done);
@@ -2034,7 +2378,13 @@ impl Compiler {
 
     /// Expression-position `match`: like `compile_match`, but each arm body is compiled as an
     /// expression that leaves its value on the stack, so the whole `match` yields one value.
-    fn compile_match_expr(&mut self, fc: &mut FnComp, scrutinee: &Expr, arms: &[MatchExprArm], span: Span) -> Result<(), CompileError> {
+    fn compile_match_expr(
+        &mut self,
+        fc: &mut FnComp,
+        scrutinee: &Expr,
+        arms: &[MatchExprArm],
+        span: Span,
+    ) -> Result<(), CompileError> {
         if self.arms_are_literal(arms.iter().map(|a| &a.pattern)) {
             return self.compile_match_lit(fc, scrutinee, arms, span, |s, fc, body| {
                 s.compile_expr(fc, body) // leaves the arm's value on the stack
@@ -2047,7 +2397,13 @@ impl Compiler {
 
     /// Expression-position `if c: a else: b`: condition, then jump to whichever branch; both
     /// branches leave exactly one value, so one value remains at the join.
-    fn compile_if_expr(&mut self, fc: &mut FnComp, cond: &Expr, then: &Expr, els: &Expr) -> Result<(), CompileError> {
+    fn compile_if_expr(
+        &mut self,
+        fc: &mut FnComp,
+        cond: &Expr,
+        then: &Expr,
+        els: &Expr,
+    ) -> Result<(), CompileError> {
         self.compile_expr(fc, cond)?;
         fc.emit(Op::AsBool, cond.span);
         let skip = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
@@ -2063,12 +2419,20 @@ impl Compiler {
         // A bare nullary *built-in* variant used as a value (`None`) — resolved before any env
         // lookup, exactly like the interpreter. User variants are qualified (handled in the `Field`
         // arm), so only built-ins resolve bare here.
-        if let Some(def) =
-            self.variant_pair(None, name).and_then(|k| self.program.variants.get(&k))
+        if let Some(def) = self
+            .variant_pair(None, name)
+            .and_then(|k| self.program.variants.get(&k))
             && def.arity == 0
         {
             let variant_id = def.variant_id;
-            fc.emit(Op::NewEnum { variant: name.to_string(), variant_id, argc: 0 }, span);
+            fc.emit(
+                Op::NewEnum {
+                    variant: name.to_string(),
+                    variant_id,
+                    argc: 0,
+                },
+                span,
+            );
             return;
         }
         self.emit_load(fc, name, span);
@@ -2077,7 +2441,12 @@ impl Compiler {
     /// `defer <call>` — evaluate the receiver/args now (Go semantics) and register a deferred call
     /// on the frame; the call runs LIFO when the frame exits. Mirrors `compile_call`'s method-vs-value
     /// split: `DeferMethod` for `obj.m(a)`, `DeferCall` for a value callee.
-    fn compile_defer(&mut self, fc: &mut FnComp, target: &DeferTarget, span: Span) -> Result<(), CompileError> {
+    fn compile_defer(
+        &mut self,
+        fc: &mut FnComp,
+        target: &DeferTarget,
+        span: Span,
+    ) -> Result<(), CompileError> {
         let call = match target {
             DeferTarget::Call(call) => call,
             DeferTarget::Block(body) => {
@@ -2132,7 +2501,13 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_call(&mut self, fc: &mut FnComp, callee: &Expr, args: &[Expr], span: Span) -> Result<(), CompileError> {
+    fn compile_call(
+        &mut self,
+        fc: &mut FnComp,
+        callee: &Expr,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<(), CompileError> {
         // Method / module-member call: `obj.name(args)`.
         if let ExprKind::Field { obj, name } = &callee.kind {
             // `Enum.Variant(args)` → variant constructor, mirroring the bare-ident variant path
@@ -2140,13 +2515,23 @@ impl Compiler {
             if let ExprKind::Ident(ename) = &obj.kind
                 && fc.resolve_local(ename).is_none()
                 && !fc.captures(ename)
-                && self.program.variants.contains_key(&(ename.clone(), name.clone()))
+                && self
+                    .program
+                    .variants
+                    .contains_key(&(ename.clone(), name.clone()))
             {
                 for a in args {
                     self.compile_expr(fc, a)?;
                 }
                 let variant_id = self.variant_id_of(Some(ename), name);
-                fc.emit(Op::NewEnum { variant: name.clone(), variant_id, argc: args.len() }, span);
+                fc.emit(
+                    Op::NewEnum {
+                        variant: name.clone(),
+                        variant_id,
+                        argc: args.len(),
+                    },
+                    span,
+                );
                 return Ok(());
             }
             self.compile_expr(fc, obj)?;
@@ -2154,7 +2539,14 @@ impl Compiler {
                 self.compile_expr(fc, a)?;
             }
             let ic = self.next_method_ic();
-            fc.emit(Op::CallMethod { name: name.clone(), argc: args.len(), ic }, span);
+            fc.emit(
+                Op::CallMethod {
+                    name: name.clone(),
+                    argc: args.len(),
+                    ic,
+                },
+                span,
+            );
             return Ok(());
         }
         // Bare-ident callees resolve by name in the interpreter's order:
@@ -2217,12 +2609,22 @@ impl Compiler {
             }
             // A bare *built-in* variant constructor (`Ok(x)`, `Some(x)`) — user variants are qualified
             // (handled in the `Field` arm above), so only built-ins resolve bare here.
-            if let Some(def) = self.variant_pair(None, name).and_then(|k| self.program.variants.get(&k)) {
+            if let Some(def) = self
+                .variant_pair(None, name)
+                .and_then(|k| self.program.variants.get(&k))
+            {
                 let variant_id = def.variant_id;
                 for a in args {
                     self.compile_expr(fc, a)?;
                 }
-                fc.emit(Op::NewEnum { variant: name.clone(), variant_id, argc: args.len() }, span);
+                fc.emit(
+                    Op::NewEnum {
+                        variant: name.clone(),
+                        variant_id,
+                        argc: args.len(),
+                    },
+                    span,
+                );
                 return Ok(());
             }
         }
@@ -2235,7 +2637,13 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_closure(&mut self, fc: &mut FnComp, params: &[crate::ast::Param], body: &Expr, span: Span) -> Result<(), CompileError> {
+    fn compile_closure(
+        &mut self,
+        fc: &mut FnComp,
+        params: &[crate::ast::Param],
+        body: &Expr,
+        span: Span,
+    ) -> Result<(), CompileError> {
         // Snapshot every binding currently visible in the enclosing frame (matches the interpreter
         // capturing all in-scope local frames).
         let entries = fc.snapshot_entries();
@@ -2289,7 +2697,10 @@ impl Compiler {
 /// accumulation into a method call the existing codegen already handles).
 fn method_call_stmt(obj: Expr, method: &str, args: Vec<Expr>, span: Span) -> Stmt {
     let callee = Expr {
-        kind: ExprKind::Field { obj: Box::new(obj), name: method.to_string() },
+        kind: ExprKind::Field {
+            obj: Box::new(obj),
+            name: method.to_string(),
+        },
         span,
     };
     Stmt {
@@ -2368,7 +2779,14 @@ impl MatchArmLike for MatchExprArm {
 
 /// Emit a half-open range test `start <= scrut < end`: two comparisons, each jumping to the next
 /// arm on failure (jumps pushed onto `fails`). Reuses `GtEq`/`Lt` + `JumpIfFalse` (no new opcode).
-fn emit_range_test(fc: &mut FnComp, scrut: usize, start: i64, end: i64, fails: &mut Vec<usize>, span: Span) {
+fn emit_range_test(
+    fc: &mut FnComp,
+    scrut: usize,
+    start: i64,
+    end: i64,
+    fails: &mut Vec<usize>,
+    span: Span,
+) {
     // scrut >= start
     fc.emit(Op::GetLocal(scrut), span);
     fc.emit(Op::ConstInt(start), span);
@@ -2443,7 +2861,8 @@ fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, CompileError
                 let (expr_src, spec_src) = crate::fmtspec::split_spec(&inner);
                 let spec = match spec_src {
                     Some(s) => Some(
-                        crate::fmtspec::parse(s).map_err(|message| CompileError { message, span })?,
+                        crate::fmtspec::parse(s)
+                            .map_err(|message| CompileError { message, span })?,
                     ),
                     None => None,
                 };
@@ -2466,8 +2885,14 @@ fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, CompileError
 }
 
 fn parse_expr_str(src: &str, span: Span) -> Result<Expr, CompileError> {
-    let tokens = lexer::tokenize(src).map_err(|e| CompileError { message: e.to_string(), span })?;
-    let mut expr = parser::parse_expr(tokens).map_err(|e| CompileError { message: e.message, span })?;
+    let tokens = lexer::tokenize(src).map_err(|e| CompileError {
+        message: e.to_string(),
+        span,
+    })?;
+    let mut expr = parser::parse_expr(tokens).map_err(|e| CompileError {
+        message: e.message,
+        span,
+    })?;
     // Fragments bypass the module-wide desugar pass; lower `?.`/`??` carriers here (both engines do).
     crate::desugar::lower_carriers(&mut expr);
     Ok(expr)
@@ -2543,7 +2968,10 @@ fn stmt_has_bare_spawn(s: &Stmt) -> bool {
         // Boundaries: spawns here do not belong to the enclosing implicit nursery.
         StmtKind::Parallel { .. } | StmtKind::Fn(_) => false,
         // Recurse through ordinary control flow.
-        StmtKind::If { branches, else_block } => {
+        StmtKind::If {
+            branches,
+            else_block,
+        } => {
             branches.iter().any(|(_, b)| block_has_bare_spawn(b))
                 || else_block.as_ref().is_some_and(|b| block_has_bare_spawn(b))
         }
@@ -2700,7 +3128,10 @@ impl FnComp {
     /// a fresh slot (later lookups find the newest).
     fn add_local(&mut self, name: String) -> usize {
         let slot = self.slot_count;
-        self.locals.push(LocalVar { name, depth: self.scope_depth });
+        self.locals.push(LocalVar {
+            name,
+            depth: self.scope_depth,
+        });
         self.slot_count += 1;
         if self.slot_count > self.max_slots {
             self.max_slots = self.slot_count;
@@ -2737,14 +3168,20 @@ impl FnComp {
             if l.name.is_empty() || !seen.insert(l.name.clone()) {
                 continue;
             }
-            entries.push(CapEntry { name: l.name.clone(), src: CapSrc::Slot(slot) });
+            entries.push(CapEntry {
+                name: l.name.clone(),
+                src: CapSrc::Slot(slot),
+            });
         }
         // A name not bound as a local here resolves against *this* frame's captured env (this frame
         // is itself a closure). Its enclosing-proto slot is its position in `self.captured_names`
         // (positional captures, lever #3) — stamp it so `MakeClosure` reads `captured[parent_slot]`.
         for (parent_slot, name) in self.captured_names.iter().enumerate() {
             if seen.insert(name.clone()) {
-                entries.push(CapEntry { name: name.clone(), src: CapSrc::Captured(parent_slot as u32) });
+                entries.push(CapEntry {
+                    name: name.clone(),
+                    src: CapSrc::Captured(parent_slot as u32),
+                });
             }
         }
         entries
@@ -2780,7 +3217,11 @@ mod interp_tests {
     #[test]
     fn parse_interpolation_width_cap_is_compile_error() {
         let err = parse_interpolation("{x:>99999999}", sp()).unwrap_err();
-        assert!(err.message.contains("exceeds maximum 4096"), "got: {}", err.message);
+        assert!(
+            err.message.contains("exceeds maximum 4096"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -2839,7 +3280,9 @@ mod capture_layout_tests {
     fn two_captures_get_distinct_slots_in_snapshot_order() {
         // `a` then `b` referenced; snapshot_entries orders innermost locals first (reverse decl).
         // Whatever the order, the two captures must occupy distinct, stable slots 0 and 1.
-        let prog = compile("fn make(a: int, b: int):\n    return fn(x: int) -> int: x + a + b\nmake(1, 2)\n");
+        let prog = compile(
+            "fn make(a: int, b: int):\n    return fn(x: int) -> int: x + a + b\nmake(1, 2)\n",
+        );
         let mut slots = captured_slots(&prog);
         slots.sort_unstable();
         assert_eq!(slots, vec![0, 1], "two captures → slots 0 and 1");
@@ -2849,7 +3292,9 @@ mod capture_layout_tests {
     fn proto_records_capture_names_in_slot_order() {
         // The closure proto carries the captured names in slot order (cold-path metadata, mirrors
         // StructDef.fields). Slot i of capture_names is the name read by GetCaptured(i).
-        let prog = compile("fn make(a: int, b: int):\n    return fn(x: int) -> int: x + a + b\nmake(1, 2)\n");
+        let prog = compile(
+            "fn make(a: int, b: int):\n    return fn(x: int) -> int: x + a + b\nmake(1, 2)\n",
+        );
         let clo = prog
             .protos
             .iter()
@@ -2867,7 +3312,10 @@ mod capture_layout_tests {
         let prog = compile("fn plain(x: int) -> int:\n    return x + 1\nplain(1)\n");
         for p in &prog.protos {
             // Only the closure proto (none here) would be non-empty.
-            assert!(p.capture_names.is_empty(), "plain fn proto has no capture names");
+            assert!(
+                p.capture_names.is_empty(),
+                "plain fn proto has no capture names"
+            );
         }
     }
 }

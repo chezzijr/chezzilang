@@ -56,7 +56,9 @@ impl Stdin {
                 let mut buf = String::new();
                 let n = std::io::stdin()
                     .read_line(&mut buf)
-                    .map_err(|e| HostError { message: e.to_string() })?;
+                    .map_err(|e| HostError {
+                        message: e.to_string(),
+                    })?;
                 if n == 0 {
                     return Ok(None);
                 }
@@ -171,7 +173,9 @@ pub trait Host {
     /// passes bools (the std-module test fixtures / off-heap host) needn't implement it.
     fn arg_bool(&mut self, i: usize) -> Result<bool, HostError> {
         let _ = i;
-        Err(HostError { message: "this host does not support bool arguments".into() })
+        Err(HostError {
+            message: "this host does not support bool arguments".into(),
+        })
     }
     /// `args[i]` as an opaque C-ABI pointer handle (a raw address). Used by the C-ABI FFI (`extern`)
     /// to marshal a Chezzi `ptr` into a C `void*`, and by `std.ffi.is_null`. The default returns a
@@ -179,7 +183,9 @@ pub trait Host {
     /// off-heap host) needn't implement it.
     fn arg_ptr(&mut self, i: usize) -> Result<usize, HostError> {
         let _ = i;
-        Err(HostError { message: "this host does not support pointer arguments".into() })
+        Err(HostError {
+            message: "this host does not support pointer arguments".into(),
+        })
     }
     /// `args[i]` as an owned string; errors if it is not a str.
     fn arg_str(&mut self, i: usize) -> Result<String, HostError>;
@@ -216,11 +222,15 @@ pub type NativeFn = fn(&mut dyn Host) -> Result<NativeRet, HostError>;
 impl HostError {
     /// A missing positional argument (the engine's bounds check failed for index `i`).
     pub fn missing_arg(i: usize) -> Self {
-        HostError { message: format!("missing argument {i}") }
+        HostError {
+            message: format!("missing argument {i}"),
+        }
     }
     /// A wrong-typed argument at index `i`.
     pub fn arg_type(i: usize, want: &str, got: &str) -> Self {
-        HostError { message: format!("argument {i} must be {want}, got {got}") }
+        HostError {
+            message: format!("argument {i} must be {want}, got {got}"),
+        }
     }
 }
 
@@ -402,7 +412,10 @@ mod tests {
 
     #[test]
     fn native_name_recognizes_the_three_native_modules() {
-        assert_eq!(native_name(&["std".into(), "math".into()]), Some("std.math"));
+        assert_eq!(
+            native_name(&["std".into(), "math".into()]),
+            Some("std.math")
+        );
         assert_eq!(native_name(&["std".into(), "io".into()]), Some("std.io"));
         assert_eq!(native_name(&["std".into(), "os".into()]), Some("std.os"));
         // str is a real Chezzi file, not virtual.
@@ -416,7 +429,17 @@ mod tests {
     /// dirty pool offloads): `std.io.read_file`/`write_file`, all of `std.fs`, and `std.time.sleep_ms`.
     #[test]
     fn is_blocking_flags_the_offloadable_set() {
-        for name in ["read_file", "write_file", "list_dir", "exists", "is_file", "is_dir", "size", "glob", "sleep_ms"] {
+        for name in [
+            "read_file",
+            "write_file",
+            "list_dir",
+            "exists",
+            "is_file",
+            "is_dir",
+            "size",
+            "glob",
+            "sleep_ms",
+        ] {
             assert!(is_blocking(name), "{name} should be blocking");
         }
     }
@@ -459,7 +482,17 @@ mod tests {
     #[test]
     fn native_member_names_are_unique_across_modules() {
         use std::collections::HashMap;
-        let modules = ["std.math", "std.io", "std.os", "std.process", "std.fs", "std.time", "std.regex", "std.request", "std.ffi"];
+        let modules = [
+            "std.math",
+            "std.io",
+            "std.os",
+            "std.process",
+            "std.fs",
+            "std.time",
+            "std.regex",
+            "std.request",
+            "std.ffi",
+        ];
         let mut seen: HashMap<&str, &str> = HashMap::new();
         for module in modules {
             for (name, _) in native_members(module) {
@@ -478,7 +511,16 @@ mod tests {
     /// cheap. Mislabeling a CPU/pure fn as blocking would needlessly bounce it through the pool.
     #[test]
     fn is_blocking_excludes_fast_and_host_io_natives() {
-        for name in ["print", "eprint", "read_line", "now", "monotonic", "format", "abs", "sqrt"] {
+        for name in [
+            "print",
+            "eprint",
+            "read_line",
+            "now",
+            "monotonic",
+            "format",
+            "abs",
+            "sqrt",
+        ] {
             assert!(!is_blocking(name), "{name} should not be blocking");
         }
     }

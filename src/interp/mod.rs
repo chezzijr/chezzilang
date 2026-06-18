@@ -2,8 +2,9 @@
 //! Chezzi before the bytecode VM (M5). Single-file programs run here.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl, LitPattern,
-    MatchArm, MatchExprArm, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp, WaitArm, WaitTarget,
+    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl,
+    LitPattern, MatchArm, MatchExprArm, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp,
+    WaitArm, WaitTarget,
 };
 use crate::{lexer, parser};
 
@@ -47,10 +48,18 @@ pub struct RunError {
 
 impl RunError {
     fn from_error(e: RuntimeError, trace: Vec<TraceFrame>) -> Self {
-        RunError { message: e.message, span: e.span, trace }
+        RunError {
+            message: e.message,
+            span: e.span,
+            trace,
+        }
     }
     fn plain(e: RuntimeError) -> Self {
-        RunError { message: e.message, span: e.span, trace: Vec::new() }
+        RunError {
+            message: e.message,
+            span: e.span,
+            trace: Vec::new(),
+        }
     }
 }
 
@@ -65,7 +74,10 @@ impl std::fmt::Display for RunError {
 pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
     let mut s = format!("runtime error ({span}): {message}");
     for frame in trace {
-        s.push_str(&format!("\n  at {} (called at {})", frame.function, frame.span));
+        s.push_str(&format!(
+            "\n  at {} (called at {})",
+            frame.function, frame.span
+        ));
     }
     s
 }
@@ -214,7 +226,8 @@ struct Interp {
     /// share a variant name. Built-in `Result`/`Option` variants register under those enum names.
     variants: std::collections::HashMap<(String, String), VariantDef>,
     /// Evaluated module namespaces, keyed by module id (run-once cache for a multi-file program).
-    namespaces: std::collections::HashMap<crate::resolver::ModuleId, std::rc::Rc<value::ModuleNamespace>>,
+    namespaces:
+        std::collections::HashMap<crate::resolver::ModuleId, std::rc::Rc<value::ModuleNamespace>>,
     /// Set by the `?` operator when it hits `Err`/`None`: the value to early-return from the
     /// enclosing function. While set, an `Err(RuntimeError)` carries the unwind up to the nearest
     /// call boundary (`call`/`call_closure`), which converts it into that function's return value.
@@ -261,9 +274,18 @@ struct Interp {
 /// arg-evaluation timing); the body runs at the `parallel:` dedent. Mirrors [`Deferred`].
 enum Task {
     /// `spawn f(args)` — invoke the callable value with the (already deep-copied) args.
-    Call { callee: Value, args: Vec<Value>, span: Span },
+    Call {
+        callee: Value,
+        args: Vec<Value>,
+        span: Span,
+    },
     /// `spawn recv.name(args)` — dispatch the named method on the (deep-copied) receiver.
-    Method { recv: Value, name: String, args: Vec<Value>, span: Span },
+    Method {
+        recv: Value,
+        name: String,
+        args: Vec<Value>,
+        span: Span,
+    },
     /// `spawn:` block — run the statement body against a deep-copied snapshot of the captured
     /// locals plus the home module globals.
     Block {
@@ -278,12 +300,26 @@ enum Task {
 /// exit via [`Interp::run_deferred`].
 enum Deferred {
     /// `defer f(args)` — invoke the callable value with the args.
-    Call { callee: Value, args: Vec<Value>, span: Span },
+    Call {
+        callee: Value,
+        args: Vec<Value>,
+        span: Span,
+    },
     /// `defer recv.name(args)` — dispatch the named method on the receiver.
-    Method { recv: Value, name: String, args: Vec<Value>, span: Span },
+    Method {
+        recv: Value,
+        name: String,
+        args: Vec<Value>,
+        span: Span,
+    },
     /// `defer:` block — run the body in its own frame against the locals snapshotted (by value,
     /// shallow — sharing heap handles, matching the VM's `MakeClosure` capture) at the defer point.
-    Block { body: Block, locals: Vec<std::collections::HashMap<String, Value>>, home: value::ModEnv, span: Span },
+    Block {
+        body: Block,
+        locals: Vec<std::collections::HashMap<String, Value>>,
+        home: value::ModEnv,
+        span: Span,
+    },
 }
 
 /// Maximum user-function call depth. Bounds recursion well within the dedicated interpreter
@@ -347,8 +383,9 @@ impl Interp {
             ExprKind::Ident(name) => {
                 // A bare nullary *built-in* variant used as a value (`None`). User variants are
                 // qualified (the `Field` arm), so only built-ins resolve bare here.
-                if let Some(def) =
-                    variant_pair(None, name).and_then(|k| self.variants.get(&k)).filter(|d| d.arity == 0)
+                if let Some(def) = variant_pair(None, name)
+                    .and_then(|k| self.variants.get(&k))
+                    .filter(|d| d.arity == 0)
                 {
                     return Ok(Value::Enum {
                         ty: def.enum_name.clone(),
@@ -398,8 +435,10 @@ impl Interp {
                 // type's `compare(self, other) -> int` method (the `Comparable` protocol). The
                 // checker has already verified conformance. Equality stays structural (handled by
                 // `eval_binary`); only ordering is overloaded.
-                if matches!(op, BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq)
-                    && matches!((&l, &r), (Value::Struct { .. }, Value::Struct { .. }))
+                if matches!(
+                    op,
+                    BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
+                ) && matches!((&l, &r), (Value::Struct { .. }, Value::Struct { .. }))
                 {
                     return self.struct_ordering(*op, l, r, expr.span);
                 }
@@ -434,22 +473,35 @@ impl Interp {
                     let k = self.eval(k_expr)?;
                     let v = self.eval(v_expr)?;
                     let hk = self.hash_value(&k, expr.span)?;
-                    match map.candidates(hk).iter().copied().find(|&p| values_equal(&map.entries[p].1, &k)) {
+                    match map
+                        .candidates(hk)
+                        .iter()
+                        .copied()
+                        .find(|&p| values_equal(&map.entries[p].1, &k))
+                    {
                         Some(i) => map.entries[i].2 = v,
                         None => map.push(hk, k, v),
                     }
                 }
                 Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map))))
             }
-            ExprKind::Comprehension { kind, key, elem, clauses } => {
-                self.eval_comprehension(*kind, key.as_deref(), elem, clauses, expr.span)
-            }
+            ExprKind::Comprehension {
+                kind,
+                key,
+                elem,
+                clauses,
+            } => self.eval_comprehension(*kind, key.as_deref(), elem, clauses, expr.span),
             ExprKind::Set(elems) => {
                 let mut set = SetData::default();
                 for e in elems {
                     let v = self.eval(e)?;
                     let hv = self.hash_value(&v, expr.span)?;
-                    if !set.candidates(hv).iter().copied().any(|p| values_equal(&set.entries[p].1, &v)) {
+                    if !set
+                        .candidates(hv)
+                        .iter()
+                        .copied()
+                        .any(|p| values_equal(&set.entries[p].1, &v))
+                    {
                         set.push(hv, v);
                     }
                 }
@@ -480,13 +532,18 @@ impl Interp {
                 let target = self.eval(obj)?;
                 match &target {
                     // `t.0`, `t.1`, … — tuple element access. The field name is the element index.
-                    Value::Tuple(items) => match name.parse::<usize>().ok().and_then(|i| items.get(i)) {
-                        Some(v) => Ok(v.clone()),
-                        None => Err(RuntimeError {
-                            message: format!("tuple has no element '.{name}' (len {})", items.len()),
-                            span: expr.span,
-                        }),
-                    },
+                    Value::Tuple(items) => {
+                        match name.parse::<usize>().ok().and_then(|i| items.get(i)) {
+                            Some(v) => Ok(v.clone()),
+                            None => Err(RuntimeError {
+                                message: format!(
+                                    "tuple has no element '.{name}' (len {})",
+                                    items.len()
+                                ),
+                                span: expr.span,
+                            }),
+                        }
+                    }
                     Value::Struct { fields, .. } => fields
                         .borrow()
                         .iter()
@@ -497,10 +554,15 @@ impl Interp {
                             span: expr.span,
                         }),
                     Value::Module(ns) => {
-                        ns.members.0.borrow().get(name).cloned().ok_or_else(|| RuntimeError {
-                            message: format!("module '{}' has no member '{name}'", ns.name),
-                            span: expr.span,
-                        })
+                        ns.members
+                            .0
+                            .borrow()
+                            .get(name)
+                            .cloned()
+                            .ok_or_else(|| RuntimeError {
+                                message: format!("module '{}' has no member '{name}'", ns.name),
+                                span: expr.span,
+                            })
                     }
                     other => Err(RuntimeError {
                         message: format!("cannot read field '{name}' of {}", other.type_name()),
@@ -591,7 +653,12 @@ impl Interp {
                     }),
                 }
             }
-            ExprKind::Slice { obj, start, end, step } => self.eval_slice(
+            ExprKind::Slice {
+                obj,
+                start,
+                end,
+                step,
+            } => self.eval_slice(
                 obj,
                 start.as_deref(),
                 end.as_deref(),
@@ -614,10 +681,13 @@ impl Interp {
                 match &v {
                     // Unwrap the success case. Gate on the *type* (`Result`/`Option`), not the bare
                     // variant name, so a user enum that shadows `Ok`/`Some` isn't unwrapped by `?`.
-                    Value::Enum { ty, variant, payload }
-                        if (ty.as_ref() == "Result" && variant.as_ref() == "Ok"
-                            || ty.as_ref() == "Option" && variant.as_ref() == "Some")
-                            && payload.len() == 1 =>
+                    Value::Enum {
+                        ty,
+                        variant,
+                        payload,
+                    } if (ty.as_ref() == "Result" && variant.as_ref() == "Ok"
+                        || ty.as_ref() == "Option" && variant.as_ref() == "Some")
+                        && payload.len() == 1 =>
                     {
                         Ok(payload[0].clone())
                     }
@@ -633,7 +703,10 @@ impl Interp {
                         })
                     }
                     other => Err(RuntimeError {
-                        message: format!("'?' expects Result or Option, found {}", other.type_name()),
+                        message: format!(
+                            "'?' expects Result or Option, found {}",
+                            other.type_name()
+                        ),
                         span: expr.span,
                     }),
                 }
@@ -643,7 +716,10 @@ impl Interp {
                 let parse_call = Expr {
                     kind: ExprKind::Call {
                         callee: Box::new(Expr {
-                            kind: ExprKind::Field { obj: obj.clone(), name: "parse".to_string() },
+                            kind: ExprKind::Field {
+                                obj: obj.clone(),
+                                name: "parse".to_string(),
+                            },
                             span: expr.span,
                         }),
                         args: vec![(**arg).clone()],
@@ -654,10 +730,18 @@ impl Interp {
                 };
                 let res = self.eval(&parse_call)?;
                 let desc = crate::json_decode::from_type(ty, &self.struct_fields, &mut Vec::new())
-                    .map_err(|message| RuntimeError { message, span: expr.span })?;
+                    .map_err(|message| RuntimeError {
+                        message,
+                        span: expr.span,
+                    })?;
                 match &res {
-                    Value::Enum { ty: rty, variant, payload }
-                        if rty.as_ref() == "Result" && variant.as_ref() == "Ok" && payload.len() == 1 =>
+                    Value::Enum {
+                        ty: rty,
+                        variant,
+                        payload,
+                    } if rty.as_ref() == "Result"
+                        && variant.as_ref() == "Ok"
+                        && payload.len() == 1 =>
                     {
                         let jv = payload[0].clone();
                         match self.coerce_json(&jv, &desc, "$") {
@@ -666,11 +750,9 @@ impl Interp {
                         }
                     }
                     // Parse error: the Result Err(str) is already a valid Result[T].
-                    Value::Enum { ty: rty, variant, .. }
-                        if rty.as_ref() == "Result" && variant.as_ref() == "Err" =>
-                    {
-                        Ok(res)
-                    }
+                    Value::Enum {
+                        ty: rty, variant, ..
+                    } if rty.as_ref() == "Result" && variant.as_ref() == "Err" => Ok(res),
                     _ => Err(RuntimeError {
                         message: "decode: parse did not return a Result".to_string(),
                         span: expr.span,
@@ -693,7 +775,12 @@ impl Interp {
         path: &str,
     ) -> Result<Value, String> {
         use crate::json_decode::TypeDescriptor as D;
-        let Value::Enum { ty, variant, payload } = jv else {
+        let Value::Enum {
+            ty,
+            variant,
+            payload,
+        } = jv
+        else {
             return Err(format!("decode: expected a JSON value at {path}"));
         };
         let _ = ty;
@@ -707,7 +794,9 @@ impl Interp {
                 }
                 Ok(Value::Int(f as i64))
             }
-            D::Float => Ok(Value::Float(json_num(variant, payload).ok_or_else(|| mismatch("float"))?)),
+            D::Float => Ok(Value::Float(
+                json_num(variant, payload).ok_or_else(|| mismatch("float"))?,
+            )),
             D::Bool => match (variant.as_ref(), payload.first()) {
                 ("Bool", Some(Value::Bool(b))) => Ok(Value::Bool(*b)),
                 _ => Err(mismatch("bool")),
@@ -720,7 +809,11 @@ impl Interp {
                 if variant.as_ref() == "Null" {
                     Ok(enum_val("Option", "None", Vec::new()))
                 } else {
-                    Ok(enum_val("Option", "Some", vec![self.coerce_json(jv, inner, path)?]))
+                    Ok(enum_val(
+                        "Option",
+                        "Some",
+                        vec![self.coerce_json(jv, inner, path)?],
+                    ))
                 }
             }
             D::List(inner) => {
@@ -752,7 +845,11 @@ impl Interp {
                         _ => String::new(),
                     };
                     // str keys are unchanged → reuse their cached hash.
-                    out.push(*hk, k.clone(), self.coerce_json(v, inner, &format!("{path}.{key}"))?);
+                    out.push(
+                        *hk,
+                        k.clone(),
+                        self.coerce_json(v, inner, &format!("{path}.{key}"))?,
+                    );
                 }
                 Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(out))))
             }
@@ -766,7 +863,10 @@ impl Interp {
                 let src = entries.borrow().clone();
                 let mut field_vals: Vec<(String, Value)> = Vec::with_capacity(fields.len());
                 for (fname, fdesc) in fields {
-                    let found = src.entries.iter().find(|(_, k, _)| matches!(k, Value::Str(s) if s.as_ref() == fname));
+                    let found = src
+                        .entries
+                        .iter()
+                        .find(|(_, k, _)| matches!(k, Value::Str(s) if s.as_ref() == fname));
                     let fpath = format!("{path}.{fname}");
                     let v = match found {
                         Some((_, _, jval)) => self.coerce_json(jval, fdesc, &fpath)?,
@@ -833,16 +933,32 @@ impl Interp {
                             // Scalars map straight to a FmtArg; everything else is rendered via
                             // `stringify` first then formatted as a plain string (fill/align/width).
                             match &value {
-                                Value::Int(n) => crate::fmtspec::apply(&spec, crate::fmtspec::FmtArg::Int(*n), &mut out)
-                                    .map_err(|message| RuntimeError { message, span })?,
-                                Value::Float(x) => crate::fmtspec::apply(&spec, crate::fmtspec::FmtArg::Float(*x), &mut out)
-                                    .map_err(|message| RuntimeError { message, span })?,
-                                Value::Str(s) => crate::fmtspec::apply(&spec, crate::fmtspec::FmtArg::Str(s), &mut out)
-                                    .map_err(|message| RuntimeError { message, span })?,
+                                Value::Int(n) => crate::fmtspec::apply(
+                                    &spec,
+                                    crate::fmtspec::FmtArg::Int(*n),
+                                    &mut out,
+                                )
+                                .map_err(|message| RuntimeError { message, span })?,
+                                Value::Float(x) => crate::fmtspec::apply(
+                                    &spec,
+                                    crate::fmtspec::FmtArg::Float(*x),
+                                    &mut out,
+                                )
+                                .map_err(|message| RuntimeError { message, span })?,
+                                Value::Str(s) => crate::fmtspec::apply(
+                                    &spec,
+                                    crate::fmtspec::FmtArg::Str(s),
+                                    &mut out,
+                                )
+                                .map_err(|message| RuntimeError { message, span })?,
                                 _ => {
                                     let rendered = self.stringify(&value, span, 0)?;
-                                    crate::fmtspec::apply(&spec, crate::fmtspec::FmtArg::Other(&rendered), &mut out)
-                                        .map_err(|message| RuntimeError { message, span })?;
+                                    crate::fmtspec::apply(
+                                        &spec,
+                                        crate::fmtspec::FmtArg::Other(&rendered),
+                                        &mut out,
+                                    )
+                                    .map_err(|message| RuntimeError { message, span })?;
                                 }
                             }
                         }
@@ -850,7 +966,8 @@ impl Interp {
                 }
                 '}' => {
                     return Err(RuntimeError {
-                        message: "unmatched '}' in string (use '}}' for a literal brace)".to_string(),
+                        message: "unmatched '}' in string (use '}}' for a literal brace)"
+                            .to_string(),
                         span,
                     });
                 }
@@ -874,9 +991,15 @@ impl Interp {
                 && self.env.get_local(ename).is_none()
                 && self.variants.contains_key(&(ename.clone(), name.clone()))
             {
-                let arg_vals =
-                    args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
-                let def = self.variants.get(&(ename.clone(), name.clone())).cloned().unwrap();
+                let arg_vals = args
+                    .iter()
+                    .map(|a| self.eval(a))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let def = self
+                    .variants
+                    .get(&(ename.clone(), name.clone()))
+                    .cloned()
+                    .unwrap();
                 if arg_vals.len() != def.arity {
                     return Err(RuntimeError {
                         message: format!(
@@ -957,30 +1080,43 @@ impl Interp {
             if name == "Shared" {
                 if arg_vals.len() != 1 {
                     return Err(RuntimeError {
-                        message: format!("Shared(v) takes exactly one argument, got {}", arg_vals.len()),
+                        message: format!(
+                            "Shared(v) takes exactly one argument, got {}",
+                            arg_vals.len()
+                        ),
                         span,
                     });
                 }
                 let init = deep_clone(&arg_vals[0]);
-                return Ok(Value::Shared(std::rc::Rc::new(std::cell::RefCell::new(init))));
+                return Ok(Value::Shared(std::rc::Rc::new(std::cell::RefCell::new(
+                    init,
+                ))));
             }
             // `Atomic(v)` — a fresh cross-task atomic box owning a copy of `v` (value-first, like `Shared`).
             if name == "Atomic" {
                 if arg_vals.len() != 1 {
                     return Err(RuntimeError {
-                        message: format!("Atomic(v) takes exactly one argument, got {}", arg_vals.len()),
+                        message: format!(
+                            "Atomic(v) takes exactly one argument, got {}",
+                            arg_vals.len()
+                        ),
                         span,
                     });
                 }
                 let init = deep_clone(&arg_vals[0]);
-                return Ok(Value::Atomic(std::rc::Rc::new(std::cell::RefCell::new(init))));
+                return Ok(Value::Atomic(std::rc::Rc::new(std::cell::RefCell::new(
+                    init,
+                ))));
             }
             // `timer(ms)` — a one-shot timeout channel. The interp is single-threaded, so the value is
             // synthesised on `recv` (inline-sleep to the deadline); here we only stamp the deadline.
             if name == "timer" {
                 if arg_vals.len() != 1 {
                     return Err(RuntimeError {
-                        message: format!("timer(ms) takes exactly one argument, got {}", arg_vals.len()),
+                        message: format!(
+                            "timer(ms) takes exactly one argument, got {}",
+                            arg_vals.len()
+                        ),
                         span,
                     });
                 }
@@ -995,10 +1131,14 @@ impl Interp {
                 };
                 let deadline = std::time::Instant::now()
                     .checked_add(std::time::Duration::from_millis(ms))
-                    .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365));
+                    .unwrap_or_else(|| {
+                        std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365)
+                    });
                 let mut state = value::ChanState::new();
                 state.timer = Some(deadline);
-                return Ok(Value::Channel(std::rc::Rc::new(std::cell::RefCell::new(state))));
+                return Ok(Value::Channel(std::rc::Rc::new(std::cell::RefCell::new(
+                    state,
+                ))));
             }
             // `Executor()` (C5 escape hatch) — a fresh, empty, explicitly-owned work queue.
             if name == "Executor" {
@@ -1021,7 +1161,10 @@ impl Interp {
             }
             // A bare *built-in* variant constructor (`Ok(x)`, `Some(x)`) — user variants are qualified
             // (the `Field` arm above), so only built-ins resolve bare here.
-            if let Some(def) = variant_pair(None, name).and_then(|k| self.variants.get(&k)).cloned() {
+            if let Some(def) = variant_pair(None, name)
+                .and_then(|k| self.variants.get(&k))
+                .cloned()
+            {
                 if arg_vals.len() != def.arity {
                     return Err(RuntimeError {
                         message: format!(
@@ -1046,7 +1189,12 @@ impl Interp {
     }
 
     /// Dispatch an already-evaluated callable value (function or closure) on evaluated args.
-    fn call_value(&mut self, callee: Value, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+    fn call_value(
+        &mut self,
+        callee: Value,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         match callee {
             Value::Func(decl, home) => self.call(&decl, &home, args, span),
             Value::Closure(clo) => self.call_closure(&clo, args, span),
@@ -1073,7 +1221,12 @@ impl Interp {
                     .iter()
                     .map(|frame| frame.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                     .collect();
-                Deferred::Block { body: body.clone(), locals, home: self.env.globals_rc(), span }
+                Deferred::Block {
+                    body: body.clone(),
+                    locals,
+                    home: self.env.globals_rc(),
+                    span,
+                }
             }
             DeferTarget::Call(call) => {
                 let ExprKind::Call { callee, args, .. } = &call.kind else {
@@ -1082,13 +1235,25 @@ impl Interp {
                         span,
                     });
                 };
-                let arg_vals = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+                let arg_vals = args
+                    .iter()
+                    .map(|a| self.eval(a))
+                    .collect::<Result<Vec<_>, _>>()?;
                 if let ExprKind::Field { obj, name } = &callee.kind {
                     let recv = self.eval(obj)?;
-                    Deferred::Method { recv, name: name.clone(), args: arg_vals, span: call.span }
+                    Deferred::Method {
+                        recv,
+                        name: name.clone(),
+                        args: arg_vals,
+                        span: call.span,
+                    }
                 } else {
                     let callee_val = self.eval(callee)?;
-                    Deferred::Call { callee: callee_val, args: arg_vals, span: call.span }
+                    Deferred::Call {
+                        callee: callee_val,
+                        args: arg_vals,
+                        span: call.span,
+                    }
                 }
             }
         };
@@ -1122,9 +1287,12 @@ impl Interp {
                 Value::Channel(q) => chans.push(q),
                 other => {
                     return Err(RuntimeError {
-                        message: format!("a wait arm must recv from a Channel, found {}", other.type_name()),
+                        message: format!(
+                            "a wait arm must recv from a Channel, found {}",
+                            other.type_name()
+                        ),
                         span: arm.chan.span,
-                    })
+                    });
                 }
             }
         }
@@ -1173,7 +1341,10 @@ impl Interp {
         // 5. No `else`, no live timer: every arm closed+empty faults distinctly; otherwise the
         //    sequential `deadlock` fault (the interp cannot block waiting for a producer — like `recv`).
         if all_closed {
-            return Err(RuntimeError { message: "wait: all channels closed".to_string(), span });
+            return Err(RuntimeError {
+                message: "wait: all channels closed".to_string(),
+                span,
+            });
         }
         Err(RuntimeError {
             message: "wait on channels that are all empty: deadlock — nothing is queued and the \
@@ -1186,7 +1357,12 @@ impl Interp {
 
     /// Run a chosen `wait` arm: deliver `val` per the arm's target in a fresh arm-local scope, then
     /// execute the arm body in that scope.
-    fn run_wait_arm(&mut self, arm: &WaitArm, val: Value, span: Span) -> Result<Flow, RuntimeError> {
+    fn run_wait_arm(
+        &mut self,
+        arm: &WaitArm,
+        val: Value,
+        span: Span,
+    ) -> Result<Flow, RuntimeError> {
         self.env.push();
         let r = match &arm.target {
             WaitTarget::Bind(name) => {
@@ -1199,7 +1375,10 @@ impl Interp {
                 // mutation) match a plain `target = recv()` exactly. The received value is delivered
                 // through a reserved, un-lexable temp binding (no user identifier can collide).
                 self.env.define(WAIT_RECV_TMP, val);
-                let value_expr = Expr { kind: ExprKind::Ident(WAIT_RECV_TMP.to_string()), span };
+                let value_expr = Expr {
+                    kind: ExprKind::Ident(WAIT_RECV_TMP.to_string()),
+                    span,
+                };
                 match self.exec_assign(target, AssignOp::Eq, &value_expr, span) {
                     Ok(()) => self.exec_block(&arm.body),
                     Err(e) => Err(e),
@@ -1221,10 +1400,14 @@ impl Interp {
         // started sibling reaches under B3.4), and ONE report line is written to stdout — byte-identical
         // to the VM's `drain_escaped_nursery`. Only the NORMAL fall-through runs the queued tasks.
         let escaped = body_result.is_err()
-            || matches!(body_result, Ok(Flow::Return(_)) | Ok(Flow::Break) | Ok(Flow::Continue));
+            || matches!(
+                body_result,
+                Ok(Flow::Return(_)) | Ok(Flow::Break) | Ok(Flow::Continue)
+            );
         if escaped {
             if !tasks.is_empty() {
-                self.out.push_str(&crate::runtime::pending_cancel_report(tasks.len()));
+                self.out
+                    .push_str(&crate::runtime::pending_cancel_report(tasks.len()));
             }
             return body_result;
         }
@@ -1270,7 +1453,8 @@ impl Interp {
             }
             self.propagating = saved_prop;
         } else if !tasks.is_empty() {
-            self.out.push_str(&crate::runtime::pending_cancel_report(tasks.len()));
+            self.out
+                .push_str(&crate::runtime::pending_cancel_report(tasks.len()));
         }
         body_result
     }
@@ -1296,14 +1480,23 @@ impl Interp {
                         .iter()
                         .map(|a| self.eval(a).map(|v| deep_clone(&v)))
                         .collect::<Result<Vec<_>, _>>()?;
-                    Task::Method { recv, name: name.clone(), args: arg_vals, span: call.span }
+                    Task::Method {
+                        recv,
+                        name: name.clone(),
+                        args: arg_vals,
+                        span: call.span,
+                    }
                 } else {
                     let callee_val = self.eval(callee)?;
                     let arg_vals = args
                         .iter()
                         .map(|a| self.eval(a).map(|v| deep_clone(&v)))
                         .collect::<Result<Vec<_>, _>>()?;
-                    Task::Call { callee: callee_val, args: arg_vals, span: call.span }
+                    Task::Call {
+                        callee: callee_val,
+                        args: arg_vals,
+                        span: call.span,
+                    }
                 }
             }
             SpawnTarget::Block(body) => {
@@ -1314,9 +1507,19 @@ impl Interp {
                     .env
                     .snapshot_locals()
                     .iter()
-                    .map(|frame| frame.iter().map(|(k, v)| (k.clone(), deep_clone(v))).collect())
+                    .map(|frame| {
+                        frame
+                            .iter()
+                            .map(|(k, v)| (k.clone(), deep_clone(v)))
+                            .collect()
+                    })
                     .collect();
-                Task::Block { body: body.clone(), locals, home: self.env.globals_rc(), span }
+                Task::Block {
+                    body: body.clone(),
+                    locals,
+                    home: self.env.globals_rc(),
+                    span,
+                }
             }
         };
         match self.nurseries.last_mut() {
@@ -1336,12 +1539,18 @@ impl Interp {
     fn run_task(&mut self, task: Task) -> Result<(), RuntimeError> {
         match task {
             Task::Call { callee, args, span } => self.call_value(callee, args, span).map(|_| ()),
-            Task::Method { recv, name, args, span } => {
-                self.dispatch_method(recv, &name, args, span).map(|_| ())
-            }
-            Task::Block { body, locals, home, span } => {
-                self.run_block_task("<spawned task>", &body, locals, home, span)
-            }
+            Task::Method {
+                recv,
+                name,
+                args,
+                span,
+            } => self.dispatch_method(recv, &name, args, span).map(|_| ()),
+            Task::Block {
+                body,
+                locals,
+                home,
+                span,
+            } => self.run_block_task("<spawned task>", &body, locals, home, span),
         }
     }
 
@@ -1357,7 +1566,10 @@ impl Interp {
     ) -> Result<(), RuntimeError> {
         self.enter_call(span)?;
         self.deferred.push(Vec::new());
-        self.call_stack.push(TraceFrame { function: name.to_string(), span });
+        self.call_stack.push(TraceFrame {
+            function: name.to_string(),
+            span,
+        });
         let saved_globals = self.env.swap_globals(home);
         let saved = self.env.swap_locals(locals);
         // M-C: a `spawn:` block (or deferred block) is its own function body — a nested bare `spawn`
@@ -1367,7 +1579,11 @@ impl Interp {
             self.nurseries.push(Vec::new());
         }
         let result = self.exec_block_inner(body);
-        let result = if implicit { self.leave_implicit_nursery(result) } else { result };
+        let result = if implicit {
+            self.leave_implicit_nursery(result)
+        } else {
+            result
+        };
         let outcome = match self.finish_frame(saved, saved_globals) {
             Err(e) => Err(e),
             // A `?` short-circuit inside the block sets `propagating`, which `finish_frame` surfaces
@@ -1394,10 +1610,18 @@ impl Interp {
             let saved_prop = self.propagating.take();
             let r = match d {
                 Deferred::Call { callee, args, span } => self.call_value(callee, args, span),
-                Deferred::Method { recv, name, args, span } => {
-                    self.dispatch_method(recv, &name, args, span)
-                }
-                Deferred::Block { body, locals, home, span } => self
+                Deferred::Method {
+                    recv,
+                    name,
+                    args,
+                    span,
+                } => self.dispatch_method(recv, &name, args, span),
+                Deferred::Block {
+                    body,
+                    locals,
+                    home,
+                    span,
+                } => self
                     .run_block_task("<deferred block>", &body, locals, home, span)
                     .map(|_| Value::Nil),
             };
@@ -1431,7 +1655,10 @@ impl Interp {
             cfg: &mut self.host,
             exit: &mut self.pending_exit,
         };
-        let ret = func(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
+        let ret = func(&mut host).map_err(|e| RuntimeError {
+            message: e.message,
+            span,
+        })?;
         Ok(lower_native(ret))
     }
 
@@ -1463,7 +1690,10 @@ impl Interp {
             cfg: &mut self.host,
             exit: &mut self.pending_exit,
         };
-        let ret = cffi.call(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
+        let ret = cffi.call(&mut host).map_err(|e| RuntimeError {
+            message: e.message,
+            span,
+        })?;
         Ok(lower_native(ret))
     }
 
@@ -1493,7 +1723,10 @@ impl Interp {
         new_locals.push(frame);
         self.enter_call(span)?;
         self.deferred.push(Vec::new());
-        self.call_stack.push(TraceFrame { function: "<closure>".to_string(), span });
+        self.call_stack.push(TraceFrame {
+            function: "<closure>".to_string(),
+            span,
+        });
         let saved_globals = self.env.swap_globals(clo.home.clone());
         let saved = self.env.swap_locals(new_locals);
         let result = self.eval(&clo.body);
@@ -1659,7 +1892,10 @@ impl Interp {
         // interp matches the VM, which evaluates call operands (bytecode) before the `CallMethod`
         // op. Without this, `(5).frob(1 / 0)` would error on the receiver type here while the VM
         // errors on the argument, breaking interp/VM parity (caught by the parity suite).
-        let arg_vals = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+        let arg_vals = args
+            .iter()
+            .map(|a| self.eval(a))
+            .collect::<Result<Vec<_>, _>>()?;
         self.dispatch_method(receiver, method, arg_vals, span)
     }
 
@@ -1688,7 +1924,10 @@ impl Interp {
         // (idempotent `None` past the end) and `.iter()` returns self. Interior-mutable via `borrow_mut`.
         if let Value::Iter(cur) = &receiver {
             if !arg_vals.is_empty() {
-                return Err(RuntimeError { message: format!("a cursor's '{method}' takes no arguments"), span });
+                return Err(RuntimeError {
+                    message: format!("a cursor's '{method}' takes no arguments"),
+                    span,
+                });
             }
             return match method {
                 "iter" => Ok(receiver.clone()), // idempotent
@@ -1702,7 +1941,10 @@ impl Interp {
                         Ok(enum_val("Option", "None", vec![]))
                     }
                 }
-                _ => Err(RuntimeError { message: format!("a cursor has no method '{method}' (only `next()`/`iter()`)"), span }),
+                _ => Err(RuntimeError {
+                    message: format!("a cursor has no method '{method}' (only `next()`/`iter()`)"),
+                    span,
+                }),
             };
         }
         // `.iter()` on a built-in collection → a FRESH cursor SNAPSHOTTING current contents in the
@@ -1712,17 +1954,27 @@ impl Interp {
             && arg_vals.is_empty()
             && matches!(
                 receiver,
-                Value::List(_) | Value::Set(_) | Value::Map(_) | Value::Str(_) | Value::Bytes(_) | Value::ByteArray(_)
+                Value::List(_)
+                    | Value::Set(_)
+                    | Value::Map(_)
+                    | Value::Str(_)
+                    | Value::Bytes(_)
+                    | Value::ByteArray(_)
             )
         {
             let rows = iter_rows_from_value(&receiver, 1, span)?;
             let items: Vec<Value> = rows.into_iter().map(|mut r| r.remove(0)).collect();
-            return Ok(Value::Iter(std::rc::Rc::new(std::cell::RefCell::new(value::IterCursor { items, pos: 0 }))));
+            return Ok(Value::Iter(std::rc::Rc::new(std::cell::RefCell::new(
+                value::IterCursor { items, pos: 0 },
+            ))));
         }
         // Higher-order list methods call a Chezzi function value per element, so they need the
         // interpreter handle (`self.call_value`) and can't live in the pure `builtins` table.
         if let Value::List(items) = &receiver
-            && matches!(method, "map" | "filter" | "fold" | "sort_by" | "sort_by_key")
+            && matches!(
+                method,
+                "map" | "filter" | "fold" | "sort_by" | "sort_by_key"
+            )
         {
             // Clone the elements out so we don't hold the `RefCell` borrow across `call_value`
             // (the closure body could re-borrow this same list).
@@ -1795,10 +2047,16 @@ impl Interp {
         }
         // `module.fn(args)` is a plain call on the looked-up member — no `self` is bound.
         if let Value::Module(ns) = &receiver {
-            let member = ns.members.0.borrow().get(method).cloned().ok_or_else(|| RuntimeError {
-                message: format!("module '{}' has no member '{method}'", ns.name),
-                span,
-            })?;
+            let member =
+                ns.members
+                    .0
+                    .borrow()
+                    .get(method)
+                    .cloned()
+                    .ok_or_else(|| RuntimeError {
+                        message: format!("module '{}' has no member '{method}'", ns.name),
+                        span,
+                    })?;
             return self.call_value(member, arg_vals, span);
         }
         // Anything else (a struct, or an unsupported receiver) goes through the struct-method path,
@@ -1830,32 +2088,50 @@ impl Interp {
         match &target {
             Value::List(items) => {
                 let items = items.borrow();
-                let idxs = crate::slice::slice_indices(s, e, st, items.len())
-                    .map_err(|m| RuntimeError { message: m.to_string(), span })?;
+                let idxs = crate::slice::slice_indices(s, e, st, items.len()).map_err(|m| {
+                    RuntimeError {
+                        message: m.to_string(),
+                        span,
+                    }
+                })?;
                 Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(
                     idxs.iter().map(|&i| items[i].clone()).collect(),
                 ))))
             }
             Value::Str(string) => {
                 let chars: Vec<char> = string.chars().collect();
-                let idxs = crate::slice::slice_indices(s, e, st, chars.len())
-                    .map_err(|m| RuntimeError { message: m.to_string(), span })?;
-                Ok(Value::Str(idxs.iter().map(|&i| chars[i]).collect::<String>().into()))
+                let idxs = crate::slice::slice_indices(s, e, st, chars.len()).map_err(|m| {
+                    RuntimeError {
+                        message: m.to_string(),
+                        span,
+                    }
+                })?;
+                Ok(Value::Str(
+                    idxs.iter().map(|&i| chars[i]).collect::<String>().into(),
+                ))
             }
             // `bytes[a:b:c]` slices over BYTE offsets and yields a new `bytes` (shared `slice_indices`).
             Value::Bytes(b) => {
-                let idxs = crate::slice::slice_indices(s, e, st, b.len())
-                    .map_err(|m| RuntimeError { message: m.to_string(), span })?;
+                let idxs =
+                    crate::slice::slice_indices(s, e, st, b.len()).map_err(|m| RuntimeError {
+                        message: m.to_string(),
+                        span,
+                    })?;
                 let sub: Vec<u8> = idxs.iter().map(|&i| b[i]).collect();
                 Ok(Value::Bytes(sub.into()))
             }
             // `bytearray[a:b:c]` yields a NEW `bytearray` (a fresh `Rc<RefCell>`, mutable copy).
             Value::ByteArray(b) => {
                 let b = b.borrow();
-                let idxs = crate::slice::slice_indices(s, e, st, b.len())
-                    .map_err(|m| RuntimeError { message: m.to_string(), span })?;
+                let idxs =
+                    crate::slice::slice_indices(s, e, st, b.len()).map_err(|m| RuntimeError {
+                        message: m.to_string(),
+                        span,
+                    })?;
                 let sub: Vec<u8> = idxs.iter().map(|&i| b[i]).collect();
-                Ok(Value::ByteArray(std::rc::Rc::new(std::cell::RefCell::new(sub))))
+                Ok(Value::ByteArray(std::rc::Rc::new(std::cell::RefCell::new(
+                    sub,
+                ))))
             }
             // A struct satisfying `Slice` dispatches `obj[a:b:c]` to `slice(self, start?, end?, step?)`,
             // passing real `Option[int]` components (`None`/`Some(n)`) the user body can match/`??`.
@@ -1864,11 +2140,17 @@ impl Interp {
                     None => enum_val("Option", "None", Vec::new()),
                     Some(n) => enum_val("Option", "Some", vec![Value::Int(n)]),
                 };
-                self.call_struct_method(target.clone(), "slice", vec![opt(s), opt(e), opt(st)], span)
+                self.call_struct_method(
+                    target.clone(),
+                    "slice",
+                    vec![opt(s), opt(e), opt(st)],
+                    span,
+                )
             }
-            other => {
-                Err(RuntimeError { message: format!("cannot slice {}", other.type_name()), span })
-            }
+            other => Err(RuntimeError {
+                message: format!("cannot slice {}", other.type_name()),
+                span,
+            }),
         }
     }
 
@@ -1888,10 +2170,14 @@ impl Interp {
                 span,
             });
         };
-        let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
-            message: format!("unknown struct type '{name}'"),
-            span,
-        })?;
+        let def = self
+            .structs
+            .get(name.as_ref())
+            .cloned()
+            .ok_or_else(|| RuntimeError {
+                message: format!("unknown struct type '{name}'"),
+                span,
+            })?;
         if let Some(decl) = def.methods.get(method).cloned() {
             let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
             call_args.push(receiver.clone());
@@ -1901,7 +2187,12 @@ impl Interp {
         // No method named `method`: fall back to a function-typed *field* — `recv.f(args)` where
         // `f` holds a function value (the checker verified `f: fn(...) -> ...`). Calls the field
         // value directly (no `self` is bound — it's not a method).
-        if let Some(f) = fields.borrow().iter().find(|(k, _)| k == method).map(|(_, v)| v.clone()) {
+        if let Some(f) = fields
+            .borrow()
+            .iter()
+            .find(|(k, _)| k == method)
+            .map(|(_, v)| v.clone())
+        {
             return self.call_value(f, arg_vals, span);
         }
         // A user iterator struct (one with `next`, no explicit `iter`) IS Iterable — `.iter()` on it
@@ -1928,7 +2219,8 @@ impl Interp {
         // unchanged (its own `enter_call` guard bounds that path); container recursions pass depth+1.
         if depth > MAX_STRUCTURAL_DEPTH {
             return Err(RuntimeError {
-                message: "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
+                message: "maximum structural depth (10000) exceeded (cyclic data structure?)"
+                    .to_string(),
                 span,
             });
         }
@@ -1957,11 +2249,17 @@ impl Interp {
             }
             Value::List(items) => {
                 let elems = items.borrow().clone();
-                Ok(format!("[{}]", self.stringify_seq(&elems, span, depth + 1)?))
+                Ok(format!(
+                    "[{}]",
+                    self.stringify_seq(&elems, span, depth + 1)?
+                ))
             }
             Value::Tuple(items) => {
                 let elems = (**items).clone();
-                Ok(format!("({})", self.stringify_seq(&elems, span, depth + 1)?))
+                Ok(format!(
+                    "({})",
+                    self.stringify_seq(&elems, span, depth + 1)?
+                ))
             }
             Value::Map(m) => {
                 let entries = m.borrow().entries.clone();
@@ -1981,14 +2279,22 @@ impl Interp {
                     Ok("set()".to_string())
                 } else {
                     let elems: Vec<Value> = entries.into_iter().map(|(_, e)| e).collect();
-                    Ok(format!("{{{}}}", self.stringify_seq(&elems, span, depth + 1)?))
+                    Ok(format!(
+                        "{{{}}}",
+                        self.stringify_seq(&elems, span, depth + 1)?
+                    ))
                 }
             }
-            Value::Enum { variant, payload, .. } => {
+            Value::Enum {
+                variant, payload, ..
+            } => {
                 if payload.is_empty() {
                     Ok(variant.to_string())
                 } else {
-                    Ok(format!("{variant}({})", self.stringify_seq(payload, span, depth + 1)?))
+                    Ok(format!(
+                        "{variant}({})",
+                        self.stringify_seq(payload, span, depth + 1)?
+                    ))
                 }
             }
             // Scalars, functions, modules — no protocol dispatch; reuse `Display`.
@@ -1997,7 +2303,12 @@ impl Interp {
     }
 
     /// `stringify` each element and join with `, ` (shared by list/tuple/set/enum-payload).
-    fn stringify_seq(&mut self, elems: &[Value], span: Span, depth: usize) -> Result<String, RuntimeError> {
+    fn stringify_seq(
+        &mut self,
+        elems: &[Value],
+        span: Span,
+        depth: usize,
+    ) -> Result<String, RuntimeError> {
         let mut rendered = Vec::with_capacity(elems.len());
         for e in elems {
             rendered.push(self.stringify(e, span, depth)?);
@@ -2028,22 +2339,38 @@ impl Interp {
     /// Arithmetic operator overloading: dispatch `+`/`-`/`*` on two structs to the receiver's
     /// `add`/`sub`/`mul(self, other) -> Self` method (the `Add`/`Sub`/`Mul` protocols). The checker
     /// has verified conformance, so the method exists and returns the same struct type.
-    fn struct_arith(&mut self, op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, RuntimeError> {
+    fn struct_arith(
+        &mut self,
+        op: BinaryOp,
+        l: Value,
+        r: Value,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         let method = match op {
             BinaryOp::Add => "add",
             BinaryOp::Sub => "sub",
             BinaryOp::Mul => "mul",
             _ => unreachable!("struct_arith only handles + - *"),
         };
-        let Value::Struct { name, .. } = &l else { unreachable!() };
-        let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
-            message: format!("unknown struct type '{name}'"),
-            span,
-        })?;
-        let decl = def.methods.get(method).cloned().ok_or_else(|| RuntimeError {
-            message: format!("struct '{name}' has no '{method}' method"),
-            span,
-        })?;
+        let Value::Struct { name, .. } = &l else {
+            unreachable!()
+        };
+        let def = self
+            .structs
+            .get(name.as_ref())
+            .cloned()
+            .ok_or_else(|| RuntimeError {
+                message: format!("unknown struct type '{name}'"),
+                span,
+            })?;
+        let decl = def
+            .methods
+            .get(method)
+            .cloned()
+            .ok_or_else(|| RuntimeError {
+                message: format!("struct '{name}' has no '{method}' method"),
+                span,
+            })?;
         self.call(&decl, &def.home, vec![l, r], span)
     }
 
@@ -2055,15 +2382,27 @@ impl Interp {
         r: Value,
         span: Span,
     ) -> Result<std::cmp::Ordering, RuntimeError> {
-        let Value::Struct { name, .. } = &l else { unreachable!() };
-        let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
-            message: format!("unknown struct type '{name}'"),
-            span,
-        })?;
-        let decl = def.methods.get("compare").cloned().ok_or_else(|| RuntimeError {
-            message: format!("struct '{name}' has no 'compare' method (needed to order its values)"),
-            span,
-        })?;
+        let Value::Struct { name, .. } = &l else {
+            unreachable!()
+        };
+        let def = self
+            .structs
+            .get(name.as_ref())
+            .cloned()
+            .ok_or_else(|| RuntimeError {
+                message: format!("unknown struct type '{name}'"),
+                span,
+            })?;
+        let decl = def
+            .methods
+            .get("compare")
+            .cloned()
+            .ok_or_else(|| RuntimeError {
+                message: format!(
+                    "struct '{name}' has no 'compare' method (needed to order its values)"
+                ),
+                span,
+            })?;
         match self.call(&decl, &def.home, vec![l, r], span)? {
             Value::Int(n) => Ok(n.cmp(&0)),
             other => Err(RuntimeError {
@@ -2081,11 +2420,17 @@ impl Interp {
     fn hash_value(&mut self, v: &Value, span: Span) -> Result<u64, RuntimeError> {
         match v {
             Value::Struct { .. } => self.struct_hash(v, span),
-            Value::Str(_) | Value::Bytes(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Nil => {
-                Ok(scalar_hash(v))
-            }
+            Value::Str(_)
+            | Value::Bytes(_)
+            | Value::Int(_)
+            | Value::Float(_)
+            | Value::Bool(_)
+            | Value::Nil => Ok(scalar_hash(v)),
             other => Err(RuntimeError {
-                message: format!("{} is not hashable (cannot be a map/set key)", other.type_name()),
+                message: format!(
+                    "{} is not hashable (cannot be a map/set key)",
+                    other.type_name()
+                ),
                 span,
             }),
         }
@@ -2094,15 +2439,27 @@ impl Interp {
     /// Dispatch a struct key's user `hash(self) -> int`, returning its `i64` as a `u64`. Mirrors
     /// [`struct_compare`].
     fn struct_hash(&mut self, v: &Value, span: Span) -> Result<u64, RuntimeError> {
-        let Value::Struct { name, .. } = v else { unreachable!() };
-        let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
-            message: format!("unknown struct type '{name}'"),
-            span,
-        })?;
-        let decl = def.methods.get("hash").cloned().ok_or_else(|| RuntimeError {
-            message: format!("struct '{name}' has no 'hash' method (needed to use it as a map/set key)"),
-            span,
-        })?;
+        let Value::Struct { name, .. } = v else {
+            unreachable!()
+        };
+        let def = self
+            .structs
+            .get(name.as_ref())
+            .cloned()
+            .ok_or_else(|| RuntimeError {
+                message: format!("unknown struct type '{name}'"),
+                span,
+            })?;
+        let decl = def
+            .methods
+            .get("hash")
+            .cloned()
+            .ok_or_else(|| RuntimeError {
+                message: format!(
+                    "struct '{name}' has no 'hash' method (needed to use it as a map/set key)"
+                ),
+                span,
+            })?;
         match self.call(&decl, &def.home, vec![v.clone()], span)? {
             Value::Int(n) => Ok(n as u64),
             other => Err(RuntimeError {
@@ -2237,12 +2594,21 @@ impl Interp {
             // The checker guarantees ≤1 arg; `set()` (0 args) is the empty set.
             None => Vec::new(),
             // Drain any for-iterable into single-element rows, then flatten to elements.
-            Some(it) => self.drain_value_to_rows(it, 1, span)?.into_iter().flatten().collect(),
+            Some(it) => self
+                .drain_value_to_rows(it, 1, span)?
+                .into_iter()
+                .flatten()
+                .collect(),
         };
         let mut set = SetData::default();
         for v in src {
             let hv = self.hash_value(&v, span)?;
-            if !set.candidates(hv).iter().copied().any(|p| values_equal(&set.entries[p].1, &v)) {
+            if !set
+                .candidates(hv)
+                .iter()
+                .copied()
+                .any(|p| values_equal(&set.entries[p].1, &v))
+            {
                 set.push(hv, v);
             }
         }
@@ -2253,11 +2619,18 @@ impl Interp {
     /// `next()` re-enters the engine. Mirrors `vm::Vm::builtin_list`.
     fn builtin_list(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
         let it = args.into_iter().next().ok_or_else(|| RuntimeError {
-            message: "list() takes exactly one iterable argument — use [] for an empty list".to_string(),
+            message: "list() takes exactly one iterable argument — use [] for an empty list"
+                .to_string(),
             span,
         })?;
-        let items: Vec<Value> = self.drain_value_to_rows(it, 1, span)?.into_iter().flatten().collect();
-        Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(items))))
+        let items: Vec<Value> = self
+            .drain_value_to_rows(it, 1, span)?
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(
+            items,
+        ))))
     }
 
     /// `map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on duplicate keys, like the
@@ -2265,7 +2638,8 @@ impl Interp {
     /// re-enter the engine. Mirrors `vm::Vm::builtin_map`.
     fn builtin_map(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
         let it = args.into_iter().next().ok_or_else(|| RuntimeError {
-            message: "map() takes exactly one iterable argument — use {} for an empty map".to_string(),
+            message: "map() takes exactly one iterable argument — use {} for an empty map"
+                .to_string(),
             span,
         })?;
         let rows = self.drain_value_to_rows(it, 1, span)?;
@@ -2274,10 +2648,15 @@ impl Interp {
             // Each drained element must be a 2-tuple (the checker enforces this statically; this guards
             // the `Unknown`-typed escape so a bad runtime shape faults recoverably, not panics).
             let (k, v) = match row.into_iter().next() {
-                Some(Value::Tuple(parts)) if parts.len() == 2 => (parts[0].clone(), parts[1].clone()),
+                Some(Value::Tuple(parts)) if parts.len() == 2 => {
+                    (parts[0].clone(), parts[1].clone())
+                }
                 Some(other) => {
                     return Err(RuntimeError {
-                        message: format!("map() expects an iterable of (key, value) 2-tuples, got {}", other.type_name()),
+                        message: format!(
+                            "map() expects an iterable of (key, value) 2-tuples, got {}",
+                            other.type_name()
+                        ),
                         span,
                     });
                 }
@@ -2292,7 +2671,12 @@ impl Interp {
     /// Collect raw bytes from a byte-sequence-shaped argument (a `bytes`, a `bytearray`, or a
     /// `list[int]` with each element 0..=255). Mirrors the VM's `collect_bytes_arg`. `what` names the
     /// constructor/method in error messages.
-    fn collect_bytes_arg(&self, what: &str, v: &Value, span: Span) -> Result<Vec<u8>, RuntimeError> {
+    fn collect_bytes_arg(
+        &self,
+        what: &str,
+        v: &Value,
+        span: Span,
+    ) -> Result<Vec<u8>, RuntimeError> {
         match v {
             Value::Bytes(b) => Ok(b.to_vec()),
             Value::ByteArray(b) => Ok(b.borrow().clone()),
@@ -2301,20 +2685,32 @@ impl Interp {
                 for e in items.borrow().iter() {
                     match e {
                         Value::Int(n) if (0..=255).contains(n) => out.push(*n as u8),
-                        Value::Int(n) => return Err(RuntimeError {
-                            message: format!("{what}() list element {n} out of range (must be 0..=255)"),
-                            span,
-                        }),
-                        other => return Err(RuntimeError {
-                            message: format!("{what}() expects a list of int, got an element of type {}", other.type_name()),
-                            span,
-                        }),
+                        Value::Int(n) => {
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "{what}() list element {n} out of range (must be 0..=255)"
+                                ),
+                                span,
+                            });
+                        }
+                        other => {
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "{what}() expects a list of int, got an element of type {}",
+                                    other.type_name()
+                                ),
+                                span,
+                            });
+                        }
                     }
                 }
                 Ok(out)
             }
             other => Err(RuntimeError {
-                message: format!("{what}() expects a bytes, a bytearray, or a list[int], got {}", other.type_name()),
+                message: format!(
+                    "{what}() expects a bytes, a bytearray, or a list[int], got {}",
+                    other.type_name()
+                ),
                 span,
             }),
         }
@@ -2328,7 +2724,10 @@ impl Interp {
             [] => Vec::new(),
             [Value::Int(n)] => {
                 if *n < 0 {
-                    return Err(RuntimeError { message: format!("bytearray() size {n} must be non-negative"), span });
+                    return Err(RuntimeError {
+                        message: format!("bytearray() size {n} must be non-negative"),
+                        span,
+                    });
                 }
                 // Bound the eager zero-fill: an unguarded `vec![0u8; n]` for a huge n aborts the
                 // process (SIGABRT), uncatchable by `recover:`. `try_reserve` turns OOM into a
@@ -2336,15 +2735,25 @@ impl Interp {
                 let n = *n as usize;
                 let mut buf: Vec<u8> = Vec::new();
                 if buf.try_reserve_exact(n).is_err() {
-                    return Err(RuntimeError { message: format!("bytearray() size {n} is too large to allocate"), span });
+                    return Err(RuntimeError {
+                        message: format!("bytearray() size {n} is too large to allocate"),
+                        span,
+                    });
                 }
                 buf.resize(n, 0u8);
                 buf
             }
             [one] => self.collect_bytes_arg("bytearray", one, span)?,
-            _ => return Err(RuntimeError { message: format!("bytearray() expects 0 or 1 argument(s), got {}", args.len()), span }),
+            _ => {
+                return Err(RuntimeError {
+                    message: format!("bytearray() expects 0 or 1 argument(s), got {}", args.len()),
+                    span,
+                });
+            }
         };
-        Ok(Value::ByteArray(std::rc::Rc::new(std::cell::RefCell::new(bytes))))
+        Ok(Value::ByteArray(std::rc::Rc::new(std::cell::RefCell::new(
+            bytes,
+        ))))
     }
 
     /// `bytes(b)` → copy; `bytes(ba)` → immutable snapshot of a `bytearray`; `bytes([ints])` → from a
@@ -2352,7 +2761,12 @@ impl Interp {
     fn builtin_bytes(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
         let bytes: Vec<u8> = match args.as_slice() {
             [one] => self.collect_bytes_arg("bytes", one, span)?,
-            _ => return Err(RuntimeError { message: format!("bytes() expects 1 argument, got {}", args.len()), span }),
+            _ => {
+                return Err(RuntimeError {
+                    message: format!("bytes() expects 1 argument, got {}", args.len()),
+                    span,
+                });
+            }
         };
         Ok(Value::Bytes(bytes.into()))
     }
@@ -2376,8 +2790,18 @@ impl Interp {
                 builtins::arity("push", &args, 1, span)?;
                 let byte = match args[0] {
                     Value::Int(n) if (0..=255).contains(&n) => n as u8,
-                    Value::Int(n) => return Err(RuntimeError { message: format!("byte value {n} out of range (must be 0..=255)"), span }),
-                    ref other => return Err(RuntimeError { message: format!("push() expects an int, got {}", other.type_name()), span }),
+                    Value::Int(n) => {
+                        return Err(RuntimeError {
+                            message: format!("byte value {n} out of range (must be 0..=255)"),
+                            span,
+                        });
+                    }
+                    ref other => {
+                        return Err(RuntimeError {
+                            message: format!("push() expects an int, got {}", other.type_name()),
+                            span,
+                        });
+                    }
                 };
                 buf.borrow_mut().push(byte);
                 Ok(Value::Nil)
@@ -2404,7 +2828,10 @@ impl Interp {
                 let bytes = buf.borrow().clone();
                 decode_utf8(&bytes, span)
             }
-            _ => Err(RuntimeError { message: format!("type bytearray has no method '{method}'"), span }),
+            _ => Err(RuntimeError {
+                message: format!("type bytearray has no method '{method}'"),
+                span,
+            }),
         }
     }
 
@@ -2422,7 +2849,10 @@ impl Interp {
                 builtins::arity("decode", &args, 0, span)?;
                 decode_utf8(b, span)
             }
-            _ => Err(RuntimeError { message: format!("type bytes has no method '{method}'"), span }),
+            _ => Err(RuntimeError {
+                message: format!("type bytes has no method '{method}'"),
+                span,
+            }),
         }
     }
 
@@ -2437,8 +2867,16 @@ impl Interp {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let some = |v: Value| Value::Enum { ty: "Option".into(), variant: "Some".into(), payload: vec![v] };
-        let none = || Value::Enum { ty: "Option".into(), variant: "None".into(), payload: vec![] };
+        let some = |v: Value| Value::Enum {
+            ty: "Option".into(),
+            variant: "Some".into(),
+            payload: vec![v],
+        };
+        let none = || Value::Enum {
+            ty: "Option".into(),
+            variant: "None".into(),
+            payload: vec![],
+        };
         match method {
             "len" => {
                 builtins::arity("len", &args, 0, span)?;
@@ -2448,14 +2886,20 @@ impl Interp {
                 builtins::arity("has", &args, 1, span)?;
                 let hk = self.hash_value(&args[0], span)?; // hash before borrowing (re-entrant)
                 let mm = m.borrow();
-                Ok(Value::Bool(mm.candidates(hk).iter().any(|&p| values_equal(&mm.entries[p].1, &args[0]))))
+                Ok(Value::Bool(
+                    mm.candidates(hk)
+                        .iter()
+                        .any(|&p| values_equal(&mm.entries[p].1, &args[0])),
+                ))
             }
             "get" => {
                 builtins::arity("get", &args, 1, span)?;
                 let hk = self.hash_value(&args[0], span)?;
                 let found = {
                     let mm = m.borrow();
-                    mm.candidates(hk).iter().copied()
+                    mm.candidates(hk)
+                        .iter()
+                        .copied()
                         .find(|&p| values_equal(&mm.entries[p].1, &args[0]))
                         .map(|p| mm.entries[p].2.clone())
                 };
@@ -2463,12 +2907,22 @@ impl Interp {
             }
             "keys" => {
                 builtins::arity("keys", &args, 0, span)?;
-                let keys: Vec<Value> = m.borrow().entries.iter().map(|(_, k, _)| k.clone()).collect();
+                let keys: Vec<Value> = m
+                    .borrow()
+                    .entries
+                    .iter()
+                    .map(|(_, k, _)| k.clone())
+                    .collect();
                 Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(keys))))
             }
             "values" => {
                 builtins::arity("values", &args, 0, span)?;
-                let vals: Vec<Value> = m.borrow().entries.iter().map(|(_, _, v)| v.clone()).collect();
+                let vals: Vec<Value> = m
+                    .borrow()
+                    .entries
+                    .iter()
+                    .map(|(_, _, v)| v.clone())
+                    .collect();
                 Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(vals))))
             }
             "remove" => {
@@ -2476,7 +2930,10 @@ impl Interp {
                 let hk = self.hash_value(&args[0], span)?;
                 let pos = {
                     let mm = m.borrow();
-                    mm.candidates(hk).iter().copied().find(|&p| values_equal(&mm.entries[p].1, &args[0]))
+                    mm.candidates(hk)
+                        .iter()
+                        .copied()
+                        .find(|&p| values_equal(&mm.entries[p].1, &args[0]))
                 };
                 match pos {
                     Some(i) => {
@@ -2490,10 +2947,15 @@ impl Interp {
                 builtins::arity(method, &args, 1, span)?;
                 let other = match &args[0] {
                     Value::Map(o) => o,
-                    other => return Err(RuntimeError {
-                        message: format!("{method}() expects a map argument, got {}", other.type_name()),
-                        span,
-                    }),
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{method}() expects a map argument, got {}",
+                                other.type_name()
+                            ),
+                            span,
+                        });
+                    }
                 };
                 // Snapshot the incoming entries first so `m.merge(m)` / `m.update(m)` terminate.
                 let incoming: Vec<(u64, Value, Value)> = other.borrow().entries.clone();
@@ -2511,7 +2973,10 @@ impl Interp {
                     Ok(Value::Nil)
                 }
             }
-            _ => Err(RuntimeError { message: format!("type map has no method '{method}'"), span }),
+            _ => Err(RuntimeError {
+                message: format!("type map has no method '{method}'"),
+                span,
+            }),
         }
     }
 
@@ -2534,14 +2999,20 @@ impl Interp {
                 builtins::arity("has", &args, 1, span)?;
                 let hx = self.hash_value(&args[0], span)?;
                 let ss = s.borrow();
-                Ok(Value::Bool(ss.candidates(hx).iter().any(|&p| values_equal(&ss.entries[p].1, &args[0]))))
+                Ok(Value::Bool(
+                    ss.candidates(hx)
+                        .iter()
+                        .any(|&p| values_equal(&ss.entries[p].1, &args[0])),
+                ))
             }
             "add" => {
                 builtins::arity("add", &args, 1, span)?;
                 let hx = self.hash_value(&args[0], span)?;
                 let present = {
                     let ss = s.borrow();
-                    ss.candidates(hx).iter().any(|&p| values_equal(&ss.entries[p].1, &args[0]))
+                    ss.candidates(hx)
+                        .iter()
+                        .any(|&p| values_equal(&ss.entries[p].1, &args[0]))
                 };
                 if !present {
                     s.borrow_mut().push(hx, args[0].clone());
@@ -2553,7 +3024,10 @@ impl Interp {
                 let hx = self.hash_value(&args[0], span)?;
                 let pos = {
                     let ss = s.borrow();
-                    ss.candidates(hx).iter().copied().find(|&p| values_equal(&ss.entries[p].1, &args[0]))
+                    ss.candidates(hx)
+                        .iter()
+                        .copied()
+                        .find(|&p| values_equal(&ss.entries[p].1, &args[0]))
                 };
                 match pos {
                     Some(i) => {
@@ -2567,7 +3041,10 @@ impl Interp {
                 builtins::arity(method, &args, 1, span)?;
                 let Value::Set(other) = &args[0] else {
                     return Err(RuntimeError {
-                        message: format!("{method}() expects a set argument, got {}", args[0].type_name()),
+                        message: format!(
+                            "{method}() expects a set argument, got {}",
+                            args[0].type_name()
+                        ),
                         span,
                     });
                 };
@@ -2576,7 +3053,11 @@ impl Interp {
                 let other = other.borrow().clone();
                 let mut out = SetData::default();
                 let add = |out: &mut SetData, he: u64, e: &Value| {
-                    if !out.candidates(he).iter().any(|&p| values_equal(&out.entries[p].1, e)) {
+                    if !out
+                        .candidates(he)
+                        .iter()
+                        .any(|&p| values_equal(&out.entries[p].1, e))
+                    {
                         out.push(he, e.clone());
                     }
                 };
@@ -2589,7 +3070,10 @@ impl Interp {
                     m => {
                         let keep_when_present = m == "intersection";
                         for (he, e) in &mine {
-                            let in_other = other.candidates(*he).iter().any(|&p| values_equal(&other.entries[p].1, e));
+                            let in_other = other
+                                .candidates(*he)
+                                .iter()
+                                .any(|&p| values_equal(&other.entries[p].1, e));
                             if in_other == keep_when_present {
                                 add(&mut out, *he, e);
                             }
@@ -2598,7 +3082,10 @@ impl Interp {
                 }
                 Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(out))))
             }
-            _ => Err(RuntimeError { message: format!("type set has no method '{method}'"), span }),
+            _ => Err(RuntimeError {
+                message: format!("type set has no method '{method}'"),
+                span,
+            }),
         }
     }
 
@@ -2619,7 +3106,10 @@ impl Interp {
                 builtins::arity("send", &args, 1, span)?;
                 let mut s = q.borrow_mut();
                 if s.closed {
-                    return Err(RuntimeError { message: "send on a closed channel".to_string(), span });
+                    return Err(RuntimeError {
+                        message: "send on a closed channel".to_string(),
+                        span,
+                    });
                 }
                 s.queue.push_back(deep_clone(&args[0]));
                 Ok(Value::Nil)
@@ -2661,7 +3151,10 @@ impl Interp {
                 // Drain-before-done: only consult `closed` on an empty queue. A closed-and-empty
                 // channel faults distinctly (not the deadlock fault) — there is no producer left.
                 if closed {
-                    return Err(RuntimeError { message: "receive on a closed channel".to_string(), span });
+                    return Err(RuntimeError {
+                        message: "receive on a closed channel".to_string(),
+                        span,
+                    });
                 }
                 Err(RuntimeError {
                     message: "recv on an empty channel: deadlock — nothing is queued and the \
@@ -2684,12 +3177,22 @@ impl Interp {
                         if s.done_latch {
                             return Some(Value::Bool(true));
                         }
-                        s.timer.filter(|d| std::time::Instant::now() >= *d).map(|_| Value::Bool(true))
+                        s.timer
+                            .filter(|d| std::time::Instant::now() >= *d)
+                            .map(|_| Value::Bool(true))
                     })
                 };
                 Ok(match popped {
-                    Some(v) => Value::Enum { ty: "Option".into(), variant: "Some".into(), payload: vec![v] },
-                    None => Value::Enum { ty: "Option".into(), variant: "None".into(), payload: vec![] },
+                    Some(v) => Value::Enum {
+                        ty: "Option".into(),
+                        variant: "Some".into(),
+                        payload: vec![v],
+                    },
+                    None => Value::Enum {
+                        ty: "Option".into(),
+                        variant: "None".into(),
+                        payload: vec![],
+                    },
                 })
             }
             // `close()` marks the channel closed (idempotent). In the sequential oracle there are no
@@ -2954,7 +3457,10 @@ impl Interp {
     ) -> Result<Value, RuntimeError> {
         if arg_vals.len() != 1 {
             return Err(RuntimeError {
-                message: format!("'sort_by_key' expects 1 argument(s), got {}", arg_vals.len()),
+                message: format!(
+                    "'sort_by_key' expects 1 argument(s), got {}",
+                    arg_vals.len()
+                ),
                 span,
             });
         }
@@ -3008,7 +3514,12 @@ impl Interp {
     /// Natural order over two `sort_by_key` keys: a Comparable struct key dispatches to its
     /// `compare`; scalar keys (int/float/str) use the built-in ordering. The checker has verified the
     /// key type is orderable, so any other shape is an internal invariant break.
-    fn order_key(&mut self, a: &Value, b: &Value, span: Span) -> Result<std::cmp::Ordering, RuntimeError> {
+    fn order_key(
+        &mut self,
+        a: &Value,
+        b: &Value,
+        span: Span,
+    ) -> Result<std::cmp::Ordering, RuntimeError> {
         if matches!(a, Value::Struct { .. }) && matches!(b, Value::Struct { .. }) {
             return self.struct_compare(a.clone(), b.clone(), span);
         }
@@ -3069,7 +3580,10 @@ impl Interp {
         match self.call_value(cmp.clone(), vec![a, b], span)? {
             Value::Int(n) => Ok(n),
             other => Err(RuntimeError {
-                message: format!("sort_by comparator must return int, got {}", other.type_name()),
+                message: format!(
+                    "sort_by comparator must return int, got {}",
+                    other.type_name()
+                ),
                 span,
             }),
         }
@@ -3103,7 +3617,10 @@ impl Interp {
         self.deferred.push(Vec::new());
         // Record this frame for stack traces; popped below only on a successful return (an error
         // path leaves it so the driver can read the call chain at the fault).
-        self.call_stack.push(TraceFrame { function: decl.name.clone(), span });
+        self.call_stack.push(TraceFrame {
+            function: decl.name.clone(),
+            span,
+        });
         // Resolve the callee's top-level names against *its* module, not the caller's.
         let saved_globals = self.env.swap_globals(home.clone());
         let saved = self.env.swap_locals(vec![frame]);
@@ -3116,7 +3633,12 @@ impl Interp {
         // the return. An inline body cannot hold a bare `spawn` (spawn is a statement), so the
         // implicit-nursery dance never applies. Mirrors the VM's `compile_fn` inline-expr branch.
         let result = if decl.inline_expr_body
-            && let [Stmt { kind: StmtKind::Expr(e), .. }] = decl.body.as_slice()
+            && let [
+                Stmt {
+                    kind: StmtKind::Expr(e),
+                    ..
+                },
+            ] = decl.body.as_slice()
         {
             self.eval(e).map(Flow::Return)
         } else {
@@ -3125,7 +3647,11 @@ impl Interp {
                 self.nurseries.push(Vec::new());
             }
             let result = self.exec_block_inner(&decl.body);
-            if implicit { self.leave_implicit_nursery(result) } else { result }
+            if implicit {
+                self.leave_implicit_nursery(result)
+            } else {
+                result
+            }
         };
         // Teardown (defer drain + scope restore + `?`/defer-fault selection) is a separate,
         // non-inlined frame so its locals don't enlarge `call`'s frame on the deep-recursion path.
@@ -3213,11 +3739,17 @@ impl Interp {
         // propagation marker still carries the `?`'s `expr.span`, so report at the real location
         // (matching the bare-expr path and the VM) rather than a hard-coded line 1.
         if let Some(value) = self.propagating.take() {
-            let span = result.as_ref().err().map(|e| e.span).unwrap_or(Span { line: 1, col: 1 });
-            return Err(top_level_error(&value, span).unwrap_or_else(|| RuntimeError {
-                message: format!("unhandled error: {value}"),
-                span,
-            }));
+            let span = result
+                .as_ref()
+                .err()
+                .map(|e| e.span)
+                .unwrap_or(Span { line: 1, col: 1 });
+            return Err(
+                top_level_error(&value, span).unwrap_or_else(|| RuntimeError {
+                    message: format!("unhandled error: {value}"),
+                    span,
+                }),
+            );
         }
         result.map(|_| ())
     }
@@ -3235,7 +3767,10 @@ impl Interp {
                 for (mname, func) in crate::native::native_members(name) {
                     m.insert(
                         mname.to_string(),
-                        Value::Native(value::NativeFnEntry { name: (*mname).into(), func: *func }),
+                        Value::Native(value::NativeFnEntry {
+                            name: (*mname).into(),
+                            func: *func,
+                        }),
                     );
                 }
                 for (cname, cval) in crate::native::native_consts(name) {
@@ -3244,7 +3779,10 @@ impl Interp {
             }
             self.namespaces.insert(
                 lm.id.clone(),
-                std::rc::Rc::new(value::ModuleNamespace { name: name.into(), members }),
+                std::rc::Rc::new(value::ModuleNamespace {
+                    name: name.into(),
+                    members,
+                }),
             );
             return Ok(());
         }
@@ -3269,23 +3807,33 @@ impl Interp {
     /// Bind a resolved import's names into the current module's scope.
     fn bind_import(&mut self, imp: &crate::resolver::ResolvedImport) -> Result<(), RuntimeError> {
         use crate::ast::Import;
-        let ns = self.namespaces.get(&imp.target).cloned().ok_or_else(|| RuntimeError {
-            message: "internal: imported module not evaluated before importer".to_string(),
-            span: imp.span,
-        })?;
+        let ns = self
+            .namespaces
+            .get(&imp.target)
+            .cloned()
+            .ok_or_else(|| RuntimeError {
+                message: "internal: imported module not evaluated before importer".to_string(),
+                span: imp.span,
+            })?;
         match &imp.import {
             Import::Module { path, alias } => {
-                let name = alias.clone().unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                let name = alias
+                    .clone()
+                    .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
                 self.env.define(&name, Value::Module(ns));
             }
             Import::From { path: _, names } => {
                 for (member, alias) in names {
-                    let value = ns.members.0.borrow().get(member).cloned().ok_or_else(|| {
-                        RuntimeError {
-                            message: format!("module '{}' has no member '{member}'", ns.name),
-                            span: imp.span,
-                        }
-                    })?;
+                    let value =
+                        ns.members
+                            .0
+                            .borrow()
+                            .get(member)
+                            .cloned()
+                            .ok_or_else(|| RuntimeError {
+                                message: format!("module '{}' has no member '{member}'", ns.name),
+                                span: imp.span,
+                            })?;
                     self.env.define(alias.as_ref().unwrap_or(member), value);
                 }
             }
@@ -3363,8 +3911,12 @@ impl Interp {
                         // (never `.expect`) — a non-scalar resolution can only mean void.
                         let ret = ef.ret.as_ref().and_then(|t| ctype_of(Some(t), &aliases));
                         let cffi = crate::native::cffi::Cffi::new(lib, &ef.name, params, ret)
-                            .map_err(|e| RuntimeError { message: e.message, span: stmt.span })?;
-                        self.env.define(&ef.name, Value::Cffi(std::sync::Arc::new(cffi)));
+                            .map_err(|e| RuntimeError {
+                                message: e.message,
+                                span: stmt.span,
+                            })?;
+                        self.env
+                            .define(&ef.name, Value::Cffi(std::sync::Arc::new(cffi)));
                     }
                 }
                 _ => {}
@@ -3411,7 +3963,11 @@ impl Interp {
                     // A genuine runtime fault: its message (a `str`, i.e. an `Error`) becomes Err.
                     self.propagating = saved_prop;
                     self.call_stack.truncate(stack_depth);
-                    Ok(enum_val("Result", "Err", vec![Value::Str(e.message.into())]))
+                    Ok(enum_val(
+                        "Result",
+                        "Err",
+                        vec![Value::Str(e.message.into())],
+                    ))
                 }
             }
         }
@@ -3443,7 +3999,9 @@ impl Interp {
         for stmt in init {
             if !matches!(self.exec_stmt(stmt)?, Flow::Normal) {
                 return Err(RuntimeError {
-                    message: "control flow (return/break/continue) is not allowed inside a recover block".to_string(),
+                    message:
+                        "control flow (return/break/continue) is not allowed inside a recover block"
+                            .to_string(),
                     span: stmt.span,
                 });
             }
@@ -3648,7 +4206,12 @@ impl Interp {
     /// (`for k in m` binds the key; `for k, v in m` binds key+value). Each iteration runs the body
     /// in a fresh scope so the loop variables don't leak. Ranges are iterated **lazily** (never
     /// materialized) so `for i in 0..huge:` can't exhaust memory.
-    fn exec_for(&mut self, vars: &[String], iter: &Expr, body: &[Stmt]) -> Result<Flow, RuntimeError> {
+    fn exec_for(
+        &mut self,
+        vars: &[String],
+        iter: &Expr,
+        body: &[Stmt],
+    ) -> Result<Flow, RuntimeError> {
         if let ExprKind::Range { start, end } = &iter.kind {
             let lo = self.eval_int(start)?;
             let hi = self.eval_int(end)?;
@@ -3685,22 +4248,35 @@ impl Interp {
         // `break` terminates. The struct advances by mutating its own fields in place (its fields
         // are `Rc<RefCell<…>>`), so re-cloning the receiver handle each step reads the new state.
         if let Value::Struct { name, .. } = &iter_val
-            && self.structs.get(name.as_ref()).is_some_and(|d| d.methods.contains_key("next"))
+            && self
+                .structs
+                .get(name.as_ref())
+                .is_some_and(|d| d.methods.contains_key("next"))
         {
             let name = name.clone();
             // Dispatch `next(self)` the same way `eval_method_call` does for a struct method.
-            let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
-                message: format!("unknown struct type '{name}'"),
-                span: iter.span,
-            })?;
-            let decl = def.methods.get("next").cloned().ok_or_else(|| RuntimeError {
-                message: format!("struct '{name}' has no method 'next'"),
-                span: iter.span,
-            })?;
+            let def = self
+                .structs
+                .get(name.as_ref())
+                .cloned()
+                .ok_or_else(|| RuntimeError {
+                    message: format!("unknown struct type '{name}'"),
+                    span: iter.span,
+                })?;
+            let decl = def
+                .methods
+                .get("next")
+                .cloned()
+                .ok_or_else(|| RuntimeError {
+                    message: format!("struct '{name}' has no method 'next'"),
+                    span: iter.span,
+                })?;
             loop {
                 let result = self.call(&decl, &def.home, vec![iter_val.clone()], iter.span)?;
                 match result {
-                    Value::Enum { variant, payload, .. } if variant.as_ref() == "Some" => {
+                    Value::Enum {
+                        variant, payload, ..
+                    } if variant.as_ref() == "Some" => {
                         let item = payload.into_iter().next().ok_or_else(|| RuntimeError {
                             message: "iterator next() returned Some with no payload".to_string(),
                             span: iter.span,
@@ -3870,21 +4446,34 @@ impl Interp {
         // eager `collect_iter_rows` used to break: it drained to `None` before any body ran, so the
         // element saw the fully-advanced state instead of the per-step state the VM observes.
         if let Value::Struct { name, .. } = &iter_val
-            && self.structs.get(name.as_ref()).is_some_and(|d| d.methods.contains_key("next"))
+            && self
+                .structs
+                .get(name.as_ref())
+                .is_some_and(|d| d.methods.contains_key("next"))
         {
             let name = name.clone();
-            let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
-                message: format!("unknown struct type '{name}'"),
-                span,
-            })?;
-            let decl = def.methods.get("next").cloned().ok_or_else(|| RuntimeError {
-                message: format!("struct '{name}' has no method 'next'"),
-                span,
-            })?;
+            let def = self
+                .structs
+                .get(name.as_ref())
+                .cloned()
+                .ok_or_else(|| RuntimeError {
+                    message: format!("unknown struct type '{name}'"),
+                    span,
+                })?;
+            let decl = def
+                .methods
+                .get("next")
+                .cloned()
+                .ok_or_else(|| RuntimeError {
+                    message: format!("struct '{name}' has no method 'next'"),
+                    span,
+                })?;
             loop {
                 let result = self.call(&decl, &def.home, vec![iter_val.clone()], span)?;
                 match result {
-                    Value::Enum { variant, payload, .. } if variant.as_ref() == "Some" => {
+                    Value::Enum {
+                        variant, payload, ..
+                    } if variant.as_ref() == "Some" => {
                         let item = payload.into_iter().next().ok_or_else(|| RuntimeError {
                             message: "iterator next() returned Some with no payload".to_string(),
                             span,
@@ -3894,9 +4483,12 @@ impl Interp {
                     Value::Enum { variant, .. } if variant.as_ref() == "None" => break,
                     other => {
                         return Err(RuntimeError {
-                            message: format!("iterator next() must return Option, found {}", other.type_name()),
+                            message: format!(
+                                "iterator next() must return Option, found {}",
+                                other.type_name()
+                            ),
                             span,
-                        })
+                        });
                     }
                 }
             }
@@ -3952,9 +4544,12 @@ impl Interp {
                 // The checker guarantees a bool guard; this is a defensive fallback.
                 other => {
                     return Err(RuntimeError {
-                        message: format!("comprehension guard must be bool, found {}", other.type_name()),
+                        message: format!(
+                            "comprehension guard must be bool, found {}",
+                            other.type_name()
+                        ),
                         span,
-                    })
+                    });
                 }
             }
         }
@@ -3971,14 +4566,23 @@ impl Interp {
             CompAcc::List(out) => out.push(v),
             CompAcc::Set(set) => {
                 let hx = self.hash_value(&v, span)?;
-                if !set.candidates(hx).iter().any(|&p| values_equal(&set.entries[p].1, &v)) {
+                if !set
+                    .candidates(hx)
+                    .iter()
+                    .any(|&p| values_equal(&set.entries[p].1, &v))
+                {
                     set.push(hx, v);
                 }
             }
             CompAcc::Map(map) => {
                 let k = k.expect("a map comprehension evaluates a key per row");
                 let hk = self.hash_value(&k, span)?;
-                match map.candidates(hk).iter().copied().find(|&p| values_equal(&map.entries[p].1, &k)) {
+                match map
+                    .candidates(hk)
+                    .iter()
+                    .copied()
+                    .find(|&p| values_equal(&map.entries[p].1, &k))
+                {
                     Some(i) => map.entries[i].2 = v,
                     None => map.push(hk, k, v),
                 }
@@ -4012,22 +4616,35 @@ impl Interp {
             _ => iter_val,
         };
         if let Value::Struct { name, .. } = &iter_val
-            && self.structs.get(name.as_ref()).is_some_and(|d| d.methods.contains_key("next"))
+            && self
+                .structs
+                .get(name.as_ref())
+                .is_some_and(|d| d.methods.contains_key("next"))
         {
             let name = name.clone();
-            let def = self.structs.get(name.as_ref()).cloned().ok_or_else(|| RuntimeError {
-                message: format!("unknown struct type '{name}'"),
-                span,
-            })?;
-            let decl = def.methods.get("next").cloned().ok_or_else(|| RuntimeError {
-                message: format!("struct '{name}' has no method 'next'"),
-                span,
-            })?;
+            let def = self
+                .structs
+                .get(name.as_ref())
+                .cloned()
+                .ok_or_else(|| RuntimeError {
+                    message: format!("unknown struct type '{name}'"),
+                    span,
+                })?;
+            let decl = def
+                .methods
+                .get("next")
+                .cloned()
+                .ok_or_else(|| RuntimeError {
+                    message: format!("struct '{name}' has no method 'next'"),
+                    span,
+                })?;
             let mut rows = Vec::new();
             loop {
                 let result = self.call(&decl, &def.home, vec![iter_val.clone()], span)?;
                 match result {
-                    Value::Enum { variant, payload, .. } if variant.as_ref() == "Some" => {
+                    Value::Enum {
+                        variant, payload, ..
+                    } if variant.as_ref() == "Some" => {
                         let item = payload.into_iter().next().ok_or_else(|| RuntimeError {
                             message: "iterator next() returned Some with no payload".to_string(),
                             span,
@@ -4037,9 +4654,12 @@ impl Interp {
                     Value::Enum { variant, .. } if variant.as_ref() == "None" => break,
                     other => {
                         return Err(RuntimeError {
-                            message: format!("iterator next() must return Option, found {}", other.type_name()),
+                            message: format!(
+                                "iterator next() must return Option, found {}",
+                                other.type_name()
+                            ),
                             span,
-                        })
+                        });
                     }
                 }
             }
@@ -4121,7 +4741,10 @@ impl Interp {
                     };
                     let pos = {
                         let m = entries.borrow();
-                        m.candidates(hk).iter().copied().find(|&p| values_equal(&m.entries[p].1, &key))
+                        m.candidates(hk)
+                            .iter()
+                            .copied()
+                            .find(|&p| values_equal(&m.entries[p].1, &key))
                     };
                     match pos {
                         Some(i) => entries.borrow_mut().entries[i].2 = new_val,
@@ -4146,7 +4769,12 @@ impl Interp {
                             eval_binary(bin, cur, rhs, span)?
                         }
                     };
-                    self.call_struct_method(target_val.clone(), "set_index", vec![key, new_val], span)?;
+                    self.call_struct_method(
+                        target_val.clone(),
+                        "set_index",
+                        vec![key, new_val],
+                        span,
+                    )?;
                     return Ok(());
                 }
                 // Validate an int index at the assignment `span` (matches the VM's `SetIndex` span).
@@ -4180,14 +4808,18 @@ impl Interp {
                     };
                     let byte = match new_val {
                         Value::Int(n) if (0..=255).contains(&n) => n as u8,
-                        Value::Int(n) => return Err(RuntimeError {
-                            message: format!("byte value {n} out of range (must be 0..=255)"),
-                            span,
-                        }),
-                        other => return Err(RuntimeError {
-                            message: format!("expected int, found {}", other.type_name()),
-                            span,
-                        }),
+                        Value::Int(n) => {
+                            return Err(RuntimeError {
+                                message: format!("byte value {n} out of range (must be 0..=255)"),
+                                span,
+                            });
+                        }
+                        other => {
+                            return Err(RuntimeError {
+                                message: format!("expected int, found {}", other.type_name()),
+                                span,
+                            });
+                        }
                     };
                     let i = bounds_check(idx, buf.borrow().len())?;
                     buf.borrow_mut()[i] = byte;
@@ -4227,7 +4859,10 @@ impl Interp {
                 let rhs = self.eval(value)?;
                 let Value::Struct { fields, .. } = &target_val else {
                     return Err(RuntimeError {
-                        message: format!("cannot assign field '{name}' of {}", target_val.type_name()),
+                        message: format!(
+                            "cannot assign field '{name}' of {}",
+                            target_val.type_name()
+                        ),
                         span,
                     });
                 };
@@ -4303,7 +4938,10 @@ impl Interp {
                     let hk = self.hash_value(&key, span)?;
                     let pos = {
                         let m = entries.borrow();
-                        m.candidates(hk).iter().copied().find(|&p| values_equal(&m.entries[p].1, &key))
+                        m.candidates(hk)
+                            .iter()
+                            .copied()
+                            .find(|&p| values_equal(&m.entries[p].1, &key))
                     };
                     match pos {
                         Some(i) => entries.borrow_mut().entries[i].2 = value,
@@ -4313,7 +4951,12 @@ impl Interp {
                 }
                 if let Value::Struct { .. } = &target_val {
                     let key = self.eval(index)?;
-                    self.call_struct_method(target_val.clone(), "set_index", vec![key, value], span)?;
+                    self.call_struct_method(
+                        target_val.clone(),
+                        "set_index",
+                        vec![key, value],
+                        span,
+                    )?;
                     return Ok(());
                 }
                 let idx = match self.eval(index)? {
@@ -4322,7 +4965,7 @@ impl Interp {
                         return Err(RuntimeError {
                             message: format!("expected int, found {}", other.type_name()),
                             span,
-                        })
+                        });
                     }
                 };
                 let Value::List(items) = &target_val else {
@@ -4331,9 +4974,14 @@ impl Interp {
                         span,
                     });
                 };
-                let i = crate::slice::norm_index(idx, items.borrow().len()).ok_or_else(|| RuntimeError {
-                    message: format!("index {idx} out of bounds (len {})", items.borrow().len()),
-                    span,
+                let i = crate::slice::norm_index(idx, items.borrow().len()).ok_or_else(|| {
+                    RuntimeError {
+                        message: format!(
+                            "index {idx} out of bounds (len {})",
+                            items.borrow().len()
+                        ),
+                        span,
+                    }
                 })?;
                 items.borrow_mut()[i] = value;
                 Ok(())
@@ -4342,7 +4990,10 @@ impl Interp {
                 let target_val = self.eval(obj)?;
                 let Value::Struct { fields, .. } = &target_val else {
                     return Err(RuntimeError {
-                        message: format!("cannot assign field '{name}' of {}", target_val.type_name()),
+                        message: format!(
+                            "cannot assign field '{name}' of {}",
+                            target_val.type_name()
+                        ),
                         span,
                     });
                 };
@@ -4411,7 +5062,13 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
     };
     // Mirror the file-backed path: normalize named/default call arguments before evaluating.
     if let Err(e) = crate::desugar::run_standalone(&mut module) {
-        return (String::new(), Err(RuntimeError { message: e.message, span: e.span }));
+        return (
+            String::new(),
+            Err(RuntimeError {
+                message: e.message,
+                span: e.span,
+            }),
+        );
     }
 
     let mut interp = Interp::new();
@@ -4452,7 +5109,15 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     let graph = match crate::resolver::build_graph(entry) {
         Ok(g) => g,
         Err(e) => {
-            return (String::new(), String::new(), Err(RunError::plain(RuntimeError { message: e.message, span: e.span })), None);
+            return (
+                String::new(),
+                String::new(),
+                Err(RunError::plain(RuntimeError {
+                    message: e.message,
+                    span: e.span,
+                })),
+                None,
+            );
         }
     };
     let mut interp = Interp::new();
@@ -4478,7 +5143,12 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
             // On an uncaught fault, `call_stack` holds the chain (outermost first, frames pop only on
             // success); reverse to innermost-first for the trace.
             let trace: Vec<TraceFrame> = interp.call_stack.iter().rev().cloned().collect();
-            return (interp.out, interp.stderr, Err(RunError::from_error(e, trace)), None);
+            return (
+                interp.out,
+                interp.stderr,
+                Err(RunError::from_error(e, trace)),
+                None,
+            );
         }
     }
     // Clean end: gracefully reap any Executor never explicitly shut down (C5 / A2). Skipped on a
@@ -4488,7 +5158,12 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
             return (interp.out, interp.stderr, Ok(()), Some(code));
         }
         let trace: Vec<TraceFrame> = interp.call_stack.iter().rev().cloned().collect();
-        return (interp.out, interp.stderr, Err(RunError::from_error(e, trace)), None);
+        return (
+            interp.out,
+            interp.stderr,
+            Err(RunError::from_error(e, trace)),
+            None,
+        );
     }
     (interp.out, interp.stderr, Ok(()), None)
 }
@@ -4542,7 +5217,11 @@ impl crate::native::Host for InterpHost<'_> {
     fn arg_int(&mut self, i: usize) -> Result<i64, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Int(n)) => Ok(*n),
-            Some(other) => Err(crate::native::HostError::arg_type(i, "int", other.type_name())),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "int",
+                other.type_name(),
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -4553,28 +5232,44 @@ impl crate::native::Host for InterpHost<'_> {
         match self.args.get(i) {
             Some(Value::Float(f)) => Ok(*f),
             Some(Value::Int(n)) => Ok(*n as f64),
-            Some(other) => Err(crate::native::HostError::arg_type(i, "float", other.type_name())),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "float",
+                other.type_name(),
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
     fn arg_bool(&mut self, i: usize) -> Result<bool, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Bool(b)) => Ok(*b),
-            Some(other) => Err(crate::native::HostError::arg_type(i, "bool", other.type_name())),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "bool",
+                other.type_name(),
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
     fn arg_ptr(&mut self, i: usize) -> Result<usize, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Ptr(a)) => Ok(*a),
-            Some(other) => Err(crate::native::HostError::arg_type(i, "ptr", other.type_name())),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "ptr",
+                other.type_name(),
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
     fn arg_str(&mut self, i: usize) -> Result<String, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Str(s)) => Ok(s.to_string()),
-            Some(other) => Err(crate::native::HostError::arg_type(i, "str", other.type_name())),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "str",
+                other.type_name(),
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -4587,15 +5282,21 @@ impl crate::native::Host for InterpHost<'_> {
                 let mut pairs = Vec::with_capacity(m.entries.len());
                 for (_, k, v) in &m.entries {
                     let (Value::Str(ks), Value::Str(vs)) = (k, v) else {
-                        return Err(crate::native::HostError::arg_type(i, "map[str, str]", "other"));
+                        return Err(crate::native::HostError::arg_type(
+                            i,
+                            "map[str, str]",
+                            "other",
+                        ));
                     };
                     pairs.push((ks.to_string(), vs.to_string()));
                 }
                 Ok(pairs)
             }
-            Some(other) => {
-                Err(crate::native::HostError::arg_type(i, "map[str, str]", other.type_name()))
-            }
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "map[str, str]",
+                other.type_name(),
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -4617,7 +5318,9 @@ impl crate::native::Host for InterpHost<'_> {
     fn os_getcwd(&self) -> Result<String, crate::native::HostError> {
         std::env::current_dir()
             .map(|p| p.display().to_string())
-            .map_err(|e| crate::native::HostError { message: e.to_string() })
+            .map_err(|e| crate::native::HostError {
+                message: e.to_string(),
+            })
     }
     fn request_exit(&mut self, code: i64) {
         *self.exit = Some(code.clamp(0, 255) as i32);
@@ -4628,7 +5331,11 @@ impl crate::native::Host for InterpHost<'_> {
 /// per row for list/set/str, and `[k]` or `[k, v]` for a map depending on the loop-variable count.
 /// Shared by `exec_for`, the comprehension driver, and the collection constructors so all iterate
 /// every collection identically.
-fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec<Vec<Value>>, RuntimeError> {
+fn iter_rows_from_value(
+    iter_val: &Value,
+    vars: usize,
+    span: Span,
+) -> Result<Vec<Vec<Value>>, RuntimeError> {
     Ok(match iter_val {
         // Over a list with >1 loop var, each element is a tuple to destructure into a row (the
         // checker guarantees the element is a tuple of matching arity). One var → whole-element row.
@@ -4659,24 +5366,39 @@ fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec
                 }
             })
             .collect(),
-        Value::Set(s) => s.borrow().entries.iter().map(|(_, e)| vec![e.clone()]).collect(),
+        Value::Set(s) => s
+            .borrow()
+            .entries
+            .iter()
+            .map(|(_, e)| vec![e.clone()])
+            .collect(),
         // Strings iterate as 1-char strings (Python-style; the checker binds a single str var).
-        Value::Str(s) => s.chars().map(|c| vec![Value::Str(c.to_string().into())]).collect(),
+        Value::Str(s) => s
+            .chars()
+            .map(|c| vec![Value::Str(c.to_string().into())])
+            .collect(),
         // `bytes`/`bytearray` iterate as `int`s (0–255). The `bytearray` snapshots its bytes so a
         // mutation during the loop does not change the iteration sequence (matches the VM).
         Value::Bytes(b) => b.iter().map(|&x| vec![Value::Int(x as i64)]).collect(),
-        Value::ByteArray(b) => b.borrow().iter().map(|&x| vec![Value::Int(x as i64)]).collect(),
+        Value::ByteArray(b) => b
+            .borrow()
+            .iter()
+            .map(|&x| vec![Value::Int(x as i64)])
+            .collect(),
         // A cursor yields its REMAINING snapshot (`items[pos..]`) as single-var rows — drains a
         // `for x in pure_iterable_struct` (lowered to a cursor) and `list(xs.iter())`.
         Value::Iter(c) => {
             let c = c.borrow();
-            c.items[c.pos.min(c.items.len())..].iter().map(|v| vec![v.clone()]).collect()
+            c.items[c.pos.min(c.items.len())..]
+                .iter()
+                .map(|v| vec![v.clone()])
+                .collect()
         }
         other => {
             return Err(RuntimeError {
                 message: format!("cannot iterate over {}", other.type_name()),
                 span,
-            })
+            });
         }
     })
 }
@@ -4687,7 +5409,10 @@ fn iter_rows_from_value(iter_val: &Value, vars: usize, span: Span) -> Result<Vec
 fn decode_utf8(bytes: &[u8], span: Span) -> Result<Value, RuntimeError> {
     match std::str::from_utf8(bytes) {
         Ok(s) => Ok(Value::Str(s.into())),
-        Err(_) => Err(RuntimeError { message: "invalid UTF-8 in decode()".to_string(), span }),
+        Err(_) => Err(RuntimeError {
+            message: "invalid UTF-8 in decode()".to_string(),
+            span,
+        }),
     }
 }
 
@@ -4727,7 +5452,10 @@ fn lower_native(ret: crate::native::NativeRet) -> Value {
             Value::List(std::rc::Rc::new(std::cell::RefCell::new(vs)))
         }
         N::Struct { name, fields } => {
-            let fs = fields.into_iter().map(|(k, v)| (k, lower_native(v))).collect();
+            let fs = fields
+                .into_iter()
+                .map(|(k, v)| (k, lower_native(v)))
+                .collect();
             Value::Struct {
                 name: name.into(),
                 fields: std::rc::Rc::new(std::cell::RefCell::new(fs)),
@@ -4752,7 +5480,11 @@ fn lower_native(ret: crate::native::NativeRet) -> Value {
 }
 
 fn enum_val(ty: &str, variant: &str, payload: Vec<Value>) -> Value {
-    Value::Enum { ty: ty.into(), variant: variant.into(), payload }
+    Value::Enum {
+        ty: ty.into(),
+        variant: variant.into(),
+        payload,
+    }
 }
 
 /// The `f64` of a JSON `Num` variant's payload, else `None` (used by `json.decode` coercion).
@@ -4774,7 +5506,11 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, Ru
     use Value::{Float, Int, Str};
 
     let type_err = |op: BinaryOp, l: &Value, r: &Value| RuntimeError {
-        message: format!("cannot apply {op:?} to {} and {}", l.type_name(), r.type_name()),
+        message: format!(
+            "cannot apply {op:?} to {} and {}",
+            l.type_name(),
+            r.type_name()
+        ),
         span,
     };
 
@@ -4855,7 +5591,11 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, Ru
                                 span,
                             });
                         }
-                        if op == Shl { a << (*b as u32) } else { a >> (*b as u32) }
+                        if op == Shl {
+                            a << (*b as u32)
+                        } else {
+                            a >> (*b as u32)
+                        }
                     }
                     _ => unreachable!(),
                 };
@@ -4900,7 +5640,10 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, Ru
             Str(hay) => match &l {
                 Str(sub) => Ok(Value::Bool(hay.contains(sub.as_ref()))),
                 _ => Err(RuntimeError {
-                    message: format!("substring `in` requires a str on the left, found {}", l.type_name()),
+                    message: format!(
+                        "substring `in` requires a str on the left, found {}",
+                        l.type_name()
+                    ),
                     span,
                 }),
             },
@@ -4940,7 +5683,14 @@ fn as_int_val(v: Value, span: Span) -> Result<i64, RuntimeError> {
 /// If `v` is an unhandled error (`Err(..)` or `None`) reaching the top level, build the runtime
 /// error that exits the program. Mirrors the VM's `top_level_error` — keep the message identical.
 fn top_level_error(v: &Value, span: Span) -> Option<RuntimeError> {
-    let Value::Enum { ty, variant, payload } = v else { return None };
+    let Value::Enum {
+        ty,
+        variant,
+        payload,
+    } = v
+    else {
+        return None;
+    };
     // Builtin `Result`/`Option` only — a user enum that shadows `Err`/`None` is a normal value.
     let unhandled = (ty.as_ref() == "Result" && variant.as_ref() == "Err")
         || (ty.as_ref() == "Option" && variant.as_ref() == "None");
@@ -4951,7 +5701,10 @@ fn top_level_error(v: &Value, span: Span) -> Option<RuntimeError> {
         Some(p) => p.to_string(),
         None => v.to_string(),
     };
-    Some(RuntimeError { message: format!("unhandled error: {detail}"), span })
+    Some(RuntimeError {
+        message: format!("unhandled error: {detail}"),
+        span,
+    })
 }
 
 fn as_f64(v: &Value) -> f64 {
@@ -5042,7 +5795,8 @@ pub(super) fn values_equal_guarded(
 ) -> Result<bool, RuntimeError> {
     if depth > MAX_STRUCTURAL_DEPTH {
         return Err(RuntimeError {
-            message: "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
+            message: "maximum structural depth (10000) exceeded (cyclic data structure?)"
+                .to_string(),
             span,
         });
     }
@@ -5129,8 +5883,14 @@ pub(super) fn values_equal_guarded(
             Ok(true)
         }
         (
-            Value::Struct { name: na, fields: fa },
-            Value::Struct { name: nb, fields: fb },
+            Value::Struct {
+                name: na,
+                fields: fa,
+            },
+            Value::Struct {
+                name: nb,
+                fields: fb,
+            },
         ) => {
             if na == nb && std::rc::Rc::ptr_eq(fa, fb) {
                 return Ok(true); // identity fast-path (mirrors the VM's `ha == hb`)
@@ -5150,8 +5910,16 @@ pub(super) fn values_equal_guarded(
             Ok(true)
         }
         (
-            Value::Enum { ty: ta, variant: va, payload: pa },
-            Value::Enum { ty: tb, variant: vb, payload: pb },
+            Value::Enum {
+                ty: ta,
+                variant: va,
+                payload: pa,
+            },
+            Value::Enum {
+                ty: tb,
+                variant: vb,
+                payload: pb,
+            },
         ) => {
             if ta != tb || va != vb || pa.len() != pb.len() {
                 return Ok(false);
@@ -5240,9 +6008,11 @@ fn try_bind(
                 variant_pair(None, name).filter(|k| variants.get(k).is_some_and(|d| d.arity == 0))
             {
                 return match value {
-                    Value::Enum { ty, variant, payload }
-                        if ty.as_ref() == en && variant.as_ref() == name && payload.is_empty() =>
-                    {
+                    Value::Enum {
+                        ty,
+                        variant,
+                        payload,
+                    } if ty.as_ref() == en && variant.as_ref() == name && payload.is_empty() => {
                         Some(Vec::new())
                     }
                     _ => None,
@@ -5258,7 +6028,9 @@ fn try_bind(
             _ => None,
         },
         Pattern::Tuple(subs) => {
-            let Value::Tuple(elems) = value else { return None };
+            let Value::Tuple(elems) = value else {
+                return None;
+            };
             if elems.len() != subs.len() {
                 return None;
             }
@@ -5268,8 +6040,17 @@ fn try_bind(
             }
             Some(out)
         }
-        Pattern::Variant { name, bindings, enum_name } => {
-            let Value::Enum { ty, variant, payload } = value else {
+        Pattern::Variant {
+            name,
+            bindings,
+            enum_name,
+        } => {
+            let Value::Enum {
+                ty,
+                variant,
+                payload,
+            } = value
+            else {
                 // A bare top-level identifier (no payload) against a non-enum value is a binding
                 // capturing the whole value — the checker permits this only for literal scrutinees.
                 if bindings.is_empty() {
@@ -5344,7 +6125,10 @@ mod tests {
         ] {
             let vm_err = crate::vm::run_capture(src).unwrap_err();
             let interp_err = run_capture(src).unwrap_err();
-            assert_eq!(vm_err.message, interp_err.message, "message parity for {src:?}");
+            assert_eq!(
+                vm_err.message, interp_err.message,
+                "message parity for {src:?}"
+            );
             assert_eq!(
                 vm_err.span.line, interp_err.span.line,
                 "line parity for {src:?}"
@@ -5359,18 +6143,28 @@ mod tests {
         // passing `assert true, loud()` printed in the VM but stayed silent in the interp, and a
         // passing `assert true, xs[5]` faulted in the VM but passed in the interp. Both forms must
         // now produce identical stdout and neither evaluate the message.
-        let side_effect =
-            "fn loud() -> str:\n    print(\"msg-evaluated\")\n    return \"m\"\nprint(\"a\")\nassert true, loud()\nprint(\"b\")\n";
-        let vm_out = crate::vm::run_capture(side_effect).expect("vm: passing assert must not fault");
+        let side_effect = "fn loud() -> str:\n    print(\"msg-evaluated\")\n    return \"m\"\nprint(\"a\")\nassert true, loud()\nprint(\"b\")\n";
+        let vm_out =
+            crate::vm::run_capture(side_effect).expect("vm: passing assert must not fault");
         let interp_out = run_capture(side_effect).expect("interp: passing assert must not fault");
-        assert_eq!(vm_out, interp_out, "stdout parity for a passing assert with a side-effecting msg");
-        assert_eq!(vm_out, "a\nb\n", "a passing assert must not evaluate its message");
+        assert_eq!(
+            vm_out, interp_out,
+            "stdout parity for a passing assert with a side-effecting msg"
+        );
+        assert_eq!(
+            vm_out, "a\nb\n",
+            "a passing assert must not evaluate its message"
+        );
 
         // A passing assert whose message expression would FAULT must not fault in either engine.
         let faulting = "xs := [\"only\"]\nprint(\"a\")\nassert true, xs[5]\nprint(\"b\")\n";
-        let vm_out = crate::vm::run_capture(faulting).expect("vm: faulting msg must not be evaluated");
+        let vm_out =
+            crate::vm::run_capture(faulting).expect("vm: faulting msg must not be evaluated");
         let interp_out = run_capture(faulting).expect("interp: faulting msg must not be evaluated");
-        assert_eq!(vm_out, interp_out, "stdout parity for a passing assert with a faulting msg expr");
+        assert_eq!(
+            vm_out, interp_out,
+            "stdout parity for a passing assert with a faulting msg expr"
+        );
         assert_eq!(vm_out, "a\nb\n");
     }
 
@@ -5429,7 +6223,11 @@ mod tests {
         // still error like the VM rather than silently under-binding (cross-engine parity).
         let err = run_capture("xs := []\nxs.push((1, 2))\nfor a, b, c in xs:\n    print(a)\n")
             .expect_err("arity mismatch should error");
-        assert!(err.message.contains("tuple has no element '.2' (len 2)"), "{}", err.message);
+        assert!(
+            err.message.contains("tuple has no element '.2' (len 2)"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
@@ -5444,18 +6242,25 @@ mod tests {
     #[test]
     fn list_comprehension_maps_and_filters() {
         assert_eq!(run("print([x * 2 for x in [1, 2, 3]])\n"), "[2, 4, 6]\n");
-        assert_eq!(run("print([x for x in [1, 2, 3, 4] if x % 2 == 0])\n"), "[2, 4]\n");
+        assert_eq!(
+            run("print([x for x in [1, 2, 3, 4] if x % 2 == 0])\n"),
+            "[2, 4]\n"
+        );
     }
 
     #[test]
     fn interp_or_pattern_matches() {
         // Literal or-pattern (first-match-wins), enum or-pattern, and a binding or-pattern.
         assert_eq!(
-            run("fn f(n: int) -> str:\n    return match n:\n        1 | 2 | 3: \"low\"\n        _: \"high\"\nprint(f(2))\nprint(f(9))\n"),
+            run(
+                "fn f(n: int) -> str:\n    return match n:\n        1 | 2 | 3: \"low\"\n        _: \"high\"\nprint(f(2))\nprint(f(9))\n"
+            ),
             "low\nhigh\n"
         );
         assert_eq!(
-            run("enum E:\n    A(int)\n    B(int)\nfn v(e: E) -> int:\n    return match e:\n        E.A(a) | E.B(a): a\nprint(v(E.A(4)))\nprint(v(E.B(6)))\n"),
+            run(
+                "enum E:\n    A(int)\n    B(int)\nfn v(e: E) -> int:\n    return match e:\n        E.A(a) | E.B(a): a\nprint(v(E.A(4)))\nprint(v(E.B(6)))\n"
+            ),
             "4\n6\n"
         );
     }
@@ -5466,7 +6271,9 @@ mod tests {
         // the inner-none case; `Some(Some(7))` falls through to `_`. Single outer `Some` arm + `_` keeps
         // this CLI-valid (one arm per outer variant), so it mirrors a runnable program.
         assert_eq!(
-            run("fn f(oo: Option[Option[int]]) -> str:\n    return match oo:\n        Some(None): \"in\"\n        _: \"out\"\nx: Option[Option[int]] = Some(None)\ny: Option[Option[int]] = Some(Some(7))\nprint(f(x))\nprint(f(y))\n"),
+            run(
+                "fn f(oo: Option[Option[int]]) -> str:\n    return match oo:\n        Some(None): \"in\"\n        _: \"out\"\nx: Option[Option[int]] = Some(None)\ny: Option[Option[int]] = Some(Some(7))\nprint(f(x))\nprint(f(y))\n"
+            ),
             "in\nout\n"
         );
     }
@@ -5479,12 +6286,18 @@ mod tests {
     #[test]
     fn set_comprehension_dedupes() {
         // Squaring mod-collapses duplicates; the set keeps insertion order of first sight.
-        assert_eq!(run("print({x % 3 for x in [0, 1, 2, 3, 4, 5]})\n"), "{0, 1, 2}\n");
+        assert_eq!(
+            run("print({x % 3 for x in [0, 1, 2, 3, 4, 5]})\n"),
+            "{0, 1, 2}\n"
+        );
     }
 
     #[test]
     fn map_comprehension_builds_entries() {
-        assert_eq!(run("print({x: x * x for x in [1, 2, 3]})\n"), "{1: 1, 2: 4, 3: 9}\n");
+        assert_eq!(
+            run("print({x: x * x for x in [1, 2, 3]})\n"),
+            "{1: 1, 2: 4, 3: 9}\n"
+        );
     }
 
     #[test]
@@ -5566,7 +6379,10 @@ main()
         let mut interp = Interp::new();
         interp.env.define(
             "add",
-            Value::Native(value::NativeFnEntry { name: "add".into(), func: add }),
+            Value::Native(value::NativeFnEntry {
+                name: "add".into(),
+                func: add,
+            }),
         );
         let expr = parse_expr_str("add(40, 2)").unwrap();
         assert_eq!(interp.eval(&expr), Ok(Value::Int(42)));
@@ -5619,7 +6435,10 @@ main()
         let mut interp = Interp::new();
         interp.env.define(
             "boom",
-            Value::Native(value::NativeFnEntry { name: "boom".into(), func: boom }),
+            Value::Native(value::NativeFnEntry {
+                name: "boom".into(),
+                func: boom,
+            }),
         );
         let expr = parse_expr_str("boom(1)").unwrap();
         let err = interp.eval(&expr).unwrap_err();
@@ -5699,13 +6518,17 @@ else:
 
     #[test]
     fn for_range_accumulates() {
-        let src = "total := 0\nfor i in 0..10:\n    if i % 2 == 0:\n        total += i\nprint(total)\n";
+        let src =
+            "total := 0\nfor i in 0..10:\n    if i % 2 == 0:\n        total += i\nprint(total)\n";
         assert_eq!(run(src), "20\n");
     }
 
     #[test]
     fn for_iterates_a_list() {
-        assert_eq!(run("for x in [10, 20, 30]:\n    print(x)\n"), "10\n20\n30\n");
+        assert_eq!(
+            run("for x in [10, 20, 30]:\n    print(x)\n"),
+            "10\n20\n30\n"
+        );
     }
 
     #[test]
@@ -5715,12 +6538,18 @@ else:
 
     #[test]
     fn while_loops_until_false() {
-        assert_eq!(run("n := 3\nwhile n > 0:\n    print(n)\n    n -= 1\n"), "3\n2\n1\n");
+        assert_eq!(
+            run("n := 3\nwhile n > 0:\n    print(n)\n    n -= 1\n"),
+            "3\n2\n1\n"
+        );
     }
 
     #[test]
     fn call_function_with_params() {
-        assert_eq!(run("fn add(a: int, b: int) -> int:\n    return a + b\nprint(add(2, 3))\n"), "5\n");
+        assert_eq!(
+            run("fn add(a: int, b: int) -> int:\n    return a + b\nprint(add(2, 3))\n"),
+            "5\n"
+        );
     }
 
     #[test]
@@ -5755,7 +6584,10 @@ else:
 
     #[test]
     fn closure_called_inline() {
-        assert_eq!(run("double := fn(x: int) -> int: x * 2\nprint(double(5))\n"), "10\n");
+        assert_eq!(
+            run("double := fn(x: int) -> int: x * 2\nprint(double(5))\n"),
+            "10\n"
+        );
     }
 
     #[test]
@@ -5782,12 +6614,20 @@ struct Point:
 
     #[test]
     fn struct_construct_and_field_read() {
-        assert_eq!(run(&format!("{POINT}p := Point(3, 4)\nprint(p.x)\nprint(p.y)\n")), "3\n4\n");
+        assert_eq!(
+            run(&format!(
+                "{POINT}p := Point(3, 4)\nprint(p.x)\nprint(p.y)\n"
+            )),
+            "3\n4\n"
+        );
     }
 
     #[test]
     fn struct_method_binds_self() {
-        assert_eq!(run(&format!("{POINT}p := Point(3, 4)\nprint(p.sum())\n")), "7\n");
+        assert_eq!(
+            run(&format!("{POINT}p := Point(3, 4)\nprint(p.sum())\n")),
+            "7\n"
+        );
     }
 
     #[test]
@@ -5825,7 +6665,9 @@ fn area(s: Shape) -> int:
 
     #[test]
     fn match_without_matching_arm_errors() {
-        let src = format!("{SHAPE}fn f(s: Shape):\n    match s:\n        Shape.Circle(r): print(r)\nf(Shape.Square(2))\n");
+        let src = format!(
+            "{SHAPE}fn f(s: Shape):\n    match s:\n        Shape.Circle(r): print(r)\nf(Shape.Square(2))\n"
+        );
         assert!(run_capture(&src).is_err());
     }
 
@@ -5867,7 +6709,10 @@ fn safe_div(a: int, b: int) -> Result[int]:
 
     #[test]
     fn interpolation_inserts_variable() {
-        assert_eq!(run("name := \"thuan\"\nprint(\"hi {name}\")\n"), "hi thuan\n");
+        assert_eq!(
+            run("name := \"thuan\"\nprint(\"hi {name}\")\n"),
+            "hi thuan\n"
+        );
     }
 
     #[test]
@@ -5877,7 +6722,10 @@ fn safe_div(a: int, b: int) -> Result[int]:
 
     #[test]
     fn interpolation_escapes_double_braces() {
-        assert_eq!(run("print(\"brace: {{not}} {1 + 1}\")\n"), "brace: {not} 2\n");
+        assert_eq!(
+            run("print(\"brace: {{not}} {1 + 1}\")\n"),
+            "brace: {not} 2\n"
+        );
     }
 
     #[test]
@@ -5924,7 +6772,9 @@ fn safe_div(a: int, b: int) -> Result[int]:
     #[test]
     fn recover_catches_index_oob() {
         // A runtime fault beneath a `recover:` boundary becomes `Err`, not a process kill.
-        let out = run("fn main():\n    r := recover:\n        [1, 2][9]\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()\n");
+        let out = run(
+            "fn main():\n    r := recover:\n        [1, 2][9]\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()\n",
+        );
         assert!(out.starts_with("recovered: "), "got: {out:?}");
         assert!(out.contains("out of bounds"), "got: {out:?}");
     }
@@ -5932,27 +6782,35 @@ fn safe_div(a: int, b: int) -> Result[int]:
     #[test]
     fn recover_ok_path_wraps_value() {
         // No fault ⇒ the block's trailing expression is the `Ok` value.
-        let out = run("fn main():\n    r := recover:\n        2 + 3\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err {e.message()}\")\nmain()\n");
+        let out = run(
+            "fn main():\n    r := recover:\n        2 + 3\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err {e.message()}\")\nmain()\n",
+        );
         assert_eq!(out, "ok 5\n");
     }
 
     #[test]
     fn recover_catches_question_mark_err() {
         // try-block: a `?` Err inside recover lands in `r` (not propagated out of the function).
-        let out = run("fn risky(ok: bool) -> int!:\n    if ok:\n        return Ok(7)\n    return Err(\"boom\")\nfn main():\n    r := recover:\n        x := risky(false)?\n        x + 1\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"caught: {e.message()}\")\nmain()\n");
+        let out = run(
+            "fn risky(ok: bool) -> int!:\n    if ok:\n        return Ok(7)\n    return Err(\"boom\")\nfn main():\n    r := recover:\n        x := risky(false)?\n        x + 1\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"caught: {e.message()}\")\nmain()\n",
+        );
         assert_eq!(out, "caught: boom\n");
     }
 
     #[test]
     fn recover_keeps_side_effects_before_a_fault() {
         // A mutation made before a caught fault persists (keep semantics; matches the VM).
-        let out = run("fn main():\n    x := 1\n    r := recover:\n        x = 99\n        [1][9]\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"recovered\")\n    print(\"x={x}\")\nmain()\n");
+        let out = run(
+            "fn main():\n    x := 1\n    r := recover:\n        x = 99\n        [1][9]\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"recovered\")\n    print(\"x={x}\")\nmain()\n",
+        );
         assert_eq!(out, "recovered\nx=99\n");
     }
 
     #[test]
     fn recover_question_mark_ok_unwraps() {
-        let out = run("fn risky(ok: bool) -> int!:\n    if ok:\n        return Ok(7)\n    return Err(\"boom\")\nfn main():\n    r := recover:\n        x := risky(true)?\n        x + 1\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"caught: {e.message()}\")\nmain()\n");
+        let out = run(
+            "fn risky(ok: bool) -> int!:\n    if ok:\n        return Ok(7)\n    return Err(\"boom\")\nfn main():\n    r := recover:\n        x := risky(true)?\n        x + 1\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"caught: {e.message()}\")\nmain()\n",
+        );
         assert_eq!(out, "ok 8\n");
     }
 
@@ -5976,7 +6834,10 @@ fn safe_div(a: int, b: int) -> Result[int]:
 
     #[test]
     fn list_method_push_mutates_in_place() {
-        assert_eq!(run("xs := [1, 2]\nxs.push(3)\nprint(xs)\nprint(xs.len())\n"), "[1, 2, 3]\n3\n");
+        assert_eq!(
+            run("xs := [1, 2]\nxs.push(3)\nprint(xs)\nprint(xs.len())\n"),
+            "[1, 2, 3]\n3\n"
+        );
     }
 
     #[test]
@@ -5990,7 +6851,9 @@ fn safe_div(a: int, b: int) -> Result[int]:
     #[test]
     fn list_map_changes_type_to_str() {
         assert_eq!(
-            run("xs := [1,2,3]\nys := xs.map(fn(x: int) -> str: \"n{x}\")\nfor y in ys:\n    print(y)\n"),
+            run(
+                "xs := [1,2,3]\nys := xs.map(fn(x: int) -> str: \"n{x}\")\nfor y in ys:\n    print(y)\n"
+            ),
             "n1\nn2\nn3\n"
         );
     }
@@ -6014,7 +6877,9 @@ fn safe_div(a: int, b: int) -> Result[int]:
     #[test]
     fn list_fold_string_acc() {
         assert_eq!(
-            run("xs := [\"a\",\"b\",\"c\"]\ns := xs.fold(\"\", fn(a: str, x: str) -> str: a + x)\nprint(s)\n"),
+            run(
+                "xs := [\"a\",\"b\",\"c\"]\ns := xs.fold(\"\", fn(a: str, x: str) -> str: a + x)\nprint(s)\n"
+            ),
             "abc\n"
         );
     }
@@ -6022,7 +6887,11 @@ fn safe_div(a: int, b: int) -> Result[int]:
     #[test]
     fn str_method_wrong_arity_errors() {
         let e = run_capture("print(\"hi\".upper(\"extra\"))\n").unwrap_err();
-        assert!(e.message.contains("upper() expects 0 argument(s), got 1"), "{}", e.message);
+        assert!(
+            e.message.contains("upper() expects 0 argument(s), got 1"),
+            "{}",
+            e.message
+        );
     }
 
     #[test]
@@ -6094,7 +6963,11 @@ fn safe_div(a: int, b: int) -> Result[int]:
     fn cyclic_print_errors_not_crashes() {
         let src = "struct Node:\n    next: list[Node]\na := Node([])\nb := Node([])\na.next.push(b)\nb.next.push(a)\nprint(a)\n";
         let err = run_capture(src).unwrap_err();
-        assert!(err.message.contains("maximum structural depth"), "{}", err.message);
+        assert!(
+            err.message.contains("maximum structural depth"),
+            "{}",
+            err.message
+        );
     }
 
     /// `==` between two separate equal cycles must error via the structural-depth guard rather than
@@ -6103,7 +6976,11 @@ fn safe_div(a: int, b: int) -> Result[int]:
     fn cyclic_equality_errors_not_crashes() {
         let src = "struct Node:\n    next: list[Node]\na := Node([])\nb := Node([])\na.next.push(b)\nb.next.push(a)\nc := Node([])\nd := Node([])\nc.next.push(d)\nd.next.push(c)\nprint(a == c)\n";
         let err = run_capture(src).unwrap_err();
-        assert!(err.message.contains("maximum structural depth"), "{}", err.message);
+        assert!(
+            err.message.contains("maximum structural depth"),
+            "{}",
+            err.message
+        );
     }
 
     /// The structural-depth fault is recoverable (a `RuntimeError`, not a SIGABRT): wrapping the
@@ -6164,7 +7041,10 @@ fn safe_div(a: int, b: int) -> Result[int]:
 
     #[test]
     fn index_assign_mutates_in_place() {
-        assert_eq!(run("xs := [1, 2, 3]\nxs[1] = 9\nprint(xs)\n"), "[1, 9, 3]\n");
+        assert_eq!(
+            run("xs := [1, 2, 3]\nxs[1] = 9\nprint(xs)\n"),
+            "[1, 9, 3]\n"
+        );
     }
 
     #[test]
@@ -6197,7 +7077,11 @@ fn safe_div(a: int, b: int) -> Result[int]:
         assert_eq!(run("print(\"hello\"[::-1])\n"), "olleh\n");
         // Zero step is a fault, message byte-identical to the VM.
         let e = run_capture("print([1, 2, 3][::0])\n").unwrap_err();
-        assert!(e.message.contains("slice step cannot be zero"), "got: {}", e.message);
+        assert!(
+            e.message.contains("slice step cannot be zero"),
+            "got: {}",
+            e.message
+        );
     }
 
     #[test]
@@ -6263,7 +7147,10 @@ b := Buf([10, 20, 30])
         assert_eq!(run(&format!("{BUF_PROG}print(b[0:2])\n")), "[10, 20]\n");
         // Optional bounds + reverse route through the protocol's None-aware body.
         assert_eq!(run(&format!("{BUF_PROG}print(b[:])\n")), "[10, 20, 30]\n");
-        assert_eq!(run(&format!("{BUF_PROG}print(b[::-1])\n")), "[30, 20, 10]\n");
+        assert_eq!(
+            run(&format!("{BUF_PROG}print(b[::-1])\n")),
+            "[30, 20, 10]\n"
+        );
     }
 
     #[test]
@@ -6285,7 +7172,9 @@ b := Buf([10, 20, 30])
     #[test]
     fn field_assign_mutates_in_place() {
         assert_eq!(
-            run("struct P:\n    x: int\n    y: int\np := P(1, 2)\np.x = 9\nprint(p.x)\nprint(p.y)\n"),
+            run(
+                "struct P:\n    x: int\n    y: int\np := P(1, 2)\np.x = 9\nprint(p.x)\nprint(p.y)\n"
+            ),
             "9\n2\n"
         );
     }
@@ -6345,7 +7234,10 @@ b := Buf([10, 20, 30])
     #[test]
     fn struct_whole_value_display_is_field_ordered() {
         // Display must follow declaration order, not HashMap iteration order.
-        assert_eq!(run(&format!("{POINT}print(Point(3, 4))\n")), "Point(x=3, y=4)\n");
+        assert_eq!(
+            run(&format!("{POINT}print(Point(3, 4))\n")),
+            "Point(x=3, y=4)\n"
+        );
     }
 
     #[test]
@@ -6382,7 +7274,10 @@ b := Buf([10, 20, 30])
     fn golden_slicing_chz() {
         let source = include_str!("../../examples/slicing.chz");
         let expected = include_str!("../../examples/slicing.expected");
-        assert_eq!(run_capture(source).expect("slicing.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("slicing.chz should run"),
+            expected
+        );
     }
 
     /// M8-M4 golden: the set type (literals, membership, algebra, iteration).
@@ -6398,9 +7293,11 @@ b := Buf([10, 20, 30])
     /// `run_capture`, which skips resolution) and asserts the interp stdout byte-matches `.expected`.
     #[test]
     fn golden_math_more_chz() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/math_more.chz");
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/math_more.chz");
         let expected = std::fs::read_to_string(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/math_more.expected"),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/math_more.expected"),
         )
         .unwrap();
         let (out, _err, res, _) = run_file(&path);
@@ -6412,9 +7309,11 @@ b := Buf([10, 20, 30])
     /// imports a std module, so they drive `run_file` (the module-graph path) and byte-match `.expected`.
     #[test]
     fn golden_channel_trip_chz() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/channel_trip.chz");
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/channel_trip.chz");
         let expected = std::fs::read_to_string(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/channel_trip.expected"),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/channel_trip.expected"),
         )
         .unwrap();
         let (out, _err, res, _) = run_file(&path);
@@ -6424,9 +7323,11 @@ b := Buf([10, 20, 30])
 
     #[test]
     fn golden_cancel_manual_chz() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_manual.chz");
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_manual.chz");
         let expected = std::fs::read_to_string(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_manual.expected"),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/cancel_manual.expected"),
         )
         .unwrap();
         let (out, _err, res, _) = run_file(&path);
@@ -6436,9 +7337,11 @@ b := Buf([10, 20, 30])
 
     #[test]
     fn golden_cancel_timeout_wait_chz() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_timeout_wait.chz");
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/cancel_timeout_wait.chz");
         let expected = std::fs::read_to_string(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_timeout_wait.expected"),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/cancel_timeout_wait.expected"),
         )
         .unwrap();
         let (out, _err, res, _) = run_file(&path);
@@ -6451,9 +7354,11 @@ b := Buf([10, 20, 30])
     /// `.expected` the VM produces — proving the feature is two-engine identical (no interp change).
     #[test]
     fn golden_cancel_tree_chz() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_tree.chz");
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_tree.chz");
         let expected = std::fs::read_to_string(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/cancel_tree.expected"),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/cancel_tree.expected"),
         )
         .unwrap();
         let (out, _err, res, _) = run_file(&path);
@@ -6485,7 +7390,8 @@ b := Buf([10, 20, 30])
     #[test]
     #[cfg(target_os = "linux")]
     fn golden_ffi_ptr_chz() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi_ptr.chz");
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi_ptr.chz");
         let expected = std::fs::read_to_string(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi_ptr.expected"),
         )
@@ -6502,8 +7408,10 @@ b := Buf([10, 20, 30])
     #[cfg(target_os = "linux")]
     fn extern_explicit_nil_return_runs() {
         let src = "extern \"libc.so.6\":\n    fn srand(seed: int) -> nil\n\nsrand(1)\nprint(42)\n";
-        let path = std::env::temp_dir()
-            .join(format!("chezzi_interp_ffi_nilret_{}.chz", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "chezzi_interp_ffi_nilret_{}.chz",
+            std::process::id()
+        ));
         std::fs::write(&path, src).unwrap();
         let (out, _err, res, _) = run_file(&path);
         let _ = std::fs::remove_file(&path);
@@ -6518,8 +7426,8 @@ b := Buf([10, 20, 30])
     #[test]
     #[cfg(target_os = "linux")]
     fn extern_cross_module_alias_runs() {
-        let dir = std::env::temp_dir()
-            .join(format!("chezzi_interp_ffi_xmod_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_interp_ffi_xmod_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sizes.chz"), "type Size = int\n").unwrap();
         let entry = dir.join("main.chz");
@@ -6548,7 +7456,10 @@ b := Buf([10, 20, 30])
     fn golden_comprehensions_chz() {
         let source = include_str!("../../examples/comprehensions.chz");
         let expected = include_str!("../../examples/comprehensions.expected");
-        assert_eq!(run_capture(source).expect("comprehensions.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("comprehensions.chz should run"),
+            expected
+        );
     }
 
     /// C1 concurrency golden: `parallel:` nursery + `spawn` (both forms) on the sequential
@@ -6558,7 +7469,10 @@ b := Buf([10, 20, 30])
     fn golden_parallel_chz() {
         let source = include_str!("../../examples/parallel.chz");
         let expected = include_str!("../../examples/parallel.expected");
-        assert_eq!(run_capture(source).expect("parallel.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("parallel.chz should run"),
+            expected
+        );
     }
 
     /// C2 concurrency golden: the canonical `Channel[T]` fan-out worker — spawned workers `send`
@@ -6568,7 +7482,10 @@ b := Buf([10, 20, 30])
     fn golden_channel_chz() {
         let source = include_str!("../../examples/channel.chz");
         let expected = include_str!("../../examples/channel.expected");
-        assert_eq!(run_capture(source).expect("channel.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("channel.chz should run"),
+            expected
+        );
     }
 
     /// A1 concurrency golden: `Channel[T].try_recv()` — a non-blocking poll. Workers `send` at the
@@ -6578,21 +7495,36 @@ b := Buf([10, 20, 30])
     fn golden_try_recv_chz() {
         let source = include_str!("../../examples/try_recv.chz");
         let expected = include_str!("../../examples/try_recv.expected");
-        assert_eq!(run_capture(source).expect("try_recv.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("try_recv.chz should run"),
+            expected
+        );
     }
 
     #[test]
     fn channel_send_after_close_faults() {
-        let err = run_capture("fn main():\n    ch := Channel[int]()\n    ch.close()\n    ch.send(1)\nmain()\n")
-            .expect_err("send on a closed channel should fault");
-        assert!(err.message.contains("send on a closed channel"), "{}", err.message);
+        let err = run_capture(
+            "fn main():\n    ch := Channel[int]()\n    ch.close()\n    ch.send(1)\nmain()\n",
+        )
+        .expect_err("send on a closed channel should fault");
+        assert!(
+            err.message.contains("send on a closed channel"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
     fn channel_recv_on_closed_empty_faults() {
-        let err = run_capture("fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.recv())\nmain()\n")
-            .expect_err("recv on a closed empty channel should fault");
-        assert!(err.message.contains("receive on a closed channel"), "{}", err.message);
+        let err = run_capture(
+            "fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.recv())\nmain()\n",
+        )
+        .expect_err("recv on a closed empty channel should fault");
+        assert!(
+            err.message.contains("receive on a closed channel"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
@@ -6617,7 +7549,8 @@ b := Buf([10, 20, 30])
     #[test]
     fn channel_close_then_len_zero() {
         // close() must not fault len(); a closed-and-empty channel still reports 0.
-        let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.len())\nmain()\n";
+        let src =
+            "fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.len())\nmain()\n";
         assert_eq!(run(src), "0\n");
     }
 
@@ -6641,8 +7574,10 @@ b := Buf([10, 20, 30])
     fn for_over_open_empty_channel_deadlocks() {
         // The sequential oracle cannot block: a `for` over an open-and-empty channel faults (it can
         // never receive a value), mirroring bare `recv`.
-        let err = run_capture("fn main():\n    ch := Channel[int]()\n    for v in ch:\n        print(v)\nmain()\n")
-            .expect_err("for over an open empty channel should deadlock-fault");
+        let err = run_capture(
+            "fn main():\n    ch := Channel[int]()\n    for v in ch:\n        print(v)\nmain()\n",
+        )
+        .expect_err("for over an open empty channel should deadlock-fault");
         assert!(err.message.contains("deadlock"), "{}", err.message);
     }
 
@@ -6653,7 +7588,10 @@ b := Buf([10, 20, 30])
     fn golden_shared_chz() {
         let source = include_str!("../../examples/shared.chz");
         let expected = include_str!("../../examples/shared.expected");
-        assert_eq!(run_capture(source).expect("shared.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("shared.chz should run"),
+            expected
+        );
     }
 
     #[test]
@@ -6675,7 +7613,10 @@ b := Buf([10, 20, 30])
     fn golden_executor_chz() {
         let source = include_str!("../../examples/executor.chz");
         let expected = include_str!("../../examples/executor.expected");
-        assert_eq!(run_capture(source).expect("executor.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("executor.chz should run"),
+            expected
+        );
     }
 
     #[test]
@@ -6689,7 +7630,11 @@ b := Buf([10, 20, 30])
     fn executor_submit_after_shutdown_errors() {
         let src = "fn main():\n    ex := Executor()\n    ex.shutdown()\n    ex.submit(fn(): print(1))\nmain()\n";
         let err = run_capture(src).expect_err("submit after shutdown should fault");
-        assert!(err.message.contains("shut-down Executor"), "got: {}", err.message);
+        assert!(
+            err.message.contains("shut-down Executor"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -6704,7 +7649,10 @@ b := Buf([10, 20, 30])
     fn golden_executor_autodrain_chz() {
         let source = include_str!("../../examples/executor_autodrain.chz");
         let expected = include_str!("../../examples/executor_autodrain.expected");
-        assert_eq!(run_capture(source).expect("executor_autodrain.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("executor_autodrain.chz should run"),
+            expected
+        );
     }
 
     #[test]
@@ -6737,7 +7685,11 @@ b := Buf([10, 20, 30])
         // uses the same re-entrant call path + first-fault-aborts semantics as `shutdown()`).
         let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\nmain()\n";
         let err = run_capture(src).expect_err("auto-drain fault should surface");
-        assert!(err.message.contains("out of bounds") || err.message.contains("index"), "got: {}", err.message);
+        assert!(
+            err.message.contains("out of bounds") || err.message.contains("index"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -6749,8 +7701,9 @@ b := Buf([10, 20, 30])
 
     #[test]
     fn channel_recv_on_empty_is_deadlock_error() {
-        let err = run_capture("fn main():\n    ch := Channel[int]()\n    print(ch.recv())\nmain()\n")
-            .unwrap_err();
+        let err =
+            run_capture("fn main():\n    ch := Channel[int]()\n    print(ch.recv())\nmain()\n")
+                .unwrap_err();
         assert!(err.message.contains("deadlock"), "got: {}", err.message);
     }
 
@@ -6816,7 +7769,11 @@ b := Buf([10, 20, 30])
     fn wait_all_closed_no_else_faults() {
         let err = run_capture("fn main():\n    ch := Channel[int]()\n    ch.close()\n    wait:\n        v := ch.recv(): print(v)\nmain()\n")
             .unwrap_err();
-        assert!(err.message.contains("all channels closed"), "got: {}", err.message);
+        assert!(
+            err.message.contains("all channels closed"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -6853,14 +7810,20 @@ b := Buf([10, 20, 30])
     fn golden_list_hof_chz() {
         let source = include_str!("../../examples/list_hof.chz");
         let expected = include_str!("../../examples/list_hof.expected");
-        assert_eq!(run_capture(source).expect("list_hof.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("list_hof.chz should run"),
+            expected
+        );
     }
 
     #[test]
     fn golden_list_methods_chz() {
         let source = include_str!("../../examples/list_methods.chz");
         let expected = include_str!("../../examples/list_methods.expected");
-        assert_eq!(run_capture(source).expect("list_methods.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("list_methods.chz should run"),
+            expected
+        );
     }
 
     #[test]
@@ -6874,7 +7837,10 @@ b := Buf([10, 20, 30])
     fn golden_match_value_chz() {
         let source = include_str!("../../examples/match_value.chz");
         let expected = include_str!("../../examples/match_value.expected");
-        assert_eq!(run_capture(source).expect("match_value.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("match_value.chz should run"),
+            expected
+        );
     }
 
     #[test]
@@ -6888,42 +7854,60 @@ b := Buf([10, 20, 30])
     fn golden_method_default_args_chz() {
         let source = include_str!("../../examples/method_default_args.chz");
         let expected = include_str!("../../examples/method_default_args.expected");
-        assert_eq!(run_capture(source).expect("method_default_args.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("method_default_args.chz should run"),
+            expected
+        );
     }
 
     #[test]
     fn golden_method_type_params_chz() {
         let source = include_str!("../../examples/method_type_params.chz");
         let expected = include_str!("../../examples/method_type_params.expected");
-        assert_eq!(run_capture(source).expect("method_type_params.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("method_type_params.chz should run"),
+            expected
+        );
     }
 
     #[test]
     fn golden_param_protocol_chz() {
         let source = include_str!("../../examples/param_protocol.chz");
         let expected = include_str!("../../examples/param_protocol.expected");
-        assert_eq!(run_capture(source).expect("param_protocol.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("param_protocol.chz should run"),
+            expected
+        );
     }
 
     #[test]
     fn golden_edge_cases_chz() {
         let source = include_str!("../../examples/edge_cases.chz");
         let expected = include_str!("../../examples/edge_cases.expected");
-        assert_eq!(run_capture(source).expect("edge_cases.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("edge_cases.chz should run"),
+            expected
+        );
     }
 
     #[test]
     fn golden_evaluator_chz() {
         let source = include_str!("../../examples/evaluator.chz");
         let expected = include_str!("../../examples/evaluator.expected");
-        assert_eq!(run_capture(source).expect("evaluator.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("evaluator.chz should run"),
+            expected
+        );
     }
 
     #[test]
     fn golden_ledger_chz() {
         let source = include_str!("../../examples/ledger.chz");
         let expected = include_str!("../../examples/ledger.expected");
-        assert_eq!(run_capture(source).expect("ledger.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("ledger.chz should run"),
+            expected
+        );
     }
 
     /// Match-guard golden: `pattern if cond:` arms (expr + stmt forms) produce the expected output.
@@ -6931,7 +7915,10 @@ b := Buf([10, 20, 30])
     fn golden_match_guard_chz() {
         let source = include_str!("../../examples/match_guard.chz");
         let expected = include_str!("../../examples/match_guard.expected");
-        assert_eq!(run_capture(source).expect("match_guard.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("match_guard.chz should run"),
+            expected
+        );
     }
 
     /// Range-pattern golden: half-open `start..end` int patterns produce the expected output.
@@ -6939,7 +7926,10 @@ b := Buf([10, 20, 30])
     fn golden_match_range_chz() {
         let source = include_str!("../../examples/match_range.chz");
         let expected = include_str!("../../examples/match_range.expected");
-        assert_eq!(run_capture(source).expect("match_range.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("match_range.chz should run"),
+            expected
+        );
     }
 
     /// M1 (tier-1) golden: Python-style char handling — `s.chars()` + iterable strings.
@@ -6947,7 +7937,10 @@ b := Buf([10, 20, 30])
     fn golden_string_iter_chz() {
         let source = include_str!("../../examples/string_iter.chz");
         let expected = include_str!("../../examples/string_iter.expected");
-        assert_eq!(run_capture(source).expect("string_iter.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("string_iter.chz should run"),
+            expected
+        );
     }
 
     /// M6 golden: core-type methods + pipe produce exactly the expected output on the interp.
@@ -6955,7 +7948,10 @@ b := Buf([10, 20, 30])
     fn golden_methods_chz() {
         let source = include_str!("../../examples/methods.chz");
         let expected = include_str!("../../examples/methods.expected");
-        assert_eq!(run_capture(source).expect("methods.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("methods.chz should run"),
+            expected
+        );
     }
 
     /// Gap #5 golden: map literal, keyed get/set, methods, and iteration on the interp.
@@ -6971,7 +7967,10 @@ b := Buf([10, 20, 30])
     fn golden_generics_chz() {
         let source = include_str!("../../examples/generics.chz");
         let expected = include_str!("../../examples/generics.expected");
-        assert_eq!(run_capture(source).expect("generics.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("generics.chz should run"),
+            expected
+        );
     }
 
     /// G2 golden: generic structs (Pair / Stack) on the interp.
@@ -6979,7 +7978,10 @@ b := Buf([10, 20, 30])
     fn golden_generic_structs_chz() {
         let source = include_str!("../../examples/generic_structs.chz");
         let expected = include_str!("../../examples/generic_structs.expected");
-        assert_eq!(run_capture(source).expect("generic_structs.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("generic_structs.chz should run"),
+            expected
+        );
     }
 
     /// Tier-2 golden: generic enums (Tree[T] / Either[A, B]) on the interp.
@@ -6987,7 +7989,10 @@ b := Buf([10, 20, 30])
     fn golden_generic_enum_chz() {
         let source = include_str!("../../examples/generic_enum.chz");
         let expected = include_str!("../../examples/generic_enum.expected");
-        assert_eq!(run_capture(source).expect("generic_enum.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("generic_enum.chz should run"),
+            expected
+        );
     }
 
     /// Golden: real hash-table map/set with Hashable struct keys, on the interp.
@@ -6995,7 +8000,10 @@ b := Buf([10, 20, 30])
     fn golden_hashmap_keys_chz() {
         let source = include_str!("../../examples/hashmap_keys.chz");
         let expected = include_str!("../../examples/hashmap_keys.expected");
-        assert_eq!(run_capture(source).expect("hashmap_keys.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("hashmap_keys.chz should run"),
+            expected
+        );
     }
 
     /// M10-G1 golden: the `Stringable` protocol — `str(self)` overrides print/str()/interpolation.
@@ -7003,7 +8011,10 @@ b := Buf([10, 20, 30])
     fn golden_stringable_chz() {
         let source = include_str!("../../examples/stringable.chz");
         let expected = include_str!("../../examples/stringable.expected");
-        assert_eq!(run_capture(source).expect("stringable.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("stringable.chz should run"),
+            expected
+        );
     }
 
     /// M10-G3 golden: operator overloading (`Add`/`Sub`/`Mul`) + multi-bound `T: Add + Mul`.
@@ -7011,7 +8022,10 @@ b := Buf([10, 20, 30])
     fn golden_operators_chz() {
         let source = include_str!("../../examples/operators.chz");
         let expected = include_str!("../../examples/operators.expected");
-        assert_eq!(run_capture(source).expect("operators.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("operators.chz should run"),
+            expected
+        );
     }
 
     /// M10-G3 golden: transparent type aliases (`type UserId = int`).
@@ -7019,14 +8033,20 @@ b := Buf([10, 20, 30])
     fn golden_type_alias_chz() {
         let source = include_str!("../../examples/type_alias.chz");
         let expected = include_str!("../../examples/type_alias.expected");
-        assert_eq!(run_capture(source).expect("type_alias.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("type_alias.chz should run"),
+            expected
+        );
     }
 
     #[test]
     fn golden_recover_chz() {
         let source = include_str!("../../examples/recover.chz");
         let expected = include_str!("../../examples/recover.expected");
-        assert_eq!(run_capture(source).expect("recover.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("recover.chz should run"),
+            expected
+        );
     }
 
     // ----- struct iterator protocol (`for x in s` driven by `next(self) -> Option[T]`) -----
@@ -7050,7 +8070,10 @@ b := Buf([10, 20, 30])
     fn golden_iterator_chz() {
         let source = include_str!("../../examples/iterator.chz");
         let expected = include_str!("../../examples/iterator.expected");
-        assert_eq!(run_capture(source).expect("iterator.chz should run"), expected);
+        assert_eq!(
+            run_capture(source).expect("iterator.chz should run"),
+            expected
+        );
     }
 
     /// G3 golden: std.cmp (generic min/max/clamp) + Comparable sort on the interp. (Imports a std
@@ -7190,7 +8213,8 @@ print(P(5) >= P(5))
     #[test]
     fn top_level_question_err_reports_real_line() {
         // The `?` is on line 3 — the error must point there, not at a hard-coded line 1.
-        let e = run_capture("fn d() -> Result[int]:\n    return Err(\"x\")\nx := d()?\n").unwrap_err();
+        let e =
+            run_capture("fn d() -> Result[int]:\n    return Err(\"x\")\nx := d()?\n").unwrap_err();
         assert_eq!(e.message, "unhandled error: x");
         assert_eq!(e.span.line, 3, "expected the `?` line, got {}", e.span.line);
     }
@@ -7205,7 +8229,10 @@ print(P(5) >= P(5))
     fn user_enum_named_err_is_not_a_top_level_error() {
         // A user enum that reuses the `Err` name is a normal value — its qualified `Signal.Err` must
         // NOT exit at top level (only the builtin Result's `Err` does). Gating is on the type.
-        assert_eq!(run("enum Signal:\n    Err(int)\n    Quiet\nSignal.Err(5)\nprint(\"made it\")\n"), "made it\n");
+        assert_eq!(
+            run("enum Signal:\n    Err(int)\n    Quiet\nSignal.Err(5)\nprint(\"made it\")\n"),
+            "made it\n"
+        );
     }
 
     #[test]
@@ -7215,7 +8242,11 @@ print(P(5) >= P(5))
             "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := Signal.Err(5)?\n    return x\nf()\n",
         )
         .unwrap_err();
-        assert!(e.message.contains("expects Result or Option"), "{}", e.message);
+        assert!(
+            e.message.contains("expects Result or Option"),
+            "{}",
+            e.message
+        );
     }
 
     #[test]
@@ -7236,9 +8267,19 @@ print(P(5) >= P(5))
     #[test]
     fn int_min_neg_and_div_overflow() {
         let neg = "fn main():\n    x := -9223372036854775807 - 1\n    print(-x)\nmain()\n";
-        assert!(run_capture(neg).expect_err("neg overflow").message.contains("integer overflow"));
+        assert!(
+            run_capture(neg)
+                .expect_err("neg overflow")
+                .message
+                .contains("integer overflow")
+        );
         let div = "fn main():\n    x := -9223372036854775807 - 1\n    print(x / -1)\nmain()\n";
-        assert!(run_capture(div).expect_err("div overflow").message.contains("integer overflow"));
+        assert!(
+            run_capture(div)
+                .expect_err("div overflow")
+                .message
+                .contains("integer overflow")
+        );
     }
 
     #[test]
@@ -7288,7 +8329,10 @@ print(P(5) >= P(5))
 
     #[test]
     fn tuple_literal_and_element_access() {
-        assert_eq!(run("t := (1, 2)\nprint(t.0)\nprint(t.1)\nprint(t)\n"), "1\n2\n(1, 2)\n");
+        assert_eq!(
+            run("t := (1, 2)\nprint(t.0)\nprint(t.1)\nprint(t)\n"),
+            "1\n2\n(1, 2)\n"
+        );
     }
 
     #[test]
@@ -7299,7 +8343,11 @@ print(P(5) >= P(5))
     #[test]
     fn tuple_element_out_of_range_is_runtime_error() {
         let err = run_capture("t := (1, 2)\nprint(t.2)\n").expect_err("out-of-range should error");
-        assert!(err.message.contains("has no element '.2'"), "{}", err.message);
+        assert!(
+            err.message.contains("has no element '.2'"),
+            "{}",
+            err.message
+        );
     }
 
     /// Robustness for `--interp` (the checker normally prevents this): destructuring a non-tuple is
@@ -7307,7 +8355,11 @@ print(P(5) >= P(5))
     #[test]
     fn destructuring_non_tuple_is_runtime_error() {
         let err = run_capture("a, b := 5\n").expect_err("non-tuple destructure should error");
-        assert!(err.message.contains("cannot destructure"), "{}", err.message);
+        assert!(
+            err.message.contains("cannot destructure"),
+            "{}",
+            err.message
+        );
     }
 }
 
@@ -7325,7 +8377,8 @@ mod module_tests {
     impl TmpDir {
         fn new() -> Self {
             let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-            let dir = std::env::temp_dir().join(format!("chezzi_interp_{}_{}", std::process::id(), n));
+            let dir =
+                std::env::temp_dir().join(format!("chezzi_interp_{}_{}", std::process::id(), n));
             std::fs::create_dir_all(&dir).unwrap();
             TmpDir(dir)
         }
@@ -7385,7 +8438,10 @@ mod module_tests {
     fn imported_fn_globals_work_when_caller_has_none() {
         let t = TmpDir::new();
         t.write("b.chz", "K := 42\nfn helper() -> int: return K\n");
-        let entry = t.write("main.chz", "import helper from b\nfn main(): print(helper())\nmain()\n");
+        let entry = t.write(
+            "main.chz",
+            "import helper from b\nfn main(): print(helper())\nmain()\n",
+        );
         assert_eq!(run_ok(&entry), "42\n");
     }
 
@@ -7406,7 +8462,10 @@ mod module_tests {
     fn from_named_import() {
         let t = TmpDir::new();
         t.write("lib.chz", "fn f(): print(\"f\")\nfn g(): print(\"g\")\n");
-        let entry = t.write("main.chz", "import f, g from lib\nfn main():\n    f()\n    g()\nmain()\n");
+        let entry = t.write(
+            "main.chz",
+            "import f, g from lib\nfn main():\n    f()\n    g()\nmain()\n",
+        );
         assert_eq!(run_ok(&entry), "f\ng\n");
     }
 
@@ -7415,10 +8474,16 @@ mod module_tests {
     fn from_named_import_alias() {
         let t = TmpDir::new();
         t.write("lib.chz", "fn f(): print(\"f\")\n");
-        let entry = t.write("main.chz", "import f as h from lib\nfn main(): h()\nmain()\n");
+        let entry = t.write(
+            "main.chz",
+            "import f as h from lib\nfn main(): h()\nmain()\n",
+        );
         assert_eq!(run_ok(&entry), "f\n");
 
-        let bad = t.write("bad.chz", "import f as h from lib\nfn main(): f()\nmain()\n");
+        let bad = t.write(
+            "bad.chz",
+            "import f as h from lib\nfn main(): f()\nmain()\n",
+        );
         assert!(run_err(&bad).contains("undefined name 'f'"));
     }
 
@@ -7434,7 +8499,11 @@ mod module_tests {
             "import a\nimport b\nfn main(): print(\"done\")\nmain()\n",
         );
         let out = run_ok(&entry);
-        assert_eq!(out.matches("init C").count(), 1, "C init ran more than once: {out:?}");
+        assert_eq!(
+            out.matches("init C").count(),
+            1,
+            "C init ran more than once: {out:?}"
+        );
         assert_eq!(out, "init C\ndone\n");
     }
 
@@ -7452,7 +8521,10 @@ mod module_tests {
     #[test]
     fn main_in_imported_module_does_not_autorun() {
         let t = TmpDir::new();
-        t.write("lib.chz", "fn main(): print(\"lib main\")\nfn f(): print(\"f\")\n");
+        t.write(
+            "lib.chz",
+            "fn main(): print(\"lib main\")\nfn f(): print(\"f\")\n",
+        );
         let entry = t.write("main.chz", "import f from lib\nfn main(): f()\nmain()\n");
         let out = run_ok(&entry);
         assert!(!out.contains("lib main"), "imported main ran: {out:?}");
@@ -7538,7 +8610,10 @@ mod module_tests {
             "    print(b\"ab\" != b\"ac\")\n",
             "main()\n"
         );
-        assert_eq!(run_capture(src).expect("interp"), "1\n3\nb'\\x03\\x02\\x01'\n6\n3\ntrue\nfalse\ntrue\n");
+        assert_eq!(
+            run_capture(src).expect("interp"),
+            "1\n3\nb'\\x03\\x02\\x01'\n6\n3\ntrue\nfalse\ntrue\n"
+        );
     }
 
     #[test]
@@ -7552,7 +8627,10 @@ mod module_tests {
             "    print(m[b\"b\"])\n",
             "main()\n"
         );
-        assert_eq!(run_capture(src).expect("interp"), "b'hi\\n'\nb'\\xff'\n1\n2\n");
+        assert_eq!(
+            run_capture(src).expect("interp"),
+            "b'hi\\n'\nb'\\xff'\n1\n2\n"
+        );
     }
 
     // ===== bytearray type (interp side — must match the VM byte-for-byte) =====

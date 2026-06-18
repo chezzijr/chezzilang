@@ -137,7 +137,10 @@ pub fn build_graph(entry: &Path) -> Result<ModuleGraph, ResolveError> {
     };
     let entry_id = ModuleId(canonical_or_abs(&entry_abs));
     b.visit(&entry_id, &[], Span { line: 1, col: 1 })?;
-    let mut graph = ModuleGraph { entry: entry_id, modules: b.order };
+    let mut graph = ModuleGraph {
+        entry: entry_id,
+        modules: b.order,
+    };
     // Normalize named/default call arguments into positional ones, so the checker and both engines
     // consume an identical, already-desugared AST.
     crate::desugar::run(&mut graph)?;
@@ -155,11 +158,18 @@ struct Builder {
 }
 
 impl Builder {
-    fn visit(&mut self, id: &ModuleId, dotted: &[String], import_span: Span) -> Result<(), ResolveError> {
+    fn visit(
+        &mut self,
+        id: &ModuleId,
+        dotted: &[String],
+        import_span: Span,
+    ) -> Result<(), ResolveError> {
         // Cycle: this module is already on the active DFS stack.
         if let Some(pos) = self.on_stack.iter().position(|(sid, _)| sid == id) {
-            let mut chain: Vec<String> =
-                self.on_stack[pos..].iter().map(|(_, d)| dotted_label(d)).collect();
+            let mut chain: Vec<String> = self.on_stack[pos..]
+                .iter()
+                .map(|(_, d)| dotted_label(d))
+                .collect();
             chain.push(dotted_label(dotted));
             return Err(ResolveError {
                 message: format!("import cycle: {}", chain.join(" -> ")),
@@ -173,7 +183,11 @@ impl Builder {
         }
 
         let source = std::fs::read_to_string(&id.0).map_err(|_| ResolveError {
-            message: format!("cannot find module '{}' (looked for {})", dotted_label(dotted), id.0.display()),
+            message: format!(
+                "cannot find module '{}' (looked for {})",
+                dotted_label(dotted),
+                id.0.display()
+            ),
             span: import_span,
             module: Some(dotted_label(dotted)),
         })?;
@@ -189,13 +203,21 @@ impl Builder {
             if let Some(name) = crate::native::native_name(&path) {
                 let target = native_id(name);
                 self.visit_native(&target, name);
-                resolved.push(ResolvedImport { target, import, span });
+                resolved.push(ResolvedImport {
+                    target,
+                    import,
+                    span,
+                });
                 continue;
             }
             let file = module_file(&path, &self.project_root, &self.std_root);
             let target = ModuleId(canonical_or_abs(&file));
             self.visit(&target, &path, span)?;
-            resolved.push(ResolvedImport { target, import, span });
+            resolved.push(ResolvedImport {
+                target,
+                import,
+                span,
+            });
         }
         self.on_stack.pop();
 
@@ -231,7 +253,10 @@ impl Builder {
     fn parse(&self, source: &str, dotted: &[String]) -> Result<Module, ResolveError> {
         let tokens = lexer::tokenize(source).map_err(|e| ResolveError {
             message: prefix(dotted, e.to_string()),
-            span: Span { line: e.line, col: 1 },
+            span: Span {
+                line: e.line,
+                col: 1,
+            },
             module: opt_label(dotted),
         })?;
         parser::parse(tokens).map_err(|e| ResolveError {
@@ -294,7 +319,9 @@ fn abs(p: &Path) -> PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
     } else {
-        std::env::current_dir().map(|d| d.join(p)).unwrap_or_else(|_| p.to_path_buf())
+        std::env::current_dir()
+            .map(|d| d.join(p))
+            .unwrap_or_else(|_| p.to_path_buf())
     }
 }
 
@@ -399,7 +426,11 @@ mod tests {
         t.write("b.chz", "import a\nfn f(): print(2)\n");
         let err = build_graph(&entry).unwrap_err();
         assert!(err.message.contains("cycle"), "got: {}", err.message);
-        assert!(err.message.contains("a") && err.message.contains("b"), "got: {}", err.message);
+        assert!(
+            err.message.contains("a") && err.message.contains("b"),
+            "got: {}",
+            err.message
+        );
     }
 
     // 6. A missing imported module is a clean error, not a panic.
@@ -408,7 +439,11 @@ mod tests {
         let t = TmpDir::new();
         let entry = t.write("main.chz", "import nope.thing\nfn main(): print(1)\n");
         let err = build_graph(&entry).unwrap_err();
-        assert!(err.message.contains("cannot find module"), "got: {}", err.message);
+        assert!(
+            err.message.contains("cannot find module"),
+            "got: {}",
+            err.message
+        );
         assert!(err.message.contains("nope.thing"), "got: {}", err.message);
     }
 
@@ -440,10 +475,17 @@ mod tests {
         let graph = build_graph(&entry).unwrap();
 
         let labels: Vec<String> = graph.modules.iter().map(|m| m.label()).collect();
-        assert_eq!(labels.iter().filter(|l| *l == "c").count(), 1, "c loaded more than once: {labels:?}");
+        assert_eq!(
+            labels.iter().filter(|l| *l == "c").count(),
+            1,
+            "c loaded more than once: {labels:?}"
+        );
 
         let pos = |name: &str| labels.iter().position(|l| l == name).unwrap();
-        assert!(pos("c") < pos("a") && pos("c") < pos("b"), "deps before dependents: {labels:?}");
+        assert!(
+            pos("c") < pos("a") && pos("c") < pos("b"),
+            "deps before dependents: {labels:?}"
+        );
         // Entry is last and has no dotted name.
         assert_eq!(graph.modules.last().unwrap().id, graph.entry);
     }

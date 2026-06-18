@@ -48,7 +48,10 @@ impl From<&str> for ChzStr {
         if s.len() <= INLINE_CAP {
             let mut bytes = [0u8; INLINE_CAP];
             bytes[..s.len()].copy_from_slice(s.as_bytes());
-            ChzStr::Inline { len: s.len() as u8, bytes }
+            ChzStr::Inline {
+                len: s.len() as u8,
+                bytes,
+            }
         } else {
             ChzStr::Heap(Box::from(s))
         }

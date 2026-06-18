@@ -102,7 +102,9 @@ pub enum Op {
     /// `msg` (a str, if `has_msg`) and fault at this op's span with that message (or
     /// `"assertion failed"`). `msg` is evaluated lazily on the failing path only — byte-identical to
     /// the interpreter, which likewise evaluates `msg` solely when the assertion fails.
-    Assert { has_msg: bool },
+    Assert {
+        has_msg: bool,
+    },
 
     // ----- variables -----
     GetLocal(usize),
@@ -156,13 +158,24 @@ pub enum Op {
     // exact unfused behaviour (`arith`/`compare_op`), so struct overloading / string concat / float
     // promotion / fiber parking all stay identical. -----
     /// `GetLocal(a), GetLocal(b), <binop>` fused — push `local[a] <op> local[b]`.
-    BinLocalLocal { a: usize, b: usize, kind: BinKind },
+    BinLocalLocal {
+        a: usize,
+        b: usize,
+        kind: BinKind,
+    },
     /// `GetLocal(slot), ConstInt(val), <binop>` fused — push `local[slot] <op> val`.
-    BinLocalConst { slot: usize, val: i64, kind: BinKind },
+    BinLocalConst {
+        slot: usize,
+        val: i64,
+        kind: BinKind,
+    },
     /// `GetLocal(s), ConstInt(d), Add, SetLocal(s)` fused — in-place `local[s] += d` with no stack
     /// traffic. (Only `Add`; `-=` keeps the two-op `BinLocalConst{Sub} + SetLocal` form to avoid
     /// negating the immediate and to preserve `Sub`'s error message for non-numeric operands.)
-    IncLocal { slot: usize, delta: i64 },
+    IncLocal {
+        slot: usize,
+        delta: i64,
+    },
 
     // ----- control flow (absolute jump targets) -----
     Jump(usize),
@@ -190,7 +203,11 @@ pub enum Op {
     /// the synthetic iterator-protocol `next`/`values` sites); [`NO_IC`] is passed ONLY by the
     /// VM-internal native-re-entry callers (`spawn`/`defer`/fiber-start method tasks), never at compile
     /// time — a real `ic` is exactly the "flatten-safe, called-from-the-dispatch-loop" signal.
-    CallMethod { name: String, argc: usize, ic: u32 },
+    CallMethod {
+        name: String,
+        argc: usize,
+        ic: u32,
+    },
     CallBuiltin(String, usize),
     CallPrint(usize),
     Return,
@@ -238,7 +255,11 @@ pub enum Op {
     /// dense, compile-time id stamped onto the instance — the enum analogue of `NewStruct`'s `tid`;
     /// `variant` is kept only for the cold arity-mismatch error message. `VID_NONE` for an
     /// unregistered variant (never constructible from source).
-    NewEnum { variant: String, variant_id: u32, argc: usize },
+    NewEnum {
+        variant: String,
+        variant_id: u32,
+        argc: usize,
+    },
     /// Build a `Func` value over `ProtoId`, capturing the current frame's home module.
     MakeFunc(ProtoId),
     /// Build a `Cffi` value from `Program.cffi_defs[id]`: `dlopen` the library + resolve the symbol
@@ -254,14 +275,20 @@ pub enum Op {
     /// (M19 Phase 4): a monomorphic, name-verified cache of the field's index, collapsing the
     /// struct name-probe to one verify-compare on a hit. `ic == NO_IC` ⇒ no cache (tuple `.0`/`.1`
     /// element access, which dispatches to the tuple arm and never touches the IC).
-    GetField { name: String, ic: u32 },
+    GetField {
+        name: String,
+        ic: u32,
+    },
     /// Stack `[obj, index]` (index already `AsInt`-checked).
     GetIndex,
     /// Stack `[obj, start, end, step]` → `[slice]` — Python-style slice of a list/str, or a
     /// struct's `slice`. Each of `start`/`end`/`step` is `Nil` when its component was omitted.
     GetSlice,
     /// Stack `[obj, value]` → `[]` — mutate a struct field in place. `ic`: see [`Op::GetField`].
-    SetField { name: String, ic: u32 },
+    SetField {
+        name: String,
+        ic: u32,
+    },
     /// Stack `[obj, index, value]` (index already `AsInt`-checked) → `[]` — mutate a list element.
     SetIndex,
     /// `[a]` → `[a, a]` — duplicate the top (compound field assignment).
@@ -519,8 +546,7 @@ pub struct SuiteInfo {
 
 /// The four recognized suite lifecycle hook names (detected by exact name on a suite struct). A
 /// name-matched method is signature-validated by the checker (`fn name(self)` returning nothing).
-pub const LIFECYCLE_HOOKS: [&str; 4] =
-    ["before_all", "after_all", "before_each", "after_each"];
+pub const LIFECYCLE_HOOKS: [&str; 4] = ["before_all", "after_all", "before_each", "after_each"];
 
 /// A compile-time description of one `extern` C function: enough to `dlopen`+`dlsym` and build the
 /// runtime [`crate::native::cffi::Cffi`] at module init. The symbol address is resolved at runtime

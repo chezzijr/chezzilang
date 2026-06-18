@@ -3,12 +3,12 @@
 //! cross-check the two engines). M5a: handle-addressed values, no collector yet (the mark-sweep
 //! GC lands in M5b).
 
-pub mod core;
-pub mod heap;
-pub mod op;
 mod blocking_pool;
 pub mod chzstr;
+pub mod core;
 mod fxhash;
+pub mod heap;
+pub mod op;
 mod poller;
 mod pool;
 mod timer;
@@ -17,7 +17,7 @@ pub mod wire;
 
 use core::{AtomicCore, ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
 use heap::{Heap, MapData, Obj, SetData};
-use op::{CapEntry, CapSrc, Op, Program, ProtoId, WaitMeta, NO_IC, TID_NONE};
+use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -62,10 +62,18 @@ pub struct RunError {
 
 impl RunError {
     fn from_error(e: RuntimeError, trace: Vec<TraceFrame>) -> Self {
-        RunError { message: e.message, span: e.span, trace }
+        RunError {
+            message: e.message,
+            span: e.span,
+            trace,
+        }
     }
     fn plain(e: RuntimeError) -> Self {
-        RunError { message: e.message, span: e.span, trace: Vec::new() }
+        RunError {
+            message: e.message,
+            span: e.span,
+            trace: Vec::new(),
+        }
     }
 }
 
@@ -80,7 +88,10 @@ impl std::fmt::Display for RunError {
 pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
     let mut s = format!("runtime error ({span}): {message}");
     for frame in trace {
-        s.push_str(&format!("\n  at {} (called at {})", frame.function, frame.span));
+        s.push_str(&format!(
+            "\n  at {} (called at {})",
+            frame.function, frame.span
+        ));
     }
     s
 }
@@ -131,7 +142,10 @@ pub fn set_worker_count(n: usize) {
 /// gate so all three agree.
 pub fn worker_count() -> usize {
     match WORKER_OVERRIDE.load(Ordering::Relaxed) {
-        0 => std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1).max(1),
+        0 => std::thread::available_parallelism()
+            .map(|x| x.get())
+            .unwrap_or(1)
+            .max(1),
         n => n.max(1),
     }
 }
@@ -245,7 +259,13 @@ impl GeneratorCore {
             out.push(c);
         }
         if let GenState::Pending(args) = &self.state {
-            out.extend(args.iter().filter_map(|v| if let Value::Obj(h) = v { Some(*h) } else { None }));
+            out.extend(args.iter().filter_map(|v| {
+                if let Value::Obj(h) = v {
+                    Some(*h)
+                } else {
+                    None
+                }
+            }));
         }
         for v in &self.ctx.stack {
             if let Value::Obj(h) = v {
@@ -270,9 +290,18 @@ impl GeneratorCore {
 #[derive(Clone)]
 enum Deferred {
     /// `defer f(args)` — invoke the callable value with the args (`invoke_value`).
-    Call { callee: Value, args: Vec<Value>, span: Span },
+    Call {
+        callee: Value,
+        args: Vec<Value>,
+        span: Span,
+    },
     /// `defer recv.name(args)` — dispatch the named method on the receiver.
-    Method { recv: Value, name: String, args: Vec<Value>, span: Span },
+    Method {
+        recv: Value,
+        name: String,
+        args: Vec<Value>,
+        span: Span,
+    },
 }
 
 impl Deferred {
@@ -282,9 +311,13 @@ impl Deferred {
             Deferred::Call { callee, args, .. } => (callee, args),
             Deferred::Method { recv, args, .. } => (recv, args),
         };
-        std::iter::once(head)
-            .chain(args.iter())
-            .filter_map(|v| if let Value::Obj(h) = v { Some(*h) } else { None })
+        std::iter::once(head).chain(args.iter()).filter_map(|v| {
+            if let Value::Obj(h) = v {
+                Some(*h)
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -299,9 +332,18 @@ impl Deferred {
 #[derive(Clone)]
 enum PendingCall {
     /// `spawn f(args)` (or a `spawn:` block, lowered to a zero-arg closure) — invoke the callable.
-    Call { callee: Value, args: Vec<Value>, span: Span },
+    Call {
+        callee: Value,
+        args: Vec<Value>,
+        span: Span,
+    },
     /// `spawn recv.name(args)` — dispatch the named method on the receiver.
-    Method { recv: Value, name: String, args: Vec<Value>, span: Span },
+    Method {
+        recv: Value,
+        name: String,
+        args: Vec<Value>,
+        span: Span,
+    },
 }
 
 impl PendingCall {
@@ -311,9 +353,13 @@ impl PendingCall {
             PendingCall::Call { callee, args, .. } => (callee, args),
             PendingCall::Method { recv, args, .. } => (recv, args),
         };
-        std::iter::once(head)
-            .chain(args.iter())
-            .filter_map(|v| if let Value::Obj(h) = v { Some(*h) } else { None })
+        std::iter::once(head).chain(args.iter()).filter_map(|v| {
+            if let Value::Obj(h) = v {
+                Some(*h)
+            } else {
+                None
+            }
+        })
     }
 
     /// The spawning span of this task (D2b — carried onto the fiber for fault attribution).
@@ -341,7 +387,10 @@ impl IcCell {
     /// `tid` is the sole liveness gate (a hit requires `tid != TID_NONE && tid == obj.tid`); the
     /// `idx: u32::MAX` is just a defensive default, not a sentinel — don't reintroduce idx-based
     /// empty-checking.
-    const EMPTY: IcCell = IcCell { idx: u32::MAX, tid: TID_NONE };
+    const EMPTY: IcCell = IcCell {
+        idx: u32::MAX,
+        tid: TID_NONE,
+    };
 }
 
 /// M19 Phase 6 — one *way* of a method-call inline cache. `tid` is the struct layout id the cached
@@ -360,7 +409,11 @@ struct MethodIcCell {
 }
 
 impl MethodIcCell {
-    const EMPTY: MethodIcCell = MethodIcCell { tid: TID_NONE, proto: 0, module_idx: 0 };
+    const EMPTY: MethodIcCell = MethodIcCell {
+        tid: TID_NONE,
+        proto: 0,
+        module_idx: 0,
+    };
 }
 
 /// Number of ways in the polymorphic method-call IC. A bounded-megamorphic site (e.g. a
@@ -387,7 +440,10 @@ struct MethodIcSite {
 }
 
 impl MethodIcSite {
-    const EMPTY: MethodIcSite = MethodIcSite { ways: [MethodIcCell::EMPTY; METHOD_IC_WAYS], sticky: false };
+    const EMPTY: MethodIcSite = MethodIcSite {
+        ways: [MethodIcCell::EMPTY; METHOD_IC_WAYS],
+        sticky: false,
+    };
 }
 
 pub struct Vm {
@@ -657,7 +713,11 @@ fn wait_fd_ready(fd: std::os::fd::RawFd, interest: poller::Interest, timeout: st
         poller::Interest::Read => libc::POLLIN,
         poller::Interest::Write => libc::POLLOUT,
     };
-    let mut pfd = libc::pollfd { fd, events, revents: 0 };
+    let mut pfd = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
     let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
     // Ignore the result: a ready fd, a timeout, or an EINTR all lead to the same next step (re-attempt
     // the non-blocking op under the caller's lock). Never blocks longer than `ms`.
@@ -667,7 +727,11 @@ fn wait_fd_ready(fd: std::os::fd::RawFd, interest: poller::Interest, timeout: st
 }
 
 #[cfg(not(unix))]
-fn wait_fd_ready(_fd: std::os::fd::RawFd, _interest: poller::Interest, timeout: std::time::Duration) {
+fn wait_fd_ready(
+    _fd: std::os::fd::RawFd,
+    _interest: poller::Interest,
+    timeout: std::time::Duration,
+) {
     std::thread::sleep(timeout);
 }
 
@@ -855,11 +919,27 @@ struct WorkerResult {
 /// home is a standalone module not in `module_objs` (the unit-test fixtures), which falls back to a
 /// fresh empty home.
 enum Lowered {
-    Closure { proto: ProtoId, captured: Vec<(String, WireValue)>, args: Vec<WireValue>, home: Option<usize>, span: Span },
-    Func { proto: ProtoId, args: Vec<WireValue>, home: Option<usize>, span: Span },
+    Closure {
+        proto: ProtoId,
+        captured: Vec<(String, WireValue)>,
+        args: Vec<WireValue>,
+        home: Option<usize>,
+        span: Span,
+    },
+    Func {
+        proto: ProtoId,
+        args: Vec<WireValue>,
+        home: Option<usize>,
+        span: Span,
+    },
     /// `spawn recv.m(args)` (B3.3d) — the receiver + args cross by wire; dispatch resolves the method
     /// against the worker's reconstructed `module_objs` (struct methods index `module_objs[module_idx]`).
-    Method { recv: WireValue, name: String, args: Vec<WireValue>, span: Span },
+    Method {
+        recv: WireValue,
+        name: String,
+        args: Vec<WireValue>,
+        span: Span,
+    },
 }
 
 /// D1 — a heap-independent, read-only snapshot of the parent's initialized module graph, shared
@@ -885,12 +965,19 @@ struct ModuleSnap {
 /// M19 Phase 2b — a module's globals as `(name, value)` pairs in **slot order** (slot `i` at index
 /// `i`). Used to snapshot a module deterministically: replaying the pairs in order via
 /// `module_define` rebuilds slots in the same order the compiler assigned them.
-fn module_slot_pairs(slots: &[Value], index: &std::collections::HashMap<Box<str>, u32>) -> Vec<(String, Value)> {
+fn module_slot_pairs(
+    slots: &[Value],
+    index: &std::collections::HashMap<Box<str>, u32>,
+) -> Vec<(String, Value)> {
     // Invariant: `index` names every slot `0..slots.len()` (the three growth paths — `run_module`
     // pre-size, `module_define` append, `set_global_slot` overwrite — keep `slots`/`index` in
     // lockstep). If that ever breaks, an unnamed hole would replay as a duplicate empty name and
     // collapse later slots in a worker, silently corrupting its globals — so fail loudly here.
-    debug_assert_eq!(slots.len(), index.len(), "module slots/index out of lockstep — slot order would corrupt on worker fault");
+    debug_assert_eq!(
+        slots.len(),
+        index.len(),
+        "module slots/index out of lockstep — slot order would corrupt on worker fault"
+    );
     let mut pairs: Vec<(String, Value)> = vec![(String::new(), Value::Nil); slots.len()];
     for (name, &i) in index {
         pairs[i as usize] = (name.to_string(), slots[i as usize]);
@@ -912,17 +999,30 @@ enum SnapValue {
     /// A named function — re-allocated over the worker's home module on replay. `home` is an index
     /// into `module_objs` (resolved via [`Vm::worker_home`], which falls back to a fresh empty module
     /// for `None` — a home not in the table, i.e. the hand-built unit-test fixtures).
-    Func { proto: ProtoId, home: Option<usize> },
+    Func {
+        proto: ProtoId,
+        home: Option<usize>,
+    },
     /// An anonymous function + its captured environment (each capture itself a `SnapValue`).
-    Closure { proto: ProtoId, captured: Vec<(String, SnapValue)>, home: Option<usize> },
+    Closure {
+        proto: ProtoId,
+        captured: Vec<(String, SnapValue)>,
+        home: Option<usize>,
+    },
     /// An import-alias global bound to another module — replays to the worker's `module_objs[idx]`
     /// (the pre-alloced module obj, which faults its own globals lazily — no eager cascade).
     ModuleAlias(usize),
     /// A module value NOT in `module_objs` (defensive — shouldn't occur for a bound import; mirrors
     /// the `None` arm of the old `map_global_value`): replayed as a fresh, eagerly-populated module.
-    ModuleInline { name: Box<str>, globals: Vec<(String, SnapValue)> },
+    ModuleInline {
+        name: Box<str>,
+        globals: Vec<(String, SnapValue)>,
+    },
     /// A native (Rust) fn — re-allocated with the same fn pointer (`NativeFn` is `Clone`/`Send`).
-    Native { name: Box<str>, func: crate::native::NativeFn },
+    Native {
+        name: Box<str>,
+        func: crate::native::NativeFn,
+    },
     /// A dynamic C-ABI FFI fn — shares its `Arc<Cffi>` to the worker (same address space; no
     /// re-dlopen). `Cffi` is `Send + Sync`, so the Arc crosses the OS-thread boundary safely.
     Cffi(Arc<crate::native::cffi::Cffi>),
@@ -931,11 +1031,20 @@ enum SnapValue {
     /// An `Iterable.iter()` cursor snapshot — its items (each a `SnapValue`) plus the cursor `pos`.
     /// Rebuilt as a fresh independent cursor on replay. Reached only for a handle-bearing cursor (a
     /// cursor over closures/modules); a pure-data cursor takes the `to_wire` fast path above.
-    Iter { items: Vec<SnapValue>, pos: usize },
+    Iter {
+        items: Vec<SnapValue>,
+        pos: usize,
+    },
     /// M19 lever #2 — the dense `variant_id` is carried directly (the same shared `Arc<Program>` makes
     /// it meaningful on replay; carrying the id, not the name, preserves identity under name shadowing).
-    Enum { variant_id: u32, payload: Vec<SnapValue> },
-    Struct { name: Box<str>, fields: Vec<(Box<str>, SnapValue)> },
+    Enum {
+        variant_id: u32,
+        payload: Vec<SnapValue>,
+    },
+    Struct {
+        name: Box<str>,
+        fields: Vec<(Box<str>, SnapValue)>,
+    },
     /// `(cached hash, key, value)` triples — hashes are value-derived, so they carry over unchanged.
     Map(Vec<(u64, SnapValue, SnapValue)>),
     /// `(cached hash, element)` pairs.
@@ -953,7 +1062,11 @@ enum TaskOutcome {
     /// Observed the nursery cancel flag and unwound (a sibling faulted/exited first). Dropped.
     Cancelled,
     /// Called `std.os.exit(code)`. Buffered output is flushed, then the parent hard-halts with `code`.
-    Exit { code: i32, out: String, stderr: String },
+    Exit {
+        code: i32,
+        out: String,
+        stderr: String,
+    },
     /// Faulted (runtime error or caught panic). The lowest-index fault propagates out of the join.
     Fault(RuntimeError),
 }
@@ -1049,7 +1162,10 @@ const SENTINEL_SCOPE: usize = usize::MAX;
 
 impl LocalQ {
     fn new() -> Self {
-        LocalQ { runnext: None, ring: std::collections::VecDeque::new() }
+        LocalQ {
+            runnext: None,
+            ring: std::collections::VecDeque::new(),
+        }
     }
     /// Pop the next fiber to run: `runnext` first (locality), then the ring front (FIFO).
     fn pop(&mut self) -> Option<Fiber> {
@@ -1287,7 +1403,10 @@ impl SchedCore {
 
     /// Register a demoted fiber's channel (refcounted). Caller holds core lock A.
     fn register_demoted(&mut self, ptr: usize, core: &Arc<ChannelCore>) {
-        self.demoted_chans.entry(ptr).or_insert_with(|| (Arc::clone(core), 0)).1 += 1;
+        self.demoted_chans
+            .entry(ptr)
+            .or_insert_with(|| (Arc::clone(core), 0))
+            .1 += 1;
     }
 
     /// Drop a demoted fiber's channel registration (removes the entry at refcount 0). Caller holds A.
@@ -1316,7 +1435,12 @@ impl MnSched {
     /// for the outermost nursery's `total` tasks + its `cancel`; nested nurseries `register_scope` more.
     /// `MnSched::cancel` keeps the OUTERMOST cancel (back-compat for the gap re-check default + the
     /// existing unit tests), but `park`/`park_wait`/`cancel_drain` use the PER-FIBER scope cancel.
-    fn new(total: usize, nworkers: usize, cancel: Arc<AtomicBool>, deadlock_err: RuntimeError) -> Self {
+    fn new(
+        total: usize,
+        nworkers: usize,
+        cancel: Arc<AtomicBool>,
+        deadlock_err: RuntimeError,
+    ) -> Self {
         MnSched {
             core: Mutex::new(SchedCore {
                 global: std::collections::VecDeque::new(),
@@ -1324,7 +1448,14 @@ impl MnSched {
                 slots: (0..total).map(|_| None).collect(),
                 running: 0,
                 parked_n: 0,
-                scopes: vec![JoinScope { base_index: 0, total, done: 0, body_open: false, awaiting_builder: false, cancel: Arc::clone(&cancel) }],
+                scopes: vec![JoinScope {
+                    base_index: 0,
+                    total,
+                    done: 0,
+                    body_open: false,
+                    awaiting_builder: false,
+                    cancel: Arc::clone(&cancel),
+                }],
                 terminate: false,
                 demoted_chans: std::collections::HashMap::new(),
             }),
@@ -1332,7 +1463,9 @@ impl MnSched {
             cancel,
             deadlock_err,
             runnable: AtomicUsize::new(0),
-            locals: (0..nworkers.max(1)).map(|_| Mutex::new(LocalQ::new())).collect(),
+            locals: (0..nworkers.max(1))
+                .map(|_| Mutex::new(LocalQ::new()))
+                .collect(),
             steal_ctr: AtomicUsize::new(0),
             inflight: AtomicUsize::new(0),
             blocked_native: AtomicUsize::new(0),
@@ -1350,7 +1483,14 @@ impl MnSched {
         let base_index = c.slots.len();
         c.slots.extend((0..total).map(|_| None));
         let scope_id = c.scopes.len();
-        c.scopes.push(JoinScope { base_index, total, done: 0, body_open: false, awaiting_builder: false, cancel });
+        c.scopes.push(JoinScope {
+            base_index,
+            total,
+            done: 0,
+            body_open: false,
+            awaiting_builder: false,
+            cancel,
+        });
         // Cross-nursery flat scheduler — a late `spawn:` into a non-outermost nursery registers a fresh
         // TRAILING scope on the HELD sched (`run_mn_nursery` held-nested branch) AFTER every prior scope
         // finished, which may already have latched global `terminate` (`finish`'s `all_scopes_done`). A
@@ -1377,7 +1517,14 @@ impl MnSched {
         let base_index = c.slots.len();
         c.slots.extend((0..total).map(|_| None));
         let scope_id = c.scopes.len();
-        c.scopes.push(JoinScope { base_index, total, done: 0, body_open: false, awaiting_builder: false, cancel });
+        c.scopes.push(JoinScope {
+            base_index,
+            total,
+            done: 0,
+            body_open: false,
+            awaiting_builder: false,
+            cancel,
+        });
         // A freshly-registered scope has unfinished work — un-latch any stale global `terminate` (see
         // `register_scope`) so the inline owner that drains it is not stopped on the stale flag.
         c.terminate = false;
@@ -1423,9 +1570,16 @@ impl MnSched {
     /// rely on). The `debug_assert` pins that invariant: inject only ever targets the last scope, so
     /// growing it never overruns a later scope's range.
     fn inject(&self, mut fiber: Fiber, scope_id: usize) {
-        debug_assert!(matches!(fiber.state, FiberState::Pending(_)), "an injected handler must be unstarted (Pending) so `run_one_fiber` runs its body via `start_task`");
+        debug_assert!(
+            matches!(fiber.state, FiberState::Pending(_)),
+            "an injected handler must be unstarted (Pending) so `run_one_fiber` runs its body via `start_task`"
+        );
         let mut c = self.lock();
-        debug_assert_eq!(scope_id, c.scopes.len() - 1, "inject only grows the LAST scope (keeps flat slots contiguous)");
+        debug_assert_eq!(
+            scope_id,
+            c.scopes.len() - 1,
+            "inject only grows the LAST scope (keeps flat slots contiguous)"
+        );
         fiber.task_index = c.slots.len(); // authoritative flat slot index — the slots END
         fiber.scope_id = scope_id;
         c.scopes[scope_id].total += 1;
@@ -1589,7 +1743,10 @@ impl MnSched {
             // atomic is the reachability oracle Go lacks). Terminate/deadlock/cancel still broadcast
             // via `notify_all`, which wakes these true sleepers to exit/unwind.
             if self.runnable.load(Ordering::Relaxed) > 0 {
-                let (guard, _) = self.cv.wait_timeout(c, SPIN_BACKOFF).unwrap_or_else(|e| e.into_inner());
+                let (guard, _) = self
+                    .cv
+                    .wait_timeout(c, SPIN_BACKOFF)
+                    .unwrap_or_else(|e| e.into_inner());
                 drop(guard);
                 continue;
             }
@@ -1637,7 +1794,10 @@ impl MnSched {
             self.cv.notify_all();
         } else {
             fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
-            c.parked.entry(key).or_default().push(ParkedEntry::Recv(fiber));
+            c.parked
+                .entry(key)
+                .or_default()
+                .push(ParkedEntry::Recv(fiber));
             c.parked_n += 1;
         }
     }
@@ -1683,9 +1843,16 @@ impl MnSched {
         }
         fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
         let keys: Vec<usize> = arms.iter().map(|(k, _)| *k).collect();
-        let wp = Arc::new(WaitPark { fiber: Mutex::new(Some(fiber)), keys: keys.clone(), claimed: AtomicBool::new(false) });
+        let wp = Arc::new(WaitPark {
+            fiber: Mutex::new(Some(fiber)),
+            keys: keys.clone(),
+            claimed: AtomicBool::new(false),
+        });
         for key in keys {
-            c.parked.entry(key).or_default().push(ParkedEntry::Wait(Arc::clone(&wp)));
+            c.parked
+                .entry(key)
+                .or_default()
+                .push(ParkedEntry::Wait(Arc::clone(&wp)));
         }
         c.parked_n += 1; // ONE fiber, regardless of arm count
     }
@@ -1769,7 +1936,9 @@ impl MnSched {
     ///   to a swept channel can never re-wake the now-moved fiber. A loser sees `claimed` already set
     ///   and drops the stale token (no double-wake, no panic). All under the one core-lock hold.
     fn wake_bucket(&self, c: &mut SchedCore, key: usize) {
-        let Some(entries) = c.parked.remove(&key) else { return };
+        let Some(entries) = c.parked.remove(&key) else {
+            return;
+        };
         for entry in entries {
             match entry {
                 ParkedEntry::Recv(mut f) => {
@@ -1780,10 +1949,19 @@ impl MnSched {
                 }
                 ParkedEntry::Wait(wp) => {
                     // CAS the wake-once gate: only the winner takes the fiber + sweeps.
-                    if wp.claimed.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                    if wp
+                        .claimed
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_err()
+                    {
                         continue; // already claimed by a concurrent waker on another key — stale token
                     }
-                    let mut f = wp.fiber.lock().unwrap_or_else(|e| e.into_inner()).take().expect("WaitPark fiber claimed twice");
+                    let mut f = wp
+                        .fiber
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take()
+                        .expect("WaitPark fiber claimed twice");
                     c.parked_n -= 1; // ONE fiber, matching park_wait's +1
                     self.runnable.fetch_add(1, Ordering::Relaxed); // parked → ready
                     f.state = FiberState::Ready;
@@ -1796,7 +1974,9 @@ impl MnSched {
                             continue;
                         }
                         if let Some(bucket) = c.parked.get_mut(&other) {
-                            bucket.retain(|e| !matches!(e, ParkedEntry::Wait(o) if Arc::ptr_eq(o, &wp)));
+                            bucket.retain(
+                                |e| !matches!(e, ParkedEntry::Wait(o) if Arc::ptr_eq(o, &wp)),
+                            );
                             if bucket.is_empty() {
                                 c.parked.remove(&other);
                             }
@@ -1809,7 +1989,11 @@ impl MnSched {
 
     fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) {
         let mut c = self.lock();
-        core.q.lock().unwrap_or_else(|e| e.into_inner()).queue.push_back(w);
+        core.q
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .queue
+            .push_back(w);
         self.wake_bucket(&mut c, key);
         drop(c);
         self.cv.notify_all();
@@ -1896,16 +2080,26 @@ impl MnSched {
                             // Either a different scope (keep parked) OR already claimed (drop). Keep the
                             // token only if the fiber is still present (i.e. a different scope), else the
                             // stale token must be dropped so it can't double-wake.
-                            let still_present = wp.fiber.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+                            let still_present =
+                                wp.fiber.lock().unwrap_or_else(|e| e.into_inner()).is_some();
                             if still_present {
                                 keep.push(ParkedEntry::Wait(wp));
                             }
                             continue;
                         }
-                        if wp.claimed.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                        if wp
+                            .claimed
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_err()
+                        {
                             continue; // raced to claimed by another bucket of this token — skip.
                         }
-                        let mut f = wp.fiber.lock().unwrap_or_else(|e| e.into_inner()).take().expect("WaitPark fiber claimed twice");
+                        let mut f = wp
+                            .fiber
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .take()
+                            .expect("WaitPark fiber claimed twice");
                         drained += 1;
                         f.state = FiberState::Ready;
                         c.global.push_back(f);
@@ -2019,10 +2213,14 @@ impl MnSched {
         // counters above (a `send` doesn't bump `runnable` for a demoted fiber), but that fiber WILL pop
         // it on its next poll and make progress — so this is NOT a deadlock. Without this peek, a sibling
         // `send` racing the quiesce could spuriously fault an innocent PARKED sibling.
-        if c.demoted_chans
-            .values()
-            .any(|(core, _)| !core.q.lock().unwrap_or_else(|e| e.into_inner()).queue.is_empty())
-        {
+        if c.demoted_chans.values().any(|(core, _)| {
+            !core
+                .q
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .queue
+                .is_empty()
+        }) {
             return false;
         }
         true
@@ -2042,7 +2240,12 @@ impl MnSched {
         let sched = Arc::clone(self);
         // On the timer path `func`/`args` are intentionally unused (a sleep computes nothing — the
         // fiber resumes with `Nil`); they are consumed only by the pool branch below.
-        let OffloadReq { func, args, span, timer_ms } = req;
+        let OffloadReq {
+            func,
+            args,
+            span,
+            timer_ms,
+        } = req;
         if let Some(ms) = timer_ms {
             // D5 owe #2 — a `sleep_ms`: park the fiber on the timer thread (no pool thread, no work),
             // waking it at the deadline. `sleep_ms` returns nothing, so the fiber resumes with
@@ -2056,7 +2259,9 @@ impl MnSched {
             let dur = std::time::Duration::from_millis(ms);
             let deadline = std::time::Instant::now()
                 .checked_add(dur)
-                .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365));
+                .unwrap_or_else(|| {
+                    std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365)
+                });
             timer::submit_at(
                 deadline,
                 Box::new(move || {
@@ -2074,10 +2279,14 @@ impl MnSched {
             // fault on the fiber (matching an inline native panic, which `run_one_fiber`'s
             // `catch_unwind` also turns into a task fault) rather than letting it escape into the
             // pool's belt-and-suspenders `catch_unwind`.
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_offload(func, args)));
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_offload(func, args)));
             let result = match outcome {
                 Ok(Ok(nr)) => Ok(nr),
-                Ok(Err(e)) => Err(RuntimeError { message: e.message, span }),
+                Ok(Err(e)) => Err(RuntimeError {
+                    message: e.message,
+                    span,
+                }),
                 Err(p) => Err(panic_to_fault(p, span)),
             };
             let mut fiber = fiber;
@@ -2101,7 +2310,15 @@ impl MnSched {
         // `register` rejects (returns the fiber) iff cancel was tripped before it could park — a
         // sibling faulted in the park-vs-cancel gap. Re-inject so the fiber resumes and unwinds on the
         // cancel flag, rather than parking on a poller a past `drain_sched` already swept (→ a hang).
-        if let Some(fiber) = poller::register(pp.key, pp.fd, pp.interest, fiber, Arc::clone(self), Arc::clone(&pp.in_flight), pp.deadline) {
+        if let Some(fiber) = poller::register(
+            pp.key,
+            pp.fd,
+            pp.interest,
+            fiber,
+            Arc::clone(self),
+            Arc::clone(&pp.in_flight),
+            pp.deadline,
+        ) {
             pp.in_flight.store(false, Ordering::Release);
             self.complete_offload(fiber);
         }
@@ -2150,10 +2367,20 @@ impl SchedCore {
                 let fiber = match entry {
                     ParkedEntry::Recv(f) => Some(f),
                     ParkedEntry::Wait(wp) => {
-                        if wp.claimed.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                        if wp
+                            .claimed
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_err()
+                        {
                             None
                         } else {
-                            Some(wp.fiber.lock().unwrap_or_else(|e| e.into_inner()).take().expect("WaitPark fiber claimed twice"))
+                            Some(
+                                wp.fiber
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .take()
+                                    .expect("WaitPark fiber claimed twice"),
+                            )
                         }
                     }
                 };
@@ -2177,7 +2404,10 @@ fn panic_to_fault(payload: Box<dyn std::any::Any + Send>, span: Span) -> Runtime
         .map(|s| s.to_string())
         .or_else(|| payload.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "unknown panic".to_string());
-    RuntimeError { message: format!("internal error: a parallel task panicked: {msg}"), span }
+    RuntimeError {
+        message: format!("internal error: a parallel task panicked: {msg}"),
+        span,
+    }
 }
 
 /// B3.3-threads — a worker `Vm` with its task already reconstructed in its own heap, ready to run on
@@ -2197,7 +2427,11 @@ enum ReadyCall {
     /// A `spawn f(x)` / `spawn:` block — invoke the rebuilt callable with its rebuilt args.
     Invoke { callee: Value, args: Vec<Value> },
     /// A `spawn recv.m(args)` method task — dispatch `name` on the rebuilt receiver/args (B3.3d).
-    Method { recv: Value, name: String, args: Vec<Value> },
+    Method {
+        recv: Value,
+        name: String,
+        args: Vec<Value>,
+    },
 }
 
 impl ReadyWorker {
@@ -2214,7 +2448,11 @@ impl ReadyWorker {
         // worker-heap `GcRef` back to the parent.
         let value = self.worker.to_wire(ret)?;
         self.worker.ensure_crossable(&value, span)?;
-        Ok(WorkerResult { value, out: self.worker.out, stderr: self.worker.stderr })
+        Ok(WorkerResult {
+            value,
+            out: self.worker.out,
+            stderr: self.worker.stderr,
+        })
     }
 
     /// Invoke the prepared task on the worker VM, leaving its return value on the stack popped into
@@ -2270,10 +2508,9 @@ impl ReadyWorker {
                     TaskOutcome::Fault(e)
                 }
                 Ok(ret) => {
-                    let crossed = self
-                        .worker
-                        .to_wire(ret)
-                        .and_then(|value| self.worker.ensure_crossable(&value, span).map(|()| value));
+                    let crossed = self.worker.to_wire(ret).and_then(|value| {
+                        self.worker.ensure_crossable(&value, span).map(|()| value)
+                    });
                     match crossed {
                         Ok(value) => TaskOutcome::Done(WorkerResult {
                             value,
@@ -2299,7 +2536,12 @@ impl ReadyWorker {
         let ReadyWorker { worker, call, span } = self;
         let task = match call {
             ReadyCall::Invoke { callee, args } => PendingCall::Call { callee, args, span },
-            ReadyCall::Method { recv, name, args } => PendingCall::Method { recv, name, args, span },
+            ReadyCall::Method { recv, name, args } => PendingCall::Method {
+                recv,
+                name,
+                args,
+                span,
+            },
         };
         let ctx = FiberCtx {
             heap: Some(worker.heap),
@@ -2311,7 +2553,14 @@ impl ReadyWorker {
             str_intern: worker.str_intern,
             ..FiberCtx::default()
         };
-        Fiber { ctx, state: FiberState::Pending(task), task_index, scope_id, span, resume_native: None }
+        Fiber {
+            ctx,
+            state: FiberState::Pending(task),
+            task_index,
+            scope_id,
+            span,
+            resume_native: None,
+        }
     }
 }
 
@@ -2457,13 +2706,13 @@ impl Vm {
             pending_connect: None,
             poll_timed_out: false,
             native_reentry: 0,
-            reds: 0,           // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
-            yield_now: false,  // D3
+            reds: 0,             // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
+            yield_now: false,    // D3
             gen_yielding: false, // experimental generators
             gen_host_ctx: Vec::new(),
             active_generators: Vec::new(),
-            wid: 0,            // D5 owe #3 (Path C) — set in mn_worker_loop
-            demoted: false,    // D5 owe #3 (Path C)
+            wid: 0,         // D5 owe #3 (Path C) — set in mn_worker_loop
+            demoted: false, // D5 owe #3 (Path C)
             scheduler_stack: Vec::new(),
             cancel: None,
             cancelled: false,
@@ -2497,7 +2746,10 @@ impl Vm {
         std::mem::swap(&mut self.handlers, &mut ctx.handlers);
         std::mem::swap(&mut self.nurseries, &mut ctx.nurseries);
         std::mem::swap(&mut self.mn_scopes, &mut ctx.mn_scopes);
-        std::mem::swap(&mut self.nursery_defer_floors, &mut ctx.nursery_defer_floors);
+        std::mem::swap(
+            &mut self.nursery_defer_floors,
+            &mut ctx.nursery_defer_floors,
+        );
         std::mem::swap(&mut self.eager_scheds, &mut ctx.eager_scheds);
         std::mem::swap(&mut self.fault_trace, &mut ctx.fault_trace);
         std::mem::swap(&mut self.fault_trace_depth, &mut ctx.fault_trace_depth);
@@ -2507,7 +2759,10 @@ impl Vm {
         // the fiber's heap-keyed side state (out/stderr/module roots/executors), so they move
         // atomically WITH the heap their `GcRef`s index. A cooperative fiber swaps none of it.
         if let Some(ctx_heap) = ctx.heap.as_mut() {
-            debug_assert!(self.parallel, "cooperative fiber must never carry its own heap (decision A)");
+            debug_assert!(
+                self.parallel,
+                "cooperative fiber must never carry its own heap (decision A)"
+            );
             std::mem::swap(&mut self.heap, ctx_heap);
             std::mem::swap(&mut self.out, &mut ctx.out);
             std::mem::swap(&mut self.stderr, &mut ctx.stderr);
@@ -2547,7 +2802,10 @@ impl Vm {
     /// is up cannot park (its caller's loop/recursion state lives on the Rust stack, not in a
     /// [`Fiber`]), so it faults `deadlock` instead of suspending. Wraps every site that re-enters
     /// Chezzi code from native Rust.
-    fn guarded<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>) -> Result<T, RuntimeError> {
+    fn guarded<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
         self.native_reentry += 1;
         let r = f(self);
         self.native_reentry -= 1;
@@ -2570,8 +2828,20 @@ impl Vm {
 
     /// Allocate a not-yet-started generator object over a generator proto + its call args. Calling a
     /// `yield`-ing function lands here instead of running the body (see `do_call`/`invoke_value`).
-    fn alloc_generator(&mut self, proto: ProtoId, home: GcRef, closure: Option<GcRef>, args: Vec<Value>) -> Value {
-        let core = GeneratorCore { proto, home, closure, state: GenState::Pending(args), ctx: GenCtx::default() };
+    fn alloc_generator(
+        &mut self,
+        proto: ProtoId,
+        home: GcRef,
+        closure: Option<GcRef>,
+        args: Vec<Value>,
+    ) -> Value {
+        let core = GeneratorCore {
+            proto,
+            home,
+            closure,
+            state: GenState::Pending(args),
+            ctx: GenCtx::default(),
+        };
         Value::Obj(self.heap.alloc(Obj::Generator(Box::new(core))))
     }
 
@@ -2632,7 +2902,10 @@ impl Vm {
 
         if yielded {
             // The yielded value sits on the generator's private stack top. Park the rest to resume.
-            let v = new_ctx.stack.pop().expect("yielded value on the generator stack");
+            let v = new_ctx
+                .stack
+                .pop()
+                .expect("yielded value on the generator stack");
             if let Obj::Generator(g) = self.heap.get_mut(h) {
                 g.ctx = new_ctx;
                 g.state = GenState::Suspended;
@@ -2652,11 +2925,18 @@ impl Vm {
     /// error that exits the program. Mirrors `interp::top_level_error` — message must be identical.
     fn top_level_error(&self, v: Value, span: Span) -> Option<RuntimeError> {
         let Value::Obj(h) = v else { return None };
-        let Obj::Enum { variant_id, payload } = self.heap.get(h) else { return None };
+        let Obj::Enum {
+            variant_id,
+            payload,
+        } = self.heap.get(h)
+        else {
+            return None;
+        };
         // Builtin `Result`/`Option` only — a user enum that shadows `Err`/`None` gets a DISTINCT id
         // (natives hold the fixed `VID_ERR`/`VID_NONE_VARIANT`), so the int compare is exactly the
         // "is this the builtin unhandled-error variant" gate (more precise than the old name compare).
-        let unhandled = *variant_id == crate::vm::op::VID_ERR || *variant_id == crate::vm::op::VID_NONE_VARIANT;
+        let unhandled =
+            *variant_id == crate::vm::op::VID_ERR || *variant_id == crate::vm::op::VID_NONE_VARIANT;
         if !unhandled {
             return None;
         }
@@ -2681,7 +2961,10 @@ impl Vm {
     /// modules. The entry is the last module in dependency order. The `chezzi test` runner uses it as
     /// the home for free `test fn`s and suite construction thunks.
     fn entry_home(&self) -> GcRef {
-        *self.module_objs.last().expect("modules initialized before invoking tests")
+        *self
+            .module_objs
+            .last()
+            .expect("modules initialized before invoking tests")
     }
 
     /// `chezzi test` — invoke one zero-arg test proto (a free `test fn` or a suite construction
@@ -2694,21 +2977,49 @@ impl Vm {
             "invoke_test called on a non-test proto"
         );
         let home = self.entry_home();
-        self.run_proto(proto, home, None, Vec::new(), true, false, Span { line: 1, col: 1 })?;
+        self.run_proto(
+            proto,
+            home,
+            None,
+            Vec::new(),
+            true,
+            false,
+            Span { line: 1, col: 1 },
+        )?;
         Ok(())
     }
 
     /// `chezzi test` — invoke a suite method/lifecycle hook proto with `self` bound to `recv` (a
     /// suite instance). Returns the method's value (ignored by the runner) or its fault.
-    pub fn invoke_suite_method(&mut self, proto: ProtoId, recv: Value) -> Result<Value, RuntimeError> {
+    pub fn invoke_suite_method(
+        &mut self,
+        proto: ProtoId,
+        recv: Value,
+    ) -> Result<Value, RuntimeError> {
         let home = self.entry_home();
-        self.run_proto(proto, home, None, vec![recv], true, false, Span { line: 1, col: 1 })
+        self.run_proto(
+            proto,
+            home,
+            None,
+            vec![recv],
+            true,
+            false,
+            Span { line: 1, col: 1 },
+        )
     }
 
     /// `chezzi test` — construct a suite instance via its synthetic zero-arg `__new_<Suite>` thunk.
     pub fn build_suite_instance(&mut self, new_thunk: ProtoId) -> Result<Value, RuntimeError> {
         let home = self.entry_home();
-        self.run_proto(new_thunk, home, None, Vec::new(), true, false, Span { line: 1, col: 1 })
+        self.run_proto(
+            new_thunk,
+            home,
+            None,
+            Vec::new(),
+            true,
+            false,
+            Span { line: 1, col: 1 },
+        )
     }
 
     /// `chezzi test` — initialize all modules (run top-levels once) so globals/functions exist before
@@ -2740,8 +3051,12 @@ impl Vm {
         // M19 Phase 2b: pre-size the namespace to the compiler's slot count and build its name→slot
         // index from `global_slots`, so `DefineGlobalSlot(i)` / bind-import writes land in the slot
         // the compiler chose. Native modules carry no slots (members injected by name below).
-        let index: std::collections::HashMap<Box<str>, u32> =
-            m.global_slots.iter().enumerate().map(|(i, n)| (n.as_str().into(), i as u32)).collect();
+        let index: std::collections::HashMap<Box<str>, u32> = m
+            .global_slots
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.as_str().into(), i as u32))
+            .collect();
         let mod_obj = self.heap.alloc(Obj::Module {
             name: m.label.clone().into_boxed_str(),
             slots: vec![Value::Nil; m.global_slots.len()],
@@ -2774,11 +3089,23 @@ impl Vm {
         // Run the module body once. No module auto-runs `main` — it's an ordinary function the
         // program calls itself (scripting-language model). An unhandled `Err`/`None` reaching the
         // top level (via `PopExprStmt` or a top-level `?`) exits during this call.
-        self.run_proto(m.toplevel, mod_obj, None, Vec::new(), false, true, Span { line: 1, col: 1 })?;
+        self.run_proto(
+            m.toplevel,
+            mod_obj,
+            None,
+            Vec::new(),
+            false,
+            true,
+            Span { line: 1, col: 1 },
+        )?;
         Ok(())
     }
 
-    fn bind_import(&mut self, into: GcRef, imp: &crate::resolver::ResolvedImport) -> Result<(), RuntimeError> {
+    fn bind_import(
+        &mut self,
+        into: GcRef,
+        imp: &crate::resolver::ResolvedImport,
+    ) -> Result<(), RuntimeError> {
         use crate::ast::Import;
         let target_idx = self
             .program
@@ -2787,14 +3114,19 @@ impl Vm {
         let target_obj = self.module_objs[target_idx];
         match &imp.import {
             Import::Module { path, alias } => {
-                let name = alias.clone().unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                let name = alias
+                    .clone()
+                    .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
                 self.module_define(into, &name, Value::Obj(target_obj));
             }
             Import::From { names, .. } => {
                 for (member, alias) in names {
                     let value = self.module_global(target_obj, member).ok_or_else(|| {
                         let tname = self.module_name(target_obj);
-                        self.err(format!("module '{tname}' has no member '{member}'"), imp.span)
+                        self.err(
+                            format!("module '{tname}' has no member '{member}'"),
+                            imp.span,
+                        )
                     })?;
                     self.module_define(into, alias.as_ref().unwrap_or(member), value);
                 }
@@ -2961,7 +3293,12 @@ impl Vm {
             // resume it (a cancelled task must die). `!self.cancelled` latches on the first
             // observation: while the cancel unwind runs the task's `defer`s back through this loop,
             // re-firing would skip them — so we stop observing once cancellation is in flight.
-            if !self.cancelled && self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+            if !self.cancelled
+                && self
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|c| c.load(Ordering::Relaxed))
+            {
                 self.cancelled = true;
                 let span = self.frames[self.frames.len() - 1].call_span;
                 let rte = self.err("cancelled".to_string(), span);
@@ -3024,7 +3361,9 @@ impl Vm {
                     Ok(())
                 }
                 Op::BinLocalLocal { a, b, kind } => self.op_bin_local_local(*a, *b, *kind, span),
-                Op::BinLocalConst { slot, val, kind } => self.op_bin_local_const(*slot, *val, *kind, span),
+                Op::BinLocalConst { slot, val, kind } => {
+                    self.op_bin_local_const(*slot, *val, *kind, span)
+                }
                 Op::IncLocal { slot, delta } => self.op_inc_local(*slot, *delta, span),
                 Op::Jump(t) => {
                     self.frames[fi].ip = *t;
@@ -3048,15 +3387,51 @@ impl Vm {
                 // are never fused. Each consults a per-site (proto,ip) deopt cell and takes an int/int
                 // fast path once warm. Handled here (not in `step`) because the site id needs `pid`+`ip`,
                 // which only `run_until` has. The slow path is byte-identical to the kept `step` arms.
-                Op::Add => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Add, span),
-                Op::Sub => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Sub, span),
-                Op::Mul => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Mul, span),
-                Op::Div => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Div, span),
-                Op::Mod => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Mod, span),
-                Op::Lt => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Lt, span),
-                Op::LtEq => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::LtEq, span),
-                Op::Gt => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::Gt, span),
-                Op::GtEq => self.q_arith(self.quicken_base[pid] as usize + ip, crate::vm::op::BinKind::GtEq, span),
+                Op::Add => self.q_arith(
+                    self.quicken_base[pid] as usize + ip,
+                    crate::vm::op::BinKind::Add,
+                    span,
+                ),
+                Op::Sub => self.q_arith(
+                    self.quicken_base[pid] as usize + ip,
+                    crate::vm::op::BinKind::Sub,
+                    span,
+                ),
+                Op::Mul => self.q_arith(
+                    self.quicken_base[pid] as usize + ip,
+                    crate::vm::op::BinKind::Mul,
+                    span,
+                ),
+                Op::Div => self.q_arith(
+                    self.quicken_base[pid] as usize + ip,
+                    crate::vm::op::BinKind::Div,
+                    span,
+                ),
+                Op::Mod => self.q_arith(
+                    self.quicken_base[pid] as usize + ip,
+                    crate::vm::op::BinKind::Mod,
+                    span,
+                ),
+                Op::Lt => self.q_arith(
+                    self.quicken_base[pid] as usize + ip,
+                    crate::vm::op::BinKind::Lt,
+                    span,
+                ),
+                Op::LtEq => self.q_arith(
+                    self.quicken_base[pid] as usize + ip,
+                    crate::vm::op::BinKind::LtEq,
+                    span,
+                ),
+                Op::Gt => self.q_arith(
+                    self.quicken_base[pid] as usize + ip,
+                    crate::vm::op::BinKind::Gt,
+                    span,
+                ),
+                Op::GtEq => self.q_arith(
+                    self.quicken_base[pid] as usize + ip,
+                    crate::vm::op::BinKind::GtEq,
+                    span,
+                ),
                 Op::Eq => self.q_eq(self.quicken_base[pid] as usize + ip, false, span),
                 Op::NotEq => self.q_eq(self.quicken_base[pid] as usize + ip, true, span),
                 other => self.step(other, span),
@@ -3079,7 +3454,8 @@ impl Vm {
                 // first, and a deeper deferred-call fault (run while its frame is still live) replaces
                 // it. A fault this loop CAN catch resets the capture below, so no stale trace survives
                 // a `recover:`.
-                let caught_here = matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
+                let caught_here =
+                    matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
                 if !caught_here && self.frames.len() > self.fault_trace_depth {
                     self.fault_trace = Some(self.capture_trace());
                     self.fault_trace_depth = self.frames.len();
@@ -3124,7 +3500,9 @@ impl Vm {
                         // Drop the scope markers of any defer scopes opened inside the recover block:
                         // the fault jumped past their `LeaveDeferScope`s, so they would otherwise leak
                         // and corrupt later drains in this frame.
-                        self.frames[h.frame_len - 1].defer_markers.truncate(h.markers_len);
+                        self.frames[h.frame_len - 1]
+                            .defer_markers
+                            .truncate(h.markers_len);
                         // Reclaim any `parallel:` nursery the fault unwound past (its `JoinNursery`
                         // never ran) — mirrors the interpreter always reclaiming its nursery list.
                         // TASK B: route through `drain_escaped_nursery` so a `?` caught by `recover:`
@@ -3250,10 +3628,16 @@ impl Vm {
         // own `run_until` safepoint. (A `--parallel` worker `Vm` has an empty `scheduler_stack`, so
         // this loop is a no-op on workers.)
         for nursery in &self.scheduler_stack {
-            debug_assert!(nursery.parent.heap.is_none(), "a cooperative parked fiber must not own a heap (decision A)");
+            debug_assert!(
+                nursery.parent.heap.is_none(),
+                "a cooperative parked fiber must not own a heap (decision A)"
+            );
             Self::root_ctx(&nursery.parent, &mut work);
             for child in &nursery.children {
-                debug_assert!(child.ctx.heap.is_none(), "a cooperative child fiber must not own a heap (decision A)");
+                debug_assert!(
+                    child.ctx.heap.is_none(),
+                    "a cooperative child fiber must not own a heap (decision A)"
+                );
                 Self::root_ctx(&child.ctx, &mut work);
                 if let FiberState::Pending(task) = &child.state {
                     work.extend(task.roots());
@@ -3333,7 +3717,8 @@ impl Vm {
                 // which only evaluates `msg` when the assertion fails.
                 let message = if *has_msg {
                     let m = self.pop();
-                    self.val_str(m).unwrap_or_else(|| "assertion failed".to_string())
+                    self.val_str(m)
+                        .unwrap_or_else(|| "assertion failed".to_string())
                 } else {
                     "assertion failed".to_string()
                 };
@@ -3401,9 +3786,16 @@ impl Vm {
             Op::Neg => {
                 let v = self.pop();
                 let r = match v {
-                    Value::Int(n) => n.checked_neg().map(Value::Int).ok_or_else(|| self.err("integer overflow in negation".to_string(), span))?,
+                    Value::Int(n) => n.checked_neg().map(Value::Int).ok_or_else(|| {
+                        self.err("integer overflow in negation".to_string(), span)
+                    })?,
                     Value::Float(f) => Value::Float(-f),
-                    other => return Err(self.err(format!("cannot apply Neg to {}", self.type_name(other)), span)),
+                    other => {
+                        return Err(self.err(
+                            format!("cannot apply Neg to {}", self.type_name(other)),
+                            span,
+                        ));
+                    }
                 };
                 self.push(r);
             }
@@ -3411,7 +3803,12 @@ impl Vm {
                 let v = self.pop();
                 match v {
                     Value::Bool(b) => self.push(Value::Bool(!b)),
-                    other => return Err(self.err(format!("cannot apply Not to {}", self.type_name(other)), span)),
+                    other => {
+                        return Err(self.err(
+                            format!("cannot apply Not to {}", self.type_name(other)),
+                            span,
+                        ));
+                    }
                 }
             }
             Op::Lt | Op::LtEq | Op::Gt | Op::GtEq => self.compare_op(op, span)?,
@@ -3436,13 +3833,17 @@ impl Vm {
             Op::AsBool => {
                 let v = *self.stack.last().unwrap();
                 if !matches!(v, Value::Bool(_)) {
-                    return Err(self.err(format!("expected bool, found {}", self.type_name(v)), span));
+                    return Err(
+                        self.err(format!("expected bool, found {}", self.type_name(v)), span)
+                    );
                 }
             }
             Op::AsInt => {
                 let v = *self.stack.last().unwrap();
                 if !matches!(v, Value::Int(_)) {
-                    return Err(self.err(format!("expected int, found {}", self.type_name(v)), span));
+                    return Err(
+                        self.err(format!("expected int, found {}", self.type_name(v)), span)
+                    );
                 }
             }
             // ----- M19 superinstructions. Bodies live in `#[inline(never)]` helpers so `step`'s own
@@ -3451,7 +3852,9 @@ impl Vm {
             // HOF/method/deferred re-entrant path still cycles `step → run_proto → run_until → step`,
             // so a fat `step` frame would still bloat that recursion. -----
             Op::BinLocalLocal { a, b, kind } => self.op_bin_local_local(*a, *b, *kind, span)?,
-            Op::BinLocalConst { slot, val, kind } => self.op_bin_local_const(*slot, *val, *kind, span)?,
+            Op::BinLocalConst { slot, val, kind } => {
+                self.op_bin_local_const(*slot, *val, *kind, span)?
+            }
             Op::IncLocal { slot, delta } => self.op_inc_local(*slot, *delta, span)?,
             Op::PushHandler(target) => self.handlers.push(Handler {
                 stack_len: self.stack.len(),
@@ -3459,7 +3862,11 @@ impl Vm {
                 call_depth: self.call_depth,
                 ip: *target,
                 defer_len: self.frames.last().map(|f| f.deferred.len()).unwrap_or(0),
-                markers_len: self.frames.last().map(|f| f.defer_markers.len()).unwrap_or(0),
+                markers_len: self
+                    .frames
+                    .last()
+                    .map(|f| f.defer_markers.len())
+                    .unwrap_or(0),
                 nursery_len: self.nurseries.len(),
             }),
             Op::PopHandler => {
@@ -3540,7 +3947,12 @@ impl Vm {
                 let mut map = MapData::default();
                 for (j, &hk) in hashes.iter().enumerate() {
                     let (k, v) = (self.stack[at + 2 * j], self.stack[at + 2 * j + 1]);
-                    match map.candidates(hk).iter().copied().find(|&p| self.values_equal(map.entries[p].1, k)) {
+                    match map
+                        .candidates(hk)
+                        .iter()
+                        .copied()
+                        .find(|&p| self.values_equal(map.entries[p].1, k))
+                    {
                         Some(p) => map.entries[p].2 = v,
                         None => map.push(hk, k, v),
                     }
@@ -3561,7 +3973,12 @@ impl Vm {
                 let mut set = SetData::default();
                 for (j, &he) in hashes.iter().enumerate() {
                     let e = self.stack[at + j];
-                    if !set.candidates(he).iter().copied().any(|p| self.values_equal(set.entries[p].1, e)) {
+                    if !set
+                        .candidates(he)
+                        .iter()
+                        .copied()
+                        .any(|p| self.values_equal(set.entries[p].1, e))
+                    {
                         set.push(he, e);
                     }
                 }
@@ -3570,10 +3987,17 @@ impl Vm {
                 self.push(Value::Obj(h));
             }
             Op::NewStruct(name, argc) => self.new_struct(name, *argc, span)?,
-            Op::NewEnum { variant, variant_id, argc } => self.new_enum(variant, *variant_id, *argc, span)?,
+            Op::NewEnum {
+                variant,
+                variant_id,
+                argc,
+            } => self.new_enum(variant, *variant_id, *argc, span)?,
             Op::MakeFunc(proto) => {
                 let home = self.frames.last().unwrap().home;
-                let h = self.heap.alloc(Obj::Func { proto: *proto, home });
+                let h = self.heap.alloc(Obj::Func {
+                    proto: *proto,
+                    home,
+                });
                 self.push(Value::Obj(h));
             }
             // Body in an `#[inline(never)]` helper so `step`'s frame stays small (the deep-recursion
@@ -3591,14 +4015,20 @@ impl Vm {
                         CapSrc::Slot(i) => self.stack[base + i],
                         CapSrc::Captured(parent_slot) => enclosing
                             .and_then(|h| match self.heap.get(h) {
-                                Obj::Closure { captured, .. } => captured.get(parent_slot as usize).copied(),
+                                Obj::Closure { captured, .. } => {
+                                    captured.get(parent_slot as usize).copied()
+                                }
                                 _ => None,
                             })
                             .unwrap_or(Value::Nil),
                     };
                     captured.push(v);
                 }
-                let h = self.heap.alloc(Obj::Closure { proto: *proto, captured, home });
+                let h = self.heap.alloc(Obj::Closure {
+                    proto: *proto,
+                    captured,
+                    home,
+                });
                 self.push(Value::Obj(h));
             }
             Op::GetField { name, ic } => self.get_field(name, *ic, span)?,
@@ -3673,12 +4103,14 @@ impl Vm {
                         // `bytes`/`bytearray` iterate as `int`s (0–255). Snapshots to a list of ints —
                         // mutating the `bytearray` during iteration does not change the loop sequence.
                         Obj::Bytes(b) => {
-                            let items: Vec<Value> = b.iter().map(|&x| Value::Int(x as i64)).collect();
+                            let items: Vec<Value> =
+                                b.iter().map(|&x| Value::Int(x as i64)).collect();
                             let nh = self.heap.alloc(Obj::List(items));
                             self.push(Value::Obj(nh));
                         }
                         Obj::ByteArray(b) => {
-                            let items: Vec<Value> = b.iter().map(|&x| Value::Int(x as i64)).collect();
+                            let items: Vec<Value> =
+                                b.iter().map(|&x| Value::Int(x as i64)).collect();
                             let nh = self.heap.alloc(Obj::List(items));
                             self.push(Value::Obj(nh));
                         }
@@ -3689,9 +4121,17 @@ impl Vm {
                             let nh = self.heap.alloc(Obj::List(cloned));
                             self.push(Value::Obj(nh));
                         }
-                        _ => return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span)),
+                        _ => {
+                            return Err(self
+                                .err(format!("cannot iterate over {}", self.type_name(v)), span));
+                        }
                     },
-                    other => return Err(self.err(format!("cannot iterate over {}", self.type_name(other)), span)),
+                    other => {
+                        return Err(self.err(
+                            format!("cannot iterate over {}", self.type_name(other)),
+                            span,
+                        ));
+                    }
                 }
             }
             Op::ArrLen => {
@@ -3726,7 +4166,11 @@ impl Vm {
                 {
                     let name = name.clone();
                     self.program.structs.get(name.as_ref()).map(|d| {
-                        (!d.methods.contains_key("next") && d.methods.contains_key("iter"), d.methods.get("iter").copied(), d.module_idx)
+                        (
+                            !d.methods.contains_key("next") && d.methods.contains_key("iter"),
+                            d.methods.get("iter").copied(),
+                            d.module_idx,
+                        )
                     })
                 } else {
                     None
@@ -3737,8 +4181,9 @@ impl Vm {
                         // Re-enter the VM to run `iter(self)`; it returns the cursor (the body calls
                         // `self.xs.iter()`). Root the receiver across the call (guarded GC).
                         self.push(v);
-                        let cursor =
-                            self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
+                        let cursor = self.guarded(|vm| {
+                            vm.run_proto(proto, home, None, vec![v], true, false, span)
+                        })?;
                         self.pop(); // unroot receiver
                         self.push(cursor);
                     }
@@ -3795,7 +4240,22 @@ impl Vm {
                     return Err(self.err(format!("cannot match on {}", self.type_name(v)), span));
                 }
             }
-            Op::MatchArm { scrut, variant, variant_id, nbind, bind_start, next } => self.match_arm(*scrut, variant, *variant_id, *nbind, *bind_start, *next, span)?,
+            Op::MatchArm {
+                scrut,
+                variant,
+                variant_id,
+                nbind,
+                bind_start,
+                next,
+            } => self.match_arm(
+                *scrut,
+                variant,
+                *variant_id,
+                *nbind,
+                *bind_start,
+                *next,
+                span,
+            )?,
             Op::MatchNoArm(slot) => {
                 let v = self.stack[self.base() + *slot];
                 let variant = match v {
@@ -3843,14 +4303,21 @@ impl Vm {
             Op::SpawnBlock(proto, entries) => self.do_spawn_block(*proto, entries, span)?,
             Op::WaitPoll(meta) => self.op_wait_poll(meta, span)?,
             Op::NewChannel => {
-                let h = self.heap.alloc(Obj::Channel(Arc::new(ChannelCore::default())));
+                let h = self
+                    .heap
+                    .alloc(Obj::Channel(Arc::new(ChannelCore::default())));
                 self.push(Value::Obj(h));
             }
             Op::NewShared => {
                 let init = self.pop();
                 // The box holds the wire form (single serialization == the old deep_clone-in).
-                let init = self.to_wire(init).expect("Shared init must be sendable (B3.1 single-thread)");
-                let h = self.heap.alloc(Obj::Shared(Arc::new(SharedCore { v: Mutex::new(init), ..Default::default() })));
+                let init = self
+                    .to_wire(init)
+                    .expect("Shared init must be sendable (B3.1 single-thread)");
+                let h = self.heap.alloc(Obj::Shared(Arc::new(SharedCore {
+                    v: Mutex::new(init),
+                    ..Default::default()
+                })));
                 self.push(Value::Obj(h));
             }
             // `NewAtomic`/`NewTimer` delegate to `#[inline(never)]` helpers so their locals (the timer's
@@ -3867,7 +4334,9 @@ impl Vm {
                 self.push(v);
             }
             Op::NewExecutor => {
-                let h = self.heap.alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
+                let h = self
+                    .heap
+                    .alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
                 // Register for the program-exit auto-drain; the handle is also a GC root, so the
                 // executor's queued work survives even after every in-program handle is gone.
                 self.executors.push(h);
@@ -3900,7 +4369,12 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn q_arith(&mut self, site: usize, kind: crate::vm::op::BinKind, span: Span) -> Result<(), RuntimeError> {
+    fn q_arith(
+        &mut self,
+        site: usize,
+        kind: crate::vm::op::BinKind,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         match self.quicken[site] {
             Q_INT => {
                 let n = self.stack.len();
@@ -3920,7 +4394,10 @@ impl Vm {
             _ => {
                 // Q_COLD — record whether this site is int/int, then run the generic path this once.
                 let n = self.stack.len();
-                let both_int = matches!((self.stack[n - 2], self.stack[n - 1]), (Value::Int(_), Value::Int(_)));
+                let both_int = matches!(
+                    (self.stack[n - 2], self.stack[n - 1]),
+                    (Value::Int(_), Value::Int(_))
+                );
                 self.quicken[site] = if both_int { Q_INT } else { Q_GENERIC };
                 self.run_bin_kind(kind, span)
             }
@@ -3945,7 +4422,10 @@ impl Vm {
             self.quicken[site] = Q_GENERIC; // non-int at a specialized site → deopt
         } else if self.quicken[site] == Q_COLD {
             let n = self.stack.len();
-            let both_int = matches!((self.stack[n - 2], self.stack[n - 1]), (Value::Int(_), Value::Int(_)));
+            let both_int = matches!(
+                (self.stack[n - 2], self.stack[n - 1]),
+                (Value::Int(_), Value::Int(_))
+            );
             self.quicken[site] = if both_int { Q_INT } else { Q_GENERIC };
             // fall through to the generic path this first time
         }
@@ -3959,7 +4439,13 @@ impl Vm {
     /// `BinLocalLocal{a,b,kind}` — push `local[a] <op> local[b]`. `#[inline(never)]` keeps the body
     /// out of `step`'s frame (see the call site).
     #[inline(never)]
-    fn op_bin_local_local(&mut self, a: usize, b: usize, kind: crate::vm::op::BinKind, span: Span) -> Result<(), RuntimeError> {
+    fn op_bin_local_local(
+        &mut self,
+        a: usize,
+        b: usize,
+        kind: crate::vm::op::BinKind,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         let l = self.stack[self.base() + a];
         let r = self.stack[self.base() + b];
         if let (Value::Int(x), Value::Int(y)) = (l, r) {
@@ -3975,7 +4461,13 @@ impl Vm {
 
     /// `BinLocalConst{slot,val,kind}` — push `local[slot] <op> val`.
     #[inline(never)]
-    fn op_bin_local_const(&mut self, slot: usize, val: i64, kind: crate::vm::op::BinKind, span: Span) -> Result<(), RuntimeError> {
+    fn op_bin_local_const(
+        &mut self,
+        slot: usize,
+        val: i64,
+        kind: crate::vm::op::BinKind,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         let l = self.stack[self.base() + slot];
         if let Value::Int(x) = l {
             let v = self.fast_int_bin(x, val, kind, span)?;
@@ -3995,7 +4487,9 @@ impl Vm {
         let at = self.base() + slot;
         match self.stack[at] {
             Value::Int(x) => {
-                let v = x.checked_add(delta).ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?;
+                let v = x
+                    .checked_add(delta)
+                    .ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?;
                 self.stack[at] = Value::Int(v);
             }
             Value::Float(f) => self.stack[at] = Value::Float(f + delta as f64),
@@ -4014,23 +4508,44 @@ impl Vm {
     /// Int/Int fast path for the fused binops (`BinLocalLocal` / `BinLocalConst`). Must match
     /// `arith` (overflow / div-by-zero errors) and `compare_op` (ordering) for `Int` operands
     /// exactly. Anything non-`Int` never reaches here — the caller falls back to the slow path.
-    fn fast_int_bin(&self, x: i64, y: i64, kind: crate::vm::op::BinKind, span: Span) -> Result<Value, RuntimeError> {
+    fn fast_int_bin(
+        &self,
+        x: i64,
+        y: i64,
+        kind: crate::vm::op::BinKind,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         use crate::vm::op::BinKind;
         let v = match kind {
-            BinKind::Add => Value::Int(x.checked_add(y).ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?),
-            BinKind::Sub => Value::Int(x.checked_sub(y).ok_or_else(|| self.err("integer overflow in Sub".to_string(), span))?),
-            BinKind::Mul => Value::Int(x.checked_mul(y).ok_or_else(|| self.err("integer overflow in Mul".to_string(), span))?),
+            BinKind::Add => Value::Int(
+                x.checked_add(y)
+                    .ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?,
+            ),
+            BinKind::Sub => Value::Int(
+                x.checked_sub(y)
+                    .ok_or_else(|| self.err("integer overflow in Sub".to_string(), span))?,
+            ),
+            BinKind::Mul => Value::Int(
+                x.checked_mul(y)
+                    .ok_or_else(|| self.err("integer overflow in Mul".to_string(), span))?,
+            ),
             BinKind::Div => {
                 if y == 0 {
                     return Err(self.err("division by zero".to_string(), span));
                 }
-                Value::Int(x.checked_div(y).ok_or_else(|| self.err("integer overflow in Div".to_string(), span))?)
+                Value::Int(
+                    x.checked_div(y)
+                        .ok_or_else(|| self.err("integer overflow in Div".to_string(), span))?,
+                )
             }
             BinKind::Mod => {
                 if y == 0 {
                     return Err(self.err("modulo by zero".to_string(), span));
                 }
-                Value::Int(x.checked_rem(y).ok_or_else(|| self.err("integer overflow in Mod".to_string(), span))?)
+                Value::Int(
+                    x.checked_rem(y)
+                        .ok_or_else(|| self.err("integer overflow in Mod".to_string(), span))?,
+                )
             }
             BinKind::Lt => Value::Bool(x < y),
             BinKind::LtEq => Value::Bool(x <= y),
@@ -4043,7 +4558,11 @@ impl Vm {
     /// Slow-path dispatch for a fused binop: the two operands are already on the stack, so route to
     /// the existing `arith` / `compare_op` (preserving struct overloading, string concat, float
     /// promotion, and fiber parking — anything the unfused op sequence would do).
-    fn run_bin_kind(&mut self, kind: crate::vm::op::BinKind, span: Span) -> Result<(), RuntimeError> {
+    fn run_bin_kind(
+        &mut self,
+        kind: crate::vm::op::BinKind,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         use crate::vm::op::BinKind;
         match kind {
             BinKind::Add => self.arith(&Op::Add, span),
@@ -4076,7 +4595,17 @@ impl Vm {
                     Op::Sub => a.checked_sub(b),
                     Op::Mul => a.checked_mul(b),
                     Op::Div | Op::Mod if b == 0 => {
-                        return Err(self.err(format!("{} by zero", if matches!(op, Op::Div) { "division" } else { "modulo" }), span));
+                        return Err(self.err(
+                            format!(
+                                "{} by zero",
+                                if matches!(op, Op::Div) {
+                                    "division"
+                                } else {
+                                    "modulo"
+                                }
+                            ),
+                            span,
+                        ));
                     }
                     Op::Div => a.checked_div(b),
                     Op::Mod => a.checked_rem(b),
@@ -4087,7 +4616,17 @@ impl Vm {
             (a, b) if is_numeric(a) && is_numeric(b) => {
                 let (x, y) = (as_f64(a), as_f64(b));
                 if matches!(op, Op::Div | Op::Mod) && y == 0.0 {
-                    return Err(self.err(format!("{} by zero", if matches!(op, Op::Div) { "division" } else { "modulo" }), span));
+                    return Err(self.err(
+                        format!(
+                            "{} by zero",
+                            if matches!(op, Op::Div) {
+                                "division"
+                            } else {
+                                "modulo"
+                            }
+                        ),
+                        span,
+                    ));
                 }
                 Value::Float(match op {
                     Op::Add => x + y,
@@ -4114,10 +4653,26 @@ impl Vm {
                     let h = self.heap.alloc(Obj::Str(s.into()));
                     Value::Obj(h)
                 } else {
-                    return Err(self.err(format!("cannot apply {name} to {} and {}", self.type_name(l), self.type_name(r)), span));
+                    return Err(self.err(
+                        format!(
+                            "cannot apply {name} to {} and {}",
+                            self.type_name(l),
+                            self.type_name(r)
+                        ),
+                        span,
+                    ));
                 }
             }
-            _ => return Err(self.err(format!("cannot apply {name} to {} and {}", self.type_name(l), self.type_name(r)), span)),
+            _ => {
+                return Err(self.err(
+                    format!(
+                        "cannot apply {name} to {} and {}",
+                        self.type_name(l),
+                        self.type_name(r)
+                    ),
+                    span,
+                ));
+            }
         };
         self.push(result);
         Ok(())
@@ -4126,7 +4681,13 @@ impl Vm {
     /// Arithmetic operator overloading: dispatch `+`/`-`/`*` on two structs to the receiver's
     /// `add`/`sub`/`mul(self, other) -> Self` method (the `Add`/`Sub`/`Mul` protocols). `l`/`r` are
     /// passed as the call's args (rooted as the new frame's locals). Mirrors `interp::struct_arith`.
-    fn struct_arith(&mut self, op: &Op, l: Value, r: Value, span: Span) -> Result<Value, RuntimeError> {
+    fn struct_arith(
+        &mut self,
+        op: &Op,
+        l: Value,
+        r: Value,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         let method = match op {
             Op::Add => "add",
             Op::Sub => "sub",
@@ -4134,7 +4695,9 @@ impl Vm {
             _ => unreachable!("struct_arith only handles + - *"),
         };
         let Value::Obj(h) = l else { unreachable!() };
-        let Obj::Struct { name, .. } = self.heap.get(h) else { unreachable!() };
+        let Obj::Struct { name, .. } = self.heap.get(h) else {
+            unreachable!()
+        };
         let name = name.clone();
         let def = self
             .program
@@ -4171,15 +4734,30 @@ impl Vm {
                     Op::BitXor => a ^ b,
                     Op::Shl | Op::Shr => {
                         if !(0..64).contains(&b) {
-                            return Err(self.err(format!("shift amount {b} out of range (0..64)"), span));
+                            return Err(
+                                self.err(format!("shift amount {b} out of range (0..64)"), span)
+                            );
                         }
-                        if matches!(op, Op::Shl) { a << (b as u32) } else { a >> (b as u32) }
+                        if matches!(op, Op::Shl) {
+                            a << (b as u32)
+                        } else {
+                            a >> (b as u32)
+                        }
                     }
                     _ => unreachable!(),
                 };
                 Value::Int(v)
             }
-            _ => return Err(self.err(format!("cannot apply {name} to {} and {}", self.type_name(l), self.type_name(r)), span)),
+            _ => {
+                return Err(self.err(
+                    format!(
+                        "cannot apply {name} to {} and {}",
+                        self.type_name(l),
+                        self.type_name(r)
+                    ),
+                    span,
+                ));
+            }
         };
         self.push(result);
         Ok(())
@@ -4203,28 +4781,62 @@ impl Vm {
                 }
                 Obj::Set(_) => {
                     let hx = self.hash_key_rooted(needle, &[Value::Obj(h), needle], span)?;
-                    let Obj::Set(s) = self.heap.get(h) else { unreachable!() };
-                    s.candidates(hx).iter().any(|&p| self.values_equal(s.entries[p].1, needle))
+                    let Obj::Set(s) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    s.candidates(hx)
+                        .iter()
+                        .any(|&p| self.values_equal(s.entries[p].1, needle))
                 }
                 Obj::Map(_) => {
                     let hk = self.hash_key_rooted(needle, &[Value::Obj(h), needle], span)?;
-                    let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
-                    m.candidates(hk).iter().any(|&p| self.values_equal(m.entries[p].1, needle))
+                    let Obj::Map(m) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    m.candidates(hk)
+                        .iter()
+                        .any(|&p| self.values_equal(m.entries[p].1, needle))
                 }
                 Obj::Str(_) => {
                     let Value::Obj(nh) = needle else {
-                        return Err(self.err(format!("substring `in` requires a str on the left, found {}", self.type_name(needle)), span));
+                        return Err(self.err(
+                            format!(
+                                "substring `in` requires a str on the left, found {}",
+                                self.type_name(needle)
+                            ),
+                            span,
+                        ));
                     };
                     let sub = match self.heap.get(nh) {
                         Obj::Str(sub) => sub.to_string(),
-                        _ => return Err(self.err(format!("substring `in` requires a str on the left, found {}", self.type_name(needle)), span)),
+                        _ => {
+                            return Err(self.err(
+                                format!(
+                                    "substring `in` requires a str on the left, found {}",
+                                    self.type_name(needle)
+                                ),
+                                span,
+                            ));
+                        }
                     };
-                    let Obj::Str(hay) = self.heap.get(h) else { unreachable!() };
+                    let Obj::Str(hay) = self.heap.get(h) else {
+                        unreachable!()
+                    };
                     hay.contains(sub.as_str())
                 }
-                _ => return Err(self.err(format!("cannot use `in` on {}", self.type_name(container)), span)),
+                _ => {
+                    return Err(self.err(
+                        format!("cannot use `in` on {}", self.type_name(container)),
+                        span,
+                    ));
+                }
             },
-            _ => return Err(self.err(format!("cannot use `in` on {}", self.type_name(container)), span)),
+            _ => {
+                return Err(self.err(
+                    format!("cannot use `in` on {}", self.type_name(container)),
+                    span,
+                ));
+            }
         };
         self.push(Value::Bool(found));
         Ok(())
@@ -4249,7 +4861,16 @@ impl Vm {
             Op::GtEq => "GtEq",
             _ => unreachable!(),
         };
-        let ord = self.compare(l, r).ok_or_else(|| self.err(format!("cannot apply {name} to {} and {}", self.type_name(l), self.type_name(r)), span))?;
+        let ord = self.compare(l, r).ok_or_else(|| {
+            self.err(
+                format!(
+                    "cannot apply {name} to {} and {}",
+                    self.type_name(l),
+                    self.type_name(r)
+                ),
+                span,
+            )
+        })?;
         let b = match op {
             Op::Lt => ord.is_lt(),
             Op::LtEq => ord.is_le(),
@@ -4263,7 +4884,13 @@ impl Vm {
 
     /// Dispatch an ordering operator on two structs to the receiver's `compare(self, other) -> int`
     /// method, mapping the sign of the result to a boolean. Mirrors `interp::struct_ordering`.
-    fn struct_ordering(&mut self, op: &Op, l: Value, r: Value, span: Span) -> Result<(), RuntimeError> {
+    fn struct_ordering(
+        &mut self,
+        op: &Op,
+        l: Value,
+        r: Value,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         let ord = self.struct_compare(l, r, span)?;
         let b = match op {
             Op::Lt => ord.is_lt(),
@@ -4279,9 +4906,16 @@ impl Vm {
     /// Call a struct's `compare(self, other) -> int` method and return the resulting `Ordering`.
     /// Shared by ordering operators (`struct_ordering`) and `list.sort()` over Comparable structs.
     /// Mirrors `interp::struct_compare`.
-    fn struct_compare(&mut self, l: Value, r: Value, span: Span) -> Result<std::cmp::Ordering, RuntimeError> {
+    fn struct_compare(
+        &mut self,
+        l: Value,
+        r: Value,
+        span: Span,
+    ) -> Result<std::cmp::Ordering, RuntimeError> {
         let Value::Obj(h) = l else { unreachable!() };
-        let Obj::Struct { name, .. } = self.heap.get(h).clone() else { unreachable!() };
+        let Obj::Struct { name, .. } = self.heap.get(h).clone() else {
+            unreachable!()
+        };
         let def = self
             .program
             .structs
@@ -4289,12 +4923,18 @@ impl Vm {
             .cloned()
             .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
         let proto = *def.methods.get("compare").ok_or_else(|| {
-            self.err(format!("struct '{name}' has no 'compare' method (needed to order its values)"), span)
+            self.err(
+                format!("struct '{name}' has no 'compare' method (needed to order its values)"),
+                span,
+            )
         })?;
         let home = self.module_objs[def.module_idx];
         match self.guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))? {
             Value::Int(n) => Ok(n.cmp(&0)),
-            other => Err(self.err(format!("compare() must return int, got {}", self.type_name(other)), span)),
+            other => Err(self.err(
+                format!("compare() must return int, got {}", self.type_name(other)),
+                span,
+            )),
         }
     }
 
@@ -4309,7 +4949,13 @@ impl Vm {
             Value::Obj(h) => match self.heap.get(h) {
                 Obj::Struct { .. } => self.struct_hash(v, span),
                 Obj::Str(_) | Obj::Bytes(_) => Ok(self.scalar_hash(v)),
-                _ => Err(self.err(format!("{} is not hashable (cannot be a map/set key)", self.type_name(v)), span)),
+                _ => Err(self.err(
+                    format!(
+                        "{} is not hashable (cannot be a map/set key)",
+                        self.type_name(v)
+                    ),
+                    span,
+                )),
             },
             _ => Ok(self.scalar_hash(v)),
         }
@@ -4349,7 +4995,9 @@ impl Vm {
     /// [`struct_compare`] (re-entrant via `run_proto`).
     fn struct_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
         let Value::Obj(h) = v else { unreachable!() };
-        let Obj::Struct { name, .. } = self.heap.get(h).clone() else { unreachable!() };
+        let Obj::Struct { name, .. } = self.heap.get(h).clone() else {
+            unreachable!()
+        };
         let def = self
             .program
             .structs
@@ -4357,12 +5005,18 @@ impl Vm {
             .cloned()
             .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
         let proto = *def.methods.get("hash").ok_or_else(|| {
-            self.err(format!("struct '{name}' has no 'hash' method (needed to use it as a map/set key)"), span)
+            self.err(
+                format!("struct '{name}' has no 'hash' method (needed to use it as a map/set key)"),
+                span,
+            )
         })?;
         let home = self.module_objs[def.module_idx];
         match self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))? {
             Value::Int(n) => Ok(n as u64),
-            other => Err(self.err(format!("hash() must return int, got {}", self.type_name(other)), span)),
+            other => Err(self.err(
+                format!("hash() must return int, got {}", self.type_name(other)),
+                span,
+            )),
         }
     }
 
@@ -4370,7 +5024,12 @@ impl Vm {
     /// `hash()` re-enters the VM and can trigger GC; the map/set receiver and any in-flight
     /// key/value (already popped off the stack before dispatch) must be rooted or the collector
     /// could free them mid-hash. For scalar keys this is a couple of redundant push/pops.
-    fn hash_key_rooted(&mut self, key: Value, roots: &[Value], span: Span) -> Result<u64, RuntimeError> {
+    fn hash_key_rooted(
+        &mut self,
+        key: Value,
+        roots: &[Value],
+        span: Span,
+    ) -> Result<u64, RuntimeError> {
         for &r in roots {
             self.push(r);
         }
@@ -4428,7 +5087,12 @@ impl Vm {
     /// Stable top-down merge sort over `idx` (positions into the rooted list `src_h`), comparing
     /// elements via each struct's `compare`. Re-reads elements from `src_h` per comparison so no
     /// unrooted `Value` is held across the GC-capable `struct_compare` call.
-    fn msort_indices_structs(&mut self, src_h: GcRef, idx: Vec<usize>, span: Span) -> Result<Vec<usize>, RuntimeError> {
+    fn msort_indices_structs(
+        &mut self,
+        src_h: GcRef,
+        idx: Vec<usize>,
+        span: Span,
+    ) -> Result<Vec<usize>, RuntimeError> {
         let n = idx.len();
         if n <= 1 {
             return Ok(idx);
@@ -4485,14 +5149,24 @@ impl Vm {
     /// bound by `values_equal(a,b) ⇒ hash(a)==hash(b)` — are untouched). A depth-exceeded fault
     /// (cyclic data) degrades to "not equal" here; the language `==`/`!=` ops surface it instead.
     fn values_equal(&self, l: Value, r: Value) -> bool {
-        self.values_equal_guarded(l, r, 0, Span { line: 1, col: 1 }).unwrap_or(false)
+        self.values_equal_guarded(l, r, 0, Span { line: 1, col: 1 })
+            .unwrap_or(false)
     }
 
     /// Depth-guarded structural equality. Returns `Err` (recoverable) once recursion exceeds
     /// [`MAX_STRUCTURAL_DEPTH`] — guarding against cyclic data structures overflowing the host stack.
-    fn values_equal_guarded(&self, l: Value, r: Value, depth: usize, span: Span) -> Result<bool, RuntimeError> {
+    fn values_equal_guarded(
+        &self,
+        l: Value,
+        r: Value,
+        depth: usize,
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
         if depth > MAX_STRUCTURAL_DEPTH {
-            return Err(self.err("maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(), span));
+            return Err(self.err(
+                "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
+                span,
+            ));
         }
         match (l, r) {
             (a, b) if is_numeric(a) && is_numeric(b) => Ok(as_f64(a) == as_f64(b)),
@@ -4542,8 +5216,10 @@ impl Vm {
                         if a.entries.len() != b.entries.len() {
                             return Ok(false);
                         }
-                        let ae: Vec<(Value, Value)> = a.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
-                        let be: Vec<(Value, Value)> = b.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
+                        let ae: Vec<(Value, Value)> =
+                            a.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
+                        let be: Vec<(Value, Value)> =
+                            b.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
                         for (ka, va) in &ae {
                             let mut found = false;
                             for (kb, vb) in &be {
@@ -4581,7 +5257,18 @@ impl Vm {
                         }
                         Ok(true)
                     }
-                    (Obj::Struct { name: na, fields: fa, .. }, Obj::Struct { name: nb, fields: fb, .. }) => {
+                    (
+                        Obj::Struct {
+                            name: na,
+                            fields: fa,
+                            ..
+                        },
+                        Obj::Struct {
+                            name: nb,
+                            fields: fb,
+                            ..
+                        },
+                    ) => {
                         // Positional structural compare: the `na != nb` guard preserves type
                         // distinction (same name ⇒ same StructDef ⇒ identical field order), so a
                         // by-position value compare suffices — no per-field name clone needed.
@@ -4597,7 +5284,16 @@ impl Vm {
                         }
                         Ok(true)
                     }
-                    (Obj::Enum { variant_id: va, payload: pa }, Obj::Enum { variant_id: vb, payload: pb }) => {
+                    (
+                        Obj::Enum {
+                            variant_id: va,
+                            payload: pa,
+                        },
+                        Obj::Enum {
+                            variant_id: vb,
+                            payload: pb,
+                        },
+                    ) => {
                         // M19 lever #2 — equal `variant_id` ⟹ same enum type AND variant (ids are
                         // globally unique per (enum, variant) pair), so this one int compare subsumes the
                         // old `ty == ty && variant == variant`.
@@ -4660,9 +5356,18 @@ impl Vm {
                 // the error path leaves `[callee, args…]` intact for the trace / `recover:`.
                 let arity = self.program.protos[proto].arity;
                 if clo.is_none() {
-                    self.check_arity("function", &self.program.protos[proto].name, arity, argc, span)?;
+                    self.check_arity(
+                        "function",
+                        &self.program.protos[proto].name,
+                        arity,
+                        argc,
+                        span,
+                    )?;
                 } else if argc != arity {
-                    return Err(self.err(format!("closure expects {arity} argument(s), got {argc}"), span));
+                    return Err(self.err(
+                        format!("closure expects {arity} argument(s), got {argc}"),
+                        span,
+                    ));
                 }
                 // Experimental generators — calling a generator function does NOT run its body; it
                 // allocates a suspendable generator object over the args. (Arity was just checked.)
@@ -4704,7 +5409,12 @@ impl Vm {
     /// instead of pushing it. Shared by `do_call` (which pushes) and the higher-order list methods
     /// (which call it per element while keeping their source/result lists rooted on the stack).
     /// `args.len()` is the explicit arg count for arity checks.
-    fn invoke_value(&mut self, callee: Value, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+    fn invoke_value(
+        &mut self,
+        callee: Value,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         let argc = args.len();
         match callee {
             Value::Obj(h) => {
@@ -4714,23 +5424,47 @@ impl Vm {
                 // read `proto`/`home`. `Native` still clones its (small) name `String`, but the hot
                 // user-function/closure paths now copy three scalars and allocate nothing.
                 enum Callee {
-                    Func { proto: ProtoId, home: GcRef },
-                    Closure { proto: ProtoId, home: GcRef },
-                    Native { func: crate::native::NativeFn, name: Box<str> },
+                    Func {
+                        proto: ProtoId,
+                        home: GcRef,
+                    },
+                    Closure {
+                        proto: ProtoId,
+                        home: GcRef,
+                    },
+                    Native {
+                        func: crate::native::NativeFn,
+                        name: Box<str>,
+                    },
                     Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
                     NotCallable,
                 }
                 let kind = match self.heap.get(h) {
-                    Obj::Func { proto, home } => Callee::Func { proto: *proto, home: *home },
-                    Obj::Closure { proto, home, .. } => Callee::Closure { proto: *proto, home: *home },
-                    Obj::Native { func, name } => Callee::Native { func: *func, name: name.clone() },
+                    Obj::Func { proto, home } => Callee::Func {
+                        proto: *proto,
+                        home: *home,
+                    },
+                    Obj::Closure { proto, home, .. } => Callee::Closure {
+                        proto: *proto,
+                        home: *home,
+                    },
+                    Obj::Native { func, name } => Callee::Native {
+                        func: *func,
+                        name: name.clone(),
+                    },
                     Obj::Cffi(c) => Callee::Cffi(std::sync::Arc::clone(c)),
                     _ => Callee::NotCallable,
                 };
                 match kind {
                     Callee::Func { proto, home } => {
                         // `&...name` (no clone): `check_arity` only formats the message on mismatch.
-                        self.check_arity("function", &self.program.protos[proto].name, self.program.protos[proto].arity, argc, span)?;
+                        self.check_arity(
+                            "function",
+                            &self.program.protos[proto].name,
+                            self.program.protos[proto].arity,
+                            argc,
+                            span,
+                        )?;
                         // Experimental generators — allocate, don't run (see `do_call`'s fast path).
                         if self.program.protos[proto].is_generator {
                             return Ok(self.alloc_generator(proto, home, None, args));
@@ -4739,7 +5473,13 @@ impl Vm {
                     }
                     Callee::Closure { proto, home } => {
                         if argc != self.program.protos[proto].arity {
-                            return Err(self.err(format!("closure expects {} argument(s), got {argc}", self.program.protos[proto].arity), span));
+                            return Err(self.err(
+                                format!(
+                                    "closure expects {} argument(s), got {argc}",
+                                    self.program.protos[proto].arity
+                                ),
+                                span,
+                            ));
                         }
                         if self.program.protos[proto].is_generator {
                             return Ok(self.alloc_generator(proto, home, Some(h), args));
@@ -4752,12 +5492,16 @@ impl Vm {
                         // could bypass the checker) so a wrong arg count never indexes out of bounds.
                         self.check_arity("function", cffi.name(), cffi.param_count(), argc, span)?;
                         let mut host = VmHost { vm: self, args };
-                        let ret = cffi
-                            .call(&mut host)
-                            .map_err(|e| RuntimeError { message: e.message, span })?;
+                        let ret = cffi.call(&mut host).map_err(|e| RuntimeError {
+                            message: e.message,
+                            span,
+                        })?;
                         Ok(self.lower_native(ret))
                     }
-                    Callee::NotCallable => Err(self.err(format!("'{}' is not callable", self.type_name(callee)), span)),
+                    Callee::NotCallable => Err(self.err(
+                        format!("'{}' is not callable", self.type_name(callee)),
+                        span,
+                    )),
                 }
             }
             other => Err(self.err(format!("'{}' is not callable", self.type_name(other)), span)),
@@ -4805,9 +5549,19 @@ impl Vm {
                         Some(crate::native::NativeArg::Int(ms)) if *ms > 0 => Some(*ms as u64),
                         _ => None, // sleep_ms(<=0) / non-int: inline no-op
                     };
-                    ms.map(|ms| OffloadReq { func, args: nargs, span, timer_ms: Some(ms) })
+                    ms.map(|ms| OffloadReq {
+                        func,
+                        args: nargs,
+                        span,
+                        timer_ms: Some(ms),
+                    })
                 }
-                _ => Some(OffloadReq { func, args: nargs, span, timer_ms: None }),
+                _ => Some(OffloadReq {
+                    func,
+                    args: nargs,
+                    span,
+                    timer_ms: None,
+                }),
             };
             if let Some(req) = offload {
                 self.offload = Some(req);
@@ -4827,7 +5581,10 @@ impl Vm {
             return self.demote_block_sleep(*ms as u64, span);
         }
         let mut host = VmHost { vm: self, args };
-        let ret = func(&mut host).map_err(|e| RuntimeError { message: e.message, span })?;
+        let ret = func(&mut host).map_err(|e| RuntimeError {
+            message: e.message,
+            span,
+        })?;
         Ok(self.lower_native(ret))
     }
 
@@ -4895,7 +5652,8 @@ impl Vm {
                 // resolving by name keeps it robust to drift). Lower first (each may allocate), then
                 // allocate the struct — keeps every allocation at this boundary (GC invariant).
                 let tid = self.struct_tid(&name);
-                let order: Option<Vec<String>> = self.program.structs.get(&name).map(|d| d.fields.clone());
+                let order: Option<Vec<String>> =
+                    self.program.structs.get(&name).map(|d| d.fields.clone());
                 let mut lowered: Vec<(Box<str>, Value)> = Vec::with_capacity(fields.len());
                 for (k, v) in fields {
                     let lv = self.lower_native(v);
@@ -4905,12 +5663,22 @@ impl Vm {
                     // Registered type: place each lowered value at its declaration-order slot.
                     Some(order) => order
                         .iter()
-                        .map(|fname| lowered.iter().find(|(k, _)| k.as_ref() == fname.as_str()).map(|(_, v)| *v).unwrap_or(Value::Nil))
+                        .map(|fname| {
+                            lowered
+                                .iter()
+                                .find(|(k, _)| k.as_ref() == fname.as_str())
+                                .map(|(_, v)| *v)
+                                .unwrap_or(Value::Nil)
+                        })
                         .collect(),
                     // Ad-hoc / unregistered (TID_NONE): keep native emit order positionally.
                     None => lowered.into_iter().map(|(_, v)| v).collect(),
                 };
-                Value::Obj(self.heap.alloc(Obj::Struct { name: name.into_boxed_str(), tid, fields: fs }))
+                Value::Obj(self.heap.alloc(Obj::Struct {
+                    name: name.into_boxed_str(),
+                    tid,
+                    fields: fs,
+                }))
             }
             N::Map(entries) => {
                 // Native maps have unique scalar (str) keys — hash them directly (no re-entry, no
@@ -4961,16 +5729,24 @@ impl Vm {
             // reserved names above. The fallback is defensive only.
             _ => VID_NONE,
         };
-        Value::Obj(self.heap.alloc(Obj::Enum { variant_id, payload }))
+        Value::Obj(self.heap.alloc(Obj::Enum {
+            variant_id,
+            payload,
+        }))
     }
 
     /// `Op::JsonDecode`: pop the `Result[Json]` from `parse`, coerce its `Ok` payload against the
     /// descriptor (passing through an `Err`), push the resulting `Result[T]`.
-    fn json_decode(&mut self, desc: &crate::json_decode::TypeDescriptor, span: Span) -> Result<(), RuntimeError> {
+    fn json_decode(
+        &mut self,
+        desc: &crate::json_decode::TypeDescriptor,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         let res = self.pop();
         let bad = "decode: parse did not return a Result".to_string();
-        let (rty, variant, payload) =
-            self.enum_parts(res).ok_or_else(|| self.err(bad.clone(), span))?;
+        let (rty, variant, payload) = self
+            .enum_parts(res)
+            .ok_or_else(|| self.err(bad.clone(), span))?;
         if rty != "Result" {
             return Err(self.err(bad, span));
         }
@@ -5002,7 +5778,10 @@ impl Vm {
     fn enum_parts(&self, v: Value) -> Option<(String, String, Vec<Value>)> {
         match v {
             Value::Obj(h) => match self.heap.get(h) {
-                Obj::Enum { variant_id, payload } => {
+                Obj::Enum {
+                    variant_id,
+                    payload,
+                } => {
                     // M19 lever #2 — cold path: resolve the type + variant names from the id.
                     let (ty, variant) = self.enum_names(*variant_id);
                     Some((ty.to_string(), variant.to_string(), payload.clone()))
@@ -5025,17 +5804,26 @@ impl Vm {
         let (_jty, variant, payload) = self
             .enum_parts(jv)
             .ok_or_else(|| format!("decode: expected a JSON value at {path}"))?;
-        let mismatch = |want: &str| format!("decode: expected {want} at {path}, found {}", crate::json_decode::json_kind(&variant));
+        let mismatch = |want: &str| {
+            format!(
+                "decode: expected {want} at {path}, found {}",
+                crate::json_decode::json_kind(&variant)
+            )
+        };
         match desc {
             D::Int => {
-                let f = self.json_num(&variant, &payload).ok_or_else(|| mismatch("int"))?;
+                let f = self
+                    .json_num(&variant, &payload)
+                    .ok_or_else(|| mismatch("int"))?;
                 if f.fract() != 0.0 || !f.is_finite() {
                     return Err(format!("decode: expected an integer at {path}, found {f}"));
                 }
                 Ok(Value::Int(f as i64))
             }
             D::Float => {
-                let f = self.json_num(&variant, &payload).ok_or_else(|| mismatch("float"))?;
+                let f = self
+                    .json_num(&variant, &payload)
+                    .ok_or_else(|| mismatch("float"))?;
                 Ok(Value::Float(f))
             }
             D::Bool => match (variant.as_str(), payload.first()) {
@@ -5100,9 +5888,9 @@ impl Vm {
                 // declaration order (see `json_decode::struct_descriptor`), so push values in order.
                 let mut field_vals: Vec<Value> = Vec::with_capacity(fields.len());
                 for (fname, fdesc) in fields {
-                    let found = entries.iter().find(|(_, k, _)| {
-                        self.val_str(*k).as_deref() == Some(fname.as_str())
-                    });
+                    let found = entries
+                        .iter()
+                        .find(|(_, k, _)| self.val_str(*k).as_deref() == Some(fname.as_str()));
                     let fpath = format!("{path}.{fname}");
                     let v = match found {
                         Some((_, _, jval)) => self.coerce_json(*jval, fdesc, &fpath)?,
@@ -5115,7 +5903,11 @@ impl Vm {
                     field_vals.push(v);
                 }
                 let tid = self.struct_tid(name);
-                let h = self.heap.alloc(Obj::Struct { name: name.clone().into_boxed_str(), tid, fields: field_vals });
+                let h = self.heap.alloc(Obj::Struct {
+                    name: name.clone().into_boxed_str(),
+                    tid,
+                    fields: field_vals,
+                });
                 Ok(Value::Obj(h))
             }
         }
@@ -5153,9 +5945,19 @@ impl Vm {
         }
     }
 
-    fn check_arity(&self, _kind: &str, name: &str, want: usize, got: usize, span: Span) -> Result<(), RuntimeError> {
+    fn check_arity(
+        &self,
+        _kind: &str,
+        name: &str,
+        want: usize,
+        got: usize,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         if want != got {
-            return Err(self.err(format!("function '{name}' expects {want} argument(s), got {got}"), span));
+            return Err(self.err(
+                format!("function '{name}' expects {want} argument(s), got {got}"),
+                span,
+            ));
         }
         Ok(())
     }
@@ -5165,7 +5967,13 @@ impl Vm {
     /// must take the re-entrant `run_proto` path (never the in-place frame flatten). A real `ic` ⟺ the
     /// caller is the running dispatch loop (the sole emit path), so a real `ic` is exactly the
     /// "flatten-safe" signal: the pushed frame is executed by the `run_until` that called us.
-    fn do_method_call(&mut self, method: &str, argc: usize, ic: u32, span: Span) -> Result<(), RuntimeError> {
+    fn do_method_call(
+        &mut self,
+        method: &str,
+        argc: usize,
+        ic: u32,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
         let recv = self.pop();
@@ -5176,15 +5984,16 @@ impl Vm {
         if method == "compare" && args.len() == 1 {
             let is_prim = matches!(recv, Value::Int(_) | Value::Float(_))
                 || matches!(recv, Value::Obj(h) if matches!(self.heap.get(h), Obj::Str(_)));
-            if is_prim
-                && let Some(ord) = self.compare(recv, args[0])
-            {
+            if is_prim && let Some(ord) = self.compare(recv, args[0]) {
                 self.push(Value::Int(ord as i64));
                 return Ok(());
             }
         }
         let Value::Obj(h) = recv else {
-            return Err(self.err(format!("type {} has no method '{method}'", self.type_name(recv)), span));
+            return Err(self.err(
+                format!("type {} has no method '{method}'", self.type_name(recv)),
+                span,
+            ));
         };
         // M19 Phase 6 / N-way poly — method-call inline-cache fast path (struct methods only). Scan
         // the site's ways for a way whose cached `tid` matches the receiver layout: a hit collapses the
@@ -5213,7 +6022,15 @@ impl Vm {
                     let proto = cell.proto;
                     let arity = self.program.protos[proto].arity;
                     if arity != argc + 1 {
-                        return Err(self.err(format!("function '{}' expects {} argument(s), got {}", self.program.protos[proto].name, arity, argc + 1), span));
+                        return Err(self.err(
+                            format!(
+                                "function '{}' expects {} argument(s), got {}",
+                                self.program.protos[proto].name,
+                                arity,
+                                argc + 1
+                            ),
+                            span,
+                        ));
                     }
                     let home = self.module_objs[cell.module_idx as usize];
                     // Experimental generators — a generator method allocates rather than running (else its
@@ -5273,7 +6090,9 @@ impl Vm {
             match method {
                 "iter" => self.push(recv), // idempotent: iter() on a cursor returns self
                 "next" => {
-                    let Obj::Iter { items, pos } = self.heap.get_mut(h) else { unreachable!() };
+                    let Obj::Iter { items, pos } = self.heap.get_mut(h) else {
+                        unreachable!()
+                    };
                     let item = if *pos < items.len() {
                         let item = items[*pos];
                         *pos += 1;
@@ -5287,7 +6106,12 @@ impl Vm {
                     };
                     self.push(result);
                 }
-                _ => return Err(self.err(format!("a cursor has no method '{method}' (only `next()`/`iter()`)"), span)),
+                _ => {
+                    return Err(self.err(
+                        format!("a cursor has no method '{method}' (only `next()`/`iter()`)"),
+                        span,
+                    ));
+                }
             }
             return Ok(());
         }
@@ -5300,7 +6124,10 @@ impl Vm {
                 return Ok(());
             }
             if method != "next" || !args.is_empty() {
-                return Err(self.err(format!("a generator has no method '{method}' (only `next()`)"), span));
+                return Err(self.err(
+                    format!("a generator has no method '{method}' (only `next()`)"),
+                    span,
+                ));
             }
             let result = self.generator_next(h, span)?;
             self.push(result);
@@ -5351,7 +6178,12 @@ impl Vm {
             && args.is_empty()
             && matches!(
                 self.heap.get(h),
-                Obj::Str(_) | Obj::List(_) | Obj::Map(_) | Obj::Set(_) | Obj::Bytes(_) | Obj::ByteArray(_)
+                Obj::Str(_)
+                    | Obj::List(_)
+                    | Obj::Map(_)
+                    | Obj::Set(_)
+                    | Obj::Bytes(_)
+                    | Obj::ByteArray(_)
             )
         {
             // `drain_iterable` may alloc (str per-char); root the receiver across the call.
@@ -5365,7 +6197,10 @@ impl Vm {
         // Core-type methods (M6): built-in methods on `str` / `list`. Handled before the clone-match
         // so `list.push` mutates the heap object in place (the match below clones the Obj). Mirrors
         // `interp::builtins::call_method` exactly — error strings included (parity-tested).
-        if matches!(self.heap.get(h), Obj::Str(_) | Obj::List(_) | Obj::Map(_) | Obj::Set(_)) {
+        if matches!(
+            self.heap.get(h),
+            Obj::Str(_) | Obj::List(_) | Obj::Map(_) | Obj::Set(_)
+        ) {
             let result = self.core_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
@@ -5388,26 +6223,44 @@ impl Vm {
         match self.heap.get(h).clone() {
             // `module.fn(args)` — plain call on the looked-up member, no `self`.
             Obj::Module { name, slots, index } => {
-                let member = index.get(method).map(|&i| slots[i as usize]).ok_or_else(|| self.err(format!("module '{name}' has no member '{method}'"), span))?;
+                let member = index
+                    .get(method)
+                    .map(|&i| slots[i as usize])
+                    .ok_or_else(|| {
+                        self.err(format!("module '{name}' has no member '{method}'"), span)
+                    })?;
                 self.stack.push(member);
                 self.stack.extend(args);
                 self.do_call(argc, span)
             }
-            Obj::Struct { name, tid, fields, .. } => {
+            Obj::Struct {
+                name, tid, fields, ..
+            } => {
                 // Fix A — resolve `(proto, module_idx)` WITHOUT cloning the whole StructDef (its
                 // `fields` Vec + `methods` HashMap). On a megamorphic / sticky-generic site this slow
                 // path runs per call, so the per-miss StructDef clone dwarfed the dispatch itself. We
                 // bump the cheap `Arc<Program>` refcount (read-only, never alias-mutated) so the
                 // immutable `structs` borrow is released before the later `&mut self` calls.
                 let prog = Arc::clone(&self.program);
-                let def = prog.structs.get(name.as_ref()).ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
+                let def = prog
+                    .structs
+                    .get(name.as_ref())
+                    .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
                 let resolved = def.methods.get(method).copied();
                 let def_module_idx = def.module_idx;
                 if let Some(proto) = resolved {
                     let home = self.module_objs[def_module_idx];
                     if self.program.protos[proto].arity != argc + 1 {
                         // `self` + explicit args.
-                        return Err(self.err(format!("function '{}' expects {} argument(s), got {}", self.program.protos[proto].name, self.program.protos[proto].arity, argc + 1), span));
+                        return Err(self.err(
+                            format!(
+                                "function '{}' expects {} argument(s), got {}",
+                                self.program.protos[proto].name,
+                                self.program.protos[proto].arity,
+                                argc + 1
+                            ),
+                            span,
+                        ));
                     }
                     // Experimental generators — a generator method allocates rather than running (else
                     // its `Op::Yield` would poison the host run). Covers both the IC-flatten and the
@@ -5428,7 +6281,11 @@ impl Vm {
                     if ic != NO_IC && tid != TID_NONE {
                         let site = &mut self.method_ic[ic as usize];
                         if !site.sticky {
-                            let cell = MethodIcCell { tid, proto, module_idx: def_module_idx as u32 };
+                            let cell = MethodIcCell {
+                                tid,
+                                proto,
+                                module_idx: def_module_idx as u32,
+                            };
                             if let Some(free) = site.ways.iter_mut().find(|w| w.tid == TID_NONE) {
                                 *free = cell;
                             } else {
@@ -5459,7 +6316,11 @@ impl Vm {
                 // where `f` holds a function value (the checker verified `f: fn(...) -> ...`).
                 // Invoked as a value (no `self` bound — it's not a method). Positional layout:
                 // resolve the field name->index from the StructDef, then index the flat `fields`.
-                let fidx = self.program.structs.get(name.as_ref()).and_then(|d| d.fields.iter().position(|f| f == method));
+                let fidx = self
+                    .program
+                    .structs
+                    .get(name.as_ref())
+                    .and_then(|d| d.fields.iter().position(|f| f == method));
                 if let Some(fval) = fidx.and_then(|i| fields.get(i).copied()) {
                     let v = self.invoke_value(fval, args, span)?;
                     if self.paused() {
@@ -5472,14 +6333,21 @@ impl Vm {
                 // self (idempotent), letting it flow into an `[S: Iterable[T]]` body. Mirrors interp.
                 if method == "iter"
                     && args.is_empty()
-                    && self.program.structs.get(name.as_ref()).is_some_and(|d| d.methods.contains_key("next"))
+                    && self
+                        .program
+                        .structs
+                        .get(name.as_ref())
+                        .is_some_and(|d| d.methods.contains_key("next"))
                 {
                     self.push(recv);
                     return Ok(());
                 }
                 Err(self.err(format!("struct '{name}' has no method '{method}'"), span))
             }
-            _ => Err(self.err(format!("type {} has no method '{method}'", self.type_name(recv)), span)),
+            _ => Err(self.err(
+                format!("type {} has no method '{method}'", self.type_name(recv)),
+                span,
+            )),
         }
     }
 
@@ -5489,7 +6357,13 @@ impl Vm {
     /// source list, the partially-built result list (map/filter), and the fold accumulator are all
     /// kept rooted on the operand stack across the iteration. Returns the result (caller pushes it).
     /// Arity & error messages match the interp exactly (parity-tested).
-    fn list_hof(&mut self, src_h: GcRef, method: &str, mut args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+    fn list_hof(
+        &mut self,
+        src_h: GcRef,
+        method: &str,
+        mut args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         // ROOT the source list on the operand stack so its elements survive every closure call.
         self.push(Value::Obj(src_h));
         let n = match self.heap.get(src_h) {
@@ -5500,7 +6374,10 @@ impl Vm {
             "map" | "filter" => {
                 if args.len() != 1 {
                     self.pop(); // unroot source before erroring
-                    return Err(self.err(format!("'{method}' expects 1 argument(s), got {}", args.len()), span));
+                    return Err(self.err(
+                        format!("'{method}' expects 1 argument(s), got {}", args.len()),
+                        span,
+                    ));
                 }
                 let f = args.swap_remove(0);
                 let is_filter = method == "filter";
@@ -5526,7 +6403,13 @@ impl Vm {
                             other => {
                                 self.pop(); // unroot result
                                 self.pop(); // unroot source
-                                return Err(self.err(format!("filter predicate must return bool, got {}", self.type_name(other)), span));
+                                return Err(self.err(
+                                    format!(
+                                        "filter predicate must return bool, got {}",
+                                        self.type_name(other)
+                                    ),
+                                    span,
+                                ));
                             }
                         }
                     } else if let Obj::List(items) = self.heap.get_mut(res_h) {
@@ -5540,7 +6423,10 @@ impl Vm {
             "fold" => {
                 if args.len() != 2 {
                     self.pop(); // unroot source
-                    return Err(self.err(format!("'fold' expects 2 argument(s), got {}", args.len()), span));
+                    return Err(self.err(
+                        format!("'fold' expects 2 argument(s), got {}", args.len()),
+                        span,
+                    ));
                 }
                 let f = args.swap_remove(1);
                 let init = args.swap_remove(0);
@@ -5572,9 +6458,17 @@ impl Vm {
     /// rooted on the operand stack, and the merge sort permutes plain `usize` **indices**, re-reading
     /// elements from the rooted heap object on each comparison. The final permutation is materialised
     /// only after all comparator calls finish (no GC in between). Returns `nil`.
-    fn list_sort_by(&mut self, src_h: GcRef, mut args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+    fn list_sort_by(
+        &mut self,
+        src_h: GcRef,
+        mut args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         if args.len() != 1 {
-            return Err(self.err(format!("'sort_by' expects 1 argument(s), got {}", args.len()), span));
+            return Err(self.err(
+                format!("'sort_by' expects 1 argument(s), got {}", args.len()),
+                span,
+            ));
         }
         let cmp = args.swap_remove(0);
         // Root the source list itself: a method receiver is popped before dispatch, so an inline
@@ -5620,7 +6514,13 @@ impl Vm {
 
     /// Stable top-down merge sort over `idx` (positions into the rooted list `src_h`), comparing
     /// elements via the Chezzi comparator `cmp`.
-    fn msort_indices(&mut self, src_h: GcRef, idx: Vec<usize>, cmp: Value, span: Span) -> Result<Vec<usize>, RuntimeError> {
+    fn msort_indices(
+        &mut self,
+        src_h: GcRef,
+        idx: Vec<usize>,
+        cmp: Value,
+        span: Span,
+    ) -> Result<Vec<usize>, RuntimeError> {
         let n = idx.len();
         if n <= 1 {
             return Ok(idx);
@@ -5655,10 +6555,22 @@ impl Vm {
     }
 
     /// Run the comparator on `(a, b)` and return its int result (errors if it returns non-int).
-    fn compare_with(&mut self, cmp: Value, a: Value, b: Value, span: Span) -> Result<i64, RuntimeError> {
+    fn compare_with(
+        &mut self,
+        cmp: Value,
+        a: Value,
+        b: Value,
+        span: Span,
+    ) -> Result<i64, RuntimeError> {
         match self.guarded(|vm| vm.invoke_value(cmp, vec![a, b], span))? {
             Value::Int(n) => Ok(n),
-            other => Err(self.err(format!("sort_by comparator must return int, got {}", self.type_name(other)), span)),
+            other => Err(self.err(
+                format!(
+                    "sort_by comparator must return int, got {}",
+                    self.type_name(other)
+                ),
+                span,
+            )),
         }
     }
 
@@ -5667,9 +6579,17 @@ impl Vm {
     /// list are all rooted on the operand stack so the re-entrant extractor (and a Comparable-struct
     /// key's `compare`) can GC freely. Keys are computed once per element; the merge sort permutes
     /// `usize` indices, re-reading keys from the rooted keys list per comparison. Returns `nil`.
-    fn list_sort_by_key(&mut self, src_h: GcRef, mut args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+    fn list_sort_by_key(
+        &mut self,
+        src_h: GcRef,
+        mut args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         if args.len() != 1 {
-            return Err(self.err(format!("'sort_by_key' expects 1 argument(s), got {}", args.len()), span));
+            return Err(self.err(
+                format!("'sort_by_key' expects 1 argument(s), got {}", args.len()),
+                span,
+            ));
         }
         let f = args.swap_remove(0);
         self.push(Value::Obj(src_h)); // ROOT the source list
@@ -5733,7 +6653,12 @@ impl Vm {
 
     /// Stable top-down merge sort over `idx` (positions into the rooted keys list `keys_h`), ordering
     /// by each key's natural order via [`order_key`].
-    fn msort_indices_by_key(&mut self, keys_h: GcRef, idx: Vec<usize>, span: Span) -> Result<Vec<usize>, RuntimeError> {
+    fn msort_indices_by_key(
+        &mut self,
+        keys_h: GcRef,
+        idx: Vec<usize>,
+        span: Span,
+    ) -> Result<Vec<usize>, RuntimeError> {
         let n = idx.len();
         if n <= 1 {
             return Ok(idx);
@@ -5770,7 +6695,12 @@ impl Vm {
     /// Natural order over two `sort_by_key` keys: a Comparable struct key dispatches to its
     /// `compare`; scalar keys (int/float/str) use the built-in [`Vm::compare`]. The checker has
     /// verified the key type is orderable.
-    fn order_key(&mut self, a: Value, b: Value, span: Span) -> Result<std::cmp::Ordering, RuntimeError> {
+    fn order_key(
+        &mut self,
+        a: Value,
+        b: Value,
+        span: Span,
+    ) -> Result<std::cmp::Ordering, RuntimeError> {
         if let (Value::Obj(ha), Value::Obj(hb)) = (a, b)
             && matches!(self.heap.get(ha), Obj::Struct { .. })
             && matches!(self.heap.get(hb), Obj::Struct { .. })
@@ -5779,7 +6709,11 @@ impl Vm {
         }
         self.compare(a, b).ok_or_else(|| {
             self.err(
-                format!("sort_by_key keys are not comparable: {} vs {}", self.type_name(a), self.type_name(b)),
+                format!(
+                    "sort_by_key keys are not comparable: {} vs {}",
+                    self.type_name(a),
+                    self.type_name(b)
+                ),
                 span,
             )
         })
@@ -5790,37 +6724,80 @@ impl Vm {
     /// instruction boundaries, never mid-opcode, so all `alloc`s here complete uninterrupted.
     /// Clone the elements of a `list`-typed argument for `concat`/`extend`. The checker guarantees
     /// the type; a non-list here is an internal invariant break, reported for safety.
-    fn expect_list_obj(&self, method: &str, arg: Value, span: Span) -> Result<Vec<Value>, RuntimeError> {
+    fn expect_list_obj(
+        &self,
+        method: &str,
+        arg: Value,
+        span: Span,
+    ) -> Result<Vec<Value>, RuntimeError> {
         match arg {
             Value::Obj(ah) => match self.heap.get(ah) {
                 Obj::List(items) => Ok(items.clone()),
-                _ => Err(self.err(format!("{method}() expects a list argument, got {}", self.type_name(arg)), span)),
+                _ => Err(self.err(
+                    format!(
+                        "{method}() expects a list argument, got {}",
+                        self.type_name(arg)
+                    ),
+                    span,
+                )),
             },
-            other => Err(self.err(format!("{method}() expects a list argument, got {}", self.type_name(other)), span)),
+            other => Err(self.err(
+                format!(
+                    "{method}() expects a list argument, got {}",
+                    self.type_name(other)
+                ),
+                span,
+            )),
         }
     }
 
     /// Insert-or-overwrite `(hk, key, val)` into the heap map at `h` (last write wins). Used by
     /// `map.update`. No allocation, so no GC concerns.
     fn map_upsert_in_heap(&mut self, h: GcRef, hk: u64, key: Value, val: Value) {
-        let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
-        let pos = m.candidates(hk).iter().copied().find(|&p| self.values_equal(m.entries[p].1, key));
-        let Obj::Map(m) = self.heap.get_mut(h) else { unreachable!() };
+        let Obj::Map(m) = self.heap.get(h) else {
+            unreachable!()
+        };
+        let pos = m
+            .candidates(hk)
+            .iter()
+            .copied()
+            .find(|&p| self.values_equal(m.entries[p].1, key));
+        let Obj::Map(m) = self.heap.get_mut(h) else {
+            unreachable!()
+        };
         match pos {
             Some(i) => m.entries[i].2 = val,
             None => m.push(hk, key, val),
         }
     }
 
-    fn core_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    fn core_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         // A str argument's owned text, with a uniform type error matching the interp.
         let str_arg = |vm: &Vm, i: usize| -> Result<String, RuntimeError> {
             match args[i] {
                 Value::Obj(ah) => match vm.heap.get(ah) {
                     Obj::Str(a) => Ok(a.to_string()),
-                    _ => Err(vm.err(format!("{method}() expects a str argument, got {}", vm.type_name(args[i])), span)),
+                    _ => Err(vm.err(
+                        format!(
+                            "{method}() expects a str argument, got {}",
+                            vm.type_name(args[i])
+                        ),
+                        span,
+                    )),
                 },
-                other => Err(vm.err(format!("{method}() expects a str argument, got {}", vm.type_name(other)), span)),
+                other => Err(vm.err(
+                    format!(
+                        "{method}() expects a str argument, got {}",
+                        vm.type_name(other)
+                    ),
+                    span,
+                )),
             }
         };
         match self.heap.get(h) {
@@ -5851,8 +6828,10 @@ impl Vm {
                     "split" => {
                         self.arity_err("split", args, 1, span)?;
                         let sep = str_arg(self, 0)?;
-                        let parts: Vec<Value> =
-                            s.split(sep.as_str()).map(|p| self.alloc_str(p.to_string())).collect();
+                        let parts: Vec<Value> = s
+                            .split(sep.as_str())
+                            .map(|p| self.alloc_str(p.to_string()))
+                            .collect();
                         Ok(Value::Obj(self.heap.alloc(Obj::List(parts))))
                     }
                     "chars" => {
@@ -5878,18 +6857,42 @@ impl Vm {
                     "join" => {
                         self.arity_err("join", args, 1, span)?;
                         let Value::Obj(lh) = args[0] else {
-                            return Err(self.err(format!("join() expects a list of str, got {}", self.type_name(args[0])), span));
+                            return Err(self.err(
+                                format!(
+                                    "join() expects a list of str, got {}",
+                                    self.type_name(args[0])
+                                ),
+                                span,
+                            ));
                         };
                         let Obj::List(items) = self.heap.get(lh) else {
-                            return Err(self.err(format!("join() expects a list of str, got {}", self.type_name(args[0])), span));
+                            return Err(self.err(
+                                format!(
+                                    "join() expects a list of str, got {}",
+                                    self.type_name(args[0])
+                                ),
+                                span,
+                            ));
                         };
                         let mut out = String::new();
                         for (i, item) in items.clone().iter().enumerate() {
                             let Value::Obj(ih) = item else {
-                                return Err(self.err(format!("join() expects a list of str, got an element of type {}", self.type_name(*item)), span));
+                                return Err(self.err(
+                                    format!(
+                                        "join() expects a list of str, got an element of type {}",
+                                        self.type_name(*item)
+                                    ),
+                                    span,
+                                ));
                             };
                             let Obj::Str(part) = self.heap.get(*ih) else {
-                                return Err(self.err(format!("join() expects a list of str, got an element of type {}", self.type_name(*item)), span));
+                                return Err(self.err(
+                                    format!(
+                                        "join() expects a list of str, got an element of type {}",
+                                        self.type_name(*item)
+                                    ),
+                                    span,
+                                ));
                             };
                             if i > 0 {
                                 out.push_str(&s);
@@ -5909,13 +6912,17 @@ impl Vm {
                 "push" => {
                     self.arity_err("push", args, 1, span)?;
                     let v = args[0];
-                    let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
+                    let Obj::List(items) = self.heap.get_mut(h) else {
+                        unreachable!()
+                    };
                     items.push(v);
                     Ok(Value::Nil)
                 }
                 "pop" => {
                     self.arity_err("pop", args, 0, span)?;
-                    let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
+                    let Obj::List(items) = self.heap.get_mut(h) else {
+                        unreachable!()
+                    };
                     let popped = items.pop();
                     // M19 lever #2 — route through `alloc_enum` so the dense `variant_id` is stamped
                     // (replacing the two ad-hoc per-instance `Box<str>` builds).
@@ -5926,7 +6933,9 @@ impl Vm {
                 }
                 "reverse" => {
                     self.arity_err("reverse", args, 0, span)?;
-                    let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
+                    let Obj::List(items) = self.heap.get_mut(h) else {
+                        unreachable!()
+                    };
                     items.reverse();
                     Ok(Value::Nil)
                 }
@@ -5938,15 +6947,16 @@ impl Vm {
                     // `value_order`. Str elements live on the heap, so `value_order` needs
                     // `&self.heap` — clone the elements out, sort (no alloc/closure → no GC for the
                     // primitive path), then write back.
-                    let is_struct =
-                        matches!(items.first(), Some(Value::Obj(hh)) if matches!(self.heap.get(*hh), Obj::Struct { .. }));
+                    let is_struct = matches!(items.first(), Some(Value::Obj(hh)) if matches!(self.heap.get(*hh), Obj::Struct { .. }));
                     if is_struct {
                         // Struct compare re-enters the VM (may GC) → rooted, index-based sort.
                         return self.list_sort_structs(h, span);
                     }
                     let mut elems = items.clone();
                     elems.sort_by(|a, b| self.value_order(*a, *b));
-                    let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
+                    let Obj::List(items) = self.heap.get_mut(h) else {
+                        unreachable!()
+                    };
                     *items = elems;
                     Ok(Value::Nil)
                 }
@@ -5954,7 +6964,9 @@ impl Vm {
                     self.arity_err("contains", args, 1, span)?;
                     let target = args[0];
                     let elems = items.clone();
-                    Ok(Value::Bool(elems.iter().any(|v| self.values_equal(*v, target))))
+                    Ok(Value::Bool(
+                        elems.iter().any(|v| self.values_equal(*v, target)),
+                    ))
                 }
                 "index_of" => {
                     self.arity_err("index_of", args, 1, span)?;
@@ -5974,7 +6986,9 @@ impl Vm {
                     self.arity_err("extend", args, 1, span)?;
                     // Snapshot the other side first so `xs.extend(xs)` (self-extend) terminates.
                     let appended = self.expect_list_obj("extend", args[0], span)?;
-                    let Obj::List(items) = self.heap.get_mut(h) else { unreachable!() };
+                    let Obj::List(items) = self.heap.get_mut(h) else {
+                        unreachable!()
+                    };
                     items.extend(appended);
                     Ok(Value::Nil)
                 }
@@ -6017,16 +7031,26 @@ impl Vm {
                     self.arity_err("has", args, 1, span)?;
                     let key = args[0];
                     let hk = self.hash_key_rooted(key, &[Value::Obj(h), key], span)?;
-                    let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
-                    let found = m.candidates(hk).iter().any(|&p| self.values_equal(m.entries[p].1, key));
+                    let Obj::Map(m) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    let found = m
+                        .candidates(hk)
+                        .iter()
+                        .any(|&p| self.values_equal(m.entries[p].1, key));
                     Ok(Value::Bool(found))
                 }
                 "get" => {
                     self.arity_err("get", args, 1, span)?;
                     let key = args[0];
                     let hk = self.hash_key_rooted(key, &[Value::Obj(h), key], span)?;
-                    let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
-                    let found = m.candidates(hk).iter().copied()
+                    let Obj::Map(m) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    let found = m
+                        .candidates(hk)
+                        .iter()
+                        .copied()
                         .find(|&p| self.values_equal(m.entries[p].1, key))
                         .map(|p| m.entries[p].2);
                     match found {
@@ -6048,11 +7072,19 @@ impl Vm {
                     self.arity_err("remove", args, 1, span)?;
                     let key = args[0];
                     let hk = self.hash_key_rooted(key, &[Value::Obj(h), key], span)?;
-                    let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
-                    let pos = m.candidates(hk).iter().copied().find(|&p| self.values_equal(m.entries[p].1, key));
+                    let Obj::Map(m) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    let pos = m
+                        .candidates(hk)
+                        .iter()
+                        .copied()
+                        .find(|&p| self.values_equal(m.entries[p].1, key));
                     match pos {
                         Some(i) => {
-                            let Obj::Map(m) = self.heap.get_mut(h) else { unreachable!() };
+                            let Obj::Map(m) = self.heap.get_mut(h) else {
+                                unreachable!()
+                            };
                             let (_, _, v) = m.remove_at(i);
                             Ok(self.alloc_enum("Option", "Some", vec![v]))
                         }
@@ -6066,15 +7098,37 @@ impl Vm {
                     let incoming = match args[0] {
                         Value::Obj(oh) => match self.heap.get(oh) {
                             Obj::Map(o) => o.entries.clone(),
-                            _ => return Err(self.err(format!("{method}() expects a map argument, got {}", self.type_name(args[0])), span)),
+                            _ => {
+                                return Err(self.err(
+                                    format!(
+                                        "{method}() expects a map argument, got {}",
+                                        self.type_name(args[0])
+                                    ),
+                                    span,
+                                ));
+                            }
                         },
-                        other => return Err(self.err(format!("{method}() expects a map argument, got {}", self.type_name(other)), span)),
+                        other => {
+                            return Err(self.err(
+                                format!(
+                                    "{method}() expects a map argument, got {}",
+                                    self.type_name(other)
+                                ),
+                                span,
+                            ));
+                        }
                     };
                     if method == "merge" {
-                        let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
+                        let Obj::Map(m) = self.heap.get(h) else {
+                            unreachable!()
+                        };
                         let mut out = m.clone();
                         for (hk, key, val) in incoming {
-                            let pos = out.candidates(hk).iter().copied().find(|&p| self.values_equal(out.entries[p].1, key));
+                            let pos = out
+                                .candidates(hk)
+                                .iter()
+                                .copied()
+                                .find(|&p| self.values_equal(out.entries[p].1, key));
                             match pos {
                                 Some(i) => out.entries[i].2 = val,
                                 None => out.push(hk, key, val),
@@ -6100,17 +7154,30 @@ impl Vm {
                     self.arity_err("has", args, 1, span)?;
                     let x = args[0];
                     let hx = self.hash_key_rooted(x, &[Value::Obj(h), x], span)?;
-                    let Obj::Set(s) = self.heap.get(h) else { unreachable!() };
-                    Ok(Value::Bool(s.candidates(hx).iter().any(|&p| self.values_equal(s.entries[p].1, x))))
+                    let Obj::Set(s) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    Ok(Value::Bool(
+                        s.candidates(hx)
+                            .iter()
+                            .any(|&p| self.values_equal(s.entries[p].1, x)),
+                    ))
                 }
                 "add" => {
                     self.arity_err("add", args, 1, span)?;
                     let x = args[0];
                     let hx = self.hash_key_rooted(x, &[Value::Obj(h), x], span)?;
-                    let Obj::Set(s) = self.heap.get(h) else { unreachable!() };
-                    let present = s.candidates(hx).iter().any(|&p| self.values_equal(s.entries[p].1, x));
+                    let Obj::Set(s) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    let present = s
+                        .candidates(hx)
+                        .iter()
+                        .any(|&p| self.values_equal(s.entries[p].1, x));
                     if !present {
-                        let Obj::Set(s) = self.heap.get_mut(h) else { unreachable!() };
+                        let Obj::Set(s) = self.heap.get_mut(h) else {
+                            unreachable!()
+                        };
                         s.push(hx, x);
                     }
                     Ok(Value::Nil)
@@ -6119,11 +7186,19 @@ impl Vm {
                     self.arity_err("remove", args, 1, span)?;
                     let x = args[0];
                     let hx = self.hash_key_rooted(x, &[Value::Obj(h), x], span)?;
-                    let Obj::Set(s) = self.heap.get(h) else { unreachable!() };
-                    let pos = s.candidates(hx).iter().copied().find(|&p| self.values_equal(s.entries[p].1, x));
+                    let Obj::Set(s) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    let pos = s
+                        .candidates(hx)
+                        .iter()
+                        .copied()
+                        .find(|&p| self.values_equal(s.entries[p].1, x));
                     match pos {
                         Some(i) => {
-                            let Obj::Set(s) = self.heap.get_mut(h) else { unreachable!() };
+                            let Obj::Set(s) = self.heap.get_mut(h) else {
+                                unreachable!()
+                            };
                             s.remove_at(i);
                             Ok(Value::Bool(true))
                         }
@@ -6142,7 +7217,11 @@ impl Vm {
                     let other = self.set_arg(args[0], method, span)?;
                     let mut out = SetData::default();
                     let add = |vm: &Vm, set: &mut SetData, he: u64, e: Value| {
-                        if !set.candidates(he).iter().any(|&p| vm.values_equal(set.entries[p].1, e)) {
+                        if !set
+                            .candidates(he)
+                            .iter()
+                            .any(|&p| vm.values_equal(set.entries[p].1, e))
+                        {
                             set.push(he, e);
                         }
                     };
@@ -6156,7 +7235,10 @@ impl Vm {
                         m => {
                             let keep_when_present = m == "intersection";
                             for (he, e) in &mine {
-                                let in_other = other.candidates(*he).iter().any(|&p| self.values_equal(other.entries[p].1, *e));
+                                let in_other = other
+                                    .candidates(*he)
+                                    .iter()
+                                    .any(|&p| self.values_equal(other.entries[p].1, *e));
                                 if in_other == keep_when_present {
                                     add(self, &mut out, *he, *e);
                                 }
@@ -6176,27 +7258,49 @@ impl Vm {
     /// `eval_bytearray_method` and the checker's `bytearray_method_sig` — keep all three in lockstep.
     /// Mutators write IN PLACE through the heap slot (`get_mut`), exactly like the `list` methods, so a
     /// second binding to the same `bytearray` observes the change.
-    fn bytearray_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    fn bytearray_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         match method {
             "len" => {
                 self.arity_err("len", args, 0, span)?;
-                let Obj::ByteArray(b) = self.heap.get(h) else { unreachable!() };
+                let Obj::ByteArray(b) = self.heap.get(h) else {
+                    unreachable!()
+                };
                 Ok(Value::Int(b.len() as i64))
             }
             "push" => {
                 self.arity_err("push", args, 1, span)?;
                 let byte = match args[0] {
                     Value::Int(n) if (0..=255).contains(&n) => n as u8,
-                    Value::Int(n) => return Err(self.err(format!("byte value {n} out of range (must be 0..=255)"), span)),
-                    other => return Err(self.err(format!("push() expects an int, got {}", self.type_name(other)), span)),
+                    Value::Int(n) => {
+                        return Err(self.err(
+                            format!("byte value {n} out of range (must be 0..=255)"),
+                            span,
+                        ));
+                    }
+                    other => {
+                        return Err(self.err(
+                            format!("push() expects an int, got {}", self.type_name(other)),
+                            span,
+                        ));
+                    }
                 };
-                let Obj::ByteArray(b) = self.heap.get_mut(h) else { unreachable!() };
+                let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                    unreachable!()
+                };
                 b.push(byte);
                 Ok(Value::Nil)
             }
             "pop" => {
                 self.arity_err("pop", args, 0, span)?;
-                let Obj::ByteArray(b) = self.heap.get_mut(h) else { unreachable!() };
+                let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                    unreachable!()
+                };
                 let popped = b.pop();
                 Ok(match popped {
                     Some(x) => self.alloc_enum("Option", "Some", vec![Value::Int(x as i64)]),
@@ -6208,7 +7312,9 @@ impl Vm {
                 // Snapshot the other side first (so `ba.extend(ba)` terminates) — also validates
                 // ints 0..=255 / element types up front, mirroring the constructor.
                 let appended = self.collect_bytes_arg("extend", args[0], span)?;
-                let Obj::ByteArray(b) = self.heap.get_mut(h) else { unreachable!() };
+                let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                    unreachable!()
+                };
                 b.extend_from_slice(&appended);
                 Ok(Value::Nil)
             }
@@ -6216,7 +7322,9 @@ impl Vm {
             // fault (catchable by `recover:`), never a panic — mirrors the bytes path + the interp.
             "decode" => {
                 self.arity_err("decode", args, 0, span)?;
-                let Obj::ByteArray(b) = self.heap.get(h) else { unreachable!() };
+                let Obj::ByteArray(b) = self.heap.get(h) else {
+                    unreachable!()
+                };
                 let bytes = b.clone();
                 self.decode_utf8(&bytes, span)
             }
@@ -6226,11 +7334,19 @@ impl Vm {
 
     /// `bytes` methods (immutable byte sequence): only `decode() -> str` (UTF-8). Mirrors the interp's
     /// bytes-method arm and the checker's `bytes_method_sig` — keep all three in lockstep.
-    fn bytes_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    fn bytes_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         match method {
             "decode" => {
                 self.arity_err("decode", args, 0, span)?;
-                let Obj::Bytes(b) = self.heap.get(h) else { unreachable!() };
+                let Obj::Bytes(b) = self.heap.get(h) else {
+                    unreachable!()
+                };
                 let bytes = b.clone();
                 self.decode_utf8(&bytes, span)
             }
@@ -6254,9 +7370,21 @@ impl Vm {
         match v {
             Value::Obj(h) => match self.heap.get(h) {
                 Obj::Set(s) => Ok(s.clone()),
-                _ => Err(self.err(format!("{method}() expects a set argument, got {}", self.type_name(v)), span)),
+                _ => Err(self.err(
+                    format!(
+                        "{method}() expects a set argument, got {}",
+                        self.type_name(v)
+                    ),
+                    span,
+                )),
             },
-            _ => Err(self.err(format!("{method}() expects a set argument, got {}", self.type_name(v)), span)),
+            _ => Err(self.err(
+                format!(
+                    "{method}() expects a set argument, got {}",
+                    self.type_name(v)
+                ),
+                span,
+            )),
         }
     }
 
@@ -6270,7 +7398,10 @@ impl Vm {
     /// into a stack buffer and boxing the `&str` is one. Used by string indexing/iteration/`chr`.
     fn alloc_char(&mut self, c: char) -> Value {
         let mut buf = [0u8; 4];
-        Value::Obj(self.heap.alloc(Obj::Str((&*c.encode_utf8(&mut buf)).into())))
+        Value::Obj(
+            self.heap
+                .alloc(Obj::Str((&*c.encode_utf8(&mut buf)).into())),
+        )
     }
 
     /// Return from the current frame. `propagated` true ⇒ the value came from `?` (no observable
@@ -6320,7 +7451,11 @@ impl Vm {
         self.drain_escaped_nursery(frame.nursery_len);
         // Drop any `recover:` handlers installed in the frame we just left (e.g. a `?` early-return
         // out of a recover block) — they must not survive to catch a later, unrelated fault.
-        while self.handlers.last().is_some_and(|h| h.frame_len > self.frames.len()) {
+        while self
+            .handlers
+            .last()
+            .is_some_and(|h| h.frame_len > self.frames.len())
+        {
             self.handlers.pop();
         }
         if let Some(e) = defer_err {
@@ -6338,8 +7473,17 @@ impl Vm {
         let args: Vec<Value> = self.stack.split_off(at);
         let head = self.pop();
         let d = match method {
-            Some(name) => Deferred::Method { recv: head, name, args, span },
-            None => Deferred::Call { callee: head, args, span },
+            Some(name) => Deferred::Method {
+                recv: head,
+                name,
+                args,
+                span,
+            },
+            None => Deferred::Call {
+                callee: head,
+                args,
+                span,
+            },
         };
         self.frames.last_mut().unwrap().deferred.push(d);
     }
@@ -6356,7 +7500,12 @@ impl Vm {
                 vm.invoke_value(callee, args, span)?;
                 Ok(())
             }
-            Deferred::Method { recv, name, args, span } => {
+            Deferred::Method {
+                recv,
+                name,
+                args,
+                span,
+            } => {
                 let argc = args.len();
                 vm.push(recv);
                 for a in args {
@@ -6375,7 +7524,12 @@ impl Vm {
     /// the method form, the receiver) across the airlock, and register the task on the innermost
     /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock. Mirrors
     /// the interpreter's `exec_spawn`.
-    fn do_spawn(&mut self, method: Option<String>, argc: usize, span: Span) -> Result<(), RuntimeError> {
+    fn do_spawn(
+        &mut self,
+        method: Option<String>,
+        argc: usize,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;
         let raw_args: Vec<Value> = self.stack.split_off(at);
         let head = self.pop();
@@ -6383,9 +7537,18 @@ impl Vm {
         let task = match method {
             Some(name) => {
                 let recv = self.deep_clone(head);
-                PendingCall::Method { recv, name, args, span }
+                PendingCall::Method {
+                    recv,
+                    name,
+                    args,
+                    span,
+                }
             }
-            None => PendingCall::Call { callee: head, args, span },
+            None => PendingCall::Call {
+                callee: head,
+                args,
+                span,
+            },
         };
         self.register_task(task, span)
     }
@@ -6394,7 +7557,12 @@ impl Vm {
     /// deep-copy each captured value across the airlock, build a zero-arg closure over the synthetic
     /// block proto, and register it as a `Call` task. Mirrors the interpreter's `Task::Block`
     /// (captured locals deep-copied; home globals by handle).
-    fn do_spawn_block(&mut self, proto: ProtoId, entries: &[CapEntry], span: Span) -> Result<(), RuntimeError> {
+    fn do_spawn_block(
+        &mut self,
+        proto: ProtoId,
+        entries: &[CapEntry],
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         let frame = self.frames.last().unwrap();
         let (base, home, enclosing) = (frame.base, frame.home, frame.closure);
         let mut captured = Vec::with_capacity(entries.len());
@@ -6403,7 +7571,9 @@ impl Vm {
                 CapSrc::Slot(i) => self.stack[base + i],
                 CapSrc::Captured(parent_slot) => enclosing
                     .and_then(|h| match self.heap.get(h) {
-                        Obj::Closure { captured, .. } => captured.get(parent_slot as usize).copied(),
+                        Obj::Closure { captured, .. } => {
+                            captured.get(parent_slot as usize).copied()
+                        }
                         _ => None,
                     })
                     .unwrap_or(Value::Nil),
@@ -6412,8 +7582,19 @@ impl Vm {
             // Positional (lever #3): slot order matches the synthetic block proto's `capture_names`.
             captured.push(self.deep_clone(v));
         }
-        let h = self.heap.alloc(Obj::Closure { proto, captured, home });
-        self.register_task(PendingCall::Call { callee: Value::Obj(h), args: Vec::new(), span }, span)
+        let h = self.heap.alloc(Obj::Closure {
+            proto,
+            captured,
+            home,
+        });
+        self.register_task(
+            PendingCall::Call {
+                callee: Value::Obj(h),
+                args: Vec::new(),
+                span,
+            },
+            span,
+        )
     }
 
     /// Register a spawned task on the innermost nursery. Per-connection spawn: if that nursery is
@@ -6479,7 +7660,8 @@ impl Vm {
                 // escape they never started → report them cancelled (parity with the lazy arm below and
                 // with coop), rather than silently dropping them. (Cross-nursery flat scheduler — #3.)
                 if !nursery.is_empty() {
-                    self.out.push_str(&crate::runtime::pending_cancel_report(nursery.len()));
+                    self.out
+                        .push_str(&crate::runtime::pending_cancel_report(nursery.len()));
                 }
                 continue;
             }
@@ -6490,7 +7672,8 @@ impl Vm {
                 Some(scope) => self.abort_eager_nursery(scope),
                 None => {
                     if !nursery.is_empty() {
-                        self.out.push_str(&crate::runtime::pending_cancel_report(nursery.len()));
+                        self.out
+                            .push_str(&crate::runtime::pending_cancel_report(nursery.len()));
                     }
                 }
             }
@@ -6541,14 +7724,26 @@ impl Vm {
         let children: Vec<Fiber> = tasks
             .into_iter()
             .enumerate()
-            .map(|(i, t)| Fiber { span: t.span(), ctx: FiberCtx::default(), state: FiberState::Pending(t), task_index: i, scope_id: 0, resume_native: None })
+            .map(|(i, t)| Fiber {
+                span: t.span(),
+                ctx: FiberCtx::default(),
+                state: FiberState::Pending(t),
+                task_index: i,
+                scope_id: 0,
+                resume_native: None,
+            })
             .collect();
         // D0: every child starts `Pending` ⇒ runnable, so seed `ready` with all indices in order.
         let ready = (0..children.len()).collect();
         // Park the parent: move its live context into the nursery, leaving `self.*` as the fresh,
         // empty arena the children execute in. The nursery (parent + children) is GC-rooted while on
         // `scheduler_stack`.
-        let mut nursery = Nursery { parent: FiberCtx::default(), children, ready, blocked_on: std::collections::HashMap::new() };
+        let mut nursery = Nursery {
+            parent: FiberCtx::default(),
+            children,
+            ready,
+            blocked_on: std::collections::HashMap::new(),
+        };
         self.swap_ctx(&mut nursery.parent);
         self.scheduler_stack.push(nursery);
         let result = self.run_scheduler();
@@ -6638,7 +7833,12 @@ impl Vm {
         // after enlisting is impossible to know pre-register; use core count (the inline owner alone
         // still guarantees completion, helpers only accelerate).
         let nworkers = worker_count();
-        let sched = Arc::new(MnSched::new(total, nworkers, Arc::clone(&cancel), deadlock_err));
+        let sched = Arc::new(MnSched::new(
+            total,
+            nworkers,
+            Arc::clone(&cancel),
+            deadlock_err,
+        ));
         sched.seed(fibers);
         // Early-enlist OUTER still-pending nurseries (case-A: `main`'s sibling `O` when the builder is a
         // nested join) — BEFORE farming any helper or starting the owner, so EVERY scope's fibers are
@@ -6661,7 +7861,9 @@ impl Vm {
             let mut shell = self.spawn_shell(&snap, &sched, &cancel);
             let sched = Arc::clone(&sched);
             pool::submit(Box::new(move || {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shell.mn_worker_loop(&sched, wid, SENTINEL_SCOPE)));
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    shell.mn_worker_loop(&sched, wid, SENTINEL_SCOPE)
+                }));
             }));
         }
         let mut shell = self.spawn_shell(&snap, &sched, &cancel);
@@ -6684,7 +7886,11 @@ impl Vm {
     /// order). Then register + seed this nursery's OWN scope, run its inline owner SCOPE-SCOPED (returns
     /// the instant ITS scope is done, having drained the global queue meanwhile), wait, reduce its
     /// sub-range. Farms NO helpers (runs inline on the worker thread that called it, reusing `self.wid`).
-    fn run_mn_nursery_nested(&mut self, sched: &Arc<MnSched>, tasks: Vec<PendingCall>) -> Result<(), RuntimeError> {
+    fn run_mn_nursery_nested(
+        &mut self,
+        sched: &Arc<MnSched>,
+        tasks: Vec<PendingCall>,
+    ) -> Result<(), RuntimeError> {
         let snap = self.ensure_snapshot();
         // This nursery's OWN scope. Prepare every worker FIRST (the fallible/heap-heavy step — touches no
         // scheduler state), THEN register the scope and seed its fibers atomically. Doing the prepare
@@ -6766,7 +7972,10 @@ impl Vm {
     /// flush — preserves per-nursery order), and release the held sched once the last enlisted scope
     /// joins. Runs on the INLINE builder VM (`self.mn == None`), so the owner loop is on a SHELL.
     fn join_enlisted_scope(&mut self, scope_id: usize) -> Result<(), RuntimeError> {
-        let sched = self.mn_enlist_sched.clone().expect("join_enlisted_scope without a held sched");
+        let sched = self
+            .mn_enlist_sched
+            .clone()
+            .expect("join_enlisted_scope without a held sched");
         // The builder has reached THIS scope's join — it is no longer feeding it from body code, it is now
         // blocked draining it. Clear `awaiting_builder` so a genuine post-body deadlock (this scope parked
         // with no live sender) faults instead of being vetoed. (Cross-nursery flat scheduler — #1/#2.)
@@ -6790,7 +7999,9 @@ impl Vm {
     /// (trip the scope cancel, drain, settle — like `abort_eager_nursery`), reduce (only `os.exit`
     /// honored — the escape error is what propagates), and release the held sched at the last scope.
     fn abort_enlisted_scope(&mut self, scope_id: usize) {
-        let Some(sched) = self.mn_enlist_sched.clone() else { return };
+        let Some(sched) = self.mn_enlist_sched.clone() else {
+            return;
+        };
         // Draining (cancelling) this scope, not feeding it — clear `awaiting_builder` so the cancel
         // quiesce is observed promptly rather than vetoed. (Cross-nursery flat scheduler — #1/#2.)
         sched.lock().scopes[scope_id].awaiting_builder = false;
@@ -6830,7 +8041,10 @@ impl Vm {
     fn activate_eager_nursery(&mut self) -> EagerScope {
         let cancel = Arc::new(AtomicBool::new(false));
         let snap = self.ensure_snapshot();
-        debug_assert!(self.module_snapshot.is_some(), "an eager nursery only activates on a worker shell (gated by mn.is_some())");
+        debug_assert!(
+            self.module_snapshot.is_some(),
+            "an eager nursery only activates on a worker shell (gated by mn.is_some())"
+        );
         let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 });
         // wid 0 = inline join worker; wid 1 = the dedicated raw drainer below.
         let sched = Arc::new(MnSched::new(0, 2, Arc::clone(&cancel), deadlock_err));
@@ -6841,10 +8055,16 @@ impl Vm {
             .stack_size(VM_STACK_BYTES)
             .name("chezzi-eager".into())
             .spawn(move || {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shell.mn_worker_loop(&drain_sched, 1, 0)));
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    shell.mn_worker_loop(&drain_sched, 1, 0)
+                }));
             })
             .ok();
-        EagerScope { sched, cancel, drainer }
+        EagerScope {
+            sched,
+            cancel,
+            drainer,
+        }
     }
 
     /// Per-connection spawn — `JoinNursery` for an eager nursery (the normal fall-through path). Close
@@ -6853,7 +8073,12 @@ impl Vm {
     /// and reduce (Decision-F output flush in spawn order; a handler fault propagates as the
     /// acceptor's body fault, which the outer nursery then sees). Mirrors `run_mn_nursery`'s tail.
     fn join_eager_nursery(&mut self, scope: EagerScope) -> Result<(), RuntimeError> {
-        let EagerScope { sched, cancel, drainer, .. } = scope;
+        let EagerScope {
+            sched,
+            cancel,
+            drainer,
+            ..
+        } = scope;
         sched.close_body(0);
         let snap = self.ensure_snapshot();
         let mut shell = self.spawn_shell(&snap, &sched, &cancel);
@@ -6874,7 +8099,12 @@ impl Vm {
     /// (Decision F). The body's own escape error is what propagates, so a handler fault here is
     /// swallowed (only its buffered output + any `os.exit` are honored via `reduce_task_slots`).
     fn abort_eager_nursery(&mut self, scope: EagerScope) {
-        let EagerScope { sched, cancel, drainer, .. } = scope;
+        let EagerScope {
+            sched,
+            cancel,
+            drainer,
+            ..
+        } = scope;
         cancel.store(true, Ordering::Relaxed);
         sched.close_body(0);
         sched.cancel_drain(0);
@@ -6898,7 +8128,12 @@ impl Vm {
     /// code itself — fibers swap their own heap + module roots into it ([`Vm::swap_ctx`]); the shell
     /// only provides the dispatch engine, the shared `module_snapshot` (for lazy module fault-in), and
     /// the `mn`/`cancel` flags the `recv`/`send`/back-edge paths read.
-    fn spawn_shell(&self, snap: &Arc<ModuleSnapshot>, sched: &Arc<MnSched>, cancel: &Arc<AtomicBool>) -> Vm {
+    fn spawn_shell(
+        &self,
+        snap: &Arc<ModuleSnapshot>,
+        sched: &Arc<MnSched>,
+        cancel: &Arc<AtomicBool>,
+    ) -> Vm {
         let mut shell = self.spawn_worker();
         shell.module_snapshot = Some(Arc::clone(snap));
         shell.mn = Some(Arc::clone(sched));
@@ -6921,7 +8156,11 @@ impl Vm {
     /// snapshot-parks. Only ever called on the M:N engine inside a native callback (the recv site gates
     /// on `mn.is_some() && native_reentry > 0`).
     fn demote_recv_block(&mut self, h: GcRef, span: Span) -> Result<RecvStep, RuntimeError> {
-        let sched = Arc::clone(self.mn.as_ref().expect("demote_recv_block on the cooperative engine"));
+        let sched = Arc::clone(
+            self.mn
+                .as_ref()
+                .expect("demote_recv_block on the cooperative engine"),
+        );
         let core = self.channel_core(h);
         let ptr = self.channel_core_ptr(h);
         // 1. Account running → blocked_native AND register the channel (#1 fix), under core lock A, then
@@ -7000,7 +8239,11 @@ impl Vm {
                 // Cancel (a sibling faulted): set `cancelled` BEFORE returning the Err so the outcome is
                 // SWALLOWED (a cancelled task is dropped, not reported) instead of surfacing as a Fault —
                 // mirrors the snapshot-park recv's cancel branch.
-                if self.cancel.as_ref().is_some_and(|x| x.load(Ordering::Relaxed)) {
+                if self
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|x| x.load(Ordering::Relaxed))
+                {
                     self.cancelled = true;
                     c.running += 1;
                     sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
@@ -7065,7 +8308,11 @@ impl Vm {
         timer: Option<(usize, std::time::Instant)>,
         span: Span,
     ) -> Result<(usize, WireValue), RuntimeError> {
-        let sched = Arc::clone(self.mn.as_ref().expect("demote_wait_block on the cooperative engine"));
+        let sched = Arc::clone(
+            self.mn
+                .as_ref()
+                .expect("demote_wait_block on the cooperative engine"),
+        );
         // 1. Account running → blocked_native AND register EVERY arm channel, under core lock A, then
         //    notify so an idle puller re-evaluates the deadlock predicate now this fiber left `running`.
         {
@@ -7130,7 +8377,11 @@ impl Vm {
                     }
                 }
                 // Cancel (a sibling faulted): swallow the outcome (mirror the snapshot-park cancel arm).
-                if self.cancel.as_ref().is_some_and(|x| x.load(Ordering::Relaxed)) {
+                if self
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|x| x.load(Ordering::Relaxed))
+                {
                     self.cancelled = true;
                     un_account(&mut c);
                     drop(c);
@@ -7178,7 +8429,8 @@ impl Vm {
                 // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
                 // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
                 let backoff = match timer {
-                    Some((_, d)) => DEMOTE_POLL_BACKOFF.min(d.saturating_duration_since(std::time::Instant::now())),
+                    Some((_, d)) => DEMOTE_POLL_BACKOFF
+                        .min(d.saturating_duration_since(std::time::Instant::now())),
                     None => DEMOTE_POLL_BACKOFF,
                 };
                 let _ = first.cv.wait_timeout(q, backoff);
@@ -7198,7 +8450,11 @@ impl Vm {
     /// `thread::sleep` is uninterruptible, so a cancel during the sleep is observed only after it returns
     /// (no worse than the inline pin it replaces — the worker is now freed).
     fn demote_block_sleep(&mut self, ms: u64, span: Span) -> Result<Value, RuntimeError> {
-        let sched = Arc::clone(self.mn.as_ref().expect("demote_block_sleep on the cooperative engine"));
+        let sched = Arc::clone(
+            self.mn
+                .as_ref()
+                .expect("demote_block_sleep on the cooperative engine"),
+        );
         // 1. Account running → inflight under the core lock, then notify idle pullers (a worker sitting in
         //    an untimed `cv.wait` re-evaluates now that this fiber left `running`).
         {
@@ -7241,7 +8497,11 @@ impl Vm {
         // callback element and then fault NORMALLY at a later back-edge — wrong classification (a
         // cancelled-task Fault masking the real sibling error) and wasted in-callback sleeps. Faulting
         // here aborts the native callback loop immediately, so no further elements sleep.
-        if self.cancel.as_ref().is_some_and(|x| x.load(Ordering::Relaxed)) {
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|x| x.load(Ordering::Relaxed))
+        {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }
@@ -7278,12 +8538,20 @@ impl Vm {
         span: Span,
         mut attempt: impl FnMut(&mut Vm) -> SockPoll,
     ) -> Result<Value, RuntimeError> {
-        let sched = Arc::clone(self.mn.as_ref().expect("demote_block_socket on the cooperative engine"));
+        let sched = Arc::clone(
+            self.mn
+                .as_ref()
+                .expect("demote_block_socket on the cooperative engine"),
+        );
         self.demote_socket_enter(span)?;
         let out = loop {
             // Observe teardown/cancel BEFORE doing more work each iteration. Cancel (a sibling faulted):
             // set `cancelled` so the outcome is SWALLOWED (a cancelled task is dropped, not reported).
-            if self.cancel.as_ref().is_some_and(|x| x.load(Ordering::Relaxed)) {
+            if self
+                .cancel
+                .as_ref()
+                .is_some_and(|x| x.load(Ordering::Relaxed))
+            {
                 self.cancelled = true;
                 break Err(self.err("cancelled".to_string(), span));
             }
@@ -7308,7 +8576,11 @@ impl Vm {
     /// recv/sleep demote also uses — one spawn + one eventual exit per demoted thread). On OS-refuse, un-roll
     /// the accounting and fault cleanly so the join still completes. Mirrors [`Vm::demote_block_sleep`] 1–2.
     fn demote_socket_enter(&mut self, span: Span) -> Result<(), RuntimeError> {
-        let sched = Arc::clone(self.mn.as_ref().expect("demote_socket_enter on the cooperative engine"));
+        let sched = Arc::clone(
+            self.mn
+                .as_ref()
+                .expect("demote_socket_enter on the cooperative engine"),
+        );
         {
             let mut c = sched.lock();
             c.running -= 1;
@@ -7338,7 +8610,11 @@ impl Vm {
     /// running` (the `+1` is essential — the fiber's next dispatch does `running -= 1`, which would
     /// underflow without this restore). Mirrors [`Vm::demote_block_sleep`] step 4.
     fn demote_socket_exit(&mut self) {
-        let sched = Arc::clone(self.mn.as_ref().expect("demote_socket_exit on the cooperative engine"));
+        let sched = Arc::clone(
+            self.mn
+                .as_ref()
+                .expect("demote_socket_exit on the cooperative engine"),
+        );
         let mut c = sched.lock();
         c.running += 1;
         sched.inflight.fetch_sub(1, Ordering::Relaxed);
@@ -7372,7 +8648,9 @@ impl Vm {
                 // queue (across all scopes) until global terminate; the demoted owner returns on its own
                 // (its fiber settles → `self.demoted` exits its loop), so the replacement must not stop
                 // early on any single scope.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shell.mn_worker_loop(&sched, wid, SENTINEL_SCOPE)));
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    shell.mn_worker_loop(&sched, wid, SENTINEL_SCOPE)
+                }));
             })
             .is_ok()
     }
@@ -7409,7 +8687,8 @@ impl Vm {
                 // this worker). The poller re-enqueues it via `complete_offload` on OS readiness.
                 Disp::PollPark(pp) => sched.poll_park_offload(fiber, pp),
                 Disp::Finish(outcome) => {
-                    let aborts = matches!(outcome, TaskOutcome::Fault(_) | TaskOutcome::Exit { .. });
+                    let aborts =
+                        matches!(outcome, TaskOutcome::Fault(_) | TaskOutcome::Exit { .. });
                     sched.finish(task_index, scope_id, outcome);
                     // A fault/exit tripped the FIBER's SCOPE cancel (in `classify_mn_outcome`, via the
                     // re-pointed `self.cancel`); requeue THAT scope's parked siblings so they observe it
@@ -7515,8 +8794,10 @@ impl Vm {
                 // WHILE the fiber heap is live (the `GcRef`s index into it), exactly as `Disp::Park`
                 // captures the single recv key; `park_wait` re-checks every arm under the sched lock.
                 let handles = self.wait_suspend.take().unwrap();
-                let arms: Vec<(usize, Arc<ChannelCore>)> =
-                    handles.iter().map(|&h| (self.channel_core_ptr(h), self.channel_core(h))).collect();
+                let arms: Vec<(usize, Arc<ChannelCore>)> = handles
+                    .iter()
+                    .map(|&h| (self.channel_core_ptr(h), self.channel_core(h)))
+                    .collect();
                 Disp::WaitPark(arms)
             } else if res.is_ok() && self.yield_now {
                 // D3 — budget exhausted (mutually exclusive with `suspend`: the safepoint returns
@@ -7540,7 +8821,11 @@ impl Vm {
     fn classify_mn_outcome(&mut self, res: Result<(), RuntimeError>) -> TaskOutcome {
         if let Some(code) = self.pending_exit {
             self.trip_cancel();
-            TaskOutcome::Exit { code, out: std::mem::take(&mut self.out), stderr: std::mem::take(&mut self.stderr) }
+            TaskOutcome::Exit {
+                code,
+                out: std::mem::take(&mut self.out),
+                stderr: std::mem::take(&mut self.stderr),
+            }
         } else if self.cancelled {
             TaskOutcome::Cancelled
         } else {
@@ -7570,7 +8855,8 @@ impl Vm {
         let n = ready.len();
         // Per-task outcome slots (task order) + a finished-count condvar the pool bumps.
         let results: TaskSlots = Arc::new(Mutex::new((0..n).map(|_| None).collect()));
-        let done: Arc<(Mutex<usize>, std::sync::Condvar)> = Arc::new((Mutex::new(0), std::sync::Condvar::new()));
+        let done: Arc<(Mutex<usize>, std::sync::Condvar)> =
+            Arc::new((Mutex::new(0), std::sync::Condvar::new()));
 
         // 2. Farm tasks[1..] to the pool; keep tasks[0] to run inline. Every farmed job runs under a
         //    `DoneSignal` guard whose `Drop` bumps the completion counter + wakes the joiner on EVERY
@@ -7687,7 +8973,12 @@ impl Vm {
     /// otherwise every remaining child is parked on an empty channel no sibling can fill — a deadlock.
     fn run_scheduler(&mut self) -> Result<(), RuntimeError> {
         loop {
-            let next = self.scheduler_stack.last_mut().expect("scheduler level present").ready.pop_first();
+            let next = self
+                .scheduler_stack
+                .last_mut()
+                .expect("scheduler level present")
+                .ready
+                .pop_first();
             match next {
                 Some(i) => self.run_child(i)?,
                 None => {
@@ -7716,8 +9007,21 @@ impl Vm {
     /// and its new state recorded.
     fn run_child(&mut self, i: usize) -> Result<(), RuntimeError> {
         let mut child = {
-            let level = self.scheduler_stack.last_mut().expect("scheduler level present");
-            std::mem::replace(&mut level.children[i], Fiber { ctx: FiberCtx::default(), state: FiberState::Done, task_index: i, scope_id: 0, span: Span { line: 1, col: 1 }, resume_native: None })
+            let level = self
+                .scheduler_stack
+                .last_mut()
+                .expect("scheduler level present");
+            std::mem::replace(
+                &mut level.children[i],
+                Fiber {
+                    ctx: FiberCtx::default(),
+                    state: FiberState::Done,
+                    task_index: i,
+                    scope_id: 0,
+                    span: Span { line: 1, col: 1 },
+                    resume_native: None,
+                },
+            )
         };
         self.swap_ctx(&mut child.ctx); // self.* = child's execution context
         self.suspend = None; // clear any prior wait before (re)running
@@ -7783,7 +9087,10 @@ impl Vm {
                 Err(e)
             }
         };
-        self.scheduler_stack.last_mut().expect("scheduler level present").children[i] = child;
+        self.scheduler_stack
+            .last_mut()
+            .expect("scheduler level present")
+            .children[i] = child;
         result
     }
 
@@ -7828,7 +9135,12 @@ impl Vm {
                 self.invoke_value(callee, args, span)?;
                 Ok(())
             }
-            PendingCall::Method { recv, name, args, span } => {
+            PendingCall::Method {
+                recv,
+                name,
+                args,
+                span,
+            } => {
                 let argc = args.len();
                 self.push(recv);
                 for a in args {
@@ -7859,7 +9171,9 @@ impl Vm {
     /// closures) can no longer cross an OS-thread boundary and `to_wire` gains real `Err` arms; at
     /// that point callers switch to direct `to_wire?` / `from_wire`.
     fn deep_clone(&mut self, v: Value) -> Value {
-        let w = self.to_wire(v).expect("deep_clone: airlock value must be sendable (B3.0 single-thread)");
+        let w = self
+            .to_wire(v)
+            .expect("deep_clone: airlock value must be sendable (B3.0 single-thread)");
         self.from_wire(w)
     }
 
@@ -8064,27 +9378,50 @@ impl Vm {
             WireValue::Struct { name, fields } => {
                 // Positional layout: the wire fields arrive in declaration order (to_wire emits
                 // them so), so rebuild positionally — the carried names are discarded.
-                let cloned: Vec<Value> =
-                    fields.into_iter().map(|(_, val)| self.from_wire(val)).collect();
+                let cloned: Vec<Value> = fields
+                    .into_iter()
+                    .map(|(_, val)| self.from_wire(val))
+                    .collect();
                 let tid = self.struct_tid(&name);
-                Value::Obj(self.heap.alloc(Obj::Struct { name, tid, fields: cloned }))
+                Value::Obj(self.heap.alloc(Obj::Struct {
+                    name,
+                    tid,
+                    fields: cloned,
+                }))
             }
-            WireValue::Enum { variant_id, payload } => {
+            WireValue::Enum {
+                variant_id,
+                payload,
+            } => {
                 let cloned: Vec<Value> = payload.into_iter().map(|x| self.from_wire(x)).collect();
                 // M19 lever #2 — the dense `variant_id` crossed the airlock directly (shared
                 // `Arc<Program>`), so it is replayed as-is — no lossy name re-resolution.
-                Value::Obj(self.heap.alloc(Obj::Enum { variant_id, payload: cloned }))
+                Value::Obj(self.heap.alloc(Obj::Enum {
+                    variant_id,
+                    payload: cloned,
+                }))
             }
             // B3.6: rebuild a submitted closure by value over the worker's reconstructed home module
             // (the `proto` is shared via `Arc<Program>`; captures reconstruct bottom-up into this heap).
             // `worker_home` resolves the home index against this VM's `module_objs` (the rebuilt graph
             // in a pool worker, or the live graph in a cooperative same-heap drain).
-            WireValue::Closure { proto, captured, home } => {
+            WireValue::Closure {
+                proto,
+                captured,
+                home,
+            } => {
                 // Lever #3: rebuild positionally — push values in wire (slot) order, discard the
                 // carried names (they live in `proto.capture_names`). `to_wire` emits in slot order.
-                let cap: Vec<Value> = captured.into_iter().map(|(_k, w)| self.from_wire(w)).collect();
+                let cap: Vec<Value> = captured
+                    .into_iter()
+                    .map(|(_k, w)| self.from_wire(w))
+                    .collect();
                 let home = self.worker_home(home);
-                Value::Obj(self.heap.alloc(Obj::Closure { proto, captured: cap, home }))
+                Value::Obj(self.heap.alloc(Obj::Closure {
+                    proto,
+                    captured: cap,
+                    home,
+                }))
             }
         }
     }
@@ -8160,7 +9497,11 @@ impl Vm {
                 let wargs = self.wire_args(args, span)?;
                 match callee {
                     Value::Obj(h) => match self.heap.get(h).clone() {
-                        Obj::Closure { proto, captured, home } => {
+                        Obj::Closure {
+                            proto,
+                            captured,
+                            home,
+                        } => {
                             // Lever #3: captures are positional; carry names from the proto in slot
                             // order so the wire format (Vec<(name, value)>) is unchanged.
                             let names = self.program.protos[proto].capture_names.clone();
@@ -8171,28 +9512,59 @@ impl Vm {
                                 let name = names.get(i).cloned().unwrap_or_default();
                                 wcap.push((name, w));
                             }
-                            Lowered::Closure { proto, captured: wcap, args: wargs, home: self.home_index(home), span }
+                            Lowered::Closure {
+                                proto,
+                                captured: wcap,
+                                args: wargs,
+                                home: self.home_index(home),
+                                span,
+                            }
                         }
-                        Obj::Func { proto, home } => Lowered::Func { proto, args: wargs, home: self.home_index(home), span },
-                        _ => return Err(self.err(
-                            format!("spawn: '{}' is not an isolable task", self.type_name(callee)),
+                        Obj::Func { proto, home } => Lowered::Func {
+                            proto,
+                            args: wargs,
+                            home: self.home_index(home),
                             span,
-                        )),
+                        },
+                        _ => {
+                            return Err(self.err(
+                                format!(
+                                    "spawn: '{}' is not an isolable task",
+                                    self.type_name(callee)
+                                ),
+                                span,
+                            ));
+                        }
                     },
-                    _ => return Err(self.err(
-                        format!("spawn: '{}' is not an isolable task", self.type_name(callee)),
-                        span,
-                    )),
+                    _ => {
+                        return Err(self.err(
+                            format!(
+                                "spawn: '{}' is not an isolable task",
+                                self.type_name(callee)
+                            ),
+                            span,
+                        ));
+                    }
                 }
             }
             // B3.3d: the receiver + args cross by wire; dispatch resolves against the worker's
             // reconstructed `module_objs` (built below). `ensure_crossable` keeps a non-sendable
             // receiver (e.g. a closure) from silently dangling.
-            PendingCall::Method { recv, name, args, span } => {
+            PendingCall::Method {
+                recv,
+                name,
+                args,
+                span,
+            } => {
                 let wrecv = self.to_wire(recv)?;
                 self.ensure_crossable(&wrecv, span)?;
                 let wargs = self.wire_args(args, span)?;
-                Lowered::Method { recv: wrecv, name, args: wargs, span }
+                Lowered::Method {
+                    recv: wrecv,
+                    name,
+                    args: wargs,
+                    span,
+                }
             }
         };
 
@@ -8206,21 +9578,44 @@ impl Vm {
         let mut worker = self.spawn_worker();
         worker.install_snapshot(snap);
         let (call, span) = match lowered {
-            Lowered::Closure { proto, captured, args, home, span } => {
+            Lowered::Closure {
+                proto,
+                captured,
+                args,
+                home,
+                span,
+            } => {
                 let home = worker.worker_home(home);
                 // Lever #3: rebuild positionally (slot order), discarding the carried names.
-                let cap: Vec<Value> = captured.into_iter().map(|(_k, w)| worker.from_wire(w)).collect();
-                let callee = Value::Obj(worker.heap.alloc(Obj::Closure { proto, captured: cap, home }));
+                let cap: Vec<Value> = captured
+                    .into_iter()
+                    .map(|(_k, w)| worker.from_wire(w))
+                    .collect();
+                let callee = Value::Obj(worker.heap.alloc(Obj::Closure {
+                    proto,
+                    captured: cap,
+                    home,
+                }));
                 let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
-            Lowered::Func { proto, args, home, span } => {
+            Lowered::Func {
+                proto,
+                args,
+                home,
+                span,
+            } => {
                 let home = worker.worker_home(home);
                 let callee = Value::Obj(worker.heap.alloc(Obj::Func { proto, home }));
                 let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
-            Lowered::Method { recv, name, args, span } => {
+            Lowered::Method {
+                recv,
+                name,
+                args,
+                span,
+            } => {
                 let recv = worker.from_wire(recv);
                 let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
                 (ReadyCall::Method { recv, name, args }, span)
@@ -8239,7 +9634,14 @@ impl Vm {
         let mut worker = self.spawn_worker();
         worker.install_snapshot(snap);
         let callee = worker.from_wire(task);
-        ReadyWorker { worker, call: ReadyCall::Invoke { callee, args: Vec::new() }, span }
+        ReadyWorker {
+            worker,
+            call: ReadyCall::Invoke {
+                callee,
+                args: Vec::new(),
+            },
+            span,
+        }
     }
 
     /// B3.6 — drain a shut `Executor`'s pending tasks onto the bounded pool under `--parallel`. Each
@@ -8247,7 +9649,11 @@ impl Vm {
     /// aborts siblings, matching the cooperative inline `r?`); **no** deadlock watch (decision D — an
     /// `Executor`-spanning deadlock hangs, as documented). Output is flushed in submission (queue) order
     /// by [`run_workers_on_pool`] (decision F).
-    fn drain_executor_on_pool(&mut self, tasks: Vec<WireValue>, span: Span) -> Result<(), RuntimeError> {
+    fn drain_executor_on_pool(
+        &mut self,
+        tasks: Vec<WireValue>,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         if tasks.is_empty() {
             return Ok(());
         }
@@ -8299,7 +9705,11 @@ impl Vm {
     fn wire_callable(&self, v: Value, span: Span) -> Result<WireValue, RuntimeError> {
         if let Value::Obj(h) = v {
             match self.heap.get(h) {
-                Obj::Closure { proto, captured, home } => {
+                Obj::Closure {
+                    proto,
+                    captured,
+                    home,
+                } => {
                     // Lever #3: positional captures — carry names from the proto in slot order.
                     let names = &self.program.protos[*proto].capture_names;
                     let mut wcap = Vec::with_capacity(captured.len());
@@ -8309,10 +9719,18 @@ impl Vm {
                         let name = names.get(i).cloned().unwrap_or_default();
                         wcap.push((name.into_boxed_str(), w));
                     }
-                    return Ok(WireValue::Closure { proto: *proto, captured: wcap, home: self.home_index(*home) });
+                    return Ok(WireValue::Closure {
+                        proto: *proto,
+                        captured: wcap,
+                        home: self.home_index(*home),
+                    });
                 }
                 Obj::Func { proto, home } => {
-                    return Ok(WireValue::Closure { proto: *proto, captured: Vec::new(), home: self.home_index(*home) });
+                    return Ok(WireValue::Closure {
+                        proto: *proto,
+                        captured: Vec::new(),
+                        home: self.home_index(*home),
+                    });
                 }
                 _ => {}
             }
@@ -8324,7 +9742,11 @@ impl Vm {
     /// cross heaps; used as the fallback when the task's home is not a real `module_objs` entry (the
     /// hand-built unit-test fixtures) — real spawns resolve a reconstructed module (see `worker_home`).
     fn fresh_worker_home(&mut self) -> GcRef {
-        self.heap.alloc(Obj::Module { name: "<worker>".into(), slots: Vec::new(), index: Default::default() })
+        self.heap.alloc(Obj::Module {
+            name: "<worker>".into(),
+            slots: Vec::new(),
+            index: Default::default(),
+        })
     }
 
     /// B3.3c — the index of a `home` module `GcRef` in this VM's `module_objs`, so the worker can
@@ -8373,10 +9795,15 @@ impl Vm {
                 // worker replays them into matching slots; the shared `Arc<Program>` slot map makes
                 // parent and worker agree on slot↔name regardless of any hash ordering.
                 let (name, globals): (Box<str>, Vec<(String, Value)>) = match self.heap.get(pm) {
-                    Obj::Module { name, slots, index } => (name.clone(), module_slot_pairs(slots, index)),
+                    Obj::Module { name, slots, index } => {
+                        (name.clone(), module_slot_pairs(slots, index))
+                    }
                     _ => ("<worker>".into(), Vec::new()),
                 };
-                let globals = globals.into_iter().map(|(k, v)| (k, self.to_snap(v))).collect();
+                let globals = globals
+                    .into_iter()
+                    .map(|(k, v)| (k, self.to_snap(v)))
+                    .collect();
                 ModuleSnap { name, globals }
             })
             .collect();
@@ -8396,7 +9823,9 @@ impl Vm {
     fn to_snap(&self, v: Value) -> SnapValue {
         let h = match v {
             Value::Obj(h) => h,
-            scalar => return SnapValue::Wire(self.to_wire(scalar).expect("scalar is always sendable")),
+            scalar => {
+                return SnapValue::Wire(self.to_wire(scalar).expect("scalar is always sendable"));
+            }
         };
         // Fast path: no embedded callable/module → the wire form is exact and cheap.
         if let Ok(w) = self.to_wire(v)
@@ -8498,9 +9927,16 @@ impl Vm {
     /// the per-module faulted flags, and keep the `Arc` so each module's globals fault in lazily on
     /// first access ([`Vm::fault_module`]). The cheap replacement for eager `build_worker_modules`.
     fn install_snapshot(&mut self, snap: Arc<ModuleSnapshot>) {
-        debug_assert!(self.module_objs.is_empty(), "install_snapshot expects a fresh worker");
+        debug_assert!(
+            self.module_objs.is_empty(),
+            "install_snapshot expects a fresh worker"
+        );
         for m in &snap.modules {
-            let wm = self.heap.alloc(Obj::Module { name: m.name.clone(), slots: Vec::new(), index: std::collections::HashMap::new() });
+            let wm = self.heap.alloc(Obj::Module {
+                name: m.name.clone(),
+                slots: Vec::new(),
+                index: std::collections::HashMap::new(),
+            });
             self.module_objs.push(wm);
         }
         self.module_faulted = vec![false; snap.modules.len()];
@@ -8516,7 +9952,11 @@ impl Vm {
             return;
         }
         self.module_faulted[idx] = true;
-        let snap = Arc::clone(self.module_snapshot.as_ref().expect("worker has a snapshot"));
+        let snap = Arc::clone(
+            self.module_snapshot
+                .as_ref()
+                .expect("worker has a snapshot"),
+        );
         let module = self.module_objs[idx];
         for (name, sv) in &snap.modules[idx].globals {
             let val = self.replay_snap(sv);
@@ -8547,24 +9987,45 @@ impl Vm {
             SnapValue::Wire(w) => self.from_wire(w.clone()),
             SnapValue::Func { proto, home } => {
                 let whome = self.worker_home(*home);
-                Value::Obj(self.heap.alloc(Obj::Func { proto: *proto, home: whome }))
+                Value::Obj(self.heap.alloc(Obj::Func {
+                    proto: *proto,
+                    home: whome,
+                }))
             }
-            SnapValue::Closure { proto, captured, home } => {
+            SnapValue::Closure {
+                proto,
+                captured,
+                home,
+            } => {
                 let whome = self.worker_home(*home);
                 // Lever #3: rebuild positionally (slot order), discarding the carried names.
-                let cap: Vec<Value> = captured.iter().map(|(_k, cv)| self.replay_snap(cv)).collect();
-                Value::Obj(self.heap.alloc(Obj::Closure { proto: *proto, captured: cap, home: whome }))
+                let cap: Vec<Value> = captured
+                    .iter()
+                    .map(|(_k, cv)| self.replay_snap(cv))
+                    .collect();
+                Value::Obj(self.heap.alloc(Obj::Closure {
+                    proto: *proto,
+                    captured: cap,
+                    home: whome,
+                }))
             }
             SnapValue::ModuleAlias(idx) => Value::Obj(self.module_objs[*idx]),
             SnapValue::ModuleInline { name, globals } => {
-                let wm = self.heap.alloc(Obj::Module { name: name.clone(), slots: Vec::new(), index: std::collections::HashMap::new() });
+                let wm = self.heap.alloc(Obj::Module {
+                    name: name.clone(),
+                    slots: Vec::new(),
+                    index: std::collections::HashMap::new(),
+                });
                 for (k, gv) in globals {
                     let val = self.replay_snap(gv);
                     self.module_define(wm, k, val);
                 }
                 Value::Obj(wm)
             }
-            SnapValue::Native { name, func } => Value::Obj(self.heap.alloc(Obj::Native { name: name.clone(), func: *func })),
+            SnapValue::Native { name, func } => Value::Obj(self.heap.alloc(Obj::Native {
+                name: name.clone(),
+                func: *func,
+            })),
             // Re-alloc from the SAME shared `Arc<Cffi>` — no re-dlopen (shared address space).
             SnapValue::Cffi(c) => Value::Obj(self.heap.alloc(Obj::Cffi(Arc::clone(c)))),
             SnapValue::List(xs) => {
@@ -8573,7 +10034,10 @@ impl Vm {
             }
             SnapValue::Iter { items, pos } => {
                 let v = items.iter().map(|x| self.replay_snap(x)).collect();
-                Value::Obj(self.heap.alloc(Obj::Iter { items: v, pos: *pos }))
+                Value::Obj(self.heap.alloc(Obj::Iter {
+                    items: v,
+                    pos: *pos,
+                }))
             }
             SnapValue::Tuple(xs) => {
                 let v = xs.iter().map(|x| self.replay_snap(x)).collect();
@@ -8584,13 +10048,23 @@ impl Vm {
                 // so), so rebuild positionally — the carried names are discarded.
                 let f = fields.iter().map(|(_, fv)| self.replay_snap(fv)).collect();
                 let tid = self.struct_tid(name);
-                Value::Obj(self.heap.alloc(Obj::Struct { name: name.clone(), tid, fields: f }))
+                Value::Obj(self.heap.alloc(Obj::Struct {
+                    name: name.clone(),
+                    tid,
+                    fields: f,
+                }))
             }
-            SnapValue::Enum { variant_id, payload } => {
+            SnapValue::Enum {
+                variant_id,
+                payload,
+            } => {
                 let p = payload.iter().map(|x| self.replay_snap(x)).collect();
                 // M19 lever #2 — the dense `variant_id` was carried directly (mirrors `from_wire`);
                 // replay it as-is against the shared program — no lossy name re-resolution.
-                Value::Obj(self.heap.alloc(Obj::Enum { variant_id: *variant_id, payload: p }))
+                Value::Obj(self.heap.alloc(Obj::Enum {
+                    variant_id: *variant_id,
+                    payload: p,
+                }))
             }
             SnapValue::Map(entries) => {
                 let mut out = MapData::default();
@@ -8640,8 +10114,12 @@ impl Vm {
     #[inline(never)]
     fn new_atomic(&mut self) -> Value {
         let init = self.pop();
-        let init = self.to_wire(init).expect("Atomic init must be sendable (B3.1 single-thread)");
-        Value::Obj(self.heap.alloc(Obj::Atomic(Arc::new(AtomicCore { v: Mutex::new(init) }))))
+        let init = self
+            .to_wire(init)
+            .expect("Atomic init must be sendable (B3.1 single-thread)");
+        Value::Obj(self.heap.alloc(Obj::Atomic(Arc::new(AtomicCore {
+            v: Mutex::new(init),
+        }))))
     }
 
     /// `timer(ms)` — pop the `ms` int, push a fresh `Channel[bool]` stamped with `now + ms`. Delivery is
@@ -8652,14 +10130,24 @@ impl Vm {
     fn new_timer(&mut self, span: Span) -> Result<Value, RuntimeError> {
         let ms = match self.pop() {
             Value::Int(ms) => ms.max(0) as u64,
-            other => return Err(self.err(format!("timer(ms) expects int, got {}", self.type_name(other)), span)),
+            other => {
+                return Err(self.err(
+                    format!("timer(ms) expects int, got {}", self.type_name(other)),
+                    span,
+                ));
+            }
         };
         // Saturate a pathological `ms` to a far-future deadline rather than panic on `Instant` overflow
         // (mirrors the `sleep_ms` offload path).
         let deadline = std::time::Instant::now()
             .checked_add(std::time::Duration::from_millis(ms))
-            .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365));
-        let core = Arc::new(ChannelCore { timer: Some(deadline), ..Default::default() });
+            .unwrap_or_else(|| {
+                std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365)
+            });
+        let core = Arc::new(ChannelCore {
+            timer: Some(deadline),
+            ..Default::default()
+        });
         Ok(Value::Obj(self.heap.alloc(Obj::Channel(core))))
     }
 
@@ -8707,18 +10195,27 @@ impl Vm {
     /// and [`Vm::run_one_fiber`] completes it via [`Vm::finish_pending_connect`] (read `SO_ERROR`) and
     /// pushes the resulting `Socket` — the bytecode call site never re-runs. The instant (loopback)
     /// case still returns immediately.
-    fn net_connect_or_listen(&mut self, name: &str, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+    fn net_connect_or_listen(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         let addr = match args.first() {
             Some(Value::Obj(h)) => match self.heap.get(*h) {
                 Obj::Str(s) => s.to_string(),
-                _ => return Err(self.err(format!("std.net.{name} expects an address string"), span)),
+                _ => {
+                    return Err(self.err(format!("std.net.{name} expects an address string"), span));
+                }
             },
             _ => return Err(self.err(format!("std.net.{name} expects an address string"), span)),
         };
         match name {
             "connect" => match crate::native::net::connect_nonblocking(&addr) {
                 // Connected synchronously (the common loopback case) — wrap + return at once.
-                Ok((stream, false)) => Ok(self.alloc_socket_ok(stream, core::next_poll_key(), core::new_in_flight())),
+                Ok((stream, false)) => {
+                    Ok(self.alloc_socket_ok(stream, core::next_poll_key(), core::new_in_flight()))
+                }
                 // Handshake in flight: park the fiber on writability under the M:N engine; off it (the
                 // cooperative / top-level v1 fallback, where there is no fiber to park), block until the
                 // handshake settles. net targets `--parallel`.
@@ -8731,7 +10228,9 @@ impl Vm {
                         // overload, list HOF, `Shared.update`, ...). The caller's loop state lives on the
                         // Rust stack, so the fiber can't park; and blocking here would pin a worker
                         // thread on the handshake. Fail loud, exactly as `read`/`write`/`accept` do.
-                        Ok(self.sock_err("connect would block: std.net sockets require the --parallel engine"))
+                        Ok(self.sock_err(
+                            "connect would block: std.net sockets require the --parallel engine",
+                        ))
                     } else {
                         // Top-level / cooperative: no fiber to park, so block (bounded) until the
                         // handshake settles. net targets `--parallel`; this keeps a top-level
@@ -8743,7 +10242,11 @@ impl Vm {
             },
             "listen" => match crate::native::net::listen_nonblocking(&addr) {
                 Ok(listener) => {
-                    let core = Arc::new(ListenerCore { listener: Mutex::new(Some(listener)), key: core::next_poll_key(), in_flight: core::new_in_flight() });
+                    let core = Arc::new(ListenerCore {
+                        listener: Mutex::new(Some(listener)),
+                        key: core::next_poll_key(),
+                        in_flight: core::new_in_flight(),
+                    });
                     let v = Value::Obj(self.heap.alloc(Obj::Listener(core)));
                     Ok(self.sock_ok(v))
                 }
@@ -8757,8 +10260,17 @@ impl Vm {
     /// become the socket's poll identity for later `read`/`write` parks (a fresh pair for a synchronous
     /// connect; the connect's own pair, reused, for one that parked — its `in_flight` was cleared on
     /// inject).
-    fn alloc_socket_ok(&mut self, stream: std::net::TcpStream, key: usize, in_flight: Arc<AtomicBool>) -> Value {
-        let core = Arc::new(SocketCore { stream: Mutex::new(Some(stream)), key, in_flight });
+    fn alloc_socket_ok(
+        &mut self,
+        stream: std::net::TcpStream,
+        key: usize,
+        in_flight: Arc<AtomicBool>,
+    ) -> Value {
+        let core = Arc::new(SocketCore {
+            stream: Mutex::new(Some(stream)),
+            key,
+            in_flight,
+        });
         let v = Value::Obj(self.heap.alloc(Obj::Socket(core)));
         self.sock_ok(v)
     }
@@ -8783,10 +10295,20 @@ impl Vm {
         let in_flight = core::new_in_flight();
         in_flight.store(true, Ordering::Release); // mark parked (matches `park_on_fd`'s swap(true))
         let fd = stream.as_raw_fd();
-        self.pending_connect = Some(ConnectInProgress { stream, key, in_flight: Arc::clone(&in_flight) });
+        self.pending_connect = Some(ConnectInProgress {
+            stream,
+            key,
+            in_flight: Arc::clone(&in_flight),
+        });
         // A `connect` never carries a user timeout (the `connect` surface takes only an address); it
         // parks forever (or until `drain_sched` re-injects it on a sibling fault).
-        self.poll_park = Some(PollPark { key, fd, interest: poller::Interest::Write, in_flight, deadline: None });
+        self.poll_park = Some(PollPark {
+            key,
+            fd,
+            interest: poller::Interest::Write,
+            in_flight,
+            deadline: None,
+        });
     }
 
     /// D6b — the top-level connect fallback (no fiber to park): block until the handshake settles, then
@@ -8795,12 +10317,17 @@ impl Vm {
     /// instead of spinning for the kernel's multi-minute connect timeout. net targets the M:N
     /// `--parallel` engine, so this path exists only to keep a top-level `net.connect` usable.
     fn block_until_connected(&mut self, stream: std::net::TcpStream) -> Value {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(CONNECT_BLOCK_TIMEOUT_SECS);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(CONNECT_BLOCK_TIMEOUT_SECS);
         loop {
             match crate::native::net::finish_connect(&stream) {
                 // SO_ERROR clear AND the peer is reachable ⇒ connected.
                 Ok(()) if stream.peer_addr().is_ok() => {
-                    return self.alloc_socket_ok(stream, core::next_poll_key(), core::new_in_flight());
+                    return self.alloc_socket_ok(
+                        stream,
+                        core::next_poll_key(),
+                        core::new_in_flight(),
+                    );
                 }
                 Err(e) => return self.sock_err(format!("connect failed: {e}")),
                 Ok(()) if std::time::Instant::now() >= deadline => {
@@ -8817,7 +10344,13 @@ impl Vm {
     /// `recv` park, but routed to the poller). Off the M:N engine (top level / cooperative) there is no
     /// fiber to park, so the op blocks the thread once (a documented v1 fallback — net targets
     /// `--parallel`).
-    fn socket_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    fn socket_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         match method {
             "read" => {
                 // `read(n)` or `read(n, timeout_ms)` — the optional trailing int bounds the FIRST
@@ -8861,7 +10394,13 @@ impl Vm {
                         if timeout.is_some_and(|t| t.poll_once) {
                             return Ok(self.sock_err("timeout"));
                         }
-                        let target = PollPark { key: core.key, fd, interest: poller::Interest::Read, in_flight: Arc::clone(&core.in_flight), deadline: timeout.map(|t| t.deadline) };
+                        let target = PollPark {
+                            key: core.key,
+                            fd,
+                            interest: poller::Interest::Read,
+                            in_flight: Arc::clone(&core.in_flight),
+                            deadline: timeout.map(|t| t.deadline),
+                        };
                         if self.park_on_fd(h, args, target, span)? {
                             return Ok(Value::Nil); // parked (sentinel; `poll_park` gates the push)
                         }
@@ -8872,28 +10411,40 @@ impl Vm {
                         // defeat the cooperative deadlock detector). net targets the `--parallel` engine.
                         if self.mn.is_some() && self.native_reentry > 0 {
                             let core = Arc::clone(&core);
-                            return self.demote_block_socket(fd, poller::Interest::Read, span, move |vm| {
-                                let mut b = vec![0u8; n];
-                                let r = {
-                                    let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
-                                    let Some(stream) = guard.as_mut() else {
-                                        return SockPoll::Ready(Ok(vm.sock_err("read on a closed socket")));
+                            return self.demote_block_socket(
+                                fd,
+                                poller::Interest::Read,
+                                span,
+                                move |vm| {
+                                    let mut b = vec![0u8; n];
+                                    let r = {
+                                        let mut guard =
+                                            core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                                        let Some(stream) = guard.as_mut() else {
+                                            return SockPoll::Ready(Ok(
+                                                vm.sock_err("read on a closed socket")
+                                            ));
+                                        };
+                                        std::io::Read::read(stream, &mut b)
                                     };
-                                    std::io::Read::read(stream, &mut b)
-                                };
-                                match r {
-                                    Ok(got) => {
-                                        b.truncate(got);
-                                        let s = String::from_utf8_lossy(&b).into_owned();
-                                        let sv = vm.alloc_str(s);
-                                        SockPoll::Ready(Ok(vm.sock_ok(sv)))
+                                    match r {
+                                        Ok(got) => {
+                                            b.truncate(got);
+                                            let s = String::from_utf8_lossy(&b).into_owned();
+                                            let sv = vm.alloc_str(s);
+                                            SockPoll::Ready(Ok(vm.sock_ok(sv)))
+                                        }
+                                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                            SockPoll::WouldBlock
+                                        }
+                                        Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
                                     }
-                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => SockPoll::WouldBlock,
-                                    Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
-                                }
-                            });
+                                },
+                            );
                         }
-                        Ok(self.sock_err("read would block: std.net sockets require the --parallel engine"))
+                        Ok(self.sock_err(
+                            "read would block: std.net sockets require the --parallel engine",
+                        ))
                     }
                     Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
                 }
@@ -8930,29 +10481,49 @@ impl Vm {
                         if timeout.is_some_and(|t| t.poll_once) {
                             return Ok(self.sock_err("timeout"));
                         }
-                        let target = PollPark { key: core.key, fd, interest: poller::Interest::Write, in_flight: Arc::clone(&core.in_flight), deadline: timeout.map(|t| t.deadline) };
+                        let target = PollPark {
+                            key: core.key,
+                            fd,
+                            interest: poller::Interest::Write,
+                            in_flight: Arc::clone(&core.in_flight),
+                            deadline: timeout.map(|t| t.deadline),
+                        };
                         if self.park_on_fd(h, args, target, span)? {
                             return Ok(Value::Nil);
                         }
                         // In-callback on M:N → demote + backoff-poll the non-blocking write (#3 socket half).
                         if self.mn.is_some() && self.native_reentry > 0 {
                             let core = Arc::clone(&core);
-                            return self.demote_block_socket(fd, poller::Interest::Write, span, move |vm| {
-                                let r = {
-                                    let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
-                                    let Some(stream) = guard.as_mut() else {
-                                        return SockPoll::Ready(Ok(vm.sock_err("write on a closed socket")));
+                            return self.demote_block_socket(
+                                fd,
+                                poller::Interest::Write,
+                                span,
+                                move |vm| {
+                                    let r = {
+                                        let mut guard =
+                                            core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                                        let Some(stream) = guard.as_mut() else {
+                                            return SockPoll::Ready(Ok(
+                                                vm.sock_err("write on a closed socket")
+                                            ));
+                                        };
+                                        std::io::Write::write(stream, &data)
                                     };
-                                    std::io::Write::write(stream, &data)
-                                };
-                                match r {
-                                    Ok(got) => SockPoll::Ready(Ok(vm.sock_ok(Value::Int(got as i64)))),
-                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => SockPoll::WouldBlock,
-                                    Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
-                                }
-                            });
+                                    match r {
+                                        Ok(got) => {
+                                            SockPoll::Ready(Ok(vm.sock_ok(Value::Int(got as i64))))
+                                        }
+                                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                            SockPoll::WouldBlock
+                                        }
+                                        Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                                    }
+                                },
+                            );
                         }
-                        Ok(self.sock_err("write would block: std.net sockets require the --parallel engine"))
+                        Ok(self.sock_err(
+                            "write would block: std.net sockets require the --parallel engine",
+                        ))
                     }
                     Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
                 }
@@ -8972,7 +10543,13 @@ impl Vm {
 
     /// D6 — `Listener` methods: `accept() -> Result[Socket]`, `close() -> nil`. `accept` parks on the
     /// listening fd's readability (a pending connection) under the M:N engine, like `Socket::read`.
-    fn listener_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    fn listener_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         match method {
             "accept" => {
                 // `accept()` or `accept(timeout_ms)` — the optional trailing int bounds how long to
@@ -9000,29 +10577,49 @@ impl Vm {
                         if timeout.is_some_and(|t| t.poll_once) {
                             return Ok(self.sock_err("timeout"));
                         }
-                        let target = PollPark { key: core.key, fd, interest: poller::Interest::Read, in_flight: Arc::clone(&core.in_flight), deadline: timeout.map(|t| t.deadline) };
+                        let target = PollPark {
+                            key: core.key,
+                            fd,
+                            interest: poller::Interest::Read,
+                            in_flight: Arc::clone(&core.in_flight),
+                            deadline: timeout.map(|t| t.deadline),
+                        };
                         if self.park_on_fd(h, args, target, span)? {
                             return Ok(Value::Nil);
                         }
                         // In-callback on M:N → demote + backoff-poll the non-blocking accept (#3 socket half).
                         if self.mn.is_some() && self.native_reentry > 0 {
                             let core = Arc::clone(&core);
-                            return self.demote_block_socket(fd, poller::Interest::Read, span, move |vm| {
-                                let r = {
-                                    let guard = core.listener.lock().unwrap_or_else(|e| e.into_inner());
-                                    let Some(listener) = guard.as_ref() else {
-                                        return SockPoll::Ready(Ok(vm.sock_err("accept on a closed listener")));
+                            return self.demote_block_socket(
+                                fd,
+                                poller::Interest::Read,
+                                span,
+                                move |vm| {
+                                    let r = {
+                                        let guard =
+                                            core.listener.lock().unwrap_or_else(|e| e.into_inner());
+                                        let Some(listener) = guard.as_ref() else {
+                                            return SockPoll::Ready(Ok(
+                                                vm.sock_err("accept on a closed listener")
+                                            ));
+                                        };
+                                        listener.accept()
                                     };
-                                    listener.accept()
-                                };
-                                match r {
-                                    Ok((stream, _peer)) => SockPoll::Ready(Ok(vm.accept_socket_value(stream))),
-                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => SockPoll::WouldBlock,
-                                    Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
-                                }
-                            });
+                                    match r {
+                                        Ok((stream, _peer)) => {
+                                            SockPoll::Ready(Ok(vm.accept_socket_value(stream)))
+                                        }
+                                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                            SockPoll::WouldBlock
+                                        }
+                                        Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                                    }
+                                },
+                            );
                         }
-                        Ok(self.sock_err("accept would block: std.net sockets require the --parallel engine"))
+                        Ok(self.sock_err(
+                            "accept would block: std.net sockets require the --parallel engine",
+                        ))
                     }
                     Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
                 }
@@ -9033,7 +10630,10 @@ impl Vm {
                 let addr = {
                     let guard = core.listener.lock().unwrap();
                     match guard.as_ref() {
-                        Some(l) => l.local_addr().map(|a| a.to_string()).map_err(|e| e.to_string()),
+                        Some(l) => l
+                            .local_addr()
+                            .map(|a| a.to_string())
+                            .map_err(|e| e.to_string()),
                         None => Err("addr on a closed listener".to_string()),
                     }
                 };
@@ -9060,7 +10660,11 @@ impl Vm {
     /// `Result::Ok`.
     fn accept_socket_value(&mut self, stream: std::net::TcpStream) -> Value {
         stream.set_nonblocking(true).ok();
-        let core = Arc::new(SocketCore { stream: Mutex::new(Some(stream)), key: core::next_poll_key(), in_flight: core::new_in_flight() });
+        let core = Arc::new(SocketCore {
+            stream: Mutex::new(Some(stream)),
+            key: core::next_poll_key(),
+            in_flight: core::new_in_flight(),
+        });
         let v = Value::Obj(self.heap.alloc(Obj::Socket(core)));
         self.sock_ok(v)
     }
@@ -9081,13 +10685,22 @@ impl Vm {
     /// (`native_reentry > 0`, where this returns `Ok(false)`) does NOT honor it — a demoted op
     /// backoff-polls in the kernel until readiness regardless of `timeout_ms` (a documented v1 gap;
     /// in-callback socket timeouts are out of scope, matching the in-callback connect-blocks behavior).
-    fn park_on_fd(&mut self, h: GcRef, args: &[Value], target: PollPark, span: Span) -> Result<bool, RuntimeError> {
+    fn park_on_fd(
+        &mut self,
+        h: GcRef,
+        args: &[Value],
+        target: PollPark,
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
         if self.mn.is_some() && self.native_reentry == 0 {
             // The `in_flight` guard: at most one op may be parked on a socket at a time. A second
             // concurrent op on a shared socket (`Arc`) faults rather than overwrite the registry entry
             // (which would drop the first fiber + leak `inflight`) or double-`add` the fd (EEXIST panic).
             if target.in_flight.swap(true, Ordering::AcqRel) {
-                return Err(self.err("concurrent operation on a shared socket is not supported".into(), span));
+                return Err(self.err(
+                    "concurrent operation on a shared socket is not supported".into(),
+                    span,
+                ));
             }
             self.push(Value::Obj(h)); // receiver (deeper on the stack)
             for &a in args {
@@ -9101,11 +10714,16 @@ impl Vm {
         }
     }
 
-
     /// `Channel[T]` methods (C2/C4): `send` (move-on-send, deep-copied in), `recv` (FIFO; empty =
     /// deadlock fault under the sequential executor), `len`. Mirrors `interp::eval_channel_method` —
     /// error strings byte-identical (parity-tested).
-    fn channel_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    fn channel_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         match method {
             "send" => {
                 self.arity_err("send", args, 1, span)?;
@@ -9142,7 +10760,10 @@ impl Vm {
                 // paths). `demote_recv_block` is itself closed-aware (a `close` faults the demoted recv).
                 // A `timer(ms)` channel is excluded from demote — it has no sibling sender to block on;
                 // `chan_recv_step` synthesises its value (inline-sleep to the deadline) at any reentry.
-                if self.mn.is_some() && self.native_reentry > 0 && self.channel_core(h).timer.is_none() {
+                if self.mn.is_some()
+                    && self.native_reentry > 0
+                    && self.channel_core(h).timer.is_none()
+                {
                     return match self.demote_recv_block(h, span)? {
                         RecvStep::Got(w) => Ok(self.from_wire(w)),
                         RecvStep::ClosedEmpty => {
@@ -9179,7 +10800,9 @@ impl Vm {
                     if core.done_latch.load(Ordering::Relaxed) {
                         return Some(WireValue::Bool(true));
                     }
-                    core.timer.filter(|d| std::time::Instant::now() >= *d).map(|_| WireValue::Bool(true))
+                    core.timer
+                        .filter(|d| std::time::Instant::now() >= *d)
+                        .map(|_| WireValue::Bool(true))
                 });
                 Ok(match popped {
                     Some(w) => {
@@ -9298,7 +10921,11 @@ impl Vm {
                     // --parallel, top level: schedule a one-shot background `send(true)` at the deadline
                     // (in THIS scheduler) and park. The pending timer is accounted `inflight` so it
                     // vetoes the deadlock predicate while the lone fiber waits; the job un-accounts it.
-                    if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    if self
+                        .cancel
+                        .as_ref()
+                        .is_some_and(|c| c.load(Ordering::Relaxed))
+                    {
                         self.cancelled = true;
                         return Err(self.err("cancelled".to_string(), span));
                     }
@@ -9332,7 +10959,11 @@ impl Vm {
         // M:N snapshot-park path (empty-open parks the fiber; the worker loop files it into the wait
         // set). Cancel is checked FIRST: a fiber woken only to be cancelled must not re-park.
         if self.mn.is_some() && self.native_reentry == 0 {
-            if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+            if self
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed))
+            {
                 self.cancelled = true;
                 return Err(self.err("cancelled".to_string(), span));
             }
@@ -9467,7 +11098,11 @@ impl Vm {
             if let Some((i, deadline)) = soonest {
                 // Cancel checked first: a fiber about to be cancelled must not arm a stray timer (mirror
                 // the single-`recv` timer-park at `chan_recv_step`).
-                if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                if self
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|c| c.load(Ordering::Relaxed))
+                {
                     self.cancelled = true;
                     return Err(self.err("cancelled".to_string(), span));
                 }
@@ -9509,8 +11144,10 @@ impl Vm {
         // loop takes the timer arm once `now >= deadline` (so a real send still beats the timer), and
         // clamps its backoff to the deadline. Lower throughput but sound — the documented v1 limit (§6d).
         if self.mn.is_some() {
-            let arms: Vec<(usize, Arc<ChannelCore>)> =
-                keys.iter().map(|&h| (self.channel_core_ptr(h), self.channel_core(h))).collect();
+            let arms: Vec<(usize, Arc<ChannelCore>)> = keys
+                .iter()
+                .map(|&h| (self.channel_core_ptr(h), self.channel_core(h)))
+                .collect();
             let (arm_index, w) = self.demote_wait_block(arms, soonest, span)?;
             let v = self.from_wire(w);
             self.take_wait_arm(base, v, meta.arm_targets[arm_index]);
@@ -9555,7 +11192,13 @@ impl Vm {
     /// `Shared[T]` methods (C3/C4): `get` (copies out), `set` (copies in), `update` (read-modify-write
     /// via the re-entrant call path). Mirrors `interp::eval_shared_method`. The box is re-rooted on
     /// the operand stack across `update`'s nested call (the receiver was popped in `do_method_call`).
-    fn shared_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    fn shared_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         match method {
             "get" => {
                 self.arity_err("get", args, 0, span)?;
@@ -9583,7 +11226,11 @@ impl Vm {
                 // `update` on the SAME box deadlocks: a documented edge (it could only lose-update
                 // before). The handle is re-rooted on the operand stack so the nested call's GC keeps
                 // the core's contents traced (the receiver was popped off the stack in `do_method_call`).
-                let _serialise = if self.parallel { Some(core.update_lock.lock().unwrap()) } else { None };
+                let _serialise = if self.parallel {
+                    Some(core.update_lock.lock().unwrap())
+                } else {
+                    None
+                };
                 let w = core.v.lock().unwrap().clone();
                 let cur = self.from_wire(w);
                 self.push(Value::Obj(h));
@@ -9604,7 +11251,13 @@ impl Vm {
     /// no user closure runs under the lock (unlike `Shared.update`), so no `update_lock` is needed.
     /// Mirrors `interp::eval_atomic_method`. `add`/`sub` use the language's `checked_add`/`checked_sub`
     /// (int overflow faults, like the `+`/`-` operators) and plain float arithmetic.
-    fn atomic_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    fn atomic_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         match method {
             "load" => {
                 self.arity_err("load", args, 0, span)?;
@@ -9653,13 +11306,17 @@ impl Vm {
                         } else {
                             (a.checked_sub(*b), "Sub")
                         };
-                        WireValue::Int(r.ok_or_else(|| self.err(format!("integer overflow in {label}"), span))?)
+                        WireValue::Int(r.ok_or_else(|| {
+                            self.err(format!("integer overflow in {label}"), span)
+                        })?)
                     }
                     (WireValue::Float(a), WireValue::Float(b)) => {
                         WireValue::Float(if method == "add" { a + b } else { a - b })
                     }
                     // The checker gates `add`/`sub` to numeric element types, so this is unreachable.
-                    _ => return Err(self.err(format!("type Atomic has no method '{method}'"), span)),
+                    _ => {
+                        return Err(self.err(format!("type Atomic has no method '{method}'"), span));
+                    }
                 };
                 *g = new.clone();
                 drop(g);
@@ -9674,7 +11331,13 @@ impl Vm {
     /// pending). Mirrors `interp::eval_executor_method` — error strings byte-identical (parity-tested).
     /// The executor handle is re-rooted on the operand stack across the drain, and each popped task is
     /// rooted across its nested call (the receiver was popped in `do_method_call`).
-    fn executor_method(&mut self, h: GcRef, method: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    fn executor_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         match method {
             "submit" => {
                 self.arity_err("submit", args, 1, span)?;
@@ -9683,7 +11346,8 @@ impl Vm {
                     let mut g = core.inner.lock().unwrap();
                     if g.shut {
                         return Err(self.err(
-                            "submit on a shut-down Executor (it no longer accepts work)".to_string(),
+                            "submit on a shut-down Executor (it no longer accepts work)"
+                                .to_string(),
                             span,
                         ));
                     }
@@ -9714,7 +11378,8 @@ impl Vm {
                     // B3.6: drain the whole queue under the lock (drop the guard before running any
                     // task — never hold the core lock across an invoke), then run the tasks on the
                     // bounded pool. Output flushes in submission order; the first fault propagates.
-                    let tasks: Vec<WireValue> = core.inner.lock().unwrap().queue.drain(..).collect();
+                    let tasks: Vec<WireValue> =
+                        core.inner.lock().unwrap().queue.drain(..).collect();
                     self.drain_executor_on_pool(tasks, span)?;
                 } else {
                     // Cooperative engine: inline FIFO drain (unchanged). Root the executor handle across
@@ -9839,7 +11504,11 @@ impl Vm {
     /// reports in `exec_parallel` / `leave_implicit_nursery` as the body unwinds and only then runs
     /// `finish_frame`'s defers. The MODULE top-level nursery is preserved (it joins only on a clean
     /// run to program end; an uncaught top-level fault leaves it silent, as in the interp).
-    fn unwind_deferred(&mut self, target_frame_len: usize, report_escaped: bool) -> Option<RuntimeError> {
+    fn unwind_deferred(
+        &mut self,
+        target_frame_len: usize,
+        report_escaped: bool,
+    ) -> Option<RuntimeError> {
         let mut err = None;
         while self.frames.len() > target_frame_len {
             let fi = self.frames.len() - 1;
@@ -9870,7 +11539,11 @@ impl Vm {
             }
             self.stack.truncate(frame.base);
             self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
-            while self.handlers.last().is_some_and(|h| h.frame_len > self.frames.len()) {
+            while self
+                .handlers
+                .last()
+                .is_some_and(|h| h.frame_len > self.frames.len())
+            {
                 self.handlers.pop();
             }
         }
@@ -9883,7 +11556,10 @@ impl Vm {
         // before we mutate the stack / unwind a frame.
         let info = match v {
             Value::Obj(h) => match self.heap.get(h) {
-                Obj::Enum { variant_id, payload } => Some((*variant_id, payload.len(), payload.first().copied())),
+                Obj::Enum {
+                    variant_id,
+                    payload,
+                } => Some((*variant_id, payload.len(), payload.first().copied())),
                 _ => None,
             },
             _ => None,
@@ -9907,7 +11583,11 @@ impl Vm {
                     self.call_depth = h.call_depth;
                     // Drop scope markers of defer scopes opened inside the recover block — the `?`
                     // jumps past their `LeaveDeferScope`s, so they would otherwise leak.
-                    self.frames.last_mut().unwrap().defer_markers.truncate(h.markers_len);
+                    self.frames
+                        .last_mut()
+                        .unwrap()
+                        .defer_markers
+                        .truncate(h.markers_len);
                     // TASK B — a recover-scoped `?` jumps past the `JoinNursery` of any `parallel:`
                     // opened inside the recover block: cancel-and-report its unstarted tasks HERE
                     // (before the handler binds its result and execution continues), so a recover-caught
@@ -9930,7 +11610,9 @@ impl Vm {
                     } else {
                         None
                     };
-                    if self.pending_exit.is_some() && let Some(e) = body_defer_err.take() {
+                    if self.pending_exit.is_some()
+                        && let Some(e) = body_defer_err.take()
+                    {
                         return Err(e);
                     }
                     self.drain_escaped_nursery(h.nursery_len);
@@ -9973,22 +11655,40 @@ impl Vm {
                 return Ok(());
             }
         }
-        Err(self.err(format!("'?' expects Result or Option, found {}", self.type_name(v)), span))
+        Err(self.err(
+            format!("'?' expects Result or Option, found {}", self.type_name(v)),
+            span,
+        ))
     }
 
     // ----- construction / access -----
 
     fn new_struct(&mut self, name: &str, argc: usize, span: Span) -> Result<(), RuntimeError> {
-        let def = self.program.structs.get(name).cloned().ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
+        let def = self
+            .program
+            .structs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
         if argc != def.fields.len() {
-            return Err(self.err(format!("struct '{name}' expects {} field(s), got {argc}", def.fields.len()), span));
+            return Err(self.err(
+                format!(
+                    "struct '{name}' expects {} field(s), got {argc}",
+                    def.fields.len()
+                ),
+                span,
+            ));
         }
         let at = self.stack.len() - argc;
         // Positional layout: the args already arrive in declaration order (desugar reorders any
         // named-field constructor before codegen), so split them straight in — no per-field name
         // strings, no zip with `def.fields`. `argc == def.fields.len()` is checked above.
         let fields: Vec<Value> = self.stack.split_off(at);
-        let h = self.heap.alloc(Obj::Struct { name: name.into(), tid: def.tid, fields });
+        let h = self.heap.alloc(Obj::Struct {
+            name: name.into(),
+            tid: def.tid,
+            fields,
+        });
         self.push(Value::Obj(h));
         Ok(())
     }
@@ -10013,15 +11713,30 @@ impl Vm {
     /// Construct an enum from `Op::NewEnum`. M19 lever #2 — the dense `variant_id` is baked into the op
     /// at compile time (no runtime hash lookup); it is stamped onto the instance instead of the two
     /// per-instance type/variant `Box<str>`s. `variant` is used only for the arity-mismatch message.
-    fn new_enum(&mut self, variant: &str, variant_id: u32, argc: usize, span: Span) -> Result<(), RuntimeError> {
+    fn new_enum(
+        &mut self,
+        variant: &str,
+        variant_id: u32,
+        argc: usize,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         if let Some(def) = self.program.variants_by_id.get(variant_id as usize)
             && argc != def.arity
         {
-            return Err(self.err(format!("variant '{variant}' expects {} value(s), got {argc}", def.arity), span));
+            return Err(self.err(
+                format!(
+                    "variant '{variant}' expects {} value(s), got {argc}",
+                    def.arity
+                ),
+                span,
+            ));
         }
         let at = self.stack.len() - argc;
         let payload: Vec<Value> = self.stack.split_off(at);
-        let h = self.heap.alloc(Obj::Enum { variant_id, payload });
+        let h = self.heap.alloc(Obj::Enum {
+            variant_id,
+            payload,
+        });
         self.push(Value::Obj(h));
         Ok(())
     }
@@ -10029,7 +11744,10 @@ impl Vm {
     fn get_field(&mut self, name: &str, ic: u32, span: Span) -> Result<(), RuntimeError> {
         let obj = self.pop();
         let Value::Obj(h) = obj else {
-            return Err(self.err(format!("cannot read field '{name}' of {}", self.type_name(obj)), span));
+            return Err(self.err(
+                format!("cannot read field '{name}' of {}", self.type_name(obj)),
+                span,
+            ));
         };
         self.ensure_module_faulted(h); // D1: `module.member` on a not-yet-faulted worker module
         // M19 Phase 5b — inline-cache fast path: a hit collapses the struct name-probe to one pure-int
@@ -10052,7 +11770,10 @@ impl Vm {
         match self.heap.get(h) {
             // `t.0`, `t.1`, … — tuple element access. The field name is the element index.
             Obj::Tuple(items) => {
-                let v = name.parse::<usize>().ok().and_then(|i| items.get(i).copied());
+                let v = name
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| items.get(i).copied());
                 match v {
                     Some(v) => {
                         self.push(v);
@@ -10064,13 +11785,22 @@ impl Vm {
                     )),
                 }
             }
-            Obj::Struct { name: sname, tid, fields, .. } => {
+            Obj::Struct {
+                name: sname,
+                tid,
+                fields,
+                ..
+            } => {
                 // Positional layout: the field name->index map lives in the StructDef (declaration
                 // order), not the instance. Resolve the slot there, then index the flat `fields`
                 // Vec. Capture both index + layout `tid` so the IC can cache them (Value is Copy,
                 // `tid` is a `u32`, so the heap borrow ends here, freeing `self` for the write).
                 let tid = *tid;
-                let idx = self.program.structs.get(sname.as_ref()).and_then(|d| d.fields.iter().position(|f| f == name));
+                let idx = self
+                    .program
+                    .structs
+                    .get(sname.as_ref())
+                    .and_then(|d| d.fields.iter().position(|f| f == name));
                 let found = idx.and_then(|i| fields.get(i).map(|v| (i, *v)));
                 match found {
                     Some((i, v)) => {
@@ -10086,14 +11816,21 @@ impl Vm {
                     }
                 }
             }
-            Obj::Module { name: mname, slots, index } => match index.get(name).map(|&i| slots[i as usize]) {
+            Obj::Module {
+                name: mname,
+                slots,
+                index,
+            } => match index.get(name).map(|&i| slots[i as usize]) {
                 Some(v) => {
                     self.push(v);
                     Ok(())
                 }
                 None => Err(self.err(format!("module '{mname}' has no member '{name}'"), span)),
             },
-            _ => Err(self.err(format!("cannot read field '{name}' of {}", self.type_name(obj)), span)),
+            _ => Err(self.err(
+                format!("cannot read field '{name}' of {}", self.type_name(obj)),
+                span,
+            )),
         }
     }
 
@@ -10129,23 +11866,27 @@ impl Vm {
         }
         let sliced = match self.heap.get(h) {
             Obj::List(items) => {
-                let idxs = crate::slice::slice_indices(s, e, st, items.len()).map_err(|m| self.err(m.to_string(), span))?;
+                let idxs = crate::slice::slice_indices(s, e, st, items.len())
+                    .map_err(|m| self.err(m.to_string(), span))?;
                 Sliced::List(idxs.iter().map(|&i| items[i]).collect())
             }
             Obj::Str(string) => {
                 let chars: Vec<char> = string.chars().collect();
-                let idxs = crate::slice::slice_indices(s, e, st, chars.len()).map_err(|m| self.err(m.to_string(), span))?;
+                let idxs = crate::slice::slice_indices(s, e, st, chars.len())
+                    .map_err(|m| self.err(m.to_string(), span))?;
                 Sliced::Str(idxs.iter().map(|&i| chars[i]).collect())
             }
             // `bytes[a:b:c]` slices over BYTE offsets and yields a new `bytes` (open bounds / step /
             // reverse / negative all via the shared `slice_indices`, exactly like list/str).
             Obj::Bytes(b) => {
-                let idxs = crate::slice::slice_indices(s, e, st, b.len()).map_err(|m| self.err(m.to_string(), span))?;
+                let idxs = crate::slice::slice_indices(s, e, st, b.len())
+                    .map_err(|m| self.err(m.to_string(), span))?;
                 Sliced::Bytes(idxs.iter().map(|&i| b[i]).collect())
             }
             // `bytearray[a:b:c]` slices over BYTE offsets and yields a NEW `bytearray` (mutable copy).
             Obj::ByteArray(b) => {
-                let idxs = crate::slice::slice_indices(s, e, st, b.len()).map_err(|m| self.err(m.to_string(), span))?;
+                let idxs = crate::slice::slice_indices(s, e, st, b.len())
+                    .map_err(|m| self.err(m.to_string(), span))?;
                 Sliced::ByteArray(idxs.iter().map(|&i| b[i]).collect())
             }
             Obj::Struct { .. } => Sliced::Struct,
@@ -10202,7 +11943,9 @@ impl Vm {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Obj::Struct { name, .. } = self.heap.get(h) else { unreachable!() };
+        let Obj::Struct { name, .. } = self.heap.get(h) else {
+            unreachable!()
+        };
         let name = name.clone();
         let def = self
             .program
@@ -10243,7 +11986,10 @@ impl Vm {
                             self.push(v);
                             Ok(())
                         }
-                        None => Err(self.err(format!("index {n} out of bounds (len {})", items.len()), span)),
+                        None => Err(self.err(
+                            format!("index {n} out of bounds (len {})", items.len()),
+                            span,
+                        )),
                     };
                 }
                 // `bytes[i]`/`bytearray[i]` → `int` (0–255); out-of-range faults recoverably.
@@ -10253,7 +11999,10 @@ impl Vm {
                             self.push(Value::Int(v));
                             Ok(())
                         }
-                        None => Err(self.err(format!("index {n} out of bounds (len {})", b.len()), span)),
+                        None => {
+                            Err(self
+                                .err(format!("index {n} out of bounds (len {})", b.len()), span))
+                        }
                     };
                 }
                 Obj::ByteArray(b) => {
@@ -10262,13 +12011,23 @@ impl Vm {
                             self.push(Value::Int(v));
                             Ok(())
                         }
-                        None => Err(self.err(format!("index {n} out of bounds (len {})", b.len()), span)),
+                        None => {
+                            Err(self
+                                .err(format!("index {n} out of bounds (len {})", b.len()), span))
+                        }
                     };
                 }
                 Obj::Map(_) => {
                     let hk = self.scalar_hash(key);
-                    let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
-                    return match m.candidates(hk).iter().copied().find(|&p| self.values_equal(m.entries[p].1, key)) {
+                    let Obj::Map(m) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    return match m
+                        .candidates(hk)
+                        .iter()
+                        .copied()
+                        .find(|&p| self.values_equal(m.entries[p].1, key))
+                    {
                         Some(p) => {
                             let v = m.entries[p].2;
                             self.push(v);
@@ -10296,7 +12055,10 @@ impl Vm {
                         self.push(v);
                         Ok(())
                     }
-                    None => Err(self.err(format!("index {idx} out of bounds (len {})", items.len()), span)),
+                    None => Err(self.err(
+                        format!("index {idx} out of bounds (len {})", items.len()),
+                        span,
+                    )),
                 }
             }
             Obj::Str(s) => {
@@ -10308,7 +12070,10 @@ impl Vm {
                         self.push(nh);
                         Ok(())
                     }
-                    None => Err(self.err(format!("index {idx} out of bounds (len {})", chars.len()), span)),
+                    None => Err(self.err(
+                        format!("index {idx} out of bounds (len {})", chars.len()),
+                        span,
+                    )),
                 }
             }
             Obj::Bytes(b) => {
@@ -10318,7 +12083,9 @@ impl Vm {
                         self.push(Value::Int(v));
                         Ok(())
                     }
-                    None => Err(self.err(format!("index {idx} out of bounds (len {})", b.len()), span)),
+                    None => {
+                        Err(self.err(format!("index {idx} out of bounds (len {})", b.len()), span))
+                    }
                 }
             }
             Obj::ByteArray(b) => {
@@ -10328,13 +12095,22 @@ impl Vm {
                         self.push(Value::Int(v));
                         Ok(())
                     }
-                    None => Err(self.err(format!("index {idx} out of bounds (len {})", b.len()), span)),
+                    None => {
+                        Err(self.err(format!("index {idx} out of bounds (len {})", b.len()), span))
+                    }
                 }
             }
             Obj::Map(_) => {
                 let hk = self.hash_key_rooted(key, &[obj, key], span)?;
-                let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
-                match m.candidates(hk).iter().copied().find(|&p| self.values_equal(m.entries[p].1, key)) {
+                let Obj::Map(m) = self.heap.get(h) else {
+                    unreachable!()
+                };
+                match m
+                    .candidates(hk)
+                    .iter()
+                    .copied()
+                    .find(|&p| self.values_equal(m.entries[p].1, key))
+                {
                     Some(p) => {
                         let v = m.entries[p].2;
                         self.push(v);
@@ -10357,7 +12133,10 @@ impl Vm {
         let val = self.pop();
         let obj = self.pop();
         let Value::Obj(h) = obj else {
-            return Err(self.err(format!("cannot assign field '{name}' of {}", self.type_name(obj)), span));
+            return Err(self.err(
+                format!("cannot assign field '{name}' of {}", self.type_name(obj)),
+                span,
+            ));
         };
         // M19 Phase 5b — IC fast path (see [`Vm::get_field`]): a hit on the `tid` guard writes straight
         // to the cached index (no field-name re-verify); a miss falls through to the probe + cache-fill.
@@ -10378,7 +12157,10 @@ impl Vm {
             Obj::Struct { name, .. } => Some(name.clone()),
             _ => None,
         };
-        let idx = sname.as_ref().and_then(|n| self.program.structs.get(n.as_ref())).and_then(|d| d.fields.iter().position(|f| f == name));
+        let idx = sname
+            .as_ref()
+            .and_then(|n| self.program.structs.get(n.as_ref()))
+            .and_then(|d| d.fields.iter().position(|f| f == name));
         let found;
         match self.heap.get_mut(h) {
             Obj::Struct { tid, fields, .. } => {
@@ -10394,10 +12176,18 @@ impl Vm {
                     }
                 }
             }
-            _ => return Err(self.err(format!("cannot assign field '{name}' of {}", self.type_name(obj)), span)),
+            _ => {
+                return Err(self.err(
+                    format!("cannot assign field '{name}' of {}", self.type_name(obj)),
+                    span,
+                ));
+            }
         }
         if ic != NO_IC {
-            self.field_ic[ic as usize] = IcCell { idx: found.0, tid: found.1 };
+            self.field_ic[ic as usize] = IcCell {
+                idx: found.0,
+                tid: found.1,
+            };
         }
         Ok(())
     }
@@ -10418,9 +12208,17 @@ impl Vm {
             && matches!(self.heap.get(h), Obj::Map(_))
         {
             let hk = self.scalar_hash(key);
-            let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
-            let pos = m.candidates(hk).iter().copied().find(|&p| self.values_equal(m.entries[p].1, key));
-            let Obj::Map(m) = self.heap.get_mut(h) else { unreachable!() };
+            let Obj::Map(m) = self.heap.get(h) else {
+                unreachable!()
+            };
+            let pos = m
+                .candidates(hk)
+                .iter()
+                .copied()
+                .find(|&p| self.values_equal(m.entries[p].1, key));
+            let Obj::Map(m) = self.heap.get_mut(h) else {
+                unreachable!()
+            };
             match pos {
                 Some(i) => m.entries[i].2 = val,
                 None => m.push(hk, key, val),
@@ -10431,9 +12229,17 @@ impl Vm {
         // hash()), locate the entry, then mutate — updating the side index on insert.
         if matches!(self.heap.get(h), Obj::Map(_)) {
             let hk = self.hash_key_rooted(key, &[obj, key, val], span)?;
-            let Obj::Map(m) = self.heap.get(h) else { unreachable!() };
-            let pos = m.candidates(hk).iter().copied().find(|&p| self.values_equal(m.entries[p].1, key));
-            let Obj::Map(m) = self.heap.get_mut(h) else { unreachable!() };
+            let Obj::Map(m) = self.heap.get(h) else {
+                unreachable!()
+            };
+            let pos = m
+                .candidates(hk)
+                .iter()
+                .copied()
+                .find(|&p| self.values_equal(m.entries[p].1, key));
+            let Obj::Map(m) = self.heap.get_mut(h) else {
+                unreachable!()
+            };
             match pos {
                 Some(i) => m.entries[i].2 = val,
                 None => m.push(hk, key, val),
@@ -10447,7 +12253,12 @@ impl Vm {
         }
         let idx = match key {
             Value::Int(n) => n,
-            other => return Err(self.err(format!("expected int, found {}", self.type_name(other)), span)),
+            other => {
+                return Err(self.err(
+                    format!("expected int, found {}", self.type_name(other)),
+                    span,
+                ));
+            }
         };
         // `bytearray[i] = x` — the NEW mutable capability `bytes` lacks. The value must be an `int`
         // in 0..=255 (validated BEFORE the in-place write); the index must be in range. Both are
@@ -10457,10 +12268,22 @@ impl Vm {
         if matches!(self.heap.get(h), Obj::ByteArray(_)) {
             let byte = match val {
                 Value::Int(n) if (0..=255).contains(&n) => n as u8,
-                Value::Int(n) => return Err(self.err(format!("byte value {n} out of range (must be 0..=255)"), span)),
-                other => return Err(self.err(format!("expected int, found {}", self.type_name(other)), span)),
+                Value::Int(n) => {
+                    return Err(self.err(
+                        format!("byte value {n} out of range (must be 0..=255)"),
+                        span,
+                    ));
+                }
+                other => {
+                    return Err(self.err(
+                        format!("expected int, found {}", self.type_name(other)),
+                        span,
+                    ));
+                }
             };
-            let Obj::ByteArray(b) = self.heap.get_mut(h) else { unreachable!() };
+            let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                unreachable!()
+            };
             return match crate::slice::norm_index(idx, b.len()) {
                 Some(i) => {
                     b[i] = byte;
@@ -10488,7 +12311,16 @@ impl Vm {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn match_arm(&mut self, scrut: usize, variant: &str, variant_id: u32, nbind: usize, bind_start: usize, next: usize, span: Span) -> Result<(), RuntimeError> {
+    fn match_arm(
+        &mut self,
+        scrut: usize,
+        variant: &str,
+        variant_id: u32,
+        nbind: usize,
+        bind_start: usize,
+        next: usize,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         let v = self.stack[self.base() + scrut];
         let h = match v {
             Value::Obj(h) => h,
@@ -10497,7 +12329,10 @@ impl Vm {
         // M19 lever #2 — dispatch is a pure-int compare of the instance's stamped `variant_id` against
         // the arm's compile-time id (no variant-name string compare). `variant` is only the cold error.
         let (matches, payload) = match self.heap.get(h) {
-            Obj::Enum { variant_id: vid, payload } => (*vid == variant_id, payload.clone()),
+            Obj::Enum {
+                variant_id: vid,
+                payload,
+            } => (*vid == variant_id, payload.clone()),
             _ => unreachable!("scrutinee ensured to be an enum"),
         };
         if !matches {
@@ -10505,7 +12340,13 @@ impl Vm {
             return Ok(());
         }
         if payload.len() != nbind {
-            return Err(self.err(format!("pattern '{variant}' binds {nbind} value(s) but variant carries {}", payload.len()), span));
+            return Err(self.err(
+                format!(
+                    "pattern '{variant}' binds {nbind} value(s) but variant carries {}",
+                    payload.len()
+                ),
+                span,
+            ));
         }
         let base = self.base();
         for (k, pv) in payload.into_iter().enumerate() {
@@ -10555,21 +12396,43 @@ impl Vm {
         Ok(())
     }
 
-    fn arity_err(&self, name: &str, args: &[Value], n: usize, span: Span) -> Result<(), RuntimeError> {
+    fn arity_err(
+        &self,
+        name: &str,
+        args: &[Value],
+        n: usize,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         if args.len() == n {
             Ok(())
         } else {
-            Err(self.err(format!("{name}() expects {n} argument(s), got {}", args.len()), span))
+            Err(self.err(
+                format!("{name}() expects {n} argument(s), got {}", args.len()),
+                span,
+            ))
         }
     }
 
     /// D6c — arity check for a method that accepts an inclusive `min..=max` argument range (the net
     /// socket ops: `read`/`write` take 1–2, `accept` 0–1 — the optional trailing `timeout_ms`).
-    fn arity_range_err(&self, name: &str, args: &[Value], min: usize, max: usize, span: Span) -> Result<(), RuntimeError> {
+    fn arity_range_err(
+        &self,
+        name: &str,
+        args: &[Value],
+        min: usize,
+        max: usize,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         if (min..=max).contains(&args.len()) {
             Ok(())
         } else {
-            Err(self.err(format!("{name}() expects {min}–{max} argument(s), got {}", args.len()), span))
+            Err(self.err(
+                format!(
+                    "{name}() expects {min}–{max} argument(s), got {}",
+                    args.len()
+                ),
+                span,
+            ))
         }
     }
 
@@ -10579,7 +12442,11 @@ impl Vm {
     /// and `deadline` is `now + ms`, saturated to a far-future deadline for a pathological `ms`
     /// (centuries) rather than panicking the worker on `Instant` overflow (mirrors `sleep_ms`). `Err`
     /// for a non-int timeout arg (the checker also rejects this; this is the runtime backstop).
-    fn parse_timeout_ms(&self, arg: Option<&Value>, span: Span) -> Result<Option<SockTimeout>, RuntimeError> {
+    fn parse_timeout_ms(
+        &self,
+        arg: Option<&Value>,
+        span: Span,
+    ) -> Result<Option<SockTimeout>, RuntimeError> {
         match arg {
             None => Ok(None),
             Some(Value::Int(ms)) => {
@@ -10588,8 +12455,13 @@ impl Vm {
                 let dur = std::time::Duration::from_millis(ms);
                 let deadline = std::time::Instant::now()
                     .checked_add(dur)
-                    .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365));
-                Ok(Some(SockTimeout { poll_once, deadline }))
+                    .unwrap_or_else(|| {
+                        std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365)
+                    });
+                Ok(Some(SockTimeout {
+                    poll_once,
+                    deadline,
+                }))
             }
             Some(_) => Err(self.err("timeout_ms expects an int (milliseconds)".into(), span)),
         }
@@ -10652,9 +12524,18 @@ impl Vm {
                     .cloned()
                     .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
                 let proto = *def.methods.get("next").ok_or_else(|| {
-                    self.err(format!("cannot iterate over {} (no `next` method)", self.type_name(v)), span)
+                    self.err(
+                        format!(
+                            "cannot iterate over {} (no `next` method)",
+                            self.type_name(v)
+                        ),
+                        span,
+                    )
                 })?;
-                Step::StructNext { proto, home: self.module_objs[def.module_idx] }
+                Step::StructNext {
+                    proto,
+                    home: self.module_objs[def.module_idx],
+                }
             }
             _ => return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span)),
         };
@@ -10666,33 +12547,64 @@ impl Vm {
             loop {
                 let res = match step {
                     Step::Generator => self.generator_next(h, span)?,
-                    Step::StructNext { proto, home } => {
-                        self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?
-                    }
+                    Step::StructNext { proto, home } => self.guarded(|vm| {
+                        vm.run_proto(proto, home, None, vec![v], true, false, span)
+                    })?,
                 };
                 let Value::Obj(rh) = res else {
-                    return Err(self.err(format!("iterator next() must return Option, found {}", self.type_name(res)), span));
+                    return Err(self.err(
+                        format!(
+                            "iterator next() must return Option, found {}",
+                            self.type_name(res)
+                        ),
+                        span,
+                    ));
                 };
-                let Obj::Enum { variant_id, payload } = self.heap.get(rh) else {
-                    return Err(self.err(format!("iterator next() must return Option, found {}", self.type_name(res)), span));
+                let Obj::Enum {
+                    variant_id,
+                    payload,
+                } = self.heap.get(rh)
+                else {
+                    return Err(self.err(
+                        format!(
+                            "iterator next() must return Option, found {}",
+                            self.type_name(res)
+                        ),
+                        span,
+                    ));
                 };
                 match *variant_id {
                     crate::vm::op::VID_SOME => {
                         let item = *payload.first().ok_or_else(|| {
-                            self.err("iterator next() returned Some with no payload".to_string(), span)
+                            self.err(
+                                "iterator next() returned Some with no payload".to_string(),
+                                span,
+                            )
                         })?;
-                        let Obj::List(buf) = self.heap.get_mut(acc) else { unreachable!() };
+                        let Obj::List(buf) = self.heap.get_mut(acc) else {
+                            unreachable!()
+                        };
                         buf.push(item);
                     }
                     crate::vm::op::VID_NONE_VARIANT => break,
-                    _ => return Err(self.err(format!("iterator next() must return Option, found {}", self.type_name(res)), span)),
+                    _ => {
+                        return Err(self.err(
+                            format!(
+                                "iterator next() must return Option, found {}",
+                                self.type_name(res)
+                            ),
+                            span,
+                        ));
+                    }
                 }
             }
             Ok(())
         })();
         result?;
         // Clone the collected elements out of the rooted list before unrooting.
-        let Obj::List(buf) = self.heap.get(acc) else { unreachable!() };
+        let Obj::List(buf) = self.heap.get(acc) else {
+            unreachable!()
+        };
         let out = buf.clone();
         self.pop(); // unroot accumulator
         self.pop(); // unroot source
@@ -10704,7 +12616,12 @@ impl Vm {
         let src: Vec<Value> = match args {
             [] => Vec::new(),
             [one] => self.drain_iterable(*one, span)?,
-            _ => return Err(self.err(format!("set() expects 0 or 1 argument(s), got {}", args.len()), span)),
+            _ => {
+                return Err(self.err(
+                    format!("set() expects 0 or 1 argument(s), got {}", args.len()),
+                    span,
+                ));
+            }
         };
         // Root the source elements (as a fresh heap list) so they survive a struct element's
         // re-entrant hash() GC; hash every element first (phase 1, rooted), then build GC-free.
@@ -10718,7 +12635,11 @@ impl Vm {
             let mut set = SetData::default();
             for (i, &v) in src.iter().enumerate() {
                 let he = hashes[i];
-                if !set.candidates(he).iter().any(|&p| self.values_equal(set.entries[p].1, v)) {
+                if !set
+                    .candidates(he)
+                    .iter()
+                    .any(|&p| self.values_equal(set.entries[p].1, v))
+                {
                     set.push(he, v);
                 }
             }
@@ -10731,7 +12652,10 @@ impl Vm {
     /// `list(it)` → a list drained from ANY for-iterable. Mirrors `interp::Interp::builtin_list`.
     fn builtin_list(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         let [one] = args else {
-            return Err(self.err("list() takes exactly one iterable argument — use [] for an empty list".to_string(), span));
+            return Err(self.err(
+                "list() takes exactly one iterable argument — use [] for an empty list".to_string(),
+                span,
+            ));
         };
         let items = self.drain_iterable(*one, span)?;
         Ok(Value::Obj(self.heap.alloc(Obj::List(items))))
@@ -10742,7 +12666,10 @@ impl Vm {
     /// VM, so the in-flight key/value are rooted via `hash_key_rooted` while the building map is rooted.
     fn builtin_map(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         let [one] = args else {
-            return Err(self.err("map() takes exactly one iterable argument — use {} for an empty map".to_string(), span));
+            return Err(self.err(
+                "map() takes exactly one iterable argument — use {} for an empty map".to_string(),
+                span,
+            ));
         };
         let drained = self.drain_iterable(*one, span)?;
         // Root the drained elements (as a fresh heap list) across the re-entrant hash() calls.
@@ -10751,16 +12678,35 @@ impl Vm {
         let built = (|| {
             let mut map = MapData::default();
             for elem in &drained {
-                let (k, v) = match elem {
-                    Value::Obj(eh) => match self.heap.get(*eh) {
-                        Obj::Tuple(parts) if parts.len() == 2 => (parts[0], parts[1]),
-                        _ => return Err(self.err(format!("map() expects an iterable of (key, value) 2-tuples, got {}", self.type_name(*elem)), span)),
-                    },
-                    other => return Err(self.err(format!("map() expects an iterable of (key, value) 2-tuples, got {}", self.type_name(*other)), span)),
-                };
+                let (k, v) =
+                    match elem {
+                        Value::Obj(eh) => match self.heap.get(*eh) {
+                            Obj::Tuple(parts) if parts.len() == 2 => (parts[0], parts[1]),
+                            _ => return Err(self.err(
+                                format!(
+                                    "map() expects an iterable of (key, value) 2-tuples, got {}",
+                                    self.type_name(*elem)
+                                ),
+                                span,
+                            )),
+                        },
+                        other => {
+                            return Err(self.err(
+                                format!(
+                                    "map() expects an iterable of (key, value) 2-tuples, got {}",
+                                    self.type_name(*other)
+                                ),
+                                span,
+                            ));
+                        }
+                    };
                 let hk = self.hash_key_rooted(k, &[v], span)?;
                 // last-wins upsert (mirrors the map literal + interp `map_upsert`).
-                let pos = map.candidates(hk).iter().copied().find(|&p| self.values_equal(map.entries[p].1, k));
+                let pos = map
+                    .candidates(hk)
+                    .iter()
+                    .copied()
+                    .find(|&p| self.values_equal(map.entries[p].1, k));
                 match pos {
                     Some(p) => map.entries[p].2 = v,
                     None => map.push(hk, k, v),
@@ -10777,23 +12723,48 @@ impl Vm {
     /// recoverable fault). The `what` label names the constructor in error messages.
     fn collect_bytes_arg(&self, what: &str, v: Value, span: Span) -> Result<Vec<u8>, RuntimeError> {
         match v {
-            Value::Obj(h) => match self.heap.get(h) {
-                Obj::Bytes(b) => Ok(b.to_vec()),
-                Obj::ByteArray(b) => Ok(b.clone()),
-                Obj::List(items) => {
-                    let mut out = Vec::with_capacity(items.len());
-                    for e in items {
-                        match e {
-                            Value::Int(n) if (0..=255).contains(n) => out.push(*n as u8),
-                            Value::Int(n) => return Err(self.err(format!("{what}() list element {n} out of range (must be 0..=255)"), span)),
-                            other => return Err(self.err(format!("{what}() expects a list of int, got an element of type {}", self.type_name(*other)), span)),
+            Value::Obj(h) => {
+                match self.heap.get(h) {
+                    Obj::Bytes(b) => Ok(b.to_vec()),
+                    Obj::ByteArray(b) => Ok(b.clone()),
+                    Obj::List(items) => {
+                        let mut out = Vec::with_capacity(items.len());
+                        for e in items {
+                            match e {
+                                Value::Int(n) if (0..=255).contains(n) => out.push(*n as u8),
+                                Value::Int(n) => return Err(self.err(
+                                    format!(
+                                        "{what}() list element {n} out of range (must be 0..=255)"
+                                    ),
+                                    span,
+                                )),
+                                other => return Err(self.err(
+                                    format!(
+                                        "{what}() expects a list of int, got an element of type {}",
+                                        self.type_name(*other)
+                                    ),
+                                    span,
+                                )),
+                            }
                         }
+                        Ok(out)
                     }
-                    Ok(out)
+                    _ => Err(self.err(
+                        format!(
+                            "{what}() expects a bytes, a bytearray, or a list[int], got {}",
+                            self.type_name(v)
+                        ),
+                        span,
+                    )),
                 }
-                _ => Err(self.err(format!("{what}() expects a bytes, a bytearray, or a list[int], got {}", self.type_name(v)), span)),
-            },
-            other => Err(self.err(format!("{what}() expects a bytes, a bytearray, or a list[int], got {}", self.type_name(other)), span)),
+            }
+            other => Err(self.err(
+                format!(
+                    "{what}() expects a bytes, a bytearray, or a list[int], got {}",
+                    self.type_name(other)
+                ),
+                span,
+            )),
         }
     }
 
@@ -10805,7 +12776,9 @@ impl Vm {
             [] => Vec::new(),
             [Value::Int(n)] => {
                 if *n < 0 {
-                    return Err(self.err(format!("bytearray() size {n} must be non-negative"), span));
+                    return Err(
+                        self.err(format!("bytearray() size {n} must be non-negative"), span)
+                    );
                 }
                 // Bound the eager zero-fill: an unguarded `vec![0u8; n]` for a huge n aborts the
                 // process (SIGABRT), uncatchable by `recover:`. `try_reserve` turns OOM into a
@@ -10814,13 +12787,21 @@ impl Vm {
                 let n = *n as usize;
                 let mut buf: Vec<u8> = Vec::new();
                 if buf.try_reserve_exact(n).is_err() {
-                    return Err(self.err(format!("bytearray() size {n} is too large to allocate"), span));
+                    return Err(self.err(
+                        format!("bytearray() size {n} is too large to allocate"),
+                        span,
+                    ));
                 }
                 buf.resize(n, 0u8);
                 buf
             }
             [one] => self.collect_bytes_arg("bytearray", *one, span)?,
-            _ => return Err(self.err(format!("bytearray() expects 0 or 1 argument(s), got {}", args.len()), span)),
+            _ => {
+                return Err(self.err(
+                    format!("bytearray() expects 0 or 1 argument(s), got {}", args.len()),
+                    span,
+                ));
+            }
         };
         Ok(Value::Obj(self.heap.alloc(Obj::ByteArray(bytes))))
     }
@@ -10830,9 +12811,16 @@ impl Vm {
     fn builtin_bytes(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         let bytes: Vec<u8> = match args {
             [one] => self.collect_bytes_arg("bytes", *one, span)?,
-            _ => return Err(self.err(format!("bytes() expects 1 argument, got {}", args.len()), span)),
+            _ => {
+                return Err(self.err(
+                    format!("bytes() expects 1 argument, got {}", args.len()),
+                    span,
+                ));
+            }
         };
-        Ok(Value::Obj(self.heap.alloc(Obj::Bytes(bytes.into_boxed_slice()))))
+        Ok(Value::Obj(
+            self.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())),
+        ))
     }
 
     fn builtin_len(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
@@ -10843,9 +12831,21 @@ impl Vm {
                 Obj::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
                 Obj::Bytes(b) => Ok(Value::Int(b.len() as i64)),
                 Obj::ByteArray(b) => Ok(Value::Int(b.len() as i64)),
-                _ => Err(self.err(format!("len() expects a list, str, or bytes, got {}", self.type_name(args[0])), span)),
+                _ => Err(self.err(
+                    format!(
+                        "len() expects a list, str, or bytes, got {}",
+                        self.type_name(args[0])
+                    ),
+                    span,
+                )),
             },
-            other => Err(self.err(format!("len() expects a list, str, or bytes, got {}", self.type_name(other)), span)),
+            other => Err(self.err(
+                format!(
+                    "len() expects a list, str, or bytes, got {}",
+                    self.type_name(other)
+                ),
+                span,
+            )),
         }
     }
 
@@ -10854,11 +12854,19 @@ impl Vm {
         let (start, end) = match args {
             [Value::Int(n)] => (0, *n),
             [Value::Int(a), Value::Int(b)] => (*a, *b),
-            _ => return Err(self.err("range() expects range(end) or range(start, end) of ints".to_string(), span)),
+            _ => {
+                return Err(self.err(
+                    "range() expects range(end) or range(start, end) of ints".to_string(),
+                    span,
+                ));
+            }
         };
         let len = i128::from(end) - i128::from(start);
         if len > i128::from(MAX_RANGE_LEN) {
-            return Err(self.err(format!("range() length {len} exceeds the maximum of {MAX_RANGE_LEN}"), span));
+            return Err(self.err(
+                format!("range() length {len} exceeds the maximum of {MAX_RANGE_LEN}"),
+                span,
+            ));
         }
         let items: Vec<Value> = (start..end).map(Value::Int).collect();
         Ok(Value::Obj(self.heap.alloc(Obj::List(items))))
@@ -10876,10 +12884,18 @@ impl Vm {
             }
             Value::Bool(b) => Ok(Value::Int(i64::from(b))),
             Value::Obj(h) => match self.heap.get(h) {
-                Obj::Str(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| self.err(format!("int(): cannot parse '{s}' as an integer"), span)),
-                _ => Err(self.err(format!("int() cannot convert {}", self.type_name(args[0])), span)),
+                Obj::Str(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
+                    self.err(format!("int(): cannot parse '{s}' as an integer"), span)
+                }),
+                _ => Err(self.err(
+                    format!("int() cannot convert {}", self.type_name(args[0])),
+                    span,
+                )),
             },
-            other => Err(self.err(format!("int() cannot convert {}", self.type_name(other)), span)),
+            other => Err(self.err(
+                format!("int() cannot convert {}", self.type_name(other)),
+                span,
+            )),
         }
     }
 
@@ -10889,11 +12905,21 @@ impl Vm {
             Value::Float(f) => Ok(Value::Float(f)),
             Value::Int(n) => Ok(Value::Float(n as f64)),
             Value::Bool(b) => Ok(Value::Float(f64::from(b))),
-            Value::Obj(h) => match self.heap.get(h) {
-                Obj::Str(s) => s.trim().parse::<f64>().map(Value::Float).map_err(|_| self.err(format!("float(): cannot parse '{s}' as a float"), span)),
-                _ => Err(self.err(format!("float() cannot convert {}", self.type_name(args[0])), span)),
-            },
-            other => Err(self.err(format!("float() cannot convert {}", self.type_name(other)), span)),
+            Value::Obj(h) => {
+                match self.heap.get(h) {
+                    Obj::Str(s) => s.trim().parse::<f64>().map(Value::Float).map_err(|_| {
+                        self.err(format!("float(): cannot parse '{s}' as a float"), span)
+                    }),
+                    _ => Err(self.err(
+                        format!("float() cannot convert {}", self.type_name(args[0])),
+                        span,
+                    )),
+                }
+            }
+            other => Err(self.err(
+                format!("float() cannot convert {}", self.type_name(other)),
+                span,
+            )),
         }
     }
 
@@ -10912,9 +12938,15 @@ impl Vm {
                     Some(c) => Ok(Value::Int(c as i64)),
                     None => Err(self.err("ord() of an empty string".to_string(), span)),
                 },
-                _ => Err(self.err(format!("ord() expects a str, got {}", self.type_name(args[0])), span)),
+                _ => Err(self.err(
+                    format!("ord() expects a str, got {}", self.type_name(args[0])),
+                    span,
+                )),
             },
-            other => Err(self.err(format!("ord() expects a str, got {}", self.type_name(other)), span)),
+            other => Err(self.err(
+                format!("ord() expects a str, got {}", self.type_name(other)),
+                span,
+            )),
         }
     }
 
@@ -10926,11 +12958,15 @@ impl Vm {
                 .ok()
                 .and_then(char::from_u32)
                 .map(|c| self.alloc_char(c))
-                .ok_or_else(|| self.err(format!("chr(): {n} is not a valid Unicode codepoint"), span)),
-            other => Err(self.err(format!("chr() expects an int, got {}", self.type_name(other)), span)),
+                .ok_or_else(|| {
+                    self.err(format!("chr(): {n} is not a valid Unicode codepoint"), span)
+                }),
+            other => Err(self.err(
+                format!("chr() expects an int, got {}", self.type_name(other)),
+                span,
+            )),
         }
     }
-
 
     // ----- module namespace helpers -----
 
@@ -11025,7 +13061,8 @@ impl Vm {
     /// depth-guarded worker — kept infallible so every error-message / `display_wire` caller is
     /// unchanged; a cyclic structure renders as `<...>` here (the print path surfaces the error).
     fn display(&self, v: Value) -> String {
-        self.display_guarded(v, 0).unwrap_or_else(|_| "<...>".to_string())
+        self.display_guarded(v, 0)
+            .unwrap_or_else(|_| "<...>".to_string())
     }
 
     /// Depth-guarded structural display. Returns `Err` (recoverable) once recursion exceeds
@@ -11065,7 +13102,11 @@ impl Vm {
                 Obj::Map(m) => {
                     let mut parts = Vec::with_capacity(m.entries.len());
                     for (_, k, v) in &m.entries {
-                        parts.push(format!("{}: {}", self.display_guarded(*k, depth + 1)?, self.display_guarded(*v, depth + 1)?));
+                        parts.push(format!(
+                            "{}: {}",
+                            self.display_guarded(*k, depth + 1)?,
+                            self.display_guarded(*v, depth + 1)?
+                        ));
                     }
                     Ok(format!("{{{}}}", parts.join(", ")))
                 }
@@ -11085,7 +13126,12 @@ impl Vm {
                     // (cold display path). Snapshot name + values first to drop the heap borrow.
                     let name = name.clone();
                     let vals: Vec<Value> = fields.clone();
-                    let names: Vec<String> = self.program.structs.get(name.as_ref()).map(|d| d.fields.clone()).unwrap_or_default();
+                    let names: Vec<String> = self
+                        .program
+                        .structs
+                        .get(name.as_ref())
+                        .map(|d| d.fields.clone())
+                        .unwrap_or_default();
                     let mut parts = Vec::with_capacity(vals.len());
                     for (i, v) in vals.iter().enumerate() {
                         let k = names.get(i).cloned().unwrap_or_else(|| i.to_string());
@@ -11093,7 +13139,10 @@ impl Vm {
                     }
                     Ok(format!("{name}({})", parts.join(", ")))
                 }
-                Obj::Enum { variant_id, payload } => {
+                Obj::Enum {
+                    variant_id,
+                    payload,
+                } => {
                     // M19 lever #2 — recover the variant name from the id (cold display path).
                     let variant = self.enum_names(*variant_id).1.to_string();
                     let payload: Vec<Value> = payload.clone();
@@ -11115,21 +13164,47 @@ impl Vm {
                 // A raw address is non-deterministic (differs per run/engine), so never render it —
                 // that would break two-engine parity if a `ptr` is printed. Only null vs live (a
                 // deterministic distinction) is observable.
-                Obj::Ptr(a) => Ok(if *a == 0 { "<ptr null>".to_string() } else { "<ptr>".to_string() }),
-                Obj::Channel(core) => Ok(format!("Channel(len={})", core.q.lock().unwrap().queue.len())),
+                Obj::Ptr(a) => Ok(if *a == 0 {
+                    "<ptr null>".to_string()
+                } else {
+                    "<ptr>".to_string()
+                }),
+                Obj::Channel(core) => Ok(format!(
+                    "Channel(len={})",
+                    core.q.lock().unwrap().queue.len()
+                )),
                 // B3.1: the box holds the wire form; render it directly (`display` is `&self` and
                 // cannot `from_wire`, which allocates — `display_wire` is the read-only equivalent).
-                Obj::Shared(core) => Ok(format!("Shared({})", self.display_wire(&core.v.lock().unwrap()))),
-                Obj::Atomic(core) => Ok(format!("Atomic({})", self.display_wire(&core.v.lock().unwrap()))),
-                Obj::Executor(core) => Ok(format!("Executor(pending={})", core.inner.lock().unwrap().queue.len())),
+                Obj::Shared(core) => Ok(format!(
+                    "Shared({})",
+                    self.display_wire(&core.v.lock().unwrap())
+                )),
+                Obj::Atomic(core) => Ok(format!(
+                    "Atomic({})",
+                    self.display_wire(&core.v.lock().unwrap())
+                )),
+                Obj::Executor(core) => Ok(format!(
+                    "Executor(pending={})",
+                    core.inner.lock().unwrap().queue.len()
+                )),
                 // D6: render open/closed without exposing the fd; matches no interp counterpart (net
                 // is VM-only) but mirrors the core handles' structural `Display`.
-                Obj::Socket(core) => {
-                    Ok(format!("Socket({})", if core.stream.lock().unwrap().is_some() { "open" } else { "closed" }))
-                }
-                Obj::Listener(core) => {
-                    Ok(format!("Listener({})", if core.listener.lock().unwrap().is_some() { "open" } else { "closed" }))
-                }
+                Obj::Socket(core) => Ok(format!(
+                    "Socket({})",
+                    if core.stream.lock().unwrap().is_some() {
+                        "open"
+                    } else {
+                        "closed"
+                    }
+                )),
+                Obj::Listener(core) => Ok(format!(
+                    "Listener({})",
+                    if core.listener.lock().unwrap().is_some() {
+                        "open"
+                    } else {
+                        "closed"
+                    }
+                )),
                 Obj::Generator(_) => Ok("<generator>".to_string()),
                 Obj::Iter { .. } => Ok("<iterator>".to_string()),
             },
@@ -11151,11 +13226,19 @@ impl Vm {
             WireValue::ByteArray(b) => crate::slice::bytearray_repr(b),
             WireValue::Handle(h) => self.display(Value::Obj(*h)),
             WireValue::List(items) => {
-                let inner = items.iter().map(|v| self.display_wire(v)).collect::<Vec<_>>().join(", ");
+                let inner = items
+                    .iter()
+                    .map(|v| self.display_wire(v))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("[{inner}]")
             }
             WireValue::Tuple(items) => {
-                let inner = items.iter().map(|v| self.display_wire(v)).collect::<Vec<_>>().join(", ");
+                let inner = items
+                    .iter()
+                    .map(|v| self.display_wire(v))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("({inner})")
             }
             WireValue::Map(entries) => {
@@ -11170,39 +13253,83 @@ impl Vm {
                 if entries.is_empty() {
                     "set()".to_string()
                 } else {
-                    let inner = entries.iter().map(|(_, v)| self.display_wire(v)).collect::<Vec<_>>().join(", ");
+                    let inner = entries
+                        .iter()
+                        .map(|(_, v)| self.display_wire(v))
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     format!("{{{inner}}}")
                 }
             }
             WireValue::Struct { name, fields } => {
-                let inner = fields.iter().map(|(k, v)| format!("{k}={}", self.display_wire(v))).collect::<Vec<_>>().join(", ");
+                let inner = fields
+                    .iter()
+                    .map(|(k, v)| format!("{k}={}", self.display_wire(v)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("{name}({inner})")
             }
-            WireValue::Enum { variant_id, payload } => {
+            WireValue::Enum {
+                variant_id,
+                payload,
+            } => {
                 // M19 lever #2 — the wire form carries the id; resolve the variant name on this cold
                 // display path via the shared program's `variants_by_id`.
                 let variant = self.enum_names(*variant_id).1;
                 if payload.is_empty() {
                     variant.to_string()
                 } else {
-                    let inner = payload.iter().map(|v| self.display_wire(v)).collect::<Vec<_>>().join(", ");
+                    let inner = payload
+                        .iter()
+                        .map(|v| self.display_wire(v))
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     format!("{variant}({inner})")
                 }
             }
-            WireValue::Channel(core) => format!("Channel(len={})", core.q.lock().unwrap().queue.len()),
-            WireValue::Shared(core) => format!("Shared({})", self.display_wire(&core.v.lock().unwrap())),
-            WireValue::Atomic(core) => format!("Atomic({})", self.display_wire(&core.v.lock().unwrap())),
-            WireValue::Executor(core) => format!("Executor(pending={})", core.inner.lock().unwrap().queue.len()),
+            WireValue::Channel(core) => {
+                format!("Channel(len={})", core.q.lock().unwrap().queue.len())
+            }
+            WireValue::Shared(core) => {
+                format!("Shared({})", self.display_wire(&core.v.lock().unwrap()))
+            }
+            WireValue::Atomic(core) => {
+                format!("Atomic({})", self.display_wire(&core.v.lock().unwrap()))
+            }
+            WireValue::Executor(core) => format!(
+                "Executor(pending={})",
+                core.inner.lock().unwrap().queue.len()
+            ),
             // D6: render open/closed without exposing the fd (mirrors the heap `Display`).
             WireValue::Socket(core) => {
-                format!("Socket({})", if core.stream.lock().unwrap().is_some() { "open" } else { "closed" })
+                format!(
+                    "Socket({})",
+                    if core.stream.lock().unwrap().is_some() {
+                        "open"
+                    } else {
+                        "closed"
+                    }
+                )
             }
             WireValue::Listener(core) => {
-                format!("Listener({})", if core.listener.lock().unwrap().is_some() { "open" } else { "closed" })
+                format!(
+                    "Listener({})",
+                    if core.listener.lock().unwrap().is_some() {
+                        "open"
+                    } else {
+                        "closed"
+                    }
+                )
             }
             // An opaque `ptr` renders like its heap counterpart (`Obj::Ptr` → "<ptr null>"/"<ptr>");
             // never the raw address (non-deterministic across engines).
-            WireValue::Ptr(a) => if *a == 0 { "<ptr null>".to_string() } else { "<ptr>".to_string() },
+            WireValue::Ptr(a) => {
+                if *a == 0 {
+                    "<ptr null>".to_string()
+                } else {
+                    "<ptr>".to_string()
+                }
+            }
             // B3.6: a wired closure renders like its heap counterpart (`Obj::Closure` → "<closure>").
             WireValue::Closure { .. } => "<closure>".to_string(),
             // A wired cursor renders like its heap counterpart (`Obj::Iter` → "<iterator>").
@@ -11232,14 +13359,20 @@ impl Vm {
     /// time, so no pathological allocation is possible here. Lives in its own `#[inline(never)]`
     /// helper to keep `step`'s frame small (commit 1450077).
     #[inline(never)]
-    fn op_to_str_fmt(&mut self, spec: &crate::fmtspec::FormatSpec, span: Span) -> Result<(), RuntimeError> {
+    fn op_to_str_fmt(
+        &mut self,
+        spec: &crate::fmtspec::FormatSpec,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         let v = self.stack[self.stack.len() - 1]; // leave rooted; rendering may run user code
         let mut out = String::new();
         match v {
             Value::Int(n) => crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Int(n), &mut out)
                 .map_err(|m| self.err(m, span))?,
-            Value::Float(x) => crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Float(x), &mut out)
-                .map_err(|m| self.err(m, span))?,
+            Value::Float(x) => {
+                crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Float(x), &mut out)
+                    .map_err(|m| self.err(m, span))?
+            }
             Value::Obj(h) if matches!(self.heap.get(h), Obj::Str(_)) => {
                 let s = match self.heap.get(h) {
                     Obj::Str(s) => s.clone(),
@@ -11263,13 +13396,22 @@ impl Vm {
         Ok(())
     }
 
-    fn stringify_into(&mut self, out: &mut String, v: Value, span: Span, depth: usize) -> Result<(), RuntimeError> {
+    fn stringify_into(
+        &mut self,
+        out: &mut String,
+        v: Value,
+        span: Span,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
         use std::fmt::Write as _;
         // Guard against cyclic data overflowing the host stack — turns SIGABRT into a recoverable
         // `RuntimeError` (a `str` method re-stringifies at the *same* depth, so a non-recursive
         // protocol hook doesn't burn the budget).
         if depth > MAX_STRUCTURAL_DEPTH {
-            return Err(self.err("maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(), span));
+            return Err(self.err(
+                "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
+                span,
+            ));
         }
         match v {
             Value::Int(n) => {
@@ -11290,7 +13432,13 @@ impl Vm {
         Ok(())
     }
 
-    fn stringify_obj_into(&mut self, out: &mut String, h: GcRef, span: Span, depth: usize) -> Result<(), RuntimeError> {
+    fn stringify_obj_into(
+        &mut self,
+        out: &mut String,
+        h: GcRef,
+        span: Span,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
         use std::fmt::Write as _;
         // Clone the object's shape out so no heap borrow is held across the nested `&mut self` calls.
         match self.heap.get(h).clone() {
@@ -11343,7 +13491,9 @@ impl Vm {
                     && self.program.protos[proto].arity == 1
                 {
                     let home = self.module_objs[def.module_idx];
-                    let res = self.guarded(|vm| vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span))?;
+                    let res = self.guarded(|vm| {
+                        vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span)
+                    })?;
                     return self.stringify_into(out, res, span, depth);
                 }
                 // Positional layout: recover declaration-order field names from the StructDef (the
@@ -11365,7 +13515,10 @@ impl Vm {
                 }
                 out.push(')');
             }
-            Obj::Enum { variant_id, payload } => {
+            Obj::Enum {
+                variant_id,
+                payload,
+            } => {
                 // M19 lever #2 — recover the variant name from the id (cold stringify path).
                 out.push_str(self.enum_names(variant_id).1);
                 if !payload.is_empty() {
@@ -11389,7 +13542,13 @@ impl Vm {
             }
             // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
             // (matches the interpreter's `stringify` catch-all falling back to `Display`).
-            Obj::Channel(_) | Obj::Shared(_) | Obj::Atomic(_) | Obj::Executor(_) | Obj::Socket(_) | Obj::Listener(_) | Obj::Ptr(_) => {
+            Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::Atomic(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Ptr(_) => {
                 out.push_str(&self.display_guarded(Value::Obj(h), depth)?);
             }
             // Experimental generators stringify opaquely (no protocol hook).
@@ -11399,7 +13558,13 @@ impl Vm {
         Ok(())
     }
 
-    fn stringify_seq_into(&mut self, out: &mut String, elems: &[Value], span: Span, depth: usize) -> Result<(), RuntimeError> {
+    fn stringify_seq_into(
+        &mut self,
+        out: &mut String,
+        elems: &[Value],
+        span: Span,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
         for (i, e) in elems.iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
@@ -11452,7 +13617,11 @@ impl crate::native::Host for OffloadHost {
         match self.args.get(i) {
             // Pre-extracted on the worker (heap live) into owned pairs; served back off-thread.
             Some(crate::native::NativeArg::Map(pairs)) => Ok(pairs.clone()),
-            Some(_) => Err(crate::native::HostError::arg_type(i, "map[str, str]", "other")),
+            Some(_) => Err(crate::native::HostError::arg_type(
+                i,
+                "map[str, str]",
+                "other",
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -11493,7 +13662,11 @@ impl crate::native::Host for VmHost<'_> {
     fn arg_int(&mut self, i: usize) -> Result<i64, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Int(n)) => Ok(*n),
-            Some(other) => Err(crate::native::HostError::arg_type(i, "int", self.vm.type_name(*other))),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "int",
+                self.vm.type_name(*other),
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -11504,14 +13677,22 @@ impl crate::native::Host for VmHost<'_> {
         match self.args.get(i) {
             Some(Value::Float(f)) => Ok(*f),
             Some(Value::Int(n)) => Ok(*n as f64),
-            Some(other) => Err(crate::native::HostError::arg_type(i, "float", self.vm.type_name(*other))),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "float",
+                self.vm.type_name(*other),
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
     fn arg_bool(&mut self, i: usize) -> Result<bool, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Bool(b)) => Ok(*b),
-            Some(other) => Err(crate::native::HostError::arg_type(i, "bool", self.vm.type_name(*other))),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "bool",
+                self.vm.type_name(*other),
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -11524,7 +13705,11 @@ impl crate::native::Host for VmHost<'_> {
                     Err(crate::native::HostError::arg_type(i, "ptr", got))
                 }
             },
-            Some(other) => Err(crate::native::HostError::arg_type(i, "ptr", self.vm.type_name(*other))),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "ptr",
+                self.vm.type_name(*other),
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -11537,7 +13722,11 @@ impl crate::native::Host for VmHost<'_> {
                     Err(crate::native::HostError::arg_type(i, "str", got))
                 }
             },
-            Some(other) => Err(crate::native::HostError::arg_type(i, "str", self.vm.type_name(*other))),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "str",
+                self.vm.type_name(*other),
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -11550,11 +13739,20 @@ impl crate::native::Host for VmHost<'_> {
                     let mut pairs = Vec::with_capacity(m.entries.len());
                     for (_, k, v) in &m.entries {
                         let (Value::Obj(kh), Value::Obj(vh)) = (k, v) else {
-                            return Err(crate::native::HostError::arg_type(i, "map[str, str]", "other"));
+                            return Err(crate::native::HostError::arg_type(
+                                i,
+                                "map[str, str]",
+                                "other",
+                            ));
                         };
-                        let (Obj::Str(ks), Obj::Str(vs)) = (self.vm.heap.get(*kh), self.vm.heap.get(*vh))
+                        let (Obj::Str(ks), Obj::Str(vs)) =
+                            (self.vm.heap.get(*kh), self.vm.heap.get(*vh))
                         else {
-                            return Err(crate::native::HostError::arg_type(i, "map[str, str]", "other"));
+                            return Err(crate::native::HostError::arg_type(
+                                i,
+                                "map[str, str]",
+                                "other",
+                            ));
                         };
                         pairs.push((ks.to_string(), vs.to_string()));
                     }
@@ -11565,9 +13763,11 @@ impl crate::native::Host for VmHost<'_> {
                     Err(crate::native::HostError::arg_type(i, "map[str, str]", got))
                 }
             },
-            Some(other) => {
-                Err(crate::native::HostError::arg_type(i, "map[str, str]", self.vm.type_name(*other)))
-            }
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "map[str, str]",
+                self.vm.type_name(*other),
+            )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -11589,7 +13789,9 @@ impl crate::native::Host for VmHost<'_> {
     fn os_getcwd(&self) -> Result<String, crate::native::HostError> {
         std::env::current_dir()
             .map(|p| p.display().to_string())
-            .map_err(|e| crate::native::HostError { message: e.to_string() })
+            .map_err(|e| crate::native::HostError {
+                message: e.to_string(),
+            })
     }
     fn request_exit(&mut self, code: i64) {
         self.vm.pending_exit = Some(code.clamp(0, 255) as i32);
@@ -11599,7 +13801,6 @@ impl crate::native::Host for VmHost<'_> {
 fn is_numeric(v: Value) -> bool {
     matches!(v, Value::Int(_) | Value::Float(_))
 }
-
 
 fn as_f64(v: Value) -> f64 {
     match v {
@@ -11637,15 +13838,39 @@ pub fn run_program(src: &str) -> (String, Result<(), RuntimeError>) {
 fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
     let tokens = match lexer::tokenize(src) {
         Ok(t) => t,
-        Err(e) => return (String::new(), Err(RuntimeError { message: e.to_string(), span: Span { line: 1, col: 1 } })),
+        Err(e) => {
+            return (
+                String::new(),
+                Err(RuntimeError {
+                    message: e.to_string(),
+                    span: Span { line: 1, col: 1 },
+                }),
+            );
+        }
     };
     let module = match parser::parse(tokens) {
         Ok(m) => m,
-        Err(e) => return (String::new(), Err(RuntimeError { message: e.message, span: e.span })),
+        Err(e) => {
+            return (
+                String::new(),
+                Err(RuntimeError {
+                    message: e.message,
+                    span: e.span,
+                }),
+            );
+        }
     };
     let program = match crate::compiler::compile_module_standalone(&module) {
         Ok(p) => p,
-        Err(e) => return (String::new(), Err(RuntimeError { message: e.message, span: e.span })),
+        Err(e) => {
+            return (
+                String::new(),
+                Err(RuntimeError {
+                    message: e.message,
+                    span: e.span,
+                }),
+            );
+        }
     };
     let mut vm = Vm::new(Arc::new(program));
     let result = vm
@@ -11670,12 +13895,24 @@ pub fn run_capture_parallel(src: &str) -> Result<String, RuntimeError> {
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
-            let tokens = lexer::tokenize(&src).map_err(|e| RuntimeError { message: e.to_string(), span: Span { line: 1, col: 1 } })?;
-            let module = parser::parse(tokens).map_err(|e| RuntimeError { message: e.message, span: e.span })?;
-            let program = crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError { message: e.message, span: e.span })?;
+            let tokens = lexer::tokenize(&src).map_err(|e| RuntimeError {
+                message: e.to_string(),
+                span: Span { line: 1, col: 1 },
+            })?;
+            let module = parser::parse(tokens).map_err(|e| RuntimeError {
+                message: e.message,
+                span: e.span,
+            })?;
+            let program =
+                crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError {
+                    message: e.message,
+                    span: e.span,
+                })?;
             let mut vm = Vm::new(Arc::new(program));
             vm.parallel = true;
-            vm.run().and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 })).map(|()| vm.out)
+            vm.run()
+                .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }))
+                .map(|()| vm.out)
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -11693,15 +13930,39 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
         .spawn(move || {
             let tokens = match lexer::tokenize(&src) {
                 Ok(t) => t,
-                Err(e) => return (Err(RuntimeError { message: e.to_string(), span: Span { line: 1, col: 1 } }), 0),
+                Err(e) => {
+                    return (
+                        Err(RuntimeError {
+                            message: e.to_string(),
+                            span: Span { line: 1, col: 1 },
+                        }),
+                        0,
+                    );
+                }
             };
             let module = match parser::parse(tokens) {
                 Ok(m) => m,
-                Err(e) => return (Err(RuntimeError { message: e.message, span: e.span }), 0),
+                Err(e) => {
+                    return (
+                        Err(RuntimeError {
+                            message: e.message,
+                            span: e.span,
+                        }),
+                        0,
+                    );
+                }
             };
             let program = match crate::compiler::compile_module_standalone(&module) {
                 Ok(p) => p,
-                Err(e) => return (Err(RuntimeError { message: e.message, span: e.span }), 0),
+                Err(e) => {
+                    return (
+                        Err(RuntimeError {
+                            message: e.message,
+                            span: e.span,
+                        }),
+                        0,
+                    );
+                }
             };
             let mut vm = Vm::new(Arc::new(program));
             vm.gc_stress = stress;
@@ -11726,11 +13987,23 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
     std::thread::Builder::new()
         .stack_size(stack_bytes)
         .spawn(move || {
-            let tokens = lexer::tokenize(&src).map_err(|e| RuntimeError { message: e.to_string(), span: Span { line: 1, col: 1 } })?;
-            let module = parser::parse(tokens).map_err(|e| RuntimeError { message: e.message, span: e.span })?;
-            let program = crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError { message: e.message, span: e.span })?;
+            let tokens = lexer::tokenize(&src).map_err(|e| RuntimeError {
+                message: e.to_string(),
+                span: Span { line: 1, col: 1 },
+            })?;
+            let module = parser::parse(tokens).map_err(|e| RuntimeError {
+                message: e.message,
+                span: e.span,
+            })?;
+            let program =
+                crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError {
+                    message: e.message,
+                    span: e.span,
+                })?;
             let mut vm = Vm::new(Arc::new(program));
-            vm.run().and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 })).map(|()| vm.out)
+            vm.run()
+                .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }))
+                .map(|()| vm.out)
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -11740,7 +14013,9 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
 /// Stdout from a stress-mode run (panics on error) — convenience for parity-under-GC tests.
 #[cfg(test)]
 pub fn run_capture_stress(src: &str) -> String {
-    run_with(src, true).0.unwrap_or_else(|e| panic!("unexpected runtime error under GC stress: {e}"))
+    run_with(src, true)
+        .0
+        .unwrap_or_else(|e| panic!("unexpected runtime error under GC stress: {e}"))
 }
 
 /// Run a single-file program, returning stdout (or error) plus the **final nursery-stack depth**
@@ -11755,15 +14030,39 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
         .spawn(move || {
             let tokens = match lexer::tokenize(&src) {
                 Ok(t) => t,
-                Err(e) => return (Err(RuntimeError { message: e.to_string(), span: Span { line: 1, col: 1 } }), 0),
+                Err(e) => {
+                    return (
+                        Err(RuntimeError {
+                            message: e.to_string(),
+                            span: Span { line: 1, col: 1 },
+                        }),
+                        0,
+                    );
+                }
             };
             let module = match parser::parse(tokens) {
                 Ok(m) => m,
-                Err(e) => return (Err(RuntimeError { message: e.message, span: e.span }), 0),
+                Err(e) => {
+                    return (
+                        Err(RuntimeError {
+                            message: e.message,
+                            span: e.span,
+                        }),
+                        0,
+                    );
+                }
             };
             let program = match crate::compiler::compile_module_standalone(&module) {
                 Ok(p) => p,
-                Err(e) => return (Err(RuntimeError { message: e.message, span: e.span }), 0),
+                Err(e) => {
+                    return (
+                        Err(RuntimeError {
+                            message: e.message,
+                            span: e.span,
+                        }),
+                        0,
+                    );
+                }
             };
             let mut vm = Vm::new(Arc::new(program));
             let result = vm
@@ -11805,7 +14104,11 @@ pub fn run_file_parallel(entry: &std::path::Path, cfg: crate::native::HostConfig
     run_file_engine(entry, cfg, true)
 }
 
-fn run_file_engine(entry: &std::path::Path, cfg: crate::native::HostConfig, parallel: bool) -> RunOutput {
+fn run_file_engine(
+    entry: &std::path::Path,
+    cfg: crate::native::HostConfig,
+    parallel: bool,
+) -> RunOutput {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
@@ -11815,14 +14118,38 @@ fn run_file_engine(entry: &std::path::Path, cfg: crate::native::HostConfig, para
         .expect("VM thread panicked")
 }
 
-fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig, parallel: bool) -> RunOutput {
+fn run_file_inner(
+    entry: &std::path::Path,
+    cfg: crate::native::HostConfig,
+    parallel: bool,
+) -> RunOutput {
     let graph = match crate::resolver::build_graph(entry) {
         Ok(g) => g,
-        Err(e) => return (String::new(), String::new(), Err(RunError::plain(RuntimeError { message: e.message, span: e.span })), None),
+        Err(e) => {
+            return (
+                String::new(),
+                String::new(),
+                Err(RunError::plain(RuntimeError {
+                    message: e.message,
+                    span: e.span,
+                })),
+                None,
+            );
+        }
     };
     let program = match crate::compiler::compile_graph(&graph) {
         Ok(p) => p,
-        Err(e) => return (String::new(), String::new(), Err(RunError::plain(RuntimeError { message: e.message, span: e.span })), None),
+        Err(e) => {
+            return (
+                String::new(),
+                String::new(),
+                Err(RunError::plain(RuntimeError {
+                    message: e.message,
+                    span: e.span,
+                })),
+                None,
+            );
+        }
     };
     let mut vm = Vm::new(Arc::new(program));
     vm.host = cfg;
@@ -11878,8 +14205,14 @@ mod tests {
                 crate::native::NativeArg::Str("not-a-map".into()),
             ],
         };
-        assert_eq!(host.arg_str_map(0).unwrap(), vec![("X-Custom".into(), "value".into())]);
-        assert!(host.arg_str_map(1).is_err(), "a non-map NativeArg must error");
+        assert_eq!(
+            host.arg_str_map(0).unwrap(),
+            vec![("X-Custom".into(), "value".into())]
+        );
+        assert!(
+            host.arg_str_map(1).is_err(),
+            "a non-map NativeArg must error"
+        );
         assert!(host.arg_str_map(9).is_err(), "a missing arg must error");
     }
 
@@ -11915,7 +14248,10 @@ mod tests {
         let mut vm = Vm::new(Arc::new(empty_program()));
         let m = build_str_map(&mut vm, &[("one", "1"), ("two", "2")]);
         let not_map = Value::Int(3);
-        let mut host = VmHost { vm: &mut vm, args: vec![m, not_map] };
+        let mut host = VmHost {
+            vm: &mut vm,
+            args: vec![m, not_map],
+        };
         assert_eq!(
             host.arg_str_map(0).unwrap(),
             vec![("one".into(), "1".into()), ("two".into(), "2".into())]
@@ -11939,7 +14275,10 @@ mod tests {
     fn implicit_nursery_return_joins_vm() {
         let src = "fn w(n: int):\n    print(\"w{n}\")\nfn f() -> int:\n    spawn w(1)\n    spawn w(2)\n    print(\"x\")\n    return 0\nfn main():\n    print(f())\nmain()\n";
         assert_eq!(run(src), "x\nw1\nw2\n0\n");
-        assert_eq!(run_capture_parallel(src).expect("parallel"), "x\nw1\nw2\n0\n");
+        assert_eq!(
+            run_capture_parallel(src).expect("parallel"),
+            "x\nw1\nw2\n0\n"
+        );
     }
 
     /// M-C: the module top level is an implicit nursery that joins at program exit.
@@ -11955,8 +14294,16 @@ mod tests {
     #[cfg(test)]
     fn assert_mc_parity(src: &str, expected: &str) {
         assert_eq!(run(src), expected, "cooperative VM");
-        assert_eq!(crate::interp::run_capture(src).expect("interp"), expected, "interp");
-        assert_eq!(run_capture_parallel(src).expect("parallel"), expected, "--parallel");
+        assert_eq!(
+            crate::interp::run_capture(src).expect("interp"),
+            expected,
+            "interp"
+        );
+        assert_eq!(
+            run_capture_parallel(src).expect("parallel"),
+            expected,
+            "--parallel"
+        );
     }
 
     /// M-C: spawned tasks JOIN before the frame's `defer`s run (tasks complete, then cleanup).
@@ -12011,7 +14358,10 @@ mod tests {
     #[test]
     fn implicit_nursery_fault_cancels_pending_tasks() {
         let src = "fn w():\n    print(\"should not run\")\nfn f():\n    spawn w()\n    x := [1]\n    print(x[9])\nfn main():\n    r := recover:\n        f()\n        0\n    print(\"recovered\")\nmain()\n";
-        assert_mc_parity(src, "1 pending task(s) cancelled on early exit from parallel:\nrecovered\n");
+        assert_mc_parity(
+            src,
+            "1 pending task(s) cancelled on early exit from parallel:\nrecovered\n",
+        );
     }
 
     /// Assert an UNCAUGHT fault yields identical stdout on the cooperative VM and the frozen interp,
@@ -12033,7 +14383,10 @@ mod tests {
     #[test]
     fn uncaught_fault_reports_implicit_nursery() {
         let src = "fn w():\n    print(\"should not run\")\nfn boom():\n    spawn w()\n    x := [1]\n    print(x[9])\nfn main():\n    boom()\nmain()\n";
-        assert_fault_parity(src, "1 pending task(s) cancelled on early exit from parallel:\n");
+        assert_fault_parity(
+            src,
+            "1 pending task(s) cancelled on early exit from parallel:\n",
+        );
     }
 
     /// Parity gap fix (T2): an UNCAUGHT fault inside an explicit `parallel:` block reports its
@@ -12041,7 +14394,10 @@ mod tests {
     #[test]
     fn uncaught_fault_reports_explicit_parallel() {
         let src = "fn w():\n    print(\"should not run\")\nfn main():\n    parallel:\n        spawn w()\n        x := [1]\n        print(x[9])\nmain()\n";
-        assert_fault_parity(src, "1 pending task(s) cancelled on early exit from parallel:\n");
+        assert_fault_parity(
+            src,
+            "1 pending task(s) cancelled on early exit from parallel:\n",
+        );
     }
 
     /// Parity gap fix (T3): TWO stacked implicit nurseries each with a pending task report
@@ -12080,14 +14436,20 @@ mod tests {
     #[test]
     fn uncaught_fault_reports_before_frame_defers() {
         let src = "fn w():\n    print(\"task\")\nfn cleanup():\n    print(\"cleanup\")\nfn boom():\n    defer cleanup()\n    spawn w()\n    x := [1]\n    print(x[9])\nfn main():\n    boom()\nmain()\n";
-        assert_fault_parity(src, "1 pending task(s) cancelled on early exit from parallel:\ncleanup\n");
+        assert_fault_parity(
+            src,
+            "1 pending task(s) cancelled on early exit from parallel:\ncleanup\n",
+        );
     }
 
     /// Same report-before-defer ordering on the recover-CAUGHT path, then the recover continues.
     #[test]
     fn recover_caught_fault_reports_before_frame_defers() {
         let src = "fn w():\n    print(\"task\")\nfn cleanup():\n    print(\"cleanup\")\nfn boom():\n    defer cleanup()\n    spawn w()\n    x := [1]\n    print(x[9])\nfn main():\n    r := recover:\n        boom()\n        0\n    print(\"recovered\")\nmain()\n";
-        assert_mc_parity(src, "1 pending task(s) cancelled on early exit from parallel:\ncleanup\nrecovered\n");
+        assert_mc_parity(
+            src,
+            "1 pending task(s) cancelled on early exit from parallel:\ncleanup\nrecovered\n",
+        );
     }
 
     /// Multi-frame interleave: each unwound frame reports its nursery, THEN runs its defer, before
@@ -12170,7 +14532,9 @@ mod tests {
     fn interned_literal_as_map_key_repeated() {
         // A literal reused as a map key: aliasing must preserve structural (by-content) map lookup.
         assert_eq!(
-            run("m := {}\ni := 0\nwhile i < 3:\n    m[\"k\"] = i\n    i = i + 1\nprint(m[\"k\"])\n"),
+            run(
+                "m := {}\ni := 0\nwhile i < 3:\n    m[\"k\"] = i\n    i = i + 1\nprint(m[\"k\"])\n"
+            ),
             "2\n"
         );
     }
@@ -12188,9 +14552,15 @@ mod tests {
     fn per_char_sites_render_unchanged() {
         // `for c in str`, string indexing, `chars()`, and `chr()` all build 1-char strs via the
         // single-allocation helper — output must stay byte-identical (same UTF-8).
-        assert_eq!(run("for c in \"héllo\":\n    print(c)\n"), "h\né\nl\nl\no\n");
+        assert_eq!(
+            run("for c in \"héllo\":\n    print(c)\n"),
+            "h\né\nl\nl\no\n"
+        );
         assert_eq!(run("s := \"héllo\"\nprint(s[1])\n"), "é\n");
-        assert_eq!(run("for c in \"abc\".chars():\n    print(c)\n"), "a\nb\nc\n");
+        assert_eq!(
+            run("for c in \"abc\".chars():\n    print(c)\n"),
+            "a\nb\nc\n"
+        );
         assert_eq!(run("print(chr(233))\n"), "é\n");
     }
 
@@ -12265,7 +14635,10 @@ mod tests {
     fn idx_parity(src: &str) {
         let vm = run_capture(src).map_err(|e| e.to_string());
         let interp = crate::interp::run_capture(src).map_err(|e| e.to_string());
-        assert_eq!(vm, interp, "vm/interp divergence (index specialization must be behavior-preserving):\n{src}");
+        assert_eq!(
+            vm, interp,
+            "vm/interp divergence (index specialization must be behavior-preserving):\n{src}"
+        );
     }
 
     #[test]
@@ -12319,7 +14692,9 @@ mod tests {
         // Int(3) and Float(3.0) hash identically (3.0.to_bits()) and are values_equal. The fast path
         // shortcuts only the HASH, never the candidates+values_equal probe, so a Float key inserted as
         // 3.0 is found by m[3] and vice-versa — exactly the interpreter's behavior.
-        idx_parity("m := {}\nm[3] = \"int\"\nprint(m[3.0])\nm[3.0] = \"float\"\nprint(m[3])\nprint(m.len())\n");
+        idx_parity(
+            "m := {}\nm[3] = \"int\"\nprint(m[3.0])\nm[3.0] = \"float\"\nprint(m[3])\nprint(m.len())\n",
+        );
     }
 
     // ---- M19 Phase 4: struct-field inline cache (correctness guards) ----
@@ -12329,7 +14704,10 @@ mod tests {
     fn run_parity(src: &str) -> String {
         let vm = run_capture(src).expect("vm run");
         let interp = crate::interp::run_capture(src).expect("interp run");
-        assert_eq!(vm, interp, "vm/interp divergence (field IC must be behavior-preserving)");
+        assert_eq!(
+            vm, interp,
+            "vm/interp divergence (field IC must be behavior-preserving)"
+        );
         vm
     }
 
@@ -12452,7 +14830,10 @@ mod tests {
         assert_eq!(program.tests.len(), 1, "exactly one free test recorded");
         let (name, pid) = &program.tests[0];
         assert_eq!(name, "t");
-        assert!(program.protos[*pid].is_test, "the test proto is tagged is_test");
+        assert!(
+            program.protos[*pid].is_test,
+            "the test proto is tagged is_test"
+        );
         // The `helper` proto is not a test.
         assert!(
             program.protos.iter().filter(|p| p.is_test).count() == 1,
@@ -12469,8 +14850,14 @@ mod tests {
         assert_eq!(program.suites.len(), 1, "one suite discovered");
         let s = &program.suites[0];
         assert_eq!(s.name, "S");
-        assert_eq!(s.tests.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["a"]);
-        assert!(s.hooks.contains_key("before_each"), "before_each hook recorded");
+        assert_eq!(
+            s.tests.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        assert!(
+            s.hooks.contains_key("before_each"),
+            "before_each hook recorded"
+        );
         // The thunk proto exists and the struct records its test methods.
         assert!(s.new_thunk < program.protos.len());
         assert_eq!(program.structs["S"].test_methods, vec!["a".to_string()]);
@@ -12488,11 +14875,18 @@ mod tests {
         let vm = Vm::new(Arc::new(program.clone()));
         let total: usize = program.protos.iter().map(|p| p.code.len()).sum();
         assert_eq!(vm.quicken.len(), total, "one quicken cell per instruction");
-        assert_eq!(vm.quicken_base.len(), program.protos.len(), "one base per proto");
+        assert_eq!(
+            vm.quicken_base.len(),
+            program.protos.len(),
+            "one base per proto"
+        );
         // prefix-sum invariant: base[0]==0, base[k+1]==base[k]+len(proto[k])
         let mut acc = 0u32;
         for (pid, p) in program.protos.iter().enumerate() {
-            assert_eq!(vm.quicken_base[pid], acc, "base[{pid}] is the running prefix sum");
+            assert_eq!(
+                vm.quicken_base[pid], acc,
+                "base[{pid}] is the running prefix sum"
+            );
             acc += p.code.len() as u32;
         }
         // all cells start Cold (0)
@@ -12570,7 +14964,11 @@ mod tests {
         let tokens = lexer::tokenize(src).unwrap();
         let module = parser::parse(tokens).unwrap();
         let program = crate::compiler::compile_module_standalone(&module).unwrap();
-        assert!(program.method_ic_sites >= 1, "expected ≥1 method-IC site, got {}", program.method_ic_sites);
+        assert!(
+            program.method_ic_sites >= 1,
+            "expected ≥1 method-IC site, got {}",
+            program.method_ic_sites
+        );
         let vm = Vm::new(Arc::new(program.clone()));
         assert_eq!(vm.method_ic.len(), program.method_ic_sites as usize);
     }
@@ -12664,8 +15062,14 @@ mod tests {
             Ok(o) => panic!("expected interp error, got {o:?}"),
             Err(e) => e.message,
         };
-        assert_eq!(vm_err, interp_err, "VM/interp must agree on the IC-hit-path fault message");
-        assert!(vm_err.contains("zero") || vm_err.contains("division"), "got: {vm_err}");
+        assert_eq!(
+            vm_err, interp_err,
+            "VM/interp must agree on the IC-hit-path fault message"
+        );
+        assert!(
+            vm_err.contains("zero") || vm_err.contains("division"),
+            "got: {vm_err}"
+        );
     }
 
     #[test]
@@ -12767,9 +15171,15 @@ mod tests {
         // Exactly one method-call site (the `x.id()` in `sum`), and it must have gone sticky with all
         // 4 ways filled by the first four distinct tids.
         let sticky_sites = vm.method_ic.iter().filter(|s| s.sticky).count();
-        assert_eq!(sticky_sites, 1, "expected the megamorphic `id` site to latch sticky");
+        assert_eq!(
+            sticky_sites, 1,
+            "expected the megamorphic `id` site to latch sticky"
+        );
         let sticky = vm.method_ic.iter().find(|s| s.sticky).unwrap();
-        assert!(sticky.ways.iter().all(|w| w.tid != TID_NONE), "all 4 ways should be occupied before sticky");
+        assert!(
+            sticky.ways.iter().all(|w| w.tid != TID_NONE),
+            "all 4 ways should be occupied before sticky"
+        );
     }
 
     #[test]
@@ -12815,7 +15225,10 @@ mod tests {
         // a host stack far below production `VM_STACK_BYTES`, like the plain-call flatten guarantee.
         let src = "struct R:\n    base: int\n\n    fn down(self, n: int) -> int:\n        if n == 0:\n            return self.base\n        return self.down(n - 1)\n\
                    r := R(99)\nprint(r.down(8000))\n";
-        assert_eq!(run_capture_on_stack(src, 256 * 1024).expect("deep method recursion on small stack"), "99\n");
+        assert_eq!(
+            run_capture_on_stack(src, 256 * 1024).expect("deep method recursion on small stack"),
+            "99\n"
+        );
     }
 
     #[test]
@@ -12824,9 +15237,14 @@ mod tests {
         // in-place fast path could introduce are stack-position errors — wrong arg order, a stale
         // callee slot left under the result, or a misplaced return value in a larger expression.
         // Non-commutative op catches arg-order swaps; the nested/expression forms catch slot drift.
-        assert_eq!(run("fn sub(a: int, b: int) -> int:\n    return a - b\nprint(sub(10, 3))\n"), "7\n");
         assert_eq!(
-            run("fn sub(a: int, b: int) -> int:\n    return a - b\nprint(sub(sub(20, 5), sub(8, 3)))\n"),
+            run("fn sub(a: int, b: int) -> int:\n    return a - b\nprint(sub(10, 3))\n"),
+            "7\n"
+        );
+        assert_eq!(
+            run(
+                "fn sub(a: int, b: int) -> int:\n    return a - b\nprint(sub(sub(20, 5), sub(8, 3)))\n"
+            ),
             "10\n"
         );
         assert_eq!(
@@ -12834,10 +15252,15 @@ mod tests {
             "15\n"
         );
         // Zero-arg call returning a value; result used in an expression.
-        assert_eq!(run("fn five() -> int:\n    return 5\nprint(five() + 1)\n"), "6\n");
+        assert_eq!(
+            run("fn five() -> int:\n    return 5\nprint(five() + 1)\n"),
+            "6\n"
+        );
         // Recursion through the call path.
         assert_eq!(
-            run("fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nprint(fib(10))\n"),
+            run(
+                "fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nprint(fib(10))\n"
+            ),
             "55\n"
         );
         // Closure value called via a binding (the Closure arm of the fast path).
@@ -12848,10 +15271,15 @@ mod tests {
             "107\n"
         );
         // HOF native (`map`) still routes through the Vec path in invoke_value — must stay correct.
-        assert_eq!(run("print([1, 2, 3].map(fn(x: int) -> int: x + 1))\n"), "[2, 3, 4]\n");
+        assert_eq!(
+            run("print([1, 2, 3].map(fn(x: int) -> int: x + 1))\n"),
+            "[2, 3, 4]\n"
+        );
         // `defer` inside a called fn runs at that fn's exit (LIFO), not the caller's.
         assert_eq!(
-            run("fn log(s: str):\n    print(s)\nfn f():\n    defer log(\"a\")\n    defer log(\"b\")\n    log(\"body\")\nf()\nlog(\"after\")\n"),
+            run(
+                "fn log(s: str):\n    print(s)\nfn f():\n    defer log(\"a\")\n    defer log(\"b\")\n    log(\"body\")\nf()\nlog(\"after\")\n"
+            ),
             "body\nb\na\nafter\n"
         );
     }
@@ -12865,7 +15293,10 @@ mod tests {
         assert_eq!(run("print(\"{[1, 2, 3]}\")\n"), "[1, 2, 3]\n");
         assert_eq!(run("print(\"{(1, 2)}\")\n"), "(1, 2)\n");
         assert_eq!(run("print(\"{[[1], [2, 3]]}\")\n"), "[[1], [2, 3]]\n");
-        assert_eq!(run("m := {\"a\": 1, \"b\": 2}\nprint(\"{m}\")\n"), "{a: 1, b: 2}\n");
+        assert_eq!(
+            run("m := {\"a\": 1, \"b\": 2}\nprint(\"{m}\")\n"),
+            "{a: 1, b: 2}\n"
+        );
         assert_eq!(run("print(str({1, 2}))\n"), "{1, 2}\n");
         assert_eq!(run("s: set[int] = set()\nprint(str(s))\n"), "set()\n");
         // Struct default repr + a multi-part f-string mixing literal text and several holes.
@@ -12875,7 +15306,9 @@ mod tests {
         );
         // `str(self)` protocol hook overrides the default repr inside interpolation.
         assert_eq!(
-            run("struct Pt:\n    x: int\n    fn str(self) -> str:\n        return \"<{self.x}>\"\nprint(\"v={Pt(7)}\")\n"),
+            run(
+                "struct Pt:\n    x: int\n    fn str(self) -> str:\n        return \"<{self.x}>\"\nprint(\"v={Pt(7)}\")\n"
+            ),
             "v=<7>\n"
         );
         // Enum nullary + payload variants.
@@ -12888,7 +15321,10 @@ mod tests {
     #[test]
     fn list_comprehension_maps_and_filters() {
         assert_eq!(run("print([x * 2 for x in [1, 2, 3]])\n"), "[2, 4, 6]\n");
-        assert_eq!(run("print([x for x in [1, 2, 3, 4] if x % 2 == 0])\n"), "[2, 4]\n");
+        assert_eq!(
+            run("print([x for x in [1, 2, 3, 4] if x % 2 == 0])\n"),
+            "[2, 4]\n"
+        );
     }
 
     #[test]
@@ -12898,12 +15334,18 @@ mod tests {
 
     #[test]
     fn set_comprehension_dedupes() {
-        assert_eq!(run("print({x % 3 for x in [0, 1, 2, 3, 4, 5]})\n"), "{0, 1, 2}\n");
+        assert_eq!(
+            run("print({x % 3 for x in [0, 1, 2, 3, 4, 5]})\n"),
+            "{0, 1, 2}\n"
+        );
     }
 
     #[test]
     fn map_comprehension_builds_entries() {
-        assert_eq!(run("print({x: x * x for x in [1, 2, 3]})\n"), "{1: 1, 2: 4, 3: 9}\n");
+        assert_eq!(
+            run("print({x: x * x for x in [1, 2, 3]})\n"),
+            "{1: 1, 2: 4, 3: 9}\n"
+        );
     }
 
     #[test]
@@ -12990,11 +15432,13 @@ main()
         let vm = run_capture(src).expect("vm run");
         let interp = crate::interp::run_capture(src).expect("interp run");
         // Two-engine parity (the hard rule).
-        assert_eq!(vm, interp, "VM vs interp divergence on stateful-iterator comprehension");
+        assert_eq!(
+            vm, interp,
+            "VM vs interp divergence on stateful-iterator comprehension"
+        );
         // And the canonical (lazy/interleaved) result: each element reads the just-advanced `n`.
         assert_eq!(
-            vm,
-            "[1, 102, 203]\n[1, 1, 102, 102, 203, 203]\n",
+            vm, "[1, 102, 203]\n[1, 1, 102, 102, 203, 203]\n",
             "lazy interleaved iteration expected"
         );
     }
@@ -13024,7 +15468,10 @@ main()
             Ok(NativeRet::Int(h.arg_int(0)? + h.arg_int(1)?))
         }
         let mut vm = Vm::new(Arc::new(empty_program()));
-        let h = vm.heap.alloc(Obj::Native { name: "add".into(), func: add });
+        let h = vm.heap.alloc(Obj::Native {
+            name: "add".into(),
+            func: add,
+        });
         vm.push(Value::Obj(h));
         vm.push(Value::Int(40));
         vm.push(Value::Int(2));
@@ -13040,8 +15487,13 @@ main()
         // gated non-sendable like a generator, which panicked `deep_clone`'s `.expect` and diverged VM
         // from interp; a cursor is plain data — a snapshot Vec + index — so it crosses by value.)
         let mut vm = Vm::new(Arc::new(empty_program()));
-        let cursor = Value::Obj(vm.heap.alloc(Obj::Iter { items: vec![Value::Int(7), Value::Int(8)], pos: 1 }));
-        let wire = vm.to_wire(cursor).expect("a cursor is sendable by deep copy");
+        let cursor = Value::Obj(vm.heap.alloc(Obj::Iter {
+            items: vec![Value::Int(7), Value::Int(8)],
+            pos: 1,
+        }));
+        let wire = vm
+            .to_wire(cursor)
+            .expect("a cursor is sendable by deep copy");
         assert!(!wire.has_handle(), "a cursor of scalars carries no handle");
         match &wire {
             WireValue::Iter { items, pos } => {
@@ -13052,7 +15504,9 @@ main()
         }
         // Rebuild on the heap: an independent cursor with the same items + pos.
         let rebuilt = vm.from_wire(wire);
-        let Value::Obj(h) = rebuilt else { panic!("from_wire(cursor) must be a heap obj") };
+        let Value::Obj(h) = rebuilt else {
+            panic!("from_wire(cursor) must be a heap obj")
+        };
         match vm.heap.get(h) {
             Obj::Iter { items, pos } => {
                 assert_eq!(*pos, 1);
@@ -13069,7 +15523,10 @@ main()
             Ok(NativeRet::Str("hi".into()))
         }
         let mut vm = Vm::new(Arc::new(empty_program()));
-        let nat = vm.heap.alloc(Obj::Native { name: "greet".into(), func: greet });
+        let nat = vm.heap.alloc(Obj::Native {
+            name: "greet".into(),
+            func: greet,
+        });
         // A native fn handle has no GC children (guards the mark-phase claim).
         assert!(vm.heap.children(nat).is_empty());
         vm.push(Value::Obj(nat));
@@ -13087,7 +15544,9 @@ main()
     fn wire_roundtrip_preserves_value_equality() {
         let mut vm = Vm::new(Arc::new(empty_program()));
         let s = vm.heap.alloc(Obj::Str("s".into()));
-        let tup = vm.heap.alloc(Obj::Tuple(vec![Value::Bool(true), Value::Nil]));
+        let tup = vm
+            .heap
+            .alloc(Obj::Tuple(vec![Value::Bool(true), Value::Nil]));
         let st = vm.heap.alloc(Obj::Struct {
             name: "P".into(),
             tid: TID_NONE,
@@ -13118,11 +15577,19 @@ main()
         ]));
         let v = Value::Obj(list);
 
-        let w = vm.to_wire(v).expect("nested sendable value should serialize");
+        let w = vm
+            .to_wire(v)
+            .expect("nested sendable value should serialize");
         let wired = vm.from_wire(w);
-        assert!(vm.values_equal(v, wired), "wire round-trip changed the value");
+        assert!(
+            vm.values_equal(v, wired),
+            "wire round-trip changed the value"
+        );
         // Data is reconstructed into a *fresh* handle (deep copy, not aliasing the original).
-        assert_ne!(v, wired, "round-tripped data should be a distinct heap object");
+        assert_ne!(
+            v, wired,
+            "round-tripped data should be a distinct heap object"
+        );
     }
 
     /// `Map`/`Set` cross the wire carrying their **cached hashes** and **insertion order** unchanged —
@@ -13139,10 +15606,18 @@ main()
 
         let w = vm.to_wire(map).expect("map should serialize");
         let wired = vm.from_wire(w);
-        let Value::Obj(h) = wired else { panic!("expected heap obj") };
-        let Obj::Map(rebuilt) = vm.heap.get(h) else { panic!("expected map") };
+        let Value::Obj(h) = wired else {
+            panic!("expected heap obj")
+        };
+        let Obj::Map(rebuilt) = vm.heap.get(h) else {
+            panic!("expected map")
+        };
         let hashes: Vec<u64> = rebuilt.entries.iter().map(|(hash, ..)| *hash).collect();
-        assert_eq!(hashes, vec![42, 7, 42], "cached hashes / order must survive the round-trip");
+        assert_eq!(
+            hashes,
+            vec![42, 7, 42],
+            "cached hashes / order must survive the round-trip"
+        );
         // The index must reflect the cached hashes (collision bucket points at positions 0 and 2).
         assert_eq!(rebuilt.candidates(42), &[0, 2]);
         assert_eq!(rebuilt.candidates(7), &[1]);
@@ -13154,10 +15629,18 @@ main()
     #[test]
     fn wire_passes_by_reference_objects_as_same_handle() {
         let mut vm = Vm::new(Arc::new(empty_program()));
-        let m = vm.heap.alloc(Obj::Module { name: "m".into(), slots: Vec::new(), index: Default::default() });
+        let m = vm.heap.alloc(Obj::Module {
+            name: "m".into(),
+            slots: Vec::new(),
+            index: Default::default(),
+        });
         let v = Value::Obj(m);
         let w = vm.to_wire(v).expect("by-ref object should serialize");
-        assert_eq!(vm.from_wire(w), v, "by-reference object must round-trip to the same handle");
+        assert_eq!(
+            vm.from_wire(w),
+            v,
+            "by-reference object must round-trip to the same handle"
+        );
     }
 
     /// B3.3a: a `str` crosses the airlock **by value** (owned bytes), not as a by-reference
@@ -13172,8 +15655,14 @@ main()
         let v = Value::Obj(s);
         let w = vm.to_wire(v).expect("str should serialize");
         let wired = vm.from_wire(w);
-        assert_ne!(wired, v, "a crossed str gets a fresh handle (by value, not by handle)");
-        assert!(vm.values_equal(v, wired), "the fresh str must be value-equal to the original");
+        assert_ne!(
+            wired, v,
+            "a crossed str gets a fresh handle (by value, not by handle)"
+        );
+        assert!(
+            vm.values_equal(v, wired),
+            "the fresh str must be value-equal to the original"
+        );
     }
 
     /// B3.3a: a `str` used as a **map key** crosses by value and stays findable — the cached hash is
@@ -13189,17 +15678,30 @@ main()
         m.push(h, Value::Obj(key), Value::Int(42));
         let map = Value::Obj(vm.heap.alloc(Obj::Map(m)));
 
-        let w = vm.to_wire(map).expect("map with a str key should serialize");
+        let w = vm
+            .to_wire(map)
+            .expect("map with a str key should serialize");
         let wired = vm.from_wire(w);
-        let Value::Obj(mh) = wired else { panic!("expected map handle") };
-        let Obj::Map(rebuilt) = vm.heap.get(mh) else { panic!("expected map") };
+        let Value::Obj(mh) = wired else {
+            panic!("expected map handle")
+        };
+        let Obj::Map(rebuilt) = vm.heap.get(mh) else {
+            panic!("expected map")
+        };
         // Same single entry: a fresh str key, value-equal, same cached hash → same bucket.
         assert_eq!(rebuilt.entries.len(), 1);
         let (rh, rk, rv) = &rebuilt.entries[0];
         assert_eq!(*rh, h, "cached hash preserved");
         assert_eq!(*rv, Value::Int(42));
-        assert_eq!(rebuilt.candidates(h), &[0], "index bucket points at the rebuilt key");
-        assert!(vm.values_equal(*rk, Value::Obj(key)), "rebuilt str key is value-equal");
+        assert_eq!(
+            rebuilt.candidates(h),
+            &[0],
+            "index bucket points at the rebuilt key"
+        );
+        assert!(
+            vm.values_equal(*rk, Value::Obj(key)),
+            "rebuilt str key is value-equal"
+        );
     }
 
     /// B3.1: `Channel`/`Shared`/`Executor` cross the airlock as their shared `Arc<…Core>`. The
@@ -13208,16 +15710,26 @@ main()
     #[test]
     fn wire_shares_core_across_a_fresh_handle() {
         let mut vm = Vm::new(Arc::new(empty_program()));
-        let ch = vm.heap.alloc(Obj::Channel(Arc::new(ChannelCore::default())));
+        let ch = vm
+            .heap
+            .alloc(Obj::Channel(Arc::new(ChannelCore::default())));
         let sh = vm.heap.alloc(Obj::Shared(Arc::new(SharedCore::default())));
-        let ex = vm.heap.alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
+        let ex = vm
+            .heap
+            .alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
         for h in [ch, sh, ex] {
             let v = Value::Obj(h);
             let w = vm.to_wire(v).expect("core handle should serialize");
             let wired = vm.from_wire(w);
             assert_ne!(wired, v, "a crossed core gets a fresh handle (new GcRef)");
             // Same underlying core: an `Arc::ptr_eq` between the two handles' cores.
-            let same = match (vm.heap.get(h), vm.heap.get(match wired { Value::Obj(g) => g, _ => unreachable!() })) {
+            let same = match (
+                vm.heap.get(h),
+                vm.heap.get(match wired {
+                    Value::Obj(g) => g,
+                    _ => unreachable!(),
+                }),
+            ) {
                 (Obj::Channel(a), Obj::Channel(b)) => Arc::ptr_eq(a, b),
                 (Obj::Shared(a), Obj::Shared(b)) => Arc::ptr_eq(a, b),
                 (Obj::Executor(a), Obj::Executor(b)) => Arc::ptr_eq(a, b),
@@ -13233,14 +15745,21 @@ main()
     #[test]
     fn channel_core_shared_across_handles() {
         let mut vm = Vm::new(Arc::new(empty_program()));
-        let h1 = vm.heap.alloc(Obj::Channel(Arc::new(ChannelCore::default())));
+        let h1 = vm
+            .heap
+            .alloc(Obj::Channel(Arc::new(ChannelCore::default())));
         // Cross the airlock → a second handle onto the same core.
         let w = vm.to_wire(Value::Obj(h1)).unwrap();
-        let Value::Obj(h2) = vm.from_wire(w) else { panic!("expected handle") };
+        let Value::Obj(h2) = vm.from_wire(w) else {
+            panic!("expected handle")
+        };
         let sp = Span { line: 1, col: 1 };
         vm.channel_method(h1, "send", &[Value::Int(7)], sp).unwrap();
         // recv through the OTHER handle sees the message.
-        assert_eq!(vm.channel_method(h2, "recv", &[], sp).unwrap(), Value::Int(7));
+        assert_eq!(
+            vm.channel_method(h2, "recv", &[], sp).unwrap(),
+            Value::Int(7)
+        );
     }
 
     /// B3.3-threads sub-step 2: under `--parallel`, a `recv` on an empty channel **blocks the OS
@@ -13259,8 +15778,11 @@ main()
         let mut sender = Vm::new(Arc::new(empty_program()));
         let sh = sender.heap.alloc(Obj::Channel(Arc::clone(&core)));
         let sp = Span { line: 1, col: 1 };
-        let handle = std::thread::spawn(move || worker.channel_method(wh, "recv", &[], sp).unwrap());
-        sender.channel_method(sh, "send", &[Value::Int(42)], sp).unwrap();
+        let handle =
+            std::thread::spawn(move || worker.channel_method(wh, "recv", &[], sp).unwrap());
+        sender
+            .channel_method(sh, "send", &[Value::Int(42)], sp)
+            .unwrap();
         assert_eq!(handle.join().unwrap(), Value::Int(42));
     }
 
@@ -13310,7 +15832,10 @@ main()
 
         let mut fiber_heap = Heap::new();
         let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
-        let mut ctx = FiberCtx { heap: Some(fiber_heap), ..FiberCtx::default() };
+        let mut ctx = FiberCtx {
+            heap: Some(fiber_heap),
+            ..FiberCtx::default()
+        };
 
         // Swap the fiber in: self.heap becomes the fiber's heap; the host heap parks in the ctx.
         vm.swap_ctx(&mut ctx);
@@ -13412,13 +15937,25 @@ main()
         // Schedule the fiber in: its eager scope becomes live; the host's parks into the ctx.
         vm.swap_ctx(&mut ctx);
         assert_eq!(vm.eager_scheds.len(), 1);
-        assert!(Arc::ptr_eq(&vm.eager_scheds[0].as_ref().unwrap().sched, &fiber_sched), "the fiber's eager scope is now live");
-        assert!(Arc::ptr_eq(&ctx.eager_scheds[0].as_ref().unwrap().sched, &host_sched), "the host's scope parked into the ctx");
+        assert!(
+            Arc::ptr_eq(&vm.eager_scheds[0].as_ref().unwrap().sched, &fiber_sched),
+            "the fiber's eager scope is now live"
+        );
+        assert!(
+            Arc::ptr_eq(&ctx.eager_scheds[0].as_ref().unwrap().sched, &host_sched),
+            "the host's scope parked into the ctx"
+        );
 
         // Park the fiber out: the host's scope is restored; the fiber keeps its own.
         vm.swap_ctx(&mut ctx);
-        assert!(Arc::ptr_eq(&vm.eager_scheds[0].as_ref().unwrap().sched, &host_sched), "host scope restored");
-        assert!(Arc::ptr_eq(&ctx.eager_scheds[0].as_ref().unwrap().sched, &fiber_sched));
+        assert!(
+            Arc::ptr_eq(&vm.eager_scheds[0].as_ref().unwrap().sched, &host_sched),
+            "host scope restored"
+        );
+        assert!(Arc::ptr_eq(
+            &ctx.eager_scheds[0].as_ref().unwrap().sched,
+            &fiber_sched
+        ));
     }
 
     /// D2b companion to [`swap_ctx_leaves_heap_untouched_for_cooperative_fiber`]: a cooperative fiber
@@ -13434,14 +15971,20 @@ main()
         vm.swap_ctx(&mut ctx);
         assert_eq!(vm.out, "host-out");
         assert_eq!(vm.module_objs, vec![host_mod]);
-        assert!(ctx.out.is_empty(), "swap must not give a cooperative fiber side state");
+        assert!(
+            ctx.out.is_empty(),
+            "swap must not give a cooperative fiber side state"
+        );
         assert!(ctx.module_objs.is_empty());
     }
 
     // ---- D2b MnSched scheduler mechanics (Step 2 — hand-built fibers, no bytecode) ----
 
     fn dl_err() -> RuntimeError {
-        RuntimeError { message: DEADLOCK_MSG.to_string(), span: Span { line: 1, col: 1 } }
+        RuntimeError {
+            message: DEADLOCK_MSG.to_string(),
+            span: Span { line: 1, col: 1 },
+        }
     }
     fn mk_sched(total: usize) -> MnSched {
         // 4 worker slots by default — enough for the multi-`wid` steal tests; single-worker tests
@@ -13449,13 +15992,31 @@ main()
         MnSched::new(total, 4, Arc::new(AtomicBool::new(false)), dl_err())
     }
     fn mk_fiber(task_index: usize) -> Fiber {
-        Fiber { ctx: FiberCtx::default(), state: FiberState::Ready, task_index, scope_id: 0, span: Span { line: 1, col: 1 }, resume_native: None }
+        Fiber {
+            ctx: FiberCtx::default(),
+            state: FiberState::Ready,
+            task_index,
+            scope_id: 0,
+            span: Span { line: 1, col: 1 },
+            resume_native: None,
+        }
     }
     /// An UNSTARTED fiber (`Pending`) — what `inject`/`seed` require so `run_one_fiber` runs the task
     /// body via `start_task` (a `Ready` fiber is treated as a resume and runs no body).
     fn mk_pending_fiber(task_index: usize) -> Fiber {
-        let task = PendingCall::Call { callee: Value::Nil, args: Vec::new(), span: Span { line: 1, col: 1 } };
-        Fiber { ctx: FiberCtx::default(), state: FiberState::Pending(task), task_index, scope_id: 0, span: Span { line: 1, col: 1 }, resume_native: None }
+        let task = PendingCall::Call {
+            callee: Value::Nil,
+            args: Vec::new(),
+            span: Span { line: 1, col: 1 },
+        };
+        Fiber {
+            ctx: FiberCtx::default(),
+            state: FiberState::Pending(task),
+            task_index,
+            scope_id: 0,
+            span: Span { line: 1, col: 1 },
+            resume_native: None,
+        }
     }
     fn empty_core() -> Arc<ChannelCore> {
         Arc::new(ChannelCore::default())
@@ -13495,19 +16056,42 @@ main()
         let core = empty_core();
         let key = core_key(&core);
         sched.seed(vec![mk_fiber(0), mk_fiber(1), mk_fiber(2)]);
-        assert_eq!(sched.runnable.load(Ordering::Relaxed), 3, "seed bumps runnable");
+        assert_eq!(
+            sched.runnable.load(Ordering::Relaxed),
+            3,
+            "seed bumps runnable"
+        );
         let f0 = take_run(&sched);
-        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "pop transitions runnable→running");
+        assert_eq!(
+            sched.runnable.load(Ordering::Relaxed),
+            2,
+            "pop transitions runnable→running"
+        );
         sched.park(key, &core, f0);
-        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "park transitions running→parked (no change)");
+        assert_eq!(
+            sched.runnable.load(Ordering::Relaxed),
+            2,
+            "park transitions running→parked (no change)"
+        );
         sched.send_wake(key, &core, WireValue::Int(7));
-        assert_eq!(sched.runnable.load(Ordering::Relaxed), 3, "send_wake transitions parked→ready");
+        assert_eq!(
+            sched.runnable.load(Ordering::Relaxed),
+            3,
+            "send_wake transitions parked→ready"
+        );
         let f = take_run(&sched);
         assert_eq!(sched.runnable.load(Ordering::Relaxed), 2);
         sched.finish(f.task_index, 0, TaskOutcome::Cancelled);
-        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "finish transitions running→done (no change)");
+        assert_eq!(
+            sched.runnable.load(Ordering::Relaxed),
+            2,
+            "finish transitions running→done (no change)"
+        );
         // The invariant: with no per-worker locals populated, runnable == global.len() at quiescence.
-        assert_eq!(sched.runnable.load(Ordering::Relaxed), sched.lock().global.len());
+        assert_eq!(
+            sched.runnable.load(Ordering::Relaxed),
+            sched.lock().global.len()
+        );
     }
 
     /// Per-connection spawn: `inject` adds a task to a LIVE sched — it grows `total` + `slots`
@@ -13524,7 +16108,11 @@ main()
         assert_eq!(c.slots.len(), 2, "inject grows the outcome-slot vec");
         assert_eq!(c.global.len(), 2, "the injected fiber is queued runnable");
         drop(c);
-        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "inject runnable-accounts the new fiber");
+        assert_eq!(
+            sched.runnable.load(Ordering::Relaxed),
+            2,
+            "inject runnable-accounts the new fiber"
+        );
     }
 
     /// Per-connection spawn: injecting a runnable fiber into a sched where every existing fiber is
@@ -13539,12 +16127,18 @@ main()
         sched.park(core_key(&core), &core, f0); // parked 1, running 0, runnable 0 → deadlock
         {
             let c = sched.lock();
-            assert!(sched.is_deadlocked(&c), "all parked, nothing runnable/inflight = deadlock");
+            assert!(
+                sched.is_deadlocked(&c),
+                "all parked, nothing runnable/inflight = deadlock"
+            );
         }
         sched.inject(mk_pending_fiber(1), 0); // runnable 1
         {
             let c = sched.lock();
-            assert!(!sched.is_deadlocked(&c), "an injected runnable fiber vetoes the deadlock fire");
+            assert!(
+                !sched.is_deadlocked(&c),
+                "an injected runnable fiber vetoes the deadlock fire"
+            );
         }
     }
 
@@ -13560,7 +16154,10 @@ main()
         let c = sched.lock();
         assert_eq!(c.scopes.len(), 2);
         assert_eq!(c.scopes[0].base_index, 0);
-        assert_eq!(c.scopes[1].base_index, 2, "scope 1 starts after scope 0's 2 slots");
+        assert_eq!(
+            c.scopes[1].base_index, 2,
+            "scope 1 starts after scope 0's 2 slots"
+        );
         assert_eq!(c.slots.len(), 5, "flat slots grew to 2 + 3");
     }
 
@@ -13579,10 +16176,16 @@ main()
             c.running = 1; // scope 1's fiber is running on some worker → not terminate, not deadlock
         }
         // The owner of the DONE scope 0 stops immediately (queue empty, its scope done).
-        assert!(matches!(sched.take_runnable(0, 1, 0), Take::Stop), "owner of done scope 0 stops");
+        assert!(
+            matches!(sched.take_runnable(0, 1, 0), Take::Stop),
+            "owner of done scope 0 stops"
+        );
         // The global terminate was NOT set (scope 1 still in flight), so the stop was scope-scoped, not
         // a global teardown — a SENTINEL would keep going (verified: terminate is still false).
-        assert!(!sched.lock().terminate, "owner stop is scope-scoped, not a global terminate");
+        assert!(
+            !sched.lock().terminate,
+            "owner stop is scope-scoped, not a global terminate"
+        );
     }
 
     /// `finish` routes the per-fiber outcome to the FIBER's scope `done` + the flat slot, and sets
@@ -13603,7 +16206,10 @@ main()
             assert!(!c.terminate, "not all scopes done yet");
         }
         sched.finish(0, 0, TaskOutcome::Cancelled);
-        assert!(sched.lock().terminate, "global terminate once every scope is done");
+        assert!(
+            sched.lock().terminate,
+            "global terminate once every scope is done"
+        );
     }
 
     /// `take_scope_slots` drains only ONE scope's contiguous sub-range in task order, leaving others.
@@ -13622,8 +16228,14 @@ main()
         assert!(s0.iter().all(|x| x.is_some()));
         {
             let c = sched.lock();
-            assert!(c.slots[0].is_none() && c.slots[1].is_none(), "scope 0 slots taken");
-            assert!(c.slots[2].is_some() && c.slots[3].is_some(), "scope 1 slots intact");
+            assert!(
+                c.slots[0].is_none() && c.slots[1].is_none(),
+                "scope 0 slots taken"
+            );
+            assert!(
+                c.slots[2].is_some() && c.slots[3].is_some(),
+                "scope 1 slots intact"
+            );
         }
     }
 
@@ -13639,11 +16251,22 @@ main()
         let core = empty_core();
         let key = core_key(&core);
         sched.park(key, &core, f0); // parked 1, running 0
-        assert_eq!(sched.lock().parked_n, 1, "recv park accounts one parked fiber");
+        assert_eq!(
+            sched.lock().parked_n,
+            1,
+            "recv park accounts one parked fiber"
+        );
         sched.send_wake(key, &core, WireValue::Int(5));
-        assert_eq!(sched.lock().parked_n, 0, "send_wake un-parks the recv fiber");
+        assert_eq!(
+            sched.lock().parked_n,
+            0,
+            "send_wake un-parks the recv fiber"
+        );
         let woke = take_run(&sched);
-        assert_eq!(woke.task_index, 0, "the recv-parked fiber is back on the run queue");
+        assert_eq!(
+            woke.task_index, 0,
+            "the recv-parked fiber is back on the run queue"
+        );
     }
 
     /// §6d M:N wait-park (TDD step 3): a wait fiber filed under keys [k1,k2,k3] as ONE shared
@@ -13659,25 +16282,56 @@ main()
         let c2 = empty_core();
         let c3 = empty_core();
         let (k1, k2, k3) = (core_key(&c1), core_key(&c2), core_key(&c3));
-        sched.park_wait(vec![(k1, Arc::clone(&c1)), (k2, Arc::clone(&c2)), (k3, Arc::clone(&c3))], f0);
-        assert_eq!(sched.lock().parked_n, 1, "a wait fiber on N keys counts as ONE parked fiber");
+        sched.park_wait(
+            vec![
+                (k1, Arc::clone(&c1)),
+                (k2, Arc::clone(&c2)),
+                (k3, Arc::clone(&c3)),
+            ],
+            f0,
+        );
+        assert_eq!(
+            sched.lock().parked_n,
+            1,
+            "a wait fiber on N keys counts as ONE parked fiber"
+        );
         // Wake on the MIDDLE key.
         sched.send_wake(k2, &c2, WireValue::Int(99));
         {
             let c = sched.lock();
-            assert_eq!(c.parked_n, 0, "claiming the wait fiber returns parked_n to 0");
-            assert!(c.parked.get(&k1).is_none_or(|v| v.is_empty()), "k1 token swept");
-            assert!(c.parked.get(&k3).is_none_or(|v| v.is_empty()), "k3 token swept");
+            assert_eq!(
+                c.parked_n, 0,
+                "claiming the wait fiber returns parked_n to 0"
+            );
+            assert!(
+                c.parked.get(&k1).is_none_or(|v| v.is_empty()),
+                "k1 token swept"
+            );
+            assert!(
+                c.parked.get(&k3).is_none_or(|v| v.is_empty()),
+                "k3 token swept"
+            );
         }
-        assert_eq!(sched.lock().global.len(), 1, "exactly one fiber re-queued by the wake");
+        assert_eq!(
+            sched.lock().global.len(),
+            1,
+            "exactly one fiber re-queued by the wake"
+        );
         let woke = take_run(&sched);
-        assert_eq!(woke.task_index, 0, "the wait fiber is back on the run queue exactly once");
+        assert_eq!(
+            woke.task_index, 0,
+            "the wait fiber is back on the run queue exactly once"
+        );
         // A later send to a swept key must be a clean no-op (the token is gone): no new runnable fiber.
         sched.send_wake(k1, &c1, WireValue::Int(1));
         sched.send_wake(k3, &c3, WireValue::Int(3));
         let c = sched.lock();
         assert_eq!(c.parked_n, 0, "no double-wake from swept buckets");
-        assert_eq!(c.global.len(), 0, "no second wake of the already-moved fiber");
+        assert_eq!(
+            c.global.len(),
+            0,
+            "no second wake of the already-moved fiber"
+        );
     }
 
     /// WAIT-2/WAIT-3 unit guard — the timed-park files the timer channel as an ORDINARY arm bucket,
@@ -13692,22 +16346,46 @@ main()
         let timer_core = empty_core(); // stands in for the timer channel's bucket
         let data_core = empty_core();
         let (timer_key, data_key) = (core_key(&timer_core), core_key(&data_core));
-        sched.park_wait(vec![(timer_key, Arc::clone(&timer_core)), (data_key, Arc::clone(&data_core))], f0);
-        assert_eq!(sched.lock().parked_n, 1, "wait on [timer,data] is ONE parked fiber");
+        sched.park_wait(
+            vec![
+                (timer_key, Arc::clone(&timer_core)),
+                (data_key, Arc::clone(&data_core)),
+            ],
+            f0,
+        );
+        assert_eq!(
+            sched.lock().parked_n,
+            1,
+            "wait on [timer,data] is ONE parked fiber"
+        );
         // The timer's deadline job fires: `send_wake(true)` on the timer key claims + sweeps.
         sched.send_wake(timer_key, &timer_core, WireValue::Bool(true));
         {
             let c = sched.lock();
-            assert_eq!(c.parked_n, 0, "the timer deadline send claims the wait fiber");
-            assert!(c.parked.get(&data_key).is_none_or(|v| v.is_empty()), "data_key token swept by the timer win");
+            assert_eq!(
+                c.parked_n, 0,
+                "the timer deadline send claims the wait fiber"
+            );
+            assert!(
+                c.parked.get(&data_key).is_none_or(|v| v.is_empty()),
+                "data_key token swept by the timer win"
+            );
             assert_eq!(c.global.len(), 1, "exactly one fiber re-queued");
         }
-        assert_eq!(take_run(&sched).task_index, 0, "the wait fiber is back on the run queue exactly once");
+        assert_eq!(
+            take_run(&sched).task_index,
+            0,
+            "the wait fiber is back on the run queue exactly once"
+        );
         // A LATE send on the swept data key (a sibling that lost the race) is a clean no-op.
         sched.send_wake(data_key, &data_core, WireValue::Int(9));
         let c = sched.lock();
         assert_eq!(c.parked_n, 0, "no double-wake from the swept data bucket");
-        assert_eq!(c.global.len(), 0, "the late send does not re-wake the already-moved fiber");
+        assert_eq!(
+            c.global.len(),
+            0,
+            "the late send does not re-wake the already-moved fiber"
+        );
     }
 
     /// §6d M:N wait-park: `close_wake` claims+sweeps a wait fiber identically to `send_wake` (a close
@@ -13726,7 +16404,10 @@ main()
         {
             let c = sched.lock();
             assert_eq!(c.parked_n, 0, "close_wake un-parks the wait fiber");
-            assert!(c.parked.get(&k2).is_none_or(|v| v.is_empty()), "k2 token swept by close");
+            assert!(
+                c.parked.get(&k2).is_none_or(|v| v.is_empty()),
+                "k2 token swept by close"
+            );
         }
         assert_eq!(take_run(&sched).task_index, 0);
     }
@@ -13741,9 +16422,18 @@ main()
         let f0 = take_run(&sched);
         let c1 = empty_core();
         let c2 = empty_core();
-        sched.park_wait(vec![(core_key(&c1), Arc::clone(&c1)), (core_key(&c2), Arc::clone(&c2))], f0);
+        sched.park_wait(
+            vec![
+                (core_key(&c1), Arc::clone(&c1)),
+                (core_key(&c2), Arc::clone(&c2)),
+            ],
+            f0,
+        );
         let c = sched.lock();
-        assert!(sched.is_deadlocked(&c), "a lone wait-parked fiber with no sender is a deadlock");
+        assert!(
+            sched.is_deadlocked(&c),
+            "a lone wait-parked fiber with no sender is a deadlock"
+        );
     }
 
     /// D4b: a `LocalQ` pops `runnext` first (locality), then the ring in FIFO order, then `None`.
@@ -13768,7 +16458,11 @@ main()
         sched.seed(vec![mk_fiber(1)]); // task 1 → global, runnable == 1
         sched.lock_local(0).ring.push_back(mk_fiber(0)); // task 0 → worker 0's local
         sched.runnable.fetch_add(1, Ordering::Relaxed); // keep the counter consistent (==2)
-        assert_eq!(take_run(&sched).task_index, 0, "own local drained before the global queue");
+        assert_eq!(
+            take_run(&sched).task_index,
+            0,
+            "own local drained before the global queue"
+        );
         assert_eq!(take_run(&sched).task_index, 1, "then the global queue");
         assert_eq!(sched.runnable.load(Ordering::Relaxed), 0);
         assert_eq!(sched.lock().running, 2);
@@ -13776,13 +16470,17 @@ main()
 
     /// A trivial blocking-shaped native for the offload tests: double the first int arg. Off-heap-safe
     /// (reads only a primitive arg, returns a primitive), so it can run on an [`OffloadHost`].
-    fn double_native(h: &mut dyn crate::native::Host) -> Result<crate::native::NativeRet, crate::native::HostError> {
+    fn double_native(
+        h: &mut dyn crate::native::Host,
+    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
         Ok(crate::native::NativeRet::Int(h.arg_int(0)? * 2))
     }
 
     /// A native that panics — stands in for a misclassified blocking fn that hits an `OffloadHost`
     /// `unreachable!`, or any panic inside an offloaded call.
-    fn panic_native(_h: &mut dyn crate::native::Host) -> Result<crate::native::NativeRet, crate::native::HostError> {
+    fn panic_native(
+        _h: &mut dyn crate::native::Host,
+    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
         panic!("boom inside offloaded native")
     }
 
@@ -13796,12 +16494,20 @@ main()
         let sched = Arc::new(mk_sched(1));
         sched.seed(vec![mk_fiber(0)]);
         let f0 = take_run(&sched); // running == 1
-        let req = OffloadReq { func: panic_native, args: vec![], span: Span { line: 1, col: 1 }, timer_ms: None };
+        let req = OffloadReq {
+            func: panic_native,
+            args: vec![],
+            span: Span { line: 1, col: 1 },
+            timer_ms: None,
+        };
         sched.offload(f0, req);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while sched.inflight.load(Ordering::Relaxed) != 0 {
-            assert!(std::time::Instant::now() < deadline, "panic in offloaded native lost the fiber (inflight pinned → hang)");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "panic in offloaded native lost the fiber (inflight pinned → hang)"
+            );
             std::thread::yield_now();
         }
         // The fiber came back runnable carrying a fault to raise on resume.
@@ -13809,7 +16515,10 @@ main()
             Take::Run(f) => f,
             Take::Stop => panic!("fiber not requeued after panicking offload"),
         };
-        assert!(matches!(f0.resume_native, Some(Err(_))), "panic surfaced as a fault on the fiber");
+        assert!(
+            matches!(f0.resume_native, Some(Err(_))),
+            "panic surfaced as a fault on the fiber"
+        );
     }
 
     /// D5: an in-flight blocking offload must SUPPRESS the deadlock fire. The predicate is
@@ -13824,9 +16533,15 @@ main()
         // running==0, runnable==0, one parked, none done: a real deadlock with no in-flight work.
         let mut c = c;
         c.parked_n = 1;
-        assert!(sched.is_deadlocked(&c), "all-parked + nothing in flight = deadlock");
+        assert!(
+            sched.is_deadlocked(&c),
+            "all-parked + nothing in flight = deadlock"
+        );
         sched.inflight.fetch_add(1, Ordering::Relaxed);
-        assert!(!sched.is_deadlocked(&c), "an in-flight blocking offload vetoes the deadlock fire");
+        assert!(
+            !sched.is_deadlocked(&c),
+            "an in-flight blocking offload vetoes the deadlock fire"
+        );
     }
 
     /// D5 owe #3 Path C (#1) — the deadlock false-positive fix. A demoted (blocked-in-callback) fiber
@@ -13886,7 +16601,10 @@ main()
         c.register_demoted(ptr, &core); // refcount now 2
         // A value queued on the shared channel → at least one demoted fiber pops + progresses.
         core.q.lock().unwrap().queue.push_back(WireValue::Int(7));
-        assert!(!sched.is_deadlocked(&c), "queued value on the shared demoted channel vetoes deadlock");
+        assert!(
+            !sched.is_deadlocked(&c),
+            "queued value on the shared demoted channel vetoes deadlock"
+        );
         // One fiber pops + un-registers (refcount 2→1); the OTHER is still demoted on this channel, so
         // the entry must remain. Queue now empty → but the entry's presence alone does NOT veto; the
         // peek is queue-driven, so an empty registered channel is a genuine all-blocked deadlock.
@@ -13905,8 +16623,14 @@ main()
         );
         core.q.lock().unwrap().queue.pop_front();
         c.unregister_demoted(ptr); // refcount 1→0, entry removed
-        assert!(c.demoted_chans.is_empty(), "the entry is removed only at refcount 0");
-        assert!(sched.is_deadlocked(&c), "all demoted fibers gone, still all-blocked = deadlock");
+        assert!(
+            c.demoted_chans.is_empty(),
+            "the entry is removed only at refcount 0"
+        );
+        assert!(
+            sched.is_deadlocked(&c),
+            "all demoted fibers gone, still all-blocked = deadlock"
+        );
     }
 
     /// D6: `poll_park_offload` hands a fiber whose socket op `WouldBlock`ed to the netpoller —
@@ -13928,19 +16652,46 @@ main()
         let f0 = take_run(&sched); // running == 1, runnable == 1
         assert_eq!(sched.lock().running, 1);
 
-        sched.poll_park_offload(f0, PollPark { key, fd: server.as_raw_fd(), interest: poller::Interest::Read, in_flight: core::new_in_flight(), deadline: None });
-        assert_eq!(sched.lock().running, 0, "poll-park freed the worker (running decremented)");
-        assert_eq!(sched.inflight.load(Ordering::Relaxed), 1, "running → inflight on poll-park");
+        sched.poll_park_offload(
+            f0,
+            PollPark {
+                key,
+                fd: server.as_raw_fd(),
+                interest: poller::Interest::Read,
+                in_flight: core::new_in_flight(),
+                deadline: None,
+            },
+        );
+        assert_eq!(
+            sched.lock().running,
+            0,
+            "poll-park freed the worker (running decremented)"
+        );
+        assert_eq!(
+            sched.inflight.load(Ordering::Relaxed),
+            1,
+            "running → inflight on poll-park"
+        );
 
         // The in-flight socket op vetoes a deadlock even with the sibling still queued drained off.
         let mut c = sched.lock();
         c.parked_n = 1;
-        assert!(!sched.is_deadlocked(&c), "a socket op in flight on the poller vetoes a false deadlock");
+        assert!(
+            !sched.is_deadlocked(&c),
+            "a socket op in flight on the poller vetoes a false deadlock"
+        );
         drop(c);
 
         // Clean up: deregister disarms the fd + re-injects (inflight→runnable), before `server` drops.
-        assert!(poller::deregister(key), "the parked socket op was registered");
-        assert_eq!(sched.inflight.load(Ordering::Relaxed), 0, "deregister re-injected the fiber");
+        assert!(
+            poller::deregister(key),
+            "the parked socket op was registered"
+        );
+        assert_eq!(
+            sched.inflight.load(Ordering::Relaxed),
+            0,
+            "deregister re-injected the fiber"
+        );
     }
 
     /// D5: `offload` hands a fiber to the blocking pool (running→inflight); when the pool finishes the
@@ -13964,11 +16715,22 @@ main()
         // The job runs asynchronously on the blocking pool; wait (bounded) for it to complete.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while sched.inflight.load(Ordering::Relaxed) != 0 {
-            assert!(std::time::Instant::now() < deadline, "offloaded native never completed");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "offloaded native never completed"
+            );
             std::thread::yield_now();
         }
-        assert_eq!(sched.lock().running, 0, "offload freed the worker (running decremented)");
-        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "f1 still queued + f0 requeued on completion");
+        assert_eq!(
+            sched.lock().running,
+            0,
+            "offload freed the worker (running decremented)"
+        );
+        assert_eq!(
+            sched.runnable.load(Ordering::Relaxed),
+            2,
+            "f1 still queued + f0 requeued on completion"
+        );
 
         // The requeued fiber carries the lowered-pending native result (Int(21)*2 == Int(42)).
         let mut found = None;
@@ -13979,7 +16741,10 @@ main()
             }
         }
         let f0 = found.expect("offloaded fiber requeued");
-        assert_eq!(f0.resume_native, Some(Ok(crate::native::NativeRet::Int(42))));
+        assert_eq!(
+            f0.resume_native,
+            Some(Ok(crate::native::NativeRet::Int(42)))
+        );
     }
 
     /// D5 owe #2: a `timer_ms` offload parks the fiber on the *timer* thread (not the blocking pool):
@@ -14006,20 +16771,34 @@ main()
 
         // While the timer holds it the fiber is `inflight` — neither running, runnable, nor parked —
         // and must veto a deadlock fire (it WILL come back).
-        assert_eq!(sched.inflight.load(Ordering::Relaxed), 1, "timer offload moved the fiber to inflight");
+        assert_eq!(
+            sched.inflight.load(Ordering::Relaxed),
+            1,
+            "timer offload moved the fiber to inflight"
+        );
         {
             let c = sched.lock();
-            assert!(!sched.is_deadlocked(&c), "a timer-parked (inflight) fiber must not fault a false deadlock");
+            assert!(
+                !sched.is_deadlocked(&c),
+                "a timer-parked (inflight) fiber must not fault a false deadlock"
+            );
         }
 
         // The timer fires at the deadline and requeues the fiber.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while sched.inflight.load(Ordering::Relaxed) != 0 {
-            assert!(std::time::Instant::now() < deadline, "timer never fired the parked fiber back (lost wakeup?)");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timer never fired the parked fiber back (lost wakeup?)"
+            );
             std::thread::yield_now();
         }
         assert_eq!(sched.lock().running, 0, "timer offload freed the worker");
-        assert_eq!(sched.runnable.load(Ordering::Relaxed), 2, "f1 still queued + f0 requeued by the timer");
+        assert_eq!(
+            sched.runnable.load(Ordering::Relaxed),
+            2,
+            "f1 still queued + f0 requeued by the timer"
+        );
 
         let mut found = None;
         while let Take::Run(f) = sched.take_runnable(0, 1, 0) {
@@ -14029,7 +16808,11 @@ main()
             }
         }
         let f0 = found.expect("timer-parked fiber requeued");
-        assert_eq!(f0.resume_native, Some(Ok(crate::native::NativeRet::Nil)), "sleep resumes with Nil, native not run");
+        assert_eq!(
+            f0.resume_native,
+            Some(Ok(crate::native::NativeRet::Nil)),
+            "sleep resumes with Nil, native not run"
+        );
     }
 
     /// D4c: `try_steal` grabs ceil-half of the first non-empty victim's ring (from the back), leaving
@@ -14046,8 +16829,16 @@ main()
         sched.runnable.fetch_add(4, Ordering::Relaxed); // keep the counter consistent with the queues
         let stolen = sched.try_steal(0); // worker 0 steals from worker 1
         assert_eq!(stolen.len(), 2, "ceil(4/2) stolen");
-        assert_eq!(sched.lock_local(1).ring.len(), 2, "half left with the victim");
-        assert_eq!(sched.runnable.load(Ordering::Relaxed), 4, "stealing is net-zero on runnable");
+        assert_eq!(
+            sched.lock_local(1).ring.len(),
+            2,
+            "half left with the victim"
+        );
+        assert_eq!(
+            sched.runnable.load(Ordering::Relaxed),
+            4,
+            "stealing is net-zero on runnable"
+        );
     }
 
     /// D4d: on a `GLOBAL_CHECK_INTERVAL`th schedule a worker pulls from the global queue before its
@@ -14087,7 +16878,10 @@ main()
             own.ring.push_back(mk_fiber(0));
             own.ring.push_back(mk_fiber(1));
         }
-        assert!(sched.try_steal(0).is_empty(), "no sibling has work; must not steal from self");
+        assert!(
+            sched.try_steal(0).is_empty(),
+            "no sibling has work; must not steal from self"
+        );
     }
 
     /// D2b/U2: parking the running fiber on an EMPTY channel frees the worker (`running--`,
@@ -14182,7 +16976,9 @@ main()
         });
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => assert_eq!(r.expect("mixed work-steal nursery completed"), "12497500\n"),
-            Err(_) => panic!("hung — D4 work-stealing/grab/wait_timeout regressed (lost wakeup or accounting bug)"),
+            Err(_) => panic!(
+                "hung — D4 work-stealing/grab/wait_timeout regressed (lost wakeup or accounting bug)"
+            ),
         }
     }
 
@@ -14231,7 +17027,11 @@ main()
                 let _ = tx.send(run_capture_parallel(src));
             });
             match rx.recv_timeout(std::time::Duration::from_secs(20)) {
-                Ok(r) => assert_eq!(r.expect("park-heavy nursery completed"), want, "round {round}"),
+                Ok(r) => assert_eq!(
+                    r.expect("park-heavy nursery completed"),
+                    want,
+                    "round {round}"
+                ),
                 Err(_) => panic!(
                     "hung on round {round} — D4e runnable-gated park lost a wakeup \
                      (an idle worker slept on cv with a runnable fiber pending)"
@@ -14284,7 +17084,10 @@ main()
             let _ = tx.send(run_capture_parallel(&src));
         });
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(r) => assert_eq!(r.expect("wake-from-sleep nursery completed"), format!("{n}\n")),
+            Ok(r) => assert_eq!(
+                r.expect("wake-from-sleep nursery completed"),
+                format!("{n}\n")
+            ),
             Err(_) => panic!(
                 "hung — D4e: a `send` failed to wake workers parked in the runnable-gated `cv.wait` \
                  (lost wakeup from true sleep)"
@@ -14300,7 +17103,10 @@ main()
     /// that gap on any machine (the inline path is always 4 batches). Watchdog 30 s.
     #[test]
     fn d5_blocking_sleeps_run_concurrently_not_serialized() {
-        let workers = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1).max(1);
+        let workers = std::thread::available_parallelism()
+            .map(|x| x.get())
+            .unwrap_or(1)
+            .max(1);
         let n = workers * 4;
         let src = format!(
             "\
@@ -14338,7 +17144,9 @@ main()
                      instead of offloading to the dirty pool (G3 starvation)"
                 );
             }
-            Err(_) => panic!("hung — D5 offload/complete regressed (lost wakeup or inflight accounting bug)"),
+            Err(_) => panic!(
+                "hung — D5 offload/complete regressed (lost wakeup or inflight accounting bug)"
+            ),
         }
     }
 
@@ -14352,7 +17160,10 @@ main()
     /// in-callback demote is wired. Watchdog 30 s.
     #[test]
     fn d5_owe3_path_c_sleep_in_callback_demotes_frees_worker() {
-        let workers = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1).max(1);
+        let workers = std::thread::available_parallelism()
+            .map(|x| x.get())
+            .unwrap_or(1)
+            .max(1);
         let n = workers * 4;
         let src = format!(
             "\
@@ -14427,7 +17238,10 @@ main()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&entry);
@@ -14437,7 +17251,9 @@ main()
                 // each work(): 2*(1+2+3) = 12; two tasks update the same sink → 24.
                 assert_eq!(out, "24\n");
             }
-            Err(_) => panic!("hung — D5 owe #3 Path C sleep-in-callback demote regressed (correctness)"),
+            Err(_) => {
+                panic!("hung — D5 owe #3 Path C sleep-in-callback demote regressed (correctness)")
+            }
         }
     }
 
@@ -14500,15 +17316,24 @@ main()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&entry);
         match result {
             Ok((out, _err, res, _code)) => {
-                assert!(res.is_ok(), "in-callback socket read demote faulted: {res:?}");
+                assert!(
+                    res.is_ok(),
+                    "in-callback socket read demote faulted: {res:?}"
+                );
                 // client prints the echoed line; main prints a trailing blank line.
-                assert_eq!(out, "hello\n\n", "in-callback read did not demote (got: {out:?})");
+                assert_eq!(
+                    out, "hello\n\n",
+                    "in-callback read did not demote (got: {out:?})"
+                );
             }
             Err(_) => panic!("hung — D5 owe #3 Path C socket-read-in-callback demote regressed"),
         }
@@ -14569,14 +17394,20 @@ main()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&entry);
         match result {
             Ok((out, _err, res, _code)) => {
                 assert!(res.is_ok(), "in-callback accept demote faulted: {res:?}");
-                assert_eq!(out, "1\n\n", "in-callback accept did not demote (got: {out:?})");
+                assert_eq!(
+                    out, "1\n\n",
+                    "in-callback accept did not demote (got: {out:?})"
+                );
             }
             Err(_) => panic!("hung — D5 owe #3 Path C accept-in-callback demote regressed"),
         }
@@ -14589,7 +17420,8 @@ main()
     /// resume-continues-past-the-call + bool-lowering path. Watchdog 30 s.
     #[test]
     fn d5_blocking_fs_calls_offload_and_resume_correctly() {
-        let path = std::env::temp_dir().join(format!("chezzi_d5_exists_{}.txt", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("chezzi_d5_exists_{}.txt", std::process::id()));
         std::fs::write(&path, b"x").expect("write temp file");
         let path_str = path.to_str().expect("utf8 temp path").to_string();
         let n = 64usize;
@@ -14615,7 +17447,10 @@ main()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&path);
@@ -14638,7 +17473,8 @@ main()
     /// see `d5_owe3_path_c_sleep_in_callback_*`). Watchdog 30 s.
     #[test]
     fn d5_blocking_native_in_callback_runs_inline() {
-        let path = std::env::temp_dir().join(format!("chezzi_d5_cb_exists_{}.txt", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("chezzi_d5_cb_exists_{}.txt", std::process::id()));
         std::fs::write(&path, b"x").expect("write temp file");
         let path_str = path.to_str().expect("utf8 temp path").to_string();
         let src = format!(
@@ -14667,7 +17503,10 @@ main()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&entry);
@@ -14677,7 +17516,9 @@ main()
                 assert!(res.is_ok(), "in-callback nursery faulted: {res:?}");
                 assert_eq!(out, "12\n");
             }
-            Err(_) => panic!("hung — D5 native_reentry gate regressed (offloaded an in-callback blocking native)"),
+            Err(_) => panic!(
+                "hung — D5 native_reentry gate regressed (offloaded an in-callback blocking native)"
+            ),
         }
     }
 
@@ -14720,22 +17561,36 @@ main()
         let entry = write_temp_chz("d5_owe3_iter_map", src);
         // Cooperative leg — deterministic: `consume` parks on the empty channel before `produce` runs.
         let (co, _ce, cr, _cc) = run_file_with(&entry, crate::native::HostConfig::default());
-        assert!(cr.is_ok(), "cooperative iter.map recv-in-callback faulted (park regressed): {cr:?}");
-        assert_eq!(co, "66\n", "cooperative iter.map recv-in-callback wrong sum");
+        assert!(
+            cr.is_ok(),
+            "cooperative iter.map recv-in-callback faulted (park regressed): {cr:?}"
+        );
+        assert_eq!(
+            co, "66\n",
+            "cooperative iter.map recv-in-callback wrong sum"
+        );
         // Parallel leg — the real M:N engine, under a watchdog so a park/wake hang fails loud.
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&entry);
         match result {
             Ok((out, _err, res, _code)) => {
-                assert!(res.is_ok(), "parallel iter.map recv-in-callback nursery faulted: {res:?}");
+                assert!(
+                    res.is_ok(),
+                    "parallel iter.map recv-in-callback nursery faulted: {res:?}"
+                );
                 assert_eq!(out, "66\n");
             }
-            Err(_) => panic!("hung — D5 owe #3 Path A regressed (recv inside iter.map did not park)"),
+            Err(_) => {
+                panic!("hung — D5 owe #3 Path A regressed (recv inside iter.map did not park)")
+            }
         }
     }
 
@@ -14817,16 +17672,24 @@ main()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&entry);
         match result {
             Ok((out, _err, res, _code)) => {
-                assert!(res.is_ok(), "Path C: recv inside native xs.map faulted under --parallel: {res:?}");
+                assert!(
+                    res.is_ok(),
+                    "Path C: recv inside native xs.map faulted under --parallel: {res:?}"
+                );
                 assert_eq!(out, "66\n");
             }
-            Err(_) => panic!("hung — D5 owe #3 Path C regressed (recv inside native xs.map did not demote-and-resume)"),
+            Err(_) => panic!(
+                "hung — D5 owe #3 Path C regressed (recv inside native xs.map did not demote-and-resume)"
+            ),
         }
     }
 
@@ -14857,7 +17720,10 @@ main()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&entry);
@@ -14865,11 +17731,16 @@ main()
             Ok((_out, _err, res, _code)) => match res {
                 Err(e) => {
                     let s = format!("{e:?}");
-                    assert!(s.contains("deadlock"), "Path C: no-sender recv-in-callback should fault deadlock, got: {s}");
+                    assert!(
+                        s.contains("deadlock"),
+                        "Path C: no-sender recv-in-callback should fault deadlock, got: {s}"
+                    );
                 }
                 Ok(()) => panic!("Path C: no-sender recv-in-callback unexpectedly succeeded"),
             },
-            Err(_) => panic!("hung — D5 owe #3 Path C deadlock detection regressed (blocked_native predicate / notify)"),
+            Err(_) => panic!(
+                "hung — D5 owe #3 Path C deadlock detection regressed (blocked_native predicate / notify)"
+            ),
         }
     }
 
@@ -14915,13 +17786,19 @@ main()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&entry);
         match result {
             Ok((out, _err, res, _code)) => {
-                assert!(res.is_ok(), "wait inside native xs.map faulted under --parallel: {res:?}");
+                assert!(
+                    res.is_ok(),
+                    "wait inside native xs.map faulted under --parallel: {res:?}"
+                );
                 assert_eq!(out, "66\n");
             }
             Err(_) => panic!("hung — M:N wait-in-callback demote-and-resume regressed"),
@@ -14967,14 +17844,23 @@ main()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&entry);
         match result {
             Ok((out, _err, res, _code)) => {
-                assert!(res.is_ok(), "wait+timer inside native xs.map faulted under --parallel: {res:?}");
-                assert_eq!(out, "7\n", "the timer arm took the wait instead of the mid-window send (WAIT-1, demote path)");
+                assert!(
+                    res.is_ok(),
+                    "wait+timer inside native xs.map faulted under --parallel: {res:?}"
+                );
+                assert_eq!(
+                    out, "7\n",
+                    "the timer arm took the wait instead of the mid-window send (WAIT-1, demote path)"
+                );
             }
             Err(_) => panic!("hung — M:N wait-in-callback timer demote regressed"),
         }
@@ -15007,13 +17893,19 @@ main()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&entry);
         match result {
             Ok((_out, _err, res, _code)) => match res {
-                Err(e) => assert!(format!("{e:?}").contains("deadlock"), "no-sender wait-in-callback should deadlock: {e:?}"),
+                Err(e) => assert!(
+                    format!("{e:?}").contains("deadlock"),
+                    "no-sender wait-in-callback should deadlock: {e:?}"
+                ),
                 Ok(()) => panic!("no-sender wait-in-callback unexpectedly succeeded"),
             },
             Err(_) => panic!("hung — M:N wait-in-callback deadlock detection regressed"),
@@ -15048,7 +17940,10 @@ main()
             let run_entry = entry.clone();
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+                let _ = tx.send(run_file_parallel(
+                    &run_entry,
+                    crate::native::HostConfig::default(),
+                ));
             });
             let result = rx.recv_timeout(std::time::Duration::from_secs(30));
             // Remove the temp file BEFORE asserting so an assert panic doesn't leak it (the other paths
@@ -15107,7 +18002,10 @@ main()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&run_entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         let result = rx.recv_timeout(std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(&entry);
@@ -15126,7 +18024,8 @@ main()
     fn write_temp_chz(tag: &str, src: &str) -> std::path::PathBuf {
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("chezzi_{tag}_{}_{seq}.chz", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("chezzi_{tag}_{}_{seq}.chz", std::process::id()));
         std::fs::write(&path, src).expect("write temp .chz");
         path
     }
@@ -15143,12 +18042,16 @@ main()
                    r := ch.recv()\nprint(r)\n";
         let entry = write_temp_chz("ffi_spawn", src);
         let (vm_out, _e, vm_res, _) = run_file(&entry);
-        let (par_out, _pe, par_res, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+        let (par_out, _pe, par_res, _) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
         let _ = std::fs::remove_file(&entry);
         assert!(vm_res.is_ok(), "cooperative VM faulted: {vm_res:?}");
         assert!(par_res.is_ok(), "parallel engine faulted: {par_res:?}");
         assert_eq!(vm_out, "3.0\n");
-        assert_eq!(vm_out, par_out, "cooperative VM and --parallel diverged on an extern-in-spawn call");
+        assert_eq!(
+            vm_out, par_out,
+            "cooperative VM and --parallel diverged on an extern-in-spawn call"
+        );
     }
 
     /// Regression (blocker): an extern fn with an explicit `-> nil` (void) return must RUN, not panic.
@@ -15185,10 +18088,19 @@ main()
         let (par_out, _pe, par_res, _) =
             run_file_parallel(&entry, crate::native::HostConfig::default());
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(vm_res.is_ok(), "VM faulted on cross-module alias extern: {vm_res:?}");
-        assert!(par_res.is_ok(), "parallel engine faulted on cross-module alias extern: {par_res:?}");
+        assert!(
+            vm_res.is_ok(),
+            "VM faulted on cross-module alias extern: {vm_res:?}"
+        );
+        assert!(
+            par_res.is_ok(),
+            "parallel engine faulted on cross-module alias extern: {par_res:?}"
+        );
         assert_eq!(vm_out, "5\n");
-        assert_eq!(vm_out, par_out, "VM and --parallel diverged on a cross-module alias extern");
+        assert_eq!(
+            vm_out, par_out,
+            "VM and --parallel diverged on a cross-module alias extern"
+        );
     }
 
     /// D3/the discriminating fairness test. 64 CPU "hog" fibers (≫ the core-sized worker pool) each
@@ -15225,7 +18137,9 @@ main()
         });
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => assert_eq!(r.expect("hog/short nursery completed"), "50\n"),
-            Err(_) => panic!("starved — D3 preemption regressed (CPU hogs never yielded their workers)"),
+            Err(_) => {
+                panic!("starved — D3 preemption regressed (CPU hogs never yielded their workers)")
+            }
         }
     }
 
@@ -15257,7 +18171,9 @@ main()
         });
         match rx.recv_timeout(std::time::Duration::from_secs(60)) {
             Ok(r) => assert_eq!(r.expect("10k-fiber nursery completed"), "10000\n"),
-            Err(_) => panic!("10k CPU-bound fibers did not all complete in time (yield machinery hang?)"),
+            Err(_) => {
+                panic!("10k CPU-bound fibers did not all complete in time (yield machinery hang?)")
+            }
         }
     }
 
@@ -15459,10 +18375,16 @@ main()
         let mut vm = Vm::new(Arc::new(empty_program()));
         let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
         let mut ctx = FiberCtx::default();
-        assert!(ctx.heap.is_none(), "a default (cooperative) fiber carries no heap");
+        assert!(
+            ctx.heap.is_none(),
+            "a default (cooperative) fiber carries no heap"
+        );
         vm.swap_ctx(&mut ctx);
         assert!(matches!(vm.heap.get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
-        assert!(ctx.heap.is_none(), "swap must not give a cooperative fiber a heap");
+        assert!(
+            ctx.heap.is_none(),
+            "swap must not give a cooperative fiber a heap"
+        );
     }
 
     /// D2a GC canary: a `collect` while an M:N fiber is swapped in must trace the FIBER's heap (via
@@ -15532,14 +18454,23 @@ main()
     #[test]
     fn executor_core_shut_is_shared_across_handles() {
         let mut vm = Vm::new(Arc::new(empty_program()));
-        let h1 = vm.heap.alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
+        let h1 = vm
+            .heap
+            .alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
         let w = vm.to_wire(Value::Obj(h1)).unwrap();
-        let Value::Obj(h2) = vm.from_wire(w) else { panic!("expected handle") };
+        let Value::Obj(h2) = vm.from_wire(w) else {
+            panic!("expected handle")
+        };
         let sp = Span { line: 1, col: 1 };
         vm.executor_method(h1, "shutdown", &[], sp).unwrap();
         let dummy = vm.heap.alloc(Obj::Str("task".into()));
-        let err = vm.executor_method(h2, "submit", &[Value::Obj(dummy)], sp).unwrap_err();
-        assert_eq!(err.message, "submit on a shut-down Executor (it no longer accepts work)");
+        let err = vm
+            .executor_method(h2, "submit", &[Value::Obj(dummy)], sp)
+            .unwrap_err();
+        assert_eq!(
+            err.message,
+            "submit on a shut-down Executor (it no longer accepts work)"
+        );
     }
 
     /// B3.1: `display` of a `Shared` box renders its contents through `display_wire` (a boxed `str`
@@ -15549,7 +18480,10 @@ main()
         let mut vm = Vm::new(Arc::new(empty_program()));
         let s = vm.heap.alloc(Obj::Str("hi".into()));
         let boxed = vm.to_wire(Value::Obj(s)).unwrap();
-        let sh = vm.heap.alloc(Obj::Shared(Arc::new(SharedCore { v: Mutex::new(boxed), ..Default::default() })));
+        let sh = vm.heap.alloc(Obj::Shared(Arc::new(SharedCore {
+            v: Mutex::new(boxed),
+            ..Default::default()
+        })));
         assert_eq!(vm.display(Value::Obj(sh)), "Shared(hi)");
     }
 
@@ -15559,12 +18493,40 @@ main()
     /// home module (the test protos never read globals). Mirrors how `do_spawn_block` shapes a task.
     fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         let sp = Span { line: 1, col: 1 };
-        let proto = op::Proto { name: "task".into(), arity: 0, n_slots: 0, lines: vec![sp; code.len()], code, has_implicit_nursery: false, is_generator: false, is_test: false, capture_names: Vec::new() };
-        let program = Program { protos: vec![proto], ..empty_program() };
+        let proto = op::Proto {
+            name: "task".into(),
+            arity: 0,
+            n_slots: 0,
+            lines: vec![sp; code.len()],
+            code,
+            has_implicit_nursery: false,
+            is_generator: false,
+            is_test: false,
+            capture_names: Vec::new(),
+        };
+        let program = Program {
+            protos: vec![proto],
+            ..empty_program()
+        };
         let mut vm = Vm::new(Arc::new(program));
-        let home = vm.heap.alloc(Obj::Module { name: "<test>".into(), slots: Vec::new(), index: Default::default() });
-        let clo = vm.heap.alloc(Obj::Closure { proto: 0, captured: Default::default(), home });
-        (vm, PendingCall::Call { callee: Value::Obj(clo), args: Vec::new(), span: sp })
+        let home = vm.heap.alloc(Obj::Module {
+            name: "<test>".into(),
+            slots: Vec::new(),
+            index: Default::default(),
+        });
+        let clo = vm.heap.alloc(Obj::Closure {
+            proto: 0,
+            captured: Default::default(),
+            home,
+        });
+        (
+            vm,
+            PendingCall::Call {
+                callee: Value::Obj(clo),
+                args: Vec::new(),
+                span: sp,
+            },
+        )
     }
 
     /// The worker allocates into its OWN heap, not the parent's: a task that builds a fresh list runs
@@ -15573,14 +18535,25 @@ main()
     #[test]
     fn worker_runs_in_distinct_heap() {
         // () -> [1, 2]
-        let (mut vm, task) =
-            worker_fixture(vec![Op::ConstInt(1), Op::ConstInt(2), Op::NewList(2), Op::Return]);
+        let (mut vm, task) = worker_fixture(vec![
+            Op::ConstInt(1),
+            Op::ConstInt(2),
+            Op::NewList(2),
+            Op::Return,
+        ]);
         let before = vm.heap.live();
         let res = vm.run_task_isolated(task).expect("isolated task runs");
-        assert_eq!(vm.heap.live(), before, "worker must not allocate into the parent heap");
+        assert_eq!(
+            vm.heap.live(),
+            before,
+            "worker must not allocate into the parent heap"
+        );
         let got = vm.from_wire(res.value);
         let want = Value::Obj(vm.heap.alloc(Obj::List(vec![Value::Int(1), Value::Int(2)])));
-        assert!(vm.values_equal(got, want), "result must round-trip back to [1, 2]");
+        assert!(
+            vm.values_equal(got, want),
+            "result must round-trip back to [1, 2]"
+        );
     }
 
     /// B3.3-threads: a worker inherits the parent's read-only host state (process args + env) so a
@@ -15593,9 +18566,15 @@ main()
         vm.host.env.insert("KEY".into(), "val".into());
         vm.host.stdin = crate::native::Stdin::Real;
         let worker = vm.spawn_worker();
-        assert_eq!(worker.host.args, vec!["prog".to_string(), "--flag".to_string()]);
+        assert_eq!(
+            worker.host.args,
+            vec!["prog".to_string(), "--flag".to_string()]
+        );
         assert_eq!(worker.host.env.get("KEY").map(String::as_str), Some("val"));
-        assert!(matches!(worker.host.stdin, crate::native::Stdin::Empty), "stdin must not be shared to workers");
+        assert!(
+            matches!(worker.host.stdin, crate::native::Stdin::Empty),
+            "stdin must not be shared to workers"
+        );
     }
 
     /// A worker's stdout is captured in ITS `out` and returned on the `WorkerResult` (decision F:
@@ -15611,10 +18590,23 @@ main()
             Op::Return,
         ]);
         let res = vm.run_task_isolated(task).expect("isolated task runs");
-        assert_eq!(res.out, "hi from worker\n", "worker stdout returns on the result");
-        assert_eq!(res.stderr, "", "stderr is captured separately and empty here");
-        assert_eq!(vm.from_wire(res.value), Value::Int(7), "return value crosses back");
-        assert_eq!(vm.out, "", "worker output must not leak into the parent's stdout");
+        assert_eq!(
+            res.out, "hi from worker\n",
+            "worker stdout returns on the result"
+        );
+        assert_eq!(
+            res.stderr, "",
+            "stderr is captured separately and empty here"
+        );
+        assert_eq!(
+            vm.from_wire(res.value),
+            Value::Int(7),
+            "return value crosses back"
+        );
+        assert_eq!(
+            vm.out, "",
+            "worker output must not leak into the parent's stdout"
+        );
     }
 
     /// A worker shares the compiled program by `Arc` (read-only), never copying it: `spawn_worker`
@@ -15625,10 +18617,21 @@ main()
         let vm = Vm::new(Arc::clone(&program)); // program + vm = 2 refs
         assert_eq!(Arc::strong_count(&program), 2);
         let worker = vm.spawn_worker();
-        assert_eq!(Arc::strong_count(&program), 3, "worker shares the program (no copy)");
-        assert!(Arc::ptr_eq(&program, &worker.program), "same Program allocation, not a clone");
+        assert_eq!(
+            Arc::strong_count(&program),
+            3,
+            "worker shares the program (no copy)"
+        );
+        assert!(
+            Arc::ptr_eq(&program, &worker.program),
+            "same Program allocation, not a clone"
+        );
         drop(worker);
-        assert_eq!(Arc::strong_count(&program), 2, "worker releases its program ref on drop");
+        assert_eq!(
+            Arc::strong_count(&program),
+            2,
+            "worker releases its program ref on drop"
+        );
     }
 
     /// B3.3a: a `str` return value crosses the worker boundary **by value** — the worker serializes its
@@ -15638,10 +18641,15 @@ main()
     fn worker_crosses_str_by_value() {
         // () -> "oops"
         let (mut vm, task) = worker_fixture(vec![Op::ConstStr("oops".into()), Op::Return]);
-        let res = vm.run_task_isolated(task).expect("a str result now crosses by value");
+        let res = vm
+            .run_task_isolated(task)
+            .expect("a str result now crosses by value");
         let got = vm.from_wire(res.value);
         let want = Value::Obj(vm.heap.alloc(Obj::Str("oops".into())));
-        assert!(vm.values_equal(got, want), "str result round-trips to \"oops\"");
+        assert!(
+            vm.values_equal(got, want),
+            "str result round-trips to \"oops\""
+        );
     }
 
     // ----- B3.3c: read-only `home` snapshot (worker module-graph reconstruction) -----
@@ -15670,7 +18678,8 @@ main()
     /// Look up a top-level global in the entry module (modules run deps-first, entry last).
     fn entry_global(vm: &Vm, name: &str) -> Value {
         let m = *vm.module_objs.last().expect("at least one module");
-        vm.module_global(m, name).unwrap_or_else(|| panic!("no global '{name}'"))
+        vm.module_global(m, name)
+            .unwrap_or_else(|| panic!("no global '{name}'"))
     }
 
     fn sp() -> Span {
@@ -15682,8 +18691,14 @@ main()
     #[test]
     fn worker_reads_module_global() {
         let mut vm = ran_standalone("answer := 42\nfn get_answer() -> int:\n    return answer\n");
-        let task = PendingCall::Call { callee: entry_global(&vm, "get_answer"), args: Vec::new(), span: sp() };
-        let res = vm.run_task_isolated(task).expect("task reads a module global in its worker");
+        let task = PendingCall::Call {
+            callee: entry_global(&vm, "get_answer"),
+            args: Vec::new(),
+            span: sp(),
+        };
+        let res = vm
+            .run_task_isolated(task)
+            .expect("task reads a module global in its worker");
         assert_eq!(vm.from_wire(res.value), Value::Int(42));
     }
 
@@ -15693,8 +18708,14 @@ main()
         // slot scramble between the parent's compiled slots and the worker's faulted-in slots would
         // surface here as the wrong global's value (e.g. reading `a` or `b` instead of `c`).
         let mut vm = ran_standalone("a := 1\nb := 2\nc := 99\nfn get_c() -> int:\n    return c\n");
-        let task = PendingCall::Call { callee: entry_global(&vm, "get_c"), args: Vec::new(), span: sp() };
-        let res = vm.run_task_isolated(task).expect("task reads the last module global in its worker");
+        let task = PendingCall::Call {
+            callee: entry_global(&vm, "get_c"),
+            args: Vec::new(),
+            span: sp(),
+        };
+        let res = vm
+            .run_task_isolated(task)
+            .expect("task reads the last module global in its worker");
         assert_eq!(vm.from_wire(res.value), Value::Int(99));
     }
 
@@ -15703,19 +18724,39 @@ main()
         // M19 Phase 2b: top-level bindings get compile-time slots. Collection order is fns first,
         // then lets — so `read_b`=0, `a`=1, `b`=2 — and a fn body reads a global by its slot
         // (`GetGlobalSlot`), never by name.
-        let tokens = lexer::tokenize("a := 1\nb := 2\nfn read_b() -> int:\n    return b\n").expect("tok");
+        let tokens =
+            lexer::tokenize("a := 1\nb := 2\nfn read_b() -> int:\n    return b\n").expect("tok");
         let module = parser::parse(tokens).expect("parse");
         let program = crate::compiler::compile_module_standalone(&module).expect("compile");
-        assert_eq!(program.modules[0].global_slots, vec!["read_b".to_string(), "a".to_string(), "b".to_string()]);
-        let read_b = program.protos.iter().find(|p| p.name == "read_b").expect("fn proto");
+        assert_eq!(
+            program.modules[0].global_slots,
+            vec!["read_b".to_string(), "a".to_string(), "b".to_string()]
+        );
+        let read_b = program
+            .protos
+            .iter()
+            .find(|p| p.name == "read_b")
+            .expect("fn proto");
         assert!(
-            read_b.code.iter().any(|op| matches!(op, Op::GetGlobalSlot(2))),
+            read_b
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::GetGlobalSlot(2))),
             "read_b should load global slot 2 (`b`): {:?}",
             read_b.code
         );
         let top = &program.protos[program.modules[0].toplevel];
-        let defines: Vec<u32> =
-            top.code.iter().filter_map(|op| if let Op::DefineGlobalSlot(s) = op { Some(*s) } else { None }).collect();
+        let defines: Vec<u32> = top
+            .code
+            .iter()
+            .filter_map(|op| {
+                if let Op::DefineGlobalSlot(s) = op {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
         // toplevel defines the fn (slot 0 via hoist) and both lets (slots 1, 2).
         assert!(
             defines.contains(&0) && defines.contains(&1) && defines.contains(&2),
@@ -15728,9 +18769,17 @@ main()
     /// reconstructed `home` globals (the sibling `Func` is re-allocated over the worker's home).
     #[test]
     fn worker_calls_sibling_free_fn() {
-        let mut vm = ran_standalone("fn helper() -> int:\n    return 7\nfn task() -> int:\n    return helper() + 1\n");
-        let task = PendingCall::Call { callee: entry_global(&vm, "task"), args: Vec::new(), span: sp() };
-        let res = vm.run_task_isolated(task).expect("task calls a sibling fn in its worker");
+        let mut vm = ran_standalone(
+            "fn helper() -> int:\n    return 7\nfn task() -> int:\n    return helper() + 1\n",
+        );
+        let task = PendingCall::Call {
+            callee: entry_global(&vm, "task"),
+            args: Vec::new(),
+            span: sp(),
+        };
+        let res = vm
+            .run_task_isolated(task)
+            .expect("task calls a sibling fn in its worker");
         assert_eq!(vm.from_wire(res.value), Value::Int(8));
     }
 
@@ -15741,15 +18790,28 @@ main()
     fn worker_calls_imported_fn() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static C: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir()
-            .join(format!("chezzi_b33c_{}_{}", std::process::id(), C.fetch_add(1, Ordering::SeqCst)));
+        let dir = std::env::temp_dir().join(format!(
+            "chezzi_b33c_{}_{}",
+            std::process::id(),
+            C.fetch_add(1, Ordering::SeqCst)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let entry = dir.join("main.chz");
-        std::fs::write(&entry, "import std.str as text\nfn task() -> str:\n    return text.repeat(\"ab\", 2)\n").unwrap();
+        std::fs::write(
+            &entry,
+            "import std.str as text\nfn task() -> str:\n    return text.repeat(\"ab\", 2)\n",
+        )
+        .unwrap();
         let mut vm = ran_graph(&entry);
         let _ = std::fs::remove_dir_all(&dir);
-        let task = PendingCall::Call { callee: entry_global(&vm, "task"), args: Vec::new(), span: sp() };
-        let res = vm.run_task_isolated(task).expect("task calls an imported fn in its worker");
+        let task = PendingCall::Call {
+            callee: entry_global(&vm, "task"),
+            args: Vec::new(),
+            span: sp(),
+        };
+        let res = vm
+            .run_task_isolated(task)
+            .expect("task calls an imported fn in its worker");
         let got = vm.from_wire(res.value);
         let want = Value::Obj(vm.heap.alloc(Obj::Str("abab".into())));
         assert!(vm.values_equal(got, want), "imported repeat returns abab");
@@ -15763,8 +18825,15 @@ main()
     fn worker_runs_method_task() {
         let mut vm = Vm::new(Arc::new(empty_program()));
         let recv = vm.heap.alloc(Obj::Str("hello".into()));
-        let task = PendingCall::Method { recv: Value::Obj(recv), name: "len".into(), args: Vec::new(), span: sp() };
-        let res = vm.run_task_isolated(task).expect("method task now runs in a worker");
+        let task = PendingCall::Method {
+            recv: Value::Obj(recv),
+            name: "len".into(),
+            args: Vec::new(),
+            span: sp(),
+        };
+        let res = vm
+            .run_task_isolated(task)
+            .expect("method task now runs in a worker");
         assert_eq!(vm.from_wire(res.value), Value::Int(5));
     }
 
@@ -15776,8 +18845,15 @@ main()
         let mut vm = ran_standalone(
             "scale := 10\nstruct Point:\n    x: int\n    y: int\n    fn weighted(self) -> int:\n        return (self.x + self.y) * scale\np := Point(3, 4)\n",
         );
-        let task = PendingCall::Method { recv: entry_global(&vm, "p"), name: "weighted".into(), args: Vec::new(), span: sp() };
-        let res = vm.run_task_isolated(task).expect("struct method task dispatches in its worker");
+        let task = PendingCall::Method {
+            recv: entry_global(&vm, "p"),
+            name: "weighted".into(),
+            args: Vec::new(),
+            span: sp(),
+        };
+        let res = vm
+            .run_task_isolated(task)
+            .expect("struct method task dispatches in its worker");
         assert_eq!(vm.from_wire(res.value), Value::Int(70));
     }
 
@@ -15790,8 +18866,14 @@ main()
         let mut vm = ran_standalone(
             "fn bump(n: int) -> int:\n    return n + 1\nhandlers := [bump]\nfn task() -> int:\n    return handlers[0](20)\n",
         );
-        let task = PendingCall::Call { callee: entry_global(&vm, "task"), args: Vec::new(), span: sp() };
-        let res = vm.run_task_isolated(task).expect("task calls a fn from a global container in its worker");
+        let task = PendingCall::Call {
+            callee: entry_global(&vm, "task"),
+            args: Vec::new(),
+            span: sp(),
+        };
+        let res = vm
+            .run_task_isolated(task)
+            .expect("task calls a fn from a global container in its worker");
         assert_eq!(vm.from_wire(res.value), Value::Int(21));
     }
 
@@ -15800,10 +18882,18 @@ main()
     /// must still round-trip — the reconstructed globals stay rooted via `module_objs`.
     #[test]
     fn worker_reconstruction_survives_gc_stress() {
-        let mut vm = ran_standalone("data := [1, 2, 3]\nfn total() -> int:\n    s := 0\n    for x in data:\n        s += x\n    return s\n");
+        let mut vm = ran_standalone(
+            "data := [1, 2, 3]\nfn total() -> int:\n    s := 0\n    for x in data:\n        s += x\n    return s\n",
+        );
         vm.gc_stress = true;
-        let task = PendingCall::Call { callee: entry_global(&vm, "total"), args: Vec::new(), span: sp() };
-        let res = vm.run_task_isolated(task).expect("reconstruction survives GC stress");
+        let task = PendingCall::Call {
+            callee: entry_global(&vm, "total"),
+            args: Vec::new(),
+            span: sp(),
+        };
+        let res = vm
+            .run_task_isolated(task)
+            .expect("reconstruction survives GC stress");
         assert_eq!(vm.from_wire(res.value), Value::Int(6));
     }
 
@@ -15879,16 +18969,28 @@ main()
     #[test]
     fn superinstruction_div_mod_by_zero_via_locals() {
         // BinLocalLocal fast path must raise the same message as `arith`.
-        assert_eq!(run_err("fn main():\n    x := 1\n    y := 0\n    print(x / y)\nmain()"), "division by zero");
-        assert_eq!(run_err("fn main():\n    x := 1\n    y := 0\n    print(x % y)\nmain()"), "modulo by zero");
+        assert_eq!(
+            run_err("fn main():\n    x := 1\n    y := 0\n    print(x / y)\nmain()"),
+            "division by zero"
+        );
+        assert_eq!(
+            run_err("fn main():\n    x := 1\n    y := 0\n    print(x % y)\nmain()"),
+            "modulo by zero"
+        );
     }
 
     #[test]
     fn superinstruction_overflow_via_inc_and_mul() {
         // IncLocal overflow.
-        assert!(run_err("fn main():\n    i := 9223372036854775807\n    i += 1\n    print(i)\nmain()").contains("integer overflow in Add"));
+        assert!(
+            run_err("fn main():\n    i := 9223372036854775807\n    i += 1\n    print(i)\nmain()")
+                .contains("integer overflow in Add")
+        );
         // BinLocalConst Mul overflow.
-        assert!(run_err("fn main():\n    x := 9223372036854775807\n    print(x * 2)\nmain()").contains("integer overflow in Mul"));
+        assert!(
+            run_err("fn main():\n    x := 9223372036854775807\n    print(x * 2)\nmain()")
+                .contains("integer overflow in Mul")
+        );
     }
 
     #[test]
@@ -16114,7 +19216,10 @@ fn f() -> int:
     x := (5)?
     return x";
         // Reaching `?` on an int is a runtime error.
-        assert!(run_err(&format!("{src}\nfn main():\n    print(f())\nmain()")).contains("'?' expects Result or Option, found int"));
+        assert!(
+            run_err(&format!("{src}\nfn main():\n    print(f())\nmain()"))
+                .contains("'?' expects Result or Option, found int")
+        );
     }
 
     #[test]
@@ -16126,7 +19231,8 @@ fn f() -> int:
     #[test]
     fn top_level_try_err_reports_real_line() {
         // The `?` is on line 3 — report there, not at a hard-coded line 1 (parity with the interp).
-        let e = run_capture("fn d() -> Result[int]:\n    return Err(\"x\")\nx := d()?\n").unwrap_err();
+        let e =
+            run_capture("fn d() -> Result[int]:\n    return Err(\"x\")\nx := d()?\n").unwrap_err();
         assert_eq!(e.message, "unhandled error: x");
         assert_eq!(e.span.line, 3, "expected the `?` line, got {}", e.span.line);
     }
@@ -16252,7 +19358,10 @@ main()";
 
     #[test]
     fn index_assign_mutates_in_place() {
-        assert_eq!(run("xs := [1, 2, 3]\nxs[1] = 9\nprint(xs)\n"), "[1, 9, 3]\n");
+        assert_eq!(
+            run("xs := [1, 2, 3]\nxs[1] = 9\nprint(xs)\n"),
+            "[1, 9, 3]\n"
+        );
     }
 
     #[test]
@@ -16315,7 +19424,10 @@ fn main():
     print(\"xyz\" in \"hello\")
 main()";
         let vm_out = run_capture(src).expect("vm");
-        assert_eq!(vm_out, "true\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\n");
+        assert_eq!(
+            vm_out,
+            "true\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\n"
+        );
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp"));
         assert_eq!(vm_out, run_capture_parallel(src).expect("parallel"));
     }
@@ -16350,7 +19462,10 @@ main()";
 
     #[test]
     fn index_assign_out_of_bounds_errors() {
-        assert_eq!(run_err("xs := [1, 2, 3]\nxs[5] = 0\n"), "index 5 out of bounds (len 3)");
+        assert_eq!(
+            run_err("xs := [1, 2, 3]\nxs[5] = 0\n"),
+            "index 5 out of bounds (len 3)"
+        );
     }
 
     #[test]
@@ -16449,7 +19564,10 @@ main()";
 
     #[test]
     fn variant_arity_error() {
-        assert!(run_err("fn main():\n    x := Ok(1, 2)\nmain()").contains("variant 'Ok' expects 1 value(s), got 2"));
+        assert!(
+            run_err("fn main():\n    x := Ok(1, 2)\nmain()")
+                .contains("variant 'Ok' expects 1 value(s), got 2")
+        );
     }
 
     #[test]
@@ -16550,7 +19668,11 @@ main()";
     fn interp_rejects_generators() {
         let src = "fn count() -> Iterator[int]:\n    yield 1\nfn main():\n    for x in count():\n        print(x)\nmain()\n";
         let err = crate::interp::run_capture(src).expect_err("interp must reject generators");
-        assert!(err.message.contains("not supported by the interpreter"), "got: {}", err.message);
+        assert!(
+            err.message.contains("not supported by the interpreter"),
+            "got: {}",
+            err.message
+        );
     }
 
     /// Driving a generator by explicit `.next()` yields `Some(v)` per yield, then `None` forever.
@@ -16617,7 +19739,10 @@ main()";
         let expected = include_str!("../../examples/inline_fn.expected");
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
-        assert_eq!(vm_out, expected, "vm output drifted from inline_fn.expected");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from inline_fn.expected"
+        );
         assert_eq!(vm_out, interp_out, "vm/interp divergence on inline_fn");
     }
 
@@ -16642,8 +19767,14 @@ main()";
         let expected = include_str!("../../examples/struct_layout.expected");
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
-        assert_eq!(vm_out, expected, "vm output drifted from struct_layout.expected");
-        assert_eq!(vm_out, interp_out, "vm/interp divergence on struct_layout (layout must be behavior-preserving)");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from struct_layout.expected"
+        );
+        assert_eq!(
+            vm_out, interp_out,
+            "vm/interp divergence on struct_layout (layout must be behavior-preserving)"
+        );
     }
 
     /// M19 memory-layout lever #1 — assert the VM stores struct fields POSITIONALLY (a flat
@@ -16655,7 +19786,10 @@ main()";
     /// `fields` as `&Vec<Value>` would not compile against the old `Vec<(Box<str>,Value)>`).
     #[test]
     fn struct_positional_layout_no_per_instance_names() {
-        let tokens = lexer::tokenize("struct Point:\n    x: int\n    y: int\nfn main():\n    print(0)\nmain()\n").expect("lex");
+        let tokens = lexer::tokenize(
+            "struct Point:\n    x: int\n    y: int\nfn main():\n    print(0)\nmain()\n",
+        )
+        .expect("lex");
         let module = parser::parse(tokens).expect("parse");
         let program = crate::compiler::compile_module_standalone(&module).expect("compile");
         let mut vm = Vm::new(Arc::new(program));
@@ -16663,12 +19797,18 @@ main()";
         vm.push(Value::Int(1));
         vm.push(Value::Int(2));
         vm.new_struct("Point", 2, span).expect("new_struct");
-        let Value::Obj(h) = vm.pop() else { panic!("expected struct obj") };
+        let Value::Obj(h) = vm.pop() else {
+            panic!("expected struct obj")
+        };
         match vm.heap.get(h) {
             Obj::Struct { name, fields, .. } => {
                 assert_eq!(name.as_ref(), "Point");
                 let fields: &Vec<Value> = fields; // positional: NOT Vec<(Box<str>, Value)>
-                assert_eq!(*fields, vec![Value::Int(1), Value::Int(2)], "fields must be positional in declaration order, no per-instance names");
+                assert_eq!(
+                    *fields,
+                    vec![Value::Int(1), Value::Int(2)],
+                    "fields must be positional in declaration order, no per-instance names"
+                );
             }
             _ => panic!("expected Obj::Struct"),
         }
@@ -16683,7 +19823,10 @@ main()";
     /// (enum-type, variant) pair.
     #[test]
     fn enum_variant_id_stamped_at_construction() {
-        let tokens = lexer::tokenize("enum Color:\n    Red\n    Green\n    Blue\nfn main():\n    print(0)\nmain()\n").expect("lex");
+        let tokens = lexer::tokenize(
+            "enum Color:\n    Red\n    Green\n    Blue\nfn main():\n    print(0)\nmain()\n",
+        )
+        .expect("lex");
         let module = parser::parse(tokens).expect("parse");
         let program = crate::compiler::compile_module_standalone(&module).expect("compile");
         // `Green`'s dense id from the program table (resolved on the cold path).
@@ -16695,10 +19838,18 @@ main()";
         let mut vm = Vm::new(Arc::new(program));
         let span = Span { line: 1, col: 1 };
         vm.new_enum("Green", green_id, 0, span).expect("new_enum");
-        let Value::Obj(h) = vm.pop() else { panic!("expected enum obj") };
+        let Value::Obj(h) = vm.pop() else {
+            panic!("expected enum obj")
+        };
         match vm.heap.get(h) {
-            Obj::Enum { variant_id, payload } => {
-                assert_eq!(*variant_id, green_id, "variant_id must be the dense id stamped at construction");
+            Obj::Enum {
+                variant_id,
+                payload,
+            } => {
+                assert_eq!(
+                    *variant_id, green_id,
+                    "variant_id must be the dense id stamped at construction"
+                );
                 let payload: &Vec<Value> = payload; // no per-instance ty/variant Box<str>
                 assert!(payload.is_empty(), "nullary variant has empty payload");
             }
@@ -16716,7 +19867,11 @@ main()";
         let module = parser::parse(tokens).expect("parse");
         let program = crate::compiler::compile_module_standalone(&module).expect("compile");
         let vid = |e: &str, v: &str| {
-            program.variants.get(&(e.to_string(), v.to_string())).unwrap().variant_id
+            program
+                .variants
+                .get(&(e.to_string(), v.to_string()))
+                .unwrap()
+                .variant_id
         };
         assert_eq!(vid("Result", "Ok"), VID_OK);
         assert_eq!(vid("Result", "Err"), VID_ERR);
@@ -16726,8 +19881,13 @@ main()";
         let mut vm = Vm::new(Arc::new(program));
         let v = vm.alloc_enum("Option", "Some", vec![Value::Int(7)]);
         let Value::Obj(h) = v else { panic!() };
-        let Obj::Enum { variant_id, .. } = vm.heap.get(h) else { panic!("expected enum") };
-        assert_eq!(*variant_id, VID_SOME, "native alloc_enum must stamp the fixed Some id");
+        let Obj::Enum { variant_id, .. } = vm.heap.get(h) else {
+            panic!("expected enum")
+        };
+        assert_eq!(
+            *variant_id, VID_SOME,
+            "native alloc_enum must stamp the fixed Some id"
+        );
     }
 
     /// M19 lever #2 regression guard — a user enum declaring a variant named `Some` must NOT collapse
@@ -16740,8 +19900,14 @@ main()";
         let src = "enum Foo:\n    Some(int)\n    Bar\nfn opt() -> int?:\n    return [5].pop()\nfn main():\n    a := opt()\n    b := Foo.Some(5)\n    print(a == b)\nmain()\n";
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
-        assert_eq!(vm_out, "false\n", "native Option::Some must not equal user Foo::Some (distinct enums)");
-        assert_eq!(vm_out, interp_out, "vm/interp divergence on shadowed-Some equality");
+        assert_eq!(
+            vm_out, "false\n",
+            "native Option::Some must not equal user Foo::Some (distinct enums)"
+        );
+        assert_eq!(
+            vm_out, interp_out,
+            "vm/interp divergence on shadowed-Some equality"
+        );
     }
 
     /// Scoped variants — two enums may now reuse a variant name (`Color.Red` / `Light.Red`). Each
@@ -16753,7 +19919,10 @@ main()";
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
         assert_eq!(vm_out, "c-red\nl-red\nc-blue\n");
-        assert_eq!(vm_out, interp_out, "vm/interp divergence on shared variant name dispatch");
+        assert_eq!(
+            vm_out, interp_out,
+            "vm/interp divergence on shared variant name dispatch"
+        );
     }
 
     /// M19 lever #2 regression guard — `?` on a GENUINE native Option must still work when a user enum
@@ -16765,8 +19934,14 @@ main()";
         let src = "enum Foo:\n    Some(int)\n    Bar\nfn first(xs: list[int]) -> int?:\n    v := xs.pop()?\n    return Some(v)\nfn main():\n    print(\"first\", first([10, 20]))\nmain()\n";
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
-        assert_eq!(vm_out, "first Some(20)\n", "? must unwrap a genuine native Option even under Some shadowing");
-        assert_eq!(vm_out, interp_out, "vm/interp divergence on ? under shadowed Some");
+        assert_eq!(
+            vm_out, "first Some(20)\n",
+            "? must unwrap a genuine native Option even under Some shadowing"
+        );
+        assert_eq!(
+            vm_out, interp_out,
+            "vm/interp divergence on ? under shadowed Some"
+        );
     }
 
     /// M19 lever #2 — `Op::MatchArm` carries a compile-time `variant_id: u32` so match dispatch is a
@@ -16787,7 +19962,10 @@ main()";
         let found = program.protos.iter().flat_map(|p| p.code.iter()).any(|op| {
             matches!(op, Op::MatchArm { variant, variant_id, .. } if variant == "Green" && *variant_id == green_id)
         });
-        assert!(found, "MatchArm for 'Green' must carry its dense variant_id");
+        assert!(
+            found,
+            "MatchArm for 'Green' must carry its dense variant_id"
+        );
         // And it must select the right arm at runtime.
         let out = run_capture(src).expect("vm run");
         assert_eq!(out, "1\n");
@@ -16805,9 +19983,19 @@ main()";
         let expected = include_str!("../../examples/enum_layout.expected");
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
-        assert_eq!(vm_out, expected, "vm output drifted from enum_layout.expected");
-        assert_eq!(vm_out, interp_out, "vm/interp divergence on enum_layout (variant-id must be behavior-preserving)");
-        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"), "parallel engine diverged on enum_layout (wire/snap variant-id rebuild)");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from enum_layout.expected"
+        );
+        assert_eq!(
+            vm_out, interp_out,
+            "vm/interp divergence on enum_layout (variant-id must be behavior-preserving)"
+        );
+        assert_eq!(
+            vm_out,
+            run_capture_parallel(src).expect("parallel run"),
+            "parallel engine diverged on enum_layout (wire/snap variant-id rebuild)"
+        );
     }
 
     /// Literals golden: `examples/literals.chz` (scientific-notation floats, `\u{…}` unicode
@@ -16927,10 +20115,14 @@ main()";
     /// function") while the VM constructed the variant.
     #[test]
     fn qualified_variant_not_shadowed_by_function_parity() {
-        let src = "enum Color:\n    Red\n    Green\nfn Color() -> int:\n    return 5\nprint(Color.Red)\n";
+        let src =
+            "enum Color:\n    Red\n    Green\nfn Color() -> int:\n    return 5\nprint(Color.Red)\n";
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
-        assert_eq!(vm_out, interp_out, "engines diverged on fn-vs-qualified-variant");
+        assert_eq!(
+            vm_out, interp_out,
+            "engines diverged on fn-vs-qualified-variant"
+        );
         assert_eq!(vm_out, "Red\n");
     }
 
@@ -17129,8 +20321,16 @@ print(\"s={5:+d}|{-5:+d}\")
 print(\"bare={5.0}|fmt={5.0:.2f}|w={5.0:>8}\")
 ";
         let vm_out = run_capture(src).expect("vm run");
-        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"), "interp parity");
-        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"), "parallel parity");
+        assert_eq!(
+            vm_out,
+            crate::interp::run_capture(src).expect("interp run"),
+            "interp parity"
+        );
+        assert_eq!(
+            vm_out,
+            run_capture_parallel(src).expect("parallel run"),
+            "parallel parity"
+        );
     }
 
     /// Regression: an interpolated ternary `{if b: a else: b}` has top-level colons that are NOT a
@@ -17145,8 +20345,16 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
 ";
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, "val=10\nfmt=    1\n");
-        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"), "interp parity");
-        assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"), "parallel parity");
+        assert_eq!(
+            vm_out,
+            crate::interp::run_capture(src).expect("interp run"),
+            "interp parity"
+        );
+        assert_eq!(
+            vm_out,
+            run_capture_parallel(src).expect("parallel run"),
+            "parallel parity"
+        );
     }
 
     /// A pathological field width is rejected (with the cap message) BEFORE any allocation — the
@@ -17156,9 +20364,15 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
     fn pathological_width_rejected() {
         let src = "x := 1\nprint(\"{x:>100000000}\")\n";
         let vm_err = run_capture(src).expect_err("vm must reject pathological width");
-        assert!(vm_err.to_string().contains("exceeds maximum 4096"), "vm: {vm_err}");
+        assert!(
+            vm_err.to_string().contains("exceeds maximum 4096"),
+            "vm: {vm_err}"
+        );
         let interp_err = crate::interp::run_capture(src).expect_err("interp must reject");
-        assert!(interp_err.to_string().contains("exceeds maximum 4096"), "interp: {interp_err}");
+        assert!(
+            interp_err.to_string().contains("exceeds maximum 4096"),
+            "interp: {interp_err}"
+        );
     }
 
     /// Golden: `examples/format_specs.chz` (the full format mini-language) byte-identical on the VM,
@@ -17287,7 +20501,9 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
 
     #[test]
     fn vm_channel_send_after_close_faults() {
-        let err = run_err("fn main():\n    ch := Channel[int]()\n    ch.close()\n    ch.send(1)\nmain()\n");
+        let err = run_err(
+            "fn main():\n    ch := Channel[int]()\n    ch.close()\n    ch.send(1)\nmain()\n",
+        );
         assert!(err.contains("send on a closed channel"), "{err}");
     }
 
@@ -17325,13 +20541,17 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
 
     #[test]
     fn vm_wait_all_closed_no_else_faults() {
-        let err = run_err("fn main():\n    ch := Channel[int]()\n    ch.close()\n    wait:\n        v := ch.recv(): print(v)\nmain()\n");
+        let err = run_err(
+            "fn main():\n    ch := Channel[int]()\n    ch.close()\n    wait:\n        v := ch.recv(): print(v)\nmain()\n",
+        );
         assert!(err.contains("all channels closed"), "{err}");
     }
 
     #[test]
     fn vm_wait_live_empty_no_else_top_level_deadlocks() {
-        let err = run_err("fn main():\n    ch := Channel[int]()\n    wait:\n        v := ch.recv(): print(v)\nmain()\n");
+        let err = run_err(
+            "fn main():\n    ch := Channel[int]()\n    wait:\n        v := ch.recv(): print(v)\nmain()\n",
+        );
         assert!(err.contains("deadlock"), "{err}");
     }
 
@@ -17377,7 +20597,8 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
     #[test]
     fn vm_wait_lone_blocked_parallel_deadlocks() {
         let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\n        w := b.recv(): print(w)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\nmain()\n";
-        let err = run_capture_parallel(src).expect_err("lone blocked wait under --parallel must deadlock");
+        let err = run_capture_parallel(src)
+            .expect_err("lone blocked wait under --parallel must deadlock");
         assert!(err.message.contains("deadlock"), "{}", err.message);
     }
 
@@ -17387,7 +20608,10 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
     #[test]
     fn vm_wait_blocks_then_wakes_on_second_channel_parallel() {
         let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(\"a {v}\")\n        w := b.recv(): print(\"b {w}\")\nfn producer(b: Channel[int]):\n    b.send(99)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn producer(b)\nmain()\n";
-        assert_eq!(run_capture_parallel(src).expect("parallel wait park"), "b 99\n");
+        assert_eq!(
+            run_capture_parallel(src).expect("parallel wait park"),
+            "b 99\n"
+        );
         assert_eq!(run(src), "b 99\n");
     }
 
@@ -17404,8 +20628,12 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         for _ in 0..20 {
             // `.expect` catches a panic-to-fault ("scheduled a Done fiber") or a hang-then-deadlock; the
             // membership check tolerates the genuine producer race.
-            let out = run_capture_parallel(src).expect("parallel wait sweep must not panic or hang");
-            assert!(out == "1\n" || out == "2\n", "unexpected sweep output: {out:?}");
+            let out =
+                run_capture_parallel(src).expect("parallel wait sweep must not panic or hang");
+            assert!(
+                out == "1\n" || out == "2\n",
+                "unexpected sweep output: {out:?}"
+            );
         }
         assert_eq!(run(src), "1\n"); // cooperative engine is deterministic (source-order poll)
     }
@@ -17415,7 +20643,10 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
     #[test]
     fn vm_wait_sibling_send_vetoes_deadlock_parallel() {
         let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(\"got {v}\")\n        w := b.recv(): print(\"got {w}\")\nfn producer(a: Channel[int]):\n    a.send(5)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn producer(a)\nmain()\n";
-        assert_eq!(run_capture_parallel(src).expect("live sibling vetoes deadlock"), "got 5\n");
+        assert_eq!(
+            run_capture_parallel(src).expect("live sibling vetoes deadlock"),
+            "got 5\n"
+        );
         assert_eq!(run(src), "got 5\n");
     }
 
@@ -17460,7 +20691,8 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         let src = "fn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn closer(ch: Channel[int]):\n    d := timer(5)\n    _ := d.recv()\n    ch.close()\nfn main():\n    ch := Channel[int]()\n    t := timer(40)\n    parallel:\n        spawn consumer(ch, t)\n        spawn closer(ch)\nmain()\n";
         for _ in 0..20 {
             assert_eq!(
-                run_capture_parallel(src).expect("timer arm must fire after a mid-window close; no hang"),
+                run_capture_parallel(src)
+                    .expect("timer arm must fire after a mid-window close; no hang"),
                 "timeout\n",
                 "a channel close that re-parks the wait stranded the timer arm"
             );
@@ -17512,7 +20744,10 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
     fn vm_wait_in_loop_reparks_parallel() {
         let src = "fn consumer(ch: Channel[int], done: Channel[int]):\n    sum := 0\n    i := 0\n    while i < 3:\n        wait:\n            v := ch.recv(): sum += v\n        i += 1\n    done.send(sum)\nfn producer(ch: Channel[int]):\n    ch.send(10)\n    ch.send(20)\n    ch.send(30)\nfn main():\n    ch := Channel[int]()\n    done := Channel[int]()\n    parallel:\n        spawn consumer(ch, done)\n        spawn producer(ch)\n    print(done.recv())\nmain()\n";
         assert_eq!(run(src), "60\n");
-        assert_eq!(run_capture_parallel(src).expect("parallel repark loop"), "60\n");
+        assert_eq!(
+            run_capture_parallel(src).expect("parallel repark loop"),
+            "60\n"
+        );
     }
 
     /// A `wait` arm body containing a bare `spawn` (exercises `block_has_bare_spawn`'s recursion into
@@ -17544,13 +20779,18 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
     #[test]
     fn vm_wait_single_arm_recv_park_unchanged_under_parallel() {
         let src = "fn consumer(a: Channel[int]):\n    v := a.recv()\n    print(\"got {v}\")\nfn producer(a: Channel[int]):\n    a.send(7)\nfn main():\n    a := Channel[int]()\n    parallel:\n        spawn consumer(a)\n        spawn producer(a)\nmain()\n";
-        assert_eq!(run_capture_parallel(src).expect("parallel recv park"), "got 7\n");
+        assert_eq!(
+            run_capture_parallel(src).expect("parallel recv park"),
+            "got 7\n"
+        );
         assert_eq!(run(src), "got 7\n");
     }
 
     #[test]
     fn vm_channel_recv_on_closed_empty_faults() {
-        let err = run_err("fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.recv())\nmain()\n");
+        let err = run_err(
+            "fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.recv())\nmain()\n",
+        );
         assert!(err.contains("receive on a closed channel"), "{err}");
     }
 
@@ -17576,7 +20816,8 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
 
     #[test]
     fn vm_channel_close_then_len_zero() {
-        let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.len())\nmain()\n";
+        let src =
+            "fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.len())\nmain()\n";
         assert_eq!(run(src), "0\n");
         assert_eq!(run(src), crate::interp::run_capture(src).expect("interp"));
     }
@@ -17706,7 +20947,11 @@ fn main():
 main()
 ";
         let err = run_capture_parallel(src).expect_err("send after close should fault");
-        assert!(err.message.contains("send on a closed channel"), "{}", err.message);
+        assert!(
+            err.message.contains("send on a closed channel"),
+            "{}",
+            err.message
+        );
     }
 
     /// B3.6 golden: `Executor` tasks run on the bounded pool. Three submitted closures capture the
@@ -17757,7 +21002,9 @@ main()
     #[test]
     fn parallel_many_spawns_cheap_and_correct() {
         const N: usize = 2000;
-        let mut src = String::from("fn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\nfn main():\n    s := Shared(0)\n    parallel:\n");
+        let mut src = String::from(
+            "fn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\nfn main():\n    s := Shared(0)\n    parallel:\n",
+        );
         for _ in 0..N {
             src.push_str("        spawn bump(s)\n");
         }
@@ -17766,7 +21013,10 @@ main()
         let out = run_capture_parallel(&src).expect("parallel run");
         let elapsed = start.elapsed();
         assert_eq!(out, format!("{N}\n"));
-        assert!(elapsed < std::time::Duration::from_secs(30), "{N} spawns took {elapsed:?} (>30s ceiling)");
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "{N} spawns took {elapsed:?} (>30s ceiling)"
+        );
     }
 
     /// B3.6: a submitted closure capturing a plain value (`int`) observes it **by value** across the
@@ -17775,7 +21025,8 @@ main()
     /// `--parallel` drain reconstructs and runs the closure on the pool.
     #[test]
     fn executor_submitted_closure_captures_by_value() {
-        let src = "fn main():\n    n := 7\n    ex := Executor()\n    ex.submit(fn(): print(n))\nmain()\n";
+        let src =
+            "fn main():\n    n := 7\n    ex := Executor()\n    ex.submit(fn(): print(n))\nmain()\n";
         assert_eq!(run_capture(src).expect("vm run"), "7\n");
         assert_eq!(run_capture_parallel(src).expect("parallel run"), "7\n");
     }
@@ -17789,8 +21040,15 @@ main()
     fn executor_cooperative_submit_shares_captures_by_reference() {
         let src = "fn main():\n    xs := [1]\n    ex := Executor()\n    ex.submit(fn(): print(xs))\n    xs.push(2)\nmain()\n";
         let vm_out = run_capture(src).expect("vm run");
-        assert_eq!(vm_out, "[1, 2]\n", "cooperative submit shares the captured list by reference");
-        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"), "VM == interp oracle");
+        assert_eq!(
+            vm_out, "[1, 2]\n",
+            "cooperative submit shares the captured list by reference"
+        );
+        assert_eq!(
+            vm_out,
+            crate::interp::run_capture(src).expect("interp run"),
+            "VM == interp oracle"
+        );
     }
 
     /// B3.3-threads: a nested `parallel:` runs on the same bounded pool without exploding the thread
@@ -17816,7 +21074,11 @@ main()
             panic!("boom in a task");
         });
         let _ = h.join(); // swallow the panic
-        assert_eq!(*done.0.lock().unwrap(), 1, "DoneSignal::drop must bump the counter even on panic");
+        assert_eq!(
+            *done.0.lock().unwrap(),
+            1,
+            "DoneSignal::drop must bump the counter even on panic"
+        );
     }
 
     /// B3.3-threads (decision F, review coverage gap): each worker buffers its own stdout and the join
@@ -17826,7 +21088,10 @@ main()
     fn parallel_output_flushes_in_task_order() {
         let src = "fn emit(s: str):\n    print(s)\n\
                    fn main():\n    parallel:\n        spawn emit(\"alpha\")\n        spawn emit(\"beta\")\n        spawn emit(\"gamma\")\nmain()\n";
-        assert_eq!(run_capture_parallel(src).expect("parallel run"), "alpha\nbeta\ngamma\n");
+        assert_eq!(
+            run_capture_parallel(src).expect("parallel run"),
+            "alpha\nbeta\ngamma\n"
+        );
     }
 
     /// B3.3-threads: a fault in a **pool** task (not the inline task[0]) propagates out of the join as
@@ -17839,7 +21104,11 @@ main()
                    fn boom():\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    s := Shared(0)\n    parallel:\n        spawn ok_task(s)\n        spawn boom()\n    print(\"unreached\")\nmain()\n";
         let err = run_capture_parallel(src).expect_err("expected the pool task fault to propagate");
-        assert!(err.message.contains("out of bounds"), "got: {}", err.message);
+        assert!(
+            err.message.contains("out of bounds"),
+            "got: {}",
+            err.message
+        );
     }
 
     /// gap #2: a plain `return` inside a `parallel:` body jumps past `JoinNursery`, so the nursery is
@@ -17859,9 +21128,20 @@ main()
         // `main`'s trailing parallel: dedents normally to its join (NOT an escape), so it runs `noop()`
         // silently — no report, proving a later parallel: still works on the reclaimed stack.
         let report = crate::runtime::pending_cancel_report(1);
-        assert_eq!(vm_out, format!("{report}5\n"), "early return wins; only the escaped nursery reports");
-        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"), "VM/interp parity");
-        assert_eq!(nursery_depth, 0, "the return-escaped nursery must be reclaimed, not leaked");
+        assert_eq!(
+            vm_out,
+            format!("{report}5\n"),
+            "early return wins; only the escaped nursery reports"
+        );
+        assert_eq!(
+            vm_out,
+            crate::interp::run_capture(src).expect("interp run"),
+            "VM/interp parity"
+        );
+        assert_eq!(
+            nursery_depth, 0,
+            "the return-escaped nursery must be reclaimed, not leaked"
+        );
     }
 
     /// gap #2, second escape form: an uncaught `?` that propagates out of the frame (no `recover:`
@@ -17876,7 +21156,10 @@ main()
                    fn main() -> int!:\n    parallel:\n        spawn noop()\n        y := boom()?\n        print(y)\n    Ok(0)\nmain()\n";
         let (vm_out, nursery_depth) = run_capture_nursery_len(src);
         assert!(vm_out.is_err(), "the uncaught ? faults the program");
-        assert_eq!(nursery_depth, 0, "the ?-escaped nursery must be reclaimed, not leaked");
+        assert_eq!(
+            nursery_depth, 0,
+            "the ?-escaped nursery must be reclaimed, not leaked"
+        );
         // Cancel-and-report: stdout-so-far is exactly the report line, identical across engines.
         let report = crate::runtime::pending_cancel_report(1);
         let (vm_so_far, vm_res) = run_program(src);
@@ -17904,9 +21187,20 @@ main()
         // The recover-caught `?` cancels its one pending task and reports, THEN the recover continues.
         // `main`'s trailing parallel: joins normally (not an escape) → silent.
         let report = crate::runtime::pending_cancel_report(1);
-        assert_eq!(vm_out, format!("{report}recovered\n"), "recover swallows the fault; cancel+report precedes it");
-        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"), "VM/interp parity");
-        assert_eq!(nursery_depth, 0, "the recover-caught nursery is reclaimed via the handler path");
+        assert_eq!(
+            vm_out,
+            format!("{report}recovered\n"),
+            "recover swallows the fault; cancel+report precedes it"
+        );
+        assert_eq!(
+            vm_out,
+            crate::interp::run_capture(src).expect("interp run"),
+            "VM/interp parity"
+        );
+        assert_eq!(
+            nursery_depth, 0,
+            "the recover-caught nursery is reclaimed via the handler path"
+        );
     }
 
     /// gap #2, ordering boundary: a recover-scoped `?` escaping a `parallel:` whose BODY has a
@@ -17924,12 +21218,25 @@ main()
         let report = crate::runtime::pending_cancel_report(1);
         let expected = format!("PDEFER\n{report}recovered\n");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
-        assert_eq!(interp_out, expected, "interp oracle: body-defer precedes report precedes recover");
+        assert_eq!(
+            interp_out, expected,
+            "interp oracle: body-defer precedes report precedes recover"
+        );
         let (vm_out, nursery_depth) = run_capture_nursery_len(src);
         let vm_out = vm_out.expect("the ? is caught by recover, so the program completes");
-        assert_eq!(vm_out, expected, "VM cooperative: report ordered after the parallel-body defer");
-        assert_eq!(nursery_depth, 0, "the recover-caught nursery is reclaimed, not leaked");
-        assert_eq!(run_capture_parallel(src).expect("--parallel run"), expected, "VM --parallel parity");
+        assert_eq!(
+            vm_out, expected,
+            "VM cooperative: report ordered after the parallel-body defer"
+        );
+        assert_eq!(
+            nursery_depth, 0,
+            "the recover-caught nursery is reclaimed, not leaked"
+        );
+        assert_eq!(
+            run_capture_parallel(src).expect("--parallel run"),
+            expected,
+            "VM --parallel parity"
+        );
     }
 
     // ----- TASK B: pending-spawn-drop on early `parallel:` escape → cancel-and-report -----
@@ -17955,11 +21262,17 @@ main()
         // The `?` faults the whole program, but the report is on stdout captured so far.
         let (vm_out, depth) = run_capture_nursery_len(src);
         assert!(vm_out.is_err(), "the uncaught ? faults the program");
-        assert_eq!(depth, 0, "the ?-escaped nursery must be reclaimed, not leaked");
+        assert_eq!(
+            depth, 0,
+            "the ?-escaped nursery must be reclaimed, not leaked"
+        );
         // Stdout captured up to the fault: exactly the cancellation report, no `side()` output.
         let (vm_so_far, vm_res) = run_program(src);
         assert!(vm_res.is_err());
-        assert_eq!(vm_so_far, report, "VM cooperative: report present, task NOT run");
+        assert_eq!(
+            vm_so_far, report,
+            "VM cooperative: report present, task NOT run"
+        );
         // Interp parity (oracle): identical stdout-so-far + identical error class.
         let (interp_so_far, interp_res) = crate::interp::run_program(src);
         assert!(interp_res.is_err());
@@ -17981,10 +21294,25 @@ main()
         // escape (inside `worker`, before its caller prints the result).
         let expected = format!("{report}5\n");
         let (vm_out, depth) = run_capture_nursery_len(src);
-        assert_eq!(vm_out.as_deref().map(str::to_string), Ok(expected.clone()), "VM cooperative");
-        assert_eq!(depth, 0, "the return-escaped nursery must be reclaimed, not leaked");
-        assert_eq!(crate::interp::run_capture(src).expect("interp run"), expected, "interp parity");
-        assert_eq!(run_capture_parallel(src).expect("parallel run"), expected, "--parallel parity");
+        assert_eq!(
+            vm_out.as_deref().map(str::to_string),
+            Ok(expected.clone()),
+            "VM cooperative"
+        );
+        assert_eq!(
+            depth, 0,
+            "the return-escaped nursery must be reclaimed, not leaked"
+        );
+        assert_eq!(
+            crate::interp::run_capture(src).expect("interp run"),
+            expected,
+            "interp parity"
+        );
+        assert_eq!(
+            run_capture_parallel(src).expect("parallel run"),
+            expected,
+            "--parallel parity"
+        );
     }
 
     /// `break`-in-loop escape: the NET-NEW VM site (a `break` that leaves a `parallel:` scope via the
@@ -18000,10 +21328,25 @@ main()
         // exit the loop. `side()` never runs (no "SIDE RAN"). "unreached" never prints.
         let expected = format!("{report}done\n");
         let (vm_out, depth) = run_capture_nursery_len(src);
-        assert_eq!(vm_out.as_deref().map(str::to_string), Ok(expected.clone()), "VM cooperative (net-new break site)");
-        assert_eq!(depth, 0, "the break-escaped nursery must be reclaimed, not leaked");
-        assert_eq!(crate::interp::run_capture(src).expect("interp run"), expected, "interp parity");
-        assert_eq!(run_capture_parallel(src).expect("parallel run"), expected, "--parallel parity");
+        assert_eq!(
+            vm_out.as_deref().map(str::to_string),
+            Ok(expected.clone()),
+            "VM cooperative (net-new break site)"
+        );
+        assert_eq!(
+            depth, 0,
+            "the break-escaped nursery must be reclaimed, not leaked"
+        );
+        assert_eq!(
+            crate::interp::run_capture(src).expect("interp run"),
+            expected,
+            "interp parity"
+        );
+        assert_eq!(
+            run_capture_parallel(src).expect("parallel run"),
+            expected,
+            "--parallel parity"
+        );
     }
 
     /// B3.4: a `recv`-blocked sibling must ABORT when a sibling faults before sending, instead of
@@ -18017,8 +21360,13 @@ main()
         let src = "fn boom(ch: Channel[int]):\n    xs := [1]\n    print(xs[9])\n\
                    fn consumer(ch: Channel[int]):\n    ch.recv()\n    print(\"consumed\")\n\
                    fn main():\n    ch := Channel[int]()\n    parallel:\n        spawn boom(ch)\n        spawn consumer(ch)\nmain()\n";
-        let err = run_capture_parallel(src).expect_err("expected the producer fault to propagate, not hang");
-        assert!(err.message.contains("out of bounds"), "got: {}", err.message);
+        let err = run_capture_parallel(src)
+            .expect_err("expected the producer fault to propagate, not hang");
+        assert!(
+            err.message.contains("out of bounds"),
+            "got: {}",
+            err.message
+        );
     }
 
     /// B3.4: a CPU-bound sibling aborts mid-flight when a sibling faults, observing the cancel flag
@@ -18032,8 +21380,12 @@ main()
         let src = "fn looper(go: Channel[int], s: Shared[int]):\n    s.set(1)\n    go.send(0)\n    i := 0\n    while i < 1000000000:\n        i = i + 1\n    s.set(99)\n\
                    fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn looper(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
-        let out = run_capture_parallel(src).expect("the fault is recovered, so the program completes");
-        assert_eq!(out, "1\n", "looper started (1) but was cancelled before completing (never wrote 99)");
+        let out =
+            run_capture_parallel(src).expect("the fault is recovered, so the program completes");
+        assert_eq!(
+            out, "1\n",
+            "looper started (1) but was cancelled before completing (never wrote 99)"
+        );
     }
 
     /// B3.4: `defer` still composes with cancellation. The blocked consumer is aborted when the
@@ -18052,8 +21404,12 @@ main()
                    fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
                    fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(s.get())\nmain()\n";
-        let out = run_capture_parallel(src).expect("the producer fault is recovered, so the program completes");
-        assert_eq!(out, "42\n", "the cancelled consumer's defer ran on the unwind");
+        let out = run_capture_parallel(src)
+            .expect("the producer fault is recovered, so the program completes");
+        assert_eq!(
+            out, "42\n",
+            "the cancelled consumer's defer ran on the unwind"
+        );
     }
 
     /// B3.4: `defer` runs even when a task is cancelled at the CPU **back-edge** (not only on the
@@ -18067,8 +21423,12 @@ main()
                    fn worker(go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    i := 0\n    while i < 1000000000:\n        i = i + 1\n\
                    fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn worker(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
-        let out = run_capture_parallel(src).expect("the trigger fault is recovered, so the program completes");
-        assert_eq!(out, "42\n", "the CPU-cancelled worker's defer ran on the back-edge unwind");
+        let out = run_capture_parallel(src)
+            .expect("the trigger fault is recovered, so the program completes");
+        assert_eq!(
+            out, "42\n",
+            "the CPU-cancelled worker's defer ran on the back-edge unwind"
+        );
     }
 
     /// B3.4: cancellation is NOT catchable by a `recover:` inside a worker — a cancelled task must
@@ -18081,8 +21441,12 @@ main()
         let src = "fn victim(go: Channel[int], s: Shared[int]):\n    s.set(1)\n    go.send(0)\n    r := recover:\n        i := 0\n        while i < 1000000000:\n            i = i + 1\n        0\n    s.set(99)\n\
                    fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn victim(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
-        let out = run_capture_parallel(src).expect("the trigger fault is recovered, so the program completes");
-        assert_eq!(out, "1\n", "victim's inner recover must NOT catch the cancel; it never reaches s.set(99)");
+        let out = run_capture_parallel(src)
+            .expect("the trigger fault is recovered, so the program completes");
+        assert_eq!(
+            out, "1\n",
+            "victim's inner recover must NOT catch the cancel; it never reaches s.set(99)"
+        );
     }
 
     /// C2 golden: `Channel[T]` fan-out — workers `send` at the dedent, the parent `recv`s after the
@@ -18105,7 +21469,10 @@ main()
             "fn work(a: Atomic[int]):\n    a.add(1)\n\
              fn main():\n    a := Atomic(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn work(a)\n    print(a.load())\nmain()\n"
         );
-        assert_eq!(run_capture_parallel(&src).expect("parallel"), format!("{n}\n"));
+        assert_eq!(
+            run_capture_parallel(&src).expect("parallel"),
+            format!("{n}\n")
+        );
     }
 
     /// `Atomic[int].cas` under contention: N fibers each increment via a load-then-CAS retry loop. A
@@ -18118,7 +21485,10 @@ main()
             "fn bump(a: Atomic[int]):\n    while true:\n        cur := a.load()\n        if a.cas(cur, cur + 1):\n            break\n\
              fn main():\n    a := Atomic(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn bump(a)\n    print(a.load())\nmain()\n"
         );
-        assert_eq!(run_capture_parallel(&src).expect("parallel"), format!("{n}\n"));
+        assert_eq!(
+            run_capture_parallel(&src).expect("parallel"),
+            format!("{n}\n")
+        );
     }
 
     /// `Atomic[float]` add/sub/exchange/cas must behave identically on both engines (covers the
@@ -18126,7 +21496,10 @@ main()
     #[test]
     fn atomic_float_ops_two_engine_parity() {
         let src = "fn main():\n    a := Atomic(1.5)\n    print(a.add(2.0))\n    print(a.sub(0.5))\n    print(a.exchange(9.0))\n    print(a.cas(9.0, 4.0))\n    print(a.load())\nmain()\n";
-        assert_eq!(run_capture(src).expect("vm"), crate::interp::run_capture(src).expect("interp"));
+        assert_eq!(
+            run_capture(src).expect("vm"),
+            crate::interp::run_capture(src).expect("interp")
+        );
     }
 
     /// `cas` on a non-scalar `T` (a list) exercises the VM's lock-held `from_wire`/`values_equal` path
@@ -18134,7 +21507,10 @@ main()
     #[test]
     fn atomic_cas_on_list_two_engine_parity() {
         let src = "fn main():\n    a := Atomic([1, 2])\n    print(a.cas([1, 2], [9]))\n    print(a.load())\n    print(a.cas([1, 2], [0]))\n    print(a.load())\nmain()\n";
-        assert_eq!(run_capture(src).expect("vm"), crate::interp::run_capture(src).expect("interp"));
+        assert_eq!(
+            run_capture(src).expect("vm"),
+            crate::interp::run_capture(src).expect("interp")
+        );
     }
 
     /// `timer(0)` (and any already-elapsed deadline) delivers `true` immediately, on every engine.
@@ -18194,7 +21570,9 @@ main()
         });
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => assert_eq!(r.expect("parallel run"), expected),
-            Err(_) => panic!("hung — cross-nursery flat scheduler regressed (lost wakeup or owner stopped too early)"),
+            Err(_) => panic!(
+                "hung — cross-nursery flat scheduler regressed (lost wakeup or owner stopped too early)"
+            ),
         }
     }
 
@@ -18211,7 +21589,9 @@ main()
         });
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => assert_eq!(r.expect("parallel run"), expected),
-            Err(_) => panic!("hung — multi-task inner cross-nursery regressed (early-enlist/deadlock-predicate race)"),
+            Err(_) => panic!(
+                "hung — multi-task inner cross-nursery regressed (early-enlist/deadlock-predicate race)"
+            ),
         }
     }
 
@@ -18229,7 +21609,9 @@ main()
         });
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => assert_eq!(r.expect("parallel run"), expected),
-            Err(_) => panic!("hung — inline-body send to an enlisted sibling regressed (lost wakeup)"),
+            Err(_) => {
+                panic!("hung — inline-body send to an enlisted sibling regressed (lost wakeup)")
+            }
         }
     }
 
@@ -18247,7 +21629,9 @@ main()
         });
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => assert_eq!(r.expect("parallel run"), expected),
-            Err(_) => panic!("hung — inline-body close to an enlisted ranging sibling regressed (lost wakeup)"),
+            Err(_) => panic!(
+                "hung — inline-body close to an enlisted ranging sibling regressed (lost wakeup)"
+            ),
         }
     }
 
@@ -18262,7 +21646,11 @@ main()
         let src = include_str!("../../examples/parallel_cross_nursery_multilevel.chz");
         let expected = include_str!("../../examples/parallel_cross_nursery_multilevel.expected");
         // Independent nesting is three-engine-stable here, so coop must produce the SAME bytes.
-        assert_eq!(run_capture(src).expect("coop run"), expected, "coop diverged from the golden");
+        assert_eq!(
+            run_capture(src).expect("coop run"),
+            expected,
+            "coop diverged from the golden"
+        );
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(run_capture_parallel(src));
@@ -18290,12 +21678,16 @@ main()
         });
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => {
-                let par = r.expect("independent multi-level nesting must run under --parallel, not fault");
+                let par = r
+                    .expect("independent multi-level nesting must run under --parallel, not fault");
                 let mut a: Vec<&str> = par.lines().collect();
                 let mut b: Vec<&str> = coop.lines().collect();
                 a.sort_unstable();
                 b.sort_unstable();
-                assert_eq!(a, b, "parallel multiset != coop\nparallel:\n{par}\ncoop:\n{coop}");
+                assert_eq!(
+                    a, b,
+                    "parallel multiset != coop\nparallel:\n{par}\ncoop:\n{coop}"
+                );
             }
             Err(_) => panic!("hung — independent multi-level nesting must complete, not hang"),
         }
@@ -18323,7 +21715,10 @@ main()
                 let mut b: Vec<&str> = coop.lines().collect();
                 a.sort_unstable();
                 b.sort_unstable();
-                assert_eq!(a, b, "parallel multiset != coop\nparallel:\n{par}\ncoop:\n{coop}");
+                assert_eq!(
+                    a, b,
+                    "parallel multiset != coop\nparallel:\n{par}\ncoop:\n{coop}"
+                );
             }
             Err(_) => panic!("hung — late-spawn-into-middle-nursery must complete, not hang/panic"),
         }
@@ -18345,8 +21740,14 @@ main()
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             // Delivery order is concurrent-divergent by design: accept Ok OR a clean deadlock fault.
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => assert!(e.message.contains("deadlock"), "contended case must succeed or deadlock-fault, got: {}", e.message),
-            Err(_) => panic!("hung — contended cross-nursery must complete or deadlock-fault, never hang/panic"),
+            Ok(Err(e)) => assert!(
+                e.message.contains("deadlock"),
+                "contended case must succeed or deadlock-fault, got: {}",
+                e.message
+            ),
+            Err(_) => panic!(
+                "hung — contended cross-nursery must complete or deadlock-fault, never hang/panic"
+            ),
         }
     }
 
@@ -18359,7 +21760,8 @@ main()
     #[test]
     fn parallel_cross_nursery_late_spawn_parked_matches_coop() {
         let src = include_str!("../../examples/parallel_cross_nursery_late_spawn_parked.chz");
-        let expected = include_str!("../../examples/parallel_cross_nursery_late_spawn_parked.expected");
+        let expected =
+            include_str!("../../examples/parallel_cross_nursery_late_spawn_parked.expected");
         let coop = run(src);
         assert_eq!(coop, expected, "coop must match expected");
         for _ in 0..12 {
@@ -18369,7 +21771,10 @@ main()
                 let _ = tx.send(run_capture_parallel(&s));
             });
             match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(r) => assert_eq!(r.expect("parallel run (no spurious deadlock on the parked outer receiver)"), expected),
+                Ok(r) => assert_eq!(
+                    r.expect("parallel run (no spurious deadlock on the parked outer receiver)"),
+                    expected
+                ),
                 Err(_) => panic!("hung — late-spawn-into-middle with a parked receiver regressed"),
             }
         }
@@ -18390,9 +21795,15 @@ main()
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => {
                 let err = r.expect_err("a genuine nested no-sender recv must still fault deadlock");
-                assert!(err.message.contains("deadlock"), "expected deadlock, got: {}", err.message);
+                assert!(
+                    err.message.contains("deadlock"),
+                    "expected deadlock, got: {}",
+                    err.message
+                );
             }
-            Err(_) => panic!("hung — awaiting_builder veto wrongly suppressed a genuine nested deadlock"),
+            Err(_) => {
+                panic!("hung — awaiting_builder veto wrongly suppressed a genuine nested deadlock")
+            }
         }
     }
 
@@ -18427,8 +21838,14 @@ main()
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => {
                 let out = r.expect("parallel run");
-                assert!(out.contains("pending task(s) cancelled"), "late escaped task dropped, not reported: {out}");
-                assert!(out.ends_with("after\n"), "post-parallel statement must run: {out}");
+                assert!(
+                    out.contains("pending task(s) cancelled"),
+                    "late escaped task dropped, not reported: {out}"
+                );
+                assert!(
+                    out.ends_with("after\n"),
+                    "post-parallel statement must run: {out}"
+                );
             }
             Err(_) => panic!("hung — late-spawn escape path regressed"),
         }
@@ -18447,9 +21864,15 @@ main()
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => {
                 let err = r.expect_err("a genuine no-sender nursery must still fault deadlock");
-                assert!(err.message.contains("deadlock"), "expected a deadlock fault, got: {}", err.message);
+                assert!(
+                    err.message.contains("deadlock"),
+                    "expected a deadlock fault, got: {}",
+                    err.message
+                );
             }
-            Err(_) => panic!("hung — the global deadlock predicate failed to fire (cross-nursery flat scheduler regressed)"),
+            Err(_) => panic!(
+                "hung — the global deadlock predicate failed to fire (cross-nursery flat scheduler regressed)"
+            ),
         }
     }
 
@@ -18481,7 +21904,10 @@ main()
     #[test]
     fn fibers_recv_inside_map_callback_faults() {
         let src = "fn use_map(ch: Channel[int]):\n    xs := [0]\n    ys := xs.map(fn(x): ch.recv())\n    print(ys)\nfn fill(ch: Channel[int]):\n    ch.send(1)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn use_map(ch)\n        spawn fill(ch)\nmain()\n";
-        assert!(run_err(src).contains("deadlock"), "recv inside map must fault, not suspend");
+        assert!(
+            run_err(src).contains("deadlock"),
+            "recv inside map must fault, not suspend"
+        );
     }
 
     /// Native-reentry guard: a blocking `recv` inside a struct `index`/`slice`/`set_index` operator
@@ -18490,7 +21916,10 @@ main()
     #[test]
     fn fibers_recv_inside_index_overload_faults() {
         let src = "struct Src:\n    ch: Channel[int]\n    fn index(self, k: int) -> int:\n        return self.ch.recv()\nfn use_index(s: Src):\n    print(s[0])\nfn fill(ch: Channel[int]):\n    ch.send(7)\nfn main():\n    ch := Channel[int]()\n    s := Src(ch)\n    parallel:\n        spawn use_index(s)\n        spawn fill(ch)\nmain()\n";
-        assert!(run_err(src).contains("deadlock"), "recv inside index overload must fault, not suspend");
+        assert!(
+            run_err(src).contains("deadlock"),
+            "recv inside index overload must fault, not suspend"
+        );
     }
 
     /// Native-reentry guard: a blocking `recv` inside a `defer`red call (run during frame teardown,
@@ -18499,7 +21928,10 @@ main()
     #[test]
     fn fibers_recv_inside_defer_faults() {
         let src = "fn consume(ch: Channel[int]):\n    ch.recv()\nfn worker(ch: Channel[int]):\n    defer consume(ch)\n    print(\"body\")\nfn sender(ch: Channel[int]):\n    ch.send(5)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn worker(ch)\n        spawn sender(ch)\nmain()\n";
-        assert!(run_err(src).contains("deadlock"), "recv inside defer must fault, not suspend");
+        assert!(
+            run_err(src).contains("deadlock"),
+            "recv inside defer must fault, not suspend"
+        );
     }
 
     /// A nested `parallel:` inside a child fiber runs its own scheduler level (recursively); the
@@ -18544,7 +21976,11 @@ main()
              fn consume(ch: Channel[int], k: int, s: Shared[int]):\n    total := 0\n    for _ in 0..k:\n        total += ch.recv()\n    s.set(total)\n\
              fn main():\n    ch := Channel[int]()\n    s := Shared(0)\n    parallel:\n        spawn consume(ch, {n}, s)\n        for _ in 0..{n}:\n            spawn produce(ch)\n    print(s.get())\nmain()\n"
         );
-        assert_eq!(run(&src), format!("{n}\n"), "consumer must receive every produced value");
+        assert_eq!(
+            run(&src),
+            format!("{n}\n"),
+            "consumer must receive every produced value"
+        );
     }
 
     /// D0 — cross-level wakeup: a fiber nested in an INNER `parallel:` `send`s to a channel an
@@ -18558,7 +21994,11 @@ main()
                    fn inner_sender(ch: Channel[int]):\n    ch.send(42)\n\
                    fn middle(ch: Channel[int]):\n    parallel:\n        spawn inner_sender(ch)\n\
                    fn main():\n    ch := Channel[int]()\n    s := Shared(0)\n    parallel:\n        spawn consumer(ch, s)\n        spawn middle(ch)\n    print(s.get())\nmain()\n";
-        assert_eq!(run(src), "42\n", "outer consumer must wake from an inner-level send");
+        assert_eq!(
+            run(src),
+            "42\n",
+            "outer consumer must wake from an inner-level send"
+        );
     }
 
     /// A `recover:` inside a child fiber catches a fault in that fiber's own context (its handlers /
@@ -18672,7 +22112,10 @@ main()
     fn executor_submit_runs_fifo_at_shutdown() {
         let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\n    ex.shutdown()\nmain()\n";
         assert_eq!(run(src), "0\n1\n2\n");
-        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(
+            run(src),
+            crate::interp::run_capture(src).expect("interp run")
+        );
     }
 
     #[test]
@@ -18681,7 +22124,9 @@ main()
         let err = run_err(src);
         assert!(err.contains("shut-down Executor"), "got: {err}");
         // Parity: same fault message on the interpreter.
-        let interp = crate::interp::run_capture(src).expect_err("interp should fault").message;
+        let interp = crate::interp::run_capture(src)
+            .expect_err("interp should fault")
+            .message;
         assert_eq!(err, interp, "VM/interp error divergence");
     }
 
@@ -18689,7 +22134,10 @@ main()
     fn executor_shutdown_now_discards_pending() {
         let src = "fn j():\n    print(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    ex.shutdown_now()\n    print(0)\nmain()\n";
         assert_eq!(run(src), "0\n");
-        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(
+            run(src),
+            crate::interp::run_capture(src).expect("interp run")
+        );
     }
 
     // ----- C5 (A2): program-exit auto-drain (VM parity) -----
@@ -18707,14 +22155,20 @@ main()
     fn executor_autodrain_runs_unshut_at_exit() {
         let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\nmain()\n";
         assert_eq!(run(src), "0\n1\n2\n");
-        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(
+            run(src),
+            crate::interp::run_capture(src).expect("interp run")
+        );
     }
 
     #[test]
     fn executor_autodrain_not_redrained_after_explicit_shutdown() {
         let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.shutdown()\n    print(0)\nmain()\n";
         assert_eq!(run(src), "1\n0\n");
-        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(
+            run(src),
+            crate::interp::run_capture(src).expect("interp run")
+        );
     }
 
     #[test]
@@ -18723,7 +22177,11 @@ main()
         // Under collect-before-every-instruction, the drained closures must still be reachable.
         let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\nmain()\n";
         let normal = run(src);
-        assert_eq!(run_capture_stress(src), normal, "VM gc_stress diverged (executor auto-drain rooting bug?)");
+        assert_eq!(
+            run_capture_stress(src),
+            normal,
+            "VM gc_stress diverged (executor auto-drain rooting bug?)"
+        );
     }
 
     #[test]
@@ -18734,7 +22192,11 @@ main()
         let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    defer ex.shutdown()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): boom())\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\nfn main():\n    r := recover:\n        run()\n        0\n    print(\"done\")\nmain()\n";
         let vm = run_capture(src).expect("vm run");
         assert_eq!(vm, "A\nC\ndone\n");
-        assert_eq!(vm, crate::interp::run_capture(src).expect("interp run"), "VM/interp divergence");
+        assert_eq!(
+            vm,
+            crate::interp::run_capture(src).expect("interp run"),
+            "VM/interp divergence"
+        );
     }
 
     #[test]
@@ -18744,7 +22206,11 @@ main()
         let src = "fn stop(e: Executor):\n    e.shutdown_now()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): stop(ex))\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n";
         let vm = run_capture(src).expect("vm run");
         assert_eq!(vm, "A\nend\n");
-        assert_eq!(vm, crate::interp::run_capture(src).expect("interp run"), "VM/interp divergence");
+        assert_eq!(
+            vm,
+            crate::interp::run_capture(src).expect("interp run"),
+            "VM/interp divergence"
+        );
     }
 
     #[test]
@@ -19478,14 +22944,20 @@ print(rec(3))
     fn for_over_struct_iterator_counts() {
         let src = "struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    for x in Counter(0, 5):\n        print(x)\nmain()\n";
         assert_eq!(run(src), "0\n1\n2\n3\n4\n");
-        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(
+            run(src),
+            crate::interp::run_capture(src).expect("interp run")
+        );
     }
 
     #[test]
     fn for_over_struct_iterator_break_lazy() {
         let src = "struct Fib:\n    a: int\n    b: int\n    fn next(self) -> Option[int]:\n        v := self.a\n        nb := self.a + self.b\n        self.a = self.b\n        self.b = nb\n        return Some(v)\nfn main():\n    for x in Fib(0, 1):\n        if x > 10:\n            break\n        print(x)\nmain()\n";
         assert_eq!(run(src), "0\n1\n1\n2\n3\n5\n8\n");
-        assert_eq!(run(src), crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(
+            run(src),
+            crate::interp::run_capture(src).expect("interp run")
+        );
     }
 
     /// Golden: the iterator example runs on the VM with exactly the expected output, matching interp.
@@ -19511,7 +22983,10 @@ a.next.push(b)
 b.next.push(a)
 print(a)
 ";
-        assert!(run_err(src).contains("maximum structural depth"), "expected structural-depth error");
+        assert!(
+            run_err(src).contains("maximum structural depth"),
+            "expected structural-depth error"
+        );
     }
 
     #[test]
@@ -19529,7 +23004,10 @@ c.next.push(d)
 d.next.push(c)
 print(a == c)
 ";
-        assert!(run_err(src).contains("maximum structural depth"), "expected structural-depth error");
+        assert!(
+            run_err(src).contains("maximum structural depth"),
+            "expected structural-depth error"
+        );
     }
 
     #[test]
@@ -19548,7 +23026,10 @@ match r:
     Err(e): print(\"caught: {e.message()}\")
 ";
         let out = run(src);
-        assert!(out.contains("caught: maximum structural depth"), "expected recovered error, got {out:?}");
+        assert!(
+            out.contains("caught: maximum structural depth"),
+            "expected recovered error, got {out:?}"
+        );
     }
 
     #[test]
@@ -19590,7 +23071,10 @@ mod gc_tests {
     /// then indexed; a GC fires (stress) between build and index.
     #[test]
     fn value_only_on_operand_stack_survives() {
-        assert_eq!(run_capture_stress("print([str(1), str(2), str(3)][0] + [str(4), str(5)][1])"), "15\n");
+        assert_eq!(
+            run_capture_stress("print([str(1), str(2), str(3)][0] + [str(4), str(5)][1])"),
+            "15\n"
+        );
     }
 
     /// A value held only in a call-frame local slot survives collections triggered by later
@@ -19802,14 +23286,20 @@ main()";
         let (out, live) = run_with(src, false);
         assert_eq!(out.unwrap(), "10000\n");
         // Without collection this would be ~20000+ live objects; the threshold GC keeps it small.
-        assert!(live < 2000, "heap not bounded: {live} live objects after 10000 allocating iterations");
+        assert!(
+            live < 2000,
+            "heap not bounded: {live} live objects after 10000 allocating iterations"
+        );
     }
 
     /// Stress-mode collection must not change observable behavior on a feature-rich program.
     #[test]
     fn hello_chz_identical_under_gc_stress() {
         let expected = include_str!("../../examples/hello.expected");
-        assert_eq!(run_capture_stress(include_str!("../../examples/hello.chz")), expected);
+        assert_eq!(
+            run_capture_stress(include_str!("../../examples/hello.chz")),
+            expected
+        );
     }
 
     /// Stress vs. normal must agree on a program exercising structs, enums, closures, and match.
@@ -19887,7 +23377,11 @@ fn main():
 main()";
         let normal = run_capture(src).unwrap();
         assert_eq!(normal, "hello\n");
-        assert_eq!(run_capture_stress(src), normal, "nested core contents must survive GC");
+        assert_eq!(
+            run_capture_stress(src),
+            normal,
+            "nested core contents must survive GC"
+        );
     }
 
     /// `Shared` box + `update`'s re-entrant call survive GC stress (the box is re-rooted across the
@@ -19931,7 +23425,11 @@ fn main():
         print(ch.recv())
 main()";
         let normal = run_capture(src).unwrap();
-        assert_eq!(run_capture_stress(src), normal, "VM gc_stress diverged (executor rooting bug?)");
+        assert_eq!(
+            run_capture_stress(src),
+            normal,
+            "VM gc_stress diverged (executor rooting bug?)"
+        );
         assert_eq!(normal, crate::interp::run_capture(src).expect("interp run"));
     }
 }
@@ -19953,7 +23451,11 @@ mod parity_tests {
     }
 
     fn assert_parity(src: &str) {
-        assert_eq!(vm_outcome(src), interp_outcome(src), "VM/interp divergence for:\n{src}");
+        assert_eq!(
+            vm_outcome(src),
+            interp_outcome(src),
+            "VM/interp divergence for:\n{src}"
+        );
     }
 
     /// M19 SSO — string ops must stay byte-identical across both engines for strings that straddle
@@ -20073,11 +23575,18 @@ main()
         let (io, ie_out, ir, _) = crate::interp::run_file(&entry_path);
         let (vo, ve_out, vr, _) = run_file(&entry_path);
         assert_eq!(io, vo, "stdout divergence (interp vs vm) for entry {entry}");
-        assert_eq!(ie_out, ve_out, "stderr divergence (interp vs vm) for entry {entry}");
+        assert_eq!(
+            ie_out, ve_out,
+            "stderr divergence (interp vs vm) for entry {entry}"
+        );
         match (&ir, &vr) {
             (Ok(()), Ok(())) => {}
             (Err(ie), Err(ve)) => {
-                assert_eq!(ie.to_string(), ve.to_string(), "error divergence (interp vs vm)");
+                assert_eq!(
+                    ie.to_string(),
+                    ve.to_string(),
+                    "error divergence (interp vs vm)"
+                );
             }
             _ => panic!("ok/err divergence: interp={ir:?} vm={vr:?}"),
         }
@@ -20177,7 +23686,10 @@ match regex.split(",", "a,b,c"):
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut buf = [0u8; 1024];
                 let n = stream.read(&mut buf).unwrap_or(0);
-                seen_srv.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                seen_srv
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
                 // `Connection: close` so ureq's thread-local pool (shared across both engine runs on
                 // this test thread) never reuses a server-closed socket — one fresh conn per request.
                 let resp = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok";
@@ -20191,16 +23703,25 @@ match regex.split(",", "a,b,c"):
         );
         let out = parity_entry(&src);
         server.join().unwrap();
-        assert_eq!(out, "200\n200\n", "VM/interp must agree and both requests succeed");
+        assert_eq!(
+            out, "200\n200\n",
+            "VM/interp must agree and both requests succeed"
+        );
 
         let reqs = seen.lock().unwrap();
         assert_eq!(reqs.len(), 4, "two requests per engine");
         let puts = reqs.iter().filter(|r| r.starts_with("PUT ")).count();
         let deletes = reqs.iter().filter(|r| r.starts_with("DELETE ")).count();
-        let with_header = reqs.iter().filter(|r| r.contains("X-Custom: value")).count();
+        let with_header = reqs
+            .iter()
+            .filter(|r| r.contains("X-Custom: value"))
+            .count();
         assert_eq!(puts, 2, "both engines must send PUT");
         assert_eq!(deletes, 2, "both engines must send DELETE");
-        assert_eq!(with_header, 2, "the custom header must reach the wire on both engines");
+        assert_eq!(
+            with_header, 2,
+            "the custom header must reach the wire on both engines"
+        );
     }
 
     #[test]
@@ -20224,7 +23745,11 @@ match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
     /// `continue` is landing on the wrong target (re-test without advancing → infinite loop).
     fn assert_parity_out(src: &str, expect: &str) {
         assert_parity(src);
-        assert_eq!(vm_outcome(src).expect("program should run"), expect, "for:\n{src}");
+        assert_eq!(
+            vm_outcome(src).expect("program should run"),
+            expect,
+            "for:\n{src}"
+        );
     }
 
     #[test]
@@ -20287,7 +23812,11 @@ match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
         let src = "o: (str, str)? = Some((\"a\" + \"b\", \"c\" + \"d\"))\nmatch o:\n    None: print(\"none\")\n    Some((x, y)): print(x + y)\n";
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "abcd\n");
-        assert_eq!(run_capture_stress(src), "abcd\n", "VM gc_stress diverged (rooting bug?)");
+        assert_eq!(
+            run_capture_stress(src),
+            "abcd\n",
+            "VM gc_stress diverged (rooting bug?)"
+        );
     }
 
     #[test]
@@ -20432,10 +23961,7 @@ match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
 
     #[test]
     fn for_over_empty_str_parity() {
-        assert_parity_out(
-            "n := 0\nfor c in \"\":\n    n += 1\nprint(n)\n",
-            "0\n",
-        );
+        assert_parity_out("n := 0\nfor c in \"\":\n    n += 1\nprint(n)\n", "0\n");
     }
 
     #[test]
@@ -20477,13 +24003,17 @@ match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
     #[test]
     fn cmp_max_int_parity() {
         // Generic min/max now live in std.cmp; abs stays in std.math. File/graph path required.
-        let out = parity_entry("import std.cmp\nimport std.math\nfn main():\n    print(cmp.max(3, 5))\n    print(cmp.min(3, 5))\n    print(math.abs(-5))\nmain()\n");
+        let out = parity_entry(
+            "import std.cmp\nimport std.math\nfn main():\n    print(cmp.max(3, 5))\n    print(cmp.min(3, 5))\n    print(math.abs(-5))\nmain()\n",
+        );
         assert_eq!(out, "5\n3\n5\n");
     }
 
     #[test]
     fn cmp_max_float_parity() {
-        let out = parity_entry("import std.cmp\nimport std.math\nfn main():\n    print(cmp.max(3.0, 5.0))\n    print(math.abs(-2.5))\nmain()\n");
+        let out = parity_entry(
+            "import std.cmp\nimport std.math\nfn main():\n    print(cmp.max(3.0, 5.0))\n    print(math.abs(-2.5))\nmain()\n",
+        );
         assert_eq!(out, "5.0\n2.5\n");
     }
 
@@ -20639,35 +24169,47 @@ match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
 
     #[test]
     fn match_int_literals_stmt_parity() {
-        assert_parity("n := 2\nmatch n:\n    0: print(\"zero\")\n    1: print(\"one\")\n    _: print(\"many\")\n");
+        assert_parity(
+            "n := 2\nmatch n:\n    0: print(\"zero\")\n    1: print(\"one\")\n    _: print(\"many\")\n",
+        );
     }
 
     #[test]
     fn match_str_literals_expr_parity() {
-        assert_parity("c := \"x\"\ns := match c:\n    \"a\": \"first\"\n    _: \"other\"\nprint(s)\n");
+        assert_parity(
+            "c := \"x\"\ns := match c:\n    \"a\": \"first\"\n    _: \"other\"\nprint(s)\n",
+        );
     }
 
     #[test]
     fn match_bool_literals_parity() {
-        assert_parity("b := false\nmatch b:\n    true: print(\"yes\")\n    false: print(\"no\")\n    _: print(\"?\")\n");
+        assert_parity(
+            "b := false\nmatch b:\n    true: print(\"yes\")\n    false: print(\"no\")\n    _: print(\"?\")\n",
+        );
     }
 
     #[test]
     fn match_literal_matched_arm_parity() {
         // The matching literal arm fires (wildcard not reached).
-        assert_parity("n := 1\ns := match n:\n    0: \"a\"\n    1: \"b\"\n    _: \"z\"\nprint(s)\n");
+        assert_parity(
+            "n := 1\ns := match n:\n    0: \"a\"\n    1: \"b\"\n    _: \"z\"\nprint(s)\n",
+        );
     }
 
     #[test]
     fn match_wildcard_reached_parity() {
         // No literal matches → the `_` arm fires.
-        assert_parity("n := 9\ns := match n:\n    0: \"a\"\n    1: \"b\"\n    _: \"z\"\nprint(s)\n");
+        assert_parity(
+            "n := 9\ns := match n:\n    0: \"a\"\n    1: \"b\"\n    _: \"z\"\nprint(s)\n",
+        );
     }
 
     #[test]
     fn match_variant_regression_parity() {
         // A variant match still lowers via the variant path unchanged.
-        assert_parity("o := Some(5)\nmatch o:\n    Some(v): print(\"got {v}\")\n    None: print(\"none\")\n");
+        assert_parity(
+            "o := Some(5)\nmatch o:\n    Some(v): print(\"got {v}\")\n    None: print(\"none\")\n",
+        );
     }
 
     #[test]
@@ -20714,7 +24256,10 @@ main()";
         let entry = t.write("main.chz", src);
         let ie = crate::interp::run_file(&entry).2.unwrap_err().to_string();
         let ve = run_file(&entry).2.unwrap_err().to_string();
-        assert_eq!(ie, ve, "abs-overflow error must be identical on both engines");
+        assert_eq!(
+            ie, ve,
+            "abs-overflow error must be identical on both engines"
+        );
         assert!(ie.contains("integer overflow in abs"), "{ie}");
     }
 
@@ -20739,7 +24284,10 @@ main()";
         assert_eq!(vo, "before\n", "vm stdout");
         assert_eq!(ic, Some(3), "interp exit code");
         assert_eq!(vc, Some(3), "vm exit code");
-        assert!(ir.is_ok() && vr.is_ok(), "exit is not a runtime error: interp={ir:?} vm={vr:?}");
+        assert!(
+            ir.is_ok() && vr.is_ok(),
+            "exit is not a runtime error: interp={ir:?} vm={vr:?}"
+        );
     }
 
     #[test]
@@ -20755,7 +24303,10 @@ main()";
         assert_eq!(vo, "before\n", "vm: cleanup defer skipped by os.exit");
         assert_eq!(ic, Some(2), "interp exit code");
         assert_eq!(vc, Some(2), "vm exit code");
-        assert!(ir.is_ok() && vr.is_ok(), "exit is not a runtime error: interp={ir:?} vm={vr:?}");
+        assert!(
+            ir.is_ok() && vr.is_ok(),
+            "exit is not a runtime error: interp={ir:?} vm={vr:?}"
+        );
     }
 
     #[test]
@@ -20767,9 +24318,18 @@ main()";
         let entry = t.write("main.chz", src);
         let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        assert_eq!(io, "before\ncleanup\n", "interp: top-level defer runs on unhandled error");
-        assert_eq!(vo, "before\ncleanup\n", "vm: top-level defer runs on unhandled error");
-        assert!(ir.is_err() && vr.is_err(), "unhandled `?` is an error: interp={ir:?} vm={vr:?}");
+        assert_eq!(
+            io, "before\ncleanup\n",
+            "interp: top-level defer runs on unhandled error"
+        );
+        assert_eq!(
+            vo, "before\ncleanup\n",
+            "vm: top-level defer runs on unhandled error"
+        );
+        assert!(
+            ir.is_err() && vr.is_err(),
+            "unhandled `?` is an error: interp={ir:?} vm={vr:?}"
+        );
     }
 
     #[test]
@@ -20796,11 +24356,20 @@ main()";
         let entry = t.write("main.chz", src);
         let (io, _ie, ir, ic) = crate::interp::run_file(&entry);
         let (vo, _ve, vr, vc) = run_file(&entry);
-        assert_eq!(vo, "a\n", "vm: sibling and post-parallel statement aborted by os.exit");
-        assert_eq!(io, "a\n", "interp: sibling and post-parallel statement aborted by os.exit");
+        assert_eq!(
+            vo, "a\n",
+            "vm: sibling and post-parallel statement aborted by os.exit"
+        );
+        assert_eq!(
+            io, "a\n",
+            "interp: sibling and post-parallel statement aborted by os.exit"
+        );
         assert_eq!(vc, Some(3), "vm exit code");
         assert_eq!(ic, Some(3), "interp exit code");
-        assert!(ir.is_ok() && vr.is_ok(), "os.exit is a clean halt, not an error: interp={ir:?} vm={vr:?}");
+        assert!(
+            ir.is_ok() && vr.is_ok(),
+            "os.exit is a clean halt, not an error: interp={ir:?} vm={vr:?}"
+        );
     }
 
     /// B3.4: a child `std.os.exit(code)` on the `--parallel` OS-thread pool is a clean hard-halt,
@@ -20812,11 +24381,25 @@ main()";
         let src = "import std.os\nfn a():\n    print(\"a\")\n    os.exit(3)\nfn b():\n    print(\"b\")\nfn main():\n    parallel:\n        spawn a()\n        spawn b()\n    print(\"after\")\nmain()\n";
         let t = TmpDir::new();
         let entry = t.write("main.chz", src);
-        let (out, _err, res, code) = run_file_parallel(&entry, crate::native::HostConfig::default());
-        assert_eq!(code, Some(3), "child os.exit code propagates cross-thread to the parent");
-        assert!(res.is_ok(), "os.exit is a clean halt, not an error: {res:?}");
-        assert!(out.contains('a'), "the exiting child's buffered output is flushed: got {out:?}");
-        assert!(!out.contains("after"), "the post-parallel statement never runs after os.exit: got {out:?}");
+        let (out, _err, res, code) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        assert_eq!(
+            code,
+            Some(3),
+            "child os.exit code propagates cross-thread to the parent"
+        );
+        assert!(
+            res.is_ok(),
+            "os.exit is a clean halt, not an error: {res:?}"
+        );
+        assert!(
+            out.contains('a'),
+            "the exiting child's buffered output is flushed: got {out:?}"
+        );
+        assert!(
+            !out.contains("after"),
+            "the post-parallel statement never runs after os.exit: got {out:?}"
+        );
     }
 
     /// B3.4: `os.exit` in one child aborts a `recv`-blocked sibling too (same machinery as a fault —
@@ -20828,9 +24411,17 @@ main()";
         let src = "import std.os\nfn exiter(ch: Channel[int]):\n    os.exit(5)\nfn consumer(ch: Channel[int]):\n    ch.recv()\n    print(\"consumed\")\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn exiter(ch)\n        spawn consumer(ch)\nmain()\n";
         let t = TmpDir::new();
         let entry = t.write("main.chz", src);
-        let (out, _err, _res, code) = run_file_parallel(&entry, crate::native::HostConfig::default());
-        assert_eq!(code, Some(5), "os.exit code propagates; the recv-blocked consumer aborts, no hang");
-        assert!(!out.contains("consumed"), "the aborted consumer never ran past its blocked recv: got {out:?}");
+        let (out, _err, _res, code) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        assert_eq!(
+            code,
+            Some(5),
+            "os.exit code propagates; the recv-blocked consumer aborts, no hang"
+        );
+        assert!(
+            !out.contains("consumed"),
+            "the aborted consumer never ran past its blocked recv: got {out:?}"
+        );
     }
 
     /// B3.5 — run an entry on the `--parallel` engine under a watchdog: a missing/broken deadlock
@@ -20842,11 +24433,16 @@ main()";
         let entry = t.write("main.chz", src);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         match rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(r) => r,
-            Err(_) => panic!("hung: --parallel nursery did not terminate (deadlock detection missing/broken)"),
+            Err(_) => panic!(
+                "hung: --parallel nursery did not terminate (deadlock detection missing/broken)"
+            ),
         }
     }
 
@@ -20895,7 +24491,10 @@ main()";
                    main()\n";
         let (out, _e, res, _c) = run_parallel_watchdog(src);
         assert!(res.is_ok(), "cancel→wait must not fault/strand: {res:?}");
-        assert_eq!(out, "30\n", "every parked waiter must be woken by the sibling's cancel");
+        assert_eq!(
+            out, "30\n",
+            "every parked waiter must be woken by the sibling's cancel"
+        );
     }
 
     /// B3.5 — the named anti-false-positive case: one sibling `send`s the very channel the other
@@ -20906,8 +24505,14 @@ main()";
         let src = "fn consumer(c: Channel[int]):\n    print(c.recv())\nfn producer(c: Channel[int]):\n    c.send(7)\nfn main():\n    c := Channel[int]()\n    parallel:\n        spawn consumer(c)\n        spawn producer(c)\n    print(\"done\")\nmain()\n";
         let (out, _e, res, _c) = run_parallel_watchdog(src);
         assert!(res.is_ok(), "near-miss must not fault: {res:?}");
-        assert!(out.contains('7'), "consumer received the sent value: {out:?}");
-        assert!(out.contains("done"), "the nursery joined and main continued: {out:?}");
+        assert!(
+            out.contains('7'),
+            "consumer received the sent value: {out:?}"
+        );
+        assert!(
+            out.contains("done"),
+            "the nursery joined and main continued: {out:?}"
+        );
     }
 
     /// B3.5 — a three-task relay (consumer ← relay ← producer) where `blocked == live` is reached
@@ -20918,8 +24523,14 @@ main()";
     fn parallel_chained_near_miss_no_false_positive() {
         let src = "fn relay(x: Channel[int], z: Channel[int]):\n    v := x.recv()\n    z.send(v)\nfn producer(x: Channel[int]):\n    x.send(1)\nfn consumer(z: Channel[int]):\n    print(z.recv())\nfn main():\n    x := Channel[int]()\n    z := Channel[int]()\n    parallel:\n        spawn consumer(z)\n        spawn relay(x, z)\n        spawn producer(x)\n    print(\"ok\")\nmain()\n";
         let (out, _e, res, _c) = run_parallel_watchdog(src);
-        assert!(res.is_ok(), "chained relay must not false-positive: {res:?}");
-        assert!(out.contains('1'), "the relayed value reached the consumer: {out:?}");
+        assert!(
+            res.is_ok(),
+            "chained relay must not false-positive: {res:?}"
+        );
+        assert!(
+            out.contains('1'),
+            "the relayed value reached the consumer: {out:?}"
+        );
         assert!(out.contains("ok"), "the nursery joined: {out:?}");
     }
 
@@ -20965,9 +24576,18 @@ main()
 "#;
         let (out, _e, res, _c) = run_parallel_watchdog(src);
         assert!(res.is_ok(), "net round-trip must not fault: {res:?}");
-        assert!(out.contains("echo:hello"), "the client received the server's echo: {out:?}");
-        assert!(out.contains("done"), "the nursery joined and main continued: {out:?}");
-        assert!(!out.contains("net error"), "no I/O error on the happy path: {out:?}");
+        assert!(
+            out.contains("echo:hello"),
+            "the client received the server's echo: {out:?}"
+        );
+        assert!(
+            out.contains("done"),
+            "the nursery joined and main continued: {out:?}"
+        );
+        assert!(
+            !out.contains("net error"),
+            "no I/O error on the happy path: {out:?}"
+        );
     }
 
     /// D6c — run a `--parallel` net program from a temp file under a 30 s watchdog (net round-trips
@@ -20978,7 +24598,10 @@ main()
         let entry = t.write("main.chz", src);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok((out, _err, res, _code)) => {
@@ -21029,8 +24652,14 @@ fn main():
 main()
 ";
         let out = run_net_timeout_watchdog("read_timeout", src);
-        assert!(out.contains("ERR:timeout"), "read(64, 100) must surface Err(\"timeout\"): {out:?}");
-        assert!(!out.contains("GOT:"), "no data should have been read: {out:?}");
+        assert!(
+            out.contains("ERR:timeout"),
+            "read(64, 100) must surface Err(\"timeout\"): {out:?}"
+        );
+        assert!(
+            !out.contains("GOT:"),
+            "no data should have been read: {out:?}"
+        );
     }
 
     /// D6c — `server.accept(timeout_ms)` returns `Err("timeout")` when NO client ever connects, and the
@@ -21061,8 +24690,14 @@ fn main():
 main()
 ";
         let out = run_net_timeout_watchdog("accept_timeout", src);
-        assert!(out.contains("ERR:timeout"), "accept(100) with no client must surface Err(\"timeout\"): {out:?}");
-        assert!(out.contains("done"), "the nursery joined and main continued (no hang): {out:?}");
+        assert!(
+            out.contains("ERR:timeout"),
+            "accept(100) with no client must surface Err(\"timeout\"): {out:?}"
+        );
+        assert!(
+            out.contains("done"),
+            "the nursery joined and main continued (no hang): {out:?}"
+        );
         assert!(!out.contains("ACCEPTED"), "nothing was accepted: {out:?}");
     }
 
@@ -21107,8 +24742,14 @@ fn main():
 main()
 ";
         let out = run_net_timeout_watchdog("read_no_timeout", src);
-        assert!(out.contains("GOT:late"), "an untimed read must block until data, not time out: {out:?}");
-        assert!(!out.contains("ERR:"), "no timeout/error on the untimed read: {out:?}");
+        assert!(
+            out.contains("GOT:late"),
+            "an untimed read must block until data, not time out: {out:?}"
+        );
+        assert!(
+            !out.contains("ERR:"),
+            "no timeout/error on the untimed read: {out:?}"
+        );
     }
 
     /// D6c — the bundled `examples/socket_timeout.chz` golden: a `--parallel` program that demonstrates
@@ -21124,12 +24765,18 @@ main()
             .expect("read examples/socket_timeout.expected");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(&entry, crate::native::HostConfig::default()));
+            let _ = tx.send(run_file_parallel(
+                &entry,
+                crate::native::HostConfig::default(),
+            ));
         });
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok((out, _err, res, _code)) => {
                 assert!(res.is_ok(), "socket_timeout.chz faulted: {res:?}");
-                assert_eq!(out, expected, "socket_timeout.chz output diverged from its golden");
+                assert_eq!(
+                    out, expected,
+                    "socket_timeout.chz output diverged from its golden"
+                );
             }
             Err(_) => panic!("socket_timeout.chz hung — D6c timeout regressed"),
         }
@@ -21168,9 +24815,17 @@ fn main():
 main()
 "#;
         let (out, _e, res, _c) = run_parallel_watchdog(src);
-        let err = res.expect_err("the faulting sibling's error must propagate, not hang the nursery");
-        assert!(err.message.contains("division by zero"), "the original fault surfaces: {}", err.message);
-        assert!(!out.contains("joined ok"), "the nursery faulted rather than joining cleanly: {out:?}");
+        let err =
+            res.expect_err("the faulting sibling's error must propagate, not hang the nursery");
+        assert!(
+            err.message.contains("division by zero"),
+            "the original fault surfaces: {}",
+            err.message
+        );
+        assert!(
+            !out.contains("joined ok"),
+            "the nursery faulted rather than joining cleanly: {out:?}"
+        );
     }
 
     /// D6b — non-blocking `connect` actually parks (and is drainable): a fiber connects to an
@@ -21206,8 +24861,15 @@ main()
 "#;
         let (out, _e, res, _c) = run_parallel_watchdog(src);
         let err = res.expect_err("the faulting sibling aborts the connect-parked dialer, no hang");
-        assert!(err.message.contains("division by zero"), "the original fault surfaces: {}", err.message);
-        assert!(!out.contains("joined ok"), "the nursery faulted rather than joining cleanly: {out:?}");
+        assert!(
+            err.message.contains("division by zero"),
+            "the original fault surfaces: {}",
+            err.message
+        );
+        assert!(
+            !out.contains("joined ok"),
+            "the nursery faulted rather than joining cleanly: {out:?}"
+        );
     }
 
     /// D6b — the top-level (no-`--parallel`) blocking connect fallback returns a clean `Err` rather
@@ -21233,9 +24895,14 @@ main()
         match rx.recv_timeout(std::time::Duration::from_secs(15)) {
             Ok((out, res)) => {
                 res.expect("top-level connect program runs");
-                assert_eq!(out, "refused\n", "dead port ⇒ Err branch (bounded, no hang)");
+                assert_eq!(
+                    out, "refused\n",
+                    "dead port ⇒ Err branch (bounded, no hang)"
+                );
             }
-            Err(_) => panic!("hung: top-level connect to a dead port did not return (unbounded spin?)"),
+            Err(_) => {
+                panic!("hung: top-level connect to a dead port did not return (unbounded spin?)")
+            }
         }
     }
 
@@ -21287,7 +24954,10 @@ main()
 "#;
         let (out, _e, res, _c) = run_parallel_watchdog(src);
         assert!(res.is_ok(), "100-conn echo server must not fault: {res:?}");
-        assert!(out.contains("all served"), "every connection was serviced + the nursery joined: {out:?}");
+        assert!(
+            out.contains("all served"),
+            "every connection was serviced + the nursery joined: {out:?}"
+        );
         assert!(!out.contains("error"), "no client saw a bad echo: {out:?}");
     }
 
@@ -21301,7 +24971,11 @@ main()
         // ≥2 hw threads: the inner join blocks the parent's outer worker (decision B), so on a single
         // core the outer clients can't progress to drain the echoes — a pre-existing M:N limit that
         // per-connection spawn is the first to exercise. Skip on 1 core (CI is ≥2 core) rather than hang.
-        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) < 2 {
+        if std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            < 2
+        {
             return;
         }
         let src = r#"import std.net
@@ -21346,8 +25020,14 @@ fn main():
 main()
 "#;
         let (out, _e, res, _c) = run_parallel_watchdog(src);
-        assert!(res.is_ok(), "per-connection-spawn echo server must not fault: {res:?}");
-        assert!(out.contains("all served"), "every connection was handled by its own fiber: {out:?}");
+        assert!(
+            res.is_ok(),
+            "per-connection-spawn echo server must not fault: {res:?}"
+        );
+        assert!(
+            out.contains("all served"),
+            "every connection was handled by its own fiber: {out:?}"
+        );
         assert!(!out.contains("error"), "no client saw a bad echo: {out:?}");
     }
 
@@ -21363,7 +25043,11 @@ main()
         // sole outer worker on a single core — see `Op::EnterNursery`). This test's whole point is a
         // handler running mid-loop to unblock the next connect, which a 1-core box cannot do; skip it
         // there rather than hang. CI runners are ≥2 core in practice.
-        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) < 2 {
+        if std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            < 2
+        {
             return;
         }
         let src = r#"import std.net
@@ -21408,9 +25092,18 @@ fn main():
 main()
 "#;
         let (out, _e, res, _c) = run_parallel_watchdog(src);
-        assert!(res.is_ok(), "sequential client must complete once handlers run concurrently: {res:?}");
-        assert!(out.contains("all served"), "all 8 sequential round-trips serviced: {out:?}");
-        assert!(!out.contains("error"), "every reply was a correct echo: {out:?}");
+        assert!(
+            res.is_ok(),
+            "sequential client must complete once handlers run concurrently: {res:?}"
+        );
+        assert!(
+            out.contains("all served"),
+            "all 8 sequential round-trips serviced: {out:?}"
+        );
+        assert!(
+            !out.contains("error"),
+            "every reply was a correct echo: {out:?}"
+        );
     }
 
     /// Per-connection spawn — a per-connection HANDLER fault propagates as the acceptor's fault and
@@ -21422,7 +25115,11 @@ main()
     #[test]
     fn net_echo_handler_fault_cancels_acceptor() {
         // Nested socket nursery → needs ≥2 hw threads (see `net_echo_server_spawns_handler_per_connection`).
-        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) < 2 {
+        if std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            < 2
+        {
             return;
         }
         let src = r#"import std.net
@@ -21476,7 +25173,10 @@ main()
             res.is_err() || out.contains("error"),
             "a per-connection handler fault must surface (faulted run or reported error), not be swallowed: res={res:?} out={out:?}"
         );
-        assert!(!out.contains("all served"), "the run must not report success once a handler faulted: {out:?}");
+        assert!(
+            !out.contains("all served"),
+            "the run must not report success once a handler faulted: {out:?}"
+        );
     }
 
     /// Per-connection spawn — the DEGENERATE eager nursery: a `parallel:` body (entered eagerly under
@@ -21486,14 +25186,27 @@ main()
     /// `body_open` → `close_body` → terminate handshake on the empty path.
     #[test]
     fn eager_nursery_with_zero_spawns_completes() {
-        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) < 2 {
+        if std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            < 2
+        {
             return;
         }
         let src = "fn worker():\n    parallel:\n        print(\"eager body, no spawn\")\n    print(\"worker done\")\nfn main():\n    parallel:\n        spawn worker()\nmain()\n";
         let (out, _e, res, _c) = run_parallel_watchdog(src);
-        assert!(res.is_ok(), "an empty eager nursery must join cleanly: {res:?}");
-        assert!(out.contains("eager body, no spawn"), "the body ran: {out:?}");
-        assert!(out.contains("worker done"), "the eager nursery joined and the worker continued: {out:?}");
+        assert!(
+            res.is_ok(),
+            "an empty eager nursery must join cleanly: {res:?}"
+        );
+        assert!(
+            out.contains("eager body, no spawn"),
+            "the body ran: {out:?}"
+        );
+        assert!(
+            out.contains("worker done"),
+            "the eager nursery joined and the worker continued: {out:?}"
+        );
     }
 
     /// Per-connection spawn — CONCURRENT eager nurseries (the pool-exhaustion regression): four
@@ -21503,7 +25216,11 @@ main()
     /// exhaust a core-sized pool and hang (undetectably, since `body_open` vetoes the deadlock predicate).
     #[test]
     fn net_concurrent_eager_servers_do_not_exhaust_pool() {
-        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) < 2 {
+        if std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            < 2
+        {
             return;
         }
         let src = r#"import std.net
@@ -21554,8 +25271,14 @@ fn main():
 main()
 "#;
         let (out, _e, res, _c) = run_parallel_watchdog(src);
-        assert!(res.is_ok(), "concurrent eager servers must not fault: {res:?}");
-        assert!(out.contains("all servers done"), "every concurrent eager nursery completed: {out:?}");
+        assert!(
+            res.is_ok(),
+            "concurrent eager servers must not fault: {res:?}"
+        );
+        assert!(
+            out.contains("all servers done"),
+            "every concurrent eager nursery completed: {out:?}"
+        );
         assert!(!out.contains("error"), "no pinger saw a bad echo: {out:?}");
     }
 
@@ -21566,25 +25289,30 @@ main()
     fn parallel_finished_task_leaves_sibling_deadlocked() {
         let src = "fn waiter(c: Channel[int]):\n    c.recv()\nfn quick():\n    print(\"quick\")\nfn main():\n    c := Channel[int]()\n    parallel:\n        spawn waiter(c)\n        spawn quick()\nmain()\n";
         let (out, _e, res, _c) = run_parallel_watchdog(src);
-        let err = res.expect_err("a finished sibling that strands a recv-blocked task is a deadlock");
+        let err =
+            res.expect_err("a finished sibling that strands a recv-blocked task is a deadlock");
         assert!(err.message.contains("deadlock"), "got: {}", err.message);
-        assert!(out.contains("quick"), "the finished task's output is still flushed: {out:?}");
+        assert!(
+            out.contains("quick"),
+            "the finished task's output is still flushed: {out:?}"
+        );
     }
 
     /// Run an entry through both engines with a freshly-built [`crate::native::HostConfig`] each
     /// (the config isn't `Clone` — `mk_cfg` produces an identical one per engine). Asserts stdout +
     /// ok/err parity; returns the agreed stdout.
-    fn parity_entry_cfg(
-        src: &str,
-        mk_cfg: impl Fn() -> crate::native::HostConfig,
-    ) -> String {
+    fn parity_entry_cfg(src: &str, mk_cfg: impl Fn() -> crate::native::HostConfig) -> String {
         let t = TmpDir::new();
         let entry = t.write("main.chz", src);
         let (io, ie_out, ir, _ic) = crate::interp::run_file_with(&entry, mk_cfg());
         let (vo, ve_out, vr, _vc) = run_file_with(&entry, mk_cfg());
         assert_eq!(io, vo, "stdout divergence (interp vs vm)");
         assert_eq!(ie_out, ve_out, "stderr divergence (interp vs vm)");
-        assert_eq!(ir.is_ok(), vr.is_ok(), "ok/err divergence: interp={ir:?} vm={vr:?}");
+        assert_eq!(
+            ir.is_ok(),
+            vr.is_ok(),
+            "ok/err divergence: interp={ir:?} vm={vr:?}"
+        );
         io
     }
 
@@ -21657,7 +25385,9 @@ main()
         let src = "import std.io\nimport std.os\nfn main():\n    for a in os.args():\n        io.print(a)\n    match os.env(\"CHEZZI_TEST_VAR\"):\n        Some(v): io.print(v)\n        None: io.print(\"no var\")\nmain()";
         let out = parity_entry_cfg(src, || HostConfig {
             args: vec!["x".to_string(), "y".to_string()],
-            env: [("CHEZZI_TEST_VAR".to_string(), "hi".to_string())].into_iter().collect(),
+            env: [("CHEZZI_TEST_VAR".to_string(), "hi".to_string())]
+                .into_iter()
+                .collect(),
             ..Default::default()
         });
         assert_eq!(out, "x\ny\nhi\n");
@@ -21688,7 +25418,8 @@ main()
         let mut vm = Vm::new(Arc::new(program));
         vm.gc_stress = true;
         vm.host = cfg;
-        vm.run().unwrap_or_else(|e| panic!("unexpected error under GC stress: {e}"));
+        vm.run()
+            .unwrap_or_else(|e| panic!("unexpected error under GC stress: {e}"));
         vm.out
     }
 
@@ -21705,7 +25436,10 @@ main()
         // Each os.args() call allocates a fresh heap list (immediately garbage); under stress the
         // collector runs every instruction. A dangling handle in native lowering would panic here.
         let src = "import std.io\nimport std.os\nfn main():\n    n := 0\n    while n < 300:\n        xs := os.args()\n        n += 1\n    io.print(\"done {n}\")\nmain()";
-        let cfg = HostConfig { args: vec!["a".to_string()], ..Default::default() };
+        let cfg = HostConfig {
+            args: vec!["a".to_string()],
+            ..Default::default()
+        };
         let out = vm_run_file_stress(src, cfg);
         assert_eq!(out, "done 300\n");
     }
@@ -21795,18 +25529,18 @@ main()
         "print((5).frob(1 / 0))",
         "print(\"hi\".frob(1 / 0))",
         // ----- entry model: no auto-main; unhandled top-level Err/None exits -----
-        "fn main():\n    print(\"hi\")",                                  // main defined but never called → no output
-        "Err(\"boom\")",                                                  // bare top-level Err → unhandled error
-        "x := Err(\"oops\")?",                                            // top-level `?` Err → unhandled error
-        "fn g() -> Option[int]:\n    return None\ng()",                   // bare None → unhandled error
+        "fn main():\n    print(\"hi\")", // main defined but never called → no output
+        "Err(\"boom\")",                 // bare top-level Err → unhandled error
+        "x := Err(\"oops\")?",           // top-level `?` Err → unhandled error
+        "fn g() -> Option[int]:\n    return None\ng()", // bare None → unhandled error
         "fn f() -> Result[int]:\n    return Err(\"x\")\nr := f()\nprint(\"handled\")", // Err bound = handled → no exit
         "fn main():\n    print(\"before\")\n    x := Err(\"boom\")?\n    print(\"after\")\nmain()", // partial output then exit
         // a user enum shadowing `Err` is a normal value: bare one must NOT exit, `?` must reject it
         "enum Signal:\n    Err(int)\n    Quiet\nErr(5)\nprint(\"made it\")",
         "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := Err(5)?\n    return x\nf()",
         // unhandled top-level error INSIDE a top-level block (interp: call_depth 0, VM: is_toplevel)
-        "if true:\n    Err(\"boom\")\nprint(\"after\")",                  // bare Err in `if` → exit, no "after"
-        "for i in 0..1:\n    Err(\"x\")\nprint(\"after\")",              // bare Err in `for` → exit
+        "if true:\n    Err(\"boom\")\nprint(\"after\")", // bare Err in `if` → exit, no "after"
+        "for i in 0..1:\n    Err(\"x\")\nprint(\"after\")", // bare Err in `for` → exit
         "fn d() -> Result[int]:\n    return Err(\"z\")\nif true:\n    x := d()?\n    print(x)", // top-level `?` in block → exit (same span both engines)
     ];
 
@@ -21912,7 +25646,8 @@ main()
 
     #[test]
     fn parity_list_sort_str() {
-        let src = "xs := [\"banana\",\"apple\",\"cherry\"]\nxs.sort()\nfor s in xs:\n    print(s)\n";
+        let src =
+            "xs := [\"banana\",\"apple\",\"cherry\"]\nxs.sort()\nfor s in xs:\n    print(s)\n";
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "apple\nbanana\ncherry\n");
     }
@@ -21945,7 +25680,11 @@ main()
         assert_parity(src);
         let expected = "n1\nn2\nn3\n";
         assert_eq!(vm_outcome(src).unwrap(), expected);
-        assert_eq!(run_capture_stress(src), expected, "VM gc_stress diverged (rooting bug?)");
+        assert_eq!(
+            run_capture_stress(src),
+            expected,
+            "VM gc_stress diverged (rooting bug?)"
+        );
     }
 
     #[test]
@@ -21954,7 +25693,11 @@ main()
         let src = "xs := [1,2,3]\nys := xs.map(fn(x: int) -> list[int]: [x, x])\nprint(ys[1][0])\n";
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "2\n");
-        assert_eq!(run_capture_stress(src), "2\n", "VM gc_stress diverged (rooting bug?)");
+        assert_eq!(
+            run_capture_stress(src),
+            "2\n",
+            "VM gc_stress diverged (rooting bug?)"
+        );
     }
 
     #[test]
@@ -21964,7 +25707,11 @@ main()
         assert_parity(src);
         let expected = "2\nbb\n";
         assert_eq!(vm_outcome(src).unwrap(), expected);
-        assert_eq!(run_capture_stress(src), expected, "VM gc_stress diverged (rooting bug?)");
+        assert_eq!(
+            run_capture_stress(src),
+            expected,
+            "VM gc_stress diverged (rooting bug?)"
+        );
     }
 
     #[test]
@@ -21981,7 +25728,11 @@ main()
         let src = "xs := [\"a\",\"b\",\"c\"]\ns := xs.fold(\"\", fn(a: str, x: str) -> str: a + x)\nprint(s)\n";
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "abc\n");
-        assert_eq!(run_capture_stress(src), "abc\n", "VM gc_stress diverged (rooting bug?)");
+        assert_eq!(
+            run_capture_stress(src),
+            "abc\n",
+            "VM gc_stress diverged (rooting bug?)"
+        );
     }
 
     #[test]
@@ -21992,7 +25743,11 @@ main()
         assert_parity(src);
         let expected = "a\nb\ndd\nccc\n";
         assert_eq!(vm_outcome(src).unwrap(), expected);
-        assert_eq!(run_capture_stress(src), expected, "VM gc_stress diverged (rooting bug?)");
+        assert_eq!(
+            run_capture_stress(src),
+            expected,
+            "VM gc_stress diverged (rooting bug?)"
+        );
     }
 
     #[test]
@@ -22002,7 +25757,11 @@ main()
         let src = "xs := [[3,0],[1,0],[2,0]]\nxs.sort_by(fn(a: list[int], b: list[int]) -> int: a[0] - b[0])\nprint(xs[0][0])\nprint(xs[2][0])\n";
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "1\n3\n");
-        assert_eq!(run_capture_stress(src), "1\n3\n", "VM gc_stress diverged (rooting bug?)");
+        assert_eq!(
+            run_capture_stress(src),
+            "1\n3\n",
+            "VM gc_stress diverged (rooting bug?)"
+        );
     }
 
     #[test]
@@ -22023,7 +25782,11 @@ main()
         let (ip_out, ip_err, ip_res, _) = crate::interp::run_file(&path);
         assert_eq!(vm_out, ip_out, "stdout divergence for {rel}");
         assert_eq!(vm_err, ip_err, "stderr divergence for {rel}");
-        assert_eq!(vm_res.err().map(|e| e.to_string()), ip_res.err().map(|e| e.to_string()), "error divergence for {rel}");
+        assert_eq!(
+            vm_res.err().map(|e| e.to_string()),
+            ip_res.err().map(|e| e.to_string()),
+            "error divergence for {rel}"
+        );
     }
 
     #[test]
@@ -22111,7 +25874,8 @@ main()
     #[test]
     fn golden_cancel_timeout_wait_via_run_file() {
         let path = fixture("examples/cancel_timeout_wait.chz");
-        let expected = std::fs::read_to_string(fixture("examples/cancel_timeout_wait.expected")).unwrap();
+        let expected =
+            std::fs::read_to_string(fixture("examples/cancel_timeout_wait.expected")).unwrap();
         let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
@@ -22125,12 +25889,19 @@ main()
     #[test]
     fn cancel_cpu_diverges_by_engine() {
         let path = fixture("examples/cancel_cpu.chz");
-        let (par_out, _e, par_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+        let (par_out, _e, par_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
         assert!(par_res.is_ok(), "{par_res:?}");
-        assert_eq!(par_out, "worker aborted early\n", "default OS-thread engine should preempt + abort");
+        assert_eq!(
+            par_out, "worker aborted early\n",
+            "default OS-thread engine should preempt + abort"
+        );
         let (coop_out, _e, coop_res, _) = run_file(&path);
         assert!(coop_res.is_ok(), "{coop_res:?}");
-        assert_eq!(coop_out, "worker ran to completion\n", "cooperative oracle should run to completion");
+        assert_eq!(
+            coop_out, "worker ran to completion\n",
+            "cooperative oracle should run to completion"
+        );
     }
 
     // ===== std.cancel TREE PROPAGATION (parent/child derivation) =====
@@ -22394,7 +26165,8 @@ main()
     #[test]
     fn golden_comprehensions_via_run_file() {
         let path = fixture("examples/comprehensions.chz");
-        let expected = std::fs::read_to_string(fixture("examples/comprehensions.expected")).unwrap();
+        let expected =
+            std::fs::read_to_string(fixture("examples/comprehensions.expected")).unwrap();
         let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
@@ -22495,7 +26267,10 @@ main()
         let lines: Vec<usize> = e.trace.iter().map(|f| f.span.line).collect();
         assert_eq!(lines, vec![15, 18, 20]);
         let vm_fmt = format_trace(&e.message, e.span, &e.trace);
-        assert!(vm_fmt.contains("at divide (called at line 15"), "got: {vm_fmt}");
+        assert!(
+            vm_fmt.contains("at divide (called at line 15"),
+            "got: {vm_fmt}"
+        );
 
         // Interp parity: identical formatted trace.
         let (_o, _er, ip_res, _) = crate::interp::run_file(&path);
@@ -22516,7 +26291,11 @@ main()
         let (_o, _e, res, _) = run_file(&path);
         let e = res.expect_err("should fault");
         let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
-        assert_eq!(names, vec!["deeper", "main"], "no stale 'boom'/'safe' frames");
+        assert_eq!(
+            names,
+            vec!["deeper", "main"],
+            "no stale 'boom'/'safe' frames"
+        );
     }
 
     /// A `defer`red call that itself faults supersedes the original fault (Go semantics); the trace
@@ -22532,12 +26311,19 @@ main()
         let (_o, _e, res, _) = run_file(&path);
         let e = res.expect_err("should fault");
         let vm_names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
-        assert_eq!(vm_names, vec!["boom", "worker", "main"], "deferred fault's chain");
+        assert_eq!(
+            vm_names,
+            vec!["boom", "worker", "main"],
+            "deferred fault's chain"
+        );
         let vm_fmt = format_trace(&e.message, e.span, &e.trace);
         let (_o2, _e2, ip_res, _) = crate::interp::run_file(&path);
         let ie = ip_res.expect_err("should fault");
         let ip_fmt = crate::interp::format_trace(&ie.message, ie.span, &ie.trace);
-        assert_eq!(vm_fmt, ip_fmt, "engines must agree on a deferred-fault trace");
+        assert_eq!(
+            vm_fmt, ip_fmt,
+            "engines must agree on a deferred-fault trace"
+        );
     }
 
     /// Non-constant default golden: `examples/default_expr.chz` — defaults that are arithmetic on
@@ -22655,7 +26441,10 @@ main()
         let expected = std::fs::read_to_string(fixture("examples/exit.expected")).unwrap();
         let (vo, _ve, vr, vc) = run_file(&path);
         let (io, _ie, ir, ic) = crate::interp::run_file(&path);
-        assert!(vr.is_ok() && ir.is_ok(), "exit is a clean halt: vm={vr:?} interp={ir:?}");
+        assert!(
+            vr.is_ok() && ir.is_ok(),
+            "exit is a clean halt: vm={vr:?} interp={ir:?}"
+        );
         assert_eq!(vo, expected, "vm stdout");
         assert_eq!(io, expected, "interp stdout");
         assert_eq!(vc, Some(2), "vm exit code");
@@ -22705,7 +26494,8 @@ main()
     #[test]
     fn golden_iterator_bound_via_run_file() {
         let path = fixture("examples/iterator_bound.chz");
-        let expected = std::fs::read_to_string(fixture("examples/iterator_bound.expected")).unwrap();
+        let expected =
+            std::fs::read_to_string(fixture("examples/iterator_bound.expected")).unwrap();
         let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
@@ -22740,7 +26530,8 @@ main()
 
     #[test]
     fn golden_multi_file_project_via_vm() {
-        let expected = std::fs::read_to_string(fixture("tests/fixtures/proj/main.expected")).unwrap();
+        let expected =
+            std::fs::read_to_string(fixture("tests/fixtures/proj/main.expected")).unwrap();
         let (out, _err, res, _) = run_file(&fixture("tests/fixtures/proj/main.chz"));
         assert!(res.is_ok());
         assert_eq!(out, expected);
@@ -22762,7 +26553,8 @@ main()
     #[test]
     fn multi_file_identical_under_gc_stress() {
         // The fixture is small; run it under stress by routing through the entry graph manually.
-        let expected = std::fs::read_to_string(fixture("tests/fixtures/proj/main.expected")).unwrap();
+        let expected =
+            std::fs::read_to_string(fixture("tests/fixtures/proj/main.expected")).unwrap();
         let graph = crate::resolver::build_graph(&fixture("tests/fixtures/proj/main.chz")).unwrap();
         let program = crate::compiler::compile_graph(&graph).unwrap();
         let mut vm = Vm::new(Arc::new(program));
@@ -22791,7 +26583,11 @@ main()
         // Both engines must error identically on a missing key.
         let src = "m := {\"a\": 1}\nprint(m[\"z\"])\n";
         assert_parity(src);
-        assert!(vm_outcome(src).unwrap_err().contains("key not found"), "{:?}", vm_outcome(src));
+        assert!(
+            vm_outcome(src).unwrap_err().contains("key not found"),
+            "{:?}",
+            vm_outcome(src)
+        );
     }
 
     #[test]
@@ -22812,13 +26608,20 @@ main()
         // Compound on a missing key is an error (consistent with read-missing).
         let src = "m := {\"a\": 1}\nm[\"z\"] += 1\n";
         assert_parity(src);
-        assert!(vm_outcome(src).unwrap_err().contains("key not found"), "{:?}", vm_outcome(src));
+        assert!(
+            vm_outcome(src).unwrap_err().contains("key not found"),
+            "{:?}",
+            vm_outcome(src)
+        );
     }
 
     #[test]
     fn parity_map_methods() {
         assert_parity_out("m := {\"a\": 1, \"b\": 2}\nprint(m.len())\n", "2\n");
-        assert_parity_out("m := {\"a\": 1}\nprint(m.has(\"a\"))\nprint(m.has(\"z\"))\n", "true\nfalse\n");
+        assert_parity_out(
+            "m := {\"a\": 1}\nprint(m.has(\"a\"))\nprint(m.has(\"z\"))\n",
+            "true\nfalse\n",
+        );
         assert_parity_out(
             "m := {\"a\": 1}\nmatch m.get(\"a\"):\n    Some(v): print(v)\n    None: print(\"absent\")\n",
             "1\n",
@@ -22930,11 +26733,23 @@ main()";
     fn parity_list_non_int_index_still_errors() {
         let src = "xs := [1, 2, 3]\nprint(xs[\"a\"])\n";
         assert_parity(src);
-        assert!(vm_outcome(src).unwrap_err().contains("expected int, found str"), "{:?}", vm_outcome(src));
+        assert!(
+            vm_outcome(src)
+                .unwrap_err()
+                .contains("expected int, found str"),
+            "{:?}",
+            vm_outcome(src)
+        );
         // And on assignment (SetIndex relocation).
         let src2 = "xs := [1, 2, 3]\nxs[\"a\"] = 9\n";
         assert_parity(src2);
-        assert!(vm_outcome(src2).unwrap_err().contains("expected int, found str"), "{:?}", vm_outcome(src2));
+        assert!(
+            vm_outcome(src2)
+                .unwrap_err()
+                .contains("expected int, found str"),
+            "{:?}",
+            vm_outcome(src2)
+        );
     }
 
     #[test]
@@ -22946,7 +26761,11 @@ main()";
         assert_parity(src);
         let expected = "v199\n[v199, x199]\n";
         assert_eq!(vm_outcome(src).unwrap(), expected);
-        assert_eq!(run_capture_stress(src), expected, "VM gc_stress diverged (untraced map key/value?)");
+        assert_eq!(
+            run_capture_stress(src),
+            expected,
+            "VM gc_stress diverged (untraced map key/value?)"
+        );
     }
 
     /// Record the VM speedup over the interpreter on a loop-heavy script (the spec's perf check).
@@ -22962,7 +26781,9 @@ main()";
         let vm_t = t.elapsed();
         assert_eq!(vm, ip, "engines disagree on the benchmark output");
         let ratio = interp_t.as_secs_f64() / vm_t.as_secs_f64();
-        println!("VM speedup over interp: {ratio:.1}x (interp {interp_t:?}, vm {vm_t:?}) [debug build; ~6x in release]");
+        println!(
+            "VM speedup over interp: {ratio:.1}x (interp {interp_t:?}, vm {vm_t:?}) [debug build; ~6x in release]"
+        );
         assert!(ratio >= 1.2, "VM not faster than interp: {ratio:.2}x");
     }
 
@@ -22992,7 +26813,10 @@ main()";
 
     #[test]
     fn parity_tuple_equality() {
-        assert_parity_out("print((1, 2) == (1, 2))\nprint((1, 2) == (1, 3))\n", "true\nfalse\n");
+        assert_parity_out(
+            "print((1, 2) == (1, 2))\nprint((1, 2) == (1, 3))\n",
+            "true\nfalse\n",
+        );
     }
 
     #[test]
@@ -23007,7 +26831,11 @@ main()";
         // building the tuple and reading it back — proving `Heap::children` traces tuple elements.
         let src = "t := (\"hi\", [1, 2, 3])\nprint(t.0)\nprint(t.1)\n";
         assert_parity(src);
-        assert_eq!(run_capture_stress(src), "hi\n[1, 2, 3]\n", "tuple elements not GC-traced?");
+        assert_eq!(
+            run_capture_stress(src),
+            "hi\n[1, 2, 3]\n",
+            "tuple elements not GC-traced?"
+        );
     }
 
     // ----- slicing + Index/IndexSet/Slice protocol dispatch (VM ↔ interp parity) -----
@@ -23081,7 +26909,10 @@ main()";
 
     #[test]
     fn struct_index_slice_dispatch_parity() {
-        assert_parity_out(BUF_PROG, "10\n99\n15\n[15, 99]\n[15, 99, 30]\n[30, 99, 15]\n");
+        assert_parity_out(
+            BUF_PROG,
+            "10\n99\n15\n[15, 99]\n[15, 99, 30]\n[30, 99, 15]\n",
+        );
     }
 
     #[test]
@@ -23090,7 +26921,11 @@ main()";
         // collect them. (Source is an inline temporary, unrooted except by the slice path.)
         let src = "print([1, 2, 3, 4, 5][1:4])\n";
         assert_parity(src);
-        assert_eq!(run_capture_stress(src), "[2, 3, 4]\n", "slice elements not GC-rooted?");
+        assert_eq!(
+            run_capture_stress(src),
+            "[2, 3, 4]\n",
+            "slice elements not GC-rooted?"
+        );
     }
 
     // ----- M19 lever #3: positional closure captures (HashMap → Vec<Value> by compile-time slot).
@@ -23243,7 +27078,11 @@ fn main():
     print(ch.recv())
 main()";
         assert_parity_out(src, "42\n");
-        assert_eq!(run_capture_parallel(src).expect("parallel"), "42\n", "--parallel capture wire");
+        assert_eq!(
+            run_capture_parallel(src).expect("parallel"),
+            "42\n",
+            "--parallel capture wire"
+        );
     }
 
     // ===== bytes type =====
@@ -23254,21 +27093,24 @@ main()";
         let src = concat!(
             "fn main():\n",
             "    b := b\"\\x01\\x02\\x03\"\n",
-            "    print(b[0])\n",          // 1
-            "    print(b[-1])\n",         // 3
-            "    print(b[::-1])\n",       // b'\x03\x02\x01'
+            "    print(b[0])\n",    // 1
+            "    print(b[-1])\n",   // 3
+            "    print(b[::-1])\n", // b'\x03\x02\x01'
             "    s := 0\n",
             "    for x in b:\n",
             "        s = s + x\n",
-            "    print(s)\n",             // 6
-            "    print(len(b))\n",        // 3
-            "    print(b\"ab\" == b\"ab\")\n",  // true
-            "    print(b\"ab\" == b\"ac\")\n",  // false
-            "    print(b\"ab\" != b\"ac\")\n",  // true
+            "    print(s)\n",                  // 6
+            "    print(len(b))\n",             // 3
+            "    print(b\"ab\" == b\"ab\")\n", // true
+            "    print(b\"ab\" == b\"ac\")\n", // false
+            "    print(b\"ab\" != b\"ac\")\n", // true
             "main()\n"
         );
         assert_parity(src);
-        assert_eq!(run_capture(src).expect("vm"), "1\n3\nb'\\x03\\x02\\x01'\n6\n3\ntrue\nfalse\ntrue\n");
+        assert_eq!(
+            run_capture(src).expect("vm"),
+            "1\n3\nb'\\x03\\x02\\x01'\n6\n3\ntrue\nfalse\ntrue\n"
+        );
     }
 
     #[test]
@@ -23293,11 +27135,11 @@ main()";
         // Display/str repr is Python b'...'; bytes works as a map key (Hashable).
         let src = concat!(
             "fn main():\n",
-            "    print(b\"hi\\n\")\n",          // b'hi\n'
-            "    print(str(b\"\\xFF\"))\n",      // b'\xff'
+            "    print(b\"hi\\n\")\n",      // b'hi\n'
+            "    print(str(b\"\\xFF\"))\n", // b'\xff'
             "    m := {b\"a\": 1, b\"b\": 2}\n",
-            "    print(m[b\"a\"])\n",            // 1
-            "    print(m[b\"b\"])\n",            // 2
+            "    print(m[b\"a\"])\n", // 1
+            "    print(m[b\"b\"])\n", // 2
             "main()\n"
         );
         assert_parity(src);
@@ -23327,7 +27169,10 @@ main()";
         // Three-engine parity: cooperative VM, --parallel M:N, and interp all agree.
         assert_parity(src);
         assert_eq!(run_capture(src).expect("vm"), "b'\\x01\\x02'\n");
-        assert_eq!(run_capture_parallel(src).expect("parallel"), "b'\\x01\\x02'\n");
+        assert_eq!(
+            run_capture_parallel(src).expect("parallel"),
+            "b'\\x01\\x02'\n"
+        );
     }
 
     // ===== bytearray type (mutable sibling of bytes) =====
@@ -23338,25 +27183,25 @@ main()";
         // len, push, pop, extend, ==/!=, and Display bytearray(b'...').
         let src = concat!(
             "fn main():\n",
-            "    print(bytearray())\n",                 // bytearray(b'')
-            "    print(bytearray(3))\n",                // bytearray(b'\x00\x00\x00')
-            "    print(bytearray(b\"\\x01\\x02\"))\n",  // bytearray(b'\x01\x02')
+            "    print(bytearray())\n",                // bytearray(b'')
+            "    print(bytearray(3))\n",               // bytearray(b'\x00\x00\x00')
+            "    print(bytearray(b\"\\x01\\x02\"))\n", // bytearray(b'\x01\x02')
             "    ba := bytearray([1, 2, 3])\n",
-            "    print(ba)\n",                          // bytearray(b'\x01\x02\x03')
-            "    print(ba[0])\n",                       // 1
-            "    print(ba[-1])\n",                      // 3
-            "    print(ba[::-1])\n",                    // bytearray(b'\x03\x02\x01')
+            "    print(ba)\n",       // bytearray(b'\x01\x02\x03')
+            "    print(ba[0])\n",    // 1
+            "    print(ba[-1])\n",   // 3
+            "    print(ba[::-1])\n", // bytearray(b'\x03\x02\x01')
             "    s := 0\n",
             "    for x in ba:\n",
             "        s = s + x\n",
-            "    print(s)\n",                           // 6
-            "    print(len(ba))\n",                     // 3
+            "    print(s)\n",       // 6
+            "    print(len(ba))\n", // 3
             "    ba.push(4)\n",
-            "    print(ba)\n",                          // bytearray(b'\x01\x02\x03\x04')
-            "    print(ba.pop())\n",                    // Some(4)
+            "    print(ba)\n",       // bytearray(b'\x01\x02\x03\x04')
+            "    print(ba.pop())\n", // Some(4)
             "    ba.extend(b\"\\xFF\")\n",
             "    ba.extend([7, 8])\n",
-            "    print(ba)\n",                          // bytearray(b'\x01\x02\x03\xff\x07\x08')
+            "    print(ba)\n", // bytearray(b'\x01\x02\x03\xff\x07\x08')
             "    print(bytearray([1]) == bytearray([1]))\n", // true
             "    print(bytearray([1]) != bytearray([2]))\n", // true
             "main()\n"
@@ -23376,9 +27221,9 @@ main()";
             "    ba := bytearray([1, 2, 3])\n",
             "    ba2 := ba\n",
             "    ba[0] = 65\n",
-            "    print(ba2[0])\n",      // 65 — same buffer
+            "    print(ba2[0])\n", // 65 — same buffer
             "    ba2[1] = 66\n",
-            "    print(ba[1])\n",       // 66 — observed through the other binding
+            "    print(ba[1])\n", // 66 — observed through the other binding
             "main()\n"
         );
         assert_parity(src);
@@ -23404,7 +27249,10 @@ main()";
             "main()\n"
         );
         assert_parity(src);
-        assert_eq!(run_capture(src).expect("vm"), "caught oob index\ncaught bad value\n");
+        assert_eq!(
+            run_capture(src).expect("vm"),
+            "caught oob index\ncaught bad value\n"
+        );
     }
 
     #[test]
@@ -23431,17 +27279,20 @@ main()";
             "fn main():\n",
             "    ba := bytearray([1, 2, 3])\n",
             "    b := bytes(ba)\n",
-            "    print(b)\n",                  // b'\x01\x02\x03'
+            "    print(b)\n", // b'\x01\x02\x03'
             "    ba[0] = 99\n",
-            "    print(b)\n",                  // b'\x01\x02\x03' — snapshot unaffected
+            "    print(b)\n", // b'\x01\x02\x03' — snapshot unaffected
             "    ba2 := bytearray(b\"\\x07\\x08\")\n",
             "    ba2[0] = 10\n",
-            "    print(ba2)\n",                // bytearray(b'\n\x08') — 0x0a renders as \n
-            "    print(bytearray(b))\n",       // bytearray(b'\x01\x02\x03')
+            "    print(ba2)\n", // bytearray(b'\n\x08') — 0x0a renders as \n
+            "    print(bytearray(b))\n", // bytearray(b'\x01\x02\x03')
             "main()\n"
         );
         assert_parity(src);
-        assert_eq!(run_capture(src).expect("vm"), "b'\\x01\\x02\\x03'\nb'\\x01\\x02\\x03'\nbytearray(b'\\n\\x08')\nbytearray(b'\\x01\\x02\\x03')\n");
+        assert_eq!(
+            run_capture(src).expect("vm"),
+            "b'\\x01\\x02\\x03'\nb'\\x01\\x02\\x03'\nbytearray(b'\\n\\x08')\nbytearray(b'\\x01\\x02\\x03')\n"
+        );
     }
 
     #[test]
@@ -23459,7 +27310,10 @@ main()";
         );
         assert_parity(src);
         assert_eq!(run_capture(src).expect("vm"), "bytearray(b'\\x01\\x02')\n");
-        assert_eq!(run_capture_parallel(src).expect("parallel"), "bytearray(b'\\x01\\x02')\n");
+        assert_eq!(
+            run_capture_parallel(src).expect("parallel"),
+            "bytearray(b'\\x01\\x02')\n"
+        );
     }
 
     // ===== Iterable[T] / `.iter()` cursor =====
@@ -23488,9 +27342,7 @@ main()";
             "b\"hi\"",
             "bytearray([7, 8])",
         ] {
-            let via_for = format!(
-                "fn main():\n    for x in {coll}:\n        print(x)\nmain()\n"
-            );
+            let via_for = format!("fn main():\n    for x in {coll}:\n        print(x)\nmain()\n");
             let via_iter = format!(
                 "fn main():\n    it := ({coll}).iter()\n    while true:\n        match it.next():\n            Some(x):\n                print(x)\n            None:\n                break\nmain()\n"
             );
@@ -23498,7 +27350,10 @@ main()";
             assert_parity(&via_iter);
             let for_out = vm_outcome(&via_for);
             let iter_out = vm_outcome(&via_iter);
-            assert_eq!(for_out, iter_out, "cursor order must match `for` for {coll}");
+            assert_eq!(
+                for_out, iter_out,
+                "cursor order must match `for` for {coll}"
+            );
         }
     }
 
@@ -23511,8 +27366,14 @@ main()";
 
     #[test]
     fn list_of_cursor_roundtrip_both_engines() {
-        assert_parity_out("fn main():\n    print(list([5, 6, 7].iter()))\nmain()\n", "[5, 6, 7]\n");
-        assert_parity_out("fn main():\n    print(set({1, 2}.iter()).len())\nmain()\n", "2\n");
+        assert_parity_out(
+            "fn main():\n    print(list([5, 6, 7].iter()))\nmain()\n",
+            "[5, 6, 7]\n",
+        );
+        assert_parity_out(
+            "fn main():\n    print(set({1, 2}.iter()).len())\nmain()\n",
+            "2\n",
+        );
     }
 
     #[test]
@@ -23586,7 +27447,11 @@ main()";
             "main()\n"
         );
         assert_parity_out(src, "Some(1)\n");
-        assert_eq!(run_capture_parallel(src).expect("--parallel"), "Some(1)\n", "cursor crosses the M:N airlock");
+        assert_eq!(
+            run_capture_parallel(src).expect("--parallel"),
+            "Some(1)\n",
+            "cursor crosses the M:N airlock"
+        );
     }
 
     #[test]

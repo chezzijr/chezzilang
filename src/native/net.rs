@@ -31,7 +31,11 @@ use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 /// literal IPs `std.net` is used with; a true async resolver is out of scope for D6b.)
 pub fn connect_nonblocking(addr: &str) -> std::io::Result<(TcpStream, bool)> {
     let target = resolve(addr)?;
-    let domain = if target.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+    let domain = if target.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     socket.set_nonblocking(true)?;
     let in_progress = match socket.connect(&SockAddr::from(target)) {
@@ -74,7 +78,8 @@ pub fn listen_nonblocking(addr: &str) -> std::io::Result<TcpListener> {
 /// `listen` directly (they allocate a handle + touch the scheduler), so this body must never run.
 fn intercepted(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Err(HostError {
-        message: "std.net members are handled by the engine and must not run as off-heap natives".into(),
+        message: "std.net members are handled by the engine and must not run as off-heap natives"
+            .into(),
     })
 }
 
@@ -111,7 +116,10 @@ mod tests {
             wait_connected(&stream);
             finish_connect(&stream).expect("loopback handshake succeeds");
         }
-        assert!(stream.peer_addr().is_ok(), "stream is connected after the handshake settles");
+        assert!(
+            stream.peer_addr().is_ok(),
+            "stream is connected after the handshake settles"
+        );
         // A non-blocking read on a connected-but-silent peer returns WouldBlock, not 0/blocked.
         let mut buf = [0u8; 1];
         match std::io::Read::read(&mut (&stream), &mut buf) {
