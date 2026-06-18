@@ -922,22 +922,56 @@ impl Checker {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     } else {
                         self.aliases.insert(name.clone(), ty.clone());
-                        // PRECISE width-alias opt-in: if this alias's body is a fixed-width FFI type
-                        // name that THIS (the defining) module imported per-name from `std.ffi`,
-                        // record the alias as licensed. `resolve_type` then lets the width name
-                        // resolve through the alias anywhere — but a `type Len = int32` whose module
-                        // never imported int32 is NOT licensed, so it can't launder the bare width
-                        // name past the import gate. `collect_names` runs after `bind_import`, so
-                        // `imported_ffi_types` is already populated here.
-                        if let Type::Named(body) = ty
-                            && crate::native::ffi::TYPE_NAMES.contains(&body.as_str())
-                            && self.imported_ffi_types.contains(body)
+                        // PRECISE width-alias opt-in: if this alias's body references fixed-width FFI
+                        // type names (`int8`..`uint64`) — directly (`type Len = int32`) or embedded in
+                        // a composite (`type Pair = (int32, int32)`, `type Buf = list[uint8]`) — and
+                        // EVERY such width was imported per-name from `std.ffi` by THIS (the defining)
+                        // module, record the alias as licensed. `resolve_type` then lets those widths
+                        // resolve through the alias anywhere, including cross-module with no re-import.
+                        // A `type Len = int32` whose module never imported int32 is NOT licensed, so it
+                        // can't launder the bare width past the import gate. Requiring ALL embedded
+                        // widths imported keeps it precise: a `type Mixed = (int32, int64)` that imported
+                        // only int32 stays unlicensed, so int64 can't ride in on int32's opt-in.
+                        // `collect_names` runs after `bind_import`, so `imported_ffi_types` is populated.
+                        let mut widths = Vec::new();
+                        Self::collect_width_names(ty, &mut widths);
+                        if !widths.is_empty()
+                            && widths.iter().all(|w| self.imported_ffi_types.contains(w))
                         {
                             self.ffi_alias_ok.insert(name.clone());
                         }
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// Collect every fixed-width FFI type name (`int8`..`uint64`) referenced anywhere in `ty`,
+    /// recursing through composites (`Generic` args, `Func` params/return, `Tuple` elements). Used
+    /// to license a width-alias only when its defining module imported all the widths it embeds.
+    fn collect_width_names(ty: &Type, out: &mut Vec<String>) {
+        match ty {
+            Type::Named(n) => {
+                if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) {
+                    out.push(n.clone());
+                }
+            }
+            Type::Generic(_, args) => {
+                for a in args {
+                    Self::collect_width_names(a, out);
+                }
+            }
+            Type::Func { params, ret } => {
+                for p in params {
+                    Self::collect_width_names(p, out);
+                }
+                Self::collect_width_names(ret, out);
+            }
+            Type::Tuple(elems) => {
+                for e in elems {
+                    Self::collect_width_names(e, out);
+                }
             }
         }
     }

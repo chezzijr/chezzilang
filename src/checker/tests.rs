@@ -5665,6 +5665,58 @@ fn width_alias_defined_with_import_resolves_in_extern() {
 }
 
 #[test]
+fn composite_width_alias_licensed_cross_module() {
+    // PRECISE licensing extends to COMPOSITE alias bodies, not just a bare `type Len = int32`. Module A
+    // imports the widths and defines `type Pair = (int32, int32)`; module B uses `Pair` without its own
+    // import. The alias is program-global, so B sees the name; because A (the defining module) imported
+    // every width the body embeds, the alias is licensed and the widths resolve through it in B.
+    // (Regression: the first cut only recorded bare-`Named` bodies, so a composite licensed alias was
+    // wrongly rejected at a non-importing use site with "unknown type 'int32'".)
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "import int32 from std.ffi\ntype Pair = (int32, int32)\nfn mk() -> Pair:\n    return (1, 2)\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import mk from lib\nfn use_pair(p: Pair) -> int:\n    return 0\n\
+         fn main():\n    print(use_pair(mk()))\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    assert!(
+        check_graph(&graph).is_ok(),
+        "composite width alias defined in an importing module must resolve at a non-importing use site"
+    );
+}
+
+#[test]
+fn composite_width_alias_partial_import_not_laundered() {
+    // The licence is precise: an alias is licensed only when its DEFINING module imported EVERY width it
+    // embeds. `type Mixed = (int32, int64)` in a module that imported only int32 is NOT licensed — so
+    // int64 cannot ride in on int32's opt-in. Using `Mixed` from a module that never imported int64 is
+    // rejected (the width it failed to import stays an unknown type).
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "import int32 from std.ffi\ntype Mixed = (int32, int64)\nfn dummy() -> int:\n    return 0\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import dummy from lib\nfn use_mixed(m: Mixed) -> int:\n    return 0\nfn main():\n    print(dummy())\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown type 'int64'")),
+        "partial-import composite alias must not launder the un-imported width, got: {errs:?}"
+    );
+}
+
+#[test]
 fn width_import_redundant_self_rename_ok() {
     // `import int32 as int32` is a redundant but harmless self-rename — the as-name is identical to
     // the member, so it carries no wrong-width risk and must be accepted (it just imports int32). A

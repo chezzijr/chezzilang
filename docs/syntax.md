@@ -1543,7 +1543,11 @@ declared (and resolved) in module A is usable from module B with **no** import i
 `int32`** — that import licenses the alias once, and any later use (including after another module is
 checked) resolves without re-importing. A `type Len = int32` whose defining module never imported `int32`
 does **not** launder the bare width name — it is still *unknown type 'int32'* (a bare `int32` always needs
-the import; only a *licensed* alias indirection bypasses the per-site requirement). To your program each
+the import; only a *licensed* alias indirection bypasses the per-site requirement). Composite alias bodies
+that *embed* widths (`type Pair = (int32, int32)`, `type Buf = list[uint8]`) follow the same rule, and the
+licence is precise: the alias is licensed only if its defining module imported **every** width it embeds —
+a `type Mixed = (int32, int64)` that imported only `int32` is **not** licensed, so `int64` can't ride in on
+`int32`'s opt-in. To your program each
 width name is a plain **`int`** — the width/signedness is a
 runtime-only marshalling distinction. Unlike `owned_str`, these are **bidirectional** (valid as both param
 and return):
