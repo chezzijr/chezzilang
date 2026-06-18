@@ -5483,6 +5483,41 @@ fn extern_owned_nullable_str_return_marshallable() {
 }
 
 #[test]
+fn extern_fixed_width_int_param_and_return_ok() {
+    // Each fixed-width int marshalling name (int8..uint64) resolves to a plain `int` (`Ty::Int`) and
+    // is BIDIRECTIONAL — valid as BOTH a param and a return. abs/atoi are stand-ins; the point is the
+    // type-checker accepts the name in both positions and the program sees an `int`.
+    for name in [
+        "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+    ] {
+        ok(&format!(
+            "extern \"libc.so.6\":\n    fn f(x: {name}) -> {name}\n\nn: int = f(5)\nprint(n)\n"
+        ));
+    }
+}
+
+#[test]
+fn extern_fixed_width_int_via_alias_ok() {
+    // A transparent `type Len = int32` used in an extern sig must behave identically to bare `int32`
+    // (the alias trap from the prior FFI task): resolve_type maps Len -> int32 -> Ty::Int (program
+    // sees a plain int), and the backends' ctype_of resolves the alias one hop to the int32 leaf.
+    ok(
+        "type Len = int32\nextern \"libc.so.6\":\n    fn f(x: Len) -> Len\n\nn: int = f(5)\nprint(n)\n",
+    );
+}
+
+#[test]
+fn extern_cyclic_int_alias_no_overflow() {
+    // A cyclic alias (`type A = B`, `type B = A`) used in an extern sig must be diagnosed as a
+    // recursive type alias, NOT stack-overflow resolve_type/ctype_of. Adding the fixed-width leaf
+    // names introduces no new recursion; the checker rejects the cycle before any extern body runs.
+    rejects(
+        "type A = B\ntype B = A\nextern \"libc.so.6\":\n    fn f(x: A) -> int\n",
+        "recursive type alias",
+    );
+}
+
+#[test]
 fn ffi_null_and_is_null_typecheck() {
     // `std.ffi.null()` is `ptr`; `is_null(p)` is `bool`; `ptr == ptr` (incl. vs `null()`) type-checks.
     entry_ok(

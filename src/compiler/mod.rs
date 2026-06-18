@@ -2953,6 +2953,18 @@ fn ctype_of(ty: Option<&Type>, aliases: &HashMap<String, Type>) -> Option<CType>
             "ptr" => Some(CType::Ptr),
             // A RETURN-ONLY owned `char*` (freed after copy). See `cffi::CType::OwnedStr`.
             "owned_str" => Some(CType::OwnedStr),
+            // Fixed-width C integers (BIDIRECTIONAL). Each maps to its own `CType` width — distinct
+            // from `CType::Int` (C long). Placed BEFORE the alias fallthrough so `type Len = int32`
+            // resolves one hop into the int32 leaf (the WIDTH, not collapsing to `CType::Int`). Kept
+            // byte-identical with `interp::ctype_of` — a divergence breaks two-engine parity.
+            "int8" => Some(CType::Int8),
+            "int16" => Some(CType::Int16),
+            "int32" => Some(CType::Int32),
+            "int64" => Some(CType::Int64),
+            "uint8" => Some(CType::UInt8),
+            "uint16" => Some(CType::UInt16),
+            "uint32" => Some(CType::UInt32),
+            "uint64" => Some(CType::UInt64),
             // A transparent alias to a scalar (resolve once; the checker rejected cyclic/non-scalar).
             other => aliases.get(other).and_then(|t| ctype_of(Some(t), aliases)),
         },
@@ -3235,6 +3247,33 @@ mod interp_tests {
             ctype_of(Some(&named("T")), &aliased),
             Some(CType::OptOwnedStr)
         );
+    }
+
+    #[test]
+    fn ctype_of_maps_fixed_width_ints() {
+        let aliases: HashMap<String, Type> = HashMap::new();
+        let named = |s: &str| Type::Named(s.to_string());
+        // Each fixed-width name maps to its distinct CType — NOT collapsed to CType::Int (which stays
+        // C long). int64/uint64 are also distinct from CType::Int.
+        for (name, want) in [
+            ("int8", CType::Int8),
+            ("int16", CType::Int16),
+            ("int32", CType::Int32),
+            ("int64", CType::Int64),
+            ("uint8", CType::UInt8),
+            ("uint16", CType::UInt16),
+            ("uint32", CType::UInt32),
+            ("uint64", CType::UInt64),
+        ] {
+            assert_eq!(ctype_of(Some(&named(name)), &aliases), Some(want), "{name}");
+        }
+        // Bare `int` is still C long (back-compat), distinct from int64.
+        assert_eq!(ctype_of(Some(&named("int")), &aliases), Some(CType::Int));
+        // Alias trap: `type Len = int32` must resolve to the WIDTH (CType::Int32), not collapse to
+        // CType::Int — the alias arm recurses one hop into the int32 leaf.
+        let mut aliased: HashMap<String, Type> = HashMap::new();
+        aliased.insert("Len".to_string(), named("int32"));
+        assert_eq!(ctype_of(Some(&named("Len")), &aliased), Some(CType::Int32));
     }
 
     #[test]

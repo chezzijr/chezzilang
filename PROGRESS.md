@@ -881,7 +881,9 @@ C-ABI FFI is NO LONGER a non-goal — v1 shipped** (`extern "lib":` scalar calls
 **plus opaque C `void*` handles** via the `ptr` type — `Obj::Ptr`/`Value::Ptr`, `std.ffi.null()`/
 `is_null`, untyped + manual-free, `examples/ffi_ptr.chz`; **plus the return-only `str` opt-ins
 `owned_str`** (copy + libc `free`, no leak) **and `str?`** (`NULL` → `None`, `examples/ffi_str.chz`);
-structs/callbacks/varargs, a custom user-named deallocator, and the rich Rust
+**plus bidirectional fixed-width integers `int8`..`uint64`** (bind C `int32_t`/`uint32_t`/…;
+truncate-on-param / sign-or-zero-extend-on-return, `examples/ffi_int.chz`);
+structs/callbacks/varargs, a custom user-named deallocator, C-spelling int aliases (`c_int`), and the rich Rust
 `Box<dyn Any>` userdata handle still deferred — see "Done" below; forward design for the Rust
 userdata Value + the package registry is in
 [`docs/ffi-and-packaging.md`](docs/ffi-and-packaging.md)). **`yield`/generators are likewise
@@ -904,6 +906,25 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **C-ABI FFI fixed-width integers — `int8`..`uint64`** (2026-06-18, `auto-task/ffi-fixed-width-ints`)
+  — eight bidirectional integer marshalling type names (`int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/
+  `uint32`/`uint64`) on the `extern "lib":` surface, siblings of `ptr`/`owned_str` (builtin names
+  recognized only inside an extern sig — **zero grammar/lexer/parser change**). Resolves the FFI-2 known
+  limit (prior: *"scalars only — int ↔ long, no fixed-width int type"*). Each resolves to a plain `int`
+  (`Ty::Int`) for the program; the width/signedness is a runtime-only marshalling distinction the backends
+  recover via `ctype_of` (the platform-exact libffi `Type::i8()`/`u8()`/…/`i64()`/`u64()`; bare `int`
+  keeps `c_long()` for back-compat). Unlike `owned_str` (return-only), these are **bidirectional**. C-cast
+  boundary semantics, **no overflow trap**: a param **truncates** the Chezzi i64 to the C width (wrapping
+  — `255` → `int8` is `-1`); a return **sign-extends** (signed) or **zero-extends** (unsigned) back to i64
+  (`int32` `-1` → `-1`; `uint32` `0xFFFFFFFF` → `4294967295`). `uint64` above `i64::MAX` wraps negative
+  (documented limit). Alias-safe: `type Len = int32` marshals as the int32 width (the alias resolves one
+  hop into the leaf, placed before the alias fallthrough), and a cyclic alias still errors at the checker
+  (no stack overflow). Eight flat `CType` variants + `ffi_type()`/param-cast/return-lower arms in the
+  shared `Cffi::call()` (parity by construction); the two `ctype_of` sites (compiler + interp) mirror
+  verbatim, guarded by twin tests. No C-spelling aliases (`c_int`) yet — width is platform-dependent,
+  deferred. Five MockHost unit tests (round-trip, int8 truncation, sign-extend, unsigned zero-extend +
+  high-bit), three checker tests (param+return for all 8, alias, cyclic-alias), twin `ctype_of` tests,
+  golden `examples/ffi_int.chz` (atoi/htonl/abs) through both engines. ~2181 tests green.
 - ✅ **C-ABI FFI `str`-return deepening — `owned_str` + `str?`** (2026-06-18, `auto-task/ffi-str-return`)
   — two paired, return-only opt-ins on the `extern "lib":` `char*` return path, implemented as **pure
   type-machinery (zero grammar/parser change)** — both ride a `Type` the backends' `ctype_of` recognizes,

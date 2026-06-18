@@ -187,7 +187,8 @@
 
 # A dynamic C-ABI FFI block: a body-less list of C function signatures bound to a shared library
 # (`extern "libm.so.6":`). Each `fn` becomes a module-global callable dispatched via dlopen+libffi.
-# v1 marshals scalars only (int/float/bool/str→char*).
+# v1 marshals scalars (int/float/bool/str→char*), fixed-width ints (int8..uint64), and opaque `ptr`
+# (↔ void*) — all are ordinary <type> IDENTs recognized only inside an extern sig (no new grammar).
 <externDecl> ::= "EXTERN" "STR" "COLON" "NEWLINE" "INDENT" <externFns> "DEDENT"
 <externFns>  ::= <externFn> | <externFn> <externFns>
 <externFn>   ::= "FN" "IDENT" "LPAREN" "RPAREN" "NEWLINE"

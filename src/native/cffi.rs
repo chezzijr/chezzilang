@@ -3,11 +3,14 @@
 //! [`CType`]s), and exposes `call(&mut dyn Host)` — reusing the engine-neutral [`Host`]/[`NativeRet`]
 //! seam (`src/native/mod.rs`) so the VM and the frozen interpreter produce identical output.
 //!
-//! v1 marshals scalars only: `int` (i64 ↔ C `long`), `float` (f64 ↔ C `double`), `bool`
+//! v1 marshals scalars: `int` (i64 ↔ C `long`), `float` (f64 ↔ C `double`), `bool`
 //! (↔ C `int` 0/1), and `str` (Chezzi str → null-terminated `const char*`; a borrowed `char*` return
-//! is copied immediately into an owned Chezzi str, never freed). Plus opaque `ptr` (Chezzi `ptr` ↔ C
-//! `void*`): an untyped raw-address handle, passed/returned by value and never auto-freed (the caller
-//! calls the library's own destroy).
+//! is copied immediately into an owned Chezzi str, never freed). Plus the bidirectional fixed-width
+//! integers `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` ([`CType::Int8`]..
+//! [`CType::UInt64`]) for C `int32_t`/`uint32_t`/… — distinct from `int` (C `long`); a param truncates
+//! the i64 to the C width (wrapping, C-cast), a return sign-/zero-extends back to i64. Plus opaque
+//! `ptr` (Chezzi `ptr` ↔ C `void*`): an untyped raw-address handle, passed/returned by value and
+//! never auto-freed (the caller calls the library's own destroy).
 //!
 //! Two RETURN-ONLY opt-in `str` forms deepen the `char*` return path (no grammar change — both ride
 //! on a `Type` the backends' `ctype_of` recognizes, exactly like `ptr`):
@@ -61,6 +64,20 @@ pub enum CType {
     /// A RETURN-ONLY nullable, owned `char*` (surface type `owned_str?`): NULL → `None` (frees
     /// nothing), non-null → `Some(str)` copied **and** freed. The composition of `OwnedStr` + `OptStr`.
     OptOwnedStr,
+    /// A fixed-width C integer (surface type names `int8`..`uint64`): a BIDIRECTIONAL marshalling
+    /// distinction for C functions taking/returning `int32_t`, `uint32_t`, etc. — distinct from
+    /// [`CType::Int`], which stays C `long`. To the Chezzi program each is a plain `int` (`Ty::Int`);
+    /// the width/signedness is a runtime-only marshalling concern. A PARAM truncates the Chezzi i64 to
+    /// the C width (wrapping, C-cast semantics — never an overflow trap); a RETURN sign-extends (signed)
+    /// or zero-extends (unsigned) the C value back to i64. Valid as both param and return.
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
 }
 
 impl CType {
@@ -77,6 +94,17 @@ impl CType {
             CType::Str | CType::Ptr | CType::OwnedStr | CType::OptStr | CType::OptOwnedStr => {
                 Type::pointer()
             }
+            // Fixed-width C integers — the platform-exact libffi constructors (NOT c_short/c_int/
+            // c_long, whose widths shift across LP64/LLP64). int64/uint64 use i64()/u64(), distinct
+            // from `CType::Int`'s c_long().
+            CType::Int8 => Type::i8(),
+            CType::Int16 => Type::i16(),
+            CType::Int32 => Type::i32(),
+            CType::Int64 => Type::i64(),
+            CType::UInt8 => Type::u8(),
+            CType::UInt16 => Type::u16(),
+            CType::UInt32 => Type::u32(),
+            CType::UInt64 => Type::u64(),
         }
     }
 }
@@ -199,6 +227,17 @@ impl Cffi {
         let mut ptr_args: Vec<*const std::os::raw::c_char> = Vec::new();
         // Raw `void*` handles (Chezzi `ptr` args) — plain addresses, stable once pushed.
         let mut void_args: Vec<*mut c_void> = Vec::new();
+        // Fixed-width integer args: each width gets its own typed vec because libffi reads through a
+        // `&T` of the exact C width. The Chezzi i64 is C-cast (`as`) to the width, wrapping on
+        // overflow (never a trap).
+        let mut i8_args: Vec<i8> = Vec::new();
+        let mut i16_args: Vec<i16> = Vec::new();
+        let mut i32_args: Vec<i32> = Vec::new();
+        let mut i64_args: Vec<i64> = Vec::new();
+        let mut u8_args: Vec<u8> = Vec::new();
+        let mut u16_args: Vec<u16> = Vec::new();
+        let mut u32_args: Vec<u32> = Vec::new();
+        let mut u64_args: Vec<u64> = Vec::new();
 
         // First pass: extract & own every scalar so the `&`-references libffi captures stay valid.
         // Each slot records which storage vec holds it and at what index.
@@ -209,6 +248,15 @@ impl Cffi {
             Ptr(usize),
             /// An opaque `void*` handle, stored in `void_args`.
             RawPtr(usize),
+            /// A fixed-width integer, stored in the matching `iN_args`/`uN_args` vec.
+            I8(usize),
+            I16(usize),
+            I32(usize),
+            I64(usize),
+            U8(usize),
+            U16(usize),
+            U32(usize),
+            U64(usize),
         }
         let mut slots: Vec<Slot> = Vec::with_capacity(self.params.len());
         for (i, p) in self.params.iter().enumerate() {
@@ -244,6 +292,41 @@ impl Cffi {
                     void_args.push(host.arg_ptr(i)? as *mut c_void);
                     slots.push(Slot::RawPtr(void_args.len() - 1));
                 }
+                // Fixed-width integers: read the Chezzi i64 and TRUNCATE to the C width via a Rust
+                // `as` cast — wrapping (C-cast) semantics, never an overflow trap (300i64 -> int8 ==
+                // 44, 255i64 -> int8 == -1). Each pushes into its own typed storage vec.
+                CType::Int8 => {
+                    i8_args.push(host.arg_int(i)? as i8);
+                    slots.push(Slot::I8(i8_args.len() - 1));
+                }
+                CType::Int16 => {
+                    i16_args.push(host.arg_int(i)? as i16);
+                    slots.push(Slot::I16(i16_args.len() - 1));
+                }
+                CType::Int32 => {
+                    i32_args.push(host.arg_int(i)? as i32);
+                    slots.push(Slot::I32(i32_args.len() - 1));
+                }
+                CType::Int64 => {
+                    i64_args.push(host.arg_int(i)?);
+                    slots.push(Slot::I64(i64_args.len() - 1));
+                }
+                CType::UInt8 => {
+                    u8_args.push(host.arg_int(i)? as u8);
+                    slots.push(Slot::U8(u8_args.len() - 1));
+                }
+                CType::UInt16 => {
+                    u16_args.push(host.arg_int(i)? as u16);
+                    slots.push(Slot::U16(u16_args.len() - 1));
+                }
+                CType::UInt32 => {
+                    u32_args.push(host.arg_int(i)? as u32);
+                    slots.push(Slot::U32(u32_args.len() - 1));
+                }
+                CType::UInt64 => {
+                    u64_args.push(host.arg_int(i)? as u64);
+                    slots.push(Slot::U64(u64_args.len() - 1));
+                }
                 // `OwnedStr`/`OptStr`/`OptOwnedStr` are RETURN-ONLY (the checker rejects them as
                 // params, resolving alias chains first). This arm should be unreachable, but we
                 // return a recoverable fault rather than `unreachable!` so a checker gap can never
@@ -275,6 +358,14 @@ impl Cffi {
                 Slot::Bool(idx) => ffi_args.push(arg(&bool_args[*idx])),
                 Slot::Ptr(idx) => ffi_args.push(arg(&ptr_args[*idx])),
                 Slot::RawPtr(idx) => ffi_args.push(arg(&void_args[*idx])),
+                Slot::I8(idx) => ffi_args.push(arg(&i8_args[*idx])),
+                Slot::I16(idx) => ffi_args.push(arg(&i16_args[*idx])),
+                Slot::I32(idx) => ffi_args.push(arg(&i32_args[*idx])),
+                Slot::I64(idx) => ffi_args.push(arg(&i64_args[*idx])),
+                Slot::U8(idx) => ffi_args.push(arg(&u8_args[*idx])),
+                Slot::U16(idx) => ffi_args.push(arg(&u16_args[*idx])),
+                Slot::U32(idx) => ffi_args.push(arg(&u32_args[*idx])),
+                Slot::U64(idx) => ffi_args.push(arg(&u64_args[*idx])),
             }
         }
 
@@ -367,6 +458,45 @@ impl Cffi {
                     let p: *mut c_void = cif.call(code, &ffi_args);
                     NativeRet::Ptr(p as usize)
                 }
+                // Fixed-width integer returns. Signed widths read the C value as `iN` then `as i64`
+                // (SIGN-extends: int32 -1 -> i64 -1). Unsigned widths read as `uN` then `as i64`
+                // (ZERO-extends: uint32 0xFFFFFFFF -> i64 4294967295). libffi promotes the C return
+                // into its declared-width slot before we read it.
+                Some(CType::Int8) => {
+                    let r: i8 = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as i64)
+                }
+                Some(CType::Int16) => {
+                    let r: i16 = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as i64)
+                }
+                Some(CType::Int32) => {
+                    let r: i32 = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as i64)
+                }
+                Some(CType::Int64) => {
+                    let r: i64 = cif.call(code, &ffi_args);
+                    NativeRet::Int(r)
+                }
+                Some(CType::UInt8) => {
+                    let r: u8 = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as i64)
+                }
+                Some(CType::UInt16) => {
+                    let r: u16 = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as i64)
+                }
+                Some(CType::UInt32) => {
+                    let r: u32 = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as i64)
+                }
+                Some(CType::UInt64) => {
+                    // u64 -> i64 reinterprets the top bit (a value > i64::MAX wraps negative). This is
+                    // the documented v1 limit: Chezzi `int` is i64, so a C uint64 above i64::MAX is not
+                    // representable and wraps (C-cast). The other 7 widths fit i64 losslessly.
+                    let r: u64 = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as i64)
+                }
                 None => {
                     let _: () = cif.call(code, &ffi_args);
                     NativeRet::Nil
@@ -409,6 +539,7 @@ mod tests {
     /// A standalone `Host` over fixed args, for unit-testing the FFI marshalling in isolation.
     #[derive(Default)]
     struct MockHost {
+        ints: Vec<i64>,
         floats: Vec<f64>,
         strs: Vec<String>,
         ptrs: Vec<usize>,
@@ -417,6 +548,11 @@ mod tests {
     }
 
     impl MockHost {
+        fn int(mut self, v: i64) -> Self {
+            self.ints.push(v);
+            self.kinds.push(('i', self.ints.len() - 1));
+            self
+        }
         fn float(mut self, v: f64) -> Self {
             self.floats.push(v);
             self.kinds.push(('f', self.floats.len() - 1));
@@ -439,14 +575,16 @@ mod tests {
             self.kinds.len()
         }
         fn arg_int(&mut self, i: usize) -> Result<i64, HostError> {
-            // not exercised by these tests
-            let _ = i;
-            Err(HostError {
-                message: "no int args".into(),
-            })
+            let (k, idx) = self.kinds[i];
+            if k != 'i' {
+                return Err(HostError {
+                    message: format!("arg {i} is not an int"),
+                });
+            }
+            Ok(self.ints[idx])
         }
-        fn arg_is_int(&self, _i: usize) -> bool {
-            false
+        fn arg_is_int(&self, i: usize) -> bool {
+            self.kinds[i].0 == 'i'
         }
         fn arg_float(&mut self, i: usize) -> Result<f64, HostError> {
             let (_, idx) = self.kinds[i];
@@ -634,5 +772,69 @@ mod tests {
     fn cffi_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Cffi>();
+    }
+
+    // ---- Fixed-width integer marshalling (int8/.../uint64) ----
+
+    #[test]
+    fn int32_param_roundtrips() {
+        // libc `abs(int)->int` declared with the fixed-width int32 marshalling type, in AND out.
+        // abs(-5) == 5: exercises a signed int32 param and an int32 return, both round-trip to i64.
+        let f = Cffi::new("libc.so.6", "abs", vec![CType::Int32], Some(CType::Int32))
+            .expect("dlopen abs");
+        let mut host = MockHost::default().int(-5);
+        assert_eq!(f.call(&mut host), Ok(NativeRet::Int(5)));
+    }
+
+    #[test]
+    fn int8_param_truncates_large_value_c_cast_wraps() {
+        // A Chezzi i64 too large for the C width TRUNCATES per a C cast (wrapping), never panics.
+        // 255 (0xFF) as a signed `char` (int8) is -1; abs(-1) == 1. Declaring abs with int8 in AND
+        // out proves the param cast wraps (255 -> -1) rather than saturating/erroring.
+        let f = Cffi::new("libc.so.6", "abs", vec![CType::Int8], Some(CType::Int8))
+            .expect("dlopen abs");
+        let mut host = MockHost::default().int(255);
+        assert_eq!(f.call(&mut host), Ok(NativeRet::Int(1)));
+    }
+
+    #[test]
+    fn int32_return_sign_extends_negative() {
+        // `atoi("-1") -> int` returns the C int -1; declared int32 it must SIGN-extend back to the
+        // Chezzi i64 -1 (not 0x00000000FFFFFFFF == 4294967295).
+        let f = Cffi::new("libc.so.6", "atoi", vec![CType::Str], Some(CType::Int32))
+            .expect("dlopen atoi");
+        let mut host = MockHost::default().string("-1");
+        assert_eq!(f.call(&mut host), Ok(NativeRet::Int(-1)));
+    }
+
+    #[test]
+    fn uint32_zero_extends_high_bit_in_and_out() {
+        // `htonl(uint32)->uint32` converts host->network byte order. On little-endian Linux,
+        // htonl(1) == 0x01000000 == 16777216, a value with bit 24 set. This exercises an unsigned
+        // int32 param AND an unsigned int32 return that ZERO-extends to a positive i64.
+        let f = Cffi::new(
+            "libc.so.6",
+            "htonl",
+            vec![CType::UInt32],
+            Some(CType::UInt32),
+        )
+        .expect("dlopen htonl");
+        let mut host = MockHost::default().int(1);
+        assert_eq!(f.call(&mut host), Ok(NativeRet::Int(16777216)));
+    }
+
+    #[test]
+    fn uint32_return_top_bit_is_positive_i64() {
+        // htonl(0x80) == 0x80000000 == 2147483648 (> i32::MAX). As `uint32` it must ZERO-extend to a
+        // positive i64 (2147483648), proving an unsigned return is NOT sign-extended into a negative.
+        let f = Cffi::new(
+            "libc.so.6",
+            "htonl",
+            vec![CType::UInt32],
+            Some(CType::UInt32),
+        )
+        .expect("dlopen htonl");
+        let mut host = MockHost::default().int(0x80);
+        assert_eq!(f.call(&mut host), Ok(NativeRet::Int(2147483648)));
     }
 }

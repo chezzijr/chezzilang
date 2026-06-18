@@ -26087,6 +26087,21 @@ main()
         assert_file_parity("examples/ffi_str.chz");
     }
 
+    /// C-ABI fixed-width integer marshalling golden (VM twin of `interp::golden_ffi_int_chz`): `atoi
+    /// -> int32` (sign-extend), `htonl(uint32) -> uint32` (zero-extend, high-bit positive), `abs(int8)
+    /// -> int8` (signed round-trip + param truncation per a C cast). Byte-matches `.expected` and stays
+    /// identical to the interpreter (`assert_file_parity`). Linux-only (needs libc).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_int_chz_via_run_file() {
+        let path = fixture("examples/ffi_int.chz");
+        let expected = std::fs::read_to_string(fixture("examples/ffi_int.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/ffi_int.chz");
+    }
+
     /// A complete self-contained program (merge sort + binary search + stats over std.math) runs on
     /// the VM, byte-matches `.expected`, and stays identical to the interpreter.
     #[test]

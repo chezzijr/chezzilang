@@ -5434,6 +5434,18 @@ fn ctype_of(
             // A RETURN-ONLY owned `char*` (freed after copy). Mirrors `compiler::ctype_of` exactly —
             // a divergence here would break two-engine parity at runtime.
             "owned_str" => Some(CType::OwnedStr),
+            // Fixed-width C integers (BIDIRECTIONAL). Each maps to its own `CType` width — distinct
+            // from `CType::Int` (C long). Placed BEFORE the alias fallthrough so `type Len = int32`
+            // resolves one hop into the int32 leaf (the WIDTH, not collapsing to `CType::Int`). Kept
+            // byte-identical with `compiler::ctype_of` — a divergence breaks two-engine parity.
+            "int8" => Some(CType::Int8),
+            "int16" => Some(CType::Int16),
+            "int32" => Some(CType::Int32),
+            "int64" => Some(CType::Int64),
+            "uint8" => Some(CType::UInt8),
+            "uint16" => Some(CType::UInt16),
+            "uint32" => Some(CType::UInt32),
+            "uint64" => Some(CType::UInt64),
             other => aliases.get(other).and_then(|t| ctype_of(Some(t), aliases)),
         },
         // A RETURN-ONLY nullable `char*` (surface `str?` / `owned_str?`): NULL → None at runtime.
@@ -7377,6 +7389,47 @@ b := Buf([10, 20, 30])
         assert_eq!(out, expected);
     }
 
+    /// Byte-identical twin of `compiler::interp_tests::ctype_of_maps_fixed_width_ints`: the interp's
+    /// `ctype_of` must map each fixed-width name to the SAME `CType` width as the compiler's (and
+    /// resolve a `type Len = int32` alias to the width, not collapse to `CType::Int`). The two
+    /// `ctype_of` impls are the ONLY parity hazard for this feature; this twin guards it.
+    #[test]
+    fn ctype_of_maps_fixed_width_ints() {
+        use crate::native::cffi::CType;
+        let aliases: std::collections::HashMap<String, crate::ast::Type> =
+            std::collections::HashMap::new();
+        let named = |s: &str| crate::ast::Type::Named(s.to_string());
+        for (name, want) in [
+            ("int8", CType::Int8),
+            ("int16", CType::Int16),
+            ("int32", CType::Int32),
+            ("int64", CType::Int64),
+            ("uint8", CType::UInt8),
+            ("uint16", CType::UInt16),
+            ("uint32", CType::UInt32),
+            ("uint64", CType::UInt64),
+        ] {
+            assert_eq!(
+                super::ctype_of(Some(&named(name)), &aliases),
+                Some(want),
+                "{name}"
+            );
+        }
+        // Bare `int` is still C long (back-compat), distinct from int64.
+        assert_eq!(
+            super::ctype_of(Some(&named("int")), &aliases),
+            Some(CType::Int)
+        );
+        // Alias trap: `type Len = int32` resolves to the WIDTH, not CType::Int.
+        let mut aliased: std::collections::HashMap<String, crate::ast::Type> =
+            std::collections::HashMap::new();
+        aliased.insert("Len".to_string(), named("int32"));
+        assert_eq!(
+            super::ctype_of(Some(&named("Len")), &aliased),
+            Some(CType::Int32)
+        );
+    }
+
     /// C-ABI FFI golden (interp side): an `extern "lib":` block calls `cos`/`sqrt` (libm) and
     /// `strlen` (libc) via dlopen+libffi. Deterministic by design (cos(0.0)=1.0, sqrt(4.0)=2.0,
     /// strlen("hello")=5 — no ULP drift). Drives `run_file` (extern decls need the module-graph +
@@ -7426,6 +7479,24 @@ b := Buf([10, 20, 30])
         .unwrap();
         let (out, _err, res, _) = run_file(&path);
         res.expect("ffi_str.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
+    /// C-ABI fixed-width integer marshalling golden (interp side): `atoi -> int32` (sign-extends a
+    /// negative), `htonl(uint32) -> uint32` (zero-extends, high-bit stays positive), `abs(int8) ->
+    /// int8` (signed round-trip + param truncation per a C cast). Deterministic on any little-endian
+    /// Linux: atoi/htonl/abs are pure + always present. VM twin asserts parity.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_int_chz() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi_int.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi_int.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("ffi_int.chz should run on the interp");
         assert_eq!(out, expected);
     }
 

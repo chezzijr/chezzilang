@@ -38,7 +38,7 @@
 | Mechanism | Rust `fn` compiled **into** the `chezzi` binary, registered in `native_members` | `dlopen`+`dlsym`+`libffi` at module init |
 | Lives in | `src/native/` (`Host`/`NativeRet`/`NativeFn`) | `src/native/cffi.rs` |
 | Used by | `std.math`/`io`/`os`/`fs`/`time`/`regex`/`request`/`net` | user `extern "lib":` blocks |
-| Crosses the airlock | `NativeRet`/`NativeArg` (primitives, list, struct, map, Result/Option) | scalars only (int↔long, float↔double, bool↔int, str→`char*`) |
+| Crosses the airlock | `NativeRet`/`NativeArg` (primitives, list, struct, map, Result/Option) | scalars (int↔long, fixed-width int8..uint64, float↔double, bool↔int, str→`char*`, opaque `ptr`↔void*) |
 | State | **none** — `NativeFn` is a bare `fn` pointer, no captured state | **none** |
 | Recompile to add? | **yes** — statically linked | **no** — dlopen at runtime |
 

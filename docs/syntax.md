@@ -1402,8 +1402,9 @@ print(sqrt(4.0))       # 2.0
 print(strlen("hello")) # 5
 ```
 
-**Marshalling (v1 — scalars + opaque `ptr`):** `int` ↔ C `long` (so a 32-bit-`int` C API is called at
-the wrong ABI width — declare against `long`-based APIs, or expect truncation), `float` ↔ C `double`,
+**Marshalling (v1 — scalars + fixed-width ints + opaque `ptr`):** `int` ↔ C `long` (for a fixed-width
+C `int32_t`/`uint32_t`/… use the dedicated `int8`..`uint64` names below — they bind the exact ABI width),
+`float` ↔ C `double`,
 `bool` ↔ C `int`, `str` → null-terminated `const char*` (a `char*` return is copied into a Chezzi
 `str`; **return-only** `owned_str` also frees it, `str?` makes a `NULL` return `None` — see below), and
 `ptr` ↔ C `void*` (an **opaque handle** — see below). No implicit `int`→`float` (`cos(2)`
@@ -1473,6 +1474,44 @@ user-named deallocator is **not** supported. **Caveat (C trust boundary):** `own
 returned buffer is genuinely `malloc`'d — declaring a **static / string-literal** return `owned_str`
 frees memory you don't own and corrupts the heap, exactly like a non-NUL-terminated return over-reads.
 
+**Fixed-width integers (`int8`..`uint64`) — bidirectional.** Bare `int` marshals as C `long`; to bind a
+C function taking or returning a **fixed-width** integer, declare it with one of eight marshalling type
+names (siblings of `ptr`/`owned_str`: builtin, recognized only inside an `extern` sig, no `import`, no
+grammar change). To your program each is a plain **`int`** — the width/signedness is a runtime-only
+marshalling distinction. Unlike `owned_str`, these are **bidirectional** (valid as both param and return):
+
+| name | C type | libffi type | as a parameter | as a return |
+|------|--------|-------------|----------------|-------------|
+| `int8`   | `int8_t`   | `sint8`  | truncate i64 → i8  (wrap) | sign-extend i8 → i64  |
+| `int16`  | `int16_t`  | `sint16` | truncate i64 → i16 (wrap) | sign-extend i16 → i64 |
+| `int32`  | `int32_t`  | `sint32` | truncate i64 → i32 (wrap) | sign-extend i32 → i64 |
+| `int64`  | `int64_t`  | `sint64` | i64 (no change)           | i64 (no change)       |
+| `uint8`  | `uint8_t`  | `uint8`  | truncate i64 → u8  (wrap) | zero-extend u8 → i64  |
+| `uint16` | `uint16_t` | `uint16` | truncate i64 → u16 (wrap) | zero-extend u16 → i64 |
+| `uint32` | `uint32_t` | `uint32` | truncate i64 → u32 (wrap) | zero-extend u32 → i64 |
+| `uint64` | `uint64_t` | `uint64` | truncate i64 → u64 (wrap) | reinterpret u64 → i64 |
+
+A **param truncates** the Chezzi i64 to the C width with **C-cast (wrapping) semantics — never an
+overflow trap**: `255` passed to `int8` becomes `-1`, `300` becomes `44`. A **return sign-extends**
+(signed) or **zero-extends** (unsigned) the C value back to i64: `int32` returning `-1` is `-1`,
+`uint32` returning `0xFFFFFFFF` is `4294967295` (stays positive). A `type Len = int32` alias used in an
+`extern` sig behaves identically to bare `int32`.
+
+```chezzi
+extern "libc.so.6":
+    fn atoi(s: str) -> int32      # parse to a C int; -1 sign-extends back to i64 -1
+    fn htonl(x: uint32) -> uint32 # unsigned in+out; a high-bit result stays positive
+    fn abs(x: int8) -> int8       # signed round-trip; an out-of-range param wraps (C cast)
+
+print(atoi("-1"))   # -1
+print(htonl(128))   # 2147483648   (0x80000000, zero-extended → positive)
+print(abs(255))     # 1            (255 → int8 → -1, then abs)
+```
+
+**Limits:** `uint64` values above `i64::MAX` are not representable in Chezzi's i64 `int` and wrap
+negative (the other seven widths fit i64 losslessly). No C-spelling aliases (`c_int`/`c_short`/…) yet —
+their width is platform-dependent (LP64 vs LLP64); deferred to a future task. See `examples/ffi_int.chz`.
+
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
 (`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/`set`), `print`, a constructor
@@ -1481,8 +1520,9 @@ resolve to a special op before a plain call, so the extern would be silently sha
 rejects the collision (*'…' is a builtin/reserved name*).
 
 **Known v1 limits (see `docs/spec.md` for detail):**
-- **C `int` width:** Chezzi `int` (i64) marshals as C **`long`** — 64-bit on supported **LP64 unix**
-  targets. 32-bit/`unsigned` C ints are out of scope, and there is **no `int32` type** (feature-frozen).
+- **C `int` width:** bare Chezzi `int` (i64) marshals as C **`long`** — 64-bit on supported **LP64 unix**
+  targets. For a **fixed-width** C integer (`int32_t`/`uint32_t`/…) use the dedicated `int8`..`uint64`
+  marshalling names (bidirectional, truncate-on-param / sign-or-zero-extend-on-return — see above).
   Non-unix (LLP64, where C `long` is 32-bit) is **unsupported**: the checker rejects `extern` there.
 - **`char*` ownership:** a plain `str` return is **borrowed** (copied, never `free`d — a `malloc`'d
   return leaks). Declare it **`owned_str`** to transfer ownership: Chezzi copies then frees it with libc

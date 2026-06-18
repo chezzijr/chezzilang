@@ -102,7 +102,9 @@ in [`docs/concurrency.md`](concurrency.md); phase history in
 
 **Still deferred (YAGNI v1):** macros, package registry, and native backend (a Cranelift AOT/JIT is
 the stretch end-game). **Level-3 dynamic C-ABI FFI is now partially shipped** (`extern "lib":` blocks
-calling C functions via dlopen+libffi) — v1 marshals scalars (int/float/bool/str→`char*`) plus an
+calling C functions via dlopen+libffi) — v1 marshals scalars (int/float/bool/str→`char*`), the
+bidirectional **fixed-width integer** marshalling names `int8`..`uint64` (bind C `int32_t`/`uint32_t`/…;
+truncate-on-param, sign-or-zero-extend-on-return), plus an
 opaque `ptr` (↔ C `void*`, an untyped never-auto-freed handle for `FILE*`/`sqlite3*`-style APIs; the
 `std.ffi` module adds `null()`/`is_null`), plus two return-only `str` opt-ins — **`owned_str`** (an
 owned `malloc`'d `char*` copied **and** freed, no leak) and **`str?`** (a nullable `char*`, `NULL` →
@@ -290,7 +292,10 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >   snapshot path shares the `Arc<Cffi>` (same address space — no re-`dlopen`). See `src/native/cffi.rs`
 >   + `examples/ffi.chz`. **v1 limits:** scalars only — structs-by-value, callbacks/function pointers,
 >   varargs, the rich Rust `Box<dyn Any>` userdata handle, and a custom user-named deallocator are
->   deferred. **`char*` ownership + nullable returns shipped:** a plain `str` return is borrowed (copied,
+>   deferred. **Fixed-width integers shipped:** beyond bare `int` (↔ C `long`), the marshalling type
+>   names `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` bind C `int32_t`/`uint32_t`/…
+>   (bidirectional, truncate-on-param / sign-or-zero-extend-on-return; `examples/ffi_int.chz`).
+>   **`char*` ownership + nullable returns shipped:** a plain `str` return is borrowed (copied,
 >   never freed); declare it **`owned_str`** (a return-only marshalling type) to copy **and** free a
 >   `malloc`'d buffer with libc `free` (no leak), or **`str?`** (`Option[str]`) to make a `NULL` return
 >   `None` instead of a fault (`owned_str?` composes both). See `examples/ffi_str.chz`. **Opaque `void*`
@@ -301,14 +306,28 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >   value vocab (`null()`/`is_null`); see `examples/ffi_ptr.chz`. A slow C call runs inline (extern
 >   names are NOT in `is_blocking`, so it pins its worker under `--parallel`).
 > - **FFI v1 limits (known + by design):**
->   - **Integer width (FFI-2):** Chezzi `int` (i64) marshals as C **`long`** — 64-bit on every
->     supported **LP64** unix target. 32-bit C ints, `unsigned`, and other fixed-width C integer types
->     are **out of v1 scope**; there is **no `int32` type** (the language is feature-frozen). A C API
->     taking a 32-bit `int` parameter still works in practice on LP64 (the value is passed in a 64-bit
->     register and the callee reads the low 32 bits), but a value that does not fit the C type's range
->     is the caller's responsibility. **Non-unix is unsupported:** on an LLP64 target (Windows x64) C
->     `long` is 32-bit and would truncate, so the checker **rejects `extern` on non-unix targets** and
->     the `cffi` module is `#[cfg(unix)]`-gated.
+>   - **Integer width (FFI-2 — RESOLVED, opt-in):** bare Chezzi `int` (i64) still marshals as C
+>     **`long`** (64-bit on every supported **LP64** unix target — unchanged for back-compat; the prior
+>     limit was *"scalars only: int ↔ long, no fixed-width int type"*). To bind a C function taking or
+>     returning a fixed-width integer (`int32_t`, `uint32_t`, …), declare the parameter/return with one
+>     of the **fixed-width marshalling type names** — `int8`, `int16`, `int32`, `int64`, `uint8`,
+>     `uint16`, `uint32`, `uint64` (siblings of `ptr`/`owned_str`: builtin names recognized only inside
+>     `extern` sigs, no grammar change). To the program each is a plain `int` (`Ty::Int`); the
+>     width/signedness is a **runtime-only** marshalling distinction the backends recover via `ctype_of`
+>     (the platform-exact libffi `sint8`/`uint8`/…/`sint64`/`uint64` types). Unlike `owned_str`
+>     (return-only), these are **bidirectional** — valid as both param and return. **Boundary semantics
+>     (C-cast, no overflow trap):** a **param truncates** the Chezzi i64 to the C width (wrapping —
+>     `255` → `int8` is `-1`, `300` → `int8` is `44`); a **return sign-extends** (signed) or
+>     **zero-extends** (unsigned) the C value back to i64 (`int32` `-1` → `-1`; `uint32` `0xFFFFFFFF` →
+>     `4294967295`). `uint64` above `i64::MAX` is not representable in Chezzi's i64 `int` and wraps
+>     negative (a documented v1 limit; the other seven widths fit i64 losslessly). **Aliases:** a
+>     `type Len = int32` used in an `extern` sig behaves identically to bare `int32` (`ctype_of`
+>     resolves the alias one hop to the width). **No C-spelling aliases** (`c_int`/`c_short`/…) yet —
+>     their width is platform-dependent (LP64 vs LLP64); deferred to a future task. See
+>     `src/native/cffi.rs` (`CType::Int8`..`CType::UInt64`) + `examples/ffi_int.chz`. **Non-unix is
+>     unsupported:** on an LLP64 target (Windows x64) C `long` is 32-bit and would truncate bare `int`,
+>     so the checker **rejects `extern` on non-unix targets** and the `cffi` module is
+>     `#[cfg(unix)]`-gated.
 >   - **`char*` ownership (FFI-3 — RESOLVED, opt-in):** a plain `str`-typed return is **borrowed** —
 >     copied into a Chezzi string and **never `free`d**, so a freshly `malloc`'d `char*` leaks (use this
 >     for static/interned returns). To take ownership, declare the return **`owned_str`** (a return-only

@@ -1411,6 +1411,14 @@ impl Checker {
                 // `ctype_of`); the return-only-ness is enforced by a surface guard in the extern
                 // param loop (an `owned_str` parameter is rejected before this collapses to `Str`).
                 "owned_str" => Ty::Str,
+                // Fixed-width C integer marshalling type names (siblings of `ptr`/`owned_str`): each
+                // resolves to a plain `int` (`Ty::Int`) — the width/signedness is a runtime-only
+                // marshalling distinction the backends recover via `ctype_of`. Unlike `owned_str`
+                // (return-only), these are BIDIRECTIONAL (valid as both param and return), so they
+                // need no return-only guard. `assert_marshallable` already accepts `Ty::Int`.
+                "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64" => {
+                    Ty::Int
+                }
                 // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation).
                 "Executor" => Ty::Executor,
                 // D6 — the std.net TCP handles, non-generic (bare `Socket` / `Listener` annotations).
