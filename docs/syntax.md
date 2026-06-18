@@ -1443,6 +1443,14 @@ to a flat struct works exactly like the bare struct.) The struct may be declared
 `int`, **not** a 1-byte `_Bool`/`char`; use `int8`/`uint8` for a byte-width field. Nested structs-by-value
 and string fields are deferred to a later version.
 
+**Deferred FFI features (with design notes in [`docs/ffi-and-packaging.md §1b`](ffi-and-packaging.md)):**
+**callbacks / C function pointers** (#4 — pass a Chezzi fn into C; needed for event-driven libs, but
+re-entrancy/cross-thread/GC-rooting hazards make it a future interactive task); **varargs** (#5 — rare;
+`printf`-family + a few syscalls, most of which you bind with a concrete *fixed-arity* signature today,
+caveat: float varargs / non-x86-64 aren't ABI-portable that way); and an exact 1-byte **`bool8`** (C99
+`_Bool`, returns a Chezzi `bool`) — for now `bool` stays C `int` (correct for the classic int-returning
+predicates like `isdigit`), and a 1-byte `_Bool` field is bound with `int8`/`uint8`.
+
 **Opaque handles (`ptr`).** A C library built around a handle (`FILE*`, `sqlite3*`, a
 `create`/`use`/`destroy` context) returns a `void*` you hold and pass back. Declare it as `ptr` — a
 builtin opaque type (a peer of `int`/`str`; no import needed in a signature). A `ptr` is **untyped**
@@ -1521,9 +1529,14 @@ import int32, uint32 from std.ffi   # bring the width TYPE names into this modul
 
 A module that uses a width name without importing it gets *unknown type 'int32' (import it from std.ffi:
 `import int32 from std.ffi`)*. Importing a non-existent width name errors like any bad import (*module
-'std.ffi' has no member 'int99'*). The import is per-module: a struct's int32 field declared (and resolved)
-in module A is usable from module B with **no** import in B, but a bare `int32` *written in B's own source*
-needs B's own import. To your program each width name is a plain **`int`** — the width/signedness is a
+'std.ffi' has no member 'int99'*). A width type **cannot be renamed on import** — `import int32 as W from
+std.ffi` is rejected (the backend marshaller keys off the literal name `int32`). You also can't redefine a
+width name as a user alias (`type int32 = …` is reserved). The import is per-module: a struct's int32 field
+declared (and resolved) in module A is usable from module B with **no** import in B, but a bare `int32`
+*written in B's own source* needs B's own import. **A transparent alias is the opt-in:** a `type Len = int32`
+resolves wherever the alias is used (including cross-module) without that site importing `int32` — the alias
+itself is the deliberate reach for the width (a bare `int32` still needs the import; only an alias indirection
+bypasses it). To your program each width name is a plain **`int`** — the width/signedness is a
 runtime-only marshalling distinction. Unlike `owned_str`, these are **bidirectional** (valid as both param
 and return):
 

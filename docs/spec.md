@@ -110,8 +110,11 @@ opaque `ptr` (↔ C `void*`, an untyped never-auto-freed handle for `FILE*`/`sql
 owned `malloc`'d `char*` copied **and** freed, no leak) and **`str?`** (a nullable `char*`, `NULL` →
 `None` instead of a fault), plus **flat-scalar structs by value** (a Chezzi `struct` of scalar fields ↔
 a C struct passed/returned by value, layout via libffi). Nested structs-by-value, `str` struct fields,
-callbacks, varargs, the rich Rust `Box<dyn Any>` userdata handle, and a custom user-named deallocator
-(only libc `free` backs `owned_str`) are still deferred. See
+**callbacks/function pointers** (#4) and **varargs** (#5) — both with design notes + a varargs
+fixed-arity workaround in [`docs/ffi-and-packaging.md §1b`](ffi-and-packaging.md) — an exact 1-byte
+`bool8` (C99 `_Bool`; `bool` stays C `int` for the pre-C99 predicate idiom), the rich Rust
+`Box<dyn Any>` userdata handle, and a custom user-named deallocator (only libc `free` backs
+`owned_str`) are still deferred. See
 the FFI subsection below + [`docs/syntax.md`](syntax.md).
 **Forward design** for the remaining FFI deepening (the C `void*` `ptr` handle has **shipped**; the
 rich Rust `Box<dyn Any>` "userdata" Value that unlocks compiled-in handle-based Rust libraries like
@@ -392,8 +395,11 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >     `examples/ffi_struct.chz`.
 > - **Still deferred (Level-3):** the rich **Rust `Box<dyn Any>` userdata handle** (for compiled-in
 >   Rust libraries like Burn — distinct from the C `void*` `ptr` above, which shipped), a **custom
->   user-named deallocator** (only libc `free` backs `owned_str`), and the deferred FFI features above
->   (nested structs-by-value / `str` struct fields / callbacks / varargs). See
+>   user-named deallocator** (only libc `free` backs `owned_str`), an exact 1-byte **`bool8`** (C99
+>   `_Bool`; `bool` stays C `int` so the pre-C99 int-returning predicate idiom keeps working — use
+>   `int8` for a 1-byte field today), and the deferred FFI features above (nested structs-by-value /
+>   `str` struct fields / **callbacks #4** / **varargs #5**, the latter two with design notes +
+>   workaround in `docs/ffi-and-packaging.md §1b`). See
 >   `docs/ffi-and-packaging.md`. (`std.os.exit` with a real exit-code channel through the run drivers
 >   has since **shipped** — see `examples/exit.chz`.)
 

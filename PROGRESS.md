@@ -886,7 +886,10 @@ truncate-on-param / sign-or-zero-extend-on-return, **imported per-name from `std
 first type imports, `examples/ffi_int.chz`);
 **plus flat-scalar structs by value** (a Chezzi `struct` of scalar fields ↔ a C struct passed/returned
 by value, `examples/ffi_struct.chz`);
-nested structs / `str` struct fields / callbacks / varargs, a custom user-named deallocator, C-spelling int aliases (`c_int`), and the rich Rust
+nested structs / `str` struct fields / **callbacks (#4)** / **varargs (#5)** (both with design notes +
+a varargs fixed-arity workaround in `docs/ffi-and-packaging.md §1b`), an exact 1-byte **`bool8`** (C99
+`_Bool`; `bool` stays C `int` for the pre-C99 int-returning predicate idiom — use `int8` for a 1-byte
+field today), a custom user-named deallocator, C-spelling int aliases (`c_int`), and the rich Rust
 `Box<dyn Any>` userdata handle still deferred — see "Done" below; forward design for the Rust
 userdata Value + the package registry is in
 [`docs/ffi-and-packaging.md`](docs/ffi-and-packaging.md)). **`yield`/generators are likewise

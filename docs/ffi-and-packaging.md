@@ -45,6 +45,78 @@
 Both seams are the **CPython-built-in-C-module model**: stateless functions, data in / data out. Neither
 can hold a live foreign object across calls.
 
+## 1b. Deferred FFI-deepening features — design notes (revisit-in-future)
+
+The v1 `extern "lib":` surface ships: scalars, fixed-width ints (`int8`..`uint64`, `std.ffi`-imported),
+`float`/`bool`, `str` (+ return-only `owned_str`/`str?`/`owned_str?`), opaque `ptr` handles, and
+flat-scalar **structs by value**. Three deepenings stay deferred. They're captured here so a revisit
+starts from a plan, not a blank page. None is blocking — the v1 surface binds the large majority of
+system/compute C libraries (numbers, strings, handles, small structs) with **no `chezzi` rebuild**.
+
+### #4 Callbacks / C function pointers
+**Unlocks:** passing a Chezzi function to C as a C function pointer so C calls *back* into Chezzi —
+needed for **event-driven / async** libraries (GLib/GTK signals, libuv, libcurl write/progress, SDL
+audio, GLFW input) and a few stdlib helpers (`qsort`, `signal`, `atexit`). Compute libraries and
+handle-based APIs (sqlite `prepare`→`step`→`finalize`, file I/O) need **none** of this → deferred, not
+blocking.
+
+**Why it's hard (the hazards — all UB-class — that make it an interactive design task, not a
+fire-and-forget):**
+1. **Unsafe executable trampoline.** A Chezzi closure isn't a C function pointer; you need libffi's
+   `ffi_closure` — it allocates W^X (writable-then-executable) memory and writes a machine-code thunk.
+2. **Engine re-entrancy.** C invokes the callback while a native call is already in flight, re-entering
+   the VM/interp dispatch loop on the same thread (`&mut Vm` aliasing).
+3. **Cross-thread invocation.** A C library may store the pointer and call it later from *its own*
+   thread (worker pools, signal/async contexts) — a thread with no fiber/heap/scheduler. Breaks the
+   M:N snapshot/airlock model.
+4. **GC rooting across the C boundary.** The closure + its captured upvalues must stay GC-rooted as
+   long as C might call the pointer — often indefinitely, with no "done" signal.
+5. **Unwind safety.** A Chezzi fault must not unwind across a C frame (UB); catch at the trampoline and
+   convert to a C-level sentinel.
+6. **New type surface.** A C-function-pointer param type (`CType::Callback{args, ret}`) + checker
+   support + inbound marshalling (the same ABI corner cases as args/structs, now inbound).
+
+**Recommended when revisited:** start **narrow** — synchronous-only callbacks (C calls back *during*
+the FFI call, not stored for later), gated to `--serial` (no cross-thread), the closure rooted in a
+side-table for the call's duration, panic caught at the boundary. Expand to stored/async callbacks only
+when a concrete target library forces it.
+
+### #5 Variadic functions
+**What:** C functions taking a variable arg count (`printf`/`scanf` family; the variadic forms of
+`open`/`fcntl`/`ioctl`/`execl`).
+
+**Why it's low priority:** the genuinely-variadic-required surface is tiny — `printf`/`scanf` (Chezzi
+has its own formatting + `print`, so you'd rarely call C's), and most "variadic" syscall wrappers have
+fixed-arity-per-call-site or array siblings (`execv`, `vprintf`). And **Chezzi has no variadic surface
+at all** (no `f(*args)` spread, no variadic params) — true varargs FFI would mean inventing a *language*
+feature first, not just an FFI addition.
+
+**Workaround that needs nothing new:** declare a **concrete fixed-arity** extern signature for the exact
+call form you need (`open` 2-arg vs a separate 3-arg binding). *Caveat:* on x86-64 SysV, calling a
+variadic C fn through a *non*-variadic libffi CIF is technically ABI-incomplete (variadic calls set
+`%al` = SSE-register count; libffi has `ffi_prep_cif_var`). Works in practice for **integer/pointer**
+varargs; can break for **float** varargs or non-x86-64 ABIs.
+
+**Two forks when revisited:** (a) a Chezzi-level variadic/spread call surface (a language feature, broad
+blast radius) feeding `ffi_prep_cif_var`; or (b) an FFI-only typed-arg-list escape hatch —
+`printf(fmt, ffi.args([ffi.int(3), ffi.str("x")]))` — that sidesteps the language gap with an explicit
+per-arg-type list. (b) is the lower-risk, FFI-contained option.
+
+### `bool8` — exact 1-byte C `_Bool` (small, planned)
+**Why:** Chezzi `bool` marshals as C `int` (4 bytes), deliberately — it matches K&R/C89 and the entire
+pre-C99 standard library, where a boolean *was* `int` and `<ctype.h>` predicates (`isdigit`, …) return
+an *arbitrary nonzero* `int` for true. The `bool` return reads a full `c_int` then `!= 0`, which is
+correct for those. **Do not change that default** — flipping `bool` to 1 byte would misread a `0x100`
+predicate return as `false`.
+
+C99 added `_Bool` (1 byte). To bind a struct whose field (or an arg) is a real `_Bool`, the 4-byte
+`bool` mis-sizes/offset-shifts it. **Today's workaround:** declare that field `int8`/`uint8` (a `_Bool`
+*is* a 1-byte int) — you get `0`/`1` back as an `int`, correct layout. **Planned:** add a `bool8`
+marshalling type (1-byte, `std.ffi`-imported like the width ints) that comes back as a Chezzi `bool` —
+pure ergonomics over `int8`, leaving the predicate-safe `bool` default untouched. Implementation note:
+its **return must read register-width then narrow to a byte + `!= 0`** (the same libffi rvalue-widening
+rule the narrow-int returns follow — a 1-byte return read through a 1-byte buffer is a stack OOB write).
+
 ## 2. Why strong libraries are blocked (value model, not linking)
 
 Linking a Rust crate is trivial — Chezzi *is* Rust, so `burn = "..."` in `Cargo.toml` + a
