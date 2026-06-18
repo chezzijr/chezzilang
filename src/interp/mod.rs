@@ -5431,8 +5431,19 @@ fn ctype_of(
             "bool" => Some(CType::Bool),
             "str" => Some(CType::Str),
             "ptr" => Some(CType::Ptr),
+            // A RETURN-ONLY owned `char*` (freed after copy). Mirrors `compiler::ctype_of` exactly —
+            // a divergence here would break two-engine parity at runtime.
+            "owned_str" => Some(CType::OwnedStr),
             other => aliases.get(other).and_then(|t| ctype_of(Some(t), aliases)),
         },
+        // A RETURN-ONLY nullable `char*` (surface `str?` / `owned_str?`): NULL → None at runtime.
+        Some(crate::ast::Type::Generic(n, args)) if n == "Option" && args.len() == 1 => {
+            match ctype_of(args.first(), aliases) {
+                Some(CType::Str) => Some(CType::OptStr),
+                Some(CType::OwnedStr) => Some(CType::OptOwnedStr),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -7398,6 +7409,23 @@ b := Buf([10, 20, 30])
         .unwrap();
         let (out, _err, res, _) = run_file(&path);
         res.expect("ffi_ptr.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
+    /// C-ABI deeper `str` returns golden (interp side): `strdup(str) -> owned_str` (the owned `char*`
+    /// is copied into a Chezzi `str` AND freed) and `getenv(str) -> str?` (NULL → `None`, set → `Some`).
+    /// Deterministic on any Linux: `strdup` is pure, `PATH` is set, the junk var is unset. VM twin asserts parity.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_str_chz() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi_str.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi_str.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("ffi_str.chz should run on the interp");
         assert_eq!(out, expected);
     }
 

@@ -4,11 +4,25 @@
 //! seam (`src/native/mod.rs`) so the VM and the frozen interpreter produce identical output.
 //!
 //! v1 marshals scalars only: `int` (i64 ↔ C `long`), `float` (f64 ↔ C `double`), `bool`
-//! (↔ C `int` 0/1), and `str` (Chezzi str → null-terminated `const char*`; a `char*` return is
-//! copied immediately into an owned Chezzi str). Plus opaque `ptr` (Chezzi `ptr` ↔ C `void*`): an
-//! untyped raw-address handle, passed/returned by value and never auto-freed (the caller calls the
-//! library's own destroy). Structs by value, callbacks, varargs, the rich Rust `Arc<dyn Any>`
-//! userdata handle, and `char*` ownership transfer / `free` are deferred (documented limits).
+//! (↔ C `int` 0/1), and `str` (Chezzi str → null-terminated `const char*`; a borrowed `char*` return
+//! is copied immediately into an owned Chezzi str, never freed). Plus opaque `ptr` (Chezzi `ptr` ↔ C
+//! `void*`): an untyped raw-address handle, passed/returned by value and never auto-freed (the caller
+//! calls the library's own destroy).
+//!
+//! Two RETURN-ONLY opt-in `str` forms deepen the `char*` return path (no grammar change — both ride
+//! on a `Type` the backends' `ctype_of` recognizes, exactly like `ptr`):
+//! - **`owned_str`** ([`CType::OwnedStr`]): an OWNED malloc'd `char*` (e.g. `strdup`). Copied into a
+//!   Chezzi `str`, then **freed** with the loaded libc's `free` (resolved once via `dlsym("free")` at
+//!   [`Cffi::new`]). To the program it is a plain `str`. NULL faults like a plain `str` return — use
+//!   `owned_str?` for nullable. Caveat: the user asserts the buffer is genuinely malloc'd; declaring a
+//!   STATIC/interned string `owned_str` corrupts the heap (a C-trust-boundary assertion, like the
+//!   non-NUL-terminated-return over-read). A user-named deallocator is not supported (libc `free` only).
+//! - **`str?`** ([`CType::OptStr`], surface `Option[str]`): a nullable `char*` (e.g. `getenv`). NULL →
+//!   `None`, non-null → `Some(str)` (borrowed, not freed). The opt-in escape from the non-null `str`
+//!   faulting-on-NULL rule. Composes: `owned_str?` ([`CType::OptOwnedStr`]) is nullable + owned.
+//!
+//! Structs by value, callbacks, varargs, the rich Rust `Arc<dyn Any>` userdata handle, and a custom
+//! user-named deallocator are deferred (documented limits).
 //!
 //! ## Send/Sync (for `--parallel`)
 //! The VM stores `Obj::Cffi(Arc<Cffi>)`, and the M:N engine shares the parent address space across
@@ -35,6 +49,18 @@ pub enum CType {
     Str,
     /// An opaque `void*` handle (Chezzi `ptr`): a raw address marshalled by value, in and out.
     Ptr,
+    /// A RETURN-ONLY `char*` whose ownership transfers to Chezzi (surface type name `owned_str`).
+    /// The returned pointer is copied into a Chezzi `str` and then **freed** with the loaded libc's
+    /// `free` (a malloc'd buffer, e.g. `strdup`). The program still sees a plain `str`. NULL faults
+    /// exactly like a plain `str` return (use `owned_str?` for a nullable owned return).
+    OwnedStr,
+    /// A RETURN-ONLY nullable `char*` (surface type `str?` / `Option[str]`): NULL → `None`,
+    /// non-null → `Some(str)` (copied, **not** freed — borrowed). The opt-in escape from the
+    /// non-null `str` faulting-on-NULL rule, for C fns that legitimately return NULL (e.g. `getenv`).
+    OptStr,
+    /// A RETURN-ONLY nullable, owned `char*` (surface type `owned_str?`): NULL → `None` (frees
+    /// nothing), non-null → `Some(str)` copied **and** freed. The composition of `OwnedStr` + `OptStr`.
+    OptOwnedStr,
 }
 
 impl CType {
@@ -45,8 +71,12 @@ impl CType {
             CType::Int => Type::c_long(),
             CType::Float => Type::f64(),
             CType::Bool => Type::c_int(),
-            // str → `const char*`, ptr → `void*` — both pointers to libffi.
-            CType::Str | CType::Ptr => Type::pointer(),
+            // str → `const char*`, ptr → `void*`, and every char*-returning variant — all
+            // pointers to libffi (the owned/nullable distinction is a Chezzi-side lowering choice,
+            // not an ABI one: the C signature is the same `char*`).
+            CType::Str | CType::Ptr | CType::OwnedStr | CType::OptStr | CType::OptOwnedStr => {
+                Type::pointer()
+            }
         }
     }
 }
@@ -63,6 +93,11 @@ pub struct Cffi {
     ret: Option<CType>,
     /// The Chezzi-visible name, for error messages.
     name: String,
+    /// The address of `free` in the loaded library (resolved once via `dlsym("free")` at construction),
+    /// used to release an `OwnedStr`/`OptOwnedStr` return after it is copied. `None` when the symbol
+    /// can't be resolved (the lib has no `free`) — then an owned return degrades to the old leak rather
+    /// than aborting. Excluded from `PartialEq`: it's a function of the lib, not the signature.
+    free_addr: Option<usize>,
 }
 
 impl Cffi {
@@ -93,13 +128,51 @@ impl Cffi {
                 message: format!("symbol '{sym_name}' has no address on this platform"),
             })? as usize
         };
+        // Resolve `free` once (only needed for an owned-str return). Best-effort: a lib without a
+        // `free` symbol leaves this `None` and the owned return degrades to the documented leak.
+        // Resolving from the just-loaded `library` gets libc's `free` (libc is in every process's
+        // symbol scope; a third-party lib's own allocator is not supported — see docs §Level-3).
+        let free_addr = if matches!(ret, Some(CType::OwnedStr) | Some(CType::OptOwnedStr)) {
+            // SAFETY: dlsym of a named symbol; the pointer is only ever invoked later via libffi with
+            // the standard `void free(void*)` signature, never deref'd here.
+            unsafe {
+                library
+                    .get::<*mut c_void>(b"free")
+                    .ok()
+                    .and_then(|s| s.try_as_raw_ptr())
+                    .map(|p| p as usize)
+            }
+        } else {
+            None
+        };
         Ok(Cffi {
             _lib: library,
             sym: addr,
             params,
             ret,
             name: sym_name.to_string(),
+            free_addr,
         })
+    }
+
+    /// Copy a non-null `char*` return into an owned Chezzi `String`, then free the C buffer with the
+    /// cached libc `free` (if resolved). The copy happens BEFORE the free, so the data is safe.
+    /// SAFETY: `p` must be a non-null pointer to a NUL-terminated, malloc'd buffer (the `owned_str`
+    /// user assertion across the C trust boundary). `free_addr`, if present, is the standard libc
+    /// `void free(void*)`.
+    unsafe fn copy_and_free_owned(&self, p: *const std::os::raw::c_char) -> String {
+        let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        if let Some(free) = self.free_addr {
+            let free_code = CodePtr::from_ptr(free as *const c_void);
+            let free_cif = Cif::new([Type::pointer()], Type::void());
+            let ptr = p as *mut c_void;
+            // SAFETY: `free_code` is libc `free`; `free_cif` matches its `void free(void*)` signature;
+            // `ptr` is the malloc'd buffer we just copied out of (non-null, owned per user assertion).
+            unsafe {
+                let _: () = free_cif.call(free_code, &[arg(&ptr)]);
+            }
+        }
+        s
     }
 
     /// The declared parameter types (used by the engines to bounds-check arity before the call).
@@ -171,6 +244,11 @@ impl Cffi {
                     void_args.push(host.arg_ptr(i)? as *mut c_void);
                     slots.push(Slot::RawPtr(void_args.len() - 1));
                 }
+                // `OwnedStr`/`OptStr`/`OptOwnedStr` are RETURN-ONLY (the checker rejects them as
+                // params before this point), so they can never appear in `self.params`.
+                CType::OwnedStr | CType::OptStr | CType::OptOwnedStr => {
+                    unreachable!("owned/nullable str CTypes are return-only and rejected as params")
+                }
             }
         }
         // Fill the pointer args now that `cstrings` won't move again.
@@ -225,8 +303,8 @@ impl Cffi {
                         // The extern is statically typed to return `str`, a non-null type. Yielding
                         // `nil` here would silently break that guarantee (a later `len(v)` would fault
                         // far from the cause). Fault honestly at the boundary instead — recoverable via
-                        // `recover:`. (A genuinely-nullable C return is out of v1 scope; model it by
-                        // returning `int`/a sentinel, or wait for a future `str?` extern return.)
+                        // `recover:`. (A genuinely-nullable C return opts in with `str?`; an owned
+                        // malloc'd return that should be freed opts in with `owned_str`.)
                         return Err(HostError {
                             message: format!(
                                 "extern fn '{}' returned NULL for its declared `str` return",
@@ -234,9 +312,45 @@ impl Cffi {
                             ),
                         });
                     }
-                    // Copy immediately into an owned Chezzi str. We never `free` the pointer
-                    // (v1 documented limit: no ownership transfer), so a malloc'd return leaks.
+                    // Copy immediately into an owned Chezzi str. A borrowed return: we never `free`
+                    // the pointer (use `owned_str` for a malloc'd buffer Chezzi should own + free).
                     NativeRet::Str(CStr::from_ptr(p).to_string_lossy().into_owned())
+                }
+                Some(CType::OwnedStr) => {
+                    // RETURN-ONLY owned `char*`: same non-null rule as `str` (NULL faults — use
+                    // `owned_str?` for nullable), but the malloc'd buffer is freed after the copy.
+                    let p: *const std::os::raw::c_char = cif.call(code, &ffi_args);
+                    if p.is_null() {
+                        return Err(HostError {
+                            message: format!(
+                                "extern fn '{}' returned NULL for its declared `owned_str` return",
+                                self.name
+                            ),
+                        });
+                    }
+                    NativeRet::Str(self.copy_and_free_owned(p))
+                }
+                Some(CType::OptStr) => {
+                    // RETURN-ONLY nullable `char*`: NULL → None, non-null → Some(copied str). The
+                    // borrowed (not freed) nullable opt-in (e.g. `getenv`).
+                    let p: *const std::os::raw::c_char = cif.call(code, &ffi_args);
+                    if p.is_null() {
+                        NativeRet::None
+                    } else {
+                        NativeRet::Some(Box::new(NativeRet::Str(
+                            CStr::from_ptr(p).to_string_lossy().into_owned(),
+                        )))
+                    }
+                }
+                Some(CType::OptOwnedStr) => {
+                    // RETURN-ONLY nullable + owned `char*`: NULL → None (frees nothing), non-null →
+                    // Some(copied str) and the buffer is freed after the copy.
+                    let p: *const std::os::raw::c_char = cif.call(code, &ffi_args);
+                    if p.is_null() {
+                        NativeRet::None
+                    } else {
+                        NativeRet::Some(Box::new(NativeRet::Str(self.copy_and_free_owned(p))))
+                    }
                 }
                 Some(CType::Ptr) => {
                     // An opaque handle. Unlike `str`, a NULL return is NOT a fault — it is a
@@ -394,6 +508,64 @@ mod tests {
             .call(&mut host)
             .expect_err("NULL char* for a `str` return must fault");
         assert!(err.message.contains("returned NULL"), "{}", err.message);
+    }
+
+    #[test]
+    fn nullable_str_return_null_is_none() {
+        // `getenv` of an unset var returns NULL. Declared `str?` (OptStr), this must NOT fault —
+        // it lowers to `None`, the whole point of the nullable opt-in.
+        let f = Cffi::new("libc.so.6", "getenv", vec![CType::Str], Some(CType::OptStr))
+            .expect("dlopen getenv");
+        let mut host = MockHost::default().string("CHEZZI_DEFINITELY_UNSET_VAR_XYZ_42");
+        assert_eq!(f.call(&mut host), Ok(NativeRet::None));
+    }
+
+    #[test]
+    fn nullable_str_return_present_is_some() {
+        // A SET env var, read back via getenv as `str?`, lowers to `Some("...")`. Set a uniquely
+        // named var so the test is self-contained.
+        // SAFETY: single-threaded test; the var name is unique to this test.
+        unsafe { std::env::set_var("CHEZZI_FFI_OPTSTR_TEST", "present") };
+        let f = Cffi::new("libc.so.6", "getenv", vec![CType::Str], Some(CType::OptStr))
+            .expect("dlopen getenv");
+        let mut host = MockHost::default().string("CHEZZI_FFI_OPTSTR_TEST");
+        assert_eq!(
+            f.call(&mut host),
+            Ok(NativeRet::Some(Box::new(NativeRet::Str("present".into()))))
+        );
+    }
+
+    #[test]
+    fn owned_str_return_is_copied_and_freed() {
+        // `strdup("hi") -> char*` returns a freshly malloc'd copy. Declared `owned_str`, the FFI
+        // copies it into a Chezzi str AND frees the C buffer. Assert the value is correct; a loop of
+        // strdup+free exercises that the freed buffer is reusable (no UAF / double-free abort).
+        let dup = Cffi::new(
+            "libc.so.6",
+            "strdup",
+            vec![CType::Str],
+            Some(CType::OwnedStr),
+        )
+        .expect("dlopen strdup");
+        for _ in 0..3 {
+            let mut host = MockHost::default().string("hi");
+            assert_eq!(dup.call(&mut host), Ok(NativeRet::Str("hi".into())));
+        }
+    }
+
+    #[test]
+    fn owned_nullable_str_null_is_none_no_free() {
+        // `getenv` of an unset var returns NULL. Declared `owned_str?` (OptOwnedStr): NULL lowers to
+        // `None` and frees nothing (free is skipped for NULL).
+        let f = Cffi::new(
+            "libc.so.6",
+            "getenv",
+            vec![CType::Str],
+            Some(CType::OptOwnedStr),
+        )
+        .expect("dlopen getenv");
+        let mut host = MockHost::default().string("CHEZZI_DEFINITELY_UNSET_VAR_XYZ_42");
+        assert_eq!(f.call(&mut host), Ok(NativeRet::None));
     }
 
     #[test]

@@ -66,6 +66,20 @@ fn is_reserved_type(name: &str) -> bool {
     name == "Result" || name == "Option" || name == "Executor" || name == "Iterator"
 }
 
+/// A short, surface-faithful label for a return-only extern `Type` in a marshallability error
+/// (`owned_str`, `str?`, `owned_str?`). Only ever called on the forms `is_return_only_extern_type`
+/// already matched, so non-matching shapes fall back to a generic label.
+fn describe_extern_type(t: &Type) -> String {
+    match t {
+        Type::Named(n) => n.clone(),
+        Type::Generic(n, args) if n == "Option" => match args.first() {
+            Some(Type::Named(inner)) => format!("{inner}?"),
+            _ => "str?".to_string(),
+        },
+        _ => "owned_str".to_string(),
+    }
+}
+
 /// Names an `extern` C fn may NOT take: a builtin (`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/
 /// `set`), `print`, or a runtime constructor (`Channel`/`Shared`/`Atomic`/`timer`/`Executor`). Both
 /// backends resolve these names to a special op *before* a plain named call (`compiler::compile_call`
@@ -1038,6 +1052,21 @@ impl Checker {
                             .iter()
                             .map(|p| match &p.ty {
                                 Some(t) => {
+                                    // RETURN-ONLY surface forms (`owned_str`, `str?`/`owned_str?`)
+                                    // must be rejected as PARAMS on the SURFACE Type, before
+                                    // `resolve_type` collapses `owned_str` to a plain `Str` (which
+                                    // would otherwise sail past `assert_marshallable`).
+                                    if Self::is_return_only_extern_type(t) {
+                                        self.error(
+                                            ef.span,
+                                            format!(
+                                                "type '{}' is not C-marshallable in extern fn '{}' \
+                                                 (owned_str / str? are return-only)",
+                                                describe_extern_type(t),
+                                                ef.name
+                                            ),
+                                        );
+                                    }
                                     let ty = self.resolve_type(t, ef.span);
                                     // A parameter must be a real C scalar — `nil` (void) is a
                                     // return-only sentinel and would panic the backend's `ctype_of`.
@@ -1093,6 +1122,21 @@ impl Checker {
         }
     }
 
+    /// Is this surface extern `Type` a RETURN-ONLY marshalling form (`owned_str`, `str?`, or
+    /// `owned_str?`)? Checked on the SURFACE `Type` (pre-`resolve_type`) because `owned_str` collapses
+    /// to a plain `Str` once resolved, losing its return-only-ness. (A plain `str?` param is also
+    /// caught by `assert_marshallable`, but this gives it a clearer "return-only" message.)
+    fn is_return_only_extern_type(t: &Type) -> bool {
+        match t {
+            Type::Named(n) => n == "owned_str",
+            // `str?` / `owned_str?` parse to `Option[inner]`.
+            Type::Generic(n, args) if n == "Option" => args.first().is_some_and(
+                |inner| matches!(inner, Type::Named(s) if s == "str" || s == "owned_str"),
+            ),
+            _ => false,
+        }
+    }
+
     /// v1 C-ABI marshallability: an extern fn's param/return types must be C-scalar — `int`, `float`,
     /// `bool`, or `str` (`char*`). `Nil` (void) is accepted ONLY for the return slot (`allow_void`),
     /// never for a parameter: a `nil` param has no `CType` lowering and would panic the backend's
@@ -1100,11 +1144,18 @@ impl Checker {
     /// else (list/map/set/tuple/struct/enum/func/option/result/protocol/channel/…) is rejected with a
     /// single uniform error. Called on the **resolved** `Ty` (after `resolve_type`), so a transparent
     /// alias to a scalar is accepted. `Unknown` is already-errored and silently allowed (no cascade).
+    ///
+    /// RETURN-ONLY (`allow_void`) additionally accepts `Option[str]` (surface `str?`): the nullable
+    /// opt-in where a NULL `char*` lowers to `None` instead of faulting. (`owned_str` resolves to a
+    /// plain `Str` and so needs no special case here — its return-only-ness is guarded on the surface
+    /// `Type` in the extern param loop, before `resolve_type` collapses it.)
     fn assert_marshallable(&mut self, ty: &Ty, fn_name: &str, span: Span, allow_void: bool) {
         let ok = matches!(
             ty,
             Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Ptr | Ty::Unknown
-        ) || (allow_void && matches!(ty, Ty::Nil));
+        ) || (allow_void
+            && (matches!(ty, Ty::Nil)
+                || matches!(ty, Ty::Option(inner) if matches!(**inner, Ty::Str))));
         if !ok {
             self.error(
                 span,
@@ -1326,6 +1377,12 @@ impl Checker {
                 // signatures (the values/helpers live in `std.ffi`, but the *type* is builtin so it
                 // needs no import). See `Ty::Ptr`.
                 "ptr" => Ty::Ptr,
+                // A RETURN-ONLY C-ABI marshalling type name (sibling of `ptr`): an OWNED `char*`
+                // the runtime copies into a `str` and then frees. To the program it IS a plain `str`
+                // (the ownership/free is a runtime-only distinction the backends recover via
+                // `ctype_of`); the return-only-ness is enforced by a surface guard in the extern
+                // param loop (an `owned_str` parameter is rejected before this collapses to `Str`).
+                "owned_str" => Ty::Str,
                 // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation).
                 "Executor" => Ty::Executor,
                 // D6 — the std.net TCP handles, non-generic (bare `Socket` / `Listener` annotations).

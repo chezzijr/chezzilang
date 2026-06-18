@@ -879,7 +879,9 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
 recoverable fault; binary work → the `bytes` (immutable) + `bytearray` (mutable) *sequence* types, both **shipped** — no `byte`/`u8` scalar). **Level-3 dynamic
 C-ABI FFI is NO LONGER a non-goal — v1 shipped** (`extern "lib":` scalar calls via dlopen+libffi,
 **plus opaque C `void*` handles** via the `ptr` type — `Obj::Ptr`/`Value::Ptr`, `std.ffi.null()`/
-`is_null`, untyped + manual-free, `examples/ffi_ptr.chz`; structs/callbacks/varargs and the rich Rust
+`is_null`, untyped + manual-free, `examples/ffi_ptr.chz`; **plus the return-only `str` opt-ins
+`owned_str`** (copy + libc `free`, no leak) **and `str?`** (`NULL` → `None`, `examples/ffi_str.chz`);
+structs/callbacks/varargs, a custom user-named deallocator, and the rich Rust
 `Box<dyn Any>` userdata handle still deferred — see "Done" below; forward design for the Rust
 userdata Value + the package registry is in
 [`docs/ffi-and-packaging.md`](docs/ffi-and-packaging.md)). **`yield`/generators are likewise
@@ -902,6 +904,23 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **C-ABI FFI `str`-return deepening — `owned_str` + `str?`** (2026-06-18, `auto-task/ffi-str-return`)
+  — two paired, return-only opt-ins on the `extern "lib":` `char*` return path, implemented as **pure
+  type-machinery (zero grammar/parser change)** — both ride a `Type` the backends' `ctype_of` recognizes,
+  exactly like `ptr`. **(1) `owned_str`** (fixes the FFI-3 leak): a return-only marshalling type name
+  (resolves to a plain `str` for the program) whose `char*` is copied into a Chezzi str **and then freed**
+  with libc `free` (resolved once via `dlsym("free")` at `Cffi::new`, cached as a `usize`; best-effort —
+  degrades to the old leak if unresolvable, never aborts). NULL still faults. **(2) `str?`** (`Option[str]`,
+  already parses): a nullable `char*` — `NULL` → `None`, non-null → `Some(str)` — the opt-in escape from
+  the non-null `str` faulting-on-NULL rule (kept byte-identical). Composes: `owned_str?` → nullable + owned.
+  Three flat `CType` variants (`OwnedStr`/`OptStr`/`OptOwnedStr`), each `Type::pointer()` to libffi; both
+  are **return-only** (a surface guard in the extern param loop + `assert_marshallable` reject them as
+  params). Parity by construction (shared `Cffi`, `NativeRet::Some/None` already lower identically); the two
+  `ctype_of` sites (compiler + interp) mirror verbatim. Golden `examples/ffi_str.chz` (strdup + getenv,
+  byte-identical VM/`--interp`/`--parallel`); 4 cffi unit tests, 5 checker tests, 1 ctype_of test, 2 goldens.
+  **Limits:** libc `free` only (a custom user-named deallocator stays deferred); `owned_str` is a user
+  assertion the buffer is genuinely `malloc`'d (a static-string mis-declaration corrupts the heap). Docs:
+  `syntax.md` §12b, `spec.md` §Level-3 (FFI-3 resolved), this file. `cargo test`/conformance green, clippy clean.
 - ✅ **Comprehension nested clauses** (2026-06-17, `auto-task/comprehension-nested-clauses`) — a
   comprehension may now have 2+ `for` clauses (cartesian/nested iteration, first clause outermost,
   later clauses see earlier clauses' bindings), with one or more `if` guards allowed after ANY clause,

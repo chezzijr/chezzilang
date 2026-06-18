@@ -5416,6 +5416,50 @@ fn extern_ptr_param_and_return_ok() {
 }
 
 #[test]
+fn extern_str_optional_return_is_marshallable() {
+    // `str?` (Option[str]) is a valid RETURN type — the nullable opt-in. The program sees an
+    // `Option[str]`, so it must be matched/`?`-handled, not used as a bare str.
+    ok(
+        "extern \"libc.so.6\":\n    fn getenv(s: str) -> str?\n\nmatch getenv(\"PATH\"):\n    Some(v): print(v)\n    None: print(\"unset\")\n",
+    );
+}
+
+#[test]
+fn extern_str_optional_param_rejected() {
+    // `str?` is RETURN-ONLY; a `str?` parameter has no C marshalling and is rejected.
+    rejects(
+        "extern \"libc.so.6\":\n    fn f(x: str?) -> int\n",
+        "not C-marshallable",
+    );
+}
+
+#[test]
+fn extern_owned_str_return_marshallable() {
+    // `owned_str` is a RETURN-ONLY marshalling type that resolves to a plain `str` for the program
+    // (the ownership/free is a runtime-only distinction). `strdup(str) -> owned_str` checks clean.
+    ok(
+        "extern \"libc.so.6\":\n    fn strdup(s: str) -> owned_str\n\ns: str = strdup(\"hi\")\nprint(s)\n",
+    );
+}
+
+#[test]
+fn extern_owned_str_param_rejected() {
+    // `owned_str` is RETURN-ONLY — there is no owned-in (ownership transfer into C is unsupported).
+    rejects(
+        "extern \"libc.so.6\":\n    fn f(s: owned_str) -> int\n",
+        "not C-marshallable",
+    );
+}
+
+#[test]
+fn extern_owned_nullable_str_return_marshallable() {
+    // `owned_str?` composes owned + nullable: program sees `Option[str]`, runtime frees + nulls.
+    ok(
+        "extern \"lib\":\n    fn g(s: str) -> owned_str?\n\nmatch g(\"x\"):\n    Some(v): print(v)\n    None: print(\"none\")\n",
+    );
+}
+
+#[test]
 fn ffi_null_and_is_null_typecheck() {
     // `std.ffi.null()` is `ptr`; `is_null(p)` is `bool`; `ptr == ptr` (incl. vs `null()`) type-checks.
     entry_ok(

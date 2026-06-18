@@ -2951,9 +2951,20 @@ fn ctype_of(ty: Option<&Type>, aliases: &HashMap<String, Type>) -> Option<CType>
             "bool" => Some(CType::Bool),
             "str" => Some(CType::Str),
             "ptr" => Some(CType::Ptr),
+            // A RETURN-ONLY owned `char*` (freed after copy). See `cffi::CType::OwnedStr`.
+            "owned_str" => Some(CType::OwnedStr),
             // A transparent alias to a scalar (resolve once; the checker rejected cyclic/non-scalar).
             other => aliases.get(other).and_then(|t| ctype_of(Some(t), aliases)),
         },
+        // A RETURN-ONLY nullable `char*` (surface `str?` / `owned_str?`). NULL → None at runtime.
+        // The inner type decides borrowed (`str` → OptStr) vs owned (`owned_str` → OptOwnedStr).
+        Some(Type::Generic(n, args)) if n == "Option" && args.len() == 1 => {
+            match ctype_of(args.first(), aliases) {
+                Some(CType::Str) => Some(CType::OptStr),
+                Some(CType::OwnedStr) => Some(CType::OptOwnedStr),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -3194,6 +3205,36 @@ mod interp_tests {
 
     fn sp() -> Span {
         Span { line: 1, col: 1 }
+    }
+
+    #[test]
+    fn ctype_of_maps_owned_and_nullable_str_returns() {
+        let aliases: HashMap<String, Type> = HashMap::new();
+        let named = |s: &str| Type::Named(s.to_string());
+        let opt = |inner: Type| Type::Generic("Option".to_string(), vec![inner]);
+        // owned_str -> OwnedStr; str? -> OptStr; owned_str? -> OptOwnedStr.
+        assert_eq!(
+            ctype_of(Some(&named("owned_str")), &aliases),
+            Some(CType::OwnedStr)
+        );
+        assert_eq!(
+            ctype_of(Some(&opt(named("str"))), &aliases),
+            Some(CType::OptStr)
+        );
+        assert_eq!(
+            ctype_of(Some(&opt(named("owned_str"))), &aliases),
+            Some(CType::OptOwnedStr)
+        );
+        // Plain str unchanged; a non-str Option return is not marshallable (-> None).
+        assert_eq!(ctype_of(Some(&named("str")), &aliases), Some(CType::Str));
+        assert_eq!(ctype_of(Some(&opt(named("int"))), &aliases), None);
+        // Aliases resolve transparently: `type T = owned_str?` -> OptOwnedStr.
+        let mut aliased: HashMap<String, Type> = HashMap::new();
+        aliased.insert("T".to_string(), opt(named("owned_str")));
+        assert_eq!(
+            ctype_of(Some(&named("T")), &aliased),
+            Some(CType::OptOwnedStr)
+        );
     }
 
     #[test]

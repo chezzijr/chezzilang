@@ -26073,6 +26073,20 @@ main()
         assert_file_parity("examples/ffi_ptr.chz");
     }
 
+    /// C-ABI deeper `str` returns golden (VM twin of `interp::golden_ffi_str_chz`): `strdup -> owned_str`
+    /// (owned `char*` copied into a Chezzi `str` AND freed) and `getenv -> str?` (NULL → `None`). Byte-
+    /// matches `.expected` and stays identical to the interpreter (`assert_file_parity`). Linux-only.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_str_chz_via_run_file() {
+        let path = fixture("examples/ffi_str.chz");
+        let expected = std::fs::read_to_string(fixture("examples/ffi_str.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/ffi_str.chz");
+    }
+
     /// A complete self-contained program (merge sort + binary search + stats over std.math) runs on
     /// the VM, byte-matches `.expected`, and stays identical to the interpreter.
     #[test]

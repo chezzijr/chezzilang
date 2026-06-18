@@ -1405,7 +1405,8 @@ print(strlen("hello")) # 5
 **Marshalling (v1 — scalars + opaque `ptr`):** `int` ↔ C `long` (so a 32-bit-`int` C API is called at
 the wrong ABI width — declare against `long`-based APIs, or expect truncation), `float` ↔ C `double`,
 `bool` ↔ C `int`, `str` → null-terminated `const char*` (a `char*` return is copied into a Chezzi
-`str`), and `ptr` ↔ C `void*` (an **opaque handle** — see below). No implicit `int`→`float` (`cos(2)`
+`str`; **return-only** `owned_str` also frees it, `str?` makes a `NULL` return `None` — see below), and
+`ptr` ↔ C `void*` (an **opaque handle** — see below). No implicit `int`→`float` (`cos(2)`
 is a type error — pass `2.0`). A no-return signature (`fn srand(seed: int)`) — or an explicit
 `-> nil` — maps to C `void`; `nil` is a **return-only** type (it is rejected as a parameter). The
 checker rejects any other non-scalar param/return (list/map/set/tuple/struct/enum/…) with a *not
@@ -1440,11 +1441,37 @@ A `ptr` prints as `<ptr null>` / `<ptr>` — never the raw address (it is non-de
 runs/engines, so printing it would break two-engine parity). A `ptr` is **sendable** (a plain
 address) — it crosses a `spawn`/channel airlock by value.
 
-**Caveats:** a `str`-declared return that comes back `NULL` (e.g. `getenv` of an unset var) is **not**
-silently turned into `nil` — that would break the static non-null `str` guarantee — it raises a
-recoverable runtime fault (catch with `recover:`). A returned `char*` is copied immediately and never
-`free`d, so a `malloc`'d return **leaks**, and a non-NUL-terminated return over-reads (the signature
-is a user assertion across the C trust boundary).
+**`str` returns — owned + nullable (return-only opt-ins).** A plain `str` return is **borrowed**: the
+`char*` is copied into a Chezzi string and never `free`d (a `malloc`'d return would **leak**), and a
+`NULL` is a recoverable **fault** (it would break the static non-null `str` guarantee). Two return-only
+forms (no `import`, no grammar change — both are recognized only inside an `extern` return slot, like
+`ptr`) opt into the other behaviours:
+
+- **`owned_str`** — the C function transfers ownership of a `malloc`'d `char*` (e.g. `strdup`). Chezzi
+  copies it into a `str` **and then frees** the buffer with libc `free`, so it does **not** leak. To
+  your program it is a plain `str`. A `NULL` still faults (use `owned_str?` for nullable).
+- **`str?`** (sugar for `Option[str]`) — the C function legitimately returns `NULL` (e.g. `getenv` of an
+  unset variable). `NULL` becomes `None`, a non-null pointer becomes `Some(str)` (still borrowed, not
+  freed). This is the only way to make a `NULL` `char*` return non-fatal.
+- **`owned_str?`** composes both: nullable **and** freed (`NULL` → `None` and frees nothing).
+
+Both are **return-only** — an `owned_str`/`str?` *parameter* is rejected as *not C-marshallable*.
+
+```chezzi
+extern "libc.so.6":
+    fn strdup(s: str) -> owned_str   # owned malloc'd char* — copied AND freed (no leak)
+    fn getenv(name: str) -> str?     # nullable — NULL → None instead of a fault
+
+print(strdup("hi"))                  # hi   (the C buffer is freed after the copy)
+match getenv("HOME"):
+    Some(v): print(v)
+    None: print("unset")
+```
+
+`free` is resolved once (via `dlsym("free")` on the loaded library, which finds libc `free`); a custom
+user-named deallocator is **not** supported. **Caveat (C trust boundary):** `owned_str` asserts the
+returned buffer is genuinely `malloc`'d — declaring a **static / string-literal** return `owned_str`
+frees memory you don't own and corrupts the heap, exactly like a non-NUL-terminated return over-reads.
 
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
@@ -1457,8 +1484,9 @@ rejects the collision (*'…' is a builtin/reserved name*).
 - **C `int` width:** Chezzi `int` (i64) marshals as C **`long`** — 64-bit on supported **LP64 unix**
   targets. 32-bit/`unsigned` C ints are out of scope, and there is **no `int32` type** (feature-frozen).
   Non-unix (LLP64, where C `long` is 32-bit) is **unsupported**: the checker rejects `extern` there.
-- **`char*` return leaks:** a `str` return is copied into a Chezzi string but the C pointer is never
-  `free`d (no ownership transfer) — a `malloc`'d return **leaks** on every call.
+- **`char*` ownership:** a plain `str` return is **borrowed** (copied, never `free`d — a `malloc`'d
+  return leaks). Declare it **`owned_str`** to transfer ownership: Chezzi copies then frees it with libc
+  `free` (no leak). Only libc `free` is supported — a custom/user-named deallocator is **deferred**.
 - **No `--parallel` serialization:** extern calls are **not** serialized; calling a **non-reentrant** C
   function (`strtok`, `gmtime`/`localtime`, `setlocale`, static-buffer APIs) from multiple workers
   **races at the C level**. Use thread-safe/reentrant C only under `--parallel`.
@@ -1468,8 +1496,9 @@ rejects the collision (*'…' is a builtin/reserved name*).
   auto-freed** (call the library's own destroy; forgetting **leaks**).
 
 **Deferred (v1 limits):** structs-by-value, callbacks / function pointers, varargs, the rich Rust
-`Box<dyn Any>` userdata handle (for compiled-in Rust libraries), nullable `str?` returns, and `char*`
-ownership transfer / `free`. (Opaque C `void*` handles — `ptr` — **shipped**, see above.)
+`Box<dyn Any>` userdata handle (for compiled-in Rust libraries), and a **custom user-named deallocator**
+(only libc `free` backs `owned_str`). (Opaque C `void*` handles — `ptr` — **shipped**; nullable `str?`
+returns and `char*` ownership transfer via `owned_str` — **shipped**, see above.)
 
 ## 13. Standard library (v1)
 

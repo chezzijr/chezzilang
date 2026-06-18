@@ -1,0 +1,25 @@
+# Deeper C-ABI `str` returns through `extern "lib":` — two opt-in return forms:
+#   • `owned_str`  : an OWNED malloc'd `char*` Chezzi copies into a `str` AND frees (no leak).
+#   • `str?`       : a nullable `char*` — NULL becomes `None` instead of a hard fault.
+# To the program, `owned_str` is just a `str`; `str?` is an `Option[str]`. Both are return-only.
+
+extern "libc.so.6":
+    # `strdup` returns a freshly malloc'd copy of its argument — owned, so we free it after copying.
+    fn strdup(s: str) -> owned_str
+    # `getenv` legitimately returns NULL for an unset variable — model it as `str?` (Option[str]).
+    fn getenv(name: str) -> str?
+
+# owned_str: the duplicated string is copied into a Chezzi `str` and the C buffer is freed.
+dup: str = strdup("chezzi")
+print(dup)                          # chezzi
+
+# str? present: a variable that is essentially always set (PATH) yields Some(value); we only print
+# whether it resolved, to stay deterministic across machines.
+match getenv("PATH"):
+    Some(_): print("PATH: set")
+    None: print("PATH: unset")
+
+# str? null: a definitely-unset variable yields None (no fault).
+match getenv("CHEZZI_DEFINITELY_UNSET_VAR_XYZ_42"):
+    Some(v): print("unexpected: {v}")
+    None: print("unset var: None")

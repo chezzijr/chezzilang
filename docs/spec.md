@@ -104,9 +104,11 @@ in [`docs/concurrency.md`](concurrency.md); phase history in
 the stretch end-game). **Level-3 dynamic C-ABI FFI is now partially shipped** (`extern "lib":` blocks
 calling C functions via dlopen+libffi) — v1 marshals scalars (int/float/bool/str→`char*`) plus an
 opaque `ptr` (↔ C `void*`, an untyped never-auto-freed handle for `FILE*`/`sqlite3*`-style APIs; the
-`std.ffi` module adds `null()`/`is_null`); structs-by-value, callbacks, varargs, the rich Rust
-`Box<dyn Any>` userdata handle, and `char*` ownership transfer are still deferred. See the FFI
-subsection below + [`docs/syntax.md`](syntax.md).
+`std.ffi` module adds `null()`/`is_null`), plus two return-only `str` opt-ins — **`owned_str`** (an
+owned `malloc`'d `char*` copied **and** freed, no leak) and **`str?`** (a nullable `char*`, `NULL` →
+`None` instead of a fault). Structs-by-value, callbacks, varargs, the rich Rust `Box<dyn Any>` userdata
+handle, and a custom user-named deallocator (only libc `free` backs `owned_str`) are still deferred. See
+the FFI subsection below + [`docs/syntax.md`](syntax.md).
 **Forward design** for the remaining FFI deepening (the C `void*` `ptr` handle has **shipped**; the
 rich Rust `Box<dyn Any>` "userdata" Value that unlocks compiled-in handle-based Rust libraries like
 Burn is the open one) and the package registry (pure-Chezzi vs native packages; the
@@ -287,8 +289,11 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >   `Cif` per call (libffi `Cif` is `!Send`), so it is `Send + Sync` for `--parallel`; the M:N
 >   snapshot path shares the `Arc<Cffi>` (same address space — no re-`dlopen`). See `src/native/cffi.rs`
 >   + `examples/ffi.chz`. **v1 limits:** scalars only — structs-by-value, callbacks/function pointers,
->   varargs, the rich Rust `Box<dyn Any>` userdata handle, and `char*` ownership transfer / `free` are
->   deferred (a `char*` return is copied immediately; a malloc'd return leaks). **Opaque `void*`
+>   varargs, the rich Rust `Box<dyn Any>` userdata handle, and a custom user-named deallocator are
+>   deferred. **`char*` ownership + nullable returns shipped:** a plain `str` return is borrowed (copied,
+>   never freed); declare it **`owned_str`** (a return-only marshalling type) to copy **and** free a
+>   `malloc`'d buffer with libc `free` (no leak), or **`str?`** (`Option[str]`) to make a `NULL` return
+>   `None` instead of a fault (`owned_str?` composes both). See `examples/ffi_str.chz`. **Opaque `void*`
 >   handles shipped:** declare `ptr` (a builtin opaque type, ↔ C `void*`) to hold a C handle
 >   (`FILE*`/`sqlite3*`/…) across calls — `Obj::Ptr(usize)` / `Value::Ptr(usize)`, a GC leaf, sendable
 >   by value (`WireValue::Ptr`), value-compared by address, `<ptr null>`/`<ptr>` stringify (never the
@@ -304,11 +309,22 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >     is the caller's responsibility. **Non-unix is unsupported:** on an LLP64 target (Windows x64) C
 >     `long` is 32-bit and would truncate, so the checker **rejects `extern` on non-unix targets** and
 >     the `cffi` module is `#[cfg(unix)]`-gated.
->   - **`char*` return leaks (FFI-3):** a `str`-typed return is copied immediately into an owned Chezzi
->     string, but the C pointer is **never `free`d** — v1 has no ownership transfer. A function that
->     returns a freshly `malloc`'d `char*` (rather than a static / interned string) therefore **leaks**
->     that allocation on every call. Prefer C APIs that return a borrowed/static string, or accept the
->     leak for short-lived programs. (Code-commented at `src/native/cffi.rs`.)
+>   - **`char*` ownership (FFI-3 — RESOLVED, opt-in):** a plain `str`-typed return is **borrowed** —
+>     copied into a Chezzi string and **never `free`d**, so a freshly `malloc`'d `char*` leaks (use this
+>     for static/interned returns). To take ownership, declare the return **`owned_str`** (a return-only
+>     marshalling type name, sibling of `ptr` — the program still sees a plain `str`): Chezzi copies the
+>     buffer **then frees it** with libc `free`, resolved once via `dlsym("free")` on the loaded library
+>     at `Cffi::new`. **Limits:** only libc `free` is supported (a custom user-named deallocator is
+>     deferred); if `free` can't be resolved the return degrades to the old leak rather than aborting;
+>     and `owned_str` is a **user assertion** that the buffer is genuinely `malloc`'d — declaring a
+>     static/string-literal return `owned_str` corrupts the heap (same C-trust-boundary stance as a
+>     non-NUL-terminated over-read). `owned_str` is **return-only** (rejected as a parameter).
+>     See `src/native/cffi.rs` (`CType::OwnedStr`) + `examples/ffi_str.chz`.
+>   - **Nullable `str?` returns (RESOLVED, opt-in):** a plain `str` return that comes back `NULL` is a
+>     recoverable **fault** (it would break the static non-null `str` guarantee). To opt into a legitimate
+>     `NULL` (e.g. `getenv` of an unset var), declare the return **`str?`** (`Option[str]`): `NULL` →
+>     `None`, non-null → `Some(str)`. Composes with ownership: `owned_str?` is nullable **and** freed.
+>     `str?` is **return-only** (a `str?` parameter is *not C-marshallable*). See `CType::OptStr`.
 >   - **No `--parallel` serialization / non-reentrant C (FFI-7):** `extern` calls are **NOT** serialized
 >     under `--parallel` — two OS-thread workers can be inside C code at the same time. Calling a
 >     **non-reentrant** C function (e.g. `strtok`, `gmtime`/`localtime`, `setlocale`, anything using
@@ -318,11 +334,13 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >   - **Untyped + un-freed handles (FFI-`ptr`):** a `ptr` is **one opaque type** for every C handle —
 >     Chezzi never distinguishes a `FILE*` from a `sqlite3*` (ctypes-level; passing the wrong handle is
 >     C-level UB, the author's cross-boundary assertion) — and is **never auto-freed**: the program
->     calls the library's own destroy (`fclose(f)`); forgetting **leaks** (same stance as FFI-3). NULL
->     is allowed (a `ptr` return of NULL is `<ptr null>`, not a fault — unlike a `str` return).
+>     calls the library's own destroy (`fclose(f)`); forgetting **leaks** (same stance as a borrowed
+>     `str` return). NULL is allowed (a `ptr` return of NULL is `<ptr null>`, not a fault — unlike a
+>     non-nullable `str`/`owned_str` return; use `str?` for a nullable `char*`).
 > - **Still deferred (Level-3):** the rich **Rust `Box<dyn Any>` userdata handle** (for compiled-in
->   Rust libraries like Burn — distinct from the C `void*` `ptr` above, which shipped), and the deferred
->   FFI features above (structs-by-value / callbacks / varargs / nullable `str?`). See
+>   Rust libraries like Burn — distinct from the C `void*` `ptr` above, which shipped), a **custom
+>   user-named deallocator** (only libc `free` backs `owned_str`), and the deferred FFI features above
+>   (structs-by-value / callbacks / varargs). See
 >   `docs/ffi-and-packaging.md`. (`std.os.exit` with a real exit-code channel through the run drivers
 >   has since **shipped** — see `examples/exit.chz`.)
 
@@ -390,9 +408,10 @@ tests/          # Rust unit + golden tests
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c**; **Level-3 dynamic C-ABI FFI v1
 > shipped** (`extern "lib":` scalar calls via dlopen+libffi, **plus opaque `void*` handles** via the
-> `ptr` type + `std.ffi`) — see the *Standard library* note above. The remaining Level-3 surface
-> (structs-by-value, callbacks, varargs, and the rich Rust `Box<dyn Any>` userdata handle) is still a
-> future idea.
+> `ptr` type + `std.ffi`, and the return-only `str` opt-ins **`owned_str`** (copy + libc `free`) and
+> **`str?`** (`NULL` → `None`)) — see the *Standard library* note above. The remaining Level-3 surface
+> (structs-by-value, callbacks, varargs, a custom user-named deallocator, and the rich Rust
+> `Box<dyn Any>` userdata handle) is still a future idea.
 
 ## Verification
 
