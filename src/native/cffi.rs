@@ -458,37 +458,44 @@ impl Cffi {
                     let p: *mut c_void = cif.call(code, &ffi_args);
                     NativeRet::Ptr(p as usize)
                 }
-                // Fixed-width integer returns. Signed widths read the C value as `iN` then `as i64`
-                // (SIGN-extends: int32 -1 -> i64 -1). Unsigned widths read as `uN` then `as i64`
-                // (ZERO-extends: uint32 0xFFFFFFFF -> i64 4294967295). libffi promotes the C return
-                // into its declared-width slot before we read it.
+                // Fixed-width integer returns. CRITICAL: any integral return narrower than the
+                // register word is widened by libffi, which writes a FULL `ffi_arg`/`ffi_sarg`
+                // (= `c_ulong`/`c_long`, register-sized) into the rvalue buffer. Reading through a
+                // narrow `iN`/`uN` would allocate a 1/2/4-byte buffer and let `ffi_call` stomp 4–7
+                // bytes past it (stack OOB write / UB). So the sub-word widths read the
+                // register-width word and then `as`-narrow-then-widen to recover the declared value
+                // (signed narrow SIGN-extends, e.g. int32 -1 -> i64 -1; unsigned narrow ZERO-extends,
+                // e.g. uint32 0xFFFFFFFF -> i64 4294967295). This masks any high-bit padding and is
+                // endianness-independent (value-semantics on a Rust integer). `int64`/`uint64` are
+                // already register-width, so they read their exact type directly. Mirrors the read
+                // path in libffi-rs's own high-level wrapper.
                 Some(CType::Int8) => {
-                    let r: i8 = cif.call(code, &ffi_args);
-                    NativeRet::Int(r as i64)
+                    let r: std::os::raw::c_long = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as i8 as i64)
                 }
                 Some(CType::Int16) => {
-                    let r: i16 = cif.call(code, &ffi_args);
-                    NativeRet::Int(r as i64)
+                    let r: std::os::raw::c_long = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as i16 as i64)
                 }
                 Some(CType::Int32) => {
-                    let r: i32 = cif.call(code, &ffi_args);
-                    NativeRet::Int(r as i64)
+                    let r: std::os::raw::c_long = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as i32 as i64)
                 }
                 Some(CType::Int64) => {
                     let r: i64 = cif.call(code, &ffi_args);
                     NativeRet::Int(r)
                 }
                 Some(CType::UInt8) => {
-                    let r: u8 = cif.call(code, &ffi_args);
-                    NativeRet::Int(r as i64)
+                    let r: std::os::raw::c_ulong = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as u8 as i64)
                 }
                 Some(CType::UInt16) => {
-                    let r: u16 = cif.call(code, &ffi_args);
-                    NativeRet::Int(r as i64)
+                    let r: std::os::raw::c_ulong = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as u16 as i64)
                 }
                 Some(CType::UInt32) => {
-                    let r: u32 = cif.call(code, &ffi_args);
-                    NativeRet::Int(r as i64)
+                    let r: std::os::raw::c_ulong = cif.call(code, &ffi_args);
+                    NativeRet::Int(r as u32 as i64)
                 }
                 Some(CType::UInt64) => {
                     // u64 -> i64 reinterprets the top bit (a value > i64::MAX wraps negative). This is
@@ -807,7 +814,10 @@ mod tests {
         assert_eq!(f.call(&mut host), Ok(NativeRet::Int(-1)));
     }
 
+    // htonl's result is byte-order dependent (identity on big-endian), so these two oracles only
+    // hold on little-endian targets — gate them rather than encode a wrong value elsewhere.
     #[test]
+    #[cfg(target_endian = "little")]
     fn uint32_zero_extends_high_bit_in_and_out() {
         // `htonl(uint32)->uint32` converts host->network byte order. On little-endian Linux,
         // htonl(1) == 0x01000000 == 16777216, a value with bit 24 set. This exercises an unsigned
@@ -824,6 +834,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_endian = "little")]
     fn uint32_return_top_bit_is_positive_i64() {
         // htonl(0x80) == 0x80000000 == 2147483648 (> i32::MAX). As `uint32` it must ZERO-extend to a
         // positive i64 (2147483648), proving an unsigned return is NOT sign-extended into a negative.

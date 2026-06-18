@@ -26091,8 +26091,9 @@ main()
     /// -> int32` (sign-extend), `htonl(uint32) -> uint32` (zero-extend, high-bit positive), `abs(int8)
     /// -> int8` (signed round-trip + param truncation per a C cast). Byte-matches `.expected` and stays
     /// identical to the interpreter (`assert_file_parity`). Linux-only (needs libc).
+    // The example's `htonl` lines encode little-endian oracles, so the golden is LE-gated.
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_endian = "little"))]
     fn golden_ffi_int_chz_via_run_file() {
         let path = fixture("examples/ffi_int.chz");
         let expected = std::fs::read_to_string(fixture("examples/ffi_int.expected")).unwrap();

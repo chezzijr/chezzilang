@@ -7487,7 +7487,7 @@ b := Buf([10, 20, 30])
     /// int8` (signed round-trip + param truncation per a C cast). Deterministic on any little-endian
     /// Linux: atoi/htonl/abs are pure + always present. VM twin asserts parity.
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_endian = "little"))]
     fn golden_ffi_int_chz() {
         let path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi_int.chz");
