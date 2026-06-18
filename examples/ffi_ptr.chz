@@ -1,0 +1,23 @@
+# Opaque C-ABI pointer handles (`ptr`) through `extern "lib":`.
+# A C handle (`FILE*`) round-trips through Chezzi as an opaque `ptr` value: returned by one extern
+# call, passed back into another. NULL is a detectable "failed" signal, not a crash. The `null`/
+# `is_null` vocabulary lives in `std.ffi` (the `ptr` type itself is builtin).
+import null, is_null from std.ffi
+
+extern "libc.so.6":
+    fn fopen(path: str, mode: str) -> ptr
+    fn fclose(f: ptr) -> int
+
+# A real handle: /dev/null is always openable on Linux. The FILE* lives in the `ptr`; we hand it
+# straight back to fclose (which returns 0). Zero-copy — Chezzi never looks inside the handle.
+f := fopen("/dev/null", "r")
+if is_null(f):
+    print("open failed")
+else:
+    print(fclose(f))            # 0
+
+# A NULL handle: opening a non-existent path returns NULL. Detect it — don't deref it.
+bad := fopen("/no/such/chezzi/path/xyz", "r")
+print(is_null(bad))             # true
+print(bad == null())            # true (ptr == ptr identity; null() is the 0 sentinel)
+print(null() == null())         # true

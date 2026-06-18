@@ -4,6 +4,14 @@
 > is feature-frozen; this is the forward map for *if/when* it unfreezes. It exists so
 > [`spec.md`](spec.md) §"Still deferred" points at a real plan instead of just the word "deferred".
 > Captures the reasoning from the FFI/packaging design discussion (2026-06).
+>
+> **Update (2026-06): the C-ABI half of the handle unlock SHIPPED.** An opaque `ptr` type (↔ C
+> `void*`) now threads through `extern "lib":` — an untyped, never-auto-freed handle (`Obj::Ptr(usize)`
+> / `Value::Ptr(usize)`) with `std.ffi.null()`/`is_null` and `ptr==ptr` identity. This covers
+> handle-based **C** libraries (and any lib exposing a C ABI) over a dlopen'd `.so` with **no chezzi
+> recompile** — see [`syntax.md`](syntax.md) §12b + `examples/ffi_ptr.chz`. The §3 below still describes
+> the **other** handle — the rich Rust `Arc<dyn Any>` userdata for compiled-in Rust crates (Burn),
+> which is the still-open forward design (it carries a live Rust object, not a raw address).
 
 ## TL;DR
 

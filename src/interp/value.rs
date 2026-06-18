@@ -215,6 +215,12 @@ pub enum Value {
     /// A dynamic C-ABI FFI function (`extern "lib":`). Shares the resolved library + symbol +
     /// signature behind an `Arc` (the same `Cffi` type the VM uses — one machinery, two engines).
     Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
+    /// An opaque C-ABI pointer handle (`ptr`) — a raw `void*` address carried as a `usize`. Produced
+    /// by an `extern "lib":` fn returning `ptr` and by `std.ffi.null()`. Untyped, never auto-freed
+    /// (the program calls the library's own destroy), value-compared by address. A `usize` is `Send`,
+    /// so it crosses the spawn/channel airlock by value (shallow clone). The same machinery the VM's
+    /// `Obj::Ptr` uses — one feature, two engines (parity).
+    Ptr(usize),
     /// An imported module — a namespace of its top-level bindings. `io.read()` is a field access
     /// on one of these.
     Module(Rc<ModuleNamespace>),
@@ -324,6 +330,7 @@ impl Value {
             Value::Closure(_) => "function",
             Value::Native(_) => "function",
             Value::Cffi(_) => "function",
+            Value::Ptr(_) => "ptr",
             Value::Module(_) => "module",
             Value::Struct { .. } => "struct",
             Value::Enum { .. } => "enum",
@@ -388,6 +395,10 @@ impl std::fmt::Display for Value {
             Value::Closure(_) => write!(f, "<closure>"),
             Value::Native(e) => write!(f, "<native fn {}>", e.name),
             Value::Cffi(c) => write!(f, "<extern fn {}>", c.name()),
+            // A raw address is non-deterministic (differs per run/engine) — never render it (would
+            // break two-engine parity if a `ptr` is printed). Only null vs live is observable.
+            // Byte-identical to the VM's `Obj::Ptr` stringify.
+            Value::Ptr(a) => write!(f, "{}", if *a == 0 { "<ptr null>" } else { "<ptr>" }),
             Value::Module(ns) => write!(f, "<module {}>", ns.name),
             Value::Struct { name, fields } => {
                 let inner = fields

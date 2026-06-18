@@ -65,6 +65,11 @@ pub enum Ty {
     /// `Listener` — a non-blocking accepting TCP socket (D6), produced by `std.net.listen`. Non-generic
     /// and sendable, like `Socket`.
     Listener,
+    /// `ptr` — an opaque C-ABI pointer handle (a raw `void*`). A builtin marshalling primitive (peer
+    /// of `int`/`float`/`bool`/`str`) usable in `extern "lib":` signatures. Fully opaque: no methods,
+    /// no fields; only `==`/`!=` against another `ptr` (incl. `std.ffi.null()`) and pass/return.
+    /// Untyped (one `ptr` for every handle), never auto-freed. Sendable (a plain address).
+    Ptr,
     /// A protocol used *as a value type* (existential), e.g. the default error type `Error`. A
     /// concrete type is assignable to it iff it satisfies the protocol; only the protocol's own
     /// methods are callable on it. Type-erased at runtime (methods dispatch by name).
@@ -146,7 +151,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         (Struct(a, aa), Struct(b, ba)) | (Enum(a, aa), Enum(b, ba)) => {
             a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| compatible(x, y))
         }
-        (Executor, Executor) | (Socket, Socket) | (Listener, Listener) => true,
+        (Executor, Executor) | (Socket, Socket) | (Listener, Listener) | (Ptr, Ptr) => true,
         (Module(a), Module(b)) | (Param(a), Param(b)) => a == b,
         (Func { params: p1, ret: r1 }, Func { params: p2, ret: r2 }) => {
             p1.len() == p2.len()
@@ -206,6 +211,7 @@ impl fmt::Display for Ty {
             Ty::Executor => write!(f, "Executor"),
             Ty::Socket => write!(f, "Socket"),
             Ty::Listener => write!(f, "Listener"),
+            Ty::Ptr => write!(f, "ptr"),
             Ty::Protocol(n) => write!(f, "{n}"),
             Ty::Struct(n, args) | Ty::Enum(n, args) => {
                 write!(f, "{n}")?;

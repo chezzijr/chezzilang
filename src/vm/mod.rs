@@ -4613,6 +4613,10 @@ impl Vm {
                         }
                         Ok(true)
                     }
+                    // Two opaque `ptr` handles are equal iff they hold the same raw address (identity).
+                    // Distinct heap slots can wrap the same address (e.g. a re-`from_wire`'d handle or
+                    // `std.ffi.null()` twice), so the same-`GcRef` shortcut above is not enough.
+                    (Obj::Ptr(a), Obj::Ptr(b)) => Ok(a == b),
                     _ => Ok(false),
                 }
             }
@@ -4876,6 +4880,7 @@ impl Vm {
             N::Float(f) => Value::Float(f),
             N::Bool(b) => Value::Bool(b),
             N::Nil => Value::Nil,
+            N::Ptr(a) => Value::Obj(self.heap.alloc(Obj::Ptr(a))),
             N::Str(s) => self.alloc_str(s),
             N::List(items) => {
                 let mut vs = Vec::with_capacity(items.len());
@@ -7906,6 +7911,10 @@ impl Vm {
                 // reaches the same fd) — same shape as `Channel`/`Shared`/`Executor`.
                 Obj::Socket(core) => WireValue::Socket(Arc::clone(core)),
                 Obj::Listener(core) => WireValue::Listener(Arc::clone(core)),
+                // An opaque `ptr` handle crosses by value — its raw address is heap-independent, so a
+                // fresh `Obj::Ptr` on the other side is observationally identical (immutable +
+                // value-compared). Cross-safe for both the serial and M:N engines.
+                Obj::Ptr(a) => WireValue::Ptr(*a),
                 Obj::List(items) => {
                     let mut out = Vec::with_capacity(items.len());
                     for x in items {
@@ -8022,6 +8031,8 @@ impl Vm {
             // in `to_wire`) — two fibers reach one fd.
             WireValue::Socket(core) => Value::Obj(self.heap.alloc(Obj::Socket(core))),
             WireValue::Listener(core) => Value::Obj(self.heap.alloc(Obj::Listener(core))),
+            // Rebuild a fresh `Obj::Ptr` from the raw address carried by value (heap-independent).
+            WireValue::Ptr(a) => Value::Obj(self.heap.alloc(Obj::Ptr(a))),
             WireValue::List(items) => {
                 let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::List(cloned)))
@@ -8465,8 +8476,11 @@ impl Vm {
             | Obj::Atomic(_)
             | Obj::Executor(_)
             | Obj::Socket(_)
-            | Obj::Listener(_) => {
-                SnapValue::Wire(self.to_wire(v).expect("str / bytes / bytearray / channel / shared / atomic / executor / socket is always sendable"))
+            | Obj::Listener(_)
+            // An opaque `ptr` is always sendable (crosses by value as `WireValue::Ptr`); normally the
+            // fast path catches it, but it is a valid leaf here too.
+            | Obj::Ptr(_) => {
+                SnapValue::Wire(self.to_wire(v).expect("str / bytes / bytearray / channel / shared / atomic / executor / socket / ptr is always sendable"))
             }
             // Experimental generators are not sendable and are never legal as a module global crossing
             // to an M:N worker — reaching here means one was smuggled past the checker.
@@ -10994,6 +11008,7 @@ impl Vm {
                 Obj::Module { .. } => "module",
                 Obj::Native { .. } => "function",
                 Obj::Cffi(_) => "function",
+                Obj::Ptr(_) => "ptr",
                 Obj::Channel(_) => "Channel",
                 Obj::Shared(_) => "Shared",
                 Obj::Atomic(_) => "Atomic",
@@ -11097,6 +11112,10 @@ impl Vm {
                 Obj::Module { name, .. } => Ok(format!("<module {name}>")),
                 Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
                 Obj::Cffi(c) => Ok(format!("<extern fn {}>", c.name())),
+                // A raw address is non-deterministic (differs per run/engine), so never render it —
+                // that would break two-engine parity if a `ptr` is printed. Only null vs live (a
+                // deterministic distinction) is observable.
+                Obj::Ptr(a) => Ok(if *a == 0 { "<ptr null>".to_string() } else { "<ptr>".to_string() }),
                 Obj::Channel(core) => Ok(format!("Channel(len={})", core.q.lock().unwrap().queue.len())),
                 // B3.1: the box holds the wire form; render it directly (`display` is `&self` and
                 // cannot `from_wire`, which allocates — `display_wire` is the read-only equivalent).
@@ -11181,6 +11200,9 @@ impl Vm {
             WireValue::Listener(core) => {
                 format!("Listener({})", if core.listener.lock().unwrap().is_some() { "open" } else { "closed" })
             }
+            // An opaque `ptr` renders like its heap counterpart (`Obj::Ptr` → "<ptr null>"/"<ptr>");
+            // never the raw address (non-deterministic across engines).
+            WireValue::Ptr(a) => if *a == 0 { "<ptr null>".to_string() } else { "<ptr>".to_string() },
             // B3.6: a wired closure renders like its heap counterpart (`Obj::Closure` → "<closure>").
             WireValue::Closure { .. } => "<closure>".to_string(),
             // A wired cursor renders like its heap counterpart (`Obj::Iter` → "<iterator>").
@@ -11367,7 +11389,7 @@ impl Vm {
             }
             // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
             // (matches the interpreter's `stringify` catch-all falling back to `Display`).
-            Obj::Channel(_) | Obj::Shared(_) | Obj::Atomic(_) | Obj::Executor(_) | Obj::Socket(_) | Obj::Listener(_) => {
+            Obj::Channel(_) | Obj::Shared(_) | Obj::Atomic(_) | Obj::Executor(_) | Obj::Socket(_) | Obj::Listener(_) | Obj::Ptr(_) => {
                 out.push_str(&self.display_guarded(Value::Obj(h), depth)?);
             }
             // Experimental generators stringify opaquely (no protocol hook).
@@ -11490,6 +11512,19 @@ impl crate::native::Host for VmHost<'_> {
         match self.args.get(i) {
             Some(Value::Bool(b)) => Ok(*b),
             Some(other) => Err(crate::native::HostError::arg_type(i, "bool", self.vm.type_name(*other))),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_ptr(&mut self, i: usize) -> Result<usize, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
+                Obj::Ptr(a) => Ok(*a),
+                _ => {
+                    let got = self.vm.type_name(self.args[i]);
+                    Err(crate::native::HostError::arg_type(i, "ptr", got))
+                }
+            },
+            Some(other) => Err(crate::native::HostError::arg_type(i, "ptr", self.vm.type_name(*other))),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -22227,6 +22262,21 @@ main()
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/ffi.chz");
+    }
+
+    /// C-ABI opaque `ptr` handle golden (VM twin of `interp::golden_ffi_ptr_chz`): the `extern "lib":`
+    /// block opens a libc `FILE*` (`fopen -> ptr`), hands the handle back to `fclose`, and detects a
+    /// NULL handle via `std.ffi.is_null` / `== std.ffi.null()`. Byte-matches `.expected` and stays
+    /// identical to the interpreter (`assert_file_parity`). Linux-only (needs libc).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_ptr_chz_via_run_file() {
+        let path = fixture("examples/ffi_ptr.chz");
+        let expected = std::fs::read_to_string(fixture("examples/ffi_ptr.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/ffi_ptr.chz");
     }
 
     /// A complete self-contained program (merge sort + binary search + stats over std.math) runs on

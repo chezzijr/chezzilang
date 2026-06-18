@@ -19,6 +19,7 @@
 // only reached on unix. All supported Chezzi targets are unix; non-unix is unsupported by design.
 #[cfg(unix)]
 pub mod cffi;
+pub mod ffi;
 pub mod fs;
 pub mod io;
 pub mod math;
@@ -123,6 +124,14 @@ pub enum NativeRet {
     Some(Box<NativeRet>),
     None,
     Nil,
+    /// An opaque C-ABI handle: a raw pointer address (`void*`), carried as a `usize` so it stays
+    /// `Send` and never touches the GC. Produced by an `extern "lib":` fn declared `-> ptr`
+    /// (`src/native/cffi.rs`) and by `std.ffi.null()`. A NULL return lowers to `Ptr(0)` — it does
+    /// **not** fault (unlike a `str` return), since NULL is a legitimate "creation failed" signal for
+    /// handle APIs. Each engine lowers this to its own opaque pointer value (`Obj::Ptr`/`Value::Ptr`).
+    /// Untyped (no `FILE*` vs `sqlite3*` distinction) and never auto-freed — the author calls the
+    /// library's own destroy (e.g. `fclose`); see `docs/spec.md` §Level-3 FFI limits.
+    Ptr(usize),
 }
 
 /// D5 — an offloaded blocking native's already-extracted argument, in `Send` primitive form (no heap
@@ -163,6 +172,14 @@ pub trait Host {
     fn arg_bool(&mut self, i: usize) -> Result<bool, HostError> {
         let _ = i;
         Err(HostError { message: "this host does not support bool arguments".into() })
+    }
+    /// `args[i]` as an opaque C-ABI pointer handle (a raw address). Used by the C-ABI FFI (`extern`)
+    /// to marshal a Chezzi `ptr` into a C `void*`, and by `std.ffi.is_null`. The default returns a
+    /// "no ptr args" error so a host that never passes handles (the std-module test fixtures /
+    /// off-heap host) needn't implement it.
+    fn arg_ptr(&mut self, i: usize) -> Result<usize, HostError> {
+        let _ = i;
+        Err(HostError { message: "this host does not support pointer arguments".into() })
     }
     /// `args[i]` as an owned string; errors if it is not a str.
     fn arg_str(&mut self, i: usize) -> Result<String, HostError>;
@@ -261,6 +278,7 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
             "regex" => Some("std.regex"),
             "request" => Some("std.request"),
             "net" => Some("std.net"),
+            "ffi" => Some("std.ffi"),
             _ => None,
         },
         _ => None,
@@ -281,6 +299,7 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn)] {
         "std.regex" => regex::MEMBERS,
         "std.request" => request::MEMBERS,
         "std.net" => net::MEMBERS,
+        "std.ffi" => ffi::MEMBERS,
         _ => &[],
     }
 }
@@ -440,7 +459,7 @@ mod tests {
     #[test]
     fn native_member_names_are_unique_across_modules() {
         use std::collections::HashMap;
-        let modules = ["std.math", "std.io", "std.os", "std.process", "std.fs", "std.time", "std.regex", "std.request"];
+        let modules = ["std.math", "std.io", "std.os", "std.process", "std.fs", "std.time", "std.regex", "std.request", "std.ffi"];
         let mut seen: HashMap<&str, &str> = HashMap::new();
         for module in modules {
             for (name, _) in native_members(module) {

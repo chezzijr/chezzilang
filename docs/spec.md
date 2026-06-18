@@ -100,11 +100,14 @@ in [`docs/concurrency.md`](concurrency.md); phase history in
 
 **Still deferred (YAGNI v1):** macros, package registry, and native backend (a Cranelift AOT/JIT is
 the stretch end-game). **Level-3 dynamic C-ABI FFI is now partially shipped** (`extern "lib":` blocks
-calling C functions via dlopen+libffi) — v1 marshals scalars only (int/float/bool/str→`char*`);
-structs-by-value, callbacks, varargs, opaque pointers / userdata, and `char*` ownership transfer are
-still deferred. See the FFI subsection below + [`docs/syntax.md`](syntax.md).
-**Forward design** for deepening FFI (the opaque-handle "userdata" Value that unlocks handle-based
-Rust/C libraries like Burn) and the package registry (pure-Chezzi vs native packages; the
+calling C functions via dlopen+libffi) — v1 marshals scalars (int/float/bool/str→`char*`) plus an
+opaque `ptr` (↔ C `void*`, an untyped never-auto-freed handle for `FILE*`/`sqlite3*`-style APIs; the
+`std.ffi` module adds `null()`/`is_null`); structs-by-value, callbacks, varargs, the rich Rust
+`Box<dyn Any>` userdata handle, and `char*` ownership transfer are still deferred. See the FFI
+subsection below + [`docs/syntax.md`](syntax.md).
+**Forward design** for the remaining FFI deepening (the C `void*` `ptr` handle has **shipped**; the
+rich Rust `Box<dyn Any>` "userdata" Value that unlocks compiled-in handle-based Rust libraries like
+Burn is the open one) and the package registry (pure-Chezzi vs native packages; the
 recompile-the-world / dynamic-plugin / C-ABI-wrapper models; the Rust-has-no-stable-ABI tax vs Python's
 pip/wheels) is captured in [`docs/ffi-and-packaging.md`](ffi-and-packaging.md).
 
@@ -282,8 +285,13 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >   `Cif` per call (libffi `Cif` is `!Send`), so it is `Send + Sync` for `--parallel`; the M:N
 >   snapshot path shares the `Arc<Cffi>` (same address space — no re-`dlopen`). See `src/native/cffi.rs`
 >   + `examples/ffi.chz`. **v1 limits:** scalars only — structs-by-value, callbacks/function pointers,
->   varargs, opaque pointers / userdata, and `char*` ownership transfer / `free` are deferred (a
->   `char*` return is copied immediately; a malloc'd return leaks). A slow C call runs inline (extern
+>   varargs, the rich Rust `Box<dyn Any>` userdata handle, and `char*` ownership transfer / `free` are
+>   deferred (a `char*` return is copied immediately; a malloc'd return leaks). **Opaque `void*`
+>   handles shipped:** declare `ptr` (a builtin opaque type, ↔ C `void*`) to hold a C handle
+>   (`FILE*`/`sqlite3*`/…) across calls — `Obj::Ptr(usize)` / `Value::Ptr(usize)`, a GC leaf, sendable
+>   by value (`WireValue::Ptr`), value-compared by address, `<ptr null>`/`<ptr>` stringify (never the
+>   raw address — non-deterministic), never auto-freed (manual destroy). The `std.ffi` module adds the
+>   value vocab (`null()`/`is_null`); see `examples/ffi_ptr.chz`. A slow C call runs inline (extern
 >   names are NOT in `is_blocking`, so it pins its worker under `--parallel`).
 > - **FFI v1 limits (known + by design):**
 >   - **Integer width (FFI-2):** Chezzi `int` (i64) marshals as C **`long`** — 64-bit on every
@@ -305,10 +313,16 @@ Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only mat
 >     `errno` carelessly or static internal buffers) concurrently **races at the C level** (Chezzi
 >     cannot guard state it does not own). Use only thread-safe/reentrant C entry points under
 >     `--parallel`, or confine such calls to the sequential engines.
-> - **Still deferred (Level-3):** **Userdata** (`Box<dyn Any>` for opaque `File`/`Regex` handles —
->   io is whole-string for now), and the deferred FFI features above (structs/callbacks/varargs/
->   userdata). (`std.os.exit` with a real exit-code channel through the run drivers has since
->   **shipped** — see `examples/exit.chz`.)
+>   - **Untyped + un-freed handles (FFI-`ptr`):** a `ptr` is **one opaque type** for every C handle —
+>     Chezzi never distinguishes a `FILE*` from a `sqlite3*` (ctypes-level; passing the wrong handle is
+>     C-level UB, the author's cross-boundary assertion) — and is **never auto-freed**: the program
+>     calls the library's own destroy (`fclose(f)`); forgetting **leaks** (same stance as FFI-3). NULL
+>     is allowed (a `ptr` return of NULL is `<ptr null>`, not a fault — unlike a `str` return).
+> - **Still deferred (Level-3):** the rich **Rust `Box<dyn Any>` userdata handle** (for compiled-in
+>   Rust libraries like Burn — distinct from the C `void*` `ptr` above, which shipped), and the deferred
+>   FFI features above (structs-by-value / callbacks / varargs / nullable `str?`). See
+>   `docs/ffi-and-packaging.md`. (`std.os.exit` with a real exit-code channel through the run drivers
+>   has since **shipped** — see `examples/exit.chz`.)
 
 ## Architecture — pipeline
 
@@ -373,9 +387,10 @@ tests/          # Rust unit + golden tests
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional; only once the language has truly stopped moving) |
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c**; **Level-3 dynamic C-ABI FFI v1
-> shipped** (`extern "lib":` scalar calls via dlopen+libffi) — see the *Standard library* note above.
-> The remaining Level-3 surface (structs-by-value, callbacks, varargs, opaque pointers / userdata)
-> is still a future idea.
+> shipped** (`extern "lib":` scalar calls via dlopen+libffi, **plus opaque `void*` handles** via the
+> `ptr` type + `std.ffi`) — see the *Standard library* note above. The remaining Level-3 surface
+> (structs-by-value, callbacks, varargs, and the rich Rust `Box<dyn Any>` userdata handle) is still a
+> future idea.
 
 ## Verification
 

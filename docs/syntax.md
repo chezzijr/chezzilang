@@ -1403,15 +1403,43 @@ print(sqrt(4.0))       # 2.0
 print(strlen("hello")) # 5
 ```
 
-**Marshalling (v1 — scalars only):** `int` ↔ C `long` (so a 32-bit-`int` C API is called at the wrong
-ABI width — declare against `long`-based APIs, or expect truncation), `float` ↔ C `double`, `bool` ↔ C
-`int`, `str` → null-terminated `const char*` (a `char*` return is copied into a Chezzi `str`). No
-implicit `int`→`float` (`cos(2)` is a type error — pass `2.0`). A no-return signature
-(`fn srand(seed: int)`) — or an explicit `-> nil` — maps to C `void`; `nil` is a **return-only** type
-(it is rejected as a parameter). The checker rejects any other non-scalar param/return
-(list/map/set/tuple/struct/enum/…) with a *not C-marshallable* error. Calls run inline (a slow C call
-pins its worker under `--parallel`) and produce identical output on all three engines
-(VM / `--interp` / `--parallel`).
+**Marshalling (v1 — scalars + opaque `ptr`):** `int` ↔ C `long` (so a 32-bit-`int` C API is called at
+the wrong ABI width — declare against `long`-based APIs, or expect truncation), `float` ↔ C `double`,
+`bool` ↔ C `int`, `str` → null-terminated `const char*` (a `char*` return is copied into a Chezzi
+`str`), and `ptr` ↔ C `void*` (an **opaque handle** — see below). No implicit `int`→`float` (`cos(2)`
+is a type error — pass `2.0`). A no-return signature (`fn srand(seed: int)`) — or an explicit
+`-> nil` — maps to C `void`; `nil` is a **return-only** type (it is rejected as a parameter). The
+checker rejects any other non-scalar param/return (list/map/set/tuple/struct/enum/…) with a *not
+C-marshallable* error. Calls run inline (a slow C call pins its worker under `--parallel`) and produce
+identical output on all three engines (VM / `--interp` / `--parallel`).
+
+**Opaque handles (`ptr`).** A C library built around a handle (`FILE*`, `sqlite3*`, a
+`create`/`use`/`destroy` context) returns a `void*` you hold and pass back. Declare it as `ptr` — a
+builtin opaque type (a peer of `int`/`str`; no import needed in a signature). A `ptr` is **untyped**
+(one `ptr` for every handle — Chezzi never distinguishes a `FILE*` from a `sqlite3*`, exactly like
+`ctypes`), holds no data Chezzi can read (zero-copy — the data stays behind the address), and is
+**never auto-freed**: call the library's own destroy yourself (forgetting **leaks**, like the `char*`
+limit). A `ptr` supports only `==`/`!=` against another `ptr` and being passed/returned — no methods,
+no fields, no arithmetic. NULL is allowed (a returned NULL is **not** a fault, unlike a `str` return —
+it is a legitimate "creation failed" signal). The NULL sentinel and a null test live in **`std.ffi`**:
+
+```chezzi
+import null, is_null from std.ffi
+
+extern "libc.so.6":
+    fn fopen(path: str, mode: str) -> ptr
+    fn fclose(f: ptr) -> int
+
+f := fopen("/dev/null", "r")
+if is_null(f):              # or: f == null()
+    print("open failed")
+else:
+    print(fclose(f))       # 0 — the FILE* handed straight back; zero-copy
+```
+
+A `ptr` prints as `<ptr null>` / `<ptr>` — never the raw address (it is non-deterministic across
+runs/engines, so printing it would break two-engine parity). A `ptr` is **sendable** (a plain
+address) — it crosses a `spawn`/channel airlock by value.
 
 **Caveats:** a `str`-declared return that comes back `NULL` (e.g. `getenv` of an unset var) is **not**
 silently turned into `nil` — that would break the static non-null `str` guarantee — it raises a
@@ -1436,8 +1464,13 @@ rejects the collision (*'…' is a builtin/reserved name*).
   function (`strtok`, `gmtime`/`localtime`, `setlocale`, static-buffer APIs) from multiple workers
   **races at the C level**. Use thread-safe/reentrant C only under `--parallel`.
 
-**Deferred (v1 limits):** structs-by-value, callbacks / function pointers, varargs, opaque pointers /
-userdata, nullable returns (`str?`), and `char*` ownership transfer / `free`.
+- **Untyped + un-freed handles:** a `ptr` is one opaque type for every C handle (no `FILE*` vs
+  `sqlite3*` checking — passing the wrong handle is C-level UB, the author's assertion) and is **never
+  auto-freed** (call the library's own destroy; forgetting **leaks**).
+
+**Deferred (v1 limits):** structs-by-value, callbacks / function pointers, varargs, the rich Rust
+`Box<dyn Any>` userdata handle (for compiled-in Rust libraries), nullable `str?` returns, and `char*`
+ownership transfer / `free`. (Opaque C `void*` handles — `ptr` — **shipped**, see above.)
 
 ## 13. Standard library (v1)
 
@@ -1482,8 +1515,12 @@ headers: map[str, str]}` (header names lowercased). A ≥400 status is a normal 
 single thread until the response arrives. `Match` and `Response` are reserved (program-global) type
 names.
 
+**`std.ffi`** (the C-ABI handle vocabulary, pairs with the opaque `ptr` type — see §12b):
+`null() -> ptr` (the NULL sentinel) and `is_null(p: ptr) -> bool`. The `ptr` *type* itself is builtin
+(usable in `extern` signatures without import); only these value helpers are imported.
+
 Importable: `std.io`, `std.math`, `std.str`, `std.cmp`, `std.os`, `std.json`, `std.process`,
-`std.fs`, `std.time`, `std.regex`, `std.request`, `std.net`, `std.iter`, `std.ref`.
+`std.fs`, `std.time`, `std.regex`, `std.request`, `std.net`, `std.ffi`, `std.iter`, `std.ref`.
 
 ---
 

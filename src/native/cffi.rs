@@ -5,8 +5,10 @@
 //!
 //! v1 marshals scalars only: `int` (i64 ↔ C `long`), `float` (f64 ↔ C `double`), `bool`
 //! (↔ C `int` 0/1), and `str` (Chezzi str → null-terminated `const char*`; a `char*` return is
-//! copied immediately into an owned Chezzi str). Structs by value, callbacks, varargs, opaque
-//! pointers / userdata, and `char*` ownership transfer / `free` are deferred (documented limits).
+//! copied immediately into an owned Chezzi str). Plus opaque `ptr` (Chezzi `ptr` ↔ C `void*`): an
+//! untyped raw-address handle, passed/returned by value and never auto-freed (the caller calls the
+//! library's own destroy). Structs by value, callbacks, varargs, the rich Rust `Arc<dyn Any>`
+//! userdata handle, and `char*` ownership transfer / `free` are deferred (documented limits).
 //!
 //! ## Send/Sync (for `--parallel`)
 //! The VM stores `Obj::Cffi(Arc<Cffi>)`, and the M:N engine shares the parent address space across
@@ -23,14 +25,16 @@ use libloading::Library;
 
 use super::{Host, HostError, NativeRet};
 
-/// A C-marshallable scalar type — the v1 FFI surface. `int`→C `long`, `float`→C `double`,
-/// `bool`→C `int`, `str`→C `const char*`.
+/// A C-marshallable type — the v1 FFI surface. `int`→C `long`, `float`→C `double`,
+/// `bool`→C `int`, `str`→C `const char*`, `ptr`→C `void*` (an opaque handle).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CType {
     Int,
     Float,
     Bool,
     Str,
+    /// An opaque `void*` handle (Chezzi `ptr`): a raw address marshalled by value, in and out.
+    Ptr,
 }
 
 impl CType {
@@ -41,8 +45,8 @@ impl CType {
             CType::Int => Type::c_long(),
             CType::Float => Type::f64(),
             CType::Bool => Type::c_int(),
-            // str → `const char*` (a pointer).
-            CType::Str => Type::pointer(),
+            // str → `const char*`, ptr → `void*` — both pointers to libffi.
+            CType::Str | CType::Ptr => Type::pointer(),
         }
     }
 }
@@ -114,6 +118,8 @@ impl Cffi {
         let mut bool_args: Vec<std::os::raw::c_int> = Vec::new();
         let mut cstrings: Vec<CString> = Vec::new();
         let mut ptr_args: Vec<*const std::os::raw::c_char> = Vec::new();
+        // Raw `void*` handles (Chezzi `ptr` args) — plain addresses, stable once pushed.
+        let mut void_args: Vec<*mut c_void> = Vec::new();
 
         // First pass: extract & own every scalar so the `&`-references libffi captures stay valid.
         // Each slot records which storage vec holds it and at what index.
@@ -122,6 +128,8 @@ impl Cffi {
             Float(usize),
             Bool(usize),
             Ptr(usize),
+            /// An opaque `void*` handle, stored in `void_args`.
+            RawPtr(usize),
         }
         let mut slots: Vec<Slot> = Vec::with_capacity(self.params.len());
         for (i, p) in self.params.iter().enumerate() {
@@ -152,6 +160,11 @@ impl Cffi {
                     ptr_args.push(std::ptr::null());
                     slots.push(Slot::Ptr(cstrings.len() - 1));
                 }
+                CType::Ptr => {
+                    // An opaque handle: read its raw address and pass it through as a `void*`.
+                    void_args.push(host.arg_ptr(i)? as *mut c_void);
+                    slots.push(Slot::RawPtr(void_args.len() - 1));
+                }
             }
         }
         // Fill the pointer args now that `cstrings` won't move again.
@@ -169,6 +182,7 @@ impl Cffi {
                 Slot::Float(idx) => ffi_args.push(arg(&float_args[*idx])),
                 Slot::Bool(idx) => ffi_args.push(arg(&bool_args[*idx])),
                 Slot::Ptr(idx) => ffi_args.push(arg(&ptr_args[*idx])),
+                Slot::RawPtr(idx) => ffi_args.push(arg(&void_args[*idx])),
             }
         }
 
@@ -218,6 +232,13 @@ impl Cffi {
                     // (v1 documented limit: no ownership transfer), so a malloc'd return leaks.
                     NativeRet::Str(CStr::from_ptr(p).to_string_lossy().into_owned())
                 }
+                Some(CType::Ptr) => {
+                    // An opaque handle. Unlike `str`, a NULL return is NOT a fault — it is a
+                    // legitimate "creation failed" signal; it lowers to `Ptr(0)` (== `std.ffi.null()`)
+                    // for the program to test. The address is never deref'd or freed here.
+                    let p: *mut c_void = cif.call(code, &ffi_args);
+                    NativeRet::Ptr(p as usize)
+                }
                 None => {
                     let _: () = cif.call(code, &ffi_args);
                     NativeRet::Nil
@@ -262,6 +283,7 @@ mod tests {
     struct MockHost {
         floats: Vec<f64>,
         strs: Vec<String>,
+        ptrs: Vec<usize>,
         // Each arg names which vec + index it lives in.
         kinds: Vec<(char, usize)>,
     }
@@ -275,6 +297,11 @@ mod tests {
         fn string(mut self, v: &str) -> Self {
             self.strs.push(v.to_string());
             self.kinds.push(('s', self.strs.len() - 1));
+            self
+        }
+        fn ptr(mut self, v: usize) -> Self {
+            self.ptrs.push(v);
+            self.kinds.push(('p', self.ptrs.len() - 1));
             self
         }
     }
@@ -298,6 +325,10 @@ mod tests {
         fn arg_str(&mut self, i: usize) -> Result<String, HostError> {
             let (_, idx) = self.kinds[i];
             Ok(self.strs[idx].clone())
+        }
+        fn arg_ptr(&mut self, i: usize) -> Result<usize, HostError> {
+            let (_, idx) = self.kinds[i];
+            Ok(self.ptrs[idx])
         }
         fn arg_str_map(&mut self, _i: usize) -> Result<Vec<(String, String)>, HostError> {
             Err(HostError { message: "no map args".into() })
@@ -351,6 +382,35 @@ mod tests {
         let mut host = MockHost::default().string("CHEZZI_DEFINITELY_UNSET_VAR_XYZ_42");
         let err = f.call(&mut host).expect_err("NULL char* for a `str` return must fault");
         assert!(err.message.contains("returned NULL"), "{}", err.message);
+    }
+
+    #[test]
+    fn tmpfile_then_fclose_roundtrips_an_opaque_handle() {
+        // `tmpfile() -> FILE*` produces an opaque `ptr` handle (no args); `fclose(FILE*) -> int`
+        // consumes it and returns 0. Exercises ptr-OUT (return) and ptr-IN (arg) in one round-trip.
+        let open = Cffi::new("libc.so.6", "tmpfile", vec![], Some(CType::Ptr)).expect("dlopen tmpfile");
+        let f = open.call(&mut MockHost::default()).expect("tmpfile call");
+        let addr = match f {
+            NativeRet::Ptr(a) => a,
+            other => panic!("expected a ptr handle, got {other:?}"),
+        };
+        assert_ne!(addr, 0, "tmpfile should succeed given a writable temp dir");
+        let close = Cffi::new("libc.so.6", "fclose", vec![CType::Ptr], Some(CType::Int))
+            .expect("dlopen fclose");
+        assert_eq!(close.call(&mut MockHost::default().ptr(addr)), Ok(NativeRet::Int(0)));
+    }
+
+    #[test]
+    fn null_ptr_return_is_not_a_fault() {
+        // `fopen` of a non-existent path returns a NULL `FILE*`. Unlike a `str` return (which faults
+        // on NULL), a `ptr` return of NULL lowers to `Ptr(0)` — a legitimate "creation failed" signal
+        // the program can test with `std.ffi.is_null` / `== std.ffi.null()`.
+        let open = Cffi::new("libc.so.6", "fopen", vec![CType::Str, CType::Str], Some(CType::Ptr))
+            .expect("dlopen fopen");
+        let mut host = MockHost::default()
+            .string("/nonexistent_dir_chezzi_xyz_42/nope")
+            .string("r");
+        assert_eq!(open.call(&mut host), Ok(NativeRet::Ptr(0)));
     }
 
     #[test]

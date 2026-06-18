@@ -867,9 +867,11 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
 
 **Permanent non-goals:** interp B1/B2 (above); variadic args, bignum (`i64`-only — every overflow is a
 recoverable fault; binary work → the `bytes` (immutable) + `bytearray` (mutable) *sequence* types, both **shipped** — no `byte`/`u8` scalar). **Level-3 dynamic
-C-ABI FFI is NO LONGER a non-goal — v1 shipped** (`extern "lib":` scalar calls via dlopen+libffi;
-structs/callbacks/varargs/userdata still deferred — see "Done" below; forward design for the
-opaque-handle "userdata" Value + the package registry is in
+C-ABI FFI is NO LONGER a non-goal — v1 shipped** (`extern "lib":` scalar calls via dlopen+libffi,
+**plus opaque C `void*` handles** via the `ptr` type — `Obj::Ptr`/`Value::Ptr`, `std.ffi.null()`/
+`is_null`, untyped + manual-free, `examples/ffi_ptr.chz`; structs/callbacks/varargs and the rich Rust
+`Box<dyn Any>` userdata handle still deferred — see "Done" below; forward design for the Rust
+userdata Value + the package registry is in
 [`docs/ffi-and-packaging.md`](docs/ffi-and-packaging.md)). **`yield`/generators are likewise
 no longer a non-goal — complete VM-only support shipped** (see below).
 
@@ -944,6 +946,23 @@ branch names) is in the git log.
   known locally (e.g. `foo().apply(r)`) still resolves only when all same-named methods agree on ref-ness
   — otherwise it falls back to deref (the checker then gives a transparent `ref T` error). Docs:
   `docs/syntax.md` §3. `cargo test` green (2068), conformance green, clippy clean.
+- ✅ **C-ABI opaque `ptr` handle for `extern "lib":`** (2026-06-18) — the first half of the FFI
+  handle-unlock: a C library built around a `void*` handle (`FILE*`/`sqlite3*`/`create→use→destroy`)
+  can now be driven over a dlopen'd `.so` with **no chezzi recompile**. New builtin opaque type `ptr`
+  (↔ C `void*`), threaded through the whole pipeline: `CType::Ptr` marshalling in `src/native/cffi.rs`
+  (arg + return; NULL return ⇒ `Ptr(0)`, **not** a fault, unlike `str`), `NativeRet::Ptr` +
+  `Host::arg_ptr` in the seam, `Obj::Ptr(usize)`/`Value::Ptr(usize)` on both engines (GC leaf, no
+  Drop, value-compared by address, `<ptr null>`/`<ptr>` stringify — **never** the raw address, which is
+  non-deterministic across engines), sendable by value (`WireValue::Ptr`, fast-path snapshot),
+  `Ty::Ptr` in the checker (marshallable + sendable; `ptr==ptr` only, no methods/fields/arithmetic).
+  New **`std.ffi`** native module (`null() -> ptr`, `is_null(p) -> bool`) — the C value vocab lives in
+  the library, not the language (no new keyword/literal). **Decisions:** untyped handles (one `ptr` for
+  all — ctypes-level, C-UB on mismatch) + **manual free** (no auto-Drop → parity-clean; leaks if you
+  forget, like FFI-3) + allow-NULL. Golden `examples/ffi_ptr.chz` (byte-identical VM/`--interp`, uses
+  `/dev/null` + a bad path so it needs no writable fs); cffi unit tests (tmpfile/fclose round-trip,
+  NULL-non-fault), checker tests, `std.ffi` unit tests. Docs: `syntax.md` §12b + stdlib, `spec.md`
+  §Level-3, `ffi-and-packaging.md` (C half shipped; Rust `Arc<dyn Any>` userdata still forward-design).
+  The Rust compiled-in handle (Burn) + registry stay deferred. `cargo test`/conformance/clippy green.
 - ✅ **Checker control-flow boundary for `spawn:`/`defer:` blocks** (2026-06-16) — fixes a three-way
   divergence where `break`/`continue` lexically nested in an enclosing loop but placed inside a `spawn:`
   or `defer:` block passed `check`, raised `break outside loop` at runtime on the VM, and was silently

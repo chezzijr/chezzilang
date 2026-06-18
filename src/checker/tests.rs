@@ -4910,6 +4910,31 @@ fn extern_non_marshallable_return_rejected() {
 }
 
 #[test]
+fn extern_ptr_param_and_return_ok() {
+    // The opaque `ptr` handle is C-marshallable: an extern fn can return one and take one back.
+    ok("extern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n");
+}
+
+#[test]
+fn ffi_null_and_is_null_typecheck() {
+    // `std.ffi.null()` is `ptr`; `is_null(p)` is `bool`; `ptr == ptr` (incl. vs `null()`) type-checks.
+    entry_ok(
+        "import null, is_null from std.ffi\n\
+         extern \"libc.so.6\":\n    fn tmpfile() -> ptr\n\n\
+         fn main():\n    h: ptr = tmpfile()\n    b: bool = is_null(h)\n    print(b)\n    print(h == null())\n",
+    );
+}
+
+#[test]
+fn ptr_arithmetic_rejected() {
+    // A `ptr` is opaque — no arithmetic. `null() + null()` is a type error (only `==`/`!=` + pass).
+    entry_rejects(
+        "import null from std.ffi\nfn main():\n    print(null() + null())\n",
+        "",
+    );
+}
+
+#[test]
 fn extern_duplicate_name_rejected() {
     rejects(
         "extern \"libm.so.6\":\n    fn cos(x: float) -> float\n    fn cos(x: float) -> float\n",

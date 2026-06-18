@@ -126,6 +126,9 @@ fn deep_clone(v: &Value) -> Value {
         | Value::Channel(_)
         | Value::Shared(_)
         | Value::Atomic(_)
+        // An opaque `ptr` handle crosses by value: clone the `usize` address (a `Send` plain scalar,
+        // never deep-copied — there is nothing behind the address that Chezzi owns).
+        | Value::Ptr(_)
         | Value::Executor(_) => v.clone(),
         Value::List(items) => {
             let cloned = items.borrow().iter().map(deep_clone).collect::<Vec<_>>();
@@ -4555,6 +4558,13 @@ impl crate::native::Host for InterpHost<'_> {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
+    fn arg_ptr(&mut self, i: usize) -> Result<usize, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Ptr(a)) => Ok(*a),
+            Some(other) => Err(crate::native::HostError::arg_type(i, "ptr", other.type_name())),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
     fn arg_str(&mut self, i: usize) -> Result<String, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Str(s)) => Ok(s.to_string()),
@@ -4689,6 +4699,7 @@ fn ctype_of(
             "float" => Some(CType::Float),
             "bool" => Some(CType::Bool),
             "str" => Some(CType::Str),
+            "ptr" => Some(CType::Ptr),
             other => aliases.get(other).and_then(|t| ctype_of(Some(t), aliases)),
         },
         _ => None,
@@ -4703,6 +4714,7 @@ fn lower_native(ret: crate::native::NativeRet) -> Value {
         N::Int(n) => Value::Int(n),
         N::Float(f) => Value::Float(f),
         N::Bool(b) => Value::Bool(b),
+        N::Ptr(a) => Value::Ptr(a),
         N::Str(s) => Value::Str(s.into()),
         N::List(items) => {
             let vs = items.into_iter().map(lower_native).collect();
@@ -6430,6 +6442,23 @@ b := Buf([10, 20, 30])
         .unwrap();
         let (out, _err, res, _) = run_file(&path);
         res.expect("ffi.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
+    /// C-ABI opaque `ptr` handle golden (interp side): an `extern "lib":` block opens a `FILE*` via
+    /// libc `fopen` (`-> ptr`), hands the handle back to `fclose` (`ptr ->` int), and detects a NULL
+    /// handle via `std.ffi.is_null` / `== std.ffi.null()`. Deterministic on any Linux: `/dev/null` is
+    /// always readable (fclose ⇒ 0), the bad path is always NULL. The VM twin asserts parity.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_ptr_chz() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi_ptr.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi_ptr.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("ffi_ptr.chz should run on the interp");
         assert_eq!(out, expected);
     }
 

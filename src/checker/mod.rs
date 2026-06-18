@@ -324,6 +324,12 @@ fn native_module_sig(name: &str) -> ModuleSig {
             func("delete", vec![Ty::Str], Ty::result(resp()));
             func("head", vec![Ty::Str], Ty::result(resp()));
         }
+        "std.ffi" => {
+            // The C-ABI vocabulary that pairs with the opaque `ptr` handle type (`extern "lib":`).
+            // `null()` is the NULL sentinel; `is_null(p)` tests it. The `ptr` *type* is builtin.
+            func("null", vec![], Ty::Ptr);
+            func("is_null", vec![Ty::Ptr], Ty::Bool);
+        }
         _ => {}
     }
     sig
@@ -1000,14 +1006,14 @@ impl Checker {
     /// single uniform error. Called on the **resolved** `Ty` (after `resolve_type`), so a transparent
     /// alias to a scalar is accepted. `Unknown` is already-errored and silently allowed (no cascade).
     fn assert_marshallable(&mut self, ty: &Ty, fn_name: &str, span: Span, allow_void: bool) {
-        let ok = matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown)
+        let ok = matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Ptr | Ty::Unknown)
             || (allow_void && matches!(ty, Ty::Nil));
         if !ok {
             self.error(
                 span,
                 format!(
                     "type '{ty}' is not C-marshallable in extern fn '{fn_name}' \
-                     (v1 supports only int, float, bool, str)"
+                     (v1 supports only int, float, bool, str, ptr)"
                 ),
             );
         }
@@ -1190,6 +1196,10 @@ impl Checker {
                 "bytes" => Ty::Bytes,
                 "bytearray" => Ty::ByteArray,
                 "nil" => Ty::Nil,
+                // An opaque C-ABI pointer handle — a builtin marshalling primitive for `extern "lib":`
+                // signatures (the values/helpers live in `std.ffi`, but the *type* is builtin so it
+                // needs no import). See `Ty::Ptr`.
+                "ptr" => Ty::Ptr,
                 // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation).
                 "Executor" => Ty::Executor,
                 // D6 — the std.net TCP handles, non-generic (bare `Socket` / `Listener` annotations).
@@ -5416,6 +5426,9 @@ impl Checker {
             // fd lives in an `Arc`'d core outside every heap), so a `parallel:` accept-loop can
             // `spawn handle(conn)` onto a fiber.
             Ty::Socket | Ty::Listener => true,
+            // An opaque `ptr` is a plain raw address (a `usize`) — it crosses the airlock by value,
+            // so it is always sendable (its referent, if any, is the foreign library's concern).
+            Ty::Ptr => true,
             Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Channel(t) => self.sendable_rec(t, stack),
             Ty::Map(k, v) => self.sendable_rec(k, stack) && self.sendable_rec(v, stack),
             Ty::Result(t, e) => self.sendable_rec(t, stack) && self.sendable_rec(e, stack),

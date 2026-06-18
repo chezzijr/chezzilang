@@ -229,6 +229,11 @@ pub enum Obj {
     /// symbol + marshalling signature behind an `Arc` (so it is `Send` for `--parallel` and shared
     /// by the M:N snapshot path without re-`dlopen`). Holds no `GcRef`s, so it has no GC children.
     Cffi(Arc<crate::native::cffi::Cffi>),
+    /// An opaque C-ABI pointer handle (`ptr`) — a raw `void*` address carried as a `usize`. Produced
+    /// by an `extern "lib":` fn returning `ptr` and by `std.ffi.null()`. Untyped, never auto-freed
+    /// (the program calls the library's own destroy), and holds no `GcRef`s, so it has no GC children.
+    /// `Send` (a plain address), so it crosses the spawn/channel airlock by value.
+    Ptr(usize),
     /// `Channel[T]` (C2) — a *handle* to the shared mailbox [`ChannelCore`]. B3.1: the queue itself
     /// moved OUT of the heap into the `Arc` (it holds wire-form messages, not `GcRef`s); the heap
     /// keeps only this handle, and two handles can alias one core. `children()` still traces any
@@ -397,6 +402,7 @@ impl Heap {
             Obj::Module { slots, .. } => slots.iter().for_each(&mut push),
             Obj::Native { .. } => {}
             Obj::Cffi(_) => {}
+            Obj::Ptr(_) => {}
             // B3.1: the core lives in an `Arc` outside this heap and holds `WireValue`s, but those
             // can still carry `Handle(GcRef)`s into *this* heap (an `Executor`'s queued closures and
             // any core nested inside another core; B3.3a: `str` messages queue as owned bytes, rooting

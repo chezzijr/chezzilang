@@ -91,6 +91,12 @@ pub enum WireValue {
     Socket(Arc<SocketCore>),
     /// A `Listener` handle crossing the airlock as its shared [`ListenerCore`] (D6). See [`Socket`].
     Listener(Arc<ListenerCore>),
+    /// An opaque C-ABI `ptr` handle crossing the airlock **by value** (the raw `usize` address). A C
+    /// `void*` is heap-independent — the same address is meaningful in any worker's heap — so
+    /// `from_wire` allocates a fresh `Obj::Ptr` wrapping the identical address. Holds no `GcRef`, so it
+    /// is cross-safe (`has_handle` leaves it `false` via the `_` arm) and works on the serial engine
+    /// and the M:N snapshot fast path alike.
+    Ptr(usize),
     /// B3.6 — a closure carried across the airlock **by value**: its `proto` (which lives in the shared
     /// `Arc<Program>`, so it is meaningful in any worker), its captures wired recursively, and its
     /// `home` as an index into the parent's `module_objs` (resolved via `Vm::home_index` at wire time,

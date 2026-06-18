@@ -2486,8 +2486,8 @@ fn block_has_defer(stmts: &[Stmt]) -> bool {
 /// own* function-like body (and so get their own implicit nursery, gated separately): `parallel:` (its
 /// spawns belong to that explicit nursery), nested `fn`, a `spawn:` block, and a `defer:` block (each
 /// runs in its own frame, so a bare `spawn` inside it joins at *that* body's end, not this one's).
-/// Map an extern fn's surface [`Type`] annotation to its runtime [`CType`]. Only the v1 scalar set
-/// (`int`/`float`/`bool`/`str`) is supported, resolving transparent type aliases (`type Len = int`)
+/// Map an extern fn's surface [`Type`] annotation to its runtime [`CType`]. Only the v1 marshallable
+/// set (`int`/`float`/`bool`/`str`/`ptr`) is supported, resolving transparent type aliases (`type Len = int`)
 /// through `aliases` first. Everything else (incl. a `None` annotation) returns `None`. The checker
 /// has already rejected non-marshallable types, so a `None` here is unreachable for a well-typed
 /// program (the call sites `.expect(...)` on it).
@@ -2498,6 +2498,7 @@ fn ctype_of(ty: Option<&Type>, aliases: &HashMap<String, Type>) -> Option<CType>
             "float" => Some(CType::Float),
             "bool" => Some(CType::Bool),
             "str" => Some(CType::Str),
+            "ptr" => Some(CType::Ptr),
             // A transparent alias to a scalar (resolve once; the checker rejected cyclic/non-scalar).
             other => aliases.get(other).and_then(|t| ctype_of(Some(t), aliases)),
         },
