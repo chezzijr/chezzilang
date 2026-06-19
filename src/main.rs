@@ -352,9 +352,24 @@ fn resolve_entrypoint() -> Result<String, String> {
             manifest_path.display()
         )
     })?;
-    let segs: Vec<String> = entrypoint.split('.').map(str::to_string).collect();
-    let file = resolver::module_file(&segs, &root, &resolver::std_root());
+    let file = entrypoint_file(&entrypoint, &root)
+        .map_err(|e| format!("chezzi run: {} {e}", manifest_path.display()))?;
     Ok(file.to_string_lossy().into_owned())
+}
+
+/// Map a manifest `[project] entrypoint` (a dotted module path) to its `.chz` file, root-relatively.
+/// Validates the path FIRST: an empty / whitespace / leading- or trailing-dot / doubled-dot value
+/// would otherwise feed empty path segments to [`resolver::module_file`], whose `push("")` +
+/// `set_extension` rewrites the project-root dir's own extension and escapes the root (e.g.
+/// `<root>.chz`), producing a baffling "cannot read" error. Pure (no cwd/env) so it is unit-testable.
+fn entrypoint_file(entrypoint: &str, root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let segs: Vec<String> = entrypoint.split('.').map(str::to_string).collect();
+    if entrypoint.trim().is_empty() || segs.iter().any(|s| s.trim().is_empty()) {
+        return Err(format!(
+            "has an invalid [project] entrypoint {entrypoint:?}; expected a dotted module path like \"src.main\""
+        ));
+    }
+    Ok(resolver::module_file(&segs, root, &resolver::std_root()))
 }
 
 /// `chezzi test [path]` — discover + run every `test fn` in `*_test.chz` files under `path` (default
@@ -777,5 +792,22 @@ mod init_tests {
         scaffold_project(&nested).expect("should create nested dir");
         assert!(nested.join("chezzi.toml").is_file());
         assert!(nested.join("src/main.chz").is_file());
+    }
+
+    #[test]
+    fn entrypoint_file_validates_dotted_path() {
+        let root = std::path::Path::new("/proj");
+        // Valid dotted path → root-relative .chz under the project root.
+        assert_eq!(
+            entrypoint_file("src.main", root).unwrap(),
+            root.join("src/main.chz")
+        );
+        // Bad forms must be REJECTED, not mangle the root path (push("") + set_extension footgun).
+        for bad in ["", "   ", ".", ".main", "src.main.", "src..main"] {
+            assert!(
+                entrypoint_file(bad, root).is_err(),
+                "entrypoint {bad:?} should be rejected"
+            );
+        }
     }
 }

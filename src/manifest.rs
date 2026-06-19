@@ -88,15 +88,26 @@ pub fn parse(src: &str) -> Result<Manifest, String> {
     Ok(manifest)
 }
 
-/// Strip an unquoted trailing `#` comment. A `#` inside a double-quoted string is preserved; this is
-/// a single-pass scanner that only honors the schema we emit (quoted string values).
+/// Strip an unquoted trailing `#` comment. A `#` inside a double-quoted string is preserved. The
+/// scanner honors `\"` / `\\` escapes inside strings so it agrees with [`parse_string_value`] on
+/// where a string literal ends (otherwise a value like `"a\"#b"` would be truncated at the `#`).
 fn strip_comment(line: &str) -> &str {
     let mut in_str = false;
+    let mut escaped = false;
     for (idx, ch) in line.char_indices() {
-        match ch {
-            '"' => in_str = !in_str,
-            '#' if !in_str => return &line[..idx],
-            _ => {}
+        if in_str {
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_str = false,
+                _ => {}
+            }
+        } else {
+            match ch {
+                '"' => in_str = true,
+                '#' => return &line[..idx],
+                _ => {}
+            }
         }
     }
     line
@@ -174,6 +185,13 @@ mod tests {
     fn parse_unquoted_value_errors() {
         let err = parse("[project]\nname = bare\n").unwrap_err();
         assert!(err.contains("double-quoted"), "got: {err}");
+    }
+
+    #[test]
+    fn escaped_quote_before_hash_is_preserved() {
+        // strip_comment must honor `\"` so the `#` inside the value is not treated as a comment.
+        let m = parse("[project]\nname = \"a\\\"#b\"\n").expect("should parse");
+        assert_eq!(m.name.as_deref(), Some("a\"#b"));
     }
 
     #[test]
