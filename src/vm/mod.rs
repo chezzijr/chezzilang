@@ -3143,19 +3143,25 @@ impl Vm {
                     {
                         continue;
                     }
-                    // A `from`-imported USER type (struct/enum/alias) carries no runtime value — it
-                    // resolves through the program-global type tables by name. Skip the value bind.
-                    if self.program.type_names.contains(member) {
-                        continue;
+                    // Bind the member's runtime value if the target module exports one (a fn/value).
+                    // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
+                    // resolves through the program-global type tables by name — so a member with no
+                    // global that IS a known type name is skipped (not an error). A member that is
+                    // neither a value nor a type is a genuine "no member". The value bind is tried
+                    // FIRST so a fn named like a type IN ANOTHER MODULE is still bound here.
+                    match self.module_global(target_obj, member) {
+                        Some(value) => {
+                            self.module_define(into, alias.as_ref().unwrap_or(member), value);
+                        }
+                        None if self.program.type_names.contains(member) => {}
+                        None => {
+                            let tname = self.module_name(target_obj);
+                            return Err(self.err(
+                                format!("module '{tname}' has no member '{member}'"),
+                                imp.span,
+                            ));
+                        }
                     }
-                    let value = self.module_global(target_obj, member).ok_or_else(|| {
-                        let tname = self.module_name(target_obj);
-                        self.err(
-                            format!("module '{tname}' has no member '{member}'"),
-                            imp.span,
-                        )
-                    })?;
-                    self.module_define(into, alias.as_ref().unwrap_or(member), value);
                 }
             }
         }
@@ -24138,6 +24144,23 @@ main()
             "main.chz",
         );
         assert_eq!(out, "1\n2\n3\n");
+    }
+
+    /// Regression: a `from`-imported FUNCTION named like SOME OTHER module's type must still bind +
+    /// call as a function — the from-import type-skip is keyed on the TARGET module's types, NOT a
+    /// program-wide type-name set, and the bare ctor only fires for a bare-VISIBLE type (not one
+    /// merely present in the global table). Without both gates, `Foo()` wrongly hit B's struct ctor.
+    #[test]
+    fn from_imported_fn_named_like_another_modules_type() {
+        let out = assert_parity_file(
+            &[
+                ("a.chz", "fn Foo() -> int:\n    return 42\n"),
+                ("b.chz", "struct Foo:\n    x: int\n"),
+                ("main.chz", "import Foo from a\nimport b\nprint(Foo())\n"),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "42\n");
     }
 
     /// A spawned task constructs an imported struct AND a value crosses a Channel (cross-airlock,

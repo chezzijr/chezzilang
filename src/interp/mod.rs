@@ -291,6 +291,12 @@ struct Interp {
     cur_module_idx: usize,
     /// The CURRENT module's bound module name → that module's index (for qualified `geo.X`).
     imported_module_idx: std::collections::HashMap<String, usize>,
+    /// The CURRENT module's bare-resolvable type names → their runtime key (locally declared +
+    /// `from`-imported + std whole-module). The bare struct/enum constructor only fires for a name
+    /// here — a type merely present in the global tables (another module's) is NOT bare-constructible,
+    /// so a `from`-imported function named like another module's type still resolves as a call.
+    /// Mirrors the compiler's `bare_types` for 3-engine parity.
+    bare_types: std::collections::HashMap<String, String>,
 }
 
 /// A task registered by `spawn`, awaiting its nursery's join barrier. The callee/receiver and
@@ -384,6 +390,7 @@ impl Interp {
             module_types: Vec::new(),
             cur_module_idx: 0,
             imported_module_idx: std::collections::HashMap::new(),
+            bare_types: std::collections::HashMap::new(),
         };
         // Built-in Result / Option variants — available without any declaration.
         interp.register_variant("Ok", "Result", 1);
@@ -410,6 +417,16 @@ impl Interp {
             .get(&(module_idx, name.to_string()))
             .cloned()
             .unwrap_or_else(|| name.to_string())
+    }
+
+    /// Runtime key for a bare-written enum name in the CURRENT module: its `bare_types` key when
+    /// bare-visible, else the name itself (built-in `Result`/`Option`, or a miss that falls through).
+    /// Mirrors the compiler's `enum_bare_key`.
+    fn enum_bare_key(&self, ename: &str) -> String {
+        self.bare_types
+            .get(ename)
+            .cloned()
+            .unwrap_or_else(|| ename.to_string())
     }
 
     /// Evaluate an expression to a value.
@@ -583,7 +600,7 @@ impl Interp {
                 // to the current module's runtime key (bare unless disambiguated).
                 if let ExprKind::Ident(ename) = &obj.kind
                     && self.env.get_local(ename).is_none()
-                    && let ekey = self.type_key(self.cur_module_idx, ename)
+                    && let ekey = self.enum_bare_key(ename)
                     && let Some(def) = self.variants.get(&(ekey, name.clone()))
                     && def.arity == 0
                 {
@@ -1090,7 +1107,7 @@ impl Interp {
             // `Enum.Variant(args)` → variant constructor (current module's runtime key for the enum).
             if let ExprKind::Ident(ename) = &obj.kind
                 && self.env.get_local(ename).is_none()
-                && let ekey = self.type_key(self.cur_module_idx, ename)
+                && let ekey = self.enum_bare_key(ename)
                 && self.variants.contains_key(&(ekey.clone(), name.clone()))
             {
                 let def = self.variants.get(&(ekey, name.clone())).cloned().unwrap();
@@ -1235,10 +1252,13 @@ impl Interp {
             if builtins::is_builtin(name) {
                 return builtins::call(name, arg_vals, span);
             }
-            // A bare struct ctor: resolve to the current module's runtime key (bare unless this
-            // module's struct collided with another's). A from-imported struct keeps its bare key.
-            let struct_key = self.type_key(self.cur_module_idx, name);
-            if let Some(def) = self.structs.get(&struct_key).cloned() {
+            // A bare struct ctor: only a BARE-resolvable struct in THIS module (local / from-import /
+            // std), keyed by its declaring module's runtime key. A struct merely present in the global
+            // table (another module's) is NOT bare-constructible — the name falls through (e.g. to a
+            // from-imported function of the same name).
+            if let Some(struct_key) = self.bare_types.get(name).cloned()
+                && let Some(def) = self.structs.get(&struct_key).cloned()
+            {
                 return self.construct_struct(&struct_key, &def, arg_vals, span);
             }
             // A bare *built-in* variant constructor (`Ok(x)`, `Some(x)`) — user variants are qualified
@@ -3823,6 +3843,21 @@ impl Interp {
     /// of globals and runs top-to-bottom (no auto-`main`). Errors surface with output preserved.
     #[cfg(test)]
     fn execute(&mut self, stmts: &[Stmt]) -> Result<(), RuntimeError> {
+        // Single-source path (no module graph): every top-level type is locally declared, hence
+        // bare-visible under its own (bare) key. Populate `module_types`/`bare_types`/`type_names`
+        // so the bare struct/enum constructor and the from-import skip behave as in the graph path.
+        self.module_types = vec![std::collections::HashSet::new()];
+        self.cur_module_idx = 0;
+        for s in stmts {
+            if let StmtKind::Struct { name, .. }
+            | StmtKind::Enum { name, .. }
+            | StmtKind::TypeAlias { name, .. } = &s.kind
+            {
+                self.module_types[0].insert(name.clone());
+                self.type_names.insert(name.clone());
+                self.bare_types.insert(name.clone(), name.clone());
+            }
+        }
         self.eval_top_level(stmts)
     }
 
@@ -3907,13 +3942,47 @@ impl Interp {
         // construction). Must match the compiler's per-module state so the runtime keys agree.
         self.cur_module_idx = self.module_idx_of.get(&lm.id).copied().unwrap_or(0);
         self.imported_module_idx.clear();
+        self.bare_types.clear();
+        let cur_idx = self.cur_module_idx;
+        if let Some(own) = self.module_types.get(cur_idx) {
+            for name in own.clone() {
+                let key = self.type_key(cur_idx, &name);
+                self.bare_types.insert(name, key);
+            }
+        }
         for imp in &lm.imports {
-            if let Import::Module { path, alias } = &imp.import {
-                let bind = alias
-                    .clone()
-                    .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                if let Some(&tidx) = self.module_idx_of.get(&imp.target) {
-                    self.imported_module_idx.insert(bind, tidx);
+            match &imp.import {
+                Import::Module { path, alias } => {
+                    let bind = alias
+                        .clone()
+                        .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                    if let Some(&tidx) = self.module_idx_of.get(&imp.target) {
+                        self.imported_module_idx.insert(bind, tidx);
+                        // Std whole-module import exposes its types bare too (mirrors the checker).
+                        if path.first().map(String::as_str) == Some("std")
+                            && let Some(types) = self.module_types.get(tidx)
+                        {
+                            for name in types.clone() {
+                                let key = self.type_key(tidx, &name);
+                                self.bare_types.entry(name).or_insert(key);
+                            }
+                        }
+                    }
+                }
+                Import::From { names, .. } => {
+                    if let Some(&tidx) = self.module_idx_of.get(&imp.target) {
+                        for (member, alias) in names {
+                            if self
+                                .module_types
+                                .get(tidx)
+                                .is_some_and(|t| t.contains(member))
+                            {
+                                let key = self.type_key(tidx, member);
+                                let bind = alias.clone().unwrap_or_else(|| member.clone());
+                                self.bare_types.insert(bind, key);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3961,22 +4030,24 @@ impl Interp {
                     {
                         continue;
                     }
-                    // A `from`-imported USER type (struct/enum/alias) carries no runtime value — it
-                    // resolves through the program-global type tables by name. Skip the value bind.
-                    if self.type_names.contains(member) {
-                        continue;
-                    }
-                    let value =
-                        ns.members
-                            .0
-                            .borrow()
-                            .get(member)
-                            .cloned()
-                            .ok_or_else(|| RuntimeError {
+                    // Bind the member's runtime value if the target module exports one (a fn/value).
+                    // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
+                    // resolves through the program-global type tables by name — so a member with no
+                    // value that IS a known type name is skipped (not an error). The value bind is
+                    // tried FIRST so a fn named like a type IN ANOTHER MODULE is still bound here.
+                    let value = ns.members.0.borrow().get(member).cloned();
+                    match value {
+                        Some(v) => {
+                            self.env.define(alias.as_ref().unwrap_or(member), v);
+                        }
+                        None if self.type_names.contains(member) => {}
+                        None => {
+                            return Err(RuntimeError {
                                 message: format!("module '{}' has no member '{member}'", ns.name),
                                 span: imp.span,
-                            })?;
-                    self.env.define(alias.as_ref().unwrap_or(member), value);
+                            });
+                        }
+                    }
                 }
             }
         }
