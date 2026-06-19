@@ -1857,6 +1857,20 @@ impl Compiler {
             .map_or(crate::vm::op::VID_NONE, |v| v.variant_id)
     }
 
+    /// Like `variant_id_of`, but `enum_key` is the ALREADY-RESOLVED module-scoped runtime key (the
+    /// `type_key`/`enum_bare_key` the *construction call site* computed to decide WHICH module's enum
+    /// it is building). Looks `(enum_key, name)` up directly — NO second pass through `enum_bare_key`.
+    /// This is the construction-side entry point: re-resolving the key against the currently-compiled
+    /// module's `bare_types` would mis-key a qualified `mod.E.V` whenever the *constructing* module
+    /// also declares a colliding `E` (it'd pick the local loser's id), so the produced value could
+    /// never match in its declaring module. `variant_id_of` stays the pattern/built-in entry point.
+    fn variant_id_of_key(&self, enum_key: &str, name: &str) -> u32 {
+        self.program
+            .variants
+            .get(&(enum_key.to_string(), name.to_string()))
+            .map_or(crate::vm::op::VID_NONE, |v| v.variant_id)
+    }
+
     /// The sorted, de-duplicated *binding* names introduced by an or-pattern's first alternative
     /// (the checker has verified every alternative binds the same set, so the first is canonical).
     /// A nested bare `Ident` naming a nullary variant is a variant match, NOT a binding, so it is
@@ -2411,7 +2425,7 @@ impl Compiler {
                         .is_some_and(|d| d.arity == 0)
                 {
                     let ekey = self.type_key(tidx, ename);
-                    let variant_id = self.variant_id_of(Some(&ekey), name);
+                    let variant_id = self.variant_id_of_key(&ekey, name);
                     fc.emit(
                         Op::NewEnum {
                             variant: name.clone(),
@@ -2435,7 +2449,7 @@ impl Compiler {
                         .get(&(ekey.clone(), name.clone()))
                         .is_some_and(|d| d.arity == 0)
                 {
-                    let variant_id = self.variant_id_of(Some(&ekey), name);
+                    let variant_id = self.variant_id_of_key(&ekey, name);
                     fc.emit(
                         Op::NewEnum {
                             variant: name.clone(),
@@ -2753,7 +2767,7 @@ impl Compiler {
                     for a in args {
                         self.compile_expr(fc, a)?;
                     }
-                    let variant_id = self.variant_id_of(Some(&ekey), name);
+                    let variant_id = self.variant_id_of_key(&ekey, name);
                     fc.emit(
                         Op::NewEnum {
                             variant: name.clone(),
@@ -2780,7 +2794,7 @@ impl Compiler {
                 for a in args {
                     self.compile_expr(fc, a)?;
                 }
-                let variant_id = self.variant_id_of(Some(&ekey), name);
+                let variant_id = self.variant_id_of_key(&ekey, name);
                 fc.emit(
                     Op::NewEnum {
                         variant: name.clone(),

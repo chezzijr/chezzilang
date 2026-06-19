@@ -24197,6 +24197,54 @@ main()
         assert_eq!(out, "42\n");
     }
 
+    /// Blocker C (variant-key double-resolution): a module BOTH imports a colliding enum (`win.E`,
+    /// the load-order winner keyed BARE) AND declares its OWN same-named loser enum (`mid::E`), then
+    /// QUALIFIED-constructs the imported one (`win.E.A`) and passes it to the importer's fn, which
+    /// MATCHES it in `win`'s context. The construction's variant_id must key on `win`'s E (the call
+    /// site's already-resolved key), NOT be re-derived from the currently-compiled module (`mid`)'s
+    /// `bare_types` — else the producer bakes `mid::E::A` and `win.pick`'s match never fires. Must be
+    /// byte-identical on both engines (interp was already correct; this guards VM/serial).
+    #[test]
+    fn enum_collision_construct_in_other_declaring_module() {
+        let out = assert_parity_file(
+            &[
+                (
+                    "win.chz",
+                    "enum E:\n    A\n    B\n\nfn pick(e: E) -> int:\n    match e:\n        E.A: return 1\n        E.B: return 2\n",
+                ),
+                (
+                    "mid.chz",
+                    "import win\n\nenum E:\n    A\n    B\n\nfn go() -> int:\n    return win.pick(win.E.A)\n",
+                ),
+                ("main.chz", "import win\nimport mid\nprint(mid.go())\n"),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "1\n");
+    }
+
+    /// No-collision twin: same layout, but the constructing module does NOT declare its own `E`
+    /// (single declarer `win`, bare key). Proves the common path (qualified construct of an imported
+    /// enum from an importer) is untouched. Passes before AND after the fix (regression guard).
+    #[test]
+    fn enum_no_collision_construct_in_importing_module() {
+        let out = assert_parity_file(
+            &[
+                (
+                    "win.chz",
+                    "enum E:\n    A\n    B\n\nfn pick(e: E) -> int:\n    match e:\n        E.A: return 1\n        E.B: return 2\n",
+                ),
+                (
+                    "mid.chz",
+                    "import win\n\nfn go() -> int:\n    return win.pick(win.E.A)\n",
+                ),
+                ("main.chz", "import win\nimport mid\nprint(mid.go())\n"),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "1\n");
+    }
+
     /// A spawned task constructs an imported struct AND a value crosses a Channel (cross-airlock,
     /// data-not-time): identical on interp, default VM, and `--parallel`.
     #[test]

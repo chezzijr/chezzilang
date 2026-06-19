@@ -25,7 +25,11 @@ compiler assigns each type a bare runtime key unless a name is declared in ≥2 
 in one program, in which case the FIRST declarer (graph load order, deps-first) keeps the bare key and
 each later one is disambiguated to `mod::Name` (so print/error/JSON output is **byte-identical** for
 non-colliding types — `Point(x=1, y=2)` unchanged). The disambiguated key is used **consistently**:
-construction, field/method resolution, AND `match`-pattern variant ids all honor it. The CHECKER
+construction, field/method resolution, AND `match`-pattern variant ids all honor it. A QUALIFIED
+construction (`mod.E.V`) bakes its variant id from the key the call site already resolved
+(`variant_id_of_key`), **not** re-derived from the currently-compiled module — so `win.E.A` keys
+`win`'s `E` even when the module *building* it also declares a colliding loser `E` (else the producer
+would mis-key the value and it could never match in its declaring module). The CHECKER
 computes the same key map (`check_graph` mirrors the compiler's `assign_type_keys`; per-module
 `bare_types`) and keys its struct/enum/variant LAYOUT tables by the runtime key — so a value of the
 disambiguated type type-checks its own fields/methods and its variants `match` (the `match`-side key is
