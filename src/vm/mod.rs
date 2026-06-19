@@ -24146,6 +24146,40 @@ main()
         assert_eq!(out, "1\n2\n3\n");
     }
 
+    /// Blocker C: two modules declare `enum Color`, both reachable. `cb.classify` MATCHES on its own
+    /// `Color.Red`/`Color.Green`. The disambiguated enum's variants must MATCH (not just construct):
+    /// the match-pattern side must use the SAME module-scoped runtime key as construction. Identical
+    /// on both engines.
+    #[test]
+    fn enum_collision_match_in_declaring_module() {
+        let out = assert_parity_file(
+            &[
+                ("ca.chz", "enum Color:\n    Red\n    Green\n"),
+                (
+                    "cb.chz",
+                    "enum Color:\n    Red\n    Green\nfn classify(c: Color) -> int:\n    return match c:\n        Color.Red: 1\n        Color.Green: 2\n",
+                ),
+                (
+                    "cmain.chz",
+                    "import ca\nimport cb\nprint(cb.classify(cb.Color.Red))\nprint(cb.classify(cb.Color.Green))\n",
+                ),
+            ],
+            "cmain.chz",
+        );
+        assert_eq!(out, "1\n2\n");
+    }
+
+    /// Blocker C (no-collision twin): a SINGLE-module enum matched within its own declaring module
+    /// must stay byte-identical (the common-case key is BARE). Guards the match-side key resolution
+    /// from regressing the non-colliding path.
+    #[test]
+    fn enum_match_same_module_no_collision() {
+        let out = parity_entry(
+            "enum Color:\n    Red\n    Green\nfn classify(c: Color) -> int:\n    return match c:\n        Color.Red: 1\n        Color.Green: 2\nprint(classify(Color.Red))\nprint(classify(Color.Green))\n",
+        );
+        assert_eq!(out, "1\n2\n");
+    }
+
     /// Regression: a `from`-imported FUNCTION named like SOME OTHER module's type must still bind +
     /// call as a function — the from-import type-skip is keyed on the TARGET module's types, NOT a
     /// program-wide type-name set, and the bare ctor only fires for a bare-VISIBLE type (not one

@@ -1824,14 +1824,18 @@ impl Compiler {
     /// name (a binding, not a variant).
     fn variant_pair(&self, enum_name: Option<&str>, name: &str) -> Option<(String, String)> {
         let en = match enum_name {
-            Some(en) => en,
+            // A pattern carries the BARE written enum name (`Color` from `Color.Red`); resolve it to
+            // the module-scoped runtime key the construction path uses (`enum_bare_key`), so a
+            // disambiguated enum (`cb::Color`) MATCHES — producer and consumer agree on the key. In
+            // the no-collision common case this resolves back to the bare name, unchanged.
+            Some(en) => self.enum_bare_key(en),
             None => match name {
-                "Ok" | "Err" => "Result",
-                "Some" | "None" => "Option",
+                "Ok" | "Err" => "Result".to_string(),
+                "Some" | "None" => "Option".to_string(),
                 _ => return None,
             },
         };
-        Some((en.to_string(), name.to_string()))
+        Some((en, name.to_string()))
     }
 
     /// Whether `(enum_name, name)` is a registered NULLARY variant (`None`, a user enum's

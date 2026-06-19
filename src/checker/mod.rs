@@ -265,6 +265,42 @@ pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
 /// import. The same type name may appear in several modules.
 pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
     let mut c = Checker::new();
+    // Module-scoped runtime keys — the IDENTICAL collision pre-pass the compiler runs
+    // (`assign_type_keys`): scan every non-native module's struct/enum/alias names in graph
+    // (deps-first) order; a name declared in exactly one module keys BARE (so print/JSON/error output
+    // is unchanged), a name declared in ≥2 modules is a genuine clash whose FIRST declarer keeps the
+    // bare key and each later one is disambiguated to `<dotted>::Name`. Built here so the checker and
+    // compiler agree on every type's runtime key (and on which declarer is the disambiguated one).
+    {
+        let mut declarers: HashMap<String, Vec<usize>> = HashMap::new();
+        for (idx, lm) in graph.modules.iter().enumerate() {
+            if lm.native.is_some() {
+                continue;
+            }
+            for s in &lm.ast.stmts {
+                if let StmtKind::Struct { name, .. }
+                | StmtKind::Enum { name, .. }
+                | StmtKind::TypeAlias { name, .. } = &s.kind
+                {
+                    let v = declarers.entry(name.clone()).or_default();
+                    if !v.contains(&idx) {
+                        v.push(idx);
+                    }
+                }
+            }
+        }
+        for (name, mods) in &declarers {
+            if mods.len() < 2 {
+                continue; // no collision → bare key (recorded implicitly by absence)
+            }
+            for &idx in &mods[1..] {
+                let lm = &graph.modules[idx];
+                let dotted = lm.label();
+                c.type_keys
+                    .insert((lm.id.clone(), name.clone()), format!("{dotted}::{name}"));
+            }
+        }
+    }
     // Build the reverse index name → declaring module label(s), in graph (deps-first) order, so a
     // bare unimported-type error can hint "import it from <module>". A non-entry module is labelled
     // by its dotted/file name; the entry module is excluded (its types are local, never imported).
@@ -549,6 +585,19 @@ struct Checker {
     defer_floors: Vec<usize>,
     /// True while checking a `std.*` module — structs hoisted now are tagged `StructOrigin::Builtin`.
     current_module_is_stdlib: bool,
+    /// Module-scoped types: `(declaring module id, bare type name) → runtime key`. Bare in the
+    /// no-collision case; `<dotted>::Name` on a genuine cross-module clash. Built once in
+    /// [`check_graph`] with the IDENTICAL graph-order, first-declarer-wins-bare rule as the compiler's
+    /// `assign_type_keys`, so the checker and compiler agree on every type's runtime key (and thus on
+    /// which declarer is disambiguated). A name absent from this map keys bare. NOT cleared per-module.
+    type_keys: HashMap<(ModuleId, String), String>,
+    /// The id of the module currently being checked (`None` for a lone `check`), so local type
+    /// declarations + bare annotations resolve to THIS module's runtime key. Set per `check_module`.
+    current_module_id: Option<ModuleId>,
+    /// The CURRENT module's bare-resolvable type names → their runtime key: locally declared +
+    /// `from`-imported + std whole-module. Mirrors the compiler's `bare_types`; resolves a bare-written
+    /// type name (annotation / constructor) to the module-scoped runtime key. Rebuilt per module.
+    bare_types: HashMap<String, String>,
 }
 
 impl Checker {
@@ -587,9 +636,32 @@ impl Checker {
             capture_floors: Vec::new(),
             defer_floors: Vec::new(),
             current_module_is_stdlib: false,
+            type_keys: HashMap::new(),
+            current_module_id: None,
+            bare_types: HashMap::new(),
         };
         c.seed_stdlib_structs();
         c
+    }
+
+    /// The runtime key for a bare-written type name in the CURRENT module: its `bare_types` entry when
+    /// bare-visible (local / `from`-imported / std), else the name itself — which covers the reserved
+    /// built-ins (`Result`/`Option`/`Ref`/…) and a not-bare-visible name (resolution then misses, as
+    /// before). Mirrors the compiler's `enum_bare_key` (shared for structs + enums here).
+    fn bare_key(&self, name: &str) -> String {
+        self.bare_types
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// The module-scoped runtime key for a type `name` declared in module `mid` (bare unless a genuine
+    /// cross-module clash disambiguated it in [`check_graph`]). Mirrors the compiler's `type_key`.
+    fn type_key(&self, mid: &ModuleId, name: &str) -> String {
+        self.type_keys
+            .get(&(mid.clone(), name.to_string()))
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
     }
 
     /// Register the synthetic struct shapes that native std modules return (M9): `Match`
@@ -660,6 +732,7 @@ impl Checker {
         self.struct_names.clear();
         self.enum_names.clear();
         self.aliases.clear();
+        self.bare_types.clear();
         self.seed_stdlib_structs();
         self.current_ret = Ty::Nil;
         self.inferring_ret = false;
@@ -672,10 +745,27 @@ impl Checker {
     fn check_module(
         &mut self,
         stmts: &[Stmt],
-        _id: Option<&ModuleId>,
+        id: Option<&ModuleId>,
         imports: &[ResolvedImport],
     ) -> ModuleSig {
         self.push_scope();
+        // Module-scoped types: record THIS module's id and seed its locally-declared type names into
+        // `bare_types` under their runtime key (bare unless disambiguated), so a bare annotation /
+        // constructor resolves to the same key the layout is registered under. `bind_import` then adds
+        // `from`-imported + std-whole-module type names. Done before `bind_import`/`hoist` so type
+        // resolution during hoisting sees the keys.
+        self.current_module_id = id.cloned();
+        if let Some(mid) = id {
+            for s in stmts {
+                if let StmtKind::Struct { name, .. }
+                | StmtKind::Enum { name, .. }
+                | StmtKind::TypeAlias { name, .. } = &s.kind
+                {
+                    let key = self.type_key(mid, name);
+                    self.bare_types.insert(name.clone(), key);
+                }
+            }
+        }
         for imp in imports {
             self.bind_import(imp);
         }
@@ -718,31 +808,30 @@ impl Checker {
                 let is_std = path.first().map(String::as_str) == Some("std");
                 if let Some(sig) = self.module_sigs.get(&imp.target).cloned() {
                     for (sname, info) in &sig.struct_defs {
-                        self.structs
-                            .entry(sname.clone())
-                            .or_insert_with(|| info.clone());
+                        // Register the LAYOUT under the DECLARING module's runtime key (bare unless a
+                        // genuine cross-module clash). Register BOTH colliding layouts (no first-wins),
+                        // so a value of either — whose `Ty` carries the matching key — resolves its
+                        // own fields/methods. A std module ALSO exposes its types bare.
+                        let key = self.type_key(&imp.target, sname);
+                        self.structs.insert(key.clone(), info.clone());
                         if is_std {
                             self.struct_names.insert(sname.clone());
+                            self.bare_types.entry(sname.clone()).or_insert(key);
                         }
                     }
                     for (ename, edef) in &sig.enum_defs {
-                        self.enums
-                            .entry(ename.clone())
-                            .or_insert_with(|| edef.variant_names.clone());
+                        let key = self.type_key(&imp.target, ename);
+                        self.enums.insert(key.clone(), edef.variant_names.clone());
                         self.enum_type_params
-                            .entry(ename.clone())
-                            .or_insert_with(|| edef.type_params.clone());
+                            .insert(key.clone(), edef.type_params.clone());
                         if is_std {
                             self.enum_names.insert(ename.clone());
+                            self.bare_types.entry(ename.clone()).or_insert(key.clone());
                         }
                         for (vname, vinfo) in edef.variant_names.iter().zip(&edef.variants) {
-                            self.variants
-                                .entry((ename.clone(), vname.clone()))
-                                .or_insert_with(|| {
-                                    let mut vi = vinfo.clone();
-                                    vi.enum_name = ename.clone();
-                                    vi
-                                });
+                            let mut vi = vinfo.clone();
+                            vi.enum_name = key.clone();
+                            self.variants.insert((key.clone(), vname.clone()), vi);
                             if is_std {
                                 self.variant_owners
                                     .entry(vname.clone())
@@ -794,22 +883,28 @@ impl Checker {
                                 self.imported_ffi_types.insert(member.clone());
                             }
                         } else if let Some(info) = sig.struct_defs.get(member) {
-                            // A user struct imported by name: inject its resolved shape into THIS
-                            // module's per-module struct tables under the bind name, so bare use
-                            // (`S(...)`, `x: S`) resolves with the right field layout.
-                            self.structs.insert(bind.clone(), info.clone());
+                            // A user struct imported by name: inject its resolved shape under the
+                            // DECLARING module's runtime key (so it unifies with that module's
+                            // signatures + a value's `Ty`), and make it BARE-VISIBLE under the bind
+                            // name via `struct_names`/`bare_types` so `S(...)`/`x: S` resolve here.
+                            let key = self.type_key(&imp.target, member);
+                            self.structs.insert(key.clone(), info.clone());
                             self.struct_names.insert(bind.clone());
+                            self.bare_types.insert(bind.clone(), key);
                         } else if let Some(edef) = sig.enum_defs.get(member) {
                             // A user enum imported by name: inject its variant names, type params, and
-                            // each variant's payload under the bind name.
-                            self.enums.insert(bind.clone(), edef.variant_names.clone());
+                            // each variant's payload under the declaring module's runtime key; expose
+                            // it bare under the bind name.
+                            let key = self.type_key(&imp.target, member);
+                            self.enums.insert(key.clone(), edef.variant_names.clone());
                             self.enum_names.insert(bind.clone());
+                            self.bare_types.insert(bind.clone(), key.clone());
                             self.enum_type_params
-                                .insert(bind.clone(), edef.type_params.clone());
+                                .insert(key.clone(), edef.type_params.clone());
                             for (vname, vinfo) in edef.variant_names.iter().zip(&edef.variants) {
                                 let mut vi = vinfo.clone();
-                                vi.enum_name = bind.clone();
-                                self.variants.insert((bind.clone(), vname.clone()), vi);
+                                vi.enum_name = key.clone();
+                                self.variants.insert((key.clone(), vname.clone()), vi);
                                 self.variant_owners
                                     .entry(vname.clone())
                                     .or_default()
@@ -871,18 +966,23 @@ impl Checker {
                 }
                 StmtKind::Struct { name, .. } => {
                     sig.types.insert(name.clone());
-                    if let Some(info) = self.structs.get(name) {
+                    // The LAYOUT lives under the runtime key (bare unless disambiguated); the sig is
+                    // keyed by the BARE name (importers look up by bare member name + their own
+                    // `type_key`).
+                    let key = self.bare_key(name);
+                    if let Some(info) = self.structs.get(&key) {
                         sig.struct_defs.insert(name.clone(), info.clone());
                     }
                 }
                 StmtKind::Enum { name, .. } => {
                     sig.types.insert(name.clone());
-                    if let Some(variant_names) = self.enums.get(name) {
+                    let key = self.bare_key(name);
+                    if let Some(variant_names) = self.enums.get(&key) {
                         let type_params =
-                            self.enum_type_params.get(name).cloned().unwrap_or_default();
+                            self.enum_type_params.get(&key).cloned().unwrap_or_default();
                         let variants = variant_names
                             .iter()
-                            .filter_map(|v| self.variants.get(&(name.clone(), v.clone())).cloned())
+                            .filter_map(|v| self.variants.get(&(key.clone(), v.clone())).cloned())
                             .collect();
                         sig.enum_defs.insert(
                             name.clone(),
@@ -1262,7 +1362,7 @@ impl Checker {
                     if is_reserved_type(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
-                    if self.structs.contains_key(name) {
+                    if self.structs.contains_key(&self.bare_key(name)) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
                     // The struct's type parameters are in scope across its field and method
@@ -1282,8 +1382,13 @@ impl Checker {
                     } else {
                         StructOrigin::User
                     };
+                    // Register the LAYOUT under this module's runtime key (bare unless a genuine
+                    // cross-module clash disambiguated it), so a value of this type — whose `Ty` also
+                    // carries the key — resolves its fields/methods here and across the module
+                    // boundary. `struct_names` (bare-visibility) stays bare; only the layout is keyed.
+                    let key = self.bare_key(name);
                     self.structs.insert(
-                        name.clone(),
+                        key,
                         StructInfo {
                             type_params: type_params.clone(),
                             fields,
@@ -1300,7 +1405,12 @@ impl Checker {
                     if is_reserved_type(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
-                    if self.enums.contains_key(name) {
+                    // The LAYOUT tables (`enums`/`variants`/`enum_type_params`) are keyed by this
+                    // module's runtime key (bare unless disambiguated), so a value's `Ty::Enum(key)`
+                    // resolves its variants here and across module boundaries. `enum_names`/
+                    // `variant_owners` (bare-visibility + qualify-hint) stay bare.
+                    let key = self.bare_key(name);
+                    if self.enums.contains_key(&key) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
                     // The enum's type parameters are in scope across its variant payloads (so a
@@ -1313,7 +1423,7 @@ impl Checker {
                     for v in variants {
                         // Variants are scoped under their enum, so two *different* enums may share a
                         // variant name. A repeat *within the same* enum is still a collision.
-                        if self.variants.contains_key(&(name.clone(), v.name.clone())) {
+                        if self.variants.contains_key(&(key.clone(), v.name.clone())) {
                             self.error(
                                 s.span,
                                 format!("variant '{}' is already defined in enum '{name}'", v.name),
@@ -1326,9 +1436,9 @@ impl Checker {
                             .map(|t| self.resolve_type(t, s.span))
                             .collect();
                         self.variants.insert(
-                            (name.clone(), v.name.clone()),
+                            (key.clone(), v.name.clone()),
                             VariantInfo {
-                                enum_name: name.clone(),
+                                enum_name: key.clone(),
                                 payload,
                             },
                         );
@@ -1338,9 +1448,8 @@ impl Checker {
                             .push(name.clone());
                     }
                     self.exit_type_params(saved);
-                    self.enums.insert(name.clone(), names);
-                    self.enum_type_params
-                        .insert(name.clone(), type_params.clone());
+                    self.enums.insert(key.clone(), names);
+                    self.enum_type_params.insert(key, type_params.clone());
                 }
                 StmtKind::Extern { fns, .. } => {
                     // Dynamic C-ABI FFI (`dlopen`/libffi) is unix-only — `int` marshals as C `long`,
@@ -1906,26 +2015,30 @@ impl Checker {
                     }
                 }
                 _ if self.struct_names.contains(n) => {
+                    // The layout is keyed by the runtime key (bare unless disambiguated); the written
+                    // name's bare-visibility is the `struct_names` gate above. Carry the key on the Ty.
+                    let key = self.bare_key(n);
                     // A generic struct written without type arguments is missing them.
-                    let nparams = self.structs.get(n).map_or(0, |i| i.type_params.len());
+                    let nparams = self.structs.get(&key).map_or(0, |i| i.type_params.len());
                     if nparams > 0 {
                         self.error(
                             span,
                             format!("type '{n}' expects {nparams} type argument(s), got 0"),
                         );
                     }
-                    Ty::strukt(n.clone())
+                    Ty::strukt(key)
                 }
                 _ if self.enum_names.contains(n) => {
+                    let key = self.bare_key(n);
                     // A generic enum written without type arguments is missing them.
-                    let nparams = self.enum_type_params.get(n).map_or(0, |tps| tps.len());
+                    let nparams = self.enum_type_params.get(&key).map_or(0, |tps| tps.len());
                     if nparams > 0 {
                         self.error(
                             span,
                             format!("type '{n}' expects {nparams} type argument(s), got 0"),
                         );
                     }
-                    Ty::Enum(n.clone(), Vec::new())
+                    Ty::Enum(key, Vec::new())
                 }
                 // A protocol name used as a value type (existential), e.g. `Error`.
                 _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
@@ -1994,11 +2107,12 @@ impl Checker {
                 }
                 // A user-defined generic struct instantiated with type arguments: `Pair[int, str]`.
                 _ if self.struct_names.contains(n) => {
+                    let key = self.bare_key(n);
                     let resolved: Vec<Ty> =
                         args.iter().map(|a| self.resolve_type(a, span)).collect();
                     // Clone the param list out so the borrow on `self.structs` is dropped before
                     // the `satisfies`/`error` calls below.
-                    let tps = self.structs.get(n).map(|i| i.type_params.clone());
+                    let tps = self.structs.get(&key).map(|i| i.type_params.clone());
                     if let Some(tps) = tps {
                         if tps.len() != resolved.len() {
                             self.error(
@@ -2019,13 +2133,14 @@ impl Checker {
                             }
                         }
                     }
-                    Ty::Struct(n.clone(), resolved)
+                    Ty::Struct(key, resolved)
                 }
                 // A user-defined generic enum instantiated with type arguments: `Tree[int]`.
                 _ if self.enum_names.contains(n) => {
+                    let key = self.bare_key(n);
                     let resolved: Vec<Ty> =
                         args.iter().map(|a| self.resolve_type(a, span)).collect();
-                    let tps = self.enum_type_params.get(n).cloned();
+                    let tps = self.enum_type_params.get(&key).cloned();
                     if let Some(tps) = tps {
                         if tps.len() != resolved.len() {
                             self.error(
@@ -2045,7 +2160,7 @@ impl Checker {
                             }
                         }
                     }
-                    Ty::Enum(n.clone(), resolved)
+                    Ty::Enum(key, resolved)
                 }
                 // A parameterized protocol may only be a bound (`[X: Container[int]]`), not an
                 // existential value type — `Ty::Protocol` carries no args. Resolve the args anyway so
@@ -2093,7 +2208,7 @@ impl Checker {
                             ),
                         );
                     }
-                    Ty::Struct(name.clone(), resolved)
+                    Ty::Struct(self.type_key(&mid, name), resolved)
                 } else if let Some(edef) = sig.enum_defs.get(name) {
                     if edef.type_params.len() != resolved.len() {
                         self.error(
@@ -2105,7 +2220,7 @@ impl Checker {
                             ),
                         );
                     }
-                    Ty::Enum(name.clone(), resolved)
+                    Ty::Enum(self.type_key(&mid, name), resolved)
                 } else if let Some(asig) = sig.type_aliases.get(name) {
                     asig.body.clone()
                 } else {
@@ -4592,20 +4707,29 @@ impl Checker {
     ) {
         match enum_name {
             Some(en) => {
+                // The pattern carries the BARE written enum name; resolve it to its runtime key (bare
+                // unless a genuine clash) for the layout lookup + the scrutinee-enum comparison, so a
+                // disambiguated enum's qualified pattern matches. Error messages keep the bare `en`.
+                let ekey = self.bare_key(en);
                 // User variants live in `self.variants` keyed by `(enum, variant)`; the built-in
                 // Result/Option variants don't, so accept their canonical enums explicitly.
                 let builtin_ok = matches!(
                     (en.as_str(), name),
                     ("Result", "Ok") | ("Result", "Err") | ("Option", "Some") | ("Option", "None")
                 );
-                if !builtin_ok && !self.variants.contains_key(&(en.clone(), name.to_string())) {
+                if !builtin_ok
+                    && !self
+                        .variants
+                        .contains_key(&(ekey.clone(), name.to_string()))
+                {
                     self.error(span, format!("enum '{en}' has no variant '{name}'"));
                     return;
                 }
                 // The qualifier must name the scrutinee's own enum. (Skipped when the scrutinee enum
-                // is unknown — an int/str/bool or un-inferable scrutinee, handled by the caller.)
+                // is unknown — an int/str/bool or un-inferable scrutinee, handled by the caller.) The
+                // scrutinee carries the runtime key, so compare against the resolved `ekey`.
                 if let Some(s) = scrut_enum
-                    && en != s
+                    && ekey != s
                 {
                     self.error(
                         span,
@@ -4639,7 +4763,10 @@ impl Checker {
         {
             match edef.variant_names.iter().position(|v| v == name) {
                 Some(i) if edef.variants[i].payload.is_empty() => {
-                    return Ty::Enum(ename.clone(), vec![Ty::Unknown; edef.type_params.len()]);
+                    return Ty::Enum(
+                        self.type_key(&mid, ename),
+                        vec![Ty::Unknown; edef.type_params.len()],
+                    );
                 }
                 Some(_) => {
                     self.error(
@@ -4656,19 +4783,21 @@ impl Checker {
         }
         // `Enum.Variant` used as a value: a bare *unbound* name that is an enum, dotted with one of
         // its nullary variants — sugar for the bare `Variant`. A real binding (struct/tuple/local
-        // named like the enum) wins, so only when `lookup` finds nothing.
+        // named like the enum) wins, so only when `lookup` finds nothing. The bare enum name is gated
+        // by `enum_names` (visibility) and resolved to its runtime key for the layout lookup.
         if let ExprKind::Ident(ename) = &obj.kind
             && !self.is_local_binding(ename)
-            && self.enums.contains_key(ename)
+            && self.enum_names.contains(ename)
         {
+            let ekey = self.bare_key(ename);
             let resolved = self
                 .variants
-                .get(&(ename.clone(), name.to_string()))
+                .get(&(ekey.clone(), name.to_string()))
                 .cloned();
             match resolved {
                 Some(v) if v.payload.is_empty() => {
-                    let nparams = self.enum_type_params.get(ename).map_or(0, |t| t.len());
-                    return Ty::Enum(ename.clone(), vec![Ty::Unknown; nparams]);
+                    let nparams = self.enum_type_params.get(&ekey).map_or(0, |t| t.len());
+                    return Ty::Enum(ekey, vec![Ty::Unknown; nparams]);
                 }
                 Some(_) => {
                     self.error(
@@ -5088,7 +5217,8 @@ impl Checker {
                 && let Some(sig) = self.module_sigs.get(&mid).cloned()
                 && let Some(info) = sig.struct_defs.get(name)
             {
-                return self.infer_qualified_struct_call(info, name, args, &targs, span);
+                let key = self.type_key(&mid, name);
+                return self.infer_qualified_struct_call(info, name, &key, args, &targs, span);
             }
             // `module.Enum.Variant(args)` — qualified payload-variant constructor.
             if let ExprKind::Field {
@@ -5108,7 +5238,9 @@ impl Checker {
                     .map(|i| edef.variants[i].clone())
                 {
                     let mut vi = vinfo;
-                    vi.enum_name = ename.clone();
+                    // The result `Ty::Enum` carries the DECLARING module's runtime key (bare unless a
+                    // genuine clash), matching the layout tables + the declaring module's signatures.
+                    vi.enum_name = self.type_key(&mid, ename);
                     return self.infer_variant_call(&vi, name, args, &targs, span);
                 }
                 self.error(obj.span, format!("enum '{ename}' has no variant '{name}'"));
@@ -5118,16 +5250,19 @@ impl Checker {
                 return Ty::Unknown;
             }
             // `Enum.Variant(args)` — qualified payload-variant constructor. Same gate as the nullary
-            // value form in `infer_field`: an unbound enum name dotted with one of its variants.
+            // value form in `infer_field`: an unbound enum name dotted with one of its variants. The
+            // bare-written enum name is gated by `enum_names` (bare visibility) and resolved to its
+            // runtime key (`bare_key`) for the layout lookup.
             if let ExprKind::Ident(ename) = &obj.kind
                 && !self.is_local_binding(ename)
-                && self.enums.contains_key(ename)
+                && self.enum_names.contains(ename)
             {
+                let ekey = self.bare_key(ename);
                 if self
                     .variants
-                    .contains_key(&(ename.clone(), name.to_string()))
+                    .contains_key(&(ekey.clone(), name.to_string()))
                 {
-                    if let Some(ty) = self.infer_named_call(name, args, &targs, span, Some(ename)) {
+                    if let Some(ty) = self.infer_named_call(name, args, &targs, span, Some(&ekey)) {
                         return ty;
                     }
                 } else {
@@ -5237,12 +5372,15 @@ impl Checker {
 
     /// Type-check a module-qualified struct constructor `module.Struct(args)` from the struct's
     /// resolved `StructInfo` (held in the defining module's `ModuleSig`), mirroring the bare struct
-    /// path in `infer_named_call`. Returns a `Ty::Struct` keyed by the BARE name (the runtime key in
-    /// the common case; the compiler handles any collision-disambiguation).
+    /// path in `infer_named_call`. Returns a `Ty::Struct` keyed by the DECLARING module's runtime key
+    /// (`key`, bare in the common case, `<dotted>::Name` on a genuine cross-module clash) so the value
+    /// resolves its fields/methods against the right module's layout — and so it unifies with the
+    /// declaring module's own signatures (which carry the same key).
     fn infer_qualified_struct_call(
         &mut self,
         info: &StructInfo,
         name: &str,
+        key: &str,
         args: &[Expr],
         targs: &[Ty],
         span: Span,
@@ -5254,7 +5392,7 @@ impl Checker {
                 self.error(span, format!("'{name}' takes no type arguments"));
             }
             self.check_args(name, &field_tys, args, span);
-            return Ty::strukt(name.to_string());
+            return Ty::strukt(key.to_string());
         }
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
         if arg_tys.len() != field_tys.len() {
@@ -5279,7 +5417,7 @@ impl Checker {
             .iter()
             .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
             .collect();
-        Ty::Struct(name.to_string(), targs_out)
+        Ty::Struct(key.to_string(), targs_out)
     }
 
     fn infer_named_call(
@@ -5578,15 +5716,16 @@ impl Checker {
                 // `struct_names`, so bare `S(...)` is not a constructor — it falls through to the
                 // unknown-name path (with an import hint).
                 if self.struct_names.contains(name)
+                    && let key = self.bare_key(name)
                     && let Some((tps, fields)) = self
                         .structs
-                        .get(name)
+                        .get(&key)
                         .map(|i| (i.type_params.clone(), i.fields.clone()))
                 {
                     let field_tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();
                     if tps.is_empty() {
                         self.check_args(name, &field_tys, args, span);
-                        return Some(Ty::strukt(name.to_string()));
+                        return Some(Ty::strukt(key));
                     }
                     // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
                     // when given, else are inferred by unifying the declared field types (which
@@ -5616,7 +5755,7 @@ impl Checker {
                         .iter()
                         .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
                         .collect();
-                    return Some(Ty::Struct(name.to_string(), targs));
+                    return Some(Ty::Struct(key, targs));
                 }
                 // A bare user-variant constructor (`Circle(5)`) is no longer allowed — variants are
                 // scoped under their enum and must be written qualified (`Shape.Circle(5)`).
@@ -6608,8 +6747,8 @@ impl Checker {
                     self.resolve_ty_ro_d(&body, depth + 1)
                 }
                 _ if self.imported_alias_tys.contains_key(n) => self.imported_alias_tys[n].clone(),
-                _ if self.struct_names.contains(n) => Ty::strukt(n.clone()),
-                _ if self.enum_names.contains(n) => Ty::Enum(n.clone(), Vec::new()),
+                _ if self.struct_names.contains(n) => Ty::strukt(self.bare_key(n)),
+                _ if self.enum_names.contains(n) => Ty::Enum(self.bare_key(n), Vec::new()),
                 _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
                 _ => Ty::Unknown,
             },
@@ -6630,13 +6769,13 @@ impl Checker {
                     self.resolve_ty_ro_d(v, depth + 1),
                 ),
                 _ if self.struct_names.contains(n) => Ty::Struct(
-                    n.clone(),
+                    self.bare_key(n),
                     args.iter()
                         .map(|a| self.resolve_ty_ro_d(a, depth + 1))
                         .collect(),
                 ),
                 _ if self.enum_names.contains(n) => Ty::Enum(
-                    n.clone(),
+                    self.bare_key(n),
                     args.iter()
                         .map(|a| self.resolve_ty_ro_d(a, depth + 1))
                         .collect(),
@@ -6676,9 +6815,9 @@ impl Checker {
             return Ty::Unknown;
         };
         if sig.struct_defs.contains_key(name) {
-            Ty::Struct(name.to_string(), args.to_vec())
+            Ty::Struct(self.type_key(mid, name), args.to_vec())
         } else if sig.enum_defs.contains_key(name) {
-            Ty::Enum(name.to_string(), args.to_vec())
+            Ty::Enum(self.type_key(mid, name), args.to_vec())
         } else if let Some(asig) = sig.type_aliases.get(name) {
             asig.body.clone()
         } else {
@@ -8857,6 +8996,68 @@ mod graph_tests {
         assert!(
             !errs.is_empty(),
             "expected a checker error for `Color.Bogus` against an int scrutinee, got none"
+        );
+    }
+
+    // 30. Genuine struct collision (Blocker A): two modules declare `Point` and BOTH are imported and
+    // used qualified. The checker must resolve a field on the SECOND module's `Point` against ITS
+    // layout (module-scoped runtime key), not first-wins by bare name.
+    #[test]
+    fn collision_struct_field_resolves_via_qualified_key() {
+        let t = TmpDir::new();
+        t.write("a.chz", "struct Point:\n    x: int\n");
+        t.write("b.chz", "struct Point:\n    y: int\n    z: int\n");
+        let entry = t.write(
+            "main.chz",
+            "import a\nimport b\nfn main():\n    pb := b.Point(2, 3)\n    print(pb.y)\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "field `y` on b.Point must resolve via b's layout: {:?}",
+            errors(&entry)
+        );
+    }
+
+    // 31. Genuine struct collision for a METHOD (Blocker B): only bb.Box has `dbl`. Resolving the
+    // method on a `bb.Box(..)` value must hit bb's layout, not ba's (which lacks the method).
+    #[test]
+    fn collision_struct_method_resolves_via_qualified_key() {
+        let t = TmpDir::new();
+        t.write("ba.chz", "struct Box:\n    v: int\n");
+        t.write(
+            "bb.chz",
+            "struct Box:\n    v: int\n    fn dbl(self) -> int:\n        return self.v * 2\n",
+        );
+        let entry = t.write(
+            "main.chz",
+            "import ba\nimport bb\nfn main():\n    bb2 := bb.Box(5)\n    print(bb2.dbl())\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "method `dbl` on bb.Box must resolve via bb's layout: {:?}",
+            errors(&entry)
+        );
+    }
+
+    // 32. Self-consistency under enum collision (Blocker C, checker side): two modules declare `Color`,
+    // cb has `fn classify(c: Color)` matching on its own `Color.Red`/`Color.Green`. With both imported
+    // the checker must still type-check the bare-`Color` annotation + the qualified match patterns.
+    #[test]
+    fn collision_enum_annotation_and_match_typecheck() {
+        let t = TmpDir::new();
+        t.write("ca.chz", "enum Color:\n    Red\n    Green\n");
+        t.write(
+            "cb.chz",
+            "enum Color:\n    Red\n    Green\nfn classify(c: Color) -> int:\n    return match c:\n        Color.Red: 1\n        Color.Green: 2\n",
+        );
+        let entry = t.write(
+            "cmain.chz",
+            "import ca\nimport cb\nfn main(): print(cb.classify(cb.Color.Red))\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "cb.classify + qualified Color match must type-check under collision: {:?}",
+            errors(&entry)
         );
     }
 }

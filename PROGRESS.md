@@ -22,12 +22,20 @@ cleared per module + re-injected via `bind_import`; `ModuleSig` carries resolved
 defs; reverse `types_by_name` index drives the hint; new `Type::Qualified{module,name,args}` AST +
 parser `m.T[args]` production). Runtime keying is **OPTION C — bare key in the common case**: the
 compiler assigns each type a bare runtime key unless a name is declared in ≥2 modules BOTH reachable
-in one program, in which case the non-entry one is disambiguated to `mod::Name` (so print/error/JSON
-output is **byte-identical** for non-colliding types — `Point(x=1, y=2)` unchanged). The same
-deterministic key map + per-module bare-visible-type set is computed identically by all three engines
-(compiler `assign_type_keys`/`bare_types` ≡ interp), so the cooperative VM, `--parallel`, and the
+in one program, in which case the FIRST declarer (graph load order, deps-first) keeps the bare key and
+each later one is disambiguated to `mod::Name` (so print/error/JSON output is **byte-identical** for
+non-colliding types — `Point(x=1, y=2)` unchanged). The disambiguated key is used **consistently**:
+construction, field/method resolution, AND `match`-pattern variant ids all honor it. The CHECKER
+computes the same key map (`check_graph` mirrors the compiler's `assign_type_keys`; per-module
+`bare_types`) and keys its struct/enum/variant LAYOUT tables by the runtime key — so a value of the
+disambiguated type type-checks its own fields/methods and its variants `match` (the `match`-side key is
+the construction key in compiler `variant_pair` and interp `try_bind`, which resolves the pattern's
+bare enum name via the callee module's `bare_types`). The same deterministic key map + per-module
+bare-visible-type set is computed identically by all three engines (compiler
+`assign_type_keys`/`bare_types` ≡ interp ≡ checker), so the cooperative VM, `--parallel`, and the
 interp agree on every key and every bare-vs-qualified resolution (3-engine parity, incl. a genuine
-collision and a cross-airlock imported-type value). The runtime `bind_import` (both engines) binds a
+collision: field access, method call, AND `match` on a disambiguated type, plus a cross-airlock
+imported-type value). The runtime `bind_import` (both engines) binds a
 member's value when the TARGET module exports one and skips only a value-less TYPE member (so a
 `from`-imported fn named like another module's type still binds); the bare constructor fires only for
 a type bare-VISIBLE in the importing module. Imported `type` aliases are **transparent** (body

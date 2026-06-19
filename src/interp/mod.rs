@@ -297,7 +297,20 @@ struct Interp {
     /// so a `from`-imported function named like another module's type still resolves as a call.
     /// Mirrors the compiler's `bare_types` for 3-engine parity.
     bare_types: std::collections::HashMap<String, String>,
+    /// `module_idx → that module's built `bare_types`` map, cached at `eval_module` so a cross-module
+    /// runtime call can RE-ESTABLISH the callee's bare-type context (which drives `enum_bare_key` for
+    /// match-pattern key resolution). Without this, a disambiguated enum matched inside its declaring
+    /// module's function — but called from another module — would resolve its pattern key against the
+    /// caller's context and never match (Blocker C).
+    module_bare_types: Vec<std::collections::HashMap<String, String>>,
+    /// `home ModEnv pointer-address → its module idx`, recorded when each module's globals are built,
+    /// so a call can find the callee's module context from the `home` env it swaps in.
+    home_module_idx: std::collections::HashMap<usize, usize>,
 }
+
+/// Saved `bare_types` from [`Interp::enter_module_ctx`]: `Some` iff the context was swapped (a
+/// cross-module call), `None` for a same-module call where restoration is a no-op.
+type ModuleCtxSaved = Option<std::collections::HashMap<String, String>>;
 
 /// A task registered by `spawn`, awaiting its nursery's join barrier. The callee/receiver and
 /// arguments are evaluated and deep-copied across the airlock at the `spawn` statement (Go's
@@ -391,6 +404,8 @@ impl Interp {
             cur_module_idx: 0,
             imported_module_idx: std::collections::HashMap::new(),
             bare_types: std::collections::HashMap::new(),
+            module_bare_types: Vec::new(),
+            home_module_idx: std::collections::HashMap::new(),
         };
         // Built-in Result / Option variants — available without any declaration.
         interp.register_variant("Ok", "Result", 1);
@@ -1672,6 +1687,7 @@ impl Interp {
             function: name.to_string(),
             span,
         });
+        let saved_ctx = self.enter_module_ctx(&home);
         let saved_globals = self.env.swap_globals(home);
         let saved = self.env.swap_locals(locals);
         // M-C: a `spawn:` block (or deferred block) is its own function body — a nested bare `spawn`
@@ -1696,6 +1712,7 @@ impl Interp {
             Ok(Some(_)) => Ok(()),
             Ok(None) => result.map(|_| ()),
         };
+        self.restore_module_ctx(saved_ctx);
         if outcome.is_ok() {
             self.call_stack.pop();
         }
@@ -1830,6 +1847,7 @@ impl Interp {
             span,
         });
         let saved_globals = self.env.swap_globals(clo.home.clone());
+        let saved_ctx = self.enter_module_ctx(&clo.home);
         let saved = self.env.swap_locals(new_locals);
         let result = self.eval(&clo.body);
         let outcome = match self.finish_frame(saved, saved_globals) {
@@ -1837,6 +1855,7 @@ impl Interp {
             Ok(Some(v)) => Ok(v),
             Ok(None) => result,
         };
+        self.restore_module_ctx(saved_ctx);
         if outcome.is_ok() {
             self.call_stack.pop();
         }
@@ -1876,7 +1895,7 @@ impl Interp {
             });
         }
         for arm in arms {
-            if let Some(binds) = try_bind(&arm.pattern, &value, &self.variants) {
+            if let Some(binds) = self.try_bind(&arm.pattern, &value) {
                 self.env.push();
                 for (name, v) in binds {
                     self.env.define(&name, v);
@@ -1925,7 +1944,7 @@ impl Interp {
             });
         }
         for arm in arms {
-            if let Some(binds) = try_bind(&arm.pattern, &value, &self.variants) {
+            if let Some(binds) = self.try_bind(&arm.pattern, &value) {
                 self.env.push();
                 for (name, v) in binds {
                     self.env.define(&name, v);
@@ -3725,6 +3744,39 @@ impl Interp {
 
     /// Call a user function: bind params in a fresh local frame (lexical scoping — the callee
     /// sees only globals + its params), run the body, and surface a `return` value (or `Nil`).
+    /// Re-establish the CALLEE's module context (`cur_module_idx` + `bare_types`) from its `home`
+    /// globals env, returning the saved caller context to restore at frame teardown. Drives
+    /// `enum_bare_key`/`type_key` so a disambiguated enum match inside the callee's declaring module
+    /// resolves its pattern key against the RIGHT module — the runtime mirror of the compiler's
+    /// per-module key resolution (Blocker C). A `home` with no recorded idx (e.g. a synthetic env)
+    /// leaves the context unchanged.
+    fn enter_module_ctx(&mut self, home: &value::ModEnv) -> (usize, ModuleCtxSaved) {
+        let saved_idx = self.cur_module_idx;
+        let ptr = std::rc::Rc::as_ptr(&home.0) as usize;
+        if let Some(&idx) = self.home_module_idx.get(&ptr)
+            && idx != saved_idx
+        {
+            let saved_bare = std::mem::replace(
+                &mut self.bare_types,
+                self.module_bare_types.get(idx).cloned().unwrap_or_default(),
+            );
+            self.cur_module_idx = idx;
+            (saved_idx, Some(saved_bare))
+        } else {
+            // Same module (or unknown home) → no swap needed; restoration is a no-op.
+            (saved_idx, None)
+        }
+    }
+
+    /// Restore the caller's module context saved by [`enter_module_ctx`].
+    fn restore_module_ctx(&mut self, saved: (usize, ModuleCtxSaved)) {
+        let (saved_idx, saved_bare) = saved;
+        if let Some(bare) = saved_bare {
+            self.cur_module_idx = saved_idx;
+            self.bare_types = bare;
+        }
+    }
+
     fn call(
         &mut self,
         decl: &FnDecl,
@@ -3757,6 +3809,9 @@ impl Interp {
         });
         // Resolve the callee's top-level names against *its* module, not the caller's.
         let saved_globals = self.env.swap_globals(home.clone());
+        // Re-establish the callee's MODULE context (key resolution) too, so a disambiguated enum
+        // match inside the callee resolves its pattern key against the callee's module (Blocker C).
+        let saved_ctx = self.enter_module_ctx(home);
         let saved = self.env.swap_locals(vec![frame]);
         // The function body's *direct* defers belong to the per-call list (pushed above, drained by
         // `finish_frame`); nested blocks open their own defer scopes via `exec_block`.
@@ -3800,6 +3855,7 @@ impl Interp {
                 Err(e) => Err(e),
             },
         };
+        self.restore_module_ctx(saved_ctx);
         if outcome.is_ok() {
             self.call_stack.pop();
         }
@@ -3986,6 +4042,17 @@ impl Interp {
                 }
             }
         }
+        // Cache this module's fully-built `bare_types` + record its `home` env address → idx, so a
+        // cross-module runtime call can re-establish the callee's module context (Blocker C: a
+        // disambiguated enum match inside this module, called from elsewhere, must resolve its pattern
+        // key against THIS module's bare-types).
+        if self.module_bare_types.len() <= cur_idx {
+            self.module_bare_types
+                .resize_with(cur_idx + 1, Default::default);
+        }
+        self.module_bare_types[cur_idx] = self.bare_types.clone();
+        self.home_module_idx
+            .insert(std::rc::Rc::as_ptr(&mod_globals.0) as usize, cur_idx);
         // Bind this module's imports before its body runs (dependencies are already evaluated, so
         // their namespaces are in `self.namespaces`).
         let bind = lm.imports.iter().try_for_each(|imp| self.bind_import(imp));
@@ -6374,88 +6441,99 @@ fn variant_pair(enum_name: Option<&str>, name: &str) -> Option<(String, String)>
     Some((en.to_string(), name.to_string()))
 }
 
-fn try_bind(
-    pattern: &Pattern,
-    value: &Value,
-    variants: &std::collections::HashMap<(String, String), VariantDef>,
-) -> Option<Vec<(String, Value)>> {
-    match pattern {
-        Pattern::Wildcard => Some(Vec::new()),
-        Pattern::Ident(name) => {
-            // A bare nested identifier naming a *built-in* NULLARY variant (`None`) is a refutable
-            // variant match, binding nothing: it matches iff the value IS that variant of that
-            // built-in enum (mirrors the VM's pure-int variant_id routing, which keys on the
-            // enum-scoped id). A non-variant name is a binding capturing the whole sub-value.
-            if let Some((en, _)) =
-                variant_pair(None, name).filter(|k| variants.get(k).is_some_and(|d| d.arity == 0))
-            {
-                return match value {
-                    Value::Enum {
-                        ty,
-                        variant,
-                        payload,
-                    } if ty.as_ref() == en && variant.as_ref() == name && payload.is_empty() => {
-                        Some(Vec::new())
-                    }
-                    _ => None,
-                };
-            }
-            Some(vec![(name.clone(), value.clone())])
-        }
-        // An or-pattern matches the first alternative that matches (first match wins).
-        Pattern::Or(alts) => alts.iter().find_map(|a| try_bind(a, value, variants)),
-        Pattern::Literal(lit) => literal_matches(lit, value).then(Vec::new),
-        Pattern::Range { start, end } => match value {
-            Value::Int(v) => (*start <= *v && *v < *end).then(Vec::new),
-            _ => None,
-        },
-        Pattern::Tuple(subs) => {
-            let Value::Tuple(elems) = value else {
-                return None;
-            };
-            if elems.len() != subs.len() {
-                return None;
-            }
-            let mut out = Vec::new();
-            for (sub, v) in subs.iter().zip(elems.iter()) {
-                out.extend(try_bind(sub, v, variants)?);
-            }
-            Some(out)
-        }
-        Pattern::Variant {
-            name,
-            bindings,
-            enum_name,
-        } => {
-            let Value::Enum {
-                ty,
-                variant,
-                payload,
-            } = value
-            else {
-                // A bare top-level identifier (no payload) against a non-enum value is a binding
-                // capturing the whole value — the checker permits this only for literal scrutinees.
-                if bindings.is_empty() {
-                    return Some(vec![(name.clone(), value.clone())]);
+impl Interp {
+    /// Attempt to bind `pattern` against `value`, returning the captured bindings on a match. A
+    /// method (not a free fn) so a *qualified* variant pattern can resolve its bare written enum name
+    /// to the module-scoped runtime key (`enum_bare_key`, against the CURRENT module context which the
+    /// callee's frame established) — so a disambiguated enum's variants MATCH (Blocker C). In the
+    /// no-collision common case the key resolves back to the bare name, unchanged.
+    fn try_bind(&self, pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
+        let variants = &self.variants;
+        match pattern {
+            Pattern::Wildcard => Some(Vec::new()),
+            Pattern::Ident(name) => {
+                // A bare nested identifier naming a *built-in* NULLARY variant (`None`) is a
+                // refutable variant match, binding nothing: it matches iff the value IS that variant
+                // of that built-in enum (mirrors the VM's pure-int variant_id routing, which keys on
+                // the enum-scoped id). A non-variant name is a binding capturing the whole sub-value.
+                if let Some((en, _)) = variant_pair(None, name)
+                    .filter(|k| variants.get(k).is_some_and(|d| d.arity == 0))
+                {
+                    return match value {
+                        Value::Enum {
+                            ty,
+                            variant,
+                            payload,
+                        } if ty.as_ref() == en
+                            && variant.as_ref() == name
+                            && payload.is_empty() =>
+                        {
+                            Some(Vec::new())
+                        }
+                        _ => None,
+                    };
                 }
-                return None;
-            };
-            if name != variant.as_ref() || bindings.len() != payload.len() {
-                return None;
+                Some(vec![(name.clone(), value.clone())])
             }
-            // A *qualified* pattern only matches a value of that same enum — two enums may share a
-            // variant name, so the variant string alone is not enough (mirrors the VM's enum-scoped
-            // variant_id compare). The bare built-in form keys on the variant name only.
-            if let Some(en) = enum_name
-                && ty.as_ref() != en.as_str()
-            {
-                return None;
+            // An or-pattern matches the first alternative that matches (first match wins).
+            Pattern::Or(alts) => alts.iter().find_map(|a| self.try_bind(a, value)),
+            Pattern::Literal(lit) => literal_matches(lit, value).then(Vec::new),
+            Pattern::Range { start, end } => match value {
+                Value::Int(v) => (*start <= *v && *v < *end).then(Vec::new),
+                _ => None,
+            },
+            Pattern::Tuple(subs) => {
+                let Value::Tuple(elems) = value else {
+                    return None;
+                };
+                if elems.len() != subs.len() {
+                    return None;
+                }
+                let mut out = Vec::new();
+                for (sub, v) in subs.iter().zip(elems.iter()) {
+                    out.extend(self.try_bind(sub, v)?);
+                }
+                Some(out)
             }
-            let mut out = Vec::new();
-            for (sub, v) in bindings.iter().zip(payload.iter()) {
-                out.extend(try_bind(sub, v, variants)?);
+            Pattern::Variant {
+                name,
+                bindings,
+                enum_name,
+            } => {
+                let Value::Enum {
+                    ty,
+                    variant,
+                    payload,
+                } = value
+                else {
+                    // A bare top-level identifier (no payload) against a non-enum value is a binding
+                    // capturing the whole value — the checker permits this only for literal
+                    // scrutinees.
+                    if bindings.is_empty() {
+                        return Some(vec![(name.clone(), value.clone())]);
+                    }
+                    return None;
+                };
+                if name != variant.as_ref() || bindings.len() != payload.len() {
+                    return None;
+                }
+                // A *qualified* pattern only matches a value of that same enum — two enums may share
+                // a variant name, so the variant string alone is not enough (mirrors the VM's
+                // enum-scoped variant_id compare). The pattern carries the BARE written enum name;
+                // resolve it to the module-scoped runtime key the construction path used, so a
+                // disambiguated enum (`cb::Color`) matches. The bare built-in form keys on the
+                // variant name only.
+                if let Some(en) = enum_name
+                    && ty.as_ref() != self.enum_bare_key(en).as_str()
+                {
+                    return None;
+                }
+                let mut out = Vec::new();
+                for (sub, v) in bindings.iter().zip(payload.iter()) {
+                    out.extend(self.try_bind(sub, v)?);
+                }
+                Some(out)
             }
-            Some(out)
         }
     }
 }
