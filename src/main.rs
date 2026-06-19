@@ -430,13 +430,27 @@ fn scaffold_project(dir: &std::path::Path) -> Result<(), String> {
         ));
     }
 
-    // Project name: the target dir's file name, falling back to "app" for "." or odd paths.
-    let name = dir
+    // Project name: the target dir's basename (canonicalized, so "." resolves to the current
+    // directory's own name). Falls back to "app" only when the path can't be canonicalized or has
+    // no basename (e.g. the filesystem root). Control chars are stripped and TOML metacharacters
+    // (`\` and `"`) escaped so an odd-but-legal dir name can never produce a malformed manifest.
+    let raw = dir
         .canonicalize()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "app".to_string());
+    let escaped: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let name = if escaped.is_empty() {
+        "app".to_string()
+    } else {
+        escaped
+    };
 
     let manifest_body = format!(
         "# chezzi.toml — project manifest.\n\
@@ -680,14 +694,29 @@ mod init_tests {
         let d = TmpDir::new();
         scaffold_project(&d.0).expect("scaffold should succeed");
         let main = d.0.join("src/main.chz");
-        let test = d.0.join("src/main_test.chz");
+
+        // Actually execute the scaffolded entry on the VM (not just type-check it).
+        let (stdout, stderr, result, _exit) = vm::run_file(&main);
         assert!(
-            matches!(type_check(main.to_str().unwrap()), CheckOutcome::Ok),
-            "scaffolded main.chz must type-check"
+            result.is_ok(),
+            "scaffolded main.chz must run; stderr:\n{stderr}"
         );
         assert!(
-            matches!(type_check(test.to_str().unwrap()), CheckOutcome::Ok),
-            "scaffolded main_test.chz must type-check"
+            stdout.contains("Hello from Chezzi!"),
+            "scaffolded main.chz should print the greeting; stdout:\n{stdout}"
+        );
+
+        // And run the scaffolded test file through the real `chezzi test` runner: both pass.
+        let report = test_runner::run_tests(&d.0);
+        assert!(
+            report.passed,
+            "scaffolded tests must pass; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("2 test(s): 2 passed, 0 failed"),
+            "expected 2 passing tests; report:\n{}",
+            report.text
         );
     }
 
