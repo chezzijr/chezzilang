@@ -2519,7 +2519,9 @@ impl ReadyWorker {
                     TaskOutcome::Fault(e)
                 }
                 Ok(ret) => {
-                    let crossed = self.worker.to_wire(ret).and_then(|value| {
+                    // Re-stamp with the task's real span: a returned non-sendable value (a
+                    // frame-holding generator) faults gracefully at the submit/spawn site, not line 0.
+                    let crossed = self.worker.to_wire_at(ret, span).and_then(|value| {
                         self.worker.ensure_crossable(&value, span).map(|()| value)
                     });
                     match crossed {
@@ -20066,6 +20068,37 @@ main()";
         );
         let err = run_capture_parallel(src)
             .expect_err("Executor.submit capturing a generator must be rejected");
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "needs a real span, got line {}",
+            err.span.line
+        );
+    }
+
+    /// An `Executor` task that RETURNS a generator under `--parallel` — the return-value airlock
+    /// (`run_outcome`). Faults gracefully with a REAL span (regression: previously `run_outcome` used
+    /// raw `to_wire`, leaking the placeholder `Span{0,0}` so the error reported line 0).
+    #[test]
+    fn generator_returned_from_executor_task_is_graceful_vm() {
+        let src = concat!(
+            "fn gen() -> Iterator[int]:\n",
+            "    yield 1\n",
+            "fn make() -> Iterator[int]:\n",
+            "    return gen()\n",
+            "fn main():\n",
+            "    ex := Executor()\n",
+            "    ex.submit(make)\n",
+            "    ex.shutdown()\n",
+            "main()\n"
+        );
+        let err = run_capture_parallel(src)
+            .expect_err("an Executor task returning a generator must be rejected");
         assert!(
             err.message
                 .contains("a generator cannot be sent across tasks"),
