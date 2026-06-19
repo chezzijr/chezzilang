@@ -2820,13 +2820,13 @@ mod tests {
 
     #[test]
     fn typed_let() {
-        match only("name: str = \"thuan\"\n") {
+        match only("name: str = \"chezzi\"\n") {
             StmtKind::Let {
                 names, ty, value, ..
             } => {
                 assert_eq!(names, vec!["name".to_string()]);
                 assert_eq!(ty, Some(Type::Named("str".into())));
-                assert_eq!(value.kind, ExprKind::Str("thuan".into()));
+                assert_eq!(value.kind, ExprKind::Str("chezzi".into()));
             }
             other => panic!("{other:?}"),
         }

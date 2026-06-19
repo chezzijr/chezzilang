@@ -11,16 +11,39 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ CLI cleanup + parsed `chezzi.toml` entrypoint (5 scoped changes; no engine/semantic change).**
+Quality-of-life + a small manifest reader, zero new deps. (1) **Sample-string rename** `"thuan"` →
+`"chezzi"` across docs/examples/tests (input + expected kept in sync; width-10 format examples in
+`docs/syntax.md` recomputed for the 6-char name). (2) **Milestone tags removed** from the `chezzi help`
+COMMANDS block. (3) **`--interp` CLI flag dropped** — the tree-walk interpreter stays as the FROZEN
+two-engine parity oracle (golden VM-vs-interp tests call it directly), but it has no CLI surface; `mod
+interp` is now `#[cfg(test)]` (test-only, where every reference lives). (4) **Hand-rolled
+`chezzi.toml` parser** (`src/manifest.rs`): a tiny fixed-schema reader — `[section]` headers,
+`key = "value"` string pairs, `#` comments; captures `[project]` `name`/`version`/`entrypoint`; an
+EMPTY manifest parses to all-`None` (the existing root-marker fixtures stay valid); malformed lines
+are a clean `Err`. (5) **Bare `chezzi run` runs the manifest entrypoint**: with no file argument it
+walks up from the cwd for `chezzi.toml` (`resolver::find_root_from_dir`), parses it, requires
+`[project] entrypoint` (a dotted module path), and resolves it root-relatively via
+`resolver::module_file` → e.g. `<root>/src/main.chz`, then runs it on the VM honoring all flags.
+Imports stay **root-relative** (`build_graph` walks up to the same marker) — locked by a tempdir test
+(`entrypoint_imports_are_root_relative`: `import lib` → `<root>/lib.chz`, `import src.utils.common` →
+`<root>/src/utils/common.chz`). `chezzi init` now scaffolds an **active** `entrypoint = "src.main"`,
+so a freshly-init'd project runs with a bare `chezzi run`. Verified end-to-end: `init` a tmp project →
+bare `chezzi run` (+ `--serial`, + nested-cwd) prints `Hello from Chezzi!`, `chezzi run src/main.chz`
+unchanged, `chezzi test .` passes, `chezzi run --interp` → `unknown flag`, `chezzi help` shows no
+`(M..)` tags/`--interp`. Docs: `docs/spec.md`, `docs/syntax.md`, `CLAUDE.md`, this file.
+
 **✅ Project tooling — `install.sh` + `chezzi init [dir]`.** Quality-of-life, no runtime/semantic
 change, no new deps. `install.sh` (POSIX `sh`, `set -e`, executable) guards for `cargo` on PATH
 (hinting https://rustup.rs if missing), then `cargo install --path .` and reminds the user to keep
 `~/.cargo/bin` on PATH. `chezzi init [dir]` (new `cmd_init` + pure `scaffold_project` in `src/main.rs`,
 unit-tested against a TmpDir) scaffolds `chezzi.toml` + `src/main.chz` (`fn main():` + a top-level
 `main()` call — no auto entrypoint) + `src/main_test.chz` (`test fn` + `assert`); `dir` defaults to `.`,
-is created if missing, and an existing `chezzi.toml` is refused (no clobber). The manifest is a
-marker / tooling-only artifact (real `[project]` name/version + commented forward-looking
-`entrypoint`/`[test]` sections) — **nothing parses it**; `run` stays top-to-bottom and `test` still
-discovers `*_test.chz`. Verified end-to-end: `chezzi init <tmp>` → `chezzi run <tmp>/src/main.chz`
+is created if missing, and an existing `chezzi.toml` is refused (no clobber). The manifest is both a
+root marker AND a parsed manifest (see the CLI-cleanup entry above): the toolchain reads its
+`[project]` keys, and `entrypoint` (scaffolded active as `"src.main"`) drives a bare `chezzi run`;
+`run <file>` stays top-to-bottom and `test` still discovers `*_test.chz`. Verified end-to-end:
+`chezzi init <tmp>` → `chezzi run <tmp>/src/main.chz`
 prints `Hello from Chezzi!` → `chezzi test <tmp>` reports `2 passed`, and re-`init` refuses with a
 non-zero exit. Docs: `docs/syntax.md` §9b, `docs/spec.md` (module-resolution section), `CLAUDE.md`.
 

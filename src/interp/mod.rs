@@ -6855,8 +6855,8 @@ fn safe_div(a: int, b: int) -> Result[int]:
     #[test]
     fn interpolation_inserts_variable() {
         assert_eq!(
-            run("name := \"thuan\"\nprint(\"hi {name}\")\n"),
-            "hi thuan\n"
+            run("name := \"chezzi\"\nprint(\"hi {name}\")\n"),
+            "hi chezzi\n"
         );
     }
 

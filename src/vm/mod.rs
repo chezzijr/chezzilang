@@ -19766,10 +19766,10 @@ main()";
     fn interpolation_and_literal_braces() {
         let src = "\
 fn main():
-    name := \"thuan\"
+    name := \"chezzi\"
     print(\"hi {name}, {{not interpolated}}\")
 main()";
-        assert_eq!(run(src), "hi thuan, {not interpolated}\n");
+        assert_eq!(run(src), "hi chezzi, {not interpolated}\n");
     }
 
     // ----- or-patterns + nested nullary (VM execution + interp parity) -----

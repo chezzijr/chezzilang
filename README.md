@@ -9,7 +9,7 @@ fn greet(name: str) -> str:
     return "hi {name}"
 
 fn main():
-    print(greet("thuan"))
+    print(greet("chezzi"))
 ```
 
 ## Status
