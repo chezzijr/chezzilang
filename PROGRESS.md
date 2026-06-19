@@ -11,6 +11,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Project tooling — `install.sh` + `chezzi init [dir]`.** Quality-of-life, no runtime/semantic
+change, no new deps. `install.sh` (POSIX `sh`, `set -e`, executable) guards for `cargo` on PATH
+(hinting https://rustup.rs if missing), then `cargo install --path .` and reminds the user to keep
+`~/.cargo/bin` on PATH. `chezzi init [dir]` (new `cmd_init` + pure `scaffold_project` in `src/main.rs`,
+unit-tested against a TmpDir) scaffolds `chezzi.toml` + `src/main.chz` (`fn main():` + a top-level
+`main()` call — no auto entrypoint) + `src/main_test.chz` (`test fn` + `assert`); `dir` defaults to `.`,
+is created if missing, and an existing `chezzi.toml` is refused (no clobber). The manifest is a
+marker / tooling-only artifact (real `[project]` name/version + commented forward-looking
+`entrypoint`/`[test]` sections) — **nothing parses it**; `run` stays top-to-bottom and `test` still
+discovers `*_test.chz`. Verified end-to-end: `chezzi init <tmp>` → `chezzi run <tmp>/src/main.chz`
+prints `Hello from Chezzi!` → `chezzi test <tmp>` reports `2 passed`, and re-`init` refuses with a
+non-zero exit. Docs: `docs/syntax.md` §9b, `docs/spec.md` (module-resolution section), `CLAUDE.md`.
+
 **✅ Formal `Iterable[T]` protocol + `.iter()` cursor (owner-requested; the decoupled follow-on the
 constructors work flagged).** Additive — nothing existing changes behavior; 3-engine parity throughout.
 The win: a plain collection now composes into the SAME lazy adapter pipeline as a hand-written struct

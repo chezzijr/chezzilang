@@ -222,6 +222,11 @@ Resolution — **optional root marker**, kills Python's run-relative footgun:
 
 Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only matters once a project spans multiple files.
 
+`chezzi init [dir]` scaffolds a new project (`chezzi.toml` + `src/main.chz` + an example `*_test.chz`).
+The generated `chezzi.toml` stays **marker / tooling-only** — nothing parses it (the resolver only
+checks for its *presence* to fix the root); it carries a real `[project]` name/version plus commented,
+forward-looking `entrypoint`/`[test]` sections for a future build tool.
+
 ## Standard library
 
 - **Builtins (no import):** `print`, `len`, `range`, casts (`int()`/`str()`/`float()`),

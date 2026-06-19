@@ -35,6 +35,7 @@ USAGE:
     chezzi <command> [flags] <file.chz> [program args...]
 
 COMMANDS:
+    init    [dir]    Scaffold a new Chezzi project (manifest + src)
     run     <file>   Type-check, then run on the bytecode VM  (M5)
     test    [path]   Run every `test fn` in *_test.chz files  (M20)
     check   <file>   Type-check only; report errors          (M4)
@@ -69,6 +70,7 @@ fn main() -> ExitCode {
         "check" => cmd_check(&args[1..]),
         "run" => cmd_run(&args[1..]),
         "test" => cmd_test(&args[1..]),
+        "init" => cmd_init(&args[1..]),
         "repl" => {
             eprintln!("chezzi: 'repl' is not implemented yet.");
             eprintln!("        see the roadmap in docs/spec.md");
@@ -367,6 +369,131 @@ fn cmd_test(args: &[String]) -> ExitCode {
     }
 }
 
+/// `chezzi init [dir]` — scaffold a new Chezzi project. `dir` defaults to the current directory;
+/// it (and any parents) are created if missing. Refuses to clobber an existing `chezzi.toml`.
+fn cmd_init(args: &[String]) -> ExitCode {
+    let mut dir: Option<String> = None;
+    for arg in args {
+        match arg.as_str() {
+            other if other.starts_with("--") => {
+                eprintln!("chezzi init: unknown flag '{other}'");
+                return ExitCode::FAILURE;
+            }
+            other if dir.is_none() => dir = Some(other.to_string()),
+            _ => {
+                eprintln!("chezzi init: unexpected extra argument");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let dir = dir.unwrap_or_else(|| ".".to_string());
+    let path = std::path::Path::new(&dir);
+    match scaffold_project(path) {
+        Ok(()) => {
+            println!("chezzi: scaffolded a new project in {}", path.display());
+            println!(
+                "  chezzi.toml          project manifest (marker / tooling-only — not parsed yet)"
+            );
+            println!(
+                "  src/main.chz         entry script  — run with: chezzi run {}/src/main.chz",
+                dir
+            );
+            println!(
+                "  src/main_test.chz    example test   — run with: chezzi test {}",
+                dir
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("chezzi init: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Write the scaffold for a new project into `dir`: a `chezzi.toml` manifest, `src/main.chz`, and an
+/// example `src/main_test.chz`. Creates `dir` (and parents) if needed; refuses to overwrite an
+/// existing `chezzi.toml` (so it never clobbers a real project). Pure filesystem work — this is the
+/// unit-testable core behind `cmd_init`. The manifest is written as a string literal only; nothing
+/// parses `chezzi.toml` (it stays a marker / forward-looking tooling artifact, per docs/spec.md).
+fn scaffold_project(dir: &std::path::Path) -> Result<(), String> {
+    use std::fs;
+
+    fs::create_dir_all(dir)
+        .map_err(|e| format!("cannot create directory '{}': {e}", dir.display()))?;
+
+    let manifest = dir.join("chezzi.toml");
+    if manifest.exists() {
+        return Err(format!(
+            "chezzi.toml already exists in {}; not overwriting (refusing to clobber an existing project)",
+            dir.display()
+        ));
+    }
+
+    // Project name: the target dir's file name, falling back to "app" for "." or odd paths.
+    let name = dir
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "app".to_string());
+
+    let manifest_body = format!(
+        "# chezzi.toml — project manifest.\n\
+         #\n\
+         # NOTE: this file is NOT parsed by the toolchain yet. It is a project ROOT MARKER\n\
+         # (module resolution walks up for it; see docs/spec.md \"Imports & module resolution\")\n\
+         # and a place for forward-looking, tooling-only configuration. The fields below are a\n\
+         # sensible default; the commented sections document settings a future build tool may read.\n\
+         \n\
+         [project]\n\
+         name = \"{name}\"\n\
+         version = \"0.1.0\"\n\
+         # root = \".\"            # forward-looking: project root dir (default: this manifest's dir)\n\
+         # entrypoint = \"main\"   # forward-looking (docs/spec.md): the fn a project build would run.\n\
+         #                       #   The language has NO automatic main — src/main.chz calls main()\n\
+         #                       #   itself today; this field is tooling-only and not parsed yet.\n\
+         \n\
+         # [test]               # forward-looking: test discovery config (not parsed yet)\n\
+         # include = [\"*_test.chz\"]   # `chezzi test` already discovers *_test.chz files today.\n",
+    );
+    fs::write(&manifest, manifest_body)
+        .map_err(|e| format!("cannot write {}: {e}", manifest.display()))?;
+
+    let src = dir.join("src");
+    fs::create_dir_all(&src).map_err(|e| format!("cannot create {}: {e}", src.display()))?;
+
+    let main_chz = "# src/main.chz — program entry.\n\
+        #\n\
+        # Chezzi is a scripting language: code runs top-to-bottom and there is NO automatic\n\
+        # entry point (see docs/syntax.md \"9b. Program entry\"). `main` is an ordinary function;\n\
+        # define it and call it yourself.\n\
+        \n\
+        fn main():\n\
+        \x20   print(\"Hello from Chezzi!\")\n\
+        \n\
+        main()        # nothing runs main for you\n";
+    let main_path = src.join("main.chz");
+    fs::write(&main_path, main_chz)
+        .map_err(|e| format!("cannot write {}: {e}", main_path.display()))?;
+
+    let test_chz = "# src/main_test.chz — example test.\n\
+        #\n\
+        # `chezzi test` discovers every `test fn` in *_test.chz files (see docs/syntax.md \"9c\").\n\
+        # Run it with:  chezzi test .\n\
+        \n\
+        test fn arithmetic():\n\
+        \x20   assert 1 + 1 == 2\n\
+        \n\
+        test fn strings():\n\
+        \x20   assert \"a\" + \"b\" == \"ab\", \"string concat\"\n";
+    let test_path = src.join("main_test.chz");
+    fs::write(&test_path, test_chz)
+        .map_err(|e| format!("cannot write {}: {e}", test_path.display()))?;
+
+    Ok(())
+}
+
 enum CheckOutcome {
     Ok,
     Errors(Vec<checker::CheckError>),
@@ -494,4 +621,82 @@ fn json_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod init_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new() -> Self {
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("chezzi_init_{}_{}", std::process::id(), n));
+            std::fs::create_dir_all(&dir).unwrap();
+            TmpDir(dir)
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn init_scaffolds_expected_files() {
+        let d = TmpDir::new();
+        let dir = d.0.join("proj");
+        scaffold_project(&dir).expect("scaffold should succeed");
+        assert!(dir.join("chezzi.toml").is_file(), "chezzi.toml missing");
+        assert!(dir.join("src/main.chz").is_file(), "src/main.chz missing");
+        assert!(
+            dir.join("src/main_test.chz").is_file(),
+            "src/main_test.chz missing"
+        );
+    }
+
+    #[test]
+    fn init_refuses_when_manifest_exists() {
+        let d = TmpDir::new();
+        std::fs::write(d.0.join("chezzi.toml"), "# pre-existing\n").unwrap();
+        let err = scaffold_project(&d.0).expect_err("should refuse to clobber");
+        assert!(
+            err.contains("already exists"),
+            "error should mention already exists, got: {err}"
+        );
+        assert!(
+            !d.0.join("src/main.chz").exists(),
+            "must not write project files when refusing"
+        );
+    }
+
+    #[test]
+    fn scaffolded_main_runs() {
+        let d = TmpDir::new();
+        scaffold_project(&d.0).expect("scaffold should succeed");
+        let main = d.0.join("src/main.chz");
+        let test = d.0.join("src/main_test.chz");
+        assert!(
+            matches!(type_check(main.to_str().unwrap()), CheckOutcome::Ok),
+            "scaffolded main.chz must type-check"
+        );
+        assert!(
+            matches!(type_check(test.to_str().unwrap()), CheckOutcome::Ok),
+            "scaffolded main_test.chz must type-check"
+        );
+    }
+
+    #[test]
+    fn init_creates_missing_dir() {
+        let d = TmpDir::new();
+        let nested = d.0.join("a/b/c");
+        scaffold_project(&nested).expect("should create nested dir");
+        assert!(nested.join("chezzi.toml").is_file());
+        assert!(nested.join("src/main.chz").is_file());
+    }
 }

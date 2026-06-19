@@ -1146,6 +1146,13 @@ main()        # nothing runs main for you
 (A future `chezzi.toml` may declare a project `entrypoint` for tooling-driven builds; the language
 core does not special-case `main`.)
 
+**`chezzi init [dir]`** scaffolds a new project (`dir` defaults to the current directory, created if
+missing): a `chezzi.toml` manifest, `src/main.chz` (a `fn main():` followed by a top-level `main()`
+call — there is no automatic entry point), and an example `src/main_test.chz` with `test fn`s. It
+refuses to overwrite an existing `chezzi.toml`. The manifest is a **marker / tooling-only** artifact —
+nothing parses it yet (it carries a real `[project]` name/version plus commented, forward-looking
+`entrypoint` and `[test]` sections); `chezzi run` and `chezzi test` ignore it.
+
 ## 10. Strings & interpolation
 
 ```chezzi

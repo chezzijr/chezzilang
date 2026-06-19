@@ -37,6 +37,7 @@ cargo test conformance   # execute docs/grammar.bnf, differential-test vs the pa
 cargo clippy -- -D warnings   # lint (must be clean before commit)
 cargo run -- help        # CLI usage
 
+cargo run -- init my_proj                # scaffold a new project (chezzi.toml + src/main.chz + a _test.chz)
 cargo run -- tokens examples/hello.chz   # token stream (M1)
 cargo run -- ast    examples/hello.chz   # parsed AST (M2)
 cargo run -- check  examples/hello.chz   # type-check only (M4); --errors=json for machine output
