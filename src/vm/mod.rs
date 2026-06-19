@@ -4277,6 +4277,7 @@ impl Vm {
                 scrut,
                 variant,
                 variant_id,
+                enum_name,
                 nbind,
                 bind_start,
                 next,
@@ -4284,6 +4285,7 @@ impl Vm {
                 *scrut,
                 variant,
                 *variant_id,
+                enum_name.as_deref(),
                 *nbind,
                 *bind_start,
                 *next,
@@ -12475,6 +12477,7 @@ impl Vm {
         scrut: usize,
         variant: &str,
         variant_id: u32,
+        enum_name: Option<&str>,
         nbind: usize,
         bind_start: usize,
         next: usize,
@@ -12487,13 +12490,24 @@ impl Vm {
         };
         // M19 lever #2 — dispatch is a pure-int compare of the instance's stamped `variant_id` against
         // the arm's compile-time id (no variant-name string compare). `variant` is only the cold error.
-        let (matches, payload) = match self.heap.get(h) {
+        let (mut matches, vid, payload) = match self.heap.get(h) {
             Obj::Enum {
                 variant_id: vid,
                 payload,
-            } => (*vid == variant_id, payload.clone()),
+            } => (*vid == variant_id, *vid, payload.clone()),
             _ => unreachable!("scrutinee ensured to be an enum"),
         };
+        // SCRUTINEE-DRIVEN fallback on an id MISS. The compile-time `variant_id` can be the WRONG
+        // module's id when a bare match-pattern enum qualifier (`Color.Red`) is reachable only via a
+        // whole-module import and TWO whole-imported modules declare the same-named enum — the
+        // construction side baked the scrutinee's correct id, but the pattern side may have guessed
+        // the other module's id. Resolve from the SCRUTINEE's own `(enum_key, variant)` identity:
+        // it matches iff the arm names that variant in the same (bare) enum. Built-in arms carry
+        // `enum_name: None` and never enter this branch (pure-int dispatch — zero behavior change).
+        if !matches && let Some(en) = enum_name {
+            let (ekey, vname) = self.enum_names(vid);
+            matches = vname == variant && crate::compiler::bare_display(ekey) == en;
+        }
         if !matches {
             self.jump(next);
             return Ok(());
@@ -24430,6 +24444,82 @@ main()
         assert_eq!(io, "5\n");
         assert_eq!(io, vo, "interp vs vm");
         assert_eq!(io, po, "interp vs --parallel");
+    }
+
+    /// BLOCKER 2/3 — a bare match-pattern enum qualifier (`Color.Red`) whose enum is reachable only
+    /// via WHOLE-MODULE import must be resolved from the SCRUTINEE'S static enum, not re-guessed by
+    /// iterating the (RandomState-seeded) import map. Two whole-imported same-named enums; scrutinee
+    /// from `a`; the `Color.Red`/`Color.Blue` arms must resolve against `a::Color`. Looped 50x to
+    /// defeat the nondeterminism (one pass could luck-pass) and asserted identical across all three
+    /// engines (interp / default VM / `--parallel`).
+    #[test]
+    fn match_arm_scrutinee_driven_three_engine() {
+        let files = [
+            ("a.chz", "enum Color:\n    Red\n    Blue\n"),
+            ("b.chz", "enum Color:\n    Red\n    Green\n"),
+            (
+                "main.chz",
+                "import a\nimport b\nc := a.Color.Red\nmatch c:\n    Color.Red: print(\"red\")\n    Color.Blue: print(\"blue\")\n",
+            ),
+        ];
+        let t = TmpDir::new();
+        let mut entry = None;
+        for (rel, c) in &files {
+            let p = t.write(rel, c);
+            if *rel == "main.chz" {
+                entry = Some(p);
+            }
+        }
+        let entry = entry.unwrap();
+        for _ in 0..50 {
+            let (io, _, ir, _) = crate::interp::run_file(&entry);
+            let (vo, _, vr, _) = run_file(&entry);
+            let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+            assert!(
+                ir.is_ok() && vr.is_ok() && pr.is_ok(),
+                "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
+            );
+            assert_eq!(io, "red\n", "interp output wrong");
+            assert_eq!(io, vo, "interp vs vm");
+            assert_eq!(io, po, "interp vs --parallel");
+        }
+    }
+
+    /// BLOCKER 2/3 divergence case — `import b` FIRST, then `import a`; scrutinee is `a.Color.Blue`,
+    /// a variant that exists ONLY in `a`. A scrutinee-blind import-iterating resolver picked `b`
+    /// (which has no `Blue`) and crashed (`--serial`/`--parallel`) or matched the wrong arm (VM). The
+    /// match-arm key MUST come from the scrutinee's `a::Color`. Looped 50x across all three engines.
+    #[test]
+    fn match_arm_only_in_a_variant_three_engine() {
+        let files = [
+            ("a.chz", "enum Color:\n    Red\n    Blue\n"),
+            ("b.chz", "enum Color:\n    Red\n    Green\n"),
+            (
+                "main.chz",
+                "import b\nimport a\nc := a.Color.Blue\nmatch c:\n    Color.Red: print(\"red\")\n    Color.Blue: print(\"blue\")\n",
+            ),
+        ];
+        let t = TmpDir::new();
+        let mut entry = None;
+        for (rel, c) in &files {
+            let p = t.write(rel, c);
+            if *rel == "main.chz" {
+                entry = Some(p);
+            }
+        }
+        let entry = entry.unwrap();
+        for _ in 0..50 {
+            let (io, _, ir, _) = crate::interp::run_file(&entry);
+            let (vo, _, vr, _) = run_file(&entry);
+            let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+            assert!(
+                ir.is_ok() && vr.is_ok() && pr.is_ok(),
+                "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
+            );
+            assert_eq!(io, "blue\n", "interp output wrong");
+            assert_eq!(io, vo, "interp vs vm");
+            assert_eq!(io, po, "interp vs --parallel");
+        }
     }
 
     /// AIRLOCK: a colliding struct value sent through a Channel survives the wire round-trip and

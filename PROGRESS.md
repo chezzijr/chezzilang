@@ -40,8 +40,14 @@ struct with it, and decode errors render the bare name. RESERVED/NATIVE types
 (`Result`/`Option`/`Some`/`Ok`, `Ref`, `Iterator`, `Match`/`Response`, the std type surface on
 `import std.*`, and the FFI width names) are **not** module-keyed — they keep their bare name (the
 qualification pre-pass skips std/native modules). A match pattern `Color.Red` against a whole-module-
-imported enum resolves `Color` to the scrutinee's enum key (checker) / the imported module's registered
-key (compiler+interp `enum_bare_key`). The same deterministic key map + per-module bare-visible-type set
+imported enum is resolved **SCRUTINEE-DRIVEN** on every engine: the matched value carries its own
+qualified enum identity key (the very enum the checker resolved the scrutinee to), and an arm matches
+iff its written qualifier equals that key's BARE form (interp `try_bind`: `bare_display(ty)==en`; VM
+`match_arm`: the M19 int-id fast path, with a `bare_display(enum_key)==enum_name` fallback baked into
+`Op::MatchArm.enum_name` on an id MISS). It is NEVER re-guessed by iterating the (RandomState-seeded)
+import map — doing so ignored the scrutinee and picked nondeterministically (often the WRONG enum when
+two whole-imported modules declared a same-named enum); the construction side (`enum_bare_key`) still
+resolves against the current module context, which is correct. The same deterministic key map + per-module bare-visible-type set
 is computed identically by all three engines, so the cooperative VM, `--parallel`, and the interp agree
 on every key (3-engine parity, incl. a genuine collision: field access, method call, `match`, AND
 `json.decode` on a colliding type, plus a cross-airlock imported-type value). The runtime `bind_import`
@@ -54,6 +60,17 @@ an un-imported width is rejected at import). Reserved/native types (`Result`/`Op
 `Ref`, the std type surface on `import std.*`, FFI widths) stay global/bare always. New grammar
 production in `docs/grammar.bnf` (`conformance` green). Docs: `docs/spec.md` + `docs/syntax.md`
 (Imports). This is a **pre-JIT sequencing gate**, not a feature freeze — new language work can still land.
+
+**✅ Redesign follow-up — two regressions fixed (2026-06).** The qualified-identity-key redesign
+introduced two bugs (caught by adversarial review, reproduced on the built binary), now fixed: (1)
+**checker errors leaked the qualified IDENTITY key** (`type single::Point has no field 'nope'`) — the
+identity-vs-display split was applied at runtime stringify but NOT in the checker's `format!("type
+{ty} …")` paths; fixed at the single choke point — `Ty`'s `Display` for `Struct`/`Enum` now renders
+`bare_display(n)`, so every field/method/type-mismatch error (single- and cross-module) prints the
+BARE name. (2) **bare match-pattern enum was resolved NONDETERMINISTICALLY** by iterating the
+RandomState-seeded import map (scrutinee-blind), alternating wrong-arm / `MatchNoArm` crash across
+identical runs and disagreeing between engines — now **scrutinee-driven** (see the match-pattern
+resolution note above), deterministic + identical on VM / `--serial` / `--parallel` / interp.
 
 **✅ CLI cleanup + parsed `chezzi.toml` entrypoint (5 scoped changes; no engine/semantic change).**
 Quality-of-life + a small manifest reader, zero new deps. (1) **Sample-string rename** `"thuan"` →

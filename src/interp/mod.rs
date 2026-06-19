@@ -6628,12 +6628,15 @@ impl Interp {
                 }
                 // A *qualified* pattern only matches a value of that same enum — two enums may share
                 // a variant name, so the variant string alone is not enough (mirrors the VM's
-                // enum-scoped variant_id compare). The pattern carries the BARE written enum name;
-                // resolve it to the module-scoped runtime key the construction path used, so a
-                // disambiguated enum (`cb::Color`) matches. The bare built-in form keys on the
-                // variant name only.
+                // enum-scoped variant_id compare). SCRUTINEE-DRIVEN: the value carries its own
+                // qualified enum identity key (`ty`, e.g. `a::Color`) — the very enum the checker
+                // resolved the scrutinee to. Match iff its BARE form equals the pattern's written
+                // qualifier (`Color`). This is deterministic and engine-independent; NEVER iterate
+                // the (RandomState-seeded) import map to re-guess which module's enum it is — that
+                // ignored the scrutinee and picked nondeterministically (often the wrong enum). The
+                // bare built-in form (`Some`/`None`) carries no `enum_name` and keys on variant only.
                 if let Some(en) = enum_name
-                    && ty.as_ref() != self.enum_bare_key(en).as_str()
+                    && crate::compiler::bare_display(ty.as_ref()).as_str() != en.as_str()
                 {
                     return None;
                 }

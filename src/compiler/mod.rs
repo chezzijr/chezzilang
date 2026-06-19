@@ -1589,6 +1589,7 @@ impl Compiler {
                     scrut: opt_slot,
                     variant: "None".to_string(),
                     variant_id: crate::vm::op::VID_NONE_VARIANT,
+                    enum_name: None,
                     nbind: 0,
                     bind_start: 0,
                     next: 0,
@@ -1604,6 +1605,7 @@ impl Compiler {
                     scrut: opt_slot,
                     variant: "Some".to_string(),
                     variant_id: crate::vm::op::VID_SOME,
+                    enum_name: None,
                     nbind: 1,
                     bind_start: item_slot,
                     next: 0,
@@ -2090,6 +2092,9 @@ impl Compiler {
                             scrut,
                             variant: name.clone(),
                             variant_id,
+                            // A nested bare nullary variant is always a BUILT-IN (`None`); user
+                            // variants are qualified. The id compare is sufficient — no fallback key.
+                            enum_name: None,
                             nbind: 0,
                             bind_start,
                             next: 0,
@@ -2153,6 +2158,10 @@ impl Compiler {
                         scrut,
                         variant: name.clone(),
                         variant_id,
+                        // SCRUTINEE-DRIVEN fallback — carry the BARE written enum qualifier so the
+                        // VM can resolve an id-compare MISS against the scrutinee's own enum key
+                        // (two whole-imported same-named enums). `None` for a built-in (`Ok`/`Err`).
+                        enum_name: enum_name.clone(),
                         nbind: bindings.len(),
                         bind_start,
                         next: 0,

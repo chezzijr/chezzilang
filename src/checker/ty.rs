@@ -237,7 +237,9 @@ impl fmt::Display for Ty {
             Ty::Ptr => write!(f, "ptr"),
             Ty::Protocol(n) => write!(f, "{n}"),
             Ty::Struct(n, args) | Ty::Enum(n, args) => {
-                write!(f, "{n}")?;
+                // `n` is the qualified IDENTITY key (`<module-key>::Name`); user-facing
+                // diagnostics must render the BARE display name, matching runtime display.
+                write!(f, "{}", crate::compiler::bare_display(n))?;
                 if !args.is_empty() {
                     write!(f, "[")?;
                     for (i, a) in args.iter().enumerate() {
@@ -332,5 +334,23 @@ mod tests {
             .to_string(),
             "fn(int, str) -> bool"
         );
+    }
+
+    #[test]
+    fn qualified_struct_enum_display_strips_module_key() {
+        // The redesign keys nominal types by a qualified identity key (`<mkey>::Name`),
+        // but user-facing Display must render the BARE name.
+        assert_eq!(
+            Ty::Struct("single::Point".into(), vec![]).to_string(),
+            "Point"
+        );
+        assert_eq!(Ty::Enum("a::Color".into(), vec![]).to_string(), "Color");
+        // Nested inside a generic — every embedded nominal type strips too.
+        assert_eq!(
+            Ty::list(Ty::Struct("geo::Point".into(), vec![])).to_string(),
+            "list[Point]"
+        );
+        // A bare (unqualified) key is unchanged.
+        assert_eq!(Ty::strukt("Point").to_string(), "Point");
     }
 }

@@ -2292,6 +2292,54 @@ fn entry_rejects(src: &str, needle: &str) {
     );
 }
 
+/// BLOCKER 1 — user-facing checker errors naming a user struct/enum must render the BARE display
+/// name, NOT the qualified IDENTITY key the redesign introduced (`<module-key>::Name`). Asserts the
+/// WHOLE message (`==`, not `contains`) across field / method / type-mismatch sites so a leaked
+/// `main::` prefix would fail. (Pre-fix these leaked `main::Point`/`main::Color`.)
+#[test]
+fn error_messages_render_bare_struct_enum_name() {
+    // unknown field on a struct
+    let errs = check_entry("struct Point:\n    x: int\np := Point(1)\nprint(p.nope)\n");
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert_eq!(errs[0].message, "type Point has no field 'nope'");
+
+    // unknown method on a struct
+    let errs = check_entry("struct Point:\n    x: int\np := Point(1)\np.frob()\n");
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert_eq!(errs[0].message, "type Point has no method 'frob'");
+
+    // type mismatch — a Point where an int is expected renders the BARE struct name
+    let errs = check_entry(
+        "struct Point:\n    x: int\nfn takes_int(n: int):\n    print(n)\np := Point(1)\ntakes_int(p)\n",
+    );
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert_eq!(
+        errs[0].message,
+        "argument 1 of 'takes_int': expected int, found Point"
+    );
+
+    // unknown field on an enum value renders the BARE enum name
+    let errs = check_entry("enum Color:\n    Red\nc := Color.Red\nprint(c.nope)\n");
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert_eq!(errs[0].message, "type Color has no field 'nope'");
+}
+
+/// BLOCKER 1 — cross-module struct: an imported type's error must still render BARE (`Point`), not
+/// the qualified key (`dep::Point`). Uses a two-file graph so the struct carries `<mkey>::Point`.
+#[test]
+fn error_messages_render_bare_cross_module_struct() {
+    let t = TmpDir::new();
+    t.write("dep.chz", "struct Point:\n    x: int\n");
+    let entry = t.write("main.chz", "import dep\np := dep.Point(1)\nprint(p.nope)\n");
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert_eq!(errs[0].message, "type Point has no field 'nope'");
+}
+
 #[test]
 fn native_math_floor_typechecks_and_returns_float() {
     entry_ok("import std.math\nfn main():\n    x: float = math.floor(2.7)\n    print(x)\n");

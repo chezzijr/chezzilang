@@ -351,6 +351,12 @@ pub enum Op {
         /// compare — the JIT jump-table groundwork). `variant` is kept only for the cold error message
         /// ("pattern '…' binds …"). `VID_NONE` for an unregistered variant (never matches).
         variant_id: u32,
+        /// SCRUTINEE-DRIVEN fallback key: the BARE written enum qualifier of a user pattern
+        /// (`Color` from `Color.Red`), or `None` for a built-in/nullary arm (`Some`/`None`). On an
+        /// id-compare MISS, the VM checks the scrutinee's own qualified enum key's bare form against
+        /// this name — so two whole-imported same-named enums resolve from the value, not from a
+        /// nondeterministic import-map guess. `None` ⇒ pure-int dispatch only (zero behavior change).
+        enum_name: Option<String>,
         nbind: usize,
         bind_start: usize,
         next: usize,
