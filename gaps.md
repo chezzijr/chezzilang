@@ -56,6 +56,20 @@ std.math trig + request verbs landed; concurrency D6 complete (Path C resolved).
   silent misroute into the documented `cannot reassign captured binding` error (`docs/syntax.md:828`
   promises read-only captures, enforced today only across `spawn`/`submit`).
 
+- **⚪ Module-scoped types: a few error paths leak the qualified identity key — latent, UNREACHABLE on
+  HEAD** (verified 2026-06-20). Module-scoped types key every user struct/enum by an always-qualified
+  identity (`mod::Point`) with a separate bare display name (`Point`) rendered in all *reachable*
+  user-facing output. A handful of *defensive* error strings still interpolate the raw key instead of
+  `bare_display`/`display_name`: `dispatch_index_method` (`vm/mod.rs:12121`) and the `next`-dispatch
+  errors (`interp/mod.rs:4636/4833/5003` + the VM twins) say `struct 'mod::Point' has no method '…'`.
+  But no well-typed program reaches them: the checker statically gates indexing/slicing/iteration on the
+  protocol method existing, so these are `unreachable!()`-adjacent. Two adversarial reviewers (build +
+  run) could not trigger any. Not fixed pre-emptively because the VM strings are contracted
+  byte-identical with their interp twins (parity-tested stdout), so a fix must touch every mirrored
+  site at once for zero observable gain. Re-open only if an index/slice/iter path becomes reachable
+  without the protocol-method check. **Pre-emptive fix:** wrap the interpolated key in
+  `crate::compiler::bare_display(...)` at all mirrored sites in lockstep.
+
 ### 🟡 Concurrency (deeper tracking in `docs/concurrency.md` §11 + `docs/concurrency-tier-d.md`)
 
 The `--parallel` engine is a true M:N scheduler through D6 (fibers, work-stealing, dirty pool,
