@@ -2,7 +2,7 @@
 //! Chezzi before the bytecode VM (M5). Single-file programs run here.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl,
+    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl, Import,
     LitPattern, MatchArm, MatchExprArm, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp,
     WaitArm, WaitTarget,
 };
@@ -274,6 +274,23 @@ struct Interp {
     /// exactly as the compiler does (two-engine parity). Empty for a single-source run (the module's
     /// own struct decls suffice).
     extern_struct_fields: std::collections::HashMap<String, Vec<crate::ast::Field>>,
+    /// User type names (struct / enum / type-alias) declared in ANY module, gathered before
+    /// evaluation. Module-scoped types: a `from`-imported TYPE name carries no runtime value (types
+    /// resolve through the program-global struct/variant tables by name), so `bind_import` skips a
+    /// from-member that is in this set — mirroring how `std.ffi` width type imports are skipped.
+    type_names: std::collections::HashSet<String>,
+    /// Module-scoped types: `(declaring module_idx, bare type name) → runtime key`. Bare in the
+    /// no-collision case; `<dotted>::Name` on a genuine cross-module clash. Computed identically to
+    /// the compiler's `assign_type_keys` so both engines agree on the runtime key (parity).
+    type_keys: std::collections::HashMap<(usize, String), String>,
+    /// `module id → its graph index`, so `eval_module` can find the current module's index.
+    module_idx_of: std::collections::HashMap<crate::resolver::ModuleId, usize>,
+    /// `module_idx → its declared user type names` (struct/enum/alias).
+    module_types: Vec<std::collections::HashSet<String>>,
+    /// The CURRENT module's index (set per `eval_module`).
+    cur_module_idx: usize,
+    /// The CURRENT module's bound module name → that module's index (for qualified `geo.X`).
+    imported_module_idx: std::collections::HashMap<String, usize>,
 }
 
 /// A task registered by `spawn`, awaiting its nursery's join barrier. The callee/receiver and
@@ -361,6 +378,12 @@ impl Interp {
             executors: Vec::new(),
             extern_aliases: std::collections::HashMap::new(),
             extern_struct_fields: std::collections::HashMap::new(),
+            type_names: std::collections::HashSet::new(),
+            type_keys: std::collections::HashMap::new(),
+            module_idx_of: std::collections::HashMap::new(),
+            module_types: Vec::new(),
+            cur_module_idx: 0,
+            imported_module_idx: std::collections::HashMap::new(),
         };
         // Built-in Result / Option variants — available without any declaration.
         interp.register_variant("Ok", "Result", 1);
@@ -378,6 +401,15 @@ impl Interp {
                 arity,
             },
         );
+    }
+
+    /// The module-scoped runtime key for a type `name` declared in module `module_idx` (bare unless
+    /// disambiguated by a genuine cross-module clash). Mirrors the compiler's `type_key`.
+    fn type_key(&self, module_idx: usize, name: &str) -> String {
+        self.type_keys
+            .get(&(module_idx, name.to_string()))
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
     }
 
     /// Evaluate an expression to a value.
@@ -524,11 +556,35 @@ impl Interp {
                 })))
             }
             ExprKind::Field { obj, name } => {
+                // `module.Enum.Variant` (nullary, qualified value form) → the variant value.
+                if let ExprKind::Field {
+                    obj: inner,
+                    name: ename,
+                } = &obj.kind
+                    && let ExprKind::Ident(mname) = &inner.kind
+                    && self.env.get_local(mname).is_none()
+                    && let Some(&tidx) = self.imported_module_idx.get(mname)
+                    && self
+                        .module_types
+                        .get(tidx)
+                        .is_some_and(|t| t.contains(ename))
+                    && let ekey = self.type_key(tidx, ename)
+                    && let Some(def) = self.variants.get(&(ekey, name.clone()))
+                    && def.arity == 0
+                {
+                    return Ok(Value::Enum {
+                        ty: def.enum_name.clone(),
+                        variant: name.as_str().into(),
+                        payload: Vec::new(),
+                    });
+                }
                 // `Enum.Variant` (nullary) → the variant value, mirroring the bare Ident path. A
-                // binding named like the enum wins, matching the checker/compiler.
+                // binding named like the enum wins, matching the checker/compiler. The enum resolves
+                // to the current module's runtime key (bare unless disambiguated).
                 if let ExprKind::Ident(ename) = &obj.kind
                     && self.env.get_local(ename).is_none()
-                    && let Some(def) = self.variants.get(&(ename.clone(), name.clone()))
+                    && let ekey = self.type_key(self.cur_module_idx, ename)
+                    && let Some(def) = self.variants.get(&(ekey, name.clone()))
                     && def.arity == 0
                 {
                     return Ok(Value::Enum {
@@ -995,35 +1051,50 @@ impl Interp {
         // A method call `obj.name(args)` — bind `obj` as `self`. But `Enum.Variant(args)` is a
         // qualified variant constructor, not a method: an unbound enum name dotted with its variant.
         if let ExprKind::Field { obj, name } = &callee.kind {
+            // `module.Struct(args)` → qualified struct constructor.
+            if let ExprKind::Ident(mname) = &obj.kind
+                && self.env.get_local(mname).is_none()
+                && let Some(&tidx) = self.imported_module_idx.get(mname)
+                && self
+                    .module_types
+                    .get(tidx)
+                    .is_some_and(|t| t.contains(name))
+            {
+                let key = self.type_key(tidx, name);
+                if let Some(def) = self.structs.get(&key).cloned() {
+                    let arg_vals = args
+                        .iter()
+                        .map(|a| self.eval(a))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return self.construct_struct(&key, &def, arg_vals, span);
+                }
+            }
+            // `module.Enum.Variant(args)` → qualified payload-variant constructor.
+            if let ExprKind::Field {
+                obj: inner,
+                name: ename,
+            } = &obj.kind
+                && let ExprKind::Ident(mname) = &inner.kind
+                && self.env.get_local(mname).is_none()
+                && let Some(&tidx) = self.imported_module_idx.get(mname)
+                && self
+                    .module_types
+                    .get(tidx)
+                    .is_some_and(|t| t.contains(ename))
+            {
+                let ekey = self.type_key(tidx, ename);
+                if let Some(def) = self.variants.get(&(ekey.clone(), name.clone())).cloned() {
+                    return self.build_variant(&def, name, args, span);
+                }
+            }
+            // `Enum.Variant(args)` → variant constructor (current module's runtime key for the enum).
             if let ExprKind::Ident(ename) = &obj.kind
                 && self.env.get_local(ename).is_none()
-                && self.variants.contains_key(&(ename.clone(), name.clone()))
+                && let ekey = self.type_key(self.cur_module_idx, ename)
+                && self.variants.contains_key(&(ekey.clone(), name.clone()))
             {
-                let arg_vals = args
-                    .iter()
-                    .map(|a| self.eval(a))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let def = self
-                    .variants
-                    .get(&(ename.clone(), name.clone()))
-                    .cloned()
-                    .unwrap();
-                if arg_vals.len() != def.arity {
-                    return Err(RuntimeError {
-                        message: format!(
-                            "variant '{}' expects {} value(s), got {}",
-                            name,
-                            def.arity,
-                            arg_vals.len()
-                        ),
-                        span,
-                    });
-                }
-                return Ok(Value::Enum {
-                    ty: def.enum_name.clone(),
-                    variant: name.as_str().into(),
-                    payload: arg_vals,
-                });
+                let def = self.variants.get(&(ekey, name.clone())).cloned().unwrap();
+                return self.build_variant(&def, name, args, span);
             }
             return self.eval_method_call(obj, name, args, span);
         }
@@ -1164,8 +1235,11 @@ impl Interp {
             if builtins::is_builtin(name) {
                 return builtins::call(name, arg_vals, span);
             }
-            if let Some(def) = self.structs.get(name).cloned() {
-                return self.construct_struct(name, &def, arg_vals, span);
+            // A bare struct ctor: resolve to the current module's runtime key (bare unless this
+            // module's struct collided with another's). A from-imported struct keeps its bare key.
+            let struct_key = self.type_key(self.cur_module_idx, name);
+            if let Some(def) = self.structs.get(&struct_key).cloned() {
+                return self.construct_struct(&struct_key, &def, arg_vals, span);
             }
             // A bare *built-in* variant constructor (`Ok(x)`, `Some(x)`) — user variants are qualified
             // (the `Field` arm above), so only built-ins resolve bare here.
@@ -1861,6 +1935,38 @@ impl Interp {
     }
 
     /// Construct a struct instance, binding the positional args to fields in declaration order.
+    /// Evaluate `args`, arity-check against the variant `def`, and build the enum value. Shared by the
+    /// bare and the qualified (`module.Enum.Variant`) constructor paths. `def.enum_name` is the enum's
+    /// runtime key (bare unless disambiguated), stamped into `Value::Enum.ty` for Display/match parity.
+    fn build_variant(
+        &mut self,
+        def: &VariantDef,
+        variant: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let arg_vals = args
+            .iter()
+            .map(|a| self.eval(a))
+            .collect::<Result<Vec<_>, _>>()?;
+        if arg_vals.len() != def.arity {
+            return Err(RuntimeError {
+                message: format!(
+                    "variant '{}' expects {} value(s), got {}",
+                    variant,
+                    def.arity,
+                    arg_vals.len()
+                ),
+                span,
+            });
+        }
+        Ok(Value::Enum {
+            ty: def.enum_name.clone(),
+            variant: variant.into(),
+            payload: arg_vals,
+        })
+    }
+
     fn construct_struct(
         &mut self,
         name: &str,
@@ -3797,6 +3903,20 @@ impl Interp {
 
         let mod_globals = value::ModEnv::new();
         let saved = self.env.swap_globals(mod_globals.clone());
+        // Module-scoped types: record this module's index + its bound module bindings (for qualified
+        // construction). Must match the compiler's per-module state so the runtime keys agree.
+        self.cur_module_idx = self.module_idx_of.get(&lm.id).copied().unwrap_or(0);
+        self.imported_module_idx.clear();
+        for imp in &lm.imports {
+            if let Import::Module { path, alias } = &imp.import {
+                let bind = alias
+                    .clone()
+                    .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                if let Some(&tidx) = self.module_idx_of.get(&imp.target) {
+                    self.imported_module_idx.insert(bind, tidx);
+                }
+            }
+        }
         // Bind this module's imports before its body runs (dependencies are already evaluated, so
         // their namespaces are in `self.namespaces`).
         let bind = lm.imports.iter().try_for_each(|imp| self.bind_import(imp));
@@ -3841,6 +3961,11 @@ impl Interp {
                     {
                         continue;
                     }
+                    // A `from`-imported USER type (struct/enum/alias) carries no runtime value — it
+                    // resolves through the program-global type tables by name. Skip the value bind.
+                    if self.type_names.contains(member) {
+                        continue;
+                    }
                     let value =
                         ns.members
                             .0
@@ -3876,9 +4001,11 @@ impl Interp {
                     methods,
                     ..
                 } => {
-                    // Type names are program-global in M4.5 (per-module type namespacing is
-                    // deferred): a name reused across modules is a collision, not a shadow.
-                    if self.structs.contains_key(name) {
+                    // Module-scoped types: register under this module's runtime KEY (bare unless a
+                    // genuine cross-module clash disambiguated it). A duplicate KEY is a real
+                    // redefinition (same module, same name) — still rejected.
+                    let key = self.type_key(self.cur_module_idx, name);
+                    if self.structs.contains_key(&key) {
                         return Err(RuntimeError {
                             message: format!("type '{name}' is already defined"),
                             span: stmt.span,
@@ -3892,13 +4019,14 @@ impl Interp {
                             .collect(),
                         home: home.clone(),
                     };
-                    self.structs.insert(name.clone(), std::rc::Rc::new(def));
-                    self.struct_fields.insert(name.clone(), fields.clone());
+                    self.structs.insert(key.clone(), std::rc::Rc::new(def));
+                    self.struct_fields.insert(key, fields.clone());
                 }
                 // Type-erased: type parameters are checker-only (identical runtime per instantiation).
                 StmtKind::Enum { name, variants, .. } => {
+                    let key = self.type_key(self.cur_module_idx, name);
                     for v in variants {
-                        self.register_variant(&v.name, name, v.payload.len());
+                        self.register_variant(&v.name, &key, v.payload.len());
                     }
                 }
                 StmtKind::Extern { lib, fns } => {
@@ -5171,6 +5299,44 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
                     .extern_struct_fields
                     .insert(name.clone(), fields.clone());
             }
+        }
+    }
+    // Gather every module's user type names (struct/enum/alias) so a `from`-imported type — which
+    // carries no runtime value — is skipped at `bind_import` rather than erroring (module-scoped
+    // types resolve through the program-global tables by name). Also compute the module-scoped
+    // runtime-key map (IDENTICAL algorithm to the compiler's `assign_type_keys`, so both engines
+    // agree on every key — parity even for a genuine cross-module name clash).
+    interp.module_types = vec![std::collections::HashSet::new(); graph.modules.len()];
+    let mut declarers: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (idx, lm) in graph.modules.iter().enumerate() {
+        interp.module_idx_of.insert(lm.id.clone(), idx);
+        if lm.native.is_some() {
+            continue;
+        }
+        for s in &lm.ast.stmts {
+            if let StmtKind::Struct { name, .. }
+            | StmtKind::Enum { name, .. }
+            | StmtKind::TypeAlias { name, .. } = &s.kind
+            {
+                interp.type_names.insert(name.clone());
+                interp.module_types[idx].insert(name.clone());
+                let v = declarers.entry(name.clone()).or_default();
+                if !v.contains(&idx) {
+                    v.push(idx);
+                }
+            }
+        }
+    }
+    for (name, mods) in &declarers {
+        if mods.len() < 2 {
+            continue;
+        }
+        for &idx in &mods[1..] {
+            let dotted = graph.modules[idx].label();
+            interp
+                .type_keys
+                .insert((idx, name.clone()), format!("{dotted}::{name}"));
         }
     }
     // Modules are in load order: dependencies first, entry last.

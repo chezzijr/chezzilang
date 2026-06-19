@@ -527,6 +527,10 @@ pub struct Program {
     /// `chezzi test` discovery — every test suite (a struct with ≥1 `test fn` method) in the entry
     /// module, with its zero-arg constructor thunk + test methods + present lifecycle hooks.
     pub suites: Vec<SuiteInfo>,
+    /// User type names (struct / enum / type-alias) declared in ANY module. Module-scoped types: a
+    /// `from`-imported TYPE name carries no runtime value (types resolve through `structs`/`variants`
+    /// by name), so `bind_import` skips a from-member in this set — like `std.ffi` width imports.
+    pub type_names: std::collections::HashSet<String>,
 }
 
 /// Discovery metadata for one test suite (a struct containing `test fn` methods). The runner builds

@@ -11,6 +11,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Module-scoped user types (struct / enum / `type` alias).** Types are now **private to their
+declaring module**, mirroring how top-level functions are namespaced — exported by default (no `pub`),
+visible elsewhere ONLY via import. `import core.geo` → `geo.Point(1,2)` / `x: geo.Point` /
+`list[geo.Point]` / `geo.Color.Red`; `import Point from core.geo` → bare `Point(1,2)` (rename allowed
+for user types). A bare use of a type whose module was imported whole but not named-imported is a
+**check-time error** with an import hint. Two modules MAY declare the same type name (no collision).
+Enforcement lives in the **checker** (per-module type tables: `structs`/`enums`/`variants`/`aliases`
+cleared per module + re-injected via `bind_import`; `ModuleSig` now carries resolved struct/enum/alias
+defs; reverse `types_by_name` index drives the hint; new `Type::Qualified{module,name,args}` AST +
+parser `m.T[args]` production). Runtime keying is **OPTION C — bare key in the common case**: the
+compiler assigns each type a bare runtime key unless a name is declared in ≥2 modules BOTH reachable
+in one program, in which case the non-entry one is disambiguated to `mod::Name` (so print/error/JSON
+output is **byte-identical** for non-colliding types — `Point(x=1, y=2)` unchanged). The same
+deterministic key map is computed identically by both engines (compiler `assign_type_keys` ≡ interp),
+so the cooperative VM, `--parallel`, and the interp agree on every key (3-engine parity, incl. a
+genuine collision and a cross-airlock imported-type value). Imported `type` aliases are **transparent**
+(body resolved in the defining module's scope, carrying the FFI-width license; an unlicensed alias
+embedding an un-imported width is rejected at import). Reserved/native types (`Result`/`Option`/
+`Some`/`Ok`, `Ref`, the std type surface on `import std.*`, FFI widths) stay global/bare always. The
+runtime `bind_import` (both engines) skips a `from`-imported TYPE name (no runtime value — types
+resolve via the program-global tables by name), like `std.ffi` width imports. New grammar production
+in `docs/grammar.bnf` (`conformance` green). Docs: `docs/spec.md` + `docs/syntax.md` (Imports). The
+language freeze is a **pre-JIT gate**, not a hard feature freeze — small scoped semantics fixes still
+land.
+
 **✅ Project tooling — `install.sh` + `chezzi init [dir]`.** Quality-of-life, no runtime/semantic
 change, no new deps. `install.sh` (POSIX `sh`, `set -e`, executable) guards for `cargo` on PATH
 (hinting https://rustup.rs if missing), then `cargo install --path .` and reminds the user to keep
@@ -324,8 +349,10 @@ faulting inside *imported* code reports the test file, not the library file — 
 `assert_eq`/value-diff messages, parametrized-test sugar, a Chezzi-side runner, running the runner on
 the interp engine. Grammar (`assertStmt`, `testFnDecl`) + corpus + `cargo test conformance` green.
 
-**🟦 M19 — Perf track (in progress).** The language is frozen feature-wise; this milestone is pure
-optimization, so the bar is **behavior-preserving + two-engine parity** on every change. Measure first
+**🟦 M19 — Perf track (in progress).** The freeze is a **pre-JIT gate**, not a hard feature freeze —
+small, well-scoped semantics fixes still land (e.g. module-scoped types, 2026-06); this milestone is
+otherwise pure optimization, so the bar is **behavior-preserving + two/three-engine parity** on every
+change. Measure first
 (`cargo run --release -- run benches/run.chz`), land behind a failing-then-green correctness test, keep
 parity green, re-measure, record the delta in [`docs/benchmarks.md`](docs/benchmarks.md). Several levers
 moved a *different* bench than predicted — trust the measurement, not the a-priori guess. The frozen

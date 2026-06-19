@@ -66,6 +66,17 @@ pub fn from_type(
         },
         Type::Func { .. } => Err("decode: cannot decode into a function type".to_string()),
         Type::Tuple(_) => Err("decode: cannot decode into a tuple type".to_string()),
+        // A module-qualified struct target (`json.decode[geo.Point]`): the `structs` descriptor map
+        // is keyed by the runtime (bare-or-disambiguated) struct name, which equals the bare name in
+        // the common case — resolve through the same struct path. Generic qualified targets are not
+        // decodable (mirrors the generic-struct rejection).
+        Type::Qualified { name, args, .. } => {
+            if args.is_empty() {
+                struct_descriptor(name, structs, visiting)
+            } else {
+                Err(format!("decode: cannot decode into generic type '{name}'"))
+            }
+        }
     }
 }
 

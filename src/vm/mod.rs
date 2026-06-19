@@ -3143,6 +3143,11 @@ impl Vm {
                     {
                         continue;
                     }
+                    // A `from`-imported USER type (struct/enum/alias) carries no runtime value — it
+                    // resolves through the program-global type tables by name. Skip the value bind.
+                    if self.program.type_names.contains(member) {
+                        continue;
+                    }
                     let value = self.module_global(target_obj, member).ok_or_else(|| {
                         let tname = self.module_name(target_obj);
                         self.err(
@@ -15634,6 +15639,7 @@ main()
             cffi_defs: vec![],
             tests: vec![],
             suites: vec![],
+            type_names: Default::default(),
         }
     }
 
@@ -24046,6 +24052,124 @@ main()
     /// Convenience: a single entry file (the common std-module case).
     fn parity_entry(src: &str) -> String {
         assert_parity_file(&[("main.chz", src)], "main.chz")
+    }
+
+    // ----- module-scoped user types: cross-module construction parity -----
+
+    /// `import geo; geo.Point(1,2)` constructs and prints `Point(x=1, y=2)` (BARE name, no `::`),
+    /// byte-identical on both engines.
+    #[test]
+    fn qualified_struct_ctor_parity() {
+        let out = assert_parity_file(
+            &[
+                ("geo.chz", "struct Point:\n    x: int\n    y: int\n"),
+                (
+                    "main.chz",
+                    "import geo\np := geo.Point(1, 2)\nprint(p)\nprint(p.x)\n",
+                ),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "Point(x=1, y=2)\n1\n");
+    }
+
+    /// `import S from types` (struct) constructs bare.
+    #[test]
+    fn from_import_struct_ctor_parity() {
+        let out = assert_parity_file(
+            &[
+                ("types.chz", "struct S:\n    n: int\n"),
+                ("main.chz", "import S from types\nprint(S(7))\n"),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "S(n=7)\n");
+    }
+
+    /// `import geo` then `geo.Color.Red` (nullary) and `geo.Shape.Circle(5)` (payload) construct.
+    #[test]
+    fn qualified_enum_ctor_parity() {
+        let out = assert_parity_file(
+            &[
+                (
+                    "geo.chz",
+                    "enum Color:\n    Red\n    Green\nenum Shape:\n    Circle(int)\n",
+                ),
+                (
+                    "main.chz",
+                    "import geo\nc := geo.Color.Red\ns := geo.Shape.Circle(5)\nmatch c:\n    Color.Red: print(\"red\")\n    Color.Green: print(\"green\")\nmatch s:\n    Shape.Circle(r): print(r)\n",
+                ),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "red\n5\n");
+    }
+
+    /// `import Color from types` (enum) constructs bare.
+    #[test]
+    fn from_import_enum_ctor_parity() {
+        let out = assert_parity_file(
+            &[
+                ("types.chz", "enum Color:\n    Red\n    Green\n"),
+                (
+                    "main.chz",
+                    "import Color from types\nc := Color.Green\nmatch c:\n    Color.Red: print(\"r\")\n    Color.Green: print(\"g\")\n",
+                ),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "g\n");
+    }
+
+    /// Two modules both declare `struct Point` with DIFFERENT layouts, both reachable in the entry
+    /// program: a REAL collision. Each constructs correctly; the entry/first keeps the bare key
+    /// (`Point(...)`), the other is disambiguated. Byte-identical on both engines.
+    #[test]
+    fn real_collision_two_modules_same_struct() {
+        let out = assert_parity_file(
+            &[
+                ("a.chz", "struct Point:\n    x: int\n"),
+                ("b.chz", "struct Point:\n    y: int\n    z: int\n"),
+                (
+                    "main.chz",
+                    "import a\nimport b\npa := a.Point(1)\npb := b.Point(2, 3)\nprint(pa.x)\nprint(pb.y)\nprint(pb.z)\n",
+                ),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "1\n2\n3\n");
+    }
+
+    /// A spawned task constructs an imported struct AND a value crosses a Channel (cross-airlock,
+    /// data-not-time): identical on interp, default VM, and `--parallel`.
+    #[test]
+    fn imported_struct_across_airlock_three_engine() {
+        let files = [
+            ("geo.chz", "struct Point:\n    x: int\n    y: int\n"),
+            (
+                "main.chz",
+                "import geo\nch := Channel[geo.Point]()\nparallel:\n    spawn:\n        ch.send(geo.Point(3, 4))\np := ch.recv()\nprint(p.x + p.y)\n",
+            ),
+        ];
+        let t = TmpDir::new();
+        let mut entry = None;
+        for (rel, c) in &files {
+            let p = t.write(rel, c);
+            if *rel == "main.chz" {
+                entry = Some(p);
+            }
+        }
+        let entry = entry.unwrap();
+        let (io, _, ir, _) = crate::interp::run_file(&entry);
+        let (vo, _, vr, _) = run_file(&entry);
+        let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+        assert!(
+            ir.is_ok() && vr.is_ok() && pr.is_ok(),
+            "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
+        );
+        assert_eq!(io, "7\n");
+        assert_eq!(io, vo, "interp vs vm");
+        assert_eq!(io, po, "interp vs --parallel");
     }
 
     // ----- C5 (A2): program-exit auto-drain is skipped on a hard `os.exit` -----

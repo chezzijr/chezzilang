@@ -1413,6 +1413,30 @@ impl Parser {
             return Ok(ty);
         }
         let name = self.expect_ident()?;
+        // A module-qualified type `module.Type` (mirrors how `module.func()` is reached): after the
+        // first ident, a `.` introduces the type's name in the bound module. Any trailing `[args]`
+        // then belongs to the qualified type (`geo.Box[int]`).
+        if self.eat(&Token::Dot) {
+            let member = self.expect_ident()?;
+            let args = if self.eat(&Token::LBracket) {
+                let mut args = vec![self.parse_type()?];
+                while self.eat(&Token::Comma) {
+                    args.push(self.parse_type()?);
+                }
+                self.expect(&Token::RBracket)?;
+                args
+            } else {
+                Vec::new()
+            };
+            let ty = Type::Qualified {
+                module: name,
+                name: member,
+                args,
+            };
+            let ty = self.parse_type_postfix(ty)?;
+            self.depth -= 1;
+            return Ok(ty);
+        }
         let mut ty = if self.eat(&Token::LBracket) {
             let mut args = vec![self.parse_type()?];
             while self.eat(&Token::Comma) {
@@ -3781,6 +3805,57 @@ mod tests {
                     "list".into(),
                     vec![Type::Named("int".into())]
                 )]
+            ))
+        );
+    }
+
+    /// A module-qualified type annotation: `x: geo.Point` parses to `Type::Qualified`.
+    #[test]
+    fn qualified_type_annotation() {
+        let StmtKind::Fn(decl) = only("fn f(x: geo.Point):\n    return x\n") else {
+            panic!()
+        };
+        assert_eq!(
+            decl.params[0].ty,
+            Some(Type::Qualified {
+                module: "geo".into(),
+                name: "Point".into(),
+                args: vec![],
+            })
+        );
+    }
+
+    /// A generic qualified type: `g.Box[int]` carries its type args.
+    #[test]
+    fn qualified_generic_type_annotation() {
+        let StmtKind::Fn(decl) = only("fn f(x: g.Box[int]):\n    return x\n") else {
+            panic!()
+        };
+        assert_eq!(
+            decl.params[0].ty,
+            Some(Type::Qualified {
+                module: "g".into(),
+                name: "Box".into(),
+                args: vec![Type::Named("int".into())],
+            })
+        );
+    }
+
+    /// A qualified type nested inside a generic: `list[geo.Point]`.
+    #[test]
+    fn qualified_type_inside_generic() {
+        let StmtKind::Fn(decl) = only("fn f(x: list[geo.Point]):\n    return x\n") else {
+            panic!()
+        };
+        assert_eq!(
+            decl.params[0].ty,
+            Some(Type::Generic(
+                "list".into(),
+                vec![Type::Qualified {
+                    module: "geo".into(),
+                    name: "Point".into(),
+                    args: vec![],
+                }]
             ))
         );
     }
