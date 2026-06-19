@@ -12506,7 +12506,9 @@ impl Vm {
         // `enum_name: None` and never enter this branch (pure-int dispatch — zero behavior change).
         if !matches && let Some(en) = enum_name {
             let (ekey, vname) = self.enum_names(vid);
-            matches = vname == variant && crate::compiler::bare_display(ekey) == en;
+            // Compare the bare display name without allocating (hot match path): strip the
+            // `<module-key>::` prefix in place rather than via `bare_display`'s owned String.
+            matches = vname == variant && ekey.rsplit("::").next().unwrap_or(ekey) == en;
         }
         if !matches {
             self.jump(next);

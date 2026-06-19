@@ -2340,6 +2340,49 @@ fn error_messages_render_bare_cross_module_struct() {
     assert_eq!(errs[0].message, "type Point has no field 'nope'");
 }
 
+/// BLOCKER 1 (match errors) — non-exhaustive / literal-against-enum match errors on a cross-module
+/// enum must render the BARE enum name (`Color`), not the qualified identity key (`a::Color`). These
+/// errors interpolate the `MatchKind` label (the enum key) directly, so they bypassed the
+/// `Ty::Display` fix and leaked the key. Uses a two-module collision so the enum carries `<mkey>::Color`.
+#[test]
+fn match_error_messages_render_bare_enum_name() {
+    let t = TmpDir::new();
+    t.write("a.chz", "enum Color:\n    Red\n    Blue\n");
+    t.write("b.chz", "enum Color:\n    Red\n    Green\n");
+
+    // non-exhaustive match: missing Blue — must name bare `Color`
+    let entry = t.write(
+        "main.chz",
+        "import a\nimport b\nc := a.Color.Red\nmatch c:\n    Color.Red: print(\"r\")\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert_eq!(
+        errs[0].message,
+        "non-exhaustive match on Color: missing Blue"
+    );
+
+    // literal against an enum — must name bare `Color`
+    let entry = t.write(
+        "main.chz",
+        "import a\nimport b\nc := a.Color.Red\nmatch c:\n    5: print(\"five\")\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(
+        errs.iter()
+            .any(|e| e.message == "cannot match a literal against Color"),
+        "expected bare literal-match error, got: {errs:?}"
+    );
+}
+
 #[test]
 fn native_math_floor_typechecks_and_returns_float() {
     entry_ok("import std.math\nfn main():\n    x: float = math.floor(2.7)\n    print(x)\n");

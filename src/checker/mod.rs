@@ -3890,7 +3890,13 @@ impl Checker {
                         self.check_pattern_qualifier(enum_name, name, Some(label.as_str()), span);
                         let payload = variants.get(name).cloned();
                         if payload.is_none() {
-                            self.error(span, format!("'{name}' is not a variant of {label}"));
+                            self.error(
+                                span,
+                                format!(
+                                    "'{name}' is not a variant of {}",
+                                    crate::compiler::bare_display(label.as_str())
+                                ),
+                            );
                         }
                         if !covered.insert(name.clone()) {
                             self.error(span, format!("duplicate match arm '{name}'"));
@@ -3918,15 +3924,27 @@ impl Checker {
                             }
                         }
                     }
-                    Pattern::Literal(_) => {
-                        self.error(span, format!("cannot match a literal against {label}"))
-                    }
-                    Pattern::Range { .. } => {
-                        self.error(span, format!("cannot match a range against {label}"))
-                    }
-                    Pattern::Tuple(_) => {
-                        self.error(span, format!("cannot match a tuple against {label}"))
-                    }
+                    Pattern::Literal(_) => self.error(
+                        span,
+                        format!(
+                            "cannot match a literal against {}",
+                            crate::compiler::bare_display(label.as_str())
+                        ),
+                    ),
+                    Pattern::Range { .. } => self.error(
+                        span,
+                        format!(
+                            "cannot match a range against {}",
+                            crate::compiler::bare_display(label.as_str())
+                        ),
+                    ),
+                    Pattern::Tuple(_) => self.error(
+                        span,
+                        format!(
+                            "cannot match a tuple against {}",
+                            crate::compiler::bare_display(label.as_str())
+                        ),
+                    ),
                     Pattern::Ident(_) | Pattern::Wildcard | Pattern::Or(_) => {
                         unreachable!("ident/wildcard/or handled elsewhere")
                     }
@@ -4072,7 +4090,8 @@ impl Checker {
                     self.error(
                         span,
                         format!(
-                            "non-exhaustive match on {label}: missing {}",
+                            "non-exhaustive match on {}: missing {}",
+                            crate::compiler::bare_display(label.as_str()),
                             missing.join(", ")
                         ),
                     );
