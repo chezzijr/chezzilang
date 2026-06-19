@@ -61,23 +61,27 @@ cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see 
 > no-op alias for the default. `--threads=N` (or env `CHEZZI_THREADS`) sizes the OS-thread engine's
 > worker pool — `0`/omitted = all cores, the flag wins over the env, and it errors with `--serial`
 > (not multi-threaded). `--parallel`/`--serial` are mutually exclusive. (The tree-walk interpreter
-> remains the frozen parity oracle for the golden VM-vs-interp tests but has **no CLI flag**.)
+> is **deprecated** and slated for removal — kept for now as the parity oracle for the golden
+> VM-vs-interp tests, with **no CLI flag**.)
 
 ## Conventions
 
 - Commits: single-line conventional (`feat:`, `fix:`, `chore:`, `docs:`, `test:`). No body.
 - Each compiler phase is its own module under `src/`: `lexer` → `parser` → `ast` →
-  `desugar` → `checker` → `compiler` → `vm` (default engine) / `interp` (frozen tree-walk
-  reference), plus `gc`, `native` + `runtime` (builtins / std), `resolver` (module paths).
+  `desugar` → `checker` → `compiler` → `vm` (the engine of record) / `interp` (**deprecated**
+  tree-walk reference, slated for removal), plus `gc`, `native` + `runtime` (builtins / std),
+  `resolver` (module paths).
 - Keep modules small and single-purpose.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
-- **Two engines, asserted equal.** Golden tests run each `examples/*.chz` through both the
-  VM and the interpreter and assert identical stdout. The interpreter is frozen (slated for
-  eventual removal) but parity is still the discipline — a VM change that diverges is a bug.
+- **Interpreter is DEPRECATED.** The bytecode VM is the engine of record. The tree-walk `interp`
+  is deprecated and slated for removal; it's kept *for now* only as the byte-identical parity
+  oracle behind the golden `examples/*.chz` tests. While it's still around, VM↔interp parity is
+  asserted — so don't let a VM change diverge — but build **no** new features on `interp`, and edit
+  it freely to keep parity (it's on its way out, not a second target to design against).
 
 ## Where things stand
 
-Core language is **feature-complete through M18** (scalars, `list`/`map`/`set`/`tuple`,
+Core language is **implemented through M18 (and still evolving)** (scalars, `list`/`map`/`set`/`tuple`,
 generic structs + enums, `Result`/`Option` + `?`, generics + structural protocols,
 exhaustive `match` + guards, closures/HOF, modules, GC, interpolation, pipe, `defer`,
 `recover:`, `Iterator[T]`, slicing/indexing protocols). **Concurrency** has landed through
@@ -88,9 +92,11 @@ OS-thread engine via `--parallel`, netpoller + `std.net`). ~1500 tests green.
 
 See **[`PROGRESS.md`](PROGRESS.md)** — single source of truth for "what's next."
 
-Right now: **M19 — Perf track (in progress).** The language is frozen feature-wise; this milestone
-is pure optimization, so the bar is **behavior-preserving + two-engine parity** on every change —
+Right now: **M19 — Perf track (in progress).** This milestone is performance-focused, so while perf
+work is in flight the bar is **behavior-preserving + two-engine parity** on every change —
 a VM speedup that diverges from the interpreter (or changes observable output) is a bug, not a win.
+(The language is still evolving — new features can land; they just go through their own milestone,
+not silently inside a perf change.)
 Landed: peephole/const-fold, superinstructions, `invoke_value` clone-kill, in-place call args,
 stringify-into-buffer, global-slotting, `ConstStr` interning, struct-field IC, FxHash, call-loop
 flatten, small-string optimization (SSO). Current gap to CPython: **~1.3×–3.5×** slower (worst on
@@ -114,6 +120,6 @@ backlog moved a *different* bench than predicted (logged in `docs/benchmarks.md`
 **Remaining levers** (ranked in **[`docs/future.md`](docs/future.md)** §4): Medium — NaN-boxing
 `Value` (16B→8B, the biggest remaining lever; its own milestone), struct-field inline caching, string
 concat/`split` builder. Big/separate — register VM, generational/incremental GC, and **Cranelift
-AOT/JIT as the stretch end-game** (a whole backend — only once the language has truly stopped moving;
-not next). Frame pooling and general arith-specialization are deprioritized (superinstructions already
+AOT/JIT as the stretch end-game** (a whole backend — a late-stage endeavor once the language has
+matured; not next). Frame pooling and general arith-specialization are deprioritized (superinstructions already
 cover the hot int paths; `CallFrame`'s per-call `Vec`s are alloc-free).

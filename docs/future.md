@@ -6,10 +6,10 @@
 > faster*, with verdicts and rough implementation shape. Most of §1–§3 has since **shipped** (noted
 > inline); §4 (optimizations) is the live M19 backlog.
 
-The language **core** is feature-complete (scalars, `list`/`map`/`set`/`tuple`, generic structs +
+The language **core** is broadly implemented and still evolving (scalars, `list`/`map`/`set`/`tuple`, generic structs +
 enums, `Result`/`Option` + `?`, generics + structural protocols, exhaustive `match`, closures/HOF,
-modules, GC, two engines, interpolation, pipe, panic recovery via `recover:`, the `Iterator[T]`
-protocol bound). What follows is the gap between "complete core" and "language you reach for to write
+modules, GC, interpolation, pipe, panic recovery via `recover:`, the `Iterator[T]`
+protocol bound). What follows is the gap between "core implemented" and "language you reach for to write
 real scripts."
 
 ---

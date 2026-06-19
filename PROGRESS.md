@@ -47,7 +47,7 @@ resolved in the defining module's scope, carrying the FFI-width license; an unli
 an un-imported width is rejected at import). Reserved/native types (`Result`/`Option`/`Some`/`Ok`,
 `Ref`, the std type surface on `import std.*`, FFI widths) stay global/bare always. New grammar
 production in `docs/grammar.bnf` (`conformance` green). Docs: `docs/spec.md` + `docs/syntax.md`
-(Imports). The freeze is a **pre-JIT gate**, not a hard feature freeze.
+(Imports). This is a **pre-JIT sequencing gate**, not a feature freeze — new language work can still land.
 
 **✅ CLI cleanup + parsed `chezzi.toml` entrypoint (5 scoped changes; no engine/semantic change).**
 Quality-of-life + a small manifest reader, zero new deps. (1) **Sample-string rename** `"thuan"` →
@@ -385,8 +385,8 @@ faulting inside *imported* code reports the test file, not the library file — 
 `assert_eq`/value-diff messages, parametrized-test sugar, a Chezzi-side runner, running the runner on
 the interp engine. Grammar (`assertStmt`, `testFnDecl`) + corpus + `cargo test conformance` green.
 
-**🟦 M19 — Perf track (in progress).** The freeze is a **pre-JIT gate**, not a hard feature freeze —
-small, well-scoped semantics fixes still land (e.g. module-scoped types, 2026-06). This milestone is otherwise pure
+**🟦 M19 — Perf track (in progress).** M19 is a **pre-JIT perf push**, not a feature freeze — language
+work still lands (e.g. module-scoped types, 2026-06). This milestone is otherwise pure
 optimization, so the bar is **behavior-preserving + two-engine parity** on every change. Measure first
 (`cargo run --release -- run benches/run.chz`), land behind a failing-then-green correctness test, keep
 parity green, re-measure, record the delta in [`docs/benchmarks.md`](docs/benchmarks.md). Several levers
@@ -504,7 +504,7 @@ conformance` green.
   `+`/`split` aren't exercised by the `str` bench.
 - **Arith specialization + frame pooling: effectively closed** — superinstructions inline the monomorphic
   int path; `CallFrame`'s `Vec`s are alloc-free (no per-call frame alloc to pool).
-- **Big/separate milestones** (only once the language has truly stopped moving): NaN-boxing as its own
+- **Big/separate milestones** (later-stage, once the language has matured): NaN-boxing as its own
   milestone, register VM, generational/incremental GC, and **Cranelift AOT/JIT as the stretch end-game**.
 
 Gap to CPython after Phases 6–7 **~1.1×–3.2×** slower (worst still call-bound `fib` ~3.2×, then `map`/
@@ -606,7 +606,7 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
 
 ## Concurrency — feature-complete (confirmed 2026-06-12)
 
-Core feature-complete through **M18**; **concurrency shipped through Tier-D (D0–D6c) + M-C**. The surface —
+Core implemented through **M18** (still evolving); **concurrency shipped through Tier-D (D0–D6c) + M-C**. The surface —
 `spawn` / `parallel:` nursery / `Channel[T]` / `Shared[T]` / `Executor`, plus the VM's real OS-thread
 engine and the netpoller + `std.net` — is complete and stable. **M-C implicit nurseries shipped
 (2026-06-12)** — every function body and the module top level is an implicit nursery; a bare `spawn` is

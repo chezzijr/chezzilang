@@ -2,7 +2,7 @@
 
 A fast, statically-typed, Python-feel scripting language. Hand-built in Rust.
 
-> **Status:** core language **feature-complete through M18** (scalars + collections, generics +
+> **Status:** core language **implemented through M18 (still evolving)** (scalars + collections, generics +
 > structural protocols, exhaustive `match`, closures/HOF, modules, `Iterator[T]`, slicing/indexing,
 > `defer` + `recover:`); **concurrency shipped through Tier-D** (`spawn` / `parallel:` nursery,
 > `Channel`/`Shared`/`Executor`, real OS-thread M:N scheduler + netpoller + `std.net`). **M19** (a
@@ -507,7 +507,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M16–M18** | Concurrency + `defer` | `spawn` / `parallel:` nursery, `Channel`/`Shared`/`Executor`, real OS-thread M:N engine (`--parallel`) with work-stealing + reduction-counting preemption + netpoller + `std.net`; `defer` (call + block forms). Design in [`docs/concurrency.md`](concurrency.md), phases in [`docs/concurrency-tier-d.md`](concurrency-tier-d.md) |
 | 🟦 **M19** | Perf track (in progress) | Landed: peephole + const-fold, superinstructions, global-slotting, struct-field inline cache, FxHash, `ConstStr` interning, call-loop flatten, small-string optimization. Behavior-preserving + two-engine parity on every change. Backlog ranked in [`docs/future.md §4`](future.md); measured deltas in [`docs/benchmarks.md`](benchmarks.md) |
 | ✅ **M20** | In-language tests | `assert <cond>[, "<msg>"]` (both-engine statement primitive, faults with its source line), the `test fn` marker (free tests + struct **suites** with `before_all`/`after_all`/`before_each`/`after_each` hooks + a shared typed fixture), and `chezzi test [path]` — a Rust-side VM-only runner over `*_test.chz` files (`PASS/FAIL name (file:line) msg`, non-zero exit on failure). Surface in [`docs/syntax.md §9c`](syntax.md) |
-| **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional; only once the language has truly stopped moving) |
+| **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional; a late-stage endeavor once the language has matured) |
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c**; **Level-3 dynamic C-ABI FFI v1
 > shipped** (`extern "lib":` scalar calls via dlopen+libffi, **plus opaque `void*` handles** via the
