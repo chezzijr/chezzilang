@@ -123,7 +123,7 @@ while **`(x,)` is a one-element tuple**.
 
 ```chezzi
 x := 5                 # declare + infer  (type = int)
-name: str = "thuan"    # declare with explicit type
+name: str = "chezzi"   # declare with explicit type
 count := 0
 count += 1             # compound assignment — see below
 a, b = b, a            # tuple swap — multi-target assignment, see below
@@ -1143,20 +1143,23 @@ fn main():
 main()        # nothing runs main for you
 ```
 
-(A future `chezzi.toml` may declare a project `entrypoint` for tooling-driven builds; the language
-core does not special-case `main`.)
+`chezzi.toml`'s `[project] entrypoint` (a dotted module path) declares which module a bare
+`chezzi run` runs; the language core does not special-case `main` (the entry module still calls its
+own `main()`).
 
 **`chezzi init [dir]`** scaffolds a new project (`dir` defaults to the current directory, created if
 missing): a `chezzi.toml` manifest, `src/main.chz` (a `fn main():` followed by a top-level `main()`
 call — there is no automatic entry point), and an example `src/main_test.chz` with `test fn`s. It
-refuses to overwrite an existing `chezzi.toml`. The manifest is a **marker / tooling-only** artifact —
-nothing parses it yet (it carries a real `[project]` name/version plus commented, forward-looking
-`entrypoint` and `[test]` sections); `chezzi run` and `chezzi test` ignore it.
+refuses to overwrite an existing `chezzi.toml`. The manifest is **both a root marker and a parsed
+manifest**: the toolchain reads its `[project]` keys (`name`/`version` metadata, and **`entrypoint`**,
+scaffolded active as `"src.main"`, which a bare `chezzi run` executes). It is a tiny fixed-schema
+reader (`[section]` headers, `key = "value"` string pairs, `#` comments); an empty `chezzi.toml` is a
+valid root marker with no entrypoint.
 
 ## 10. Strings & interpolation
 
 ```chezzi
-name := "thuan"
+name := "chezzi"
 age := 30
 print("hi {name}, age {age}")     # {expr} interpolates
 print("sum: {a + b}")             # any expression
@@ -1198,10 +1201,10 @@ print("literal {{x}} vs value {x}")
 ```
 
 ```chezzi
-print("|{name:<10}|")     # left,  width 10            → "|thuan     |"
-print("|{name:>10}|")     # right                      → "|     thuan|"
-print("|{name:^10}|")     # center                     → "|  thuan   |"
-print("|{name:*^10}|")    # center, '*' fill           → "|**thuan***|"
+print("|{name:<10}|")     # left,  width 10            → "|chezzi    |"
+print("|{name:>10}|")     # right                      → "|    chezzi|"
+print("|{name:^10}|")     # center                     → "|  chezzi  |"
+print("|{name:*^10}|")    # center, '*' fill           → "|**chezzi**|"
 print("{42:06}")          # zero-pad to width 6        → "000042"
 print("{-7:06}")          # sign kept before zeros     → "-00007"
 print("{3.14159:.2f}")    # 2 decimals                 → "3.14"

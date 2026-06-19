@@ -158,7 +158,7 @@ reusing an exhausted one yields nothing.
 fn add(a: int, b: int) -> int:        # explicit params; '-> T' optional (inferred from body)
     return a + b
 
-name := "thuan"
+name := "chezzi"
 print("hi {name}")                     # interpolation
 
 struct Point:
@@ -199,8 +199,10 @@ collection/`<params>`/`<argList>` productions in [`grammar.bnf`](grammar.bnf).)
 
 **Entry model.** Programs run top-to-bottom; there is no automatic `main`. An `Err`/`None` left
 unhandled at the top level (a bare expression statement, or a top-level `?`) exits the program with
-`unhandled error: …` and a non-zero code. A future `chezzi.toml` `entrypoint` (tooling-only) may
-declare which function a project build runs.
+`unhandled error: …` and a non-zero code. A bare `chezzi run` (no file argument) runs the project
+manifest's `[project] entrypoint` — a **dotted module path** (e.g. `"src.main"`), resolved
+root-relatively and executed top-to-bottom like any other file (it is the *module* that runs, not a
+function — the entry module still calls its own `main()`).
 
 ## Imports & module resolution
 
@@ -248,9 +250,12 @@ imported `type` alias is **transparent**: its body is resolved in the *defining*
 cross-module `import Len from sizes` where `type Len = int32` carries its FFI-width license.
 
 `chezzi init [dir]` scaffolds a new project (`chezzi.toml` + `src/main.chz` + an example `*_test.chz`).
-The generated `chezzi.toml` stays **marker / tooling-only** — nothing parses it (the resolver only
-checks for its *presence* to fix the root); it carries a real `[project]` name/version plus commented,
-forward-looking `entrypoint`/`[test]` sections for a future build tool.
+The generated `chezzi.toml` is **both a root marker and a parsed manifest**: the resolver checks for
+its *presence* to fix the root, and the toolchain parses its `[project]` keys. `name`/`version` are
+metadata; **`entrypoint`** (a dotted module path, scaffolded active as `"src.main"`) is what a bare
+`chezzi run` executes. The parser is a tiny fixed-schema reader (`[section]` headers, `key = "value"`
+string pairs, `#` comments); unknown keys/sections are ignored, and an empty `chezzi.toml` is a valid
+root marker (all fields default to unset, so `entrypoint` is required only for the no-file `chezzi run`).
 
 ## Standard library
 
