@@ -43,6 +43,21 @@ you can't call `.next()` on a `list`. Wired (mirroring the `bytes`/`bytearray` O
   is UNCHANGED — a cursor reuses `Iterator[T]`'s type, already sendable; no static change was needed. An
   earlier cut gated the cursor non-sendable like a generator, which panicked the spawned VM worker while
   the interp succeeded — a parity divergence, now fixed.)
+- **Generator airlock = graceful runtime error, never a panic** — a frame-holding generator (a value from
+  calling a generator `fn`) shares the `Iterator[T]` existential with a cursor, so the checker cannot
+  distinguish them; the RUNTIME is the enforcement point. A generator crossing **any** airlock-out site
+  raises a catchable `a generator cannot be sent across tasks` error with the real spawn/nursery-site span:
+  `to_snap`/`snapshot_modules`/`ensure_snapshot` are now fallible (the choke point re-stamps `to_wire`'s
+  placeholder `Span{0,0}` with the nursery span; `ensure_snapshot` memoizes only on success), and the
+  smuggle sites (`deep_clone` for `spawn` args/`spawn:` captures, `Op::NewShared`, `new_atomic`,
+  `Channel.send`/`try_send`, `Shared.set`/`update`, `Atomic.store`/`exchange`/`cas`, plus `wire_args` /
+  `wire_callable` for spawn-method args + `Executor.submit` closure captures) re-stamp via a shared
+  `to_wire_at` helper. The **module-global** path was the missed-critical site: the M:N engine eagerly
+  snapshots EVERY module global at the first nursery, so a module-level generator + any `parallel:` block
+  previously aborted via `to_snap`'s `unreachable!` even when no task touched it — now graceful. (Parity is
+  per-engine, NOT `assert_parity`: interp rejects `yield` EARLIER at gen() with a different message; both
+  engines still reject the program. Tests `generator_module_global_with_nursery_is_graceful_vm` +
+  siblings.)
 - **NON-GOALS (documented, not built):** multi-pass/single-pass TYPE SAFETY (unfixable without
   move/ownership — `count_twice([list]) == 6` via two independent cursors vs `count_twice(generator) ==
   3` consumed once; each `.iter()` is fresh, but reusing an exhausted cursor yields nothing); auto-

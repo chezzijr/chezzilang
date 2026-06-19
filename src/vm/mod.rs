@@ -942,6 +942,17 @@ enum Lowered {
     },
 }
 
+impl Lowered {
+    /// The spawn-site span carried on every variant — used to re-stamp a module-global snapshot fault.
+    fn span(&self) -> Span {
+        match self {
+            Lowered::Closure { span, .. }
+            | Lowered::Func { span, .. }
+            | Lowered::Method { span, .. } => *span,
+        }
+    }
+}
+
 /// D1 — a heap-independent, read-only snapshot of the parent's initialized module graph, shared
 /// across a nursery's workers via `Arc` (like `Arc<Program>`) and **faulted into each worker heap
 /// lazily, one module at a time, on first global access** (see [`Vm::fault_module`]). It replaces
@@ -4319,10 +4330,9 @@ impl Vm {
             }
             Op::NewShared => {
                 let init = self.pop();
-                // The box holds the wire form (single serialization == the old deep_clone-in).
-                let init = self
-                    .to_wire(init)
-                    .expect("Shared init must be sendable (B3.1 single-thread)");
+                // The box holds the wire form (single serialization == the old deep_clone-in). A
+                // non-sendable init (a frame-holding generator) faults gracefully with this Op's span.
+                let init = self.to_wire_at(init, span)?;
                 let h = self.heap.alloc(Obj::Shared(Arc::new(SharedCore {
                     v: Mutex::new(init),
                     ..Default::default()
@@ -4335,7 +4345,7 @@ impl Vm {
             // don't reuse match-arm stack slots) and can overflow the host stack before the
             // `MAX_CALL_DEPTH` guard fires. Keep these cold constructors out of line.
             Op::NewAtomic => {
-                let v = self.new_atomic();
+                let v = self.new_atomic(span)?;
                 self.push(v);
             }
             Op::NewTimer => {
@@ -7542,10 +7552,13 @@ impl Vm {
         let at = self.stack.len() - argc;
         let raw_args: Vec<Value> = self.stack.split_off(at);
         let head = self.pop();
-        let args: Vec<Value> = raw_args.into_iter().map(|a| self.deep_clone(a)).collect();
+        let mut args: Vec<Value> = Vec::with_capacity(raw_args.len());
+        for a in raw_args {
+            args.push(self.deep_clone(a, span)?);
+        }
         let task = match method {
             Some(name) => {
-                let recv = self.deep_clone(head);
+                let recv = self.deep_clone(head, span)?;
                 PendingCall::Method {
                     recv,
                     name,
@@ -7589,7 +7602,7 @@ impl Vm {
             };
             // Deep-copy across the airlock: the task can't share mutable state with the parent.
             // Positional (lever #3): slot order matches the synthetic block proto's `capture_names`.
-            captured.push(self.deep_clone(v));
+            captured.push(self.deep_clone(v, span)?);
         }
         let h = self.heap.alloc(Obj::Closure {
             proto,
@@ -7830,7 +7843,13 @@ impl Vm {
     fn run_mn_nursery_outermost(&mut self, tasks: Vec<PendingCall>) -> Result<(), RuntimeError> {
         let total = tasks.len();
         let cancel = Arc::new(AtomicBool::new(false));
-        let snap = self.ensure_snapshot();
+        // Peek a real nursery-site span BEFORE consuming `tasks` — a module-global generator faults
+        // here (the first nursery snapshots all globals) and must report a real location.
+        let nursery_span = tasks
+            .first()
+            .map(|t| t.span())
+            .unwrap_or(Span { line: 1, col: 1 });
+        let snap = self.ensure_snapshot(nursery_span)?;
         let mut fibers = Vec::with_capacity(total);
         for (i, t) in tasks.into_iter().enumerate() {
             fibers.push(self.prepare_worker(t)?.into_fiber(i, 0)); // scope 0 — the outermost nursery
@@ -7900,7 +7919,13 @@ impl Vm {
         sched: &Arc<MnSched>,
         tasks: Vec<PendingCall>,
     ) -> Result<(), RuntimeError> {
-        let snap = self.ensure_snapshot();
+        // Runs on a worker shell (`module_snapshot.is_some()`), so `ensure_snapshot` early-returns and
+        // never re-lowers globals — but pass a real span anyway (peeked before consuming `tasks`).
+        let nursery_span = tasks
+            .first()
+            .map(|t| t.span())
+            .unwrap_or(Span { line: 1, col: 1 });
+        let snap = self.ensure_snapshot(nursery_span)?;
         // This nursery's OWN scope. Prepare every worker FIRST (the fallible/heap-heavy step — touches no
         // scheduler state), THEN register the scope and seed its fibers atomically. Doing the prepare
         // BEFORE registration is what makes `register_scope_seeded` race-free: there is no window where the
@@ -7989,7 +8014,9 @@ impl Vm {
         // blocked draining it. Clear `awaiting_builder` so a genuine post-body deadlock (this scope parked
         // with no live sender) faults instead of being vetoed. (Cross-nursery flat scheduler — #1/#2.)
         sched.lock().scopes[scope_id].awaiting_builder = false;
-        let snap = self.ensure_snapshot();
+        // The snapshot was already built (and any module-global generator already faulted) at the
+        // outermost nursery, so this is a memo/worker-shell early-return — the span is unused.
+        let snap = self.ensure_snapshot(Span { line: 1, col: 1 })?;
         let cancel = Arc::clone(&sched.lock().scopes[scope_id].cancel);
         let wid = self.wid;
         let mut shell = self.spawn_shell(&snap, &sched, &cancel);
@@ -8018,7 +8045,11 @@ impl Vm {
         cancel.store(true, Ordering::Relaxed);
         sched.cancel_drain(scope_id);
         poller::drain_sched(&sched);
-        let snap = self.ensure_snapshot();
+        // Worker-shell / memo early-return (the snapshot was already built at the outermost nursery,
+        // so this cannot fault); `.expect` the Ok with that justification (this fn returns `()`).
+        let snap = self
+            .ensure_snapshot(Span { line: 1, col: 1 })
+            .expect("abort_enlisted_scope: snapshot already built (no fault possible)");
         let wid = self.wid;
         let mut shell = self.spawn_shell(&snap, &sched, &cancel);
         shell.mn_worker_loop(&sched, wid, scope_id);
@@ -8049,7 +8080,12 @@ impl Vm {
     /// thread serves many); multi-core handler parallelism is future work.
     fn activate_eager_nursery(&mut self) -> EagerScope {
         let cancel = Arc::new(AtomicBool::new(false));
-        let snap = self.ensure_snapshot();
+        // An eager nursery only activates on a worker shell where `module_snapshot.is_some()` (the
+        // debug_assert below), so `ensure_snapshot` always early-returns the installed Arc and cannot
+        // fault — `.expect` the Ok (this fn returns `EagerScope`, not Result). The span is unused.
+        let snap = self.ensure_snapshot(Span { line: 1, col: 1 }).expect(
+            "activate_eager_nursery: worker shell has an installed snapshot (no fault possible)",
+        );
         debug_assert!(
             self.module_snapshot.is_some(),
             "an eager nursery only activates on a worker shell (gated by mn.is_some())"
@@ -8089,7 +8125,9 @@ impl Vm {
             ..
         } = scope;
         sched.close_body(0);
-        let snap = self.ensure_snapshot();
+        // Worker-shell early-return (an eager nursery runs only on a shell with an installed
+        // snapshot) — cannot fault; the span is unused.
+        let snap = self.ensure_snapshot(Span { line: 1, col: 1 })?;
         let mut shell = self.spawn_shell(&snap, &sched, &cancel);
         shell.mn_worker_loop(&sched, 0, 0);
         sched.wait_for_completion();
@@ -8118,7 +8156,11 @@ impl Vm {
         sched.close_body(0);
         sched.cancel_drain(0);
         poller::drain_sched(&sched);
-        let snap = self.ensure_snapshot();
+        // Worker-shell early-return (an eager nursery runs only on a shell with an installed
+        // snapshot) — cannot fault; `.expect` the Ok (this fn returns `()`).
+        let snap = self.ensure_snapshot(Span { line: 1, col: 1 }).expect(
+            "abort_eager_nursery: worker shell has an installed snapshot (no fault possible)",
+        );
         let mut shell = self.spawn_shell(&snap, &sched, &cancel);
         shell.mn_worker_loop(&sched, 0, 0);
         sched.wait_for_completion();
@@ -9171,19 +9213,24 @@ impl Vm {
     /// `interp::deep_clone` exactly. Allocates, but only at the instruction boundary that called it
     /// (no GC runs mid-clone), so intermediate handles can't be collected.
     ///
-    /// B3.0: implemented as a [`WireValue`] round-trip — `to_wire` (read-only serialize) then
-    /// `from_wire` (reconstruct into this heap). Byte-identical to the old direct deep-copy; the
-    /// wire form is what de-risks B3.1 (cores → `Arc`) and B3.3 (the value crosses a real thread).
-    /// The `.expect` cannot fire in B3.0: `to_wire` is total (every `Obj` variant maps to a wire
-    /// arm — by-reference objects cross as `Handle`), so it is statically infallible here. Its
-    /// `Result` return is forward-plumbing for B3.3, where by-reference handles (`Module` / `Func` /
-    /// closures) can no longer cross an OS-thread boundary and `to_wire` gains real `Err` arms; at
-    /// that point callers switch to direct `to_wire?` / `from_wire`.
-    fn deep_clone(&mut self, v: Value) -> Value {
-        let w = self
-            .to_wire(v)
-            .expect("deep_clone: airlock value must be sendable (B3.0 single-thread)");
-        self.from_wire(w)
+    /// Implemented as a [`WireValue`] round-trip — `to_wire` (read-only serialize) then `from_wire`
+    /// (reconstruct into this heap). Byte-identical to the old direct deep-copy; the wire form is what
+    /// de-risks the cores-as-`Arc` and real-OS-thread-boundary crossings. By-reference objects cross
+    /// as `Handle`; the ONE non-sendable value is a frame-holding generator (its parked frames
+    /// reference this heap), so this is **fallible**: a generator (or one nested in a container) faults
+    /// gracefully here, re-stamped with the real spawn-site `span` (the caller has it) via `to_wire_at`
+    /// — a catchable error instead of a panic.
+    fn deep_clone(&mut self, v: Value, span: Span) -> Result<Value, RuntimeError> {
+        let w = self.to_wire_at(v, span)?;
+        Ok(self.from_wire(w))
+    }
+
+    /// `to_wire` re-stamped with a real call-site `span`. `to_wire`'s only `Err` (a frame-holding
+    /// generator crossing the airlock) carries a placeholder `Span{0,0}`; every method-level airlock
+    /// site (`Channel.send`/`Shared.set`/`Atomic.store`/…) has a real span, so route through this so
+    /// the catchable error reports the operation's location rather than line 0.
+    fn to_wire_at(&self, v: Value, span: Span) -> Result<WireValue, RuntimeError> {
+        self.to_wire(v).map_err(|e| self.err(e.message, span))
     }
 
     /// B3.0 — serialize a value into its [`WireValue`] form (the airlock's outbound half). A
@@ -9193,11 +9240,13 @@ impl Vm {
     /// [`WireValue::Handle`] (the existing handle, same heap in B3.0). `Map`/`Set` carry their cached
     /// hashes through so reconstruction never re-hashes.
     ///
-    /// **B3.0: this is total — every `Value` and every `Obj` variant maps to a wire arm, so it never
-    /// returns `Err`** (the `?` only forwards from recursion, which is itself infallible). The
-    /// `Result` return is deliberate forward-plumbing: at B3.3, by-reference handles whose object
-    /// cannot cross an OS thread (`Module` with mutable globals, `Func`/`Closure`) stop mapping to
-    /// `Handle` and instead return a real `Err` defensive fault here. No such arm exists yet.
+    /// Every `Value` and every `Obj` variant maps to a wire arm — by-reference objects (callables,
+    /// modules, `Channel`/`Shared`/`Executor`) cross as `Handle`. The ONE fallible arm is a
+    /// frame-holding **generator** (`Obj::Generator`): its parked frames reference this heap, so it
+    /// is not sendable and returns a graceful `a generator cannot be sent across tasks` error here
+    /// (carrying a placeholder `Span{0,0}` that airlock callers re-stamp with the real site via
+    /// `to_wire_at`/`deep_clone`/`ensure_snapshot`). Every other arm is infallible (the `?` only
+    /// forwards the generator error up through container recursion).
     fn to_wire(&self, v: Value) -> Result<WireValue, RuntimeError> {
         Ok(match v {
             Value::Int(n) => WireValue::Int(n),
@@ -9516,7 +9565,7 @@ impl Vm {
                             let names = self.program.protos[proto].capture_names.clone();
                             let mut wcap = Vec::with_capacity(captured.len());
                             for (i, v) in captured.into_iter().enumerate() {
-                                let w = self.to_wire(v)?;
+                                let w = self.to_wire_at(v, span)?;
                                 self.ensure_crossable(&w, span)?;
                                 let name = names.get(i).cloned().unwrap_or_default();
                                 wcap.push((name, w));
@@ -9565,7 +9614,7 @@ impl Vm {
                 args,
                 span,
             } => {
-                let wrecv = self.to_wire(recv)?;
+                let wrecv = self.to_wire_at(recv, span)?;
                 self.ensure_crossable(&wrecv, span)?;
                 let wargs = self.wire_args(args, span)?;
                 Lowered::Method {
@@ -9583,7 +9632,7 @@ impl Vm {
         //    per task. 3. rebuild the callable/receiver + args into the worker heap (a `home` index
         //    resolves to a pre-alloced empty module that faults on first global read). The actual
         //    invoke is `ReadyWorker::run`.
-        let snap = self.ensure_snapshot();
+        let snap = self.ensure_snapshot(lowered.span())?;
         let mut worker = self.spawn_worker();
         worker.install_snapshot(snap);
         let (call, span) = match lowered {
@@ -9636,21 +9685,26 @@ impl Vm {
     /// B3.6 — the `Executor`-drain analogue of [`prepare_worker`]: build a worker, install the shared
     /// read-only [`ModuleSnapshot`] (D1 — modules fault in lazily on first global access), and rebuild
     /// a submitted closure (a [`WireValue::Closure`] drained from the executor queue) into that heap as
-    /// a zero-arg call. Infallible — the closure already crossed `to_wire`/`ensure_crossable` at
-    /// `submit`. `--parallel` only.
-    fn prepare_worker_from_wire(&mut self, task: WireValue, span: Span) -> ReadyWorker {
-        let snap = self.ensure_snapshot();
+    /// a zero-arg call. The submitted closure already crossed `to_wire`/`ensure_crossable` at `submit`,
+    /// but `ensure_snapshot` can fault if a module global is a frame-holding generator — so this
+    /// forwards that snapshot fault (re-stamped with `span`) rather than panicking. `--parallel` only.
+    fn prepare_worker_from_wire(
+        &mut self,
+        task: WireValue,
+        span: Span,
+    ) -> Result<ReadyWorker, RuntimeError> {
+        let snap = self.ensure_snapshot(span)?;
         let mut worker = self.spawn_worker();
         worker.install_snapshot(snap);
         let callee = worker.from_wire(task);
-        ReadyWorker {
+        Ok(ReadyWorker {
             worker,
             call: ReadyCall::Invoke {
                 callee,
                 args: Vec::new(),
             },
             span,
-        }
+        })
     }
 
     /// B3.6 — drain a shut `Executor`'s pending tasks onto the bounded pool under `--parallel`. Each
@@ -9669,7 +9723,7 @@ impl Vm {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut ready = Vec::with_capacity(tasks.len());
         for t in tasks {
-            let mut rw = self.prepare_worker_from_wire(t, span);
+            let mut rw = self.prepare_worker_from_wire(t, span)?;
             rw.worker.cancel = Some(Arc::clone(&cancel));
             ready.push(rw);
         }
@@ -9696,7 +9750,8 @@ impl Vm {
     fn wire_args(&self, args: Vec<Value>, span: Span) -> Result<Vec<WireValue>, RuntimeError> {
         args.into_iter()
             .map(|a| {
-                let w = self.to_wire(a)?;
+                // `to_wire_at` re-stamps a generator's placeholder span with this call site's `span`.
+                let w = self.to_wire_at(a, span)?;
                 self.ensure_crossable(&w, span)?;
                 Ok(w)
             })
@@ -9723,7 +9778,8 @@ impl Vm {
                     let names = &self.program.protos[*proto].capture_names;
                     let mut wcap = Vec::with_capacity(captured.len());
                     for (i, cv) in captured.iter().enumerate() {
-                        let w = self.to_wire(*cv)?;
+                        // `to_wire_at` re-stamps a generator capture's placeholder span with `span`.
+                        let w = self.to_wire_at(*cv, span)?;
                         self.ensure_crossable(&w, span)?;
                         let name = names.get(i).cloned().unwrap_or_default();
                         wcap.push((name.into_boxed_str(), w));
@@ -9779,44 +9835,56 @@ impl Vm {
     /// (decision G1) — so a nested `spawn` reuses that same `Arc` rather than re-snapshotting a partial
     /// heap; on the **top-level** VM the snapshot is built from the real, fully-populated modules and
     /// memoized in `snapshot_memo`.
-    fn ensure_snapshot(&mut self) -> Arc<ModuleSnapshot> {
+    ///
+    /// Fallible: a module global that is a frame-holding generator cannot be snapshotted (its parked
+    /// frames reference the parent heap). `to_wire`/`to_snap` stamp the airlock fault with a
+    /// placeholder span, so this choke point RE-STAMPS it with the real nursery/spawn-site `span`
+    /// (the caller has it) — a graceful, catchable error instead of a panic. The build path memoizes
+    /// ONLY on success: a module-global generator fails deterministically every call (the program is
+    /// rejected at its first nursery, so it never loops), which sidesteps caching a stale error.
+    fn ensure_snapshot(&mut self, span: Span) -> Result<Arc<ModuleSnapshot>, RuntimeError> {
         if let Some(s) = &self.module_snapshot {
-            return Arc::clone(s);
+            return Ok(Arc::clone(s));
         }
         if let Some(s) = &self.snapshot_memo {
-            return Arc::clone(s);
+            return Ok(Arc::clone(s));
         }
-        let snap = Arc::new(self.snapshot_modules());
+        let snap = Arc::new(
+            self.snapshot_modules()
+                .map_err(|e| self.err(e.message, span))?,
+        );
         self.snapshot_memo = Some(Arc::clone(&snap));
-        snap
+        Ok(snap)
     }
 
     /// D1 — read this VM's initialized module graph (read-only) into a heap-independent
     /// [`ModuleSnapshot`]: one [`ModuleSnap`] per module in `module_objs` order (so a callable's home
     /// index lines up with a worker's pre-alloced modules), each global lowered by [`Vm::to_snap`].
     /// Replaces the eager per-task `build_worker_modules` reconstruction — built once, replayed lazily.
-    fn snapshot_modules(&self) -> ModuleSnapshot {
-        let modules = self
-            .module_objs
-            .iter()
-            .map(|&pm| {
-                // M19 Phase 2b — collect globals in *slot order* (not HashMap iteration order) so a
-                // worker replays them into matching slots; the shared `Arc<Program>` slot map makes
-                // parent and worker agree on slot↔name regardless of any hash ordering.
-                let (name, globals): (Box<str>, Vec<(String, Value)>) = match self.heap.get(pm) {
-                    Obj::Module { name, slots, index } => {
-                        (name.clone(), module_slot_pairs(slots, index))
-                    }
-                    _ => ("<worker>".into(), Vec::new()),
-                };
-                let globals = globals
-                    .into_iter()
-                    .map(|(k, v)| (k, self.to_snap(v)))
-                    .collect();
-                ModuleSnap { name, globals }
-            })
-            .collect();
-        ModuleSnapshot { modules }
+    fn snapshot_modules(&self) -> Result<ModuleSnapshot, RuntimeError> {
+        let mut modules = Vec::with_capacity(self.module_objs.len());
+        for &pm in &self.module_objs {
+            // M19 Phase 2b — collect globals in *slot order* (not HashMap iteration order) so a
+            // worker replays them into matching slots; the shared `Arc<Program>` slot map makes
+            // parent and worker agree on slot↔name regardless of any hash ordering.
+            let (name, globals): (Box<str>, Vec<(String, Value)>) = match self.heap.get(pm) {
+                Obj::Module { name, slots, index } => {
+                    (name.clone(), module_slot_pairs(slots, index))
+                }
+                _ => ("<worker>".into(), Vec::new()),
+            };
+            // Fallible: a module global that is a frame-holding generator faults here (graceful,
+            // re-stamped with the nursery span by `ensure_snapshot`) instead of panicking in `to_snap`.
+            let mut snapped = Vec::with_capacity(globals.len());
+            for (k, v) in globals {
+                snapped.push((k, self.to_snap(v)?));
+            }
+            modules.push(ModuleSnap {
+                name,
+                globals: snapped,
+            });
+        }
+        Ok(ModuleSnapshot { modules })
     }
 
     /// D1 — lower one parent-heap global value into a heap-independent [`SnapValue`]. The snapshot
@@ -9829,30 +9897,41 @@ impl Vm {
     /// - `Func`/`Closure` → record the home as a `module_objs` index (captures recursed); import-alias
     ///   `Module` → `ModuleAlias(idx)`; `Native` → fn pointer; containers → element-wise (map/set
     ///   hashes are value-derived, carried unchanged).
-    fn to_snap(&self, v: Value) -> SnapValue {
+    ///
+    /// Fallible: a frame-holding generator (`Obj::Generator`) is NOT sendable — its parked frames
+    /// reference this heap. Reaching that arm (smuggled past the permissive `Iterator[T]` checker
+    /// branch — a cursor and a generator share that existential type) returns a graceful airlock
+    /// error (re-stamped with the real nursery span by `ensure_snapshot`) instead of a panic. The
+    /// recursion propagates that error with `?`, so a generator nested in any container faults too.
+    fn to_snap(&self, v: Value) -> Result<SnapValue, RuntimeError> {
         let h = match v {
             Value::Obj(h) => h,
+            // A scalar (Int/Float/Bool/Nil) is always sendable — never `Obj::Generator`, so this
+            // `.expect` is unreachable for a generator.
             scalar => {
-                return SnapValue::Wire(self.to_wire(scalar).expect("scalar is always sendable"));
+                return Ok(SnapValue::Wire(
+                    self.to_wire(scalar).expect("scalar is always sendable"),
+                ));
             }
         };
-        // Fast path: no embedded callable/module → the wire form is exact and cheap.
+        // Fast path: no embedded callable/module → the wire form is exact and cheap. A generator's
+        // `to_wire` errors (so the `if let Ok` fails) — we fall through to the `Obj::Generator` arm,
+        // which re-produces the same graceful error below.
         if let Ok(w) = self.to_wire(v)
             && !w.has_handle()
         {
-            return SnapValue::Wire(w);
+            return Ok(SnapValue::Wire(w));
         }
-        match self.heap.get(h).clone() {
+        Ok(match self.heap.get(h).clone() {
             Obj::Func { proto, home } => SnapValue::Func { proto, home: self.home_index(home) },
             Obj::Closure { proto, captured, home } => {
                 // Lever #3: positional captures — carry names from the proto in slot order.
                 let names = &self.program.protos[proto].capture_names;
-                let captured = captured
-                    .iter()
-                    .enumerate()
-                    .map(|(i, cv)| (names.get(i).cloned().unwrap_or_default(), self.to_snap(*cv)))
-                    .collect();
-                SnapValue::Closure { proto, captured, home: self.home_index(home) }
+                let mut snapped = Vec::with_capacity(captured.len());
+                for (i, cv) in captured.iter().enumerate() {
+                    snapped.push((names.get(i).cloned().unwrap_or_default(), self.to_snap(*cv)?));
+                }
+                SnapValue::Closure { proto, captured: snapped, home: self.home_index(home) }
             }
             // An import alias bound to another module obj.
             Obj::Module { name, slots, index } => match self.home_index(h) {
@@ -9860,10 +9939,10 @@ impl Vm {
                 // A module not in `module_objs` (shouldn't occur for a bound import) — encode inline,
                 // in slot order so replay rebuilds matching slots.
                 None => {
-                    let globals = module_slot_pairs(&slots, &index)
-                        .into_iter()
-                        .map(|(k, mv)| (k, self.to_snap(mv)))
-                        .collect();
+                    let mut globals = Vec::new();
+                    for (k, mv) in module_slot_pairs(&slots, &index) {
+                        globals.push((k, self.to_snap(mv)?));
+                    }
                     SnapValue::ModuleInline { name, globals }
                 }
             },
@@ -9872,9 +9951,21 @@ impl Vm {
             // worker re-allocs `Obj::Cffi` from the SAME Arc — no re-dlopen, no symbol re-resolution.
             Obj::Cffi(c) => SnapValue::Cffi(Arc::clone(&c)),
             // Containers embedding a callable: encode each element. (Pure-data containers took the fast
-            // path above.)
-            Obj::List(items) => SnapValue::List(items.iter().map(|x| self.to_snap(*x)).collect()),
-            Obj::Tuple(items) => SnapValue::Tuple(items.iter().map(|x| self.to_snap(*x)).collect()),
+            // path above.) A generator embedded in any of these faults via the recursive `?`.
+            Obj::List(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for x in &items {
+                    out.push(self.to_snap(*x)?);
+                }
+                SnapValue::List(out)
+            }
+            Obj::Tuple(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for x in &items {
+                    out.push(self.to_snap(*x)?);
+                }
+                SnapValue::Tuple(out)
+            }
             Obj::Struct { name, fields, .. } => {
                 // Positional layout: recover declaration-order field names from the StructDef so
                 // the SnapValue encoding (which carries names) is unchanged (cold cross-task path).
@@ -9884,28 +9975,40 @@ impl Vm {
                     .get(name.as_ref())
                     .map(|d| d.fields.iter().map(|f| f.clone().into_boxed_str()).collect())
                     .unwrap_or_default();
-                let fields = fields
-                    .iter()
-                    .enumerate()
-                    .map(|(i, fv)| {
-                        let k = names.get(i).cloned().unwrap_or_else(|| i.to_string().into_boxed_str());
-                        (k, self.to_snap(*fv))
-                    })
-                    .collect();
-                SnapValue::Struct { name, fields }
+                let mut out = Vec::with_capacity(fields.len());
+                for (i, fv) in fields.iter().enumerate() {
+                    let k = names.get(i).cloned().unwrap_or_else(|| i.to_string().into_boxed_str());
+                    out.push((k, self.to_snap(*fv)?));
+                }
+                SnapValue::Struct { name, fields: out }
             }
             Obj::Enum { variant_id, payload } => {
-                let payload = payload.iter().map(|x| self.to_snap(*x)).collect();
+                let mut out = Vec::with_capacity(payload.len());
+                for x in &payload {
+                    out.push(self.to_snap(*x)?);
+                }
                 // M19 lever #2 — carry the dense `variant_id` directly on the cold snap path (mirrors
                 // `to_wire`); replay reuses it as-is against the shared program.
-                SnapValue::Enum { variant_id, payload }
+                SnapValue::Enum { variant_id, payload: out }
             }
-            Obj::Map(m) => SnapValue::Map(
-                m.entries.iter().map(|(hash, k, val)| (*hash, self.to_snap(*k), self.to_snap(*val))).collect(),
-            ),
-            Obj::Set(s) => SnapValue::Set(s.entries.iter().map(|(hash, e)| (*hash, self.to_snap(*e))).collect()),
+            Obj::Map(m) => {
+                let mut out = Vec::with_capacity(m.entries.len());
+                for (hash, k, val) in &m.entries {
+                    out.push((*hash, self.to_snap(*k)?, self.to_snap(*val)?));
+                }
+                SnapValue::Map(out)
+            }
+            Obj::Set(s) => {
+                let mut out = Vec::with_capacity(s.entries.len());
+                for (hash, e) in &s.entries {
+                    out.push((*hash, self.to_snap(*e)?));
+                }
+                SnapValue::Set(out)
+            }
             // Leaf data / cores are handled by the fast path; if `to_wire` ever errored above we land
-            // here for a `str`/core (always sendable) — encode its wire form.
+            // here for a `str`/core (always sendable) — encode its wire form. A generator is
+            // `Obj::Generator` (handled below), never one of these, so this `.expect` is unreachable
+            // for a generator.
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)
@@ -9920,15 +10023,24 @@ impl Vm {
             | Obj::Ptr(_) => {
                 SnapValue::Wire(self.to_wire(v).expect("str / bytes / bytearray / channel / shared / atomic / executor / socket / ptr is always sendable"))
             }
-            // Experimental generators are not sendable and are never legal as a module global crossing
-            // to an M:N worker — reaching here means one was smuggled past the checker.
-            Obj::Generator(_) => unreachable!("a generator cannot be snapshotted (not sendable)"),
+            // A frame-holding generator is not sendable and is never legal as a module global crossing
+            // to an M:N worker. Reaching here means one was smuggled past the permissive `Iterator[T]`
+            // checker branch (a cursor and a generator share that existential type). Fault gracefully
+            // with the same message as `to_wire`'s Generator arm — `ensure_snapshot` re-stamps the
+            // placeholder span with the real nursery/spawn site.
+            Obj::Generator(_) => {
+                return Err(self.err("a generator cannot be sent across tasks".to_string(), Span { line: 0, col: 0 }));
+            }
             // A cursor snapshots like a `List`: its items (recursively snapped) + `pos`. Only a
             // handle-bearing cursor reaches here; a pure-data cursor took the `to_wire` fast path.
             Obj::Iter { items, pos } => {
-                SnapValue::Iter { items: items.iter().map(|x| self.to_snap(*x)).collect(), pos }
+                let mut out = Vec::with_capacity(items.len());
+                for x in &items {
+                    out.push(self.to_snap(*x)?);
+                }
+                SnapValue::Iter { items: out, pos }
             }
-        }
+        })
     }
 
     /// D1 — install a shared [`ModuleSnapshot`] into a freshly-built worker: pre-alloc one **empty**
@@ -10121,14 +10233,15 @@ impl Vm {
     /// `Atomic(v)` — pop the init, box its wire form behind a fresh `Arc<AtomicCore>`. `#[inline(never)]`
     /// so its locals stay out of `step`'s (recursion-path) stack frame.
     #[inline(never)]
-    fn new_atomic(&mut self) -> Value {
+    fn new_atomic(&mut self, span: Span) -> Result<Value, RuntimeError> {
         let init = self.pop();
-        let init = self
-            .to_wire(init)
-            .expect("Atomic init must be sendable (B3.1 single-thread)");
-        Value::Obj(self.heap.alloc(Obj::Atomic(Arc::new(AtomicCore {
-            v: Mutex::new(init),
-        }))))
+        // A non-sendable init (a frame-holding generator) faults gracefully with the `NewAtomic` span.
+        let init = self.to_wire_at(init, span)?;
+        Ok(Value::Obj(self.heap.alloc(Obj::Atomic(Arc::new(
+            AtomicCore {
+                v: Mutex::new(init),
+            },
+        )))))
     }
 
     /// `timer(ms)` — pop the `ms` int, push a fresh `Channel[bool]` stamped with `now + ms`. Delivery is
@@ -10736,8 +10849,9 @@ impl Vm {
         match method {
             "send" => {
                 self.arity_err("send", args, 1, span)?;
-                // B3.1: serialize once into the core (the wire form IS the airlock copy).
-                let w = self.to_wire(args[0])?;
+                // B3.1: serialize once into the core (the wire form IS the airlock copy). A
+                // non-sendable value (a frame-holding generator) faults gracefully with `send`'s span.
+                let w = self.to_wire_at(args[0], span)?;
                 // Closed-channel guard: a `send` after `close()` faults (Go-panic analog). A `close`
                 // racing in the window between this check and the enqueue is benign — the value is
                 // still buffered and drained before the close is observed (drain-before-close), exactly
@@ -10752,7 +10866,7 @@ impl Vm {
             // a closed channel — returns `false` then (never faults), `true` once the value is queued.
             "try_send" => {
                 self.arity_err("try_send", args, 1, span)?;
-                let w = self.to_wire(args[0])?;
+                let w = self.to_wire_at(args[0], span)?;
                 if self.channel_core(h).q.lock().unwrap().closed {
                     return Ok(Value::Bool(false));
                 }
@@ -11218,7 +11332,7 @@ impl Vm {
             }
             "set" => {
                 self.arity_err("set", args, 1, span)?;
-                let w = self.to_wire(args[0])?;
+                let w = self.to_wire_at(args[0], span)?;
                 *self.shared_core(h).v.lock().unwrap() = w;
                 Ok(Value::Nil)
             }
@@ -11246,7 +11360,7 @@ impl Vm {
                 let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 let next = next?;
-                let stored = self.to_wire(next)?;
+                let stored = self.to_wire_at(next, span)?;
                 *core.v.lock().unwrap() = stored;
                 Ok(Value::Nil)
             }
@@ -11275,13 +11389,13 @@ impl Vm {
             }
             "store" => {
                 self.arity_err("store", args, 1, span)?;
-                let w = self.to_wire(args[0])?;
+                let w = self.to_wire_at(args[0], span)?;
                 *self.atomic_core(h).v.lock().unwrap() = w;
                 Ok(Value::Nil)
             }
             "exchange" => {
                 self.arity_err("exchange", args, 1, span)?;
-                let new_w = self.to_wire(args[0])?;
+                let new_w = self.to_wire_at(args[0], span)?;
                 let core = self.atomic_core(h);
                 let old = {
                     let mut g = core.v.lock().unwrap();
@@ -11299,13 +11413,13 @@ impl Vm {
                 let cur = self.from_wire(g.clone());
                 let swapped = self.values_equal(cur, args[0]);
                 if swapped {
-                    *g = self.to_wire(args[1])?;
+                    *g = self.to_wire_at(args[1], span)?;
                 }
                 Ok(Value::Bool(swapped))
             }
             "add" | "sub" => {
                 self.arity_err(method, args, 1, span)?;
-                let delta = self.to_wire(args[0])?;
+                let delta = self.to_wire_at(args[0], span)?;
                 let core = self.atomic_core(h);
                 let mut g = core.v.lock().unwrap();
                 let new = match (&*g, &delta) {
@@ -19748,6 +19862,248 @@ main()";
     fn vm_generator_never_yields() {
         let src = "fn empty() -> Iterator[int]:\n    if false:\n        yield 1\nfn main():\n    print(\"before\")\n    for x in empty():\n        print(x)\n    print(\"after\")\nmain()\n";
         assert_eq!(run(src), "before\nafter\n");
+    }
+
+    // --- Airlock: a frame-holding generator is NOT sendable; crossing ANY task airlock (incl.
+    // merely being a module global when a nursery runs) must produce a GRACEFUL, catchable Chezzi
+    // RuntimeError with a real spawn/nursery-site span — never a Rust panic/process-abort. A
+    // snapshot cursor (`.iter()`, `Obj::Iter`) stays sendable (see cursor_crosses_* tests).
+    //
+    // Parity note: generators are VM-only (interp rejects `yield` at statement execution). The two
+    // engines fault at DIFFERENT stages with DIFFERENT messages — interp at gen() ("not supported by
+    // the interpreter"), the VM at the airlock ("a generator cannot be sent across tasks"). So these
+    // assert PER-ENGINE via run_capture/run_capture_parallel (VM) and crate::interp::run_capture
+    // (interp), NOT assert_parity. The invariant is that BOTH engines reject the program.
+
+    /// VERIFIED REPRO: a module-level generator global plus ANY nursery. `snapshot_modules` eagerly
+    /// lowers EVERY module global, so the worker need NOT touch the generator. Only the M:N engine
+    /// snapshots module globals — the cooperative VM (`run_capture`) never does, so it prints
+    /// normally (asserted below). On M:N (`run_capture_parallel`, and the CLI default `chezzi run`)
+    /// this previously PANICKED at `to_snap`'s `unreachable!`; it must now fault gracefully with a
+    /// real (line >= 1) span.
+    #[test]
+    fn generator_module_global_with_nursery_is_graceful_vm() {
+        let src = concat!(
+            "fn gen() -> Iterator[int]:\n",
+            "    yield 1\n",
+            "    yield 2\n",
+            "g := gen()\n",
+            "fn worker():\n",
+            "    print(\"in worker\")\n",
+            "fn main():\n",
+            "    parallel:\n",
+            "        spawn worker()\n",
+            "    print(\"done\")\n",
+            "main()\n"
+        );
+        let err =
+            run_capture_parallel(src).expect_err("M:N VM must reject a module-global generator");
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "needs a real span, got line {}",
+            err.span.line
+        );
+        // The cooperative engine never snapshots module globals, so it is unaffected (no nursery
+        // global lowering) and runs to completion.
+        assert_eq!(
+            run_capture(src).expect("cooperative VM ignores the unused module global"),
+            "in worker\ndone\n"
+        );
+    }
+
+    /// Co-pins the interp half of the BOTH-engines-reject invariant: interp faults EARLIER (at the
+    /// `yield` in gen()) with a DIFFERENT message. A refactor must not make interp silently accept.
+    #[test]
+    fn generator_module_global_rejected_by_interp() {
+        let src = concat!(
+            "fn gen() -> Iterator[int]:\n",
+            "    yield 1\n",
+            "    yield 2\n",
+            "g := gen()\n",
+            "fn worker():\n",
+            "    print(\"in worker\")\n",
+            "fn main():\n",
+            "    parallel:\n",
+            "        spawn worker()\n",
+            "    print(\"done\")\n",
+            "main()\n"
+        );
+        let err = crate::interp::run_capture(src).expect_err("interp must reject generators");
+        assert!(
+            err.message.contains("not supported by the interpreter"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    /// A generator passed DIRECTLY as a spawn arg (the deep_clone airlock-copy path). Previously
+    /// PANICKED at deep_clone's `.expect`; now a graceful error with a real span.
+    #[test]
+    fn generator_passed_to_spawn_is_graceful_vm() {
+        let src = concat!(
+            "fn gen() -> Iterator[int]:\n",
+            "    yield 1\n",
+            "fn work(g: Iterator[int]):\n",
+            "    print(\"hi\")\n",
+            "fn main():\n",
+            "    parallel:\n",
+            "        spawn work(gen())\n",
+            "main()\n"
+        );
+        let err =
+            run_capture_parallel(src).expect_err("M:N VM must reject a spawned generator arg");
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "needs a real span, got line {}",
+            err.span.line
+        );
+    }
+
+    /// A generator embedded inside a LIST spawn arg — the nested-position guard. The recursive `?`
+    /// through containers must fault on the leaf generator.
+    #[test]
+    fn generator_in_list_arg_to_spawn_is_graceful_vm() {
+        let src = concat!(
+            "fn gen() -> Iterator[int]:\n",
+            "    yield 1\n",
+            "fn work(g: list[Iterator[int]]):\n",
+            "    print(\"hi\")\n",
+            "fn main():\n",
+            "    parallel:\n",
+            "        spawn work([gen()])\n",
+            "main()\n"
+        );
+        let err = run_capture_parallel(src)
+            .expect_err("M:N VM must reject a generator nested in a list arg");
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "needs a real span, got line {}",
+            err.span.line
+        );
+    }
+
+    /// A generator into `Shared(...)` — the Op::NewShared airlock-out. Previously PANICKED.
+    #[test]
+    fn generator_into_shared_is_graceful_vm() {
+        let src = concat!(
+            "fn gen() -> Iterator[int]:\n",
+            "    yield 1\n",
+            "fn main():\n",
+            "    s := Shared(gen())\n",
+            "    print(\"unreachable\")\n",
+            "main()\n"
+        );
+        let err = run_capture(src).expect_err("Shared(generator) must be rejected gracefully");
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "needs a real span, got line {}",
+            err.span.line
+        );
+    }
+
+    /// A generator into `Atomic(...)` — the new_atomic airlock-out. Previously PANICKED.
+    #[test]
+    fn generator_into_atomic_is_graceful_vm() {
+        let src = concat!(
+            "fn gen() -> Iterator[int]:\n",
+            "    yield 1\n",
+            "fn main():\n",
+            "    a := Atomic(gen())\n",
+            "    print(\"unreachable\")\n",
+            "main()\n"
+        );
+        let err = run_capture(src).expect_err("Atomic(generator) must be rejected gracefully");
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "needs a real span, got line {}",
+            err.span.line
+        );
+    }
+
+    /// A closure CAPTURING a generator submitted to an `Executor` under `--parallel` — the
+    /// `wire_callable` airlock-out. Faults gracefully (via `to_wire_at`) with a real span.
+    #[test]
+    fn generator_captured_in_executor_submit_is_graceful_vm() {
+        let src = concat!(
+            "fn gen() -> Iterator[int]:\n",
+            "    yield 1\n",
+            "fn main():\n",
+            "    g := gen()\n",
+            "    ex := Executor()\n",
+            "    ex.submit(fn(): print(g.next()))\n",
+            "    ex.shutdown()\n",
+            "main()\n"
+        );
+        let err = run_capture_parallel(src)
+            .expect_err("Executor.submit capturing a generator must be rejected");
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "needs a real span, got line {}",
+            err.span.line
+        );
+    }
+
+    /// A generator into `Channel.send(...)` — already graceful (the `?` path); pins it.
+    #[test]
+    fn generator_into_channel_is_graceful_vm() {
+        let src = concat!(
+            "fn gen() -> Iterator[int]:\n",
+            "    yield 1\n",
+            "fn main():\n",
+            "    ch := Channel[Iterator[int]]()\n",
+            "    ch.send(gen())\n",
+            "    print(\"unreachable\")\n",
+            "main()\n"
+        );
+        let err =
+            run_capture(src).expect_err("Channel.send(generator) must be rejected gracefully");
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "needs a real span, got line {}",
+            err.span.line
+        );
     }
 
     /// Captured args mutate across yields; an infinite generator terminates via `break`.

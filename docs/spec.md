@@ -141,7 +141,14 @@ then idempotent None). This lets a plain `list` flow into the same Take/Mapped a
 hand-written struct iterator (`examples/iterable.chz`). A generator, a user `next`-struct, and a struct
 with only `iter(self) -> Iterator[E]` (driven by a one-time `.iter()`) all satisfy `[S: Iterable[T]]`.
 The cursor is **sendable** — it crosses the `spawn`/channel airlock as a deep copy (an independent
-snapshot + position on the receiver), exactly like a `list`. There is **no** compile-time
+snapshot + position on the receiver), exactly like a `list`. A frame-holding **generator** (a value
+returned by calling a generator `fn`) shares the same `Iterator[T]` existential but is **not**
+sendable — its parked frames reference the producing heap. The checker cannot distinguish the two
+(both are `Iterator[T]`), so the runtime is the enforcement point: a generator crossing **any** task
+airlock — passed/captured into a `spawn`, stored in a `Channel`/`Shared`/`Atomic`, or **merely being
+a module global while a nursery runs** (the M:N engine snapshots all module globals) — raises a
+**graceful, catchable** runtime error (`a generator cannot be sent across tasks`) with the real
+spawn/nursery-site location, **never** a panic. There is **no** compile-time
 multi-pass/single-pass safety (unfixable without move/ownership): each `.iter()` is a fresh cursor, but
 reusing an exhausted one yields nothing.
 

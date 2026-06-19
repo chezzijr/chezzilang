@@ -526,11 +526,19 @@ captured bindings are **read-only inside the task**.
 
 - **Sendable:** scalars (`int`/`float`/`bool`), `str`, containers + structs whose contents are all
   sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, a **`Shared[T]`** handle,
-  and a **`std.cancel` `Token`** (a struct over the above, so it flows down the call tree).
-- **Not sendable:** closures (bound to a heap), native handles (file/regex/HTTP `Response`/etc.), and
-  **`Ref[T]`** — and therefore the **`ref T`** binding modifier, which is sugar over it (an
-  in-task-only box; capturing/passing it across the airlock is a **compile error**, not a silent copy
-  — deref to a value first, or use `Shared[T]` for cross-task mutation).
+  a **`std.cancel` `Token`** (a struct over the above, so it flows down the call tree), and a
+  **`.iter()` snapshot cursor** — a frozen data snapshot + read position, so it crosses by deep copy
+  exactly like a `list` (the cursor and a generator share the `Iterator[T]` existential, but a cursor
+  is plain data).
+- **Not sendable:** closures (bound to a heap), native handles (file/regex/HTTP `Response`/etc.), a
+  **frame-holding generator** (a value from calling a generator `fn`, whose parked frames reference the
+  producing heap), and **`Ref[T]`** — and therefore the **`ref T`** binding modifier, which is sugar
+  over it (an in-task-only box; capturing/passing it across the airlock is a **compile error**, not a
+  silent copy — deref to a value first, or use `Shared[T]` for cross-task mutation). The checker
+  cannot distinguish a generator from a cursor (both are `Iterator[T]`), so a generator crossing **any**
+  task airlock — including merely being a **module global while a nursery runs** — is reported at
+  **runtime** as a **graceful, catchable** error (`a generator cannot be sent across tasks`) carrying
+  the real spawn/nursery-site location, **never** a panic.
 - **Read-only captures:** reassigning a captured binding inside a task body is a **compile error** —
   so the copy semantics are obvious: read captured config freely, but produce output only via a
   `Channel` or a `Shared`. The checker gates capture and `send`, **with the fix in the error message**.
