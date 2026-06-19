@@ -3143,14 +3143,25 @@ impl Vm {
                     {
                         continue;
                     }
-                    let value = self.module_global(target_obj, member).ok_or_else(|| {
-                        let tname = self.module_name(target_obj);
-                        self.err(
-                            format!("module '{tname}' has no member '{member}'"),
-                            imp.span,
-                        )
-                    })?;
-                    self.module_define(into, alias.as_ref().unwrap_or(member), value);
+                    // Bind the member's runtime value if the target module exports one (a fn/value).
+                    // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
+                    // resolves through the program-global type tables by name — so a member with no
+                    // global that IS a known type name is skipped (not an error). A member that is
+                    // neither a value nor a type is a genuine "no member". The value bind is tried
+                    // FIRST so a fn named like a type IN ANOTHER MODULE is still bound here.
+                    match self.module_global(target_obj, member) {
+                        Some(value) => {
+                            self.module_define(into, alias.as_ref().unwrap_or(member), value);
+                        }
+                        None if self.program.type_names.contains(member) => {}
+                        None => {
+                            let tname = self.module_name(target_obj);
+                            return Err(self.err(
+                                format!("module '{tname}' has no member '{member}'"),
+                                imp.span,
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -15634,6 +15645,7 @@ main()
             cffi_defs: vec![],
             tests: vec![],
             suites: vec![],
+            type_names: Default::default(),
         }
     }
 
@@ -24046,6 +24058,223 @@ main()
     /// Convenience: a single entry file (the common std-module case).
     fn parity_entry(src: &str) -> String {
         assert_parity_file(&[("main.chz", src)], "main.chz")
+    }
+
+    // ----- module-scoped user types: cross-module construction parity -----
+
+    /// `import geo; geo.Point(1,2)` constructs and prints `Point(x=1, y=2)` (BARE name, no `::`),
+    /// byte-identical on both engines.
+    #[test]
+    fn qualified_struct_ctor_parity() {
+        let out = assert_parity_file(
+            &[
+                ("geo.chz", "struct Point:\n    x: int\n    y: int\n"),
+                (
+                    "main.chz",
+                    "import geo\np := geo.Point(1, 2)\nprint(p)\nprint(p.x)\n",
+                ),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "Point(x=1, y=2)\n1\n");
+    }
+
+    /// `import S from types` (struct) constructs bare.
+    #[test]
+    fn from_import_struct_ctor_parity() {
+        let out = assert_parity_file(
+            &[
+                ("types.chz", "struct S:\n    n: int\n"),
+                ("main.chz", "import S from types\nprint(S(7))\n"),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "S(n=7)\n");
+    }
+
+    /// `import geo` then `geo.Color.Red` (nullary) and `geo.Shape.Circle(5)` (payload) construct.
+    #[test]
+    fn qualified_enum_ctor_parity() {
+        let out = assert_parity_file(
+            &[
+                (
+                    "geo.chz",
+                    "enum Color:\n    Red\n    Green\nenum Shape:\n    Circle(int)\n",
+                ),
+                (
+                    "main.chz",
+                    "import geo\nc := geo.Color.Red\ns := geo.Shape.Circle(5)\nmatch c:\n    Color.Red: print(\"red\")\n    Color.Green: print(\"green\")\nmatch s:\n    Shape.Circle(r): print(r)\n",
+                ),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "red\n5\n");
+    }
+
+    /// `import Color from types` (enum) constructs bare.
+    #[test]
+    fn from_import_enum_ctor_parity() {
+        let out = assert_parity_file(
+            &[
+                ("types.chz", "enum Color:\n    Red\n    Green\n"),
+                (
+                    "main.chz",
+                    "import Color from types\nc := Color.Green\nmatch c:\n    Color.Red: print(\"r\")\n    Color.Green: print(\"g\")\n",
+                ),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "g\n");
+    }
+
+    /// Two modules both declare `struct Point` with DIFFERENT layouts, both reachable in the entry
+    /// program: a REAL collision. Each constructs correctly; the entry/first keeps the bare key
+    /// (`Point(...)`), the other is disambiguated. Byte-identical on both engines.
+    #[test]
+    fn real_collision_two_modules_same_struct() {
+        let out = assert_parity_file(
+            &[
+                ("a.chz", "struct Point:\n    x: int\n"),
+                ("b.chz", "struct Point:\n    y: int\n    z: int\n"),
+                (
+                    "main.chz",
+                    "import a\nimport b\npa := a.Point(1)\npb := b.Point(2, 3)\nprint(pa.x)\nprint(pb.y)\nprint(pb.z)\n",
+                ),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "1\n2\n3\n");
+    }
+
+    /// Blocker C: two modules declare `enum Color`, both reachable. `cb.classify` MATCHES on its own
+    /// `Color.Red`/`Color.Green`. The disambiguated enum's variants must MATCH (not just construct):
+    /// the match-pattern side must use the SAME module-scoped runtime key as construction. Identical
+    /// on both engines.
+    #[test]
+    fn enum_collision_match_in_declaring_module() {
+        let out = assert_parity_file(
+            &[
+                ("ca.chz", "enum Color:\n    Red\n    Green\n"),
+                (
+                    "cb.chz",
+                    "enum Color:\n    Red\n    Green\nfn classify(c: Color) -> int:\n    return match c:\n        Color.Red: 1\n        Color.Green: 2\n",
+                ),
+                (
+                    "cmain.chz",
+                    "import ca\nimport cb\nprint(cb.classify(cb.Color.Red))\nprint(cb.classify(cb.Color.Green))\n",
+                ),
+            ],
+            "cmain.chz",
+        );
+        assert_eq!(out, "1\n2\n");
+    }
+
+    /// Blocker C (no-collision twin): a SINGLE-module enum matched within its own declaring module
+    /// must stay byte-identical (the common-case key is BARE). Guards the match-side key resolution
+    /// from regressing the non-colliding path.
+    #[test]
+    fn enum_match_same_module_no_collision() {
+        let out = parity_entry(
+            "enum Color:\n    Red\n    Green\nfn classify(c: Color) -> int:\n    return match c:\n        Color.Red: 1\n        Color.Green: 2\nprint(classify(Color.Red))\nprint(classify(Color.Green))\n",
+        );
+        assert_eq!(out, "1\n2\n");
+    }
+
+    /// Regression: a `from`-imported FUNCTION named like SOME OTHER module's type must still bind +
+    /// call as a function — the from-import type-skip is keyed on the TARGET module's types, NOT a
+    /// program-wide type-name set, and the bare ctor only fires for a bare-VISIBLE type (not one
+    /// merely present in the global table). Without both gates, `Foo()` wrongly hit B's struct ctor.
+    #[test]
+    fn from_imported_fn_named_like_another_modules_type() {
+        let out = assert_parity_file(
+            &[
+                ("a.chz", "fn Foo() -> int:\n    return 42\n"),
+                ("b.chz", "struct Foo:\n    x: int\n"),
+                ("main.chz", "import Foo from a\nimport b\nprint(Foo())\n"),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "42\n");
+    }
+
+    /// Blocker C (variant-key double-resolution): a module BOTH imports a colliding enum (`win.E`,
+    /// the load-order winner keyed BARE) AND declares its OWN same-named loser enum (`mid::E`), then
+    /// QUALIFIED-constructs the imported one (`win.E.A`) and passes it to the importer's fn, which
+    /// MATCHES it in `win`'s context. The construction's variant_id must key on `win`'s E (the call
+    /// site's already-resolved key), NOT be re-derived from the currently-compiled module (`mid`)'s
+    /// `bare_types` — else the producer bakes `mid::E::A` and `win.pick`'s match never fires. Must be
+    /// byte-identical on both engines (interp was already correct; this guards VM/serial).
+    #[test]
+    fn enum_collision_construct_in_other_declaring_module() {
+        let out = assert_parity_file(
+            &[
+                (
+                    "win.chz",
+                    "enum E:\n    A\n    B\n\nfn pick(e: E) -> int:\n    match e:\n        E.A: return 1\n        E.B: return 2\n",
+                ),
+                (
+                    "mid.chz",
+                    "import win\n\nenum E:\n    A\n    B\n\nfn go() -> int:\n    return win.pick(win.E.A)\n",
+                ),
+                ("main.chz", "import win\nimport mid\nprint(mid.go())\n"),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "1\n");
+    }
+
+    /// No-collision twin: same layout, but the constructing module does NOT declare its own `E`
+    /// (single declarer `win`, bare key). Proves the common path (qualified construct of an imported
+    /// enum from an importer) is untouched. Passes before AND after the fix (regression guard).
+    #[test]
+    fn enum_no_collision_construct_in_importing_module() {
+        let out = assert_parity_file(
+            &[
+                (
+                    "win.chz",
+                    "enum E:\n    A\n    B\n\nfn pick(e: E) -> int:\n    match e:\n        E.A: return 1\n        E.B: return 2\n",
+                ),
+                (
+                    "mid.chz",
+                    "import win\n\nfn go() -> int:\n    return win.pick(win.E.A)\n",
+                ),
+                ("main.chz", "import win\nimport mid\nprint(mid.go())\n"),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "1\n");
+    }
+
+    /// A spawned task constructs an imported struct AND a value crosses a Channel (cross-airlock,
+    /// data-not-time): identical on interp, default VM, and `--parallel`.
+    #[test]
+    fn imported_struct_across_airlock_three_engine() {
+        let files = [
+            ("geo.chz", "struct Point:\n    x: int\n    y: int\n"),
+            (
+                "main.chz",
+                "import geo\nch := Channel[geo.Point]()\nparallel:\n    spawn:\n        ch.send(geo.Point(3, 4))\np := ch.recv()\nprint(p.x + p.y)\n",
+            ),
+        ];
+        let t = TmpDir::new();
+        let mut entry = None;
+        for (rel, c) in &files {
+            let p = t.write(rel, c);
+            if *rel == "main.chz" {
+                entry = Some(p);
+            }
+        }
+        let entry = entry.unwrap();
+        let (io, _, ir, _) = crate::interp::run_file(&entry);
+        let (vo, _, vr, _) = run_file(&entry);
+        let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+        assert!(
+            ir.is_ok() && vr.is_ok() && pr.is_ok(),
+            "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
+        );
+        assert_eq!(io, "7\n");
+        assert_eq!(io, vo, "interp vs vm");
+        assert_eq!(io, po, "interp vs --parallel");
     }
 
     // ----- C5 (A2): program-exit auto-drain is skipped on a hard `os.exit` -----

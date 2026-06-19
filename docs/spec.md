@@ -224,6 +224,34 @@ Resolution — **optional root marker**, kills Python's run-relative footgun:
 
 Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only matters once a project spans multiple files.
 
+**Types are module-scoped (Python-style).** A `struct` / `enum` / `type` alias is private to its
+declaring module — every top-level type is exported by default (like functions; no `pub`), and is
+reachable elsewhere **only via import**, accessed by the same bound last-segment name a function uses:
+
+```chezzi
+import core.geo                      # binds `geo`
+p: geo.Point = geo.Point(1, 2)       # qualified construction + annotation
+c := geo.Color.Red                   # qualified enum variant
+xs: list[geo.Point] = []             # qualified type inside a generic
+
+import Point from core.geo           # named import → bare use
+q := Point(3, 4)                     # bare construction
+import Point as Pt from core.geo     # rename on import (user types only)
+```
+
+A bare use of a type whose module was imported whole (`import geo`) but not named-imported is a
+**check-time error** (`unknown type 'Point'; import it from geo`). Two modules MAY declare the same
+type name with no collision — each is reachable from its own module. Print/error/JSON output is the
+bare name (`Point(x=1, y=2)`); only in the rare case where two same-named types are *both* reachable
+in one program does the compiler disambiguate the colliding key (the first declarer in load order
+keeps the bare key, each later one gets a module-qualified `mod::Point`). The disambiguated key is
+used **consistently everywhere** — construction, field/method resolution, and `match`-pattern variant
+ids all honor it (checker, compiler, and both engines agree), so a value of the disambiguated type
+reads its own fields/methods and its variants `match`. Reserved/native types (`Result`/`Option`/`Some`/`Ok`/…, `Ref`, the
+std library type surface on `import std.*`, and the FFI width names) stay global/bare always. An
+imported `type` alias is **transparent**: its body is resolved in the *defining* module's scope, so a
+cross-module `import Len from sizes` where `type Len = int32` carries its FFI-width license.
+
 `chezzi init [dir]` scaffolds a new project (`chezzi.toml` + `src/main.chz` + an example `*_test.chz`).
 The generated `chezzi.toml` is **both a root marker and a parsed manifest**: the resolver checks for
 its *presence* to fix the root, and the toolchain parses its `[project]` keys. `name`/`version` are

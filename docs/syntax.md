@@ -1392,6 +1392,27 @@ import core.db.pool              # local module → <root>/core/db/pool.chz
 **Resolution:** walk up from the file for `chezzi.toml`; found → that's the project root, else the
 script's own dir is root. `std.*` is reserved (stdlib). `a.b.c` → `<root>/a/b/c.chz`. No `./` relative imports.
 
+**Types are module-scoped** (like functions — exported by default, no `pub`; visible elsewhere only
+via import, under the same bound last-segment name):
+
+```chezzi
+import core.geo
+p: geo.Point = geo.Point(1, 2)   # qualified construct + annotate
+c := geo.Color.Red               # qualified enum variant
+xs: list[geo.Point] = []         # qualified type inside a generic
+print(p)                         # Point(x=1, y=2)  — bare name, no `::`
+
+import Point from core.geo       # named import → bare use
+q := Point(3, 4)
+import Point as Pt from core.geo # rename (user types only; FFI widths can't be renamed)
+```
+
+A bare type whose module was imported whole (`import geo`) but not named-imported is a **check-time
+error** (`unknown type 'Point'; import it from geo`). Two modules may declare the same type name —
+no collision; each is importable. Reserved/native types (`Result`/`Option`/`Some`/`Ok`, `Ref`, the
+std type surface on `import std.*`, FFI widths) stay global/bare always. An imported `type` alias is
+transparent (its body resolves in the defining module's scope, carrying any FFI-width license).
+
 ## 12b. Dynamic C-ABI FFI — `extern "lib":`
 
 Call C functions in a shared library directly, with full static type-checking. An `extern "lib":`

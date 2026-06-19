@@ -388,6 +388,16 @@ pub enum Import {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Named(String),
+    /// A module-qualified user type: `geo.Point` / `geo.Box[int]`. `module` is the bound
+    /// last-segment/alias name (the SAME name a function call `geo.ping()` uses); `name` is the type
+    /// in that module; `args` carries any generic type arguments (`geo.Box[int]` ⇒ args `[int]`,
+    /// empty for a non-generic qualified type). The checker resolves it through `imported_modules` →
+    /// the target module's `ModuleSig`. Mirrors how a function is reached via the bound module name.
+    Qualified {
+        module: String,
+        name: String,
+        args: Vec<Type>,
+    },
     Generic(String, Vec<Type>),
     Func {
         params: Vec<Type>,

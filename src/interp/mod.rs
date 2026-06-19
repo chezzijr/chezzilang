@@ -2,7 +2,7 @@
 //! Chezzi before the bytecode VM (M5). Single-file programs run here.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl,
+    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl, Import,
     LitPattern, MatchArm, MatchExprArm, Pattern, Span, SpawnTarget, Stmt, StmtKind, UnaryOp,
     WaitArm, WaitTarget,
 };
@@ -274,7 +274,43 @@ struct Interp {
     /// exactly as the compiler does (two-engine parity). Empty for a single-source run (the module's
     /// own struct decls suffice).
     extern_struct_fields: std::collections::HashMap<String, Vec<crate::ast::Field>>,
+    /// User type names (struct / enum / type-alias) declared in ANY module, gathered before
+    /// evaluation. Module-scoped types: a `from`-imported TYPE name carries no runtime value (types
+    /// resolve through the program-global struct/variant tables by name), so `bind_import` skips a
+    /// from-member that is in this set — mirroring how `std.ffi` width type imports are skipped.
+    type_names: std::collections::HashSet<String>,
+    /// Module-scoped types: `(declaring module_idx, bare type name) → runtime key`. Bare in the
+    /// no-collision case; `<dotted>::Name` on a genuine cross-module clash. Computed identically to
+    /// the compiler's `assign_type_keys` so both engines agree on the runtime key (parity).
+    type_keys: std::collections::HashMap<(usize, String), String>,
+    /// `module id → its graph index`, so `eval_module` can find the current module's index.
+    module_idx_of: std::collections::HashMap<crate::resolver::ModuleId, usize>,
+    /// `module_idx → its declared user type names` (struct/enum/alias).
+    module_types: Vec<std::collections::HashSet<String>>,
+    /// The CURRENT module's index (set per `eval_module`).
+    cur_module_idx: usize,
+    /// The CURRENT module's bound module name → that module's index (for qualified `geo.X`).
+    imported_module_idx: std::collections::HashMap<String, usize>,
+    /// The CURRENT module's bare-resolvable type names → their runtime key (locally declared +
+    /// `from`-imported + std whole-module). The bare struct/enum constructor only fires for a name
+    /// here — a type merely present in the global tables (another module's) is NOT bare-constructible,
+    /// so a `from`-imported function named like another module's type still resolves as a call.
+    /// Mirrors the compiler's `bare_types` for 3-engine parity.
+    bare_types: std::collections::HashMap<String, String>,
+    /// `module_idx → that module's built `bare_types`` map, cached at `eval_module` so a cross-module
+    /// runtime call can RE-ESTABLISH the callee's bare-type context (which drives `enum_bare_key` for
+    /// match-pattern key resolution). Without this, a disambiguated enum matched inside its declaring
+    /// module's function — but called from another module — would resolve its pattern key against the
+    /// caller's context and never match (Blocker C).
+    module_bare_types: Vec<std::collections::HashMap<String, String>>,
+    /// `home ModEnv pointer-address → its module idx`, recorded when each module's globals are built,
+    /// so a call can find the callee's module context from the `home` env it swaps in.
+    home_module_idx: std::collections::HashMap<usize, usize>,
 }
+
+/// Saved `bare_types` from [`Interp::enter_module_ctx`]: `Some` iff the context was swapped (a
+/// cross-module call), `None` for a same-module call where restoration is a no-op.
+type ModuleCtxSaved = Option<std::collections::HashMap<String, String>>;
 
 /// A task registered by `spawn`, awaiting its nursery's join barrier. The callee/receiver and
 /// arguments are evaluated and deep-copied across the airlock at the `spawn` statement (Go's
@@ -361,6 +397,15 @@ impl Interp {
             executors: Vec::new(),
             extern_aliases: std::collections::HashMap::new(),
             extern_struct_fields: std::collections::HashMap::new(),
+            type_names: std::collections::HashSet::new(),
+            type_keys: std::collections::HashMap::new(),
+            module_idx_of: std::collections::HashMap::new(),
+            module_types: Vec::new(),
+            cur_module_idx: 0,
+            imported_module_idx: std::collections::HashMap::new(),
+            bare_types: std::collections::HashMap::new(),
+            module_bare_types: Vec::new(),
+            home_module_idx: std::collections::HashMap::new(),
         };
         // Built-in Result / Option variants — available without any declaration.
         interp.register_variant("Ok", "Result", 1);
@@ -378,6 +423,25 @@ impl Interp {
                 arity,
             },
         );
+    }
+
+    /// The module-scoped runtime key for a type `name` declared in module `module_idx` (bare unless
+    /// disambiguated by a genuine cross-module clash). Mirrors the compiler's `type_key`.
+    fn type_key(&self, module_idx: usize, name: &str) -> String {
+        self.type_keys
+            .get(&(module_idx, name.to_string()))
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// Runtime key for a bare-written enum name in the CURRENT module: its `bare_types` key when
+    /// bare-visible, else the name itself (built-in `Result`/`Option`, or a miss that falls through).
+    /// Mirrors the compiler's `enum_bare_key`.
+    fn enum_bare_key(&self, ename: &str) -> String {
+        self.bare_types
+            .get(ename)
+            .cloned()
+            .unwrap_or_else(|| ename.to_string())
     }
 
     /// Evaluate an expression to a value.
@@ -524,11 +588,35 @@ impl Interp {
                 })))
             }
             ExprKind::Field { obj, name } => {
+                // `module.Enum.Variant` (nullary, qualified value form) → the variant value.
+                if let ExprKind::Field {
+                    obj: inner,
+                    name: ename,
+                } = &obj.kind
+                    && let ExprKind::Ident(mname) = &inner.kind
+                    && self.env.get_local(mname).is_none()
+                    && let Some(&tidx) = self.imported_module_idx.get(mname)
+                    && self
+                        .module_types
+                        .get(tidx)
+                        .is_some_and(|t| t.contains(ename))
+                    && let ekey = self.type_key(tidx, ename)
+                    && let Some(def) = self.variants.get(&(ekey, name.clone()))
+                    && def.arity == 0
+                {
+                    return Ok(Value::Enum {
+                        ty: def.enum_name.clone(),
+                        variant: name.as_str().into(),
+                        payload: Vec::new(),
+                    });
+                }
                 // `Enum.Variant` (nullary) → the variant value, mirroring the bare Ident path. A
-                // binding named like the enum wins, matching the checker/compiler.
+                // binding named like the enum wins, matching the checker/compiler. The enum resolves
+                // to the current module's runtime key (bare unless disambiguated).
                 if let ExprKind::Ident(ename) = &obj.kind
                     && self.env.get_local(ename).is_none()
-                    && let Some(def) = self.variants.get(&(ename.clone(), name.clone()))
+                    && let ekey = self.enum_bare_key(ename)
+                    && let Some(def) = self.variants.get(&(ekey, name.clone()))
                     && def.arity == 0
                 {
                     return Ok(Value::Enum {
@@ -995,35 +1083,50 @@ impl Interp {
         // A method call `obj.name(args)` — bind `obj` as `self`. But `Enum.Variant(args)` is a
         // qualified variant constructor, not a method: an unbound enum name dotted with its variant.
         if let ExprKind::Field { obj, name } = &callee.kind {
+            // `module.Struct(args)` → qualified struct constructor.
+            if let ExprKind::Ident(mname) = &obj.kind
+                && self.env.get_local(mname).is_none()
+                && let Some(&tidx) = self.imported_module_idx.get(mname)
+                && self
+                    .module_types
+                    .get(tidx)
+                    .is_some_and(|t| t.contains(name))
+            {
+                let key = self.type_key(tidx, name);
+                if let Some(def) = self.structs.get(&key).cloned() {
+                    let arg_vals = args
+                        .iter()
+                        .map(|a| self.eval(a))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return self.construct_struct(&key, &def, arg_vals, span);
+                }
+            }
+            // `module.Enum.Variant(args)` → qualified payload-variant constructor.
+            if let ExprKind::Field {
+                obj: inner,
+                name: ename,
+            } = &obj.kind
+                && let ExprKind::Ident(mname) = &inner.kind
+                && self.env.get_local(mname).is_none()
+                && let Some(&tidx) = self.imported_module_idx.get(mname)
+                && self
+                    .module_types
+                    .get(tidx)
+                    .is_some_and(|t| t.contains(ename))
+            {
+                let ekey = self.type_key(tidx, ename);
+                if let Some(def) = self.variants.get(&(ekey.clone(), name.clone())).cloned() {
+                    return self.build_variant(&def, name, args, span);
+                }
+            }
+            // `Enum.Variant(args)` → variant constructor (current module's runtime key for the enum).
             if let ExprKind::Ident(ename) = &obj.kind
                 && self.env.get_local(ename).is_none()
-                && self.variants.contains_key(&(ename.clone(), name.clone()))
+                && let ekey = self.enum_bare_key(ename)
+                && self.variants.contains_key(&(ekey.clone(), name.clone()))
             {
-                let arg_vals = args
-                    .iter()
-                    .map(|a| self.eval(a))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let def = self
-                    .variants
-                    .get(&(ename.clone(), name.clone()))
-                    .cloned()
-                    .unwrap();
-                if arg_vals.len() != def.arity {
-                    return Err(RuntimeError {
-                        message: format!(
-                            "variant '{}' expects {} value(s), got {}",
-                            name,
-                            def.arity,
-                            arg_vals.len()
-                        ),
-                        span,
-                    });
-                }
-                return Ok(Value::Enum {
-                    ty: def.enum_name.clone(),
-                    variant: name.as_str().into(),
-                    payload: arg_vals,
-                });
+                let def = self.variants.get(&(ekey, name.clone())).cloned().unwrap();
+                return self.build_variant(&def, name, args, span);
             }
             return self.eval_method_call(obj, name, args, span);
         }
@@ -1164,8 +1267,14 @@ impl Interp {
             if builtins::is_builtin(name) {
                 return builtins::call(name, arg_vals, span);
             }
-            if let Some(def) = self.structs.get(name).cloned() {
-                return self.construct_struct(name, &def, arg_vals, span);
+            // A bare struct ctor: only a BARE-resolvable struct in THIS module (local / from-import /
+            // std), keyed by its declaring module's runtime key. A struct merely present in the global
+            // table (another module's) is NOT bare-constructible — the name falls through (e.g. to a
+            // from-imported function of the same name).
+            if let Some(struct_key) = self.bare_types.get(name).cloned()
+                && let Some(def) = self.structs.get(&struct_key).cloned()
+            {
+                return self.construct_struct(&struct_key, &def, arg_vals, span);
             }
             // A bare *built-in* variant constructor (`Ok(x)`, `Some(x)`) — user variants are qualified
             // (the `Field` arm above), so only built-ins resolve bare here.
@@ -1578,6 +1687,7 @@ impl Interp {
             function: name.to_string(),
             span,
         });
+        let saved_ctx = self.enter_module_ctx(&home);
         let saved_globals = self.env.swap_globals(home);
         let saved = self.env.swap_locals(locals);
         // M-C: a `spawn:` block (or deferred block) is its own function body — a nested bare `spawn`
@@ -1602,6 +1712,7 @@ impl Interp {
             Ok(Some(_)) => Ok(()),
             Ok(None) => result.map(|_| ()),
         };
+        self.restore_module_ctx(saved_ctx);
         if outcome.is_ok() {
             self.call_stack.pop();
         }
@@ -1736,6 +1847,7 @@ impl Interp {
             span,
         });
         let saved_globals = self.env.swap_globals(clo.home.clone());
+        let saved_ctx = self.enter_module_ctx(&clo.home);
         let saved = self.env.swap_locals(new_locals);
         let result = self.eval(&clo.body);
         let outcome = match self.finish_frame(saved, saved_globals) {
@@ -1743,6 +1855,7 @@ impl Interp {
             Ok(Some(v)) => Ok(v),
             Ok(None) => result,
         };
+        self.restore_module_ctx(saved_ctx);
         if outcome.is_ok() {
             self.call_stack.pop();
         }
@@ -1782,7 +1895,7 @@ impl Interp {
             });
         }
         for arm in arms {
-            if let Some(binds) = try_bind(&arm.pattern, &value, &self.variants) {
+            if let Some(binds) = self.try_bind(&arm.pattern, &value) {
                 self.env.push();
                 for (name, v) in binds {
                     self.env.define(&name, v);
@@ -1831,7 +1944,7 @@ impl Interp {
             });
         }
         for arm in arms {
-            if let Some(binds) = try_bind(&arm.pattern, &value, &self.variants) {
+            if let Some(binds) = self.try_bind(&arm.pattern, &value) {
                 self.env.push();
                 for (name, v) in binds {
                     self.env.define(&name, v);
@@ -1861,6 +1974,38 @@ impl Interp {
     }
 
     /// Construct a struct instance, binding the positional args to fields in declaration order.
+    /// Evaluate `args`, arity-check against the variant `def`, and build the enum value. Shared by the
+    /// bare and the qualified (`module.Enum.Variant`) constructor paths. `def.enum_name` is the enum's
+    /// runtime key (bare unless disambiguated), stamped into `Value::Enum.ty` for Display/match parity.
+    fn build_variant(
+        &mut self,
+        def: &VariantDef,
+        variant: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let arg_vals = args
+            .iter()
+            .map(|a| self.eval(a))
+            .collect::<Result<Vec<_>, _>>()?;
+        if arg_vals.len() != def.arity {
+            return Err(RuntimeError {
+                message: format!(
+                    "variant '{}' expects {} value(s), got {}",
+                    variant,
+                    def.arity,
+                    arg_vals.len()
+                ),
+                span,
+            });
+        }
+        Ok(Value::Enum {
+            ty: def.enum_name.clone(),
+            variant: variant.into(),
+            payload: arg_vals,
+        })
+    }
+
     fn construct_struct(
         &mut self,
         name: &str,
@@ -3599,6 +3744,39 @@ impl Interp {
 
     /// Call a user function: bind params in a fresh local frame (lexical scoping — the callee
     /// sees only globals + its params), run the body, and surface a `return` value (or `Nil`).
+    /// Re-establish the CALLEE's module context (`cur_module_idx` + `bare_types`) from its `home`
+    /// globals env, returning the saved caller context to restore at frame teardown. Drives
+    /// `enum_bare_key`/`type_key` so a disambiguated enum match inside the callee's declaring module
+    /// resolves its pattern key against the RIGHT module — the runtime mirror of the compiler's
+    /// per-module key resolution (Blocker C). A `home` with no recorded idx (e.g. a synthetic env)
+    /// leaves the context unchanged.
+    fn enter_module_ctx(&mut self, home: &value::ModEnv) -> (usize, ModuleCtxSaved) {
+        let saved_idx = self.cur_module_idx;
+        let ptr = std::rc::Rc::as_ptr(&home.0) as usize;
+        if let Some(&idx) = self.home_module_idx.get(&ptr)
+            && idx != saved_idx
+        {
+            let saved_bare = std::mem::replace(
+                &mut self.bare_types,
+                self.module_bare_types.get(idx).cloned().unwrap_or_default(),
+            );
+            self.cur_module_idx = idx;
+            (saved_idx, Some(saved_bare))
+        } else {
+            // Same module (or unknown home) → no swap needed; restoration is a no-op.
+            (saved_idx, None)
+        }
+    }
+
+    /// Restore the caller's module context saved by [`enter_module_ctx`].
+    fn restore_module_ctx(&mut self, saved: (usize, ModuleCtxSaved)) {
+        let (saved_idx, saved_bare) = saved;
+        if let Some(bare) = saved_bare {
+            self.cur_module_idx = saved_idx;
+            self.bare_types = bare;
+        }
+    }
+
     fn call(
         &mut self,
         decl: &FnDecl,
@@ -3631,6 +3809,9 @@ impl Interp {
         });
         // Resolve the callee's top-level names against *its* module, not the caller's.
         let saved_globals = self.env.swap_globals(home.clone());
+        // Re-establish the callee's MODULE context (key resolution) too, so a disambiguated enum
+        // match inside the callee resolves its pattern key against the callee's module (Blocker C).
+        let saved_ctx = self.enter_module_ctx(home);
         let saved = self.env.swap_locals(vec![frame]);
         // The function body's *direct* defers belong to the per-call list (pushed above, drained by
         // `finish_frame`); nested blocks open their own defer scopes via `exec_block`.
@@ -3674,6 +3855,7 @@ impl Interp {
                 Err(e) => Err(e),
             },
         };
+        self.restore_module_ctx(saved_ctx);
         if outcome.is_ok() {
             self.call_stack.pop();
         }
@@ -3717,6 +3899,21 @@ impl Interp {
     /// of globals and runs top-to-bottom (no auto-`main`). Errors surface with output preserved.
     #[cfg(test)]
     fn execute(&mut self, stmts: &[Stmt]) -> Result<(), RuntimeError> {
+        // Single-source path (no module graph): every top-level type is locally declared, hence
+        // bare-visible under its own (bare) key. Populate `module_types`/`bare_types`/`type_names`
+        // so the bare struct/enum constructor and the from-import skip behave as in the graph path.
+        self.module_types = vec![std::collections::HashSet::new()];
+        self.cur_module_idx = 0;
+        for s in stmts {
+            if let StmtKind::Struct { name, .. }
+            | StmtKind::Enum { name, .. }
+            | StmtKind::TypeAlias { name, .. } = &s.kind
+            {
+                self.module_types[0].insert(name.clone());
+                self.type_names.insert(name.clone());
+                self.bare_types.insert(name.clone(), name.clone());
+            }
+        }
         self.eval_top_level(stmts)
     }
 
@@ -3797,6 +3994,65 @@ impl Interp {
 
         let mod_globals = value::ModEnv::new();
         let saved = self.env.swap_globals(mod_globals.clone());
+        // Module-scoped types: record this module's index + its bound module bindings (for qualified
+        // construction). Must match the compiler's per-module state so the runtime keys agree.
+        self.cur_module_idx = self.module_idx_of.get(&lm.id).copied().unwrap_or(0);
+        self.imported_module_idx.clear();
+        self.bare_types.clear();
+        let cur_idx = self.cur_module_idx;
+        if let Some(own) = self.module_types.get(cur_idx) {
+            for name in own.clone() {
+                let key = self.type_key(cur_idx, &name);
+                self.bare_types.insert(name, key);
+            }
+        }
+        for imp in &lm.imports {
+            match &imp.import {
+                Import::Module { path, alias } => {
+                    let bind = alias
+                        .clone()
+                        .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                    if let Some(&tidx) = self.module_idx_of.get(&imp.target) {
+                        self.imported_module_idx.insert(bind, tidx);
+                        // Std whole-module import exposes its types bare too (mirrors the checker).
+                        if path.first().map(String::as_str) == Some("std")
+                            && let Some(types) = self.module_types.get(tidx)
+                        {
+                            for name in types.clone() {
+                                let key = self.type_key(tidx, &name);
+                                self.bare_types.entry(name).or_insert(key);
+                            }
+                        }
+                    }
+                }
+                Import::From { names, .. } => {
+                    if let Some(&tidx) = self.module_idx_of.get(&imp.target) {
+                        for (member, alias) in names {
+                            if self
+                                .module_types
+                                .get(tidx)
+                                .is_some_and(|t| t.contains(member))
+                            {
+                                let key = self.type_key(tidx, member);
+                                let bind = alias.clone().unwrap_or_else(|| member.clone());
+                                self.bare_types.insert(bind, key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Cache this module's fully-built `bare_types` + record its `home` env address → idx, so a
+        // cross-module runtime call can re-establish the callee's module context (Blocker C: a
+        // disambiguated enum match inside this module, called from elsewhere, must resolve its pattern
+        // key against THIS module's bare-types).
+        if self.module_bare_types.len() <= cur_idx {
+            self.module_bare_types
+                .resize_with(cur_idx + 1, Default::default);
+        }
+        self.module_bare_types[cur_idx] = self.bare_types.clone();
+        self.home_module_idx
+            .insert(std::rc::Rc::as_ptr(&mod_globals.0) as usize, cur_idx);
         // Bind this module's imports before its body runs (dependencies are already evaluated, so
         // their namespaces are in `self.namespaces`).
         let bind = lm.imports.iter().try_for_each(|imp| self.bind_import(imp));
@@ -3841,17 +4097,24 @@ impl Interp {
                     {
                         continue;
                     }
-                    let value =
-                        ns.members
-                            .0
-                            .borrow()
-                            .get(member)
-                            .cloned()
-                            .ok_or_else(|| RuntimeError {
+                    // Bind the member's runtime value if the target module exports one (a fn/value).
+                    // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
+                    // resolves through the program-global type tables by name — so a member with no
+                    // value that IS a known type name is skipped (not an error). The value bind is
+                    // tried FIRST so a fn named like a type IN ANOTHER MODULE is still bound here.
+                    let value = ns.members.0.borrow().get(member).cloned();
+                    match value {
+                        Some(v) => {
+                            self.env.define(alias.as_ref().unwrap_or(member), v);
+                        }
+                        None if self.type_names.contains(member) => {}
+                        None => {
+                            return Err(RuntimeError {
                                 message: format!("module '{}' has no member '{member}'", ns.name),
                                 span: imp.span,
-                            })?;
-                    self.env.define(alias.as_ref().unwrap_or(member), value);
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -3876,9 +4139,11 @@ impl Interp {
                     methods,
                     ..
                 } => {
-                    // Type names are program-global in M4.5 (per-module type namespacing is
-                    // deferred): a name reused across modules is a collision, not a shadow.
-                    if self.structs.contains_key(name) {
+                    // Module-scoped types: register under this module's runtime KEY (bare unless a
+                    // genuine cross-module clash disambiguated it). A duplicate KEY is a real
+                    // redefinition (same module, same name) — still rejected.
+                    let key = self.type_key(self.cur_module_idx, name);
+                    if self.structs.contains_key(&key) {
                         return Err(RuntimeError {
                             message: format!("type '{name}' is already defined"),
                             span: stmt.span,
@@ -3892,13 +4157,14 @@ impl Interp {
                             .collect(),
                         home: home.clone(),
                     };
-                    self.structs.insert(name.clone(), std::rc::Rc::new(def));
-                    self.struct_fields.insert(name.clone(), fields.clone());
+                    self.structs.insert(key.clone(), std::rc::Rc::new(def));
+                    self.struct_fields.insert(key, fields.clone());
                 }
                 // Type-erased: type parameters are checker-only (identical runtime per instantiation).
                 StmtKind::Enum { name, variants, .. } => {
+                    let key = self.type_key(self.cur_module_idx, name);
                     for v in variants {
-                        self.register_variant(&v.name, name, v.payload.len());
+                        self.register_variant(&v.name, &key, v.payload.len());
                     }
                 }
                 StmtKind::Extern { lib, fns } => {
@@ -5173,6 +5439,44 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
             }
         }
     }
+    // Gather every module's user type names (struct/enum/alias) so a `from`-imported type — which
+    // carries no runtime value — is skipped at `bind_import` rather than erroring (module-scoped
+    // types resolve through the program-global tables by name). Also compute the module-scoped
+    // runtime-key map (IDENTICAL algorithm to the compiler's `assign_type_keys`, so both engines
+    // agree on every key — parity even for a genuine cross-module name clash).
+    interp.module_types = vec![std::collections::HashSet::new(); graph.modules.len()];
+    let mut declarers: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (idx, lm) in graph.modules.iter().enumerate() {
+        interp.module_idx_of.insert(lm.id.clone(), idx);
+        if lm.native.is_some() {
+            continue;
+        }
+        for s in &lm.ast.stmts {
+            if let StmtKind::Struct { name, .. }
+            | StmtKind::Enum { name, .. }
+            | StmtKind::TypeAlias { name, .. } = &s.kind
+            {
+                interp.type_names.insert(name.clone());
+                interp.module_types[idx].insert(name.clone());
+                let v = declarers.entry(name.clone()).or_default();
+                if !v.contains(&idx) {
+                    v.push(idx);
+                }
+            }
+        }
+    }
+    for (name, mods) in &declarers {
+        if mods.len() < 2 {
+            continue;
+        }
+        for &idx in &mods[1..] {
+            let dotted = graph.modules[idx].label();
+            interp
+                .type_keys
+                .insert((idx, name.clone()), format!("{dotted}::{name}"));
+        }
+    }
     // Modules are in load order: dependencies first, entry last.
     for lm in &graph.modules {
         if let Err(e) = interp.eval_module(lm) {
@@ -6137,88 +6441,99 @@ fn variant_pair(enum_name: Option<&str>, name: &str) -> Option<(String, String)>
     Some((en.to_string(), name.to_string()))
 }
 
-fn try_bind(
-    pattern: &Pattern,
-    value: &Value,
-    variants: &std::collections::HashMap<(String, String), VariantDef>,
-) -> Option<Vec<(String, Value)>> {
-    match pattern {
-        Pattern::Wildcard => Some(Vec::new()),
-        Pattern::Ident(name) => {
-            // A bare nested identifier naming a *built-in* NULLARY variant (`None`) is a refutable
-            // variant match, binding nothing: it matches iff the value IS that variant of that
-            // built-in enum (mirrors the VM's pure-int variant_id routing, which keys on the
-            // enum-scoped id). A non-variant name is a binding capturing the whole sub-value.
-            if let Some((en, _)) =
-                variant_pair(None, name).filter(|k| variants.get(k).is_some_and(|d| d.arity == 0))
-            {
-                return match value {
-                    Value::Enum {
-                        ty,
-                        variant,
-                        payload,
-                    } if ty.as_ref() == en && variant.as_ref() == name && payload.is_empty() => {
-                        Some(Vec::new())
-                    }
-                    _ => None,
-                };
-            }
-            Some(vec![(name.clone(), value.clone())])
-        }
-        // An or-pattern matches the first alternative that matches (first match wins).
-        Pattern::Or(alts) => alts.iter().find_map(|a| try_bind(a, value, variants)),
-        Pattern::Literal(lit) => literal_matches(lit, value).then(Vec::new),
-        Pattern::Range { start, end } => match value {
-            Value::Int(v) => (*start <= *v && *v < *end).then(Vec::new),
-            _ => None,
-        },
-        Pattern::Tuple(subs) => {
-            let Value::Tuple(elems) = value else {
-                return None;
-            };
-            if elems.len() != subs.len() {
-                return None;
-            }
-            let mut out = Vec::new();
-            for (sub, v) in subs.iter().zip(elems.iter()) {
-                out.extend(try_bind(sub, v, variants)?);
-            }
-            Some(out)
-        }
-        Pattern::Variant {
-            name,
-            bindings,
-            enum_name,
-        } => {
-            let Value::Enum {
-                ty,
-                variant,
-                payload,
-            } = value
-            else {
-                // A bare top-level identifier (no payload) against a non-enum value is a binding
-                // capturing the whole value — the checker permits this only for literal scrutinees.
-                if bindings.is_empty() {
-                    return Some(vec![(name.clone(), value.clone())]);
+impl Interp {
+    /// Attempt to bind `pattern` against `value`, returning the captured bindings on a match. A
+    /// method (not a free fn) so a *qualified* variant pattern can resolve its bare written enum name
+    /// to the module-scoped runtime key (`enum_bare_key`, against the CURRENT module context which the
+    /// callee's frame established) — so a disambiguated enum's variants MATCH (Blocker C). In the
+    /// no-collision common case the key resolves back to the bare name, unchanged.
+    fn try_bind(&self, pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
+        let variants = &self.variants;
+        match pattern {
+            Pattern::Wildcard => Some(Vec::new()),
+            Pattern::Ident(name) => {
+                // A bare nested identifier naming a *built-in* NULLARY variant (`None`) is a
+                // refutable variant match, binding nothing: it matches iff the value IS that variant
+                // of that built-in enum (mirrors the VM's pure-int variant_id routing, which keys on
+                // the enum-scoped id). A non-variant name is a binding capturing the whole sub-value.
+                if let Some((en, _)) = variant_pair(None, name)
+                    .filter(|k| variants.get(k).is_some_and(|d| d.arity == 0))
+                {
+                    return match value {
+                        Value::Enum {
+                            ty,
+                            variant,
+                            payload,
+                        } if ty.as_ref() == en
+                            && variant.as_ref() == name
+                            && payload.is_empty() =>
+                        {
+                            Some(Vec::new())
+                        }
+                        _ => None,
+                    };
                 }
-                return None;
-            };
-            if name != variant.as_ref() || bindings.len() != payload.len() {
-                return None;
+                Some(vec![(name.clone(), value.clone())])
             }
-            // A *qualified* pattern only matches a value of that same enum — two enums may share a
-            // variant name, so the variant string alone is not enough (mirrors the VM's enum-scoped
-            // variant_id compare). The bare built-in form keys on the variant name only.
-            if let Some(en) = enum_name
-                && ty.as_ref() != en.as_str()
-            {
-                return None;
+            // An or-pattern matches the first alternative that matches (first match wins).
+            Pattern::Or(alts) => alts.iter().find_map(|a| self.try_bind(a, value)),
+            Pattern::Literal(lit) => literal_matches(lit, value).then(Vec::new),
+            Pattern::Range { start, end } => match value {
+                Value::Int(v) => (*start <= *v && *v < *end).then(Vec::new),
+                _ => None,
+            },
+            Pattern::Tuple(subs) => {
+                let Value::Tuple(elems) = value else {
+                    return None;
+                };
+                if elems.len() != subs.len() {
+                    return None;
+                }
+                let mut out = Vec::new();
+                for (sub, v) in subs.iter().zip(elems.iter()) {
+                    out.extend(self.try_bind(sub, v)?);
+                }
+                Some(out)
             }
-            let mut out = Vec::new();
-            for (sub, v) in bindings.iter().zip(payload.iter()) {
-                out.extend(try_bind(sub, v, variants)?);
+            Pattern::Variant {
+                name,
+                bindings,
+                enum_name,
+            } => {
+                let Value::Enum {
+                    ty,
+                    variant,
+                    payload,
+                } = value
+                else {
+                    // A bare top-level identifier (no payload) against a non-enum value is a binding
+                    // capturing the whole value — the checker permits this only for literal
+                    // scrutinees.
+                    if bindings.is_empty() {
+                        return Some(vec![(name.clone(), value.clone())]);
+                    }
+                    return None;
+                };
+                if name != variant.as_ref() || bindings.len() != payload.len() {
+                    return None;
+                }
+                // A *qualified* pattern only matches a value of that same enum — two enums may share
+                // a variant name, so the variant string alone is not enough (mirrors the VM's
+                // enum-scoped variant_id compare). The pattern carries the BARE written enum name;
+                // resolve it to the module-scoped runtime key the construction path used, so a
+                // disambiguated enum (`cb::Color`) matches. The bare built-in form keys on the
+                // variant name only.
+                if let Some(en) = enum_name
+                    && ty.as_ref() != self.enum_bare_key(en).as_str()
+                {
+                    return None;
+                }
+                let mut out = Vec::new();
+                for (sub, v) in bindings.iter().zip(payload.iter()) {
+                    out.extend(self.try_bind(sub, v)?);
+                }
+                Some(out)
             }
-            Some(out)
         }
     }
 }

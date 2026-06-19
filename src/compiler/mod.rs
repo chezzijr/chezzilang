@@ -12,7 +12,7 @@
 //!      forward references resolve) and one proto per `fn` / method / closure.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl,
+    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl, Import,
     LitPattern, MatchArm, MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type,
     UnaryOp, WaitArm, WaitTarget,
 };
@@ -58,9 +58,14 @@ fn is_builtin(name: &str) -> bool {
 /// Compile a whole resolved module graph in dependency order.
 pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     let mut c = Compiler::new();
+    // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
+    // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
+    // output); a name declared in ≥2 modules that are BOTH in the program is disambiguated (the
+    // first/entry-most keeps bare, the rest get `<dotted.path>::Name`).
+    c.assign_type_keys(graph);
     // Pass 1: hoist all type declarations across every module.
-    for lm in &graph.modules {
-        c.hoist_types(&lm.ast.stmts)?;
+    for (idx, lm) in graph.modules.iter().enumerate() {
+        c.hoist_types(idx, &lm.ast.stmts)?;
         c.gather_aliases(&lm.ast.stmts);
     }
     // Pass 2: compile each module's toplevel + functions. The entry module is last (deps first);
@@ -94,7 +99,19 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     })?;
     let module = &module;
     let mut c = Compiler::new();
-    c.hoist_types(&module.stmts)?;
+    // Single-module: no cross-module collisions, so every type keeps its bare key. Still record the
+    // declared type names (for the engines' from-import skip) and the per-module type set.
+    c.module_types = vec![std::collections::HashSet::new()];
+    for s in &module.stmts {
+        if let StmtKind::Struct { name, .. }
+        | StmtKind::Enum { name, .. }
+        | StmtKind::TypeAlias { name, .. } = &s.kind
+        {
+            c.module_types[0].insert(name.clone());
+            c.program.type_names.insert(name.clone());
+        }
+    }
+    c.hoist_types(0, &module.stmts)?;
     c.gather_aliases(&module.stmts);
     let toplevel = c.compile_module(0, module, &[], true)?;
     let global_slots = std::mem::take(&mut c.global_slots);
@@ -137,6 +154,26 @@ struct Compiler {
     /// fn's scalar-alias param/return types to `CType` — an alias defined in one module and used bare
     /// in another's `extern` signature must resolve here exactly as the checker accepted it.
     aliases: HashMap<String, Type>,
+    /// Module-scoped types: `(declaring module_idx, bare type name) → runtime key`. The key is the
+    /// bare name in the no-collision case, or `<dotted.path>::Name` when a name collides across
+    /// modules. Built once by [`Compiler::assign_type_keys`] before any module compiles. A name NOT
+    /// in this map has the bare key (reserved/native types, or a name with no collision recorded).
+    type_keys: HashMap<(usize, String), String>,
+    /// `module_idx → its declared user type names` (struct/enum/alias). Drives the collision detection
+    /// and resolves a qualified `geo.X` to the right module's key.
+    module_types: Vec<std::collections::HashSet<String>>,
+    /// The CURRENT module's bound module name → that module's index, rebuilt per `compile_module`
+    /// (mirrors the checker's `imported_modules`). Lets `geo.Point(...)` resolve the qualified key.
+    imported_modules: HashMap<String, usize>,
+    /// The CURRENT module's index, set at the top of `compile_module` — the home module whose
+    /// locally-declared types use its own `type_keys` entry.
+    current_module_idx: usize,
+    /// The CURRENT module's bare-resolvable type names → their runtime key: locally-declared types
+    /// plus `from`-imported ones (rebuilt per `compile_module`). The bare struct/enum constructor
+    /// only fires for a name in this set — a type merely present in the global `program.structs`
+    /// (declared in another module, imported whole or not at all) is NOT bare-constructible here, so
+    /// a `from`-imported function named like some other module's type still resolves as a call.
+    bare_types: HashMap<String, String>,
 }
 
 /// M19 lever #2 — register an enum variant into BOTH program tables, assigning it the next dense
@@ -171,6 +208,7 @@ impl Compiler {
             cffi_defs: Vec::new(),
             tests: Vec::new(),
             suites: Vec::new(),
+            type_names: std::collections::HashSet::new(),
         };
         // Built-in Result / Option variants, available without declaration. M19 lever #2 — these are
         // registered FIRST so they get the fixed dense ids `Ok`=VID_OK(0), `Err`=VID_ERR(1),
@@ -222,7 +260,74 @@ impl Compiler {
             field_ic_next: 0,
             method_ic_next: 0,
             aliases: HashMap::new(),
+            type_keys: HashMap::new(),
+            module_types: Vec::new(),
+            imported_modules: HashMap::new(),
+            current_module_idx: 0,
+            bare_types: HashMap::new(),
         }
+    }
+
+    /// Pass 0 — assign a runtime key to every module-scoped user type. Scans every module's struct /
+    /// enum / alias names (skipping native modules, which export only fns). For a name declared in
+    /// exactly one module the key is the BARE name (so Display/print/error/JSON output is unchanged).
+    /// For a name declared in ≥2 modules — a genuine cross-module clash — the FIRST declarer (graph
+    /// order, deps-first) keeps the bare key and each later one is disambiguated to `<dotted>::Name`.
+    /// Reserved/native names are never user-declared here, so they never collide. Also seeds
+    /// `program.type_names` (used by the engines' `bind_import` to skip from-imported type members).
+    fn assign_type_keys(&mut self, graph: &ModuleGraph) {
+        self.module_types = vec![std::collections::HashSet::new(); graph.modules.len()];
+        // name → the module indices (graph order) that declare it.
+        let mut declarers: HashMap<String, Vec<usize>> = HashMap::new();
+        for (idx, lm) in graph.modules.iter().enumerate() {
+            if lm.native.is_some() {
+                continue;
+            }
+            for s in &lm.ast.stmts {
+                if let StmtKind::Struct { name, .. }
+                | StmtKind::Enum { name, .. }
+                | StmtKind::TypeAlias { name, .. } = &s.kind
+                {
+                    self.module_types[idx].insert(name.clone());
+                    self.program.type_names.insert(name.clone());
+                    let v = declarers.entry(name.clone()).or_default();
+                    if !v.contains(&idx) {
+                        v.push(idx);
+                    }
+                }
+            }
+        }
+        for (name, mods) in &declarers {
+            if mods.len() < 2 {
+                continue; // no collision → bare key (recorded implicitly by absence)
+            }
+            // First declarer keeps the bare name; the rest get a module-qualified key.
+            for &idx in &mods[1..] {
+                let dotted = graph.modules[idx].label();
+                self.type_keys
+                    .insert((idx, name.clone()), format!("{dotted}::{name}"));
+            }
+        }
+    }
+
+    /// The runtime key for a type `name` declared in module `module_idx` (bare unless disambiguated
+    /// by the collision pre-pass).
+    fn type_key(&self, module_idx: usize, name: &str) -> String {
+        self.type_keys
+            .get(&(module_idx, name.to_string()))
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// The runtime key for a bare-written enum name `ename` in the CURRENT module: its `bare_types`
+    /// key when it is a bare-visible user enum (local / `from`-imported / std), else the name itself
+    /// — which covers the built-in `Result`/`Option` (always bare) and a not-bare-visible name (the
+    /// variant lookup then simply misses, leaving the call to fall through).
+    fn enum_bare_key(&self, ename: &str) -> String {
+        self.bare_types
+            .get(ename)
+            .cloned()
+            .unwrap_or_else(|| ename.to_string())
     }
 
     /// Gather `type Name = T` aliases from a module's statements into `self.aliases`. Called once per
@@ -321,12 +426,14 @@ impl Compiler {
         }
     }
 
-    /// Pass 1: register struct / enum declarations into the program-global tables.
-    fn hoist_types(&mut self, stmts: &[Stmt]) -> Result<(), CompileError> {
+    /// Pass 1: register struct / enum declarations into the program-global tables under their
+    /// module-scoped RUNTIME KEY (bare in the no-collision case; `<dotted>::Name` on a real clash).
+    fn hoist_types(&mut self, module_idx: usize, stmts: &[Stmt]) -> Result<(), CompileError> {
         for stmt in stmts {
             match &stmt.kind {
                 StmtKind::Struct { name, fields, .. } => {
-                    if self.program.structs.contains_key(name) {
+                    let key = self.type_key(module_idx, name);
+                    if self.program.structs.contains_key(&key) {
                         return Err(CompileError {
                             message: format!("type '{name}' is already defined"),
                             span: stmt.span,
@@ -336,7 +443,7 @@ impl Compiler {
                     // are rejected above, so the pre-insert count is a stable unique id per layout).
                     let tid = self.program.structs.len() as u32;
                     self.program.structs.insert(
-                        name.clone(),
+                        key.clone(),
                         StructDef {
                             fields: fields.iter().map(|f| f.name.clone()).collect(),
                             methods: HashMap::new(),
@@ -345,15 +452,17 @@ impl Compiler {
                             test_methods: Vec::new(), // filled in pass 2
                         },
                     );
-                    self.struct_fields.insert(name.clone(), fields.clone());
+                    self.struct_fields.insert(key, fields.clone());
                 }
                 // Type-erased: type parameters are checker-only, the runtime is identical for
                 // `Tree[int]` and `Tree[str]`.
                 StmtKind::Enum { name, variants, .. } => {
                     // M19 lever #2 — assign each variant the next dense `variant_id` (user variants
-                    // follow the fixed native ids at `4..`, in declaration order).
+                    // follow the fixed native ids at `4..`, in declaration order). The enum is keyed
+                    // by its module-scoped runtime key (bare unless a cross-module clash).
+                    let key = self.type_key(module_idx, name);
                     for v in variants {
-                        register_variant(&mut self.program, name, &v.name, v.payload.len());
+                        register_variant(&mut self.program, &key, &v.name, v.payload.len());
                     }
                 }
                 _ => {}
@@ -373,6 +482,58 @@ impl Compiler {
         // M19 Phase 2b: assign a stable slot to every module global before emitting any code, so
         // forward references (method/fn bodies, imports used before their line) resolve to a slot.
         self.collect_globals(imports, &module.stmts);
+        // Module-scoped types: record this module's index + its imported module bindings, so a
+        // qualified `geo.Point(...)` resolves to the right module's runtime key.
+        self.current_module_idx = module_idx;
+        self.imported_modules.clear();
+        // Bare-resolvable type names in THIS module → runtime key: locally declared first.
+        self.bare_types.clear();
+        if let Some(own) = self.module_types.get(module_idx) {
+            for name in own.clone() {
+                let key = self.type_key(module_idx, &name);
+                self.bare_types.insert(name, key);
+            }
+        }
+        for imp in imports {
+            match &imp.import {
+                Import::Module { path, alias } => {
+                    let bind = alias
+                        .clone()
+                        .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                    if let Some(tidx) = self.program.module_index(&imp.target) {
+                        self.imported_modules.insert(bind, tidx);
+                        // A whole-module import of a STDLIB module exposes its types BARE too (mirrors
+                        // the checker's std exception — e.g. the `Ref` from `import std.ref`). User
+                        // whole-module imports do NOT (their types are only reachable qualified).
+                        if path.first().map(String::as_str) == Some("std")
+                            && let Some(types) = self.module_types.get(tidx)
+                        {
+                            for name in types.clone() {
+                                let key = self.type_key(tidx, &name);
+                                self.bare_types.entry(name).or_insert(key);
+                            }
+                        }
+                    }
+                }
+                Import::From { names, .. } => {
+                    if let Some(tidx) = self.program.module_index(&imp.target) {
+                        for (member, alias) in names {
+                            // A `from`-imported user type becomes bare-resolvable under its bind name,
+                            // keyed by the DECLARING module's runtime key.
+                            if self
+                                .module_types
+                                .get(tidx)
+                                .is_some_and(|t| t.contains(member))
+                            {
+                                let key = self.type_key(tidx, member);
+                                let bind = alias.clone().unwrap_or_else(|| member.clone());
+                                self.bare_types.insert(bind, key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Compile struct methods first, recording their proto ids + this module as their home.
         for stmt in &module.stmts {
             if let StmtKind::Struct {
@@ -382,12 +543,13 @@ impl Compiler {
                 ..
             } = &stmt.kind
             {
+                let key = self.type_key(module_idx, name);
                 let mut test_methods: Vec<String> = Vec::new();
                 let mut suite_tests: Vec<(String, ProtoId)> = Vec::new();
                 let mut hooks: HashMap<String, ProtoId> = HashMap::new();
                 for m in methods {
                     let pid = self.compile_fn(m, false)?;
-                    let def = self.program.structs.get_mut(name).expect("hoisted");
+                    let def = self.program.structs.get_mut(&key).expect("hoisted");
                     def.module_idx = module_idx;
                     def.methods.insert(m.name.clone(), pid);
                     if m.is_test {
@@ -398,7 +560,7 @@ impl Compiler {
                     }
                 }
                 if !test_methods.is_empty() {
-                    let def = self.program.structs.get_mut(name).expect("hoisted");
+                    let def = self.program.structs.get_mut(&key).expect("hoisted");
                     def.test_methods = test_methods;
                     // A struct with ≥1 `test fn` method is a suite. Emit a zero-arg constructor thunk
                     // (returns `Suite(<each field default>)`) so the runner builds the instance via
@@ -1662,14 +1824,18 @@ impl Compiler {
     /// name (a binding, not a variant).
     fn variant_pair(&self, enum_name: Option<&str>, name: &str) -> Option<(String, String)> {
         let en = match enum_name {
-            Some(en) => en,
+            // A pattern carries the BARE written enum name (`Color` from `Color.Red`); resolve it to
+            // the module-scoped runtime key the construction path uses (`enum_bare_key`), so a
+            // disambiguated enum (`cb::Color`) MATCHES — producer and consumer agree on the key. In
+            // the no-collision common case this resolves back to the bare name, unchanged.
+            Some(en) => self.enum_bare_key(en),
             None => match name {
-                "Ok" | "Err" => "Result",
-                "Some" | "None" => "Option",
+                "Ok" | "Err" => "Result".to_string(),
+                "Some" | "None" => "Option".to_string(),
                 _ => return None,
             },
         };
-        Some((en.to_string(), name.to_string()))
+        Some((en, name.to_string()))
     }
 
     /// Whether `(enum_name, name)` is a registered NULLARY variant (`None`, a user enum's
@@ -1688,6 +1854,20 @@ impl Compiler {
     fn variant_id_of(&self, enum_name: Option<&str>, name: &str) -> u32 {
         self.variant_pair(enum_name, name)
             .and_then(|k| self.program.variants.get(&k))
+            .map_or(crate::vm::op::VID_NONE, |v| v.variant_id)
+    }
+
+    /// Like `variant_id_of`, but `enum_key` is the ALREADY-RESOLVED module-scoped runtime key (the
+    /// `type_key`/`enum_bare_key` the *construction call site* computed to decide WHICH module's enum
+    /// it is building). Looks `(enum_key, name)` up directly — NO second pass through `enum_bare_key`.
+    /// This is the construction-side entry point: re-resolving the key against the currently-compiled
+    /// module's `bare_types` would mis-key a qualified `mod.E.V` whenever the *constructing* module
+    /// also declares a colliding `E` (it'd pick the local loser's id), so the produced value could
+    /// never match in its declaring module. `variant_id_of` stays the pattern/built-in entry point.
+    fn variant_id_of_key(&self, enum_key: &str, name: &str) -> u32 {
+        self.program
+            .variants
+            .get(&(enum_key.to_string(), name.to_string()))
             .map_or(crate::vm::op::VID_NONE, |v| v.variant_id)
     }
 
@@ -2225,18 +2405,51 @@ impl Compiler {
                 self.compile_call(fc, callee, args, expr.span)?
             }
             ExprKind::Field { obj, name } => {
-                // `Enum.Variant` (nullary) → construct the variant, mirroring bare `compile_ident`.
-                // A real binding (local/captured) named like the enum wins, matching the checker.
-                if let ExprKind::Ident(ename) = &obj.kind
-                    && fc.resolve_local(ename).is_none()
-                    && !fc.captures(ename)
+                // `module.Enum.Variant` (nullary, qualified value form) → construct the variant.
+                if let ExprKind::Field {
+                    obj: inner,
+                    name: ename,
+                } = &obj.kind
+                    && let ExprKind::Ident(mname) = &inner.kind
+                    && fc.resolve_local(mname).is_none()
+                    && !fc.captures(mname)
+                    && let Some(&tidx) = self.imported_modules.get(mname)
+                    && self
+                        .module_types
+                        .get(tidx)
+                        .is_some_and(|t| t.contains(ename))
                     && self
                         .program
                         .variants
-                        .get(&(ename.clone(), name.clone()))
+                        .get(&(self.type_key(tidx, ename), name.clone()))
                         .is_some_and(|d| d.arity == 0)
                 {
-                    let variant_id = self.variant_id_of(Some(ename), name);
+                    let ekey = self.type_key(tidx, ename);
+                    let variant_id = self.variant_id_of_key(&ekey, name);
+                    fc.emit(
+                        Op::NewEnum {
+                            variant: name.clone(),
+                            variant_id,
+                            argc: 0,
+                        },
+                        expr.span,
+                    );
+                    return Ok(());
+                }
+                // `Enum.Variant` (nullary) → construct the variant, mirroring bare `compile_ident`.
+                // A real binding (local/captured) named like the enum wins, matching the checker.
+                // The enum resolves to its bare-visible runtime key (`enum_bare_key`).
+                if let ExprKind::Ident(ename) = &obj.kind
+                    && fc.resolve_local(ename).is_none()
+                    && !fc.captures(ename)
+                    && let ekey = self.enum_bare_key(ename)
+                    && self
+                        .program
+                        .variants
+                        .get(&(ekey.clone(), name.clone()))
+                        .is_some_and(|d| d.arity == 0)
+                {
+                    let variant_id = self.variant_id_of_key(&ekey, name);
                     fc.emit(
                         Op::NewEnum {
                             variant: name.clone(),
@@ -2510,20 +2723,78 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         // Method / module-member call: `obj.name(args)`.
         if let ExprKind::Field { obj, name } = &callee.kind {
+            // `module.Struct(args)` → qualified struct constructor. `module` is a bound module name
+            // whose target declares struct `name`; emit `NewStruct` keyed by that module's runtime key.
+            if let ExprKind::Ident(mname) = &obj.kind
+                && fc.resolve_local(mname).is_none()
+                && !fc.captures(mname)
+                && let Some(&tidx) = self.imported_modules.get(mname)
+                && self
+                    .module_types
+                    .get(tidx)
+                    .is_some_and(|t| t.contains(name))
+            {
+                let key = self.type_key(tidx, name);
+                if self.program.structs.contains_key(&key) {
+                    for a in args {
+                        self.compile_expr(fc, a)?;
+                    }
+                    fc.emit(Op::NewStruct(key, args.len()), span);
+                    return Ok(());
+                }
+            }
+            // `module.Enum.Variant(args)` → qualified payload-variant constructor. `obj` is the
+            // qualified `module.Enum`; resolve the enum's runtime key in the target module.
+            if let ExprKind::Field {
+                obj: inner,
+                name: ename,
+            } = &obj.kind
+                && let ExprKind::Ident(mname) = &inner.kind
+                && fc.resolve_local(mname).is_none()
+                && !fc.captures(mname)
+                && let Some(&tidx) = self.imported_modules.get(mname)
+                && self
+                    .module_types
+                    .get(tidx)
+                    .is_some_and(|t| t.contains(ename))
+            {
+                let ekey = self.type_key(tidx, ename);
+                if self
+                    .program
+                    .variants
+                    .contains_key(&(ekey.clone(), name.clone()))
+                {
+                    for a in args {
+                        self.compile_expr(fc, a)?;
+                    }
+                    let variant_id = self.variant_id_of_key(&ekey, name);
+                    fc.emit(
+                        Op::NewEnum {
+                            variant: name.clone(),
+                            variant_id,
+                            argc: args.len(),
+                        },
+                        span,
+                    );
+                    return Ok(());
+                }
+            }
             // `Enum.Variant(args)` → variant constructor, mirroring the bare-ident variant path
             // below. Gated like the value form: an unbound enum name dotted with one of its variants.
+            // The enum name resolves to its bare-visible runtime key (`enum_bare_key`).
             if let ExprKind::Ident(ename) = &obj.kind
                 && fc.resolve_local(ename).is_none()
                 && !fc.captures(ename)
+                && let ekey = self.enum_bare_key(ename)
                 && self
                     .program
                     .variants
-                    .contains_key(&(ename.clone(), name.clone()))
+                    .contains_key(&(ekey.clone(), name.clone()))
             {
                 for a in args {
                     self.compile_expr(fc, a)?;
                 }
-                let variant_id = self.variant_id_of(Some(ename), name);
+                let variant_id = self.variant_id_of_key(&ekey, name);
                 fc.emit(
                     Op::NewEnum {
                         variant: name.clone(),
@@ -2600,11 +2871,18 @@ impl Compiler {
                 fc.emit(Op::CallBuiltin(name.clone(), args.len()), span);
                 return Ok(());
             }
-            if self.program.structs.contains_key(name) {
+            // A bare struct ctor: only a BARE-resolvable struct in THIS module (locally declared,
+            // `from`-imported, or a std type) — keyed by its declaring module's runtime key. A struct
+            // merely present in the global `program.structs` (another module's, imported whole or not
+            // imported) is NOT bare-constructible here, so the name falls through (e.g. to a
+            // `from`-imported FUNCTION of the same name).
+            if let Some(struct_key) = self.bare_types.get(name).cloned()
+                && self.program.structs.contains_key(&struct_key)
+            {
                 for a in args {
                     self.compile_expr(fc, a)?;
                 }
-                fc.emit(Op::NewStruct(name.clone(), args.len()), span);
+                fc.emit(Op::NewStruct(struct_key, args.len()), span);
                 return Ok(());
             }
             // A bare *built-in* variant constructor (`Ok(x)`, `Some(x)`) — user variants are qualified

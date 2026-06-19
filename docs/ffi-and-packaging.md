@@ -1,9 +1,10 @@
 # Chezzi — FFI deepening & package distribution (design, NOT scheduled)
 
-> Status: **brainstorm / design only.** Nothing here is on the M19 (perf-only) milestone. The language
-> is feature-frozen; this is the forward map for *if/when* it unfreezes. It exists so
-> [`spec.md`](spec.md) §"Still deferred" points at a real plan instead of just the word "deferred".
-> Captures the reasoning from the FFI/packaging design discussion (2026-06).
+> Status: **brainstorm / design only.** Nothing here is on the M19 (perf-only) milestone. The freeze
+> is a **pre-JIT gate**, not a hard language freeze — small, well-scoped semantics fixes still land
+> (e.g. module-scoped user types, 2026-06); this is the forward map for the larger FFI/packaging work.
+> It exists so [`spec.md`](spec.md) §"Still deferred" points at a real plan instead of just the word
+> "deferred". Captures the reasoning from the FFI/packaging design discussion (2026-06).
 >
 > **Update (2026-06): the C-ABI half of the handle unlock SHIPPED.** An opaque `ptr` type (↔ C
 > `void*`) now threads through `extern "lib":` — an untyped, never-auto-freed handle (`Obj::Ptr(usize)`

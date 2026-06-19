@@ -5679,13 +5679,13 @@ fn composite_width_alias_licensed_cross_module() {
     );
     let entry = t.write(
         "main.chz",
-        "import mk from lib\nfn use_pair(p: Pair) -> int:\n    return 0\n\
+        "import mk from lib\nimport Pair from lib\nfn use_pair(p: Pair) -> int:\n    return 0\n\
          fn main():\n    print(use_pair(mk()))\n",
     );
     let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
     assert!(
         check_graph(&graph).is_ok(),
-        "composite width alias defined in an importing module must resolve at a non-importing use site"
+        "imported composite width alias must carry its license to the importing use site"
     );
 }
 
@@ -5702,7 +5702,7 @@ fn composite_width_alias_partial_import_not_laundered() {
     );
     let entry = t.write(
         "main.chz",
-        "import dummy from lib\nfn use_mixed(m: Mixed) -> int:\n    return 0\nfn main():\n    print(dummy())\n",
+        "import dummy from lib\nimport Mixed from lib\nfn use_mixed(m: Mixed) -> int:\n    return 0\nfn main():\n    print(dummy())\n",
     );
     let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
     let errs = match check_graph(&graph) {

@@ -285,7 +285,12 @@
 # Postfix sugar on a base type: `T?` = Option[T], `T!` = Result[T, Error], `T!E` = Result[T, E]
 # (stacks left-to-right). A parenthesized type is grouping when it has one element (`(T)` ⇒ `T`)
 # and a tuple type when it has two or more (`(T1, T2, …)`).
+# A `IDENT.IDENT` (optionally with `[typeList]`) is a MODULE-QUALIFIED type (`geo.Point`,
+# `geo.Box[int]`): the first ident is a bound module name (the same name `geo.func()` uses), the
+# second is a type in that module. Types are module-scoped — a type declared in one module is
+# reachable elsewhere only via import (qualified `m.Type` or bare after `import Type from m`).
 <type>     ::= "IDENT" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
+             | "IDENT" "DOT" "IDENT" | "IDENT" "DOT" "IDENT" "LBRACKET" <typeList> "RBRACKET"
              | "FN" "LPAREN" "RPAREN" "ARROW" <type>
              | "FN" "LPAREN" <typeList> "RPAREN" "ARROW" <type>
              | "LPAREN" <typeList> "RPAREN"
