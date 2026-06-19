@@ -4737,10 +4737,12 @@ impl Vm {
             .get(name.as_ref())
             .cloned()
             .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
-        let proto = *def
-            .methods
-            .get(method)
-            .ok_or_else(|| self.err(format!("struct '{name}' has no '{method}' method"), span))?;
+        let proto = *def.methods.get(method).ok_or_else(|| {
+            self.err(
+                format!("struct '{}' has no '{method}' method", def.display_name),
+                span,
+            )
+        })?;
         let home = self.module_objs[def.module_idx];
         self.guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))
     }
@@ -4956,7 +4958,10 @@ impl Vm {
             .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
         let proto = *def.methods.get("compare").ok_or_else(|| {
             self.err(
-                format!("struct '{name}' has no 'compare' method (needed to order its values)"),
+                format!(
+                    "struct '{}' has no 'compare' method (needed to order its values)",
+                    def.display_name
+                ),
                 span,
             )
         })?;
@@ -5038,7 +5043,10 @@ impl Vm {
             .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
         let proto = *def.methods.get("hash").ok_or_else(|| {
             self.err(
-                format!("struct '{name}' has no 'hash' method (needed to use it as a map/set key)"),
+                format!(
+                    "struct '{}' has no 'hash' method (needed to use it as a map/set key)",
+                    def.display_name
+                ),
                 span,
             )
         })?;
@@ -5908,9 +5916,14 @@ impl Vm {
                 }
                 Ok(Value::Obj(self.heap.alloc(Obj::Map(out))))
             }
-            D::Struct { name, fields } => {
+            D::Struct {
+                key,
+                display,
+                fields,
+            } => {
                 if variant != "Obj" {
-                    return Err(mismatch(&format!("object for {name}")));
+                    // ROOT REDESIGN — error text shows the BARE display name, never the identity key.
+                    return Err(mismatch(&format!("object for {display}")));
                 }
                 let entries = match self.heap.get(self.as_obj(payload[0])) {
                     Obj::Map(m) => m.entries.clone(),
@@ -5934,9 +5947,11 @@ impl Vm {
                     };
                     field_vals.push(v);
                 }
-                let tid = self.struct_tid(name);
+                // ROOT REDESIGN — tag the value with the qualified IDENTITY KEY (so downstream
+                // field/method lookups + `struct_tid` hit the right layout); display renders bare.
+                let tid = self.struct_tid(key);
                 let h = self.heap.alloc(Obj::Struct {
-                    name: name.clone().into_boxed_str(),
+                    name: key.clone().into_boxed_str(),
                     tid,
                     fields: field_vals,
                 });
@@ -6374,7 +6389,14 @@ impl Vm {
                     self.push(recv);
                     return Ok(());
                 }
-                Err(self.err(format!("struct '{name}' has no method '{method}'"), span))
+                // ROOT REDESIGN — render the BARE display name (not the identity key) in the error.
+                let display = self
+                    .program
+                    .structs
+                    .get(name.as_ref())
+                    .map(|d| d.display_name.clone())
+                    .unwrap_or_else(|| crate::compiler::bare_display(name.as_ref()));
+                Err(self.err(format!("struct '{display}' has no method '{method}'"), span))
             }
             _ => Err(self.err(
                 format!("type {} has no method '{method}'", self.type_name(recv)),
@@ -11809,7 +11831,8 @@ impl Vm {
         if argc != def.fields.len() {
             return Err(self.err(
                 format!(
-                    "struct '{name}' expects {} field(s), got {argc}",
+                    "struct '{}' expects {} field(s), got {argc}",
+                    def.display_name,
                     def.fields.len()
                 ),
                 span,
@@ -13262,18 +13285,22 @@ impl Vm {
                     // (cold display path). Snapshot name + values first to drop the heap borrow.
                     let name = name.clone();
                     let vals: Vec<Value> = fields.clone();
-                    let names: Vec<String> = self
+                    // ROOT REDESIGN — render the BARE display name (not the qualified identity key);
+                    // `name` is the key the StructDef is stored under. Fall back to stripping the key.
+                    let (display, names): (String, Vec<String>) = self
                         .program
                         .structs
                         .get(name.as_ref())
-                        .map(|d| d.fields.clone())
-                        .unwrap_or_default();
+                        .map(|d| (d.display_name.clone(), d.fields.clone()))
+                        .unwrap_or_else(|| {
+                            (crate::compiler::bare_display(name.as_ref()), Vec::new())
+                        });
                     let mut parts = Vec::with_capacity(vals.len());
                     for (i, v) in vals.iter().enumerate() {
                         let k = names.get(i).cloned().unwrap_or_else(|| i.to_string());
                         parts.push(format!("{k}={}", self.display_guarded(*v, depth + 1)?));
                     }
-                    Ok(format!("{name}({})", parts.join(", ")))
+                    Ok(format!("{display}({})", parts.join(", ")))
                 }
                 Obj::Enum {
                     variant_id,
@@ -13403,7 +13430,14 @@ impl Vm {
                     .map(|(k, v)| format!("{k}={}", self.display_wire(v)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("{name}({inner})")
+                // ROOT REDESIGN — `name` is the qualified identity key; render the bare display name.
+                let display = self
+                    .program
+                    .structs
+                    .get(name.as_ref())
+                    .map(|d| d.display_name.clone())
+                    .unwrap_or_else(|| crate::compiler::bare_display(name.as_ref()));
+                format!("{display}({inner})")
             }
             WireValue::Enum {
                 variant_id,
@@ -13634,7 +13668,12 @@ impl Vm {
                 }
                 // Positional layout: recover declaration-order field names from the StructDef (the
                 // same `def` already cloned for the `str` hook) — no per-instance name strings.
-                let _ = write!(out, "{name}(");
+                // ROOT REDESIGN — render the BARE display name, not the qualified identity key.
+                let display = def
+                    .as_ref()
+                    .map(|d| d.display_name.clone())
+                    .unwrap_or_else(|| crate::compiler::bare_display(name.as_ref()));
+                let _ = write!(out, "{display}(");
                 for (i, fv) in fields.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
@@ -15046,9 +15085,13 @@ mod tests {
             s.hooks.contains_key("before_each"),
             "before_each hook recorded"
         );
-        // The thunk proto exists and the struct records its test methods.
+        // The thunk proto exists and the struct records its test methods. ROOT REDESIGN — the struct
+        // table is keyed by the qualified IDENTITY KEY (`<main>::S` on the standalone path).
         assert!(s.new_thunk < program.protos.len());
-        assert_eq!(program.structs["S"].test_methods, vec!["a".to_string()]);
+        assert_eq!(
+            program.structs["<main>::S"].test_methods,
+            vec!["a".to_string()]
+        );
     }
 
     #[test]
@@ -20258,13 +20301,14 @@ main()";
         let span = Span { line: 1, col: 1 };
         vm.push(Value::Int(1));
         vm.push(Value::Int(2));
-        vm.new_struct("Point", 2, span).expect("new_struct");
+        // ROOT REDESIGN — structs are keyed by the qualified IDENTITY KEY (`<main>::Point` standalone).
+        vm.new_struct("<main>::Point", 2, span).expect("new_struct");
         let Value::Obj(h) = vm.pop() else {
             panic!("expected struct obj")
         };
         match vm.heap.get(h) {
             Obj::Struct { name, fields, .. } => {
-                assert_eq!(name.as_ref(), "Point");
+                assert_eq!(name.as_ref(), "<main>::Point");
                 let fields: &Vec<Value> = fields; // positional: NOT Vec<(Box<str>, Value)>
                 assert_eq!(
                     *fields,
@@ -20291,10 +20335,11 @@ main()";
         .expect("lex");
         let module = parser::parse(tokens).expect("parse");
         let program = crate::compiler::compile_module_standalone(&module).expect("compile");
-        // `Green`'s dense id from the program table (resolved on the cold path).
+        // `Green`'s dense id from the program table (resolved on the cold path). ROOT REDESIGN — the
+        // enum is keyed by its qualified IDENTITY KEY (`<main>::Color` on the standalone path).
         let green_id = program
             .variants
-            .get(&("Color".to_string(), "Green".to_string()))
+            .get(&("<main>::Color".to_string(), "Green".to_string()))
             .expect("Green registered")
             .variant_id;
         let mut vm = Vm::new(Arc::new(program));
@@ -20415,9 +20460,10 @@ main()";
         let tokens = lexer::tokenize(src).expect("lex");
         let module = parser::parse(tokens).expect("parse");
         let program = crate::compiler::compile_module_standalone(&module).expect("compile");
+        // ROOT REDESIGN — the enum is keyed by its qualified IDENTITY KEY (`<main>::Color`).
         let green_id = program
             .variants
-            .get(&("Color".to_string(), "Green".to_string()))
+            .get(&("<main>::Color".to_string(), "Green".to_string()))
             .expect("Green registered")
             .variant_id;
         // The emitted MatchArm for the `Green` arm must carry Green's dense id.
@@ -24273,6 +24319,148 @@ main()
             "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
         );
         assert_eq!(io, "7\n");
+        assert_eq!(io, vo, "interp vs vm");
+        assert_eq!(io, po, "interp vs --parallel");
+    }
+
+    // ----- ROOT REDESIGN: always-qualified identity key + bare display name -----
+
+    /// THE BUG (collision-loser decode against the WRONG layout): the entry module declares its OWN
+    /// `Point{a,b}` while a dep also declares `Point{x}`. A bare `json.decode[Point]` must decode
+    /// against the ENTRY's layout (the bare name resolves to the entry's `Point`), printing 5 — not
+    /// fail `decode: missing key 'x'` against the dep's layout. Byte-identical on both engines.
+    #[test]
+    fn decode_collision_loser_against_correct_layout() {
+        let out = assert_parity_file(
+            &[
+                ("dep.chz", "struct Point:\n    x: int\n"),
+                (
+                    "main.chz",
+                    "import std.json\nimport dep\nstruct Point:\n    a: int\n    b: int\np := json.decode[Point](\"{{\\\"a\\\":5,\\\"b\\\":9}}\")\nmatch p:\n    Ok(v): print(v.a)\n    Err(e): print(e)\n",
+                ),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "5\n");
+    }
+
+    /// Twin: a QUALIFIED `json.decode[dep.Point]` decodes against the dep's layout (`x`), printing 7.
+    #[test]
+    fn decode_qualified_target() {
+        let out = assert_parity_file(
+            &[
+                ("dep.chz", "struct Point:\n    x: int\n"),
+                (
+                    "main.chz",
+                    "import std.json\nimport dep\nstruct Point:\n    a: int\n    b: int\np := json.decode[dep.Point](\"{{\\\"x\\\":7}}\")\nmatch p:\n    Ok(v): print(v.x)\n    Err(e): print(e)\n",
+                ),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "7\n");
+    }
+
+    /// BARE DISPLAY ON COLLISION: two modules both declare `struct Point` with different layouts;
+    /// printing each value shows the BARE name (`Point(x=1)` / `Point(y=2)`) on BOTH — never the
+    /// module-qualified identity key. Byte-identical on both engines.
+    #[test]
+    fn collision_prints_bare_for_both() {
+        let out = assert_parity_file(
+            &[
+                ("a.chz", "struct Point:\n    x: int\n"),
+                ("b.chz", "struct Point:\n    y: int\n"),
+                (
+                    "main.chz",
+                    "import a\nimport b\nprint(a.Point(1))\nprint(b.Point(2))\n",
+                ),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "Point(x=1)\nPoint(y=2)\n");
+    }
+
+    /// NESTED-COLLISION FIELD DECODE: `dep` has `Wrap{inner: Inner}` + `Inner{k}`; the entry declares
+    /// its OWN `Inner{other}`. `json.decode[dep.Wrap]` must expand the nested `Inner` field in dep's
+    /// DEFINING scope (`dep::Inner` with `k`), not the entry's. Prints 3. Byte-identical both engines.
+    #[test]
+    fn decode_nested_struct_field_in_defining_module() {
+        let out = assert_parity_file(
+            &[
+                (
+                    "dep.chz",
+                    "struct Inner:\n    k: int\nstruct Wrap:\n    inner: Inner\n",
+                ),
+                (
+                    "main.chz",
+                    "import std.json\nimport dep\nstruct Inner:\n    other: int\np := json.decode[dep.Wrap](\"{{\\\"inner\\\":{{\\\"k\\\":3}}}}\")\nmatch p:\n    Ok(w): print(w.inner.k)\n    Err(e): print(e)\n",
+                ),
+            ],
+            "main.chz",
+        );
+        assert_eq!(out, "3\n");
+    }
+
+    /// AIRLOCK 3-ENGINE PARITY: the collision-decode repro must produce identical output under interp,
+    /// the default VM, and the `--parallel` OS-thread engine.
+    #[test]
+    fn decode_collision_three_engine() {
+        let files = [
+            ("dep.chz", "struct Point:\n    x: int\n"),
+            (
+                "main.chz",
+                "import std.json\nimport dep\nstruct Point:\n    a: int\n    b: int\nmatch json.decode[Point](\"{{\\\"a\\\":5,\\\"b\\\":9}}\"):\n    Ok(v): print(v.a)\n    Err(e): print(e)\n",
+            ),
+        ];
+        let t = TmpDir::new();
+        let mut entry = None;
+        for (rel, c) in &files {
+            let p = t.write(rel, c);
+            if *rel == "main.chz" {
+                entry = Some(p);
+            }
+        }
+        let entry = entry.unwrap();
+        let (io, _, ir, _) = crate::interp::run_file(&entry);
+        let (vo, _, vr, _) = run_file(&entry);
+        let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+        assert!(
+            ir.is_ok() && vr.is_ok() && pr.is_ok(),
+            "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
+        );
+        assert_eq!(io, "5\n");
+        assert_eq!(io, vo, "interp vs vm");
+        assert_eq!(io, po, "interp vs --parallel");
+    }
+
+    /// AIRLOCK: a colliding struct value sent through a Channel survives the wire round-trip and
+    /// prints its BARE name on the other side. Identical on interp, default VM, and `--parallel`.
+    #[test]
+    fn collision_struct_sent_across_task() {
+        let files = [
+            ("a.chz", "struct Point:\n    x: int\n"),
+            ("b.chz", "struct Point:\n    y: int\n"),
+            (
+                "main.chz",
+                "import a\nimport b\nch := Channel[b.Point]()\nparallel:\n    spawn:\n        ch.send(b.Point(9))\np := ch.recv()\nprint(p)\nprint(p.y)\n",
+            ),
+        ];
+        let t = TmpDir::new();
+        let mut entry = None;
+        for (rel, c) in &files {
+            let p = t.write(rel, c);
+            if *rel == "main.chz" {
+                entry = Some(p);
+            }
+        }
+        let entry = entry.unwrap();
+        let (io, _, ir, _) = crate::interp::run_file(&entry);
+        let (vo, _, vr, _) = run_file(&entry);
+        let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+        assert!(
+            ir.is_ok() && vr.is_ok() && pr.is_ok(),
+            "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
+        );
+        assert_eq!(io, "Point(y=9)\n9\n");
         assert_eq!(io, vo, "interp vs vm");
         assert_eq!(io, po, "interp vs --parallel");
     }

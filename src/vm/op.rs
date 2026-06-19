@@ -451,6 +451,11 @@ pub struct StructDef {
     pub fields: Vec<String>,
     pub methods: HashMap<String, ProtoId>,
     pub module_idx: usize,
+    /// ROOT REDESIGN — the BARE user-facing name (`Point`), separate from the program-global IDENTITY
+    /// KEY (`<module-key>::Point`) this def is stored under. Display/print/stringify/error/json-encode
+    /// render this, so output stays byte-identical regardless of module (and two colliding `Point`s
+    /// both print `Point`). The key is identity; this is display.
+    pub display_name: String,
     /// M19 Phase 5b — a dense, declaration-order numeric id (unique per struct type, hence per field
     /// layout). Stamped onto every `Obj::Struct` instance so the field inline cache can guard on a
     /// pure-int `tid` compare instead of re-verifying the field-name string. See [`super::mod`]'s

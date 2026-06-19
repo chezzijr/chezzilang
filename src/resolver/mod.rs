@@ -59,6 +59,14 @@ pub struct LoadedModule {
 }
 
 impl LoadedModule {
+    /// ROOT REDESIGN — whether this is a stdlib module (`std.*`, file-backed OR native). Its exported
+    /// types (`Ref`, `Iterator`, the FFI widths, `Match`/`Response`) are RESERVED/NATIVE: they are NOT
+    /// module-keyed (they keep their bare name, resolvable bare wherever the std module is imported), so
+    /// the qualification pre-pass skips std modules exactly like the synthetic native ones.
+    pub fn is_std(&self) -> bool {
+        self.native.is_some() || self.dotted.first().map(String::as_str) == Some("std")
+    }
+
     /// Human label for messages: the dotted name, or the file stem for the entry.
     pub fn label(&self) -> String {
         if self.dotted.is_empty() {
@@ -78,6 +86,36 @@ impl LoadedModule {
 pub struct ModuleGraph {
     pub entry: ModuleId,
     pub modules: Vec<LoadedModule>,
+}
+
+/// ROOT REDESIGN — the canonical, per-module identity prefix used to qualify EVERY user
+/// struct/enum/variant/type-alias runtime key (`<module-key>::<Name>`). The single source of truth
+/// for all three engines (compiler, checker, interpreter), so they derive byte-identical keys.
+///
+/// Each module's key starts from its [`LoadedModule::label`] (the dotted path for an imported
+/// module, the file stem for the entry — so the entry gets a real, non-empty key and a key is never
+/// the malformed `::Name`). Because two modules' labels can collide (an entry file `geo.chz` whose
+/// stem equals a one-segment import `geo`, or two like-named files in different dirs), any duplicate
+/// label is made unique by appending `#<idx>` (the module's graph index). Graph order is identical
+/// across every engine, so this tiebreak is deterministic — the parity invariant holds. Native
+/// modules get a key too (harmless: they declare no user types, so it is never used to key one).
+pub fn module_keys(graph: &ModuleGraph) -> Vec<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut keys = Vec::with_capacity(graph.modules.len());
+    for (idx, lm) in graph.modules.iter().enumerate() {
+        let label = lm.label();
+        let count = seen.entry(label.clone()).or_insert(0);
+        // First module with this label keeps the bare label; any later duplicate is disambiguated by
+        // its graph index — deterministic because graph order is fixed across all engines.
+        let key = if *count == 0 {
+            label
+        } else {
+            format!("{label}#{idx}")
+        };
+        *count += 1;
+        keys.push(key);
+    }
+    keys
 }
 
 /// Walk up from `entry`'s directory looking for `chezzi.toml`; that dir is the project root. None

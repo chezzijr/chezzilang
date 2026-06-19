@@ -37,6 +37,13 @@ pub struct CompileError {
 }
 
 /// The name a builtin resolves to (mirrors `interp::builtins::is_builtin` + the special `print`).
+/// ROOT REDESIGN — the module key used to qualify user-type identity keys in the single-source
+/// (standalone / `<main>`) compile + run paths, where there is no module graph to derive a real
+/// label from. The three engines must agree on it (parity), so it lives here as one constant. Only
+/// the test-only standalone paths use it (the CLI always runs the module-graph path).
+#[cfg(test)]
+pub(crate) const STANDALONE_MODULE_KEY: &str = "<main>";
+
 fn is_builtin(name: &str) -> bool {
     matches!(
         name,
@@ -99,8 +106,8 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     })?;
     let module = &module;
     let mut c = Compiler::new();
-    // Single-module: no cross-module collisions, so every type keeps its bare key. Still record the
-    // declared type names (for the engines' from-import skip) and the per-module type set.
+    // Single-module: every type is locally declared, keyed `<main>::Name` (the standalone module
+    // key). Record the declared type names (for the engines' from-import skip) and the per-module set.
     c.module_types = vec![std::collections::HashSet::new()];
     for s in &module.stmts {
         if let StmtKind::Struct { name, .. }
@@ -109,6 +116,10 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         {
             c.module_types[0].insert(name.clone());
             c.program.type_names.insert(name.clone());
+            c.type_keys.insert(
+                (0, name.clone()),
+                format!("{STANDALONE_MODULE_KEY}::{name}"),
+            );
         }
     }
     c.hoist_types(0, &module.stmts)?;
@@ -154,10 +165,12 @@ struct Compiler {
     /// fn's scalar-alias param/return types to `CType` — an alias defined in one module and used bare
     /// in another's `extern` signature must resolve here exactly as the checker accepted it.
     aliases: HashMap<String, Type>,
-    /// Module-scoped types: `(declaring module_idx, bare type name) → runtime key`. The key is the
-    /// bare name in the no-collision case, or `<dotted.path>::Name` when a name collides across
-    /// modules. Built once by [`Compiler::assign_type_keys`] before any module compiles. A name NOT
-    /// in this map has the bare key (reserved/native types, or a name with no collision recorded).
+    /// ROOT REDESIGN — module-scoped types: `(declaring module_idx, bare type name) → IDENTITY KEY`.
+    /// The key is ALWAYS `<module-key>::<Name>` (no winner/loser, no bare keys) so every user
+    /// struct/enum/variant/alias is unique by construction. Built once by
+    /// [`Compiler::assign_type_keys`] before any module compiles. A name NOT in this map is a
+    /// reserved/native type (`Result`/`Option`/`Match`/`Response`/`Ref`/`Iterator`/FFI widths),
+    /// which keeps its bare name (those never module-key).
     type_keys: HashMap<(usize, String), String>,
     /// `module_idx → its declared user type names` (struct/enum/alias). Drives the collision detection
     /// and resolves a qualified `geo.X` to the right module's key.
@@ -249,6 +262,8 @@ impl Compiler {
                     module_idx: 0,
                     tid,
                     test_methods: Vec::new(),
+                    // Native std structs are not module-keyed; key == display name.
+                    display_name: name.to_string(),
                 },
             );
         }
@@ -268,21 +283,23 @@ impl Compiler {
         }
     }
 
-    /// Pass 0 — assign a runtime key to every module-scoped user type. Scans every module's struct /
-    /// enum / alias names (skipping native modules, which export only fns). For a name declared in
-    /// exactly one module the key is the BARE name (so Display/print/error/JSON output is unchanged).
-    /// For a name declared in ≥2 modules — a genuine cross-module clash — the FIRST declarer (graph
-    /// order, deps-first) keeps the bare key and each later one is disambiguated to `<dotted>::Name`.
-    /// Reserved/native names are never user-declared here, so they never collide. Also seeds
-    /// `program.type_names` (used by the engines' `bind_import` to skip from-imported type members).
+    /// ROOT REDESIGN — Pass 0: assign the canonical IDENTITY KEY to every module-scoped user type.
+    /// Scans every (non-native) module's struct / enum / alias names and keys EACH one
+    /// `<module-key>::<Name>` (via [`crate::resolver::module_keys`]) — no winner/loser, no bare keys,
+    /// so every user type is unique by construction (a cross-module name clash is just two distinct
+    /// keys). Reserved/native names are never user-declared here, so they keep their bare name (absent
+    /// from this map). Also seeds `program.type_names` (the engines' `bind_import` skips from-imported
+    /// type members) and `module_types` (per-module declared names, deps-first).
     fn assign_type_keys(&mut self, graph: &ModuleGraph) {
         self.module_types = vec![std::collections::HashSet::new(); graph.modules.len()];
-        // name → the module indices (graph order) that declare it.
-        let mut declarers: HashMap<String, Vec<usize>> = HashMap::new();
+        let mkeys = crate::resolver::module_keys(graph);
         for (idx, lm) in graph.modules.iter().enumerate() {
             if lm.native.is_some() {
                 continue;
             }
+            // ROOT REDESIGN — std modules' types are RESERVED/NATIVE: keep their BARE name (no qualified
+            // key entry → `type_key` falls back to bare), so `Ref`/`Iterator`/FFI widths resolve bare.
+            let is_std = lm.is_std();
             for s in &lm.ast.stmts {
                 if let StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
@@ -290,28 +307,17 @@ impl Compiler {
                 {
                     self.module_types[idx].insert(name.clone());
                     self.program.type_names.insert(name.clone());
-                    let v = declarers.entry(name.clone()).or_default();
-                    if !v.contains(&idx) {
-                        v.push(idx);
+                    if !is_std {
+                        self.type_keys
+                            .insert((idx, name.clone()), format!("{}::{name}", mkeys[idx]));
                     }
                 }
             }
         }
-        for (name, mods) in &declarers {
-            if mods.len() < 2 {
-                continue; // no collision → bare key (recorded implicitly by absence)
-            }
-            // First declarer keeps the bare name; the rest get a module-qualified key.
-            for &idx in &mods[1..] {
-                let dotted = graph.modules[idx].label();
-                self.type_keys
-                    .insert((idx, name.clone()), format!("{dotted}::{name}"));
-            }
-        }
     }
 
-    /// The runtime key for a type `name` declared in module `module_idx` (bare unless disambiguated
-    /// by the collision pre-pass).
+    /// The IDENTITY KEY for a type `name` declared in module `module_idx` (always `<module-key>::Name`
+    /// for a user type). A name absent from the map is a reserved/native type — return it bare.
     fn type_key(&self, module_idx: usize, name: &str) -> String {
         self.type_keys
             .get(&(module_idx, name.to_string()))
@@ -319,15 +325,52 @@ impl Compiler {
             .unwrap_or_else(|| name.to_string())
     }
 
-    /// The runtime key for a bare-written enum name `ename` in the CURRENT module: its `bare_types`
-    /// key when it is a bare-visible user enum (local / `from`-imported / std), else the name itself
-    /// — which covers the built-in `Result`/`Option` (always bare) and a not-bare-visible name (the
-    /// variant lookup then simply misses, leaving the call to fall through).
+    /// ROOT REDESIGN — build the module-aware [`crate::json_decode::DecodeEnv`] for the CURRENT module
+    /// so `json.decode[T]` resolves its target (and nested field types) to qualified identity keys.
+    fn decode_env(&self) -> CompilerDecodeEnv<'_> {
+        CompilerDecodeEnv { c: self }
+    }
+
+    /// ROOT REDESIGN — rewrite a bare struct type name in an extern signature to its qualified
+    /// IDENTITY KEY (so the lowered `CType::Struct.name` matches the qualified-keyed `struct_fields`
+    /// table, and a returned by-value struct carries the right tag for field access). Only a top-level
+    /// `Type::Named` that names a bare-visible USER struct in THIS module is rewritten; scalars, FFI
+    /// width names, aliases, and non-struct names pass through unchanged (FFI structs are flat-scalar
+    /// per the checker, so there are no nested struct fields to recurse into).
+    fn qualify_ffi_type(&self, ty: &Type) -> Type {
+        if let Type::Named(n) = ty
+            && let Some(key) = self.bare_types.get(n)
+            && self.struct_fields.contains_key(key)
+        {
+            return Type::Named(key.clone());
+        }
+        ty.clone()
+    }
+
+    /// The IDENTITY KEY for a bare-written enum name `ename` in the CURRENT module: its `bare_types`
+    /// key when it is a bare-visible user enum (local / `from`-imported / std). ROOT REDESIGN — a
+    /// WHOLE-module-imported enum (`Color` matched as `Color.Red` against a `geo::Color` value) is NOT
+    /// bare-visible, so resolve it through the imported modules: pick an imported module that declares
+    /// `ename` whose qualified key is a registered enum (deterministic — a match pattern's enum is
+    /// uniquely the scrutinee's, and a genuine local collision is resolved first via `bare_types`).
+    /// Falls back to the bare name (built-in `Result`/`Option`, or a miss that fall-throughs).
     fn enum_bare_key(&self, ename: &str) -> String {
-        self.bare_types
-            .get(ename)
-            .cloned()
-            .unwrap_or_else(|| ename.to_string())
+        if let Some(k) = self.bare_types.get(ename) {
+            return k.clone();
+        }
+        for &tidx in self.imported_modules.values() {
+            if self
+                .module_types
+                .get(tidx)
+                .is_some_and(|t| t.contains(ename))
+            {
+                let key = self.type_key(tidx, ename);
+                if self.program.variants.keys().any(|(e, _)| *e == key) {
+                    return key;
+                }
+            }
+        }
+        ename.to_string()
     }
 
     /// Gather `type Name = T` aliases from a module's statements into `self.aliases`. Called once per
@@ -447,9 +490,14 @@ impl Compiler {
                         StructDef {
                             fields: fields.iter().map(|f| f.name.clone()).collect(),
                             methods: HashMap::new(),
-                            module_idx: 0, // filled in pass 2
+                            // ROOT REDESIGN — set the DECLARING module here (pass 1) so it is correct
+                            // even for a struct with no methods (pass 2 only filled it inside the
+                            // methods loop). `json.decode` field-type resolution relies on this.
+                            module_idx,
                             tid,
                             test_methods: Vec::new(), // filled in pass 2
+                            // ROOT REDESIGN — bare name for display; `key` is the identity it's keyed by.
+                            display_name: name.clone(),
                         },
                     );
                     self.struct_fields.insert(key, fields.clone());
@@ -598,11 +646,16 @@ impl Compiler {
             // param/return types are scalars (possibly via a transparent alias) resolvable to `CType`.
             if let StmtKind::Extern { lib, fns } = &stmt.kind {
                 for ef in fns {
+                    // ROOT REDESIGN — rewrite each extern by-value struct's BARE type name to its
+                    // qualified IDENTITY KEY before lowering, so `CType::Struct.name` (the value tag a
+                    // returned struct carries) matches the qualified-keyed `struct_fields`/`structs`
+                    // table — otherwise the returned struct's field-name lookup misses.
                     let params: Vec<CType> = ef
                         .params
                         .iter()
                         .map(|p| {
-                            ctype_of(p.ty.as_ref(), &self.aliases, &self.struct_fields)
+                            let ty = p.ty.as_ref().map(|t| self.qualify_ffi_type(t));
+                            ctype_of(ty.as_ref(), &self.aliases, &self.struct_fields)
                                 .expect("checker verified marshallable param")
                         })
                         .collect();
@@ -612,7 +665,8 @@ impl Compiler {
                     let ret = ef
                         .ret
                         .as_ref()
-                        .and_then(|t| ctype_of(Some(t), &self.aliases, &self.struct_fields));
+                        .map(|t| self.qualify_ffi_type(t))
+                        .and_then(|t| ctype_of(Some(&t), &self.aliases, &self.struct_fields));
                     let id = self.program.cffi_defs.len() as u32;
                     self.program.cffi_defs.push(CffiDef {
                         lib: lib.clone(),
@@ -668,7 +722,10 @@ impl Compiler {
                 }
             }
         }
-        fc.emit(Op::NewStruct(name.to_string(), fields.len()), span);
+        // ROOT REDESIGN — construct under the suite struct's IDENTITY KEY (always qualified), not its
+        // bare name; the struct table is keyed by the qualified key. Suites are entry-module only.
+        let key = self.type_key(self.current_module_idx, name);
+        fc.emit(Op::NewStruct(key, fields.len()), span);
         fc.emit(Op::Return, span);
         Ok(self.finish(fc))
     }
@@ -2520,11 +2577,20 @@ impl Compiler {
                     span: expr.span,
                 };
                 self.compile_expr(fc, &parse_call)?;
-                let desc = crate::json_decode::from_type(ty, &self.struct_fields, &mut Vec::new())
-                    .map_err(|message| CompileError {
-                        message,
-                        span: expr.span,
-                    })?;
+                // ROOT REDESIGN — resolve the decode target (and its nested field struct types) to
+                // their qualified IDENTITY KEYS via a module-aware env, so the descriptor tags the
+                // produced struct with the right key and decodes against the right layout.
+                let env = self.decode_env();
+                let desc = crate::json_decode::from_type(
+                    ty,
+                    self.current_module_idx,
+                    &env,
+                    &mut Vec::new(),
+                )
+                .map_err(|message| CompileError {
+                    message,
+                    span: expr.span,
+                })?;
                 fc.emit(Op::JsonDecode(desc), expr.span);
             }
             ExprKind::Closure { params, body, .. } => {
@@ -3219,6 +3285,65 @@ fn block_has_defer(stmts: &[Stmt]) -> bool {
 /// Map an extern fn's surface [`Type`] annotation to its runtime [`CType`]. Only the v1 marshallable
 /// set (`int`/`float`/`bool`/`str`/`ptr`) is supported, resolving transparent type aliases (`type Len = int`)
 /// through `aliases` first. Everything else (incl. a `None` annotation) returns `None`. The checker
+/// ROOT REDESIGN — the compiler's [`crate::json_decode::DecodeEnv`]: resolves a decode target and its
+/// nested field struct types to qualified identity keys, using the compiler's per-module type tables.
+struct CompilerDecodeEnv<'a> {
+    c: &'a Compiler,
+}
+
+impl crate::json_decode::DecodeEnv for CompilerDecodeEnv<'_> {
+    fn resolve_bare(&self, module_idx: usize, name: &str) -> Option<String> {
+        // In the CALL module, a bare name may be local / from-imported / std — use `bare_types`.
+        // In any other (declaring) module, a nested field type resolves to that module's own type.
+        if module_idx == self.c.current_module_idx
+            && let Some(k) = self.c.bare_types.get(name)
+        {
+            return Some(k.clone());
+        }
+        self.c
+            .type_keys
+            .get(&(module_idx, name.to_string()))
+            .cloned()
+    }
+
+    fn resolve_qualified(&self, _module_idx: usize, binder: &str, name: &str) -> Option<String> {
+        // A qualified `binder.name` is only written at the call site; resolve `binder` against the
+        // current module's imported-module bindings, then key `name` in that target module.
+        let tidx = *self.c.imported_modules.get(binder)?;
+        if self
+            .c
+            .module_types
+            .get(tidx)
+            .is_some_and(|t| t.contains(name))
+        {
+            self.c.type_keys.get(&(tidx, name.to_string())).cloned()
+        } else {
+            None
+        }
+    }
+
+    fn struct_def(&self, key: &str) -> Option<(usize, &[crate::ast::Field])> {
+        let module_idx = self.c.program.structs.get(key)?.module_idx;
+        let fields = self.c.struct_fields.get(key)?;
+        Some((module_idx, fields.as_slice()))
+    }
+
+    fn display_of(&self, key: &str) -> String {
+        self.c
+            .program
+            .structs
+            .get(key)
+            .map(|d| d.display_name.clone())
+            .unwrap_or_else(|| bare_display(key))
+    }
+}
+
+/// ROOT REDESIGN — strip a qualified identity key `<module-key>::Name` back to its bare `Name` for a
+/// display fallback when no `StructDef` is registered (defensive). Splits on the LAST `::`.
+pub(crate) fn bare_display(key: &str) -> String {
+    key.rsplit("::").next().unwrap_or(key).to_string()
+}
+
 /// has already rejected non-marshallable types, so a `None` here is unreachable for a well-typed
 /// program (the call sites `.expect(...)` on it).
 fn ctype_of(

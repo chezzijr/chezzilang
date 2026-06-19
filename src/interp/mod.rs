@@ -220,8 +220,13 @@ struct Interp {
     /// Runtime configuration the native std modules read (args/env/stdin). Default = inert.
     host: crate::native::HostConfig,
     structs: std::collections::HashMap<String, std::rc::Rc<StructDef>>,
-    /// Struct name → declared fields (with types), for building `json.decode` descriptors.
+    /// ROOT REDESIGN — struct IDENTITY KEY (`<module-key>::Name`) → declared fields (with types), for
+    /// building `json.decode` descriptors. Qualified-keyed, like the compiler's `struct_fields`.
     struct_fields: std::collections::HashMap<String, Vec<crate::ast::Field>>,
+    /// ROOT REDESIGN — struct IDENTITY KEY → the graph index of the module that DECLARED it, so a
+    /// nested `json.decode` field type expands in its own defining module's scope (the nested-collision
+    /// fix). Populated alongside `struct_fields` at hoist.
+    struct_module: std::collections::HashMap<String, usize>,
     /// Keyed by `(enum_name, variant_name)`: variants are scoped under their enum, so two enums may
     /// share a variant name. Built-in `Result`/`Option` variants register under those enum names.
     variants: std::collections::HashMap<(String, String), VariantDef>,
@@ -386,6 +391,7 @@ impl Interp {
             host: crate::native::HostConfig::default(),
             structs: std::collections::HashMap::new(),
             struct_fields: std::collections::HashMap::new(),
+            struct_module: std::collections::HashMap::new(),
             variants: std::collections::HashMap::new(),
             namespaces: std::collections::HashMap::new(),
             propagating: None,
@@ -434,14 +440,36 @@ impl Interp {
             .unwrap_or_else(|| name.to_string())
     }
 
-    /// Runtime key for a bare-written enum name in the CURRENT module: its `bare_types` key when
-    /// bare-visible, else the name itself (built-in `Result`/`Option`, or a miss that falls through).
-    /// Mirrors the compiler's `enum_bare_key`.
+    /// IDENTITY KEY for a bare-written enum name in the CURRENT module: its `bare_types` key when
+    /// bare-visible. ROOT REDESIGN — a WHOLE-module-imported enum (`Color` matched as `Color.Red`
+    /// against a `geo::Color` value) is NOT bare-visible, so resolve it through the imported modules:
+    /// pick an imported module that declares `ename` whose qualified key is a registered enum. Falls
+    /// back to the bare name (built-in `Result`/`Option`, or a miss). Mirrors the compiler's
+    /// `enum_bare_key` byte-for-byte (parity).
     fn enum_bare_key(&self, ename: &str) -> String {
-        self.bare_types
-            .get(ename)
-            .cloned()
-            .unwrap_or_else(|| ename.to_string())
+        if let Some(k) = self.bare_types.get(ename) {
+            return k.clone();
+        }
+        for &tidx in self.imported_module_idx.values() {
+            if self
+                .module_types
+                .get(tidx)
+                .is_some_and(|t| t.contains(ename))
+            {
+                let key = self.type_key(tidx, ename);
+                if self.variants.keys().any(|(e, _)| *e == key) {
+                    return key;
+                }
+            }
+        }
+        ename.to_string()
+    }
+
+    /// ROOT REDESIGN — build the module-aware [`crate::json_decode::DecodeEnv`] for the CURRENT module
+    /// so `json.decode[T]` resolves its target (and nested field types) to qualified identity keys,
+    /// byte-identically to the VM.
+    fn decode_env(&self) -> InterpDecodeEnv<'_> {
+        InterpDecodeEnv { i: self }
     }
 
     /// Evaluate an expression to a value.
@@ -825,8 +853,12 @@ impl Interp {
                     span: expr.span,
                 };
                 let res = self.eval(&parse_call)?;
-                let desc = crate::json_decode::from_type(ty, &self.struct_fields, &mut Vec::new())
-                    .map_err(|message| RuntimeError {
+                // ROOT REDESIGN — resolve the decode target (+ nested field struct types) to qualified
+                // identity keys via a module-aware env, mirroring the VM (parity).
+                let env = self.decode_env();
+                let desc =
+                    crate::json_decode::from_type(ty, self.cur_module_idx, &env, &mut Vec::new())
+                        .map_err(|message| RuntimeError {
                         message,
                         span: expr.span,
                     })?;
@@ -949,9 +981,14 @@ impl Interp {
                 }
                 Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(out))))
             }
-            D::Struct { name, fields } => {
+            D::Struct {
+                key,
+                display,
+                fields,
+            } => {
                 if variant.as_ref() != "Obj" {
-                    return Err(mismatch(&format!("object for {name}")));
+                    // ROOT REDESIGN — error text shows the BARE display name, never the identity key.
+                    return Err(mismatch(&format!("object for {display}")));
                 }
                 let Value::Map(entries) = payload.first().cloned().unwrap_or(Value::Nil) else {
                     return Err(mismatch("object"));
@@ -973,8 +1010,10 @@ impl Interp {
                     };
                     field_vals.push((fname.clone(), v));
                 }
+                // ROOT REDESIGN — tag the value with the qualified IDENTITY KEY (downstream
+                // field/method lookups key on it); the inline field names + display drive rendering.
                 Ok(Value::Struct {
-                    name: name.clone().into(),
+                    name: key.clone().into(),
                     fields: std::rc::Rc::new(std::cell::RefCell::new(field_vals)),
                 })
             }
@@ -2017,7 +2056,7 @@ impl Interp {
             return Err(RuntimeError {
                 message: format!(
                     "struct '{}' expects {} field(s), got {}",
-                    name,
+                    crate::compiler::bare_display(name),
                     def.fields.len(),
                     args.len()
                 ),
@@ -2355,7 +2394,10 @@ impl Interp {
             return Ok(receiver.clone());
         }
         Err(RuntimeError {
-            message: format!("struct '{name}' has no method '{method}'"),
+            message: format!(
+                "struct '{}' has no method '{method}'",
+                crate::compiler::bare_display(name)
+            ),
             span,
         })
     }
@@ -2398,7 +2440,9 @@ impl Interp {
                 for (k, fv) in &parts {
                     rendered.push(format!("{k}={}", self.stringify(fv, span, depth + 1)?));
                 }
-                Ok(format!("{name}({})", rendered.join(", ")))
+                // ROOT REDESIGN — `name` is the qualified IDENTITY KEY; render the bare display name.
+                let display = crate::compiler::bare_display(name.as_ref());
+                Ok(format!("{display}({})", rendered.join(", ")))
             }
             Value::List(items) => {
                 let elems = items.borrow().clone();
@@ -2521,7 +2565,10 @@ impl Interp {
             .get(method)
             .cloned()
             .ok_or_else(|| RuntimeError {
-                message: format!("struct '{name}' has no '{method}' method"),
+                message: format!(
+                    "struct '{}' has no '{method}' method",
+                    crate::compiler::bare_display(name)
+                ),
                 span,
             })?;
         self.call(&decl, &def.home, vec![l, r], span)
@@ -2552,7 +2599,8 @@ impl Interp {
             .cloned()
             .ok_or_else(|| RuntimeError {
                 message: format!(
-                    "struct '{name}' has no 'compare' method (needed to order its values)"
+                    "struct '{}' has no 'compare' method (needed to order its values)",
+                    crate::compiler::bare_display(name)
                 ),
                 span,
             })?;
@@ -2609,7 +2657,8 @@ impl Interp {
             .cloned()
             .ok_or_else(|| RuntimeError {
                 message: format!(
-                    "struct '{name}' has no 'hash' method (needed to use it as a map/set key)"
+                    "struct '{}' has no 'hash' method (needed to use it as a map/set key)",
+                    crate::compiler::bare_display(name)
                 ),
                 span,
             })?;
@@ -3909,9 +3958,13 @@ impl Interp {
             | StmtKind::Enum { name, .. }
             | StmtKind::TypeAlias { name, .. } = &s.kind
             {
+                // ROOT REDESIGN — single-source types are keyed `<main>::Name` (the standalone module
+                // key), identical to the compiler's standalone path, so identity keys agree (parity).
+                let key = format!("{}::{name}", crate::compiler::STANDALONE_MODULE_KEY);
                 self.module_types[0].insert(name.clone());
                 self.type_names.insert(name.clone());
-                self.bare_types.insert(name.clone(), name.clone());
+                self.type_keys.insert((0, name.clone()), key.clone());
+                self.bare_types.insert(name.clone(), key);
             }
         }
         self.eval_top_level(stmts)
@@ -4158,6 +4211,7 @@ impl Interp {
                         home: home.clone(),
                     };
                     self.structs.insert(key.clone(), std::rc::Rc::new(def));
+                    self.struct_module.insert(key.clone(), self.cur_module_idx);
                     self.struct_fields.insert(key, fields.clone());
                 }
                 // Type-erased: type parameters are checker-only (identical runtime per instantiation).
@@ -4180,21 +4234,36 @@ impl Interp {
                             aliases.insert(name.clone(), ty.clone());
                         }
                     }
-                    // Program-global struct fields (cross-module, populated by the run driver) plus
-                    // this module's own — so an extern can name a by-value struct declared anywhere
-                    // (matching the compiler's pass-1 `struct_fields`, which spans every module).
+                    // ROOT REDESIGN — key the extern struct-field view by the QUALIFIED IDENTITY KEY so
+                    // a returned by-value struct carries the same tag the VM stamps (parity) and field
+                    // access hits. Local module structs use this module's `type_key`; cross-module
+                    // `extern_struct_fields` (bare-keyed, declarer unknown) is kept under both its bare
+                    // name AND — when bare-visible here — its resolved key, so the rewrite below finds it.
                     let mut struct_fields = self.extern_struct_fields.clone();
                     for s in stmts {
                         if let StmtKind::Struct { name, fields, .. } = &s.kind {
-                            struct_fields.insert(name.clone(), fields.clone());
+                            let key = self.type_key(self.cur_module_idx, name);
+                            struct_fields.insert(key, fields.clone());
                         }
                     }
+                    // A bare struct type name written in an extern signature → its qualified key (so the
+                    // lowered `CType::Struct.name` matches the qualified-keyed `struct_fields`).
+                    let qualify = |t: &crate::ast::Type| -> crate::ast::Type {
+                        if let crate::ast::Type::Named(n) = t
+                            && let Some(key) = self.bare_types.get(n)
+                            && struct_fields.contains_key(key)
+                        {
+                            return crate::ast::Type::Named(key.clone());
+                        }
+                        t.clone()
+                    };
                     for ef in fns {
                         let params: Vec<crate::native::cffi::CType> = ef
                             .params
                             .iter()
                             .map(|p| {
-                                ctype_of(p.ty.as_ref(), &aliases, &struct_fields)
+                                let ty = p.ty.as_ref().map(&qualify);
+                                ctype_of(ty.as_ref(), &aliases, &struct_fields)
                                     .expect("checker verified marshallable param")
                             })
                             .collect();
@@ -4204,7 +4273,8 @@ impl Interp {
                         let ret = ef
                             .ret
                             .as_ref()
-                            .and_then(|t| ctype_of(Some(t), &aliases, &struct_fields));
+                            .map(&qualify)
+                            .and_then(|t| ctype_of(Some(&t), &aliases, &struct_fields));
                         let cffi = crate::native::cffi::Cffi::new(lib, &ef.name, params, ret)
                             .map_err(|e| RuntimeError {
                                 message: e.message,
@@ -5324,6 +5394,53 @@ const INTERP_STACK_BYTES: usize = 384 * 1024 * 1024;
 /// user identifier can collide.
 const WAIT_RECV_TMP: &str = "\u{0}wait-recv\u{0}";
 
+/// ROOT REDESIGN — the interpreter's [`crate::json_decode::DecodeEnv`]: resolves a decode target and
+/// its nested field struct types to qualified identity keys via the interp's per-module type tables.
+/// Mirrors the compiler's `CompilerDecodeEnv` (parity — identical key derivation, identical errors).
+struct InterpDecodeEnv<'a> {
+    i: &'a Interp,
+}
+
+impl crate::json_decode::DecodeEnv for InterpDecodeEnv<'_> {
+    fn resolve_bare(&self, module_idx: usize, name: &str) -> Option<String> {
+        // In the CALL module, a bare name may be local / from-imported / std — use `bare_types`.
+        // In any other (declaring) module, a nested field type resolves to that module's own type.
+        if module_idx == self.i.cur_module_idx
+            && let Some(k) = self.i.bare_types.get(name)
+        {
+            return Some(k.clone());
+        }
+        self.i
+            .type_keys
+            .get(&(module_idx, name.to_string()))
+            .cloned()
+    }
+
+    fn resolve_qualified(&self, _module_idx: usize, binder: &str, name: &str) -> Option<String> {
+        let tidx = *self.i.imported_module_idx.get(binder)?;
+        if self
+            .i
+            .module_types
+            .get(tidx)
+            .is_some_and(|t| t.contains(name))
+        {
+            self.i.type_keys.get(&(tidx, name.to_string())).cloned()
+        } else {
+            None
+        }
+    }
+
+    fn struct_def(&self, key: &str) -> Option<(usize, &[crate::ast::Field])> {
+        let module_idx = *self.i.struct_module.get(key)?;
+        let fields = self.i.struct_fields.get(key)?;
+        Some((module_idx, fields.as_slice()))
+    }
+
+    fn display_of(&self, key: &str) -> String {
+        crate::compiler::bare_display(key)
+    }
+}
+
 /// Run a whole program from a source string, returning the output produced **so far** alongside
 /// the outcome. The single-file test entry point — the CLI uses [`run_file`] so multi-file
 /// programs work. Runs on a dedicated large-stack thread (see [`INTERP_STACK_BYTES`]).
@@ -5441,17 +5558,19 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     }
     // Gather every module's user type names (struct/enum/alias) so a `from`-imported type — which
     // carries no runtime value — is skipped at `bind_import` rather than erroring (module-scoped
-    // types resolve through the program-global tables by name). Also compute the module-scoped
-    // runtime-key map (IDENTICAL algorithm to the compiler's `assign_type_keys`, so both engines
-    // agree on every key — parity even for a genuine cross-module name clash).
+    // types resolve through the program-global tables by name). ROOT REDESIGN — assign each user type
+    // the canonical IDENTITY KEY `<module-key>::Name` (via the shared `resolver::module_keys`, the
+    // SAME derivation the compiler + checker use), so all three engines agree on every key (parity).
     interp.module_types = vec![std::collections::HashSet::new(); graph.modules.len()];
-    let mut declarers: std::collections::HashMap<String, Vec<usize>> =
-        std::collections::HashMap::new();
+    let mkeys = crate::resolver::module_keys(&graph);
     for (idx, lm) in graph.modules.iter().enumerate() {
         interp.module_idx_of.insert(lm.id.clone(), idx);
         if lm.native.is_some() {
             continue;
         }
+        // ROOT REDESIGN — std modules' types are RESERVED/NATIVE: keep their BARE name (skip the
+        // qualified key → `type_key` falls back to bare), so `Ref`/`Iterator`/FFI widths resolve bare.
+        let is_std = lm.is_std();
         for s in &lm.ast.stmts {
             if let StmtKind::Struct { name, .. }
             | StmtKind::Enum { name, .. }
@@ -5459,22 +5578,12 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
             {
                 interp.type_names.insert(name.clone());
                 interp.module_types[idx].insert(name.clone());
-                let v = declarers.entry(name.clone()).or_default();
-                if !v.contains(&idx) {
-                    v.push(idx);
+                if !is_std {
+                    interp
+                        .type_keys
+                        .insert((idx, name.clone()), format!("{}::{name}", mkeys[idx]));
                 }
             }
-        }
-    }
-    for (name, mods) in &declarers {
-        if mods.len() < 2 {
-            continue;
-        }
-        for &idx in &mods[1..] {
-            let dotted = graph.modules[idx].label();
-            interp
-                .type_keys
-                .insert((idx, name.clone()), format!("{dotted}::{name}"));
         }
     }
     // Modules are in load order: dependencies first, entry last.

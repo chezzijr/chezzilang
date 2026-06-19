@@ -20,26 +20,32 @@ for user types). A bare use of a type whose module was imported whole but not na
 Enforcement lives in the **checker** (per-module type tables: `structs`/`enums`/`variants`/`aliases`
 cleared per module + re-injected via `bind_import`; `ModuleSig` carries resolved struct/enum/alias
 defs; reverse `types_by_name` index drives the hint; new `Type::Qualified{module,name,args}` AST +
-parser `m.T[args]` production). Runtime keying is **OPTION C — bare key in the common case**: the
-compiler assigns each type a bare runtime key unless a name is declared in ≥2 modules BOTH reachable
-in one program, in which case the FIRST declarer (graph load order, deps-first) keeps the bare key and
-each later one is disambiguated to `mod::Name` (so print/error/JSON output is **byte-identical** for
-non-colliding types — `Point(x=1, y=2)` unchanged). The disambiguated key is used **consistently**:
-construction, field/method resolution, AND `match`-pattern variant ids all honor it. A QUALIFIED
-construction (`mod.E.V`) bakes its variant id from the key the call site already resolved
-(`variant_id_of_key`), **not** re-derived from the currently-compiled module — so `win.E.A` keys
-`win`'s `E` even when the module *building* it also declares a colliding loser `E` (else the producer
-would mis-key the value and it could never match in its declaring module). The CHECKER
-computes the same key map (`check_graph` mirrors the compiler's `assign_type_keys`; per-module
-`bare_types`) and keys its struct/enum/variant LAYOUT tables by the runtime key — so a value of the
-disambiguated type type-checks its own fields/methods and its variants `match` (the `match`-side key is
-the construction key in compiler `variant_pair` and interp `try_bind`, which resolves the pattern's
-bare enum name via the callee module's `bare_types`). The same deterministic key map + per-module
-bare-visible-type set is computed identically by all three engines (compiler
-`assign_type_keys`/`bare_types` ≡ interp ≡ checker), so the cooperative VM, `--parallel`, and the
-interp agree on every key and every bare-vs-qualified resolution (3-engine parity, incl. a genuine
-collision: field access, method call, AND `match` on a disambiguated type, plus a cross-airlock
-imported-type value). The runtime `bind_import` (both engines) binds a
+parser `m.T[args]` production). Runtime keying is the **always-qualified identity key + bare display name** model (ROOT REDESIGN,
+2026-06 — replaced the old "Option C" bare-key/disambiguate-on-collision scheme, which was a bug
+factory: the key doubled as the printed name, so consumers had to know bare-vs-qualified and several
+got it wrong, e.g. `json.decode` decoding a collision-loser against the WRONG layout). The new design
+**separates identity from display**: (1) **IDENTITY KEY** is ALWAYS `<module-key>::Name` for EVERY user
+struct/enum/variant/alias — no winner/loser, no bare keys, unique by construction (the module key is
+the declaring module's dotted path or the entry file's stem, from the shared
+`resolver::module_keys(graph)`, deterministic + `#idx`-tiebroken so all three engines derive it
+byte-identically). The compiler, checker, both engines, AND the `--parallel` snapshot/wire format key
+every layout table (`Program::structs`/`variants`, checker tables, interp `struct_fields`, …) by this
+ONE key; the value's runtime tag carries it. (2) **DISPLAY NAME** is the bare `Name`, stored on the
+def (`StructDef::display_name`): ALL user-facing output — print/`str`/stringify, errors, `json` ENCODE,
+`repr` — renders it, so output is **byte-identical** regardless of module and two colliding `Point`s
+both print `Point(...)`. Because there is ONE canonical key, the whole bug class vanishes structurally:
+`json.decode` (`json_decode::DecodeEnv`, implemented by both engines) resolves the target — and nested
+struct-field types **in their own DEFINING module's scope** — to the qualified key, tags the produced
+struct with it, and decode errors render the bare name. RESERVED/NATIVE types
+(`Result`/`Option`/`Some`/`Ok`, `Ref`, `Iterator`, `Match`/`Response`, the std type surface on
+`import std.*`, and the FFI width names) are **not** module-keyed — they keep their bare name (the
+qualification pre-pass skips std/native modules). A match pattern `Color.Red` against a whole-module-
+imported enum resolves `Color` to the scrutinee's enum key (checker) / the imported module's registered
+key (compiler+interp `enum_bare_key`). The same deterministic key map + per-module bare-visible-type set
+is computed identically by all three engines, so the cooperative VM, `--parallel`, and the interp agree
+on every key (3-engine parity, incl. a genuine collision: field access, method call, `match`, AND
+`json.decode` on a colliding type, plus a cross-airlock imported-type value). The runtime `bind_import`
+(both engines) binds a
 member's value when the TARGET module exports one and skips only a value-less TYPE member (so a
 `from`-imported fn named like another module's type still binds); the bare constructor fires only for
 a type bare-VISIBLE in the importing module. Imported `type` aliases are **transparent** (body

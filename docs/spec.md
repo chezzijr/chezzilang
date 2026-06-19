@@ -241,16 +241,24 @@ import Point as Pt from core.geo     # rename on import (user types only)
 
 A bare use of a type whose module was imported whole (`import geo`) but not named-imported is a
 **check-time error** (`unknown type 'Point'; import it from geo`). Two modules MAY declare the same
-type name with no collision — each is reachable from its own module. Print/error/JSON output is the
-bare name (`Point(x=1, y=2)`); only in the rare case where two same-named types are *both* reachable
-in one program does the compiler disambiguate the colliding key (the first declarer in load order
-keeps the bare key, each later one gets a module-qualified `mod::Point`). The disambiguated key is
-used **consistently everywhere** — construction, field/method resolution, and `match`-pattern variant
-ids all honor it (checker, compiler, and both engines agree), so a value of the disambiguated type
-reads its own fields/methods and its variants `match`. Reserved/native types (`Result`/`Option`/`Some`/`Ok`/…, `Ref`, the
-std library type surface on `import std.*`, and the FFI width names) stay global/bare always. An
-imported `type` alias is **transparent**: its body is resolved in the *defining* module's scope, so a
-cross-module `import Len from sizes` where `type Len = int32` carries its FFI-width license.
+type name with no collision — each is reachable from its own module.
+
+**Identity is separate from display.** Every user `struct` / `enum` / variant / `type` alias has ONE
+canonical **identity key** — always module-qualified, `<module-key>::Name` (the module key is the
+declaring module's dotted path, or the entry file's stem) — used uniformly as the runtime type tag and
+as the key into every layout table (construction, field/method resolution, `match`-pattern variant
+ids, `json.decode` targets, the `--parallel` wire/snapshot format; checker, compiler, and both engines
+derive it identically). Because the key is unique by construction there is **no** collision special-
+case: two modules' `Point` are simply `a::Point` and `b::Point`. The **display name** is the bare
+`Name`, carried separately on the type's def: all user-facing output — print/`str`, error messages,
+`json.decode` errors, `repr` — renders the bare name, so output is byte-identical regardless of module
+and two colliding `Point`s **both** print `Point(...)` (Python-like; the module is never shown in
+normal output). JSON *encode* likewise emits the bare field/type naming (no `module::` leaks into the
+wire). Reserved/native types (`Result`/`Option`/`Some`/`Ok`/…, `Ref`, `Iterator`, the std library type
+surface on `import std.*`, and the FFI width names like `int32`) are **not** module-keyed — they keep
+their bare name globally. An imported `type` alias is **transparent**: its body is resolved in the
+*defining* module's scope, so a cross-module `import Len from sizes` where `type Len = int32` carries
+its FFI-width license.
 
 `chezzi init [dir]` scaffolds a new project (`chezzi.toml` + `src/main.chz` + an example `*_test.chz`).
 The generated `chezzi.toml` is **both a root marker and a parsed manifest**: the resolver checks for

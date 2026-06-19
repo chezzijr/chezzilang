@@ -1409,9 +1409,13 @@ import Point as Pt from core.geo # rename (user types only; FFI widths can't be 
 
 A bare type whose module was imported whole (`import geo`) but not named-imported is a **check-time
 error** (`unknown type 'Point'; import it from geo`). Two modules may declare the same type name —
-no collision; each is importable. Reserved/native types (`Result`/`Option`/`Some`/`Ok`, `Ref`, the
-std type surface on `import std.*`, FFI widths) stay global/bare always. An imported `type` alias is
-transparent (its body resolves in the defining module's scope, carrying any FFI-width license).
+no collision; each is importable. Under the hood every user type has ONE canonical, always-qualified
+**identity key** (`<module-key>::Name`) used as the runtime tag + every layout lookup, while its **bare
+name** is what prints — so output stays byte-identical regardless of module and two colliding `Point`s
+both render `Point(...)` (the module is never shown). Reserved/native types (`Result`/`Option`/`Some`/
+`Ok`, `Ref`, `Iterator`, the std type surface on `import std.*`, FFI widths) stay global/bare always. An
+imported `type` alias is transparent (its body resolves in the defining module's scope, carrying any
+FFI-width license).
 
 ## 12b. Dynamic C-ABI FFI — `extern "lib":`
 

@@ -415,7 +415,9 @@ impl std::fmt::Display for Value {
                     .map(|(k, v)| format!("{k}={v}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                write!(f, "{name}({inner})")
+                // ROOT REDESIGN — `name` is the qualified IDENTITY KEY; render the bare display name.
+                let display = crate::compiler::bare_display(name.as_ref());
+                write!(f, "{display}({inner})")
             }
             Value::Enum {
                 variant, payload, ..

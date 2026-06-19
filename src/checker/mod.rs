@@ -265,16 +265,16 @@ pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
 /// import. The same type name may appear in several modules.
 pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
     let mut c = Checker::new();
-    // Module-scoped runtime keys — the IDENTICAL collision pre-pass the compiler runs
-    // (`assign_type_keys`): scan every non-native module's struct/enum/alias names in graph
-    // (deps-first) order; a name declared in exactly one module keys BARE (so print/JSON/error output
-    // is unchanged), a name declared in ≥2 modules is a genuine clash whose FIRST declarer keeps the
-    // bare key and each later one is disambiguated to `<dotted>::Name`. Built here so the checker and
-    // compiler agree on every type's runtime key (and on which declarer is the disambiguated one).
+    // ROOT REDESIGN — module-scoped IDENTITY KEYS: scan every non-native module's struct/enum/alias
+    // names and key EACH one `<module-key>::Name` (via the shared `resolver::module_keys`, the SAME
+    // derivation the compiler + interpreter use), so all three engines agree on every key (parity) and
+    // every user type is unique by construction (a cross-module name clash is just two distinct keys).
     {
-        let mut declarers: HashMap<String, Vec<usize>> = HashMap::new();
+        let mkeys = crate::resolver::module_keys(graph);
         for (idx, lm) in graph.modules.iter().enumerate() {
-            if lm.native.is_some() {
+            // ROOT REDESIGN — std modules' types are RESERVED/NATIVE: keep their BARE name (skip the
+            // qualified key), so `Ref`/`Iterator`/FFI widths resolve bare, like the synthetic natives.
+            if lm.native.is_some() || lm.is_std() {
                 continue;
             }
             for s in &lm.ast.stmts {
@@ -282,22 +282,11 @@ pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
                 | StmtKind::Enum { name, .. }
                 | StmtKind::TypeAlias { name, .. } = &s.kind
                 {
-                    let v = declarers.entry(name.clone()).or_default();
-                    if !v.contains(&idx) {
-                        v.push(idx);
-                    }
+                    c.type_keys.insert(
+                        (lm.id.clone(), name.clone()),
+                        format!("{}::{name}", mkeys[idx]),
+                    );
                 }
-            }
-        }
-        for (name, mods) in &declarers {
-            if mods.len() < 2 {
-                continue; // no collision → bare key (recorded implicitly by absence)
-            }
-            for &idx in &mods[1..] {
-                let lm = &graph.modules[idx];
-                let dotted = lm.label();
-                c.type_keys
-                    .insert((lm.id.clone(), name.clone()), format!("{dotted}::{name}"));
             }
         }
     }
@@ -4707,10 +4696,19 @@ impl Checker {
     ) {
         match enum_name {
             Some(en) => {
-                // The pattern carries the BARE written enum name; resolve it to its runtime key (bare
-                // unless a genuine clash) for the layout lookup + the scrutinee-enum comparison, so a
-                // disambiguated enum's qualified pattern matches. Error messages keep the bare `en`.
-                let ekey = self.bare_key(en);
+                // ROOT REDESIGN — the pattern carries the BARE written enum name. Resolve it to its
+                // qualified IDENTITY KEY for the layout lookup. A bare-visible enum (local / from-import
+                // / std) resolves via `bare_types`; but a WHOLE-module-imported enum (`Color` from
+                // `import geo`) is NOT bare-visible, so fall back to the SCRUTINEE's own enum key when
+                // its bare display name equals `en` (the pattern `Color.Red` matching a `geo::Color`
+                // value). Error messages keep the bare `en`.
+                let ekey = match self.bare_types.get(en) {
+                    Some(k) => k.clone(),
+                    None => match scrut_enum {
+                        Some(s) if crate::compiler::bare_display(s) == *en => s.to_string(),
+                        _ => en.to_string(),
+                    },
+                };
                 // User variants live in `self.variants` keyed by `(enum, variant)`; the built-in
                 // Result/Option variants don't, so accept their canonical enums explicitly.
                 let builtin_ok = matches!(
