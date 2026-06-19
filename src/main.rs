@@ -12,9 +12,14 @@ mod checker;
 mod compiler;
 mod desugar;
 mod fmtspec;
+// The tree-walk interpreter is the FROZEN two-engine parity oracle: golden tests run each program
+// through both the VM and `interp` and assert identical stdout. It has no CLI surface (the `--interp`
+// flag was removed), so it is only compiled for tests, where every reference to it lives.
+#[cfg(test)]
 mod interp;
 mod json_decode;
 mod lexer;
+mod manifest;
 mod native;
 mod parser;
 mod resolver;
@@ -36,12 +41,12 @@ USAGE:
 
 COMMANDS:
     init    [dir]    Scaffold a new Chezzi project (manifest + src)
-    run     <file>   Type-check, then run on the bytecode VM  (M5)
-    test    [path]   Run every `test fn` in *_test.chz files  (M20)
-    check   <file>   Type-check only; report errors          (M4)
-    tokens  <file>   Print the token stream                  (M1)
-    ast     <file>   Print the parsed AST                    (M2)
-    repl             Start an interactive REPL                (M1+)
+    run     [file]   Type-check, then run on the bytecode VM (no file → manifest entrypoint)
+    test    [path]   Run every `test fn` in *_test.chz files
+    check   <file>   Type-check only; report errors
+    tokens  <file>   Print the token stream
+    ast     <file>   Print the parsed AST
+    repl             Start an interactive REPL
     help             Show this message
 
 FLAGS:
@@ -49,7 +54,6 @@ FLAGS:
     --serial         Run on the cooperative single-thread VM (the frozen parity oracle)
     --parallel       Select the OS-thread engine (now the DEFAULT; flag kept as a no-op)
     --threads=N      Worker threads for the OS-thread engine (0 = all cores; env: CHEZZI_THREADS)
-    --interp         Run on the tree-walk interpreter instead of the bytecode VM
 
 NOTE: flags must come BEFORE the file path. Anything after the file is passed
       to the program as an argument, so `chezzi run prog.chz --serial` runs the
@@ -176,23 +180,23 @@ fn cmd_check(args: &[String]) -> ExitCode {
     }
 }
 
-/// `chezzi run <file> [--errors=json] [--interp] [--serial] [--parallel] [--threads=N]` —
-/// type-check first (M4 gate), then execute on the bytecode VM (default, M5) or the tree-walk
-/// interpreter (`--interp`, the reference engine). The VM now runs the real OS-thread engine
-/// (B3.3-threads) BY DEFAULT; `--serial` opts back into the cooperative single-thread VM (the frozen
-/// byte-identical oracle). `--parallel` is kept as an accepted no-op alias for the (now default)
-/// OS-thread engine. `--threads=N` (or the `CHEZZI_THREADS` env var) sizes the OS-thread engine's
-/// worker pool — `0` (or omitted) = all cores; the flag wins over the env var.
+/// `chezzi run [file] [--errors=json] [--serial] [--parallel] [--threads=N]` — type-check first,
+/// then execute on the bytecode VM. With NO file argument, the project's manifest entrypoint is run:
+/// the project root is found by walking up from the cwd for `chezzi.toml`, and its
+/// `[project] entrypoint` (a dotted module path, e.g. `"src.main"`) is resolved root-relatively and
+/// run. The VM now runs the real OS-thread engine BY DEFAULT; `--serial` opts back into the
+/// cooperative single-thread VM (the frozen byte-identical oracle). `--parallel` is kept as an
+/// accepted no-op alias for the (now default) OS-thread engine. `--threads=N` (or the
+/// `CHEZZI_THREADS` env var) sizes the OS-thread engine's worker pool — `0` (or omitted) = all
+/// cores; the flag wins over the env var.
 fn cmd_run(args: &[String]) -> ExitCode {
     let mut path = None;
     let mut json = false;
-    let mut use_vm = true;
     // The OS-thread engine (bounded pool + condvar `recv`) is now the DEFAULT VM engine.
     // `--serial` opts back into the cooperative single-thread VM (the frozen parity oracle).
-    // `--interp` is the frozen sequential oracle and never runs parallel.
     let mut parallel = true;
-    // Track explicit `--parallel`/`--serial` so contradictory combos (and `--interp --parallel`)
-    // still error instead of silently picking one.
+    // Track explicit `--parallel`/`--serial` so contradictory combos still error instead of
+    // silently picking one.
     let mut saw_parallel = false;
     let mut saw_serial = false;
     // `--threads=N` worker count for the M:N engine (orthogonal to which engine runs). `0` = all
@@ -207,8 +211,6 @@ fn cmd_run(args: &[String]) -> ExitCode {
         match arg.as_str() {
             _ if path.is_some() => prog_args.push(arg.clone()),
             "--errors=json" => json = true,
-            "--vm" => use_vm = true,
-            "--interp" => use_vm = false,
             "--parallel" => saw_parallel = true,
             "--serial" => {
                 saw_serial = true;
@@ -233,36 +235,34 @@ fn cmd_run(args: &[String]) -> ExitCode {
             other => path = Some(other.to_string()),
         }
     }
-    let Some(path) = path else {
-        eprintln!(
-            "chezzi run: missing file argument\nusage: chezzi run <file.chz> [--errors=json] [--interp] [--serial] [--parallel] [--threads=N]"
-        );
-        return ExitCode::FAILURE;
-    };
     if saw_parallel && saw_serial {
         eprintln!("chezzi run: --parallel and --serial are mutually exclusive");
         return ExitCode::FAILURE;
     }
-    if saw_parallel && !use_vm {
-        eprintln!(
-            "chezzi run: --parallel is VM-only and cannot combine with --interp (the interpreter is the frozen sequential engine)"
-        );
-        return ExitCode::FAILURE;
-    }
+
+    // No file argument → run the project manifest's entrypoint. Find the project root by walking up
+    // from the cwd for `chezzi.toml`, parse it, and resolve `[project] entrypoint` (a dotted module
+    // path) root-relatively. This keeps imports root-relative (build_graph walks up to the same
+    // marker), so a bare `chezzi run` from anywhere in the project runs the configured entry.
+    let path = match path {
+        Some(p) => p,
+        None => match resolve_entrypoint() {
+            Ok(p) => p,
+            Err(msg) => {
+                eprintln!("{msg}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
 
     // Resolve the M:N worker count. An explicit `--threads` wins and errors if the parallel engine
     // won't run (contradiction); otherwise `CHEZZI_THREADS` applies only when it actually will, so a
-    // stray env var never breaks `--serial`/`--interp`. `0`/unset both mean auto (all cores).
-    let runs_parallel = use_vm && parallel;
+    // stray env var never breaks `--serial`. `0`/unset both mean auto (all cores).
+    let runs_parallel = parallel;
     if let Some(n) = threads_flag {
         if !runs_parallel {
-            let conflict = if !use_vm {
-                "--interp (the interpreter is single-threaded)"
-            } else {
-                "--serial (the cooperative single-thread engine)"
-            };
             eprintln!(
-                "chezzi run: --threads sizes the parallel engine and has no effect with {conflict}"
+                "chezzi run: --threads sizes the parallel engine and has no effect with --serial (the cooperative single-thread engine)"
             );
             return ExitCode::FAILURE;
         }
@@ -300,7 +300,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
     // modules read args/env/stdin from a process-backed config.
     let p = std::path::Path::new(&path);
     let cfg = native::HostConfig::from_process(prog_args);
-    let (output, errout, errored, exit_code) = if use_vm {
+    let (output, errout, errored, exit_code) = {
         let (out, err, result, code) = if parallel {
             vm::run_file_parallel(p, cfg)
         } else {
@@ -312,16 +312,6 @@ fn cmd_run(args: &[String]) -> ExitCode {
             result
                 .err()
                 .map(|e| vm::format_trace(&e.message, e.span, &e.trace)),
-            code,
-        )
-    } else {
-        let (out, err, result, code) = interp::run_file_with(p, cfg);
-        (
-            out,
-            err,
-            result
-                .err()
-                .map(|e| interp::format_trace(&e.message, e.span, &e.trace)),
             code,
         )
     };
@@ -339,6 +329,47 @@ fn cmd_run(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Resolve the file to run for a bare `chezzi run` (no file argument): find the project root by
+/// walking up from the cwd for `chezzi.toml`, parse the manifest, require a `[project] entrypoint`
+/// (a dotted module path), and map it to a file root-relatively. Returns the resolved `.chz` path,
+/// or a ready-to-print error message.
+fn resolve_entrypoint() -> Result<String, String> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("chezzi run: cannot read current directory: {e}"))?;
+    let root = resolver::find_root_from_dir(&cwd).ok_or_else(|| {
+        "chezzi run: no file given and no chezzi.toml found (run from inside a project, or pass a file: chezzi run <file.chz>)".to_string()
+    })?;
+    let manifest_path = root.join("chezzi.toml");
+    let src = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("chezzi run: cannot read {}: {e}", manifest_path.display()))?;
+    let manifest = manifest::parse(&src)
+        .map_err(|e| format!("chezzi run: invalid {}: {e}", manifest_path.display()))?;
+    let entrypoint = manifest.entrypoint.ok_or_else(|| {
+        format!(
+            "chezzi run: {} has no [project] entrypoint; add entrypoint = \"src.main\" or pass a file",
+            manifest_path.display()
+        )
+    })?;
+    let file = entrypoint_file(&entrypoint, &root)
+        .map_err(|e| format!("chezzi run: {} {e}", manifest_path.display()))?;
+    Ok(file.to_string_lossy().into_owned())
+}
+
+/// Map a manifest `[project] entrypoint` (a dotted module path) to its `.chz` file, root-relatively.
+/// Validates the path FIRST: an empty / whitespace / leading- or trailing-dot / doubled-dot value
+/// would otherwise feed empty path segments to [`resolver::module_file`], whose `push("")` +
+/// `set_extension` rewrites the project-root dir's own extension and escapes the root (e.g.
+/// `<root>.chz`), producing a baffling "cannot read" error. Pure (no cwd/env) so it is unit-testable.
+fn entrypoint_file(entrypoint: &str, root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let segs: Vec<String> = entrypoint.split('.').map(str::to_string).collect();
+    if entrypoint.trim().is_empty() || segs.iter().any(|s| s.trim().is_empty()) {
+        return Err(format!(
+            "has an invalid [project] entrypoint {entrypoint:?}; expected a dotted module path like \"src.main\""
+        ));
+    }
+    Ok(resolver::module_file(&segs, root, &resolver::std_root()))
 }
 
 /// `chezzi test [path]` — discover + run every `test fn` in `*_test.chz` files under `path` (default
@@ -392,11 +423,10 @@ fn cmd_init(args: &[String]) -> ExitCode {
         Ok(()) => {
             println!("chezzi: scaffolded a new project in {}", path.display());
             println!(
-                "  chezzi.toml          project manifest (marker / tooling-only — not parsed yet)"
+                "  chezzi.toml          project manifest (entrypoint = \"src.main\" — drives bare `chezzi run`)"
             );
             println!(
-                "  src/main.chz         entry script  — run with: chezzi run {}/src/main.chz",
-                dir
+                "  src/main.chz         entry script  — run with: chezzi run (from {dir}) or chezzi run {dir}/src/main.chz",
             );
             println!(
                 "  src/main_test.chz    example test   — run with: chezzi test {}",
@@ -414,8 +444,9 @@ fn cmd_init(args: &[String]) -> ExitCode {
 /// Write the scaffold for a new project into `dir`: a `chezzi.toml` manifest, `src/main.chz`, and an
 /// example `src/main_test.chz`. Creates `dir` (and parents) if needed; refuses to overwrite an
 /// existing `chezzi.toml` (so it never clobbers a real project). Pure filesystem work — this is the
-/// unit-testable core behind `cmd_init`. The manifest is written as a string literal only; nothing
-/// parses `chezzi.toml` (it stays a marker / forward-looking tooling artifact, per docs/spec.md).
+/// unit-testable core behind `cmd_init`. The manifest's `[project] entrypoint` is written ACTIVE
+/// (`"src.main"`), so a freshly-init'd project runs with a bare `chezzi run` (see `manifest::parse`
+/// + `resolve_entrypoint`).
 fn scaffold_project(dir: &std::path::Path) -> Result<(), String> {
     use std::fs;
 
@@ -455,21 +486,15 @@ fn scaffold_project(dir: &std::path::Path) -> Result<(), String> {
     let manifest_body = format!(
         "# chezzi.toml — project manifest.\n\
          #\n\
-         # NOTE: this file is NOT parsed by the toolchain yet. It is a project ROOT MARKER\n\
-         # (module resolution walks up for it; see docs/spec.md \"Imports & module resolution\")\n\
-         # and a place for forward-looking, tooling-only configuration. The fields below are a\n\
-         # sensible default; the commented sections document settings a future build tool may read.\n\
+         # This file is BOTH a project ROOT MARKER (module resolution walks up for it; see\n\
+         # docs/spec.md \"Imports & module resolution\") AND a parsed manifest. The toolchain reads\n\
+         # `[project]` keys: `entrypoint` (a dotted module path) is the module a bare `chezzi run`\n\
+         # executes. `name`/`version` are project metadata. Unknown keys/sections are ignored.\n\
          \n\
          [project]\n\
          name = \"{name}\"\n\
          version = \"0.1.0\"\n\
-         # root = \".\"            # forward-looking: project root dir (default: this manifest's dir)\n\
-         # entrypoint = \"main\"   # forward-looking (docs/spec.md): the fn a project build would run.\n\
-         #                       #   The language has NO automatic main — src/main.chz calls main()\n\
-         #                       #   itself today; this field is tooling-only and not parsed yet.\n\
-         \n\
-         # [test]               # forward-looking: test discovery config (not parsed yet)\n\
-         # include = [\"*_test.chz\"]   # `chezzi test` already discovers *_test.chz files today.\n",
+         entrypoint = \"src.main\"   # dotted module path → src/main.chz; run with a bare `chezzi run`\n",
     );
     fs::write(&manifest, manifest_body)
         .map_err(|e| format!("cannot write {}: {e}", manifest.display()))?;
@@ -721,11 +746,68 @@ mod init_tests {
     }
 
     #[test]
+    fn scaffolded_manifest_entrypoint_resolves_and_runs() {
+        // A freshly-init'd project must run with a bare `chezzi run`: the manifest's active
+        // `entrypoint = "src.main"` parses, resolves root-relatively to src/main.chz, and runs.
+        let d = TmpDir::new();
+        scaffold_project(&d.0).expect("scaffold should succeed");
+
+        // The scaffolded manifest parses to an active entrypoint.
+        let toml = std::fs::read_to_string(d.0.join("chezzi.toml")).unwrap();
+        let m = manifest::parse(&toml).expect("scaffolded manifest must parse");
+        assert_eq!(
+            m.entrypoint.as_deref(),
+            Some("src.main"),
+            "scaffolded manifest must write an active entrypoint"
+        );
+
+        // find_root_from_dir(root) → the project root (the cwd case for bare `chezzi run`).
+        let root = resolver::find_root_from_dir(&d.0).expect("chezzi.toml marks the root");
+
+        // The entrypoint resolves root-relatively to src/main.chz and runs on the VM.
+        let segs: Vec<String> = m
+            .entrypoint
+            .unwrap()
+            .split('.')
+            .map(str::to_string)
+            .collect();
+        let entry = resolver::module_file(&segs, &root, &resolver::std_root());
+        assert!(
+            entry.ends_with("src/main.chz"),
+            "entry: {}",
+            entry.display()
+        );
+        let (stdout, stderr, result, _exit) = vm::run_file(&entry);
+        assert!(result.is_ok(), "entrypoint must run; stderr:\n{stderr}");
+        assert!(
+            stdout.contains("Hello from Chezzi!"),
+            "entrypoint should print the greeting; stdout:\n{stdout}"
+        );
+    }
+
+    #[test]
     fn init_creates_missing_dir() {
         let d = TmpDir::new();
         let nested = d.0.join("a/b/c");
         scaffold_project(&nested).expect("should create nested dir");
         assert!(nested.join("chezzi.toml").is_file());
         assert!(nested.join("src/main.chz").is_file());
+    }
+
+    #[test]
+    fn entrypoint_file_validates_dotted_path() {
+        let root = std::path::Path::new("/proj");
+        // Valid dotted path → root-relative .chz under the project root.
+        assert_eq!(
+            entrypoint_file("src.main", root).unwrap(),
+            root.join("src/main.chz")
+        );
+        // Bad forms must be REJECTED, not mangle the root path (push("") + set_extension footgun).
+        for bad in ["", "   ", ".", ".main", "src.main.", "src..main"] {
+            assert!(
+                entrypoint_file(bad, root).is_err(),
+                "entrypoint {bad:?} should be rejected"
+            );
+        }
     }
 }

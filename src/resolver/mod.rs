@@ -94,6 +94,22 @@ pub fn find_root(entry: &Path) -> PathBuf {
     start.to_path_buf()
 }
 
+/// Walk up from `start` itself (typically the current working directory) looking for `chezzi.toml`;
+/// that dir is the project root. Returns `None` if no marker is found up to the filesystem root.
+///
+/// Unlike [`find_root`] (which begins at an entry file's *parent*), this begins AT `start` — the
+/// no-file `chezzi run` case, where the project root may BE the cwd.
+pub fn find_root_from_dir(start: &Path) -> Option<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        if d.join("chezzi.toml").is_file() {
+            return Some(d.to_path_buf());
+        }
+        dir = d.parent();
+    }
+    None
+}
+
 /// The stdlib directory: `$CHEZZI_STD` if set, else the compile-time `<crate>/std`. The env
 /// override keeps tests deterministic (point it at a tempdir) and defers a real install story
 /// (next-to-binary discovery) to M6, when `std/` actually ships content.
@@ -461,6 +477,84 @@ mod tests {
         assert_eq!(m.native, Some("std.math"));
         assert!(m.ast.stmts.is_empty());
         // Dependencies precede dependents: the native module loads before the entry.
+        assert_eq!(graph.modules.last().unwrap().id, graph.entry);
+    }
+
+    // 9. find_root_from_dir starts AT the given dir (cwd) and walks up to the chezzi.toml marker.
+    #[test]
+    fn find_root_from_dir_walks_up() {
+        let t = TmpDir::new();
+        t.write("chezzi.toml", "");
+        let nested = t.path("sub/deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        // From a nested dir we find the root.
+        let root = find_root_from_dir(&nested).expect("should find root");
+        assert_eq!(canonical_or_abs(&root), canonical_or_abs(&t.0));
+        // From the root dir itself (the cwd case) we find it without going up.
+        let root2 = find_root_from_dir(&t.0).expect("should find root at start dir");
+        assert_eq!(canonical_or_abs(&root2), canonical_or_abs(&t.0));
+    }
+
+    // 10. No marker anywhere → None (so the caller can emit a clear "no chezzi.toml" error).
+    #[test]
+    fn find_root_from_dir_none_without_marker() {
+        let t = TmpDir::new();
+        let nested = t.path("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(
+            find_root_from_dir(&nested).is_none(),
+            "no marker → None, got Some"
+        );
+    }
+
+    // 11. The user's verification concern: entrypoint imports resolve ROOT-relative, not
+    //     file-relative. A project root with chezzi.toml + entrypoint = "src.main"; src/main.chz
+    //     imports `lib` (at root) AND `src.utils.common`. All four modules must resolve.
+    #[test]
+    fn entrypoint_imports_are_root_relative() {
+        let t = TmpDir::new();
+        t.write("chezzi.toml", "[project]\nentrypoint = \"src.main\"\n");
+        t.write("lib.chz", "fn helper(): print(1)\n");
+        t.write(
+            "src/main.chz",
+            "import lib\nimport src.utils.common\nfn main(): print(1)\n",
+        );
+        t.write("src/utils/common.chz", "fn shared(): print(1)\n");
+
+        // Resolve the entrypoint exactly like bare `chezzi run` will: dotted "src.main" → file.
+        let root = t.0.clone();
+        let entry = module_file(&["src".into(), "main".into()], &root, &std_root());
+        assert_eq!(
+            canonical_or_abs(&entry),
+            canonical_or_abs(&t.path("src/main.chz"))
+        );
+
+        let graph = build_graph(&entry).unwrap();
+        let labels: Vec<String> = graph.modules.iter().map(|m| m.label()).collect();
+        // `import lib` resolves to <root>/lib.chz (root-relative, NOT src/lib.chz).
+        let lib = graph
+            .modules
+            .iter()
+            .find(|m| m.label() == "lib")
+            .expect("lib must resolve");
+        assert_eq!(
+            canonical_or_abs(&lib.id.0),
+            canonical_or_abs(&t.path("lib.chz")),
+            "import lib must be root-relative; labels: {labels:?}"
+        );
+        // `import src.utils.common` resolves to <root>/src/utils/common.chz.
+        let common = graph
+            .modules
+            .iter()
+            .find(|m| m.label() == "src.utils.common")
+            .expect("src.utils.common must resolve");
+        assert_eq!(
+            canonical_or_abs(&common.id.0),
+            canonical_or_abs(&t.path("src/utils/common.chz")),
+            "import src.utils.common must be root-relative; labels: {labels:?}"
+        );
+        assert!(labels.contains(&"lib".to_string()));
+        assert!(labels.contains(&"src.utils.common".to_string()));
         assert_eq!(graph.modules.last().unwrap().id, graph.entry);
     }
 

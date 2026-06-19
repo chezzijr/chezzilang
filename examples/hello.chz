@@ -26,7 +26,7 @@ fn safe_div(a: int, b: int) -> Result[int]:
     return Ok(a / b)
 
 fn main():
-    print(greet("thuan"))
+    print(greet("chezzi"))
 
     total := 0
     for i in 0..10:
