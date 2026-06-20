@@ -4977,6 +4977,13 @@ impl Checker {
             Div | Mod => {
                 if l.is_numeric() && r.is_numeric() {
                     numeric_result(&l, &r)
+                } else if let (Ty::NewType(a), Ty::NewType(b)) = (&l, &r)
+                    && a == b
+                    && self.newtype_underlying(a).is_some_and(|u| u.is_numeric())
+                {
+                    // Same numeric newtype: `/`/`%` auto-flow the underlying op like `+ - *`
+                    // (unwrap→op→rewrap), keeping the checker in step with the runtime.
+                    l.clone()
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
@@ -5674,6 +5681,20 @@ impl Checker {
             {
                 let key = self.type_key(&mid, name);
                 return self.infer_qualified_struct_call(info, name, &key, args, &targs, span);
+            }
+            // `module.NewType(args)` — qualified newtype constructor: one arg of the underlying
+            // type, returns the newtype keyed to the declaring module (mirrors the bare newtype
+            // ctor in `infer_named_call`; the struct arm above already consumed any struct name).
+            if let ExprKind::Ident(mname) = &obj.kind
+                && !self.is_local_binding(mname)
+                && let Some(mid) = self.imported_modules.get(mname).cloned()
+                && let Some(sig) = self.module_sigs.get(&mid).cloned()
+                && let Some(info) = sig.newtype_defs.get(name)
+            {
+                let key = self.type_key(&mid, name);
+                let under = info.underlying.clone();
+                self.check_args(name, std::slice::from_ref(&under), args, span);
+                return Ty::NewType(key);
             }
             // `module.Enum.Variant(args)` — qualified payload-variant constructor.
             if let ExprKind::Field {
@@ -9587,6 +9608,23 @@ mod graph_tests {
         assert!(
             check_entry(&entry).is_ok(),
             "imported enum methods should resolve cross-module: {:?}",
+            errors(&entry)
+        );
+    }
+
+    // A whole-module-imported newtype is constructible in QUALIFIED form (`m.UserId(10)`), not just
+    // usable as a qualified type — mirrors qualified struct/enum-variant construction.
+    #[test]
+    fn qualified_newtype_construct_usable() {
+        let t = TmpDir::new();
+        t.write("types.chz", "newtype UserId = int\n");
+        let entry = t.write(
+            "main.chz",
+            "import types\nfn needs(u: types.UserId) -> int:\n    return int(u)\nfn main():\n    u := types.UserId(10)\n    print(needs(u))\nmain()\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "qualified newtype ctor should resolve cross-module: {:?}",
             errors(&entry)
         );
     }

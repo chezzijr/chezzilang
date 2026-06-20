@@ -2865,6 +2865,15 @@ impl Compiler {
                     fc.emit(Op::NewStruct(key, args.len()), span);
                     return Ok(());
                 }
+                // `module.NewType(args)` → qualified newtype constructor; emit `Op::NewType` keyed
+                // by the target module's runtime key (mirrors the bare newtype ctor below).
+                if self.program.newtype_home.contains_key(&key) {
+                    for a in args {
+                        self.compile_expr(fc, a)?;
+                    }
+                    fc.emit(Op::NewType(key), span);
+                    return Ok(());
+                }
             }
             // `module.Enum.Variant(args)` → qualified payload-variant constructor. `obj` is the
             // qualified `module.Enum`; resolve the enum's runtime key in the target module.

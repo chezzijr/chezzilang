@@ -21328,6 +21328,15 @@ main()";
         assert_eq!(vm_out, interp_out, "vm/interp divergence on newtype");
     }
 
+    /// Same numeric newtype `/` and `%` auto-flow the underlying op and re-wrap, just like `+ - *`.
+    /// Regression: the checker's `Div|Mod` arm previously rejected these even though the runtime
+    /// handled them (dead runtime path) — now checker + both engines agree.
+    #[test]
+    fn newtype_div_mod_same_type_flows() {
+        let src = "newtype Meters = float\nnewtype Count = int\nfn main():\n    a := Meters(8.0) / Meters(2.0)\n    print(int(a))\n    c := Count(7) % Count(3)\n    print(int(c))\nmain()\n";
+        assert_eq!(run_parity(src), "4\n1\n");
+    }
+
     /// M19 memory-layout lever #1 golden: `examples/struct_layout.chz` exercises the positional
     /// struct-field storage across every observable surface the layout change touches — field
     /// read/write, struct `==` (equal / unequal-by-value / unequal-by-type), Display + `{}`

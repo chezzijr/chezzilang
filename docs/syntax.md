@@ -737,9 +737,12 @@ Crossing the boundary is always **explicit** — either **construct** (`UserId(1
 via the existing scalar cast builtins: `int(uid)` / `float(m)` return the inner value (and for a
 `newtype N = str`, `str(n)` unwraps the inner string). There is no `.value` field and no auto-deref.
 
-For a **scalar** underlying (`int`/`float`/`bool`/`str`), operators **auto-flow same-type only**:
-`a OP b` where both operands are the *same* newtype applies the underlying's **native** primitive op
-and re-wraps — `Meters + Meters -> Meters`, `Meters < Meters -> bool`, `UserId == UserId -> bool`.
+For a **numeric** underlying (`int`/`float`), arithmetic and ordering **auto-flow same-type only**:
+`a OP b` where both operands are the *same* newtype applies the underlying's **native** op and
+re-wraps — `Meters + Meters -> Meters` (also `- * / %`), `Meters < Meters -> bool`. Equality
+(`==`/`!=`) works between two values of the same newtype for **any** underlying
+(`UserId == UserId -> bool`). A `str`/`bool` newtype does **not** auto-inherit `+`/`<` in v1 — define
+a method or unwrap to operate (operator auto-flow for non-numeric underlyings is a follow-up).
 Mixing a newtype with its raw underlying (`Meters + 1.0`) or with a *different* newtype
 (`Meters + Seconds`) is a type error — that rejection is the whole point.
 
