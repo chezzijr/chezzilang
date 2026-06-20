@@ -6919,3 +6919,42 @@ fn inline_nonnil_expr_against_nil_ret_rejected() {
     ok("fn a(): print(\"x\")\nfn main():\n    a()\nmain()\n");
     ok("fn a() -> nil: print(\"x\")\nfn main():\n    a()\nmain()\n");
 }
+
+// ===== user-callable panic(msg) builtin (raises a recoverable RuntimeError; bottom-typed) =====
+
+#[test]
+fn panic_typechecks_in_tail_position_no_missing_return() {
+    // A fn body ending in `panic(...)` diverges — no explicit `return` required.
+    ok("fn f() -> int:\n    panic(\"x\")\nfn main():\n    print(\"ok\")\nmain()\n");
+    // A branch ending in `panic(...)` satisfies the all-paths-return rule.
+    ok(
+        "fn f(b: bool) -> int:\n    if b:\n        return 1\n    panic(\"x\")\nfn main():\n    print(\"ok\")\nmain()\n",
+    );
+}
+
+#[test]
+fn panic_typechecks_in_value_position_as_bottom() {
+    // `if cond: a else: panic(...)` types as `a`'s type (bottom absorbs into the concrete branch).
+    ok("fn main():\n    x := if true: 1 else: panic(\"no\")\n    print(x + 1)\nmain()\n");
+    // Bare-statement and value-binding forms both type-check.
+    ok("fn main():\n    panic(\"boom\")\nmain()\n");
+}
+
+#[test]
+fn panic_requires_a_str_argument() {
+    rejects(
+        "fn main():\n    panic(123)\nmain()\n",
+        "panic() expects a str",
+    );
+}
+
+#[test]
+fn panic_arity_is_exactly_one() {
+    rejects("fn main():\n    panic()\nmain()\n", "panic");
+    rejects("fn main():\n    panic(\"a\", \"b\")\nmain()\n", "panic");
+}
+
+#[test]
+fn panic_is_reserved_against_extern_shadowing() {
+    assert!(is_reserved_name("panic"));
+}

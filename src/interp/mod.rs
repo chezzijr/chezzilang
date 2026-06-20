@@ -1206,6 +1206,19 @@ impl Interp {
             if name == "bytes" {
                 return self.builtin_bytes(arg_vals, span);
             }
+            // `panic(msg)` — raise the SAME recoverable `RuntimeError` the runtime uses for
+            // overflow/OOB/decode. It unwinds (running `defer`s) to the nearest `recover:` as
+            // `Err(e)` with `e.message() == msg`, else aborts the program. Routed here (not the pure
+            // `builtins::call` table, which returns `Ok`) because it must return `Err`. The checker
+            // guarantees a single `str` arg; guard defensively for a non-str.
+            if name == "panic" {
+                let message = match arg_vals.first() {
+                    Some(Value::Str(s)) => s.to_string(),
+                    Some(other) => other.type_name().to_string(),
+                    None => String::new(),
+                };
+                return Err(RuntimeError { message, span });
+            }
             // `Channel[T]()` (C2) — a fresh empty mailbox (type arg erased at runtime).
             if name == "Channel" {
                 if !arg_vals.is_empty() {
@@ -8602,6 +8615,16 @@ b := Buf([10, 20, 30])
         );
     }
 
+    /// `panic` golden (interp twin): recover-catches `panic(msg)`, a defer runs during the unwind,
+    /// and bottom-typed `panic` type-checks in if-expression value position. (The VM half asserts the
+    /// byte-for-byte cross-engine parity.)
+    #[test]
+    fn golden_panic_chz() {
+        let source = include_str!("../../examples/panic.chz");
+        let expected = include_str!("../../examples/panic.expected");
+        assert_eq!(run_capture(source).expect("panic.chz should run"), expected);
+    }
+
     // ----- struct iterator protocol (`for x in s` driven by `next(self) -> Option[T]`) -----
 
     /// A `Counter` struct yields 0..limit lazily via `next`; iteration advances by mutating `self.n`.
@@ -8913,6 +8936,31 @@ print(P(5) >= P(5))
             "{}",
             err.message
         );
+    }
+
+    // ---- user-callable panic(msg) builtin (interp half + cross-engine parity) ----
+
+    /// `panic(msg)` beneath `recover:` materializes as `Err(e)` whose `.message()` == msg — the same
+    /// recoverable fault the runtime raises for overflow/OOB.
+    #[test]
+    fn interp_panic_under_recover_yields_err_with_message() {
+        let src = "fn main():\n    r := recover:\n        panic(\"boom\")\n    match r:\n        Ok(v): print(\"ok: {v}\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()\n";
+        assert_eq!(run(src), "recovered: boom\n");
+    }
+
+    /// An uncaught `panic(msg)` aborts the program with that message (run_capture returns Err).
+    #[test]
+    fn interp_panic_uncaught_returns_runtime_error() {
+        let src = "fn main():\n    panic(\"kaboom\")\nmain()\n";
+        let err = run_capture(src).expect_err("uncaught panic should fault");
+        assert_eq!(err.message, "kaboom");
+    }
+
+    /// `defer`s run during the panic unwind (same path overflow takes today).
+    #[test]
+    fn interp_panic_runs_defers_during_unwind() {
+        let src = "fn log(m: str):\n    print(m)\nfn risky():\n    defer log(\"cleanup ran\")\n    panic(\"kaboom\")\nfn main():\n    r := recover:\n        risky()\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()\n";
+        assert_eq!(run(src), "cleanup ran\nrecovered: kaboom\n");
     }
 }
 

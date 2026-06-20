@@ -63,13 +63,14 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 - **Transparent type aliases** — `type UserId = int` (M10).
 - **Bitwise ops** — `& | ^ << >>` (int-only, M8/M11).
 - **`recover:` block** — panic-recovery boundary → `Result[T, Error]` catching any runtime fault beneath it (M11).
+- **`panic(msg: str)`** — user-raised recoverable fault (bottom-typed; unwinds, runs `defer`s, caught by `recover:` as `Err`, else aborts) (M11).
 
 **Shipped post-v1 (M7–M18):**
 - **M7** — user-defined generics + structural protocols (generic fns/structs, `Comparable`; `std.cmp`).
 - **M8** — tier-1 stdlib (`std.json`/`process`/`fs`/`time`), the `set` type, iterable strings (`s.chars()`).
 - **M9** — tier-2 stdlib (`std.regex`, `std.request`) — first runtime crate deps.
 - **M10** — type-system depth: `Stringable`/`Hashable` + operator protocols (`Add`/`Sub`/`Mul`), generic enums, type aliases, multi-bound generics (`T: Add + Mul`), any-`Hashable` map/set keys.
-- **M11** — panic recovery (`recover:`) + Go-style `Result[T, E]` with the built-in `Error` protocol (`message(self) -> str`).
+- **M11** — panic recovery (`recover:`) + user-raised `panic(msg: str)` (bottom-typed, unwinds, caught by `recover:` as `Err` else aborts) + Go-style `Result[T, E]` with the built-in `Error` protocol (`message(self) -> str`).
 - **M12** — iterator protocol (structs with `next(self) -> Option[T]` iterable in `for`), match guards + range patterns.
 - **M13** — `Iterator[T]`: the first **parameterized** protocol bound (`[S: Iterator[T], T]`) — any iterable, element type recovered; lazy adapter structs replace `yield`.
 - **M14** — method-level type params (`fn map_to[U](self, …)`) + **user-defined parameterized protocols** (`protocol Container[T]`, concrete-arg bounds `[X: Container[int]]`) — generalizing the special-cased `Iterator[T]`.
@@ -271,8 +272,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 ## Standard library
 
 - **Builtins (no import):** `print`, `len`, `range`, casts (`int()`/`str()`/`float()`),
-  `ord`/`chr`, `set()`/`set(list)`, core-type methods (`s.upper()`, `s.chars()`, `xs.push()`,
-  `m.get()`, `set.add()`).
+  `ord`/`chr`, `set()`/`set(list)`, `panic(msg)` (raise a recoverable fault), core-type methods
+  (`s.upper()`, `s.chars()`, `xs.push()`, `m.get()`, `set.add()`).
 - **Std modules v1 (shipped, M6c):** `std.math`/`std.io`/`std.os` (native-Rust via the FFI seam),
   `std.str` + `std.cmp` (written in Chezzi; `std.cmp` adds M7-G3). Imported with
   `import std.math` / `import f from std.io`. `std.cmp` holds generic `min`/`max`/`clamp`

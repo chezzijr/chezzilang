@@ -1047,6 +1047,24 @@ escape it are rejected; a `?` on an `Option` inside it is rejected (its result i
 use `match`). Reach for `recover:` at boundaries (a request, a REPL line, a plugin, a test), not as
 everyday error handling — `Result`/`?` remain the tool for expected failures.
 
+**`panic(msg: str)` — raise a panic yourself.** The faults above (OOB, divide-by-zero, overflow) are
+raised by the runtime; `panic(msg)` raises the *same* recoverable fault from your own code. It
+**unwinds** — it does not return a value (it is **not** sugar for `return Err(...)`, which already
+exists for *expected* errors). The nearest enclosing `recover:` catches it as `Err(e)` with
+`e.message() == msg`; uncaught, it terminates the program with that message and a non-zero exit code,
+exactly like an integer overflow. `defer`s run as it unwinds, like any panic. Because `panic` never
+returns, it is *bottom-typed*: it type-checks in any position — as a statement, as the diverging tail
+of a branch (no explicit `return` needed), or in an expression (`x := if ok: v else: panic("no")`
+takes `v`'s type).
+
+```chezzi
+r := recover:
+    panic("boom")                 # raised here, caught at the boundary
+match r:
+    Ok(v):  print(v)
+    Err(e): print("recovered: {e.message()}")   # → recovered: boom
+```
+
 ### `defer` — block-scoped cleanup  (M16)
 
 `defer <call>` schedules a call to run when the **enclosing lexical block** exits — on **every**
@@ -1649,7 +1667,7 @@ their width is platform-dependent (LP64 vs LLP64); deferred to a future task. Se
 
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
-(`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/`set`), `print`, a constructor
+(`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
 (`Channel`/`Shared`/`Atomic`/`timer`/`Executor`), or any of your `struct`/enum-variant names — those
 resolve to a special op before a plain call, so the extern would be silently shadowed; the checker
 rejects the collision (*'…' is a builtin/reserved name*).
@@ -1680,7 +1698,7 @@ via `owned_str` — **shipped**; **flat-scalar structs by value** — **shipped*
 
 Always available (no import): `print`, `len`, `range`, `int()`, `str()`, `float()`,
 `ord(s)→int` (first codepoint), `chr(n)→str` (codepoint → 1-char string), `set()`/`set(list)`,
-plus methods on core types.
+`panic(msg)` (raise a recoverable fault; see `recover:`), plus methods on core types.
 
 `std.math.abs` is int+float polymorphic (int → int, float → float). `min`/`max`/`clamp` live in
 **`std.cmp`** as generic `[T: Comparable]` functions — they work on int, float, str, **and any

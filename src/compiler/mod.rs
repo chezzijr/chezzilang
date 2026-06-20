@@ -59,6 +59,9 @@ fn is_builtin(name: &str) -> bool {
             | "map"
             | "bytes"
             | "bytearray"
+            // `panic(msg)` compiles to `Op::CallBuiltin("panic", 1)`; the VM's `do_builtin` arm
+            // raises the recoverable `RuntimeError` instead of pushing a value.
+            | "panic"
     )
 }
 

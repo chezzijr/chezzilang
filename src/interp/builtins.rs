@@ -23,6 +23,9 @@ pub fn is_builtin(name: &str) -> bool {
             | "map"
             | "bytes"
             | "bytearray"
+            // `panic(msg)` is intercepted in `eval_call` (raises an Err, not an Ok value), so the
+            // pure `call` table below never sees it — but it must be a recognized builtin name.
+            | "panic"
     )
 }
 

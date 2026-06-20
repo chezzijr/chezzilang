@@ -12552,6 +12552,23 @@ impl Vm {
     fn do_builtin(&mut self, name: &str, argc: usize, span: Span) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
+        // `panic(msg)` raises the SAME recoverable `RuntimeError` (`self.err`) the runtime uses for
+        // overflow/OOB/decode, instead of pushing a value — it unwinds (running `defer`s) to the
+        // nearest `recover:` as `Err(e)` with `e.message() == msg`, else aborts. Early-return before
+        // the value-returning match so nothing is pushed on the (unwinding) path. The checker
+        // guarantees a single `str` arg; fall back to the value's type name for a non-str (matches
+        // the interp's defensive guard, keeping messages byte-identical across engines).
+        if name == "panic" {
+            let message = match args.first() {
+                Some(Value::Obj(h)) => match self.heap.get(*h) {
+                    Obj::Str(s) => s.to_string(),
+                    _ => self.type_name(args[0]).to_string(),
+                },
+                Some(other) => self.type_name(*other).to_string(),
+                None => String::new(),
+            };
+            return Err(self.err(message, span));
+        }
         let result = match name {
             "len" => self.builtin_len(&args, span)?,
             "range" => self.builtin_range(&args, span)?,
@@ -21484,6 +21501,51 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
     fn golden_assert_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/assert.chz");
         let expected = include_str!("../../examples/assert.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    // ---- user-callable panic(msg) builtin (VM half + cross-engine parity) ----
+
+    /// `panic(msg)` beneath `recover:` materializes as `Err(e)` whose `.message()` == msg on the VM
+    /// too — byte-identical to the interp (the parity oracle).
+    #[test]
+    fn vm_panic_under_recover_yields_err_with_message() {
+        let src = "fn main():\n    r := recover:\n        panic(\"boom\")\n    match r:\n        Ok(v): print(\"ok: {v}\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()\n";
+        assert_eq!(run(src), "recovered: boom\n");
+        assert_eq!(
+            run_capture(src).expect("vm run"),
+            crate::interp::run_capture(src).expect("interp run")
+        );
+    }
+
+    /// An uncaught `panic(msg)` aborts with that message (run_capture returns Err), same as overflow.
+    #[test]
+    fn vm_panic_uncaught_returns_runtime_error() {
+        let src = "fn main():\n    panic(\"kaboom\")\nmain()\n";
+        let err = run_capture(src).expect_err("uncaught panic should fault");
+        assert_eq!(err.message, "kaboom");
+    }
+
+    /// `defer`s run during the VM panic unwind, identically to the interp.
+    #[test]
+    fn vm_panic_runs_defers_during_unwind() {
+        let src = "fn log(m: str):\n    print(m)\nfn risky():\n    defer log(\"cleanup ran\")\n    panic(\"kaboom\")\nfn main():\n    r := recover:\n        risky()\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()\n";
+        assert_eq!(run(src), "cleanup ran\nrecovered: kaboom\n");
+        assert_eq!(
+            run_capture(src).expect("vm run"),
+            crate::interp::run_capture(src).expect("interp run")
+        );
+    }
+
+    /// `panic` golden: a `recover:` catching a bare `panic(msg)` as `Err`, a `defer` running during
+    /// the panic unwind, and the bottom-typed `panic` in if-expression value position. Byte-identical
+    /// on the VM, the interpreter (parity oracle), and its `.expected`.
+    #[test]
+    fn golden_panic_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/panic.chz");
+        let expected = include_str!("../../examples/panic.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));

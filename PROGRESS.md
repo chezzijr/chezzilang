@@ -1026,6 +1026,20 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **User-callable `panic(msg: str)` builtin** (2026-06-20, `auto-task/panic-builtin`) — exposes a
+  user-facing way to raise the **same** recoverable `RuntimeError` the runtime already uses internally
+  (overflow / OOB / bad decode); the M11 `recover:`/`defer` machinery catches it unchanged. `panic`
+  **unwinds** (it is NOT sugar for `return Err(...)` — that already exists for *expected* errors):
+  caught by the nearest `recover:` as `Err(e)` with `e.message() == msg`, else it aborts the program
+  with that message + non-zero exit (byte-identical to an integer overflow), running `defer`s on the
+  way out. It is **bottom-typed** (`Ty::Unknown`, no new `Ty::Never`): type-checks as a statement, as
+  a diverging branch tail (no explicit `return` — `expr_is_diverging_call` generalizes the `exit`
+  precedent), and in value position (`x := if ok: v else: panic("no")` takes `v`'s type via
+  `unify_branch`). Pure-builtin path — compiles to `Op::CallBuiltin("panic", 1)`; each engine's
+  name-keyed dispatcher returns `Err(RuntimeError{message, span})` (VM `do_builtin` early-return /
+  interp `eval_call` interceptor) instead of an `Ok` value. Registered across all four name tables
+  (checker `is_reserved_name` + `builtin_call`, interp + compiler `is_builtin`). No grammar change
+  (plain call). New golden `examples/panic.chz`; checker/interp/VM unit tests + cross-engine parity.
 - ✅ **Match arms accept module-qualified enum-variant patterns (`geo.Color.Red`)**
   (2026-06-20, `auto-task/qualified-variant-patterns`) — match is now symmetric with construction:
   for an enum from a whole-module `import geo` you can write `match c:\n  geo.Color.Red:` directly

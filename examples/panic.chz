@@ -1,0 +1,36 @@
+# `panic(msg)` — raise the same recoverable fault the runtime uses for overflow/OOB. A `recover:`
+# beneath it catches it as `Err(e)` with `e.message() == msg`; uncaught, it aborts the program with
+# that message (same as an integer overflow). `defer`s run as it unwinds.
+#
+# NOTE: a bare top-level `panic("boom")` would abort the whole program (non-zero exit), so it is left
+# as a comment here — running it would kill this golden. Every case below is recoverable.
+
+# `defer` targets a user fn/method (built-ins like `print` are wrapped), so wrap `print`.
+fn log(msg: str):
+    print(msg)
+
+# A fn that cleans up on its way out, then panics: the defer runs during the unwind.
+fn risky():
+    defer log("cleanup ran")
+    panic("kaboom")
+
+fn main():
+    # Caught by `recover:` → an Err whose `.message()` is the panic string.
+    a := recover:
+        panic("boom")
+    match a:
+        Ok(v): print("ok: {v}")
+        Err(e): print("recovered: {e.message()}")
+
+    # The defer fires as the panic unwinds, before the boundary regains control.
+    b := recover:
+        risky()
+    match b:
+        Ok(v): print("ok: {v}")
+        Err(e): print("recovered: {e.message()}")
+
+    # `panic` is bottom-typed, so it type-checks in value position: the if-expression takes the
+    # int branch's type and the panic branch is unreachable here (cond is true).
+    x := if true: 1 else: panic("unreachable")
+    print("x = {x}")
+main()

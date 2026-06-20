@@ -114,6 +114,8 @@ fn is_reserved_name(name: &str) -> bool {
         "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set" | "list" | "map" | "bytes" | "bytearray"
         // the special print op
         | "print"
+        // the diverging panic(msg) op (raises a recoverable RuntimeError; bottom-typed)
+        | "panic"
         // runtime constructors the backends special-case before a plain call
         | "Channel" | "Shared" | "Atomic" | "timer" | "Executor"
     )
@@ -3187,23 +3189,24 @@ impl Checker {
             StmtKind::While { cond, body } => {
                 matches!(cond.kind, ExprKind::Bool(true)) && !Self::block_has_break(body)
             }
-            // `exit(...)` (the one builtin typed `nil` that never returns) diverges. A narrow,
-            // syntactic special-case on the callee name; a user shadowing `exit` only causes an
-            // acceptable false-negative (missed error), never a false-positive.
-            StmtKind::Expr(e) => Self::expr_is_exit_call(e),
+            // A trailing `exit(...)` / `panic(...)` diverges (neither returns to the caller). A
+            // narrow, syntactic special-case on the callee name; a user shadowing the name only
+            // causes an acceptable false-negative (missed error), never a false-positive.
+            StmtKind::Expr(e) => Self::expr_is_diverging_call(e),
             _ => false,
         }
     }
 
-    /// Whether `e` is a call to `exit` — the one builtin (`std.os.exit`, typed `nil`) that never
-    /// returns. Matches both a bare `exit(...)` and the module-qualified `os.exit(...)` form. A
-    /// narrow, syntactic special-case: a user shadowing the name only causes an acceptable
-    /// false-negative (a missed error), never a false-positive that breaks a valid build.
-    fn expr_is_exit_call(e: &Expr) -> bool {
+    /// Whether `e` is a call to a diverging builtin — `exit` (`std.os.exit`, typed `nil`, never
+    /// returns) or `panic` (raises a recoverable `RuntimeError`, bottom-typed, never returns
+    /// normally). Matches both a bare `exit(...)`/`panic(...)` and the module-qualified
+    /// `os.exit(...)` form. A narrow, syntactic special-case: a user shadowing the name only causes
+    /// an acceptable false-negative (a missed error), never a false-positive that breaks a valid build.
+    fn expr_is_diverging_call(e: &Expr) -> bool {
         if let ExprKind::Call { callee, .. } = &e.kind {
             match &callee.kind {
-                ExprKind::Ident(name) => name == "exit",
-                ExprKind::Field { name, .. } => name == "exit",
+                ExprKind::Ident(name) => name == "exit" || name == "panic",
+                ExprKind::Field { name, .. } => name == "exit" || name == "panic",
                 _ => false,
             }
         } else {
@@ -5714,6 +5717,21 @@ impl Checker {
                     self.infer_value(a);
                 }
                 Some(Ty::Nil)
+            }
+            // `panic(msg)` raises the same recoverable `RuntimeError` the runtime uses for overflow/
+            // OOB/decode faults (caught by the nearest `recover:` as `Err`, else aborts the program).
+            // It never returns, so it is bottom-typed (`Ty::Unknown`): in value position it absorbs
+            // into the other branch's concrete type via `unify_branch`, and in tail position
+            // `stmt_terminates` (via `expr_is_diverging_call`) treats it as a divergence.
+            "panic" => {
+                self.check_arity("panic", 1, args, span);
+                if let Some(a) = args.first() {
+                    match self.infer_value(a) {
+                        Ty::Str | Ty::Unknown => {}
+                        other => self.error(a.span, format!("panic() expects a str, got {other}")),
+                    }
+                }
+                Some(Ty::Unknown)
             }
             "len" => {
                 self.check_arity("len", 1, args, span);
