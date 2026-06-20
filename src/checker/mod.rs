@@ -13,12 +13,32 @@ use crate::ast::{
     Import, LitPattern, MethodSig, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type,
     TypeParam, UnaryOp, WaitArm, WaitTarget,
 };
+use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
 use std::collections::HashMap;
 use std::fmt;
 
 pub use ty::Ty;
 use ty::{compatible, ref_display};
+
+/// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
+/// module's import/alias scope (the single source of truth for every alias spelling). Each param /
+/// the return is a width-bearing [`CType`] (NOT a `Ty`, which collapses `int8`..`int64` to `Ty::Int`
+/// — the width is exactly what FFI marshalling needs). `None` for a param means an annotation the
+/// checker could not lower (only reachable on an ill-typed program the marshallability gate already
+/// rejected); `ret` is `None` for a `void` return (no annotation or one resolving to `nil`).
+#[derive(Clone, Default)]
+pub struct ExternCSig {
+    pub params: Vec<Option<CType>>,
+    pub ret: Option<CType>,
+}
+
+/// Resolved C signatures for every `extern` fn in a module graph, keyed by `(graph module index,
+/// fn name)` — the SAME index both backends derive (`compile_graph`'s enumerate / interp's
+/// `module_idx_of`). The backends consume these instead of re-resolving alias names themselves, so
+/// every alias spelling (local chain, named-import hop, qualified hop, mixed) resolves in its own
+/// module's scope, collision-proof by construction. Produced by [`resolve_extern_signatures`].
+pub type ExternTable = HashMap<(usize, String), ExternCSig>;
 
 /// What a `match` scrutinee is being matched against, threaded through the match-checking helpers.
 enum MatchKind {
@@ -235,6 +255,12 @@ struct AliasSig {
     body: Ty,
     licensed: bool,
     unlicensed_width: Option<String>,
+    /// The alias body resolved to a width-bearing [`CType`] in the DEFINING module's scope (so a
+    /// cross-module `type Len = int32` exports `int32`, not `Ty::Int`). `None` if the body is not
+    /// C-marshallable (its FFI use is rejected by the checker). This is what carries the real C
+    /// width across a `from`-import or a `module.Alias` hop — the `body: Ty` cannot, since `Ty`
+    /// collapses every FFI width to `Ty::Int`.
+    ctype: Option<CType>,
 }
 
 /// An enum's exported shape inside a `ModuleSig`: variant names in declaration order, the enum's
@@ -265,71 +291,127 @@ pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
 /// import. The same type name may appear in several modules.
 pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
     let mut c = Checker::new();
-    // ROOT REDESIGN — module-scoped IDENTITY KEYS: scan every non-native module's struct/enum/alias
-    // names and key EACH one `<module-key>::Name` (via the shared `resolver::module_keys`, the SAME
-    // derivation the compiler + interpreter use), so all three engines agree on every key (parity) and
-    // every user type is unique by construction (a cross-module name clash is just two distinct keys).
-    {
-        let mkeys = crate::resolver::module_keys(graph);
-        for (idx, lm) in graph.modules.iter().enumerate() {
-            // ROOT REDESIGN — std modules' types are RESERVED/NATIVE: keep their BARE name (skip the
-            // qualified key), so `Ref`/`Iterator`/FFI widths resolve bare, like the synthetic natives.
-            if lm.native.is_some() || lm.is_std() {
+    c.run_graph_pass(graph, false);
+    if c.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(std::mem::take(&mut c.errors))
+    }
+}
+
+/// FFI ROOT FIX (fix4): resolve the fully-resolved, width-bearing C signature of every `extern` fn
+/// in the graph, each in its DEFINING module's import/alias scope — the SINGLE resolver both backends
+/// consume so every alias spelling (local chain, named-import hop, qualified hop, mixed) resolves
+/// collision-proof by construction. Runs the SAME module-scoped pass as [`check_graph`] (deps-first,
+/// `begin_module` / `bind_import` / `module_sigs`) but harvests the extern table and ignores type
+/// errors (the error gate is `check_graph`, run separately by the CLI). The returned table is keyed
+/// by `(graph module index, fn name)`.
+pub fn resolve_extern_signatures(graph: &ModuleGraph) -> ExternTable {
+    let mut c = Checker::new();
+    c.run_graph_pass(graph, true);
+    std::mem::take(&mut c.extern_sigs)
+}
+
+impl Checker {
+    /// The shared deps-first module-checking pass behind both [`check_graph`] and
+    /// [`resolve_extern_signatures`]. When `harvest_externs` is set, gathers every struct's AST field
+    /// types up front and stamps each module's graph index so the extern loop records resolved C
+    /// signatures into `self.extern_sigs`.
+    fn run_graph_pass(&mut self, graph: &ModuleGraph, harvest_externs: bool) {
+        let c = self;
+        // ROOT REDESIGN — module-scoped IDENTITY KEYS: scan every non-native module's struct/enum/alias
+        // names and key EACH one `<module-key>::Name` (via the shared `resolver::module_keys`, the SAME
+        // derivation the compiler + interpreter use), so all three engines agree on every key (parity) and
+        // every user type is unique by construction (a cross-module name clash is just two distinct keys).
+        {
+            let mkeys = crate::resolver::module_keys(graph);
+            for (idx, lm) in graph.modules.iter().enumerate() {
+                // ROOT REDESIGN — std modules' types are RESERVED/NATIVE: keep their BARE name (skip the
+                // qualified key), so `Ref`/`Iterator`/FFI widths resolve bare, like the synthetic natives.
+                if lm.native.is_some() || lm.is_std() {
+                    continue;
+                }
+                for s in &lm.ast.stmts {
+                    if let StmtKind::Struct { name, .. }
+                    | StmtKind::Enum { name, .. }
+                    | StmtKind::TypeAlias { name, .. } = &s.kind
+                    {
+                        c.type_keys.insert(
+                            (lm.id.clone(), name.clone()),
+                            format!("{}::{name}", mkeys[idx]),
+                        );
+                    }
+                }
+            }
+        }
+        // FFI ROOT FIX (fix4): when harvesting extern signatures, gather every user struct's AST field
+        // types up front, keyed by IDENTITY KEY (`<module-key>::Name`, the SAME derivation), so
+        // `resolve_ctype` can build a by-value extern struct's `CType::Struct` with each field's real C
+        // width — even when the struct is declared after the extern block, or in another module.
+        if harvest_externs {
+            let mkeys = crate::resolver::module_keys(graph);
+            for (idx, lm) in graph.modules.iter().enumerate() {
+                if lm.native.is_some() {
+                    continue;
+                }
+                let is_std = lm.is_std();
+                for s in &lm.ast.stmts {
+                    if let StmtKind::Struct { name, fields, .. } = &s.kind {
+                        let key = if is_std {
+                            name.clone()
+                        } else {
+                            format!("{}::{name}", mkeys[idx])
+                        };
+                        c.struct_field_asts.insert(
+                            key,
+                            fields
+                                .iter()
+                                .map(|f| (f.name.clone(), f.ty.clone()))
+                                .collect(),
+                        );
+                    }
+                }
+            }
+        }
+        // Build the reverse index name → declaring module label(s), in graph (deps-first) order, so a
+        // bare unimported-type error can hint "import it from <module>". A non-entry module is labelled
+        // by its dotted/file name; the entry module is excluded (its types are local, never imported).
+        for lm in &graph.modules {
+            if lm.native.is_some() || lm.id == graph.entry {
                 continue;
             }
+            let label = lm.label();
             for s in &lm.ast.stmts {
                 if let StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
                 | StmtKind::TypeAlias { name, .. } = &s.kind
                 {
-                    c.type_keys.insert(
-                        (lm.id.clone(), name.clone()),
-                        format!("{}::{name}", mkeys[idx]),
-                    );
+                    c.types_by_name
+                        .entry(name.clone())
+                        .or_default()
+                        .push(label.clone());
                 }
             }
         }
-    }
-    // Build the reverse index name → declaring module label(s), in graph (deps-first) order, so a
-    // bare unimported-type error can hint "import it from <module>". A non-entry module is labelled
-    // by its dotted/file name; the entry module is excluded (its types are local, never imported).
-    for lm in &graph.modules {
-        if lm.native.is_some() || lm.id == graph.entry {
-            continue;
-        }
-        let label = lm.label();
-        for s in &lm.ast.stmts {
-            if let StmtKind::Struct { name, .. }
-            | StmtKind::Enum { name, .. }
-            | StmtKind::TypeAlias { name, .. } = &s.kind
-            {
-                c.types_by_name
-                    .entry(name.clone())
-                    .or_default()
-                    .push(label.clone());
+        for (idx, lm) in graph.modules.iter().enumerate() {
+            // A native std module (std.math/io/os) has no AST: its public surface is a static table.
+            if let Some(name) = lm.native {
+                c.module_sigs.insert(lm.id.clone(), native_module_sig(name));
+                continue;
             }
+            let label = if lm.id == graph.entry {
+                None
+            } else {
+                Some(lm.label())
+            };
+            c.begin_module(label);
+            // Stamp the current module's graph index so the extern loop keys its resolved C signatures
+            // the SAME way both backends look them up. `None` outside the harvesting pass.
+            c.extern_module_idx = if harvest_externs { Some(idx) } else { None };
+            c.current_module_is_stdlib = lm.dotted.first().map(String::as_str) == Some("std");
+            let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
+            c.module_sigs.insert(lm.id.clone(), sig);
         }
-    }
-    for lm in &graph.modules {
-        // A native std module (std.math/io/os) has no AST: its public surface is a static table.
-        if let Some(name) = lm.native {
-            c.module_sigs.insert(lm.id.clone(), native_module_sig(name));
-            continue;
-        }
-        let label = if lm.id == graph.entry {
-            None
-        } else {
-            Some(lm.label())
-        };
-        c.begin_module(label);
-        c.current_module_is_stdlib = lm.dotted.first().map(String::as_str) == Some("std");
-        let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
-        c.module_sigs.insert(lm.id.clone(), sig);
-    }
-    if c.errors.is_empty() {
-        Ok(())
-    } else {
-        Err(c.errors)
     }
 }
 
@@ -541,6 +623,25 @@ struct Checker {
     /// (`import Len from m` where `m` declares `type Len = int32`). Resolved in the DEFINING module's
     /// scope and injected here so `resolve_type` returns the right underlying type. Per-module.
     imported_alias_tys: HashMap<String, Ty>,
+    /// Parallel to [`Self::imported_alias_tys`] but carrying the alias's width-bearing [`CType`]
+    /// (computed in the DEFINING module's scope), so a `from`-imported FFI-width alias resolves to
+    /// its true width at an extern boundary in THIS module. `Ty` can't carry it (it collapses all
+    /// FFI widths to `Ty::Int`), so this is the channel a named-import hop's real width travels.
+    /// Per-module: cleared in `begin_module`.
+    imported_alias_ctypes: HashMap<String, Option<CType>>,
+    /// Extern-fn resolved C signatures harvested during checking, keyed by `(graph module index, fn
+    /// name)`. Only populated when [`resolve_extern_signatures`] drives the pass (the error-gate
+    /// `check_graph` leaves it empty). The current module's graph index is set per `check_module`.
+    extern_sigs: ExternTable,
+    /// AST field types of every user struct in the graph, keyed by IDENTITY KEY, gathered once for
+    /// [`resolve_ctype`]: a by-value extern struct's `CType::Struct` is built from these (preserving
+    /// each field's real C width, which `StructInfo`'s `Ty` fields collapse to `Ty::Int`). Only
+    /// populated when [`resolve_extern_signatures`] drives the pass.
+    struct_field_asts: HashMap<String, Vec<(String, Type)>>,
+    /// The CURRENT module's graph index (set in `check_module` when harvesting extern sigs), so each
+    /// extern fn's resolved C signature is keyed under the SAME index the backends derive. `None`
+    /// for a lone `check`.
+    extern_module_idx: Option<usize>,
     /// Reverse index built once across the whole graph: a user type name → the modules (in graph
     /// load order, deps-first) that declare it. Drives the "import it from <module>" hint when a bare
     /// type name is used without importing its declaring module. NOT cleared per-module.
@@ -617,6 +718,10 @@ impl Checker {
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
             imported_alias_tys: HashMap::new(),
+            imported_alias_ctypes: HashMap::new(),
+            extern_sigs: ExternTable::new(),
+            extern_module_idx: None,
+            struct_field_asts: HashMap::new(),
             types_by_name: HashMap::new(),
             imported_poly: std::collections::HashSet::new(),
             imported_ffi_types: std::collections::HashSet::new(),
@@ -707,6 +812,7 @@ impl Checker {
         self.type_params.clear();
         self.imported_modules.clear();
         self.imported_alias_tys.clear();
+        self.imported_alias_ctypes.clear();
         self.imported_poly.clear();
         self.imported_ffi_types.clear();
         // Types are MODULE-SCOPED: a type declared in module A is NOT visible bare in module B (it
@@ -917,6 +1023,11 @@ impl Checker {
                                 // a concrete `Ty`, so no width re-check is hit).
                                 self.imported_alias_tys
                                     .insert(bind.clone(), asig.body.clone());
+                                // Carry the alias's width-bearing CType (computed in its DEFINING
+                                // module's scope) so an extern boundary in THIS module marshals the
+                                // real width through the named-import hop — not the bare flat map.
+                                self.imported_alias_ctypes
+                                    .insert(bind.clone(), asig.ctype.clone());
                                 if asig.licensed {
                                     self.ffi_alias_ok.insert(bind.clone());
                                 }
@@ -989,6 +1100,10 @@ impl Checker {
                         // Resolve the alias body in THIS (the defining) module's scope so an
                         // importer carries the right underlying type (incl. an FFI width license).
                         let resolved = self.resolve_type_ro_pub(body);
+                        // Also resolve the body to a WIDTH-BEARING CType in this defining scope, so a
+                        // cross-module `type Len = int32` exports `int32` (not `Ty::Int`). This is the
+                        // channel the real width travels through a `from`-import / `module.Alias` hop.
+                        let ctype = self.resolve_ctype(body);
                         let licensed = self.ffi_alias_ok.contains(name);
                         // If the alias embeds FFI widths but is NOT licensed, find the first width
                         // the defining module did not import — an importer must reject the alias
@@ -1008,6 +1123,7 @@ impl Checker {
                                 body: resolved,
                                 licensed,
                                 unlicensed_width,
+                                ctype,
                             },
                         );
                     }
@@ -1546,6 +1662,27 @@ impl Checker {
                         };
                         self.functions
                             .insert(ef.name.clone(), FnSig::plain(params, ret));
+                        // ROOT FIX (fix4): harvest the FULLY-RESOLVED, width-bearing C signature for
+                        // each extern fn, resolved here in THIS module's import/alias scope (the same
+                        // scope `resolve_type` used to accept it). Both backends consume this instead
+                        // of re-resolving alias names themselves — closing every spelling at once.
+                        // Keyed by `(graph module index, fn name)`, the index both backends derive.
+                        // Only built when `resolve_extern_signatures` drives the pass.
+                        if let Some(midx) = self.extern_module_idx {
+                            let cparams: Vec<Option<CType>> = ef
+                                .params
+                                .iter()
+                                .map(|p| p.ty.as_ref().and_then(|t| self.resolve_ctype(t)))
+                                .collect();
+                            let cret = ef.ret.as_ref().and_then(|t| self.resolve_ctype(t));
+                            self.extern_sigs.insert(
+                                (midx, ef.name.clone()),
+                                ExternCSig {
+                                    params: cparams,
+                                    ret: cret,
+                                },
+                            );
+                        }
                     }
                 }
                 _ => {}
@@ -6843,6 +6980,104 @@ impl Checker {
         } else {
             Ty::Unknown
         }
+    }
+
+    /// Resolve a surface extern `Type` to its WIDTH-BEARING [`CType`] in the CURRENT module's
+    /// import/alias scope — the SINGLE resolver both backends consume (the FFI collision-fix root).
+    /// Mirrors `resolve_ty_ro_d`'s alias / `from`-import / `Qualified` walk EXACTLY, but stops at the
+    /// width-bearing leaf instead of collapsing every FFI integer to `Ty::Int`. Crucially:
+    ///   * a LOCAL alias (`self.aliases`) recurses on its body — resolving each hop in THIS module's
+    ///     scope (a colliding same-named alias in another module can never be reached);
+    ///   * a `from`-imported alias reads `self.imported_alias_ctypes` (the alias's CType computed in
+    ///     its DEFINING module's scope) — closing the named-import-hop hole;
+    ///   * a `module.Alias` reads the TARGET module's `AliasSig.ctype` (likewise defining-scope).
+    ///
+    /// `depth > 64` returns `None` (cycle guard, matching `resolve_ty_ro_d`). `None` means "not
+    /// C-marshallable here" — the marshallability gate (`assert_marshallable`) is the actual error,
+    /// this is only the width carrier.
+    fn resolve_ctype(&self, t: &Type) -> Option<CType> {
+        self.resolve_ctype_d(t, 0)
+    }
+
+    fn resolve_ctype_d(&self, t: &Type, depth: usize) -> Option<CType> {
+        if depth > 64 {
+            return None; // cyclic alias — defended (the marshal gate rejects it cleanly).
+        }
+        match t {
+            Type::Named(n) => match n.as_str() {
+                "int" => Some(CType::Int),
+                "float" => Some(CType::Float),
+                "bool" => Some(CType::Bool),
+                "str" => Some(CType::Str),
+                "ptr" => Some(CType::Ptr),
+                "owned_str" => Some(CType::OwnedStr),
+                "int8" => Some(CType::Int8),
+                "int16" => Some(CType::Int16),
+                "int32" => Some(CType::Int32),
+                "int64" => Some(CType::Int64),
+                "uint8" => Some(CType::UInt8),
+                "uint16" => Some(CType::UInt16),
+                "uint32" => Some(CType::UInt32),
+                "uint64" => Some(CType::UInt64),
+                // A LOCAL transparent alias: recurse on its body in THIS module's scope.
+                _ if self.aliases.contains_key(n) => {
+                    let body = self.aliases[n].clone();
+                    self.resolve_ctype_d(&body, depth + 1)
+                }
+                // A `from`-imported alias: its CType was computed in the DEFINING module's scope.
+                _ if self.imported_alias_ctypes.contains_key(n) => {
+                    self.imported_alias_ctypes[n].clone()
+                }
+                // A bare-visible struct (local or `from`-imported): a by-value flat-scalar struct.
+                _ if self.struct_names.contains(n) => {
+                    self.resolve_struct_ctype(&self.bare_key(n), depth)
+                }
+                _ => None,
+            },
+            // RETURN-ONLY nullable `char*` (`str?` / `owned_str?`): the inner type decides
+            // borrowed (`str` → OptStr) vs owned (`owned_str` → OptOwnedStr).
+            Type::Generic(n, args) if n == "Option" && args.len() == 1 => {
+                match self.resolve_ctype_d(&args[0], depth + 1) {
+                    Some(CType::Str) => Some(CType::OptStr),
+                    Some(CType::OwnedStr) => Some(CType::OptOwnedStr),
+                    _ => None,
+                }
+            }
+            // A module-qualified type `mod.Name` — resolved in the TARGET module's scope, so a width
+            // alias carries its DEFINING module's width and a struct its identity key (collision-proof
+            // by construction: never the bare flat alias map).
+            Type::Qualified { module, name, .. } => {
+                let mid = self.imported_modules.get(module)?;
+                let sig = self.module_sigs.get(mid)?;
+                if sig.struct_defs.contains_key(name) {
+                    self.resolve_struct_ctype(&self.type_key(mid, name), depth)
+                } else if let Some(asig) = sig.type_aliases.get(name) {
+                    asig.ctype.clone()
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Build a by-value `CType::Struct` for the struct under IDENTITY `key`, mapping each AST field
+    /// type to its own width-bearing `CType` (so an `int32` field stays 4 bytes — the layout the C
+    /// ABI expects). `name` is the identity key (the tag a returned struct carries, so field lookup
+    /// hits). `None` if a field isn't a scalar leaf (a non-marshallable struct — the gate rejects it).
+    fn resolve_struct_ctype(&self, key: &str, depth: usize) -> Option<CType> {
+        let fields = self.struct_field_asts.get(key)?;
+        let mut cfields = Vec::with_capacity(fields.len());
+        let mut field_names = Vec::with_capacity(fields.len());
+        for (fname, fty) in fields {
+            cfields.push(self.resolve_ctype_d(fty, depth + 1)?);
+            field_names.push(fname.clone());
+        }
+        Some(CType::Struct {
+            name: key.to_string(),
+            field_names,
+            fields: cfields,
+        })
     }
 
     /// Does concrete `ty` satisfy `protocol` instantiated with `args` (the bound's type arguments,

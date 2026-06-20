@@ -18316,10 +18316,11 @@ main()
         assert_eq!(out, "42\n");
     }
 
-    /// Regression (blocker): a type alias defined in an IMPORTED module, used bare in an extern
-    /// signature, type-checks (the checker's alias table is program-global). The compiler must build
-    /// its extern alias map program-globally too — else `ctype_of` returns `None` and the call site
-    /// `.expect`s (param) or silently drops a scalar return. Linux-only (needs libc.so.6).
+    /// Regression (blocker): a type alias defined in an IMPORTED module, `from`-imported and used at
+    /// an extern signature, must lower to its underlying C type. The checker resolves it (module-scoped
+    /// types: a cross-module alias is reachable via `import Size from sizes`, not bare), and the FFI
+    /// backend consumes that checker-resolved C type — else `ctype_of` returns `None` and the call site
+    /// silently drops a scalar return. Linux-only (needs libc.so.6).
     #[test]
     #[cfg(target_os = "linux")]
     fn extern_cross_module_alias_runs() {
@@ -18329,7 +18330,7 @@ main()
         let entry = dir.join("main.chz");
         std::fs::write(
             &entry,
-            "import sizes\n\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Size\n\nprint(strlen(\"hello\"))\n",
+            "import Size from sizes\n\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Size\n\nprint(strlen(\"hello\"))\n",
         )
         .unwrap();
         let (vm_out, _e, vm_res, _) = run_file(&entry);
@@ -18674,6 +18675,144 @@ main()
         assert!(
             msg.contains("not C-marshallable") || msg.contains("C-marshallable"),
             "error should mention marshallability, got: {msg}"
+        );
+    }
+
+    /// Regression (ROOT, the named-import chain hop — fix4): a module-QUALIFIED width alias whose
+    /// resolution hops through a NAMED-IMPORTED alias (`import W from core.widths` in the defining
+    /// module) must resolve EVERY hop in its own module's import/alias scope — NOT fall back to the
+    /// flat bare `aliases` map on the imported hop. `main` declares a colliding `type W = int8`; the
+    /// true chain is `w3.Len -> W(from widths) -> int64`. With the bug the imported hop collapses to
+    /// main's int8 and `abs(-300)` rounds to 44; correctly resolved (int64) it stays 300 across all
+    /// three engines. Linux-only (needs libc.so.6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_qualified_width_alias_named_import_hop_collision_runs() {
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_vm_ffi_qnamedhop_{}", std::process::id()));
+        let core = dir.join("core");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(
+            core.join("widths.chz"),
+            "import int64 from std.ffi\n\ntype W = int64\n",
+        )
+        .unwrap();
+        std::fs::write(
+            core.join("w3.chz"),
+            "import W from core.widths\n\ntype Len = W\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import core.w3\nimport int8 from std.ffi\n\ntype W = int8\n\nextern \"libc.so.6\":\n    \
+             fn abs(n: w3.Len) -> w3.Len\n\nprint(abs(-300))\n",
+        )
+        .unwrap();
+        let (vm_out, _e, vm_res, _) = run_file(&entry);
+        let (io, _ie, ir, _) = crate::interp::run_file(&entry);
+        let (par_out, _pe, par_res, _) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            vm_res.is_ok(),
+            "VM faulted on named-import-hop qualified width-alias extern: {vm_res:?}"
+        );
+        assert!(
+            ir.is_ok(),
+            "interp faulted on named-import-hop qualified width-alias extern: {ir:?}"
+        );
+        assert!(
+            par_res.is_ok(),
+            "parallel engine faulted on named-import-hop qualified width-alias extern: {par_res:?}"
+        );
+        assert_eq!(
+            vm_out, "300\n",
+            "named-import-hop `w3.Len -> W(from widths) -> int64` must marshal as int64 (300), not main's colliding int8 (44)"
+        );
+        assert_eq!(
+            vm_out, io,
+            "VM and interp diverged (named-import-hop qualified width param)"
+        );
+        assert_eq!(
+            vm_out, par_out,
+            "VM and --parallel diverged (named-import-hop qualified width param)"
+        );
+    }
+
+    /// Regression (ROOT, the MIXED chain — fix4): a single qualified alias whose resolution hops
+    /// through a LOCAL alias, then a NAMED-IMPORTED alias, then a QUALIFIED alias — with a colliding
+    /// `type W = int8` shadow at each module along the way — must resolve to the true width (int64)
+    /// at every hop in that hop's own module scope. The chain: main's extern names `mid.Outer`;
+    /// `mid` declares `type Outer = ImpW` (local hop) where `ImpW` is `import ImpW from core.widths`
+    /// (named-import hop) and `core.widths` declares `type ImpW = base.Base` (qualified hop into
+    /// `core.base` `type Base = int64`). Every module ALSO declares a colliding `type W = int8` and
+    /// some declare colliding `Outer`/`ImpW`/`Base` bare. Correctly resolved it stays 300; any single
+    /// mis-resolved hop rounds to 44. All three engines must agree on 300. Linux-only (libc.so.6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_qualified_width_alias_mixed_chain_collision_runs() {
+        let dir = std::env::temp_dir().join(format!("chezzi_vm_ffi_qmixed_{}", std::process::id()));
+        let core = dir.join("core");
+        std::fs::create_dir_all(&core).unwrap();
+        // core/base.chz: the true leaf width (`Base = int64`). It ALSO declares `Outer = int8` and
+        // `ImpW = int8` — the names the OTHER modules' hops use — so a stray flat-map fallback there
+        // would round to 44.
+        std::fs::write(
+            core.join("base.chz"),
+            "import int64 from std.ffi\nimport int8 from std.ffi\n\ntype Base = int64\ntype Outer = int8\ntype ImpW = int8\n",
+        )
+        .unwrap();
+        // core/widths.chz: a QUALIFIED hop into base (`ImpW = base.Base`). It collides `Base` (its
+        // own qualified body-name spelled bare here would be int8) and `Outer`.
+        std::fs::write(
+            core.join("widths.chz"),
+            "import core.base\nimport int8 from std.ffi\n\ntype ImpW = base.Base\ntype Base = int8\ntype Outer = int8\n",
+        )
+        .unwrap();
+        // mid.chz: a NAMED-IMPORT hop (`ImpW from core.widths`), then a LOCAL hop (`Outer = ImpW`).
+        // It does NOT locally redefine `ImpW` (that would legitimately shadow the import); the
+        // collisions live in the OTHER modules. It collides `Base`.
+        std::fs::write(
+            dir.join("mid.chz"),
+            "import ImpW from core.widths\nimport int8 from std.ffi\n\ntype Outer = ImpW\ntype Base = int8\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import mid\nimport int8 from std.ffi\n\ntype Outer = int8\ntype ImpW = int8\ntype Base = int8\n\nextern \"libc.so.6\":\n    \
+             fn abs(n: mid.Outer) -> mid.Outer\n\nprint(abs(-300))\n",
+        )
+        .unwrap();
+        let (vm_out, _e, vm_res, _) = run_file(&entry);
+        let (io, _ie, ir, _) = crate::interp::run_file(&entry);
+        let (par_out, _pe, par_res, _) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            vm_res.is_ok(),
+            "VM faulted on mixed-chain qualified width-alias extern: {vm_res:?}"
+        );
+        assert!(
+            ir.is_ok(),
+            "interp faulted on mixed-chain qualified width-alias extern: {ir:?}"
+        );
+        assert!(
+            par_res.is_ok(),
+            "parallel engine faulted on mixed-chain qualified width-alias extern: {par_res:?}"
+        );
+        assert_eq!(
+            vm_out, "300\n",
+            "mixed chain (local -> named-import -> qualified) must marshal as int64 (300), not any colliding int8 hop (44)"
+        );
+        assert_eq!(
+            vm_out, io,
+            "VM and interp diverged (mixed-chain qualified width param)"
+        );
+        assert_eq!(
+            vm_out, par_out,
+            "VM and --parallel diverged (mixed-chain qualified width param)"
         );
     }
 

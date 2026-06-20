@@ -272,12 +272,6 @@ struct Interp {
     /// declared in one module and used bare in another's `extern` signature resolves here exactly as
     /// the checker accepted it. Empty for a single-source run (the module's own aliases suffice).
     extern_aliases: std::collections::HashMap<String, crate::ast::Type>,
-    /// Module-SCOPED type-alias bodies: `(declaring module_idx, bare alias name) → alias body`. The
-    /// interp twin of the compiler's `module_aliases`. A module-QUALIFIED FFI width alias (`w3.Len`)
-    /// resolves to ITS DEFINING module's body HERE — the flat `extern_aliases` map above is last-write
-    /// -wins, so two modules each declaring `type Len` (different widths) collide there. Keeps the
-    /// 3-engine C ABI in lockstep (matches the checker's defining-module alias resolution).
-    module_aliases: std::collections::HashMap<(usize, String), crate::ast::Type>,
     /// Program-global struct-field table (struct name → declared fields), gathered across EVERY module
     /// before evaluation begins — the interp twin of the compiler's pass-1 `struct_fields`. Used only
     /// to lower an extern fn's by-value struct param/return types to `CType::Struct` in
@@ -285,6 +279,12 @@ struct Interp {
     /// exactly as the compiler does (two-engine parity). Empty for a single-source run (the module's
     /// own struct decls suffice).
     extern_struct_fields: std::collections::HashMap<String, Vec<crate::ast::Field>>,
+    /// FFI ROOT FIX (fix4): the checker-resolved C signature of every `extern` fn, keyed by `(graph
+    /// module index, fn name)` — the SAME table + key the VM consumes. The extern lowering reads CTypes
+    /// from HERE instead of re-resolving alias names itself, so every qualified/imported/aliased width
+    /// resolves in its DEFINING module's scope (collision-proof, byte-identical to the VM). Filled in
+    /// `run_file_inner`; empty on the source-string test path (its externs use the local backstop).
+    extern_sigs: crate::checker::ExternTable,
     /// User type names (struct / enum / type-alias) declared in ANY module, gathered before
     /// evaluation. Module-scoped types: a `from`-imported TYPE name carries no runtime value (types
     /// resolve through the program-global struct/variant tables by name), so `bind_import` skips a
@@ -408,8 +408,8 @@ impl Interp {
             nurseries: Vec::new(),
             executors: Vec::new(),
             extern_aliases: std::collections::HashMap::new(),
-            module_aliases: std::collections::HashMap::new(),
             extern_struct_fields: std::collections::HashMap::new(),
+            extern_sigs: crate::checker::ExternTable::new(),
             type_names: std::collections::HashSet::new(),
             type_keys: std::collections::HashMap::new(),
             module_idx_of: std::collections::HashMap::new(),
@@ -445,58 +445,6 @@ impl Interp {
             .get(&(module_idx, name.to_string()))
             .cloned()
             .unwrap_or_else(|| name.to_string())
-    }
-
-    /// Resolve a module-QUALIFIED FFI type/alias `mod.Name` (declared in module `tidx`) to a `Type`
-    /// whose every alias hop is collapsed IN `tidx`'s OWN SCOPE — so a width-alias CHAIN never
-    /// re-enters the flat last-write-wins bare `aliases` map on an inner hop, and a colliding alias of
-    /// the same name in the CALLING module cannot hijack the width at any depth. An inner bare
-    /// `Type::Named(inner)` is interpreted as `tidx`'s `inner`: another `tidx` alias ⇒ recurse; a
-    /// `tidx` struct ⇒ its IDENTITY KEY; otherwise a scalar / FFI-width LEAF (or a cross-module
-    /// bare-keyed struct) ⇒ its bare name, which `ctype_of` resolves directly without alias re-entry.
-    /// `struct_fields` is the extern stmt's view (the same map the `qualify` closure tests).
-    ///
-    /// Bounded by `visited` (`(module_idx, name)` pairs): a repeated hop is a CYCLE ⇒ `None`, which
-    /// propagates to `ctype_of`'s clean "not C-marshallable" error (no hang, no stack overflow, never
-    /// a silent wrong width). A cross-module qualified body mid-chain (`type Len = other.X` declared
-    /// inside `tidx`) is likewise `None`.
-    ///
-    /// Kept byte-identical in logic with `compiler::Compiler::resolve_qualified_alias` — a divergence
-    /// breaks two-engine parity.
-    fn resolve_qualified_alias(
-        &self,
-        tidx: usize,
-        name: &str,
-        struct_fields: &std::collections::HashMap<String, Vec<crate::ast::Field>>,
-        visited: &mut Vec<(usize, String)>,
-    ) -> Option<crate::ast::Type> {
-        let here = (tidx, name.to_string());
-        if visited.contains(&here) {
-            return None; // cycle — defended (yields the clean marshal error, never a hang).
-        }
-        visited.push(here);
-        // A name that is a STRUCT in `tidx` ⇒ its identity key (hits the identity-keyed `struct_fields`).
-        if let Some(key) = self.type_keys.get(&(tidx, name.to_string()))
-            && struct_fields.contains_key(key)
-        {
-            return Some(crate::ast::Type::Named(key.clone()));
-        }
-        // An ALIAS declared in `tidx` ⇒ follow its one-hop AST body, recursing module-scoped.
-        match self.module_aliases.get(&(tidx, name.to_string())) {
-            Some(crate::ast::Type::Named(inner)) => {
-                self.resolve_qualified_alias(tidx, inner, struct_fields, visited)
-            }
-            // A cross-module qualified body mid-chain is not resolvable here (see doc) ⇒ clean error.
-            Some(crate::ast::Type::Qualified { .. }) => None,
-            // A non-`Named` body (e.g. `Option[..]`) carries no inner alias name to re-enter the flat
-            // map; `ctype_of` handles it directly. (FFI width aliases are scalar; this is defensive.)
-            Some(other) => Some(other.clone()),
-            // Not a tidx alias and not an identity-keyed struct: a scalar / FFI-width LEAF
-            // (`int64`, …) or a cross-module bare-keyed struct. Return the BARE name — `ctype_of`
-            // resolves a width leaf or a bare-keyed struct directly, with no alias re-entry (a width
-            // leaf and a registered struct are never themselves in the flat `aliases` map).
-            None => Some(crate::ast::Type::Named(name.to_string())),
-        }
     }
 
     /// IDENTITY KEY for a bare-written enum name in the CURRENT module: its `bare_types` key when
@@ -4284,83 +4232,30 @@ impl Interp {
                     // Eager `dlopen` + `dlsym` at module init (like the VM's `MakeCffi`): a missing
                     // library/symbol surfaces as a startup error. Each extern fn binds a `Cffi` value
                     // into the module's globals, exactly where a top-level `fn` binds.
-                    // Program-global aliases (cross-module, populated by the run driver) plus this
-                    // module's own — so a same-file alias works even on the single-source path where
-                    // `extern_aliases` is empty.
+                    //
+                    // FFI ROOT FIX (fix4): each param/return CType comes from the CHECKER-RESOLVED
+                    // `extern_sigs` table (resolved module-scoped, every alias spelling) — the interp
+                    // NEVER re-resolves alias/qualified names itself. On a table miss (the source-string
+                    // test path, which has no cross-module imports), it falls back to a LOCAL-only
+                    // `ctype_of` over this file's aliases + struct fields (no qualified resolution is
+                    // possible without imports). Byte-identical to the VM by construction.
+                    let cur_idx = self.cur_module_idx;
+                    // Local-only fallback tables (only consulted on a table miss).
                     let mut aliases = self.extern_aliases.clone();
                     for s in stmts {
                         if let StmtKind::TypeAlias { name, ty } = &s.kind {
                             aliases.insert(name.clone(), ty.clone());
                         }
                     }
-                    // ROOT REDESIGN — key the extern struct-field view by the QUALIFIED IDENTITY KEY so
-                    // a returned by-value struct carries the same tag the VM stamps (parity) and field
-                    // access hits. Local module structs use this module's `type_key`; cross-module
-                    // `extern_struct_fields` (bare-keyed, declarer unknown) is kept under both its bare
-                    // name AND — when bare-visible here — its resolved key, so the rewrite below finds it.
                     let mut struct_fields = self.extern_struct_fields.clone();
                     for s in stmts {
                         if let StmtKind::Struct { name, fields, .. } = &s.kind {
-                            let key = self.type_key(self.cur_module_idx, name);
-                            struct_fields.insert(key, fields.clone());
+                            let key = self.type_key(cur_idx, name);
+                            struct_fields.insert(key.clone(), fields.clone());
+                            // The bare name is also accepted by the local fallback's `ctype_of`.
+                            struct_fields.insert(name.clone(), fields.clone());
                         }
                     }
-                    // A bare struct type name written in an extern signature → its qualified key (so the
-                    // lowered `CType::Struct.name` matches the qualified-keyed `struct_fields`). A
-                    // module-QUALIFIED `mod.Type`/`mod.Alias` is resolved through `imported_module_idx`
-                    // → the target module's identity key (mirrors the compiler's `qualify_ffi_type` for
-                    // 3-engine parity): a qualified STRUCT → `Named(identity_key)`; a qualified WIDTH
-                    // ALIAS → `Named(bare name)` so it hits the bare-keyed `aliases` table.
-                    let qualify = |t: &crate::ast::Type| -> crate::ast::Type {
-                        match t {
-                            crate::ast::Type::Named(n)
-                                if self
-                                    .bare_types
-                                    .get(n)
-                                    .is_some_and(|key| struct_fields.contains_key(key)) =>
-                            {
-                                crate::ast::Type::Named(self.bare_types[n].clone())
-                            }
-                            crate::ast::Type::Qualified {
-                                module: binder,
-                                name,
-                                ..
-                            } => {
-                                if let Some(&tidx) = self.imported_module_idx.get(binder)
-                                    && self
-                                        .module_types
-                                        .get(tidx)
-                                        .is_some_and(|ts| ts.contains(name))
-                                    && let Some(key) = self.type_keys.get(&(tidx, name.clone()))
-                                {
-                                    if struct_fields.contains_key(key) {
-                                        return crate::ast::Type::Named(key.clone());
-                                    }
-                                    // Not a struct → a width ALIAS, possibly a CHAIN. Resolve the WHOLE
-                                    // chain in its DEFINING module's scope (keyed by `tidx`) — never the
-                                    // bare name, never re-entering the flat last-write-wins `aliases` map
-                                    // on an inner hop, so a colliding alias of the same name in ANOTHER
-                                    // module can't hijack the C ABI at any depth. Matches the checker +
-                                    // the compiler's `qualify_ffi_type` (3-engine parity). An
-                                    // unresolvable hop (cross-module body, cycle, dangling) ⇒ the
-                                    // qualified type passes through to `ctype_of`'s clean error.
-                                    if let Some(resolved) = self.resolve_qualified_alias(
-                                        tidx,
-                                        name,
-                                        &struct_fields,
-                                        &mut Vec::new(),
-                                    ) {
-                                        return resolved;
-                                    }
-                                }
-                                t.clone()
-                            }
-                            _ => t.clone(),
-                        }
-                    };
-                    // Lower every extern fn's param/return CTypes FIRST (the `qualify` closure borrows
-                    // `self` immutably via `resolve_qualified_alias`), then bind into `self.env` in a
-                    // second pass so the closure's borrow has ended before the mutable `env` borrow.
                     #[allow(clippy::type_complexity)]
                     let mut lowered: Vec<(
                         String,
@@ -4368,15 +4263,16 @@ impl Interp {
                         Option<crate::native::cffi::CType>,
                     )> = Vec::with_capacity(fns.len());
                     for ef in fns {
+                        let sig = self.extern_sigs.get(&(cur_idx, ef.name.clone()));
                         let params: Vec<crate::native::cffi::CType> = ef
                             .params
                             .iter()
-                            .map(|p| {
-                                let ty = p.ty.as_ref().map(&qualify);
-                                // The checker is the real gate; this is the never-panic backstop
-                                // (parity with the compiler), keyed to the extern stmt span.
-                                ctype_of(ty.as_ref(), &aliases, &struct_fields).ok_or_else(|| {
-                                    RuntimeError {
+                            .enumerate()
+                            .map(|(i, p)| {
+                                // The checker is the real gate; this is the never-panic backstop.
+                                sig.and_then(|s| s.params.get(i).cloned().flatten())
+                                    .or_else(|| ctype_of(p.ty.as_ref(), &aliases, &struct_fields))
+                                    .ok_or_else(|| RuntimeError {
                                         message: format!(
                                             "type '{}' is not C-marshallable in extern fn '{}' \
                                              (v1 supports only int, float, bool, str, ptr, and a \
@@ -4385,18 +4281,18 @@ impl Interp {
                                             ef.name
                                         ),
                                         span: stmt.span,
-                                    }
-                                })
+                                    })
                             })
                             .collect::<Result<_, _>>()?;
                         // `None` ⇒ void: no annotation, or one resolving to `nil` (incl. an alias to
-                        // `nil`). The checker guarantees a non-void return is a scalar, so `and_then`
-                        // (never `.expect`) — a non-scalar resolution can only mean void.
-                        let ret = ef
-                            .ret
-                            .as_ref()
-                            .map(&qualify)
-                            .and_then(|t| ctype_of(Some(&t), &aliases, &struct_fields));
+                        // `nil`). The checker guarantees a non-void return is a scalar.
+                        let ret = match sig {
+                            Some(s) => s.ret.clone(),
+                            None => ef
+                                .ret
+                                .as_ref()
+                                .and_then(|t| ctype_of(Some(t), &aliases, &struct_fields)),
+                        };
                         lowered.push((ef.name.clone(), params, ret));
                     }
                     for (name, params, ret) in lowered {
@@ -5659,6 +5555,10 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     };
     let mut interp = Interp::new();
     interp.host = cfg;
+    // FFI ROOT FIX (fix4): resolve every extern fn's C signature ONCE in the checker (module-scoped,
+    // every alias spelling) and consume it at extern lowering — the same table + key the VM uses, so
+    // the C ABI width is byte-identical across engines by construction. Keyed by graph module index.
+    interp.extern_sigs = crate::checker::resolve_extern_signatures(&graph);
     // Gather every module's type aliases up front so an `extern` signature in any module can resolve
     // a scalar alias declared anywhere (program-global, matching the checker). Per-module hoisting
     // would otherwise miss an alias imported from another file (panic / silently-void return).
@@ -5708,14 +5608,6 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
                         .type_keys
                         .insert((idx, name.clone()), format!("{}::{name}", mkeys[idx]));
                 }
-            }
-            // Record alias bodies under the DEFINING module index (twin of the compiler's
-            // `module_aliases`) so a module-qualified FFI width alias resolves to the right width
-            // even when another module shadows the bare name.
-            if let StmtKind::TypeAlias { name, ty } = &s.kind {
-                interp
-                    .module_aliases
-                    .insert((idx, name.clone()), ty.clone());
             }
         }
     }
@@ -8277,10 +8169,11 @@ b := Buf([10, 20, 30])
         assert_eq!(out, "42\n");
     }
 
-    /// Regression (blocker): a type alias defined in an IMPORTED module, used bare in an extern
-    /// signature, type-checks (the checker's alias table is program-global) — so the interp's
-    /// `ctype_of` must resolve aliases program-globally too, else it returns `None` and either panics
-    /// (param) or silently drops the return (would-be void). Linux-only (needs libc).
+    /// Regression (blocker): a type alias defined in an IMPORTED module, `from`-imported and used at
+    /// an extern signature, must lower to its underlying C type — the interp consumes the checker's
+    /// module-scoped resolution (a cross-module alias is reachable via `import Size from sizes`, not
+    /// bare), else it returns `None` and silently drops the return (would-be void). Linux-only (needs
+    /// libc).
     #[test]
     #[cfg(target_os = "linux")]
     fn extern_cross_module_alias_runs() {
@@ -8291,7 +8184,7 @@ b := Buf([10, 20, 30])
         let entry = dir.join("main.chz");
         std::fs::write(
             &entry,
-            "import sizes\n\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Size\n\nprint(strlen(\"hello\"))\n",
+            "import Size from sizes\n\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Size\n\nprint(strlen(\"hello\"))\n",
         )
         .unwrap();
         let (out, _err, res, _) = run_file(&entry);

@@ -1065,8 +1065,41 @@ branch names) is in the git log.
   (→7), struct (→3/2), and clean-error guards stay green; full suite + conformance green, clippy clean.
   Docs: `ffi-and-packaging.md`, this file. (The single-hop fix's chained-alias gap is closed by the
   ROOT fix below — chains are now resolved fully module-scoped at all depths.)
+- ✅ **C-ABI FFI FINAL ROOT fix: qualified/imported/aliased extern types resolve via the CHECKER**
+  (2026-06-20, `auto-task/ffi-qualified-type-fix4`) — ended the AST-recursive alias-spelling
+  whack-a-mole (fix..fix3 each closed one spelling and the next re-entered a flat bare-name alias map).
+  Confirmed-still-broken on fix2: a **named-import chain hop** (`core/widths` = `import int64 from
+  std.ffi` + `type W = int64`; `core/w3` = `import W from core.widths` + `type Len = W`; `main` =
+  `import core.w3` + colliding `type W = int8` + `extern fn abs(n: w3.Len) -> w3.Len`) — `check` OK
+  (w3.Len → W(from widths) → int64) but `run`/`--serial`/`--parallel` all printed **44** (main's
+  colliding int8) instead of **300**. Root cause: the backend's `qualify_ffi_type`/`resolve_qualified_
+  alias` only knew aliases DECLARED in the defining module (`module_aliases`); a name brought in via
+  `import X from other` matched neither key and fell back to the flat last-write-wins bare `aliases`
+  map → collision. **The robust fix (mandated): one resolver — the checker.** New
+  `checker::resolve_extern_signatures(graph) -> ExternTable` runs the SAME deps-first module pass and,
+  for each `extern` fn, records the fully-resolved width-bearing `CType` per param/return via a new
+  `resolve_ctype` walk that mirrors `resolve_ty_ro`'s alias/`from`-import/`Qualified`/cycle logic but
+  stops at the WIDTH leaf (`Ty` collapses every FFI width to `Ty::Int`, so the carrier must be a
+  `CType`, not a `Ty`). The width crosses module boundaries via a new `AliasSig.ctype` (computed in the
+  defining scope) + a parallel `imported_alias_ctypes` populated in `bind_import`. **Both backends now
+  consume the table** (keyed by `(graph module idx, fn name)`, the index both derive) and NEVER
+  re-resolve alias names — closing every spelling at once: single-hop, local chain (any depth),
+  named-import hop, qualified hop, AND mixed chains. **Deleted** the dead machinery: `qualify_ffi_type`
+  + `resolve_qualified_alias` + `module_aliases` in BOTH engines (the standalone source-string test
+  path keeps a LOCAL-only `ctype_of` fallback — no imports there, so no qualified resolution needed and
+  no collision possible). The fix2 "cross-module qualified body mid-chain (`type Len = other.X`)" `None`
+  case is now resolved too (the checker has each module's real import-binder map). Tests: new VM 3-engine
+  parity tests for the named-import hop and a LOCAL→named-import→QUALIFIED **mixed** chain (each hop a
+  collision, all → 300 on VM/`--serial`/`--parallel`), 7 new checker `resolve_ctype` unit tests
+  asserting the exact `CType` per spelling (the dual-resolver-drift guard), and all prior FFI guards
+  (single-hop/chain collisions → 300, struct → 3/2, width param → 7, cyclic → clean error, non-
+  marshallable → clean check error) stay green. The stale `extern_cross_module_alias_runs` test (which
+  asserted a BARE cross-module alias the checker now rejects as module-scoped) was corrected to the
+  `import Size from sizes` spelling. Full suite (2292) + conformance green, clippy `--all-targets`
+  clean; CLI repro 20×/`--parallel` deterministic at 300.
 - ✅ **C-ABI FFI ROOT fix: module-qualified width-alias CHAIN resolves module-scoped at ALL depths**
-  (2026-06-20, `auto-task/ffi-qualified-type-fix2`) — the deeper adversarial find on the single-hop
+  (2026-06-20, `auto-task/ffi-qualified-type-fix2`; **superseded by fix4 above** — the backend
+  re-resolvers it added are now deleted) — the deeper adversarial find on the single-hop
   fix above: it only resolved the FIRST hop in the defining module's scope. A CHAINED qualified alias
   (`type Len = Inner; type Inner = int64` in `core/w3`) returned w3's RAW ONE-HOP body (`Named("Inner")`)
   and handed it to `ctype_of`, which resolved the INNER name `Inner` through the flat, last-write-wins,

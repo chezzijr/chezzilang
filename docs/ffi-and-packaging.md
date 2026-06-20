@@ -52,16 +52,28 @@ two ways — by **named import** (`import DivT from core.cdefs`, then bare `DivT
 to the identical C type (struct-by-value or scalar width). The checker is the marshallability gate for
 either spelling; a non-marshallable type is a clean compile error, never a VM panic.
 
-A module-qualified **width alias** resolves to its **defining module's** width even when the calling
-module declares a colliding bare alias of the same name, and this holds **at every chain depth** — not
-just a direct `type Len = int64`, but a chain like `type Len = Inner; type Inner = int64` (and deeper).
-With `core/w3.chz` = `type Inner = int64; type Len = Inner` and a `main.chz` that declares a colliding
-`type Inner = int8`, an `extern fn abs(n: w3.Len) -> w3.Len` marshals as **int64** (w3's `Inner`), never
-the local int8 — exactly what the checker promised. The lowering follows the whole alias chain in its
-defining module's scope (keyed by the resolved defining-module index), so **no hop** ever falls back to
-the flat last-write-wins alias-name table; the C ABI can't be hijacked by a same-named local alias at
-any depth. A cyclic alias chain is a clean "not C-marshallable" compile error (never a hang). (3-engine
-parity: VM / `--serial` / interp.)
+Every qualified/imported/aliased extern type resolves **module-scoped via the checker** — the single
+authority. The checker already resolves each `extern` param/return in its **defining module's**
+import/alias scope (which is why `chezzi check` is always correct); it now records the fully-resolved,
+width-bearing C type per param/return into an extern-signature table, and **both backends consume that
+table** instead of re-resolving alias names themselves. So a module-qualified **width alias** resolves
+to its defining module's width even when the calling module declares a colliding bare alias of the same
+name, and this holds for **every spelling and every depth**:
+
+- a direct alias (`type Len = int64`),
+- a local chain (`type Len = A; type A = B; type B = int64`),
+- a **named-import hop** (the defining module reached the width via `import W from other`, e.g.
+  `core/w3.chz` = `import W from core.widths` + `type Len = W` where `widths` declares `type W = int64`),
+- a **qualified hop** (`type ImpW = base.Base`),
+- and any **mix** of the above across modules.
+
+With colliding `type W = int8` (or `Inner`/`Outer`/…) shadows in the calling module(s), an
+`extern fn abs(n: mod.Len) -> mod.Len` still marshals as **int64** — never the local int8. Because the
+checker walks each module's real import/alias environment, **no hop** can fall back to a flat
+last-write-wins alias-name table; the C ABI can't be hijacked by a same-named local alias at any depth.
+A by-value struct keeps each field's exact C width (an `int32` field stays 4 bytes). A cyclic alias
+chain is a clean "not C-marshallable" error (never a hang). (3-engine parity: VM / `--serial` / interp;
+verified silent-safe — the prior bug printed the wrong width with `check` passing.)
 
 ## 1b. Deferred FFI-deepening features — design notes (revisit-in-future)
 

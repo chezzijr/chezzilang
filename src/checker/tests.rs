@@ -5601,6 +5601,162 @@ fn extern_qualified_struct_and_alias_typecheck() {
     assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
 }
 
+/// FFI ROOT FIX (fix4) — the dual-resolver-drift guard: `resolve_extern_signatures` must produce the
+/// exact width-bearing `CType` per param/return, resolved in the DEFINING module's scope, for EVERY
+/// alias spelling. These assert the actual `CType` (not just that `check` passes), so a divergence
+/// between `resolve_ctype` and `resolve_type` (which `check` exercises) is caught here, not silently
+/// at runtime. The entry module is last in graph order; its key is `(graph.modules.len()-1, fn)`.
+mod resolve_extern_ctype {
+    use super::*;
+    use crate::native::cffi::CType;
+
+    /// Resolve the entry module's extern table and return one fn's `(params, ret)`.
+    fn entry_sig(files: &[(&str, &str)]) -> crate::checker::ExternCSig {
+        let t = TmpDir::new();
+        let mut entry = None;
+        for (rel, src) in files {
+            if let Some(parent) = std::path::Path::new(rel).parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(t.0.join(parent)).unwrap();
+            }
+            let p = t.write(rel, src);
+            if *rel == "main.chz" {
+                entry = Some(p);
+            }
+        }
+        let graph = crate::resolver::build_graph(&entry.expect("a main.chz"))
+            .expect("resolve should succeed");
+        let table = crate::checker::resolve_extern_signatures(&graph);
+        let last = graph.modules.len() - 1;
+        // Each test below declares exactly one extern fn named `f` (or `abs`) in main.
+        table
+            .iter()
+            .find(|((idx, _), _)| *idx == last)
+            .map(|(_, s)| s.clone())
+            .expect("entry module has an extern fn signature")
+    }
+
+    #[test]
+    fn single_hop_width_alias_resolves_to_width() {
+        // `type Len = int32` (same file) → int32, not collapsed to Int.
+        let s = entry_sig(&[(
+            "main.chz",
+            "import int32 from std.ffi\n\ntype Len = int32\n\nextern \"libc.so.6\":\n    fn f(n: Len) -> Len\n",
+        )]);
+        assert_eq!(s.params, vec![Some(CType::Int32)]);
+        assert_eq!(s.ret, Some(CType::Int32));
+    }
+
+    #[test]
+    fn named_import_hop_resolves_to_defining_width_not_local_collision() {
+        // main declares a colliding `type W = int8`; the true chain is `w3.Len -> W(from widths) ->
+        // int64`. The resolved CType must be int64 (the named-import hop's defining width), NOT int8.
+        let s = entry_sig(&[
+            (
+                "core/widths.chz",
+                "import int64 from std.ffi\n\ntype W = int64\n",
+            ),
+            ("core/w3.chz", "import W from core.widths\n\ntype Len = W\n"),
+            (
+                "main.chz",
+                "import core.w3\nimport int8 from std.ffi\n\ntype W = int8\n\nextern \"libc.so.6\":\n    fn f(n: w3.Len) -> w3.Len\n",
+            ),
+        ]);
+        assert_eq!(s.params, vec![Some(CType::Int64)]);
+        assert_eq!(s.ret, Some(CType::Int64));
+    }
+
+    #[test]
+    fn qualified_return_struct_preserves_field_widths_and_identity_key() {
+        // `cdefs.DivT` (two int32 fields) → CType::Struct keyed by the identity key, each field int32
+        // (NOT collapsed to Int — the by-value struct layout depends on the real width).
+        let s = entry_sig(&[
+            (
+                "cdefs.chz",
+                "import int32 from std.ffi\n\nstruct DivT:\n    quot: int32\n    rem: int32\n",
+            ),
+            (
+                "main.chz",
+                "import cdefs\nimport int32 from std.ffi\n\nextern \"libc.so.6\":\n    fn f(numer: int32, denom: int32) -> cdefs.DivT\n",
+            ),
+        ]);
+        assert_eq!(s.params, vec![Some(CType::Int32), Some(CType::Int32)]);
+        match s.ret {
+            Some(CType::Struct {
+                name,
+                field_names,
+                fields,
+            }) => {
+                assert!(name.ends_with("::DivT"), "identity key, got {name}");
+                assert_eq!(field_names, vec!["quot".to_string(), "rem".to_string()]);
+                assert_eq!(fields, vec![CType::Int32, CType::Int32]);
+            }
+            other => panic!("expected a struct return, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_chain_resolves_through_every_hop() {
+        // `type Len = A; type A = B; type B = int64` (same file) → int64 (each hop in this scope).
+        let s = entry_sig(&[(
+            "main.chz",
+            "import int64 from std.ffi\n\ntype B = int64\ntype A = B\ntype Len = A\n\nextern \"libc.so.6\":\n    fn f(n: Len) -> Len\n",
+        )]);
+        assert_eq!(s.params, vec![Some(CType::Int64)]);
+        assert_eq!(s.ret, Some(CType::Int64));
+    }
+
+    #[test]
+    fn cyclic_alias_resolves_to_none_no_overflow() {
+        // `type A = B; type B = A` (no leaf) → None (the depth guard terminates, no stack overflow).
+        // `check` rejects this separately; here we assert the width carrier cleanly yields None.
+        let s = entry_sig(&[(
+            "main.chz",
+            "type A = B\ntype B = A\n\nextern \"libc.so.6\":\n    fn f(n: A) -> A\n",
+        )]);
+        assert_eq!(s.params, vec![None]);
+        assert_eq!(s.ret, None);
+    }
+
+    #[test]
+    fn plain_scalars_and_void_return() {
+        // Plain scalars resolve directly; a missing return annotation is void (`None`).
+        let s = entry_sig(&[(
+            "main.chz",
+            "extern \"libc.so.6\":\n    fn f(a: int, b: float, c: bool, s: str, p: ptr)\n",
+        )]);
+        assert_eq!(
+            s.params,
+            vec![
+                Some(CType::Int),
+                Some(CType::Float),
+                Some(CType::Bool),
+                Some(CType::Str),
+                Some(CType::Ptr),
+            ]
+        );
+        assert_eq!(s.ret, None);
+    }
+
+    #[test]
+    fn return_only_owned_and_nullable_str() {
+        // `owned_str` → OwnedStr; `str?` → OptStr; `owned_str?` → OptOwnedStr (return-only forms).
+        let s = entry_sig(&[(
+            "main.chz",
+            "extern \"libc.so.6\":\n    fn f() -> owned_str\n",
+        )]);
+        assert_eq!(s.ret, Some(CType::OwnedStr));
+        let s2 = entry_sig(&[("main.chz", "extern \"libc.so.6\":\n    fn f() -> str?\n")]);
+        assert_eq!(s2.ret, Some(CType::OptStr));
+        let s3 = entry_sig(&[(
+            "main.chz",
+            "extern \"libc.so.6\":\n    fn f() -> owned_str?\n",
+        )]);
+        assert_eq!(s3.ret, Some(CType::OptOwnedStr));
+    }
+}
+
 #[test]
 fn extern_cyclic_option_alias_param_no_overflow() {
     // A cyclic alias routed through an `Option`/`?` form (`type A = A?`) must be diagnosed as a
