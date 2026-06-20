@@ -7,8 +7,14 @@
 //! [project]
 //! name = "myapp"
 //! version = "0.1.0"
-//! entrypoint = "src.main"   # dotted module path the bare `chezzi run` executes
+//! entrypoint = "src.main:main"   # module path + ":function" the bare `chezzi run` executes
 //! ```
+//!
+//! The `entrypoint` value is a dotted module path, optionally suffixed with `:function`. With a
+//! `:function` suffix (e.g. `"src.main:main"`) a bare `chezzi run` runs the module's top-level and
+//! then calls that function — so the source needs no trailing call. Without the suffix
+//! (`"src.main"`) it just runs the module top-level (scripting model). This parser keeps the value
+//! verbatim; the `:`-split happens in the CLI (`main::split_entrypoint`).
 //!
 //! Recognized syntax: `[section]` headers, `key = "value"` string pairs, `#` comments, blank lines,
 //! and leading/trailing whitespace. Only `[project]` keys (`name`/`version`/`entrypoint`) are

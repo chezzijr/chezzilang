@@ -46,6 +46,7 @@ COMMANDS:
     check   <file>   Type-check only; report errors
     tokens  <file>   Print the token stream
     ast     <file>   Print the parsed AST
+    docs    [topic]  Print language docs (no topic → full reference, for piping to an LLM)
     repl             Start an interactive REPL
     help             Show this message
 
@@ -75,6 +76,7 @@ fn main() -> ExitCode {
         "run" => cmd_run(&args[1..]),
         "test" => cmd_test(&args[1..]),
         "init" => cmd_init(&args[1..]),
+        "docs" => cmd_docs(&args[1..]),
         "repl" => {
             eprintln!("chezzi: 'repl' is not implemented yet.");
             eprintln!("        see the roadmap in docs/spec.md");
@@ -244,10 +246,13 @@ fn cmd_run(args: &[String]) -> ExitCode {
     // from the cwd for `chezzi.toml`, parse it, and resolve `[project] entrypoint` (a dotted module
     // path) root-relatively. This keeps imports root-relative (build_graph walks up to the same
     // marker), so a bare `chezzi run` from anywhere in the project runs the configured entry.
-    let path = match path {
-        Some(p) => p,
+    // An explicit `chezzi run <file>` is script-mode (run the file's top-level, no entry fn). The
+    // bare `chezzi run` resolves the manifest entrypoint, which MAY name a function to call
+    // (`module:function`) — `entry_fn` is `Some` only in that case.
+    let (path, entry_fn): (String, Option<String>) = match path {
+        Some(p) => (p, None),
         None => match resolve_entrypoint() {
-            Ok(p) => p,
+            Ok(pair) => pair,
             Err(msg) => {
                 eprintln!("{msg}");
                 return ExitCode::FAILURE;
@@ -301,11 +306,8 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let p = std::path::Path::new(&path);
     let cfg = native::HostConfig::from_process(prog_args);
     let (output, errout, errored, exit_code) = {
-        let (out, err, result, code) = if parallel {
-            vm::run_file_parallel(p, cfg)
-        } else {
-            vm::run_file_with(p, cfg)
-        };
+        let (out, err, result, code) =
+            vm::run_file_with_entry(p, cfg, parallel, entry_fn.as_deref());
         (
             out,
             err,
@@ -331,11 +333,13 @@ fn cmd_run(args: &[String]) -> ExitCode {
     }
 }
 
-/// Resolve the file to run for a bare `chezzi run` (no file argument): find the project root by
-/// walking up from the cwd for `chezzi.toml`, parse the manifest, require a `[project] entrypoint`
-/// (a dotted module path), and map it to a file root-relatively. Returns the resolved `.chz` path,
-/// or a ready-to-print error message.
-fn resolve_entrypoint() -> Result<String, String> {
+/// Resolve what to run for a bare `chezzi run` (no file argument): find the project root by walking
+/// up from the cwd for `chezzi.toml`, parse the manifest, require a `[project] entrypoint`, and map
+/// it to a file root-relatively. The entrypoint is a dotted module path optionally suffixed with
+/// `:function` (e.g. `"src.main:main"`) — when a function is named, the VM calls it after the
+/// module's top-level runs. Returns `(resolved .chz path, Some(function))`, or a ready-to-print
+/// error message. A bare `"src.main"` (no `:function`) yields `None` → run the module top-level only.
+fn resolve_entrypoint() -> Result<(String, Option<String>), String> {
     let cwd = std::env::current_dir()
         .map_err(|e| format!("chezzi run: cannot read current directory: {e}"))?;
     let root = resolver::find_root_from_dir(&cwd).ok_or_else(|| {
@@ -348,13 +352,33 @@ fn resolve_entrypoint() -> Result<String, String> {
         .map_err(|e| format!("chezzi run: invalid {}: {e}", manifest_path.display()))?;
     let entrypoint = manifest.entrypoint.ok_or_else(|| {
         format!(
-            "chezzi run: {} has no [project] entrypoint; add entrypoint = \"src.main\" or pass a file",
+            "chezzi run: {} has no [project] entrypoint; add entrypoint = \"src.main:main\" or pass a file",
             manifest_path.display()
         )
     })?;
-    let file = entrypoint_file(&entrypoint, &root)
+    let (module_path, entry_fn) = split_entrypoint(&entrypoint)
         .map_err(|e| format!("chezzi run: {} {e}", manifest_path.display()))?;
-    Ok(file.to_string_lossy().into_owned())
+    let file = entrypoint_file(module_path, &root)
+        .map_err(|e| format!("chezzi run: {} {e}", manifest_path.display()))?;
+    Ok((
+        file.to_string_lossy().into_owned(),
+        entry_fn.map(str::to_string),
+    ))
+}
+
+/// Split a manifest `entrypoint` value into its dotted module path and an optional `:function`
+/// suffix. Splits on the FIRST `:` so the function name is taken verbatim; `"src.main"` →
+/// `("src.main", None)`, `"src.main:main"` → `("src.main", Some("main"))`. A `:` with no function
+/// after it (`"src.main:"`) is rejected — otherwise it reaches the VM as an empty name and produces a
+/// baffling "function `` not found" error. Pure (no I/O) so it is unit-testable.
+fn split_entrypoint(entrypoint: &str) -> Result<(&str, Option<&str>), String> {
+    match entrypoint.split_once(':') {
+        Some((_, "")) => Err(format!(
+            "has an invalid [project] entrypoint {entrypoint:?}; the ':' must be followed by a function name like \"src.main:main\""
+        )),
+        Some((module, func)) => Ok((module, Some(func))),
+        None => Ok((entrypoint, None)),
+    }
 }
 
 /// Map a manifest `[project] entrypoint` (a dotted module path) to its `.chz` file, root-relatively.
@@ -445,8 +469,9 @@ fn cmd_init(args: &[String]) -> ExitCode {
 /// example `src/main_test.chz`. Creates `dir` (and parents) if needed; refuses to overwrite an
 /// existing `chezzi.toml` (so it never clobbers a real project). Pure filesystem work — this is the
 /// unit-testable core behind `cmd_init`. The manifest's `[project] entrypoint` is written ACTIVE
-/// (`"src.main"`), so a freshly-init'd project runs with a bare `chezzi run` (see `manifest::parse`
-/// + `resolve_entrypoint`).
+/// (`"src.main:main"` — module path + `:function`), so a freshly-init'd project runs with a bare
+/// `chezzi run`, which calls `main` directly (no trailing call in the source needed; see
+/// `manifest::parse` + `resolve_entrypoint`).
 fn scaffold_project(dir: &std::path::Path) -> Result<(), String> {
     use std::fs;
 
@@ -488,13 +513,16 @@ fn scaffold_project(dir: &std::path::Path) -> Result<(), String> {
          #\n\
          # This file is BOTH a project ROOT MARKER (module resolution walks up for it; see\n\
          # docs/spec.md \"Imports & module resolution\") AND a parsed manifest. The toolchain reads\n\
-         # `[project]` keys: `entrypoint` (a dotted module path) is the module a bare `chezzi run`\n\
-         # executes. `name`/`version` are project metadata. Unknown keys/sections are ignored.\n\
+         # `[project]` keys: `entrypoint` is what a bare `chezzi run` executes — a dotted module\n\
+         # path, optionally suffixed with `:function` to call that function directly after the\n\
+         # module loads (swap which function runs by editing the part after the colon). Without a\n\
+         # `:function` suffix the module's top-level runs instead. `name`/`version` are project\n\
+         # metadata. Unknown keys/sections are ignored.\n\
          \n\
          [project]\n\
          name = \"{name}\"\n\
          version = \"0.1.0\"\n\
-         entrypoint = \"src.main\"   # dotted module path → src/main.chz; run with a bare `chezzi run`\n",
+         entrypoint = \"src.main:main\"   # → src/main.chz, calls `main`; run with a bare `chezzi run`\n",
     );
     fs::write(&manifest, manifest_body)
         .map_err(|e| format!("cannot write {}: {e}", manifest.display()))?;
@@ -504,14 +532,13 @@ fn scaffold_project(dir: &std::path::Path) -> Result<(), String> {
 
     let main_chz = "# src/main.chz — program entry.\n\
         #\n\
-        # Chezzi is a scripting language: code runs top-to-bottom and there is NO automatic\n\
-        # entry point (see docs/syntax.md \"9b. Program entry\"). `main` is an ordinary function;\n\
-        # define it and call it yourself.\n\
+        # chezzi.toml's `entrypoint = \"src.main:main\"` calls `main` for you after this module\n\
+        # loads, so no trailing `main()` call is needed (see docs/syntax.md \"9b. Program entry\").\n\
+        # Swap the function a bare `chezzi run` invokes by editing the part after the `:`. Run a\n\
+        # *file* directly (`chezzi run src/main.chz`) and it is scripting-style: top-level only.\n\
         \n\
         fn main():\n\
-        \x20   print(\"Hello from Chezzi!\")\n\
-        \n\
-        main()        # nothing runs main for you\n";
+        \x20   print(\"Hello from Chezzi!\")\n";
     let main_path = src.join("main.chz");
     fs::write(&main_path, main_chz)
         .map_err(|e| format!("cannot write {}: {e}", main_path.display()))?;
@@ -531,6 +558,103 @@ fn scaffold_project(dir: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", test_path.display()))?;
 
     Ok(())
+}
+
+/// Embedded language documentation, keyed by topic. `include_str!` paths are relative to this file
+/// (`src/main.rs`), so the docs live at `../docs/...`. Bundling them into the binary means
+/// `chezzi docs` works anywhere (no repo checkout), e.g. piping the full reference to an LLM.
+const DOC_TOPICS: &[(&str, &str)] = &[
+    ("spec", include_str!("../docs/spec.md")),
+    ("syntax", include_str!("../docs/syntax.md")),
+    ("stdlib", include_str!("../docs/stdlib.md")),
+];
+
+/// The topics, in order, that make up the `llms` bundle (`chezzi docs` with no topic): the essentials
+/// an LLM needs to write correct Chezzi — language overview, full syntax, and the library surface.
+const LLMS_BUNDLE: &[&str] = &["spec", "syntax", "stdlib"];
+
+fn doc_topic(name: &str) -> Option<&'static str> {
+    DOC_TOPICS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, body)| *body)
+}
+
+/// Build the text `chezzi docs <topic>` prints, or a ready-to-print error message. Pure (no I/O) so
+/// it is unit-testable. Topics:
+/// - `llms` / `all` → the full reference bundle (spec + syntax + stdlib + grammar).
+/// - `topics` / `list` → the available topic names.
+/// - `<topic>` → that one embedded document. Unknown topic / any flag → `Err`.
+fn render_docs(topic: &str) -> Result<String, String> {
+    match topic {
+        "llms" | "all" => {
+            let mut out = format!(
+                "# Chezzi language reference (generated by `chezzi docs`)\n\
+                 # The complete language + library reference, concatenated for LLM consumption.\n\
+                 # Sections: {}.\n\n",
+                LLMS_BUNDLE.join(", ")
+            );
+            for name in LLMS_BUNDLE {
+                let body = doc_topic(name).expect("bundle topic must be embedded");
+                out.push_str(&format!("# ===== Chezzi reference: {name} =====\n\n"));
+                out.push_str(body);
+                out.push('\n');
+            }
+            Ok(out)
+        }
+        "topics" | "list" => {
+            let mut out = String::from("available docs topics:\n");
+            for (name, _) in DOC_TOPICS {
+                out.push_str(&format!("    {name}\n"));
+            }
+            out.push_str(&format!(
+                "    llms     full reference bundle ({})\n",
+                LLMS_BUNDLE.join(" + ")
+            ));
+            Ok(out)
+        }
+        other if other.starts_with("--") => Err(format!("chezzi docs: unknown flag '{other}'")),
+        other => doc_topic(other).map(str::to_string).ok_or_else(|| {
+            let names: Vec<&str> = DOC_TOPICS.iter().map(|(n, _)| *n).collect();
+            format!(
+                "chezzi docs: unknown topic '{other}'\nvalid topics: {}, llms, topics",
+                names.join(", ")
+            )
+        }),
+    }
+}
+
+/// `chezzi docs [topic]` — print embedded language documentation (see [`render_docs`]). With no
+/// topic, prints the full LLM reference bundle to stdout (pipe it: `chezzi docs > chezzi-llms.txt`).
+fn cmd_docs(args: &[String]) -> ExitCode {
+    let topic = args.first().map(String::as_str).unwrap_or("llms");
+    match render_docs(topic) {
+        Ok(text) => match write_stdout(&text) {
+            Ok(()) => ExitCode::SUCCESS,
+            // A reader that closed the pipe early (`chezzi docs | head`, an LLM tool reading a
+            // prefix) is the expected case for a bulk dump, not an error — exit clean, don't panic.
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("chezzi docs: cannot write output: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(msg) => {
+            eprintln!("{msg}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Write `s` to stdout, surfacing the I/O error (notably `BrokenPipe`) instead of panicking like
+/// `print!`. Used by `chezzi docs`, whose bundle output is designed to be piped to a reader that may
+/// close early.
+fn write_stdout(s: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    lock.write_all(s.as_bytes())?;
+    lock.flush()
 }
 
 enum CheckOutcome {
@@ -720,15 +844,28 @@ mod init_tests {
         scaffold_project(&d.0).expect("scaffold should succeed");
         let main = d.0.join("src/main.chz");
 
-        // Actually execute the scaffolded entry on the VM (not just type-check it).
+        // The scaffolded main.chz no longer self-calls `main` — the manifest's `:main` entrypoint
+        // does. Running the FILE directly is scripting-mode (top-level only): it defines `main` but
+        // prints nothing.
         let (stdout, stderr, result, _exit) = vm::run_file(&main);
         assert!(
             result.is_ok(),
-            "scaffolded main.chz must run; stderr:\n{stderr}"
+            "scaffolded main.chz must load; stderr:\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("Hello from Chezzi!"),
+            "running the file directly must NOT call main; stdout:\n{stdout}"
+        );
+
+        // Invoking the entry function (what a bare `chezzi run` does) prints the greeting.
+        let (stdout, stderr, result, _exit) = vm::run_file_entry(&main, "main");
+        assert!(
+            result.is_ok(),
+            "scaffolded entry `main` must run; stderr:\n{stderr}"
         );
         assert!(
             stdout.contains("Hello from Chezzi!"),
-            "scaffolded main.chz should print the greeting; stdout:\n{stdout}"
+            "scaffolded entry `main` should print the greeting; stdout:\n{stdout}"
         );
 
         // And run the scaffolded test file through the real `chezzi test` runner: both pass.
@@ -748,40 +885,112 @@ mod init_tests {
     #[test]
     fn scaffolded_manifest_entrypoint_resolves_and_runs() {
         // A freshly-init'd project must run with a bare `chezzi run`: the manifest's active
-        // `entrypoint = "src.main"` parses, resolves root-relatively to src/main.chz, and runs.
+        // `entrypoint = "src.main:main"` parses, resolves the module root-relatively to src/main.chz,
+        // and the `:main` suffix calls `main` directly.
         let d = TmpDir::new();
         scaffold_project(&d.0).expect("scaffold should succeed");
 
-        // The scaffolded manifest parses to an active entrypoint.
+        // The scaffolded manifest parses to an active `module:function` entrypoint.
         let toml = std::fs::read_to_string(d.0.join("chezzi.toml")).unwrap();
         let m = manifest::parse(&toml).expect("scaffolded manifest must parse");
         assert_eq!(
             m.entrypoint.as_deref(),
-            Some("src.main"),
-            "scaffolded manifest must write an active entrypoint"
+            Some("src.main:main"),
+            "scaffolded manifest must write an active module:function entrypoint"
         );
+
+        // Splits into the module path and the function name.
+        let (module_path, entry_fn) = split_entrypoint(m.entrypoint.as_deref().unwrap()).unwrap();
+        assert_eq!(module_path, "src.main");
+        assert_eq!(entry_fn, Some("main"));
 
         // find_root_from_dir(root) → the project root (the cwd case for bare `chezzi run`).
         let root = resolver::find_root_from_dir(&d.0).expect("chezzi.toml marks the root");
 
-        // The entrypoint resolves root-relatively to src/main.chz and runs on the VM.
-        let segs: Vec<String> = m
-            .entrypoint
-            .unwrap()
-            .split('.')
-            .map(str::to_string)
-            .collect();
-        let entry = resolver::module_file(&segs, &root, &resolver::std_root());
+        // The module path resolves root-relatively to src/main.chz.
+        let entry = entrypoint_file(module_path, &root).expect("module path resolves");
         assert!(
             entry.ends_with("src/main.chz"),
             "entry: {}",
             entry.display()
         );
-        let (stdout, stderr, result, _exit) = vm::run_file(&entry);
+
+        // Calling the named entry function prints the greeting.
+        let (stdout, stderr, result, _exit) = vm::run_file_entry(&entry, entry_fn.unwrap());
         assert!(result.is_ok(), "entrypoint must run; stderr:\n{stderr}");
         assert!(
             stdout.contains("Hello from Chezzi!"),
             "entrypoint should print the greeting; stdout:\n{stdout}"
+        );
+
+        // A missing entry function is a clear error, not a silent no-op.
+        let (_o, _e, result, _exit) = vm::run_file_entry(&entry, "nope");
+        let err = result.expect_err("missing entry function must error");
+        let msg = vm::format_trace(&err.message, err.span, &err.trace);
+        assert!(
+            msg.contains("entrypoint function `nope` not found"),
+            "expected a clear not-found error; got:\n{msg}"
+        );
+    }
+
+    #[test]
+    fn doc_topics_are_embedded_and_nonempty() {
+        // Every advertised topic resolves to non-empty embedded content.
+        for (name, _) in DOC_TOPICS {
+            let body = doc_topic(name).unwrap_or_else(|| panic!("topic {name} missing"));
+            assert!(!body.trim().is_empty(), "topic {name} is empty");
+        }
+        // An unknown topic does not resolve.
+        assert!(doc_topic("nope").is_none());
+    }
+
+    #[test]
+    fn llms_bundle_topics_all_resolve() {
+        // Every name in the bundle must be a real embedded topic (the bundle uses expect()).
+        for name in LLMS_BUNDLE {
+            assert!(
+                doc_topic(name).is_some(),
+                "bundle topic {name} not embedded"
+            );
+        }
+        // The bundle pulls together the language + library reference.
+        for name in ["spec", "syntax", "stdlib"] {
+            assert!(LLMS_BUNDLE.contains(&name), "bundle should include {name}");
+        }
+    }
+
+    #[test]
+    fn render_docs_topics_and_bundle() {
+        // A known topic returns its body; an unknown topic errors with guidance.
+        assert!(render_docs("stdlib").unwrap().contains("Standard library"));
+        let err = render_docs("definitely-not-a-topic").unwrap_err();
+        assert!(err.contains("unknown topic"), "got: {err}");
+        // A flag is rejected.
+        assert!(render_docs("--full").is_err());
+        // The listing names the topics.
+        let list = render_docs("topics").unwrap();
+        assert!(list.contains("stdlib") && list.contains("syntax"));
+        // The default bundle stitches spec + syntax + stdlib together with banners.
+        let bundle = render_docs("llms").unwrap();
+        assert!(bundle.contains("# ===== Chezzi reference: spec ====="));
+        assert!(bundle.contains("# ===== Chezzi reference: syntax ====="));
+        assert!(bundle.contains("# ===== Chezzi reference: stdlib ====="));
+    }
+
+    #[test]
+    fn split_entrypoint_forms() {
+        assert_eq!(split_entrypoint("src.main").unwrap(), ("src.main", None));
+        assert_eq!(
+            split_entrypoint("src.main:main").unwrap(),
+            ("src.main", Some("main"))
+        );
+        // Split on the FIRST colon (module path can't contain one; the rest is the fn name verbatim).
+        assert_eq!(split_entrypoint("a.b:c:d").unwrap(), ("a.b", Some("c:d")));
+        // A trailing `:` with no function name is rejected (would otherwise be an empty fn name).
+        let err = split_entrypoint("src.main:").unwrap_err();
+        assert!(
+            err.contains("must be followed by a function name"),
+            "got: {err}"
         );
     }
 

@@ -201,9 +201,11 @@ collection/`<params>`/`<argList>` productions in [`grammar.bnf`](grammar.bnf).)
 **Entry model.** Programs run top-to-bottom; there is no automatic `main`. An `Err`/`None` left
 unhandled at the top level (a bare expression statement, or a top-level `?`) exits the program with
 `unhandled error: …` and a non-zero code. A bare `chezzi run` (no file argument) runs the project
-manifest's `[project] entrypoint` — a **dotted module path** (e.g. `"src.main"`), resolved
-root-relatively and executed top-to-bottom like any other file (it is the *module* that runs, not a
-function — the entry module still calls its own `main()`).
+manifest's `[project] entrypoint` — a **dotted module path**, optionally suffixed with
+**`:function`** (e.g. `"src.main:main"`). The module runs top-to-bottom like any other file; with a
+`:function` suffix the entry function is then **called** (a missing/non-function name is a clear
+error), so the source needs no trailing call. Without the suffix the module just runs top-to-bottom
+and calls its own `main()`. Running an explicit file (`chezzi run <file>`) is always top-level-only.
 
 ## Imports & module resolution
 
@@ -264,8 +266,10 @@ its FFI-width license.
 `chezzi init [dir]` scaffolds a new project (`chezzi.toml` + `src/main.chz` + an example `*_test.chz`).
 The generated `chezzi.toml` is **both a root marker and a parsed manifest**: the resolver checks for
 its *presence* to fix the root, and the toolchain parses its `[project]` keys. `name`/`version` are
-metadata; **`entrypoint`** (a dotted module path, scaffolded active as `"src.main"`) is what a bare
-`chezzi run` executes. The parser is a tiny fixed-schema reader (`[section]` headers, `key = "value"`
+metadata; **`entrypoint`** (a dotted module path + optional `:function`, scaffolded active as
+`"src.main:main"`) is what a bare `chezzi run` executes — the `:main` suffix calls `main` so the
+scaffolded `src/main.chz` needs no trailing call. The parser is a tiny fixed-schema reader
+(`[section]` headers, `key = "value"`
 string pairs, `#` comments); unknown keys/sections are ignored, and an empty `chezzi.toml` is a valid
 root marker (all fields default to unset, so `entrypoint` is required only for the no-file `chezzi run`).
 
@@ -499,7 +503,7 @@ src/
   runtime/      # builtins + native std modules
   resolver/     # module path resolution
   test_runner   # `chezzi test` — discovers + runs `test fn`s in `*_test.chz`
-  main.rs       # `chezzi run/test/repl/tokens/ast`
+  main.rs       # `chezzi run/test/docs/repl/tokens/ast`
 std/            # std modules written in Chezzi
 examples/*.chz  # golden-test corpus + LLM eval material
 tests/          # Rust unit + golden tests

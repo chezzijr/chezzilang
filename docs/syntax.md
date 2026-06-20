@@ -394,8 +394,10 @@ unknown to the desugar pass, methods are resolved by name: if two structs define
 with **different** parameters, a named call to it is rejected as ambiguous and — since the binding
 can't be chosen safely — its **defaults aren't filled** either (the call then fails the arity check),
 so give same-named methods the same parameter shape or unique names. A method that reuses a built-in
-method name (`map`, `push`, `len`, …) does not get default/named support. Defaults are **not yet**
-supported on closures or enum variants. (Per §above, a default may be any expression that doesn't
+method name (`map`, `push`, `len`, …) does not get default/named support. Defaults are **not**
+supported on **closures** or on **enum variant constructors** — note this is the variant
+*constructor*; an enum's *methods* take defaults just like struct methods. (Per §above, a default may
+be any expression that doesn't
 reference another parameter — a literal, a global, arithmetic, or a call; only param-referencing
 defaults are rejected.)
 
@@ -1273,27 +1275,40 @@ path, not the library file's.
 ## 9b. Program entry — there is no automatic `main`
 
 Chezzi is a scripting language: a program runs **top-to-bottom**. There is **no automatic entry
-point** — `main` is an ordinary function. Define it and call it yourself if you want one:
+point** in the language — `main` is an ordinary function. Run a file directly and only its top-level
+runs, so you call `main` yourself:
 
 ```chezzi
 fn main():
     print("hello")
 
-main()        # nothing runs main for you
+main()        # running this FILE directly needs the call; nothing runs main for you
 ```
 
-`chezzi.toml`'s `[project] entrypoint` (a dotted module path) declares which module a bare
-`chezzi run` runs; the language core does not special-case `main` (the entry module still calls its
-own `main()`).
+For a **project**, `chezzi.toml`'s `[project] entrypoint` declares what a bare `chezzi run` executes.
+It is a dotted module path, optionally suffixed with **`:function`**:
+
+```toml
+[project]
+entrypoint = "src.main:main"   # run src/main.chz's top-level, then call its `main`
+# entrypoint = "src.main"      # (no :function) run src/main.chz's top-level only — call main yourself
+```
+
+With a `:function` suffix, a bare `chezzi run` runs the entry module's top-level and **then calls that
+function** — so the source needs no trailing call, and you can swap which function runs (e.g.
+`main` → `other_main`) by editing the manifest alone. A named function that doesn't exist (or isn't a
+function) is a clear error, not a silent no-op. Without the suffix, the module top-level runs and
+nothing is auto-called. Running an explicit file (`chezzi run src/main.chz`) is always top-level-only
+(scripting model) regardless of the manifest.
 
 **`chezzi init [dir]`** scaffolds a new project (`dir` defaults to the current directory, created if
-missing): a `chezzi.toml` manifest, `src/main.chz` (a `fn main():` followed by a top-level `main()`
-call — there is no automatic entry point), and an example `src/main_test.chz` with `test fn`s. It
-refuses to overwrite an existing `chezzi.toml`. The manifest is **both a root marker and a parsed
-manifest**: the toolchain reads its `[project]` keys (`name`/`version` metadata, and **`entrypoint`**,
-scaffolded active as `"src.main"`, which a bare `chezzi run` executes). It is a tiny fixed-schema
-reader (`[section]` headers, `key = "value"` string pairs, `#` comments); an empty `chezzi.toml` is a
-valid root marker with no entrypoint.
+missing): a `chezzi.toml` manifest, `src/main.chz` (a `fn main():` — **no** trailing call, since the
+scaffolded `entrypoint = "src.main:main"` calls it), and an example `src/main_test.chz` with
+`test fn`s. It refuses to overwrite an existing `chezzi.toml`. The manifest is **both a root marker and
+a parsed manifest**: the toolchain reads its `[project]` keys (`name`/`version` metadata, and
+**`entrypoint`**, scaffolded active as `"src.main:main"`). It is a tiny fixed-schema reader
+(`[section]` headers, `key = "value"` string pairs, `#` comments); an empty `chezzi.toml` is a valid
+root marker with no entrypoint.
 
 ## 10. Strings & interpolation
 
@@ -1812,54 +1827,29 @@ via `owned_str` — **shipped**; **flat-scalar structs by value** — **shipped*
 
 ## 13. Standard library (v1)
 
-Always available (no import): `print`, `len`, `range`, `int()`, `str()`, `float()`,
+> **The complete library reference — every global builtin, type method, runtime type, and `std.*`
+> module with signatures — lives in [`stdlib.md`](stdlib.md).** This section is a short orientation.
+
+Always available (no import): `print`, `len`, `range`, `int()`/`float()`/`str()`,
 `ord(s)→int` (first codepoint), `chr(n)→str` (codepoint → 1-char string), `set()`/`set(list)`,
-`panic(msg)` (raise a recoverable fault; see `recover:`), plus methods on core types.
+`panic(msg)` (raise a recoverable fault; see `recover:`), plus methods on the core types
+(`list`/`map`/`set`/`str`/`bytes`/`bytearray`).
 
-`std.math.abs` is int+float polymorphic (int → int, float → float). `min`/`max`/`clamp` live in
-**`std.cmp`** as generic `[T: Comparable]` functions — they work on int, float, str, **and any
-struct that implements `compare`** (the old numeric-only `std.math.min`/`max` were replaced by these
-in M7). `list.sort()` is likewise Comparable: it sorts lists of int/float/str or of any struct with
-a `compare` method.
+Modules are `import std.X` then `X.func(...)`. Importable:
+`std.io`, `std.math`, `std.str`, `std.cmp`, `std.os`, `std.json`, `std.process`, `std.fs`,
+`std.time`, `std.regex`, `std.request`, `std.net`, `std.ffi`, `std.iter`, `std.ref`, `std.cancel`.
 
-**`std.json`** (M8): `json.parse(s) -> Result[Json]` and `json.stringify(j) -> str` over a dynamic
-`Json` enum (`Null`/`Bool`/`Num`/`Str`/`Arr`/`Obj`), with accessors `as_int`/`as_float`/`as_str`/
-`as_bool`/`get`/`at`/`is_null`/`as_object`/`as_array`. For known shapes, `json.decode[T](s) ->
-Result[T]` deserializes straight into a struct / `map[str, V]` / `list[T]` / scalar (Option fields
-accept null-or-absent; extra keys ignored; recursive/generic struct targets are rejected). Note: a
-JSON *literal in Chezzi source* either uses a raw string (`r"""{"k": 1}"""`, verbatim — preferred) or
-doubles its braces (`"{{ }}"`) — in a normal string a bare `{…}` is interpolation.
+A few cross-cutting notes (full detail in `stdlib.md`):
 
-**`std.os`**: `args() -> list[str]`, `env(key) -> str?`, `getcwd() -> Result[str]`, and
-`exit(code)` — a **hard, uncatchable** exit: the program halts immediately with `code` as its process
-exit status (clamped `0..=255`), unwinding past any `recover:`. Output written before the call is
-preserved; statements after it never run.
-**`std.process`** (M8): `cmd(s) -> Result[str]` runs `s` via the shell — `Ok(stdout)` on success,
-`Err(stderr)` otherwise. **`std.fs`**: `list_dir`, `exists`, `is_file`, `is_dir`, `size`, `glob`
-(`*`/`?` in the last path component). **`std.time`**: `now()` (epoch secs), `monotonic()` (secs,
-steady), `sleep_ms(n)`, `format(epoch)` (UTC `"YYYY-MM-DD HH:MM:SS"`).
-
-**`std.regex`** (M9, backed by the `regex` crate — stateless, with an internal compile cache):
-`is_match(pat, s) -> Result[bool]`, `find(pat, s) -> Result[Option[Match]]`,
-`find_all(pat, s) -> Result[list[Match]]`, `replace_all(pat, s, repl) -> Result[str]`,
-`split(pat, s) -> Result[list[str]]`. A `Match` is `{text: str, start: int, end: int,
-groups: list[str]}` (`start`/`end` are **byte** offsets; `groups` is capture groups 1..n, a
-non-participating optional group is `""`). A bad pattern → `Err`. Patterns are ordinary strings, so a
-literal backslash is written `\\` (e.g. `"\\d+"`, `"\\."`).
-
-**`std.request`** (M9, blocking HTTP/HTTPS via `ureq` + rustls): `get(url) -> Result[Response]`,
-`post(url, body) -> Result[Response]`. A `Response` is `{status: int, body: str,
-headers: map[str, str]}` (header names lowercased). A ≥400 status is a normal `Response` (its
-`status` carries the code); only transport/DNS/TLS failures are `Err`. Synchronous — blocks the
-single thread until the response arrives. `Match` and `Response` are reserved (program-global) type
-names.
-
-**`std.ffi`** (the C-ABI handle vocabulary, pairs with the opaque `ptr` type — see §12b):
-`null() -> ptr` (the NULL sentinel) and `is_null(p: ptr) -> bool`. The `ptr` *type* itself is builtin
-(usable in `extern` signatures without import); only these value helpers are imported.
-
-Importable: `std.io`, `std.math`, `std.str`, `std.cmp`, `std.os`, `std.json`, `std.process`,
-`std.fs`, `std.time`, `std.regex`, `std.request`, `std.net`, `std.ffi`, `std.iter`, `std.ref`.
+- `min`/`max`/`clamp` live in **`std.cmp`** as generic `[T: Comparable]` functions (int/float/str and
+  any struct with a `compare` method); `list.sort()` is likewise Comparable.
+- **`std.json`** parses/stringifies a dynamic `Json` enum, and `json.decode[T](s) -> Result[T]`
+  deserializes straight into a known shape. A JSON *literal in source* needs a raw string
+  (`r"""{"k": 1}"""`) or doubled braces — a bare `{…}` in a normal string is interpolation.
+- **`std.os.exit(code)`** is a hard, uncatchable exit (does not run `defer`s). **`std.process.cmd`**
+  runs a shell line — never interpolate untrusted input.
+- `Match` (from `std.regex`) and `Response` (from `std.request`) are reserved program-global struct
+  names.
 
 ---
 

@@ -11,6 +11,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ `chezzi docs` + `module:function` entrypoint + stdlib reference (tooling/docs).** Three related
+changes: (1) **`chezzi docs [topic]`** prints embedded language docs — topics `spec`/`syntax`/`stdlib`,
+and a bare `chezzi docs` (or `docs llms`) emits the full reference bundle (spec+syntax+stdlib) for
+piping to an LLM. Docs are `include_str!`-embedded so the
+binary is self-contained; logic is a pure `render_docs` (unit-tested), `cmd_docs` just prints/maps to
+`ExitCode`. (2) **`module:function` entrypoint:** `chezzi.toml`'s `entrypoint` now accepts a
+`:function` suffix (`"src.main:main"`) — a bare `chezzi run` runs the module top-level and then calls
+that function (missing/non-function = clear error), so the source needs no trailing call and you can
+swap which function runs via the manifest. Bare `"src.main"` keeps the old run-top-level behavior;
+explicit `chezzi run <file>` is always top-level-only. Implemented via `main::split_entrypoint` +
+`vm::invoke_entrypoint` (reuses `invoke_value`/`entry_home`) threaded through a new
+`run_file_with_entry`; the old `run_file_with`/`run_file_parallel` became `#[cfg(test)]` parity-test
+helpers. Scaffold now writes `entrypoint = "src.main:main"` and a `main.chz` with no trailing call.
+(3) **New [`docs/stdlib.md`](docs/stdlib.md)** — the previously-undocumented stdlib/builtin surface
+(global builtins, per-type methods, runtime types, native + pure-Chezzi `std.*` modules); `syntax.md
+§13` shrank to a pointer + orientation. Docs synced (`spec.md`, `syntax.md §9b`, `CLAUDE.md`,
+`manifest.rs`). VM↔interp parity untouched (entrypoint is VM-only; no `examples/*.chz` changed).
+
 **✅ Enum methods (mirrors the struct-method machinery end-to-end).** Enums now accept `fn name(self, …)`
 method blocks after their variants, parsed via the same `parse_fn(true)` path structs use; the parser
 enforces variants-before-methods. (`test fn` is **rejected** in enum bodies — enum test *suites* are not

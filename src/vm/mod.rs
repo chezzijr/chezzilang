@@ -3008,6 +3008,49 @@ impl Vm {
         Ok(())
     }
 
+    /// Bare `chezzi run` with a `module:function` manifest entrypoint — invoke a named top-level
+    /// function of the entry module after `run()` has initialized all modules. Looks the name up in
+    /// the entry module's namespace (so a re-exported import works too) and calls it with no args.
+    /// A missing name (or a non-callable binding) is a clear runtime error rather than a silent no-op.
+    pub fn invoke_entrypoint(&mut self, fn_name: &str) -> Result<(), RuntimeError> {
+        let span = Span { line: 1, col: 1 };
+        let home = self.entry_home();
+        // Read the binding by name from the entry module's slot table (mirrors `module_define`).
+        let callee = match self.heap.get(home) {
+            Obj::Module { slots, index, .. } => index.get(fn_name).map(|&i| slots[i as usize]),
+            _ => None,
+        };
+        let callee = callee.ok_or_else(|| {
+            self.err(
+                format!(
+                    "entrypoint function `{fn_name}` not found in module `{}`",
+                    self.module_name(home)
+                ),
+                span,
+            )
+        })?;
+        // Guard with a clear message before `invoke_value`'s generic "not callable" fault.
+        let callable = matches!(
+            callee,
+            Value::Obj(h) if matches!(
+                self.heap.get(h),
+                Obj::Func { .. } | Obj::Closure { .. } | Obj::Native { .. } | Obj::Cffi(_)
+            )
+        );
+        if !callable {
+            return Err(self.err(
+                format!(
+                    "entrypoint `{fn_name}` in module `{}` is not a function (it is a {})",
+                    self.module_name(home),
+                    self.type_name(callee)
+                ),
+                span,
+            ));
+        }
+        self.invoke_value(callee, Vec::new(), span)?;
+        Ok(())
+    }
+
     /// `chezzi test` — invoke a suite method/lifecycle hook proto with `self` bound to `recv` (a
     /// suite instance). Returns the method's value (ignored by the runner) or its fault.
     pub fn invoke_suite_method(
@@ -14808,33 +14851,62 @@ pub fn run_file(entry: &std::path::Path) -> RunOutput {
     run_file_with(entry, crate::native::HostConfig::default())
 }
 
+/// Like [`run_file`], but invokes a named top-level entry function after the module loads (the
+/// `module:function` manifest path). Test-only convenience over [`run_file_with_entry`].
+#[cfg(test)]
+pub fn run_file_entry(entry: &std::path::Path, entry_fn: &str) -> RunOutput {
+    run_file_with_entry(
+        entry,
+        crate::native::HostConfig::default(),
+        false,
+        Some(entry_fn),
+    )
+}
+
 /// A finished run: captured `(stdout, stderr, outcome, exit_code)`. Stderr holds `std.io.eprint`
 /// output. `exit_code` is `Some(n)` only when the program called `std.os.exit(n)` (a clean halt,
 /// so `outcome` is `Ok`); `None` for a normal end or a runtime error.
 pub type RunOutput = (String, String, Result<(), RunError>, Option<i32>);
 
 /// Like [`run_file`], but with an explicit [`crate::native::HostConfig`] (args/env/stdin) for the
-/// native std modules. The CLI passes a process-backed config; tests inject a deterministic one.
+/// native std modules. Test-only convenience over [`run_file_with_entry`] (entry-fn `None`); the
+/// CLI calls [`run_file_with_entry`] directly so a `module:function` entrypoint can name a function.
+#[cfg(test)]
 pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
-    run_file_engine(entry, cfg, false)
+    run_file_engine(entry, cfg, false, None)
 }
 
 /// Like [`run_file_with`], but runs on the **B3.3-threads `--parallel` engine** (real OS-thread
-/// pool + condvar `recv`) rather than the cooperative default. The CLI selects this for
-/// `chezzi run --parallel <file>`.
+/// pool + condvar `recv`). Test-only convenience over [`run_file_with_entry`]; the parity tests use
+/// it to exercise the OS-thread engine.
+#[cfg(test)]
 pub fn run_file_parallel(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
-    run_file_engine(entry, cfg, true)
+    run_file_engine(entry, cfg, true, None)
+}
+
+/// Resolve, compile, and run a program from its entry path on the dedicated VM thread, then — if
+/// `entry_fn` is `Some` — invoke that named top-level function of the entry module (the
+/// `module:function` manifest entrypoint). `None` runs the module top-level only (scripting model).
+/// `parallel` selects the OS-thread engine. This is the single entry the CLI's `chezzi run` uses.
+pub fn run_file_with_entry(
+    entry: &std::path::Path,
+    cfg: crate::native::HostConfig,
+    parallel: bool,
+    entry_fn: Option<&str>,
+) -> RunOutput {
+    run_file_engine(entry, cfg, parallel, entry_fn.map(str::to_string))
 }
 
 fn run_file_engine(
     entry: &std::path::Path,
     cfg: crate::native::HostConfig,
     parallel: bool,
+    entry_fn: Option<String>,
 ) -> RunOutput {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
-        .spawn(move || run_file_inner(&entry, cfg, parallel))
+        .spawn(move || run_file_inner(&entry, cfg, parallel, entry_fn.as_deref()))
         .expect("failed to spawn VM thread")
         .join()
         .expect("VM thread panicked")
@@ -14844,6 +14916,7 @@ fn run_file_inner(
     entry: &std::path::Path,
     cfg: crate::native::HostConfig,
     parallel: bool,
+    entry_fn: Option<&str>,
 ) -> RunOutput {
     let graph = match crate::resolver::build_graph(entry) {
         Ok(g) => g,
@@ -14881,6 +14954,11 @@ fn run_file_inner(
     // `drain_live_executors` via `pending_exit`).
     let result = vm
         .run()
+        // A `module:function` entrypoint calls the named function once the modules are initialized.
+        .and_then(|()| match entry_fn {
+            Some(name) => vm.invoke_entrypoint(name),
+            None => Ok(()),
+        })
         .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
     // A pending exit means `result` is the `exit()` unwind sentinel, not a fault: report the
     // requested code as a clean halt.

@@ -1,7 +1,7 @@
 # Chezzi — Claude Code Guide
 
 Chezzi is a fast, statically-typed, Python-feel scripting language, hand-built in Rust.
-Full design + roadmap: **[`docs/spec.md`](docs/spec.md)**. Syntax cheat-sheet: **[`docs/syntax.md`](docs/syntax.md)**. Canonical grammar: **[`docs/grammar.bnf`](docs/grammar.bnf)** (executed + drift-checked by `cargo test conformance`). Progress tracker: **[`PROGRESS.md`](PROGRESS.md)**.
+Full design + roadmap: **[`docs/spec.md`](docs/spec.md)**. Syntax cheat-sheet: **[`docs/syntax.md`](docs/syntax.md)**. Stdlib/builtin reference: **[`docs/stdlib.md`](docs/stdlib.md)**. Canonical grammar: **[`docs/grammar.bnf`](docs/grammar.bnf)** (executed + drift-checked by `cargo test conformance`). Progress tracker: **[`PROGRESS.md`](PROGRESS.md)**. The docs are also emitted by the CLI: `chezzi docs <topic>` / `chezzi docs` (full LLM bundle).
 
 ## How we work
 
@@ -37,7 +37,7 @@ cargo test conformance   # execute docs/grammar.bnf, differential-test vs the pa
 cargo clippy -- -D warnings   # lint (must be clean before commit)
 cargo run -- help        # CLI usage
 
-cargo run -- init my_proj                # scaffold a new project (chezzi.toml w/ entrypoint="src.main" + src/main.chz + a _test.chz)
+cargo run -- init my_proj                # scaffold a new project (chezzi.toml w/ entrypoint="src.main:main" + src/main.chz + a _test.chz)
 cargo run -- tokens examples/hello.chz   # token stream (M1)
 cargo run -- ast    examples/hello.chz   # parsed AST (M2)
 cargo run -- check  examples/hello.chz   # type-check only (M4); --errors=json for machine output
@@ -47,6 +47,7 @@ cargo run -- run --serial   examples/hello.chz   # cooperative single-thread VM 
 cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alias (engine is now default)
 cargo run -- run --threads=4 examples/primes_parallel.chz  # size the OS-thread pool (0/omitted = all cores; env CHEZZI_THREADS)
 cargo run -- test examples/              # run every `test fn` in *_test.chz (M20); file or dir, default cwd
+cargo run -- docs                        # print docs: no topic = full LLM reference bundle; `docs <topic>` = one (spec/syntax/stdlib); `docs topics` lists them
 cargo run -- repl                        # interactive REPL (NOT IMPLEMENTED — stub errors; see src/main.rs:65)
 
 cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see docs/benchmarks.md)
@@ -54,8 +55,11 @@ cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see 
 
 > Flags go **before** the file path; anything after the file is passed to the program.
 > `chezzi run` with NO file argument runs the project manifest's `[project] entrypoint` (a dotted
-> module path, e.g. `"src.main"`): the project root is found by walking up from the cwd for
-> `chezzi.toml`, and the entrypoint is resolved root-relatively. `chezzi run <file>` runs that file.
+> module path with an optional `:function` suffix, e.g. `"src.main:main"`): the project root is found
+> by walking up from the cwd for `chezzi.toml`, the module resolves root-relatively and runs
+> top-to-bottom, and with a `:function` suffix that function is then called (missing/non-function =
+> clear error). Without the suffix the module top-level runs only. `chezzi run <file>` runs that file
+> (top-level only, scripting model).
 > `chezzi run` defaults to the VM's real-thread OS-thread engine. `--serial` selects the
 > cooperative single-thread VM (the frozen byte-identical parity oracle); `--parallel` is kept as a
 > no-op alias for the default. `--threads=N` (or env `CHEZZI_THREADS`) sizes the OS-thread engine's
