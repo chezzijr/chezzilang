@@ -6958,3 +6958,14 @@ fn panic_arity_is_exactly_one() {
 fn panic_is_reserved_against_extern_shadowing() {
     assert!(is_reserved_name("panic"));
 }
+
+#[test]
+fn user_method_named_panic_does_not_suppress_missing_return() {
+    // A user method literally named `panic` compiles to CallMethod and RETURNS normally — it does
+    // NOT diverge. A `-> int` body whose tail is `p.panic(...)` must still be rejected for falling
+    // off the end (only the bare builtin call `panic(...)` is a divergence).
+    rejects(
+        "struct P:\n    x: int\n    fn panic(self, m: str) -> int:\n        return -1\nfn f(p: P, ok: bool) -> int:\n    if ok:\n        return 100\n    p.panic(\"bad\")\nfn main():\n    print(\"ok\")\nmain()\n",
+        "can fall off the end",
+    );
+}

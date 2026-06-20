@@ -3206,7 +3206,11 @@ impl Checker {
         if let ExprKind::Call { callee, .. } = &e.kind {
             match &callee.kind {
                 ExprKind::Ident(name) => name == "exit" || name == "panic",
-                ExprKind::Field { name, .. } => name == "exit" || name == "panic",
+                // Only `exit` has a module-qualified form (`os.exit`); `panic` is bare-call only.
+                // A user method named `panic` (`obj.panic()`) compiles to CallMethod and RETURNS
+                // normally, so treating it as divergence would suppress missing-return and let a
+                // typed body fall through to nil. Keep the Field arm to `exit`.
+                ExprKind::Field { name, .. } => name == "exit",
                 _ => false,
             }
         } else {
