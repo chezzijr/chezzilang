@@ -6919,3 +6919,48 @@ fn inline_nonnil_expr_against_nil_ret_rejected() {
     ok("fn a(): print(\"x\")\nfn main():\n    a()\nmain()\n");
     ok("fn a() -> nil: print(\"x\")\nfn main():\n    a()\nmain()\n");
 }
+
+// ===== enum methods =====
+
+#[test]
+fn enum_method_call_typechecks() {
+    ok(
+        "enum Color:\n    Red\n    Green\n    fn area(self) -> int:\n        match self:\n            Color.Red: return 1\n            Color.Green: return 2\nfn main():\n    c := Color.Red\n    x: int = c.area()\n    print(x)\nmain()\n",
+    );
+}
+
+#[test]
+fn enum_method_missing_rejected() {
+    rejects(
+        "enum Color:\n    Red\n    Green\nfn main():\n    c := Color.Red\n    c.foo()\nmain()\n",
+        "no method 'foo'",
+    );
+}
+
+#[test]
+fn enum_method_returns_new_variant_ok() {
+    ok(
+        "enum Sw:\n    On\n    Off\n    fn flip(self) -> Sw:\n        match self:\n            Sw.On: return Sw.Off\n            Sw.Off: return Sw.On\nfn main():\n    s := Sw.On\n    print(s.flip().flip() == s)\nmain()\n",
+    );
+}
+
+#[test]
+fn generic_enum_method_uses_type_param_ok() {
+    ok(
+        "enum Box[T]:\n    Val(T)\n    fn get(self) -> T:\n        match self:\n            Box.Val(x): return x\nfn main():\n    b := Box.Val(5)\n    n: int = b.get()\n    print(n)\nmain()\n",
+    );
+}
+
+#[test]
+fn enum_str_satisfies_stringable_ok() {
+    ok(
+        "enum Color:\n    Red\n    Green\n    fn str(self) -> str:\n        match self:\n            Color.Red: return \"red\"\n            Color.Green: return \"green\"\nfn main():\n    print(Color.Red)\nmain()\n",
+    );
+}
+
+#[test]
+fn enum_add_bound_into_generic_fn_ok() {
+    ok(
+        "enum Money:\n    Cents(int)\n    fn add(self, o: Money) -> Money:\n        match self:\n            Money.Cents(a):\n                match o:\n                    Money.Cents(b): return Money.Cents(a + b)\nfn twice[T: Add](x: T) -> T:\n    return x + x\nfn main():\n    m := twice(Money.Cents(3))\n    print(m.add(m) == Money.Cents(12))\nmain()\n",
+    );
+}

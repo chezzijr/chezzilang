@@ -4671,13 +4671,14 @@ impl Vm {
                     _ => unreachable!(),
                 })
             }
-            // Arithmetic overloading: `+`/`-`/`*` on two structs dispatch to `add`/`sub`/`mul` (the
-            // `Add`/`Sub`/`Mul` protocols). The checker has verified conformance. Must precede the
-            // string-concat `Add` arm below (which would otherwise reject struct+struct).
+            // Arithmetic overloading: `+`/`-`/`*` on two structs (or two enums) dispatch to
+            // `add`/`sub`/`mul` (the `Add`/`Sub`/`Mul` protocols). The checker has verified
+            // conformance. Must precede the string-concat `Add` arm below (which would otherwise
+            // reject struct+struct).
             (Value::Obj(ha), Value::Obj(hb))
                 if matches!(op, Op::Add | Op::Sub | Op::Mul)
-                    && matches!(self.heap.get(ha), Obj::Struct { .. })
-                    && matches!(self.heap.get(hb), Obj::Struct { .. }) =>
+                    && matches!(self.heap.get(ha), Obj::Struct { .. } | Obj::Enum { .. })
+                    && matches!(self.heap.get(hb), Obj::Struct { .. } | Obj::Enum { .. }) =>
             {
                 self.struct_arith(op, l, r, span)?
             }
@@ -4728,25 +4729,56 @@ impl Vm {
             Op::Mul => "mul",
             _ => unreachable!("struct_arith only handles + - *"),
         };
-        let Value::Obj(h) = l else { unreachable!() };
-        let Obj::Struct { name, .. } = self.heap.get(h) else {
-            unreachable!()
-        };
-        let name = name.clone();
-        let def = self
-            .program
-            .structs
-            .get(name.as_ref())
-            .cloned()
-            .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
-        let proto = *def.methods.get(method).ok_or_else(|| {
-            self.err(
-                format!("struct '{}' has no '{method}' method", def.display_name),
-                span,
-            )
-        })?;
-        let home = self.module_objs[def.module_idx];
+        let (proto, home) = self.resolve_overload_method(l, method, span)?;
         self.guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))
+    }
+
+    /// Resolve `(proto, home_module_obj)` for an operator-overload method `method` on receiver `recv`
+    /// — a struct (via `program.structs`) or an enum (via `program.enum_methods` + `enum_home`). The
+    /// shared dispatch core for arithmetic and ordering overloads on both struct and enum values.
+    fn resolve_overload_method(
+        &self,
+        recv: Value,
+        method: &str,
+        span: Span,
+    ) -> Result<(usize, GcRef), RuntimeError> {
+        let Value::Obj(h) = recv else { unreachable!() };
+        match self.heap.get(h) {
+            Obj::Struct { name, .. } => {
+                let name = name.clone();
+                let def = self
+                    .program
+                    .structs
+                    .get(name.as_ref())
+                    .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
+                let proto = *def.methods.get(method).ok_or_else(|| {
+                    self.err(
+                        format!("struct '{}' has no '{method}' method", def.display_name),
+                        span,
+                    )
+                })?;
+                Ok((proto, self.module_objs[def.module_idx]))
+            }
+            Obj::Enum { variant_id, .. } => {
+                let key = self.enum_names(*variant_id).0.to_string();
+                let proto = *self
+                    .program
+                    .enum_methods
+                    .get(&key)
+                    .and_then(|ms| ms.get(method))
+                    .ok_or_else(|| {
+                        self.err(
+                            format!(
+                                "enum '{}' has no '{method}' method",
+                                crate::compiler::bare_display(&key)
+                            ),
+                            span,
+                        )
+                    })?;
+                Ok((proto, self.module_objs[self.enum_home_module(&key)]))
+            }
+            _ => unreachable!("overload receiver is a struct or enum"),
+        }
     }
 
     /// Bitwise / shift ops — int-only (gap #13). Shift amounts outside `0..64` are a runtime error
@@ -4885,8 +4917,8 @@ impl Vm {
         // (the `Comparable` protocol). The checker has verified conformance. Equality stays
         // structural; only ordering is overloaded. Mirrors `interp::struct_ordering`.
         if let (Value::Obj(hl), Value::Obj(hr)) = (l, r)
-            && matches!(self.heap.get(hl), Obj::Struct { .. })
-            && matches!(self.heap.get(hr), Obj::Struct { .. })
+            && matches!(self.heap.get(hl), Obj::Struct { .. } | Obj::Enum { .. })
+            && matches!(self.heap.get(hr), Obj::Struct { .. } | Obj::Enum { .. })
         {
             return self.struct_ordering(op, l, r, span);
         }
@@ -4948,26 +4980,7 @@ impl Vm {
         r: Value,
         span: Span,
     ) -> Result<std::cmp::Ordering, RuntimeError> {
-        let Value::Obj(h) = l else { unreachable!() };
-        let Obj::Struct { name, .. } = self.heap.get(h).clone() else {
-            unreachable!()
-        };
-        let def = self
-            .program
-            .structs
-            .get(name.as_ref())
-            .cloned()
-            .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
-        let proto = *def.methods.get("compare").ok_or_else(|| {
-            self.err(
-                format!(
-                    "struct '{}' has no 'compare' method (needed to order its values)",
-                    def.display_name
-                ),
-                span,
-            )
-        })?;
-        let home = self.module_objs[def.module_idx];
+        let (proto, home) = self.resolve_overload_method(l, "compare", span)?;
         match self.guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))? {
             Value::Int(n) => Ok(n.cmp(&0)),
             other => Err(self.err(
@@ -6399,6 +6412,60 @@ impl Vm {
                     .map(|d| d.display_name.clone())
                     .unwrap_or_else(|| crate::compiler::bare_display(name.as_ref()));
                 Err(self.err(format!("struct '{display}' has no method '{method}'"), span))
+            }
+            // Enum method dispatch (name-resolved, like structs). Enums are type-erased — no `tid`,
+            // so the method IC is skipped (follow-up lever); we resolve `enum_methods[key][method]`
+            // off the variant's `enum_name` and dispatch with the same `self`-binding path structs use.
+            Obj::Enum { variant_id, .. } => {
+                let prog = Arc::clone(&self.program);
+                let enum_key = self.enum_names(variant_id).0.to_string();
+                let resolved = prog
+                    .enum_methods
+                    .get(&enum_key)
+                    .and_then(|ms| ms.get(method).copied());
+                if let Some(proto) = resolved {
+                    // An enum method's home module is the enum's declaring module (recorded in
+                    // `enum_home`), so its body resolves top-level names against the right globals.
+                    let home = self.module_objs[self.enum_home_module(&enum_key)];
+                    if self.program.protos[proto].arity != argc + 1 {
+                        return Err(self.err(
+                            format!(
+                                "function '{}' expects {} argument(s), got {}",
+                                self.program.protos[proto].name,
+                                self.program.protos[proto].arity,
+                                argc + 1
+                            ),
+                            span,
+                        ));
+                    }
+                    if self.program.protos[proto].is_generator {
+                        let mut gen_args = Vec::with_capacity(argc + 1);
+                        gen_args.push(recv);
+                        gen_args.extend(args);
+                        let g = self.alloc_generator(proto, home, None, gen_args);
+                        self.push(g);
+                        return Ok(());
+                    }
+                    // Flatten only on the real dispatch-loop path (`ic != NO_IC`); re-entrant callers
+                    // pass `NO_IC` and use the synchronous `run_proto` path (mirrors the struct arm).
+                    if ic != NO_IC {
+                        let base = self.stack.len();
+                        self.stack.push(recv);
+                        self.stack.extend(args);
+                        return self.push_frame_in_place(proto, home, None, base, span);
+                    }
+                    let mut call_args = Vec::with_capacity(argc + 1);
+                    call_args.push(recv);
+                    call_args.extend(args);
+                    let v = self.run_proto(proto, home, None, call_args, true, false, span)?;
+                    if self.paused() {
+                        return Ok(());
+                    }
+                    self.push(v);
+                    return Ok(());
+                }
+                let display = crate::compiler::bare_display(&enum_key);
+                Err(self.err(format!("type {display} has no method '{method}'"), span))
             }
             _ => Err(self.err(
                 format!("type {} has no method '{method}'", self.type_name(recv)),
@@ -11871,6 +11938,12 @@ impl Vm {
             .map_or(("?", "?"), |d| (d.enum_name.as_str(), d.name.as_str()))
     }
 
+    /// The index of the module that declared the enum keyed by `enum_key` (its method bodies resolve
+    /// top-level names against that module's globals). Defaults to module 0 if unrecorded.
+    fn enum_home_module(&self, enum_key: &str) -> usize {
+        self.program.enum_home.get(enum_key).copied().unwrap_or(0)
+    }
+
     /// Construct an enum from `Op::NewEnum`. M19 lever #2 — the dense `variant_id` is baked into the op
     /// at compile time (no runtime hash lookup); it is stamped onto the instance instead of the two
     /// per-instance type/variant `Box<str>`s. `variant` is used only for the arity-mismatch message.
@@ -13710,6 +13783,22 @@ impl Vm {
                 variant_id,
                 payload,
             } => {
+                // `str(self) -> str` overrides the default `Variant(payload)` repr (Stringable).
+                // Only a self-only method is the hook (mirrors the struct arm above).
+                let key = self.enum_names(variant_id).0.to_string();
+                if let Some(&proto) = self
+                    .program
+                    .enum_methods
+                    .get(&key)
+                    .and_then(|m| m.get("str"))
+                    && self.program.protos[proto].arity == 1
+                {
+                    let home = self.module_objs[self.enum_home_module(&key)];
+                    let res = self.guarded(|vm| {
+                        vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span)
+                    })?;
+                    return self.stringify_into(out, res, span, depth);
+                }
                 // M19 lever #2 — recover the variant name from the id (cold stringify path).
                 out.push_str(self.enum_names(variant_id).1);
                 if !payload.is_empty() {
@@ -15696,6 +15785,8 @@ main()
         Program {
             protos: vec![],
             structs: Default::default(),
+            enum_methods: Default::default(),
+            enum_home: Default::default(),
             variants: Default::default(),
             variants_by_id: Vec::new(),
             modules: vec![],
@@ -21075,6 +21166,31 @@ main()";
             vm_out,
             run_capture_parallel(src).expect("parallel run"),
             "parallel engine diverged on enum_layout (wire/snap variant-id rebuild)"
+        );
+    }
+
+    /// Enum-methods golden: `examples/enum_methods.chz` (a `match self` method, a method returning a
+    /// new variant, a generic enum method using `T`, an enum `str(self)` satisfying Stringable, and an
+    /// enum satisfying `Add`/`Comparable` through both a generic bound and direct `+`/`<`/`==`)
+    /// byte-identical on the VM, the interpreter, the parallel engine, and its `.expected`.
+    #[test]
+    fn golden_enum_methods_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/enum_methods.chz");
+        let expected = include_str!("../../examples/enum_methods.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from enum_methods.expected"
+        );
+        assert_eq!(
+            vm_out,
+            crate::interp::run_capture(src).expect("interp run"),
+            "vm/interp divergence on enum_methods (enum methods must be behavior-preserving)"
+        );
+        assert_eq!(
+            vm_out,
+            run_capture_parallel(src).expect("parallel run"),
+            "parallel engine diverged on enum_methods"
         );
     }
 

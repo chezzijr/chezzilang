@@ -512,6 +512,13 @@ pub struct ModuleProto {
 pub struct Program {
     pub protos: Vec<Proto>,
     pub structs: HashMap<String, StructDef>,
+    /// Enum methods, keyed by the enum's module-scoped runtime key → (method name → its proto). The
+    /// enum analogue of `StructDef::methods` (enums are type-erased — no `StructDef`/`tid`). Looked up
+    /// by `do_method_call` (via `variants_by_id[id].enum_name`) and the arith/compare overload paths.
+    pub enum_methods: HashMap<String, HashMap<String, ProtoId>>,
+    /// Enum runtime key → the index of the module that declared it, so an enum method resolves its
+    /// top-level names against that module's globals (home-globals), mirroring `StructDef::module_idx`.
+    pub enum_home: HashMap<String, usize>,
     pub variants: HashMap<(String, String), VariantDef>,
     /// M19 lever #2 — variants indexed by their dense `variant_id` (`variants_by_id[id]` ⇒ that
     /// variant's `VariantDef`, carrying its `enum_name` + `name`). The reverse of `variants`: O(1)

@@ -71,6 +71,7 @@ pub enum StmtKind {
         name: String,
         type_params: Vec<TypeParam>,
         variants: Vec<Variant>,
+        methods: Vec<FnDecl>,
     },
     /// `type Name = <type>` — a transparent type alias (`Name` is interchangeable with the aliased
     /// type everywhere; structural, not a distinct nominal type).

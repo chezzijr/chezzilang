@@ -791,25 +791,41 @@ impl Parser {
         let type_params = self.parse_type_params()?;
         self.open_block()?;
         let mut variants = Vec::new();
+        let mut methods = Vec::new();
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
-            let vname = self.expect_ident()?;
-            let mut payload = Vec::new();
-            if self.eat(&Token::LParen) {
-                if !self.check(&Token::RParen) {
-                    loop {
-                        payload.push(self.parse_type()?);
-                        if !self.eat(&Token::Comma) {
-                            break;
+            if self.check(&Token::Fn) {
+                // Methods accept default params (like free fns / struct methods); the desugar pass
+                // fills omitted args / reorders named args at method call sites by method name.
+                methods.push(self.parse_fn(true)?);
+            } else if self.check(&Token::Test) {
+                // `test fn name(self)` — a suite test method.
+                methods.push(self.parse_test_fn(true)?);
+            } else {
+                // Variants must precede methods: a variant after a method is a structuring error.
+                if !methods.is_empty() {
+                    return Err(
+                        self.err("enum variants must be declared before methods".to_string())
+                    );
+                }
+                let vname = self.expect_ident()?;
+                let mut payload = Vec::new();
+                if self.eat(&Token::LParen) {
+                    if !self.check(&Token::RParen) {
+                        loop {
+                            payload.push(self.parse_type()?);
+                            if !self.eat(&Token::Comma) {
+                                break;
+                            }
                         }
                     }
+                    self.expect(&Token::RParen)?;
                 }
-                self.expect(&Token::RParen)?;
+                variants.push(Variant {
+                    name: vname,
+                    payload,
+                });
             }
-            variants.push(Variant {
-                name: vname,
-                payload,
-            });
             self.skip_newlines();
         }
         self.expect(&Token::Dedent)?;
@@ -817,6 +833,7 @@ impl Parser {
             name,
             type_params,
             variants,
+            methods,
         })
     }
 
@@ -2297,6 +2314,49 @@ mod tests {
     }
 
     #[test]
+    fn enum_with_method_parses() {
+        match only("enum Color:\n    Red\n    Green\n    fn area(self) -> int:\n        return 5\n")
+        {
+            StmtKind::Enum {
+                variants, methods, ..
+            } => {
+                assert_eq!(variants.len(), 2);
+                let a = methods.iter().find(|m| m.name == "area").unwrap();
+                assert_eq!(a.params.len(), 1);
+                assert_eq!(a.params[0].name, "self");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn enum_variant_after_method_rejected() {
+        // Methods must follow ALL variants; a variant after a method is a structuring error.
+        let toks = crate::lexer::tokenize(
+            "enum E:\n    A\n    fn f(self) -> int:\n        return 1\n    B\n",
+        )
+        .expect("lex");
+        let err = parse(toks).expect_err("variant after method should be rejected");
+        assert!(
+            err.message
+                .contains("variants must be declared before methods"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn enum_test_method_parses_with_is_test() {
+        match only("enum E:\n    A\n    test fn t(self):\n        assert true\n") {
+            StmtKind::Enum { methods, .. } => {
+                let t = methods.iter().find(|m| m.name == "t").unwrap();
+                assert!(t.is_test, "enum `test fn` should set is_test");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn tuple_swap_parses() {
         match only("a, b = b, a\n") {
             StmtKind::Assign { target, op, value } => {
@@ -2940,6 +3000,7 @@ mod tests {
                 name,
                 type_params,
                 variants,
+                ..
             } => {
                 assert_eq!(name, "Shape");
                 assert!(type_params.is_empty());
@@ -2959,6 +3020,7 @@ mod tests {
                 name,
                 type_params,
                 variants,
+                ..
             } => {
                 assert_eq!(name, "Tree");
                 assert_eq!(type_params.len(), 1);

@@ -324,6 +324,11 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 - **Shipped:** whole-string `std.regex` (`is_match`, `find`, `find_all`, `replace_all`, `split` —
   each takes the pattern as a string, compiled behind an internal cache). **Later:** a first-class
   *compiled* `Regex` handle value (compile once, reuse) — still blocked on Level-3 **Userdata** below.
+- **Shipped:** **enum methods** — `fn name(self, …)` blocks after an enum's variants, mirroring struct
+  methods end-to-end (name-resolved dispatch, generic-enum type params in scope, structural-protocol
+  satisfaction so an enum can define `str`/`hash`/`add`/`compare` for `Stringable`/`Hashable`/`Add`/
+  `Comparable` and pass into protocol-bound generics, and `+`/`-`/`*`/`<` operator overloading). No
+  `derive` and no nominal `newtype` (write the method).
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 dynamic C-ABI v1 SHIPPED.** Because Chezzi is
 > written in Rust, the native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn

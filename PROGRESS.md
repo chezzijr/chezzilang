@@ -11,6 +11,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Enum methods (mirrors the struct-method machinery end-to-end).** Enums now accept `fn name(self, …)`
+method blocks after their variants (`test fn` too), parsed via the same `parse_fn(true)`/`parse_test_fn(true)`
+path structs use; the parser enforces variants-before-methods. The checker gained a name-keyed
+`enum_methods` map (+ `EnumSigInfo.methods` ferried across the module boundary on both the whole-module
+and `from`-import paths) and a `Ty::Enum` arm in `infer_method_call` (with generic-enum `T`-substitution),
+in `satisfies_args` (cloned from the struct arm into a shared `satisfies_methods` helper — unlocks
+`Stringable`/`Hashable`/`Add`/`Sub`/`Mul`/`Comparable` for enums and protocol-bound generics), and in
+`op_overload_result`/`ordering_allowed`. The desugar collectors (`collect_methods*`, `validate_defaults`,
+the walk) now treat struct + enum methods uniformly (name-keyed; `normalize_call` unchanged). Both engines
+bind the whole enum value as `self`: the VM added `Program::enum_methods`/`enum_home`, an `Obj::Enum` arm
+in `do_method_call`, a shared `resolve_overload_method` used by `struct_arith`/`struct_compare`, and the
+`str(self)` Stringable hook in `stringify`; the interp mirrors all of it (`enum_defs` registry, an enum
+branch in `call_struct_method`, its own `resolve_overload_method`, the stringify hook) — kept byte-identical
+(golden `examples/enum_methods.chz` runs on VM + interp + parallel + `.expected`). **Follow-up lever:** the
+method IC is skipped for enums (type-erased → no `tid`); enum-method dispatch uses the slow `run_proto`/
+flatten path. **Out of scope (deferred):** `derive`, nominal `newtype`, and the multi-bound same-name-method
+ambiguity diagnostic (a pre-existing struct-era wart, first-bound-wins).
+
 **✅ Module-scoped user types (struct / enum / `type` alias).** Types are now **private to their
 declaring module**, mirroring how top-level functions are namespaced — exported by default (no `pub`),
 visible elsewhere ONLY via import. `import core.geo` → `geo.Point(1,2)` / `x: geo.Point` /

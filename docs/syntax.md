@@ -716,11 +716,11 @@ uid: UserId = 7        # UserId and int are the same type
 ```
 
 The prebuilt **`Stringable`** protocol (`str(self) -> str`) customises how a value is rendered. A
-struct that defines `str(self) -> str` overrides its default `Name(field=value, …)` repr everywhere
-it is printed: by `print`, by the `str()` builtin, and inside `{…}` string interpolation — including
-when nested in a list / tuple / map / set / enum payload. Structs without a `str` method keep the
-default repr; enums always use the built-in `Variant(payload)` repr (enums have no methods). Like
-`Comparable`, `Stringable` is prebuilt and works as a generic bound (`fn show[T: Stringable](v: T)`).
+struct *or enum* that defines `str(self) -> str` overrides its default repr (`Name(field=value, …)`
+for a struct, `Variant(payload)` for an enum) everywhere it is printed: by `print`, by the `str()`
+builtin, and inside `{…}` string interpolation — including when nested in a list / tuple / map / set
+/ enum payload. Types without a `str` method keep the default repr. Like `Comparable`, `Stringable`
+is prebuilt and works as a generic bound (`fn show[T: Stringable](v: T)`).
 
 ```chezzi
 struct Point:
@@ -825,6 +825,34 @@ fn sum(t: Tree[int]) -> int:
 A **payload-carrying** variant's type args are inferred from the payload, but may be pinned
 explicitly — `Tree.Node[int](1, Tree.Leaf, Tree.Leaf)` — the same `name[Type, …](…)` form as generic
 fns and structs (§7b).
+
+Enums may carry **methods** — `fn name(self, …)` blocks written **after all variants**, exactly like
+struct methods. The receiver `self` is the whole enum value (a method body typically `match self`).
+A generic enum's methods may use its type parameters (`fn get(self) -> T`). Methods are name-resolved
+on the value (`shape.area()`), satisfy structural protocols (so an enum can define `str(self)` for
+`Stringable`, `hash(self)` for `Hashable`, `add`/`sub`/`mul`/`compare` for `Add`/`Sub`/`Mul`/
+`Comparable`, and pass into protocol-bound generics like `fn twice[T: Add](x: T)`), and overload the
+matching operators (`a + b`, `a < b`) just as struct methods do. (No `derive` — write the method.)
+
+```chezzi
+enum Light:
+    Red
+    Yellow
+    Green
+    fn cost(self) -> int:           # method matching on self
+        match self:
+            Light.Red:    return 0
+            Light.Yellow: return 1
+            Light.Green:  return 2
+    fn next(self) -> Light:         # a method may return a new variant
+        match self:
+            Light.Red:    return Light.Green
+            Light.Yellow: return Light.Red
+            Light.Green:  return Light.Yellow
+
+print(Light.Green.cost())           # 2
+print(Light.Red.next().cost())      # 2
+```
 
 Variants are **scoped under their enum** and must be written **qualified** as `Enum.Variant`
 everywhere they're used: as a value (`Shape.Point`), a constructor (`Shape.Circle(2)`), and in a
