@@ -6,15 +6,21 @@ to a one-line log — full detail lives in `PROGRESS.md` + the cited `examples/*
 
 Legend: 🔴 blocks real apps · 🟡 notable friction · ⚪ latent (not currently reachable) · 🟢 works.
 
-Last updated: 2026-06-16. Baseline: post-M20 (`assert`/`test fn`/`chezzi test`), Python-colon slicing,
-std.math trig + request verbs landed; concurrency D6 complete (Path C resolved). Gaps pass II.
+Last updated: 2026-06-20. Baseline: post-M21 (`newtype`), plus enum methods, raw string literals
+(`r"…"`), the `extern "lib"` header, module-scoped user types + module-qualified match patterns, and
+the `chezzi docs` / `chezzi init` CLI + `module:function` manifest entrypoint. Earlier baseline
+(post-M20): `assert`/`test fn`/`chezzi test`, Python-colon slicing, std.math trig + request verbs;
+concurrency D6 complete (Path C resolved). Gaps pass III.
 
-> **Core language is feature-complete:** scalars, `list`/`map`/`set`/`tuple`, generic structs + enums,
+> **Core constructs are all in place** (the language **still evolves** — new features land via their
+> own milestone; M19 is **pre-JIT perf, not a feature freeze**): scalars, `list`/`map`/`set`/`tuple`,
+> generic structs + enums (+ enum methods), nominal `newtype` (M21),
 > `Result`/`Option` + `?`, generics + structural protocols
 > (`Comparable`/`Add`/`Sub`/`Mul`/`Hashable`/`Stringable`/`Error`/`Iterator[T]`/`Iterable[T]`/`Index[K,V]`/`IndexSet[K,V]`/`Slice[R]`),
-> exhaustive `match` (literals/wildcard/nested/tuple/guards/ranges), closures/HOF, methods, modules, GC,
-> two backends, interpolation, pipe, `recover:`, `defer` (block-scoped), default + named args,
-> comprehensions, optional-chaining/`??`. What remains is **stdlib breadth + a few runtime-depth nits**.
+> exhaustive `match` (literals/wildcard/nested/tuple/guards/ranges/qualified variants), closures/HOF,
+> methods, module-scoped types, GC, two backends, interpolation, raw strings, pipe, `recover:`,
+> `defer` (block-scoped), default + named args, comprehensions, optional-chaining/`??`. What remains is
+> **stdlib breadth + a few runtime-depth nits** (plus new features as they're scoped).
 >
 > **This doc is the unified actionable backlog** — open language/stdlib gaps *and* the M19 perf +
 > runtime track (memory layout, JIT, GC, NaN-box) with `file:line` anchors. Full design detail +
@@ -110,7 +116,7 @@ netpoller + `std.net`). Remaining items are correctness/semantics nits, not miss
   return**, not block-scoped like interp's `exec_parallel` pop — bounded to frame lifetime, output always
   correct. Closing it needs loop-exit-jump codegen to emit a nursery-drain across a nursery boundary.
 
-### 🟡 Stdlib breadth (low priority — language is feature-complete; this is library fill)
+### 🟡 Stdlib breadth (low priority — core constructs are in place; this is library fill)
 
 Current stdlib (`std.fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`str`/`iter`/
 `cancel`/`ref`/`net`) covers read-and-transform scripting well. Gaps below block write-heavy
@@ -162,8 +168,9 @@ comments + docgen. (`assert` + test runner shipped M20.)
 
 ### ⚙️ Performance + runtime backlog (M19 perf track — detail in [`docs/future.md` §4](docs/future.md) + [`docs/benchmarks.md`](docs/benchmarks.md))
 
-Language is **frozen feature-wise**; M19 is pure optimization, so every item here is
-**behavior-preserving + two-engine parity** (a VM speedup that diverges from the interp is a bug).
+M19 is a **pre-JIT perf track, not a feature freeze** (new features still land via their own
+milestone). Every item in *this section* is therefore **behavior-preserving + two-engine parity** —
+a perf change must not alter observable behavior (a VM speedup that diverges from the interp is a bug).
 Current gap to CPython 3.14: **~1.3×–3.5×** slower (worst on call-bound `fib` 3.54×; `loop` 1.32× is at
 the dispatch floor), startup ~11× **faster**. Discipline per item: failing-then-green parity test →
 keep parity → measure `benches/run.chz` → record the delta in `docs/benchmarks.md`. **Already landed**
@@ -389,6 +396,15 @@ groundwork (constant field offsets). Interp left untouched (frozen oracle; parit
 iterator protocol, match guards + ranges, default/named args) · M14 generics-depth (method type params,
 user parameterized protocols, method defaults) · M15 slicing + `Index`/`IndexSet`/`Slice` protocols ·
 **M20 in-language tests** (`assert`, `test fn`, `chezzi test` w/ suites/fixtures, `examples/assert.chz`).
+**M21 nominal `newtype`** (`newtype Name = <type>`, distinct-type wrap; construct/cast-unwrap;
+numeric same-type ops; methods/protocols; qualified `mod.NewType(x)` ctor — `31f2f85`/`adc2a9c`,
+`examples/newtype.chz`) · **enum methods** (`match self`, generic `T`, `Stringable`/`Add`/`Comparable`
+— `008444f`/`d11a353`, `examples/enum_methods.chz`) · **raw string literals** (`r"…"`/`r'…'`/triple,
+verbatim, no interp/escapes — `7a645b8`, `examples/raw_string.chz`) · **`extern "lib"` header** +
+raw strings in match patterns (`15e7818`) · **module-scoped user types** (struct/enum/alias qualified
+access) + **module-qualified match patterns** (`geo.Color.Red` — `e269f16`/`01ddd6f`) · **CLI:**
+`chezzi init` scaffolder + `chezzi docs` reference dump + `module:function` manifest entrypoint +
+`--interp` flag dropped (`7a8cc2e`/`f92bcc4`/`b0fe92c`).
 **std.math fill** (`5a25a5c`: trig/exp/log + `pi`/`e`) · **std.request verbs** (put/patch/delete/head +
 header map). **Tech debt:** parser `MAX_DEPTH` 128→64, dup type-param rejected, nested-`set` equality,
 call-site type args, `?`-in-closure return checking.

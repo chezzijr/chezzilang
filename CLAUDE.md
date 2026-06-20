@@ -85,7 +85,7 @@ cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see 
 
 ## Where things stand
 
-Core language is **implemented through M18 (and still evolving)** (scalars, `list`/`map`/`set`/`tuple`,
+Core language is **implemented through M21 (and still evolving; M19 perf in progress)** (scalars, `list`/`map`/`set`/`tuple`,
 generic structs + enums, `Result`/`Option` + `?`, generics + structural protocols,
 exhaustive `match` + guards, closures/HOF, modules, GC, interpolation, pipe, `defer`,
 `recover:`, `Iterator[T]`, slicing/indexing protocols). **Concurrency** has landed through

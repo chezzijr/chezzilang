@@ -707,7 +707,7 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
 
 ## Concurrency — feature-complete (confirmed 2026-06-12)
 
-Core implemented through **M18** (still evolving); **concurrency shipped through Tier-D (D0–D6c) + M-C**. The surface —
+Core implemented through **M21** (still evolving; M19 perf in progress); **concurrency shipped through Tier-D (D0–D6c) + M-C**. The surface —
 `spawn` / `parallel:` nursery / `Channel[T]` / `Shared[T]` / `Executor`, plus the VM's real OS-thread
 engine and the netpoller + `std.net` — is complete and stable. **M-C implicit nurseries shipped
 (2026-06-12)** — every function body and the module top level is an implicit nursery; a bare `spawn` is

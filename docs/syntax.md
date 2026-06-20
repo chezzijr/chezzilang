@@ -754,6 +754,8 @@ n: int = int(uid)      # unwrap via the cast builtin → 10
 Crossing the boundary is always **explicit** — either **construct** (`UserId(10)`) or **cast-unwrap**
 via the existing scalar cast builtins: `int(uid)` / `float(m)` return the inner value (and for a
 `newtype N = str`, `str(n)` unwraps the inner string). There is no `.value` field and no auto-deref.
+From another module the constructor takes the **qualified path** — `geo.UserId(10)`, exactly like a
+qualified enum variant.
 
 For a **numeric** underlying (`int`/`float`), arithmetic and ordering **auto-flow same-type only**:
 `a OP b` where both operands are the *same* newtype applies the underlying's **native** op and

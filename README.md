@@ -14,7 +14,7 @@ fn main():
 
 ## Status
 
-**Core language implemented through M18 (still evolving); concurrency shipped through Tier-D.** Currently in
+**Core language implemented through M21 (still evolving; M19 perf in progress); concurrency shipped through Tier-D.** Currently in
 **M19** (a perf track — optimization-focused). ~1565 tests green, both engines.
 - [`PROGRESS.md`](PROGRESS.md) — live milestone tracker (single source of truth for "what's next")
 - [`docs/spec.md`](docs/spec.md) — full language design
