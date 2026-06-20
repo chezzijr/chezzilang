@@ -4640,6 +4640,7 @@ impl Checker {
             ExprKind::Int(_) => Ty::Int,
             ExprKind::Float(_) => Ty::Float,
             ExprKind::Str(_) => Ty::Str, // opaque; interpolation contents are not checked (M2 defer)
+            ExprKind::RawStr(_) => Ty::Str, // verbatim `str`, no interpolation to check
             ExprKind::Bytes(_) => Ty::Bytes,
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Ident(name) => self.infer_ident(name, expr.span),
@@ -8582,6 +8583,7 @@ fn collect_free_calls_expr(
         | ExprKind::Float(_)
         | ExprKind::Str(_)
         | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
         | ExprKind::Ident(_) => {}
     }
@@ -8815,6 +8817,7 @@ fn find_mutations_in_expr(
         | ExprKind::Float(_)
         | ExprKind::Str(_)
         | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
         | ExprKind::Ident(_) => {}
     }

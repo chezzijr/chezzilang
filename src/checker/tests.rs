@@ -7129,6 +7129,14 @@ fn newtype_aggregate_underlying_no_method_inherit() {
 }
 
 #[test]
+fn raw_string_is_str_type() {
+    // A raw string is plain `str` everywhere a normal string is — annotating it `str` is clean.
+    ok("fn main():\n    s: str = r\"\\d+\"\n    print(s)\nmain()\n");
+    // ...and using it where an `int` is expected is rejected (proves it's classified `str`, not int).
+    rejects("fn main():\n    n: int = r\"x\"\nmain()\n", "str");
+}
+
+#[test]
 fn newtype_generic_rejected_at_parse_or_check() {
     // `newtype Box[T] = int` is rejected (parse-time); ensure the checker path is clean of it too.
     let errs = std::panic::catch_unwind(|| check_src("newtype Box[T] = int\n"));

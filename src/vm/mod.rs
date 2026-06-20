@@ -21328,6 +21328,25 @@ main()";
         assert_eq!(vm_out, interp_out, "vm/interp divergence on newtype");
     }
 
+    /// Raw-string golden: `examples/raw_string.chz` exercises the verbatim `r"..."` forms —
+    /// literal braces (`r"{}"` → `{}`, the thing that needed `{{}}` before), literal backslashes
+    /// (`r"\d+\s"`), the single-quote + Windows-path form, the triple form embedding quotes+braces
+    /// (JSON), and a side-by-side proving a NORMAL string still interpolates (`"{x}"` → 5) while the
+    /// raw form keeps `{x}` literal. NO interpolation + NO escapes, so VM and interp emit the same
+    /// compile-time literal — byte-identical on the VM, interp, and the checked-in `.expected`.
+    #[test]
+    fn golden_raw_string_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/raw_string.chz");
+        let expected = include_str!("../../examples/raw_string.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from raw_string.expected"
+        );
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on raw_string");
+    }
+
     /// Same numeric newtype `/` and `%` auto-flow the underlying op and re-wrap, just like `+ - *`.
     /// Regression: the checker's `Div|Mod` arm previously rejected these even though the runtime
     /// handled them (dead runtime path) — now checker + both engines agree.

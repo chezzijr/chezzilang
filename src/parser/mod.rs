@@ -1967,6 +1967,7 @@ impl Parser {
             Token::Float(f) => ExprKind::Float(f),
             Token::Str(s) => ExprKind::Str(s),
             Token::Bytes(b) => ExprKind::Bytes(b),
+            Token::RawStr(s) => ExprKind::RawStr(s),
             Token::True => ExprKind::Bool(true),
             Token::False => ExprKind::Bool(false),
             Token::Ident(name) => ExprKind::Ident(name),
@@ -2212,6 +2213,7 @@ fn describe(tok: &Token) -> String {
         Float(f) => return format!("float {f}"),
         Str(_) => "a string literal",
         Bytes(_) => "a byte-string literal",
+        RawStr(_) => "a raw-string literal",
         // keywords print as their lowercase source spelling
         other => return format!("'{}'", format!("{other:?}").to_lowercase()),
     };
@@ -2306,6 +2308,18 @@ mod tests {
         let mut m = parse_ok(src);
         assert_eq!(m.stmts.len(), 1, "expected exactly one statement");
         m.stmts.remove(0).kind
+    }
+
+    #[test]
+    fn raw_str_parses_to_rawstr_expr() {
+        // A raw string parses to a distinct `ExprKind::RawStr` carrying verbatim text.
+        match only("r\"{}\"\n") {
+            StmtKind::Expr(e) => match e.kind {
+                ExprKind::RawStr(s) => assert_eq!(s, "{}"),
+                other => panic!("expected RawStr, got {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

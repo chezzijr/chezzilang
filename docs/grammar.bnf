@@ -404,7 +404,12 @@
 # interp::interpolate), so they need NO production here.
 # A "BYTES" token is a whole `b"..."` / `b'...'` byte-string literal (the lexer stripped the `b`
 # prefix + quotes and resolved escapes, incl. `\xHH`; no `\u`, no interpolation — see syntax.md).
-<primary> ::= "INT" | "FLOAT" | "STR" | "BYTES" | "TRUE" | "FALSE" | "IDENT"
+# A "RAWSTR" token is a whole `r"..."` / `r'...'` (or triple `r"""..."""` / `r'''...'''`) raw-string
+# literal: VERBATIM contents (the lexer stripped the `r` prefix + quotes only). Unlike STR there is
+# NO escape processing (`\n` is backslash-n, `\` is a literal backslash) and NO `{expr}` interpolation
+# (braces are literal) — so the post-lexer interpolation pass never sees it. Its type is plain `str`.
+# The short form cannot contain its closing quote; the triple form embeds lone quotes (e.g. JSON).
+<primary> ::= "INT" | "FLOAT" | "STR" | "BYTES" | "RAWSTR" | "TRUE" | "FALSE" | "IDENT"
             | "LPAREN" <expr> "RPAREN"
             | "LPAREN" <expr> "COMMA" "RPAREN"
             | "LPAREN" <expr> "COMMA" <exprList> "RPAREN"

@@ -1,0 +1,8 @@
+# rule: primary
+fn main():
+    a := r"{}"
+    b := r'\d+\s'
+    c := r"""{"k": [1,2]}"""
+    print(a)
+    print(b)
+    print(c)

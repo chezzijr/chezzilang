@@ -457,6 +457,7 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
         | ExprKind::Float(_)
         | ExprKind::Str(_)
         | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
         | ExprKind::Bool(_) => {}
         ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
             xs.iter().for_each(|x| walk_idents(x, f))
@@ -1226,6 +1227,7 @@ impl Walker<'_> {
             | ExprKind::Float(_)
             | ExprKind::Str(_)
             | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
             | ExprKind::Bool(_) => {}
         }
 

@@ -22,6 +22,11 @@ pub enum Token {
     /// A `b"..."` byte-string literal: the resolved raw bytes (escapes applied, quotes stripped).
     /// Lexer-only, like the radix-prefixed int literals — no interpolation, no `\u`.
     Bytes(Vec<u8>),
+    /// An `r"..."` / `r'...'` (and triple `r"""..."""`) raw-string literal: verbatim contents,
+    /// quotes stripped. NO interpolation (braces `{`/`}` are literal, never a `{expr}` site) and
+    /// NO escape processing (`\n` is backslash-n, `\` is a literal backslash). Its type downstream
+    /// is plain `str` — a distinct token only so the later interpolation pass NEVER sees it.
+    RawStr(String),
     Ident(String),
 
     // --- keywords ---
@@ -598,6 +603,20 @@ impl Lexer {
                         self.byte_string(quote)?
                     }
                 }
+                // `r"..."` / `r'...'` raw-string literal — verbatim, no interpolation, no escapes.
+                // Fires ONLY when the `r`/`R` is immediately followed by a quote (mirrors the `b`
+                // byte-string trigger above). A bare `r` (e.g. `r := 5`, `rx + 1`) falls through to
+                // `identifier()` because the guard requires an adjacent quote.
+                'r' | 'R' if matches!(self.peek(), '"' | '\'') => {
+                    let quote = self.advance(); // consume the opening quote
+                    if self.peek() == quote && self.peek_next() == quote {
+                        self.advance(); // second quote
+                        self.advance(); // third quote
+                        self.raw_triple_string(quote)?
+                    } else {
+                        self.raw_string(quote)?
+                    }
+                }
                 c if c.is_ascii_digit() => self.number(start)?,
                 c if c.is_alphabetic() || c == '_' => self.identifier(start),
 
@@ -935,6 +954,55 @@ impl Lexer {
         Ok(Token::Str(text))
     }
 
+    /// Scan an `r"..."` / `r'...'` raw-string literal. The `r`/`R` prefix and the opening `quote`
+    /// are already consumed. Identical to [`string`] EXCEPT every char is pushed verbatim — there is
+    /// NO backslash-escape branch, so `\n` is two chars (backslash, n), `\` is a literal backslash,
+    /// and a brace `{`/`}` is an ordinary char (the later interpolation pass never sees `RawStr`).
+    /// The short form cannot contain the closing `quote` (no escaping — use the other quote style or
+    /// the triple form). Produces a [`Token::RawStr`].
+    fn raw_string(&mut self, quote: char) -> Result<Token, LexError> {
+        let mut text = String::new();
+        while !self.is_at_end() && self.peek() != quote {
+            if self.peek() == '\n' {
+                self.line += 1; // a *literal* newline → multi-line string; keep line count honest
+                self.line_start = self.pos + 1; // next char begins the new line
+            }
+            text.push(self.advance());
+        }
+        if self.is_at_end() {
+            return Err(self.error("unterminated raw string literal"));
+        }
+        self.advance(); // consume the closing quote
+        Ok(Token::RawStr(text))
+    }
+
+    /// Scan a *triple-quoted* raw-string literal (`r"""…"""` / `r'''…'''`). The `r`/`R` prefix and
+    /// the opening triple `quote` are already consumed. Like [`triple_string`] but verbatim: no
+    /// escapes, no interpolation; a single/double `quote` inside is an ordinary char, so this is how
+    /// quote-heavy data (e.g. JSON) is embedded. Closes only on the next triple `quote`.
+    fn raw_triple_string(&mut self, quote: char) -> Result<Token, LexError> {
+        let mut text = String::new();
+        // Closes only when the next THREE chars are all `quote`.
+        while !(self.peek() == quote
+            && self.peek_next() == quote
+            && self.chars.get(self.pos + 2) == Some(&quote))
+        {
+            if self.is_at_end() {
+                return Err(self.error("unterminated triple-quoted raw string literal"));
+            }
+            if self.peek() == '\n' {
+                self.line += 1; // keep the line count honest across embedded newlines
+                self.line_start = self.pos + 1;
+            }
+            text.push(self.advance());
+        }
+        // consume the closing triple
+        self.advance();
+        self.advance();
+        self.advance();
+        Ok(Token::RawStr(text))
+    }
+
     /// Scan a `b"..."` / `b'...'` byte-string literal. The `b`/`B` prefix and the opening `quote`
     /// are already consumed. Produces a [`Token::Bytes`] holding the resolved raw bytes.
     ///
@@ -1152,6 +1220,72 @@ mod tests {
         assert_eq!(
             kinds("\"\"\"a\nb\"\"\""),
             vec![Token::Str("a\nb".into()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn raw_string_short_verbatim() {
+        // `r"..."` is verbatim: braces are literal, backslashes are literal (no escapes).
+        assert_eq!(
+            kinds("r\"{}\""),
+            vec![Token::RawStr("{}".into()), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            kinds("r'\\d+'"),
+            vec![Token::RawStr("\\d+".into()), Token::Newline, Token::Eof]
+        );
+        // Uppercase `R` behaves identically (mirrors `b`/`B`).
+        assert_eq!(
+            kinds("R\"x\""),
+            vec![Token::RawStr("x".into()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn raw_string_triple_embeds_quotes() {
+        // Triple raw string: embedded double-quotes + braces are literal.
+        assert_eq!(
+            kinds("r\"\"\"{\"k\": [1,2]}\"\"\""),
+            vec![
+                Token::RawStr("{\"k\": [1,2]}".into()),
+                Token::Newline,
+                Token::Eof
+            ]
+        );
+        // A literal `\n` inside a raw triple stays two chars (backslash, n) — no escapes.
+        assert_eq!(
+            kinds("r\"\"\"a\\nb\"\"\""),
+            vec![Token::RawStr("a\\nb".into()), Token::Newline, Token::Eof]
+        );
+        // A real embedded newline is preserved verbatim.
+        assert_eq!(
+            kinds("r\"\"\"a\nb\"\"\""),
+            vec![Token::RawStr("a\nb".into()), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn bare_r_is_identifier() {
+        // A bare `r`/`rx` (no adjacent quote) is still an identifier — adjacency rule preserved.
+        assert_eq!(
+            kinds("r := 5"),
+            vec![
+                Token::Ident("r".into()),
+                Token::Walrus,
+                Token::Int(5),
+                Token::Newline,
+                Token::Eof
+            ]
+        );
+        assert_eq!(
+            kinds("rx + 1"),
+            vec![
+                Token::Ident("rx".into()),
+                Token::Plus,
+                Token::Int(1),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 

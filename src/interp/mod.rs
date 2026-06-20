@@ -492,6 +492,8 @@ impl Interp {
             ExprKind::Float(f) => Ok(Value::Float(*f)),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
             ExprKind::Str(s) => Ok(Value::Str(self.interpolate(s, expr.span)?.into())),
+            // Raw string: verbatim — does NOT call `self.interpolate`, so braces stay literal.
+            ExprKind::RawStr(s) => Ok(Value::Str(s.as_str().into())),
             ExprKind::Bytes(b) => Ok(Value::Bytes(b.as_slice().into())),
             ExprKind::Ident(name) => {
                 // A bare nullary *built-in* variant used as a value (`None`). User variants are
@@ -6876,6 +6878,16 @@ mod tests {
 
     fn run(src: &str) -> String {
         run_capture(src).expect("run should succeed")
+    }
+
+    #[test]
+    fn interp_raw_string_is_verbatim_no_interpolation() {
+        // A raw string is NOT interpolated even with `x` in scope — braces stay literal.
+        assert_eq!(run("x := 5\nprint(r\"{x}\")\n"), "{x}\n");
+        // Backslashes are verbatim (no escape processing).
+        assert_eq!(run("print(r\"\\d+\")\n"), "\\d+\n");
+        // ...while a NORMAL string still interpolates, proving raw is opt-in.
+        assert_eq!(run("x := 5\nprint(\"{x}\")\n"), "5\n");
     }
 
     #[test]

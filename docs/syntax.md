@@ -34,6 +34,9 @@ true  false   # bool
 '''it's "ok"'''  # str — triple single-quote, equivalent
 "hi {name}"   # str with interpolation — see §10
 "emoji \u{1F600}, A=\u{41}"   # str — \u{HEX} unicode escape (1-6 hex digits)
+r"\d+\s"      # str — raw string: VERBATIM; no escapes (\ is literal), no interp ({ } are literal)
+r'C:\tmp'     # str — raw, single-quote / uppercase R"…" both work; cannot contain its own quote
+r"""{"k": [1,2]}"""  # str — triple raw: embeds quotes + braces verbatim (best for JSON / brace-heavy)
 b"\x01\x02AB"  # bytes — byte-string literal; \xHH hex byte + \n \t \r \\ \" \' \0; no \u, no interp
 b'\xff'       # bytes — single quotes / uppercase B'…' both work; raw byte >=0x80 must use \xHH
 bytearray([1, 2, 3])  # bytearray — MUTABLE byte buffer; constructor-only (no literal), see below
@@ -50,6 +53,19 @@ panic), `b[a:b:c]` → `bytes` (Slice protocol over byte offsets — open bounds
 negative), `for x in b` yields `int`, `len(b)` is the byte count, `==`/`!=` are structural, and `bytes`
 is `Hashable` (valid `map`/`set` key). `str(b)` / `print(b)` / interpolation use the Python `b'...'`
 repr (printable ASCII literal, others `\xHH`). `bytes` is immutable — `b[i] = x` is a type error.
+
+**Raw strings — `r"..."` / `r'...'` and triple `r"""..."""` / `r'''...'''`.** A raw string is an
+ordinary `str` (`Ty::Str`, identical downstream) but lexed **verbatim**: there is **no escape
+processing** (`r"\d+"` is a backslash, `d`, `+` — *not* an escape; `r"C:\tmp"` is a literal Windows
+path) and **no interpolation** (the always-on `{expr}` of normal strings is OFF — `r"{}"` prints a
+literal `{}`, and `r"{x}"` stays `{x}` even with `x` in scope). It is the escape hatch for the
+always-on interpolation: instead of doubling braces (`"{{}}"`) you write `r"{}"`. The `r`/`R` prefix
+fires only when immediately followed by a quote (so a variable named `r` is unaffected, exactly like
+`b`). The **short** form `r"..."` cannot contain its own closing quote (no escaping in raw — switch
+quote style or use the triple form); the **triple** form `r"""..."""` embeds lone single/double
+quotes verbatim, which is how you write brace-and-quote-heavy data like JSON: `r"""{"k": [1,2]}"""`.
+Uppercase `R"..."` is accepted (mirrors `B"..."`). (Out of scope for now: a combined raw-bytes
+prefix `rb"..."`, and Rust-style `r#"..."#` hash delimiters — the triple form already embeds quotes.)
 
 **`bytearray` — the MUTABLE sibling (Python `bytearray` model).** Constructor-only — there is **no**
 `ba"..."` literal (the `b"..."` literal already makes a `bytes`). Four forms: `bytearray()` (empty),
@@ -1304,6 +1320,24 @@ print("""She said "hello" to {name}""")   # unescaped quotes + interpolation
 print('''it's a "quoted" word''')          # apostrophes and double-quotes, literal
 ```
 
+**Raw strings — the verbatim opt-out (`r"…"`).** Interpolation is always on, so a literal brace in a
+normal string must be doubled (`"{{}}"`). The escape hatch is a **raw string**: prefix any quote form
+with `r`/`R` (`r"…"`, `r'…'`, triple `r"""…"""` / `r'''…'''`) and the contents are taken **verbatim** —
+**no escape processing** and **no interpolation**. So `\` is a literal backslash (great for regex
+`r"\d+\s"` and Windows paths `r"C:\tmp"`), and `{`/`}` are literal (`r"{}"` prints `{}`, `r"{x}"` stays
+`{x}`). The result is a plain `str`, identical downstream. The short form cannot contain its own
+closing quote (no escaping — use the other quote style or the triple form); the triple form embeds
+quotes verbatim, which is how you write JSON: `r"""{"k": [1,2]}"""`.
+
+```chezzi
+x := 5
+print(r"{}")                  # {}        ← literal braces, no doubling needed
+print(r"\d+\s")               # \d+\s     ← literal backslashes, no escapes
+print(r"{x}")                 # {x}       ← raw: NOT interpolated
+print("{x}")                  # 5         ← normal string still interpolates (raw is opt-in)
+print(r"""{"k": [1,2]}""")    # {"k": [1,2]}   ← triple raw embeds quotes + braces
+```
+
 **Escapes.** Backslash escapes resolve at lex time: `\n` `\t` `\r` `\\` `\"` `\'` `\0` and
 `\u{HEX}` (1-6 hex digits naming a Unicode scalar value, e.g. `\u{41}` → `A`, `\u{1F600}` → 😀).
 A surrogate (`D800`-`DFFF`), a value above `10FFFF`, an empty `\u{}`, a missing brace, a non-hex
@@ -1793,7 +1827,8 @@ a `compare` method.
 `as_bool`/`get`/`at`/`is_null`/`as_object`/`as_array`. For known shapes, `json.decode[T](s) ->
 Result[T]` deserializes straight into a struct / `map[str, V]` / `list[T]` / scalar (Option fields
 accept null-or-absent; extra keys ignored; recursive/generic struct targets are rejected). Note: a
-JSON *literal in Chezzi source* must double its braces (`{{ }}`) — bare `{…}` is interpolation.
+JSON *literal in Chezzi source* either uses a raw string (`r"""{"k": 1}"""`, verbatim — preferred) or
+doubles its braces (`"{{ }}"`) — in a normal string a bare `{…}` is interpolation.
 
 **`std.os`**: `args() -> list[str]`, `env(key) -> str?`, `getcwd() -> Result[str]`, and
 `exit(code)` — a **hard, uncatchable** exit: the program halts immediately with `code` as its process

@@ -453,6 +453,21 @@ list[str]`) gets identity+construct+unwrap+own-methods ONLY — no `.push`/index
 no generic `newtype Box[T]`; no `derive`. Docs: `syntax.md §7`, `spec.md` (M21 row + enum-methods note
 de-staled), `grammar.bnf`.
 
+**✅ Raw string literals — `r"…"` / `r'…'` / triple `r"""…"""` (and uppercase `R`).** A verbatim `str`:
+**NO interpolation** (braces `{`/`}` are literal — `r"{}"` prints `{}`, no `{{}}` doubling) and **NO
+escape processing** (`r"\d+"` is literal backslashes — best for regex / Windows paths / brace-heavy
+JSON). The escape hatch for the always-on `{…}` interpolation. Type is plain `str` (`Ty::Str`),
+identical downstream. Lexer-only: a new `Token::RawStr` → distinct `ExprKind::RawStr` (mirrors
+`Bytes` across all 9 touch-sites) so Rust's exhaustiveness checker FORCES both engines to handle it —
+the VM emits `Op::ConstStr` directly and interp returns `Value::Str` directly, **both bypassing
+interpolation**, so VM/interp/`--serial` are byte-identical by construction. The `r`/`R` prefix fires
+only when immediately followed by a quote (adjacency rule — a variable named `r` is unaffected,
+exactly like `b`). Short form can't contain its own quote; triple form embeds quotes (JSON).
+**Two-engine parity** golden `examples/raw_string.chz` + `.expected`; `tests/corpus/accept/raw_string_literal.chz`
++ new `RAWSTR` terminal in `grammar.bnf <primary>`, `cargo test conformance` green; clippy clean.
+**Out of scope (follow-ups):** combined raw-bytes `rb"…"`/`br"…"`, Rust-style `r#"…"#` hash delimiters
+(the triple form already embeds quotes). Docs: `syntax.md §2/§10`, `spec.md`, `grammar.bnf`.
+
 **🟦 M19 — Perf track (in progress).** M19 is a **pre-JIT perf push**, not a feature freeze — language
 work still lands (e.g. module-scoped types, 2026-06). This milestone is otherwise pure
 optimization, so the bar is **behavior-preserving + two-engine parity** on every change. Measure first

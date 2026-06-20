@@ -1,0 +1,26 @@
+# raw string literals — `r"..."` / `r'...'` and triple `r"""..."""` / `r'''...'''`.
+# A raw string is VERBATIM: NO interpolation (braces `{`/`}` are literal, never a `{expr}` site)
+# and NO escape processing (`\n` is backslash-n, `\` is a literal backslash). Its type is plain `str`.
+# This is the escape hatch for the always-on `{...}` interpolation in normal strings.
+
+fn main():
+    # 1. Literal braces — the exact thing that needed `{{}}` in a normal string.
+    print(r"{}")
+
+    # 2. A regex-ish literal: backslashes are verbatim, no escapes processed.
+    print(r"\d+\s")
+
+    # 3. Single-quote raw form (interchangeable quote style).
+    print(r'C:\tmp\new')
+
+    # 4. Triple form embeds quotes + braces (brace-heavy JSON, verbatim).
+    print(r"""{"k": [1,2]}""")
+
+    # 5. A NORMAL string still interpolates — raw is opt-in, the default is unchanged.
+    x := 5
+    print("{x}")
+
+    # 6. Side by side: raw keeps `{x}` literal, normal expands it.
+    print(r"{x}")
+
+main()
