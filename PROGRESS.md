@@ -12,8 +12,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 ## Current focus
 
 **✅ Enum methods (mirrors the struct-method machinery end-to-end).** Enums now accept `fn name(self, …)`
-method blocks after their variants (`test fn` too), parsed via the same `parse_fn(true)`/`parse_test_fn(true)`
-path structs use; the parser enforces variants-before-methods. The checker gained a name-keyed
+method blocks after their variants, parsed via the same `parse_fn(true)` path structs use; the parser
+enforces variants-before-methods. (`test fn` is **rejected** in enum bodies — enum test *suites* are not
+wired in the compiler/test-runner, so a `test fn` would silently never run; rejected at parse time as a
+follow-up. A `Hashable` enum's `hash(self)` is dispatched at runtime in both engines, so `set[E]`/`map[E,V]`
+keys work — not just type-check.) The checker gained a name-keyed
 `enum_methods` map (+ `EnumSigInfo.methods` ferried across the module boundary on both the whole-module
 and `from`-import paths) and a `Ty::Enum` arm in `infer_method_call` (with generic-enum `T`-substitution),
 in `satisfies_args` (cloned from the struct arm into a shared `satisfies_methods` helper — unlocks

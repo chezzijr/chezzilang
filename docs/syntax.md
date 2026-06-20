@@ -833,6 +833,8 @@ on the value (`shape.area()`), satisfy structural protocols (so an enum can defi
 `Stringable`, `hash(self)` for `Hashable`, `add`/`sub`/`mul`/`compare` for `Add`/`Sub`/`Mul`/
 `Comparable`, and pass into protocol-bound generics like `fn twice[T: Add](x: T)`), and overload the
 matching operators (`a + b`, `a < b`) just as struct methods do. (No `derive` — write the method.)
+A `test fn` is **not** allowed inside an enum body (enum test suites aren't wired — it would silently
+never run); test suites are a struct-only feature.
 
 ```chezzi
 enum Light:

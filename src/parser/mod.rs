@@ -799,8 +799,11 @@ impl Parser {
                 // fills omitted args / reorders named args at method call sites by method name.
                 methods.push(self.parse_fn(true)?);
             } else if self.check(&Token::Test) {
-                // `test fn name(self)` — a suite test method.
-                methods.push(self.parse_test_fn(true)?);
+                // Enum test *suites* are not supported: the compiler/test-runner build SuiteInfo +
+                // discovery only for structs, so an enum `test fn` would silently never run (a
+                // false-green). Reject at parse time until enum suites are wired (follow-up).
+                return Err(self
+                    .err("test methods are not supported on enums (only on structs)".to_string()));
             } else {
                 // Variants must precede methods: a variant after a method is a structuring error.
                 if !methods.is_empty() {
@@ -2346,14 +2349,19 @@ mod tests {
     }
 
     #[test]
-    fn enum_test_method_parses_with_is_test() {
-        match only("enum E:\n    A\n    test fn t(self):\n        assert true\n") {
-            StmtKind::Enum { methods, .. } => {
-                let t = methods.iter().find(|m| m.name == "t").unwrap();
-                assert!(t.is_test, "enum `test fn` should set is_test");
-            }
-            other => panic!("{other:?}"),
-        }
+    fn enum_test_method_rejected() {
+        // Enum test suites are not wired (compiler/runner build discovery for structs only), so a
+        // `test fn` in an enum body would silently never run. The parser rejects it outright.
+        let toks =
+            crate::lexer::tokenize("enum E:\n    A\n    test fn t(self):\n        assert true\n")
+                .expect("lex");
+        let err = parse(toks).expect_err("enum `test fn` should be rejected");
+        assert!(
+            err.message
+                .contains("test methods are not supported on enums"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]

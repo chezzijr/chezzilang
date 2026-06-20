@@ -5000,6 +5000,9 @@ impl Vm {
             // A struct key dispatches its user `hash()` (re-entrant). Everything else is scalar.
             Value::Obj(h) => match self.heap.get(h) {
                 Obj::Struct { .. } => self.struct_hash(v, span),
+                // An enum key dispatches its user `hash(self) -> int` via the shared enum-aware
+                // resolver, mirroring the struct path (re-entrant — may allocate / trigger GC).
+                Obj::Enum { .. } => self.enum_hash(v, span),
                 Obj::Str(_) | Obj::Bytes(_) => Ok(self.scalar_hash(v)),
                 _ => Err(self.err(
                     format!(
@@ -5066,6 +5069,19 @@ impl Vm {
             )
         })?;
         let home = self.module_objs[def.module_idx];
+        match self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))? {
+            Value::Int(n) => Ok(n as u64),
+            other => Err(self.err(
+                format!("hash() must return int, got {}", self.type_name(other)),
+                span,
+            )),
+        }
+    }
+
+    /// Dispatch an enum key's user `hash(self) -> int` via the shared enum-aware
+    /// [`resolve_overload_method`], mirroring [`struct_hash`] (re-entrant via `run_proto`).
+    fn enum_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
+        let (proto, home) = self.resolve_overload_method(v, "hash", span)?;
         match self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))? {
             Value::Int(n) => Ok(n as u64),
             other => Err(self.err(
@@ -21173,6 +21189,20 @@ main()";
     /// new variant, a generic enum method using `T`, an enum `str(self)` satisfying Stringable, and an
     /// enum satisfying `Add`/`Comparable` through both a generic bound and direct `+`/`<`/`==`)
     /// byte-identical on the VM, the interpreter, the parallel engine, and its `.expected`.
+    #[test]
+    fn enum_with_hash_is_usable_as_map_set_key() {
+        // Regression: an enum defining `hash(self) -> int` satisfies Hashable at the CHECKER, so
+        // `set[E]`/`map[E,V]` type-check — but both engines must also DISPATCH the enum's hash at
+        // runtime (previously they raised "enum is not hashable", crashing a check-clean program).
+        let src = "enum Color:\n    Red\n    Green\n    Blue\n\
+                   \n    fn hash(self) -> int:\n        match self:\n            Color.Red: return 1\n            Color.Green: return 2\n            Color.Blue: return 3\n\
+                   s := {Color.Red, Color.Green, Color.Red}\n\
+                   print(s.len())\n\
+                   m := {Color.Blue: \"b\"}\n\
+                   print(m[Color.Blue])\n";
+        assert_eq!(run_parity(src), "2\nb\n");
+    }
+
     #[test]
     fn golden_enum_methods_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/enum_methods.chz");

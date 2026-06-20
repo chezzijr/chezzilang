@@ -2684,6 +2684,9 @@ impl Interp {
     fn hash_value(&mut self, v: &Value, span: Span) -> Result<u64, RuntimeError> {
         match v {
             Value::Struct { .. } => self.struct_hash(v, span),
+            // An enum key dispatches its user `hash(self) -> int` via the shared enum-aware
+            // resolver, mirroring the struct path.
+            Value::Enum { .. } => self.enum_hash(v, span),
             Value::Str(_)
             | Value::Bytes(_)
             | Value::Int(_)
@@ -2695,6 +2698,19 @@ impl Interp {
                     "{} is not hashable (cannot be a map/set key)",
                     other.type_name()
                 ),
+                span,
+            }),
+        }
+    }
+
+    /// Dispatch an enum key's user `hash(self) -> int` via the shared enum-aware
+    /// [`resolve_overload_method`], mirroring [`struct_hash`].
+    fn enum_hash(&mut self, v: &Value, span: Span) -> Result<u64, RuntimeError> {
+        let (decl, home) = self.resolve_overload_method(v, "hash", span)?;
+        match self.call(&decl, &home, vec![v.clone()], span)? {
+            Value::Int(n) => Ok(n as u64),
+            other => Err(RuntimeError {
+                message: format!("hash() must return int, got {}", other.type_name()),
                 span,
             }),
         }
