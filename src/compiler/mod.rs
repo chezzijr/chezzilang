@@ -127,7 +127,9 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         }
     }
     c.hoist_types(0, &module.stmts)?;
-    c.gather_aliases(&module.stmts);
+    // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
+    // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
+    c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
     let toplevel = c.compile_module(0, module, &[], true)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -164,12 +166,6 @@ struct Compiler {
     /// (like `field_ic_next`). Each `CallMethod` op gets a unique slot into the VM's `method_ic`
     /// vector. Recorded into `Program::method_ic_sites`.
     method_ic_next: u32,
-    /// Type-alias table (`type Name = T`) for the standalone single-file compile path's extern
-    /// fallback ONLY: when `extern_sigs` (the checker-resolved table) has no entry for a module — the
-    /// source-string test path, which has no cross-module imports — a same-file extern's scalar alias
-    /// is lowered from here. The CLI's multi-file path never consults this (every extern type comes
-    /// pre-resolved, module-scoped, from `extern_sigs`).
-    aliases: HashMap<String, Type>,
     /// ROOT REDESIGN — module-scoped types: `(declaring module_idx, bare type name) → IDENTITY KEY`.
     /// The key is ALWAYS `<module-key>::<Name>` (no winner/loser, no bare keys) so every user
     /// struct/enum/variant/alias is unique by construction. Built once by
@@ -195,8 +191,8 @@ struct Compiler {
     /// FFI ROOT FIX (fix4): the checker-resolved C signature of every `extern` fn, keyed by `(graph
     /// module index, fn name)`. The extern lowering consumes THIS instead of re-resolving alias names
     /// itself — so every qualified/imported/aliased width resolves in its DEFINING module's scope
-    /// (collision-proof). Filled once in `compile_graph`; empty on the standalone test path (which
-    /// has no cross-module imports — its externs lower from the table-miss backstop's direct path).
+    /// (collision-proof). Filled once in `compile_graph` (multi-file) or by
+    /// `resolve_extern_signatures_standalone` (single-file) — the ONE extern-type resolver.
     extern_sigs: crate::checker::ExternTable,
 }
 
@@ -285,7 +281,6 @@ impl Compiler {
             global_slots: Vec::new(),
             field_ic_next: 0,
             method_ic_next: 0,
-            aliases: HashMap::new(),
             type_keys: HashMap::new(),
             module_types: Vec::new(),
             imported_modules: HashMap::new(),
@@ -367,19 +362,6 @@ impl Compiler {
             }
         }
         ename.to_string()
-    }
-
-    /// Gather `type Name = T` aliases from a module's statements into `self.aliases` — the flat table
-    /// the standalone single-file extern fallback resolves a same-file scalar alias through (the
-    /// multi-file CLI path uses the checker-resolved `extern_sigs` instead). Only the test-only
-    /// `compile_module_standalone` builds this; the real CLI never consults the flat map.
-    #[cfg(test)]
-    fn gather_aliases(&mut self, stmts: &[Stmt]) {
-        for stmt in stmts {
-            if let StmtKind::TypeAlias { name, ty } = &stmt.kind {
-                self.aliases.insert(name.clone(), ty.clone());
-            }
-        }
     }
 
     /// M19 Phase 6 — allocate an inline-cache site id for a `CallMethod` op. Every method/module-member
@@ -640,12 +622,11 @@ impl Compiler {
                 }
             }
             // extern C fns: register a CffiDef and bind the name to a `Cffi` value at module init,
-            // exactly like a top-level `fn`. FFI ROOT FIX (fix4): each param/return CType comes from
-            // the CHECKER-RESOLVED `extern_sigs` table (resolved module-scoped, every alias spelling)
-            // — the backend NEVER re-resolves alias/qualified names itself. On a table miss (the
-            // standalone single-file test path, which has no cross-module imports) it falls back to a
-            // LOCAL-only `ctype_of` over this file's aliases + struct fields (no qualified resolution
-            // is possible without imports), so a same-file extern still lowers.
+            // exactly like a top-level `fn`. SINGLE-RESOLVER (fix5): each param/return CType comes
+            // VERBATIM from the CHECKER-RESOLVED `extern_sigs` table — the ONLY extern-type resolver
+            // (the multi-file CLI fills it via `resolve_extern_signatures`, the standalone path via
+            // `resolve_extern_signatures_standalone`). The backend does ZERO alias/qualified/struct
+            // resolution of its own, so a second resolver cannot exist or drift.
             if let StmtKind::Extern { lib, fns } = &stmt.kind {
                 for ef in fns {
                     let sig = self
@@ -660,9 +641,6 @@ impl Compiler {
                             // never-panic backstop (a user program must never abort the VM) for any
                             // path that bypasses it — it does not fire for valid programs.
                             sig.and_then(|s| s.params.get(i).cloned().flatten())
-                                .or_else(|| {
-                                    ctype_of(p.ty.as_ref(), &self.aliases, &self.struct_fields)
-                                })
                                 .ok_or_else(|| CompileError {
                                     message: format!(
                                         "type '{}' is not C-marshallable in extern fn '{}' \
@@ -676,15 +654,8 @@ impl Compiler {
                         })
                         .collect::<Result<_, _>>()?;
                     // `None` ⇒ void: either no annotation, or an annotation resolving to `nil`
-                    // (incl. an alias to `nil`). The checker guarantees a non-void return is a scalar,
-                    // so a non-scalar here can only mean void — use `and_then`, never `.expect`.
-                    let ret = match sig {
-                        Some(s) => s.ret.clone(),
-                        None => ef
-                            .ret
-                            .as_ref()
-                            .and_then(|t| ctype_of(Some(t), &self.aliases, &self.struct_fields)),
-                    };
+                    // (incl. an alias to `nil`). The checker guarantees a non-void return is a scalar.
+                    let ret = sig.and_then(|s| s.ret.clone());
                     let id = self.program.cffi_defs.len() as u32;
                     self.program.cffi_defs.push(CffiDef {
                         lib: lib.clone(),
@@ -3384,91 +3355,6 @@ fn ffi_type_display(ty: Option<&Type>) -> String {
     }
 }
 
-/// has already rejected non-marshallable types, so a `None` here is unreachable for a well-typed
-/// program (the call sites `.expect(...)` on it).
-fn ctype_of(
-    ty: Option<&Type>,
-    aliases: &HashMap<String, Type>,
-    struct_fields: &HashMap<String, Vec<crate::ast::Field>>,
-) -> Option<CType> {
-    ctype_of_visiting(ty, aliases, struct_fields, &mut Vec::new())
-}
-
-/// `ctype_of` with a shared visited-name stack threaded through the alias + struct-field recursion,
-/// so a (checker-rejected, but defended-against) cyclic alias/struct can't overflow the stack — it
-/// resolves to `None` instead. The checker has already accepted only marshallable scalars + flat-
-/// scalar structs, so `None` is unreachable for a well-typed program (the call sites `.expect`).
-fn ctype_of_visiting(
-    ty: Option<&Type>,
-    aliases: &HashMap<String, Type>,
-    struct_fields: &HashMap<String, Vec<crate::ast::Field>>,
-    visited: &mut Vec<String>,
-) -> Option<CType> {
-    match ty {
-        Some(Type::Named(n)) => match n.as_str() {
-            "int" => Some(CType::Int),
-            "float" => Some(CType::Float),
-            "bool" => Some(CType::Bool),
-            "str" => Some(CType::Str),
-            "ptr" => Some(CType::Ptr),
-            // A RETURN-ONLY owned `char*` (freed after copy). See `cffi::CType::OwnedStr`.
-            "owned_str" => Some(CType::OwnedStr),
-            // Fixed-width C integers (BIDIRECTIONAL). Each maps to its own `CType` width — distinct
-            // from `CType::Int` (C long). Placed BEFORE the alias fallthrough so `type Len = int32`
-            // resolves one hop into the int32 leaf (the WIDTH, not collapsing to `CType::Int`). Kept
-            // byte-identical with `interp::ctype_of` — a divergence breaks two-engine parity.
-            "int8" => Some(CType::Int8),
-            "int16" => Some(CType::Int16),
-            "int32" => Some(CType::Int32),
-            "int64" => Some(CType::Int64),
-            "uint8" => Some(CType::UInt8),
-            "uint16" => Some(CType::UInt16),
-            "uint32" => Some(CType::UInt32),
-            "uint64" => Some(CType::UInt64),
-            other => {
-                if visited.iter().any(|v| v == other) {
-                    return None; // cycle — defended against (checker rejected it already).
-                }
-                visited.push(other.to_string());
-                // A transparent alias to a scalar/struct (resolve once; checker rejected cyclic).
-                let r = if let Some(t) = aliases.get(other) {
-                    ctype_of_visiting(Some(t), aliases, struct_fields, visited)
-                } else if let Some(fields) = struct_fields.get(other) {
-                    // A flat-scalar struct BY VALUE: map each field recursively to its CType. The
-                    // checker guarantees every field is a scalar leaf, so a `None` field means a
-                    // cyclic/non-scalar (defended) — propagate it as a whole-struct `None`.
-                    let mut cfields = Vec::with_capacity(fields.len());
-                    let mut field_names = Vec::with_capacity(fields.len());
-                    for f in fields {
-                        let ct = ctype_of_visiting(Some(&f.ty), aliases, struct_fields, visited)?;
-                        cfields.push(ct);
-                        field_names.push(f.name.clone());
-                    }
-                    Some(CType::Struct {
-                        name: other.to_string(),
-                        field_names,
-                        fields: cfields,
-                    })
-                } else {
-                    None
-                };
-                visited.pop();
-                r
-            }
-        },
-        // A RETURN-ONLY nullable `char*` (surface `str?` / `owned_str?`). NULL → None at runtime.
-        // The inner type decides borrowed (`str` → OptStr) vs owned (`owned_str` → OptOwnedStr).
-        Some(Type::Generic(n, args)) if n == "Option" && args.len() == 1 => {
-            match ctype_of_visiting(args.first(), aliases, struct_fields, visited) {
-                Some(CType::Str) => Some(CType::OptStr),
-                Some(CType::OwnedStr) => Some(CType::OptOwnedStr),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
 pub(crate) fn block_has_bare_spawn(stmts: &[Stmt]) -> bool {
     stmts.iter().any(stmt_has_bare_spawn)
 }
@@ -3707,132 +3593,10 @@ mod interp_tests {
         Span { line: 1, col: 1 }
     }
 
-    /// An empty struct-field table for the `ctype_of` tests that don't exercise structs.
-    fn no_structs() -> HashMap<String, Vec<crate::ast::Field>> {
-        HashMap::new()
-    }
-
-    #[test]
-    fn ctype_of_maps_owned_and_nullable_str_returns() {
-        let aliases: HashMap<String, Type> = HashMap::new();
-        let sf = no_structs();
-        let named = |s: &str| Type::Named(s.to_string());
-        let opt = |inner: Type| Type::Generic("Option".to_string(), vec![inner]);
-        // owned_str -> OwnedStr; str? -> OptStr; owned_str? -> OptOwnedStr.
-        assert_eq!(
-            ctype_of(Some(&named("owned_str")), &aliases, &sf),
-            Some(CType::OwnedStr)
-        );
-        assert_eq!(
-            ctype_of(Some(&opt(named("str"))), &aliases, &sf),
-            Some(CType::OptStr)
-        );
-        assert_eq!(
-            ctype_of(Some(&opt(named("owned_str"))), &aliases, &sf),
-            Some(CType::OptOwnedStr)
-        );
-        // Plain str unchanged; a non-str Option return is not marshallable (-> None).
-        assert_eq!(
-            ctype_of(Some(&named("str")), &aliases, &sf),
-            Some(CType::Str)
-        );
-        assert_eq!(ctype_of(Some(&opt(named("int"))), &aliases, &sf), None);
-        // Aliases resolve transparently: `type T = owned_str?` -> OptOwnedStr.
-        let mut aliased: HashMap<String, Type> = HashMap::new();
-        aliased.insert("T".to_string(), opt(named("owned_str")));
-        assert_eq!(
-            ctype_of(Some(&named("T")), &aliased, &sf),
-            Some(CType::OptOwnedStr)
-        );
-    }
-
-    #[test]
-    fn ctype_of_maps_fixed_width_ints() {
-        let aliases: HashMap<String, Type> = HashMap::new();
-        let sf = no_structs();
-        let named = |s: &str| Type::Named(s.to_string());
-        // Each fixed-width name maps to its distinct CType — NOT collapsed to CType::Int (which stays
-        // C long). int64/uint64 are also distinct from CType::Int.
-        for (name, want) in [
-            ("int8", CType::Int8),
-            ("int16", CType::Int16),
-            ("int32", CType::Int32),
-            ("int64", CType::Int64),
-            ("uint8", CType::UInt8),
-            ("uint16", CType::UInt16),
-            ("uint32", CType::UInt32),
-            ("uint64", CType::UInt64),
-        ] {
-            assert_eq!(
-                ctype_of(Some(&named(name)), &aliases, &sf),
-                Some(want),
-                "{name}"
-            );
-        }
-        // Bare `int` is still C long (back-compat), distinct from int64.
-        assert_eq!(
-            ctype_of(Some(&named("int")), &aliases, &sf),
-            Some(CType::Int)
-        );
-        // Alias trap: `type Len = int32` must resolve to the WIDTH (CType::Int32), not collapse to
-        // CType::Int — the alias arm recurses one hop into the int32 leaf.
-        let mut aliased: HashMap<String, Type> = HashMap::new();
-        aliased.insert("Len".to_string(), named("int32"));
-        assert_eq!(
-            ctype_of(Some(&named("Len")), &aliased, &sf),
-            Some(CType::Int32)
-        );
-    }
-
-    #[test]
-    fn ctype_of_maps_flat_struct() {
-        use crate::ast::Field;
-        let field = |name: &str, ty: &str| Field {
-            name: name.to_string(),
-            ty: Type::Named(ty.to_string()),
-            default: None,
-        };
-        let mut sf: HashMap<String, Vec<Field>> = HashMap::new();
-        sf.insert(
-            "Point".to_string(),
-            vec![field("x", "int32"), field("y", "int32")],
-        );
-        let aliases: HashMap<String, Type> = HashMap::new();
-
-        let want = CType::Struct {
-            name: "Point".to_string(),
-            field_names: vec!["x".to_string(), "y".to_string()],
-            fields: vec![CType::Int32, CType::Int32],
-        };
-        assert_eq!(
-            ctype_of(Some(&Type::Named("Point".to_string())), &aliases, &sf),
-            Some(want.clone())
-        );
-        // `type P = Point` resolves identically to bare `Point` (the struct keeps its OWN name).
-        let mut aliased = aliases.clone();
-        aliased.insert("P".to_string(), Type::Named("Point".to_string()));
-        assert_eq!(
-            ctype_of(Some(&Type::Named("P".to_string())), &aliased, &sf),
-            Some(want)
-        );
-        // An unknown name is `None`.
-        assert_eq!(
-            ctype_of(Some(&Type::Named("Nope".to_string())), &aliases, &sf),
-            None
-        );
-    }
-
-    #[test]
-    fn ctype_of_struct_cyclic_alias_no_overflow() {
-        let sf = no_structs();
-        let mut aliases: HashMap<String, Type> = HashMap::new();
-        aliases.insert("A".to_string(), Type::Named("B".to_string()));
-        aliases.insert("B".to_string(), Type::Named("A".to_string()));
-        assert_eq!(
-            ctype_of(Some(&Type::Named("A".to_string())), &aliases, &sf),
-            None
-        );
-    }
+    // The compiler's standalone-path `ctype_of`/`ctype_of_visiting` second resolver was DELETED in
+    // fix5 (the single-resolver redesign); extern C types now come VERBATIM from the checker's
+    // `resolve_extern_signatures{,_standalone}`. Its behavioral coverage (widths, owned/nullable str,
+    // flat struct, cyclic-alias-no-overflow) lives in `checker::tests::resolve_extern_ctype`.
 
     #[test]
     fn parse_interpolation_attaches_spec() {

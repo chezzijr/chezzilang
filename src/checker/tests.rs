@@ -5697,6 +5697,96 @@ mod resolve_extern_ctype {
     }
 
     #[test]
+    fn qualified_return_struct_with_aliased_field_resolves_field_width() {
+        // REGRESSION (fix4): a qualified return struct whose FIELDS are typed via the DEFINING
+        // module's LOCAL alias (`type Half = int32`). On fix4 the importer's scope (where `Half` is
+        // invisible) was used to resolve the fields → field None → struct CType None → void return.
+        // The single-resolver fix computes the struct's CType in ITS defining module's scope, so each
+        // field keeps its true int32 width.
+        let s = entry_sig(&[
+            (
+                "core/cdefs.chz",
+                "import int32 from std.ffi\n\ntype Half = int32\n\nstruct DivT:\n    quot: Half\n    rem: Half\n",
+            ),
+            (
+                "main.chz",
+                "import core.cdefs\nimport int32 from std.ffi\n\nextern \"libc.so.6\":\n    fn f(numer: int32, denom: int32) -> cdefs.DivT\n",
+            ),
+        ]);
+        assert_eq!(s.params, vec![Some(CType::Int32), Some(CType::Int32)]);
+        match s.ret {
+            Some(CType::Struct {
+                name,
+                field_names,
+                fields,
+            }) => {
+                assert!(name.ends_with("::DivT"), "identity key, got {name}");
+                assert_eq!(field_names, vec!["quot".to_string(), "rem".to_string()]);
+                assert_eq!(fields, vec![CType::Int32, CType::Int32]);
+            }
+            other => panic!("expected a struct return, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn struct_field_named_import_qualified_and_nested_defining_width_wins() {
+        // Module A's struct has three fields whose types resolve ONLY in A's defining scope:
+        //   * `w` via a NAMED-IMPORTED alias (`import W from widths`, widths: `type W = int32`),
+        //   * `w2` via a QUALIFIED `widths.W2` (`type W2 = int16`),
+        //   * `n` whose type is a struct from a THIRD module (`mods.Inner`, an int8 field) — nested.
+        // main declares COLLIDING `type W = uint64`/`type W2 = uint64` and a colliding `struct Inner`.
+        // Each field's CType must be the DEFINING width, never main's collisions.
+        let s = entry_sig(&[
+            (
+                "core/widths.chz",
+                "import int32 from std.ffi\nimport int16 from std.ffi\n\ntype W = int32\ntype W2 = int16\n",
+            ),
+            (
+                "core/mods.chz",
+                "import int8 from std.ffi\n\nstruct Inner:\n    b: int8\n",
+            ),
+            (
+                "core/a.chz",
+                "import W from core.widths\nimport core.widths\nimport core.mods\n\nstruct Outer:\n    w: W\n    w2: widths.W2\n    n: mods.Inner\n",
+            ),
+            (
+                "main.chz",
+                "import core.a\nimport uint64 from std.ffi\nimport int8 from std.ffi\n\ntype W = uint64\ntype W2 = uint64\n\nstruct Inner:\n    z: uint64\n\nextern \"libc.so.6\":\n    fn f() -> a.Outer\n",
+            ),
+        ]);
+        match s.ret {
+            Some(CType::Struct {
+                name,
+                field_names,
+                fields,
+            }) => {
+                assert!(name.ends_with("::Outer"), "identity key, got {name}");
+                assert_eq!(
+                    field_names,
+                    vec!["w".to_string(), "w2".to_string(), "n".to_string()]
+                );
+                assert_eq!(fields[0], CType::Int32, "named-import alias W -> int32");
+                assert_eq!(fields[1], CType::Int16, "qualified widths.W2 -> int16");
+                match &fields[2] {
+                    CType::Struct {
+                        name: inner,
+                        fields: ifields,
+                        ..
+                    } => {
+                        assert!(
+                            inner.ends_with("::Inner"),
+                            "nested identity key, got {inner}"
+                        );
+                        assert_eq!(ifields, &vec![CType::Int8], "nested Inner.b -> int8");
+                    }
+                    other => panic!("expected nested struct field, got {other:?}"),
+                }
+            }
+            other => panic!("expected a struct return, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn local_chain_resolves_through_every_hop() {
         // `type Len = A; type A = B; type B = int64` (same file) → int64 (each hop in this scope).
         let s = entry_sig(&[(

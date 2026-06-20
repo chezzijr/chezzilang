@@ -71,9 +71,16 @@ With colliding `type W = int8` (or `Inner`/`Outer`/…) shadows in the calling m
 `extern fn abs(n: mod.Len) -> mod.Len` still marshals as **int64** — never the local int8. Because the
 checker walks each module's real import/alias environment, **no hop** can fall back to a flat
 last-write-wins alias-name table; the C ABI can't be hijacked by a same-named local alias at any depth.
-A by-value struct keeps each field's exact C width (an `int32` field stays 4 bytes). A cyclic alias
-chain is a clean "not C-marshallable" error (never a hang). (3-engine parity: VM / `--serial` / interp;
-verified silent-safe — the prior bug printed the wrong width with `check` passing.)
+A by-value struct keeps each field's exact C width (an `int32` field stays 4 bytes), and — crucially —
+each **field's** type resolves in the **struct's own defining module's scope**, not the importer's. So a
+qualified/imported return struct whose fields are typed via the defining module's local alias
+(`core/cdefs.chz`: `type Half = int32` + `struct DivT{quot:Half; rem:Half}`; `main`:
+`extern fn div(...) -> cdefs.DivT`) marshals correctly — a colliding/invisible `Half` in the importer
+can't drop the field. A cyclic alias chain is a clean "not C-marshallable" error (never a hang).
+(3-engine parity: VM / `--serial` / interp; verified silent-safe — the prior bug returned void with
+`check` passing.) There is exactly **one** extern-type resolver — the checker — for single-file source
+and multi-file projects alike; the backends do zero type resolution of their own, so a second resolver
+cannot drift.
 
 ## 1b. Deferred FFI-deepening features — design notes (revisit-in-future)
 

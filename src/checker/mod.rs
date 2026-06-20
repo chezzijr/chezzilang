@@ -312,6 +312,35 @@ pub fn resolve_extern_signatures(graph: &ModuleGraph) -> ExternTable {
     std::mem::take(&mut c.extern_sigs)
 }
 
+/// Resolve extern C signatures for a SINGLE-FILE (standalone, source-string) program, going through
+/// the EXACT SAME [`resolve_extern_signatures`] pass as the multi-file CLI — so there is exactly ONE
+/// extern-type resolver in the whole codebase and the backends never re-resolve. Wraps `stmts` in a
+/// synthetic one-module [`ModuleGraph`]: id `<main>` (so `module_keys` yields `<main>`, matching the
+/// backends' `STANDALONE_MODULE_KEY` struct-identity key), no imports, no native. Width names
+/// (`int32`) resolve as reserved leaves; local aliases/structs resolve from the parsed stmts; no
+/// qualified / named-import forms exist in single-file source, so nothing else is needed.
+///
+/// Test-only: the single-file standalone compile/run paths (`compile_module_standalone`,
+/// `Interp::execute`) are `#[cfg(test)]`. The production CLI — single- AND multi-file — always goes
+/// through `build_graph` → `resolve_extern_signatures`.
+#[cfg(test)]
+pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
+    let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
+    let graph = ModuleGraph {
+        entry: id.clone(),
+        modules: vec![crate::resolver::LoadedModule {
+            id,
+            dotted: Vec::new(),
+            ast: crate::ast::Module {
+                stmts: stmts.to_vec(),
+            },
+            imports: Vec::new(),
+            native: None,
+        }],
+    };
+    resolve_extern_signatures(&graph)
+}
+
 impl Checker {
     /// The shared deps-first module-checking pass behind both [`check_graph`] and
     /// [`resolve_extern_signatures`]. When `harvest_externs` is set, gathers every struct's AST field
@@ -638,6 +667,17 @@ struct Checker {
     /// each field's real C width, which `StructInfo`'s `Ty` fields collapse to `Ty::Int`). Only
     /// populated when [`resolve_extern_signatures`] drives the pass.
     struct_field_asts: HashMap<String, Vec<(String, Type)>>,
+    /// The FULLY-RESOLVED, width-bearing by-value [`CType::Struct`] of every user struct in the graph,
+    /// keyed by IDENTITY KEY, each computed ONCE in the struct's OWN DEFINING module's import/alias
+    /// scope (extending the [`AliasSig::ctype`] precedent to structs). This is the structural fix to
+    /// the FFI qualified/aliased-struct-field saga: an importer's extern returning `mod.DivT` reads
+    /// this cache VERBATIM, so a field typed via the defining module's local alias (`type Half =
+    /// int32`) keeps its true width — the importer's scope (where `Half` is invisible / colliding) is
+    /// never consulted. `None` entry = a field is not a scalar leaf (non-marshallable; the marshal
+    /// gate is the actual error). Populated deps-first, so a cross-module / qualified / nested struct
+    /// is always cached before an importer needs it. NOT cleared per-module (graph-wide). Only built
+    /// when [`resolve_extern_signatures`] drives the pass.
+    struct_ctypes: HashMap<String, Option<CType>>,
     /// The CURRENT module's graph index (set in `check_module` when harvesting extern sigs), so each
     /// extern fn's resolved C signature is keyed under the SAME index the backends derive. `None`
     /// for a lone `check`.
@@ -722,6 +762,7 @@ impl Checker {
             extern_sigs: ExternTable::new(),
             extern_module_idx: None,
             struct_field_asts: HashMap::new(),
+            struct_ctypes: HashMap::new(),
             types_by_name: HashMap::new(),
             imported_poly: std::collections::HashSet::new(),
             imported_ffi_types: std::collections::HashSet::new(),
@@ -866,6 +907,16 @@ impl Checker {
         }
         self.collect_names(stmts);
         self.hoist(stmts);
+        // SINGLE-RESOLVER FFI fix: cache every struct declared in THIS module under its identity key,
+        // its by-value `CType::Struct` computed HERE — in this (the DEFINING) module's import/alias
+        // scope (extends the `AliasSig::ctype` precedent to structs). Done only when harvesting
+        // externs, after `hoist` (all of this module's aliases/`from`-imports are live) and BEFORE the
+        // check_stmt loop (so a same-module extern harvested in the loop reads the cache). Modules are
+        // checked deps-first, so a downstream importer's extern returning `mod.Struct` reads this
+        // cached, defining-scope CType verbatim — its own (colliding/invisible) scope is never used.
+        if self.extern_module_idx.is_some() {
+            self.populate_struct_ctypes(stmts, id);
+        }
         self.infer_returns(stmts);
         for stmt in stmts {
             self.check_stmt(stmt);
@@ -7029,8 +7080,13 @@ impl Checker {
                     self.imported_alias_ctypes[n].clone()
                 }
                 // A bare-visible struct (local or `from`-imported): a by-value flat-scalar struct.
+                // SAME-MODULE path (current scope == defining scope): a cache hit (already populated)
+                // OR a field-walk in THIS scope for a not-yet-populated forward-reference nested struct
+                // — both correct here because this is the struct's own defining scope.
                 _ if self.struct_names.contains(n) => {
-                    self.resolve_struct_ctype(&self.bare_key(n), depth)
+                    let key = self.bare_key(n);
+                    self.resolve_struct_ctype(&key)
+                        .or_else(|| self.struct_ctype_from_asts(&key, depth))
                 }
                 _ => None,
             },
@@ -7050,7 +7106,10 @@ impl Checker {
                 let mid = self.imported_modules.get(module)?;
                 let sig = self.module_sigs.get(mid)?;
                 if sig.struct_defs.contains_key(name) {
-                    self.resolve_struct_ctype(&self.type_key(mid, name), depth)
+                    // CROSS-MODULE: read the qualified struct's CType from the cache VERBATIM (computed
+                    // in ITS defining module's scope, deps-first). NEVER field-walk here — the current
+                    // scope is the IMPORTER's, where the struct's field aliases are invisible/colliding.
+                    self.resolve_struct_ctype(&self.type_key(mid, name))
                 } else if let Some(asig) = sig.type_aliases.get(name) {
                     asig.ctype.clone()
                 } else {
@@ -7061,11 +7120,46 @@ impl Checker {
         }
     }
 
-    /// Build a by-value `CType::Struct` for the struct under IDENTITY `key`, mapping each AST field
-    /// type to its own width-bearing `CType` (so an `int32` field stays 4 bytes — the layout the C
-    /// ABI expects). `name` is the identity key (the tag a returned struct carries, so field lookup
-    /// hits). `None` if a field isn't a scalar leaf (a non-marshallable struct — the gate rejects it).
-    fn resolve_struct_ctype(&self, key: &str, depth: usize) -> Option<CType> {
+    /// PURE CACHE READ of the by-value `CType::Struct` for the struct under IDENTITY `key`. The CType
+    /// was pre-computed in the struct's OWN DEFINING module's scope (by `populate_struct_ctypes`, run
+    /// after `hoist` in each module's `check_module` — deps-first AND before this module's own extern
+    /// harvest, so a cross-module OR same-module struct is always cached before an extern needs it).
+    /// This is the SINGLE-RESOLVER invariant that kills the FFI drift: `resolve_struct_ctype` NEVER
+    /// re-resolves a struct's fields in the (wrong, importing) current scope — it only reads the cache,
+    /// so a field typed via the defining module's local alias keeps its true width.
+    fn resolve_struct_ctype(&self, key: &str) -> Option<CType> {
+        self.struct_ctypes.get(key).cloned().flatten()
+    }
+
+    /// Cache every struct DECLARED IN THIS MODULE under its identity key, its by-value `CType::Struct`
+    /// computed HERE — in this (the DEFINING) module's import/alias scope (extending the
+    /// `AliasSig::ctype` precedent to structs). Called once per module from `check_module` after
+    /// `hoist` (so all of this module's aliases/`from`-imports are live) and BEFORE the check_stmt loop
+    /// (so a same-module extern harvested in the loop reads the cache). Modules are checked deps-first,
+    /// so a downstream importer's extern returning `mod.Struct` reads this cached, defining-scope CType
+    /// verbatim. Gated to the extern-harvesting pass; a lone `check` never builds these.
+    fn populate_struct_ctypes(&mut self, stmts: &[Stmt], id: Option<&ModuleId>) {
+        let Some(mid) = id else { return };
+        let mid = mid.clone();
+        for stmt in stmts {
+            if let StmtKind::Struct { name, .. } = &stmt.kind {
+                let key = self.type_key(&mid, name);
+                if self.struct_ctypes.contains_key(&key) {
+                    continue; // already cached (a cross-module forward-ref resolved it earlier).
+                }
+                let c = self.struct_ctype_from_asts(&key, 0);
+                self.struct_ctypes.insert(key, c);
+            }
+        }
+    }
+
+    /// Build a by-value `CType::Struct` for the struct under IDENTITY `key` from its raw field ASTs,
+    /// mapping each AST field type to its own width-bearing `CType` (so an `int32` field stays 4 bytes
+    /// — the layout the C ABI expects) IN THE CURRENT SCOPE. `key` is the identity key (the tag a
+    /// returned struct carries, so field lookup hits). `None` if a field isn't a scalar leaf (a
+    /// non-marshallable struct — the marshal gate rejects it). The ONLY field-resolving path — only
+    /// `populate_struct_ctypes` calls it, in the defining scope, so there is exactly one resolver.
+    fn struct_ctype_from_asts(&self, key: &str, depth: usize) -> Option<CType> {
         let fields = self.struct_field_asts.get(key)?;
         let mut cfields = Vec::with_capacity(fields.len());
         let mut field_names = Vec::with_capacity(fields.len());

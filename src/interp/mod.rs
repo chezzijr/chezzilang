@@ -266,24 +266,12 @@ struct Interp {
     /// gracefully drain any executor never explicitly `shutdown`/`shutdown_now`-ed at program exit
     /// (C5 / A2) — without it, that submitted work would silently never run.
     executors: Vec<std::rc::Rc<std::cell::RefCell<value::ExecState>>>,
-    /// Program-global type-alias table (`type Name = T`), gathered across EVERY module before
-    /// evaluation begins, mirroring the checker's program-global alias scope. Used only to lower an
-    /// extern fn's scalar-alias param/return types to `CType` in `hoist_declarations` — so an alias
-    /// declared in one module and used bare in another's `extern` signature resolves here exactly as
-    /// the checker accepted it. Empty for a single-source run (the module's own aliases suffice).
-    extern_aliases: std::collections::HashMap<String, crate::ast::Type>,
-    /// Program-global struct-field table (struct name → declared fields), gathered across EVERY module
-    /// before evaluation begins — the interp twin of the compiler's pass-1 `struct_fields`. Used only
-    /// to lower an extern fn's by-value struct param/return types to `CType::Struct` in
-    /// `hoist_declarations`, so an extern naming a struct declared in another module resolves here
-    /// exactly as the compiler does (two-engine parity). Empty for a single-source run (the module's
-    /// own struct decls suffice).
-    extern_struct_fields: std::collections::HashMap<String, Vec<crate::ast::Field>>,
-    /// FFI ROOT FIX (fix4): the checker-resolved C signature of every `extern` fn, keyed by `(graph
+    /// FFI ROOT FIX: the checker-resolved C signature of every `extern` fn, keyed by `(graph
     /// module index, fn name)` — the SAME table + key the VM consumes. The extern lowering reads CTypes
     /// from HERE instead of re-resolving alias names itself, so every qualified/imported/aliased width
-    /// resolves in its DEFINING module's scope (collision-proof, byte-identical to the VM). Filled in
-    /// `run_file_inner`; empty on the source-string test path (its externs use the local backstop).
+    /// resolves in its DEFINING module's scope (collision-proof, byte-identical to the VM). The ONLY
+    /// extern-type resolver: filled in `run_file_inner` (multi-file) via `resolve_extern_signatures`,
+    /// and in `execute` (standalone) via `resolve_extern_signatures_standalone`.
     extern_sigs: crate::checker::ExternTable,
     /// User type names (struct / enum / type-alias) declared in ANY module, gathered before
     /// evaluation. Module-scoped types: a `from`-imported TYPE name carries no runtime value (types
@@ -407,8 +395,6 @@ impl Interp {
             call_stack: Vec::new(),
             nurseries: Vec::new(),
             executors: Vec::new(),
-            extern_aliases: std::collections::HashMap::new(),
-            extern_struct_fields: std::collections::HashMap::new(),
             extern_sigs: crate::checker::ExternTable::new(),
             type_names: std::collections::HashSet::new(),
             type_keys: std::collections::HashMap::new(),
@@ -3960,6 +3946,9 @@ impl Interp {
         // so the bare struct/enum constructor and the from-import skip behave as in the graph path.
         self.module_types = vec![std::collections::HashSet::new()];
         self.cur_module_idx = 0;
+        // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver
+        // the multi-file path uses (no second backend resolver exists). Consumed verbatim below.
+        self.extern_sigs = crate::checker::resolve_extern_signatures_standalone(stmts);
         for s in stmts {
             if let StmtKind::Struct { name, .. }
             | StmtKind::Enum { name, .. }
@@ -4233,29 +4222,12 @@ impl Interp {
                     // library/symbol surfaces as a startup error. Each extern fn binds a `Cffi` value
                     // into the module's globals, exactly where a top-level `fn` binds.
                     //
-                    // FFI ROOT FIX (fix4): each param/return CType comes from the CHECKER-RESOLVED
-                    // `extern_sigs` table (resolved module-scoped, every alias spelling) — the interp
-                    // NEVER re-resolves alias/qualified names itself. On a table miss (the source-string
-                    // test path, which has no cross-module imports), it falls back to a LOCAL-only
-                    // `ctype_of` over this file's aliases + struct fields (no qualified resolution is
-                    // possible without imports). Byte-identical to the VM by construction.
+                    // SINGLE-RESOLVER (fix5): each param/return CType comes VERBATIM from the
+                    // CHECKER-RESOLVED `extern_sigs` table — the ONLY extern-type resolver (the
+                    // multi-file path fills it via `resolve_extern_signatures`, the standalone path via
+                    // `resolve_extern_signatures_standalone`). The interp does ZERO alias/qualified/
+                    // struct resolution of its own, so a second resolver cannot exist or drift.
                     let cur_idx = self.cur_module_idx;
-                    // Local-only fallback tables (only consulted on a table miss).
-                    let mut aliases = self.extern_aliases.clone();
-                    for s in stmts {
-                        if let StmtKind::TypeAlias { name, ty } = &s.kind {
-                            aliases.insert(name.clone(), ty.clone());
-                        }
-                    }
-                    let mut struct_fields = self.extern_struct_fields.clone();
-                    for s in stmts {
-                        if let StmtKind::Struct { name, fields, .. } = &s.kind {
-                            let key = self.type_key(cur_idx, name);
-                            struct_fields.insert(key.clone(), fields.clone());
-                            // The bare name is also accepted by the local fallback's `ctype_of`.
-                            struct_fields.insert(name.clone(), fields.clone());
-                        }
-                    }
                     #[allow(clippy::type_complexity)]
                     let mut lowered: Vec<(
                         String,
@@ -4271,7 +4243,6 @@ impl Interp {
                             .map(|(i, p)| {
                                 // The checker is the real gate; this is the never-panic backstop.
                                 sig.and_then(|s| s.params.get(i).cloned().flatten())
-                                    .or_else(|| ctype_of(p.ty.as_ref(), &aliases, &struct_fields))
                                     .ok_or_else(|| RuntimeError {
                                         message: format!(
                                             "type '{}' is not C-marshallable in extern fn '{}' \
@@ -4286,13 +4257,7 @@ impl Interp {
                             .collect::<Result<_, _>>()?;
                         // `None` ⇒ void: no annotation, or one resolving to `nil` (incl. an alias to
                         // `nil`). The checker guarantees a non-void return is a scalar.
-                        let ret = match sig {
-                            Some(s) => s.ret.clone(),
-                            None => ef
-                                .ret
-                                .as_ref()
-                                .and_then(|t| ctype_of(Some(t), &aliases, &struct_fields)),
-                        };
+                        let ret = sig.and_then(|s| s.ret.clone());
                         lowered.push((ef.name.clone(), params, ret));
                     }
                     for (name, params, ret) in lowered {
@@ -5559,28 +5524,6 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     // every alias spelling) and consume it at extern lowering — the same table + key the VM uses, so
     // the C ABI width is byte-identical across engines by construction. Keyed by graph module index.
     interp.extern_sigs = crate::checker::resolve_extern_signatures(&graph);
-    // Gather every module's type aliases up front so an `extern` signature in any module can resolve
-    // a scalar alias declared anywhere (program-global, matching the checker). Per-module hoisting
-    // would otherwise miss an alias imported from another file (panic / silently-void return).
-    for lm in &graph.modules {
-        for s in &lm.ast.stmts {
-            if let StmtKind::TypeAlias { name, ty } = &s.kind {
-                interp.extern_aliases.insert(name.clone(), ty.clone());
-            }
-        }
-    }
-    // Likewise gather every module's struct fields up front (load order, deps first) so an `extern`
-    // signature can name a by-value struct declared in any module — mirroring the compiler's pass-1
-    // `struct_fields` (which spans every module before any extern compiles).
-    for lm in &graph.modules {
-        for s in &lm.ast.stmts {
-            if let StmtKind::Struct { name, fields, .. } = &s.kind {
-                interp
-                    .extern_struct_fields
-                    .insert(name.clone(), fields.clone());
-            }
-        }
-    }
     // Gather every module's user type names (struct/enum/alias) so a `from`-imported type — which
     // carries no runtime value — is skipped at `bind_import` rather than erroring (module-scoped
     // types resolve through the program-global tables by name). ROOT REDESIGN — assign each user type
@@ -5952,86 +5895,9 @@ fn ffi_type_display(ty: Option<&crate::ast::Type>) -> String {
     }
 }
 
-/// Map an extern fn's surface [`crate::ast::Type`] to its runtime [`crate::native::cffi::CType`],
-/// resolving transparent type aliases (`type Len = int`) through `aliases`. v1 scalars only; the
-/// checker has already rejected non-marshallable types, so a `None` is unreachable for valid input.
-fn ctype_of(
-    ty: Option<&crate::ast::Type>,
-    aliases: &std::collections::HashMap<String, crate::ast::Type>,
-    struct_fields: &std::collections::HashMap<String, Vec<crate::ast::Field>>,
-) -> Option<crate::native::cffi::CType> {
-    ctype_of_visiting(ty, aliases, struct_fields, &mut Vec::new())
-}
-
-/// BYTE-IDENTICAL twin of `compiler::ctype_of_visiting` — a shared visited-name stack guards a
-/// (checker-rejected, defended-against) cyclic alias/struct from overflowing the host stack.
-fn ctype_of_visiting(
-    ty: Option<&crate::ast::Type>,
-    aliases: &std::collections::HashMap<String, crate::ast::Type>,
-    struct_fields: &std::collections::HashMap<String, Vec<crate::ast::Field>>,
-    visited: &mut Vec<String>,
-) -> Option<crate::native::cffi::CType> {
-    use crate::native::cffi::CType;
-    match ty {
-        Some(crate::ast::Type::Named(n)) => match n.as_str() {
-            "int" => Some(CType::Int),
-            "float" => Some(CType::Float),
-            "bool" => Some(CType::Bool),
-            "str" => Some(CType::Str),
-            "ptr" => Some(CType::Ptr),
-            // A RETURN-ONLY owned `char*` (freed after copy). Mirrors `compiler::ctype_of` exactly —
-            // a divergence here would break two-engine parity at runtime.
-            "owned_str" => Some(CType::OwnedStr),
-            // Fixed-width C integers (BIDIRECTIONAL). Each maps to its own `CType` width — distinct
-            // from `CType::Int` (C long). Placed BEFORE the alias fallthrough so `type Len = int32`
-            // resolves one hop into the int32 leaf (the WIDTH, not collapsing to `CType::Int`). Kept
-            // byte-identical with `compiler::ctype_of` — a divergence breaks two-engine parity.
-            "int8" => Some(CType::Int8),
-            "int16" => Some(CType::Int16),
-            "int32" => Some(CType::Int32),
-            "int64" => Some(CType::Int64),
-            "uint8" => Some(CType::UInt8),
-            "uint16" => Some(CType::UInt16),
-            "uint32" => Some(CType::UInt32),
-            "uint64" => Some(CType::UInt64),
-            other => {
-                if visited.iter().any(|v| v == other) {
-                    return None;
-                }
-                visited.push(other.to_string());
-                let r = if let Some(t) = aliases.get(other) {
-                    ctype_of_visiting(Some(t), aliases, struct_fields, visited)
-                } else if let Some(fields) = struct_fields.get(other) {
-                    let mut cfields = Vec::with_capacity(fields.len());
-                    let mut field_names = Vec::with_capacity(fields.len());
-                    for f in fields {
-                        let ct = ctype_of_visiting(Some(&f.ty), aliases, struct_fields, visited)?;
-                        cfields.push(ct);
-                        field_names.push(f.name.clone());
-                    }
-                    Some(CType::Struct {
-                        name: other.to_string(),
-                        field_names,
-                        fields: cfields,
-                    })
-                } else {
-                    None
-                };
-                visited.pop();
-                r
-            }
-        },
-        // A RETURN-ONLY nullable `char*` (surface `str?` / `owned_str?`): NULL → None at runtime.
-        Some(crate::ast::Type::Generic(n, args)) if n == "Option" && args.len() == 1 => {
-            match ctype_of_visiting(args.first(), aliases, struct_fields, visited) {
-                Some(CType::Str) => Some(CType::OptStr),
-                Some(CType::OwnedStr) => Some(CType::OptOwnedStr),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
+// The interp's standalone-path `ctype_of`/`ctype_of_visiting` second resolver was DELETED in fix5
+// (the single-resolver redesign); extern C types now come VERBATIM from the checker's
+// `resolve_extern_signatures{,_standalone}`, the ONLY extern-type resolver.
 
 /// Lower a native fn's engine-neutral [`crate::native::NativeRet`] into an interpreter `Value`.
 /// `Ok`/`Err`/`Some`/`None` become the built-in `Result` / `Option` enum values.
@@ -7976,91 +7842,10 @@ b := Buf([10, 20, 30])
         assert_eq!(out, expected);
     }
 
-    /// Byte-identical twin of `compiler::interp_tests::ctype_of_maps_fixed_width_ints`: the interp's
-    /// `ctype_of` must map each fixed-width name to the SAME `CType` width as the compiler's (and
-    /// resolve a `type Len = int32` alias to the width, not collapse to `CType::Int`). The two
-    /// `ctype_of` impls are the ONLY parity hazard for this feature; this twin guards it.
-    #[test]
-    fn ctype_of_maps_fixed_width_ints() {
-        use crate::native::cffi::CType;
-        let aliases: std::collections::HashMap<String, crate::ast::Type> =
-            std::collections::HashMap::new();
-        let sf: std::collections::HashMap<String, Vec<crate::ast::Field>> =
-            std::collections::HashMap::new();
-        let named = |s: &str| crate::ast::Type::Named(s.to_string());
-        for (name, want) in [
-            ("int8", CType::Int8),
-            ("int16", CType::Int16),
-            ("int32", CType::Int32),
-            ("int64", CType::Int64),
-            ("uint8", CType::UInt8),
-            ("uint16", CType::UInt16),
-            ("uint32", CType::UInt32),
-            ("uint64", CType::UInt64),
-        ] {
-            assert_eq!(
-                super::ctype_of(Some(&named(name)), &aliases, &sf),
-                Some(want),
-                "{name}"
-            );
-        }
-        // Bare `int` is still C long (back-compat), distinct from int64.
-        assert_eq!(
-            super::ctype_of(Some(&named("int")), &aliases, &sf),
-            Some(CType::Int)
-        );
-        // Alias trap: `type Len = int32` resolves to the WIDTH, not CType::Int.
-        let mut aliased: std::collections::HashMap<String, crate::ast::Type> =
-            std::collections::HashMap::new();
-        aliased.insert("Len".to_string(), named("int32"));
-        assert_eq!(
-            super::ctype_of(Some(&named("Len")), &aliased, &sf),
-            Some(CType::Int32)
-        );
-    }
-
-    /// BYTE-IDENTICAL twin of `compiler::interp_tests::ctype_of_maps_flat_struct`: interp's
-    /// `ctype_of` must map a flat-scalar struct + an alias to it to the SAME `CType::Struct` the
-    /// compiler does (two-engine parity of the extern type lowering). Unknown name ⇒ `None`.
-    #[test]
-    fn ctype_of_maps_flat_struct() {
-        use crate::ast::{Field, Type};
-        use crate::native::cffi::CType;
-        let field = |name: &str, ty: &str| Field {
-            name: name.to_string(),
-            ty: Type::Named(ty.to_string()),
-            default: None,
-        };
-        let mut sf: std::collections::HashMap<String, Vec<Field>> =
-            std::collections::HashMap::new();
-        sf.insert(
-            "Point".to_string(),
-            vec![field("x", "int32"), field("y", "int32")],
-        );
-        let aliases: std::collections::HashMap<String, Type> = std::collections::HashMap::new();
-
-        let want = CType::Struct {
-            name: "Point".to_string(),
-            field_names: vec!["x".to_string(), "y".to_string()],
-            fields: vec![CType::Int32, CType::Int32],
-        };
-        assert_eq!(
-            super::ctype_of(Some(&Type::Named("Point".to_string())), &aliases, &sf),
-            Some(want.clone())
-        );
-
-        let mut aliased = aliases.clone();
-        aliased.insert("P".to_string(), Type::Named("Point".to_string()));
-        assert_eq!(
-            super::ctype_of(Some(&Type::Named("P".to_string())), &aliased, &sf),
-            Some(want)
-        );
-
-        assert_eq!(
-            super::ctype_of(Some(&Type::Named("Nope".to_string())), &aliases, &sf),
-            None
-        );
-    }
+    // The interp's `ctype_of` second resolver + its parity-twin tests were DELETED in fix5 (the
+    // single-resolver redesign). Both engines now read the checker's `resolve_extern_signatures`
+    // table verbatim, so the two-engine FFI-type parity is structural, not a duplicated-resolver
+    // hazard; the behavioral coverage lives in `checker::tests::resolve_extern_ctype`.
 
     /// C-ABI FFI golden (interp side): an `extern "lib":` block calls `cos`/`sqrt` (libm) and
     /// `strlen` (libc) via dlopen+libffi. Deterministic by design (cos(0.0)=1.0, sqrt(4.0)=2.0,
@@ -8167,6 +7952,22 @@ b := Buf([10, 20, 30])
         let _ = std::fs::remove_file(&path);
         res.expect("extern with `-> nil` return should run on the interp");
         assert_eq!(out, "42\n");
+    }
+
+    /// SINGLE-RESOLVER guard (fix5): the source-string standalone path (`run_capture`/`run_program`,
+    /// NOT `run_file`) must lower an extern by-value RETURN STRUCT via the checker's
+    /// `resolve_extern_signatures_standalone` — the ONLY extern-type resolver. After the backend's
+    /// `ctype_of` fallback is deleted there is no other path, so a void/None return here would be a
+    /// regression. `div(17,5)` must read `quot` 3 (libc `div`). Linux-only.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_standalone_source_string_struct_return_runs() {
+        let src = "import int32 from std.ffi\n\nstruct DivT:\n    quot: int32\n    rem: int32\n\n\
+                   extern \"libc.so.6\":\n    fn div(numer: int32, denom: int32) -> DivT\n\n\
+                   r := div(17, 5)\nprint(r.quot)\n";
+        let out =
+            run_capture(src).expect("standalone extern struct return should run on the interp");
+        assert_eq!(out, "3\n");
     }
 
     /// Regression (blocker): a type alias defined in an IMPORTED module, `from`-imported and used at

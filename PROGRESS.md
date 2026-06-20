@@ -1085,9 +1085,10 @@ branch names) is in the git log.
   consume the table** (keyed by `(graph module idx, fn name)`, the index both derive) and NEVER
   re-resolve alias names — closing every spelling at once: single-hop, local chain (any depth),
   named-import hop, qualified hop, AND mixed chains. **Deleted** the dead machinery: `qualify_ffi_type`
-  + `resolve_qualified_alias` + `module_aliases` in BOTH engines (the standalone source-string test
-  path keeps a LOCAL-only `ctype_of` fallback — no imports there, so no qualified resolution needed and
-  no collision possible). The fix2 "cross-module qualified body mid-chain (`type Len = other.X`)" `None`
+  + `resolve_qualified_alias` + `module_aliases` in BOTH engines. (At fix4 the standalone source-string
+  test path still kept a LOCAL-only `ctype_of` fallback — **that second resolver was deleted in fix5
+  below**; the standalone path now goes through the checker too, so there is exactly ONE resolver.) The
+  fix2 "cross-module qualified body mid-chain (`type Len = other.X`)" `None`
   case is now resolved too (the checker has each module's real import-binder map). Tests: new VM 3-engine
   parity tests for the named-import hop and a LOCAL→named-import→QUALIFIED **mixed** chain (each hop a
   collision, all → 300 on VM/`--serial`/`--parallel`), 7 new checker `resolve_ctype` unit tests
@@ -1097,6 +1098,42 @@ branch names) is in the git log.
   asserted a BARE cross-module alias the checker now rejects as module-scoped) was corrected to the
   `import Size from sizes` spelling. Full suite (2292) + conformance green, clippy `--all-targets`
   clean; CLI repro 20×/`--parallel` deterministic at 300.
+- ✅ **C-ABI FFI ARCHITECTURALLY-FINAL fix: struct FIELDS resolve in the STRUCT's defining scope +
+  the second resolver is DELETED** (2026-06-20, `auto-task/ffi-qualified-type-fix5`) — closed the one
+  regression the fix4 redesign introduced and made dual-resolver drift structurally impossible. **The
+  regression:** a qualified/imported extern RETURN STRUCT whose FIELDS are typed via the DEFINING
+  module's local alias (`core/cdefs.chz`: `type Half = int32` + `struct DivT{quot:Half; rem:Half}`;
+  `main`: `extern fn div(...) -> cdefs.DivT`) resolved to a **void return (nil)** — `run`/`--serial`/
+  `--parallel` all faulted with `cannot read field 'quot' of nil` (expected quot 3, rem 2). Root cause:
+  the checker's `resolve_struct_ctype` read the struct's raw field ASTs but resolved each field via
+  `resolve_ctype_d`'s alias arms against the **importing** module's `aliases`/`imported_alias_ctypes`,
+  where `Half` is invisible → field `None` → whole-struct `CType` `None` → backend lowered the return as
+  void. **Structural fix (extends the `AliasSig.ctype` precedent to structs):** a graph-wide
+  `struct_ctypes: HashMap<identity-key, Option<CType>>` cache on the `Checker`, populated once per module
+  after `hoist` (all that module's aliases/`from`-imports live) and before the check_stmt loop, each
+  struct's complete by-value `CType::Struct` computed **in its OWN defining module's scope**. Modules are
+  checked deps-first, so an importer's extern returning `mod.Struct` reads the cached defining-scope CType
+  **verbatim**; `resolve_struct_ctype` became a pure cache read (the bare/same-module arm keeps a
+  field-walk fallback in the defining scope for forward-ref nested structs; the qualified arm NEVER
+  field-walks — it only reads the cache). **Single-resolver enforcement (deletion):** removed the
+  backends' second resolver entirely — `compiler::ctype_of`/`ctype_of_visiting` + `gather_aliases` + the
+  `aliases` field + their `ctype_of_maps_*`/`ctype_of_struct_cyclic_alias_no_overflow` tests, and
+  `interp::ctype_of`/`ctype_of_visiting` + the `extern_aliases`/`extern_struct_fields` fields + their
+  gather loops + parity-twin tests. The two `.or_else(ctype_of…)`/`None => ctype_of(…)` fallback arms are
+  gone; both backends now read `extern_sigs` (the checker's `ExternTable`) **verbatim**. The standalone
+  single-file paths (`compile_module_standalone`, `Interp::execute`) route through a new
+  `checker::resolve_extern_signatures_standalone(stmts)` (a synthetic one-module `<main>` graph
+  delegating to the same `resolve_extern_signatures`), so there is now **exactly ONE** extern-type
+  resolver in the codebase — drift is impossible by construction. (`compiler::struct_fields` is retained
+  for `json.decode` only; it no longer feeds extern lowering.) Tests: new checker
+  `resolve_extern_ctype` units (aliased-field regression repro; a named-import + qualified + nested
+  struct-field case where each field's DEFINING width wins over a colliding importer alias), a VM
+  3-engine `extern_qualified_return_struct_aliased_field_runs` (quot 3 / rem 2 on VM/`--serial`/
+  `--parallel`), and a standalone-path `extern_standalone_source_string_struct_return_runs` guard locking
+  the single-resolver wiring; all prior FFI guards (single-hop/chain/named-import/mixed → 300, plain
+  struct → 3/2, width param → 7, cyclic → clean error, non-marshallable → clean check error) stay green.
+  Full suite (2290) + conformance green, clippy `--all-targets` clean; CLI struct-aliased-field repro
+  20×/`--parallel` deterministic at 3/2.
 - ✅ **C-ABI FFI ROOT fix: module-qualified width-alias CHAIN resolves module-scoped at ALL depths**
   (2026-06-20, `auto-task/ffi-qualified-type-fix2`; **superseded by fix4 above** — the backend
   re-resolvers it added are now deleted) — the deeper adversarial find on the single-hop

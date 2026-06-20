@@ -18740,6 +18740,63 @@ main()
         );
     }
 
+    /// Regression (ROOT, the struct-field scope — fix5): a qualified extern RETURN STRUCT whose FIELDS
+    /// are typed via the DEFINING module's LOCAL alias (`type Half = int32`; `struct DivT{quot:Half;
+    /// rem:Half}`). fix4 resolved the struct's fields in the IMPORTER's scope (where `Half` is
+    /// invisible) → field None → struct CType None → void return → `cannot read field 'quot' of nil`.
+    /// The single-resolver fix computes the struct's CType in ITS defining module's scope, so the
+    /// return marshals as a real two-int32 struct and `div(17,5)` reads quot 3 / rem 2 on all three
+    /// engines. Linux-only (needs libc.so.6 `div`).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_qualified_return_struct_aliased_field_runs() {
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_vm_ffi_structalias_{}", std::process::id()));
+        let core = dir.join("core");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(
+            core.join("cdefs.chz"),
+            "import int32 from std.ffi\n\ntype Half = int32\n\nstruct DivT:\n    quot: Half\n    rem: Half\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import core.cdefs\nimport int32 from std.ffi\n\nextern \"libc.so.6\":\n    \
+             fn div(numer: int32, denom: int32) -> cdefs.DivT\n\nr := div(17, 5)\nprint(r.quot)\nprint(r.rem)\n",
+        )
+        .unwrap();
+        let (vm_out, _e, vm_res, _) = run_file(&entry);
+        let (io, _ie, ir, _) = crate::interp::run_file(&entry);
+        let (par_out, _pe, par_res, _) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            vm_res.is_ok(),
+            "VM faulted on qualified return struct with aliased fields: {vm_res:?}"
+        );
+        assert!(
+            ir.is_ok(),
+            "interp faulted on qualified return struct with aliased fields: {ir:?}"
+        );
+        assert!(
+            par_res.is_ok(),
+            "parallel engine faulted on qualified return struct with aliased fields: {par_res:?}"
+        );
+        assert_eq!(
+            vm_out, "3\n2\n",
+            "qualified return struct whose fields use the defining module's local alias must marshal as two int32 (quot 3, rem 2)"
+        );
+        assert_eq!(
+            vm_out, io,
+            "VM and interp diverged (qualified return struct aliased fields)"
+        );
+        assert_eq!(
+            vm_out, par_out,
+            "VM and --parallel diverged (qualified return struct aliased fields)"
+        );
+    }
+
     /// Regression (ROOT, the MIXED chain — fix4): a single qualified alias whose resolution hops
     /// through a LOCAL alias, then a NAMED-IMPORTED alias, then a QUALIFIED alias — with a colliding
     /// `type W = int8` shadow at each module along the way — must resolve to the true width (int64)
