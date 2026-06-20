@@ -18506,6 +18506,147 @@ main()
         );
     }
 
+    /// Regression (ROOT, the deeper adversarial find): a module-QUALIFIED width alias whose body is
+    /// itself ANOTHER alias (a CHAIN, `type Len = Inner; type Inner = int64`) must resolve EVERY hop
+    /// in its DEFINING module's scope — NOT re-enter the flat last-write-wins bare `aliases` map on
+    /// the inner hop. The calling module declares a colliding bare `type Inner = int8`; with the bug
+    /// the inner hop collapses to int8 and `abs(-300)` rounds to 44. Correctly resolved (int64) it
+    /// stays 300 across all three engines. Linux-only (needs libc.so.6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_qualified_width_alias_chain_depth2_collision_runs() {
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_vm_ffi_qchain2_{}", std::process::id()));
+        let core = dir.join("core");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(
+            core.join("w3.chz"),
+            "import int64 from std.ffi\n\ntype Inner = int64\ntype Len = Inner\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import core.w3\nimport int8 from std.ffi\n\ntype Inner = int8\n\nextern \"libc.so.6\":\n    \
+             fn abs(n: w3.Len) -> w3.Len\n\nprint(abs(-300))\n",
+        )
+        .unwrap();
+        let (vm_out, _e, vm_res, _) = run_file(&entry);
+        let (io, _ie, ir, _) = crate::interp::run_file(&entry);
+        let (par_out, _pe, par_res, _) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            vm_res.is_ok(),
+            "VM faulted on chained qualified width-alias extern: {vm_res:?}"
+        );
+        assert!(
+            ir.is_ok(),
+            "interp faulted on chained qualified width-alias extern: {ir:?}"
+        );
+        assert!(
+            par_res.is_ok(),
+            "parallel engine faulted on chained qualified width-alias extern: {par_res:?}"
+        );
+        assert_eq!(
+            vm_out, "300\n",
+            "chained `w3.Len -> Inner -> int64` must marshal as int64 (300), not the inner hop's colliding local int8 (44)"
+        );
+        assert_eq!(
+            vm_out, io,
+            "VM and interp diverged (chained qualified width param, depth 2)"
+        );
+        assert_eq!(
+            vm_out, par_out,
+            "VM and --parallel diverged (chained qualified width param, depth 2)"
+        );
+    }
+
+    /// Regression (ROOT, depth-3): proves arbitrary chain depth, not just one inner hop. `w3.Len ->
+    /// A -> B -> int64`, with the calling module colliding BOTH inner names (`type A = int8`,
+    /// `type B = int8`). Every hop must resolve in w3's scope; correctly resolved it stays 300, the
+    /// bug rounds to 44. Linux-only (needs libc.so.6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_qualified_width_alias_chain_depth3_collision_runs() {
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_vm_ffi_qchain3_{}", std::process::id()));
+        let core = dir.join("core");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(
+            core.join("w3.chz"),
+            "import int64 from std.ffi\n\ntype B = int64\ntype A = B\ntype Len = A\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import core.w3\nimport int8 from std.ffi\n\ntype A = int8\ntype B = int8\n\nextern \"libc.so.6\":\n    \
+             fn abs(n: w3.Len) -> w3.Len\n\nprint(abs(-300))\n",
+        )
+        .unwrap();
+        let (vm_out, _e, vm_res, _) = run_file(&entry);
+        let (io, _ie, ir, _) = crate::interp::run_file(&entry);
+        let (par_out, _pe, par_res, _) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            vm_res.is_ok(),
+            "VM faulted on depth-3 chained qualified width-alias extern: {vm_res:?}"
+        );
+        assert!(
+            ir.is_ok(),
+            "interp faulted on depth-3 chained qualified width-alias extern: {ir:?}"
+        );
+        assert!(
+            par_res.is_ok(),
+            "parallel engine faulted on depth-3 chained qualified width-alias extern: {par_res:?}"
+        );
+        assert_eq!(
+            vm_out, "300\n",
+            "depth-3 `w3.Len -> A -> B -> int64` must marshal as int64 (300), not the colliding local int8 (44)"
+        );
+        assert_eq!(
+            vm_out, io,
+            "VM and interp diverged (chained qualified width param, depth 3)"
+        );
+        assert_eq!(
+            vm_out, par_out,
+            "VM and --parallel diverged (chained qualified width param, depth 3)"
+        );
+    }
+
+    /// A CYCLIC qualified alias chain (`type A = B; type B = A`, no scalar leaf) used at an extern
+    /// boundary must surface a clean "not C-marshallable" error and — critically — must NOT hang or
+    /// overflow the stack while following the chain. The recursive module-scoped resolver is bounded
+    /// by a visited set: a repeated hop yields `None`, which propagates to the marshal backstop's
+    /// clean error. No libc needed (the checker/marshal gate rejects before any dlopen). The test
+    /// merely COMPLETING proves no infinite loop.
+    #[test]
+    fn extern_qualified_alias_cycle_is_clean_error() {
+        let dir = std::env::temp_dir().join(format!("chezzi_vm_ffi_qcycle_{}", std::process::id()));
+        let core = dir.join("core");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(core.join("w3.chz"), "type A = B\ntype B = A\n").unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import core.w3\n\nextern \"libc.so.6\":\n    fn abs(n: w3.A) -> w3.A\n\nprint(0)\n",
+        )
+        .unwrap();
+        let (_vm_out, _e, vm_res, _) = run_file(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            vm_res.is_err(),
+            "expected a clean error for a cyclic qualified alias extern type, got Ok"
+        );
+        let msg = format!("{:?}", vm_res.unwrap_err());
+        assert!(
+            msg.contains("not C-marshallable") || msg.contains("C-marshallable"),
+            "error should mention marshallability, got: {msg}"
+        );
+    }
+
     /// A genuinely non-marshallable QUALIFIED type at an extern boundary must surface a clean
     /// compile/runtime error (the checker is the real gate), and — even if a path slipped past the
     /// checker — the marshal loop's backstop must NEVER panic the VM. No libc needed (the checker

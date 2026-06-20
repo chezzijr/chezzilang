@@ -1063,9 +1063,31 @@ branch names) is in the git log.
   `aliases` table are all untouched. Tests: one new VM 3-engine collision parity test (`w3.Len`=int64 +
   local `Len`=int8 → `abs(-300)`=300 on VM/`--serial`/`--parallel`); the existing non-colliding twin
   (→7), struct (→3/2), and clean-error guards stay green; full suite + conformance green, clippy clean.
-  Docs: `ffi-and-packaging.md`, this file. Known limit (deferred, out of realistic FFI scope): a
-  qualified alias whose body is ANOTHER bare alias (a chain) would re-enter the flat map on the inner
-  name; direct alias-to-width (the actual FFI case) is fixed.
+  Docs: `ffi-and-packaging.md`, this file. (The single-hop fix's chained-alias gap is closed by the
+  ROOT fix below — chains are now resolved fully module-scoped at all depths.)
+- ✅ **C-ABI FFI ROOT fix: module-qualified width-alias CHAIN resolves module-scoped at ALL depths**
+  (2026-06-20, `auto-task/ffi-qualified-type-fix2`) — the deeper adversarial find on the single-hop
+  fix above: it only resolved the FIRST hop in the defining module's scope. A CHAINED qualified alias
+  (`type Len = Inner; type Inner = int64` in `core/w3`) returned w3's RAW ONE-HOP body (`Named("Inner")`)
+  and handed it to `ctype_of`, which resolved the INNER name `Inner` through the flat, last-write-wins,
+  **bare-keyed** `aliases` map — so a colliding `type Inner = int8` in the CALLING module hijacked the
+  inner hop. `check` was correct (the checker fully resolves the chain in the defining module's scope),
+  but `run`/`--serial`/`--parallel` all printed `44` instead of `300`; the same fault held at depth 3+.
+  Fix: a new `resolve_qualified_alias(tidx, name, …)` helper in BOTH engines follows the WHOLE chain
+  in its defining module's scope (each inner bare `Named(inner)` is interpreted as `tidx`'s `inner` via
+  `module_aliases`/`type_keys`), so NO hop ever re-enters the flat bare `aliases` map; it returns a
+  scalar/FFI-width LEAF or a struct identity key, never a re-entrant alias name. The qualified-alias arm
+  in `qualify_ffi_type` (compiler) / the `qualify` closure (interp) now calls it. Bounded by a visited
+  `(module_idx, name)` set: a cyclic alias (`type A = B; type B = A`) ⇒ `None` ⇒ `ctype_of`'s clean
+  "not C-marshallable" error — no hang, no stack overflow, never a silent wrong width. A cross-module
+  qualified body mid-chain (`type Len = other.X` declared inside the defining module) is the one
+  remaining `None` case (it needs that module's own import-binder map, not threaded here) — a clean
+  error, not the bare-`Named`-chain family this closes. Both engines kept byte-identical in logic
+  (two-engine parity). Tests: new VM 3-engine parity tests at depth 2 AND depth 3 with colliding inner
+  alias names across modules (`abs(-300)`=300 on VM/`--serial`/`--parallel`) plus a cyclic-alias
+  clean-error/no-hang test; the single-hop collision (→300), non-colliding width (→7), struct (→3/2),
+  and clean-error guards stay green; full suite (2283) + conformance green, clippy `--all-targets`
+  clean. Docs: `ffi-and-packaging.md`, this file.
 - ✅ **C-ABI FFI follow-ups: `bool`=C `_Bool`, precise width-alias gate, redundant self-rename allowed**
   (2026-06-18, `auto-task/ffi-bool-cbool-alias-gate`) — three FFI loose ends from the prior reviews.
   (1) **`bool` now means C `_Bool` (1 byte)**, not C `int` (4 bytes): re-mapped `CType::Bool`'s libffi

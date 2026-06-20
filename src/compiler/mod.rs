@@ -379,19 +379,73 @@ impl Compiler {
                     if self.struct_fields.contains_key(key) {
                         return Type::Named(key.clone());
                     }
-                    // Not a struct → a width alias. Resolve to its DEFINING module's body (keyed by
-                    // the resolved `tidx`), NOT the bare name — the flat `aliases` table is last-write
-                    // -wins, so a colliding local `type Len` in another module would otherwise hijack
-                    // the C ABI. This matches the checker, which resolves a `Type::Qualified` alias via
-                    // the defining module's `type_aliases`. (Generic qualified types are checker-rejected.)
-                    if let Some(body) = self.module_aliases.get(&(tidx, name.clone())) {
-                        return body.clone();
+                    // Not a struct → a width ALIAS, possibly a CHAIN (`type Len = Inner; type Inner =
+                    // int64`). Resolve the WHOLE chain in its DEFINING module's scope (keyed by the
+                    // resolved `tidx`) — never the bare name, and never re-entering the flat last-write
+                    // -wins `aliases` table on an inner hop, so a colliding local alias of the same
+                    // name in ANOTHER module can't hijack the C ABI at any depth. This matches the
+                    // checker, which fully resolves a `Type::Qualified` alias via the defining module's
+                    // `type_aliases`. A genuinely unresolvable hop (cross-module body, cycle, dangling)
+                    // ⇒ `None` ⇒ the qualified `Type` passes through to `ctype_of`'s clean
+                    // "not C-marshallable" backstop — NEVER a silent wrong width.
+                    if let Some(resolved) =
+                        self.resolve_qualified_alias(tidx, name, &mut Vec::new())
+                    {
+                        return resolved;
                     }
-                    return Type::Named(name.clone());
                 }
                 ty.clone()
             }
             _ => ty.clone(),
+        }
+    }
+
+    /// Resolve a module-QUALIFIED FFI type/alias `mod.Name` (declared in module `tidx`) to a `Type`
+    /// whose every alias hop is collapsed IN `tidx`'s OWN SCOPE — so a width-alias CHAIN never
+    /// re-enters the flat last-write-wins bare `aliases` map on an inner hop, and a colliding alias of
+    /// the same name in the CALLING module cannot hijack the width at any depth. An inner bare
+    /// `Type::Named(inner)` is interpreted as `tidx`'s `inner`: another `tidx` alias ⇒ recurse; a
+    /// `tidx` struct ⇒ its IDENTITY KEY; otherwise a scalar / FFI-width LEAF (or a cross-module
+    /// bare-keyed struct) ⇒ its bare name, which `ctype_of` resolves directly without alias re-entry.
+    ///
+    /// Bounded by `visited` (`(module_idx, name)` pairs): a repeated hop is a CYCLE ⇒ `None`, which
+    /// propagates to `ctype_of`'s clean "not C-marshallable" error (no hang, no stack overflow, never
+    /// a silent wrong width). A cross-module qualified body mid-chain (`type Len = other.X` declared
+    /// inside `tidx`) is likewise `None` — resolving it needs `tidx`'s own import-binder map, which
+    /// isn't threaded here; it is NOT the bare-`Named`-chain family this fixes.
+    ///
+    /// Kept byte-identical in logic with `interp::Interp::resolve_qualified_alias` — a divergence
+    /// breaks two-engine parity.
+    fn resolve_qualified_alias(
+        &self,
+        tidx: usize,
+        name: &str,
+        visited: &mut Vec<(usize, String)>,
+    ) -> Option<Type> {
+        let here = (tidx, name.to_string());
+        if visited.contains(&here) {
+            return None; // cycle — defended (yields the clean marshal error, never a hang).
+        }
+        visited.push(here);
+        // A name that is a STRUCT in `tidx` ⇒ its identity key (hits the identity-keyed `struct_fields`).
+        if let Some(key) = self.type_keys.get(&(tidx, name.to_string()))
+            && self.struct_fields.contains_key(key)
+        {
+            return Some(Type::Named(key.clone()));
+        }
+        // An ALIAS declared in `tidx` ⇒ follow its one-hop AST body, recursing module-scoped.
+        match self.module_aliases.get(&(tidx, name.to_string())) {
+            Some(Type::Named(inner)) => self.resolve_qualified_alias(tidx, inner, visited),
+            // A cross-module qualified body mid-chain is not resolvable here (see doc) ⇒ clean error.
+            Some(Type::Qualified { .. }) => None,
+            // A non-`Named` body (e.g. `Option[..]`) carries no inner alias name to re-enter the flat
+            // map; `ctype_of` handles it directly. (FFI width aliases are scalar; this is defensive.)
+            Some(other) => Some(other.clone()),
+            // Not a tidx alias and not an identity-keyed struct: a scalar / FFI-width LEAF
+            // (`int64`, …) or a cross-module bare-keyed struct. Return the BARE name — `ctype_of`
+            // resolves a width leaf or a bare-keyed struct directly, with no alias re-entry (a width
+            // leaf and a registered struct are never themselves in the flat `aliases` map).
+            None => Some(Type::Named(name.to_string())),
         }
     }
 
