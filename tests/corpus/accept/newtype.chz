@@ -1,0 +1,7 @@
+# rule: newtypeDecl
+newtype UserId = int
+newtype Meters = float:
+    fn double(self) -> Meters:
+        return self + self
+uid := UserId(10)
+print(int(uid))

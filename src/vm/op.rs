@@ -251,6 +251,9 @@ pub enum Op {
     /// Build a set from the top `n` values (deduped, insertion order kept). Mirrors `NewList`.
     NewSet(usize),
     NewStruct(String, usize),
+    /// Construct a `newtype` wrapper: pop ONE inner value off the stack, allocate an
+    /// `Obj::NewType { type_key, inner }`. The newtype analogue of a single-field `NewStruct`.
+    NewType(String),
     /// Construct an enum variant from the top `argc` stack values. `variant_id` (M19 lever #2) is the
     /// dense, compile-time id stamped onto the instance — the enum analogue of `NewStruct`'s `tid`;
     /// `variant` is kept only for the cold arity-mismatch error message. `VID_NONE` for an
@@ -519,6 +522,13 @@ pub struct Program {
     /// Enum runtime key → the index of the module that declared it, so an enum method resolves its
     /// top-level names against that module's globals (home-globals), mirroring `StructDef::module_idx`.
     pub enum_home: HashMap<String, usize>,
+    /// Newtype methods, keyed by the newtype's runtime key → (method name → its proto). The newtype
+    /// analogue of `enum_methods` (a newtype is a 1-field nominal wrapper). Looked up by
+    /// `do_method_call`, `resolve_overload_method` (str/hash), and the stringify/hash paths.
+    pub newtype_methods: HashMap<String, HashMap<String, ProtoId>>,
+    /// Newtype runtime key → the index of the module that declared it (home-globals for its methods),
+    /// mirroring `enum_home`.
+    pub newtype_home: HashMap<String, usize>,
     pub variants: HashMap<(String, String), VariantDef>,
     /// M19 lever #2 — variants indexed by their dense `variant_id` (`variants_by_id[id]` ⇒ that
     /// variant's `VariantDef`, carrying its `enum_name` + `name`). The reverse of `variants`: O(1)

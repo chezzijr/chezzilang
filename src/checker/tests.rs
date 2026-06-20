@@ -7014,3 +7014,128 @@ fn enum_add_bound_into_generic_fn_ok() {
         "enum Money:\n    Cents(int)\n    fn add(self, o: Money) -> Money:\n        match self:\n            Money.Cents(a):\n                match o:\n                    Money.Cents(b): return Money.Cents(a + b)\nfn twice[T: Add](x: T) -> T:\n    return x + x\nfn main():\n    m := twice(Money.Cents(3))\n    print(m.add(m) == Money.Cents(12))\nmain()\n",
     );
 }
+
+// ===== newtype (M21): nominal distinct types =====
+
+#[test]
+fn newtype_construct_ok() {
+    ok("newtype UserId = int\nfn main():\n    uid := UserId(10)\n    print(uid)\nmain()\n");
+}
+
+#[test]
+fn newtype_construct_wrong_arg_rejected() {
+    rejects(
+        "newtype UserId = int\nfn main():\n    uid := UserId(\"hi\")\nmain()\n",
+        "UserId",
+    );
+}
+
+#[test]
+fn newtype_not_assignable_from_underlying_literal() {
+    // A bare int literal is NOT assignable to a UserId binding (nominal distinctness).
+    rejects(
+        "newtype UserId = int\nfn main():\n    x: UserId = 10\nmain()\n",
+        "UserId",
+    );
+}
+
+#[test]
+fn newtype_passed_where_underlying_expected_rejected() {
+    // needs_int wants a raw int; a UserId must NOT flow in.
+    rejects(
+        "newtype UserId = int\nfn needs_int(x: int) -> int:\n    return x\nfn main():\n    uid := UserId(10)\n    print(needs_int(uid))\nmain()\n",
+        "expected int",
+    );
+}
+
+#[test]
+fn newtype_cast_unwrap_ok() {
+    // int(uid) unwraps to the inner int; float(meters) for Meters=float unwraps.
+    ok(
+        "newtype UserId = int\nnewtype Meters = float\nfn main():\n    uid := UserId(10)\n    n: int = int(uid)\n    m := Meters(2.5)\n    f: float = float(m)\n    print(n)\n    print(f)\nmain()\n",
+    );
+}
+
+#[test]
+fn newtype_str_underlying_unwrap_ok() {
+    // For newtype N = str, str(n) unwraps to the inner str.
+    ok(
+        "newtype Name = str\nfn main():\n    n := Name(\"bob\")\n    s: str = str(n)\n    print(s)\nmain()\n",
+    );
+}
+
+#[test]
+fn newtype_same_type_arithmetic_ok() {
+    // Meters + Meters -> Meters; Meters < Meters -> bool.
+    ok(
+        "newtype Meters = float\nfn main():\n    a := Meters(1.0)\n    b := Meters(2.0)\n    c: Meters = a + b\n    lt: bool = a < b\n    print(lt)\nmain()\n",
+    );
+}
+
+#[test]
+fn newtype_plus_raw_underlying_rejected() {
+    rejects(
+        "newtype Meters = float\nfn main():\n    a := Meters(1.0)\n    c := a + 2.0\nmain()\n",
+        "cannot apply",
+    );
+}
+
+#[test]
+fn newtype_plus_other_newtype_rejected() {
+    rejects(
+        "newtype Meters = float\nnewtype Seconds = float\nfn main():\n    a := Meters(1.0)\n    b := Seconds(2.0)\n    c := a + b\nmain()\n",
+        "cannot apply",
+    );
+}
+
+#[test]
+fn newtype_method_dispatch_ok() {
+    ok(
+        "newtype Meters = float:\n    fn double(self) -> Meters:\n        return self + self\nfn main():\n    m := Meters(2.0)\n    d: Meters = m.double()\n    print(d)\nmain()\n",
+    );
+}
+
+#[test]
+fn newtype_add_into_generic_add_bound_ok() {
+    // A newtype with its native same-type + passes into fn twice[T: Add].
+    ok(
+        "newtype Meters = float\nfn twice[T: Add](x: T) -> T:\n    return x + x\nfn main():\n    m := twice(Meters(3.0))\n    print(m)\nmain()\n",
+    );
+}
+
+#[test]
+fn newtype_as_map_key_requires_hash() {
+    // Without hash(self), a newtype is NOT a map/set key even if underlying int is hashable.
+    rejects(
+        "newtype UserId = int\nfn main():\n    m: map[UserId, str] = {}\nmain()\n",
+        "Hashable",
+    );
+}
+
+#[test]
+fn newtype_with_hash_is_map_key_ok() {
+    ok(
+        "newtype UserId = int:\n    fn hash(self) -> int:\n        return int(self)\nfn main():\n    m: map[UserId, str] = {}\n    m[UserId(1)] = \"a\"\n    print(m.len())\nmain()\n",
+    );
+}
+
+#[test]
+fn newtype_aggregate_underlying_no_method_inherit() {
+    // newtype Names = list[str] does NOT inherit .push() (v1 limit).
+    rejects(
+        "newtype Names = list[str]\nfn main():\n    ns := Names([\"a\"])\n    ns.push(\"b\")\nmain()\n",
+        "push",
+    );
+}
+
+#[test]
+fn newtype_generic_rejected_at_parse_or_check() {
+    // `newtype Box[T] = int` is rejected (parse-time); ensure the checker path is clean of it too.
+    let errs = std::panic::catch_unwind(|| check_src("newtype Box[T] = int\n"));
+    // parse itself errors, so check_src panics in `parse`. Treat a panic (parse error) as the
+    // expected rejection.
+    assert!(
+        errs.is_err(),
+        "expected parse/check to reject a generic newtype"
+    );
+}

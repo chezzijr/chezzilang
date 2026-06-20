@@ -119,6 +119,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     for s in &module.stmts {
         if let StmtKind::Struct { name, .. }
         | StmtKind::Enum { name, .. }
+        | StmtKind::NewType { name, .. }
         | StmtKind::TypeAlias { name, .. } = &s.kind
         {
             c.module_types[0].insert(name.clone());
@@ -225,6 +226,8 @@ impl Compiler {
             structs: HashMap::new(),
             enum_methods: HashMap::new(),
             enum_home: HashMap::new(),
+            newtype_methods: HashMap::new(),
+            newtype_home: HashMap::new(),
             variants: HashMap::new(),
             variants_by_id: Vec::new(),
             modules: Vec::new(),
@@ -315,6 +318,7 @@ impl Compiler {
             for s in &lm.ast.stmts {
                 if let StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
+                | StmtKind::NewType { name, .. }
                 | StmtKind::TypeAlias { name, .. } = &s.kind
                 {
                     self.module_types[idx].insert(name.clone());
@@ -498,6 +502,13 @@ impl Compiler {
                         register_variant(&mut self.program, &key, &v.name, v.payload.len());
                     }
                 }
+                // A newtype's key must be known (via `newtype_home`) BEFORE any method body compiles,
+                // so that a `Name(...)` ctor inside a method resolves as `Op::NewType`, not a global
+                // call. Methods themselves are compiled (into `newtype_methods`) in pass 2.
+                StmtKind::NewType { name, .. } => {
+                    let key = self.type_key(module_idx, name);
+                    self.program.newtype_home.insert(key, module_idx);
+                }
                 _ => {}
             }
         }
@@ -630,6 +641,25 @@ impl Compiler {
                     .or_default()
                     .extend(compiled);
                 self.program.enum_home.insert(key, module_idx);
+            }
+        }
+        // Compile newtype methods (name-keyed, like enum methods), recording proto ids under the
+        // newtype's module-scoped runtime key. A newtype ALWAYS gets a `newtype_home` entry (even
+        // method-less) so the runtime can recognize the key as a newtype.
+        for stmt in &module.stmts {
+            if let StmtKind::NewType { name, methods, .. } = &stmt.kind {
+                let key = self.type_key(module_idx, name);
+                let mut compiled: HashMap<String, ProtoId> = HashMap::new();
+                for m in methods {
+                    let pid = self.compile_fn(m, false)?;
+                    compiled.insert(m.name.clone(), pid);
+                }
+                self.program
+                    .newtype_methods
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(compiled);
+                self.program.newtype_home.insert(key, module_idx);
             }
         }
         // The synthetic toplevel function: top-level `fn`s are hoisted as globals before the body.
@@ -940,6 +970,7 @@ impl Compiler {
             }
             StmtKind::Struct { .. }
             | StmtKind::Enum { .. }
+            | StmtKind::NewType { .. } // methods compiled in compile_module; ctor is a named call
             | StmtKind::Protocol { .. }
             | StmtKind::Extern { .. } // bound at module init (see compile_module), like top-level fn
             | StmtKind::TypeAlias { .. }
@@ -2961,6 +2992,17 @@ impl Compiler {
                     self.compile_expr(fc, a)?;
                 }
                 fc.emit(Op::CallBuiltin(name.clone(), args.len()), span);
+                return Ok(());
+            }
+            // A bare newtype ctor: `UserId(x)` wraps the single arg. Resolved exactly like the struct
+            // ctor — only a BARE-resolvable newtype in THIS module — keyed by its runtime key.
+            if let Some(nt_key) = self.bare_types.get(name).cloned()
+                && self.program.newtype_home.contains_key(&nt_key)
+            {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(Op::NewType(nt_key), span);
                 return Ok(());
             }
             // A bare struct ctor: only a BARE-resolvable struct in THIS module (locally declared,

@@ -40,6 +40,10 @@ pub enum Ty {
     /// An enum type, with its generic type arguments (empty for a non-generic enum). E.g.
     /// `Tree[int]` is `Enum("Tree", [Int])`; a plain `Shape` is `Enum("Shape", [])`.
     Enum(String, Vec<Ty>),
+    /// A `newtype` — a DISTINCT nominal type wrapping an underlying type (non-generic in v1). Keyed
+    /// by `bare_key` exactly like [`Ty::Struct`]/[`Ty::Enum`] (so module-scoping composes for free).
+    /// NOT compatible with its underlying: only an explicit construct/cast crosses the boundary.
+    NewType(String),
     /// A bound generic type variable (e.g. `T` inside `fn max[T: Comparable]`). Opaque while
     /// checking a generic body; replaced by a concrete `Ty` at each call site via substitution.
     Param(String),
@@ -161,6 +165,10 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         (Struct(a, aa), Struct(b, ba)) | (Enum(a, aa), Enum(b, ba)) => {
             a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| compatible(x, y))
         }
+        // A newtype is nominal: compatible ONLY with the same newtype (by key). It is deliberately
+        // NOT compatible with its underlying scalar — that is the entire point of the distinct type.
+        // Crossing the boundary needs an explicit construct (`Name(x)`) or cast-unwrap (`int(n)`).
+        (NewType(a), NewType(b)) => a == b,
         (Executor, Executor) | (Socket, Socket) | (Listener, Listener) | (Ptr, Ptr) => true,
         (Module(a), Module(b)) | (Param(a), Param(b)) => a == b,
         (
@@ -252,6 +260,8 @@ impl fmt::Display for Ty {
                 }
                 Ok(())
             }
+            // A newtype renders its BARE display name (`UserId`), like struct/enum, matching runtime.
+            Ty::NewType(n) => write!(f, "{}", crate::compiler::bare_display(n)),
             Ty::Param(n) => write!(f, "{n}"),
             Ty::Module(n) => write!(f, "module {n}"),
             Ty::Func { params, ret } => {

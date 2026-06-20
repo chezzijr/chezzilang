@@ -76,6 +76,15 @@ pub enum StmtKind {
     /// `type Name = <type>` — a transparent type alias (`Name` is interchangeable with the aliased
     /// type everywhere; structural, not a distinct nominal type).
     TypeAlias { name: String, ty: Type },
+    /// `newtype Name = <type>` (optionally with a trailing-colon method block) — a DISTINCT nominal
+    /// type that wraps `underlying`. Unlike `TypeAlias` it is NOT interchangeable with the
+    /// underlying: only an explicit construct (`Name(x)`) or cast-unwrap (`int(n)`) crosses the
+    /// boundary. Non-generic in v1. `methods` are name-keyed like struct/enum methods.
+    NewType {
+        name: String,
+        underlying: Type,
+        methods: Vec<FnDecl>,
+    },
     /// `if` / `else if` / `else`. Each `(cond, body)` is one branch; `else if` adds another
     /// branch; a final bare `else` is `else_block`.
     If {

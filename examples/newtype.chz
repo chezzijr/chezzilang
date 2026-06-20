@@ -1,0 +1,55 @@
+# newtype (M21) — nominal distinct types.
+# A `newtype` wraps an underlying type but is a DISTINCT type: it does not silently mix with the
+# raw underlying. Only an explicit construct (`UserId(10)`) or cast-unwrap (`int(uid)`) crosses.
+
+# A method-less newtype over int, plus a method block.
+newtype UserId = int:
+    fn hash(self) -> int:
+        return int(self)
+    fn bump(self) -> UserId:
+        return UserId(int(self) + 1)
+
+# A float newtype with same-type arithmetic + a Stringable `str(self)` override.
+newtype Meters = float:
+    fn str(self) -> str:
+        return "{float(self)}m"
+
+# A str newtype: str(self) unwraps the inner str.
+newtype Name = str
+
+fn twice[T: Add](x: T) -> T:
+    return x + x
+
+fn main():
+    # construct + unwrap
+    uid := UserId(10)
+    print(int(uid))          # 10
+    print(int(uid.bump()))   # 11
+
+    # same-type arithmetic + compare on Meters
+    a := Meters(1.5)
+    b := Meters(2.0)
+    print(float(a + b))      # 3.5
+    print(a < b)             # true
+
+    # str(self) Stringable override
+    print(a)                 # 1.5m
+
+    # generic Add bound over a newtype (native underlying op)
+    print(float(twice(Meters(3.0))))  # 6.0
+
+    # newtype as a map key via runtime-dispatched hash(self)
+    m := {UserId(1): "alice", UserId(2): "bob"}
+    m[UserId(1)] = "alfred"
+    print(m[UserId(1)])      # alfred
+    print(m.len())           # 2
+
+    # newtype as a set element (dedupe via hash)
+    s := {UserId(7), UserId(7), UserId(8)}
+    print(s.len())           # 2
+
+    # str newtype unwrap
+    n := Name("chez")
+    print(str(n))            # chez
+
+main()

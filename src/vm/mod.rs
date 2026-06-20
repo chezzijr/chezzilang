@@ -1056,6 +1056,12 @@ enum SnapValue {
         name: Box<str>,
         fields: Vec<(Box<str>, SnapValue)>,
     },
+    /// A newtype wrapper — its runtime key + its (handle-bearing) inner snap. Reached only when the
+    /// inner embeds a handle (a pure-data newtype takes the `to_wire` fast path above).
+    NewType {
+        type_key: Box<str>,
+        inner: Box<SnapValue>,
+    },
     /// `(cached hash, key, value)` triples — hashes are value-derived, so they carry over unchanged.
     Map(Vec<(u64, SnapValue, SnapValue)>),
     /// `(cached hash, element)` pairs.
@@ -4020,6 +4026,14 @@ impl Vm {
                 self.push(Value::Obj(h));
             }
             Op::NewStruct(name, argc) => self.new_struct(name, *argc, span)?,
+            Op::NewType(type_key) => {
+                let inner = self.pop();
+                let h = self.heap.alloc(Obj::NewType {
+                    type_key: type_key.as_str().into(),
+                    inner,
+                });
+                self.push(Value::Obj(h));
+            }
             Op::NewEnum {
                 variant,
                 variant_id,
@@ -4671,6 +4685,18 @@ impl Vm {
                     _ => unreachable!(),
                 })
             }
+            // Same-newtype arithmetic: `Meters + Meters` etc. UNWRAPS both wrappers, runs the
+            // underlying's NATIVE primitive op (identical overflow/div-by-zero/float semantics — it
+            // recurses through `self.binary` on the inners), then REWRAPS in the same newtype. This is
+            // NOT a user `add` method — it is the underlying's own op (distinct from struct
+            // overloading). The checker has rejected `Meters + float` / `Meters + Seconds`, so a
+            // mismatched pair never reaches here from typechecked code. Must precede struct_arith.
+            (Value::Obj(ha), Value::Obj(hb))
+                if matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod)
+                    && self.same_newtype_keys(ha, hb) =>
+            {
+                self.newtype_arith(op, ha, hb, name, span)?
+            }
             // Arithmetic overloading: `+`/`-`/`*` on two structs (or two enums) dispatch to
             // `add`/`sub`/`mul` (the `Add`/`Sub`/`Mul` protocols). The checker has verified
             // conformance. Must precede the string-concat `Add` arm below (which would otherwise
@@ -4733,6 +4759,104 @@ impl Vm {
         self.guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))
     }
 
+    /// Do `ha` and `hb` both hold a newtype with the SAME runtime key? (Drives same-type operator
+    /// auto-flow — `Meters + Meters`, never `Meters + Seconds`.)
+    fn same_newtype_keys(&self, ha: GcRef, hb: GcRef) -> bool {
+        match (self.heap.get(ha), self.heap.get(hb)) {
+            (Obj::NewType { type_key: a, .. }, Obj::NewType { type_key: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Same-newtype arithmetic: unwrap both inners, run the underlying's NATIVE primitive op (via the
+    /// scalar `arith_scalar` core — identical overflow/div-by-zero/float semantics as a raw int/float
+    /// op), then REWRAP in the same newtype key. NOT a user method (distinct from struct overloading).
+    fn newtype_arith(
+        &mut self,
+        op: &Op,
+        ha: GcRef,
+        hb: GcRef,
+        name: &str,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let (key, a) = match self.heap.get(ha) {
+            Obj::NewType { type_key, inner } => (type_key.clone(), *inner),
+            _ => unreachable!(),
+        };
+        let b = match self.heap.get(hb) {
+            Obj::NewType { inner, .. } => *inner,
+            _ => unreachable!(),
+        };
+        let inner = self.arith_scalar(op, a, b, name, span)?;
+        Ok(Value::Obj(self.heap.alloc(Obj::NewType {
+            type_key: key,
+            inner,
+        })))
+    }
+
+    /// The underlying primitive `+`/`-`/`*`/`/`/`%` on two scalar values (int or float), with the
+    /// SAME overflow / division-by-zero / float semantics as the inline `binary` arms. Shared by the
+    /// newtype same-type operator path so it byte-matches a raw int/float op.
+    fn arith_scalar(
+        &self,
+        op: &Op,
+        a: Value,
+        b: Value,
+        name: &str,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => {
+                let v = match op {
+                    Op::Add => a.checked_add(b),
+                    Op::Sub => a.checked_sub(b),
+                    Op::Mul => a.checked_mul(b),
+                    Op::Div | Op::Mod if b == 0 => {
+                        let kind = if matches!(op, Op::Div) {
+                            "division"
+                        } else {
+                            "modulo"
+                        };
+                        return Err(self.err(format!("{kind} by zero"), span));
+                    }
+                    Op::Div => a.checked_div(b),
+                    Op::Mod => a.checked_rem(b),
+                    _ => unreachable!(),
+                };
+                Ok(Value::Int(v.ok_or_else(|| {
+                    self.err(format!("integer overflow in {name}"), span)
+                })?))
+            }
+            (a, b) if is_numeric(a) && is_numeric(b) => {
+                let (x, y) = (as_f64(a), as_f64(b));
+                if matches!(op, Op::Div | Op::Mod) && y == 0.0 {
+                    let kind = if matches!(op, Op::Div) {
+                        "division"
+                    } else {
+                        "modulo"
+                    };
+                    return Err(self.err(format!("{kind} by zero"), span));
+                }
+                Ok(Value::Float(match op {
+                    Op::Add => x + y,
+                    Op::Sub => x - y,
+                    Op::Mul => x * y,
+                    Op::Div => x / y,
+                    Op::Mod => x % y,
+                    _ => unreachable!(),
+                }))
+            }
+            _ => Err(self.err(
+                format!(
+                    "cannot apply {name} to {} and {}",
+                    self.type_name(a),
+                    self.type_name(b)
+                ),
+                span,
+            )),
+        }
+    }
+
     /// Resolve `(proto, home_module_obj)` for an operator-overload method `method` on receiver `recv`
     /// — a struct (via `program.structs`) or an enum (via `program.enum_methods` + `enum_home`). The
     /// shared dispatch core for arithmetic and ordering overloads on both struct and enum values.
@@ -4777,7 +4901,27 @@ impl Vm {
                     })?;
                 Ok((proto, self.module_objs[self.enum_home_module(&key)]))
             }
-            _ => unreachable!("overload receiver is a struct or enum"),
+            // A newtype's overload/hook methods (`hash`/`str`/user methods) resolve via
+            // `newtype_methods`, mirroring the enum path.
+            Obj::NewType { type_key, .. } => {
+                let key = type_key.to_string();
+                let proto = *self
+                    .program
+                    .newtype_methods
+                    .get(&key)
+                    .and_then(|ms| ms.get(method))
+                    .ok_or_else(|| {
+                        self.err(
+                            format!(
+                                "newtype '{}' has no '{method}' method",
+                                crate::compiler::bare_display(&key)
+                            ),
+                            span,
+                        )
+                    })?;
+                Ok((proto, self.module_objs[self.newtype_home_module(&key)]))
+            }
+            _ => unreachable!("overload receiver is a struct, enum, or newtype"),
         }
     }
 
@@ -4913,6 +5057,47 @@ impl Vm {
     fn compare_op(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
+        // Same-newtype ordering: `Meters < Meters` UNWRAPS both and compares the underlyings with
+        // their NATIVE ordering (the checker rejected `Meters < float` / `< Seconds`). Not a user
+        // `compare` method — the underlying's native compare. Must precede the struct/enum overload.
+        if let (Value::Obj(hl), Value::Obj(hr)) = (l, r)
+            && self.same_newtype_keys(hl, hr)
+        {
+            let a = match self.heap.get(hl) {
+                Obj::NewType { inner, .. } => *inner,
+                _ => unreachable!(),
+            };
+            let b = match self.heap.get(hr) {
+                Obj::NewType { inner, .. } => *inner,
+                _ => unreachable!(),
+            };
+            let name = match op {
+                Op::Lt => "Lt",
+                Op::LtEq => "LtEq",
+                Op::Gt => "Gt",
+                Op::GtEq => "GtEq",
+                _ => unreachable!(),
+            };
+            let ord = self.compare(a, b).ok_or_else(|| {
+                self.err(
+                    format!(
+                        "cannot apply {name} to {} and {}",
+                        self.type_name(a),
+                        self.type_name(b)
+                    ),
+                    span,
+                )
+            })?;
+            let bres = match op {
+                Op::Lt => ord.is_lt(),
+                Op::LtEq => ord.is_le(),
+                Op::Gt => ord.is_gt(),
+                Op::GtEq => ord.is_ge(),
+                _ => unreachable!(),
+            };
+            self.push(Value::Bool(bres));
+            return Ok(());
+        }
         // Operator overloading: ordering on two structs dispatches to `compare(self, other) -> int`
         // (the `Comparable` protocol). The checker has verified conformance. Equality stays
         // structural; only ordering is overloaded. Mirrors `interp::struct_ordering`.
@@ -5003,6 +5188,9 @@ impl Vm {
                 // An enum key dispatches its user `hash(self) -> int` via the shared enum-aware
                 // resolver, mirroring the struct path (re-entrant — may allocate / trigger GC).
                 Obj::Enum { .. } => self.enum_hash(v, span),
+                // A newtype key dispatches its user `hash(self) -> int` (opt-in — the checker rejects
+                // a newtype with no `hash` as a key, even over an intrinsically-hashable underlying).
+                Obj::NewType { .. } => self.newtype_hash(v, span),
                 Obj::Str(_) | Obj::Bytes(_) => Ok(self.scalar_hash(v)),
                 _ => Err(self.err(
                     format!(
@@ -5081,6 +5269,19 @@ impl Vm {
     /// Dispatch an enum key's user `hash(self) -> int` via the shared enum-aware
     /// [`resolve_overload_method`], mirroring [`struct_hash`] (re-entrant via `run_proto`).
     fn enum_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
+        let (proto, home) = self.resolve_overload_method(v, "hash", span)?;
+        match self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))? {
+            Value::Int(n) => Ok(n as u64),
+            other => Err(self.err(
+                format!("hash() must return int, got {}", self.type_name(other)),
+                span,
+            )),
+        }
+    }
+
+    /// Dispatch a newtype key's user `hash(self) -> int` via the shared resolver (mirrors `enum_hash`;
+    /// re-entrant via `run_proto`). The checker guarantees a key-used newtype defines `hash`.
+    fn newtype_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
         let (proto, home) = self.resolve_overload_method(v, "hash", span)?;
         match self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))? {
             Value::Int(n) => Ok(n as u64),
@@ -5379,6 +5580,24 @@ impl Vm {
                             }
                         }
                         Ok(true)
+                    }
+                    // Two newtypes are equal iff they are the SAME newtype (key) and their inners are
+                    // structurally equal. A different key is a distinct type ⇒ never equal.
+                    (
+                        Obj::NewType {
+                            type_key: ka,
+                            inner: ia,
+                        },
+                        Obj::NewType {
+                            type_key: kb,
+                            inner: ib,
+                        },
+                    ) => {
+                        if ka != kb {
+                            return Ok(false);
+                        }
+                        let (ia, ib) = (*ia, *ib);
+                        self.values_equal_guarded(ia, ib, depth + 1, span)
                     }
                     // Two opaque `ptr` handles are equal iff they hold the same raw address (identity).
                     // Distinct heap slots can wrap the same address (e.g. a re-`from_wire`'d handle or
@@ -6481,6 +6700,55 @@ impl Vm {
                     return Ok(());
                 }
                 let display = crate::compiler::bare_display(&enum_key);
+                Err(self.err(format!("type {display} has no method '{method}'"), span))
+            }
+            // Newtype method dispatch (name-resolved, like enums). Resolves `newtype_methods[key]
+            // [method]` off the wrapper's `type_key`. The underlying's methods are NOT inherited.
+            Obj::NewType { type_key, .. } => {
+                let prog = Arc::clone(&self.program);
+                let nt_key = type_key.to_string();
+                let resolved = prog
+                    .newtype_methods
+                    .get(&nt_key)
+                    .and_then(|ms| ms.get(method).copied());
+                if let Some(proto) = resolved {
+                    let home = self.module_objs[self.newtype_home_module(&nt_key)];
+                    if self.program.protos[proto].arity != argc + 1 {
+                        return Err(self.err(
+                            format!(
+                                "function '{}' expects {} argument(s), got {}",
+                                self.program.protos[proto].name,
+                                self.program.protos[proto].arity,
+                                argc + 1
+                            ),
+                            span,
+                        ));
+                    }
+                    if self.program.protos[proto].is_generator {
+                        let mut gen_args = Vec::with_capacity(argc + 1);
+                        gen_args.push(recv);
+                        gen_args.extend(args);
+                        let g = self.alloc_generator(proto, home, None, gen_args);
+                        self.push(g);
+                        return Ok(());
+                    }
+                    if ic != NO_IC {
+                        let base = self.stack.len();
+                        self.stack.push(recv);
+                        self.stack.extend(args);
+                        return self.push_frame_in_place(proto, home, None, base, span);
+                    }
+                    let mut call_args = Vec::with_capacity(argc + 1);
+                    call_args.push(recv);
+                    call_args.extend(args);
+                    let v = self.run_proto(proto, home, None, call_args, true, false, span)?;
+                    if self.paused() {
+                        return Ok(());
+                    }
+                    self.push(v);
+                    return Ok(());
+                }
+                let display = crate::compiler::bare_display(&nt_key);
                 Err(self.err(format!("type {display} has no method '{method}'"), span))
             }
             _ => Err(self.err(
@@ -9463,6 +9731,12 @@ impl Vm {
                     // it (not the name) preserves native-vs-user identity under variant-name shadowing.
                     WireValue::Enum { variant_id: *variant_id, payload: out }
                 }
+                // A newtype crosses by value (deep copy), like a 1-field struct: carry its key + the
+                // wired inner. Sendable iff its inner is (the checker's `sendable_rec` agrees).
+                Obj::NewType { type_key, inner } => WireValue::NewType {
+                    type_key: type_key.clone(),
+                    inner: Box::new(self.to_wire(*inner)?),
+                },
                 // Experimental generators cannot cross an OS-thread heap boundary — their parked
                 // frames reference this heap. The checker marks them non-sendable, so this is a
                 // defensive fault (an erased path that smuggled one into a `spawn`/channel).
@@ -9578,6 +9852,10 @@ impl Vm {
                     variant_id,
                     payload: cloned,
                 }))
+            }
+            WireValue::NewType { type_key, inner } => {
+                let inner = self.from_wire(*inner);
+                Value::Obj(self.heap.alloc(Obj::NewType { type_key, inner }))
             }
             // B3.6: rebuild a submitted closure by value over the worker's reconstructed home module
             // (the `proto` is shared via `Arc<Program>`; captures reconstruct bottom-up into this heap).
@@ -10111,6 +10389,10 @@ impl Vm {
                 // `to_wire`); replay reuses it as-is against the shared program.
                 SnapValue::Enum { variant_id, payload: out }
             }
+            Obj::NewType { type_key, inner } => SnapValue::NewType {
+                type_key,
+                inner: Box::new(self.to_snap(inner)?),
+            },
             Obj::Map(m) => {
                 let mut out = Vec::with_capacity(m.entries.len());
                 for (hash, k, val) in &m.entries {
@@ -10305,6 +10587,13 @@ impl Vm {
                 Value::Obj(self.heap.alloc(Obj::Enum {
                     variant_id: *variant_id,
                     payload: p,
+                }))
+            }
+            SnapValue::NewType { type_key, inner } => {
+                let inner = self.replay_snap(inner);
+                Value::Obj(self.heap.alloc(Obj::NewType {
+                    type_key: type_key.clone(),
+                    inner,
                 }))
             }
             SnapValue::Map(entries) => {
@@ -11960,6 +12249,12 @@ impl Vm {
         self.program.enum_home.get(enum_key).copied().unwrap_or(0)
     }
 
+    /// The index of the module that declared the newtype keyed by `key` (home-globals for its
+    /// methods). Mirrors [`enum_home_module`]. Defaults to module 0 if unrecorded.
+    fn newtype_home_module(&self, key: &str) -> usize {
+        self.program.newtype_home.get(key).copied().unwrap_or(0)
+    }
+
     /// Construct an enum from `Op::NewEnum`. M19 lever #2 — the dense `variant_id` is baked into the op
     /// at compile time (no runtime hash lookup); it is stamped onto the instance instead of the two
     /// per-instance type/variant `Box<str>`s. `variant` is used only for the arity-mismatch message.
@@ -13168,6 +13463,12 @@ impl Vm {
                 Obj::Str(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
                     self.err(format!("int(): cannot parse '{s}' as an integer"), span)
                 }),
+                // `int(newtype)` unwraps the inner value (the cast-unwrap path). The checker has
+                // already verified the underlying is `int`, so recursing yields the inner `Int`.
+                Obj::NewType { inner, .. } => {
+                    let inner = *inner;
+                    self.builtin_int(&[inner], span)
+                }
                 _ => Err(self.err(
                     format!("int() cannot convert {}", self.type_name(args[0])),
                     span,
@@ -13191,6 +13492,11 @@ impl Vm {
                     Obj::Str(s) => s.trim().parse::<f64>().map(Value::Float).map_err(|_| {
                         self.err(format!("float(): cannot parse '{s}' as a float"), span)
                     }),
+                    // `float(newtype)` unwraps the inner (checker verified the underlying is float).
+                    Obj::NewType { inner, .. } => {
+                        let inner = *inner;
+                        self.builtin_float(&[inner], span)
+                    }
                     _ => Err(self.err(
                         format!("float() cannot convert {}", self.type_name(args[0])),
                         span,
@@ -13206,6 +13512,21 @@ impl Vm {
 
     fn builtin_str(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         self.arity_err("str", args, 1, span)?;
+        // `str` is dual: a `newtype N = str` with NO `str(self)` override UNWRAPS to its inner str
+        // (the cast-unwrap). A `str(self)` override OR any other underlying goes through `stringify`
+        // (the display cast — which itself honors the override). Mirrors the interp.
+        if let Value::Obj(h) = args[0]
+            && let Obj::NewType { type_key, inner } = self.heap.get(h)
+            && let Value::Obj(ih) = *inner
+            && matches!(self.heap.get(ih), Obj::Str(_))
+            && !self
+                .program
+                .newtype_methods
+                .get(type_key.as_ref())
+                .is_some_and(|m| m.contains_key("str"))
+        {
+            return Ok(Value::Obj(ih));
+        }
         let s = self.stringify(args[0], span, 0)?;
         Ok(Value::Obj(self.heap.alloc(Obj::Str(s.into()))))
     }
@@ -13321,6 +13642,7 @@ impl Vm {
                 Obj::Set(_) => "set",
                 Obj::Struct { .. } => "struct",
                 Obj::Enum { .. } => "enum",
+                Obj::NewType { .. } => "newtype",
                 Obj::Func { .. } | Obj::Closure { .. } => "function",
                 Obj::Module { .. } => "module",
                 Obj::Native { .. } => "function",
@@ -13440,6 +13762,16 @@ impl Vm {
                         }
                         Ok(format!("{variant}({})", parts.join(", ")))
                     }
+                }
+                // Raw display fallback (no method dispatch here): `Name(inner)`. The `str(self)`
+                // override is honored by `stringify` (the path print/`str()` actually use).
+                Obj::NewType { type_key, inner } => {
+                    let display = crate::compiler::bare_display(type_key.as_ref());
+                    let inner = *inner;
+                    Ok(format!(
+                        "{display}({})",
+                        self.display_guarded(inner, depth + 1)?
+                    ))
                 }
                 Obj::Func { proto, .. } => Ok(format!("<fn {}>", self.program.protos[*proto].name)),
                 Obj::Closure { .. } => Ok("<closure>".to_string()),
@@ -13578,6 +13910,10 @@ impl Vm {
                         .join(", ");
                     format!("{variant}({inner})")
                 }
+            }
+            WireValue::NewType { type_key, inner } => {
+                let display = crate::compiler::bare_display(type_key.as_ref());
+                format!("{display}({})", self.display_wire(inner))
             }
             WireValue::Channel(core) => {
                 format!("Channel(len={})", core.q.lock().unwrap().queue.len())
@@ -13839,6 +14175,27 @@ impl Vm {
                     self.stringify_seq_into(out, &payload, span, depth + 1)?;
                     out.push(')');
                 }
+            }
+            // A newtype honors a `str(self) -> str` override (Stringable) exactly like enum/struct;
+            // else it renders `Name(inner)` (its raw `Display`).
+            Obj::NewType { type_key, inner } => {
+                if let Some(&proto) = self
+                    .program
+                    .newtype_methods
+                    .get(type_key.as_ref())
+                    .and_then(|m| m.get("str"))
+                    && self.program.protos[proto].arity == 1
+                {
+                    let home = self.module_objs[self.newtype_home_module(&type_key)];
+                    let res = self.guarded(|vm| {
+                        vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span)
+                    })?;
+                    return self.stringify_into(out, res, span, depth);
+                }
+                let display = crate::compiler::bare_display(type_key.as_ref());
+                let _ = write!(out, "{display}(");
+                self.stringify_into(out, inner, span, depth + 1)?;
+                out.push(')');
             }
             Obj::Func { proto, .. } => {
                 let _ = write!(out, "<fn {}>", self.program.protos[proto].name);
@@ -15820,6 +16177,8 @@ main()
             structs: Default::default(),
             enum_methods: Default::default(),
             enum_home: Default::default(),
+            newtype_methods: Default::default(),
+            newtype_home: Default::default(),
             variants: Default::default(),
             variants_by_id: Vec::new(),
             modules: vec![],
@@ -20953,6 +21312,20 @@ main()";
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
         assert_eq!(vm_out, interp_out);
+    }
+
+    /// M21 newtype golden: `examples/newtype.chz` exercises construct/unwrap, same-type
+    /// arithmetic + compare, a `str(self)` Stringable override, a runtime-dispatched `hash(self)`
+    /// for map/set keys, a generic `[T: Add]` bound over a newtype, and a str-newtype unwrap.
+    /// Byte-identical on the VM, interp, and the checked-in `.expected`.
+    #[test]
+    fn golden_newtype_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/newtype.chz");
+        let expected = include_str!("../../examples/newtype.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(vm_out, expected, "vm output drifted from newtype.expected");
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on newtype");
     }
 
     /// M19 memory-layout lever #1 golden: `examples/struct_layout.chz` exercises the positional

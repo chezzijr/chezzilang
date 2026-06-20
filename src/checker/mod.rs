@@ -240,6 +240,9 @@ struct ModuleSig {
     /// Resolved enum definitions this module declares: variant names (in order), generic type
     /// params, and each variant's payload `VariantInfo`.
     enum_defs: HashMap<String, EnumSigInfo>,
+    /// Resolved newtype definitions this module declares: the underlying `Ty` and the name-keyed
+    /// methods. An importer injects these into its per-module `newtype_defs`/`newtype_names`.
+    newtype_defs: HashMap<String, NewTypeSigInfo>,
     /// Transparent type aliases this module declares, with their body RESOLVED in the DEFINING
     /// module's scope (so a cross-module `type Len = int32` carries its FFI-width license). The bool
     /// records whether the alias was licensed (`ffi_alias_ok`) in the defining module. The
@@ -263,6 +266,14 @@ struct AliasSig {
     /// width across a `from`-import or a `module.Alias` hop — the `body: Ty` cannot, since `Ty`
     /// collapses every FFI width to `Ty::Int`.
     ctype: Option<CType>,
+}
+
+/// A newtype's exported shape inside a `ModuleSig`: its resolved underlying `Ty` and its name-keyed
+/// methods, ferried across the module boundary so an imported newtype constructs/unwraps/dispatches.
+#[derive(Clone)]
+struct NewTypeSigInfo {
+    underlying: Ty,
+    methods: HashMap<String, FnSig>,
 }
 
 /// An enum's exported shape inside a `ModuleSig`: variant names in declaration order, the enum's
@@ -368,6 +379,7 @@ impl Checker {
                 for s in &lm.ast.stmts {
                     if let StmtKind::Struct { name, .. }
                     | StmtKind::Enum { name, .. }
+                    | StmtKind::NewType { name, .. }
                     | StmtKind::TypeAlias { name, .. } = &s.kind
                     {
                         c.type_keys.insert(
@@ -418,6 +430,7 @@ impl Checker {
             for s in &lm.ast.stmts {
                 if let StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
+                | StmtKind::NewType { name, .. }
                 | StmtKind::TypeAlias { name, .. } = &s.kind
                 {
                     c.types_by_name
@@ -626,6 +639,12 @@ struct Checker {
     variant_owners: HashMap<String, Vec<String>>,
     struct_names: std::collections::HashSet<String>,
     enum_names: std::collections::HashSet<String>,
+    /// newtype name (BARE, current-module visibility) — mirrors `enum_names`/`struct_names`.
+    newtype_names: std::collections::HashSet<String>,
+    /// newtype runtime key (`bare_key`) → its (underlying `Ty`, name-keyed methods). Mirrors
+    /// `enum_methods` + the layout tables: drives construct, cast-unwrap, same-type operators,
+    /// method dispatch, and protocol satisfaction. NOT cleared per-module (graph-wide, like `enums`).
+    newtype_defs: HashMap<String, (Ty, HashMap<String, FnSig>)>,
     /// Transparent type aliases (`type UserId = int`): name → the aliased AST type, resolved on
     /// demand in `resolve_type`. `alias_resolving` is the active resolution stack (cycle guard).
     aliases: HashMap<String, Type>,
@@ -756,6 +775,8 @@ impl Checker {
             variant_owners: HashMap::new(),
             struct_names: std::collections::HashSet::new(),
             enum_names: std::collections::HashSet::new(),
+            newtype_names: std::collections::HashSet::new(),
+            newtype_defs: HashMap::new(),
             aliases: HashMap::new(),
             alias_resolving: Vec::new(),
             ffi_alias_ok: std::collections::HashSet::new(),
@@ -877,6 +898,8 @@ impl Checker {
         self.variant_owners.clear();
         self.struct_names.clear();
         self.enum_names.clear();
+        self.newtype_names.clear();
+        self.newtype_defs.clear();
         self.aliases.clear();
         self.bare_types.clear();
         self.seed_stdlib_structs();
@@ -905,6 +928,7 @@ impl Checker {
             for s in stmts {
                 if let StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
+                | StmtKind::NewType { name, .. }
                 | StmtKind::TypeAlias { name, .. } = &s.kind
                 {
                     let key = self.type_key(mid, name);
@@ -997,6 +1021,20 @@ impl Checker {
                             }
                         }
                     }
+                    for (ntname, ntdef) in &sig.newtype_defs {
+                        // Register the newtype's underlying + methods under the declaring module's
+                        // runtime key (so a value whose `Ty::NewType(key)` matches resolves its
+                        // methods/construct/cast). A std module also exposes it bare.
+                        let key = self.type_key(&imp.target, ntname);
+                        self.newtype_defs.insert(
+                            key.clone(),
+                            (ntdef.underlying.clone(), ntdef.methods.clone()),
+                        );
+                        if is_std {
+                            self.newtype_names.insert(ntname.clone());
+                            self.bare_types.entry(ntname.clone()).or_insert(key);
+                        }
+                    }
                 }
             }
             Import::From { path: _, names } => {
@@ -1068,6 +1106,16 @@ impl Checker {
                                     .or_default()
                                     .push(bind.clone());
                             }
+                        } else if let Some(ntdef) = sig.newtype_defs.get(member) {
+                            // A user newtype imported by name: inject its underlying + methods under
+                            // the declaring module's runtime key; expose it bare under the bind name.
+                            let key = self.type_key(&imp.target, member);
+                            self.newtype_defs.insert(
+                                key.clone(),
+                                (ntdef.underlying.clone(), ntdef.methods.clone()),
+                            );
+                            self.newtype_names.insert(bind.clone());
+                            self.bare_types.insert(bind.clone(), key);
                         } else if let Some(asig) = sig.type_aliases.get(member) {
                             // A user type alias imported by name. An unlicensed alias embedding an
                             // un-imported FFI width cannot be laundered — reject it here, mirroring the
@@ -1154,6 +1202,19 @@ impl Checker {
                                 type_params,
                                 variants,
                                 methods: self.enum_methods.get(&key).cloned().unwrap_or_default(),
+                            },
+                        );
+                    }
+                }
+                StmtKind::NewType { name, .. } => {
+                    sig.types.insert(name.clone());
+                    let key = self.bare_key(name);
+                    if let Some((underlying, methods)) = self.newtype_defs.get(&key) {
+                        sig.newtype_defs.insert(
+                            name.clone(),
+                            NewTypeSigInfo {
+                                underlying: underlying.clone(),
+                                methods: methods.clone(),
                             },
                         );
                     }
@@ -1394,16 +1455,32 @@ impl Checker {
                     // register, the enum silently shadowed, and — sharing a `Name[args]` Display —
                     // produce nonsense like "cannot assign Foo[int] to … Foo[int]"). Same-kind dups
                     // are caught later in the resolve pass.
-                    if self.enum_names.contains(name) {
+                    if self.enum_names.contains(name) || self.newtype_names.contains(name) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
                     self.struct_names.insert(name.clone());
                 }
                 StmtKind::Enum { name, .. } => {
-                    if self.struct_names.contains(name) {
+                    if self.struct_names.contains(name) || self.newtype_names.contains(name) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
                     self.enum_names.insert(name.clone());
+                }
+                StmtKind::NewType { name, .. } => {
+                    if matches!(
+                        name.as_str(),
+                        "int" | "float" | "bool" | "str" | "bytes" | "bytearray" | "nil"
+                    ) || is_reserved_type(name)
+                        || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
+                    {
+                        self.error(s.span, format!("type '{name}' is reserved (builtin)"));
+                    } else if self.struct_names.contains(name)
+                        || self.enum_names.contains(name)
+                        || self.newtype_names.contains(name)
+                    {
+                        self.error(s.span, format!("type '{name}' is already defined"));
+                    }
+                    self.newtype_names.insert(name.clone());
                 }
                 StmtKind::TypeAlias { name, ty } => {
                     if matches!(
@@ -1416,6 +1493,7 @@ impl Checker {
                     } else if self.aliases.contains_key(name)
                         || self.struct_names.contains(name)
                         || self.enum_names.contains(name)
+                        || self.newtype_names.contains(name)
                     {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     } else {
@@ -1628,6 +1706,28 @@ impl Checker {
                     self.enum_type_params
                         .insert(key.clone(), type_params.clone());
                     self.enum_methods.insert(key, method_sigs);
+                }
+                StmtKind::NewType {
+                    name,
+                    underlying,
+                    methods,
+                } => {
+                    if is_reserved_type(name) {
+                        self.error(s.span, format!("type '{name}' is reserved (builtin)"));
+                    }
+                    let key = self.bare_key(name);
+                    if self.newtype_defs.contains_key(&key) {
+                        self.error(s.span, format!("type '{name}' is already defined"));
+                    }
+                    let under_ty = self.resolve_type(underlying, s.span);
+                    // A newtype cannot wrap itself or another newtype's identity that's still a bare
+                    // newtype value — but a newtype OF a newtype is simply nominal nesting (allowed:
+                    // construct/unwrap one level at a time). No special rejection needed here.
+                    let method_sigs: HashMap<String, FnSig> = methods
+                        .iter()
+                        .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
+                        .collect();
+                    self.newtype_defs.insert(key, (under_ty, method_sigs));
                 }
                 StmtKind::Extern { fns, .. } => {
                     // Dynamic C-ABI FFI (`dlopen`/libffi) is unix-only — `int` marshals as C `long`,
@@ -2239,6 +2339,7 @@ impl Checker {
                     }
                     Ty::Enum(key, Vec::new())
                 }
+                _ if self.newtype_names.contains(n) => Ty::NewType(self.bare_key(n)),
                 // A protocol name used as a value type (existential), e.g. `Error`.
                 _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
                 _ => {
@@ -2374,6 +2475,17 @@ impl Checker {
                     );
                     Ty::Unknown
                 }
+                // A newtype is non-generic in v1: `Foo[int]` is invalid.
+                _ if self.newtype_names.contains(n) => {
+                    for a in args {
+                        let _ = self.resolve_type(a, span);
+                    }
+                    self.error(
+                        span,
+                        format!("newtype '{n}' is not generic (it takes no type arguments)"),
+                    );
+                    Ty::NewType(self.bare_key(n))
+                }
                 _ => {
                     self.error(span, format!("unknown generic type '{n}'"));
                     Ty::Unknown
@@ -2420,6 +2532,14 @@ impl Checker {
                         );
                     }
                     Ty::Enum(self.type_key(&mid, name), resolved)
+                } else if sig.newtype_defs.contains_key(name) {
+                    if !resolved.is_empty() {
+                        self.error(
+                            span,
+                            format!("newtype '{module}.{name}' is not generic (it takes no type arguments)"),
+                        );
+                    }
+                    Ty::NewType(self.type_key(&mid, name))
                 } else if let Some(asig) = sig.type_aliases.get(name) {
                     asig.body.clone()
                 } else {
@@ -2584,6 +2704,26 @@ impl Checker {
                     }
                 }
                 self.exit_type_params(saved);
+            }
+            // Newtype method bodies are checked here, mirroring the enum path (`self` is the newtype).
+            StmtKind::NewType { name, methods, .. } => {
+                let self_ty = self.newtype_self_ty(name);
+                let key = self.bare_key(name);
+                for m in methods {
+                    if m.is_test {
+                        // Parser rejects `test fn` in a newtype body, so this is unreachable; guard
+                        // anyway to keep the suite invariants explicit.
+                        self.validate_test_fn_shape(m, true);
+                    }
+                    if let Some(sig) = self
+                        .newtype_defs
+                        .get(&key)
+                        .and_then(|(_, ms)| ms.get(&m.name))
+                        .cloned()
+                    {
+                        self.check_fn_body(m, Some(self_ty.clone()), sig);
+                    }
+                }
             }
             // Imports and protocols carry nothing to check in pass 2 (protocol method
             // signatures are validated during hoisting).
@@ -5735,6 +5875,29 @@ impl Checker {
         Ty::Struct(key.to_string(), targs_out)
     }
 
+    /// For a numeric/scalar cast builtin (`int`/`float`/`bool`), if the single arg is a NEWTYPE,
+    /// require its underlying to be exactly the cast target — `int(uid)` unwraps a `newtype X=int`
+    /// but `int(meters)` (underlying float) is rejected. A non-newtype arg is left to the normal
+    /// permissive cast. (`str` is handled separately — it is dual cast+display, never rejected.)
+    fn check_newtype_cast_unwrap(&mut self, cast: &str, arg: &Expr, target: Ty) {
+        let aty = self.infer_value(arg);
+        if let Ty::NewType(k) = &aty {
+            let under = self
+                .newtype_defs
+                .get(k)
+                .map(|(u, _)| u.clone())
+                .unwrap_or(Ty::Unknown);
+            if !matches!(under, Ty::Unknown) && !compatible(&target, &under) {
+                self.error(
+                    arg.span,
+                    format!(
+                        "{cast}() cannot unwrap newtype {aty} (its underlying type is {under}, not {target})"
+                    ),
+                );
+            }
+        }
+    }
+
     fn infer_named_call(
         &mut self,
         name: &str,
@@ -5809,16 +5972,25 @@ impl Checker {
             }
             "int" => {
                 self.check_arity("int", 1, args, span);
+                if let Some(a) = args.first() {
+                    self.check_newtype_cast_unwrap("int", a, Ty::Int);
+                }
                 self.infer_all(args);
                 Some(Ty::Int)
             }
             "float" => {
                 self.check_arity("float", 1, args, span);
+                if let Some(a) = args.first() {
+                    self.check_newtype_cast_unwrap("float", a, Ty::Float);
+                }
                 self.infer_all(args);
                 Some(Ty::Float)
             }
             "str" => {
                 self.check_arity("str", 1, args, span);
+                // `str` is dual: for `newtype N = str` it UNWRAPS the inner str; for any other
+                // underlying it is the normal Stringable display cast (accepts anything). So no
+                // newtype-mismatch check here — `str(meters)` is a legal display, not an error.
                 self.infer_all(args);
                 Some(Ty::Str)
             }
@@ -6040,6 +6212,18 @@ impl Checker {
             // `Err(x)`: error type known (`typeof x`), success type open.
             "Err" => Some(Ty::result_e(Ty::Unknown, self.one_arg(name, args, span))),
             _ => {
+                // Newtype constructor? `UserId(x)` — one arg of the underlying type, returns the
+                // newtype. Mirrors the single-field struct ctor; only a BARE-resolvable newtype.
+                if self.newtype_names.contains(name) {
+                    let key = self.bare_key(name);
+                    let under = self
+                        .newtype_defs
+                        .get(&key)
+                        .map(|(u, _)| u.clone())
+                        .unwrap_or(Ty::Unknown);
+                    self.check_args(name, std::slice::from_ref(&under), args, span);
+                    return Some(Ty::NewType(key));
+                }
                 // Struct constructor? Only a BARE-resolvable struct (`struct_names`): a locally
                 // declared, `from`-imported, or std type. A whole-module-imported USER struct's layout
                 // lives in `self.structs` for `m.S(...)`/field access, but its name is NOT in
@@ -6251,6 +6435,39 @@ impl Checker {
             }
             // Enum methods (name-resolved exactly like struct methods). Substitute the enum's type
             // arguments into the method signature, so `Box[int].get()` returns `int`, not `T`.
+            // A newtype dispatches its own (non-generic) methods by name, like an enum. The
+            // underlying's methods are NOT inherited (an aggregate underlying's `.push`/index/iter
+            // never resolve here — that is the v1 distinct-type contract).
+            Ty::NewType(ntkey) => {
+                let resolved = self
+                    .newtype_defs
+                    .get(ntkey)
+                    .and_then(|(_, ms)| ms.get(method))
+                    .map(|sig| (sig.params.clone(), sig.ret.clone(), sig.type_params.clone()));
+                if let Some((params, ret, mtps)) = resolved {
+                    if !mtps.is_empty() {
+                        return self.infer_generic_method(
+                            method, &params, &ret, &mtps, &obj_ty, args, span,
+                        );
+                    }
+                    match params.split_first() {
+                        Some((_receiver, expected)) => {
+                            self.check_args(method, expected, args, span)
+                        }
+                        None => {
+                            self.error(
+                                span,
+                                format!("method '{method}' has no receiver parameter (its first parameter must be the receiver, e.g. `self`)"),
+                            );
+                            self.infer_all(args);
+                        }
+                    }
+                    return ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
             Ty::Enum(ename, targs) => {
                 let resolved = self.enum_methods.get(ename).and_then(|ms| {
                     ms.get(method).map(|sig| {
@@ -6896,6 +7113,11 @@ impl Checker {
         Ty::Enum(key, args)
     }
 
+    /// The `Ty::NewType` of a newtype's own `self`, keyed by its runtime key. Non-generic in v1.
+    fn newtype_self_ty(&self, name: &str) -> Ty {
+        Ty::NewType(self.bare_key(name))
+    }
+
     /// Install `tps` as the in-scope generic type parameters, returning the previous map to restore.
     fn enter_type_params(&mut self, tps: &[TypeParam]) -> HashMap<String, Vec<Bound>> {
         let saved = self.type_params.clone();
@@ -7134,6 +7356,7 @@ impl Checker {
                 _ if self.imported_alias_tys.contains_key(n) => self.imported_alias_tys[n].clone(),
                 _ if self.struct_names.contains(n) => Ty::strukt(self.bare_key(n)),
                 _ if self.enum_names.contains(n) => Ty::Enum(self.bare_key(n), Vec::new()),
+                _ if self.newtype_names.contains(n) => Ty::NewType(self.bare_key(n)),
                 _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
                 _ => Ty::Unknown,
             },
@@ -7487,6 +7710,23 @@ impl Checker {
                 };
                 self.satisfies_methods(ty, protocol, args, pinfo, methods)
             }
+            // A newtype satisfies a protocol structurally via its OWN methods (like struct/enum).
+            // PLUS, when its underlying is numeric, it intrinsically satisfies the operator protocols
+            // (`Add`/`Sub`/`Mul`/`Comparable`) — its same-type `+`/`<` use the underlying's native op
+            // (unwrap→op→rewrap), so a `newtype Meters = float` flows into a `[T: Add]` generic with
+            // no user `add` method. Hashable/Stringable stay strictly opt-in (the user's own method).
+            Ty::NewType(ntkey) => {
+                let numeric = self
+                    .newtype_underlying(ntkey)
+                    .is_some_and(|u| u.is_numeric());
+                if numeric && matches!(protocol, "Add" | "Sub" | "Mul" | "Comparable") {
+                    return Ok(());
+                }
+                let Some((_, methods)) = self.newtype_defs.get(ntkey) else {
+                    return Err(format!("type {ty} does not satisfy {protocol}"));
+                };
+                self.satisfies_methods(ty, protocol, args, pinfo, methods)
+            }
             _ => Err(format!("type {ty} does not satisfy {protocol}")),
         }
     }
@@ -7540,9 +7780,21 @@ impl Checker {
     /// struct or type-parameter that satisfies `protocol` (`Add`/`Sub`/`Mul`). The runtime dispatches
     /// to the `add`/`sub`/`mul` method; the result type is that same type. `None` ⇒ not overloadable.
     fn op_overload_result(&self, l: &Ty, r: &Ty, protocol: &str) -> Option<Ty> {
+        // A SAME newtype with a NUMERIC underlying auto-applies the underlying's NATIVE arithmetic op
+        // (unwrap→op→rewrap, NOT a user `add`) and returns the newtype. `Meters + float` /
+        // `Meters + Seconds` don't match (different/non-newtype operands) → the caller's "cannot
+        // apply" error. (A user-defined `add` method also works via the satisfies() path below, but
+        // the native numeric op is the no-method common case.)
+        if let (Ty::NewType(a), Ty::NewType(b)) = (l, r)
+            && a == b
+            && self.newtype_underlying(a).is_some_and(|u| u.is_numeric())
+        {
+            return Some(l.clone());
+        }
         let same = match (l, r) {
             (Ty::Struct(a, _), Ty::Struct(b, _)) => a == b,
             (Ty::Enum(a, _), Ty::Enum(b, _)) => a == b,
+            (Ty::NewType(a), Ty::NewType(b)) => a == b,
             (Ty::Param(a), Ty::Param(b)) => a == b,
             _ => false,
         };
@@ -7551,6 +7803,11 @@ impl Checker {
         } else {
             None
         }
+    }
+
+    /// The resolved underlying `Ty` of a newtype (by runtime key), if known.
+    fn newtype_underlying(&self, key: &str) -> Option<Ty> {
+        self.newtype_defs.get(key).map(|(u, _)| u.clone())
     }
 
     /// Are `l < r` etc. allowed? True for same-named comparable type params, or same-named structs
@@ -7565,6 +7822,12 @@ impl Checker {
                 self.satisfies(l, "Comparable").is_ok()
             }
             (Ty::Enum(a, _), Ty::Enum(b, _)) if a == b => self.satisfies(l, "Comparable").is_ok(),
+            // Same newtype with a numeric underlying: `Meters < Meters` uses the underlying's native
+            // ordering (returns bool). A user `compare` method also enables it via satisfies().
+            (Ty::NewType(a), Ty::NewType(b)) if a == b => {
+                self.newtype_underlying(a).is_some_and(|u| u.is_numeric())
+                    || self.satisfies(l, "Comparable").is_ok()
+            }
             _ => false,
         }
     }
@@ -7672,6 +7935,23 @@ impl Checker {
                 let ok = payloads.iter().all(|pty| self.sendable_rec(pty, stack));
                 stack.pop();
                 ok
+            }
+            // A newtype is sendable iff its underlying type is (it crosses by deep-copy of the inner
+            // value, like a 1-field struct). Cycle-guarded by the newtype key.
+            Ty::NewType(name) => {
+                if stack.contains(name) {
+                    return true;
+                }
+                match self.newtype_defs.get(name) {
+                    Some((under, _)) => {
+                        let under = under.clone();
+                        stack.push(name.clone());
+                        let ok = self.sendable_rec(&under, stack);
+                        stack.pop();
+                        ok
+                    }
+                    None => true,
+                }
             }
         }
     }

@@ -237,6 +237,13 @@ pub enum Value {
         variant: Rc<str>,
         payload: Vec<Value>,
     },
+    /// A `newtype` value — a DISTINCT nominal wrapper around a single `inner` value (mirrors a
+    /// 1-field struct). `type_key` is the newtype's runtime key. Methods/protocols dispatch like a
+    /// struct; same-newtype scalar operators unwrap→primitive-op→rewrap; casts unwrap to `inner`.
+    NewType {
+        type_key: Rc<str>,
+        inner: Box<Value>,
+    },
     /// `Channel[T]` (C2) — a shared mailbox (buffered, unbounded FIFO) for cross-task messages.
     /// Shared by reference (the handle is what `spawn` copies across the airlock); values move in
     /// on `send` (deep-copied) and out on `recv`.
@@ -337,6 +344,7 @@ impl Value {
             Value::Module(_) => "module",
             Value::Struct { .. } => "struct",
             Value::Enum { .. } => "enum",
+            Value::NewType { .. } => "newtype",
             Value::Channel(_) => "Channel",
             Value::Shared(_) => "Shared",
             Value::Atomic(_) => "Atomic",
@@ -432,6 +440,12 @@ impl std::fmt::Display for Value {
                         .join(", ");
                     write!(f, "{variant}({inner})")
                 }
+            }
+            // Raw display fallback (no method dispatch here): `Name(inner)`. A `str(self)` override
+            // is honored by `stringify` (interp/mod.rs), which is the path `str()`/print actually use.
+            Value::NewType { type_key, inner } => {
+                let display = crate::compiler::bare_display(type_key.as_ref());
+                write!(f, "{display}({inner})")
             }
             Value::Channel(q) => write!(f, "Channel(len={})", q.borrow().queue.len()),
             Value::Shared(cell) => write!(f, "Shared({})", cell.borrow()),

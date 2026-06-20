@@ -272,6 +272,7 @@ impl Parser {
                 self.expect_stmt_end()?;
                 k
             }
+            Token::NewType => self.parse_newtype()?,
             Token::If => self.parse_if()?,
             Token::For => self.parse_for()?,
             Token::While => self.parse_while()?,
@@ -836,6 +837,53 @@ impl Parser {
             name,
             type_params,
             variants,
+            methods,
+        })
+    }
+
+    /// `newtype Name = <type>` (the common, method-less case, terminated like a typeAlias) or
+    /// `newtype Name = <type>:` followed by an indented `fn` method block (compound, ends at its
+    /// Dedent). A DISTINCT nominal type — not a transparent alias. Non-generic in v1: a `[T]` after
+    /// the name is rejected. `test fn` in the body is rejected (suites aren't wired — enum precedent).
+    fn parse_newtype(&mut self) -> PResult<StmtKind> {
+        self.expect(&Token::NewType)?;
+        let name = self.expect_ident()?;
+        if self.check(&Token::LBracket) {
+            return Err(self.err(
+                "generic newtypes (`newtype Name[T] = …`) are not supported in v1".to_string(),
+            ));
+        }
+        self.expect(&Token::Assign)?;
+        let underlying = self.parse_type()?;
+        let mut methods = Vec::new();
+        // An optional trailing `:` opens a method block. Without it, this is a one-line declaration
+        // terminated by a newline (like a typeAlias).
+        if self.check(&Token::Colon) {
+            self.open_block()?;
+            self.skip_newlines();
+            while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+                if self.check(&Token::Fn) {
+                    methods.push(self.parse_fn(true)?);
+                } else if self.check(&Token::Test) {
+                    // Like enums: newtype test *suites* aren't wired into discovery, so a `test fn`
+                    // here would silently never run (a false-green). Reject at parse time.
+                    return Err(self.err(
+                        "test methods are not supported on newtypes (only on structs)".to_string(),
+                    ));
+                } else {
+                    return Err(
+                        self.err("expected a method (`fn …`) in the newtype body".to_string())
+                    );
+                }
+                self.skip_newlines();
+            }
+            self.expect(&Token::Dedent)?;
+        } else {
+            self.expect_stmt_end()?;
+        }
+        Ok(StmtKind::NewType {
+            name,
+            underlying,
             methods,
         })
     }
@@ -3019,6 +3067,58 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn newtype_method_less_parses() {
+        match only("newtype UserId = int\n") {
+            StmtKind::NewType {
+                name,
+                underlying,
+                methods,
+            } => {
+                assert_eq!(name, "UserId");
+                assert_eq!(underlying, Type::Named("int".into()));
+                assert!(methods.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn newtype_with_method_block_parses() {
+        match only("newtype Meters = float:\n    fn double(self) -> Meters:\n        return self\n")
+        {
+            StmtKind::NewType {
+                name,
+                underlying,
+                methods,
+            } => {
+                assert_eq!(name, "Meters");
+                assert_eq!(underlying, Type::Named("float".into()));
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].name, "double");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn newtype_rejects_test_fn() {
+        let e = parse_err("newtype Meters = float:\n    test fn t(self):\n        return\n");
+        assert!(
+            e.to_string().contains("test"),
+            "expected a test-fn rejection, got: {e}"
+        );
+    }
+
+    #[test]
+    fn newtype_rejects_generic() {
+        let e = parse_err("newtype Box[T] = int\n");
+        assert!(
+            e.to_string().to_lowercase().contains("generic") || e.to_string().contains("["),
+            "expected a generic rejection, got: {e}"
+        );
     }
 
     #[test]

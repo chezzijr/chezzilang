@@ -192,6 +192,10 @@ fn deep_clone(v: &Value) -> Value {
             variant: variant.clone(),
             payload: payload.iter().map(deep_clone).collect(),
         },
+        Value::NewType { type_key, inner } => Value::NewType {
+            type_key: type_key.clone(),
+            inner: Box::new(deep_clone(inner)),
+        },
     }
 }
 
@@ -241,6 +245,9 @@ struct Interp {
     /// Enum runtime KEY → its methods + home globals (the enum analogue of `structs`). Resolves
     /// `enumval.method(args)`, the `str(self)` Stringable hook, and the arith/compare overloads.
     enum_defs: std::collections::HashMap<String, std::rc::Rc<EnumDef>>,
+    /// Newtype runtime KEY → its methods + home globals (mirrors `enum_defs`). Resolves
+    /// `ntval.method(args)`, the `str(self)`/`hash(self)` hooks; same-type operators are native.
+    newtype_defs: std::collections::HashMap<String, std::rc::Rc<EnumDef>>,
     /// Evaluated module namespaces, keyed by module id (run-once cache for a multi-file program).
     namespaces:
         std::collections::HashMap<crate::resolver::ModuleId, std::rc::Rc<value::ModuleNamespace>>,
@@ -399,6 +406,7 @@ impl Interp {
             struct_module: std::collections::HashMap::new(),
             variants: std::collections::HashMap::new(),
             enum_defs: std::collections::HashMap::new(),
+            newtype_defs: std::collections::HashMap::new(),
             namespaces: std::collections::HashMap::new(),
             propagating: None,
             pending_exit: None,
@@ -561,6 +569,44 @@ impl Interp {
                     )
                 {
                     return self.struct_arith(*op, l, r, expr.span);
+                }
+                // Same-newtype operators auto-flow to the UNDERLYING's NATIVE op (unwrap→op→rewrap for
+                // arithmetic; unwrap→compare for ordering), NOT a user method. The checker rejected
+                // `Meters + float` / `Meters + Seconds` / `Meters < Seconds`. Mirrors the VM.
+                if let (
+                    Value::NewType {
+                        type_key: ka,
+                        inner: ia,
+                    },
+                    Value::NewType {
+                        type_key: kb,
+                        inner: ib,
+                    },
+                ) = (&l, &r)
+                    && ka == kb
+                {
+                    if matches!(
+                        op,
+                        BinaryOp::Add
+                            | BinaryOp::Sub
+                            | BinaryOp::Mul
+                            | BinaryOp::Div
+                            | BinaryOp::Mod
+                    ) {
+                        let inner = eval_binary(*op, (**ia).clone(), (**ib).clone(), expr.span)?;
+                        return Ok(Value::NewType {
+                            type_key: ka.clone(),
+                            inner: Box::new(inner),
+                        });
+                    }
+                    if matches!(
+                        op,
+                        BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
+                    ) {
+                        // ordering on the inners (native compare), mapped to bool.
+                        return eval_binary(*op, (**ia).clone(), (**ib).clone(), expr.span);
+                    }
+                    // ==/!= fall through to `eval_binary`'s structural newtype equality.
                 }
                 eval_binary(*op, l, r, expr.span)
             }
@@ -1202,6 +1248,18 @@ impl Interp {
             // `str(x)` dispatches to a `Stringable` struct's `str` method (else default repr).
             // Arity ≠ 1 falls through to the builtin so its arity error is preserved.
             if name == "str" && arg_vals.len() == 1 {
+                // `str` is dual: a `newtype N = str` with NO `str(self)` override UNWRAPS to its
+                // inner str (cast-unwrap). A `str` override or other underlying goes through
+                // `stringify` (display cast, which honors the override). Mirrors the VM.
+                if let Value::NewType { type_key, inner } = &arg_vals[0]
+                    && let Value::Str(_) = inner.as_ref()
+                    && !self
+                        .newtype_defs
+                        .get(type_key.as_ref())
+                        .is_some_and(|d| d.methods.contains_key("str"))
+                {
+                    return Ok((**inner).clone());
+                }
                 let s = self.stringify(&arg_vals[0], span, 0)?;
                 return Ok(Value::Str(s.into()));
             }
@@ -1329,8 +1387,38 @@ impl Interp {
                 self.executors.push(std::rc::Rc::clone(&ex));
                 return Ok(Value::Executor(ex));
             }
+            // `int(newtype)` / `float(newtype)` UNWRAP the inner value (the cast-unwrap; the checker
+            // verified the underlying matches). Intercepted before the pure `builtins` table, which
+            // doesn't know newtypes. `str` is handled above (unwrap iff str-underlying + no override).
+            if matches!(name.as_str(), "int" | "float")
+                && arg_vals.len() == 1
+                && let Value::NewType { inner, .. } = &arg_vals[0]
+            {
+                let inner = (**inner).clone();
+                return builtins::call(name, vec![inner], span);
+            }
             if builtins::is_builtin(name) {
                 return builtins::call(name, arg_vals, span);
+            }
+            // A bare newtype ctor: `UserId(x)` wraps the single arg. Resolved like the struct ctor —
+            // only a BARE-resolvable newtype — keyed by its runtime key.
+            if let Some(nt_key) = self.bare_types.get(name).cloned()
+                && self.newtype_defs.contains_key(&nt_key)
+            {
+                if arg_vals.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "newtype '{}' expects 1 value, got {}",
+                            crate::compiler::bare_display(&nt_key),
+                            arg_vals.len()
+                        ),
+                        span,
+                    });
+                }
+                return Ok(Value::NewType {
+                    type_key: nt_key.into(),
+                    inner: Box::new(arg_vals.into_iter().next().unwrap()),
+                });
             }
             // A bare struct ctor: only a BARE-resolvable struct in THIS module (local / from-import /
             // std), keyed by its declaring module's runtime key. A struct merely present in the global
@@ -2402,6 +2490,26 @@ impl Interp {
                 span,
             });
         }
+        // Newtype method dispatch (name-resolved, like enums). Resolves `newtype_defs[key][method]`
+        // off the wrapper's key. The underlying's methods are NOT inherited.
+        if let Value::NewType { type_key, .. } = &receiver {
+            let key = type_key.to_string();
+            if let Some(def) = self.newtype_defs.get(&key).cloned()
+                && let Some(decl) = def.methods.get(method).cloned()
+            {
+                let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
+                call_args.push(receiver.clone());
+                call_args.extend(arg_vals);
+                return self.call(&decl, &def.home, call_args, span);
+            }
+            return Err(RuntimeError {
+                message: format!(
+                    "type {} has no method '{method}'",
+                    crate::compiler::bare_display(&key)
+                ),
+                span,
+            });
+        }
         let Value::Struct { name, fields } = &receiver else {
             return Err(RuntimeError {
                 message: format!("type {} has no method '{method}'", receiver.type_name()),
@@ -2553,6 +2661,24 @@ impl Interp {
                     ))
                 }
             }
+            // A newtype honors a `str(self) -> str` override (Stringable) like enum/struct; else it
+            // renders `Name(inner)` (recursing so an inner struct/enum honors its own override).
+            Value::NewType { type_key, inner } => {
+                if let Some(def) = self.newtype_defs.get(type_key.as_ref()).cloned()
+                    && let Some(decl) = def.methods.get("str").cloned()
+                    && decl.params.len() == 1
+                {
+                    self.enter_call(span)?;
+                    let res = self.call(&decl, &def.home, vec![v.clone()], span);
+                    self.call_depth -= 1;
+                    return self.stringify(&res?, span, depth);
+                }
+                let display = crate::compiler::bare_display(type_key.as_ref());
+                Ok(format!(
+                    "{display}({})",
+                    self.stringify(inner, span, depth + 1)?
+                ))
+            }
             // Scalars, functions, modules — no protocol dispatch; reuse `Display`.
             other => Ok(other.to_string()),
         }
@@ -2667,7 +2793,31 @@ impl Interp {
                     })?;
                 Ok((decl, def.home.clone()))
             }
-            _ => unreachable!("overload receiver is a struct or enum"),
+            // A newtype's overload/hook methods (`hash`/`str`/user methods) resolve via
+            // `newtype_defs`, mirroring the enum path.
+            Value::NewType { type_key, .. } => {
+                let def = self
+                    .newtype_defs
+                    .get(type_key.as_ref())
+                    .cloned()
+                    .ok_or_else(|| RuntimeError {
+                        message: format!("unknown newtype '{type_key}'"),
+                        span,
+                    })?;
+                let decl = def
+                    .methods
+                    .get(method)
+                    .cloned()
+                    .ok_or_else(|| RuntimeError {
+                        message: format!(
+                            "newtype '{}' has no '{method}' method",
+                            crate::compiler::bare_display(type_key)
+                        ),
+                        span,
+                    })?;
+                Ok((decl, def.home.clone()))
+            }
+            _ => unreachable!("overload receiver is a struct, enum, or newtype"),
         }
     }
 
@@ -2700,6 +2850,9 @@ impl Interp {
             // An enum key dispatches its user `hash(self) -> int` via the shared enum-aware
             // resolver, mirroring the struct path.
             Value::Enum { .. } => self.enum_hash(v, span),
+            // A newtype key dispatches its user `hash(self) -> int` (opt-in — the checker rejects a
+            // newtype with no `hash` as a key, even over an intrinsically-hashable underlying).
+            Value::NewType { .. } => self.newtype_hash(v, span),
             Value::Str(_)
             | Value::Bytes(_)
             | Value::Int(_)
@@ -2719,6 +2872,18 @@ impl Interp {
     /// Dispatch an enum key's user `hash(self) -> int` via the shared enum-aware
     /// [`resolve_overload_method`], mirroring [`struct_hash`].
     fn enum_hash(&mut self, v: &Value, span: Span) -> Result<u64, RuntimeError> {
+        let (decl, home) = self.resolve_overload_method(v, "hash", span)?;
+        match self.call(&decl, &home, vec![v.clone()], span)? {
+            Value::Int(n) => Ok(n as u64),
+            other => Err(RuntimeError {
+                message: format!("hash() must return int, got {}", other.type_name()),
+                span,
+            }),
+        }
+    }
+
+    /// Dispatch a newtype key's user `hash(self) -> int` via the shared resolver (mirrors `enum_hash`).
+    fn newtype_hash(&mut self, v: &Value, span: Span) -> Result<u64, RuntimeError> {
         let (decl, home) = self.resolve_overload_method(v, "hash", span)?;
         match self.call(&decl, &home, vec![v.clone()], span)? {
             Value::Int(n) => Ok(n as u64),
@@ -4051,6 +4216,7 @@ impl Interp {
         for s in stmts {
             if let StmtKind::Struct { name, .. }
             | StmtKind::Enum { name, .. }
+            | StmtKind::NewType { name, .. }
             | StmtKind::TypeAlias { name, .. } = &s.kind
             {
                 // ROOT REDESIGN — single-source types are keyed `<main>::Name` (the standalone module
@@ -4331,6 +4497,18 @@ impl Interp {
                         self.enum_defs.insert(key, std::rc::Rc::new(def));
                     }
                 }
+                // A newtype registers its methods (name-keyed, like an enum) under its runtime key.
+                StmtKind::NewType { name, methods, .. } => {
+                    let key = self.type_key(self.cur_module_idx, name);
+                    let def = EnumDef {
+                        methods: methods
+                            .iter()
+                            .map(|m| (m.name.clone(), std::rc::Rc::new(m.clone())))
+                            .collect(),
+                        home: home.clone(),
+                    };
+                    self.newtype_defs.insert(key, std::rc::Rc::new(def));
+                }
                 StmtKind::Extern { lib, fns } => {
                     // Eager `dlopen` + `dlsym` at module init (like the VM's `MakeCffi`): a missing
                     // library/symbol surfaces as a startup error. Each extern fn binds a `Cffi` value
@@ -4609,6 +4787,7 @@ impl Interp {
             // before the body runs (see `eval_module`). Nothing to do when execution reaches them.
             StmtKind::Struct { .. }
             | StmtKind::Enum { .. }
+            | StmtKind::NewType { .. }
             | StmtKind::Protocol { .. }
             | StmtKind::Extern { .. } // bound by hoist_declarations, like top-level fn
             | StmtKind::TypeAlias { .. }
@@ -5656,6 +5835,7 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
         for s in &lm.ast.stmts {
             if let StmtKind::Struct { name, .. }
             | StmtKind::Enum { name, .. }
+            | StmtKind::NewType { name, .. }
             | StmtKind::TypeAlias { name, .. } = &s.kind
             {
                 interp.type_names.insert(name.clone());
@@ -6506,6 +6686,23 @@ pub(super) fn values_equal_guarded(
                 }
             }
             Ok(true)
+        }
+        // Two newtypes are equal iff SAME key and structurally-equal inner (recurse so numeric
+        // unification — Int(3)==Float(3.0) — matches the VM). A different key is a distinct type.
+        (
+            Value::NewType {
+                type_key: ka,
+                inner: ia,
+            },
+            Value::NewType {
+                type_key: kb,
+                inner: ib,
+            },
+        ) => {
+            if ka != kb {
+                return Ok(false);
+            }
+            values_equal_guarded(ia, ib, depth + 1, span)
         }
         // Cross-type `bytes == bytearray` is content-equal (Python parity: `b"a" == bytearray(b"a")`
         // is true). Same-type `Bytes`/`ByteArray` equality falls through to the derived `PartialEq`

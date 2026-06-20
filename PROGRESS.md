@@ -29,8 +29,9 @@ in `do_method_call`, a shared `resolve_overload_method` used by `struct_arith`/`
 branch in `call_struct_method`, its own `resolve_overload_method`, the stringify hook) — kept byte-identical
 (golden `examples/enum_methods.chz` runs on VM + interp + parallel + `.expected`). **Follow-up lever:** the
 method IC is skipped for enums (type-erased → no `tid`); enum-method dispatch uses the slow `run_proto`/
-flatten path. **Out of scope (deferred):** `derive`, nominal `newtype`, and the multi-bound same-name-method
-ambiguity diagnostic (a pre-existing struct-era wart, first-bound-wins).
+flatten path. **Out of scope (deferred):** `derive` and the multi-bound same-name-method
+ambiguity diagnostic (a pre-existing struct-era wart, first-bound-wins). (Nominal `newtype` — once
+listed here as deferred — **shipped in M21**; see its section below.)
 
 **✅ Module-scoped user types (struct / enum / `type` alias).** Types are now **private to their
 declaring module**, mirroring how top-level functions are namespaced — exported by default (no `pub`),
@@ -428,6 +429,29 @@ Dogfood: `examples/{membership,operators,match_or,suite}_test.chz` author real t
 faulting inside *imported* code reports the test file, not the library file — a documented MVP limit),
 `assert_eq`/value-diff messages, parametrized-test sugar, a Chezzi-side runner, running the runner on
 the interp engine. Grammar (`assertStmt`, `testFnDecl`) + corpus + `cargo test conformance` green.
+
+**✅ M21 — Nominal `newtype`.** `newtype Name = <type>` (a new keyword, distinct from the transparent
+`type` alias) is a DISTINCT nominal type wrapping the underlying — Go's defined-type model. It does
+NOT silently mix with the raw underlying: a bare `int` is not assignable to a `UserId`, and a `UserId`
+is not an `int`; only an explicit **construct** (`UserId(10)`, a call with one underlying-typed arg) or
+**cast-unwrap** via the existing scalar casts (`int(uid)`/`float(m)`, and `str(n)` for a str-underlying)
+crosses the boundary — no `.value`, no auto-deref. For a **scalar** underlying, same-newtype operators
+**auto-flow** to the underlying's *native* op (unwrap→primitive-op→rewrap, NOT a user `add`):
+`Meters + Meters -> Meters`, `Meters < Meters -> bool`, `==` compares inner; `Meters + float` /
+`Meters + Seconds` are rejected (the whole point). A newtype carries its own (non-generic) methods and
+satisfies protocols via them — `str(self)` (Stringable override), `hash(self)` (map/set key — opt-in,
+*not* inherited), `compare`/`add` — and a numeric newtype satisfies `Add`/`Sub`/`Mul`/`Comparable`
+intrinsically, so it flows into `fn twice[T: Add]`. Implemented by treating a newtype as ~a 1-field
+nominal struct and reusing the struct/enum machinery at every layer: `Ty::NewType(key)` (checker),
+`Obj::NewType{type_key,inner}` (VM) / `Value::NewType{type_key,inner}` (interp), `program.newtype_methods`
++ `newtype_home`, with `hash`/`str` dispatched **at runtime in both engines** (like the enum-hash fix)
+and the wire/snap/airlock paths covered so a newtype is sendable iff its inner is. **Both engines +
+parity** (VM/`--serial`/interp byte-identical) via `examples/newtype.chz` + `newtype.expected` golden;
+new grammar `<newtypeDecl>` + `tests/corpus/accept/newtype.chz` + `cargo test conformance` green; clippy
+clean; ~2347 tests pass. **v1 limits (documented):** an aggregate underlying (`newtype Names =
+list[str]`) gets identity+construct+unwrap+own-methods ONLY — no `.push`/index/iterate forwarding;
+no generic `newtype Box[T]`; no `derive`. Docs: `syntax.md §7`, `spec.md` (M21 row + enum-methods note
+de-staled), `grammar.bnf`.
 
 **🟦 M19 — Perf track (in progress).** M19 is a **pre-JIT perf push**, not a feature freeze — language
 work still lands (e.g. module-scoped types, 2026-06). This milestone is otherwise pure

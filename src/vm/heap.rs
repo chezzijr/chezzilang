@@ -200,6 +200,14 @@ pub enum Obj {
         variant_id: u32,
         payload: Vec<Value>,
     },
+    /// A `newtype` instance — a DISTINCT nominal wrapper around a single `inner` value (the heap
+    /// analogue of a 1-field `Struct`). `type_key` is the newtype's runtime key. `inner` may be a heap
+    /// object, so it is GC-traced as a child. Method/protocol/hash/str dispatch reuses the struct/enum
+    /// paths via `Program::newtype_methods`; scalar operators unwrap→primitive-op→rewrap.
+    NewType {
+        type_key: Box<str>,
+        inner: Value,
+    },
     /// A named function (top-level `fn` / method) + the module globals it resolves against.
     Func {
         proto: ProtoId,
@@ -397,6 +405,8 @@ impl Heap {
             Obj::Set(s) => s.entries.iter().for_each(|(_, e)| push(e)),
             Obj::Struct { fields, .. } => fields.iter().for_each(&mut push),
             Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
+            // The wrapped inner value may be a heap object — trace it (like a 1-field struct).
+            Obj::NewType { inner, .. } => push(inner),
             Obj::Func { home, .. } => out.push(*home),
             Obj::Closure { captured, home, .. } => {
                 captured.iter().for_each(&mut push);

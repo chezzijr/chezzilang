@@ -38,6 +38,7 @@ pub enum Token {
     Enum,
     Protocol,
     Type,
+    NewType,
     Match,
     Recover,
     Defer,
@@ -168,6 +169,7 @@ fn keyword(word: &str) -> Option<Token> {
         "enum" => Token::Enum,
         "protocol" => Token::Protocol,
         "type" => Token::Type,
+        "newtype" => Token::NewType,
         "match" => Token::Match,
         "recover" => Token::Recover,
         "defer" => Token::Defer,
@@ -2040,6 +2042,22 @@ mod tests {
         assert_eq!(
             kinds("test fn"),
             vec![Token::Test, Token::Fn, Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lexes_newtype_keyword() {
+        assert_eq!(keyword("newtype"), Some(Token::NewType));
+        assert_eq!(
+            kinds("newtype Foo = int"),
+            vec![
+                Token::NewType,
+                Token::Ident("Foo".to_string()),
+                Token::Assign,
+                Token::Ident("int".to_string()),
+                Token::Newline,
+                Token::Eof
+            ]
         );
     }
 }

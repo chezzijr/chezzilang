@@ -187,6 +187,7 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         WireValue::Enum { payload, .. } => payload
             .iter()
             .for_each(|x| collect_core_gcrefs(x, out, seen)),
+        WireValue::NewType { inner, .. } => collect_core_gcrefs(inner, out, seen),
         // A cursor queued in a channel/executor roots its snapshot items' handles (like `List`).
         WireValue::Iter { items, .. } => {
             items.iter().for_each(|x| collect_core_gcrefs(x, out, seen))

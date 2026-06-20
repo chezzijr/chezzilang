@@ -276,6 +276,7 @@ fn collect_methods_into(stmts: &[Stmt], map: &mut HashMap<String, Vec<Vec<PSpec>
         let methods = match &stmt.kind {
             StmtKind::Struct { methods, .. } => methods,
             StmtKind::Enum { methods, .. } => methods,
+            StmtKind::NewType { methods, .. } => methods,
             _ => continue,
         };
         for method in methods {
@@ -307,6 +308,7 @@ fn collect_methods_by_struct(graph: &ModuleGraph) -> HashMap<(String, String), V
             let (name, methods) = match &stmt.kind {
                 StmtKind::Struct { name, methods, .. } => (name, methods),
                 StmtKind::Enum { name, methods, .. } => (name, methods),
+                StmtKind::NewType { name, methods, .. } => (name, methods),
                 _ => continue,
             };
             {
@@ -355,6 +357,7 @@ fn collect_methods_by_struct_into_standalone(
         let (name, methods) = match &stmt.kind {
             StmtKind::Struct { name, methods, .. } => (name, methods),
             StmtKind::Enum { name, methods, .. } => (name, methods),
+            StmtKind::NewType { name, methods, .. } => (name, methods),
             _ => continue,
         };
         for method in methods {
@@ -403,7 +406,7 @@ fn validate_defaults(stmts: &[Stmt]) -> Result<(), ResolveError> {
                     check_param_defaults(&m.params)?;
                 }
             }
-            StmtKind::Enum { methods, .. } => {
+            StmtKind::Enum { methods, .. } | StmtKind::NewType { methods, .. } => {
                 for m in methods {
                     check_param_defaults(&m.params)?;
                 }
@@ -1015,9 +1018,9 @@ impl Walker<'_> {
                     self.walk_block(b)?;
                 }
             }
-            // Enum method bodies (and param defaults) are rewritten exactly like a struct's; enums
-            // have no fields to splice.
-            StmtKind::Enum { methods, .. } => {
+            // Enum AND newtype method bodies (and param defaults) are rewritten exactly like a
+            // struct's; neither has fields to splice.
+            StmtKind::Enum { methods, .. } | StmtKind::NewType { methods, .. } => {
                 for m in methods.iter_mut() {
                     for p in m.params.iter_mut() {
                         if let Some(d) = &mut p.default {

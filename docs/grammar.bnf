@@ -41,7 +41,7 @@
 <stmts>         ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
-<compoundStmt> ::= <fnDecl> | <testFnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
+<compoundStmt> ::= <fnDecl> | <testFnDecl> | <structDecl> | <enumDecl> | <newtypeDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
 <simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <assertStmt> | <exprStmt>
@@ -211,6 +211,14 @@
 
 # A transparent type alias: `type Name = <type>`. `Name` is interchangeable with the aliased type.
 <typeAliasDecl> ::= "TYPE" "IDENT" "ASSIGN" <type> "NEWLINE"
+
+# A nominal `newtype`: a DISTINCT type wrapping <type> (NOT interchangeable with it — only an explicit
+# construct `Name(x)` or cast-unwrap `int(n)` crosses). Non-generic in v1 (no `[T]`). The method-less
+# one-liner is the common case; an optional trailing-colon block adds `fn` methods (no `test fn`, like
+# enums). Contrast `<typeAliasDecl>` above, which is transparent (structurally identical to its body).
+<newtypeDecl> ::= "NEWTYPE" "IDENT" "ASSIGN" <type> "NEWLINE"
+               | "NEWTYPE" "IDENT" "ASSIGN" <type> "COLON" "NEWLINE" "INDENT" <newtypeMethods> "DEDENT"
+<newtypeMethods> ::= <fnDecl> | <fnDecl> <newtypeMethods>
 
 # ===== control flow =====
 <ifStmt> ::= "IF" <expr> <block>

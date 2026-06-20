@@ -328,8 +328,15 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 - **Shipped:** **enum methods** — `fn name(self, …)` blocks after an enum's variants, mirroring struct
   methods end-to-end (name-resolved dispatch, generic-enum type params in scope, structural-protocol
   satisfaction so an enum can define `str`/`hash`/`add`/`compare` for `Stringable`/`Hashable`/`Add`/
-  `Comparable` and pass into protocol-bound generics, and `+`/`-`/`*`/`<` operator overloading). No
-  `derive` and no nominal `newtype` (write the method).
+  `Comparable` and pass into protocol-bound generics, and `+`/`-`/`*`/`<` operator overloading).
+- **Shipped (M21):** nominal **`newtype`** — `newtype Name = <type>` (optionally with a method block)
+  is a DISTINCT type wrapping the underlying (Go defined-type model), not a transparent alias: only an
+  explicit construct (`Name(x)`) or cast-unwrap (`int(n)`/`float(n)`/`str(n)`) crosses the boundary,
+  so accidental mixing with the raw underlying (or a different newtype) is a compile error. Scalar
+  underlyings auto-flow same-type operators (the underlying's *native* op, unwrap→op→rewrap); methods
+  + `Stringable`/`Hashable`/`Add`/`Comparable` work via the newtype's own methods (hash/str dispatched
+  at runtime in both engines). v1 limits: aggregate underlyings get identity+construct+unwrap+own-
+  methods only (no `.push`/index/iterate forwarding); no generic `newtype Box[T]`; no `derive`.
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 dynamic C-ABI v1 SHIPPED.** Because Chezzi is
 > written in Rust, the native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn
@@ -521,6 +528,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M16–M18** | Concurrency + `defer` | `spawn` / `parallel:` nursery, `Channel`/`Shared`/`Executor`, real OS-thread M:N engine (`--parallel`) with work-stealing + reduction-counting preemption + netpoller + `std.net`; `defer` (call + block forms). Design in [`docs/concurrency.md`](concurrency.md), phases in [`docs/concurrency-tier-d.md`](concurrency-tier-d.md) |
 | 🟦 **M19** | Perf track (in progress) | Landed: peephole + const-fold, superinstructions, global-slotting, struct-field inline cache, FxHash, `ConstStr` interning, call-loop flatten, small-string optimization. Behavior-preserving + two-engine parity on every change. Backlog ranked in [`docs/future.md §4`](future.md); measured deltas in [`docs/benchmarks.md`](benchmarks.md) |
 | ✅ **M20** | In-language tests | `assert <cond>[, "<msg>"]` (both-engine statement primitive, faults with its source line), the `test fn` marker (free tests + struct **suites** with `before_all`/`after_all`/`before_each`/`after_each` hooks + a shared typed fixture), and `chezzi test [path]` — a Rust-side VM-only runner over `*_test.chz` files (`PASS/FAIL name (file:line) msg`, non-zero exit on failure). Surface in [`docs/syntax.md §9c`](syntax.md) |
+| ✅ **M21** | Nominal `newtype` | `newtype Name = <type>` — a DISTINCT type wrapping the underlying (Go defined-type model), not a transparent alias: construct (`Name(x)`) / cast-unwrap (`int(n)`) cross the boundary; accidental mixing with the raw underlying or a different newtype is a compile error. Scalar same-type operators auto-flow (native op, unwrap→op→rewrap); methods + `Stringable`/`Hashable`/`Add`/`Comparable` via the newtype's own methods (runtime hash/str dispatch, both engines). v1 limits: aggregate underlyings get identity+construct+unwrap+own-methods only; no generic newtypes; no `derive`. Surface in [`docs/syntax.md §7`](syntax.md) |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional; a late-stage endeavor once the language has matured) |
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c**; **Level-3 dynamic C-ABI FFI v1

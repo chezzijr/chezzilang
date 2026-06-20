@@ -73,6 +73,12 @@ pub enum WireValue {
         variant_id: u32,
         payload: Vec<WireValue>,
     },
+    /// A `newtype` crossing the airlock by value (deep copy) like a 1-field struct: its runtime
+    /// `type_key` (meaningful in any worker, shared `Arc<Program>`) plus its wired inner value.
+    NewType {
+        type_key: Box<str>,
+        inner: Box<WireValue>,
+    },
     /// A by-reference object carried across the airlock as its existing heap handle (single-thread /
     /// same heap). Covers the callables `Func`/`Closure`/`Module`/`Native` (`Str` now crosses by value
     /// — see [`WireValue::Str`]). At B3.3 the handles whose object cannot cross an OS thread (`Module`
@@ -131,6 +137,7 @@ impl WireValue {
             WireValue::Map(es) => es.iter().any(|(_, k, v)| k.has_handle() || v.has_handle()),
             WireValue::Set(es) => es.iter().any(|(_, e)| e.has_handle()),
             WireValue::Struct { fields, .. } => fields.iter().any(|(_, v)| v.has_handle()),
+            WireValue::NewType { inner, .. } => inner.has_handle(),
             // A cursor's snapshot items could themselves embed a `Handle` (e.g. a cursor over a list
             // of closures) — recurse so the snapshot fast-path stays honest.
             WireValue::Iter { items, .. } => items.iter().any(WireValue::has_handle),

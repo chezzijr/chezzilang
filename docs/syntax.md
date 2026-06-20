@@ -715,6 +715,55 @@ type Scores = map[str, int]
 uid: UserId = 7        # UserId and int are the same type
 ```
 
+**Newtypes** (`newtype Name = <type>`, M21) are the *distinct-type* counterpart to a transparent
+`type` alias: `Name` wraps the underlying type but is a **separate, nominal** type that does NOT
+silently mix with the raw underlying (Go's "defined type" model). The point is to catch accidental
+mixing at compile time — a bare `int` is **not** assignable to a `UserId` parameter/binding/field,
+and a `UserId` is **not** accepted where a raw `int` is expected.
+
+```chezzi
+newtype UserId = int
+newtype Meters = float
+
+fn needs_int(x: int): ...
+
+uid := UserId(10)      # construct (a call with one arg of the underlying type)
+n: int = int(uid)      # unwrap via the cast builtin → 10
+# x: UserId = 10       # ERROR: an int literal is not a UserId
+# needs_int(uid)       # ERROR: a UserId is not an int
+```
+
+Crossing the boundary is always **explicit** — either **construct** (`UserId(10)`) or **cast-unwrap**
+via the existing scalar cast builtins: `int(uid)` / `float(m)` return the inner value (and for a
+`newtype N = str`, `str(n)` unwraps the inner string). There is no `.value` field and no auto-deref.
+
+For a **scalar** underlying (`int`/`float`/`bool`/`str`), operators **auto-flow same-type only**:
+`a OP b` where both operands are the *same* newtype applies the underlying's **native** primitive op
+and re-wraps — `Meters + Meters -> Meters`, `Meters < Meters -> bool`, `UserId == UserId -> bool`.
+Mixing a newtype with its raw underlying (`Meters + 1.0`) or with a *different* newtype
+(`Meters + Seconds`) is a type error — that rejection is the whole point.
+
+A newtype may carry its own **methods** (a trailing-colon block, like a struct/enum), and satisfies
+the prebuilt protocols by defining the relevant method — `str(self)` (Stringable display override),
+`hash(self)` (so it can be a `map`/`set` key — opt-in, *not* inherited from the underlying),
+`compare`/`add`/… — so it passes into protocol-bound generics (`fn twice[T: Add](x: T)`). A numeric
+newtype satisfies `Add`/`Sub`/`Mul`/`Comparable` intrinsically (via the native same-type ops above).
+
+```chezzi
+newtype Meters = float:
+    fn str(self) -> str:
+        return "{float(self)}m"
+
+print(Meters(1.5))                 # 1.5m       (str(self) override)
+print(float(Meters(1.0) + Meters(2.0)))  # 3.0  (same-type +)
+```
+
+**v1 limit — aggregate underlyings.** A `newtype` may wrap an aggregate (`newtype Names =
+list[str]`), but it gets **identity + construct + unwrap + its own methods only** — it does NOT
+auto-inherit the underlying's operations: `names.push(..)`, `names[i]`, and `for x in names` do not
+resolve. Reach the underlying through an explicit method or an unwrap. (Operation-forwarding for
+aggregates, generic newtypes `newtype Box[T]`, and `derive` are out of scope for v1.)
+
 The prebuilt **`Stringable`** protocol (`str(self) -> str`) customises how a value is rendered. A
 struct *or enum* that defines `str(self) -> str` overrides its default repr (`Name(field=value, …)`
 for a struct, `Variant(payload)` for an enum) everywhere it is printed: by `print`, by the `str()`
