@@ -165,16 +165,14 @@ impl Parser {
         }
     }
 
-    /// Expect a string literal (used for the library name in an `extern "lib":` header).
+    /// Expect a string literal (used for the library name in an `extern "lib":` header). A raw
+    /// string (`r"lib"`) is an ordinary `str` literal and is accepted here too.
     fn expect_str(&mut self) -> PResult<String> {
         match self.peek() {
-            Token::Str(_) => {
-                if let Token::Str(s) = self.advance().kind {
-                    Ok(s)
-                } else {
-                    unreachable!()
-                }
-            }
+            Token::Str(_) | Token::RawStr(_) => match self.advance().kind {
+                Token::Str(s) | Token::RawStr(s) => Ok(s),
+                _ => unreachable!(),
+            },
             _ => Err(self.err(format!(
                 "expected string literal, found {}",
                 describe(self.peek())
@@ -1098,7 +1096,8 @@ impl Parser {
                 }
                 return Ok(Pattern::Literal(LitPattern::Int(n)));
             }
-            Token::Str(s) => {
+            // A raw string is an ordinary `str` literal in pattern position too.
+            Token::Str(s) | Token::RawStr(s) => {
                 let s = s.clone();
                 self.advance();
                 return Ok(Pattern::Literal(LitPattern::Str(s)));
@@ -2320,6 +2319,15 @@ mod tests {
             },
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn raw_str_usable_as_match_pattern() {
+        // Regression: a raw string is a valid literal pattern in a match arm (was rejected with a
+        // misleading "expected identifier" because parse_pattern_primary lacked a RawStr arm).
+        let src = "fn f(s: str) -> int:\n    return match s:\n        r\"{}\": 1\n        _: 0\nfn main():\n    print(f(r\"{}\"))\nmain()\n";
+        parse(crate::lexer::tokenize(src).expect("lex"))
+            .expect("raw string should parse as a pattern");
     }
 
     #[test]

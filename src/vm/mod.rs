@@ -21328,6 +21328,15 @@ main()";
         assert_eq!(vm_out, interp_out, "vm/interp divergence on newtype");
     }
 
+    /// A raw string is an ordinary `str` end-to-end: usable as a match-arm literal pattern
+    /// (regression — the pattern parser previously rejected it) with its braces kept literal,
+    /// byte-identical on both engines.
+    #[test]
+    fn raw_string_as_match_pattern_runs() {
+        let src = "fn classify(s: str) -> str:\n    return match s:\n        r\"{}\": \"braces\"\n        _: \"other\"\nfn main():\n    print(classify(r\"{}\"))\n    print(classify(\"x\"))\nmain()\n";
+        assert_eq!(run_parity(src), "braces\nother\n");
+    }
+
     /// Raw-string golden: `examples/raw_string.chz` exercises the verbatim `r"..."` forms —
     /// literal braces (`r"{}"` → `{}`, the thing that needed `{{}}` before), literal backslashes
     /// (`r"\d+\s"`), the single-quote + Windows-path form, the triple form embedding quotes+braces

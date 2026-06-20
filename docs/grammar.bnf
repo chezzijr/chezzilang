@@ -191,6 +191,7 @@
 # (↔ void*), and a flat-scalar struct by value (a `struct` <type> named in an extern sig) — all are
 # ordinary <type> forms recognized only inside an extern sig (no new grammar).
 <externDecl> ::= "EXTERN" "STR" "COLON" "NEWLINE" "INDENT" <externFns> "DEDENT"
+              | "EXTERN" "RAWSTR" "COLON" "NEWLINE" "INDENT" <externFns> "DEDENT"
 <externFns>  ::= <externFn> | <externFn> <externFns>
 <externFn>   ::= "FN" "IDENT" "LPAREN" "RPAREN" "NEWLINE"
               | "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
@@ -283,7 +284,7 @@
                 | "IDENT" "DOT" "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "DOT" "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
-                | "INT" | "STR" | "TRUE" | "FALSE"
+                | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE"
                 | "INT" "DOTDOT" "INT"
 # A sub-pattern (nested position) is itself an or-alternation of primaries. A bare "IDENT" here is a
 # binding name OR — when it names a nullary variant of the matched type — a refutable variant match
@@ -300,7 +301,7 @@
                 | "IDENT" "DOT" "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "DOT" "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
-                | "INT" | "STR" | "TRUE" | "FALSE"
+                | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE"
                 | "INT" "DOTDOT" "INT"
 <subpatterns> ::= <subpattern> | <subpattern> "COMMA" <subpatterns>
 <tuplePattern> ::= "LPAREN" <subpatterns> "RPAREN"
