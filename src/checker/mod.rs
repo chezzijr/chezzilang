@@ -4750,7 +4750,10 @@ impl Checker {
                 {
                     self.error(
                         span,
-                        format!("variant '{en}.{name}' cannot match a value of enum '{s}'"),
+                        format!(
+                            "variant '{en}.{name}' cannot match a value of enum '{}'",
+                            crate::compiler::bare_display(s)
+                        ),
                     );
                 }
             }
@@ -9075,6 +9078,30 @@ mod graph_tests {
             check_entry(&entry).is_ok(),
             "cb.classify + qualified Color match must type-check under collision: {:?}",
             errors(&entry)
+        );
+    }
+
+    // 33. The "foreign qualifier" match error must render the scrutinee enum's BARE display name,
+    // never the qualified identity key. Two modules declare `Color`; a `match` on one using the
+    // other's `Color.<variant>` arms must report `enum 'Color'`, not `enum 'modkey::Color'`.
+    #[test]
+    fn foreign_variant_match_error_renders_bare_enum_name() {
+        let t = TmpDir::new();
+        t.write("ea.chz", "enum Color:\n    Red\n    Green\n");
+        t.write("eb.chz", "enum Color:\n    Cyan\n    Magenta\n");
+        let entry = t.write(
+            "emain.chz",
+            "import Color from ea\nimport Color as C2 from eb\nfn main():\n    c := Color.Red\n    match c:\n        C2.Cyan: print(\"x\")\n        C2.Magenta: print(\"y\")\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("cannot match a value of enum 'Color'")),
+            "expected bare 'Color' in foreign-qualifier match error, got: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|e| e.contains("::Color'")),
+            "qualified identity key must not leak into match error: {errs:?}"
         );
     }
 }
