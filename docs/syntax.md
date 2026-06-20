@@ -1476,7 +1476,10 @@ print(r.rem)    # 2
 struct** field is rejected with an error naming the struct *and* the offending field; **generic
 structs** (`Pair[int]`) have no fixed C layout and are rejected. (A transparent `type P = Point` alias
 to a flat struct works exactly like the bare struct.) The struct may be declared **before or after** the
-`extern` block. A **`bool` field** marshals as a C `_Bool` (1 byte) — it matches a C struct field
+`extern` block. A struct (or a width alias like `type Len = int32`) declared in another **module** may be
+named at the extern boundary either by **named import** (`import DivT from core.cdefs`, then bare `DivT`)
+or by the **module-qualified spelling** (`import core.cdefs`, then `cdefs.DivT` directly in the `extern`
+fn) — both lower to the same C type. A **`bool` field** marshals as a C `_Bool` (1 byte) — it matches a C struct field
 declared `_Bool` (or `char`), **not** a 4-byte `int`; for an *int*-width boolean field declared `int` in
 C, use `int8`/`uint8` (or `int32`) and test `!= 0`. Nested structs-by-value and string fields are
 deferred to a later version.

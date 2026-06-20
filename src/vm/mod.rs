@@ -18351,6 +18351,135 @@ main()
         );
     }
 
+    /// Regression (blocker): a module-QUALIFIED struct type (`cdefs.DivT`) written at the extern
+    /// return boundary must lower to its C struct just like the bare/named-import spelling. The
+    /// qualified `Type::Qualified` was previously passed through unchanged → `ctype_of` returned
+    /// `None` → silent void return → reading a field of the (nil) result faulted. All three engines
+    /// must yield quot=3, rem=2 for `div(17, 5)`. Linux-only (needs libc.so.6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_qualified_return_struct_runs() {
+        let dir = std::env::temp_dir().join(format!("chezzi_vm_ffi_qret_{}", std::process::id()));
+        let core = dir.join("core");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(
+            core.join("cdefs.chz"),
+            "import int32 from std.ffi\n\nstruct DivT:\n    quot: int32\n    rem: int32\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import core.cdefs\nimport int32 from std.ffi\n\nextern \"libc.so.6\":\n    \
+             fn div(numer: int32, denom: int32) -> cdefs.DivT\n\nr: cdefs.DivT = div(17, 5)\n\
+             print(r.quot)\nprint(r.rem)\n",
+        )
+        .unwrap();
+        let (vm_out, _e, vm_res, _) = run_file(&entry);
+        let (io, _ie, ir, _) = crate::interp::run_file(&entry);
+        let (par_out, _pe, par_res, _) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            vm_res.is_ok(),
+            "VM faulted on qualified return struct extern: {vm_res:?}"
+        );
+        assert!(
+            ir.is_ok(),
+            "interp faulted on qualified return struct extern: {ir:?}"
+        );
+        assert!(
+            par_res.is_ok(),
+            "parallel engine faulted on qualified return struct extern: {par_res:?}"
+        );
+        assert_eq!(vm_out, "3\n2\n");
+        assert_eq!(
+            vm_out, io,
+            "VM and interp diverged (qualified return struct)"
+        );
+        assert_eq!(
+            vm_out, par_out,
+            "VM and --parallel diverged (qualified return struct)"
+        );
+    }
+
+    /// Regression (blocker): a module-QUALIFIED width alias (`w3.Len`, `type Len = int32`) at both
+    /// the extern PARAM and return boundary must resolve through the alias table like the bare/
+    /// named-import spelling. Previously the qualified param panicked the VM at the marshal loop's
+    /// `.expect("checker verified marshallable param")`. All three engines must yield 7 for
+    /// `abs(-7)`. Linux-only (needs libc.so.6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_qualified_width_alias_param_runs() {
+        let dir = std::env::temp_dir().join(format!("chezzi_vm_ffi_qparam_{}", std::process::id()));
+        let core = dir.join("core");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(
+            core.join("w3.chz"),
+            "import int32 from std.ffi\n\ntype Len = int32\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import core.w3\n\nextern \"libc.so.6\":\n    fn abs(n: w3.Len) -> w3.Len\n\nprint(abs(-7))\n",
+        )
+        .unwrap();
+        let (vm_out, _e, vm_res, _) = run_file(&entry);
+        let (io, _ie, ir, _) = crate::interp::run_file(&entry);
+        let (par_out, _pe, par_res, _) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            vm_res.is_ok(),
+            "VM faulted/panicked on qualified width-alias param extern: {vm_res:?}"
+        );
+        assert!(
+            ir.is_ok(),
+            "interp faulted on qualified width-alias param extern: {ir:?}"
+        );
+        assert!(
+            par_res.is_ok(),
+            "parallel engine faulted on qualified width-alias param extern: {par_res:?}"
+        );
+        assert_eq!(vm_out, "7\n");
+        assert_eq!(vm_out, io, "VM and interp diverged (qualified width param)");
+        assert_eq!(
+            vm_out, par_out,
+            "VM and --parallel diverged (qualified width param)"
+        );
+    }
+
+    /// A genuinely non-marshallable QUALIFIED type at an extern boundary must surface a clean
+    /// compile/runtime error (the checker is the real gate), and — even if a path slipped past the
+    /// checker — the marshal loop's backstop must NEVER panic the VM. No libc needed (the checker
+    /// rejects before any dlopen). Asserts `is_err`, the "not C-marshallable" wording, and that the
+    /// process did not abort (the test simply completing proves no panic).
+    #[test]
+    fn extern_non_marshallable_qualified_is_clean_error() {
+        let dir = std::env::temp_dir().join(format!("chezzi_vm_ffi_qbad_{}", std::process::id()));
+        let core = dir.join("core");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(core.join("bag.chz"), "struct Bag:\n    items: list[int]\n").unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import core.bag\n\nextern \"libc.so.6\":\n    fn use_it(b: bag.Bag) -> int\n\nprint(0)\n",
+        )
+        .unwrap();
+        let (_vm_out, _e, vm_res, _) = run_file(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            vm_res.is_err(),
+            "expected a clean error for a non-marshallable qualified extern type, got Ok"
+        );
+        let msg = format!("{:?}", vm_res.unwrap_err());
+        assert!(
+            msg.contains("not C-marshallable") || msg.contains("C-marshallable"),
+            "error should mention marshallability, got: {msg}"
+        );
+    }
+
     /// D3/the discriminating fairness test. 64 CPU "hog" fibers (≫ the core-sized worker pool) each
     /// busy-wait on a `Shared[int]` until it reaches 50, spawned FIRST; then 50 "short" fibers that
     /// each `update(+1)` and exit. WITHOUT preemption every worker grabs a hog (FIFO seed order), all

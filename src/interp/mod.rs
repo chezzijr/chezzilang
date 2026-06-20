@@ -4247,15 +4247,42 @@ impl Interp {
                         }
                     }
                     // A bare struct type name written in an extern signature → its qualified key (so the
-                    // lowered `CType::Struct.name` matches the qualified-keyed `struct_fields`).
+                    // lowered `CType::Struct.name` matches the qualified-keyed `struct_fields`). A
+                    // module-QUALIFIED `mod.Type`/`mod.Alias` is resolved through `imported_module_idx`
+                    // → the target module's identity key (mirrors the compiler's `qualify_ffi_type` for
+                    // 3-engine parity): a qualified STRUCT → `Named(identity_key)`; a qualified WIDTH
+                    // ALIAS → `Named(bare name)` so it hits the bare-keyed `aliases` table.
                     let qualify = |t: &crate::ast::Type| -> crate::ast::Type {
-                        if let crate::ast::Type::Named(n) = t
-                            && let Some(key) = self.bare_types.get(n)
-                            && struct_fields.contains_key(key)
-                        {
-                            return crate::ast::Type::Named(key.clone());
+                        match t {
+                            crate::ast::Type::Named(n)
+                                if self
+                                    .bare_types
+                                    .get(n)
+                                    .is_some_and(|key| struct_fields.contains_key(key)) =>
+                            {
+                                crate::ast::Type::Named(self.bare_types[n].clone())
+                            }
+                            crate::ast::Type::Qualified {
+                                module: binder,
+                                name,
+                                ..
+                            } => {
+                                if let Some(&tidx) = self.imported_module_idx.get(binder)
+                                    && self
+                                        .module_types
+                                        .get(tidx)
+                                        .is_some_and(|ts| ts.contains(name))
+                                    && let Some(key) = self.type_keys.get(&(tidx, name.clone()))
+                                {
+                                    if struct_fields.contains_key(key) {
+                                        return crate::ast::Type::Named(key.clone());
+                                    }
+                                    return crate::ast::Type::Named(name.clone());
+                                }
+                                t.clone()
+                            }
+                            _ => t.clone(),
                         }
-                        t.clone()
                     };
                     for ef in fns {
                         let params: Vec<crate::native::cffi::CType> = ef
@@ -4263,10 +4290,22 @@ impl Interp {
                             .iter()
                             .map(|p| {
                                 let ty = p.ty.as_ref().map(&qualify);
-                                ctype_of(ty.as_ref(), &aliases, &struct_fields)
-                                    .expect("checker verified marshallable param")
+                                // The checker is the real gate; this is the never-panic backstop
+                                // (parity with the compiler), keyed to the extern stmt span.
+                                ctype_of(ty.as_ref(), &aliases, &struct_fields).ok_or_else(|| {
+                                    RuntimeError {
+                                        message: format!(
+                                            "type '{}' is not C-marshallable in extern fn '{}' \
+                                             (v1 supports only int, float, bool, str, ptr, and a \
+                                             flat struct of those)",
+                                            ffi_type_display(p.ty.as_ref()),
+                                            ef.name
+                                        ),
+                                        span: stmt.span,
+                                    }
+                                })
                             })
-                            .collect();
+                            .collect::<Result<_, _>>()?;
                         // `None` ⇒ void: no annotation, or one resolving to `nil` (incl. an alias to
                         // `nil`). The checker guarantees a non-void return is a scalar, so `and_then`
                         // (never `.expect`) — a non-scalar resolution can only mean void.
@@ -5911,6 +5950,19 @@ fn decode_utf8(bytes: &[u8], span: Span) -> Result<Value, RuntimeError> {
             message: "invalid UTF-8 in decode()".to_string(),
             span,
         }),
+    }
+}
+
+/// Render an extern param/return source `Type` for a marshallability error message (the surface
+/// spelling the user wrote). Twin of the compiler's `ffi_type_display` (parity); used only by the
+/// never-panic backstop in the extern marshal loop.
+fn ffi_type_display(ty: Option<&crate::ast::Type>) -> String {
+    match ty {
+        Some(crate::ast::Type::Named(n)) => n.clone(),
+        Some(crate::ast::Type::Qualified { module, name, .. }) => format!("{module}.{name}"),
+        Some(crate::ast::Type::Generic(n, _)) => n.clone(),
+        Some(_) => "<unsupported>".to_string(),
+        None => "nil".to_string(),
     }
 }
 

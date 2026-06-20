@@ -337,14 +337,47 @@ impl Compiler {
     /// `Type::Named` that names a bare-visible USER struct in THIS module is rewritten; scalars, FFI
     /// width names, aliases, and non-struct names pass through unchanged (FFI structs are flat-scalar
     /// per the checker, so there are no nested struct fields to recurse into).
+    ///
+    /// A module-QUALIFIED `mod.Type` / `mod.Alias` (`Type::Qualified`) is also lowered here so it
+    /// reaches `ctype_of` as a plain `Type::Named` (the shared `ctype_of_visiting` twin has no
+    /// `Type::Qualified` arm — resolving here keeps both engines' twin byte-identical). The binder is
+    /// resolved against `imported_modules` to the target module's identity key (`type_keys`, guarded
+    /// by `module_types`): a qualified STRUCT rewrites to `Named(identity_key)` so it hits the
+    /// identity-keyed `struct_fields`; a qualified WIDTH ALIAS rewrites to `Named(bare name)` so it
+    /// hits the bare-keyed `aliases` table exactly like the named-import spelling does.
     fn qualify_ffi_type(&self, ty: &Type) -> Type {
-        if let Type::Named(n) = ty
-            && let Some(key) = self.bare_types.get(n)
-            && self.struct_fields.contains_key(key)
-        {
-            return Type::Named(key.clone());
+        match ty {
+            Type::Named(n)
+                if self
+                    .bare_types
+                    .get(n)
+                    .is_some_and(|key| self.struct_fields.contains_key(key)) =>
+            {
+                Type::Named(self.bare_types[n].clone())
+            }
+            Type::Qualified {
+                module: binder,
+                name,
+                ..
+            } => {
+                if let Some(&tidx) = self.imported_modules.get(binder)
+                    && self
+                        .module_types
+                        .get(tidx)
+                        .is_some_and(|t| t.contains(name))
+                    && let Some(key) = self.type_keys.get(&(tidx, name.clone()))
+                {
+                    if self.struct_fields.contains_key(key) {
+                        return Type::Named(key.clone());
+                    }
+                    // Not a struct → a width alias: resolve through the bare-keyed `aliases` table
+                    // like the named-import spelling. (Generic qualified types are checker-rejected.)
+                    return Type::Named(name.clone());
+                }
+                ty.clone()
+            }
+            _ => ty.clone(),
         }
-        ty.clone()
     }
 
     /// The IDENTITY KEY for a bare-written enum name `ename` in the CURRENT module: its `bare_types`
@@ -650,15 +683,28 @@ impl Compiler {
                     // qualified IDENTITY KEY before lowering, so `CType::Struct.name` (the value tag a
                     // returned struct carries) matches the qualified-keyed `struct_fields`/`structs`
                     // table — otherwise the returned struct's field-name lookup misses.
-                    let params: Vec<CType> = ef
-                        .params
-                        .iter()
-                        .map(|p| {
-                            let ty = p.ty.as_ref().map(|t| self.qualify_ffi_type(t));
-                            ctype_of(ty.as_ref(), &self.aliases, &self.struct_fields)
-                                .expect("checker verified marshallable param")
-                        })
-                        .collect();
+                    let params: Vec<CType> =
+                        ef.params
+                            .iter()
+                            .map(|p| {
+                                let ty = p.ty.as_ref().map(|t| self.qualify_ffi_type(t));
+                                // The checker is the real marshallability gate; this `ok_or_else` is a
+                                // never-panic backstop (a user program must never abort the VM) for any
+                                // path that bypasses it. After the qualify fix it does not fire for valid
+                                // programs. Mirrors the checker's wording.
+                                ctype_of(ty.as_ref(), &self.aliases, &self.struct_fields)
+                                    .ok_or_else(|| CompileError {
+                                        message: format!(
+                                            "type '{}' is not C-marshallable in extern fn '{}' \
+                                         (v1 supports only int, float, bool, str, ptr, and a flat \
+                                         struct of those)",
+                                            ffi_type_display(p.ty.as_ref()),
+                                            ef.name
+                                        ),
+                                        span: stmt.span,
+                                    })
+                            })
+                            .collect::<Result<_, _>>()?;
                     // `None` ⇒ void: either no annotation, or an annotation resolving to `nil`
                     // (incl. an alias to `nil`). The checker guarantees a non-void return is a scalar,
                     // so a non-scalar here can only mean void — use `and_then`, never `.expect`.
@@ -3351,6 +3397,19 @@ impl crate::json_decode::DecodeEnv for CompilerDecodeEnv<'_> {
 /// display fallback when no `StructDef` is registered (defensive). Splits on the LAST `::`.
 pub(crate) fn bare_display(key: &str) -> String {
     key.rsplit("::").next().unwrap_or(key).to_string()
+}
+
+/// Render an extern param/return source `Type` for a marshallability error message (the surface
+/// spelling the user wrote, e.g. `cdefs.DivT`). Used only by the never-panic backstop, so it covers
+/// the spellings that reach an extern boundary; anything else falls back to a plain placeholder.
+fn ffi_type_display(ty: Option<&Type>) -> String {
+    match ty {
+        Some(Type::Named(n)) => n.clone(),
+        Some(Type::Qualified { module, name, .. }) => format!("{module}.{name}"),
+        Some(Type::Generic(n, _)) => n.clone(),
+        Some(_) => "<unsupported>".to_string(),
+        None => "nil".to_string(),
+    }
 }
 
 /// has already rejected non-marshallable types, so a `None` here is unreachable for a well-typed

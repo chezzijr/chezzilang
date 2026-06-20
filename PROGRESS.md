@@ -1026,6 +1026,26 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **C-ABI FFI: module-qualified type at the extern boundary (`mod.Type` / `mod.Alias`)**
+  (2026-06-20, `auto-task/ffi-qualified-type`) — fixed a scoping bug in the module-scoped-types
+  feature: a module-qualified type written at an `extern` boundary (`cdefs.DivT`, `w3.Len`, AST
+  `Type::Qualified`) was not lowered to a C type, so the checker (which resolves `Qualified`) and the
+  backends disagreed. Symptoms: a qualified RETURN struct silently became void (`cannot read field … of
+  nil`); a qualified PARAM panicked the VM at the marshal loop's `.expect`. Root cause: `qualify_ffi_type`
+  (compiler) and the interp `qualify` closure only rewrote a bare `Type::Named` struct → identity key and
+  passed `Type::Qualified` through unchanged, so the byte-identical `ctype_of` twin (no `Qualified` arm)
+  lowered it to `None`. Fix: both rewrites now resolve `Qualified { module: binder, name, .. }` via
+  `imported_modules`/`module_types`/`type_keys` → a qualified STRUCT becomes `Named(identity_key)` (hits
+  the identity-keyed `struct_fields`), a qualified WIDTH ALIAS becomes `Named(bare name)` (hits the
+  bare-keyed `aliases`), all BEFORE `ctype_of` so the twin stays byte-identical. Also converted the
+  param-marshal `.expect("checker verified marshallable param")` (both engines) into a graceful
+  compile/runtime error mirroring the checker's "not C-marshallable" wording — a user program can no
+  longer panic the VM via this path (the checker remains the real gate). Named-import spelling
+  (`import DivT from core.cdefs`) already worked; only the DOTTED spelling was broken. Tests: three new VM
+  parity tests (qualified return struct → 3/2, qualified width param → 7, non-marshallable qualified →
+  clean error not panic), two new checker guard tests; full suite (2279) + conformance green, clippy
+  clean. Docs: `syntax.md` §12b, `ffi-and-packaging.md`, this file. Out of scope (untouched): the
+  separate "type alias to an FFI STRUCT at the boundary" inconsistency.
 - ✅ **C-ABI FFI follow-ups: `bool`=C `_Bool`, precise width-alias gate, redundant self-rename allowed**
   (2026-06-18, `auto-task/ffi-bool-cbool-alias-gate`) — three FFI loose ends from the prior reviews.
   (1) **`bool` now means C `_Bool` (1 byte)**, not C `int` (4 bytes): re-mapped `CType::Bool`'s libffi

@@ -5553,6 +5553,54 @@ fn extern_owned_str_param_via_alias_rejected() {
     );
 }
 
+/// The checker is the true marshallability gate for a module-QUALIFIED extern type. A `mod.Struct`
+/// whose field is non-marshallable (`list[int]`) must be rejected at `check` time (the compiler's
+/// graceful backstop is only for paths that bypass the checker). Guards that resolving `Qualified`
+/// → struct still runs `assert_marshallable`. Uses a two-file graph so `bag.Bag` carries an
+/// identity key.
+#[test]
+fn extern_qualified_non_marshallable_struct_rejected() {
+    let t = TmpDir::new();
+    t.write("bag.chz", "struct Bag:\n    items: list[int]\n");
+    let entry = t.write(
+        "main.chz",
+        "import bag\n\nextern \"libc.so.6\":\n    fn use_it(b: bag.Bag) -> int\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("not C-marshallable")),
+        "expected a marshallability error, got: {errs:?}"
+    );
+}
+
+/// A module-QUALIFIED struct/width-alias used at an extern boundary type-checks (the qualified
+/// spelling is now first-class at the FFI boundary, like the named-import spelling). Guards the
+/// checker accepts the valid forms the lowering fix supports.
+#[test]
+fn extern_qualified_struct_and_alias_typecheck() {
+    let t = TmpDir::new();
+    t.write(
+        "cdefs.chz",
+        "import int32 from std.ffi\n\nstruct DivT:\n    quot: int32\n    rem: int32\n\ntype Len = int32\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import cdefs\nimport int32 from std.ffi\n\nextern \"libc.so.6\":\n    \
+         fn div(numer: int32, denom: int32) -> cdefs.DivT\n    fn abs(n: cdefs.Len) -> cdefs.Len\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
 #[test]
 fn extern_cyclic_option_alias_param_no_overflow() {
     // A cyclic alias routed through an `Option`/`?` form (`type A = A?`) must be diagnosed as a

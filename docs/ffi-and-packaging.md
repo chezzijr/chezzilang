@@ -46,6 +46,12 @@
 Both seams are the **CPython-built-in-C-module model**: stateless functions, data in / data out. Neither
 can hold a live foreign object across calls.
 
+A marshallable struct or width alias declared in another **module** can be named at an `extern` boundary
+two ways — by **named import** (`import DivT from core.cdefs`, then bare `DivT`) or by the
+**module-qualified spelling** (`import core.cdefs`, then `cdefs.DivT` in the `extern` fn) — and both lower
+to the identical C type (struct-by-value or scalar width). The checker is the marshallability gate for
+either spelling; a non-marshallable type is a clean compile error, never a VM panic.
+
 ## 1b. Deferred FFI-deepening features — design notes (revisit-in-future)
 
 The v1 `extern "lib":` surface ships: scalars, fixed-width ints (`int8`..`uint64`, `std.ffi`-imported),
