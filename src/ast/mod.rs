@@ -342,6 +342,12 @@ pub enum Pattern {
         /// A pure spelling aid: validated by the checker, then ignored by both engines (variant names
         /// are globally unique, so `name` alone still identifies the variant).
         enum_name: Option<String>,
+        /// Optional leading module binder from `module.Enum.Variant:` (`None` for the bare/from-import
+        /// `Enum.Variant:` form). The binder is the bound module name (last path segment or `as`
+        /// alias), mirroring construction (`geo.Color.Red`). Like `enum_name`, a pure spelling aid:
+        /// the checker validates the module is bound and owns the enum, then BOTH engines ignore it
+        /// (the resolved variant identity is identical to the bare form, so runtime is byte-identical).
+        module_name: Option<String>,
     },
     /// A tuple pattern, e.g. `(a, b)` or `(0, _)`. Two-or-more elements (matches a tuple value).
     Tuple(Vec<Pattern>),

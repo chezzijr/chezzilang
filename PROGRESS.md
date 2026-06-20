@@ -1026,6 +1026,22 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **Match arms accept module-qualified enum-variant patterns (`geo.Color.Red`)**
+  (2026-06-20, `auto-task/qualified-variant-patterns`) — match is now symmetric with construction:
+  for an enum from a whole-module `import geo` you can write `match c:\n  geo.Color.Red:` directly
+  (was a `parse error: expected ':', found '.'`; workaround was `import Color from geo` + bare
+  `Color.Red`). The 3-part spelling is `module.Enum.Variant` (the binder is the bound module name —
+  last path segment or `as` alias); `import geo as g` → `g.Color.Red:`; payload bindings work
+  (`geo.Shape.Circle(r):`). A new `module_name: Option<String>` on `Pattern::Variant` carries the
+  binder; the **parser** accepts an optional leading `IDENT.` (a 3rd dot deterministically means
+  module-qualified — unambiguous); the **checker** (`check_pattern_qualifier`) validates the module is
+  bound + owns the enum (errors render BARE names, never the `::` identity key) then resolves the enum's
+  identity key and delegates to the existing scrutinee-driven validation; **both engines drop the binder**
+  and key on the same `(enum, variant)` identity as the bare/named-import form, so VM == interp ==
+  `--serial` == `--parallel` byte-for-byte (exhaustiveness unchanged, by identity). A bare user-variant
+  is still rejected with the "write it qualified" hint; `Ok/Err/Some/None` stay bare; a 2-part
+  `module.Variant` (dropping the enum) is NOT accepted. Docs: `docs/grammar.bnf` (+conformance green),
+  `docs/syntax.md` match section.
 - ✅ **C-ABI FFI: module-qualified type at the extern boundary (`mod.Type` / `mod.Alias`)**
   (2026-06-20, `auto-task/ffi-qualified-type`) — fixed a scoping bug in the module-scoped-types
   feature: a module-qualified type written at an `extern` boundary (`cdefs.DivT`, `w3.Len`, AST

@@ -254,13 +254,20 @@
 # A leading "IDENT" "DOT" "IDENT" is a QUALIFIED variant `Enum.Variant`. User variants are scoped
 # under their enum (two enums may share a variant name) and MUST be written qualified; the checker
 # rejects a bare user-variant name. Resolution keys on the `(enum, variant)` pair. (Built-in
-# Result/Option variants Ok/Err/Some/None stay bare.)
+# Result/Option variants Ok/Err/Some/None stay bare.) An OPTIONAL leading module qualifier
+# `module.Enum.Variant` ("IDENT" "DOT" "IDENT" "DOT" "IDENT") mirrors module-qualified construction
+# (`geo.Color.Red`): the module binder is the bound module name (last path segment or `as` alias),
+# validated by the checker (module bound, owns the enum) then dropped — runtime keys on the same
+# `(enum, variant)` identity as the bare/from-import form.
 <patternPrimary> ::= "IDENT"
                 | "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "LPAREN" <subpatterns> "RPAREN"
                 | "IDENT" "DOT" "IDENT"
                 | "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
+                | "IDENT" "DOT" "IDENT" "DOT" "IDENT"
+                | "IDENT" "DOT" "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
+                | "IDENT" "DOT" "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | "INT" | "STR" | "TRUE" | "FALSE"
                 | "INT" "DOTDOT" "INT"
@@ -275,6 +282,9 @@
                 | "IDENT" "DOT" "IDENT"
                 | "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
+                | "IDENT" "DOT" "IDENT" "DOT" "IDENT"
+                | "IDENT" "DOT" "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
+                | "IDENT" "DOT" "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | "INT" | "STR" | "TRUE" | "FALSE"
                 | "INT" "DOTDOT" "INT"

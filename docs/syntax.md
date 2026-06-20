@@ -843,6 +843,29 @@ match s:
     Shape.Point:     0
 ```
 
+A `match` arm may also use the **module-qualified** spelling `module.Enum.Variant` — symmetric with
+module-qualified construction (`geo.Color.Red`). For an enum from a whole-module `import geo` (so its
+bare `Color` isn't in scope), you can match it directly without a named import:
+
+```chezzi
+import geo
+import geo as g                  # an `as` alias works as the binder too
+c := geo.Color.Red
+match c:
+    geo.Color.Red:      print("red")
+    geo.Color.Green:    print("green")
+match c:
+    g.Color.Red:        print("R")    # aliased binder
+    g.Color.Green:      print("G")
+match shp:
+    geo.Shape.Circle(r): r * r        # payload bindings work as usual
+```
+
+The module binder (`geo`/`g`) is the bound module name (last path segment or `as` alias). The checker
+validates that the module is bound and owns the named enum, then it's dropped — matching keys on the
+same `(enum, variant)` identity as the bare/named-import form, so output is byte-identical. (A
+plain `module.Variant` — dropping the enum name — is **not** accepted; the enum name is mandatory.)
+
 `match` also works on `Result`/`Option` (they're enums under the hood):
 
 ```chezzi

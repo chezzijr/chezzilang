@@ -18352,6 +18352,40 @@ main()
         );
     }
 
+    /// Module-qualified enum-variant patterns (`geo.Color.Red`) in match arms, symmetric with
+    /// construction. The module binder is validated by the checker then dropped — both engines match
+    /// purely by the bare enum/variant identity, so VM == interp == --parallel byte-for-byte. Covers:
+    /// whole-module `import geo` qualified arms, an `import geo as g` aliased binder, and a
+    /// payload-binding `geo.Shape.Circle(r)` arm.
+    #[test]
+    fn match_module_qualified_variant_three_engine_parity() {
+        let dir = std::env::temp_dir().join(format!("chezzi_vm_mqvp_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("geo.chz"),
+            "enum Color:\n    Red\n    Green\n\nenum Shape:\n    Circle(int)\n    Square(int)\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import geo\nimport geo as g\n\nfn name(c: geo.Color) -> str:\n    match c:\n        geo.Color.Red: return \"red\"\n        geo.Color.Green: return \"green\"\n\nfn area(s: geo.Shape) -> int:\n    match s:\n        geo.Shape.Circle(r): return r * r\n        geo.Shape.Square(w): return w * w\n\nfn aliased(c: geo.Color) -> str:\n    match c:\n        g.Color.Red: return \"R\"\n        g.Color.Green: return \"G\"\n\nfn main():\n    print(name(geo.Color.Red))\n    print(name(geo.Color.Green))\n    print(area(geo.Shape.Circle(4)))\n    print(area(geo.Shape.Square(3)))\n    print(aliased(geo.Color.Green))\nmain()\n",
+        )
+        .unwrap();
+        let cfg = crate::native::HostConfig::default;
+        let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
+        let (po, _pe, pr, _pc) = run_file_parallel(&entry, cfg());
+        let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(vr.is_ok(), "VM faulted: {vr:?}");
+        assert!(pr.is_ok(), "--parallel faulted: {pr:?}");
+        assert!(ir.is_ok(), "interp faulted: {ir:?}");
+        let expected = "red\ngreen\n16\n9\nG\n";
+        assert_eq!(vo, expected, "cooperative VM output");
+        assert_eq!(vo, po, "VM vs --parallel divergence");
+        assert_eq!(vo, io, "VM vs interp divergence");
+    }
+
     /// Regression (blocker): a module-QUALIFIED struct type (`cdefs.DivT`) written at the extern
     /// return boundary must lower to its C struct just like the bare/named-import spelling. The
     /// qualified `Type::Qualified` was previously passed through unchanged → `ctype_of` returned

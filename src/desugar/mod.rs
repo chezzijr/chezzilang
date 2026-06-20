@@ -1512,6 +1512,7 @@ fn variant_pat(name: &str, bindings: Vec<Pattern>) -> Pattern {
         name: name.to_string(),
         bindings,
         enum_name: None,
+        module_name: None,
     }
 }
 

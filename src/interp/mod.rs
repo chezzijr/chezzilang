@@ -6512,6 +6512,7 @@ impl Interp {
                 name,
                 bindings,
                 enum_name,
+                ..
             } => {
                 let Value::Enum {
                     ty,

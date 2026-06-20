@@ -3881,8 +3881,15 @@ impl Checker {
                 name,
                 bindings,
                 enum_name,
+                module_name,
             } => {
-                self.check_pattern_qualifier(enum_name, name, Self::scrutinee_enum(ty), span);
+                self.check_pattern_qualifier(
+                    module_name,
+                    enum_name,
+                    name,
+                    Self::scrutinee_enum(ty),
+                    span,
+                );
                 match self.variants_of(ty) {
                     Some(vmap) => match vmap.get(name) {
                         Some(payload) => {
@@ -4051,9 +4058,10 @@ impl Checker {
                         name,
                         bindings,
                         enum_name,
+                        module_name,
                     } => {
                         // Un-inferable scrutinee (Skip): no enum to validate the qualifier against.
-                        self.check_pattern_qualifier(enum_name, name, None, span);
+                        self.check_pattern_qualifier(module_name, enum_name, name, None, span);
                         covered.insert(name.clone());
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
@@ -4074,8 +4082,15 @@ impl Checker {
                         name,
                         bindings,
                         enum_name,
+                        module_name,
                     } => {
-                        self.check_pattern_qualifier(enum_name, name, Some(label.as_str()), span);
+                        self.check_pattern_qualifier(
+                            module_name,
+                            enum_name,
+                            name,
+                            Some(label.as_str()),
+                            span,
+                        );
                         let payload = variants.get(name).cloned();
                         if payload.is_none() {
                             self.error(
@@ -4171,6 +4186,7 @@ impl Checker {
                         name,
                         bindings,
                         enum_name,
+                        module_name,
                     } if bindings.is_empty() => {
                         // A *qualified* `Enum.Variant` is unambiguously a variant, never a binding —
                         // validate the qualifier and reject it against an int/str/bool scrutinee (a
@@ -4179,7 +4195,7 @@ impl Checker {
                         if enum_name.is_some() {
                             // int/str/bool scrutinee: no enum to validate against (the variant is
                             // rejected below regardless).
-                            self.check_pattern_qualifier(enum_name, name, None, span);
+                            self.check_pattern_qualifier(module_name, enum_name, name, None, span);
                             self.error(span, format!("cannot match a variant against {ty}"));
                             return false;
                         }
@@ -4203,8 +4219,9 @@ impl Checker {
                         bindings,
                         enum_name,
                         name,
+                        module_name,
                     } => {
-                        self.check_pattern_qualifier(enum_name, name, None, span);
+                        self.check_pattern_qualifier(module_name, enum_name, name, None, span);
                         self.error(span, format!("cannot match a variant against {ty}"));
                         // Still bind the payload sub-patterns (as Unknown) so the arm body doesn't
                         // cascade into spurious "unknown name" errors — notably the desugared `?.`
@@ -4896,24 +4913,59 @@ impl Checker {
     /// name is an error — variants must be written qualified (built-in Ok/Err/Some/None stay bare).
     fn check_pattern_qualifier(
         &mut self,
+        module_name: &Option<String>,
         enum_name: &Option<String>,
         name: &str,
         scrut_enum: Option<&str>,
         span: Span,
     ) {
+        // A leading module binder (`module.Enum.Variant`) is validated here then dropped: the module
+        // must be bound and must own the named enum. Resolution mirrors construction
+        // (`infer_field`'s module.Enum.Variant path) — `imported_modules` → `ModuleSig` → `enum_defs`.
+        // Errors render BARE names only (never the qualified identity key). On success we fall through
+        // to the existing `enum_name` validation, which is scrutinee-driven and keeps everything else
+        // (variant-exists, scrutinee-agrees, exhaustiveness-by-identity) unchanged.
+        // When a module binder is present and resolves, this holds the enum's true IDENTITY KEY
+        // (`module::Enum`), used below instead of the bare/scrutinee fallback so variant-lookup and
+        // scrutinee-agreement key on the SAME identity as construction.
+        let mut module_ekey: Option<String> = None;
+        if let Some(m) = module_name {
+            let Some(en) = enum_name else {
+                // A module binder always comes with an enum name from the parser (3-part form); a
+                // None here would be a parser bug. Defensive: nothing to validate.
+                return;
+            };
+            let Some(mid) = self.imported_modules.get(m).cloned() else {
+                self.error(span, format!("unknown module '{m}'"));
+                return;
+            };
+            match self.module_sigs.get(&mid) {
+                Some(sig) if sig.enum_defs.contains_key(en) => {
+                    module_ekey = Some(self.type_key(&mid, en));
+                }
+                _ => {
+                    self.error(span, format!("module '{m}' has no enum '{en}'"));
+                    return;
+                }
+            }
+        }
         match enum_name {
             Some(en) => {
                 // ROOT REDESIGN — the pattern carries the BARE written enum name. Resolve it to its
-                // qualified IDENTITY KEY for the layout lookup. A bare-visible enum (local / from-import
-                // / std) resolves via `bare_types`; but a WHOLE-module-imported enum (`Color` from
+                // qualified IDENTITY KEY for the layout lookup. A module binder (`module.Enum.Variant`)
+                // resolves the key directly (above). Otherwise a bare-visible enum (local / from-import
+                // / std) resolves via `bare_types`; a WHOLE-module-imported enum (`Color` from
                 // `import geo`) is NOT bare-visible, so fall back to the SCRUTINEE's own enum key when
                 // its bare display name equals `en` (the pattern `Color.Red` matching a `geo::Color`
                 // value). Error messages keep the bare `en`.
-                let ekey = match self.bare_types.get(en) {
-                    Some(k) => k.clone(),
-                    None => match scrut_enum {
-                        Some(s) if crate::compiler::bare_display(s) == *en => s.to_string(),
-                        _ => en.to_string(),
+                let ekey = match module_ekey {
+                    Some(k) => k,
+                    None => match self.bare_types.get(en) {
+                        Some(k) => k.clone(),
+                        None => match scrut_enum {
+                            Some(s) if crate::compiler::bare_display(s) == *en => s.to_string(),
+                            _ => en.to_string(),
+                        },
                     },
                 };
                 // User variants live in `self.variants` keyed by `(enum, variant)`; the built-in
@@ -9431,6 +9483,165 @@ mod graph_tests {
         assert!(
             !errs.iter().any(|e| e.contains("::Color'")),
             "qualified identity key must not leak into match error: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn module_qualified_variant_pattern_type_checks_clean() {
+        let t = TmpDir::new();
+        t.write("geo.chz", "enum Color:\n    Red\n    Green\n");
+        let entry = t.write(
+            "main.chz",
+            "import geo\nfn main():\n    c := geo.Color.Red\n    match c:\n        geo.Color.Red: print(\"r\")\n        geo.Color.Green: print(\"g\")\nmain()\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "module-qualified variant pattern should type-check clean: {:?}",
+            check_entry(&entry)
+        );
+    }
+
+    #[test]
+    fn module_qualified_variant_pattern_aliased_binder_clean() {
+        let t = TmpDir::new();
+        t.write("geo.chz", "enum Color:\n    Red\n    Green\n");
+        let entry = t.write(
+            "main.chz",
+            "import geo as g\nfn main():\n    c := g.Color.Red\n    match c:\n        g.Color.Red: print(\"r\")\n        g.Color.Green: print(\"g\")\nmain()\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "aliased module-qualified variant pattern should type-check clean: {:?}",
+            check_entry(&entry)
+        );
+    }
+
+    #[test]
+    fn module_qualified_variant_pattern_payload_binds_clean() {
+        let t = TmpDir::new();
+        t.write("geo.chz", "enum Shape:\n    Circle(int)\n    Square(int)\n");
+        let entry = t.write(
+            "main.chz",
+            "import geo\nfn main():\n    s := geo.Shape.Circle(3)\n    match s:\n        geo.Shape.Circle(r): print(r)\n        geo.Shape.Square(w): print(w)\nmain()\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "payload-binding module-qualified variant pattern should type-check clean: {:?}",
+            check_entry(&entry)
+        );
+    }
+
+    #[test]
+    fn module_qualified_variant_pattern_wrong_variant_bare_error() {
+        let t = TmpDir::new();
+        t.write("geo.chz", "enum Color:\n    Red\n    Green\n");
+        let entry = t.write(
+            "main.chz",
+            "import geo\nfn main():\n    c := geo.Color.Red\n    match c:\n        geo.Color.Blue: print(\"b\")\n        _: print(\"x\")\nmain()\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("enum 'Color' has no variant 'Blue'")),
+            "expected bare-name wrong-variant error, got: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|e| e.contains("::Color")),
+            "qualified identity key must not leak: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn module_qualified_variant_pattern_wrong_enum_bare_error() {
+        let t = TmpDir::new();
+        t.write("geo.chz", "enum Color:\n    Red\n    Green\n");
+        let entry = t.write(
+            "main.chz",
+            "import geo\nfn main():\n    c := geo.Color.Red\n    match c:\n        geo.Shape.Red: print(\"r\")\n        _: print(\"x\")\nmain()\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("module 'geo' has no enum 'Shape'")),
+            "expected bare module/enum error, got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn module_qualified_variant_pattern_unknown_module_error() {
+        let t = TmpDir::new();
+        t.write("geo.chz", "enum Color:\n    Red\n    Green\n");
+        let entry = t.write(
+            "main.chz",
+            "import geo\nfn main():\n    c := geo.Color.Red\n    match c:\n        nope.Color.Red: print(\"r\")\n        _: print(\"x\")\nmain()\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter().any(|e| e.contains("unknown module 'nope'")),
+            "expected unknown-module error, got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn module_qualified_variant_pattern_cross_enum_bare_error() {
+        let t = TmpDir::new();
+        t.write("geo.chz", "enum Color:\n    Red\n    Green\n");
+        t.write("light.chz", "enum Light:\n    Red\n    Off\n");
+        let entry = t.write(
+            "main.chz",
+            "import geo\nimport light\nfn main():\n    c := geo.Color.Red\n    match c:\n        light.Light.Red: print(\"r\")\n        _: print(\"x\")\nmain()\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("cannot match a value of enum 'Color'")),
+            "expected bare cross-enum error, got: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|e| e.contains("::")),
+            "qualified identity key must not leak: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn module_qualified_variant_pattern_collision_no_cross_talk() {
+        let t = TmpDir::new();
+        t.write("a.chz", "enum Color:\n    Red\n    Green\n");
+        t.write("b.chz", "enum Color:\n    Cyan\n    Magenta\n");
+        // Exhaustive over a's Color via a.Color.* arms => clean.
+        let ok = t.write(
+            "ok.chz",
+            "import a\nimport b\nfn main():\n    c := a.Color.Red\n    match c:\n        a.Color.Red: print(\"r\")\n        a.Color.Green: print(\"g\")\nmain()\n",
+        );
+        assert!(
+            check_entry(&ok).is_ok(),
+            "a.Color.* arms over an a.Color value should be exhaustive: {:?}",
+            check_entry(&ok)
+        );
+        // Using b's variant under a's enum => wrong-variant error (no cross-talk).
+        let xtalk = t.write(
+            "xtalk.chz",
+            "import a\nimport b\nfn main():\n    c := a.Color.Red\n    match c:\n        a.Color.Cyan: print(\"c\")\n        _: print(\"x\")\nmain()\n",
+        );
+        let errs = errors(&xtalk);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("enum 'Color' has no variant 'Cyan'")),
+            "expected no cross-talk with b's Color, got: {errs:?}"
+        );
+        // Non-exhaustive over a's Color => missing Green (bare name).
+        let nonex = t.write(
+            "nonex.chz",
+            "import a\nimport b\nfn main():\n    c := a.Color.Red\n    match c:\n        a.Color.Red: print(\"r\")\nmain()\n",
+        );
+        let errs = errors(&nonex);
+        assert!(
+            errs.iter().any(|e| e.contains("Green")),
+            "expected non-exhaustive to report missing bare 'Green', got: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|e| e.contains("::")),
+            "exhaustiveness error must use bare names: {errs:?}"
         );
     }
 }

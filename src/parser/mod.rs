@@ -1056,11 +1056,22 @@ impl Parser {
         let name = self.expect_ident()?;
         // `Enum.Variant` — a qualified variant pattern. The first ident is the enum qualifier; the
         // ident after `.` is the variant. A qualified pattern is always a variant (never a binding),
-        // even in a sub-position.
-        let (name, enum_name) = if self.eat(&Token::Dot) {
-            (self.expect_ident()?, Some(name))
+        // even in a sub-position. A THIRD ident after a second `.` (`module.Enum.Variant`) shifts the
+        // first ident to a module binder, the second to the enum, the third to the variant —
+        // symmetric with module-qualified construction (`geo.Color.Red`). This is unambiguous: a
+        // 2-part variant pattern can't be followed by a `.` today, so a 3rd dot deterministically
+        // means module-qualified.
+        let (name, enum_name, module_name) = if self.eat(&Token::Dot) {
+            let second = self.expect_ident()?;
+            if self.eat(&Token::Dot) {
+                // `module.Enum.Variant`
+                (self.expect_ident()?, Some(second), Some(name))
+            } else {
+                // `Enum.Variant`
+                (second, Some(name), None)
+            }
         } else {
-            (name, None)
+            (name, None, None)
         };
         if self.eat(&Token::LParen) {
             // `Name(p, …)` — a variant with (possibly nested) sub-patterns.
@@ -1078,6 +1089,7 @@ impl Parser {
                 name,
                 bindings,
                 enum_name,
+                module_name,
             });
         }
         // A bare identifier: a nullary variant at the top of an arm, or a binding in a sub-position.
@@ -1087,6 +1099,7 @@ impl Parser {
                 name,
                 bindings: Vec::new(),
                 enum_name,
+                module_name,
             })
         } else {
             Ok(Pattern::Ident(name))
@@ -3131,7 +3144,8 @@ mod tests {
                         == Pattern::Variant {
                             name: "Point".into(),
                             bindings: vec![],
-                            enum_name: None
+                            enum_name: None,
+                            module_name: None
                         }
                 );
             }
@@ -4061,6 +4075,7 @@ mod tests {
                 name: "Circle".into(),
                 bindings: vec![Pattern::Ident("r".into())],
                 enum_name: Some("Shape".into()),
+                module_name: None,
             }
         );
     }
@@ -4609,6 +4624,7 @@ mod tests {
                 name,
                 bindings,
                 enum_name,
+                ..
             } => {
                 assert_eq!(name, "Red");
                 assert!(bindings.is_empty());
@@ -4622,6 +4638,7 @@ mod tests {
                 name,
                 bindings,
                 enum_name,
+                ..
             } => {
                 assert_eq!(name, "Circle");
                 assert_eq!(enum_name.as_deref(), Some("Shape"));
@@ -4636,6 +4653,67 @@ mod tests {
             } => {
                 assert_eq!(name, "None");
                 assert_eq!(enum_name, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn module_qualified_variant_pattern_parses() {
+        // `geo.Color.Red` (nullary, module-qualified) ->
+        // Variant{name:"Red", enum_name:Some("Color"), module_name:Some("geo")}.
+        match first_arm_pattern("match c:\n    geo.Color.Red: print(0)\n    _: print(1)\n") {
+            Pattern::Variant {
+                name,
+                bindings,
+                enum_name,
+                module_name,
+            } => {
+                assert_eq!(name, "Red");
+                assert!(bindings.is_empty());
+                assert_eq!(enum_name.as_deref(), Some("Color"));
+                assert_eq!(module_name.as_deref(), Some("geo"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Aliased binder `g.Color.Red`.
+        match first_arm_pattern("match c:\n    g.Color.Red: print(0)\n    _: print(1)\n") {
+            Pattern::Variant {
+                name,
+                enum_name,
+                module_name,
+                ..
+            } => {
+                assert_eq!(name, "Red");
+                assert_eq!(enum_name.as_deref(), Some("Color"));
+                assert_eq!(module_name.as_deref(), Some("g"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Payload binding `geo.Shape.Circle(r)`.
+        match first_arm_pattern("match s:\n    geo.Shape.Circle(r): print(r)\n    _: print(0)\n") {
+            Pattern::Variant {
+                name,
+                bindings,
+                enum_name,
+                module_name,
+            } => {
+                assert_eq!(name, "Circle");
+                assert_eq!(enum_name.as_deref(), Some("Shape"));
+                assert_eq!(module_name.as_deref(), Some("geo"));
+                assert!(matches!(&bindings[0], Pattern::Ident(n) if n == "r"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Bare `Color.Red` keeps module_name:None.
+        match first_arm_pattern("match c:\n    Color.Red: print(0)\n    _: print(1)\n") {
+            Pattern::Variant {
+                module_name,
+                enum_name,
+                ..
+            } => {
+                assert_eq!(module_name, None);
+                assert_eq!(enum_name.as_deref(), Some("Color"));
             }
             other => panic!("{other:?}"),
         }

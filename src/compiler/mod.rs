@@ -1958,6 +1958,7 @@ impl Compiler {
                 name,
                 bindings,
                 enum_name,
+                ..
             } if bindings.is_empty() => self
                 .variant_pair(enum_name.as_deref(), name)
                 .is_none_or(|k| !self.program.variants.contains_key(&k)),
@@ -2125,6 +2126,7 @@ impl Compiler {
                 name,
                 bindings,
                 enum_name,
+                ..
             } => {
                 // One slot per payload element. A plain `Ident` *binding* names its slot directly (so
                 // `Some(c)` binds `c` with no copy); a nested nullary-variant `Ident` (e.g. the
