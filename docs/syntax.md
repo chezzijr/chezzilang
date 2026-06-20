@@ -1155,7 +1155,7 @@ calls run **LIFO** (last registered, first run); an unwind crossing several bloc
 defers inner-block-first. The receiver and arguments are evaluated **at the `defer` statement** (Go
 semantics); only the call itself is delayed.
 
-Every indented block is a defer scope: the function body, a loop body, an `if`/`elif`/`else` branch,
+Every indented block is a defer scope: the function body, a loop body, an `if`/`else if`/`else` branch,
 a `recover:` block, a statement-form `match` arm, and the module top level.
 
 ```chezzi
