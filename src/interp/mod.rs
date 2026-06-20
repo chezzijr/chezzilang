@@ -210,6 +210,14 @@ struct VariantDef {
     arity: usize,
 }
 
+/// An enum's methods (`fn area(self) …`) by name, plus the module globals its method bodies resolve
+/// top-level names against (the module that declared the enum). The enum analogue of `StructDef`'s
+/// `methods`/`home` (enums carry no fields — variants live in the `variants` map).
+struct EnumDef {
+    methods: std::collections::HashMap<String, std::rc::Rc<FnDecl>>,
+    home: value::ModEnv,
+}
+
 /// The interpreter: environment, output buffer, and the declared struct / enum types.
 struct Interp {
     env: env::Env,
@@ -230,6 +238,9 @@ struct Interp {
     /// Keyed by `(enum_name, variant_name)`: variants are scoped under their enum, so two enums may
     /// share a variant name. Built-in `Result`/`Option` variants register under those enum names.
     variants: std::collections::HashMap<(String, String), VariantDef>,
+    /// Enum runtime KEY → its methods + home globals (the enum analogue of `structs`). Resolves
+    /// `enumval.method(args)`, the `str(self)` Stringable hook, and the arith/compare overloads.
+    enum_defs: std::collections::HashMap<String, std::rc::Rc<EnumDef>>,
     /// Evaluated module namespaces, keyed by module id (run-once cache for a multi-file program).
     namespaces:
         std::collections::HashMap<crate::resolver::ModuleId, std::rc::Rc<value::ModuleNamespace>>,
@@ -387,6 +398,7 @@ impl Interp {
             struct_fields: std::collections::HashMap::new(),
             struct_module: std::collections::HashMap::new(),
             variants: std::collections::HashMap::new(),
+            enum_defs: std::collections::HashMap::new(),
             namespaces: std::collections::HashMap::new(),
             propagating: None,
             pending_exit: None,
@@ -531,14 +543,22 @@ impl Interp {
                 if matches!(
                     op,
                     BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
-                ) && matches!((&l, &r), (Value::Struct { .. }, Value::Struct { .. }))
-                {
+                ) && matches!(
+                    (&l, &r),
+                    (Value::Struct { .. }, Value::Struct { .. })
+                        | (Value::Enum { .. }, Value::Enum { .. })
+                ) {
                     return self.struct_ordering(*op, l, r, expr.span);
                 }
-                // Arithmetic overloading: `+`/`-`/`*` on two structs dispatch to `add`/`sub`/`mul`
-                // (the `Add`/`Sub`/`Mul` protocols). The checker has verified conformance.
+                // Arithmetic overloading: `+`/`-`/`*` on two structs (or two enums) dispatch to
+                // `add`/`sub`/`mul` (the `Add`/`Sub`/`Mul` protocols). The checker has verified
+                // conformance.
                 if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul)
-                    && matches!((&l, &r), (Value::Struct { .. }, Value::Struct { .. }))
+                    && matches!(
+                        (&l, &r),
+                        (Value::Struct { .. }, Value::Struct { .. })
+                            | (Value::Enum { .. }, Value::Enum { .. })
+                    )
                 {
                     return self.struct_arith(*op, l, r, expr.span);
                 }
@@ -2362,6 +2382,26 @@ impl Interp {
         arg_vals: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        // Enum method dispatch (name-resolved, like structs). Resolves `enum_defs[ty][method]` off
+        // the value's enum key and binds the whole enum value as `self`.
+        if let Value::Enum { ty, .. } = &receiver {
+            let key = ty.to_string();
+            if let Some(def) = self.enum_defs.get(&key).cloned()
+                && let Some(decl) = def.methods.get(method).cloned()
+            {
+                let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
+                call_args.push(receiver.clone());
+                call_args.extend(arg_vals);
+                return self.call(&decl, &def.home, call_args, span);
+            }
+            return Err(RuntimeError {
+                message: format!(
+                    "type {} has no method '{method}'",
+                    crate::compiler::bare_display(&key)
+                ),
+                span,
+            });
+        }
         let Value::Struct { name, fields } = &receiver else {
             return Err(RuntimeError {
                 message: format!("type {} has no method '{method}'", receiver.type_name()),
@@ -2489,8 +2529,21 @@ impl Interp {
                 }
             }
             Value::Enum {
-                variant, payload, ..
+                ty,
+                variant,
+                payload,
             } => {
+                // `str(self) -> str` overrides the default `Variant(payload)` repr (Stringable).
+                // Only a self-only method is the hook (mirrors the struct arm above).
+                if let Some(def) = self.enum_defs.get(ty.as_ref()).cloned()
+                    && let Some(decl) = def.methods.get("str").cloned()
+                    && decl.params.len() == 1
+                {
+                    self.enter_call(span)?;
+                    let res = self.call(&decl, &def.home, vec![v.clone()], span);
+                    self.call_depth -= 1;
+                    return self.stringify(&res?, span, depth);
+                }
                 if payload.is_empty() {
                     Ok(variant.to_string())
                 } else {
@@ -2555,29 +2608,67 @@ impl Interp {
             BinaryOp::Mul => "mul",
             _ => unreachable!("struct_arith only handles + - *"),
         };
-        let Value::Struct { name, .. } = &l else {
-            unreachable!()
-        };
-        let def = self
-            .structs
-            .get(name.as_ref())
-            .cloned()
-            .ok_or_else(|| RuntimeError {
-                message: format!("unknown struct type '{name}'"),
-                span,
-            })?;
-        let decl = def
-            .methods
-            .get(method)
-            .cloned()
-            .ok_or_else(|| RuntimeError {
-                message: format!(
-                    "struct '{}' has no '{method}' method",
-                    crate::compiler::bare_display(name)
-                ),
-                span,
-            })?;
-        self.call(&decl, &def.home, vec![l, r], span)
+        let (decl, home) = self.resolve_overload_method(&l, method, span)?;
+        self.call(&decl, &home, vec![l, r], span)
+    }
+
+    /// Resolve `(method decl, home globals)` for an operator-overload method on receiver `recv` — a
+    /// struct (via `structs`) or an enum (via `enum_defs`). The shared dispatch core for the
+    /// arithmetic and ordering overloads on both struct and enum values.
+    #[allow(clippy::type_complexity)]
+    fn resolve_overload_method(
+        &self,
+        recv: &Value,
+        method: &str,
+        span: Span,
+    ) -> Result<(std::rc::Rc<FnDecl>, value::ModEnv), RuntimeError> {
+        match recv {
+            Value::Struct { name, .. } => {
+                let def = self
+                    .structs
+                    .get(name.as_ref())
+                    .cloned()
+                    .ok_or_else(|| RuntimeError {
+                        message: format!("unknown struct type '{name}'"),
+                        span,
+                    })?;
+                let decl = def
+                    .methods
+                    .get(method)
+                    .cloned()
+                    .ok_or_else(|| RuntimeError {
+                        message: format!(
+                            "struct '{}' has no '{method}' method",
+                            crate::compiler::bare_display(name)
+                        ),
+                        span,
+                    })?;
+                Ok((decl, def.home.clone()))
+            }
+            Value::Enum { ty, .. } => {
+                let def = self
+                    .enum_defs
+                    .get(ty.as_ref())
+                    .cloned()
+                    .ok_or_else(|| RuntimeError {
+                        message: format!("unknown enum type '{ty}'"),
+                        span,
+                    })?;
+                let decl = def
+                    .methods
+                    .get(method)
+                    .cloned()
+                    .ok_or_else(|| RuntimeError {
+                        message: format!(
+                            "enum '{}' has no '{method}' method",
+                            crate::compiler::bare_display(ty)
+                        ),
+                        span,
+                    })?;
+                Ok((decl, def.home.clone()))
+            }
+            _ => unreachable!("overload receiver is a struct or enum"),
+        }
     }
 
     /// Call a struct's `compare(self, other) -> int` method and return the resulting `Ordering`.
@@ -2588,29 +2679,8 @@ impl Interp {
         r: Value,
         span: Span,
     ) -> Result<std::cmp::Ordering, RuntimeError> {
-        let Value::Struct { name, .. } = &l else {
-            unreachable!()
-        };
-        let def = self
-            .structs
-            .get(name.as_ref())
-            .cloned()
-            .ok_or_else(|| RuntimeError {
-                message: format!("unknown struct type '{name}'"),
-                span,
-            })?;
-        let decl = def
-            .methods
-            .get("compare")
-            .cloned()
-            .ok_or_else(|| RuntimeError {
-                message: format!(
-                    "struct '{}' has no 'compare' method (needed to order its values)",
-                    crate::compiler::bare_display(name)
-                ),
-                span,
-            })?;
-        match self.call(&decl, &def.home, vec![l, r], span)? {
+        let (decl, home) = self.resolve_overload_method(&l, "compare", span)?;
+        match self.call(&decl, &home, vec![l, r], span)? {
             Value::Int(n) => Ok(n.cmp(&0)),
             other => Err(RuntimeError {
                 message: format!("compare() must return int, got {}", other.type_name()),
@@ -2627,6 +2697,9 @@ impl Interp {
     fn hash_value(&mut self, v: &Value, span: Span) -> Result<u64, RuntimeError> {
         match v {
             Value::Struct { .. } => self.struct_hash(v, span),
+            // An enum key dispatches its user `hash(self) -> int` via the shared enum-aware
+            // resolver, mirroring the struct path.
+            Value::Enum { .. } => self.enum_hash(v, span),
             Value::Str(_)
             | Value::Bytes(_)
             | Value::Int(_)
@@ -2638,6 +2711,19 @@ impl Interp {
                     "{} is not hashable (cannot be a map/set key)",
                     other.type_name()
                 ),
+                span,
+            }),
+        }
+    }
+
+    /// Dispatch an enum key's user `hash(self) -> int` via the shared enum-aware
+    /// [`resolve_overload_method`], mirroring [`struct_hash`].
+    fn enum_hash(&mut self, v: &Value, span: Span) -> Result<u64, RuntimeError> {
+        let (decl, home) = self.resolve_overload_method(v, "hash", span)?;
+        match self.call(&decl, &home, vec![v.clone()], span)? {
+            Value::Int(n) => Ok(n as u64),
+            other => Err(RuntimeError {
+                message: format!("hash() must return int, got {}", other.type_name()),
                 span,
             }),
         }
@@ -4224,10 +4310,25 @@ impl Interp {
                     self.struct_fields.insert(key, fields.clone());
                 }
                 // Type-erased: type parameters are checker-only (identical runtime per instantiation).
-                StmtKind::Enum { name, variants, .. } => {
+                StmtKind::Enum {
+                    name,
+                    variants,
+                    methods,
+                    ..
+                } => {
                     let key = self.type_key(self.cur_module_idx, name);
                     for v in variants {
                         self.register_variant(&v.name, &key, v.payload.len());
+                    }
+                    if !methods.is_empty() {
+                        let def = EnumDef {
+                            methods: methods
+                                .iter()
+                                .map(|m| (m.name.clone(), std::rc::Rc::new(m.clone())))
+                                .collect(),
+                            home: home.clone(),
+                        };
+                        self.enum_defs.insert(key, std::rc::Rc::new(def));
                     }
                 }
                 StmtKind::Extern { lib, fns } => {

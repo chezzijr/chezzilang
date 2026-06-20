@@ -271,20 +271,25 @@ fn collect_methods(graph: &ModuleGraph) -> HashMap<String, Vec<Vec<PSpec>>> {
 /// explicit args correspond to params[1..].
 fn collect_methods_into(stmts: &[Stmt], map: &mut HashMap<String, Vec<Vec<PSpec>>>) {
     for stmt in stmts {
-        if let StmtKind::Struct { methods, .. } = &stmt.kind {
-            for method in methods {
-                let spec: Vec<PSpec> = method
-                    .params
-                    .iter()
-                    .skip(1)
-                    .map(|p| PSpec {
-                        name: p.name.clone(),
-                        default: p.default.clone(),
-                        is_ref: p.is_ref,
-                    })
-                    .collect();
-                map.entry(method.name.clone()).or_default().push(spec);
-            }
+        // Struct AND enum methods share one name-keyed registry (a method call is resolved by name
+        // in this pre-type pass; the checker has already validated the receiver type).
+        let methods = match &stmt.kind {
+            StmtKind::Struct { methods, .. } => methods,
+            StmtKind::Enum { methods, .. } => methods,
+            _ => continue,
+        };
+        for method in methods {
+            let spec: Vec<PSpec> = method
+                .params
+                .iter()
+                .skip(1)
+                .map(|p| PSpec {
+                    name: p.name.clone(),
+                    default: p.default.clone(),
+                    is_ref: p.is_ref,
+                })
+                .collect();
+            map.entry(method.name.clone()).or_default().push(spec);
         }
     }
 }
@@ -299,7 +304,12 @@ fn collect_methods_by_struct(graph: &ModuleGraph) -> HashMap<(String, String), V
     let mut map: HashMap<(String, String), Option<Vec<PSpec>>> = HashMap::new();
     for m in &graph.modules {
         for stmt in &m.ast.stmts {
-            if let StmtKind::Struct { name, methods, .. } = &stmt.kind {
+            let (name, methods) = match &stmt.kind {
+                StmtKind::Struct { name, methods, .. } => (name, methods),
+                StmtKind::Enum { name, methods, .. } => (name, methods),
+                _ => continue,
+            };
+            {
                 for method in methods {
                     let spec: Vec<PSpec> = method
                         .params
@@ -342,20 +352,23 @@ fn collect_methods_by_struct_into_standalone(
 ) -> HashMap<(String, String), Vec<PSpec>> {
     let mut map: HashMap<(String, String), Vec<PSpec>> = HashMap::new();
     for stmt in stmts {
-        if let StmtKind::Struct { name, methods, .. } = &stmt.kind {
-            for method in methods {
-                let spec: Vec<PSpec> = method
-                    .params
-                    .iter()
-                    .skip(1)
-                    .map(|p| PSpec {
-                        name: p.name.clone(),
-                        default: p.default.clone(),
-                        is_ref: p.is_ref,
-                    })
-                    .collect();
-                map.insert((name.clone(), method.name.clone()), spec);
-            }
+        let (name, methods) = match &stmt.kind {
+            StmtKind::Struct { name, methods, .. } => (name, methods),
+            StmtKind::Enum { name, methods, .. } => (name, methods),
+            _ => continue,
+        };
+        for method in methods {
+            let spec: Vec<PSpec> = method
+                .params
+                .iter()
+                .skip(1)
+                .map(|p| PSpec {
+                    name: p.name.clone(),
+                    default: p.default.clone(),
+                    is_ref: p.is_ref,
+                })
+                .collect();
+            map.insert((name.clone(), method.name.clone()), spec);
         }
     }
     map
@@ -386,6 +399,11 @@ fn validate_defaults(stmts: &[Stmt]) -> Result<(), ResolveError> {
                         ));
                     }
                 }
+                for m in methods {
+                    check_param_defaults(&m.params)?;
+                }
+            }
+            StmtKind::Enum { methods, .. } => {
                 for m in methods {
                     check_param_defaults(&m.params)?;
                 }
@@ -997,6 +1015,26 @@ impl Walker<'_> {
                     self.walk_block(b)?;
                 }
             }
+            // Enum method bodies (and param defaults) are rewritten exactly like a struct's; enums
+            // have no fields to splice.
+            StmtKind::Enum { methods, .. } => {
+                for m in methods.iter_mut() {
+                    for p in m.params.iter_mut() {
+                        if let Some(d) = &mut p.default {
+                            self.walk_expr(d)?;
+                        }
+                    }
+                    self.push_scope();
+                    for p in &m.params {
+                        self.bind(&p.name);
+                        if p.is_ref && self.lower_refs {
+                            self.bind_ref(&p.name);
+                        }
+                    }
+                    self.walk_block(&mut m.body)?;
+                    self.pop_scope();
+                }
+            }
             // No nested expressions / bindings to rewrite.
             StmtKind::Return(None)
             | StmtKind::Break
@@ -1004,7 +1042,6 @@ impl Walker<'_> {
             | StmtKind::Import(_)
             | StmtKind::Protocol { .. }
             | StmtKind::Extern { .. }
-            | StmtKind::Enum { .. }
             | StmtKind::TypeAlias { .. } => {}
         }
         Ok(())

@@ -223,6 +223,8 @@ impl Compiler {
         let mut program = Program {
             protos: Vec::new(),
             structs: HashMap::new(),
+            enum_methods: HashMap::new(),
+            enum_home: HashMap::new(),
             variants: HashMap::new(),
             variants_by_id: Vec::new(),
             modules: Vec::new(),
@@ -607,6 +609,27 @@ impl Compiler {
                         });
                     }
                 }
+            }
+        }
+        // Compile enum methods next (type-erased — no `StructDef`/`tid`), recording proto ids under
+        // the enum's module-scoped runtime key. Mirrors the struct-method pass above.
+        for stmt in &module.stmts {
+            if let StmtKind::Enum { name, methods, .. } = &stmt.kind {
+                if methods.is_empty() {
+                    continue;
+                }
+                let key = self.type_key(module_idx, name);
+                let mut compiled: HashMap<String, ProtoId> = HashMap::new();
+                for m in methods {
+                    let pid = self.compile_fn(m, false)?;
+                    compiled.insert(m.name.clone(), pid);
+                }
+                self.program
+                    .enum_methods
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(compiled);
+                self.program.enum_home.insert(key, module_idx);
             }
         }
         // The synthetic toplevel function: top-level `fn`s are hoisted as globals before the body.

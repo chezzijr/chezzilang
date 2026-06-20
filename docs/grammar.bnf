@@ -197,8 +197,14 @@
               | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
               | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
 
-<enumDecl> ::= "ENUM" "IDENT" "COLON" "NEWLINE" "INDENT" <variants> "DEDENT"
-            | "ENUM" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <variants> "DEDENT"
+# An enum body is its variants, optionally followed by methods (`fn` only — unlike a struct, an enum
+# may NOT carry `test fn`: enum test suites aren't wired, so the parser rejects them).
+# Methods must come AFTER all variants (the parser rejects a variant after a method).
+<enumDecl> ::= "ENUM" "IDENT" "COLON" "NEWLINE" "INDENT" <enumMembers> "DEDENT"
+            | "ENUM" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <enumMembers> "DEDENT"
+<enumMembers> ::= <variants> | <variants> <enumMethods>
+<enumMethods> ::= <enumMethod> | <enumMethod> <enumMethods>
+<enumMethod>  ::= <fnDecl>
 <variants> ::= <variant> | <variant> <variants>
 <variant>  ::= "IDENT" "NEWLINE"
              | "IDENT" "LPAREN" <typeList> "RPAREN" "NEWLINE"

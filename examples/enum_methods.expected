@@ -1,0 +1,10 @@
+cost: 2
+next.next.cost: 0
+get_or: 5 -1
+color: crimson
+teal
+sum amount: 6
+twice amount: 6
+eq: true
+lt: true
+direct add: 9

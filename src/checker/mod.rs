@@ -272,6 +272,9 @@ struct EnumSigInfo {
     variant_names: Vec<String>,
     type_params: Vec<TypeParam>,
     variants: Vec<VariantInfo>,
+    /// The enum's methods (`fn area(self) …`), name-keyed like `StructInfo.methods`. Ferried across
+    /// the module boundary so an imported enum's methods resolve in the importer.
+    methods: HashMap<String, FnSig>,
 }
 
 /// Type-check a single parsed module (no imports). Retained as the unit-test entry point; the CLI
@@ -610,6 +613,9 @@ struct Checker {
     /// enum name → its generic type parameters (empty for a non-generic enum). Used to build the
     /// substitution from `Tree[int]`'s args onto each variant's payload (which may name `T`).
     enum_type_params: HashMap<String, Vec<TypeParam>>,
+    /// enum name (runtime key) → its methods (`fn area(self) …`), name-keyed exactly like
+    /// `StructInfo.methods`. Resolves `enumval.method(args)` and protocol satisfaction for enums.
+    enum_methods: HashMap<String, HashMap<String, FnSig>>,
     /// Keyed by `(enum_name, variant_name)`: variants are scoped under their enum, so two enums may
     /// declare the same variant name. Resolution always carries the enum (a qualified `Enum.Variant`
     /// or, in a pattern slot, the scrutinee's enum) — there is no bare-name lookup.
@@ -745,6 +751,7 @@ impl Checker {
             type_params: HashMap::new(),
             enums: HashMap::new(),
             enum_type_params: HashMap::new(),
+            enum_methods: HashMap::new(),
             variants: HashMap::new(),
             variant_owners: HashMap::new(),
             struct_names: std::collections::HashSet::new(),
@@ -865,6 +872,7 @@ impl Checker {
         self.structs.clear();
         self.enums.clear();
         self.enum_type_params.clear();
+        self.enum_methods.clear();
         self.variants.clear();
         self.variant_owners.clear();
         self.struct_names.clear();
@@ -972,6 +980,7 @@ impl Checker {
                         self.enums.insert(key.clone(), edef.variant_names.clone());
                         self.enum_type_params
                             .insert(key.clone(), edef.type_params.clone());
+                        self.enum_methods.insert(key.clone(), edef.methods.clone());
                         if is_std {
                             self.enum_names.insert(ename.clone());
                             self.bare_types.entry(ename.clone()).or_insert(key.clone());
@@ -1049,6 +1058,7 @@ impl Checker {
                             self.bare_types.insert(bind.clone(), key.clone());
                             self.enum_type_params
                                 .insert(key.clone(), edef.type_params.clone());
+                            self.enum_methods.insert(key.clone(), edef.methods.clone());
                             for (vname, vinfo) in edef.variant_names.iter().zip(&edef.variants) {
                                 let mut vi = vinfo.clone();
                                 vi.enum_name = key.clone();
@@ -1143,6 +1153,7 @@ impl Checker {
                                 variant_names: variant_names.clone(),
                                 type_params,
                                 variants,
+                                methods: self.enum_methods.get(&key).cloned().unwrap_or_default(),
                             },
                         );
                     }
@@ -1559,6 +1570,7 @@ impl Checker {
                     name,
                     type_params,
                     variants,
+                    methods,
                 } => {
                     if is_reserved_type(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
@@ -1605,9 +1617,17 @@ impl Checker {
                             .or_default()
                             .push(name.clone());
                     }
+                    // Methods see the enum's type parameters in scope (like the struct path), so a
+                    // generic `fn get(self) -> T` resolves `T`. Name-keyed exactly like struct methods.
+                    let method_sigs: HashMap<String, FnSig> = methods
+                        .iter()
+                        .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
+                        .collect();
                     self.exit_type_params(saved);
                     self.enums.insert(key.clone(), names);
-                    self.enum_type_params.insert(key, type_params.clone());
+                    self.enum_type_params
+                        .insert(key.clone(), type_params.clone());
+                    self.enum_methods.insert(key, method_sigs);
                 }
                 StmtKind::Extern { fns, .. } => {
                     // Dynamic C-ABI FFI (`dlopen`/libffi) is unix-only — `int` marshals as C `long`,
@@ -2536,10 +2556,38 @@ impl Checker {
                 }
                 self.exit_type_params(saved);
             }
-            // Enums, imports, and protocols carry nothing to check in pass 2 (protocol method
+            // Enum methods' bodies are checked here (mirroring the struct path); the variant/payload
+            // shapes are validated during hoisting.
+            StmtKind::Enum {
+                name,
+                type_params,
+                methods,
+                ..
+            } => {
+                let self_ty = self.enum_self_ty(name);
+                // The enum's type parameters are in scope across its method bodies.
+                let saved = self.enter_type_params(type_params);
+                let is_suite = methods.iter().any(|m| m.is_test);
+                for m in methods {
+                    if m.is_test {
+                        self.validate_test_fn_shape(m, true);
+                    } else if is_suite && is_lifecycle_hook(&m.name) {
+                        self.validate_lifecycle_hook(m);
+                    }
+                    if let Some(sig) = self
+                        .enum_methods
+                        .get(&self.bare_key(name))
+                        .and_then(|ms| ms.get(&m.name))
+                        .cloned()
+                    {
+                        self.check_fn_body(m, Some(self_ty.clone()), sig);
+                    }
+                }
+                self.exit_type_params(saved);
+            }
+            // Imports and protocols carry nothing to check in pass 2 (protocol method
             // signatures are validated during hoisting).
-            StmtKind::Enum { .. }
-            | StmtKind::Import(_)
+            StmtKind::Import(_)
             | StmtKind::Protocol { .. }
             | StmtKind::Extern { .. }
             | StmtKind::TypeAlias { .. } => {}
@@ -6201,6 +6249,49 @@ impl Checker {
                 self.error(span, format!("type {obj_ty} has no method '{method}'"));
                 Ty::Unknown
             }
+            // Enum methods (name-resolved exactly like struct methods). Substitute the enum's type
+            // arguments into the method signature, so `Box[int].get()` returns `int`, not `T`.
+            Ty::Enum(ename, targs) => {
+                let resolved = self.enum_methods.get(ename).and_then(|ms| {
+                    ms.get(method).map(|sig| {
+                        let map: HashMap<String, Ty> = self
+                            .enum_type_params
+                            .get(ename)
+                            .map(|tps| {
+                                tps.iter()
+                                    .map(|tp| tp.name.clone())
+                                    .zip(targs.iter().cloned())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
+                        (params, subst(&sig.ret, &map), sig.type_params.clone())
+                    })
+                });
+                if let Some((params, ret, mtps)) = resolved {
+                    if !mtps.is_empty() {
+                        return self.infer_generic_method(
+                            method, &params, &ret, &mtps, &obj_ty, args, span,
+                        );
+                    }
+                    match params.split_first() {
+                        Some((_receiver, expected)) => {
+                            self.check_args(method, expected, args, span)
+                        }
+                        None => {
+                            self.error(
+                                span,
+                                format!("method '{method}' has no receiver parameter (its first parameter must be the receiver, e.g. `self`)"),
+                            );
+                            self.infer_all(args);
+                        }
+                    }
+                    return ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
             // Core-type methods (M6): built-in methods on `str` and `list[T]`.
             Ty::Str => {
                 if let Some(sig) = str_method_sig(method) {
@@ -6793,6 +6884,18 @@ impl Checker {
         Ty::Struct(name.to_string(), args)
     }
 
+    /// The `Ty::Enum` of an enum's own `self`: keyed by its runtime key, parameterized by its own
+    /// generic type params as `Ty::Param`s (so `fn get(self) -> T` inside `enum Box[T]` resolves).
+    fn enum_self_ty(&self, name: &str) -> Ty {
+        let key = self.bare_key(name);
+        let args = self
+            .enum_type_params
+            .get(&key)
+            .map(|tps| tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect())
+            .unwrap_or_default();
+        Ty::Enum(key, args)
+    }
+
     /// Install `tps` as the in-scope generic type parameters, returning the previous map to restore.
     fn enter_type_params(&mut self, tps: &[TypeParam]) -> HashMap<String, Vec<Bound>> {
         let saved = self.type_params.clone();
@@ -7373,43 +7476,64 @@ impl Checker {
                 let Some(info) = self.structs.get(sname) else {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 };
-                // Substitute the protocol's own type params with the bound's args (`T ↦ int` for
-                // `Container[int]`) before matching; `Self` is handled inside `method_matches`.
-                let pmap: HashMap<String, Ty> = pinfo
-                    .type_params
-                    .iter()
-                    .cloned()
-                    .zip(args.iter().cloned())
-                    .collect();
-                for (mname, msig) in &pinfo.methods {
-                    let subst_params: Vec<Ty> =
-                        msig.params.iter().map(|t| subst(t, &pmap)).collect();
-                    let min_params = subst_params.len();
-                    let want = FnSig {
-                        params: subst_params,
-                        ret: subst(&msig.ret, &pmap),
-                        type_params: Vec::new(),
-                        min_params,
-                    };
-                    let msig = &want;
-                    match info.methods.get(mname) {
-                        Some(actual) if method_matches(msig, actual, ty) => {}
-                        Some(_) => {
-                            return Err(format!(
-                                "type {ty} does not satisfy {protocol} (method '{mname}' has the wrong signature)"
-                            ));
-                        }
-                        None => {
-                            return Err(format!(
-                                "type {ty} does not satisfy {protocol} (missing method '{mname}')"
-                            ));
-                        }
-                    }
-                }
-                Ok(())
+                self.satisfies_methods(ty, protocol, args, pinfo, &info.methods)
+            }
+            // Enum conformance is structural exactly like a struct's: the enum satisfies `protocol`
+            // iff its `methods` map carries every protocol method with a matching signature. This
+            // unlocks Stringable/Hashable/Add/Sub/Mul/Comparable for enums and protocol-bound generics.
+            Ty::Enum(ename, _) => {
+                let Some(methods) = self.enum_methods.get(ename) else {
+                    return Err(format!("type {ty} does not satisfy {protocol}"));
+                };
+                self.satisfies_methods(ty, protocol, args, pinfo, methods)
             }
             _ => Err(format!("type {ty} does not satisfy {protocol}")),
         }
+    }
+
+    /// Structural conformance check shared by the struct and enum arms of [`satisfies_args`]: a type
+    /// satisfies `protocol` iff `methods` carries every protocol method with a matching signature
+    /// (the protocol's own type params substituted from the bound's `args`; `Self` handled inside
+    /// `method_matches`).
+    fn satisfies_methods(
+        &self,
+        ty: &Ty,
+        protocol: &str,
+        args: &[Ty],
+        pinfo: &ProtocolInfo,
+        methods: &HashMap<String, FnSig>,
+    ) -> Result<(), String> {
+        let pmap: HashMap<String, Ty> = pinfo
+            .type_params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
+        for (mname, msig) in &pinfo.methods {
+            let subst_params: Vec<Ty> = msig.params.iter().map(|t| subst(t, &pmap)).collect();
+            let min_params = subst_params.len();
+            let want = FnSig {
+                params: subst_params,
+                ret: subst(&msig.ret, &pmap),
+                type_params: Vec::new(),
+                min_params,
+            };
+            let msig = &want;
+            match methods.get(mname) {
+                Some(actual) if method_matches(msig, actual, ty) => {}
+                Some(_) => {
+                    return Err(format!(
+                        "type {ty} does not satisfy {protocol} (method '{mname}' has the wrong signature)"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "type {ty} does not satisfy {protocol} (missing method '{mname}')"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Result type of an overloaded arithmetic operator (`+`/`-`/`*`) on two operands of the *same*
@@ -7418,6 +7542,7 @@ impl Checker {
     fn op_overload_result(&self, l: &Ty, r: &Ty, protocol: &str) -> Option<Ty> {
         let same = match (l, r) {
             (Ty::Struct(a, _), Ty::Struct(b, _)) => a == b,
+            (Ty::Enum(a, _), Ty::Enum(b, _)) => a == b,
             (Ty::Param(a), Ty::Param(b)) => a == b,
             _ => false,
         };
@@ -7439,6 +7564,7 @@ impl Checker {
             (Ty::Struct(a, _), Ty::Struct(b, _)) if a == b => {
                 self.satisfies(l, "Comparable").is_ok()
             }
+            (Ty::Enum(a, _), Ty::Enum(b, _)) if a == b => self.satisfies(l, "Comparable").is_ok(),
             _ => false,
         }
     }
@@ -9161,6 +9287,26 @@ mod graph_tests {
         assert!(
             check_entry(&entry).is_ok(),
             "from-imported enum should be usable: {:?}",
+            errors(&entry)
+        );
+    }
+
+    // An imported enum's METHODS must ferry across the module boundary (EnumSigInfo.methods →
+    // importer's enum_methods). Both the from-import and qualified-access paths.
+    #[test]
+    fn imported_enum_methods_usable() {
+        let t = TmpDir::new();
+        t.write(
+            "types.chz",
+            "enum Color:\n    Red\n    Green\n    fn cost(self) -> int:\n        match self:\n            Color.Red: return 1\n            Color.Green: return 2\n",
+        );
+        let entry = t.write(
+            "main.chz",
+            "import Color from types\nimport types\nfn main():\n    c := Color.Red\n    x: int = c.cost()\n    q: int = types.Color.Green.cost()\n    print(x + q)\nmain()\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "imported enum methods should resolve cross-module: {:?}",
             errors(&entry)
         );
     }
