@@ -18450,6 +18450,62 @@ main()
         );
     }
 
+    /// Regression (blocker, the adversarial-panel find): a module-QUALIFIED width alias must resolve
+    /// to its DEFINING module's body even when the CALLING module declares a colliding bare alias of
+    /// the SAME name but a DIFFERENT width. `w3.Len` (= int64 in core/w3) must marshal as int64 — NOT
+    /// collapse to the calling module's local `type Len = int8`. With the bug, `abs(-300)` rounds
+    /// through int8 to 44; correctly resolved (int64) it stays 300. All three engines must agree on
+    /// 300. Linux-only (needs libc.so.6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extern_qualified_width_alias_param_collision_runs() {
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_vm_ffi_qcollide_{}", std::process::id()));
+        let core = dir.join("core");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(
+            core.join("w3.chz"),
+            "import int64 from std.ffi\n\ntype Len = int64\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import core.w3\nimport int8 from std.ffi\n\ntype Len = int8\n\nextern \"libc.so.6\":\n    \
+             fn abs(n: w3.Len) -> w3.Len\n\nprint(abs(-300))\n",
+        )
+        .unwrap();
+        let (vm_out, _e, vm_res, _) = run_file(&entry);
+        let (io, _ie, ir, _) = crate::interp::run_file(&entry);
+        let (par_out, _pe, par_res, _) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            vm_res.is_ok(),
+            "VM faulted on colliding qualified width-alias extern: {vm_res:?}"
+        );
+        assert!(
+            ir.is_ok(),
+            "interp faulted on colliding qualified width-alias extern: {ir:?}"
+        );
+        assert!(
+            par_res.is_ok(),
+            "parallel engine faulted on colliding qualified width-alias extern: {par_res:?}"
+        );
+        assert_eq!(
+            vm_out, "300\n",
+            "qualified `w3.Len` must marshal as the DEFINING module's int64 (300), not the local int8 (44)"
+        );
+        assert_eq!(
+            vm_out, io,
+            "VM and interp diverged (colliding qualified width param)"
+        );
+        assert_eq!(
+            vm_out, par_out,
+            "VM and --parallel diverged (colliding qualified width param)"
+        );
+    }
+
     /// A genuinely non-marshallable QUALIFIED type at an extern boundary must surface a clean
     /// compile/runtime error (the checker is the real gate), and — even if a path slipped past the
     /// checker — the marshal loop's backstop must NEVER panic the VM. No libc needed (the checker

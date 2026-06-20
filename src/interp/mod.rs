@@ -272,6 +272,12 @@ struct Interp {
     /// declared in one module and used bare in another's `extern` signature resolves here exactly as
     /// the checker accepted it. Empty for a single-source run (the module's own aliases suffice).
     extern_aliases: std::collections::HashMap<String, crate::ast::Type>,
+    /// Module-SCOPED type-alias bodies: `(declaring module_idx, bare alias name) → alias body`. The
+    /// interp twin of the compiler's `module_aliases`. A module-QUALIFIED FFI width alias (`w3.Len`)
+    /// resolves to ITS DEFINING module's body HERE — the flat `extern_aliases` map above is last-write
+    /// -wins, so two modules each declaring `type Len` (different widths) collide there. Keeps the
+    /// 3-engine C ABI in lockstep (matches the checker's defining-module alias resolution).
+    module_aliases: std::collections::HashMap<(usize, String), crate::ast::Type>,
     /// Program-global struct-field table (struct name → declared fields), gathered across EVERY module
     /// before evaluation begins — the interp twin of the compiler's pass-1 `struct_fields`. Used only
     /// to lower an extern fn's by-value struct param/return types to `CType::Struct` in
@@ -402,6 +408,7 @@ impl Interp {
             nurseries: Vec::new(),
             executors: Vec::new(),
             extern_aliases: std::collections::HashMap::new(),
+            module_aliases: std::collections::HashMap::new(),
             extern_struct_fields: std::collections::HashMap::new(),
             type_names: std::collections::HashSet::new(),
             type_keys: std::collections::HashMap::new(),
@@ -4277,6 +4284,16 @@ impl Interp {
                                     if struct_fields.contains_key(key) {
                                         return crate::ast::Type::Named(key.clone());
                                     }
+                                    // Not a struct → a width alias. Resolve to its DEFINING module's
+                                    // body (keyed by the resolved `tidx`), NOT the bare name — the
+                                    // local `aliases` map is last-write-wins, so a colliding `type Len`
+                                    // in another module would otherwise hijack the C ABI. Matches the
+                                    // checker + the compiler's `qualify_ffi_type` (3-engine parity).
+                                    if let Some(body) =
+                                        self.module_aliases.get(&(tidx, name.clone()))
+                                    {
+                                        return body.clone();
+                                    }
                                     return crate::ast::Type::Named(name.clone());
                                 }
                                 t.clone()
@@ -5622,6 +5639,14 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
                         .type_keys
                         .insert((idx, name.clone()), format!("{}::{name}", mkeys[idx]));
                 }
+            }
+            // Record alias bodies under the DEFINING module index (twin of the compiler's
+            // `module_aliases`) so a module-qualified FFI width alias resolves to the right width
+            // even when another module shadows the bare name.
+            if let StmtKind::TypeAlias { name, ty } = &s.kind {
+                interp
+                    .module_aliases
+                    .insert((idx, name.clone()), ty.clone());
             }
         }
     }

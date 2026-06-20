@@ -1046,6 +1046,26 @@ branch names) is in the git log.
   clean error not panic), two new checker guard tests; full suite (2279) + conformance green, clippy
   clean. Docs: `syntax.md` §12b, `ffi-and-packaging.md`, this file. Out of scope (untouched): the
   separate "type alias to an FFI STRUCT at the boundary" inconsistency.
+- ✅ **C-ABI FFI follow-up: module-qualified WIDTH ALIAS resolves to its DEFINING module's width**
+  (2026-06-20, `auto-task/ffi-qualified-type-fix`) — the adversarial panel found the prior fix
+  reintroduced the bare-name class for the WIDTH-ALIAS case: the qualified arm rewrote `mod.Alias` to a
+  bare `Named(name)`, which `ctype_of` then resolved through the flat, program-global, **bare-keyed**
+  `aliases` table (last-write-wins). So when two reachable modules both declared `type Len` with
+  DIFFERENT widths (`core/w3.chz` int64 + a colliding local `type Len = int8`), `w3.Len` collapsed to
+  bare `Len` and silently marshalled through the WRONG width — the checker said OK (int64) but all three
+  engines printed `44` (int8-truncated `abs(-300)`) instead of `300`. Fix (module-scoped, mirrors
+  `type_keys`): added a `module_aliases: (module_idx, name) → body` map to BOTH engines, populated
+  alongside the existing alias gather; the qualified width-alias arm now looks up the body by the
+  ALREADY-resolved defining-module index `tidx` and returns THAT (an `int64` width scalar `ctype_of`
+  resolves directly, no flat-map hop), so a colliding local alias can't hijack the C ABI — matching the
+  checker, which resolves a `Type::Qualified` alias via the defining module's `type_aliases`. The
+  qualified STRUCT path, the non-colliding qualified width path, the bare/named-import path, and the flat
+  `aliases` table are all untouched. Tests: one new VM 3-engine collision parity test (`w3.Len`=int64 +
+  local `Len`=int8 → `abs(-300)`=300 on VM/`--serial`/`--parallel`); the existing non-colliding twin
+  (→7), struct (→3/2), and clean-error guards stay green; full suite + conformance green, clippy clean.
+  Docs: `ffi-and-packaging.md`, this file. Known limit (deferred, out of realistic FFI scope): a
+  qualified alias whose body is ANOTHER bare alias (a chain) would re-enter the flat map on the inner
+  name; direct alias-to-width (the actual FFI case) is fixed.
 - ✅ **C-ABI FFI follow-ups: `bool`=C `_Bool`, precise width-alias gate, redundant self-rename allowed**
   (2026-06-18, `auto-task/ffi-bool-cbool-alias-gate`) — three FFI loose ends from the prior reviews.
   (1) **`bool` now means C `_Bool` (1 byte)**, not C `int` (4 bytes): re-mapped `CType::Bool`'s libffi

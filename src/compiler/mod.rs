@@ -73,7 +73,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // Pass 1: hoist all type declarations across every module.
     for (idx, lm) in graph.modules.iter().enumerate() {
         c.hoist_types(idx, &lm.ast.stmts)?;
-        c.gather_aliases(&lm.ast.stmts);
+        c.gather_aliases(idx, &lm.ast.stmts);
     }
     // Pass 2: compile each module's toplevel + functions. The entry module is last (deps first);
     // only its `test fn`s / suites are recorded for `chezzi test` discovery.
@@ -123,7 +123,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         }
     }
     c.hoist_types(0, &module.stmts)?;
-    c.gather_aliases(&module.stmts);
+    c.gather_aliases(0, &module.stmts);
     let toplevel = c.compile_module(0, module, &[], true)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -165,6 +165,14 @@ struct Compiler {
     /// fn's scalar-alias param/return types to `CType` — an alias defined in one module and used bare
     /// in another's `extern` signature must resolve here exactly as the checker accepted it.
     aliases: HashMap<String, Type>,
+    /// Module-SCOPED type-alias bodies: `(declaring module_idx, bare alias name) → alias body`.
+    /// Mirrors `type_keys` (which is per-module for structs/enums). A module-QUALIFIED FFI width alias
+    /// (`w3.Len`) must resolve to ITS DEFINING module's body — the flat bare-keyed `aliases` map above
+    /// is last-write-wins, so two modules each declaring `type Len` (different widths) collide there.
+    /// `qualify_ffi_type` looks the qualified case up HERE by the resolved defining-module index, so a
+    /// colliding local alias of the same name can't hijack the C ABI (matches the checker, which
+    /// resolves a `Type::Qualified` alias via the defining module's signature `type_aliases`).
+    module_aliases: HashMap<(usize, String), Type>,
     /// ROOT REDESIGN — module-scoped types: `(declaring module_idx, bare type name) → IDENTITY KEY`.
     /// The key is ALWAYS `<module-key>::<Name>` (no winner/loser, no bare keys) so every user
     /// struct/enum/variant/alias is unique by construction. Built once by
@@ -275,6 +283,7 @@ impl Compiler {
             field_ic_next: 0,
             method_ic_next: 0,
             aliases: HashMap::new(),
+            module_aliases: HashMap::new(),
             type_keys: HashMap::new(),
             module_types: Vec::new(),
             imported_modules: HashMap::new(),
@@ -370,8 +379,14 @@ impl Compiler {
                     if self.struct_fields.contains_key(key) {
                         return Type::Named(key.clone());
                     }
-                    // Not a struct → a width alias: resolve through the bare-keyed `aliases` table
-                    // like the named-import spelling. (Generic qualified types are checker-rejected.)
+                    // Not a struct → a width alias. Resolve to its DEFINING module's body (keyed by
+                    // the resolved `tidx`), NOT the bare name — the flat `aliases` table is last-write
+                    // -wins, so a colliding local `type Len` in another module would otherwise hijack
+                    // the C ABI. This matches the checker, which resolves a `Type::Qualified` alias via
+                    // the defining module's `type_aliases`. (Generic qualified types are checker-rejected.)
+                    if let Some(body) = self.module_aliases.get(&(tidx, name.clone())) {
+                        return body.clone();
+                    }
                     return Type::Named(name.clone());
                 }
                 ty.clone()
@@ -409,10 +424,13 @@ impl Compiler {
     /// Gather `type Name = T` aliases from a module's statements into `self.aliases`. Called once per
     /// module before compilation so an extern signature in any module can resolve a scalar alias
     /// declared anywhere in the program (matching the checker's program-global alias scope).
-    fn gather_aliases(&mut self, stmts: &[Stmt]) {
+    fn gather_aliases(&mut self, idx: usize, stmts: &[Stmt]) {
         for stmt in stmts {
             if let StmtKind::TypeAlias { name, ty } = &stmt.kind {
                 self.aliases.insert(name.clone(), ty.clone());
+                // Also record the body under the DEFINING module index so a module-qualified FFI
+                // alias resolves to the right width even when another module shadows the bare name.
+                self.module_aliases.insert((idx, name.clone()), ty.clone());
             }
         }
     }

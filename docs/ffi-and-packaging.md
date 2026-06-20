@@ -52,6 +52,13 @@ two ways — by **named import** (`import DivT from core.cdefs`, then bare `DivT
 to the identical C type (struct-by-value or scalar width). The checker is the marshallability gate for
 either spelling; a non-marshallable type is a clean compile error, never a VM panic.
 
+A module-qualified **width alias** resolves to its **defining module's** width even when the calling
+module declares a colliding bare alias of the same name: with `core/w3.chz` = `type Len = int64` and a
+`main.chz` that also declares `type Len = int8`, an `extern fn abs(n: w3.Len) -> w3.Len` marshals as
+**int64** (w3's `Len`), never the local int8 — exactly what the checker promised. The lowering keys the
+qualified alias by its resolved defining-module index (not the flat last-write-wins alias name table),
+so the C ABI can't be hijacked by a same-named local alias. (3-engine parity: VM / `--serial` / interp.)
+
 ## 1b. Deferred FFI-deepening features — design notes (revisit-in-future)
 
 The v1 `extern "lib":` surface ships: scalars, fixed-width ints (`int8`..`uint64`, `std.ffi`-imported),
