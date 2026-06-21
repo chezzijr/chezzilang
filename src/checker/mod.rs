@@ -7541,8 +7541,11 @@ impl Checker {
             Ty::Set(_) => Ty::set(elem),
             _ => return,
         };
-        // (d) cascade invariant: if inferring the arg itself reported an error, don't refine.
+        // (d) cascade invariant: if inferring the arg itself reported an error, don't refine — and
+        // roll back the speculative diagnostics so the real dispatch path (check_args) reports them
+        // exactly once. Leaving them here double-reports an erroring arg (e.g. `xs.push(undefined)`).
         if self.errors.len() != mark {
+            self.errors.truncate(mark);
             return;
         }
         // A shape that is itself Unknown supplies nothing concrete; merge is a no-op, bail early.
@@ -7595,7 +7598,8 @@ impl Checker {
             _ => return,
         };
         if self.errors.len() != mark {
-            return;
+            self.errors.truncate(mark); // roll back the speculative index-infer diagnostics; the
+            return; // real index-assign path re-infers + reports them once (no double-report)
         }
         let merged = merge_unknown(&obj_ty, &shape);
         if merged == obj_ty {

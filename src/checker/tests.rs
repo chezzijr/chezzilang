@@ -7279,6 +7279,32 @@ fn empty_list_push_pins_element_then_mixed_rejected() {
 }
 
 #[test]
+fn refine_erroring_push_arg_reports_once() {
+    // Regression: the speculative arg-infer in refine_receiver must roll its diagnostics back so an
+    // erroring mutator arg (`xs.push(undefined_v)`) is reported exactly ONCE by the real dispatch
+    // path, not duplicated. (Empty-collection refine over-reported on base of this branch.)
+    let errs = check_src("fn main():\n xs := []\n xs.push(undefined_v)\nmain()");
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert!(
+        errs[0].message.contains("unknown name"),
+        "got: {:?}",
+        errs[0]
+    );
+}
+
+#[test]
+fn refine_erroring_index_key_reports_once() {
+    // Same rollback for the index-assign refine path (`m[undefined_k] = 1`).
+    let errs = check_src("fn main():\n m := {}\n m[undefined_k] = 1\nmain()");
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert!(
+        errs[0].message.contains("unknown name"),
+        "got: {:?}",
+        errs[0]
+    );
+}
+
+#[test]
 fn empty_list_of_none_then_conflicting_some_rejected() {
     // [None] is list[Option[Unknown]]; push(Some(5)) refines to list[Option[int]];
     // push(Some("hi")) then conflicts (nested-typeparam + native None producer).
