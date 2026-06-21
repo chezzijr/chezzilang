@@ -11,6 +11,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Soundness fix — return-type inference is now ORDER-INDEPENDENT (fixpoint), closing the
+recursive/forward-reference half of the `Ty::Unknown`-is-assignable hole.** The checker inferred
+function/method return types in a single SOURCE-ORDER pass and bailed to `Ty::Unknown` whenever the
+deciding `return` was a call to a not-yet-inferred function (a forward reference, or mutual recursion).
+`Unknown` is universally assignable, so a bogus return flowed check-blessed into a typed slot and
+faulted at runtime (`fn rec(n:int): if n<=0 return base(0) else return rec(n-1)` + later
+`fn base(n:int): return "hello"`, then `v: int = rec(2)` wrongly passed `check` — `rec` really returns
+`str`). Fix: `infer_returns` (`checker/mod.rs`) now wraps the per-pass walk (`infer_returns_pass`) in a
+bounded FIXPOINT — re-infer every un-annotated fn/method until no stored `FnSig.ret` changes (cap =
+un-annotated-count + 1; monotone, a concrete ret is never reverted to `Unknown`, so it converges and the
+final ret is order-independent). A self-recursive call still contributes no type; the non-recursive
+returns decide (so `fact`/`fib` are unchanged — base-case concrete wins). Divergent CONCRETE returns
+stay the user's job to annotate (`-> T` or a protocol existential `-> Stringable`); with no annotation
+conflicting concretes are an `expected return type …, found …` error — **no union types**. New behavior:
+after convergence, a genuinely un-inferable un-annotated fn/method (pure self-recursion, or mutual
+recursion with no concrete base anywhere — ret still `Unknown`) is now REJECTED:
+`cannot infer return type of recursive function '<name>'; add an explicit `-> T`` (was silently
+accepted). Checker-only change ⇒ VM==interp parity automatic. `gaps.md` "Ty::Unknown is treated as
+assignable" updated (recursive-return producer RESOLVED; empty-collection = sibling task,
+generic-nullary-variant remains). 2375 tests green; clippy + conformance clean.
+
 **✅ Soundness fix — string-interpolation fragments are now type-checked (was a CRITICAL compiler
 panic + unsound `check`).** The checker treated an interpolated `str` as opaque `Ty::Str` and never
 resolved/type-checked the `{…}` fragment exprs, while the compiler hard-assumed the checker already

@@ -2088,7 +2088,53 @@ impl Checker {
     /// Pass-1.5: for every function/method that omitted `-> T`, infer its return type from the
     /// body and overwrite the provisional `Unknown` left by `fn_sig`. Runs after `hoist`, so all
     /// type names, variants, and (provisional) function sigs are already visible to the inference.
+    ///
+    /// Inference is ORDER-INDEPENDENT: a single source-order pass would bail to `Unknown` whenever
+    /// the deciding return is a call to a not-yet-inferred function (a forward reference or mutual
+    /// recursion), leaking an unsound permissive `Unknown` into a typed slot. Instead this runs the
+    /// per-pass walk (`infer_returns_pass`) repeatedly to a FIXPOINT: each pass re-infers every
+    /// un-annotated fn/method, and because a callee's resolved `FnSig.ret` is written back
+    /// immediately, a later pass sees the earlier pass's resolutions. The iteration is MONOTONE — a
+    /// pass only ever turns an `Unknown` ret into a concrete one (or detects a conflict via pass-2),
+    /// and a concrete ret is never reverted to `Unknown` — so it converges. The cap
+    /// (`un-annotated count + 1`) bounds the longest forward-ref resolution chain and guarantees
+    /// termination on genuinely un-inferable cases (pure recursion / mutual recursion with no
+    /// concrete base, where the ret stays `Unknown` forever). Those are caught afterwards by
+    /// `report_uninferable_returns`, which requires the user to add an explicit `-> T`.
     fn infer_returns(&mut self, stmts: &[Stmt]) {
+        // Bound: each productive pass resolves at least one more `Unknown`→concrete; `+1` lets the
+        // final pass confirm no change (the fixpoint). A non-productive pass breaks the loop early.
+        let cap = self.count_uninferred(stmts) + 1;
+        for _ in 0..cap {
+            if !self.infer_returns_pass(stmts) {
+                break;
+            }
+        }
+        self.report_uninferable_returns(stmts);
+    }
+
+    /// Count the un-annotated free fns + struct methods that `infer_returns` infers — the fixpoint
+    /// iteration bound. (Annotated decls are skipped by the pass, so they cannot extend the chain.)
+    fn count_uninferred(&self, stmts: &[Stmt]) -> usize {
+        let mut n = 0;
+        for s in stmts {
+            match &s.kind {
+                StmtKind::Fn(decl) if decl.ret.is_none() => n += 1,
+                StmtKind::Struct { methods, .. } => {
+                    n += methods.iter().filter(|m| m.ret.is_none()).count();
+                }
+                _ => {}
+            }
+        }
+        n
+    }
+
+    /// One inference pass over every un-annotated fn/method. Re-infers each from the body (idempotent
+    /// per the truncate-errors model in `infer_fn_ret`) and writes the result back into the stored
+    /// `FnSig.ret` immediately, so a callee resolved earlier in THIS pass is already visible to a
+    /// caller later in the pass. Returns `true` iff any stored ret changed (drives the fixpoint).
+    fn infer_returns_pass(&mut self, stmts: &[Stmt]) -> bool {
+        let mut changed = false;
         for s in stmts {
             match &s.kind {
                 StmtKind::Fn(decl) if decl.ret.is_none() => {
@@ -2096,8 +2142,11 @@ impl Checker {
                         continue;
                     };
                     let ret = self.infer_fn_ret(decl, None, &sig.params);
-                    if let Some(sig) = self.functions.get_mut(&decl.name) {
+                    if let Some(sig) = self.functions.get_mut(&decl.name)
+                        && sig.ret != ret
+                    {
                         sig.ret = ret;
+                        changed = true;
                     }
                 }
                 StmtKind::Struct {
@@ -2125,11 +2174,65 @@ impl Checker {
                             .structs
                             .get_mut(name)
                             .and_then(|s| s.methods.get_mut(&m.name))
+                            && ms.ret != ret
                         {
                             ms.ret = ret;
+                            changed = true;
                         }
                     }
                     self.exit_type_params(saved);
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    /// After the fixpoint converges, any un-annotated fn/method whose stored ret is STILL `Unknown`
+    /// is genuinely un-inferable (pure self-recursion, or mutual recursion with no concrete base
+    /// anywhere): the permissive `Unknown` would otherwise be silently assignable to any typed slot.
+    /// Require an explicit annotation instead. (Void fns carry `Nil`, not `Unknown`, so they are not
+    /// affected; annotated decls were skipped throughout.)
+    fn report_uninferable_returns(&mut self, stmts: &[Stmt]) {
+        for s in stmts {
+            match &s.kind {
+                StmtKind::Fn(decl) if decl.ret.is_none() => {
+                    let is_unknown = self
+                        .functions
+                        .get(&decl.name)
+                        .is_some_and(|sig| sig.ret.is_unknown());
+                    if is_unknown {
+                        let span = decl.body.first().map_or(s.span, |b| b.span);
+                        self.error(
+                            span,
+                            format!(
+                                "cannot infer return type of recursive function '{}'; add an explicit `-> T`",
+                                decl.name
+                            ),
+                        );
+                    }
+                }
+                StmtKind::Struct { name, methods, .. } => {
+                    for m in methods {
+                        if m.ret.is_some() {
+                            continue;
+                        }
+                        let is_unknown = self
+                            .structs
+                            .get(name)
+                            .and_then(|st| st.methods.get(&m.name))
+                            .is_some_and(|ms| ms.ret.is_unknown());
+                        if is_unknown {
+                            let span = m.body.first().map_or(s.span, |b| b.span);
+                            self.error(
+                                span,
+                                format!(
+                                    "cannot infer return type of recursive function '{}'; add an explicit `-> T`",
+                                    m.name
+                                ),
+                            );
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -2141,13 +2244,16 @@ impl Checker {
     /// The pick rule, in order:
     /// - first concrete non-`nil` return wins (pass 2 then validates the rest against it);
     /// - else, if any value-return was uncertain (`Unknown` — a forward ref to a not-yet-inferred
-    ///   function, or a self-recursive call) → `Unknown`, so the function stays permissive instead
-    ///   of producing spurious errors (forward refs degrade *silently*, as the design promises);
+    ///   function, or a self-recursive call) → `Unknown` for THIS pass, so the function stays
+    ///   permissive instead of producing spurious errors; the enclosing fixpoint (`infer_returns`)
+    ///   then re-infers it on a later pass once the callee resolves;
     /// - else (only bare `return`s / no returns at all) → `nil` (void preserved).
     ///
-    /// Inference is single-pass in source order with no fixpoint: a call to a *later* un-annotated
-    /// function infers `Unknown` (permissive) rather than its precise type — define callees first,
-    /// or annotate, for a precise inferred type.
+    /// One pass is order-dependent (a call to a not-yet-inferred function yields `Unknown`), but
+    /// `infer_returns` iterates this to a FIXPOINT, so the FINAL stored ret is order-independent: a
+    /// forward-ref / mutually-recursive callee resolves on a later pass. Only a genuinely
+    /// un-inferable function (no concrete base anywhere) stays `Unknown` after convergence — those
+    /// are then required to carry an explicit `-> T` (see `report_uninferable_returns`).
     fn infer_fn_ret(&mut self, decl: &FnDecl, self_ty: Option<Ty>, params: &[Ty]) -> Ty {
         let mark = self.errors.len();
         let saved_tps = self.enter_type_params(&decl.type_params);

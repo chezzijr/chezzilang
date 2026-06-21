@@ -1477,10 +1477,73 @@ fn inferred_forward_ref_callee_later_is_permissive() {
 }
 
 #[test]
-fn inferred_recursion_only_no_spurious_error() {
-    // A body whose only return is a self-recursive call infers `Unknown` (not `nil`), so it does
-    // not wrongly report "function returns nothing".
-    ok("fn loopy(n: int):\n    return loopy(n - 1)\n");
+fn inferred_recursion_only_requires_annotation() {
+    // A body whose only return is a self-recursive call has NO concrete base, so its return type
+    // is genuinely un-inferable: the fixpoint leaves it `Unknown` and the checker now requires an
+    // explicit `-> T` rather than silently blessing the permissive `Unknown`.
+    rejects(
+        "fn loopy(n: int):\n    return loopy(n - 1)\n",
+        "cannot infer return type of recursive function",
+    );
+}
+
+#[test]
+fn inferred_recursion_only_with_annotation_ok() {
+    // An explicit `-> int` satisfies the un-inferable recursive function — annotated fns bypass
+    // inference (and the post-fixpoint un-inferable check) entirely.
+    ok("fn loopy(n: int) -> int:\n    return loopy(n - 1)\n");
+}
+
+#[test]
+fn inferred_forward_ref_recursive_rejects_wrong_slot() {
+    // o2.chz: `rec` forward-references `base` (defined AFTER) and self-recurses. Order-independent
+    // fixpoint inference resolves `base -> str`, then `rec -> str`, so feeding `rec(2)` into an
+    // `int` slot is correctly rejected (was wrongly accepted under single-pass source-order infer).
+    rejects(
+        "fn rec(n: int):\n    if n <= 0:\n        return base(0)\n    return rec(n - 1)\nfn base(n: int):\n    return \"hello\"\nv: int = rec(2)\n",
+        "cannot assign str to variable of type int",
+    );
+}
+
+#[test]
+fn inferred_mutual_recursion_with_base_resolves() {
+    // Mutual recursion with a concrete base: `a` has base `return 1` (int) but also forward+mutual
+    // calls `b`; `b` returns `a(...)`. Only the fixpoint resolves `a -> int` then `b -> int`, so
+    // `v: str = b(5)` is rejected.
+    rejects(
+        "fn a(n: int):\n    if n <= 0:\n        return 1\n    return b(n - 1)\nfn b(n: int):\n    return a(n - 1)\nv: str = b(5)\n",
+        "cannot assign int to variable of type str",
+    );
+}
+
+#[test]
+fn inferred_pure_mutual_recursion_requires_annotation() {
+    // Pure mutual recursion with NO concrete base anywhere: both returns stay `Unknown` after the
+    // fixpoint, so an annotation is required.
+    rejects(
+        "fn a(n: int):\n    return b(n - 1)\nfn b(n: int):\n    return a(n - 1)\n",
+        "cannot infer return type of recursive function",
+    );
+}
+
+#[test]
+fn fact_still_infers_int() {
+    // Regression guard: a self-recursive function with a CONCRETE literal base case already infers
+    // correctly today (base case `int` wins; the self-call's `Unknown` is ignored). The fixpoint
+    // must not perturb this.
+    ok(
+        "fn fact(n: int):\n    if n <= 1:\n        return 1\n    return n * fact(n - 1)\nx := fact(5)\ny := x + 1\n",
+    );
+}
+
+#[test]
+fn inferred_divergent_returns_accepted_when_annotated_protocol() {
+    // Divergent concrete returns are the user's job to annotate: an explicit `-> Shape` protocol
+    // existential accepts struct returns that each satisfy the protocol (no union types). Annotated
+    // fns bypass inference, so the fixpoint must not break this.
+    ok(
+        "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s * self.s\nstruct Ci:\n    r: int\n    fn area(self) -> int:\n        return 3 * self.r * self.r\nfn pick(c: bool) -> Shape:\n    if c:\n        return Sq(2)\n    return Ci(1)\n",
+    );
 }
 
 #[test]
