@@ -77,6 +77,10 @@ Conventions used below:
 | `filter` | `(pred: fn(T) -> bool) -> list[T]` | Returns a new list. |
 | `fold` | `(init: U, f: fn(U, T) -> U) -> U` | Left fold. |
 
+`map`/`filter`/`fold` iterate over a **snapshot** of the receiver's elements taken at call time: a
+callback that mutates the receiver (e.g. `xs.pop()`/`xs.push(..)`) does not change the iteration
+sequence (and never faults). Same as comprehensions and Python `map`/`filter`.
+
 ### `map[K, V]`
 | Method | Signature | Notes |
 |--------|-----------|-------|

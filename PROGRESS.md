@@ -1120,6 +1120,17 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **`list.map`/`.filter`/`.fold` OOB-on-shrink fixed** (2026-06-21, `auto-task/list-hof-shrink-oob`) —
+  VM `list_hof` captured `n = v.len()` once then indexed the *live* heap list, so a callback that
+  shrank the receiver (`xs.pop()`) ran a stale index past the now-shorter `Vec` → `index out of bounds`
+  panic (vm/mod.rs:6840 map/filter, ~6890 fold) on both engines. Fix: allocate a **rooted snapshot**
+  of the receiver's elements at call time and index that (mirrors `list_sort_by`; the interp already
+  snapshots `elems` before dispatch, so this aligns the VM to interp). **Chosen semantics: snapshot** —
+  map/filter/fold iterate the receiver's elements as of call time; a callback that shrinks **or** grows
+  the receiver does not perturb iteration (consistent with comprehensions/`for`-loops/Python). Tests:
+  `map`/`filter`/`fold`_shrinking_callback_no_panic + golden `examples/list_hof_shrink.chz` (VM==interp).
+  Docs: `docs/stdlib.md` (snapshot note), `gaps.md` (entry → ✅ RESOLVED).
+
 - ✅ **User-callable `panic(msg: str)` builtin** (2026-06-20, `auto-task/panic-builtin`) — exposes a
   user-facing way to raise the **same** recoverable `RuntimeError` the runtime already uses internally
   (overflow / OOB / bad decode); the M11 `recover:`/`defer` machinery catches it unchanged. `panic`

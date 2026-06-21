@@ -2285,7 +2285,11 @@ impl Interp {
             )
         {
             // Clone the elements out so we don't hold the `RefCell` borrow across `call_value`
-            // (the closure body could re-borrow this same list).
+            // (the closure body could re-borrow this same list). This clone is also the SNAPSHOT
+            // that defines HOF semantics: map/filter/fold iterate the receiver's elements as of call
+            // time, so a callback that mutates (shrinks/grows) the receiver does not perturb the
+            // iteration. The VM mirrors this (see `list_hof` in `src/vm/mod.rs`, which allocates a
+            // rooted snapshot) — keep both engines on this same snapshot semantics for parity.
             let elems: Vec<Value> = items.borrow().clone();
             if method == "sort_by" {
                 // `sort_by` sorts in place; keep the `Rc` so we can write the result back.
