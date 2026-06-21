@@ -1372,6 +1372,53 @@ impl Checker {
     fn lookup(&self, name: &str) -> Option<Ty> {
         self.scopes.iter().rev().find_map(|s| s.get(name).cloned())
     }
+    /// Re-pin `name`'s binding to `ty` **in its OWNING scope** (the same scope `lookup` resolves),
+    /// not the innermost one. Used by refine-on-first-use to narrow an empty-collection's `Unknown`
+    /// element/key/value slot to the concrete type the first mutating op supplies. `declare` always
+    /// writes the last scope — wrong for an outer-scope receiver refined inside an `if`/`for` block
+    /// (it would shadow-create a bogus inner binding that leaks on pop), so we walk innermost-first
+    /// and overwrite the first scope that owns `name`. Returns the scope index written (so the
+    /// flow-sensitivity snapshot/restore barrier can revert THIS scope's binding precisely).
+    fn repin(&mut self, name: &str, ty: Ty) -> Option<usize> {
+        for i in (0..self.scopes.len()).rev() {
+            if self.scopes[i].contains_key(name) {
+                self.scopes[i].insert(name.to_string(), ty);
+                return Some(i);
+            }
+        }
+        None
+    }
+    /// Snapshot every in-scope binding whose type still carries an `Unknown` in a slot position (a
+    /// refinable empty-collection / nullary-variant / None producer), recording its OWNING scope
+    /// index, name, and current type. Paired with [`Self::restore_refinable`] to make refinement
+    /// BLOCK-LOCAL flow-sensitive: a refinement performed inside one branch arm / loop body must not
+    /// leak into a sibling arm or into code after the branch (only one arm runs at runtime). We
+    /// snapshot the OWNING scope index — not the innermost block scope — so restoring reverts the
+    /// exact binding `repin` wrote, even when the receiver was declared in an outer scope.
+    fn snapshot_refinable(&self) -> Vec<(usize, String, Ty)> {
+        let mut snap = Vec::new();
+        for (i, scope) in self.scopes.iter().enumerate() {
+            for (name, ty) in scope {
+                if contains_unknown_in_slot(ty) {
+                    snap.push((i, name.clone(), ty.clone()));
+                }
+            }
+        }
+        snap
+    }
+    /// Restore the bindings captured by [`Self::snapshot_refinable`], reverting any in-arm/in-body
+    /// refinement so each branch arm refines independently from the pre-branch type and the binding
+    /// reverts after the branch. Writes back by (scope index, name); a snapshotted scope that was
+    /// already popped is skipped (the binding is gone, nothing to revert).
+    fn restore_refinable(&mut self, snap: Vec<(usize, String, Ty)>) {
+        for (i, name, ty) in snap {
+            if let Some(scope) = self.scopes.get_mut(i)
+                && scope.contains_key(&name)
+            {
+                scope.insert(name, ty);
+            }
+        }
+    }
     /// Is `name` bound *below* the module-global scope (scope 0) — i.e. a local, parameter, or
     /// captured binding? The qualified enum-variant form `Enum.Variant` yields to such a binding but
     /// NOT to a module global or function, mirroring both engines' locals-only precedence gate (VM
@@ -2612,11 +2659,21 @@ impl Checker {
     // ===== pass 2: check statements =====
 
     fn check_block(&mut self, block: &Block) {
+        // BLOCK-LOCAL flow-sensitivity barrier: `check_block` runs every CONDITIONALLY-executed body
+        // (an `if`/`else if`/`else` branch, a `while` body, a `defer:` block). A refine-on-first-use
+        // narrowing of an OUTER binding performed inside this body must NOT leak into a sibling arm
+        // or into code after the branch — only one arm runs at runtime, so each must refine
+        // independently from the pre-branch type. Snapshot the refinable in-scope bindings on entry
+        // and restore them on exit so the binding reverts to its pre-block type. Straight-line code
+        // (a function body / module top level) does NOT go through `check_block`, so an on-all-paths
+        // refinement still persists — which is exactly what catches the real soundness bug.
+        let snap = self.snapshot_refinable();
         self.push_scope();
         for stmt in block {
             self.check_stmt(stmt);
         }
         self.pop_scope();
+        self.restore_refinable(snap);
     }
 
     fn check_stmt(&mut self, stmt: &Stmt) {
@@ -2804,6 +2861,10 @@ impl Checker {
             }
             StmtKind::For { vars, iter, body } => {
                 let bindings = self.for_bindings(vars, iter);
+                // Flow-sensitivity barrier (see `check_block`): a refinement inside the loop body
+                // must not leak past the loop — a zero-trip loop runs the body never, so a later op
+                // must see the pre-loop type. Snapshot/restore the refinable outer bindings.
+                let snap = self.snapshot_refinable();
                 self.push_scope();
                 for (name, ty) in bindings {
                     self.declare(&name, ty);
@@ -2817,6 +2878,7 @@ impl Checker {
                 }
                 self.loop_depth -= 1;
                 self.pop_scope();
+                self.restore_refinable(snap);
             }
             StmtKind::While { cond, body } => {
                 self.expect_bool(cond, "while condition");
@@ -3115,11 +3177,27 @@ impl Checker {
             // `xs[i] = v` — only lists are mutable by index. Strings are immutable; other types
             // aren't indexable. (`infer_index` would green-light a str index — handle it here.)
             ExprKind::Index { obj, index } => {
+                // Refine-on-first-use for `m[k]=v` / `xs[i]=v`: when `obj` is a simple variable whose
+                // type has an `Unknown` key/value/element slot (an empty `{}`/`[]`), the supplied
+                // (idx_ty, val_ty) makes the slot concrete — re-pin the binding so a later conflicting
+                // assign is a normal mismatch. The match below then re-reads the refined type from
+                // scope. (Same simple-variable-only limitation as `refine_receiver`.)
+                self.refine_index_receiver(obj, index, &val_ty);
                 match self.infer(obj) {
                     Ty::Map(k, v) => {
                         let idx_ty = self.infer(index);
                         if !compatible(&k, &idx_ty) {
                             self.error(index.span, format!("map key must be {k}, found {idx_ty}"));
+                        }
+                        // Direct insertion-site Hashable / float-key ban: reject a non-Hashable key
+                        // expr even when the map's key type is still `Unknown` (an empty `{}`), so
+                        // `m:={}; m[1.5]=..` faults here (mirrors the literal `{1.5:..}` ban) rather
+                        // than slipping past check.
+                        if !idx_ty.is_unknown() && !self.is_hashable_key(&idx_ty) {
+                            self.error(
+                                index.span,
+                                format!("map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {idx_ty}"),
+                            );
                         }
                         self.check_assign_value(&v, op, &val_ty, target.span);
                     }
@@ -4609,6 +4687,9 @@ impl Checker {
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
         for arm in arms {
+            // Flow-sensitivity barrier (see `check_block`): each match arm is a conditionally-run
+            // body — a refinement inside one arm must not leak into a sibling arm or past the match.
+            let snap = self.snapshot_refinable();
             let irref = self.bind_match_arm(&arm.pattern, &kind, scrutinee.span, &mut covered);
             // The guard is type-checked with the arm's bindings in scope. A guarded arm is never
             // irrefutable — its guard may fail at runtime — so it can't make the match exhaustive.
@@ -4620,6 +4701,7 @@ impl Checker {
                 self.check_stmt(stmt);
             }
             self.pop_scope();
+            self.restore_refinable(snap);
         }
         self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
     }
@@ -4632,6 +4714,9 @@ impl Checker {
         let mut has_wildcard = false;
         let mut result: Option<Ty> = None;
         for arm in arms {
+            // Flow-sensitivity barrier (see `check_block`): expression-`match` arms run
+            // conditionally too — refinement inside one arm must not leak across arms or past it.
+            let snap = self.snapshot_refinable();
             let irref = self.bind_match_arm(&arm.pattern, &kind, scrutinee.span, &mut covered);
             if let Some(guard) = &arm.guard {
                 self.expect_bool(guard, "match guard");
@@ -4639,6 +4724,7 @@ impl Checker {
             has_wildcard |= irref && arm.guard.is_none();
             let t = self.infer(&arm.body);
             self.pop_scope();
+            self.restore_refinable(snap);
             result = Some(self.unify_branch(result, t, arm.body.span));
         }
         self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
@@ -4648,8 +4734,13 @@ impl Checker {
     /// Infer an expression-position `if c: a else: b`: condition is bool, the two branches unify.
     fn infer_if_else(&mut self, cond: &Expr, then: &Expr, els: &Expr) -> Ty {
         self.expect_bool(cond, "if condition");
+        // Flow-sensitivity barrier (see `check_block`): the two branch expressions run
+        // conditionally — refinement inside one must not leak into the other or past the `if`.
+        let snap = self.snapshot_refinable();
         let t_then = self.infer(then);
+        self.restore_refinable(snap.clone());
         let t_els = self.infer(els);
+        self.restore_refinable(snap);
         let acc = self.unify_branch(None, t_then, then.span);
         self.unify_branch(Some(acc), t_els, els.span)
     }
@@ -6415,6 +6506,17 @@ impl Checker {
 
     fn infer_method_call(&mut self, obj: &Expr, method: &str, args: &[Expr], span: Span) -> Ty {
         let obj_ty = self.infer(obj);
+        // Refine-on-first-use: if `obj` is a simple variable whose type has an `Unknown` element/
+        // key/value/type-arg slot (an empty literal / nullary variant / native `None`), and this is
+        // a slot-supplying mutator (`push`/`add`/`insert`/`extend`), re-pin the binding to the
+        // concrete shape the arg supplies — so a later conflicting op is a normal `check_args`
+        // mismatch and the set-element Hashable ban runs at concrete-ification. Then re-read the
+        // (possibly refined) receiver type from scope so dispatch sees the narrowed element.
+        self.refine_receiver(obj, &obj_ty, method, args);
+        let obj_ty = match &obj.kind {
+            ExprKind::Ident(name) => self.lookup(name).unwrap_or(obj_ty),
+            _ => obj_ty,
+        };
         // `.iter()` — the formal `Iterable[T]` entry point. Returns a fresh cursor typed as the
         // existing `Iterator[T]` existential (no new `Ty`), `T = iter_elem`. Handled here, BEFORE the
         // per-type dispatch, for every built-in iterable AND for an `Iterator[T]` value (a generator
@@ -7157,10 +7259,22 @@ impl Checker {
                 } else {
                     (pt.to_string(), at.to_string())
                 };
+                // Annotation hint for a collection mutator whose element slot was PINNED by an
+                // earlier push/add/insert (refine-on-first-use). An un-annotated `xs := []` reads as
+                // `list[<first element>]`; a later element of a different (e.g. protocol-sibling) type
+                // is a real mismatch — point the user at the explicit annotation that makes a
+                // mixed/protocol collection legal.
+                let hint = if i == 0 && matches!(name, "push" | "add" | "insert") {
+                    format!(
+                        " (the collection's element type was pinned to {expected} by an earlier {name}; annotate the binding, e.g. `list[<protocol>] = []`, for a mixed/protocol collection)"
+                    )
+                } else {
+                    String::new()
+                };
                 self.error(
                     arg.span,
                     format!(
-                        "argument {} of '{name}': expected {expected}, found {actual}",
+                        "argument {} of '{name}': expected {expected}, found {actual}{hint}",
                         i + 1
                     ),
                 );
@@ -7369,6 +7483,128 @@ impl Checker {
     /// user structs can be map keys / set elements, hashed via their `hash()` at runtime.
     fn is_hashable_key(&self, t: &Ty) -> bool {
         self.satisfies(t, "Hashable").is_ok()
+    }
+
+    /// Refine-on-first-use (empty-slot half of the `Ty::Unknown` soundness family). A bare empty
+    /// collection literal (`[]`/`{}`/`set()`), a nullary user-enum variant (`Box.Empty`), or the
+    /// native nullary `None` types its element/key/value/type-arg slot as `Ty::Unknown`, which is
+    /// permissive in both directions — so junk would flow into a check-blessed program and fault at
+    /// runtime, and the float-key/Hashable ban would be bypassed. This hook fires at the top of
+    /// `infer_method_call`, when a mutating method (`push`/`add`/`insert`/`extend`) on a
+    /// **simple-variable** receiver supplies a CONCRETE type at an `Unknown` slot: it structurally
+    /// merges the supplied shape into the binding, re-pins it in its owning scope, and runs the
+    /// Hashable check on a newly-concrete set element. A later op supplying an incompatible concrete
+    /// type then fails as a normal `check_args` mismatch against the now-pinned element — and the
+    /// mismatch diagnostic is enriched (in `check_args`) to hint at annotating for a mixed/protocol
+    /// collection.
+    ///
+    /// RESIDUAL HOLE (documented, not fixed here): refine only fires when the receiver is a simple
+    /// `Ident` in scope. `obj.field.push(...)` / `f().push(...)` / `xss[0].push(...)` (non-Ident
+    /// receivers) stay unrefined — struct fields are explicitly typed anyway, so the impact is low.
+    fn refine_receiver(&mut self, obj: &Expr, obj_ty: &Ty, method: &str, args: &[Expr]) {
+        // (a) simple-variable receiver only (the documented limitation).
+        let ExprKind::Ident(name) = &obj.kind else {
+            return;
+        };
+        // Must be a real in-scope binding (not a function/global-type name).
+        if self.lookup(name).is_none() {
+            return;
+        }
+        // Skip captured bindings: mirror the airlock reassignment ban — refine is a checker-side
+        // narrowing, but skipping it here keeps behavior aligned and avoids a confusing diagnostic.
+        if self.is_captured(name) {
+            return;
+        }
+        // (b) the binding must have an Unknown in a SLOT position (not a bare top-level Unknown —
+        // that's the cascade-suppression sentinel and must stay permissive).
+        if !contains_unknown_in_slot(obj_ty) {
+            return;
+        }
+        // (c) determine the supplied ELEMENT type from a slot-supplying mutator's args.
+        // `push(x)`/`add(x)`/`insert(x)` supply the element directly; `extend(xs)` supplies a
+        // list/set whose element refines ours.
+        let mark = self.errors.len();
+        let elem = match method {
+            "push" | "add" | "insert" => args.first().map(|a| self.infer_value(a)),
+            "extend" => args.first().map(|a| match self.infer_value(a) {
+                Ty::List(e) | Ty::Set(e) => *e,
+                other => other,
+            }),
+            _ => return,
+        };
+        let Some(elem) = elem else { return };
+        // Wrap the element into a RECEIVER-SHAPED value so the structural merge lines up the slot:
+        // a list receiver merges with `list[elem]`, a set receiver with `set[elem]`. Any other
+        // receiver kind isn't a push/add/extend target, so nothing to refine.
+        let shape = match obj_ty {
+            Ty::List(_) => Ty::list(elem),
+            Ty::Set(_) => Ty::set(elem),
+            _ => return,
+        };
+        // (d) cascade invariant: if inferring the arg itself reported an error, don't refine.
+        if self.errors.len() != mark {
+            return;
+        }
+        // A shape that is itself Unknown supplies nothing concrete; merge is a no-op, bail early.
+        if shape.is_unknown() {
+            return;
+        }
+        let merged = merge_unknown(obj_ty, &shape);
+        if merged == *obj_ty {
+            return; // nothing newly concrete
+        }
+        // Run the Hashable / float-key ban at the moment a SET element becomes concrete (the sig
+        // tables don't). Map keys are handled in the `m[k]=v` index-assign refine path.
+        if let Ty::Set(e) = &merged
+            && !e.is_unknown()
+            && !self.is_hashable_key(e)
+        {
+            self.error(
+                obj.span,
+                format!("set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {e}"),
+            );
+        }
+        self.repin(name, merged);
+    }
+
+    /// Refine-on-first-use for an index-assign `m[k]=v` / `xs[i]=v` (the assignment-statement
+    /// sibling of [`Self::refine_receiver`]). When the receiver is a simple variable whose type has
+    /// an `Unknown` key/value/element slot, merge the supplied (index type, value type) shape into
+    /// the binding, re-pin it, and run the Hashable / float-key ban on a newly-concrete MAP key.
+    /// `val_ty` is already inferred by the caller; we infer the index type here only when the
+    /// receiver is actually refinable (so we don't double-report on the common already-typed path).
+    fn refine_index_receiver(&mut self, obj: &Expr, index: &Expr, val_ty: &Ty) {
+        let ExprKind::Ident(name) = &obj.kind else {
+            return;
+        };
+        let Some(obj_ty) = self.lookup(name) else {
+            return;
+        };
+        if self.is_captured(name) || !contains_unknown_in_slot(&obj_ty) {
+            return;
+        }
+        if val_ty.is_unknown() {
+            return;
+        }
+        // The supplied shape mirrors the receiver kind: `Map(idx, val)` for a map, `List(val)` for a
+        // list (index type is the int position, irrelevant to the element slot).
+        let mark = self.errors.len();
+        let shape = match &obj_ty {
+            Ty::Map(..) => Ty::map(self.infer(index), val_ty.clone()),
+            Ty::List(..) => Ty::list(val_ty.clone()),
+            _ => return,
+        };
+        if self.errors.len() != mark {
+            return;
+        }
+        let merged = merge_unknown(&obj_ty, &shape);
+        if merged == obj_ty {
+            return;
+        }
+        // NOTE: the map-key Hashable / float-key ban is NOT run here — it is the direct
+        // insertion-site check in `check_assign`'s Index branch (so it fires even while the key type
+        // is still `Unknown`, e.g. `m:={}; m[1.5]=..`), keeping a single owner and no double-report.
+        self.repin(name, merged);
     }
 
     /// Assignability with protocol-existential awareness. Like the free [`compatible`], but a
@@ -9122,6 +9358,88 @@ fn ty_fully_concrete(ty: &Ty) -> bool {
         Ty::Tuple(ts) => ts.iter().all(ty_fully_concrete),
         Ty::Func { params, ret } => params.iter().all(ty_fully_concrete) && ty_fully_concrete(ret),
         _ => true,
+    }
+}
+
+/// True iff `t` is a COMPOUND type whose recursive structure contains a `Ty::Unknown` anywhere in a
+/// type-argument / element / key / value position. A bare top-level `Ty::Unknown` returns FALSE —
+/// that is the cascade-suppression sentinel (a real type error already happened, or a permissive
+/// receiver); refining it would fight cascade-suppression. Drives the refine-on-first-use gate: we
+/// only narrow a binding whose empty-slot Unknown is reachable, never the bare sentinel.
+fn contains_unknown_in_slot(t: &Ty) -> bool {
+    fn has_unknown(t: &Ty) -> bool {
+        match t {
+            Ty::Unknown => true,
+            Ty::List(x)
+            | Ty::Option(x)
+            | Ty::Set(x)
+            | Ty::Channel(x)
+            | Ty::Shared(x)
+            | Ty::Atomic(x) => has_unknown(x),
+            Ty::Map(k, v) => has_unknown(k) || has_unknown(v),
+            Ty::Result(a, b) => has_unknown(a) || has_unknown(b),
+            Ty::Struct(_, a) | Ty::Enum(_, a) => a.iter().any(has_unknown),
+            Ty::Tuple(ts) => ts.iter().any(has_unknown),
+            _ => false,
+        }
+    }
+    match t {
+        Ty::Unknown => false, // bare sentinel — never refine
+        _ => has_unknown(t),
+    }
+}
+
+/// Structural merge for refine-on-first-use: fill `Ty::Unknown` slots in `a` with the corresponding
+/// concrete slot from `shape`, recursing to arbitrary depth (so `list[Option[Box[int]]]` fills in a
+/// single merge). A bare `Unknown` in `a` becomes `shape` (when `shape` is concrete). For matching
+/// compounds (List/Set/Option/Channel/Shared/Atomic ×1, Map/Result ×2, Tuple ×n, Struct/Enum by
+/// NAME + arity) it recurses pairwise. On a shape-NAME or arity mismatch (e.g. pushing a different
+/// generic enum) it leaves `a` unchanged — no refine — so the normal `check_args` mismatch fires.
+fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
+    use Ty::*;
+    if shape.is_unknown() {
+        return a.clone();
+    }
+    if a.is_unknown() {
+        return shape.clone();
+    }
+    match (a, shape) {
+        (List(ae), List(se)) => List(Box::new(merge_unknown(ae, se))),
+        (Set(ae), Set(se)) => Set(Box::new(merge_unknown(ae, se))),
+        (Option(ae), Option(se)) => Option(Box::new(merge_unknown(ae, se))),
+        (Channel(ae), Channel(se)) => Channel(Box::new(merge_unknown(ae, se))),
+        (Shared(ae), Shared(se)) => Shared(Box::new(merge_unknown(ae, se))),
+        (Atomic(ae), Atomic(se)) => Atomic(Box::new(merge_unknown(ae, se))),
+        (Map(ak, av), Map(sk, sv)) => Map(
+            Box::new(merge_unknown(ak, sk)),
+            Box::new(merge_unknown(av, sv)),
+        ),
+        (Result(at, ae), Result(st, se)) => Result(
+            Box::new(merge_unknown(at, st)),
+            Box::new(merge_unknown(ae, se)),
+        ),
+        (Tuple(ats), Tuple(sts)) if ats.len() == sts.len() => Tuple(
+            ats.iter()
+                .zip(sts)
+                .map(|(x, y)| merge_unknown(x, y))
+                .collect(),
+        ),
+        (Struct(an, aa), Struct(sn, sa)) if an == sn && aa.len() == sa.len() => Struct(
+            an.clone(),
+            aa.iter()
+                .zip(sa)
+                .map(|(x, y)| merge_unknown(x, y))
+                .collect(),
+        ),
+        (Enum(an, aa), Enum(sn, sa)) if an == sn && aa.len() == sa.len() => Enum(
+            an.clone(),
+            aa.iter()
+                .zip(sa)
+                .map(|(x, y)| merge_unknown(x, y))
+                .collect(),
+        ),
+        // Shape/name/arity mismatch: leave `a` unchanged (no refine — normal mismatch fires later).
+        _ => a.clone(),
     }
 }
 

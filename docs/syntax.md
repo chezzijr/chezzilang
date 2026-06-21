@@ -1440,6 +1440,20 @@ List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.c
 and `xs.sort_by_key(fn(x) -> K)` — sort by a derived key (`K` Comparable: int/float/str or a struct
 with `compare`), stable, in place.
 
+> **Empty-collection element typing (refine-on-first-use).** An un-annotated empty `[]` / `{}` /
+> `set()` has no element/key type yet; the **first** mutating op on the binding — `.push`/`.add`/
+> `.insert`/`.extend`, or `m[k]=v` — **pins** the element/key/value type, and later ops are checked
+> against that pinned type. So `out := []; out.push(1)` is `list[int]` and a later `out.push("s")` is a
+> type error (it would read as `list[int]`). A **heterogeneous / protocol** collection therefore needs
+> an explicit annotation — `shapes: list[Shape] = []` — which is also clearer to readers. The
+> `Hashable` key/element ban applies the moment the type is concrete (and a non-Hashable key/element
+> like a `float` is rejected at the insertion site even on an empty `{}`/`set()`). Refinement is
+> **block-local**: a pin inside one `if`/`else`/`match` arm or a loop body does not leak into a sibling
+> arm or past the branch (each arm refines independently; only an on-all-paths pin persists).
+> Limitations: refinement fires only on a **simple-variable** receiver (`obj.field.push(…)` /
+> `xss[0].push(…)` are not refined — annotate those), and mixing types *across* branch arms / after a
+> branch is not yet caught.
+
 Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
 `m.merge(n)→map` (new map, `n` wins on a key clash) and `m.update(n)` (write `n` into `m` in place,
 → nil); `m[k]` reads (errors on a missing key), `m[k] = v` inserts/updates. Iterate with `for k in m`

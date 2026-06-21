@@ -11,6 +11,39 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Soundness fix — empty-collection / nullary-variant / `None` `Ty::Unknown` slot is now closed via
+FULL refine-on-first-use + insertion-site Hashable check + BLOCK-LOCAL flow-sensitivity (the
+empty-slot half of the `Ty::Unknown`-is-assignable family; sibling to the recursive-return fix below).**
+A bare empty literal (`[]`/`{}`/`set()`), a nullary user-enum variant (`Box.Empty`), or native `None`
+typed its element/key/value/type-arg slot as the permissive `Ty::Unknown`, which nothing later refined —
+so `x:=[]; x.push(1); x.push("s")` passed `check` then faulted at runtime, and the deliberate
+float-key/Hashable ban was bypassed (`m:={}; m[1.5]=...`, `s:=set(); s.add(nan)`). Fix (checker-only,
+`checker/mod.rs`): `refine_receiver` (top of `infer_method_call`) and `refine_index_receiver`
+(`check_assign` Index branch) — when a **simple-variable** binding's type carries `Unknown` in a slot
+(detected by `contains_unknown_in_slot`, recursing through list/set/map/Option/Result/tuple/Channel/
+Shared/Atomic and user generic struct/enum), the FIRST mutating op (`.push`/`.add`/`.insert`/`.extend` /
+`x[k]=v`) that supplies a concrete type RE-PINS the binding at that slot via `merge_unknown` (which
+recurses into nested type params — `list[Option[Unknown]]` + `Some(5)` → `list[Option[int]]`, `[Box.Empty]`
++ `Box.Full("hi")` → `list[Box[str]]`). A later INCOMPATIBLE concrete type is then a normal `check_args`
+mismatch, enriched to hint at annotating for a mixed/protocol collection. Heterogeneous/protocol
+collections now REQUIRE an explicit annotation (`shapes: list[Shape] = []`) — intended and clearer.
+Non-Hashable keys/elements are rejected by a DIRECT insertion-site `is_hashable_key` check at `m[k]=v`
+(fires even while the key type is still `Unknown`) and at set-element concrete-ification. **Block-local
+flow-sensitivity** (`snapshot_refinable`/`restore_refinable` wrapping `check_block`, the `for` body, and
+`match`/`if`-expr arms): a refinement inside one branch arm does NOT leak into a sibling arm or
+post-branch — `xs:=[]` + `if c: xs.push(1) else: xs.push("s")` is accepted (each arm refines from the
+pre-branch type), while a straight-line on-all-paths refinement persists (catches the real bug).
+**Residuals** (documented): simple-variable-receiver-only (`obj.field`/`f()`/`xss[0]` unrefined), and
+cross/post-branch mixing needs join reconciliation (no false rejection, no leak). **Golden-test
+checker-bypass fixed:** the golden tests drive `run_capture`, which BYPASSES the Checker, so a checker
+regression on a shipped example shipped falsely green — added `checker::tests::all_shipped_examples_typecheck`
+(build_graph + check_graph over every `examples/*.chz`, two intentional run-only demos `panic.chz` /
+`explicit_type_args.chz` allow-listed) and annotated `examples/poly_method.chz` `list[Shape]` under the
+new rule. Checker-only ⇒ VM==interp parity automatic (newly-failing programs fail `check` before either
+engine runs; passing programs run byte-identical). All 2394 tests green; clippy + conformance clean.
+`gaps.md` updated (empty-collection + generic-nullary-variant producers RESOLVED; all three `Unknown`-in-slot
+producers now closed).
+
 **✅ Soundness fix — return-type inference is now ORDER-INDEPENDENT (fixpoint), closing the
 recursive/forward-reference half of the `Ty::Unknown`-is-assignable hole.** The checker inferred
 function/method return types in a single SOURCE-ORDER pass and bailed to `Ty::Unknown` whenever the

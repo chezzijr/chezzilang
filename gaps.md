@@ -51,26 +51,41 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
   (two-engine parity preserved). Same-quote nesting (`"{"a"}"`) still errors at the *lexer*
   (pre-3.12-Python limit) — out of scope. Pinned by `checker::tests::interpolation_*`.
 
-- **🔴 Empty collection literals (`[]` / `{}` / `set()`) get an unrefinable `Ty::Unknown` element →
-  `check` unsound + the deliberate float-key ban is bypassed.** `infer_list` / `infer_set` / `infer_map`
-  (`checker/mod.rs:4777`+) type an empty literal's element as `Ty::Unknown` — the permissive
-  "already-errored" sentinel (compatible-with-anything; the `Hashable` key/element check is skipped via
-  `!et.is_unknown()`). A NON-empty literal pins and checks the element correctly; only the *empty* form is
-  unsound, and nothing later refines it (`.push` / `[k]=` never narrows the binding). It propagates
-  through inferred returns (`fn make(): return []`), comprehensions (`[x for x in []]`), and closures.
-  - **Mixed-type elements accepted:** `x := []; x.push(1); x.push("s")` passes `check`; a downstream op
-    (`x[1] + 1`, or summing the list into an int) then faults at runtime.
-  - **Reopens the NaN footgun the float-key ban exists to prevent:** literal `{1.5: "b"}` is correctly
-    rejected ("map key type must implement Hashable … found float"), but `m := {}; m[1.5] = "b"` and
-    `s := set(); s.add(1.5)` slip through. With a NaN (`inf := 1e308 * 10.0; nan := inf - inf`):
-    `s.add(nan); s.add(nan); s.len()` is **2** (two identical NaNs) and `nan in s` is **false** — exactly
-    the footgun.
-  - Minor downstream: `.sort()` on a now-heterogeneous list is a silent no-op (no error).
-  - Workaround: annotate — `x: list[int] = []` is checked correctly.
-  - **Pre-emptive fix:** make an empty literal's element a real unification variable (not `Ty::Unknown`)
-    tied to the binding, and unify it on the first `.push` / insert / index-set; OR reject a bare
-    `[]` / `{}` / `set()` whose element can't be inferred from context with "cannot infer element type —
-    add an annotation". Either way run the `Hashable` key/element check once the element is concrete.
+- **✅ RESOLVED (2026-06-21) — Empty collection literals (`[]` / `{}` / `set()`) no longer ship an
+  unrefinable `Ty::Unknown` element.** Closed via **full refine-on-first-use** (`checker/mod.rs`
+  `refine_receiver` at the top of `infer_method_call`; `refine_index_receiver` in `check_assign`'s
+  Index branch). When a LOCAL binding (simple variable only) has a type carrying `Unknown` in an
+  element/key/value/type-arg slot (recursing through list/set/map/Option/Result/tuple/Channel/Shared/
+  Atomic and user generic struct/enum via `contains_unknown_in_slot` + `merge_unknown`), the FIRST
+  mutating op that supplies a concrete type (`.push`/`.add`/`.insert`/`.extend` / `x[k]=v`) re-pins the
+  binding at that slot; a later op supplying an INCOMPATIBLE concrete type is then a normal mismatch,
+  enriched to hint at annotating for a mixed/protocol collection.
+  - **Mixed-type elements now rejected:** `x := []; x.push(1); x.push("s")` is a type error. So is the
+    nested-typeparam (`[None]` then conflicting `Some`) and nullary-variant (`[Box.Empty]` then
+    conflicting `Box.Full`) form. Heterogeneous/protocol collections now REQUIRE an explicit
+    annotation (`shapes: list[Shape] = []`) — intended; an annotated binding has a concrete element
+    type so refinement never engages and pushes check against the protocol as before.
+  - **Float-key / NaN footgun closed:** `m := {}; m[1.5] = "b"` and `s := set(); s.add(1.5)` (and the
+    NaN `inf - inf`) are rejected — via a DIRECT insertion-site `is_hashable_key` check at `m[k]=v`
+    (so it fires even while the key type is still `Unknown`) and at set-element concrete-ification in
+    `refine_receiver`.
+  - **Refinement is BLOCK-LOCAL flow-sensitive** (`snapshot_refinable`/`restore_refinable` wrapping
+    every conditionally-run body: `check_block` (if/else/while/defer), the `for` body, and `match`/
+    `if`-expr arms): a refinement inside one branch arm does NOT leak into a sibling arm or post-branch.
+    `xs := []` + `if c: xs.push(1) else: xs.push("s")` is accepted (each arm refines independently);
+    a straight-line on-all-paths refinement still persists (catches the real bug).
+  - **Residuals (documented):** (1) **simple-variable receiver only** — `obj.field.push(…)` /
+    `f().push(…)` / `xss[0].push(…)` are not refined (struct fields are explicitly typed, low impact);
+    (2) **cross-branch / post-branch mixing is not caught** (e.g. push int in one arm, str after the
+    branch) — that needs full join reconciliation, a follow-up — but there is NO false rejection and
+    NO leak.
+  - **Golden-test checker-bypass fixed:** the golden example tests drive `run_capture`, which BYPASSES
+    the Checker, so a checker regression on a shipped example shipped falsely green. Added
+    `checker::tests::all_shipped_examples_typecheck` (build_graph + check_graph over every
+    `examples/*.chz`, mirroring `chezzi check`; two intentional run-only demos allow-listed) so example
+    type-errors are caught from now on. `examples/poly_method.chz` was annotated `list[Shape]` under
+    the new rule. Pinned by `checker::tests::{empty_list_*, empty_map_*, empty_set_*, flow_sensitive_*,
+    heterogeneous_struct_list_unannotated_rejected, …}`.
 
 - **🟡 `int`→`float` coercion is inconsistent — silently allowed in binary operators, forbidden
   everywhere else.** `docs/syntax.md:1621` states the contract "No implicit `int`→`float`", and it IS
@@ -131,25 +146,26 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
     (Divergent CONCRETE returns remain the user's job to annotate — `-> T` or a protocol existential
     `-> Stringable`; with no annotation conflicting concretes are a `expected return type …, found …`
     error. No union types.)
-  - **Nullary variant of a generic enum (and `None`).** `Box.Empty` of `enum Box[T]` infers `T = Unknown`;
-    a `list[Box[Unknown]]` then accepts `Box.Full` payloads of any type, and the bound-out payload is
-    `Unknown`:
+  - **Nullary variant of a generic enum (and `None`). ✅ RESOLVED** by the same refine-on-first-use
+    pass (the slot Unknown is nested in the user-enum / Option type arg; `merge_unknown` recurses into
+    it). `xs := [Box.Empty]; xs.push(Box.Full("hi"))` pins `list[Box[str]]`, so a conflicting
+    `Box.Full(5)` push is a type error; likewise `[None]` + conflicting `Some` pushes:
     ```chezzi
     enum Box[T]:
         Full(T)
         Empty
     xs := [Box.Empty]
-    xs.push(Box.Full("hi"))
-    match xs[1]:
-        Box.Full(x): print(x + 1)     # check ok; run → cannot apply Add to str and int
-        Box.Empty:   print("e")
+    xs.push(Box.Full("hi"))   # pins list[Box[str]]
+    xs.push(Box.Full(5))      # ✅ check REJECTS (expected Box[str], found Box[int])
     ```
   **Status:** the recursive/forward-reference-return producer is **✅ RESOLVED** via fixpoint inference
-  (above). The **empty-collection** producer is handled by its own (sibling) task; the
-  **generic-nullary-variant** (`Box.Empty` / `None`) producer remains open. **Remaining fix** for those:
-  stop treating `Unknown` as universally assignable into/out of *concrete* declared types — at an
-  assignment/arg/return boundary where the expected type is concrete and the actual is `Unknown`, either
-  defer to a unification variable resolved on use, or require an annotation.
+  (above). The **empty-collection** AND **generic-nullary-variant** (`Box.Empty` / `None`) producers are
+  now **✅ RESOLVED** via full refine-on-first-use + insertion-site Hashable check + block-local
+  flow-sensitivity (see the resolved entry above; residuals: simple-variable-receiver-only, and
+  cross/post-branch mixing needs join reconciliation). All three reachable `Unknown`-in-slot producers
+  are closed; `Unknown` remains permissive only as the bare cascade-suppression sentinel (which is by
+  design — `contains_unknown_in_slot` returns FALSE for a bare top-level `Unknown`, so refinement never
+  fights cascade-suppression).
 
 - **🟡 Import name collisions are silently mis-resolved (checker ↔ runtime can even disagree).**
   `bind_import` records value members via `declare()` but function members into a separate `self.functions`
