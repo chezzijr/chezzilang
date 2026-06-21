@@ -7478,3 +7478,171 @@ fn all_shipped_examples_typecheck() {
         failures.join("\n")
     );
 }
+
+// === Import name collisions (soundness) + duplicate binder in one pattern ===
+
+/// Build a multi-file graph from (rel, src) pairs (first must be `main.chz`) and check it.
+fn check_files(files: &[(&str, &str)]) -> Vec<CheckError> {
+    let t = TmpDir::new();
+    let mut entry = None;
+    for (rel, src) in files {
+        let p = t.write(rel, src);
+        if *rel == "main.chz" {
+            entry = Some(p);
+        }
+    }
+    let graph =
+        crate::resolver::build_graph(&entry.expect("a main.chz")).expect("resolve should succeed");
+    match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    }
+}
+
+fn files_reject(files: &[(&str, &str)], needle: &str) {
+    let errs = check_files(files);
+    assert!(
+        errs.iter().any(|e| e.message.contains(needle)),
+        "expected an error containing {needle:?}, got: {errs:?}"
+    );
+}
+
+fn files_ok(files: &[(&str, &str)]) {
+    let errs = check_files(files);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// UNSOUND case: `import v from vmod` (a value) then `import v from fmod` (a fn) — checker resolved
+/// `v` to the value, runtime binds the function → `v + 1` faulted at runtime. Must be a check error.
+#[test]
+fn import_value_then_fn_same_name_rejected() {
+    files_reject(
+        &[
+            ("vmod.chz", "v := 42\n"),
+            ("fmod.chz", "fn v() -> int:\n    return 7\n"),
+            (
+                "main.chz",
+                "import v from vmod\nimport v from fmod\nfn main():\n    print(v + 1)\n",
+            ),
+        ],
+        "is already imported",
+    );
+}
+
+/// WRONG/SILENT case: two `fn f` from different modules, last-wins, no error. Must be a check error.
+#[test]
+fn duplicate_from_import_fn_rejected() {
+    files_reject(
+        &[
+            ("lib.chz", "fn f() -> int:\n    return 1\n"),
+            ("lib2.chz", "fn f() -> int:\n    return 99\n"),
+            (
+                "main.chz",
+                "import f from lib\nimport f from lib2\nprint(f())\n",
+            ),
+        ],
+        "is already imported",
+    );
+}
+
+/// Two structs of the same name from different modules. Must be a check error.
+#[test]
+fn duplicate_from_import_struct_rejected() {
+    files_reject(
+        &[
+            ("a.chz", "struct P:\n    x: int\n"),
+            ("b.chz", "struct P:\n    y: int\n"),
+            ("main.chz", "import P from a\nimport P from b\n"),
+        ],
+        "is already imported",
+    );
+}
+
+/// Distinct from-imports must still pass.
+#[test]
+fn distinct_from_imports_ok() {
+    files_ok(&[
+        ("lib.chz", "fn f() -> int:\n    return 1\n"),
+        ("lib2.chz", "fn g() -> int:\n    return 2\n"),
+        (
+            "main.chz",
+            "import f from lib\nimport g from lib2\nprint(f() + g())\n",
+        ),
+    ]);
+}
+
+/// Two whole-module imports with distinct bind names (one aliased) must still pass.
+#[test]
+fn import_module_as_alias_ok() {
+    files_ok(&[
+        ("a.chz", "fn f() -> int:\n    return 1\n"),
+        ("b.chz", "fn f() -> int:\n    return 2\n"),
+        (
+            "main.chz",
+            "import a\nimport b as c\nprint(a.f() + c.f())\n",
+        ),
+    ]);
+}
+
+/// `import v as w` + `import f as w` (both alias to `w`) must collide on the bind name.
+#[test]
+fn import_alias_collision_rejected() {
+    files_reject(
+        &[
+            ("vmod.chz", "v := 42\n"),
+            ("fmod.chz", "fn f() -> int:\n    return 7\n"),
+            (
+                "main.chz",
+                "import v as w from vmod\nimport f as w from fmod\n",
+            ),
+        ],
+        "is already imported",
+    );
+}
+
+/// A tuple pattern binding the same name twice must be a compile error.
+#[test]
+fn duplicate_tuple_pattern_binder_rejected() {
+    rejects(
+        "fn f(t: (int, int)) -> int:\n    match t:\n        (x, x): return x\n        _: return -1\n",
+        "is bound more than once",
+    );
+}
+
+/// An enum-variant payload binding the same name twice must be a compile error.
+#[test]
+fn duplicate_enum_payload_binder_rejected() {
+    rejects(
+        "enum E:\n    V(int, int)\nfn f(e: E) -> int:\n    match e:\n        E.V(a, a): return a\n        _: return -1\n",
+        "is bound more than once",
+    );
+}
+
+/// A nested duplicate binder (tuple inside a variant) must be caught too.
+#[test]
+fn duplicate_nested_pattern_binder_rejected() {
+    rejects(
+        "enum E:\n    V((int, int))\nfn f(e: E) -> int:\n    match e:\n        E.V((a, a)): return a\n        _: return -1\n",
+        "is bound more than once",
+    );
+}
+
+/// `_` repeated in a pattern binds nothing → must still be OK.
+#[test]
+fn wildcard_repeated_in_pattern_ok() {
+    ok("fn f(t: (int, int)) -> int:\n    match t:\n        (_, _): return 0\n");
+}
+
+/// The same binder name reused across SEPARATE arms is fine (distinct scopes).
+#[test]
+fn same_binder_across_arms_ok() {
+    ok("fn f(t: int) -> int:\n    match t:\n        0: return 0\n        x: return x\n");
+}
+
+/// An or-pattern binding the same names across DIFFERENT alternatives is legal.
+#[test]
+fn or_pattern_same_names_across_alts_ok() {
+    ok(
+        "enum E:\n    A(int)\n    B(int)\nfn f(e: E) -> int:\n    match e:\n        E.A(x) | E.B(x): return x\n",
+    );
+}

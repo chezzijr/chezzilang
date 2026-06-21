@@ -11,6 +11,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Soundness fix — two missing duplicate/collision checks in the checker are now rejected (both
+checker-only; two-engine parity preserved by construction — rejected programs never reach an engine,
+accepted programs are byte-identical).** (1) **Import name collisions.** `bind_import` recorded a value
+member via `declare()`, a function member into a separate `self.functions` map, and a module into
+`imported_modules`, with **no cross-namespace duplicate check** — so `import v from vmod` (value) +
+`import v from fmod` (fn) was UNSOUND (the checker resolved `v` to the value and `v + 1` type-checked,
+but the runtime bound the function and faulted `cannot apply Add to function and int`), and `import f
+from lib` + `import f from lib2` silently last-won. Fix: a per-module `import_binds: HashMap<String,
+Span>` records every import bind-name across ALL namespaces; a second bind of an already-imported name
+errors `'<name>' is already imported` (the bind-name = alias when present, so distinct names and `import
+mod as alias` still pass; a missing member stays its own error). (2) **Duplicate binder in one pattern.**
+`(x, x)` / `E.V(a, a)` was neither rejected nor treated as an equality constraint — it matched ANY
+values and the arm was wrongly irrefutable (`f((3,9))` returned 9, not -1). Fix: `bind_match_arm` runs a
+new `first_duplicate_binder` over each (non-Or, non-Wildcard) pattern and errors `identifier '<name>' is
+bound more than once in this pattern` (Rust's rule); covers tuple / enum-payload / nested patterns. `_`
+repeated, a name reused across SEPARATE arms, and an or-pattern `A(x) | B(x)` all stay legal. All in
+`src/checker/mod.rs`; tests in `src/checker/tests.rs` (6 reject + 6 `*_ok` regression fences). `gaps.md`
+"Import name collisions" + "Duplicate binding in a single pattern" → RESOLVED. Full `cargo test` +
+`cargo test conformance` green; `cargo clippy --all-targets -- -D warnings` clean.
+
 **✅ Soundness fix — empty-collection / nullary-variant / `None` `Ty::Unknown` slot is now closed via
 FULL refine-on-first-use + insertion-site Hashable check + BLOCK-LOCAL flow-sensitivity (the
 empty-slot half of the `Ty::Unknown`-is-assignable family; sibling to the recursive-return fix below).**

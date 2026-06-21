@@ -167,35 +167,23 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
   design — `contains_unknown_in_slot` returns FALSE for a bare top-level `Unknown`, so refinement never
   fights cascade-suppression).
 
-- **🟡 Import name collisions are silently mis-resolved (checker ↔ runtime can even disagree).**
-  `bind_import` records value members via `declare()` but function members into a separate `self.functions`
-  map (and modules into `imported_modules`), with **no cross-namespace duplicate check** — while a local
-  name colliding with an import IS correctly rejected ("function 'f' is already defined"). Two failures:
-  - **Unsound — checker and runtime pick different bindings.** `import v from vmod` (a value `v := 42`) +
-    `import v from fmod` (a `fn v()`): `check` resolves `v` to the value (`v + 1` type-checks), runtime
-    resolves to the function → `runtime error: cannot apply Add to function and int`. check ok, run fails.
-  - **Wrong/silent — duplicate `from`-imports last-win.** `import f from lib` + `import f from lib2`
-    (both export `fn f`, returning 1 vs 99) → no error; `f()` is 99 (or 1 if the imports are reversed).
-    Same for two `Point` structs of different layout. Should be a duplicate-binding error like the local case.
-  **Pre-emptive fix:** in `bind_import`, check the name against all three import namespaces (values,
-  functions, modules) + locals before binding; reject a second binding of an already-bound import name.
+- **✅ RESOLVED — Import name collisions are now rejected (checker ↔ runtime no longer disagree).**
+  `bind_import` records every import bind-name (across values / functions / modules / type-names) into a
+  per-module `import_binds` set; a second import binding an already-bound name is rejected with `'<name>'
+  is already imported`. Catches both the unsound value-then-fn case (`import v` value + `import v` fn) and
+  the wrong/silent duplicate `from`-import case (`import f from lib` + `import f from lib2`, two `Point`
+  structs, etc.). Distinct names + `import mod as alias` still pass; a missing member stays its own error.
+  Tests in `src/checker/tests.rs` (`import_value_then_fn_same_name_rejected`, `duplicate_from_import_*`,
+  `import_alias_collision_rejected`, + the `*_ok` regression fences).
 
-- **🟡 Duplicate binding in a single pattern (`(x, x)`, `V(a, a)`) silently last-wins and is treated as
-  irrefutable.** A pattern that binds the same name twice is neither rejected as a duplicate binding nor
-  treated as an equality constraint — it matches *any* values, keeps the last, and the arm is wrongly
-  considered exhaustive:
-  ```chezzi
-  fn f(t: (int, int)) -> int:
-      match t:
-          (x, x): return x          # matches ANY pair; x = the 2nd element
-          _: return -1
-  print(f((3, 3)))   # 3
-  print(f((3, 9)))   # 9  ← expected -1 (or a compile error); (x,x) matched a non-equal pair
-  ```
-  If the two positions differ in type, the second binding wins the type too (confirming last-wins rebind,
-  not equality). Reproduces on enum payloads (`V(a, a)`). **Pre-emptive fix:** reject a repeated binder
-  in one pattern with "identifier 'x' is bound more than once in this pattern" (Rust's rule), in the
-  pattern-collection pass of the checker.
+- **✅ RESOLVED — Duplicate binding in a single pattern (`(x, x)`, `V(a, a)`) is now a compile error.**
+  `bind_match_arm` runs `first_duplicate_binder` over each (non-Or, non-Wildcard) pattern and rejects a
+  repeated binder with `identifier '<name>' is bound more than once in this pattern` (Rust's rule).
+  Covers tuple, enum-variant payload, and nested patterns; `_` repeated stays OK (binds nothing), a name
+  reused across SEPARATE arms stays OK, and an or-pattern `A(x) | B(x)` (same names across distinct alts)
+  stays OK. Tests: `duplicate_tuple_pattern_binder_rejected`, `duplicate_enum_payload_binder_rejected`,
+  `duplicate_nested_pattern_binder_rejected`, `wildcard_repeated_in_pattern_ok`, `same_binder_across_arms_ok`,
+  `or_pattern_same_names_across_alts_ok`.
 
 - **🟡 `--serial` lets a generator cross the `spawn`/`parallel:` airlock — engine-parity divergence; the
   oracle is the unsound one.** A live generator captured as a module global and driven from inside a

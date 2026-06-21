@@ -675,6 +675,13 @@ struct Checker {
     module_sigs: HashMap<ModuleId, ModuleSig>,
     /// Names bound to an imported module in the *current* module → which module they refer to.
     imported_modules: HashMap<String, ModuleId>,
+    /// Every name an `import`/`import … from` binds in the *current* module → the span of its first
+    /// import, across ALL import namespaces (values, functions, modules, type-names). Used to reject
+    /// a SECOND import binding the same name (`import f from lib` + `import f from lib2`, or
+    /// value-then-fn `import v` + `import v`), which the separate namespace tables otherwise let pass
+    /// last-wins (and which makes the checker and runtime disagree on the binding). Per-module:
+    /// cleared in `begin_module`.
+    import_binds: HashMap<String, Span>,
     /// Type names `from`-imported into the *current* module that resolve to an aliased `Ty`
     /// (`import Len from m` where `m` declares `type Len = int32`). Resolved in the DEFINING module's
     /// scope and injected here so `resolve_type` returns the right underlying type. Per-module.
@@ -787,6 +794,7 @@ impl Checker {
             collected_rets: Vec::new(),
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
+            import_binds: HashMap::new(),
             imported_alias_tys: HashMap::new(),
             imported_alias_ctypes: HashMap::new(),
             extern_sigs: ExternTable::new(),
@@ -882,6 +890,7 @@ impl Checker {
         self.functions.clear();
         self.type_params.clear();
         self.imported_modules.clear();
+        self.import_binds.clear();
         self.imported_alias_tys.clear();
         self.imported_alias_ctypes.clear();
         self.imported_poly.clear();
@@ -961,6 +970,19 @@ impl Checker {
         sig
     }
 
+    /// Record that `bind` is bound by an import at `span`. Returns `true` if this name was ALREADY
+    /// bound by an earlier import in this module — the caller then emits the duplicate-import error
+    /// and skips re-binding. Spans across ALL import namespaces (values/functions/modules/types) so a
+    /// value-then-fn or fn-then-fn collision is caught (which the separate tables otherwise miss).
+    fn note_import_bind(&mut self, bind: &str, span: Span) -> bool {
+        if self.import_binds.contains_key(bind) {
+            self.error(span, format!("'{bind}' is already imported"));
+            return true;
+        }
+        self.import_binds.insert(bind.to_string(), span);
+        false
+    }
+
     /// Bind an import into the current module: a whole-module import becomes a `Ty::Module` name;
     /// a `from` import injects each member (function/value) into scope, validating it exists.
     fn bind_import(&mut self, imp: &ResolvedImport) {
@@ -969,6 +991,9 @@ impl Checker {
                 let name = alias
                     .clone()
                     .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                if self.note_import_bind(&name, imp.span) {
+                    return;
+                }
                 self.imported_modules
                     .insert(name.clone(), imp.target.clone());
                 self.declare(&name, Ty::Module(name.clone()));
@@ -1045,6 +1070,16 @@ impl Checker {
                     .unwrap_or_default();
                 for (member, alias) in names {
                     let bind = alias.as_ref().unwrap_or(member);
+                    // Reject a second import binding the same name (across ALL namespaces), but only
+                    // when the member actually exists — a missing member is its own error below, and
+                    // shouldn't also claim the name. The bind-name (alias wins) is the collision key,
+                    // so `import x as y` + `import z as y` collides while distinct names don't.
+                    let member_exists = sig.functions.contains_key(member)
+                        || sig.values.contains_key(member)
+                        || sig.types.contains(member);
+                    if member_exists && self.note_import_bind(bind, imp.span) {
+                        continue;
+                    }
                     if let Some(fsig) = sig.functions.get(member) {
                         self.functions.insert(bind.clone(), fsig.clone());
                         // Carry the numeric-polymorphism marker onto the imported name (gap #12).
@@ -4379,6 +4414,16 @@ impl Checker {
             }
             self.enforce_or_consistency(&binders, span);
             return irref;
+        }
+        // Reject a name bound more than once within this (non-Or, non-Wildcard) pattern, e.g. `(x, x)`
+        // or `E.V(a, a)` — Rust's rule. Emitted (not early-returned) so the arm body still checks on
+        // the last binding, avoiding cascade errors. Or-alternatives are checked when this fn recurses
+        // on each alt above, so a duplicate inside one alt is still caught.
+        if let Some(dup) = first_duplicate_binder(pattern) {
+            self.error(
+                span,
+                format!("identifier '{dup}' is bound more than once in this pattern"),
+            );
         }
         match kind {
             MatchKind::Skip => {
@@ -9169,6 +9214,38 @@ fn pattern_bindings(p: &Pattern) -> std::collections::HashSet<String> {
     }
     go(p, &mut out);
     out
+}
+
+/// The first identifier bound more than once WITHIN a single pattern (Rust's rule), or `None`. Walks
+/// like [`pattern_bindings`] but COUNTS instead of dedup'ing: `_` (wildcard) binds nothing and is
+/// skipped; literals/ranges bind nothing. Or-alternatives are NOT descended — each `A(x) | B(x)`
+/// alternative is its own binding context (consistency across alts is governed elsewhere); a
+/// duplicate inside one alternative is caught when `bind_match_arm` recurses on that alternative.
+fn first_duplicate_binder(p: &Pattern) -> Option<String> {
+    fn go(p: &Pattern, seen: &mut std::collections::HashSet<String>) -> Option<String> {
+        match p {
+            Pattern::Ident(n) => {
+                if !seen.insert(n.clone()) {
+                    return Some(n.clone());
+                }
+                None
+            }
+            Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) => {
+                for b in bindings {
+                    if let Some(dup) = go(b, seen) {
+                        return Some(dup);
+                    }
+                }
+                None
+            }
+            // Or-alternatives are separate binding contexts: do not descend here.
+            Pattern::Or(_) | Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {
+                None
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    go(p, &mut seen)
 }
 
 /// The prebuilt protocols every program starts with. `Comparable` requires
