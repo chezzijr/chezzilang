@@ -6801,12 +6801,22 @@ impl Vm {
         }
     }
 
-    /// Higher-order list methods `map` / `filter` / `fold`. `src_h` is the receiver list. Each
-    /// element is fed to a closure via `invoke_value`, which runs nested VM frames that can trigger
-    /// GC at instruction boundaries. To keep the GC from collecting in-flight heap values, the
-    /// source list, the partially-built result list (map/filter), and the fold accumulator are all
-    /// kept rooted on the operand stack across the iteration. Returns the result (caller pushes it).
-    /// Arity & error messages match the interp exactly (parity-tested).
+    /// Higher-order list methods `map` / `filter` / `fold`. `src_h` is the receiver list.
+    ///
+    /// SNAPSHOT semantics: iteration walks a copy of the receiver's elements taken at call time, so
+    /// a callback that MUTATES the receiver (e.g. `xs.pop()`/`xs.push(..)`) does NOT perturb the
+    /// iteration sequence — it always visits exactly the elements present when the HOF was invoked.
+    /// This (a) matches the interpreter (the parity oracle clones `elems` before dispatch — see
+    /// `src/interp/mod.rs` `eval_method_call`, the `map`/`filter`/`fold`/`sort_by` arm), (b) matches
+    /// comprehensions/for-loops (`Op::ListClone`) and `list_sort_by`/`sort_by_key` (which snapshot),
+    /// (c) matches Python `map`/`filter`, and (d) is OOB-safe: indexing the original live list while
+    /// a callback shrinks it would panic (regression: `map_shrinking_callback_no_panic`).
+    ///
+    /// GC discipline: each element is fed to a closure via `invoke_value`, which runs nested VM
+    /// frames that can trigger GC at instruction boundaries. To keep the GC from collecting in-flight
+    /// heap values, the source list, the snapshot list, the partially-built result list (map/filter),
+    /// and the fold accumulator are all kept rooted on the operand stack across the iteration. Returns
+    /// the result (caller pushes it). Arity & error messages match the interp exactly (parity-tested).
     fn list_hof(
         &mut self,
         src_h: GcRef,
@@ -6814,16 +6824,31 @@ impl Vm {
         mut args: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        // ROOT the source list on the operand stack so its elements survive every closure call.
+        // ROOT the source list on the operand stack: a method receiver is popped before dispatch, so
+        // an inline temporary (`make().map(..)`) is otherwise unrooted and the callback's GC could
+        // collect it before we snapshot.
         self.push(Value::Obj(src_h));
-        let n = match self.heap.get(src_h) {
+        // Take a SNAPSHOT now (matching the interpreter): iterate the receiver's elements as of call
+        // time so a callback that shrinks/grows the receiver mid-iteration neither perturbs the
+        // sequence nor indexes past the live (now-shorter) Vec. The snapshot is heap-allocated and
+        // rooted on the operand stack so its elements survive the callback's collections.
+        let snap_h = {
+            let elems = match self.heap.get(src_h) {
+                Obj::List(v) => v.clone(),
+                _ => unreachable!("list_hof on non-list"),
+            };
+            self.heap.alloc(Obj::List(elems))
+        };
+        self.push(Value::Obj(snap_h)); // ROOT the snapshot
+        let n = match self.heap.get(snap_h) {
             Obj::List(v) => v.len(),
-            _ => unreachable!("list_hof on non-list"),
+            _ => unreachable!(),
         };
         match method {
             "map" | "filter" => {
                 if args.len() != 1 {
-                    self.pop(); // unroot source before erroring
+                    self.pop(); // unroot snapshot
+                    self.pop(); // unroot source
                     return Err(self.err(
                         format!("'{method}' expects 1 argument(s), got {}", args.len()),
                         span,
@@ -6835,12 +6860,13 @@ impl Vm {
                 let res_h = self.heap.alloc(Obj::List(Vec::new()));
                 self.push(Value::Obj(res_h));
                 for i in 0..n {
-                    // Re-read each iteration; `src_h` stays valid (rooted on the stack).
-                    let elem = match self.heap.get(src_h) {
+                    // Read from the rooted SNAPSHOT, not the live receiver: a callback that shrinks
+                    // the receiver must not affect this index (stays valid, no OOB).
+                    let elem = match self.heap.get(snap_h) {
                         Obj::List(v) => v[i],
                         _ => unreachable!(),
                     };
-                    // May GC; both source and result lists are rooted, so their elements survive.
+                    // May GC; source, snapshot, and result lists are rooted, so elements survive.
                     let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
                     if is_filter {
                         match out {
@@ -6852,6 +6878,7 @@ impl Vm {
                             Value::Bool(false) => {}
                             other => {
                                 self.pop(); // unroot result
+                                self.pop(); // unroot snapshot
                                 self.pop(); // unroot source
                                 return Err(self.err(
                                     format!(
@@ -6867,11 +6894,13 @@ impl Vm {
                     }
                 }
                 self.pop(); // unroot result
+                self.pop(); // unroot snapshot
                 self.pop(); // unroot source
                 Ok(Value::Obj(res_h))
             }
             "fold" => {
                 if args.len() != 2 {
+                    self.pop(); // unroot snapshot
                     self.pop(); // unroot source
                     return Err(self.err(
                         format!("'fold' expects 2 argument(s), got {}", args.len()),
@@ -6886,7 +6915,9 @@ impl Vm {
                 self.push(init);
                 let acc_slot = self.stack.len() - 1;
                 for i in 0..n {
-                    let elem = match self.heap.get(src_h) {
+                    // Read from the rooted SNAPSHOT (see map/filter): OOB-safe under a shrinking
+                    // callback.
+                    let elem = match self.heap.get(snap_h) {
                         Obj::List(v) => v[i],
                         _ => unreachable!(),
                     };
@@ -6895,6 +6926,7 @@ impl Vm {
                     self.stack[acc_slot] = new;
                 }
                 let acc = self.pop(); // unroot accumulator
+                self.pop(); // unroot snapshot
                 self.pop(); // unroot source
                 Ok(acc)
             }
@@ -15282,6 +15314,33 @@ mod tests {
             Ok(out) => panic!("expected a runtime error, got output: {out:?}"),
             Err(e) => e.message,
         }
+    }
+
+    // ---- list HOF: callback that shrinks the receiver (snapshot semantics) ----
+
+    /// `map` iterates a SNAPSHOT of the receiver's elements at call time: a callback that pops the
+    /// receiver mid-iteration must not perturb the iteration sequence (no OOB panic), matching the
+    /// interpreter, comprehensions, and Python `map`. Regression for the OOB at list_hof's index.
+    #[test]
+    fn map_shrinking_callback_no_panic() {
+        let src = "xs := [1, 2, 3, 4, 5]\nfn f(x: int) -> int:\n    xs.pop()\n    return x * 2\nys := xs.map(f)\nprint(ys)\n";
+        assert_eq!(run(src), "[2, 4, 6, 8, 10]\n");
+    }
+
+    /// `filter` over a snapshot: a predicate that shrinks the receiver still tests every original
+    /// element. Original 1..5 → evens kept → `[2, 4]`.
+    #[test]
+    fn filter_shrinking_callback_no_panic() {
+        let src = "xs := [1, 2, 3, 4, 5]\nfn p(x: int) -> bool:\n    xs.pop()\n    return x % 2 == 0\nprint(xs.filter(p))\n";
+        assert_eq!(run(src), "[2, 4]\n");
+    }
+
+    /// `fold` over a snapshot: a callback that shrinks the receiver still folds all original
+    /// elements. Sum of 1..5 = 15.
+    #[test]
+    fn fold_shrinking_callback_no_panic() {
+        let src = "xs := [1, 2, 3, 4, 5]\nfn g(acc: int, x: int) -> int:\n    xs.pop()\n    return acc + x\nprint(xs.fold(0, g))\n";
+        assert_eq!(run(src), "15\n");
     }
 
     // ---- assert (Phase A) ----
@@ -24222,6 +24281,18 @@ main()
     fn golden_list_hof_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/list_hof.chz");
         let expected = include_str!("../../examples/list_hof.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `examples/list_hof_shrink.chz` — map/filter/fold iterate a snapshot, so a callback that
+    /// shrinks (or grows) the receiver does not perturb iteration (and never OOB-panics). Locks
+    /// VM==interp byte-identical: before the fix the VM panicked here while the interp passed.
+    #[test]
+    fn golden_list_hof_shrink_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/list_hof_shrink.chz");
+        let expected = include_str!("../../examples/list_hof_shrink.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));

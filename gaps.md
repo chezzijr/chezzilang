@@ -97,22 +97,21 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
     recoverable panic (never wraps)") is false for shifts. Also `INT_MIN` is unwritable as a literal
     (`-9223372036854775808` lexes as unary-minus over `i64::MAX` → "number too large"; same as Rust).
 
-- **🔴 `list.map` / `.filter` / `.fold` panic (Rust, OOB) when the callback shrinks the receiver list.**
-  `list_hof` (`vm/mod.rs` ~6819) captures the element count `n = v.len()` once before the loop, then
-  indexes `v[i]` for `i in 0..n` on the *live* heap list each iteration — it re-fetches the heap handle
-  but NOT the current length, so a callback that `pop()`s (or otherwise shrinks) the list lets a stale
-  `i` run past the shrunk `Vec`:
+- **✅ RESOLVED — `list.map` / `.filter` / `.fold` no longer panic when the callback shrinks the
+  receiver list.** `list_hof` (`vm/mod.rs`) now allocates a **rooted snapshot** of the receiver's
+  elements at call time and indexes that (mirroring `list_sort_by` and the interp, which already
+  snapshots `elems` before dispatch). Chosen semantics: **snapshot** — map/filter/fold iterate the
+  receiver's elements as of call time; a callback that shrinks **or** grows the receiver does not
+  perturb the iteration (consistent with comprehensions, `for`-loops, and Python `map`/`filter`).
   ```chezzi
   xs := [1,2,3,4,5]
   fn f(x: int) -> int:
       xs.pop()
       return x * 2
-  ys := xs.map(f)        # check ok; run → panicked at vm/mod.rs:6840: index out of bounds: len 2 index 3
+  ys := xs.map(f)        # was: panic OOB at vm/mod.rs:6840; now → [2, 4, 6, 8, 10] on BOTH engines
   ```
-  `.map`/`.filter` panic at `vm/mod.rs:6840`, `.fold` at `~6890`; on BOTH engines. (Growing the list,
-  and `for`-loops / comprehensions, are snapshot-safe — only the HOF path is unguarded.)
-  **Pre-emptive fix:** re-read the length each iteration (`i < v.len()` guard) or snapshot the elements
-  up front like the comprehension path already does.
+  Regression tests: `map`/`filter`/`fold`_shrinking_callback_no_panic (vm), golden
+  `examples/list_hof_shrink.chz` (VM==interp byte-identical).
 
 - **🔴 `Ty::Unknown` is treated as assignable to/from ANY concrete type — every source of `Unknown`
   is a soundness hole (generalizes the empty-collection hole above).** `Unknown` is the checker's
