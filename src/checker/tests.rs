@@ -7627,6 +7627,34 @@ fn duplicate_nested_pattern_binder_rejected() {
     );
 }
 
+/// A binder shared between an OUTER slot and a nested OR-pattern is a single-pattern duplicate
+/// (the or binds `x` and the outer tuple slot binds `x` → `x` twice on a matching path).
+#[test]
+fn duplicate_binder_across_outer_and_or_rejected() {
+    rejects(
+        "enum E:\n    A(int)\n    B(int)\nfn f(t: (int, E)) -> int:\n    match t:\n        (x, E.A(x) | E.B(x)): return 100\n        _: return -1\n",
+        "is bound more than once",
+    );
+}
+
+/// A duplicate INSIDE one or-alternative must still be caught.
+#[test]
+fn duplicate_binder_within_or_alternative_rejected() {
+    rejects(
+        "enum E:\n    V(int, int)\n    W(int)\nfn f(e: E) -> int:\n    match e:\n        E.V(a, a) | E.W(a): return a\n        _: return -1\n",
+        "is bound more than once",
+    );
+}
+
+/// Cross-alternative reuse of the SAME name (`A(x) | B(x)`) is NOT a duplicate — each alternative
+/// is its own binding context (guards the or-fix against over-rejection).
+#[test]
+fn or_alternatives_reuse_binder_ok() {
+    ok(
+        "enum E:\n    A(int)\n    B(int)\nfn f(e: E) -> int:\n    match e:\n        E.A(x) | E.B(x): return x\n        _: return -1\n",
+    );
+}
+
 /// `_` repeated in a pattern binds nothing → must still be OK.
 #[test]
 fn wildcard_repeated_in_pattern_ok() {

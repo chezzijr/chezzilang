@@ -9238,10 +9238,28 @@ fn first_duplicate_binder(p: &Pattern) -> Option<String> {
                 }
                 None
             }
-            // Or-alternatives are separate binding contexts: do not descend here.
-            Pattern::Or(_) | Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {
+            // An or-pattern's alternatives are separate binding contexts, so a name reused ACROSS
+            // alternatives (`A(x) | B(x)`) is NOT a duplicate. But (a) each alternative must itself
+            // be duplicate-free, and (b) the names an or-pattern binds STILL collide with binders
+            // OUTSIDE the or (`(x, A(x) | B(x))` binds `x` twice on a matching path). So check each
+            // alternative on its own, then merge the or's binder set ONCE into the outer `seen`.
+            Pattern::Or(alts) => {
+                let mut or_binds = std::collections::BTreeSet::new();
+                for alt in alts {
+                    let mut alt_seen = std::collections::HashSet::new();
+                    if let Some(dup) = go(alt, &mut alt_seen) {
+                        return Some(dup);
+                    }
+                    or_binds.extend(alt_seen);
+                }
+                for n in or_binds {
+                    if !seen.insert(n.clone()) {
+                        return Some(n);
+                    }
+                }
                 None
             }
+            Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => None,
         }
     }
     let mut seen = std::collections::HashSet::new();
