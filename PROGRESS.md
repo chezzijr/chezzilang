@@ -24,13 +24,15 @@ un-annotated-count + 1; monotone, a concrete ret is never reverted to `Unknown`,
 final ret is order-independent). A self-recursive call still contributes no type; the non-recursive
 returns decide (so `fact`/`fib` are unchanged — base-case concrete wins). Divergent CONCRETE returns
 stay the user's job to annotate (`-> T` or a protocol existential `-> Stringable`); with no annotation
-conflicting concretes are an `expected return type …, found …` error — **no union types**. New behavior:
-after convergence, a genuinely un-inferable un-annotated fn/method (pure self-recursion, or mutual
-recursion with no concrete base anywhere — ret still `Unknown`) is now REJECTED:
-`cannot infer return type of recursive function '<name>'; add an explicit `-> T`` (was silently
-accepted). Checker-only change ⇒ VM==interp parity automatic. `gaps.md` "Ty::Unknown is treated as
-assignable" updated (recursive-return producer RESOLVED; empty-collection = sibling task,
-generic-nullary-variant remains). 2375 tests green; clippy + conformance clean.
+conflicting concretes are an `expected return type …, found …` error — **no union types**. A genuinely
+un-inferable un-annotated fn/method (pure self-recursion, or mutual recursion with no concrete base
+anywhere — ret stays `Unknown`) keeps a **permissive** type, NOT rejected: a blanket "leftover Unknown
+⇒ require annotation" check over-reaches (bare `Unknown` is also produced by non-recursive paths like
+`return x[0]` of an empty collection, and by already-errored bodies), so soundly rejecting only the
+recursive-no-base case needs call-graph cycle detection — tracked as a follow-up. Checker-only change ⇒
+VM==interp parity automatic. `gaps.md` "Ty::Unknown is treated as assignable" updated (recursive-return
+producer RESOLVED; empty-collection = sibling task, generic-nullary-variant remains). Tests green;
+clippy + conformance clean.
 
 **✅ Soundness fix — string-interpolation fragments are now type-checked (was a CRITICAL compiler
 panic + unsound `check`).** The checker treated an interpolated `str` as opaque `Ty::Str` and never

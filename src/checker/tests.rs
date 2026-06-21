@@ -1477,20 +1477,19 @@ fn inferred_forward_ref_callee_later_is_permissive() {
 }
 
 #[test]
-fn inferred_recursion_only_requires_annotation() {
-    // A body whose only return is a self-recursive call has NO concrete base, so its return type
-    // is genuinely un-inferable: the fixpoint leaves it `Unknown` and the checker now requires an
-    // explicit `-> T` rather than silently blessing the permissive `Unknown`.
-    rejects(
-        "fn loopy(n: int):\n    return loopy(n - 1)\n",
-        "cannot infer return type of recursive function",
-    );
+fn inferred_recursion_only_stays_permissive() {
+    // A body whose only return is a self-recursive call has NO concrete base, so its return type is
+    // genuinely un-inferable: the fixpoint leaves it `Unknown`, which stays permissive (NOT rejected
+    // — a blanket "leftover Unknown ⇒ require annotation" check over-reaches onto non-recursive
+    // Unknown sources like `return x[0]` of an empty collection; soundly rejecting only this needs
+    // call-graph cycle detection, tracked as a follow-up).
+    ok("fn loopy(n: int):\n    return loopy(n - 1)\n");
 }
 
 #[test]
 fn inferred_recursion_only_with_annotation_ok() {
-    // An explicit `-> int` satisfies the un-inferable recursive function — annotated fns bypass
-    // inference (and the post-fixpoint un-inferable check) entirely.
+    // An explicit `-> int` annotation bypasses inference entirely (the cleanest way to type a
+    // self-recursive-only function).
     ok("fn loopy(n: int) -> int:\n    return loopy(n - 1)\n");
 }
 
@@ -1517,12 +1516,32 @@ fn inferred_mutual_recursion_with_base_resolves() {
 }
 
 #[test]
-fn inferred_pure_mutual_recursion_requires_annotation() {
+fn inferred_pure_mutual_recursion_stays_permissive() {
     // Pure mutual recursion with NO concrete base anywhere: both returns stay `Unknown` after the
-    // fixpoint, so an annotation is required.
-    rejects(
-        "fn a(n: int):\n    return b(n - 1)\nfn b(n: int):\n    return a(n - 1)\n",
-        "cannot infer return type of recursive function",
+    // fixpoint and stay permissive (same residual as the self-recursive-only case above — a
+    // follow-up needs cycle detection to reject it without over-reaching).
+    ok("fn a(n: int):\n    return b(n - 1)\nfn b(n: int):\n    return a(n - 1)\n");
+}
+
+#[test]
+fn non_recursive_unknown_return_not_falsely_rejected() {
+    // Regression: a NON-recursive un-annotated fn whose return infers `Unknown` for a reason
+    // unrelated to recursion (here `x[0]` of an empty list literal → element type `Unknown`) must
+    // NOT be rejected by the recursive-return inference — that empty-collection case is the sibling
+    // producer's domain. Accepted on base; the fixpoint change must not regress it.
+    ok("fn f():\n    x := []\n    return x[0]\nprint(\"ok\")\n");
+}
+
+#[test]
+fn errored_body_unknown_return_reports_once() {
+    // Regression: a fn whose body has a real error (undefined name) infers `Unknown`; the fixpoint
+    // change must not pile a spurious "cannot infer return type" on top of the genuine error.
+    let errs = check_src("fn f():\n    return undefined_fn()\n");
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert!(
+        errs[0].message.contains("unknown name"),
+        "got: {:?}",
+        errs[0]
     );
 }
 

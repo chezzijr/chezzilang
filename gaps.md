@@ -115,9 +115,12 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
     changes, cap = un-annotated-count + 1), so a forward-reference or mutually-recursive callee resolves
     on a later pass instead of leaking `Unknown`. A self-recursive call contributes no type (skipped);
     the non-recursive returns decide. After convergence, any un-annotated fn/method still `Unknown`
-    (pure recursion / mutual recursion with no concrete base anywhere) is genuinely un-inferable and is
-    rejected: `cannot infer return type of recursive function '<name>'; add an explicit `-> T``. The
-    example below now correctly REJECTS `v: int = rec(2)` (`rec` infers `str`):
+    (pure recursion / mutual recursion with no concrete base anywhere) is genuinely un-inferable and
+    keeps a **permissive** type — it is NOT rejected (a blanket "leftover Unknown ⇒ require annotation"
+    over-reaches onto non-recursive Unknown sources like `return x[0]` of an empty collection and
+    double-reports on already-errored bodies; soundly rejecting only the recursive-no-base case needs
+    call-graph cycle detection — a follow-up). The example below now correctly REJECTS `v: int = rec(2)`
+    (`rec` infers `str`):
     ```chezzi
     fn rec(n: int):
         if n <= 0: return base(0)

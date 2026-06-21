@@ -335,8 +335,8 @@ value-returning `return` infers `nil`. Param types stay required. Inference is *
 recursive call contributes no type (it is skipped, the non-recursive returns decide), and forward
 references / mutual recursion resolve via a fixpoint — so a callee defined *after* the caller still
 yields the caller's precise inferred type. A function that is genuinely un-inferable (pure self- or
-mutual recursion with **no concrete base case anywhere**) must carry an explicit `-> T`
-(`cannot infer return type of recursive function …`).
+mutual recursion with **no concrete base case anywhere**) keeps a permissive inferred type; annotate
+it with an explicit `-> T` for a precise type.
 
 **Returns on every path (enforced).** A **multiline** function with a **declared non-void return
 type** (`-> int`, `-> str`, …) must return a value on *every* control-flow path. The checker rejects a
