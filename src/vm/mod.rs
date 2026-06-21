@@ -28725,8 +28725,10 @@ main()
 
     /// `ref T` indirect-callee golden: `examples/ref_indirect.chz` — the type-directed arg coercion
     /// (alias / deref / by receiver type) reached through a LOCAL fn-value, a closure, and a method
-    /// name shared across structs that disagree on ref-ness. All lower to the same `Ref[T]` box, so
-    /// the VM and interp are byte-identical by construction.
+    /// name shared across structs that disagree on ref-ness — including EXPRESSION receivers (an
+    /// inline ctor call and a struct-returning fn call), which resolve by receiver type identically
+    /// to a named local. All lower to the same `Ref[T]` box, so the VM and interp are byte-identical
+    /// by construction.
     #[test]
     fn golden_ref_indirect_via_run_file() {
         let path = fixture("examples/ref_indirect.chz");

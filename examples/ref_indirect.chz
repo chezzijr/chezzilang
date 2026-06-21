@@ -46,3 +46,20 @@ print(r)                 # 42
 p := Printer(0)
 p.apply(r)               # resolves to Printer.apply (by-value) -> deref copy (prints 42)
 print(r)                 # 42 (unchanged)
+
+# --- shared method name on an EXPRESSION receiver (not a named local) ----------------------------
+# The receiver's type still picks the method, so the alias/deref decision is identical to the
+# named-local form above — whether the receiver is an inline ctor call or a struct-returning fn call.
+r = 7                    # reset the box (via the alias) for the expression-receiver cases
+Setter(0).apply(r)       # inline ctor receiver -> Setter.apply (ref) -> ALIAS
+print(r)                 # 42
+
+Printer(0).apply(r)      # inline ctor receiver -> Printer.apply (by-value) -> deref copy (prints 42)
+print(r)                 # 42 (unchanged)
+
+fn mk() -> Setter:       # a struct-returning free fn
+    return Setter(0)
+
+r = 7
+mk().apply(r)            # fn-call receiver, return type Setter -> Setter.apply (ref) -> ALIAS
+print(r)                 # 42

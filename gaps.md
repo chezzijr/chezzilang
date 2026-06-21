@@ -12,7 +12,8 @@ holes" below, all verified on both engines: **2 Rust panics** (interpolation w/ 
 family** (empty collections + recursive-return inference + generic nullary variants — one root fix
 closes all three) incl. the float-key/NaN-footgun bypass, import name-collision mis-resolution,
 duplicate-binding-in-pattern last-wins, `--serial` generator-airlock parity divergence, inconsistent
-int→float coercion, and a `ref` shared-method false rejection. Concurrency core (airlock, channel
+int→float coercion (the `ref` shared-method expression-receiver false rejection is now RESOLVED).
+Concurrency core (airlock, channel
 close, deadlock detect, CAS, 100k spawns, cancel-tree) fuzzed clean.). Baseline: post-M21 (`newtype`), plus enum methods, raw string literals
 (`r"…"`), the `extern "lib"` header, module-scoped user types + module-qualified match patterns, and
 the `chezzi docs` / `chezzi init` CLI + `module:function` manifest entrypoint. Earlier baseline
@@ -196,14 +197,21 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
   **Pre-emptive fix:** mirror the VM's send-time generator-sendability check in the serial engine's
   spawn/closure-capture path.
 
-- **🟡 `ref` shared-method-name dispatch falsely rejects an expression receiver.** When ≥2 structs share
-  a method name with differing param ref-ness (so the receiver type must disambiguate, per docs §3), the
-  call type-checks when the receiver is a *named local* (`a := A(0); a.apply(r)` → runs, prints 42) but is
-  falsely rejected when the receiver is an *inline expression* (`A(0).apply(r)` → "argument 1 of 'apply':
-  expected Ref[int], found int"). Over-rejection of valid code (safe, not unsound). The existing test
-  `ref_through_shared_method_name_aliases_ok` (`checker/tests.rs:4844`) covers only the named-local form.
-  **Pre-emptive fix:** resolve the receiver's type for the ref-param coercion decision even when it is an
-  expression, not only a bound name.
+- **✅ RESOLVED (2026-06-22) — `ref` shared-method-name dispatch no longer falsely rejects an expression
+  receiver.** When ≥2 structs share a method name with differing param ref-ness (so the receiver type must
+  disambiguate, per docs §3), the call type-checks both when the receiver is a *named local* (`a := A(0);
+  a.apply(r)`) AND when it is an *inline expression* (`A(0).apply(r)`, or a struct-returning fn call
+  `mk().apply(r)` where `fn mk() -> A`). Previously the inline-expression form was falsely rejected
+  ("argument 1 of 'apply': expected Ref[int], found int") — an over-rejection of valid code (safe, not
+  unsound). **Fix (desugar-only, pre-type):** `callee_param_is_ref`'s method-call arm now resolves the
+  receiver's struct name via a new `receiver_struct_ty` helper covering a named local, an inline ctor call
+  (`struct_value_ty`), and a struct-returning free fn (new `ModReg::fn_ret_struct` map, populated from the
+  declared return type), then keys `methods_by_struct` uniformly — so the alias survives into the checker.
+  Covered by `lowers_ref_arg_through_ctor_receiver_typed_method` / `..._fn_call_receiver_typed_method`
+  (desugar), `ref_through_shared_method_name_ctor_receiver_ok` / `..._fn_receiver_ok` (checker), and the
+  extended `examples/ref_indirect.chz` golden (two-engine parity, stdout `42`). Limit: the fn-call receiver
+  resolves only through the declared return-type annotation (syntactic, pre-type) — same narrow scope as the
+  existing pre-type method-resolution.
 
 ### 🟡 Type-system + runtime depth
 

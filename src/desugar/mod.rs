@@ -82,6 +82,10 @@ fn is_builtin_method(name: &str) -> bool {
 struct ModReg {
     fns: HashMap<String, Vec<PSpec>>,
     structs: HashMap<String, Vec<PSpec>>,
+    /// For a free fn whose declared return type is a struct of THIS module, the bare struct name.
+    /// Lets a struct-returning-fn-call receiver (`mk().apply(r)`) resolve its method by receiver
+    /// type pre-type, exactly like a named-local or ctor-call receiver.
+    fn_ret_struct: HashMap<String, String>,
 }
 
 impl ModReg {
@@ -611,6 +615,22 @@ fn collect_module_reg(stmts: &[Stmt]) -> ModReg {
             _ => {}
         }
     }
+    // Second pass: a free fn whose declared return type names a struct of THIS module records the
+    // bare struct head (so `mk().m(r)` resolves `m` by the receiver's struct type pre-type). Done
+    // after both maps are filled so a fn declared before its return struct still resolves.
+    for stmt in stmts {
+        if let StmtKind::Fn(decl) = &stmt.kind {
+            let head = match &decl.ret {
+                Some(Type::Named(n)) | Some(Type::Generic(n, _)) => Some(n.clone()),
+                _ => None,
+            };
+            if let Some(h) = head
+                && reg.structs.contains_key(&h)
+            {
+                reg.fn_ret_struct.insert(decl.name.clone(), h);
+            }
+        }
+    }
     reg
 }
 
@@ -798,6 +818,48 @@ impl Walker<'_> {
             return Some(n.clone());
         }
         None
+    }
+
+    /// The struct name of a method-call receiver `obj`, when knowable pre-type — so a shared method
+    /// name (siblings disagreeing on a param's ref-ness) resolves to the RIGHT sibling regardless of
+    /// the receiver's syntactic shape. Covers: (i) a named local, (ii) an inline ctor call
+    /// `StructName(...)`, (iii) a free-fn call `mk()` whose declared return type is a struct. Returns
+    /// `None` for any receiver whose struct type cannot be determined syntactically (the caller then
+    /// falls back to the agreement-gated name-keyed table).
+    fn receiver_struct_ty(&self, obj: &Expr) -> Option<String> {
+        match &obj.kind {
+            // (i) a named local receiver: its constructed/annotated struct type.
+            ExprKind::Ident(recv) if self.is_local(recv) => self.local_struct_ty(recv).cloned(),
+            // (ii) inline ctor call `StructName(...)` — struct head is syntactic.
+            ExprKind::Call { .. } if self.struct_value_ty(obj).is_some() => {
+                self.struct_value_ty(obj)
+            }
+            // (iii) struct-returning free fn `mk()` — resolved through the SAME module the callee
+            // resolves in (own module first, then a `from`-import), mirroring `resolve_bare`.
+            ExprKind::Call { callee, .. } => {
+                let ExprKind::Ident(n) = &callee.kind else {
+                    return None;
+                };
+                if self.is_local(n) {
+                    return None;
+                }
+                if let Some(s) = self
+                    .ctx
+                    .regs
+                    .get(self.ctx.own_id)
+                    .and_then(|r| r.fn_ret_struct.get(n))
+                {
+                    return Some(s.clone());
+                }
+                let target = self.ctx.bare_from.get(n)?;
+                self.ctx
+                    .regs
+                    .get(target)
+                    .and_then(|r| r.fn_ret_struct.get(n))
+                    .cloned()
+            }
+            _ => None,
+        }
     }
 
     /// Walk a block in its own lexical scope (sequential `let`s bind into this scope).
@@ -1356,16 +1418,14 @@ impl Walker<'_> {
                         .map(|s| s.iter().map(|p| p.is_ref).collect())
                 }
                 _ if !is_builtin_method(name) && !self.ctx.fn_fields.contains(name) => {
-                    // A method call `recv.m(...)`. If the receiver's struct type is known locally,
-                    // resolve `m` against THAT struct (charge 2 — sibling structs may disagree on a
-                    // param's ref-ness). Otherwise fall back to the name-keyed table, using it only
+                    // A method call `recv.m(...)`. If the receiver's struct type is knowable pre-type
+                    // (a named local, an inline ctor call, or a struct-returning fn call — see
+                    // `receiver_struct_ty`), resolve `m` against THAT struct (charge 2 — sibling
+                    // structs may disagree on a param's ref-ness). Otherwise fall back to the
+                    // name-keyed table, using it only
                     // when every defining struct agrees (an unambiguous pre-type shape).
-                    if let ExprKind::Ident(recv) = &obj.kind
-                        && let Some(sname) = self.local_struct_ty(recv)
-                        && let Some(spec) = self
-                            .ctx
-                            .methods_by_struct
-                            .get(&(sname.clone(), name.clone()))
+                    if let Some(sname) = self.receiver_struct_ty(obj)
+                        && let Some(spec) = self.ctx.methods_by_struct.get(&(sname, name.clone()))
                     {
                         return Some(spec.iter().map(|p| p.is_ref).collect());
                     }
@@ -2204,6 +2264,57 @@ mod tests {
         assert!(
             is_get_call(&args[0]),
             "B.apply (by-value) arg should auto-deref to r.get(), got {:?}",
+            args[0].kind
+        );
+    }
+
+    #[test]
+    fn lowers_ref_arg_through_ctor_receiver_typed_method() {
+        // Charge 2 (expression receiver): two structs share `apply` with DIFFERENT ref-ness; an
+        // INLINE ctor-call receiver `A(0).apply(r)` must resolve to A's (ref) signature via the
+        // receiver's struct type (just like a named local), so the box aliases — and `B(0).apply(r)`
+        // resolves to B's (by-value) signature, so the arg auto-derefs.
+        let src = "struct A:\n    t: int\n    fn apply(self, x: ref int):\n        x = 1\nstruct B:\n    t: int\n    fn apply(self, x: int):\n        print(x)\nr: ref int = 0\nA(0).apply(r)\nB(0).apply(r)\n";
+        let s = desugar_ok(src);
+        let StmtKind::Expr(e) = &s[s.len() - 2].kind else {
+            panic!("A(0).apply stmt")
+        };
+        let ExprKind::Call { args, .. } = &e.kind else {
+            panic!("call")
+        };
+        assert!(
+            matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
+            "A(0).apply (ref) arg should alias (bare ident), got {:?}",
+            args[0].kind
+        );
+        let StmtKind::Expr(e) = &s[s.len() - 1].kind else {
+            panic!("B(0).apply stmt")
+        };
+        let ExprKind::Call { args, .. } = &e.kind else {
+            panic!("call")
+        };
+        assert!(
+            is_get_call(&args[0]),
+            "B(0).apply (by-value) arg should auto-deref to r.get(), got {:?}",
+            args[0].kind
+        );
+    }
+
+    #[test]
+    fn lowers_ref_arg_through_fn_call_receiver_typed_method() {
+        // Charge 2 (struct-returning free-fn receiver): `mk()` returns `A`, so `mk().apply(r)` must
+        // resolve to A's (ref) signature via the return type and alias the box.
+        let src = "struct A:\n    t: int\n    fn apply(self, x: ref int):\n        x = 1\nstruct B:\n    t: int\n    fn apply(self, x: int):\n        print(x)\nfn mk() -> A:\n    return A(0)\nr: ref int = 0\nmk().apply(r)\n";
+        let s = desugar_ok(src);
+        let StmtKind::Expr(e) = &s[s.len() - 1].kind else {
+            panic!("mk().apply stmt")
+        };
+        let ExprKind::Call { args, .. } = &e.kind else {
+            panic!("call")
+        };
+        assert!(
+            matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
+            "mk().apply (ref) arg should alias (bare ident), got {:?}",
             args[0].kind
         );
     }

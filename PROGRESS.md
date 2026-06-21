@@ -11,6 +11,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Bug fix — `ref` shared-method-name dispatch no longer falsely rejects an EXPRESSION receiver
+(2026-06-22).** When ≥2 structs share a method name with differing param ref-ness (the receiver type
+disambiguates which signature applies, per `docs/syntax.md §3`), a call with a *named-local* receiver
+(`a := A(0); a.apply(r)`) type-checked but the equivalent *inline-expression* receiver (`A(0).apply(r)`,
+or `mk().apply(r)` where `fn mk() -> A`) was falsely rejected ("expected Ref[int], found int") — an
+over-rejection of valid code (safe, not unsound). Root cause was **desugar-only, pre-type**:
+`callee_param_is_ref` resolved the receiver's struct (to pick the right sibling's `ref`-ness) only for a
+named-local `Ident`; an expression receiver fell through to the agreement-gated name table, which returned
+`None` for disagreeing siblings, so the `ref` arg was wrongly auto-deref'd before the checker ran. Fix:
+new `receiver_struct_ty` helper resolves the receiver struct name for a named local, an inline ctor call,
+AND a struct-returning free fn (new `ModReg::fn_ret_struct` map from the declared return type), driving
+`methods_by_struct` uniformly. Desugar runs once before every engine, so VM == interp == serial ==
+parallel is structural (no `src/interp` edit). Tests: `lowers_ref_arg_through_ctor_receiver_typed_method`
+/ `..._fn_call_receiver_typed_method` (desugar), `ref_through_shared_method_name_ctor_receiver_ok` /
+`..._fn_receiver_ok` + `ref_shared_method_byval_sibling_ctor_receiver_ok` (checker), extended
+`examples/ref_indirect.chz` golden (stdout `42`, two-engine parity). Negative guards intact (single-struct
+mismatch + by-value-into-ref still error). Docs: `gaps.md` entry → RESOLVED.
+
 **✅ Soundness fix — two missing duplicate/collision checks in the checker are now rejected (both
 checker-only; two-engine parity preserved by construction — rejected programs never reach an engine,
 accepted programs are byte-identical).** (1) **Import name collisions.** `bind_import` recorded a value

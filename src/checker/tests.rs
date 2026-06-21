@@ -4960,6 +4960,34 @@ fn ref_through_shared_method_name_aliases_ok() {
 }
 
 #[test]
+fn ref_through_shared_method_name_ctor_receiver_ok() {
+    // Charge 2 (expression receiver): the receiver is an INLINE ctor call `A(0).apply(r)` rather
+    // than a named local. The receiver's struct type must still pick A's (ref) signature, so the box
+    // aliases — no false `expected Ref[int], found int`. Mirrors the named-local form exactly.
+    entry_ok(
+        "import std.ref\nstruct A:\n    dummy: int\n    fn apply(self, x: ref int):\n        x = 42\nstruct B:\n    dummy: int\n    fn apply(self, x: int):\n        print(x)\nfn main():\n    r: ref int = 1\n    A(0).apply(r)\n    print(r)\nmain()\n",
+    );
+}
+
+#[test]
+fn ref_through_shared_method_name_fn_receiver_ok() {
+    // Charge 2 (expression receiver): the receiver is a struct-returning free-fn call `mk().apply(r)`
+    // where `fn mk() -> A`. The declared return type picks A's (ref) signature, so the box aliases.
+    entry_ok(
+        "import std.ref\nstruct A:\n    dummy: int\n    fn apply(self, x: ref int):\n        x = 42\nstruct B:\n    dummy: int\n    fn apply(self, x: int):\n        print(x)\nfn mk() -> A:\n    return A(0)\nfn main():\n    r: ref int = 1\n    mk().apply(r)\n    print(r)\nmain()\n",
+    );
+}
+
+#[test]
+fn ref_shared_method_byval_sibling_ctor_receiver_ok() {
+    // Charge 2 sibling (expression receiver): the by-value `B(0).apply(r)` must still accept a `ref`
+    // arg by auto-deref (row 2) — the fix must NOT over-alias. Positive guard against over-relaxing.
+    entry_ok(
+        "import std.ref\nstruct A:\n    dummy: int\n    fn apply(self, x: ref int):\n        x = 42\nstruct B:\n    dummy: int\n    fn apply(self, x: int):\n        print(x)\nfn main():\n    r: ref int = 1\n    B(0).apply(r)\nmain()\n",
+    );
+}
+
+#[test]
 fn ref_shared_method_byval_sibling_ok() {
     // Charge 2 sibling: the by-value `B.apply` must still accept a `ref` arg by auto-deref (row 2).
     entry_ok(
