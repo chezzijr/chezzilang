@@ -6,7 +6,14 @@ to a one-line log — full detail lives in `PROGRESS.md` + the cited `examples/*
 
 Legend: 🔴 blocks real apps · 🟡 notable friction · ⚪ latent (not currently reachable) · 🟢 works.
 
-Last updated: 2026-06-20. Baseline: post-M21 (`newtype`), plus enum methods, raw string literals
+Last updated: 2026-06-21 (adversarial fuzz pass, 6 parallel hunters — 9 issues filed under "🔴 Soundness
+holes" below, all verified on both engines: **2 Rust panics** (interpolation w/ undefined name; list
+`map`/`filter`/`fold` when the callback shrinks the list), the **`Ty::Unknown` permissive-sentinel
+family** (empty collections + recursive-return inference + generic nullary variants — one root fix
+closes all three) incl. the float-key/NaN-footgun bypass, import name-collision mis-resolution,
+duplicate-binding-in-pattern last-wins, `--serial` generator-airlock parity divergence, inconsistent
+int→float coercion, and a `ref` shared-method false rejection. Concurrency core (airlock, channel
+close, deadlock detect, CAS, 100k spawns, cancel-tree) fuzzed clean.). Baseline: post-M21 (`newtype`), plus enum methods, raw string literals
 (`r"…"`), the `extern "lib"` header, module-scoped user types + module-qualified match patterns, and
 the `chezzi docs` / `chezzi init` CLI + `module:function` manifest entrypoint. Earlier baseline
 (post-M20): `assert`/`test fn`/`chezzi test`, Python-colon slicing, std.math trig + request verbs;
@@ -30,6 +37,171 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
 ---
 
 ## Open gaps — START HERE
+
+### 🔴 Soundness holes (found 2026-06-21, adversarial fuzz pass — `check` greenlights code that breaks at runtime)
+
+- **🔴 String interpolation expressions bypass the checker → `check` unsound + a hard compiler panic on
+  undefined names.** The checker types every interpolated `str` as opaque `Ty::Str` and never resolves
+  or type-checks the `{…}` fragments — `checker/mod.rs:4642` (`ExprKind::Str(_) => Ty::Str, // opaque;
+  interpolation contents are not checked (M2 defer)`). The compiler then *does* compile those fragments,
+  on the documented assumption that "the checker rejects undefined names before compilation"
+  (`compiler/mod.rs:399-404`). That invariant is violated:
+  - **Undefined name → Rust panic (worst):** `print("{nope}")` passes `check` ("ok: no type errors")
+    then aborts the VM thread — `panicked at compiler/mod.rs:404: global 'nope' has no slot (checker
+    should reject undefined names)` + a leaked backtrace. Far worse buried in a never-called fn: `check`
+    is green, it ships, it blows up on the line that finally evaluates the string.
+  - **Every type / method / arity error inside `{…}` escapes `check` (unsound):** `"{x + y}"` (int+list),
+    `"{x.no_such()}"`, `"{f(1,2,3)}"` (wrong arity) all report "no type errors", then fault at runtime.
+    Breaks the green-check-is-safe contract the docs promise.
+  - Same-quote nesting (`"{"a"}"`) breaks the *lexer* (pre-3.12-Python limit) so it errors early — only
+    lexically-clean fragments slip past.
+  - **Pre-emptive fix:** in the `ExprKind::Str` arm resolve + `infer_value` each parsed fragment (the AST
+    already holds the exprs — the compiler walks them), reusing the normal expr path so undefined names /
+    type mismatches surface as compile errors at the fragment's span; then `global_slot`'s invariant
+    holds. Drive both `check` and the runtime fragment-eval off the same resolved exprs for two-engine
+    parity. (The interp path already evaluates fragments at runtime, so confirm it errors identically.)
+
+- **🔴 Empty collection literals (`[]` / `{}` / `set()`) get an unrefinable `Ty::Unknown` element →
+  `check` unsound + the deliberate float-key ban is bypassed.** `infer_list` / `infer_set` / `infer_map`
+  (`checker/mod.rs:4777`+) type an empty literal's element as `Ty::Unknown` — the permissive
+  "already-errored" sentinel (compatible-with-anything; the `Hashable` key/element check is skipped via
+  `!et.is_unknown()`). A NON-empty literal pins and checks the element correctly; only the *empty* form is
+  unsound, and nothing later refines it (`.push` / `[k]=` never narrows the binding). It propagates
+  through inferred returns (`fn make(): return []`), comprehensions (`[x for x in []]`), and closures.
+  - **Mixed-type elements accepted:** `x := []; x.push(1); x.push("s")` passes `check`; a downstream op
+    (`x[1] + 1`, or summing the list into an int) then faults at runtime.
+  - **Reopens the NaN footgun the float-key ban exists to prevent:** literal `{1.5: "b"}` is correctly
+    rejected ("map key type must implement Hashable … found float"), but `m := {}; m[1.5] = "b"` and
+    `s := set(); s.add(1.5)` slip through. With a NaN (`inf := 1e308 * 10.0; nan := inf - inf`):
+    `s.add(nan); s.add(nan); s.len()` is **2** (two identical NaNs) and `nan in s` is **false** — exactly
+    the footgun.
+  - Minor downstream: `.sort()` on a now-heterogeneous list is a silent no-op (no error).
+  - Workaround: annotate — `x: list[int] = []` is checked correctly.
+  - **Pre-emptive fix:** make an empty literal's element a real unification variable (not `Ty::Unknown`)
+    tied to the binding, and unify it on the first `.push` / insert / index-set; OR reject a bare
+    `[]` / `{}` / `set()` whose element can't be inferred from context with "cannot infer element type —
+    add an annotation". Either way run the `Hashable` key/element check once the element is concrete.
+
+- **🟡 `int`→`float` coercion is inconsistent — silently allowed in binary operators, forbidden
+  everywhere else.** `docs/syntax.md:1621` states the contract "No implicit `int`→`float`", and it IS
+  enforced for function args (`f(5)` into a `float` param → error), bindings (`x: float = 5` → error),
+  and collection elements (`[1.0].push(2)` → error). But the binary arithmetic + comparison operators
+  silently widen an `int` operand: `5 + 2.0` → `7.0`, `n * y` (`int`*`float`) → float, `5 == 5.0` →
+  true, `5 < 5.5` → true. The result is correctly typed `float` (can't flow back into an `int` slot), so
+  it is not a runtime hole — but it contradicts the stated rule and bypasses the `Add(self, other:
+  Self) -> Self` framing (intrinsic numeric ops are `Self`-typed, so a mixed-type op should not match).
+  Decide one: document the operator exception (ergonomic, Python-like) or reject mixed operands
+  (consistent, Go-like). Likely a hardcoded coercion in the numeric binary-op path.
+  - Sibling: **`1 << 63` wraps silently to `INT_MIN`** (no overflow check) while `+ - * / %` are
+    checked (recoverable-panic on overflow) — so the "Verified working" line below ("integer overflow →
+    recoverable panic (never wraps)") is false for shifts. Also `INT_MIN` is unwritable as a literal
+    (`-9223372036854775808` lexes as unary-minus over `i64::MAX` → "number too large"; same as Rust).
+
+- **🔴 `list.map` / `.filter` / `.fold` panic (Rust, OOB) when the callback shrinks the receiver list.**
+  `list_hof` (`vm/mod.rs` ~6819) captures the element count `n = v.len()` once before the loop, then
+  indexes `v[i]` for `i in 0..n` on the *live* heap list each iteration — it re-fetches the heap handle
+  but NOT the current length, so a callback that `pop()`s (or otherwise shrinks) the list lets a stale
+  `i` run past the shrunk `Vec`:
+  ```chezzi
+  xs := [1,2,3,4,5]
+  fn f(x: int) -> int:
+      xs.pop()
+      return x * 2
+  ys := xs.map(f)        # check ok; run → panicked at vm/mod.rs:6840: index out of bounds: len 2 index 3
+  ```
+  `.map`/`.filter` panic at `vm/mod.rs:6840`, `.fold` at `~6890`; on BOTH engines. (Growing the list,
+  and `for`-loops / comprehensions, are snapshot-safe — only the HOF path is unguarded.)
+  **Pre-emptive fix:** re-read the length each iteration (`i < v.len()` guard) or snapshot the elements
+  up front like the comprehension path already does.
+
+- **🔴 `Ty::Unknown` is treated as assignable to/from ANY concrete type — every source of `Unknown`
+  is a soundness hole (generalizes the empty-collection hole above).** `Unknown` is the checker's
+  "already-errored / permissive" sentinel; `compatible(Unknown, T)` is true in *both* directions, so any
+  `Unknown`-typed value flows, fully check-blessed, into an `int`/`float`/`str`/struct/`fn`/map-key slot
+  and then faults at runtime (the VM is defensive — recoverable error, not a Rust panic, but the static
+  guarantee is gone). Beyond empty collections, two more reachable producers:
+  - **Recursive / forward-reference return inference.** A fn whose only `return`s are recursive or
+    forward calls infers `-> Unknown` (`checker/mod.rs:2143-2154`, "self-recursive call → Unknown, so the
+    function stays permissive"). Its result then assigns into any declared type:
+    ```chezzi
+    fn rec(n: int):
+        if n <= 0: return base(0)
+        return rec(n - 1)
+    fn base(n: int): return "hello"   # forward ref ⇒ rec infers Unknown
+    fn main():
+        v: int = rec(2)               # check ok — Unknown→int
+        print(v * 2)                  # run → cannot apply Mul to str and int
+    main()
+    ```
+    Also lands a raw `int` in a `float` slot silently (`f: float = rec(...)` printing `5` not `5.0`).
+  - **Nullary variant of a generic enum (and `None`).** `Box.Empty` of `enum Box[T]` infers `T = Unknown`;
+    a `list[Box[Unknown]]` then accepts `Box.Full` payloads of any type, and the bound-out payload is
+    `Unknown`:
+    ```chezzi
+    enum Box[T]:
+        Full(T)
+        Empty
+    xs := [Box.Empty]
+    xs.push(Box.Full("hi"))
+    match xs[1]:
+        Box.Full(x): print(x + 1)     # check ok; run → cannot apply Add to str and int
+        Box.Empty:   print("e")
+    ```
+  **Pre-emptive fix:** the single highest-leverage fix in this file. Stop treating `Unknown` as
+  universally assignable into/out of *concrete* declared types — at an assignment/arg/return boundary
+  where the expected type is concrete and the actual is `Unknown`, either defer to a unification variable
+  resolved on use, or require an annotation. This one change closes the empty-collection hole, the
+  recursive-return hole, and the generic-nullary-variant hole at once.
+
+- **🟡 Import name collisions are silently mis-resolved (checker ↔ runtime can even disagree).**
+  `bind_import` records value members via `declare()` but function members into a separate `self.functions`
+  map (and modules into `imported_modules`), with **no cross-namespace duplicate check** — while a local
+  name colliding with an import IS correctly rejected ("function 'f' is already defined"). Two failures:
+  - **Unsound — checker and runtime pick different bindings.** `import v from vmod` (a value `v := 42`) +
+    `import v from fmod` (a `fn v()`): `check` resolves `v` to the value (`v + 1` type-checks), runtime
+    resolves to the function → `runtime error: cannot apply Add to function and int`. check ok, run fails.
+  - **Wrong/silent — duplicate `from`-imports last-win.** `import f from lib` + `import f from lib2`
+    (both export `fn f`, returning 1 vs 99) → no error; `f()` is 99 (or 1 if the imports are reversed).
+    Same for two `Point` structs of different layout. Should be a duplicate-binding error like the local case.
+  **Pre-emptive fix:** in `bind_import`, check the name against all three import namespaces (values,
+  functions, modules) + locals before binding; reject a second binding of an already-bound import name.
+
+- **🟡 Duplicate binding in a single pattern (`(x, x)`, `V(a, a)`) silently last-wins and is treated as
+  irrefutable.** A pattern that binds the same name twice is neither rejected as a duplicate binding nor
+  treated as an equality constraint — it matches *any* values, keeps the last, and the arm is wrongly
+  considered exhaustive:
+  ```chezzi
+  fn f(t: (int, int)) -> int:
+      match t:
+          (x, x): return x          # matches ANY pair; x = the 2nd element
+          _: return -1
+  print(f((3, 3)))   # 3
+  print(f((3, 9)))   # 9  ← expected -1 (or a compile error); (x,x) matched a non-equal pair
+  ```
+  If the two positions differ in type, the second binding wins the type too (confirming last-wins rebind,
+  not equality). Reproduces on enum payloads (`V(a, a)`). **Pre-emptive fix:** reject a repeated binder
+  in one pattern with "identifier 'x' is bound more than once in this pattern" (Rust's rule), in the
+  pattern-collection pass of the checker.
+
+- **🟡 `--serial` lets a generator cross the `spawn`/`parallel:` airlock — engine-parity divergence; the
+  oracle is the unsound one.** A live generator captured as a module global and driven from inside a
+  `spawn`ed task is correctly rejected at runtime by the default OS-thread engine
+  (`a generator cannot be sent across tasks`), but `--serial` (the deprecated cooperative oracle) runs it,
+  sharing one mutable generator across the task boundary (parent reads 0, task advances to 1, parent reads
+  2). Same program → different observable output on the two engines, violating the byte-identical
+  invariant; `--serial` permits the airlock-forbidden behavior. Low urgency (serial is the
+  slated-for-removal parity oracle and the *default* engine is correct), but it is a real divergence.
+  **Pre-emptive fix:** mirror the VM's send-time generator-sendability check in the serial engine's
+  spawn/closure-capture path.
+
+- **🟡 `ref` shared-method-name dispatch falsely rejects an expression receiver.** When ≥2 structs share
+  a method name with differing param ref-ness (so the receiver type must disambiguate, per docs §3), the
+  call type-checks when the receiver is a *named local* (`a := A(0); a.apply(r)` → runs, prints 42) but is
+  falsely rejected when the receiver is an *inline expression* (`A(0).apply(r)` → "argument 1 of 'apply':
+  expected Ref[int], found int"). Over-rejection of valid code (safe, not unsound). The existing test
+  `ref_through_shared_method_name_aliases_ok` (`checker/tests.rs:4844`) covers only the named-local form.
+  **Pre-emptive fix:** resolve the receiver's type for the ref-param coercion decision even when it is an
+  expression, not only a bound name.
 
 ### 🟡 Type-system + runtime depth
 
@@ -325,7 +497,17 @@ Recorded for completeness — likely stay as-is unless a real program forces the
   contains/starts_with`, `s.chars()`, `for c in s`), **list-of-structs + nested-list read**, by-ref list
   sharing across calls.
 - **`if`/`match` as expressions** (incl. in interpolation), **`Result`/`Option` + `?`**, exhaustive-match,
-  deep recursion, **integer overflow → recoverable panic** (never wraps), int-div truncation, `%` on negatives.
+  deep recursion, **integer `+ - * / %` overflow → recoverable panic** (never wraps; **but shifts DO wrap
+  silently** — see the int→float entry above), int-div truncation, `%` on negatives.
+- **Fuzz-pass robustness (verified 2026-06-21, both engines):** parser nesting-depth guard ("expression
+  nested too deeply" — no stack overflow on 5000-deep parens / blocks), structural-depth guard on
+  print/`==` ("maximum structural depth (10000)" — no infinite loop on a self-referential struct cycle),
+  call-depth cap (10000, no native stack overflow), index/slice OOB faults + Python-asymmetric clamp,
+  `slice step 0` fault, generator idempotent-`None` after drain, per-iteration closure capture of a loop
+  var, deep-copy `spawn`/`parallel:` airlock (mutations don't leak back), default-arg expressions fully
+  checked (undefined name / type mismatch caught — NOT a bypass like interpolation), generic bound
+  enforcement, char-indexed multibyte `str` (`len`/index/slice by codepoint), unicode identifiers,
+  empty file, `bytearray` byte-range fault, `assert` fault, missing-module + missing-stdlib resolve error.
 - **All std modules on both engines**, **recursive/self-referential structs** (BST, list) GC-clean,
   **mutable `self` across methods**, **nested-list DP**, **empty-map `K,V` inference from later use**.
 - **User-struct iterator protocol** (`next() -> Option[T]`, lazy, early-`break`-safe) + **`Iterator[T]`
