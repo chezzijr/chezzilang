@@ -16,13 +16,13 @@ use crate::ast::{
     LitPattern, MatchArm, MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type,
     UnaryOp, WaitArm, WaitTarget,
 };
+use crate::interpolation::{Chunk, parse_interpolation};
 use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ResolvedImport};
 use crate::vm::op::{
     CapEntry, CapSrc, CffiDef, LIFECYCLE_HOOKS, ModuleProto, NO_IC, Op, Program, Proto, ProtoId,
     StructDef, SuiteInfo, VariantDef, WaitMeta,
 };
-use crate::{lexer, parser};
 use std::collections::HashMap;
 
 mod peephole;
@@ -3090,7 +3090,10 @@ impl Compiler {
     /// from literal text. `{{`/`}}` are literal braces. A literal-only string is a single
     /// `ConstStr`; an interpolated one builds its chunks and concatenates with `BuildStr`.
     fn compile_str(&mut self, fc: &mut FnComp, raw: &str, span: Span) -> Result<(), CompileError> {
-        let chunks = parse_interpolation(raw, span)?;
+        let chunks = parse_interpolation(raw, span).map_err(|e| CompileError {
+            message: e.message,
+            span: e.span,
+        })?;
         if let [Chunk::Lit(s)] = chunks.as_slice() {
             fc.emit(Op::ConstStr(s.clone()), span);
             return Ok(());
@@ -3231,95 +3234,6 @@ fn emit_lit_const(fc: &mut FnComp, lit: &LitPattern, span: Span) {
         LitPattern::Str(s) => fc.emit(Op::ConstStr(s.clone()), span),
         LitPattern::Bool(b) => fc.emit(if *b { Op::True } else { Op::False }, span),
     }
-}
-
-// ===== string interpolation (compile-time pre-parse) =====
-
-#[derive(Debug)]
-enum Chunk {
-    Lit(String),
-    /// An interpolated `{expr}` or `{expr:spec}`; the format spec (parsed at compile time) is
-    /// `None` for a bare `{expr}`.
-    Expr(Expr, Option<crate::fmtspec::FormatSpec>),
-}
-
-/// Split an interpolated string literal into literal/expr chunks, mirroring `interp::interpolate`
-/// (but at compile time): `{{`/`}}` are literal braces; each `{ … }` is lexed + parsed as an
-/// expression. A malformed interpolation surfaces here as a compile error.
-fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, CompileError> {
-    let mut chunks = Vec::new();
-    let mut lit = String::new();
-    let mut chars = raw.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '{' if chars.peek() == Some(&'{') => {
-                chars.next();
-                lit.push('{');
-            }
-            '}' if chars.peek() == Some(&'}') => {
-                chars.next();
-                lit.push('}');
-            }
-            '{' => {
-                if !lit.is_empty() {
-                    chunks.push(Chunk::Lit(std::mem::take(&mut lit)));
-                }
-                let mut inner = String::new();
-                let mut closed = false;
-                for ic in chars.by_ref() {
-                    if ic == '}' {
-                        closed = true;
-                        break;
-                    }
-                    inner.push(ic);
-                }
-                if !closed {
-                    return Err(CompileError {
-                        message: "unterminated '{' in interpolated string".to_string(),
-                        span,
-                    });
-                }
-                // Split on the first top-level `:` into (expr, spec); a `:` inside brackets/quotes
-                // (e.g. `{m["a:b"]}`, slices `a[1:2]`) is NOT a separator. Spec parse errors are
-                // surfaced as compile errors (good UX); type/value mismatches are deferred to the VM.
-                let (expr_src, spec_src) = crate::fmtspec::split_spec(&inner);
-                let spec = match spec_src {
-                    Some(s) => Some(
-                        crate::fmtspec::parse(s)
-                            .map_err(|message| CompileError { message, span })?,
-                    ),
-                    None => None,
-                };
-                let expr = parse_expr_str(expr_src, span)?;
-                chunks.push(Chunk::Expr(expr, spec));
-            }
-            '}' => {
-                return Err(CompileError {
-                    message: "unmatched '}' in string (use '}}' for a literal brace)".to_string(),
-                    span,
-                });
-            }
-            _ => lit.push(c),
-        }
-    }
-    if !lit.is_empty() {
-        chunks.push(Chunk::Lit(lit));
-    }
-    Ok(chunks)
-}
-
-fn parse_expr_str(src: &str, span: Span) -> Result<Expr, CompileError> {
-    let tokens = lexer::tokenize(src).map_err(|e| CompileError {
-        message: e.to_string(),
-        span,
-    })?;
-    let mut expr = parser::parse_expr(tokens).map_err(|e| CompileError {
-        message: e.message,
-        span,
-    })?;
-    // Fragments bypass the module-wide desugar pass; lower `?.`/`??` carriers here (both engines do).
-    crate::desugar::lower_carriers(&mut expr);
-    Ok(expr)
 }
 
 // ===== per-function compile state =====

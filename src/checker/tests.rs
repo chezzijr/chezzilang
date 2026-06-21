@@ -57,6 +57,33 @@ fn rejects_desugared(src: &str, needle: &str) {
     );
 }
 
+// ===== string interpolation fragments are type-checked =====
+
+#[test]
+fn interpolation_undefined_name_rejected() {
+    // An undefined name inside `{...}` must surface as a compile error (was opaque before the fix;
+    // it slipped past `check` and panicked the compiler at global_slot).
+    rejects("print(\"{nope}\")\n", "unknown name 'nope'");
+}
+
+#[test]
+fn interpolation_type_error_rejected() {
+    // A type error inside `{...}` (int + list) must be reported by `check`, not deferred to runtime.
+    let errs = check_src("x: int = 1\ny: list[int] = [1]\nprint(\"{x + y}\")\n");
+    assert!(
+        !errs.is_empty(),
+        "expected a type error for int + list inside interpolation, got none"
+    );
+}
+
+#[test]
+fn interpolation_valid_ok() {
+    // No false positives on valid interpolations / plain / literal-brace strings.
+    ok("x: int = 1\nprint(\"x is {x}\")\n");
+    ok("print(\"plain\")\n");
+    ok("print(\"lit braces {{ }}\")\n");
+}
+
 // ===== compound assignment (*= /= %= &= |= ^= <<= >>=) =====
 
 #[test]

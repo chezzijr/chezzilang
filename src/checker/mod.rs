@@ -4617,6 +4617,37 @@ impl Checker {
 
     // ===== expression inference =====
 
+    /// Type-check an interpolated string literal's `{...}` fragment expressions. The string is
+    /// parsed into chunks by the SHARED `crate::interpolation` parser (the very one the compiler
+    /// emits from — so the checker and the compiler can never disagree on how a string is chunked),
+    /// and every fragment `Expr` is run through the normal `infer_value` path: undefined names,
+    /// type/method/arity mismatches, and void-call fragments all surface here as compile errors
+    /// instead of slipping past `check` to panic the compiler (`global_slot`) or fault at runtime.
+    ///
+    /// A malformed interpolation (unterminated `{`, bad format spec) is reported as an error; we
+    /// then stop (the compiler treats the same malformed string as fatal). Format-spec *validation*
+    /// stays the compiler's job — we discard the parsed spec and only infer the expression.
+    ///
+    /// Span imprecision: fragment errors point at the whole string literal, not the fragment's byte
+    /// offset within it. This matches the compiler's existing emit site (it uses the string span for
+    /// fragment bytecode too); narrowing the span is out of scope and fragments are short. Always
+    /// returns `Ty::Str`.
+    fn check_interpolation(&mut self, raw: &str, span: Span) -> Ty {
+        match crate::interpolation::parse_interpolation(raw, span) {
+            Ok(chunks) => {
+                for chunk in &chunks {
+                    if let crate::interpolation::Chunk::Expr(e, _spec) = chunk {
+                        // Discard the inferred type; we only want the side-effecting checks
+                        // (name resolution, arity/type/method validation, nil ban).
+                        let _ = self.infer_value(e);
+                    }
+                }
+            }
+            Err(e) => self.error(span, e.message),
+        }
+        Ty::Str
+    }
+
     /// Infer an expression that is used in **value position** (assignment RHS, a call/collection
     /// argument, a binary/unary operand, an index/range bound, …). `nil` is a return-only / void
     /// type, never a writable value: a void call's result must not silently propagate into a binding
@@ -4639,7 +4670,7 @@ impl Checker {
         match &expr.kind {
             ExprKind::Int(_) => Ty::Int,
             ExprKind::Float(_) => Ty::Float,
-            ExprKind::Str(_) => Ty::Str, // opaque; interpolation contents are not checked (M2 defer)
+            ExprKind::Str(raw) => self.check_interpolation(raw, expr.span),
             ExprKind::RawStr(_) => Ty::Str, // verbatim `str`, no interpolation to check
             ExprKind::Bytes(_) => Ty::Bytes,
             ExprKind::Bool(_) => Ty::Bool,

@@ -17,6 +17,7 @@ mod fmtspec;
 // flag was removed), so it is only compiled for tests, where every reference to it lives.
 #[cfg(test)]
 mod interp;
+mod interpolation;
 mod json_decode;
 mod lexer;
 mod manifest;
