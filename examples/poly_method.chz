@@ -45,7 +45,10 @@ fn total(shapes: list[Shape]) -> int:
     return acc
 
 fn main():
-    shapes := []
+    # Annotated `list[Shape]`: a heterogeneous/protocol collection needs the explicit element type.
+    # Without it, refine-on-first-use pins the element to the first push's concrete struct (`Sq`),
+    # and a later `Rect`/`Tri`/… push is a type error. The annotation is also clearer to readers.
+    shapes: list[Shape] = []
     shapes.push(Sq(3))      # 9
     shapes.push(Rect(2, 4)) # 8
     shapes.push(Tri(4, 5))  # 10

@@ -7256,3 +7256,225 @@ fn newtype_generic_rejected_at_parse_or_check() {
         "expected parse/check to reject a generic newtype"
     );
 }
+
+// ============================================================================
+// refine-on-first-use: empty-collection element/key/value Unknown slots
+// (the empty-slot half of the Ty::Unknown soundness family). An empty literal's
+// element/key/value (or nullary-variant type arg / native None) is Unknown; the
+// FIRST mutating op that supplies a concrete type re-pins the binding, so a later
+// conflicting op is a normal error and the Hashable/float-key ban runs when the
+// key/element becomes concrete. Refinement is BLOCK-LOCAL flow-sensitive: a
+// refinement inside one branch arm does not leak into a sibling arm or post-branch.
+// ============================================================================
+
+// ---- step 1: straight-line refine pins the element, later conflict rejected ----
+
+#[test]
+fn empty_list_push_pins_element_then_mixed_rejected() {
+    // x:=[]; x.push(1) pins list[int]; x.push("s") is then a normal mismatch.
+    rejects(
+        "fn main():\n x := []\n x.push(1)\n x.push(\"s\")\nmain()",
+        "pinned",
+    );
+}
+
+#[test]
+fn refine_erroring_push_arg_reports_once() {
+    // Regression: the speculative arg-infer in refine_receiver must roll its diagnostics back so an
+    // erroring mutator arg (`xs.push(undefined_v)`) is reported exactly ONCE by the real dispatch
+    // path, not duplicated. (Empty-collection refine over-reported on base of this branch.)
+    let errs = check_src("fn main():\n xs := []\n xs.push(undefined_v)\nmain()");
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert!(
+        errs[0].message.contains("unknown name"),
+        "got: {:?}",
+        errs[0]
+    );
+}
+
+#[test]
+fn refine_erroring_index_key_reports_once() {
+    // Same rollback for the index-assign refine path (`m[undefined_k] = 1`).
+    let errs = check_src("fn main():\n m := {}\n m[undefined_k] = 1\nmain()");
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert!(
+        errs[0].message.contains("unknown name"),
+        "got: {:?}",
+        errs[0]
+    );
+}
+
+#[test]
+fn empty_list_of_none_then_conflicting_some_rejected() {
+    // [None] is list[Option[Unknown]]; push(Some(5)) refines to list[Option[int]];
+    // push(Some("hi")) then conflicts (nested-typeparam + native None producer).
+    rejects(
+        "fn main():\n xs := [None]\n xs.push(Some(5))\n xs.push(Some(\"hi\"))\nmain()",
+        "expected",
+    );
+}
+
+#[test]
+fn empty_list_of_nullary_enum_then_conflicting_variant_rejected() {
+    // [Box.Empty] is list[Box[Unknown]]; push(Box.Full("hi")) refines to list[Box[str]];
+    // push(Box.Full(5)) then conflicts (nullary-variant producer).
+    rejects(
+        "enum Box[T]:\n Full(T)\n Empty\nfn main():\n xs := [Box.Empty]\n xs.push(Box.Full(\"hi\"))\n xs.push(Box.Full(5))\nmain()",
+        "expected",
+    );
+}
+
+// ---- step 2: insertion-site Hashable / float-key ban on empty {}/set() ----
+
+#[test]
+fn empty_map_float_key_rejected() {
+    // m:={}; m[1.5]="b" — float key must be rejected even though key type is Unknown.
+    rejects("fn main():\n m := {}\n m[1.5] = \"b\"\nmain()", "Hashable");
+}
+
+#[test]
+fn empty_set_float_and_nan_rejected() {
+    // s:=set(); s.add(1.5) and the inf-inf NaN add — both non-Hashable, rejected.
+    rejects("fn main():\n s := set()\n s.add(1.5)\nmain()", "Hashable");
+    rejects(
+        "fn main():\n big := 1e308\n inf := big * 10.0\n nan := inf - inf\n s := set()\n s.add(nan)\nmain()",
+        "Hashable",
+    );
+}
+
+// ---- step 3: un-annotated heterogeneous struct list rejected with annotation hint ----
+
+#[test]
+fn heterogeneous_struct_list_unannotated_rejected() {
+    // shapes:=[]; push Sq; push Rect — the pin makes the 2nd push a mismatch; the
+    // diagnostic must hint at annotating list[<protocol>].
+    let errs = check_src(
+        "struct Sq:\n s: int\nstruct Rect:\n w: int\n h: int\nfn main():\n shapes := []\n shapes.push(Sq(3))\n shapes.push(Rect(2, 4))\nmain()",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("pinned") && e.message.contains("annotate")),
+        "expected a pinned/annotate hint, got: {errs:?}"
+    );
+}
+
+// ---- step 4: BLOCK-LOCAL FLOW-SENSITIVITY — sibling arms refine independently ----
+
+#[test]
+fn flow_sensitive_if_else_int_vs_str_ok() {
+    // Only one arm runs; each refines from the pre-branch list[Unknown] independently.
+    ok("fn main():\n c := true\n xs := []\n if c:\n  xs.push(1)\n else:\n  xs.push(\"s\")\nmain()");
+}
+
+#[test]
+fn flow_sensitive_map_if_elif_ok() {
+    // int value in one arm, float value in another — independent map refinements.
+    ok(
+        "fn main():\n c := 1\n cfg := {}\n if c == 1:\n  cfg[\"x\"] = 1\n else if c == 2:\n  cfg[\"y\"] = 2.0\nmain()",
+    );
+}
+
+#[test]
+fn flow_sensitive_set_if_else_ok() {
+    ok("fn main():\n c := true\n s := set()\n if c:\n  s.add(1)\n else:\n  s.add(\"x\")\nmain()");
+}
+
+// ---- step 5: straight-line persists, branch refine does NOT leak ----
+
+#[test]
+fn refine_inside_block_then_outer_after_does_not_leak() {
+    // if-arm push(1) does NOT leak; post-if xs reverts to list[Unknown], so push("s")
+    // refines cleanly. (Cross/post-branch mixing is the documented residual — accepted.)
+    ok("fn main():\n xs := []\n if true:\n  xs.push(1)\n xs.push(\"s\")\nmain()");
+}
+
+#[test]
+fn refine_inside_block_on_outer_list_ok() {
+    // repin targets the OWNING (outer) scope; a homogeneous build across block boundary is fine.
+    ok("fn main():\n xs := []\n if true:\n  xs.push(1)\n xs.push(2)\nmain()");
+}
+
+// ---- step 6: invariants — never-refined empties, homogeneous builds, residual hole ----
+
+#[test]
+fn never_refined_empty_ok() {
+    ok("fn main():\n empty := {}\n print(empty)\n xs := []\n print(xs)\nmain()");
+}
+
+#[test]
+fn idiomatic_homogeneous_push_ok() {
+    ok(
+        "fn main():\n out := []\n out.push(1)\n out.push(2)\n s := set()\n s.add(\"a\")\n s.add(\"b\")\n m := {}\n m[\"k\"] = 1\n m[\"j\"] = 2\nmain()",
+    );
+}
+
+#[test]
+fn single_nullary_enum_push_stays_ok() {
+    // v7.chz shape: one non-conflicting Box.Full push after Box.Empty stays accepted.
+    ok(
+        "enum Box[T]:\n Full(T)\n Empty\nfn main():\n c := Box.Empty\n xs := [c]\n xs.push(Box.Full(\"hi\"))\nmain()",
+    );
+}
+
+#[test]
+fn annotated_heterogeneous_list_ok() {
+    // The intended escape hatch: an explicit list[Shape] annotation accepts mixed structs
+    // sharing the protocol (refinement never engages on an already-concrete element type).
+    ok(
+        "protocol Shape:\n fn area(self) -> int\nstruct Sq:\n s: int\n fn area(self) -> int:\n  return self.s * self.s\nstruct Rect:\n w: int\n h: int\n fn area(self) -> int:\n  return self.w * self.h\nfn main():\n shapes: list[Shape] = []\n shapes.push(Sq(3))\n shapes.push(Rect(2, 4))\nmain()",
+    );
+}
+
+#[test]
+fn nonident_receiver_not_refined_documented_hole() {
+    // Residual hole: refine only fires on a simple-variable receiver. A non-Ident receiver
+    // (Index expr xss[0]) is never refined — the mixed push stays accepted (documented).
+    ok("fn main():\n xss := [[]]\n xss[0].push(1)\n xss[0].push(\"s\")\nmain()");
+}
+
+// ---- step 7: golden-test checker-bypass fix — every shipped example type-checks ----
+
+#[test]
+fn all_shipped_examples_typecheck() {
+    // The golden example tests drive run_capture, which BYPASSES the Checker — so a checker
+    // regression on a shipped example would ship FALSELY GREEN. This routes every
+    // examples/*.chz through the real checked path (build_graph + check_graph, mirroring
+    // `chezzi check`) so example type-errors are caught from now on.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    // Two shipped examples are INTENTIONAL `chezzi check` failures on base (they pre-date this
+    // change and are deliberately run-only demos that the golden VM tests exercise via `run`, which
+    // bypasses the checker): `panic.chz` (a top-level `panic(...)` demo whose result is used in
+    // value position) and `explicit_type_args.chz` (demos call-site type args the checker doesn't
+    // yet accept — a separate, pre-existing gap). They are allow-listed here so this test catches
+    // NEW checker regressions on the OTHER examples without being blocked by those two known holes.
+    let known_check_failures = ["panic.chz", "explicit_type_args.chz"];
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("examples dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("chz"))
+        .filter(|p| {
+            !p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| known_check_failures.contains(&n))
+                .unwrap_or(false)
+        })
+        .collect();
+    entries.sort();
+    assert!(!entries.is_empty(), "no examples found in {dir:?}");
+    let mut failures = Vec::new();
+    for path in &entries {
+        match crate::resolver::build_graph(path) {
+            Ok(graph) => {
+                if let Err(errs) = crate::checker::check_graph(&graph) {
+                    failures.push(format!("{}: {:?}", path.display(), errs));
+                }
+            }
+            Err(e) => failures.push(format!("{}: resolve/parse error: {e}", path.display())),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "these shipped examples fail `chezzi check`:\n{}",
+        failures.join("\n")
+    );
+}
