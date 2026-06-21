@@ -11,6 +11,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Soundness fix — string-interpolation fragments are now type-checked (was a CRITICAL compiler
+panic + unsound `check`).** The checker treated an interpolated `str` as opaque `Ty::Str` and never
+resolved/type-checked the `{…}` fragment exprs, while the compiler hard-assumed the checker already
+rejected undefined names — so `print("{nope}")` passed `check` then panicked the compiler at
+`global_slot` (`compiler/mod.rs`), and every type/method/arity error inside `{…}` escaped `check`
+entirely. Fix: the `ExprKind::Str` arm now parses the literal with the shared interpolation parser and
+`infer_value`s each fragment (`checker/mod.rs::check_interpolation`), so undefined names + type errors
+surface as compile errors at the string's span and `global_slot`'s invariant holds (panic impossible).
+The compiler's private interpolation parser (`Chunk`/`parse_interpolation`/`parse_expr_str`) was
+extracted into a new shared leaf module `src/interpolation.rs` (neutral `InterpError`; compiler and
+checker each map it to their own error type) so both engines chunk strings byte-identically — two-engine
+parity preserved (no `interp` edit needed; the new check is a pre-run gate). Pinned by
+`checker::tests::interpolation_{undefined_name_rejected,type_error_rejected,valid_ok}`. Full `cargo
+test` (2365) + `cargo test conformance` green, `cargo clippy --all-targets -- -D warnings` clean.
+
 **✅ `chezzi docs` + `module:function` entrypoint + stdlib reference (tooling/docs).** Three related
 changes: (1) **`chezzi docs [topic]`** prints embedded language docs — topics `spec`/`syntax`/`stdlib`,
 and a bare `chezzi docs` (or `docs llms`) emits the full reference bundle (spec+syntax+stdlib) for
@@ -255,8 +270,9 @@ clean.
   No grammar change (both reuse existing productions) → `cargo test conformance` stays green.
   `examples/inline_fn.chz` + `.expected` goldened (VM == interp). Docs: `docs/syntax.md §5`,
   `docs/grammar.bnf` (`<fnDecl>` comment), `gaps.md` (void-discard footgun → RESOLVED, cross-ref the
-  bare-fn entry). NOTE: string-interpolation operands are NOT nil-checked — the checker treats `Str` as
-  opaque (interpolation contents unparsed), so that one listed site is out of scope here. All cargo
+  bare-fn entry). NOTE (since 2026-06-21 superseded): string-interpolation operands ARE now checked —
+  the `ExprKind::Str` arm parses `{…}` fragments and `infer_value`s each (see the soundness-fix entry
+  below), so void-call / nil fragments are nil-banned too. All cargo
   wrapped at MemoryMax=6G; full `cargo test` (2104) + `cargo test conformance` green,
   `cargo clippy --all-targets -- -D warnings` clean.
 - **Follow-up fixes (2026-06-17).** Two checker bugs in the inline-expr return path, both fixed:

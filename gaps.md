@@ -40,26 +40,16 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
 
 ### 🔴 Soundness holes (found 2026-06-21, adversarial fuzz pass — `check` greenlights code that breaks at runtime)
 
-- **🔴 String interpolation expressions bypass the checker → `check` unsound + a hard compiler panic on
-  undefined names.** The checker types every interpolated `str` as opaque `Ty::Str` and never resolves
-  or type-checks the `{…}` fragments — `checker/mod.rs:4642` (`ExprKind::Str(_) => Ty::Str, // opaque;
-  interpolation contents are not checked (M2 defer)`). The compiler then *does* compile those fragments,
-  on the documented assumption that "the checker rejects undefined names before compilation"
-  (`compiler/mod.rs:399-404`). That invariant is violated:
-  - **Undefined name → Rust panic (worst):** `print("{nope}")` passes `check` ("ok: no type errors")
-    then aborts the VM thread — `panicked at compiler/mod.rs:404: global 'nope' has no slot (checker
-    should reject undefined names)` + a leaked backtrace. Far worse buried in a never-called fn: `check`
-    is green, it ships, it blows up on the line that finally evaluates the string.
-  - **Every type / method / arity error inside `{…}` escapes `check` (unsound):** `"{x + y}"` (int+list),
-    `"{x.no_such()}"`, `"{f(1,2,3)}"` (wrong arity) all report "no type errors", then fault at runtime.
-    Breaks the green-check-is-safe contract the docs promise.
-  - Same-quote nesting (`"{"a"}"`) breaks the *lexer* (pre-3.12-Python limit) so it errors early — only
-    lexically-clean fragments slip past.
-  - **Pre-emptive fix:** in the `ExprKind::Str` arm resolve + `infer_value` each parsed fragment (the AST
-    already holds the exprs — the compiler walks them), reusing the normal expr path so undefined names /
-    type mismatches surface as compile errors at the fragment's span; then `global_slot`'s invariant
-    holds. Drive both `check` and the runtime fragment-eval off the same resolved exprs for two-engine
-    parity. (The interp path already evaluates fragments at runtime, so confirm it errors identically.)
+- **✅ RESOLVED (2026-06-21) — String interpolation expressions bypass the checker.** The `ExprKind::Str`
+  arm now parses the literal into chunks via the shared `crate::interpolation` parser (the same one the
+  compiler emits from) and runs every `{…}` fragment expr through the normal `infer_value` path
+  (`checker/mod.rs::check_interpolation`). Undefined names (`print("{nope}")`), type/method/arity errors
+  (`"{x + y}"` int+list, `"{x.no_such()}"`, `"{f(1,2,3)}"`), and void-call fragments now surface as
+  compile errors at the string's span, so `compiler/mod.rs` `global_slot`'s "checker rejected undefined
+  names" invariant holds and the prior panic is impossible. The interpolation parser was extracted from
+  the compiler into `src/interpolation.rs` so checker and compiler chunk strings byte-identically
+  (two-engine parity preserved). Same-quote nesting (`"{"a"}"`) still errors at the *lexer*
+  (pre-3.12-Python limit) — out of scope. Pinned by `checker::tests::interpolation_*`.
 
 - **🔴 Empty collection literals (`[]` / `{}` / `set()`) get an unrefinable `Ty::Unknown` element →
   `check` unsound + the deliberate float-key ban is bypassed.** `infer_list` / `infer_set` / `infer_map`
