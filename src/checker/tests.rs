@@ -1477,10 +1477,92 @@ fn inferred_forward_ref_callee_later_is_permissive() {
 }
 
 #[test]
-fn inferred_recursion_only_no_spurious_error() {
-    // A body whose only return is a self-recursive call infers `Unknown` (not `nil`), so it does
-    // not wrongly report "function returns nothing".
+fn inferred_recursion_only_stays_permissive() {
+    // A body whose only return is a self-recursive call has NO concrete base, so its return type is
+    // genuinely un-inferable: the fixpoint leaves it `Unknown`, which stays permissive (NOT rejected
+    // — a blanket "leftover Unknown ⇒ require annotation" check over-reaches onto non-recursive
+    // Unknown sources like `return x[0]` of an empty collection; soundly rejecting only this needs
+    // call-graph cycle detection, tracked as a follow-up).
     ok("fn loopy(n: int):\n    return loopy(n - 1)\n");
+}
+
+#[test]
+fn inferred_recursion_only_with_annotation_ok() {
+    // An explicit `-> int` annotation bypasses inference entirely (the cleanest way to type a
+    // self-recursive-only function).
+    ok("fn loopy(n: int) -> int:\n    return loopy(n - 1)\n");
+}
+
+#[test]
+fn inferred_forward_ref_recursive_rejects_wrong_slot() {
+    // o2.chz: `rec` forward-references `base` (defined AFTER) and self-recurses. Order-independent
+    // fixpoint inference resolves `base -> str`, then `rec -> str`, so feeding `rec(2)` into an
+    // `int` slot is correctly rejected (was wrongly accepted under single-pass source-order infer).
+    rejects(
+        "fn rec(n: int):\n    if n <= 0:\n        return base(0)\n    return rec(n - 1)\nfn base(n: int):\n    return \"hello\"\nv: int = rec(2)\n",
+        "cannot assign str to variable of type int",
+    );
+}
+
+#[test]
+fn inferred_mutual_recursion_with_base_resolves() {
+    // Mutual recursion with a concrete base: `a` has base `return 1` (int) but also forward+mutual
+    // calls `b`; `b` returns `a(...)`. Only the fixpoint resolves `a -> int` then `b -> int`, so
+    // `v: str = b(5)` is rejected.
+    rejects(
+        "fn a(n: int):\n    if n <= 0:\n        return 1\n    return b(n - 1)\nfn b(n: int):\n    return a(n - 1)\nv: str = b(5)\n",
+        "cannot assign int to variable of type str",
+    );
+}
+
+#[test]
+fn inferred_pure_mutual_recursion_stays_permissive() {
+    // Pure mutual recursion with NO concrete base anywhere: both returns stay `Unknown` after the
+    // fixpoint and stay permissive (same residual as the self-recursive-only case above — a
+    // follow-up needs cycle detection to reject it without over-reaching).
+    ok("fn a(n: int):\n    return b(n - 1)\nfn b(n: int):\n    return a(n - 1)\n");
+}
+
+#[test]
+fn non_recursive_unknown_return_not_falsely_rejected() {
+    // Regression: a NON-recursive un-annotated fn whose return infers `Unknown` for a reason
+    // unrelated to recursion (here `x[0]` of an empty list literal → element type `Unknown`) must
+    // NOT be rejected by the recursive-return inference — that empty-collection case is the sibling
+    // producer's domain. Accepted on base; the fixpoint change must not regress it.
+    ok("fn f():\n    x := []\n    return x[0]\nprint(\"ok\")\n");
+}
+
+#[test]
+fn errored_body_unknown_return_reports_once() {
+    // Regression: a fn whose body has a real error (undefined name) infers `Unknown`; the fixpoint
+    // change must not pile a spurious "cannot infer return type" on top of the genuine error.
+    let errs = check_src("fn f():\n    return undefined_fn()\n");
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert!(
+        errs[0].message.contains("unknown name"),
+        "got: {:?}",
+        errs[0]
+    );
+}
+
+#[test]
+fn fact_still_infers_int() {
+    // Regression guard: a self-recursive function with a CONCRETE literal base case already infers
+    // correctly today (base case `int` wins; the self-call's `Unknown` is ignored). The fixpoint
+    // must not perturb this.
+    ok(
+        "fn fact(n: int):\n    if n <= 1:\n        return 1\n    return n * fact(n - 1)\nx := fact(5)\ny := x + 1\n",
+    );
+}
+
+#[test]
+fn inferred_divergent_returns_accepted_when_annotated_protocol() {
+    // Divergent concrete returns are the user's job to annotate: an explicit `-> Shape` protocol
+    // existential accepts struct returns that each satisfy the protocol (no union types). Annotated
+    // fns bypass inference, so the fixpoint must not break this.
+    ok(
+        "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s * self.s\nstruct Ci:\n    r: int\n    fn area(self) -> int:\n        return 3 * self.r * self.r\nfn pick(c: bool) -> Shape:\n    if c:\n        return Sq(2)\n    return Ci(1)\n",
+    );
 }
 
 #[test]

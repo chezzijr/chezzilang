@@ -109,20 +109,28 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
   `Unknown`-typed value flows, fully check-blessed, into an `int`/`float`/`str`/struct/`fn`/map-key slot
   and then faults at runtime (the VM is defensive — recoverable error, not a Rust panic, but the static
   guarantee is gone). Beyond empty collections, two more reachable producers:
-  - **Recursive / forward-reference return inference.** A fn whose only `return`s are recursive or
-    forward calls infers `-> Unknown` (`checker/mod.rs:2143-2154`, "self-recursive call → Unknown, so the
-    function stays permissive"). Its result then assigns into any declared type:
+  - **Recursive / forward-reference return inference. ✅ RESOLVED** (fixpoint inference,
+    `checker/mod.rs` `infer_returns`). Return-type inference is now ORDER-INDEPENDENT: the per-pass walk
+    runs to a bounded FIXPOINT (re-infer every un-annotated fn/method until no stored `FnSig.ret`
+    changes, cap = un-annotated-count + 1), so a forward-reference or mutually-recursive callee resolves
+    on a later pass instead of leaking `Unknown`. A self-recursive call contributes no type (skipped);
+    the non-recursive returns decide. After convergence, any un-annotated fn/method still `Unknown`
+    (pure recursion / mutual recursion with no concrete base anywhere) is genuinely un-inferable and
+    keeps a **permissive** type — it is NOT rejected (a blanket "leftover Unknown ⇒ require annotation"
+    over-reaches onto non-recursive Unknown sources like `return x[0]` of an empty collection and
+    double-reports on already-errored bodies; soundly rejecting only the recursive-no-base case needs
+    call-graph cycle detection — a follow-up). The example below now correctly REJECTS `v: int = rec(2)`
+    (`rec` infers `str`):
     ```chezzi
     fn rec(n: int):
         if n <= 0: return base(0)
         return rec(n - 1)
-    fn base(n: int): return "hello"   # forward ref ⇒ rec infers Unknown
-    fn main():
-        v: int = rec(2)               # check ok — Unknown→int
-        print(v * 2)                  # run → cannot apply Mul to str and int
-    main()
+    fn base(n: int): return "hello"   # forward ref ⇒ rec now infers str (fixpoint)
+    v: int = rec(2)                   # ✅ check REJECTS: cannot assign str to variable of type int
     ```
-    Also lands a raw `int` in a `float` slot silently (`f: float = rec(...)` printing `5` not `5.0`).
+    (Divergent CONCRETE returns remain the user's job to annotate — `-> T` or a protocol existential
+    `-> Stringable`; with no annotation conflicting concretes are a `expected return type …, found …`
+    error. No union types.)
   - **Nullary variant of a generic enum (and `None`).** `Box.Empty` of `enum Box[T]` infers `T = Unknown`;
     a `list[Box[Unknown]]` then accepts `Box.Full` payloads of any type, and the bound-out payload is
     `Unknown`:
@@ -136,11 +144,12 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
         Box.Full(x): print(x + 1)     # check ok; run → cannot apply Add to str and int
         Box.Empty:   print("e")
     ```
-  **Pre-emptive fix:** the single highest-leverage fix in this file. Stop treating `Unknown` as
-  universally assignable into/out of *concrete* declared types — at an assignment/arg/return boundary
-  where the expected type is concrete and the actual is `Unknown`, either defer to a unification variable
-  resolved on use, or require an annotation. This one change closes the empty-collection hole, the
-  recursive-return hole, and the generic-nullary-variant hole at once.
+  **Status:** the recursive/forward-reference-return producer is **✅ RESOLVED** via fixpoint inference
+  (above). The **empty-collection** producer is handled by its own (sibling) task; the
+  **generic-nullary-variant** (`Box.Empty` / `None`) producer remains open. **Remaining fix** for those:
+  stop treating `Unknown` as universally assignable into/out of *concrete* declared types — at an
+  assignment/arg/return boundary where the expected type is concrete and the actual is `Unknown`, either
+  defer to a unification variable resolved on use, or require an annotation.
 
 - **🟡 Import name collisions are silently mis-resolved (checker ↔ runtime can even disagree).**
   `bind_import` records value members via `declare()` but function members into a separate `self.functions`
