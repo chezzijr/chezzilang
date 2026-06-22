@@ -114,7 +114,10 @@ a C struct passed/returned by value, layout via libffi). `bool` marshals as C `_
 int-returning predicate idiom (`isdigit`, …) binds `-> int` and tests `!= 0`. **Sync scalar callbacks
 (#4) have shipped**: a function-typed extern param spelled `fn(scalars) -> scalar` (no new grammar)
 marshals a Chezzi closure into a libffi trampoline C calls *back* synchronously during the extern call
-(scalars only; faults are caught + re-raised — stronger than ctypes). Nested structs-by-value, `str`
+(scalars only; faults are caught + re-raised — stronger than ctypes). **Pointer-deref builtins**
+(`std.ffi` `load_*`/`store_*`) **and the C-buffer alloc layer** (`ffi.alloc`/`alloc_zeroed`/`free`,
+libc-backed, manually freed) **have also shipped** — so `qsort`/`bsearch` of a Chezzi list now fully
+works (alloc + `store_*` + a callback comparator + `load_*`). Nested structs-by-value, `str`
 struct fields, **stored/cross-thread callbacks** (the rest of #4) and **varargs** (#5) — with design
 notes + the callback feasibility ladder + a varargs fixed-arity workaround in
 [`docs/ffi-and-packaging.md §1b`](ffi-and-packaging.md) — the rich Rust `Box<dyn Any>` userdata handle,
@@ -416,7 +419,13 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >   value vocab (`null()`/`is_null`); see `examples/ffi_ptr.chz`. **The memory behind a `ptr` is now
 >   readable/writable** via `std.ffi` `load_*`/`store_*` (every C scalar width + `load_str`, each with
 >   an `_at(p, off)` byte-offset form) — so struct fields, return buffers, and C output-params a library
->   hands you can be read/written. **Unsafe, like ctypes:** a bad pointer segfaults; only the NULL base
+>   hands you can be read/written. **You can also make your OWN C-laid-out buffer** via `std.ffi`
+>   `alloc(nbytes)` / `alloc_zeroed(nbytes)` (libc `malloc`/`calloc`, returning a raw `ptr`) and release
+>   it with `free(p)` — **manually freed** (`defer ffi.free(p)`; never auto-freed; `free(null())` is a
+>   no-op; negative-size + OOM are recoverable errors). Combined with the deref builtins + a callback
+>   comparator, `qsort`/`bsearch` of a Chezzi list now fully works (see `examples/ffi_qsort.chz`).
+>   **Unsafe, like ctypes:** a bad pointer segfaults; double-free / use-after-free / out-of-bounds
+>   store_/load_ are UB (no bounds/lifetime tracking); only the NULL base
 >   pointer is guarded (recoverable error, no fault) — a `ptr` cannot be forged from an int (provenance
 >   is C-sourced). See `stdlib.md §std.ffi`. A slow C call runs inline (extern
 >   names are NOT in `is_blocking`, so it pins its worker under `--parallel`).
@@ -499,7 +508,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >   user-named deallocator** (only libc `free` backs `owned_str`), and the deferred FFI features above
 >   (nested structs-by-value /
 >   `str` struct fields / **the rest of callbacks #4** — stored/cross-thread callbacks; **sync scalar
->   callbacks AND pointer-deref `load_*`/`store_*` builtins have shipped** / **varargs #5**, with design
+>   callbacks, pointer-deref `load_*`/`store_*` builtins, AND the C-buffer alloc layer
+>   (`ffi.alloc`/`alloc_zeroed`/`free`) have shipped** (so `qsort`/`bsearch` of a Chezzi list works; a
+>   GC-tracked auto-freed owned-buffer type + bulk-copy helpers + `realloc` remain deferred) /
+>   **varargs #5**, with design
 >   notes + the callback feasibility ladder + workaround in `docs/ffi-and-packaging.md §1b`). See
 >   `docs/ffi-and-packaging.md`. (`std.os.exit` with a real exit-code channel through the run drivers
 >   has since **shipped** — see `examples/exit.chz`.)
@@ -572,9 +584,12 @@ tests/          # Rust unit + golden tests
 > `ptr` type + `std.ffi`, the return-only `str` opt-ins **`owned_str`** (copy + libc `free`) and
 > **`str?`** (`NULL` → `None`), **plus flat-scalar structs by value**, **plus sync scalar callbacks**
 > — a `fn(scalars) -> scalar` extern param C calls back synchronously, same-thread, scalars only,
-> **plus pointer-deref `load_*`/`store_*` builtins** reading/writing the memory behind a `ptr`) — see
+> **plus pointer-deref `load_*`/`store_*` builtins** reading/writing the memory behind a `ptr`,
+> **plus the C-buffer alloc layer** `ffi.alloc`/`alloc_zeroed`/`free` — libc-backed, manually-freed raw
+> buffers, so `qsort`/`bsearch` of a Chezzi list now fully works) — see
 > the *Standard library* note above. The remaining Level-3 surface (nested structs-by-value, `str`
-> struct fields, stored/cross-thread callbacks, a C-buffer alloc layer (`ffi.alloc`/`free`), varargs,
+> struct fields, stored/cross-thread callbacks, a GC-tracked auto-freed owned-buffer type + bulk-copy
+> helpers + `realloc`, varargs,
 > a custom user-named deallocator, and the rich Rust `Box<dyn Any>` userdata handle) is still a future idea.
 
 ## Verification

@@ -11,6 +11,36 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Feature — FFI C-buffer alloc layer `std.ffi.alloc`/`alloc_zeroed`/`free` (feasibility-ladder
+tier 3) (2026-06-22).** Allocate raw C-laid-out memory to hand to a C array/buffer API (`qsort`,
+`bsearch`, `fread`-into-buffer): `alloc(nbytes) -> ptr` (`malloc`; garbage bytes),
+`alloc_zeroed(nbytes) -> ptr` (`calloc`; zeroed), `free(p)` (`free`; returns nil). Fill/read with the
+already-shipped `store_*`/`load_*` deref builtins — **no** bulk-copy helper (the loop idiom is the
+surface). **Allocator:** direct `unsafe extern "C"` `malloc`/`calloc`/`free` (the **libc** allocator,
+NOT Rust's `GlobalAlloc`), so a buffer may be handed to a C fn that reallocs/frees it and it pairs with
+the same allocator `cffi`'s `owned_str` free path uses; extern decls resolve at link time, zero
+per-call dlsym/libffi overhead. **Manual free** (`defer ffi.free(p)`) — a `ptr` is never auto-freed
+(consistent with the FFI-ptr rule); forgetting **leaks**. **Faults (recoverable, never segfault/abort):**
+`nbytes < 0` → `ffi.alloc: negative size`; `malloc`/`calloc` returning NULL for `nbytes > 0` →
+`ffi.alloc: out of memory` (OOM checked only when `n > 0`, so a legitimate NULL from `malloc(0)` is not
+mis-reported); `free(ffi.null())` is a **no-op** (does NOT route through `base_addr`); `nbytes == 0`
+passes through (impl-defined). Double-free / use-after-free / OOB store_/load_ are the user's
+responsibility (documented UB, no bounds/lifetime tracking — that's the deferred auto-buffer type).
+`#[cfg(unix)]`-gated (non-unix registers the names but every call errors, mirroring the deref builtins).
+**Parity by construction:** pure-additive on the engine-neutral `Host`/`NativeFn` seam — no VM/interp
+edit — so VM == interp == M:N. **Wiring:** 3 new `MEMBERS` entries (now 59) in `src/native/ffi.rs` +
+`native_module_sig`'s `std.ffi` arm (`src/checker/mod.rs`: `alloc`/`alloc_zeroed`:int→ptr,
+`free`:ptr→nil). **Tests:** 5 ffi unit tests (roundtrip+free, zeroed-reads-zero, negative-size error,
+free(null) no-op, MEMBERS coverage) + 1 checker sig test + 2 cffi two-engine parity tests (alloc+fill+
+read+free; alloc_zeroed) + the **capstone `examples/ffi_qsort.chz`** golden on BOTH engines (sort a
+Chezzi `int` list via libc `qsort` with a Chezzi `fn(ptr,ptr)->int` comparator that `load_int64`s both
+sides — the marquee proof callbacks + deref + alloc all compose; also verified on `--parallel`). Full
+suite + conformance + `clippy --all-targets -D warnings` clean. Docs: `docs/stdlib.md` (new alloc
+surface + qsort idiom), `docs/ffi-and-packaging.md §1b` (tier 3 → LANDED; `qsort`/`bsearch` of a Chezzi
+list now fully works; honest about what remains deferred: stored/cross-thread callbacks + variadics +
+a GC-tracked owned-buffer), `docs/spec.md` + `docs/syntax.md` (FFI limits: manual C-buffer alloc now
+available).
+
 **✅ Feature — FFI memory-deref builtins `std.ffi.load_*`/`store_*` (feasibility-ladder tier 2)
 (2026-06-22).** Read/write the **C-owned memory behind an opaque `ptr`** — for struct fields, return
 buffers, event payloads, and C output-params a library hands you. Two-form API (fixed-arity native
@@ -35,9 +65,10 @@ but every call errors). **Parity by construction:** pure-additive on the engine-
 width store, NULL-error, MEMBERS coverage) + 3 checker sig tests + 3 cffi two/three-engine parity
 tests (a `cc`-built `mkrec()` returning a `ptr` to `{int32 a@0; int64 b@8; double c@16}`, read/written
 field-by-field). Full suite (2478) + conformance + `clippy --all-targets -D warnings` clean. Docs:
-`docs/stdlib.md` (new `std.ffi` surface), `docs/ffi-and-packaging.md §1b` (tier 2 → LANDED; records the
-remaining gap: `qsort`/`bsearch` of a Chezzi *list* still needs a C-buffer alloc layer
-`ffi.alloc`/`free`), `docs/spec.md` (FFI v1 limits: `ptr` memory now readable/writable), `docs/syntax.md`.
+`docs/stdlib.md` (new `std.ffi` surface), `docs/ffi-and-packaging.md §1b` (tier 2 → LANDED; the
+remaining gap at the time — `qsort`/`bsearch` of a Chezzi *list* needing a C-buffer alloc layer — has
+**since landed**, see the tier-3 entry above), `docs/spec.md` (FFI v1 limits: `ptr` memory now
+readable/writable), `docs/syntax.md`.
 
 **✅ Feature — FFI sync scalar callbacks (callbacks #4, sync subset) (2026-06-22).** An `extern "lib":`
 fn can now take a **function-typed parameter** spelled with the *existing* `fn(a, b) -> r` type (no new
