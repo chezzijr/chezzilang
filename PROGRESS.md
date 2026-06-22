@@ -11,6 +11,33 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Feature — FFI sync scalar callbacks (callbacks #4, sync subset) (2026-06-22).** An `extern "lib":`
+fn can now take a **function-typed parameter** spelled with the *existing* `fn(a, b) -> r` type (no new
+grammar) whose params + return are all C scalars (`int`/`float`/`bool`/`ptr`/`int8`..`uint64`; no
+`str`/struct/nested callback) — a Chezzi closure passed to C as a C function pointer that C calls
+*back* synchronously, on the same thread, during the extern call. **Pipeline:** `CType::Callback{params,
+ret}` + an `is_scalar()` helper (`src/native/cffi.rs`); the checker's `assert_marshallable` accepts a
+scalar `Ty::Func` in **param** position only (a func-typed *return* is rejected) and `resolve_ctype_d`
+lowers `Type::Func` → `CType::Callback`; `Cffi::call` builds a libffi `ffi_closure` trampoline (raw
+`ffi_prep_closure_loc` + `low::closure_alloc`/`closure_free`) whose userdata holds a `*mut dyn Host` +
+the arg index + the signature + a fault slot, pushes the trampoline's code address as the `void*` arg,
+and frees the closure when `call` returns (**sync scope ⇒ no GC rooting**). **The one new engine seam**
+is `Host::invoke_callback(arg_index, &[NativeRet]) -> NativeRet` (keyed by arg index so no engine
+`Value` leaks across the FFI layer): the VM host re-enters via `guarded`+`invoke_value`; the interp
+host gained a callback-capable `InterpCallbackHost` (holds `&mut Interp`, re-enters `call_value`) used
+only by `call_cffi`. **Fault rule (stronger than ctypes):** the trampoline body is `catch_unwind`-
+wrapped — a Chezzi fault or panic writes a zeroed C result (clean unwind), stashes the error, and
+re-raises it as the extern call's own error (ctypes swallows to stderr + returns 0). **Tests:** a
+`cc`-built `.so` fixture (`int apply(int,int(*)(int))` + a `double` variant) drives int/float
+round-trips, fault + panic re-raise, and **two-engine + three-engine** (`--parallel`) parity (sync
+callback fires on the calling worker thread — no cross-thread hand-off). 7 cffi tests + 6 checker tests
+green; full suite (2459) + conformance + `clippy --all-targets -D warnings` clean. Docs: `docs/spec.md`,
+`docs/syntax.md`, `docs/ffi-and-packaging.md §1b` (incl. the **feasibility ladder**: (1) sync scalar
+done, (2) pointer-deref builtins → `qsort`/`bsearch`, (3) stored/cross-thread = own milestone, needs a
+GC-rooting registry + thread-safe re-entry; **biggest caveat:** `--parallel` has **no GIL**, so
+cross-thread is strictly harder than Python — needs a mini-GIL or thread-marshalling). `cc` added to
+`[dev-dependencies]`.
+
 **✅ Feature — one-way C-like `int`→`float` implicit widening (2026-06-22).** An `int` value now flows
 into a `float` SLOT automatically, converted to a real `f64` (the reverse stays a lossy type error).
 The design (Architecture C) emits a **real** runtime conversion at each value-DEFINITION boundary,
@@ -1240,7 +1267,11 @@ first type imports, `examples/ffi_int.chz`);
 by value, `examples/ffi_struct.chz`);
 **plus `bool` ↔ C `_Bool`** (1 byte — params/returns/struct fields; int-returning predicates like
 `isdigit` bind `-> int` + test `!= 0`);
-nested structs / `str` struct fields / **callbacks (#4)** / **varargs (#5)** (both with design notes +
+**plus sync scalar callbacks (#4)** (a `fn(scalars) -> scalar` extern param → a libffi closure
+trampoline C calls back synchronously, same-thread, scalars only; faults caught + re-raised; both
+engines + `--parallel` parity; `src/native/cffi.rs` `CType::Callback` + `Host::invoke_callback`);
+nested structs / `str` struct fields / **the rest of callbacks (#4 — stored/cross-thread + pointer-deref
+builtins)** / **varargs (#5)** (with design notes + the callback feasibility ladder +
 a varargs fixed-arity workaround in `docs/ffi-and-packaging.md §1b`),
 a custom user-named deallocator, C-spelling int aliases (`c_int`), and the rich Rust
 `Box<dyn Any>` userdata handle still deferred — see "Done" below; forward design for the Rust
@@ -1876,8 +1907,11 @@ VM == interp == `--parallel` on every registered example. Conformance + clippy c
 
 - **Native FFI / Rust-library bindings** — let Chezzi call into Rust libs; design sketch in `docs/spec.md`
   → *Standard library* → "Future idea — native FFI". **Dynamic C-ABI FFI v1 has since shipped** (`extern
-  "lib":` scalar calls via dlopen+libffi — see "Done" below); remaining surface (structs-by-value,
-  callbacks, varargs, opaque pointers / userdata, `char*` ownership) is still deferred.
+  "lib":` scalar calls via dlopen+libffi — see "Done" below; **plus opaque `ptr` handles, `char*`
+  ownership (`owned_str`/`str?`), flat-scalar structs by value, and sync scalar callbacks — all
+  shipped**); remaining surface (nested structs-by-value, `str` struct fields, stored/cross-thread
+  callbacks + pointer-deref builtins, varargs, the rich Rust `Box<dyn Any>` userdata handle) is still
+  deferred.
 
 ---
 

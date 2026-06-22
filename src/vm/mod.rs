@@ -2826,9 +2826,18 @@ impl Vm {
         f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
         self.native_reentry += 1;
-        let r = f(self);
+        // The guard counter MUST return to its entry value on every exit path, including an unwind:
+        // it gates park-vs-demote for all blocking concurrency ops, and a re-entered FFI callback's
+        // Rust panic is caught one frame up (`callback_trampoline`'s `catch_unwind`) and re-raised as
+        // a recoverable error — so a plain `-= 1` after `f(self)` would be skipped on panic and leak
+        // the counter at +1 for the VM's lifetime. A `Drop`-based guard can't be used here (it would
+        // alias `self` across `f(self)`), so catch the unwind, decrement, then resume it unchanged.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
         self.native_reentry -= 1;
-        r
+        match r {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     // ----- experimental generators (VM-only) -----
@@ -5978,6 +5987,25 @@ impl Vm {
     /// Lower a native fn's engine-neutral [`crate::native::NativeRet`] into a VM `Value`, allocating
     /// heap objects for the reference kinds. `Ok`/`Err`/`Some`/`None` become the built-in
     /// `Result` / `Option` enum objects.
+    /// Map a SCALAR callback result [`Value`] back to an engine-neutral [`crate::native::NativeRet`]
+    /// for the FFI trampoline to write into C's return slot (the reverse of `lower_native`, scalar-
+    /// only: a callback return is checker-restricted to int/float/bool/ptr). A non-scalar is a
+    /// checker-prevented case; default to `Int(0)` defensively (the trampoline then writes a zeroed
+    /// register, never UB).
+    fn value_to_native_ret(&self, v: Value) -> crate::native::NativeRet {
+        use crate::native::NativeRet as N;
+        match v {
+            Value::Int(n) => N::Int(n),
+            Value::Float(f) => N::Float(f),
+            Value::Bool(b) => N::Bool(b),
+            Value::Nil => N::Nil,
+            Value::Obj(h) => match self.heap.get(h) {
+                Obj::Ptr(a) => N::Ptr(*a),
+                _ => N::Int(0),
+            },
+        }
+    }
+
     fn lower_native(&mut self, ret: crate::native::NativeRet) -> Value {
         use crate::native::NativeRet as N;
         match ret {
@@ -14542,6 +14570,34 @@ impl crate::native::Host for VmHost<'_> {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
+    fn invoke_callback(
+        &mut self,
+        arg_index: usize,
+        args: &[crate::native::NativeRet],
+    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        // The Chezzi closure passed as extern arg `arg_index` (a function pointer to C). Re-enter the
+        // engine to run it on the C scalars, then lower its result back to a NativeRet. Same-thread,
+        // synchronous: this fires inside the extern `ffi_call` on the calling (worker) thread, so it
+        // is plain Rust-stack recursion through the proven `guarded`+`invoke_value` re-entry path
+        // (the one map/filter/sort use). No span is available at the FFI boundary; use a zero span.
+        let callee = *self
+            .args
+            .get(arg_index)
+            .ok_or_else(|| crate::native::HostError {
+                message: format!("callback argument {arg_index} is missing"),
+            })?;
+        let span = Span { line: 0, col: 0 };
+        // Lower the C scalar args to engine `Value`s (allocations happen here, at the boundary).
+        let vals: Vec<Value> = args
+            .iter()
+            .map(|a| self.vm.lower_native(a.clone()))
+            .collect();
+        let result = self
+            .vm
+            .guarded(|vm| vm.invoke_value(callee, vals, span))
+            .map_err(|e| crate::native::HostError { message: e.message })?;
+        Ok(self.vm.value_to_native_ret(result))
+    }
     fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
@@ -16386,6 +16442,33 @@ main()
         vm.push(Value::Int(2));
         vm.do_call(2, Span { line: 1, col: 1 }).unwrap();
         assert_eq!(vm.pop(), Value::Int(42));
+    }
+
+    #[test]
+    fn guarded_restores_native_reentry_on_panic() {
+        // Regression (FFI callbacks): a Rust panic re-entered through a native FFI callback is caught
+        // one frame up by `callback_trampoline`'s `catch_unwind` and re-raised as a recoverable error.
+        // `guarded` MUST restore `native_reentry` on that unwind — otherwise the counter leaks at +1
+        // for the VM's lifetime, and every blocking op gated on `native_reentry == 0` silently
+        // demotes/inlines instead of parking on `--parallel` after a recovered callback panic
+        // (diverging from interp, which has no such counter). A `Drop` guard can't fix this (it would
+        // alias `self` across the re-entry), so `guarded` catches + decrements + resumes the unwind.
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        assert_eq!(vm.native_reentry, 0);
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the expected panic print
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vm.guarded(|_vm| -> Result<(), RuntimeError> { panic!("callback boom") })
+        }));
+        std::panic::set_hook(prev);
+        assert!(
+            caught.is_err(),
+            "the panic must propagate out of guarded unchanged"
+        );
+        assert_eq!(
+            vm.native_reentry, 0,
+            "native_reentry must return to its entry value after a panicking re-entry"
+        );
     }
 
     #[test]

@@ -2045,6 +2045,20 @@ impl Checker {
         if ok {
             return;
         }
+        // A sync scalar callback (callbacks #4): a function-typed PARAM whose every param and its
+        // return is a C scalar (`int`/`float`/`bool`/`ptr`; widths resolve to those). PARAM-ONLY — a
+        // function-typed RETURN (`allow_void`) is rejected (no C marshalling for a returned function
+        // pointer in v1). A non-scalar part (str/struct/nested callback/void return) falls through to
+        // the uniform error below, which names the offending function type.
+        if let Ty::Func { params, ret } = ty
+            && !allow_void
+        {
+            let part_ok =
+                |t: &Ty| matches!(t, Ty::Int | Ty::Float | Ty::Bool | Ty::Ptr | Ty::Unknown);
+            if params.iter().all(part_ok) && part_ok(ret) {
+                return;
+            }
+        }
         // A flat-scalar struct BY VALUE: every field must itself be a marshallable C *scalar* (no
         // nested struct, no str/owned_str). Generic structs (non-empty type args) have no fixed C
         // layout — reject them. `visited` guards a struct cycling back through a field (defensive; a
@@ -7962,6 +7976,28 @@ impl Checker {
                 }
                 _ => None,
             },
+            // A sync scalar callback param (callbacks #4): `fn(scalars...) -> scalar` lowers to
+            // `CType::Callback`. Every part must lower to a C SCALAR (`is_scalar`) — a non-scalar
+            // part (str/struct/nested callback) yields `None`, so the marshal gate rejects it cleanly.
+            // (Param-only; a function-typed RETURN is rejected by `assert_marshallable`, never lowered.)
+            Type::Func { params, ret } => {
+                let mut cparams = Vec::with_capacity(params.len());
+                for p in params {
+                    let cp = self.resolve_ctype_d(p, depth + 1)?;
+                    if !cp.is_scalar() {
+                        return None;
+                    }
+                    cparams.push(cp);
+                }
+                let cret = self.resolve_ctype_d(ret, depth + 1)?;
+                if !cret.is_scalar() {
+                    return None;
+                }
+                Some(CType::Callback {
+                    params: cparams,
+                    ret: Box::new(cret),
+                })
+            }
             // RETURN-ONLY nullable `char*` (`str?` / `owned_str?`): the inner type decides
             // borrowed (`str` → OptStr) vs owned (`owned_str` → OptOwnedStr).
             Type::Generic(n, args) if n == "Option" && args.len() == 1 => {

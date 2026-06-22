@@ -1704,13 +1704,33 @@ declared `_Bool` (or `char`), **not** a 4-byte `int`; for an *int*-width boolean
 C, use `int8`/`uint8` (or `int32`) and test `!= 0`. Nested structs-by-value and string fields are
 deferred to a later version.
 
-**Deferred FFI features (with design notes in [`docs/ffi-and-packaging.md §1b`](ffi-and-packaging.md)):**
-**callbacks / C function pointers** (#4 — pass a Chezzi fn into C; needed for event-driven libs, but
-re-entrancy/cross-thread/GC-rooting hazards make it a future interactive task); and **varargs** (#5 —
-rare; `printf`-family + a few syscalls, most of which you bind with a concrete *fixed-arity* signature
-today, caveat: float varargs / non-x86-64 aren't ABI-portable that way). `bool` now **is** C `_Bool` (1
-byte) — no separate `bool8` type; the classic int-returning predicates (`isdigit`, …) bind `-> int` and
-test `!= 0`.
+**Sync scalar callbacks (`fn(...)` extern params).** Pass a Chezzi closure to C as a C function
+pointer C calls *back* synchronously, during the extern call. Declare the param with the **existing**
+function-type spelling — `fn(scalars) -> scalar` (no new syntax) — restricted to C scalars
+(`int`/`float`/`bool`/`ptr`/`int8`..`uint64`; no `str`, struct, or nested callback):
+
+```chezzi
+extern "libapply.so":
+    # f is a sync scalar callback: C calls it back during apply(), on this thread.
+    fn apply(x: int, f: fn(int) -> int) -> int
+
+print(apply(10, fn(n: int) -> int: n * n))   # C runs f(10) -> 100, then returns 100 + 1 = 101
+```
+
+If the Chezzi callback faults (or panics), the error is **re-raised** as the extern call's own error
+(recoverable via `recover:`) — stronger than CPython `ctypes`, which swallows it to stderr and returns
+`0`. Both engines run the callback identically (two-engine parity), and it fires on the calling thread
+under `--parallel` (no cross-thread hand-off).
+
+**Deferred FFI features (with design notes + the callback feasibility ladder in
+[`docs/ffi-and-packaging.md §1b`](ffi-and-packaging.md)):** the **rest of callbacks** (#4 — *stored* /
+*cross-thread* callbacks a C library keeps and calls later or from its own thread; harder than in
+Python because `--parallel` has no GIL to serialize the re-entry, plus they need a GC-rooting registry)
+and **pointer-deref builtins** (to deref a `void*` callback arg → unlocks `qsort`/`bsearch`); and
+**varargs** (#5 — rare; `printf`-family + a few syscalls, most of which you bind with a concrete
+*fixed-arity* signature today, caveat: float varargs / non-x86-64 aren't ABI-portable that way). `bool`
+now **is** C `_Bool` (1 byte) — no separate `bool8` type; the classic int-returning predicates
+(`isdigit`, …) bind `-> int` and test `!= 0`.
 
 **Opaque handles (`ptr`).** A C library built around a handle (`FILE*`, `sqlite3*`, a
 `create`/`use`/`destroy` context) returns a `void*` you hold and pass back. Declare it as `ptr` — a
@@ -1867,11 +1887,13 @@ rejects the collision (*'…' is a builtin/reserved name*).
   `sqlite3*` checking — passing the wrong handle is C-level UB, the author's assertion) and is **never
   auto-freed** (call the library's own destroy; forgetting **leaks**).
 
-**Deferred (v1 limits):** callbacks / function pointers, varargs, the rich Rust `Box<dyn Any>` userdata
+**Deferred (v1 limits):** *stored / cross-thread* callbacks + pointer-deref builtins (sync scalar
+callbacks **shipped** — see above), varargs, the rich Rust `Box<dyn Any>` userdata
 handle (for compiled-in Rust libraries), a **custom user-named deallocator** (only libc `free` backs
 `owned_str`), and — within structs-by-value — **nested structs** and **`str`/`owned_str` fields**.
 (Opaque C `void*` handles — `ptr` — **shipped**; nullable `str?` returns and `char*` ownership transfer
-via `owned_str` — **shipped**; **flat-scalar structs by value** — **shipped**, see above.)
+via `owned_str` — **shipped**; **flat-scalar structs by value** — **shipped**; **sync scalar callbacks**
+(`fn(scalars) -> scalar` extern params) — **shipped**, see above.)
 
 ## 13. Standard library (v1)
 

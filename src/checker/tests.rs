@@ -5759,6 +5759,55 @@ fn extern_ptr_param_and_return_ok() {
 }
 
 #[test]
+fn extern_callback_param_accepts_scalar_fn() {
+    // A function-typed extern param whose params + return are all C scalars is a sync callback —
+    // accepted with no error (callbacks #4). `apply(x: int, f: fn(int) -> int) -> int`.
+    ok("extern \"libapply.so\":\n    fn apply(x: int, f: fn(int) -> int) -> int\n");
+}
+
+#[test]
+fn extern_callback_param_accepts_float_scalar_fn() {
+    ok("extern \"libapply.so\":\n    fn applyd(x: float, f: fn(float) -> float) -> float\n");
+}
+
+#[test]
+fn extern_callback_nonscalar_param_part_rejected() {
+    // A callback param whose own parameter is non-scalar (`str`) is not C-marshallable.
+    rejects(
+        "extern \"libapply.so\":\n    fn apply(f: fn(str) -> int) -> int\n",
+        "not C-marshallable",
+    );
+}
+
+#[test]
+fn extern_callback_nonscalar_ret_part_rejected() {
+    // A callback param whose return is non-scalar (`str`) is not C-marshallable.
+    rejects(
+        "extern \"libapply.so\":\n    fn apply(f: fn(int) -> str) -> int\n",
+        "not C-marshallable",
+    );
+}
+
+#[test]
+fn extern_callback_nested_callback_rejected() {
+    // A nested callback (a callback param taking a callback) is not supported (v1) — rejected.
+    rejects(
+        "extern \"libapply.so\":\n    fn apply(f: fn(fn(int) -> int) -> int) -> int\n",
+        "not C-marshallable",
+    );
+}
+
+#[test]
+fn extern_callback_as_return_rejected() {
+    // A callback is PARAM-ONLY: a function-typed RETURN is rejected (no C marshalling for a returned
+    // function pointer in v1).
+    rejects(
+        "extern \"libapply.so\":\n    fn make() -> fn(int) -> int\n",
+        "not C-marshallable",
+    );
+}
+
+#[test]
 fn extern_str_optional_return_is_marshallable() {
     // `str?` (Option[str]) is a valid RETURN type — the nullable opt-in. The program sees an
     // `Option[str]`, so it must be matched/`?`-handled, not used as a bare str.

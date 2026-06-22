@@ -2028,12 +2028,14 @@ impl Interp {
                 span,
             });
         }
-        let mut host = InterpHost {
+        // Use the callback-capable host (holds `&mut Interp`) so a `fn(...)`-typed extern param can
+        // re-enter `call_closure` (callbacks #4). `call_native` keeps the lighter split-borrow
+        // `InterpHost` (it never carries callbacks). The two route I/O through the same Interp fields,
+        // so behavior is byte-identical (asserted by the two-engine parity tests).
+        let mut host = InterpCallbackHost {
+            interp: self,
             args,
-            out: &mut self.out,
-            stderr: &mut self.stderr,
-            cfg: &mut self.host,
-            exit: &mut self.pending_exit,
+            span,
         };
         let ret = cffi.call(&mut host).map_err(|e| RuntimeError {
             message: e.message,
@@ -6052,6 +6054,177 @@ struct InterpHost<'a> {
     stderr: &'a mut String,
     cfg: &'a mut crate::native::HostConfig,
     exit: &'a mut Option<i32>,
+}
+
+/// The callback-capable host for `call_cffi` (callbacks #4): unlike [`InterpHost`]'s split borrows,
+/// it holds `&mut Interp`, so a `fn(...)`-typed extern param's trampoline can RE-ENTER the engine via
+/// `Interp::call_value` to run the Chezzi closure. All other `Host` methods route through the same
+/// Interp fields `InterpHost` borrows (`out`/`stderr`/`host`/`pending_exit`), so behavior is
+/// byte-identical (the two-engine parity tests assert it). `span` is the extern call site (used to
+/// attribute a callback runtime error).
+struct InterpCallbackHost<'a> {
+    interp: &'a mut Interp,
+    args: Vec<Value>,
+    span: Span,
+}
+
+impl crate::native::Host for InterpCallbackHost<'_> {
+    fn arg_count(&self) -> usize {
+        self.args.len()
+    }
+    fn arg_int(&mut self, i: usize) -> Result<i64, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Int(n)) => Ok(*n),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "int",
+                other.type_name(),
+            )),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_is_int(&self, i: usize) -> bool {
+        matches!(self.args.get(i), Some(Value::Int(_)))
+    }
+    fn arg_float(&mut self, i: usize) -> Result<f64, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Float(f)) => Ok(*f),
+            Some(Value::Int(n)) => Ok(*n as f64),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "float",
+                other.type_name(),
+            )),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_bool(&mut self, i: usize) -> Result<bool, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "bool",
+                other.type_name(),
+            )),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_ptr(&mut self, i: usize) -> Result<usize, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Ptr(a)) => Ok(*a),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "ptr",
+                other.type_name(),
+            )),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_struct_fields(
+        &mut self,
+        i: usize,
+    ) -> Result<Vec<crate::native::NativeRet>, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Struct { fields, .. }) => {
+                let fields = fields.borrow();
+                let mut out = Vec::with_capacity(fields.len());
+                for (_, v) in fields.iter() {
+                    out.push(value_to_native_scalar(v, i)?);
+                }
+                Ok(out)
+            }
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "struct",
+                other.type_name(),
+            )),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn invoke_callback(
+        &mut self,
+        arg_index: usize,
+        args: &[crate::native::NativeRet],
+    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        // Re-enter the engine to run the closure passed as extern arg `arg_index` on the C scalars,
+        // then lower its result back to a NativeRet. Synchronous, same-thread: plain Rust-stack
+        // recursion through `call_value` (the dispatch map/closure calls already use).
+        let callee = self
+            .args
+            .get(arg_index)
+            .cloned()
+            .ok_or_else(|| crate::native::HostError {
+                message: format!("callback argument {arg_index} is missing"),
+            })?;
+        let vals: Vec<Value> = args.iter().cloned().map(lower_native).collect();
+        let result = self
+            .interp
+            .call_value(callee, vals, self.span)
+            .map_err(|e| crate::native::HostError { message: e.message })?;
+        // A callback return is checker-restricted to a C scalar; a non-scalar is a defended case.
+        Ok(value_to_native_scalar(&result, arg_index).unwrap_or(crate::native::NativeRet::Int(0)))
+    }
+    fn arg_str(&mut self, i: usize) -> Result<String, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Str(s)) => Ok(s.to_string()),
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "str",
+                other.type_name(),
+            )),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Map(m)) => {
+                let m = m.borrow();
+                let mut pairs = Vec::with_capacity(m.entries.len());
+                for (_, k, v) in &m.entries {
+                    let (Value::Str(ks), Value::Str(vs)) = (k, v) else {
+                        return Err(crate::native::HostError::arg_type(
+                            i,
+                            "map[str, str]",
+                            "other",
+                        ));
+                    };
+                    pairs.push((ks.to_string(), vs.to_string()));
+                }
+                Ok(pairs)
+            }
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "map[str, str]",
+                other.type_name(),
+            )),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn write_stdout(&mut self, s: &str) {
+        self.interp.out.push_str(s);
+    }
+    fn write_stderr(&mut self, s: &str) {
+        self.interp.stderr.push_str(s);
+    }
+    fn read_line(&mut self) -> Result<Option<String>, crate::native::HostError> {
+        self.interp.host.stdin.read_line()
+    }
+    fn os_args(&self) -> Vec<String> {
+        self.interp.host.args.clone()
+    }
+    fn os_env(&self, key: &str) -> Option<String> {
+        self.interp.host.env.get(key).cloned()
+    }
+    fn os_getcwd(&self) -> Result<String, crate::native::HostError> {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .map_err(|e| crate::native::HostError {
+                message: e.to_string(),
+            })
+    }
+    fn request_exit(&mut self, code: i64) {
+        self.interp.pending_exit = Some(code.clamp(0, 255) as i32);
+    }
 }
 
 /// Map a scalar [`Value`] to an engine-neutral [`crate::native::NativeRet`] scalar — the field

@@ -91,33 +91,70 @@ captured here so a revisit starts from a plan, not a blank page. None is blockin
 the large majority of system/compute C libraries (numbers, strings, handles, small structs) with **no
 `chezzi` rebuild**.
 
-### #4 Callbacks / C function pointers
+### #4 Callbacks / C function pointers — **sync scalar callbacks LANDED**
 **Unlocks:** passing a Chezzi function to C as a C function pointer so C calls *back* into Chezzi —
 needed for **event-driven / async** libraries (GLib/GTK signals, libuv, libcurl write/progress, SDL
 audio, GLFW input) and a few stdlib helpers (`qsort`, `signal`, `atexit`). Compute libraries and
-handle-based APIs (sqlite `prepare`→`step`→`finalize`, file I/O) need **none** of this → deferred, not
-blocking.
+handle-based APIs (sqlite `prepare`→`step`→`finalize`, file I/O) need **none** of this.
 
-**Why it's hard (the hazards — all UB-class — that make it an interactive design task, not a
-fire-and-forget):**
-1. **Unsafe executable trampoline.** A Chezzi closure isn't a C function pointer; you need libffi's
-   `ffi_closure` — it allocates W^X (writable-then-executable) memory and writes a machine-code thunk.
-2. **Engine re-entrancy.** C invokes the callback while a native call is already in flight, re-entering
-   the VM/interp dispatch loop on the same thread (`&mut Vm` aliasing).
-3. **Cross-thread invocation.** A C library may store the pointer and call it later from *its own*
-   thread (worker pools, signal/async contexts) — a thread with no fiber/heap/scheduler. Breaks the
-   M:N snapshot/airlock model.
-4. **GC rooting across the C boundary.** The closure + its captured upvalues must stay GC-rooted as
-   long as C might call the pointer — often indefinitely, with no "done" signal.
-5. **Unwind safety.** A Chezzi fault must not unwind across a C frame (UB); catch at the trampoline and
-   convert to a C-level sentinel.
-6. **New type surface.** A C-function-pointer param type (`CType::Callback{args, ret}`) + checker
-   support + inbound marshalling (the same ABI corner cases as args/structs, now inbound).
+**What landed (this milestone): synchronous, same-thread, scalar-by-value callbacks.** A
+function-typed extern parameter — spelled with the *existing* `fn(a, b) -> r` type (no new grammar) —
+whose params and return are all C scalars (`int`/`float`/`bool`/`ptr`/`int8`..`uint64`; **no** `str`,
+struct, or nested callback) marshals a Chezzi closure into a libffi `ffi_closure` trampoline. C
+receives the trampoline's code address as a `void*`; when C invokes it (synchronously, *during* the
+extern call), the trampoline reads the C scalar args, re-enters the engine through one engine-neutral
+seam (`Host::invoke_callback`, keyed by arg index so no engine `Value` leaks across the FFI layer),
+and writes the Chezzi result back into C's return slot. Wired on **both** engines (VM via
+`guarded`+`invoke_value`; interp via a callback-capable `InterpCallbackHost` that re-enters
+`call_value`) — two-engine parity asserted, and consistent under `--parallel` (a sync callback fires
+on the calling worker thread, no cross-thread hand-off). The closure is freed when the extern call
+returns (sync scope ⇒ **no** GC rooting). Example:
 
-**Recommended when revisited:** start **narrow** — synchronous-only callbacks (C calls back *during*
-the FFI call, not stored for later), gated to `--serial` (no cross-thread), the closure rooted in a
-side-table for the call's duration, panic caught at the boundary. Expand to stored/async callbacks only
-when a concrete target library forces it.
+```chezzi
+extern "libapply.so":
+    fn apply(x: int, f: fn(int) -> int) -> int   # f is a sync scalar callback param
+
+print(apply(10, fn(n: int) -> int: n * n))       # C calls f(10) -> 100, returns 100 + 1 = 101
+```
+
+**Fault rule (stronger than ctypes).** The trampoline body is wrapped in `catch_unwind`: if the Chezzi
+callback faults (or panics), a zeroed value is written to C's return slot so C unwinds cleanly, the
+error is stashed, and it is **re-raised** as the extern call's own error (recoverable via `recover:`).
+CPython's `ctypes` instead swallows a callback exception to stderr and returns `0`/`NULL`.
+
+**Hazards this slice handles** (the synchronous subset of the UB-class list): the **unsafe executable
+trampoline** (libffi `ffi_closure`), **engine re-entrancy** (the `Host::invoke_callback` seam solves
+both `&mut Vm` aliasing and VM↔interp parity), **inbound marshalling** (`CType::Callback{params, ret}`
++ checker support, scalars only), and **unwind safety** (the catch+re-raise above). **Cross-thread
+invocation** and **GC rooting across the boundary** are *not* needed here because the callback can only
+fire inside the same `ffi_call` on the same thread — they are the next deferred milestone (below).
+
+#### Future work / deferred — the feasibility ladder
+Recorded so a revisit starts from a plan, not a blank page:
+
+1. **(landed, this milestone)** Sync scalar callbacks (above).
+2. **(easy, additive next) Pointer-deref builtins** to read/write through a `void*` callback arg:
+   `ffi.load_int`/`load_float`/`store_int`/`store_float`/… so a callback receiving a `ptr` can deref
+   it. **Unlocks `qsort`/`bsearch`** (the comparator gets two `const void*`). *Python ref:* `ctypes`
+   uses typed `POINTER(c_int)` args and `a[0]` to deref — Chezzi would expose the same as explicit
+   typed load/store builtins on a `ptr`. Purely additive (no callback-engine change).
+3. **(its own milestone) Stored + cross-thread callbacks** — a callback C keeps and calls *after* the
+   extern call returns and/or from *its own* thread. Needs **two** new pieces:
+   - a **callback registry** that GC-roots the closure (+ its upvalues) until an explicit `unregister`,
+     since there is no "done" signal. *Python ref:* `ctypes` punts this onto the user — its docs warn
+     *"Make sure you keep references to `CFUNCTYPE` objects as long as they are used from C code.
+     `ctypes` doesn't, and if you don't, they may be garbage collected, crashing your program."* A
+     registry makes Chezzi safe-by-construction where `ctypes` is footgun-by-default.
+   - **thread-safe VM re-entry. ⚠️ The single biggest deferred caveat:** `ctypes` leans on the **GIL**
+     to serialize a cross-thread callback onto the interpreter. **Chezzi's `--parallel` OS-thread
+     engine has NO GIL**, so a callback fired from a C-owned thread is *strictly harder* than in
+     Python — it cannot just acquire a global lock that already exists. It needs **either** a mini-GIL
+     (a global callback lock that serializes all C→Chezzi re-entry) **or** thread-marshalling that
+     hops the call onto the owning fiber's thread (the Node N-API `threadsafe_function` / JNI
+     `AttachCurrentThread` pattern). This is the gating design decision for level 3.
+
+   Note: our level-1 catch+re-raise fault rule already exceeds `ctypes`' swallow-to-stderr-and-return-0,
+   and carries forward to levels 2–3 unchanged.
 
 ### #5 Variadic functions
 **What:** C functions taking a variable arg count (`printf`/`scanf` family; the variadic forms of
@@ -286,7 +323,7 @@ A registry serving native packages needs one of:
 |---|---|---|
 | **A. Recompile-the-world** (Zig-like) | native pkg = vendored Rust crate + glue; `chezzi build` links a **project-specific binary** | ABI-safe, simple; every native dep = a Rust rebuild; needs the Rust toolchain on the user machine |
 | **B. Dynamic plugins** (CPython C-ext model) | pkg ships a prebuilt `cdylib` (`.so`); `chezzi` `dlopen`s it at module-init | no user rebuild — but needs a **frozen `repr(C)` ABI** for the seam |
-| **C. C-ABI wrapper** (`extern "lib":`) | pkg = manifest → a system `.so` + Chezzi wrapper source | already half-built; **scalar-only** today (needs handles/structs/callbacks) |
+| **C. C-ABI wrapper** (`extern "lib":`) | pkg = manifest → a system `.so` + Chezzi wrapper source | already largely built; scalars, handles, flat structs by value, and **sync scalar callbacks** today (stored/cross-thread callbacks + pointer-deref builtins deferred) |
 
 ### 6.3 The gotcha that decides it: Rust has no stable ABI
 Model B's blocker: the `Host`/`NativeRet`/`Arc<dyn Any>` seam is a **Rust** ABI — `String`, `Vec`,
