@@ -86,6 +86,12 @@ fn is_reserved_type(name: &str) -> bool {
     name == "Result" || name == "Option" || name == "Executor" || name == "Iterator"
 }
 
+/// True iff `{a, b}` is an `int`/`float` mix in either order — the trigger for one-way int→float
+/// widening when unifying a collection literal's element/value types (`[1, 2.3]` → `list[float]`).
+fn numeric_mix(a: &Ty, b: &Ty) -> bool {
+    matches!((a, b), (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int))
+}
+
 /// A short, surface-faithful label for a return-only extern `Type` in a marshallability error
 /// (`owned_str`, `str?`, `owned_str?`). Only ever called on the forms `is_return_only_extern_type`
 /// already matched, so non-matching shapes fall back to a generic label.
@@ -2743,7 +2749,7 @@ impl Checker {
                         } else {
                             self.resolve_type(t, span)
                         };
-                        if !self.assignable(&expected, &val_ty) {
+                        if !self.assignable_w(&expected, &val_ty, true) {
                             // Transparency: a `ref T` binding's mismatch renders `ref T`, not `Ref[T]`.
                             let exp = if is_ref {
                                 ref_display(&expected)
@@ -2792,7 +2798,8 @@ impl Checker {
                     if let Some(def) = &field.default {
                         let expected = self.resolve_type(&field.ty, def.span);
                         let actual = self.infer(def);
-                        if !matches!(expected, Ty::Unknown) && !self.assignable(&expected, &actual)
+                        if !matches!(expected, Ty::Unknown)
+                            && !self.assignable_w(&expected, &actual, true)
                         {
                             self.error(
                                 def.span,
@@ -3445,7 +3452,7 @@ impl Checker {
                 let ty = self.infer(e);
                 if ret == Ty::Nil {
                     self.error(e.span, "function returns nothing, cannot return a value");
-                } else if !self.assignable(&ret, &ty) {
+                } else if !self.assignable_w(&ret, &ty, true) {
                     self.error(e.span, format!("expected return type {ret}, found {ty}"));
                 }
             }
@@ -3699,7 +3706,7 @@ impl Checker {
                 if ty != Ty::Nil && !ty.is_unknown() {
                     self.error(e.span, "function returns nothing, cannot return a value");
                 }
-            } else if !self.assignable(&ret, &ty) {
+            } else if !self.assignable_w(&ret, &ty, true) {
                 self.error(e.span, format!("expected return type {ret}, found {ty}"));
             }
         } else {
@@ -5006,6 +5013,9 @@ impl Checker {
             let t = self.infer_value(item);
             if elem.is_unknown() {
                 elem = t;
+            } else if numeric_mix(&elem, &t) {
+                // One-way int→float widening: a mixed int/float list literal infers `list[float]`.
+                elem = Ty::Float;
             } else if !t.is_unknown() && !compatible(&elem, &t) {
                 self.error(item.span, format!("list elements differ: {elem} vs {t}"));
             }
@@ -5053,6 +5063,10 @@ impl Checker {
             }
             if value.is_unknown() {
                 value = vt;
+            } else if numeric_mix(&value, &vt) {
+                // One-way int→float widening on the VALUE position (keys stay strict — float keys are
+                // banned anyway): a mixed int/float map value infers `map[K, float]`.
+                value = Ty::Float;
             } else if !vt.is_unknown() && !compatible(&value, &vt) {
                 self.error(v_expr.span, format!("map values differ: {value} vs {vt}"));
             }
@@ -5998,7 +6012,8 @@ impl Checker {
         let callee_ty = self.infer(callee);
         match callee_ty {
             Ty::Func { params, ret } => {
-                self.check_args("closure", &params, args, span);
+                // A closure/fn value coerces its float params at the prologue.
+                self.check_args_w("closure", &params, args, span);
                 *ret
             }
             Ty::Unknown => {
@@ -6094,7 +6109,8 @@ impl Checker {
             if !targs.is_empty() {
                 self.error(span, format!("'{name}' takes no type arguments"));
             }
-            self.check_args(name, &field_tys, args, span);
+            // Struct ctor float fields are coerced per-field by the backend's `NewStruct` site.
+            self.check_args_w(name, &field_tys, args, span);
             return Ty::strukt(key.to_string());
         }
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
@@ -6486,7 +6502,8 @@ impl Checker {
                 {
                     let field_tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();
                     if tps.is_empty() {
-                        self.check_args(name, &field_tys, args, span);
+                        // Struct ctor float fields are coerced per-field by the `NewStruct` site.
+                        self.check_args_w(name, &field_tys, args, span);
                         return Some(Ty::strukt(key));
                     }
                     // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
@@ -6541,7 +6558,8 @@ impl Checker {
                     if !sig.type_params.is_empty() {
                         return Some(self.infer_generic_call(name, &sig, args, targs, span));
                     }
-                    self.check_args(name, &sig.params, args, span);
+                    // Float params are coerced at the callee's prologue (compile_fn / extern).
+                    self.check_args_w(name, &sig.params, args, span);
                     return Some(sig.ret);
                 }
                 None
@@ -6595,7 +6613,8 @@ impl Checker {
                     if !fsig.type_params.is_empty() {
                         return self.infer_generic_call(method, &fsig, args, &[], span);
                     }
-                    self.check_args(method, &fsig.params, args, span);
+                    // Float params are coerced at the callee's prologue.
+                    self.check_args_w(method, &fsig.params, args, span);
                     return fsig.ret;
                 }
                 self.infer_all(args);
@@ -6661,7 +6680,7 @@ impl Checker {
                     // so reject the call here instead.
                     match params.split_first() {
                         Some((_receiver, expected)) => {
-                            self.check_args(method, expected, args, span)
+                            self.check_args_w(method, expected, args, span)
                         }
                         None => {
                             self.error(
@@ -6685,7 +6704,8 @@ impl Checker {
                         .map(|(_, ty)| subst(ty, &map))
                 });
                 if let Some(Ty::Func { params, ret }) = field_fn {
-                    self.check_args(method, &params, args, span);
+                    // A fn-typed field is a closure/fn value; its prologue coerces float params.
+                    self.check_args_w(method, &params, args, span);
                     return *ret;
                 }
                 self.infer_all(args);
@@ -6711,7 +6731,7 @@ impl Checker {
                     }
                     match params.split_first() {
                         Some((_receiver, expected)) => {
-                            self.check_args(method, expected, args, span)
+                            self.check_args_w(method, expected, args, span)
                         }
                         None => {
                             self.error(
@@ -6752,7 +6772,7 @@ impl Checker {
                     }
                     match params.split_first() {
                         Some((_receiver, expected)) => {
-                            self.check_args(method, expected, args, span)
+                            self.check_args_w(method, expected, args, span)
                         }
                         None => {
                             self.error(
@@ -7263,15 +7283,25 @@ impl Checker {
         }
     }
 
-    /// Check argument count and each argument's type against a known parameter list.
+    /// Check argument count and each argument's type against a known parameter list. STRICT — no
+    /// int→float widening. Used for type-blind / collection-mutator paths (`push`/`add`/`insert`,
+    /// `send`, builtin methods) where the backend cannot coerce the argument.
     fn check_args(&mut self, name: &str, params: &[Ty], args: &[Expr], span: Span) {
-        self.check_args_range(name, params, params.len(), args, span);
+        self.check_args_range_w(name, params, params.len(), args, span, false);
+    }
+
+    /// Like [`Checker::check_args`] but accepting C-like one-way int→float widening. Used ONLY where
+    /// the COMPILER coerces the argument at the callee boundary from a static annotation: a call into
+    /// a user/extern function or method's float param, and a struct constructor's float field. The
+    /// backend's prologue / per-field coercion makes the stored value a genuine `f64` (no hole).
+    fn check_args_w(&mut self, name: &str, params: &[Ty], args: &[Expr], span: Span) {
+        self.check_args_range_w(name, params, params.len(), args, span, true);
     }
 
     /// D6c — `check_args` generalized to an optional trailing tail: the arg count must fall in
     /// `min_params..=params.len()`, and each supplied arg must match its positional param. Used for the
     /// net socket ops whose `timeout_ms` is optional. `min_params == params.len()` reproduces the
-    /// exact-arity behavior of [`Checker::check_args`].
+    /// exact-arity behavior of [`Checker::check_args`]. STRICT (no widening).
     fn check_args_range(
         &mut self,
         name: &str,
@@ -7279,6 +7309,19 @@ impl Checker {
         min_params: usize,
         args: &[Expr],
         span: Span,
+    ) {
+        self.check_args_range_w(name, params, min_params, args, span, false);
+    }
+
+    /// [`Checker::check_args_range`] with an explicit `widen` flag — see [`Checker::assignable_w`].
+    fn check_args_range_w(
+        &mut self,
+        name: &str,
+        params: &[Ty],
+        min_params: usize,
+        args: &[Expr],
+        span: Span,
+        widen: bool,
     ) {
         if !(min_params..=params.len()).contains(&args.len()) {
             let want = if min_params == params.len() {
@@ -7294,7 +7337,7 @@ impl Checker {
         for (i, arg) in args.iter().enumerate() {
             let at = self.infer_value(arg);
             if let Some(pt) = params.get(i)
-                && !self.assignable(pt, &at)
+                && !self.assignable_w(pt, &at, widen)
             {
                 // Transparency: render `ref T` (not the lowered `Ref[T]`) ONLY when the argument is
                 // a `ref` binding — an explicit first-class `Ref[T]` arg keeps its `Ref[T]` spelling.
@@ -7661,13 +7704,40 @@ impl Checker {
     /// protocol/struct registry, so it can't live in the context-free `compatible`. Recurses through
     /// compound types so a nested existential (the `E` in `Result[T, Error]`) is checked structurally.
     fn assignable(&self, expected: &Ty, actual: &Ty) -> bool {
+        self.assignable_w(expected, actual, false)
+    }
+
+    /// Like [`Checker::assignable`], but C-like **one-way int→float widening** is accepted when
+    /// `widen` is true: `(Float, Int) => true` at the top level, and through `list`/`set`/`option`
+    /// element + `map`/`result` VALUE positions (so `list[float] = [1, 2.3]` accepts the int element).
+    /// Widening is ONLY enabled at value-DEFINITION sinks the COMPILER coerces from a static
+    /// annotation (typed `let`, function/struct/method args, returns, struct-field defaults) — so the
+    /// stored value is a genuine `f64`, never an `Int` in a float slot. Widening is deliberately NOT
+    /// propagated into `map` KEYS (float keys are banned), into `struct`/`tuple`/`func` element
+    /// positions (those flow to type-blind assign targets — `p.x = 3`, `(a,_) = …` — that the compiler
+    /// cannot coerce, so they must stay strict to avoid a runtime hole), nor into the `result` ERROR
+    /// position. `widen=false` is the strict behaviour (identical to the old `assignable`).
+    fn assignable_w(&self, expected: &Ty, actual: &Ty, widen: bool) -> bool {
         use Ty::*;
         match (expected, actual) {
             (Unknown, _) | (_, Unknown) => true,
+            // One-way C-like widening: an `int` value flows into a `float` slot (never the reverse).
+            (Float, Int) if widen => true,
             (Protocol(p), a) => self.satisfies(a, p).is_ok(),
-            (List(e), List(a)) | (Option(e), Option(a)) | (Set(e), Set(a)) => self.assignable(e, a),
-            (Result(et, ee), Result(at, ae)) => self.assignable(et, at) && self.assignable(ee, ae),
-            (Map(ek, ev), Map(ak, av)) => self.assignable(ek, ak) && self.assignable(ev, av),
+            (List(e), List(a)) | (Option(e), Option(a)) | (Set(e), Set(a)) => {
+                self.assignable_w(e, a, widen)
+            }
+            // The error position stays strict; only the success/value position widens.
+            (Result(et, ee), Result(at, ae)) => {
+                self.assignable_w(et, at, widen) && self.assignable(ee, ae)
+            }
+            // The key stays strict (floats are banned as map keys); only the value position widens.
+            (Map(ek, ev), Map(ak, av)) => {
+                self.assignable(ek, ak) && self.assignable_w(ev, av, widen)
+            }
+            // Struct/tuple/func element positions stay STRICT even under `widen`: they reach
+            // type-blind assign targets the compiler can't coerce, so widening them would store an
+            // `Int` in a `float` slot.
             (Struct(n, ea), Struct(m, aa)) | (Enum(n, ea), Enum(m, aa)) => {
                 n == m
                     && ea.len() == aa.len()

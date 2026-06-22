@@ -57,6 +57,85 @@ fn rejects_desugared(src: &str, needle: &str) {
     );
 }
 
+// ===== one-way int→float implicit widening (C-like) =====
+
+/// `x: float = 3` — an int literal widens into a float-annotated let binding (the checker ACCEPTS it).
+#[test]
+fn widen_int_to_float_let_accepted() {
+    ok("x: float = 3\nprint(x)\n");
+}
+
+/// Passing an int (literal or variable) into a `float` parameter widens at the callee boundary.
+#[test]
+fn widen_int_arg_into_float_param_accepted() {
+    ok("fn f(z: float):\n    print(z)\na := 3\nf(a)\nf(7)\n");
+}
+
+/// A non-literal int expression returned from a `-> float` function widens.
+#[test]
+fn widen_int_return_into_float_ret_accepted() {
+    ok("fn g(n: int) -> float:\n    return n + 1\nprint(g(2))\n");
+}
+
+/// An int field value widens into a `float` struct field.
+#[test]
+fn widen_int_into_float_struct_field_accepted() {
+    ok_desugared("struct P:\n    v: float\np := P(3)\nprint(p.v)\n");
+}
+
+/// An annotated `list[float]` accepts int elements (widened); a `map` VALUE position too. (Float is
+/// not Hashable, so `set[float]` / `map[float, _]` are independently illegal — not a widening case.)
+#[test]
+fn widen_int_elems_into_annotated_float_collection_accepted() {
+    ok("xs: list[float] = [1, 2.3]\nprint(xs)\n");
+    ok("m: map[str, float] = {\"a\": 1, \"b\": 2.3}\nprint(m)\n");
+}
+
+/// Lossy / wrong-direction conversions MUST stay type errors (the widen arm is one-way Float←Int only).
+#[test]
+fn widen_float_into_int_still_rejected() {
+    rejects("y: int = 2.3\nprint(y)\n", "cannot assign");
+    rejects("fn h(p: int):\n    print(p)\nh(2.3)\n", "expected");
+    rejects("fn f() -> int:\n    return 2.3\n", "expected return type");
+    rejects("zs: list[int] = [1, 2.3]\nprint(zs)\n", "cannot assign");
+    rejects("n: int = 0\nn = 2.3\nprint(n)\n", "cannot assign");
+}
+
+/// A plain `x = <int>` reassignment to a `float`-declared local is a STRICT assign target (no
+/// widening — the documented carve-out): the checker rejects it. (Annotated/param/return/field DO
+/// widen; a reassignment target is type-blind for the same reason `p.x = 3` is.)
+#[test]
+fn widen_reassign_int_to_float_local_rejected() {
+    rejects("x: float = 1.0\nx = 3\nprint(x)\n", "cannot assign");
+}
+
+/// Type-blind assign TARGETS stay strict (no runtime hole): `p.x = 3` / `xs[0] = 3` / `m[k] = 3`
+/// into a float container reject, because the compiler has no field/elem type to coerce against.
+#[test]
+fn widen_typeblind_assign_targets_still_reject() {
+    rejects_desugared(
+        "struct P:\n    x: float\np := P(1.0)\np.x = 3\nprint(p.x)\n",
+        "cannot assign",
+    );
+    rejects(
+        "xs: list[float] = [1.0]\nxs[0] = 3\nprint(xs)\n",
+        "cannot assign",
+    );
+    rejects(
+        "m: map[str, float] = {\"a\": 1.0}\nm[\"a\"] = 3\nprint(m)\n",
+        "cannot assign",
+    );
+}
+
+/// A newtype boundary stays nominal — NO int→float widening into a `float`-backed newtype ctor.
+#[test]
+fn widen_no_int_into_float_newtype() {
+    rejects_desugared(
+        "newtype Celsius = float\nc := Celsius(3)\nprint(c)\n",
+        "expected",
+    );
+}
+
 // ===== string interpolation fragments are type-checked =====
 
 #[test]
@@ -2524,12 +2603,11 @@ fn native_math_from_import_binds_member() {
 }
 
 #[test]
-fn native_math_float_param_rejects_int() {
-    // The language has no implicit int->float; math.sqrt(int) is a type error.
-    entry_rejects(
-        "import std.math\nfn main():\n    print(math.sqrt(16))\n",
-        "",
-    );
+fn native_math_float_param_accepts_int() {
+    // One-way int->float widening: `math.sqrt(16)` widens the int arg to a float (the native host's
+    // `arg_float` already runtime-promotes int, so this is hole-free — resolves the old
+    // "inconsistent" gap where the runtime promoted but the checker rejected).
+    entry_ok("import std.math\nfn main():\n    print(math.sqrt(16))\n");
 }
 
 // ===== int+float polymorphic math (gap #12) =====
@@ -2575,12 +2653,10 @@ fn native_math_abs_float_returns_float() {
 }
 
 #[test]
-fn cmp_max_int_result_not_float() {
-    // The int instantiation must NOT be a float — assigning to a float slot is rejected.
-    entry_rejects(
-        "import std.cmp\nfn main():\n    x: float = cmp.max(3, 5)\n    print(x)\n",
-        "",
-    );
+fn cmp_max_int_result_widens_into_float_let() {
+    // `cmp.max(3, 5)` instantiates `T = int` and returns `int`; one-way int->float widening then lets
+    // that int flow into a `float`-annotated let (the typed-`let` sink coerces the value at runtime).
+    entry_ok("import std.cmp\nfn main():\n    x: float = cmp.max(3, 5)\n    print(x)\n");
 }
 
 #[test]
@@ -2604,20 +2680,17 @@ fn cmp_from_import_max_float_returns_float() {
 }
 
 #[test]
-fn cmp_from_import_max_int_not_float() {
-    entry_rejects(
-        "import max from std.cmp\nfn main():\n    x: float = max(3, 5)\n    print(x)\n",
-        "",
-    );
+fn cmp_from_import_max_int_widens_into_float_let() {
+    // Same one-way int->float widening through the `from`-import generic-call path.
+    entry_ok("import max from std.cmp\nfn main():\n    x: float = max(3, 5)\n    print(x)\n");
 }
 
 #[test]
-fn native_math_floor_still_float_only() {
-    // Only abs/min/max became polymorphic; floor stays float-only.
-    entry_rejects(
-        "import std.math\nfn main():\n    print(math.floor(2))\n",
-        "",
-    );
+fn native_math_floor_widens_int_arg() {
+    // `floor`/`ceil`/`sqrt` keep a float-only RESULT (not numeric-polymorphic like abs/min/max), but
+    // one-way int->float widening now lets an int ARG flow into their float param (hole-free: the
+    // native host promotes int). `floor(2)` is `floor(2.0)`.
+    entry_ok("import std.math\nfn main():\n    print(math.floor(2))\n");
 }
 
 // ===== higher-order-function parameter types =====
@@ -5599,12 +5672,11 @@ fn extern_call_typechecks() {
 }
 
 #[test]
-fn extern_call_wrong_arg_type_rejected() {
-    // No implicit int->float (matches std.math): `cos(2)` with an int literal is an error.
-    rejects(
-        "extern \"libm.so.6\":\n    fn cos(x: float) -> float\n\nprint(cos(2))\n",
-        "",
-    );
+fn extern_call_int_into_float_param_widens() {
+    // One-way int->float widening (matches std.math): `cos(2)` widens the int literal into the C
+    // `double` param. Hole-free — the FFI host's `arg_float` promotes an int arg to f64 before
+    // marshalling, so the C function receives `2.0`. A non-numeric arg (str/bool) is still rejected.
+    ok("extern \"libm.so.6\":\n    fn cos(x: float) -> float\n\nprint(cos(2))\n");
 }
 
 #[test]

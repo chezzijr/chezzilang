@@ -12,7 +12,8 @@ holes" below, all verified on both engines: **2 Rust panics** (interpolation w/ 
 family** (empty collections + recursive-return inference + generic nullary variants — one root fix
 closes all three) incl. the float-key/NaN-footgun bypass, import name-collision mis-resolution,
 duplicate-binding-in-pattern last-wins, `--serial` generator-airlock parity divergence, inconsistent
-int→float coercion (the `ref` shared-method expression-receiver false rejection is now RESOLVED).
+int→float coercion (the inconsistent int→float coercion is now RESOLVED — one-way C-like widening
+landed 2026-06-22; the `ref` shared-method expression-receiver false rejection is RESOLVED too).
 Concurrency core (airlock, channel
 close, deadlock detect, CAS, 100k spawns, cancel-tree) fuzzed clean.). Baseline: post-M21 (`newtype`), plus enum methods, raw string literals
 (`r"…"`), the `extern "lib"` header, module-scoped user types + module-qualified match patterns, and
@@ -88,16 +89,27 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
     the new rule. Pinned by `checker::tests::{empty_list_*, empty_map_*, empty_set_*, flow_sensitive_*,
     heterogeneous_struct_list_unannotated_rejected, …}`.
 
-- **🟡 `int`→`float` coercion is inconsistent — silently allowed in binary operators, forbidden
-  everywhere else.** `docs/syntax.md:1621` states the contract "No implicit `int`→`float`", and it IS
-  enforced for function args (`f(5)` into a `float` param → error), bindings (`x: float = 5` → error),
-  and collection elements (`[1.0].push(2)` → error). But the binary arithmetic + comparison operators
-  silently widen an `int` operand: `5 + 2.0` → `7.0`, `n * y` (`int`*`float`) → float, `5 == 5.0` →
-  true, `5 < 5.5` → true. The result is correctly typed `float` (can't flow back into an `int` slot), so
-  it is not a runtime hole — but it contradicts the stated rule and bypasses the `Add(self, other:
-  Self) -> Self` framing (intrinsic numeric ops are `Self`-typed, so a mixed-type op should not match).
-  Decide one: document the operator exception (ergonomic, Python-like) or reject mixed operands
-  (consistent, Go-like). Likely a hardcoded coercion in the numeric binary-op path.
+- **✅ RESOLVED (2026-06-22) — one-way C-like `int`→`float` implicit widening landed.** Was: coercion
+  was *inconsistent* — silently allowed in binary operators, forbidden everywhere else. Now Chezzi has a
+  uniform **one-way** rule: an `int` value widens into a `float` SLOT (never the reverse), so the binary
+  operators that already widened (`5 + 2.0`, `5 == 5.0`, `5 < 5.5`) are now consistent with the rest of
+  the language. The compiler emits a **real** runtime conversion (`Op::CoerceFloat`; the interp applies
+  the equivalent `coerce_float` helper) at each value-DEFINITION sink, driven by the static annotation —
+  so the stored value is a genuine `f64`, identical on the checked CLI path AND the checker-bypassing
+  parity harness (byte-identical two-engine parity by construction). **Covered sinks:** typed `let`
+  (`x: float = 3`), function / method / closure args incl. an int VARIABLE (coerced at the callee
+  prologue), `-> float` returns (incl. inline-expr bodies), `float` struct fields, native std.math float
+  params (`sqrt(16)`; already runtime-promoted — this resolves the old "inconsistent" complaint),
+  `extern` C `double` params (FFI host promotes), and `float`-annotated / all-literal collection literals
+  (`xs: list[float] = [1, 2.3]`, `[1, 2.3]`, `map[_, float]` values). **Anti-lossy stays a type error:**
+  `y: int = 2.3`, `f() -> int: return 2.3`, a `float` into a `list[int]`, an int→float into a NEWTYPE
+  (nominal). **Scoped carve-outs (documented, not holes):** (1) an UN-annotated NON-literal mixed
+  collection (`xs := [a, b]` with `a:int`, `b:float`) — the checker now infers `list[float]`, but the
+  compiler is type-blind about the non-literal `a`, so `xs[0]` stays `Int` at runtime (never widened
+  before; rare). (2) a plain reassignment `x = 3` to a `float`-declared local stays a STRICT assign
+  target (rejected by the checker) — like the type-blind `p.x = 3` / `xs[0] = 3` / `m[k] = 3` targets,
+  which the compiler cannot coerce against and which therefore remain rejected (no runtime hole). (3) a
+  generic field/param typed `T` bound to `float` is not widened (matches existing no-generic-widening).
   - Sibling: **`1 << 63` wraps silently to `INT_MIN`** (no overflow check) while `+ - * / %` are
     checked (recoverable-panic on overflow) — so the "Verified working" line below ("integer overflow →
     recoverable panic (never wraps)") is false for shifts. Also `INT_MIN` is unwritable as a literal
@@ -552,7 +564,12 @@ Recorded for completeness — likely stay as-is unless a real program forces the
 hex/bin/oct literals (`hex.chz`); tuple-`for` + `enumerate`/`zip` (`for_tuple.chz`); optional-chaining
 `x?.f` + `??` (`optchain.chz`); `defer` block-scoped (M16→M18) + `defer:` block form (`defer.chz`).
 
-**Type-system + runtime depth ✅** · non-const default exprs (relaxed; param-ref defaults still out);
+**Type-system + runtime depth ✅** · one-way C-like `int`→`float` implicit widening (2026-06-22) —
+real runtime `Op::CoerceFloat`/`coerce_float` at every value-definition sink (typed `let`, fn/method/
+closure args incl. an int variable via callee prologue, `-> float` returns, `float` struct fields,
+native/extern float params, `float`/all-literal collection literals); anti-lossy `float`→`int` stays a
+type error; scoped carve-outs = un-annotated non-literal mixed collection + plain reassign to a float
+local + generic `T` (see entry above); two-engine byte-identical parity. non-const default exprs (relaxed; param-ref defaults still out);
 calling a `fn`-typed field (`fn_field.chz`); `sort_by_key` (`sort_by_key.chz`); `Ref[T]` mutable box
 (`std/ref.chz`, `ref.chz`); runtime stack traces (both engines identical, `stack_trace.chz`); integer
 overflow policy (every `i64` overflow recoverable, `overflow.chz`); loop-var reassignment rejected;

@@ -285,7 +285,18 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `std.cmp`; `abs` stays native.) **Integer overflow policy:** the one integer type is `i64`; every
   overflow — arithmetic (`+ - * / %`), negation, `MIN / -1`, and `math.abs(MIN)` — is a *recoverable
   panic* (`"integer overflow in <op>"`, catchable by `recover:`), never a silent wrap and never a host
-  crash. No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
+  crash. **One-way `int`→`float` widening (C-like):** an `int` value flows into a `float` slot and is
+  converted to a real `f64` (the reverse is a lossy type error). It fires at every value-definition
+  boundary: a typed `let` (`x: float = 3` so `x / 2 == 1.5`, real float division), a `float`
+  function/method/closure parameter (incl. an `int` *variable*, coerced at the callee prologue), a
+  `-> float` return, a `float` struct field, native/`extern` `double` params, and a `float`-element or
+  all-literal collection literal. The compiler emits a real conversion (`Op::CoerceFloat`; the interp
+  applies an equivalent helper) so the checked path and the parity harness are byte-identical across both
+  engines. Lossy conversions stay type errors (`y: int = 2.3`, `-> int: return 2.3`, `float` into
+  `list[int]`, `int`→`float` across a **newtype** boundary). Carve-outs: a plain reassignment `x = 3` to
+  a `float` local is rejected (type-blind target), and an un-annotated non-literal mixed collection is
+  inferred `list[float]` but its non-literal `int` element is not widened at runtime (annotate to convert).
+  No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
   scalar) and no bignum (a non-goal). **`bytes`** is a heap byte sequence (`b"..."` literal with
   `\xHH` escapes): `b[i]` -> `int` 0-255 (Index protocol), `b[a:b:c]` -> `bytes` (Slice protocol, byte
   offsets), `for x in b` yields `int`, `len(b)` is the byte count, `==`/`!=` are structural, and

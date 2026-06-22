@@ -109,6 +109,61 @@ fn block_has_defer(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| matches!(s.kind, StmtKind::Defer(_)))
 }
 
+/// One-way int→float coercion (C-like implicit widening) — the tree-walk interpreter's equivalent of
+/// the VM's `Op::CoerceFloat`, applied at the SAME AST annotation boundaries (typed `let`, float
+/// params, float returns, float struct fields, annotated/all-literal float collections) so both
+/// engines coerce deterministically from the IDENTICAL annotation → byte-identical parity. `Int(n)` →
+/// `Float(n as f64)`; a `Float` (or anything else) is returned unchanged (the checker guarantees the
+/// value is numeric at every emit site, and idempotence makes a double-coerce a harmless no-op).
+fn coerce_float(v: Value) -> Value {
+    match v {
+        Value::Int(n) => Value::Float(n as f64),
+        other => other,
+    }
+}
+
+/// One-way int→float widening at a typed `let` binding — coerce `v` IN PLACE to match a `float`-shaped
+/// annotation: a scalar `float` coerces the whole value; a `list[float]` coerces every int element; a
+/// `map[_, float]` coerces every int VALUE (keys untouched). Mirrors the VM, where the typed-`let`
+/// sink emits `Op::CoerceFloat` (scalar) and the `list[float]`/`map[_, float]` element hint coerces
+/// each int element at the literal-compile site. The element walk runs ONLY when `is_literal` (the
+/// value was a list/map LITERAL) — exactly matching the VM, which coerces elements at the literal
+/// compile site, so a non-literal value (`xs: list[float] = f()`) is element-coerced by neither
+/// engine. Any other annotation is a no-op.
+fn coerce_value_to_annotation(v: &mut Value, ty: &crate::ast::Type, is_literal: bool) {
+    if crate::ast::is_float_ty(ty) {
+        let taken = std::mem::replace(v, Value::Nil);
+        *v = coerce_float(taken);
+        return;
+    }
+    if !is_literal {
+        return;
+    }
+    match ty {
+        crate::ast::Type::Generic(n, args)
+            if n == "list" && args.len() == 1 && crate::ast::is_float_ty(&args[0]) =>
+        {
+            if let Value::List(items) = v {
+                for elem in items.borrow_mut().iter_mut() {
+                    let taken = std::mem::replace(elem, Value::Nil);
+                    *elem = coerce_float(taken);
+                }
+            }
+        }
+        crate::ast::Type::Generic(n, args)
+            if n == "map" && args.len() == 2 && crate::ast::is_float_ty(&args[1]) =>
+        {
+            if let Value::Map(map) = v {
+                for entry in map.borrow_mut().entries.iter_mut() {
+                    let taken = std::mem::replace(&mut entry.2, Value::Nil);
+                    entry.2 = coerce_float(taken);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Deep-copy a value across a task airlock (`spawn`): data — scalars, `str`, collections, structs,
 /// enums — is recursively cloned into fresh `Rc<RefCell<…>>` cells so a spawned task can't share
 /// mutable state with the spawner. Callables and modules pass by handle (a task's entry point, not
@@ -613,9 +668,19 @@ impl Interp {
                 eval_binary(*op, l, r, expr.span)
             }
             ExprKind::List(items) => {
+                // One-way int→float widening — the all-literal peephole (mirrors the VM): an
+                // un-annotated list literal with ≥1 float literal widens its int LITERAL siblings.
+                let peephole = crate::compiler::literal_numeric_mix(items.iter());
                 let vals = items
                     .iter()
-                    .map(|e| self.eval(e))
+                    .map(|e| {
+                        let v = self.eval(e)?;
+                        Ok(if peephole && matches!(e.kind, ExprKind::Int(_)) {
+                            coerce_float(v)
+                        } else {
+                            v
+                        })
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(vals))))
             }
@@ -630,9 +695,15 @@ impl Interp {
                 // Evaluate key then value per entry; duplicate keys upsert (last wins). A struct
                 // key's hash() re-enters the interpreter (fine — the Rc heap never moves).
                 let mut map = MapData::default();
+                // One-way int→float widening — all-literal peephole over the VALUE column (mirrors
+                // the VM): a mixed int/float-literal value set widens its int VALUE literals.
+                let peephole = crate::compiler::literal_numeric_mix(entries.iter().map(|(_, v)| v));
                 for (k_expr, v_expr) in entries {
                     let k = self.eval(k_expr)?;
-                    let v = self.eval(v_expr)?;
+                    let mut v = self.eval(v_expr)?;
+                    if peephole && matches!(v_expr.kind, ExprKind::Int(_)) {
+                        v = coerce_float(v);
+                    }
                     let hk = self.hash_value(&k, expr.span)?;
                     match map
                         .candidates(hk)
@@ -1991,6 +2062,13 @@ impl Interp {
         }
         let mut frame = std::collections::HashMap::new();
         for (param, arg) in clo.params.iter().zip(args) {
+            // One-way int→float widening at the closure prologue (mirrors `compile_closure`): coerce
+            // an int argument to a `float`-typed closure param. (A closure declares no return type.)
+            let arg = if param.ty.as_ref().is_some_and(crate::ast::is_float_ty) {
+                coerce_float(arg)
+            } else {
+                arg
+            };
             frame.insert(param.name.clone(), arg);
         }
         let mut new_locals = clo.captured.clone();
@@ -2178,6 +2256,21 @@ impl Interp {
                 ),
                 span,
             });
+        }
+        // One-way int→float widening (mirrors the VM's per-field `CoerceFloat` at `NewStruct`): coerce
+        // an int argument whose declared field type is `float`. Field types come from `struct_fields`
+        // (keyed by the struct's runtime key == `name`); a generic field typed `T` is not `float`, so
+        // it is left untouched (the no-generic-widening carve-out).
+        let mut args = args;
+        if let Some(decl_fields) = self.struct_fields.get(name) {
+            for (i, f) in decl_fields.iter().enumerate() {
+                if crate::ast::is_float_ty(&f.ty)
+                    && let Some(slot) = args.get_mut(i)
+                {
+                    let taken = std::mem::replace(slot, Value::Nil);
+                    *slot = coerce_float(taken);
+                }
+            }
         }
         let fields = def.fields.iter().cloned().zip(args).collect::<Vec<_>>();
         Ok(Value::Struct {
@@ -4107,8 +4200,18 @@ impl Interp {
                 span,
             });
         }
+        // One-way int→float widening: does this fn declare a `float` return type? (Used at the
+        // return site below to coerce the returned value, mirroring the VM.)
+        let ret_is_float = decl.ret.as_ref().is_some_and(crate::ast::is_float_ty);
         let mut frame = std::collections::HashMap::new();
         for (param, arg) in decl.params.iter().zip(args) {
+            // One-way int→float widening at the callee prologue (mirrors the VM): coerce an int
+            // argument to a `float`-typed param, so EVERY caller (incl. an int variable) widens.
+            let arg = if param.ty.as_ref().is_some_and(crate::ast::is_float_ty) {
+                coerce_float(arg)
+            } else {
+                arg
+            };
             frame.insert(param.name.clone(), arg);
         }
         self.enter_call(span)?;
@@ -4160,6 +4263,11 @@ impl Interp {
             Err(e) => Err(e),
             Ok(Some(v)) => Ok(v),
             Ok(None) => match result {
+                // One-way int→float widening (mirrors the VM's `Op::CoerceFloat` before `Op::Return`,
+                // incl. the inline-expr body's implicit return): a `-> float` fn coerces its returned
+                // value. Only the explicit/implicit RETURN value is coerced — a `?`-propagated value
+                // (`Ok(Some(v))` above) is a Result/Option, never a bare numeric in a `-> float` fn.
+                Ok(Flow::Return(v)) if ret_is_float => Ok(coerce_float(v)),
                 Ok(Flow::Return(v)) => Ok(v),
                 // A function body falling off the end (or a stray break/continue the checker would
                 // have rejected) yields nil.
@@ -4722,8 +4830,22 @@ impl Interp {
     /// Execute one statement.
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<Flow, RuntimeError> {
         match &stmt.kind {
-            StmtKind::Let { names, value, .. } => {
-                let v = self.eval(value)?;
+            StmtKind::Let { names, value, ty, .. } => {
+                let mut v = self.eval(value)?;
+                // One-way int→float widening — coerce from the binding's annotation, mirroring the
+                // VM's `Op::CoerceFloat` at the typed-`let` sink. A scalar `float` coerces the value
+                // unconditionally (the VM coerces after the value expr, whatever its shape). A
+                // `list[float]`/`map[_, float]` annotation coerces int ELEMENTS only when the value is
+                // a LITERAL collection — the VM's element coercion is emitted at the literal-compile
+                // site, so a non-literal value (`xs: list[float] = f()`) is NOT element-coerced by
+                // either engine (it stays whatever `f()` returned).
+                if names.len() == 1
+                    && let Some(t) = ty
+                {
+                    let value_is_collection_literal =
+                        matches!(value.kind, ExprKind::List(_) | ExprKind::Map(_));
+                    coerce_value_to_annotation(&mut v, t, value_is_collection_literal);
+                }
                 if names.len() > 1 {
                     // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
                     let Value::Tuple(items) = &v else {
