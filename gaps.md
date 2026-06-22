@@ -115,7 +115,8 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
   so the stored value is a genuine `f64`, identical on the checked CLI path AND the checker-bypassing
   parity harness (byte-identical two-engine parity by construction). **Covered sinks:** typed `let`
   (`x: float = 3`), function / method / closure args incl. an int VARIABLE (coerced at the callee
-  prologue), `-> float` returns (incl. inline-expr bodies), `float` struct fields, native std.math float
+  prologue), `float` parameter DEFAULT values (`fn g(a: float = 3)` — coerced at the prologue when the
+  default is spliced in), `-> float` returns (incl. inline-expr bodies), `float` struct fields, native std.math float
   params (`sqrt(16)`; already runtime-promoted — this resolves the old "inconsistent" complaint),
   `extern` C `double` params (FFI host promotes), and **mixed-numeric-literal** collections — a list/map
   literal with ≥1 float literal infers `list[float]`/`map[_, float]` and its int literals are coerced

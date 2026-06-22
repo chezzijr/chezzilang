@@ -288,7 +288,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   crash. **One-way `int`→`float` widening (C-like):** an `int` value flows into a `float` slot and is
   converted to a real `f64` (the reverse is a lossy type error). It fires at every value-definition
   boundary: a typed `let` (`x: float = 3` so `x / 2 == 1.5`, real float division), a `float`
-  function/method/closure parameter (incl. an `int` *variable*, coerced at the callee prologue), a
+  function/method/closure parameter (incl. an `int` *variable*, coerced at the callee prologue), a `float`
+  parameter DEFAULT value (`fn g(a: float = 3)`), a
   `-> float` return, a `float` struct field, native/`extern` `double` params, and a **mixed-numeric-literal**
   collection (a list/map literal with ≥1 float literal infers `list[float]`/`map[_, float]`). The compiler
   emits a real conversion (`Op::CoerceFloat`; the interp applies an equivalent helper) so the checked path

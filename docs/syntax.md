@@ -254,7 +254,8 @@ and `T!` for `Result[T, Error]` (E defaults to the built-in `Error` protocol). E
 is converted to a real `f64`; the reverse (`float`→`int`) is always a type error (lossy). Widening
 fires at every value-DEFINITION boundary: a typed binding (`x: float = 3` → `3.0`), a `float` function /
 method / closure parameter (incl. when you pass an `int` *variable*, not just a literal — it is coerced
-at the callee), a `-> float` return, a `float` struct field (`P(3)` for `v: float`), and a
+at the callee), a `float` parameter DEFAULT value (`fn g(a: float = 3)`), a `-> float` return, a `float`
+struct field (`P(3)` for `v: float`), and a
 **mixed-numeric-literal** collection — a list/map literal with ≥1 float literal infers `list[float]` /
 `map[_, float]` and coerces its int literals (`xs: list[float] = [1, 2.3]`, a `map[_, float]` value, or
 a bare `[1, 2.3]`). Because the conversion is real, the stored value behaves as a float everywhere — e.g.

@@ -91,6 +91,17 @@ fn widen_int_elems_into_annotated_float_collection_accepted() {
     ok("m: map[str, float] = {\"a\": 1, \"b\": 2.3}\nprint(m)\n");
 }
 
+/// An int DEFAULT value widens into a `float` parameter (scalar sink; coerced at the callee prologue
+/// when the default is desugar-spliced into a call). The reverse (float default into an int param)
+/// stays a lossy type error (covered in `widen_float_into_int_still_rejected`).
+#[test]
+fn widen_int_default_into_float_param_accepted() {
+    // The default-value-vs-param-type check fires at the DECLARATION (so a wrong-typed default is
+    // caught even when every call overrides it); declaration-only keeps this off the desugar/arity
+    // path. The omitted-default RUNTIME coercion is covered by vm::parity_tests::widen_default_param_division.
+    ok("fn g(a: float = 3) -> float:\n    return a\n");
+}
+
 /// Lossy / wrong-direction conversions MUST stay type errors (the widen arm is one-way Float←Int only).
 #[test]
 fn widen_float_into_int_still_rejected() {
@@ -99,6 +110,10 @@ fn widen_float_into_int_still_rejected() {
     rejects("fn f() -> int:\n    return 2.3\n", "expected return type");
     rejects("zs: list[int] = [1, 2.3]\nprint(zs)\n", "cannot assign");
     rejects("n: int = 0\nn = 2.3\nprint(n)\n", "cannot assign");
+    rejects(
+        "fn k(a: int = 2.3):\n    print(a)\nk()\n",
+        "default value for parameter",
+    );
 }
 
 /// Widening is SCALAR-ONLY: a compound/nested/wrapped `float` annotation does NOT accept an
