@@ -11,6 +11,34 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Feature — FFI memory-deref builtins `std.ffi.load_*`/`store_*` (feasibility-ladder tier 2)
+(2026-06-22).** Read/write the **C-owned memory behind an opaque `ptr`** — for struct fields, return
+buffers, event payloads, and C output-params a library hands you. Two-form API (fixed-arity native
+fns, no variadic/optional machinery): a base form at byte offset `0` and an `_at(p, off)` byte-offset
+form (the `_at` *store* takes the offset *before* the value). **Loads** (`-> int/float/bool/ptr/str`):
+`load_int` (C `long`), `load_int8`..`load_int64` (sign-extend), `load_uint8`..`load_uint64`
+(zero-extend), `load_float` (C `double`), `load_float32` (C `float`, widened), `load_bool`, `load_ptr`
+(deref `void**`), `load_str` (copy a NUL-terminated C string, not freed). **Stores** (`-> nil`,
+natural C width) mirror every width except `str` (`store_str` deferred — unbounded-write footgun).
+**Reuse, not re-derive:** the loads/stores delegate to `cffi::read_field`/`write_field` (made
+`pub(crate)`) — the *same* sign/zero-extend + truncation rules the callback/struct paths already use —
+over a transient byte slice (`slice::from_raw_parts[_mut]`) at the natural width; `float32`/`str`
+hand-roll (no f32 arm in `read_field`; `CStr::from_ptr` for the string). **Safety:** every fn rejects
+a **NULL** base pointer with a *recoverable* `HostError` (`ffi.<fn>: null pointer`) **before** any
+deref — the only cheaply-checkable guard; a dangling/misaligned/OOB *non-null* pointer is documented
+UB (like `ctypes`). Mitigation `ctypes` lacks: a `ptr` is opaque and **cannot be forged from an int**
+(provenance is C-sourced). Deref bodies are `#[cfg(unix)]`-gated (a non-unix build registers the names
+but every call errors). **Parity by construction:** pure-additive on the engine-neutral `Host`/
+`NativeFn` seam — no VM/interp edit — so VM == interp == M:N. **Wiring:** all 56 `std.ffi` members in
+`MEMBERS` (`src/native/ffi.rs`) + `native_module_sig`'s `std.ffi` arm (`src/checker/mod.rs`).
+**Tests:** 13 ffi unit tests (width/extend boundaries, `_at` offset, store→load round-trip, natural-
+width store, NULL-error, MEMBERS coverage) + 3 checker sig tests + 3 cffi two/three-engine parity
+tests (a `cc`-built `mkrec()` returning a `ptr` to `{int32 a@0; int64 b@8; double c@16}`, read/written
+field-by-field). Full suite (2478) + conformance + `clippy --all-targets -D warnings` clean. Docs:
+`docs/stdlib.md` (new `std.ffi` surface), `docs/ffi-and-packaging.md §1b` (tier 2 → LANDED; records the
+remaining gap: `qsort`/`bsearch` of a Chezzi *list* still needs a C-buffer alloc layer
+`ffi.alloc`/`free`), `docs/spec.md` (FFI v1 limits: `ptr` memory now readable/writable), `docs/syntax.md`.
+
 **✅ Feature — FFI sync scalar callbacks (callbacks #4, sync subset) (2026-06-22).** An `extern "lib":`
 fn can now take a **function-typed parameter** spelled with the *existing* `fn(a, b) -> r` type (no new
 grammar) whose params + return are all C scalars (`int`/`float`/`bool`/`ptr`/`int8`..`uint64`; no

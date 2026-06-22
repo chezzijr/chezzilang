@@ -1885,15 +1885,20 @@ rejects the collision (*'…' is a builtin/reserved name*).
 
 - **Untyped + un-freed handles:** a `ptr` is one opaque type for every C handle (no `FILE*` vs
   `sqlite3*` checking — passing the wrong handle is C-level UB, the author's assertion) and is **never
-  auto-freed** (call the library's own destroy; forgetting **leaks**).
+  auto-freed** (call the library's own destroy; forgetting **leaks**). The `ptr` is opaque *as a value*
+  (cannot be forged from an int), but its **memory is readable/writable** via `std.ffi`
+  `load_*`/`store_*` (every C scalar width + `load_str`, each with an `_at(p, off)` byte-offset form) —
+  for struct fields, return buffers, and C output-params. Unsafe like `ctypes`: a bad pointer
+  segfaults; only the NULL base pointer is guarded (recoverable error). See `stdlib.md §std.ffi`.
 
-**Deferred (v1 limits):** *stored / cross-thread* callbacks + pointer-deref builtins (sync scalar
-callbacks **shipped** — see above), varargs, the rich Rust `Box<dyn Any>` userdata
+**Deferred (v1 limits):** *stored / cross-thread* callbacks (sync scalar callbacks **shipped** — see
+above), a **C-buffer alloc layer** (`ffi.alloc`/`free` + bulk list↔buffer copy, needed to run e.g.
+`qsort` over a Chezzi `list`), varargs, the rich Rust `Box<dyn Any>` userdata
 handle (for compiled-in Rust libraries), a **custom user-named deallocator** (only libc `free` backs
 `owned_str`), and — within structs-by-value — **nested structs** and **`str`/`owned_str` fields**.
-(Opaque C `void*` handles — `ptr` — **shipped**; nullable `str?` returns and `char*` ownership transfer
-via `owned_str` — **shipped**; **flat-scalar structs by value** — **shipped**; **sync scalar callbacks**
-(`fn(scalars) -> scalar` extern params) — **shipped**, see above.)
+(Opaque C `void*` handles — `ptr` — **shipped**, with `load_*`/`store_*` memory deref; nullable `str?`
+returns and `char*` ownership transfer via `owned_str` — **shipped**; **flat-scalar structs by value** —
+**shipped**; **sync scalar callbacks** (`fn(scalars) -> scalar` extern params) — **shipped**, see above.)
 
 ## 13. Standard library (v1)
 

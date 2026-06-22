@@ -86,7 +86,8 @@ cannot drift.
 
 The v1 `extern "lib":` surface ships: scalars, fixed-width ints (`int8`..`uint64`, `std.ffi`-imported),
 `float`/`bool` (`bool` ↔ C `_Bool`, 1 byte), `str` (+ return-only `owned_str`/`str?`/`owned_str?`),
-opaque `ptr` handles, and flat-scalar **structs by value**. Two deepenings stay deferred. They're
+opaque `ptr` handles (with `std.ffi` `load_*`/`store_*` to deref the memory behind them), and
+flat-scalar **structs by value**. A couple of deepenings stay deferred. They're
 captured here so a revisit starts from a plan, not a blank page. None is blocking — the v1 surface binds
 the large majority of system/compute C libraries (numbers, strings, handles, small structs) with **no
 `chezzi` rebuild**.
@@ -133,11 +134,19 @@ fire inside the same `ffi_call` on the same thread — they are the next deferre
 Recorded so a revisit starts from a plan, not a blank page:
 
 1. **(landed, this milestone)** Sync scalar callbacks (above).
-2. **(easy, additive next) Pointer-deref builtins** to read/write through a `void*` callback arg:
-   `ffi.load_int`/`load_float`/`store_int`/`store_float`/… so a callback receiving a `ptr` can deref
-   it. **Unlocks `qsort`/`bsearch`** (the comparator gets two `const void*`). *Python ref:* `ctypes`
-   uses typed `POINTER(c_int)` args and `a[0]` to deref — Chezzi would expose the same as explicit
-   typed load/store builtins on a `ptr`. Purely additive (no callback-engine change).
+2. **(LANDED) Pointer-deref builtins** to read/write through a `void*` (a callback arg, an extern
+   return, or any held `ptr`): `ffi.load_int`/`load_int8`..`load_uint64`/`load_float`/`load_float32`/
+   `load_bool`/`load_ptr`/`load_str` and the `store_*` mirror (no `store_str` — unbounded write
+   footgun), each with an `_at(p, off)` byte-offset form. See `stdlib.md §std.ffi` for the full
+   surface + the NULL-fault rule + the "unsafe: arbitrary memory" warning. **Callback-WITH-pointer
+   already worked** before this — `CType::Ptr` is a callback scalar, so `fn cmp(a: ptr, b: ptr) -> int`
+   type-checks and runs — this slice only added the deref builtins so the held `ptr` can be read/written.
+   *Python ref:* `ctypes` uses typed `POINTER(c_int)` args and `a[0]` to deref — Chezzi exposes the
+   same as explicit typed load/store builtins on a `ptr`. Purely additive (no callback-engine change).
+   **Remaining gap (NOT in this slice):** running `qsort`/`bsearch` over a *Chezzi `list`* still needs
+   a **C-buffer alloc layer** (`ffi.alloc`/`ffi.free` + a bulk list↔buffer copy) to hand C a contiguous
+   array — the deref builtins read/write memory C already owns, they don't allocate one. That alloc
+   layer is its own deferred slice.
 3. **(its own milestone) Stored + cross-thread callbacks** — a callback C keeps and calls *after* the
    extern call returns and/or from *its own* thread. Needs **two** new pieces:
    - a **callback registry** that GC-roots the closure (+ its upvalues) until an explicit `unregister`,
@@ -323,7 +332,7 @@ A registry serving native packages needs one of:
 |---|---|---|
 | **A. Recompile-the-world** (Zig-like) | native pkg = vendored Rust crate + glue; `chezzi build` links a **project-specific binary** | ABI-safe, simple; every native dep = a Rust rebuild; needs the Rust toolchain on the user machine |
 | **B. Dynamic plugins** (CPython C-ext model) | pkg ships a prebuilt `cdylib` (`.so`); `chezzi` `dlopen`s it at module-init | no user rebuild — but needs a **frozen `repr(C)` ABI** for the seam |
-| **C. C-ABI wrapper** (`extern "lib":`) | pkg = manifest → a system `.so` + Chezzi wrapper source | already largely built; scalars, handles, flat structs by value, and **sync scalar callbacks** today (stored/cross-thread callbacks + pointer-deref builtins deferred) |
+| **C. C-ABI wrapper** (`extern "lib":`) | pkg = manifest → a system `.so` + Chezzi wrapper source | already largely built; scalars, handles, flat structs by value, **sync scalar callbacks**, and **pointer-deref `load_*`/`store_*` builtins** today (stored/cross-thread callbacks + a C-buffer alloc layer deferred) |
 
 ### 6.3 The gotcha that decides it: Rust has no stable ABI
 Model B's blocker: the `Host`/`NativeRet`/`Arc<dyn Any>` seam is a **Rust** ABI — `String`, `Vec`,

@@ -208,7 +208,12 @@ fn struct_layout(fields: &[CType]) -> (Type, usize, usize, Vec<usize>) {
 /// 1 byte, `ptr`→C `void*`). Errors on a non-scalar field value (a checker-prevented case, guarded
 /// defensively). `Str`/owned/opt/nested `Struct` fields are rejected by the checker, so they are
 /// not reachable here.
-fn write_field(buf: &mut [u8], offset: usize, ct: &CType, v: &NativeRet) -> Result<(), HostError> {
+pub(crate) fn write_field(
+    buf: &mut [u8],
+    offset: usize,
+    ct: &CType,
+    v: &NativeRet,
+) -> Result<(), HostError> {
     let want_int = |v: &NativeRet| match v {
         NativeRet::Int(n) => Ok(*n),
         other => Err(HostError {
@@ -287,7 +292,7 @@ fn write_field(buf: &mut [u8], offset: usize, ct: &CType, v: &NativeRet) -> Resu
 /// neutral [`NativeRet`] — the mirror of [`write_field`]. Sub-word fields read their exact stored
 /// width (NOT the register width — a struct member is at its real offset, unlike a narrow *return*
 /// which libffi widens), then sign-/zero-extend back to i64. Only scalar leaf variants are reachable.
-fn read_field(buf: &[u8], offset: usize, ct: &CType) -> NativeRet {
+pub(crate) fn read_field(buf: &[u8], offset: usize, ct: &CType) -> NativeRet {
     macro_rules! get {
         ($ty:ty) => {{
             const N: usize = std::mem::size_of::<$ty>();
@@ -1726,9 +1731,15 @@ mod tests {
         let mut f = std::fs::File::create(&csrc).expect("create apply.c");
         f.write_all(
             br#"
+#include <stdint.h>
 int apply(int x, int (*f)(int)) { return f(x) + 1; }
 double applyd(double x, double (*f)(double)) { return f(x); }
 int apply2(int (*f)(int), int x) { return f(x) + 1; }
+/* A small record returned BY POINTER, for the ffi deref tests. The fields are laid out at known C
+   offsets: a at 0 (int32), b at 8 (int64, after padding), c at 16 (double). mkrec returns a pointer
+   to a static instance the Chezzi side then reads field-by-field via the load builtins. */
+struct R { int32_t a; int64_t b; double c; };
+void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
 "#,
         )
         .expect("write apply.c");
@@ -1919,6 +1930,100 @@ int apply2(int (*f)(int), int x) { return f(x) + 1; }
         let parallel = crate::vm::run_capture_parallel(&src).expect("vm parallel run");
         let interp = crate::interp::run_capture(&src).expect("interp run");
         assert_eq!(serial, "101\n");
+        assert_eq!(parallel, serial, "M:N parity with serial VM");
+        assert_eq!(interp, serial, "interp parity with VM");
+    }
+
+    /// Write a `.chz` program to a unique temp file (so `import std.ffi` resolves via the graph
+    /// resolver — the standalone `run_capture` path can't resolve module-member calls).
+    fn write_deref_chz(src: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "chezzi_ffideref_{}_{}.chz",
+            std::process::id(),
+            CB_SO_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&path, src).expect("write temp .chz");
+        path
+    }
+
+    #[test]
+    fn ffi_deref_load_two_engine_parity() {
+        // End-to-end: a C fn returns a `ptr` to a struct { int32 a@0; int64 b@8; double c@16 }; the
+        // Chezzi side reads each field via the ffi load builtins and prints them. Run through BOTH the
+        // VM and the interpreter (frozen oracle) and assert identical, expected output. This is the
+        // end-to-end golden for the deref builtins (callbacks set the precedent: no examples/ file,
+        // only the in-crate parity test — an examples/ golden would need `cc` at golden-test time).
+        let so = build_callback_so();
+        let src = format!(
+            "import std.ffi\n\
+extern \"{}\":\n    fn mkrec() -> ptr\n\n\
+p := mkrec()\n\
+print(ffi.load_int32_at(p, 0))\n\
+print(ffi.load_int64_at(p, 8))\n\
+print(ffi.load_float_at(p, 16))\n",
+            so.to_str().unwrap()
+        );
+        let entry = write_deref_chz(&src);
+        let (vm_out, _e, vm_res, _) = crate::vm::run_file(&entry);
+        let (interp_out, _ie, interp_res, _) = crate::interp::run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(vm_res.is_ok(), "vm faulted: {vm_res:?}");
+        assert!(interp_res.is_ok(), "interp faulted: {interp_res:?}");
+        assert_eq!(vm_out, "-3\n70000\n2.5\n", "vm stdout");
+        assert_eq!(interp_out, "-3\n70000\n2.5\n", "interp stdout");
+        assert_eq!(vm_out, interp_out, "two-engine parity");
+    }
+
+    #[test]
+    fn ffi_deref_store_then_load_two_engine_parity() {
+        // Round-trip through C-owned memory: store into the static record's fields, then read back.
+        // (mkrec returns the SAME static each call, so a store is observable on the next load.) Both
+        // engines must agree. Both runs dlopen the SAME `.so` (same static `R`); the store-then-load
+        // sequence is self-contained within each run, so they produce identical output.
+        let so = build_callback_so();
+        let src = format!(
+            "import std.ffi\n\
+extern \"{}\":\n    fn mkrec() -> ptr\n\n\
+p := mkrec()\n\
+ffi.store_int32_at(p, 0, 99)\n\
+ffi.store_float_at(p, 16, 1.5)\n\
+print(ffi.load_int32_at(p, 0))\n\
+print(ffi.load_float_at(p, 16))\n",
+            so.to_str().unwrap()
+        );
+        let entry = write_deref_chz(&src);
+        let (vm_out, _e, vm_res, _) = crate::vm::run_file(&entry);
+        let (interp_out, _ie, interp_res, _) = crate::interp::run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(vm_res.is_ok(), "vm faulted: {vm_res:?}");
+        assert!(interp_res.is_ok(), "interp faulted: {interp_res:?}");
+        assert_eq!(vm_out, "99\n1.5\n", "vm stdout");
+        assert_eq!(interp_out, "99\n1.5\n", "interp stdout");
+        assert_eq!(vm_out, interp_out, "two-engine parity");
+    }
+
+    #[test]
+    fn ffi_deref_three_engine_parity() {
+        // The M:N --parallel engine reaches the deref builtins through the same engine-neutral host
+        // path — parity by construction. (mkrec's static is process-global; this test only reads.)
+        let so = build_callback_so();
+        let src = format!(
+            "import std.ffi\n\
+extern \"{}\":\n    fn mkrec() -> ptr\n\n\
+p := mkrec()\n\
+print(ffi.load_int32_at(p, 0))\n",
+            so.to_str().unwrap()
+        );
+        let entry = write_deref_chz(&src);
+        let (serial, _e, sres, _) = crate::vm::run_file(&entry);
+        let (parallel, _pe, pres, _) =
+            crate::vm::run_file_parallel(&entry, crate::native::HostConfig::default());
+        let (interp, _ie, ires, _) = crate::interp::run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(sres.is_ok(), "vm serial faulted: {sres:?}");
+        assert!(pres.is_ok(), "vm parallel faulted: {pres:?}");
+        assert!(ires.is_ok(), "interp faulted: {ires:?}");
+        assert_eq!(serial, "-3\n");
         assert_eq!(parallel, serial, "M:N parity with serial VM");
         assert_eq!(interp, serial, "interp parity with VM");
     }
