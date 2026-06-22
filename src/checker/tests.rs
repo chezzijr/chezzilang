@@ -7486,40 +7486,132 @@ fn heterogeneous_struct_list_unannotated_rejected() {
     );
 }
 
-// ---- step 4: BLOCK-LOCAL FLOW-SENSITIVITY — sibling arms refine independently ----
+// ---- step 4: PERSISTENT refine-on-first-use — the first use pins the element/key/value type
+// for the binding's whole scope, even across sibling STATEMENT branches/arms. Building a
+// heterogeneous collection split across branches is now a type error, exactly like `[1, "s"]`. ----
 
 #[test]
-fn flow_sensitive_if_else_int_vs_str_ok() {
-    // Only one arm runs; each refines from the pre-branch list[Unknown] independently.
-    ok("fn main():\n c := true\n xs := []\n if c:\n  xs.push(1)\n else:\n  xs.push(\"s\")\nmain()");
-}
-
-#[test]
-fn flow_sensitive_map_if_elif_ok() {
-    // int value in one arm, float value in another — independent map refinements.
-    ok(
-        "fn main():\n c := 1\n cfg := {}\n if c == 1:\n  cfg[\"x\"] = 1\n else if c == 2:\n  cfg[\"y\"] = 2.0\nmain()",
+fn flow_sensitive_if_else_int_vs_str_rejects() {
+    // First-use pin PERSISTS: the then-arm pins xs to list[int]; the else-arm's str push is a
+    // cross-branch element-type conflict — rejected (a sound static over-approximation).
+    rejects(
+        "fn main():\n c := true\n xs := []\n if c:\n  xs.push(1)\n else:\n  xs.push(\"s\")\nmain()",
+        "argument 1 of 'push': expected int, found str",
     );
 }
 
 #[test]
-fn flow_sensitive_set_if_else_ok() {
-    ok("fn main():\n c := true\n s := set()\n if c:\n  s.add(1)\n else:\n  s.add(\"x\")\nmain()");
+fn flow_sensitive_map_if_elif_rejects() {
+    // The first arm pins cfg to map[str,int]; the else-if writes a float value. float→int is the
+    // LOSSY direction (NOT widened — consistent with one-way int→float widening) → rejected.
+    rejects(
+        "fn main():\n c := 1\n cfg := {}\n if c == 1:\n  cfg[\"x\"] = 1\n else if c == 2:\n  cfg[\"y\"] = 2.0\nmain()",
+        "cannot assign float to int",
+    );
 }
 
-// ---- step 5: straight-line persists, branch refine does NOT leak ----
+#[test]
+fn flow_sensitive_set_if_else_rejects() {
+    // First-use pin persists across sibling arms: set pinned to set[int], the str add is rejected.
+    rejects(
+        "fn main():\n c := true\n s := set()\n if c:\n  s.add(1)\n else:\n  s.add(\"x\")\nmain()",
+        "argument 1 of 'add': expected int, found str",
+    );
+}
+
+// ---- step 5: an inner-block first-use pin PERSISTS; a later conflicting use is rejected ----
 
 #[test]
-fn refine_inside_block_then_outer_after_does_not_leak() {
-    // if-arm push(1) does NOT leak; post-if xs reverts to list[Unknown], so push("s")
-    // refines cleanly. (Cross/post-branch mixing is the documented residual — accepted.)
-    ok("fn main():\n xs := []\n if true:\n  xs.push(1)\n xs.push(\"s\")\nmain()");
+fn refine_inside_block_persists_then_conflict_rejected() {
+    // The if-arm's push(1) pins xs to list[int] for the whole scope (the pin is written to the
+    // OWNING outer scope by `repin` and survives the block's `pop_scope`). The post-if push("s")
+    // is therefore a real element-type conflict — rejected. (Persistent first-use pinning replaces
+    // the old block-local "does not leak" design.)
+    rejects(
+        "fn main():\n xs := []\n if true:\n  xs.push(1)\n xs.push(\"s\")\nmain()",
+        "argument 1 of 'push': expected int, found str",
+    );
 }
 
 #[test]
 fn refine_inside_block_on_outer_list_ok() {
-    // repin targets the OWNING (outer) scope; a homogeneous build across block boundary is fine.
+    // repin targets the OWNING (outer) scope; a HOMOGENEOUS build across block boundary stays fine
+    // — the persistent pin only rejects a CONFLICTING later use, not a matching one.
     ok("fn main():\n xs := []\n if true:\n  xs.push(1)\n xs.push(2)\nmain()");
+}
+
+// ---- repros 2-5: persistent-pin rejections (single arm then concrete use, second-arm conflict,
+// statement-match arm conflict, loop-body pin then post-loop conflict) ----
+
+#[test]
+fn refine_single_arm_then_concrete_use_rejects() {
+    // One arm pins xs to list[int]; the annotated read `s: str = xs[0]` then mismatches.
+    rejects(
+        "fn main():\n c := true\n xs := []\n if c:\n  xs.push(1)\n s: str = xs[0]\nmain()",
+        "cannot assign int to variable of type str",
+    );
+}
+
+#[test]
+fn refine_conflict_in_second_arm_rejects() {
+    // Homogeneous first arm pins list[int]; the conflict lands in the SECOND (else-if) arm.
+    rejects(
+        "fn main():\n c := 1\n xs := []\n if c == 1:\n  xs.push(1)\n else if c == 2:\n  xs.push(\"s\")\nmain()",
+        "argument 1 of 'push': expected int, found str",
+    );
+}
+
+#[test]
+fn refine_stmt_match_arm_conflict_rejects() {
+    // Statement-`match` arms mirror if/else statements (Option B): the `1:` arm pins list[int],
+    // the `_:` arm's str push is a hard cross-arm conflict.
+    rejects(
+        "fn main():\n c := 1\n xs := []\n match c:\n  1:\n   xs.push(1)\n  _:\n   xs.push(\"s\")\nmain()",
+        "argument 1 of 'push': expected int, found str",
+    );
+}
+
+#[test]
+fn refine_loop_body_pin_then_post_loop_conflict_rejects() {
+    // The for-loop body pins xs to list[int]; the post-loop str push conflicts. Accepts the
+    // zero-trip / always-runs over-approximation by design (sound static over-approximation).
+    rejects(
+        "fn main():\n xs := []\n for i in [1,2]:\n  xs.push(i)\n xs.push(\"s\")\nmain()",
+        "argument 1 of 'push': expected int, found str",
+    );
+    // while variant: condition guards the body, but the body's first-use pin still persists.
+    rejects(
+        "fn main():\n n := 3\n xs := []\n while n > 0:\n  xs.push(1)\n  n = n - 1\n xs.push(\"s\")\nmain()",
+        "argument 1 of 'push': expected int, found str",
+    );
+}
+
+#[test]
+fn refine_zero_trip_loop_over_approximation_rejects() {
+    // Zero-trip over-approximation made explicit: the loop body never runs at runtime, yet the
+    // static pin still fires — `xs:=[]; for i in []: xs.push(1); xs.push("s")` REJECTS by design.
+    rejects(
+        "fn main():\n xs := []\n for i in []:\n  xs.push(1)\n xs.push(\"s\")\nmain()",
+        "argument 1 of 'push': expected int, found str",
+    );
+}
+
+#[test]
+fn expr_arm_pin_independence_ok() {
+    // GUARD: the EXPRESSION-position arms (`infer_if_else`/`infer_match`) keep their
+    // snapshot/restore barrier so a refinable empty produced/refined inside one value-arm refines
+    // independently from its sibling — value-arm inference must not be disturbed by the persistent-
+    // pin change. An if-EXPRESSION whose two arms each yield an empty list must unify to
+    // list[Unknown] and then refine cleanly on first use; a later conflicting use is rejected
+    // because the RESULT binding's first-use pin persists (statement-position). This fails if an
+    // expression-site restore is wrongly removed (sibling-arm pins would leak and corrupt inference).
+    ok("fn main():\n c := true\n xs := (if c: [] else: [])\n xs.push(1)\n xs.push(2)\nmain()");
+    rejects(
+        "fn main():\n c := true\n xs := (if c: [] else: [])\n xs.push(1)\n xs.push(\"s\")\nmain()",
+        "argument 1 of 'push': expected int, found str",
+    );
+    // Expression-`match` arms yielding empties unify the same way (exercises `infer_match`).
+    ok("fn main():\n c := 1\n xs := match c:\n  1: []\n  _: []\n xs.push(1)\n xs.push(2)\nmain()");
 }
 
 // ---- step 6: invariants — never-refined empties, homogeneous builds, residual hole ----

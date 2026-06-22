@@ -1467,12 +1467,17 @@ with `compare`), stable, in place.
 > type error (it would read as `list[int]`). A **heterogeneous / protocol** collection therefore needs
 > an explicit annotation — `shapes: list[Shape] = []` — which is also clearer to readers. The
 > `Hashable` key/element ban applies the moment the type is concrete (and a non-Hashable key/element
-> like a `float` is rejected at the insertion site even on an empty `{}`/`set()`). Refinement is
-> **block-local**: a pin inside one `if`/`else`/`match` arm or a loop body does not leak into a sibling
-> arm or past the branch (each arm refines independently; only an on-all-paths pin persists).
-> Limitations: refinement fires only on a **simple-variable** receiver (`obj.field.push(…)` /
-> `xss[0].push(…)` are not refined — annotate those), and mixing types *across* branch arms / after a
-> branch is not yet caught.
+> like a `float` is rejected at the insertion site even on an empty `{}`/`set()`). The pin is
+> **persistent** (scope-wide first-use pinning): the first mutating op fixes the element type for the
+> binding's whole scope, even across sibling `if`/`else`/statement-`match` arms and a loop body — so
+> building a heterogeneous collection split across branches/arms is a type error, exactly like the
+> literal `[1, "s"]`. `xs := []; if c: xs.push(1) else: xs.push("s")` is **rejected**. This accepts a
+> sound zero-trip over-approximation: `xs := []; for i in []: xs.push(1); xs.push("s")` rejects even
+> though the loop body never runs. Limitations: refinement fires only on a **simple-variable** receiver
+> (`obj.field.push(…)` / `xss[0].push(…)` are not refined — annotate those), and the one remaining
+> uncaught sliver is a differently-typed push done as a *side effect* inside sibling **if-EXPRESSION /
+> match-EXPRESSION** value-arms (value-arms refine independently so branch value inference stays
+> correct; rare, since a value-arm is a single expression and the mutating ops are statements).
 
 Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
 `m.merge(n)→map` (new map, `n` wins on a key clash) and `m.update(n)` (write `n` into `m` in place,

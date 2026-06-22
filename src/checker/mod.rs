@@ -1431,11 +1431,14 @@ impl Checker {
     }
     /// Snapshot every in-scope binding whose type still carries an `Unknown` in a slot position (a
     /// refinable empty-collection / nullary-variant / None producer), recording its OWNING scope
-    /// index, name, and current type. Paired with [`Self::restore_refinable`] to make refinement
-    /// BLOCK-LOCAL flow-sensitive: a refinement performed inside one branch arm / loop body must not
-    /// leak into a sibling arm or into code after the branch (only one arm runs at runtime). We
-    /// snapshot the OWNING scope index — not the innermost block scope — so restoring reverts the
-    /// exact binding `repin` wrote, even when the receiver was declared in an outer scope.
+    /// index, name, and current type. Paired with [`Self::restore_refinable`]. Refine-on-first-use is
+    /// now PERSISTENT scope-wide first-use pinning, so the STATEMENT-position sites
+    /// (`check_block`/for-loop/`check_match`) no longer snapshot/restore — a pin there persists. These
+    /// helpers remain in use by the EXPRESSION-position arms (`infer_if_else`/`infer_match`): a value-
+    /// arm produces a VALUE, so a pin in one value-arm must not leak to a sibling value-arm or it
+    /// would corrupt branch value inference. We snapshot the OWNING scope index — not the innermost
+    /// block scope — so restoring reverts the exact binding `repin` wrote, even when the receiver was
+    /// declared in an outer scope.
     fn snapshot_refinable(&self) -> Vec<(usize, String, Ty)> {
         let mut snap = Vec::new();
         for (i, scope) in self.scopes.iter().enumerate() {
@@ -1447,10 +1450,11 @@ impl Checker {
         }
         snap
     }
-    /// Restore the bindings captured by [`Self::snapshot_refinable`], reverting any in-arm/in-body
-    /// refinement so each branch arm refines independently from the pre-branch type and the binding
-    /// reverts after the branch. Writes back by (scope index, name); a snapshotted scope that was
-    /// already popped is skipped (the binding is gone, nothing to revert).
+    /// Restore the bindings captured by [`Self::snapshot_refinable`], reverting any in-arm refinement
+    /// so each EXPRESSION-position value-arm refines independently from the pre-arm type (kept only
+    /// at `infer_if_else`/`infer_match`; statement-position pins now persist). Writes back by (scope
+    /// index, name); a snapshotted scope that was already popped is skipped (binding gone, nothing to
+    /// revert).
     fn restore_refinable(&mut self, snap: Vec<(usize, String, Ty)>) {
         for (i, name, ty) in snap {
             if let Some(scope) = self.scopes.get_mut(i)
@@ -2700,21 +2704,23 @@ impl Checker {
     // ===== pass 2: check statements =====
 
     fn check_block(&mut self, block: &Block) {
-        // BLOCK-LOCAL flow-sensitivity barrier: `check_block` runs every CONDITIONALLY-executed body
-        // (an `if`/`else if`/`else` branch, a `while` body, a `defer:` block). A refine-on-first-use
-        // narrowing of an OUTER binding performed inside this body must NOT leak into a sibling arm
-        // or into code after the branch — only one arm runs at runtime, so each must refine
-        // independently from the pre-branch type. Snapshot the refinable in-scope bindings on entry
-        // and restore them on exit so the binding reverts to its pre-block type. Straight-line code
-        // (a function body / module top level) does NOT go through `check_block`, so an on-all-paths
-        // refinement still persists — which is exactly what catches the real soundness bug.
-        let snap = self.snapshot_refinable();
+        // PERSISTENT refine-on-first-use (scope-wide first-use pinning): `check_block` runs every
+        // CONDITIONALLY-executed STATEMENT body (an `if`/`else if`/`else` branch, a `while` body, a
+        // `defer:` block). A refine-on-first-use narrowing of an OUTER binding performed inside this
+        // body PERSISTS — the first mutating op that fixes an empty collection's element/key/value
+        // type pins it for the binding's whole scope, even across sibling branches and past the
+        // branch. `repin` writes the pin to the binding's OWNING scope, so it survives `pop_scope`
+        // (which only removes inner-block-declared bindings, not the outer owner). Building a
+        // heterogeneous collection split across branches/arms is therefore now a type error, exactly
+        // like the literal `[1, "s"]`. Lexical scoping is intact: a binding DECLARED in this block is
+        // still removed by `pop_scope`; only an OUTER binding's first-use pin persists. (Expression-
+        // position arms — `infer_if_else`/`infer_match` — keep their snapshot/restore barrier: a pin
+        // in one value-arm must not leak to a sibling value-arm, that being the narrow residual.)
         self.push_scope();
         for stmt in block {
             self.check_stmt(stmt);
         }
         self.pop_scope();
-        self.restore_refinable(snap);
     }
 
     fn check_stmt(&mut self, stmt: &Stmt) {
@@ -2903,10 +2909,13 @@ impl Checker {
             }
             StmtKind::For { vars, iter, body } => {
                 let bindings = self.for_bindings(vars, iter);
-                // Flow-sensitivity barrier (see `check_block`): a refinement inside the loop body
-                // must not leak past the loop — a zero-trip loop runs the body never, so a later op
-                // must see the pre-loop type. Snapshot/restore the refinable outer bindings.
-                let snap = self.snapshot_refinable();
+                // PERSISTENT refine-on-first-use (see `check_block`): a refine-on-first-use pin of an
+                // OUTER empty collection inside the loop body PERSISTS past the loop. We accept the
+                // zero-trip / always-runs over-approximation by design — `xs:=[]; for i in []:
+                // xs.push(1); xs.push("s")` REJECTS even though the body never runs at runtime; a
+                // sound static over-approximation, matching "first statement that fixes the element
+                // type records it". (No snapshot/restore here, so the pin written to the binding's
+                // OWNING scope by `repin` survives `pop_scope`, which only removes the loop vars.)
                 self.push_scope();
                 for (name, ty) in bindings {
                     self.declare(&name, ty);
@@ -2920,7 +2929,6 @@ impl Checker {
                 }
                 self.loop_depth -= 1;
                 self.pop_scope();
-                self.restore_refinable(snap);
             }
             StmtKind::While { cond, body } => {
                 self.expect_bool(cond, "while condition");
@@ -4739,9 +4747,13 @@ impl Checker {
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
         for arm in arms {
-            // Flow-sensitivity barrier (see `check_block`): each match arm is a conditionally-run
-            // body — a refinement inside one arm must not leak into a sibling arm or past the match.
-            let snap = self.snapshot_refinable();
+            // PERSISTENT refine-on-first-use (see `check_block`): a STATEMENT-`match` arm mirrors an
+            // if/else statement body — a refine-on-first-use pin of an OUTER empty collection inside
+            // one arm PERSISTS across sibling arms and past the match (Option B: a cross-arm element-
+            // type conflict is a hard error). No snapshot/restore here, so the pin `repin` wrote to
+            // the binding's OWNING scope survives `pop_scope` (which only removes the arm's binders).
+            // The EXPRESSION-position matcher `infer_match` keeps its barrier — value-arms stay
+            // independent.
             let irref = self.bind_match_arm(&arm.pattern, &kind, scrutinee.span, &mut covered);
             // The guard is type-checked with the arm's bindings in scope. A guarded arm is never
             // irrefutable — its guard may fail at runtime — so it can't make the match exhaustive.
@@ -4753,7 +4765,6 @@ impl Checker {
                 self.check_stmt(stmt);
             }
             self.pop_scope();
-            self.restore_refinable(snap);
         }
         self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
     }

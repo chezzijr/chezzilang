@@ -73,8 +73,33 @@ repeated, a name reused across SEPARATE arms, and an or-pattern `A(x) | B(x)` al
 "Import name collisions" + "Duplicate binding in a single pattern" → RESOLVED. Full `cargo test` +
 `cargo test conformance` green; `cargo clippy --all-targets -- -D warnings` clean.
 
+**✅ Soundness fix — refine-on-first-use is now PERSISTENT scope-wide first-use pinning (closes the
+cross/post-branch `Ty::Unknown` residual).** The earlier design (entry below) was BLOCK-LOCAL: a
+refine pin inside a conditionally-run body was snapshot/restored so it did not leak past the branch,
+leaving cross/post-branch heterogeneous builds uncaught. Now the FIRST mutating op that fixes an empty
+collection's element/key/value type **pins it for the binding's whole scope**, even across sibling
+branches/arms — building a heterogeneous collection split across branches is a hard type error, exactly
+like the literal `[1, "s"]`. Checker-only fix (`src/checker/mod.rs`): removed the
+`snapshot_refinable`/`restore_refinable` barrier at the THREE STATEMENT-position sites — `check_block`
+(if/else/while/defer), the `for` body, and statement-`match` arms (`check_match`, Option B: a cross-arm
+conflict is a hard error). The pin already targets the binding's OWNING scope (`repin`), so it survives
+`pop_scope` (which only removes inner-block-declared bindings — lexical scoping intact). The two
+EXPRESSION-position sites (`infer_if_else`/`infer_match`) KEEP their barrier: a value-arm produces a
+VALUE, so a pin in one value-arm must not leak to a sibling value-arm (would corrupt branch value
+inference). Accepts the zero-trip / always-runs over-approximation by design (`xs:=[]; for i in []:
+xs.push(1); xs.push("s")` rejects even though the body never runs — sound static over-approximation).
+**New narrow residual** (documented in `gaps.md`): a differently-typed push done as a SIDE EFFECT inside
+sibling if-EXPRESSION / match-EXPRESSION value-arms is still not caught (rare — a value-arm is a single
+expression, the mutating ops are statements). Checker-only ⇒ VM==interp parity automatic. Tests:
+`flow_sensitive_{if_else_int_vs_str,map_if_elif,set_if_else}_rejects`,
+`refine_inside_block_persists_then_conflict_rejected`, `refine_{single_arm_then_concrete_use,
+conflict_in_second_arm,stmt_match_arm_conflict,loop_body_pin_then_post_loop_conflict,
+zero_trip_loop_over_approximation}_rejects`, `expr_arm_pin_independence_ok`; must-stay-green
+`refine_inside_block_on_outer_list_ok` etc. All 2444 tests + conformance + clippy clean.
+
 **✅ Soundness fix — empty-collection / nullary-variant / `None` `Ty::Unknown` slot is now closed via
-FULL refine-on-first-use + insertion-site Hashable check + BLOCK-LOCAL flow-sensitivity (the
+FULL refine-on-first-use + insertion-site Hashable check + (originally BLOCK-LOCAL, now PERSISTENT —
+see the entry above) flow-sensitivity (the
 empty-slot half of the `Ty::Unknown`-is-assignable family; sibling to the recursive-return fix below).**
 A bare empty literal (`[]`/`{}`/`set()`), a nullary user-enum variant (`Box.Empty`), or native `None`
 typed its element/key/value/type-arg slot as the permissive `Ty::Unknown`, which nothing later refined —
@@ -90,13 +115,15 @@ recurses into nested type params — `list[Option[Unknown]]` + `Some(5)` → `li
 mismatch, enriched to hint at annotating for a mixed/protocol collection. Heterogeneous/protocol
 collections now REQUIRE an explicit annotation (`shapes: list[Shape] = []`) — intended and clearer.
 Non-Hashable keys/elements are rejected by a DIRECT insertion-site `is_hashable_key` check at `m[k]=v`
-(fires even while the key type is still `Unknown`) and at set-element concrete-ification. **Block-local
-flow-sensitivity** (`snapshot_refinable`/`restore_refinable` wrapping `check_block`, the `for` body, and
-`match`/`if`-expr arms): a refinement inside one branch arm does NOT leak into a sibling arm or
-post-branch — `xs:=[]` + `if c: xs.push(1) else: xs.push("s")` is accepted (each arm refines from the
-pre-branch type), while a straight-line on-all-paths refinement persists (catches the real bug).
+(fires even while the key type is still `Unknown`) and at set-element concrete-ification. **Flow-
+sensitivity** (now PERSISTENT scope-wide first-use pinning — see the entry above; originally block-local
+via `snapshot_refinable`/`restore_refinable`): a refine pin at a STATEMENT-position site (`check_block`,
+the `for` body, statement-`match` arms) now PERSISTS for the binding's whole scope, so `xs:=[]` + `if c:
+xs.push(1) else: xs.push("s")` is **rejected**; the EXPRESSION-position arms (`infer_if_else`/
+`infer_match`) keep their restore so value-arms refine independently.
 **Residuals** (documented): simple-variable-receiver-only (`obj.field`/`f()`/`xss[0]` unrefined), and
-cross/post-branch mixing needs join reconciliation (no false rejection, no leak). **Golden-test
+side-effect pushes inside sibling EXPRESSION-position arms (the cross/post-branch STATEMENT leak is now
+closed). **Golden-test
 checker-bypass fixed:** the golden tests drive `run_capture`, which BYPASSES the Checker, so a checker
 regression on a shipped example shipped falsely green — added `checker::tests::all_shipped_examples_typecheck`
 (build_graph + check_graph over every `examples/*.chz`, two intentional run-only demos `panic.chz` /

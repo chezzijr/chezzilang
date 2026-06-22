@@ -10,8 +10,11 @@ Last updated: 2026-06-22 (adversarial fuzz pass, 6 parallel hunters — 9 issues
 holes" below, all verified on both engines: **2 Rust panics** (interpolation w/ undefined name; list
 `map`/`filter`/`fold` when the callback shrinks the list) **✅ both RESOLVED**, the **`Ty::Unknown`
 permissive-sentinel family** (empty collections + recursive-return inference + generic nullary variants)
-**✅ three reachable producers RESOLVED** — residual: cross/post-branch refinement join still leaks (verified
-still live 2026-06-22), import name-collision mis-resolution **✅ RESOLVED**,
+**✅ all three reachable producers RESOLVED** — the cross/post-branch refinement residual is now **✅ RESOLVED**
+too: refine-on-first-use is PERSISTENT scope-wide first-use pinning (statement conditionals persist), so a
+heterogeneous collection built across sibling branches/arms is now a hard type error; only side-effect pushes
+inside sibling EXPRESSION-position arms remain a narrow uncaught sliver (2026-06-22), import name-collision
+mis-resolution **✅ RESOLVED**,
 duplicate-binding-in-pattern last-wins **✅ RESOLVED**, `--serial` generator-airlock parity divergence
 **[mooted-by-removal — `--serial` deprecated]**, inconsistent int→float coercion **✅ RESOLVED**
 (one-way C-like scalar-sink widening landed 2026-06-22), `ref`
@@ -74,16 +77,27 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
     NaN `inf - inf`) are rejected — via a DIRECT insertion-site `is_hashable_key` check at `m[k]=v`
     (so it fires even while the key type is still `Unknown`) and at set-element concrete-ification in
     `refine_receiver`.
-  - **Refinement is BLOCK-LOCAL flow-sensitive** (`snapshot_refinable`/`restore_refinable` wrapping
-    every conditionally-run body: `check_block` (if/else/while/defer), the `for` body, and `match`/
-    `if`-expr arms): a refinement inside one branch arm does NOT leak into a sibling arm or post-branch.
-    `xs := []` + `if c: xs.push(1) else: xs.push("s")` is accepted (each arm refines independently);
-    a straight-line on-all-paths refinement still persists (catches the real bug).
+  - **Refinement is PERSISTENT scope-wide first-use pinning** (2026-06-22 — replaced the earlier
+    block-local design). The FIRST mutating op that fixes an empty collection's element/key/value type
+    pins it for the binding's WHOLE scope; `repin` writes the pin to the binding's OWNING scope, so it
+    survives `pop_scope`. The three STATEMENT-position sites no longer snapshot/restore: `check_block`
+    (if/else/while/defer), the `for` body, and statement-`match` arms (`check_match`, Option B). So a
+    heterogeneous collection built across sibling STATEMENT branches/arms is now a hard type error,
+    exactly like the literal `[1, "s"]`: `xs := []` + `if c: xs.push(1) else: xs.push("s")` REJECTS.
+    Lexical scoping is intact (a binding declared inside a block is still removed by `pop_scope`; only
+    an OUTER binding's pin persists). Accepts the zero-trip / always-runs over-approximation by design
+    (`xs:=[]; for i in []: xs.push(1); xs.push("s")` rejects even though the loop never runs at
+    runtime — a sound static over-approximation). The two EXPRESSION-position arms
+    (`infer_if_else`/`infer_match`) KEEP their `snapshot_refinable`/`restore_refinable` barrier: a
+    value-arm produces a VALUE, so a pin in one value-arm must not leak to a sibling value-arm (it
+    would corrupt branch value inference).
   - **Residuals (documented):** (1) **simple-variable receiver only** — `obj.field.push(…)` /
     `f().push(…)` / `xss[0].push(…)` are not refined (struct fields are explicitly typed, low impact);
-    (2) **cross-branch / post-branch mixing is not caught** (e.g. push int in one arm, str after the
-    branch) — that needs full join reconciliation, a follow-up — but there is NO false rejection and
-    NO leak.
+    (2) **side-effect pushes inside sibling EXPRESSION-position arms** (an if-EXPRESSION / match-
+    EXPRESSION value-arm that mutates an outer empty collection as a side effect) are NOT caught — the
+    expression-arm restores are kept so value inference stays independent. Rare (a value-arm is a
+    single expression; the mutating ops are all statements / void), so this is the narrow remaining
+    sliver — NOT the old cross/post-branch STATEMENT leak (that is now closed).
   - **Golden-test checker-bypass fixed:** the golden example tests drive `run_capture`, which BYPASSES
     the Checker, so a checker regression on a shipped example shipped falsely green. Added
     `checker::tests::all_shipped_examples_typecheck` (build_graph + check_graph over every
@@ -184,12 +198,13 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
     ```
   **Status:** the recursive/forward-reference-return producer is **✅ RESOLVED** via fixpoint inference
   (above). The **empty-collection** AND **generic-nullary-variant** (`Box.Empty` / `None`) producers are
-  now **✅ RESOLVED** via full refine-on-first-use + insertion-site Hashable check + block-local
-  flow-sensitivity (see the resolved entry above; residuals: simple-variable-receiver-only, and
-  cross/post-branch mixing needs join reconciliation). All three reachable `Unknown`-in-slot producers
-  are closed; `Unknown` remains permissive only as the bare cascade-suppression sentinel (which is by
-  design — `contains_unknown_in_slot` returns FALSE for a bare top-level `Unknown`, so refinement never
-  fights cascade-suppression).
+  now **✅ RESOLVED** via full refine-on-first-use + insertion-site Hashable check + PERSISTENT
+  scope-wide first-use pinning (see the resolved entry above; residuals: simple-variable-receiver-only,
+  and side-effect pushes inside sibling EXPRESSION-position arms — the cross/post-branch STATEMENT leak
+  is now CLOSED, statement conditionals persist their pin). All three reachable `Unknown`-in-slot
+  producers are closed; `Unknown` remains permissive only as the bare cascade-suppression sentinel
+  (which is by design — `contains_unknown_in_slot` returns FALSE for a bare top-level `Unknown`, so
+  refinement never fights cascade-suppression).
 
 - **✅ RESOLVED — Import name collisions are now rejected (checker ↔ runtime no longer disagree).**
   `bind_import` records every import bind-name (across values / functions / modules / type-names) into a
