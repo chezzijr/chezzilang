@@ -1888,15 +1888,20 @@ rejects the collision (*'…' is a builtin/reserved name*).
   auto-freed** (call the library's own destroy; forgetting **leaks**). The `ptr` is opaque *as a value*
   (cannot be forged from an int), but its **memory is readable/writable** via `std.ffi`
   `load_*`/`store_*` (every C scalar width + `load_str`, each with an `_at(p, off)` byte-offset form) —
-  for struct fields, return buffers, and C output-params. Unsafe like `ctypes`: a bad pointer
-  segfaults; only the NULL base pointer is guarded (recoverable error). See `stdlib.md §std.ffi`.
+  for struct fields, return buffers, and C output-params. You can also **make your own C-laid-out
+  buffer** via `std.ffi` `alloc(nbytes)`/`alloc_zeroed(nbytes)` (libc `malloc`/`calloc` → a raw `ptr`)
+  and release it with `free(p)` (**manually freed** — `defer ffi.free(p)`; never auto-freed). Unsafe
+  like `ctypes`: a bad pointer segfaults; double-free / use-after-free / out-of-bounds is UB; only the
+  NULL base pointer is guarded (recoverable error). See `stdlib.md §std.ffi`.
 
 **Deferred (v1 limits):** *stored / cross-thread* callbacks (sync scalar callbacks **shipped** — see
-above), a **C-buffer alloc layer** (`ffi.alloc`/`free` + bulk list↔buffer copy, needed to run e.g.
-`qsort` over a Chezzi `list`), varargs, the rich Rust `Box<dyn Any>` userdata
-handle (for compiled-in Rust libraries), a **custom user-named deallocator** (only libc `free` backs
-`owned_str`), and — within structs-by-value — **nested structs** and **`str`/`owned_str` fields**.
-(Opaque C `void*` handles — `ptr` — **shipped**, with `load_*`/`store_*` memory deref; nullable `str?`
+above), varargs, a **GC-tracked auto-freed owned-buffer type** + bulk-copy helpers + `realloc` (the
+manual `ffi.alloc`/`alloc_zeroed`/`free` layer **shipped** — see above), the rich Rust `Box<dyn Any>`
+userdata handle (for compiled-in Rust libraries), a **custom user-named deallocator** (only libc `free`
+backs `owned_str`), and — within structs-by-value — **nested structs** and **`str`/`owned_str` fields**.
+(Opaque C `void*` handles — `ptr` — **shipped**, with `load_*`/`store_*` memory deref + the
+`ffi.alloc`/`alloc_zeroed`/`free` C-buffer layer, so `qsort`/`bsearch` of a Chezzi list now fully works;
+nullable `str?`
 returns and `char*` ownership transfer via `owned_str` — **shipped**; **flat-scalar structs by value** —
 **shipped**; **sync scalar callbacks** (`fn(scalars) -> scalar` extern params) — **shipped**, see above.)
 

@@ -8559,6 +8559,27 @@ b := Buf([10, 20, 30])
         assert_eq!(out, expected);
     }
 
+    /// CAPSTONE C-buffer FFI golden (interp side): sort a Chezzi list with libc `qsort`, composing the
+    /// WHOLE C-buffer surface — `ffi.alloc` lays out an int64[n] buffer, `store_int64_at` fills it from
+    /// the list, `qsort` sorts it in place CALLING BACK into a Chezzi comparator that `load_int64`s both
+    /// `const void*` sides, `load_int64_at` reads the sorted values back, `defer ffi.free` releases it.
+    /// Proves callbacks + deref + alloc all compose. Deterministic on any LP64 Linux (qsort is pure +
+    /// always present; the fixed 8-byte stride matches the comparator). The VM twin asserts parity.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_qsort_chz() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/ffi_qsort.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/ffi_qsort.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("ffi_qsort.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
     /// Regression (blocker): an extern fn declared with an explicit `-> nil` (void) return must RUN,
     /// not panic. `ctype_of("nil")` is `None`, which means *void* here — not an unresolvable type — so
     /// the return slot must use `and_then` (None ⇒ void), never `.expect`. Linux-only (needs libc).

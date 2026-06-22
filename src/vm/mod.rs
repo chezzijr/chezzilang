@@ -28497,6 +28497,23 @@ main()
         assert_file_parity("examples/ffi_struct.chz");
     }
 
+    /// CAPSTONE C-buffer FFI golden (VM twin of `interp::golden_ffi_qsort_chz`): sort a Chezzi list
+    /// with libc `qsort`, composing `ffi.alloc` + `store_int64_at` + a Chezzi `qsort` comparator
+    /// callback (`load_int64` both `const void*` sides) + `load_int64_at` read-back + `defer ffi.free`.
+    /// The marquee proof that callbacks + deref + alloc all compose. Byte-matches `.expected` and stays
+    /// identical to the interpreter (`assert_file_parity` runs the serial VM + interp). Linux-only
+    /// (needs libc); the fixed 8-byte int64 stride matches the comparator on every LP64 unix.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_qsort_chz_via_run_file() {
+        let path = fixture("examples/ffi_qsort.chz");
+        let expected = std::fs::read_to_string(fixture("examples/ffi_qsort.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/ffi_qsort.chz");
+    }
+
     /// C-ABI deeper `str` returns golden (VM twin of `interp::golden_ffi_str_chz`): `strdup -> owned_str`
     /// (owned `char*` copied into a Chezzi `str` AND freed) and `getenv -> str?` (NULL → `None`). Byte-
     /// matches `.expected` and stays identical to the interpreter (`assert_file_parity`). Linux-only.

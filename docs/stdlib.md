@@ -246,6 +246,50 @@ buffer is a footgun). Each returns `nil`:
 > out-of-bounds *non-null* pointer is undefined behavior (not detectable — documented limit). These
 > builtins are **unix-only** (a non-unix build registers the names but every call errors).
 
+**C-buffer alloc layer (`alloc` / `alloc_zeroed` / `free`).** Allocate raw C-laid-out memory to hand
+to a C array/buffer API (`qsort`, `bsearch`, `fread`-into-buffer, …). Fill and read it with the
+`store_*`/`load_*` builtins above. Backed by the **libc allocator** (`malloc`/`calloc`/`free`), so a
+buffer can be handed to a C fn that itself reallocs/frees it.
+
+- `alloc(nbytes) -> ptr` — `malloc(nbytes)`; the bytes are **garbage** (uninitialized).
+- `alloc_zeroed(nbytes) -> ptr` — `calloc`-style; the bytes are **zeroed**.
+- `free(p)` — release a buffer; returns `nil`. `free(ffi.null())` is a safe **no-op**.
+
+> **Manual free.** A `ptr` is **never auto-freed** (the same rule as every other `ptr`). The idiom is
+> `p := ffi.alloc(n)` then `defer ffi.free(p)`. **Forgetting to free is a leak.** A `nbytes < 0` is a
+> recoverable error (`ffi.alloc: negative size`); `malloc`/`calloc` returning NULL for `nbytes > 0` is
+> a recoverable `ffi.alloc: out of memory` (not a crash). `nbytes == 0` passes through to `malloc(0)`
+> (impl-defined: may be NULL or a unique ptr). **Double-free, use-after-free, or `store_*`/`load_*`
+> beyond the allocation are undefined behavior** — the same inherently-unsafe contract as ctypes; there
+> is no bounds or lifetime tracking. Unix-only (a non-unix build registers the names but every call
+> errors).
+
+Sort a Chezzi list with libc `qsort` (the full composition — alloc + `store_*` + a callback comparator
++ `load_*`):
+
+```chezzi
+import std.ffi
+
+extern "libc.so.6":
+    fn qsort(base: ptr, n: int, size: int, cmp: fn(ptr, ptr) -> int)
+
+fn cmp(a: ptr, b: ptr) -> int:           # qsort hands two const void* (each an int64 slot)
+    x := ffi.load_int64(a)
+    y := ffi.load_int64(b)
+    if x < y: return -1
+    if x > y: return 1
+    return 0
+
+data := [5, 2, 9, 1, 7]
+buf := ffi.alloc(len(data) * 8)          # one int64 slot per element
+defer ffi.free(buf)                      # manual free — never auto-freed
+for i in range(len(data)):
+    ffi.store_int64_at(buf, i * 8, data[i])
+qsort(buf, len(data), 8, cmp)            # sorts in place, calling back into `cmp`
+for i in range(len(data)):
+    print(ffi.load_int64_at(buf, i * 8)) # 1 2 5 7 9
+```
+
 ---
 
 ## 5. Pure-Chezzi modules

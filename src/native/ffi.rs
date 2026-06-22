@@ -77,6 +77,124 @@ fn is_null(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// C-buffer alloc layer — malloc/calloc/free-backed raw buffers for handing C array/buffer APIs
+// (qsort, bsearch, fread-into-buffer, …). Fill/read with the load_*/store_* deref builtins above.
+//
+// ALLOCATOR: these call the LIBC allocator (`malloc`/`calloc`/`free`), NOT Rust's `GlobalAlloc`,
+// so a buffer may be handed to a C fn that reallocs/frees it and it pairs with the same allocator
+// the rest of `cffi` uses (the `owned_str` return path already frees `malloc`'d memory with C
+// `free`). malloc/calloc/free are unconditionally linked libc on every supported unix target
+// (the existing strlen/div/srand libc.so.6 FFI tests already prove libc symbols are in scope), so
+// the extern decls resolve at link time with zero per-call dlsym/libffi overhead.
+//
+// MANUAL FREE: a `ptr` is never auto-freed (consistent with the FFI-ptr rule). The idiom is
+// `defer ffi.free(p)`. Forgetting to free is a leak. Double-free / use-after-free / out-of-bounds
+// store_/load_ beyond the allocation are the user's responsibility (an inherently unsafe surface,
+// documented like ctypes — no bounds/lifetime tracking).
+//
+// Non-unix: the same names are registered but every call returns a `HostError` (mirrors the
+// load_*/store_* `deref_unsupported` cfg pattern).
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(unix)]
+unsafe extern "C" {
+    #[link_name = "malloc"]
+    fn c_malloc(size: usize) -> *mut std::os::raw::c_void;
+    #[link_name = "calloc"]
+    fn c_calloc(nmemb: usize, size: usize) -> *mut std::os::raw::c_void;
+    #[link_name = "free"]
+    fn c_free(ptr: *mut std::os::raw::c_void);
+}
+
+/// `alloc(nbytes: int) -> ptr` — `malloc(nbytes)`; the bytes are GARBAGE (uninitialized). Faults
+/// recoverably on a negative size or out-of-memory; never segfaults/aborts. `nbytes == 0` passes
+/// through to `malloc(0)` (impl-defined: NULL or a unique ptr — not special-cased).
+fn alloc(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "alloc", 1)?;
+    #[cfg(unix)]
+    {
+        let n = h.arg_int(0)?;
+        if n < 0 {
+            return Err(HostError {
+                message: "ffi.alloc: negative size".into(),
+            });
+        }
+        // SAFETY: `malloc` is libc's allocator (always linked); it takes a byte count and returns
+        // either a valid pointer to `n` uninitialized bytes or NULL. No memory is dereferenced here
+        // — only the returned address is captured as an opaque `ptr`. Pairs with `ffi.free`.
+        let p = unsafe { c_malloc(n as usize) };
+        // OOM only when n > 0 (a legitimate NULL from malloc(0) is impl-defined, not an error).
+        if p.is_null() && n > 0 {
+            return Err(HostError {
+                message: "ffi.alloc: out of memory".into(),
+            });
+        }
+        Ok(NativeRet::Ptr(p as usize))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = h;
+        deref_unsupported("alloc")
+    }
+}
+
+/// `alloc_zeroed(nbytes: int) -> ptr` — `calloc`-style; the bytes are ZEROED. Same recoverable
+/// faults as `alloc` (negative size, out-of-memory). `nbytes == 0` passes through to `calloc(0, 1)`.
+fn alloc_zeroed(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "alloc_zeroed", 1)?;
+    #[cfg(unix)]
+    {
+        let n = h.arg_int(0)?;
+        if n < 0 {
+            return Err(HostError {
+                message: "ffi.alloc_zeroed: negative size".into(),
+            });
+        }
+        // SAFETY: `calloc` is libc's allocator (always linked); `calloc(n, 1)` returns either a
+        // valid pointer to `n` zeroed bytes or NULL. No memory is dereferenced here. Pairs with
+        // `ffi.free`.
+        let p = unsafe { c_calloc(n as usize, 1) };
+        if p.is_null() && n > 0 {
+            return Err(HostError {
+                message: "ffi.alloc_zeroed: out of memory".into(),
+            });
+        }
+        Ok(NativeRet::Ptr(p as usize))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = h;
+        deref_unsupported("alloc_zeroed")
+    }
+}
+
+/// `free(p: ptr)` — `free(p)`; returns nil. `free(ffi.null())` (address 0) is a safe no-op (C
+/// `free(NULL)` is a defined no-op) — it does NOT route through `base_addr`. Double-free / freeing
+/// a non-`ffi.alloc`'d pointer is the user's responsibility (undefined behavior, documented).
+fn free(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "free", 1)?;
+    #[cfg(unix)]
+    {
+        let addr = h.arg_ptr(0)?;
+        if addr == 0 {
+            // C free(NULL) is a defined no-op — return nil without calling free.
+            return Ok(NativeRet::Nil);
+        }
+        // SAFETY: `addr` is a non-null C-sourced `ptr` (a `ptr` cannot be forged from an int). The
+        // caller guarantees it was returned by `ffi.alloc`/`ffi.alloc_zeroed` (or a paired libc
+        // allocator) and is freed at most once — a double-free / freeing a foreign pointer is
+        // documented UB, the same contract as C `free`. `free` is libc's allocator.
+        unsafe { c_free(addr as *mut std::os::raw::c_void) };
+        Ok(NativeRet::Nil)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = h;
+        deref_unsupported("free")
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Memory deref builtins — read/write the C-owned memory behind an opaque `ptr` (load_*/store_*).
 //
 // SAFETY (the whole surface): these read/write ARBITRARY memory through a C-sourced address, so a
@@ -633,6 +751,10 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("store_bool_at", store_bool_at),
     ("store_ptr", store_ptr),
     ("store_ptr_at", store_ptr_at),
+    // --- C-buffer alloc layer (libc malloc/calloc/free; MANUAL free — `defer ffi.free(p)`) ---
+    ("alloc", alloc),
+    ("alloc_zeroed", alloc_zeroed),
+    ("free", free),
 ];
 
 /// The fixed-width C-ABI integer *type* names that `std.ffi` exports (Chezzi's first type imports).
@@ -1029,8 +1151,9 @@ mod tests {
     #[test]
     fn members_registers_every_builtin() {
         let names: std::collections::HashSet<&str> = MEMBERS.iter().map(|(n, _)| *n).collect();
-        // null/is_null + 14 loads × 2 forms + 13 stores × 2 forms = 2 + 28 + 26 = 56.
-        assert_eq!(MEMBERS.len(), 56, "expected exactly 56 std.ffi members");
+        // null/is_null + 14 loads × 2 forms + 13 stores × 2 forms + alloc/alloc_zeroed/free
+        // = 2 + 28 + 26 + 3 = 59.
+        assert_eq!(MEMBERS.len(), 59, "expected exactly 59 std.ffi members");
         for n in [
             "load_int",
             "load_int_at",
@@ -1044,6 +1167,91 @@ mod tests {
             "store_bool",
             "store_ptr_at",
         ] {
+            assert!(names.contains(n), "MEMBERS missing {n}");
+        }
+    }
+
+    // ---- C-buffer alloc layer (alloc / alloc_zeroed / free) ----
+
+    #[cfg(unix)]
+    #[test]
+    fn alloc_roundtrip_and_free() {
+        // alloc a buffer, store an int64 into it via the existing store builtin, read it back, free.
+        let p = alloc(&mut ArgHost::default().int(64)).expect("alloc ok");
+        let addr = match p {
+            NativeRet::Ptr(a) => a,
+            other => panic!("alloc must return a Ptr, got {other:?}"),
+        };
+        assert_ne!(addr, 0, "alloc(64) must not return NULL");
+        assert_eq!(
+            store_int64_at(&mut ArgHost::default().ptr(addr).int(0).int(123)),
+            Ok(NativeRet::Nil)
+        );
+        assert_eq!(
+            load_int64_at(&mut ArgHost::default().ptr(addr).int(0)),
+            Ok(NativeRet::Int(123))
+        );
+        assert_eq!(
+            free(&mut ArgHost::default().ptr(addr)),
+            Ok(NativeRet::Nil),
+            "free must return nil without crashing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alloc_zeroed_reads_zero() {
+        let p = alloc_zeroed(&mut ArgHost::default().int(32)).expect("alloc_zeroed ok");
+        let addr = match p {
+            NativeRet::Ptr(a) => a,
+            other => panic!("alloc_zeroed must return a Ptr, got {other:?}"),
+        };
+        assert_ne!(addr, 0);
+        for off in [0, 8, 16, 24] {
+            assert_eq!(
+                load_int64_at(&mut ArgHost::default().ptr(addr).int(off)),
+                Ok(NativeRet::Int(0)),
+                "alloc_zeroed byte at offset {off} must be zero"
+            );
+        }
+        assert_eq!(free(&mut ArgHost::default().ptr(addr)), Ok(NativeRet::Nil));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alloc_negative_is_recoverable_error() {
+        let err = alloc(&mut ArgHost::default().int(-1)).expect_err("negative size must error");
+        assert!(
+            err.message.contains("ffi.alloc: negative size"),
+            "{}",
+            err.message
+        );
+        let err =
+            alloc_zeroed(&mut ArgHost::default().int(-1)).expect_err("negative size must error");
+        assert!(
+            err.message.contains("ffi.alloc_zeroed: negative size"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn free_null_is_noop() {
+        // C free(NULL) is a defined no-op; ffi.free(ffi.null()) must NOT error (and must NOT route
+        // through base_addr, which rejects address 0).
+        assert_eq!(
+            free(&mut ArgHost::default().ptr(0)),
+            Ok(NativeRet::Nil),
+            "free(null) must be a safe no-op returning nil"
+        );
+    }
+
+    #[test]
+    fn members_registers_alloc_layer() {
+        let names: std::collections::HashSet<&str> = MEMBERS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(MEMBERS.len(), 59, "expected exactly 59 std.ffi members");
+        for n in ["alloc", "alloc_zeroed", "free"] {
             assert!(names.contains(n), "MEMBERS missing {n}");
         }
     }

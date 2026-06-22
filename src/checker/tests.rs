@@ -6219,6 +6219,29 @@ fn ffi_deref_store_returns_nil_and_takes_matching_value() {
 }
 
 #[test]
+fn ffi_alloc_layer_typechecks() {
+    // The C-buffer alloc layer: alloc/alloc_zeroed take an int and return a ptr; free takes a ptr
+    // and returns nil. `defer ffi.free(p)` is the manual-free idiom.
+    entry_ok(
+        "import std.ffi\nfn main():\n    p := ffi.alloc(64)\n    q := ffi.alloc_zeroed(32)\n    ffi.store_int64_at(p, 0, 7)\n    n: int = ffi.load_int64_at(p, 0)\n    print(n)\n    ffi.free(p)\n    ffi.free(q)\n",
+    );
+    // alloc returns a ptr (usable where a ptr is expected, e.g. is_null).
+    entry_ok(
+        "import std.ffi\nfn main():\n    p: ptr = ffi.alloc(8)\n    print(ffi.is_null(p))\n    ffi.free(p)\n",
+    );
+    // free returns nil — using it as an int is a type error.
+    entry_rejects(
+        "import std.ffi\nfn main():\n    p := ffi.alloc(8)\n    n: int = ffi.free(p)\n    print(n)\n",
+        "nil",
+    );
+    // alloc's arg is an int; passing a str is a type error.
+    entry_rejects(
+        "import std.ffi\nfn main():\n    print(ffi.is_null(ffi.alloc(\"x\")))\n",
+        "alloc",
+    );
+}
+
+#[test]
 fn ffi_deref_wrong_arg_type_rejected() {
     // load_int's param is `ptr`; passing an int is a type error.
     entry_rejects(

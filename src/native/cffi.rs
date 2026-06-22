@@ -2021,4 +2021,54 @@ print(ffi.load_int32_at(p, 0))\n",
         assert_eq!(parallel, serial, "M:N parity with serial VM");
         assert_eq!(interp, serial, "interp parity with VM");
     }
+
+    /// C-buffer alloc layer end-to-end: `ffi.alloc` a buffer of N int64 slots, fill it from a Chezzi
+    /// list via `store_int64_at`, read them back via `load_int64_at`, `ffi.free`. Run through BOTH the
+    /// VM and the interpreter (frozen oracle) and assert identical, expected output. No `.so` needed
+    /// (the buffer is process-local libc memory). Linux-gated like the other ffi goldens.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn ffi_alloc_fill_read_two_engine_parity() {
+        let src = concat!(
+            "import std.ffi\n",
+            "data := [10, 20, 30, 40]\n",
+            "p := ffi.alloc(len(data) * 8)\n",
+            "for i in range(len(data)):\n",
+            "    ffi.store_int64_at(p, i * 8, data[i])\n",
+            "for i in range(len(data)):\n",
+            "    print(ffi.load_int64_at(p, i * 8))\n",
+            "ffi.free(p)\n",
+        );
+        let entry = write_deref_chz(src);
+        let (vm_out, _e, vm_res, _) = crate::vm::run_file(&entry);
+        let (interp_out, _ie, interp_res, _) = crate::interp::run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(vm_res.is_ok(), "vm faulted: {vm_res:?}");
+        assert!(interp_res.is_ok(), "interp faulted: {interp_res:?}");
+        assert_eq!(vm_out, "10\n20\n30\n40\n", "vm stdout");
+        assert_eq!(interp_out, "10\n20\n30\n40\n", "interp stdout");
+        assert_eq!(vm_out, interp_out, "two-engine parity");
+    }
+
+    /// `alloc_zeroed` returns zeroed memory; reading before any store yields 0 on both engines.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn ffi_alloc_zeroed_two_engine_parity() {
+        let src = concat!(
+            "import std.ffi\n",
+            "p := ffi.alloc_zeroed(32)\n",
+            "for i in range(4):\n",
+            "    print(ffi.load_int64_at(p, i * 8))\n",
+            "ffi.free(p)\n",
+        );
+        let entry = write_deref_chz(src);
+        let (vm_out, _e, vm_res, _) = crate::vm::run_file(&entry);
+        let (interp_out, _ie, interp_res, _) = crate::interp::run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(vm_res.is_ok(), "vm faulted: {vm_res:?}");
+        assert!(interp_res.is_ok(), "interp faulted: {interp_res:?}");
+        assert_eq!(vm_out, "0\n0\n0\n0\n", "vm stdout");
+        assert_eq!(interp_out, "0\n0\n0\n0\n", "interp stdout");
+        assert_eq!(vm_out, interp_out, "two-engine parity");
+    }
 }

@@ -637,6 +637,14 @@ fn native_module_sig(name: &str) -> ModuleSig {
                 func(n, vec![Ty::Ptr, v.clone()], Ty::Nil);
                 func(&format!("{n}_at"), vec![Ty::Ptr, Ty::Int, v], Ty::Nil);
             }
+            // C-buffer alloc layer — libc malloc/calloc/free-backed raw buffers for C array/buffer
+            // APIs (qsort/bsearch/fread-into-buffer). `alloc`/`alloc_zeroed` take a byte count and
+            // return a raw `ptr`; `free` releases it (returns nil). The buffer is MANUALLY freed
+            // (never auto-freed) — the idiom is `defer ffi.free(p)`. A negative size or out-of-memory
+            // is a recoverable runtime error; `free(ffi.null())` is a no-op.
+            func("alloc", vec![Ty::Int], Ty::Ptr);
+            func("alloc_zeroed", vec![Ty::Int], Ty::Ptr);
+            func("free", vec![Ty::Ptr], Ty::Nil);
             // `std.ffi` ALSO exports the eight fixed-width C-ABI integer TYPE names (Chezzi's first
             // type imports). They live in `sig.types` so `import int32 from std.ffi` validates; the
             // checker's `bind_import` records the import into `imported_ffi_types` and `resolve_type`
