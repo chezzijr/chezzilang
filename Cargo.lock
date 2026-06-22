@@ -76,6 +76,7 @@ name = "chezzi"
 version = "0.1.0"
 dependencies = [
  "bnf",
+ "cc",
  "libc",
  "libffi",
  "libloading",

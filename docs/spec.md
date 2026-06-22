@@ -111,11 +111,14 @@ opaque `ptr` (↔ C `void*`, an untyped never-auto-freed handle for `FILE*`/`sql
 owned `malloc`'d `char*` copied **and** freed, no leak) and **`str?`** (a nullable `char*`, `NULL` →
 `None` instead of a fault), plus **flat-scalar structs by value** (a Chezzi `struct` of scalar fields ↔
 a C struct passed/returned by value, layout via libffi). `bool` marshals as C `_Bool` (1 byte) — the
-int-returning predicate idiom (`isdigit`, …) binds `-> int` and tests `!= 0`. Nested structs-by-value,
-`str` struct fields, **callbacks/function pointers** (#4) and **varargs** (#5) — both with design notes +
-a varargs fixed-arity workaround in [`docs/ffi-and-packaging.md §1b`](ffi-and-packaging.md) — the rich
-Rust `Box<dyn Any>` userdata handle, and a custom user-named deallocator (only libc `free` backs
-`owned_str`) are still deferred. See
+int-returning predicate idiom (`isdigit`, …) binds `-> int` and tests `!= 0`. **Sync scalar callbacks
+(#4) have shipped**: a function-typed extern param spelled `fn(scalars) -> scalar` (no new grammar)
+marshals a Chezzi closure into a libffi trampoline C calls *back* synchronously during the extern call
+(scalars only; faults are caught + re-raised — stronger than ctypes). Nested structs-by-value, `str`
+struct fields, **stored/cross-thread callbacks** (the rest of #4) and **varargs** (#5) — with design
+notes + the callback feasibility ladder + a varargs fixed-arity workaround in
+[`docs/ffi-and-packaging.md §1b`](ffi-and-packaging.md) — the rich Rust `Box<dyn Any>` userdata handle,
+and a custom user-named deallocator (only libc `free` backs `owned_str`) are still deferred. See
 the FFI subsection below + [`docs/syntax.md`](syntax.md).
 **Forward design** for the remaining FFI deepening (the C `void*` `ptr` handle has **shipped**; the
 rich Rust `Box<dyn Any>` "userdata" Value that unlocks compiled-in handle-based Rust libraries like
@@ -394,9 +397,11 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >   sizeof(ffi_arg))` (the register-width floor the narrow-int-return fix established), reading each field
 >   at its libffi offset into a `NativeRet::Struct` both engines already lower. See `examples/ffi_struct.chz`.
 >   **v1 limits:** nested structs, `str`/`owned_str` struct fields, and generic structs are rejected (a
->   struct with a non-scalar field errors naming the struct + field); callbacks/function pointers,
->   varargs, the rich Rust `Box<dyn Any>` userdata handle, and a custom user-named deallocator are
->   deferred. **Fixed-width integers shipped:** beyond bare `int` (↔ C `long`), the marshalling type
+>   struct with a non-scalar field errors naming the struct + field); **sync scalar callbacks shipped**
+>   (a `fn(scalars) -> scalar` extern param → a libffi closure trampoline C calls back synchronously,
+>   scalars only, fault caught + re-raised; stored/cross-thread callbacks + pointer-deref deref builtins
+>   deferred), varargs, the rich Rust `Box<dyn Any>` userdata handle, and a custom user-named
+>   deallocator are deferred. **Fixed-width integers shipped:** beyond bare `int` (↔ C `long`), the marshalling type
 >   names `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` bind C `int32_t`/`uint32_t`/…
 >   (bidirectional, truncate-on-param / sign-or-zero-extend-on-return; `examples/ffi_int.chz`). They are
 >   **imported per-name from `std.ffi`** (Chezzi's first type imports), not global builtins.
@@ -485,8 +490,9 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >   Rust libraries like Burn — distinct from the C `void*` `ptr` above, which shipped), a **custom
 >   user-named deallocator** (only libc `free` backs `owned_str`), and the deferred FFI features above
 >   (nested structs-by-value /
->   `str` struct fields / **callbacks #4** / **varargs #5**, the latter two with design notes +
->   workaround in `docs/ffi-and-packaging.md §1b`). See
+>   `str` struct fields / **the rest of callbacks #4** — stored/cross-thread callbacks + pointer-deref
+>   builtins; **sync scalar callbacks have shipped** / **varargs #5**, with design notes + the callback
+>   feasibility ladder + workaround in `docs/ffi-and-packaging.md §1b`). See
 >   `docs/ffi-and-packaging.md`. (`std.os.exit` with a real exit-code channel through the run drivers
 >   has since **shipped** — see `examples/exit.chz`.)
 
@@ -556,9 +562,11 @@ tests/          # Rust unit + golden tests
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c**; **Level-3 dynamic C-ABI FFI v1
 > shipped** (`extern "lib":` scalar calls via dlopen+libffi, **plus opaque `void*` handles** via the
 > `ptr` type + `std.ffi`, the return-only `str` opt-ins **`owned_str`** (copy + libc `free`) and
-> **`str?`** (`NULL` → `None`), **plus flat-scalar structs by value**) — see the *Standard library* note
-> above. The remaining Level-3 surface (nested structs-by-value, `str` struct fields, callbacks, varargs,
-> a custom user-named deallocator, and the rich Rust `Box<dyn Any>` userdata handle) is still a future idea.
+> **`str?`** (`NULL` → `None`), **plus flat-scalar structs by value**, **plus sync scalar callbacks**
+> — a `fn(scalars) -> scalar` extern param C calls back synchronously, same-thread, scalars only) — see
+> the *Standard library* note above. The remaining Level-3 surface (nested structs-by-value, `str`
+> struct fields, stored/cross-thread callbacks + pointer-deref builtins, varargs, a custom user-named
+> deallocator, and the rich Rust `Box<dyn Any>` userdata handle) is still a future idea.
 
 ## Verification
 

@@ -97,9 +97,42 @@ pub enum CType {
     UInt16,
     UInt32,
     UInt64,
+    /// A C function pointer passed as a PARAM (callbacks #4): a Chezzi closure marshalled into a
+    /// libffi closure trampoline whose code address is the `void*` C receives. Params and the return
+    /// are restricted to C SCALARS only (`is_scalar`) — no `str`/struct/nested callback. Sync +
+    /// same-thread: the trampoline only fires inside the extern call on the calling thread (the
+    /// closure is freed before `call` returns — no GC rooting, no cross-thread re-entry). RETURN
+    /// position is rejected by the checker (a callback can only be a parameter). The C signature is a
+    /// plain `void*` to libffi, so `ffi_type` is `Type::pointer()`.
+    Callback {
+        params: Vec<CType>,
+        ret: Box<CType>,
+    },
 }
 
 impl CType {
+    /// Whether this is a C scalar a callback param/return may use — `int`/`float`/`bool`/`ptr` and
+    /// the fixed-width integers. NOT `str`/`owned_str`/opt/struct/nested `Callback` (those have no
+    /// register-width scalar marshalling for the trampoline arg-read / result-write). Shared by the
+    /// checker's callback-part validation and the trampoline scalar read/write.
+    pub fn is_scalar(&self) -> bool {
+        matches!(
+            self,
+            CType::Int
+                | CType::Float
+                | CType::Bool
+                | CType::Ptr
+                | CType::Int8
+                | CType::Int16
+                | CType::Int32
+                | CType::Int64
+                | CType::UInt8
+                | CType::UInt16
+                | CType::UInt32
+                | CType::UInt64
+        )
+    }
+
     /// The libffi argument/result [`Type`] for this type. For a `Struct`, this builds a libffi
     /// structure type from the field types (libffi computes size/alignment/offsets from the ABI).
     fn ffi_type(&self) -> Type {
@@ -128,6 +161,8 @@ impl CType {
             CType::UInt64 => Type::u64(),
             // A flat struct: a libffi structure type over the field ffi_types (rebuilt per call).
             CType::Struct { fields, .. } => Type::structure(fields.iter().map(|f| f.ffi_type())),
+            // A callback param is a C function pointer — ABI-identical to `void*`.
+            CType::Callback { .. } => Type::pointer(),
         }
     }
 }
@@ -231,12 +266,14 @@ fn write_field(buf: &mut [u8], offset: usize, ct: &CType, v: &NativeRet) -> Resu
             };
             put!(a);
         }
-        // The checker rejects str / owned / opt / nested-struct fields, so they never reach here.
+        // The checker rejects str / owned / opt / nested-struct / callback fields, so they never
+        // reach here.
         CType::Str
         | CType::OwnedStr
         | CType::OptStr
         | CType::OptOwnedStr
-        | CType::Struct { .. } => {
+        | CType::Struct { .. }
+        | CType::Callback { .. } => {
             return Err(HostError {
                 message: "struct field marshal: str / nested-struct fields are not supported (v1)"
                     .into(),
@@ -280,12 +317,216 @@ fn read_field(buf: &[u8], offset: usize, ct: &CType) -> NativeRet {
             NativeRet::Bool(c != 0)
         }
         CType::Ptr => NativeRet::Ptr(get!(usize)),
-        // Unreachable for a well-typed struct (checker rejects str/owned/opt/nested); default to Nil.
+        // Unreachable for a well-typed struct (checker rejects str/owned/opt/nested/callback); Nil.
         CType::Str
         | CType::OwnedStr
         | CType::OptStr
         | CType::OptOwnedStr
-        | CType::Struct { .. } => NativeRet::Nil,
+        | CType::Struct { .. }
+        | CType::Callback { .. } => NativeRet::Nil,
+    }
+}
+
+/// Read one INCOMING C scalar callback argument out of libffi's `*mut c_void` avalue slot and widen
+/// it to an engine-neutral [`NativeRet`] — the reverse of the top-level return-narrowing rules. A
+/// libffi closure passes each arg as a pointer to its natural-width C value (NOT register-widened
+/// like a *return*), so each width reads its exact stored type then sign-/zero-extends back to i64.
+/// Only the [`CType::is_scalar`] variants are reachable (the checker rejects non-scalar parts).
+///
+/// # Safety
+/// `slot` must be a valid, aligned pointer to a C value of width matching `ct` (libffi's avalue slot
+/// for that arg position). Only called from the trampoline with libffi's own avalue array.
+unsafe fn read_c_arg(slot: *const c_void, ct: &CType) -> NativeRet {
+    macro_rules! rd {
+        ($ty:ty) => {{
+            // SAFETY: `slot` points at a C value of this exact width (caller contract).
+            unsafe { *(slot as *const $ty) }
+        }};
+    }
+    match ct {
+        CType::Int => {
+            let n: std::os::raw::c_long = rd!(std::os::raw::c_long);
+            NativeRet::Int(n as i64)
+        }
+        CType::Int8 => NativeRet::Int(rd!(i8) as i64),
+        CType::Int16 => NativeRet::Int(rd!(i16) as i64),
+        CType::Int32 => NativeRet::Int(rd!(i32) as i64),
+        CType::Int64 => NativeRet::Int(rd!(i64)),
+        CType::UInt8 => NativeRet::Int(rd!(u8) as i64),
+        CType::UInt16 => NativeRet::Int(rd!(u16) as i64),
+        CType::UInt32 => NativeRet::Int(rd!(u32) as i64),
+        // u64 -> i64 reinterprets the top bit (documented v1 limit, same as the return path).
+        CType::UInt64 => NativeRet::Int(rd!(u64) as i64),
+        CType::Float => NativeRet::Float(rd!(f64)),
+        CType::Bool => NativeRet::Bool(rd!(u8) != 0),
+        CType::Ptr => NativeRet::Ptr(rd!(usize)),
+        // Non-scalar parts are checker-rejected; default defensively to Nil.
+        _ => NativeRet::Nil,
+    }
+}
+
+/// Write the callback's [`NativeRet`] RESULT into libffi's `*mut c_void` result slot, casting to the
+/// declared return C width. CRITICAL: libffi's closure result buffer is register-width
+/// (`sizeof(ffi_arg)`) for any sub-register integral return — so a sub-word integral result is
+/// written as a full register word (the same rule the top-level narrow-*return* read follows in
+/// reverse), never a narrow store that would leave the upper bytes of the register undefined. `float`
+/// and `ptr` write their natural width. Only the [`CType::is_scalar`] variants are reachable.
+///
+/// # Safety
+/// `slot` must be a valid pointer to a result buffer at least `sizeof(ffi_arg)` bytes (libffi's
+/// closure rvalue contract), aligned for a register word. Only called from the trampoline.
+unsafe fn write_c_result(slot: *mut c_void, ct: &CType, v: &NativeRet) {
+    let as_int = |v: &NativeRet| match v {
+        NativeRet::Int(n) => *n,
+        NativeRet::Bool(b) => {
+            if *b {
+                1
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    };
+    // SAFETY (all arms): `slot` is libffi's result buffer, >= register width and aligned (caller
+    // contract). Sub-register integral returns widen to a full `ffi_arg`/`ffi_sarg` register word.
+    unsafe {
+        match ct {
+            // Signed integral returns (`int`/the fixed signed widths) widen to the signed register
+            // word (`ffi_sarg`). A sub-register width still occupies a full register in the result.
+            CType::Int | CType::Int8 | CType::Int16 | CType::Int32 | CType::Int64 => {
+                *(slot as *mut libffi::raw::ffi_sarg) = as_int(v) as libffi::raw::ffi_sarg;
+            }
+            // Unsigned integral returns widen to the unsigned register word (`ffi_arg`).
+            CType::UInt8 | CType::UInt16 | CType::UInt32 | CType::UInt64 => {
+                *(slot as *mut libffi::raw::ffi_arg) = as_int(v) as libffi::raw::ffi_arg;
+            }
+            CType::Bool => *(slot as *mut libffi::raw::ffi_arg) = as_int(v) as libffi::raw::ffi_arg,
+            CType::Float => {
+                let f = match v {
+                    NativeRet::Float(f) => *f,
+                    NativeRet::Int(n) => *n as f64,
+                    _ => 0.0,
+                };
+                *(slot as *mut f64) = f;
+            }
+            CType::Ptr => {
+                let a = match v {
+                    NativeRet::Ptr(a) => *a,
+                    NativeRet::Int(n) => *n as usize,
+                    _ => 0,
+                };
+                *(slot as *mut *mut c_void) = a as *mut c_void;
+            }
+            // Non-scalar returns are checker-rejected; zero the register word defensively.
+            _ => *(slot as *mut libffi::raw::ffi_arg) = 0,
+        }
+    }
+}
+
+/// The userdata a callback trampoline closes over: a raw `*mut dyn Host` (a fat pointer — sound ONLY
+/// because the trampoline fires synchronously inside the same `ffi_call` on the same thread while the
+/// `&mut dyn Host` is live one Rust frame up), the extern arg index of the closure, the callback's
+/// param/return signature (borrowed from the live `Cffi`), and a fault out-slot the trampoline stashes
+/// a host error / caught panic into for [`Cffi::call`] to re-raise. NOT stored, never sent across a
+/// thread: built on the `call` stack, freed when `call` returns.
+struct TrampolineCtx<'h> {
+    host: *mut (dyn Host + 'h),
+    arg_index: usize,
+    params: *const [CType],
+    ret: *const CType,
+    fault: *mut Option<HostError>,
+}
+
+/// The libffi closure handler (one shared `extern "C"` fn; the per-callback distinction is the
+/// userdata). C calls this with the CIF, a result buffer, the avalue array, and our `TrampolineCtx*`.
+/// It reads the C scalar args into [`NativeRet`]s, re-enters the engine via [`Host::invoke_callback`]
+/// (keyed by arg index, so no engine `Value` leaks here), and writes the result back. The ENTIRE body
+/// is wrapped in `catch_unwind`: a Chezzi fault or a Rust panic must NOT unwind into the C frames —
+/// on either, a zeroed result is written (so C unwinds with a defined value) and the error is stashed
+/// in `ctx.fault` for `Cffi::call` to re-raise (stronger than ctypes, which swallows to stderr + 0).
+///
+/// # Safety
+/// Invoked only by libffi for a closure prepped with a CIF matching `ctx.params -> ctx.ret` and a
+/// `TrampolineCtx*` userdata. `args` is the avalue array (one slot per param), `result` the rvalue
+/// buffer (>= register width), `userdata` the `TrampolineCtx*`.
+unsafe extern "C" fn callback_trampoline(
+    _cif: *mut libffi::raw::ffi_cif,
+    result: *mut c_void,
+    args: *mut *mut c_void,
+    userdata: *mut c_void,
+) {
+    // SAFETY: `userdata` is the `TrampolineCtx*` we passed to `ffi_prep_closure_loc`, live for the
+    // whole `ffi_call` (it sits on `Cffi::call`'s stack frame, one Rust frame up). The lifetime is
+    // erased at runtime — reading it through any concrete `'h` is sound because the trampoline only
+    // uses `ctx.host` synchronously within this call, while the original `&mut dyn Host` is live.
+    let ctx = unsafe { &*(userdata as *const TrampolineCtx<'_>) };
+    // SAFETY: `ctx.params` is a slice pointer into the live `Cffi`'s signature (valid for the call).
+    let params: &[CType] = unsafe { &*ctx.params };
+    // SAFETY: `ctx.ret` points at the live callback return CType.
+    let ret_ct: &CType = unsafe { &*ctx.ret };
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Read each incoming C scalar arg into a NativeRet.
+        let mut native_args: Vec<NativeRet> = Vec::with_capacity(params.len());
+        for (i, p) in params.iter().enumerate() {
+            // SAFETY: `args` is libffi's avalue array with `params.len()` slots; slot `i` points at a
+            // C value of width matching `p` (the CIF was built from these same param types).
+            let slot = unsafe { *args.add(i) } as *const c_void;
+            native_args.push(unsafe { read_c_arg(slot, p) });
+        }
+        // SAFETY: `ctx.host` is the live `&mut dyn Host` (this trampoline fires synchronously inside
+        // the same `ffi_call`, on the same thread, while that borrow is live one frame up). No other
+        // alias is active during this call (the engine is single-threaded; re-entry is plain Rust-
+        // stack recursion through the Host trait).
+        let host: &mut dyn Host = unsafe { &mut *ctx.host };
+        host.invoke_callback(ctx.arg_index, &native_args)
+    }));
+
+    match outcome {
+        Ok(Ok(v)) => {
+            // SAFETY: `result` is libffi's rvalue buffer (>= register width, aligned); `ret_ct` is the
+            // declared return width.
+            unsafe { write_c_result(result, ret_ct, &v) };
+        }
+        Ok(Err(host_err)) => {
+            // SAFETY: zero the result so C unwinds with a defined value.
+            unsafe { write_c_result(result, ret_ct, &NativeRet::Int(0)) };
+            // SAFETY: `ctx.fault` is the live `Option<HostError>` out-slot on `Cffi::call`'s stack.
+            unsafe { *ctx.fault = Some(host_err) };
+        }
+        Err(panic_payload) => {
+            // SAFETY: zero the result so C unwinds with a defined value (no panic into C frames).
+            unsafe { write_c_result(result, ret_ct, &NativeRet::Int(0)) };
+            let msg = panic_payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "callback panicked".to_string());
+            // SAFETY: as above — the fault out-slot is live.
+            unsafe {
+                *ctx.fault = Some(HostError {
+                    message: format!("callback panicked: {msg}"),
+                })
+            };
+        }
+    }
+}
+
+/// A live libffi closure backing one callback arg: the allocated closure handle (freed on drop), its
+/// code pointer (the `void*` C receives), the CIF (libffi reads through it during the call, so it must
+/// outlive the call), and the boxed [`TrampolineCtx`] userdata (must outlive the call too). Dropping
+/// frees the closure via `ffi_closure_free` — done only AFTER `ffi_call` returns (sync scope).
+struct CallbackClosure<'h> {
+    handle: *mut libffi::raw::ffi_closure,
+    _cif: Cif,
+    _ctx: Box<TrampolineCtx<'h>>,
+}
+
+impl Drop for CallbackClosure<'_> {
+    fn drop(&mut self) {
+        // SAFETY: `handle` was returned by `ffi_closure_alloc` (via `low::closure_alloc`) and is freed
+        // exactly once here, after the extern `ffi_call` that may have used `code` has returned.
+        unsafe { libffi::low::closure_free(self.handle) };
     }
 }
 
@@ -426,6 +667,16 @@ impl Cffi {
         // a plain `Vec<u8>` only guarantees 1. The `Vec<u64>` owns its allocation, so its address is
         // stable as this outer `Vec` grows; the `Arg` points at the first word (the struct's first byte).
         let mut struct_bufs: Vec<Vec<u64>> = Vec::new();
+        // Live libffi closures backing any callback args. Each owns its closure handle, CIF, and
+        // boxed userdata; all kept alive until AFTER `ffi_call` returns, then dropped (which frees
+        // the closure). The `void*` code pointer pushed as the arg is stored in `cb_codes`.
+        let mut callback_closures: Vec<CallbackClosure<'_>> = Vec::new();
+        let mut cb_codes: Vec<*mut c_void> = Vec::new();
+        // A fault out-slot the trampoline stashes a callback error / caught panic into; drained after
+        // the call and re-raised as the extern call's own error (boxed so its address is stable while
+        // `callback_closures` grows — each `TrampolineCtx` holds a raw `*mut` to it).
+        let mut callback_fault: Box<Option<HostError>> = Box::new(None);
+        let fault_ptr: *mut Option<HostError> = &mut *callback_fault;
 
         // First pass: extract & own every scalar so the `&`-references libffi captures stay valid.
         // Each slot records which storage vec holds it and at what index.
@@ -447,6 +698,9 @@ impl Cffi {
             U64(usize),
             /// A by-value struct arg, stored in `struct_bufs` (the `Arg` points at the buffer start).
             Struct(usize),
+            /// A callback arg: the closure's code `void*` is stored in `cb_codes` at this index (the
+            /// `Arg` points at that pointer cell).
+            Callback(usize),
         }
         let mut slots: Vec<Slot> = Vec::with_capacity(self.params.len());
         for (i, p) in self.params.iter().enumerate() {
@@ -551,6 +805,56 @@ impl Cffi {
                     struct_bufs.push(buf);
                     slots.push(Slot::Struct(struct_bufs.len() - 1));
                 }
+                CType::Callback { params, ret } => {
+                    // Build a libffi closure trampoline for this callback param. Its userdata holds a
+                    // raw `*mut dyn Host` + this arg index + the callback signature + the shared fault
+                    // slot; when C invokes the code pointer, `callback_trampoline` re-enters the engine
+                    // via `host.invoke_callback(arg_index, ...)`. The host raw pointer is valid for the
+                    // whole `ffi_call` (it fires synchronously, same thread, while `host` is live).
+                    let host_ptr: *mut (dyn Host + '_) = host;
+                    let mut ctx = Box::new(TrampolineCtx {
+                        host: host_ptr,
+                        arg_index: i,
+                        params: params.as_slice() as *const [CType],
+                        ret: ret.as_ref() as *const CType,
+                        fault: fault_ptr,
+                    });
+                    // The closure's own CIF (callback signature). libffi reads through it during the
+                    // call, so it is kept alive in the `CallbackClosure` until after `ffi_call`.
+                    let cb_cif = Cif::new(params.iter().map(|p| p.ffi_type()), ret.ffi_type());
+                    let (handle, code) = libffi::low::closure_alloc();
+                    // SAFETY: `handle`/`code` are a fresh closure pair from `closure_alloc`; `cb_cif`
+                    // is the callback's CIF (kept alive in `CallbackClosure`); `callback_trampoline`
+                    // matches libffi's `RawCallback` shape; `&mut *ctx` is the live boxed userdata
+                    // (also kept alive in `CallbackClosure`, address stable behind the `Box`).
+                    let status = unsafe {
+                        libffi::raw::ffi_prep_closure_loc(
+                            handle,
+                            cb_cif.as_raw_ptr(),
+                            Some(callback_trampoline),
+                            &mut *ctx as *mut TrampolineCtx<'_> as *mut c_void,
+                            code.as_mut_ptr(),
+                        )
+                    };
+                    if status != libffi::raw::ffi_status_FFI_OK {
+                        // SAFETY: free the just-allocated closure before bailing (no call used it).
+                        unsafe { libffi::low::closure_free(handle) };
+                        return Err(HostError {
+                            message: format!(
+                                "failed to build callback trampoline for argument {i} to '{}'",
+                                self.name
+                            ),
+                        });
+                    }
+                    let code_ptr = code.as_mut_ptr();
+                    callback_closures.push(CallbackClosure {
+                        handle,
+                        _cif: cb_cif,
+                        _ctx: ctx,
+                    });
+                    cb_codes.push(code_ptr);
+                    slots.push(Slot::Callback(cb_codes.len() - 1));
+                }
                 // `OwnedStr`/`OptStr`/`OptOwnedStr` are RETURN-ONLY (the checker rejects them as
                 // params, resolving alias chains first). This arm should be unreachable, but we
                 // return a recoverable fault rather than `unreachable!` so a checker gap can never
@@ -591,6 +895,8 @@ impl Cffi {
                 Slot::U32(idx) => ffi_args.push(arg(&u32_args[*idx])),
                 Slot::U64(idx) => ffi_args.push(arg(&u64_args[*idx])),
                 Slot::Struct(idx) => ffi_args.push(arg(&struct_bufs[*idx][0])),
+                // The callback arg is the closure's code `void*` (a C function pointer).
+                Slot::Callback(idx) => ffi_args.push(arg(&cb_codes[*idx])),
             }
         }
 
@@ -610,7 +916,15 @@ impl Cffi {
             fields,
         }) = &self.ret
         {
-            return self.call_struct_return(&cif, code, &ffi_args, name, field_names, fields);
+            let r = self.call_struct_return(&cif, code, &ffi_args, name, field_names, fields);
+            // A callback fired during the call may have stashed a fault; re-raise it over the result.
+            // Keep the closures alive until after the call returns, then drop (frees them).
+            if let Some(err) = callback_fault.take() {
+                drop(callback_closures);
+                return Err(err);
+            }
+            drop(callback_closures);
+            return r;
         }
 
         // SAFETY: `code` is a function whose C signature matches `self.params`/`self.ret`, which the
@@ -745,17 +1059,24 @@ impl Cffi {
                     let r: u64 = cif.call(code, &ffi_args);
                     NativeRet::Int(r as i64)
                 }
-                // A struct return was handled above (early return); a `None`/void return falls here.
-                Some(CType::Struct { .. }) | None => {
+                // A struct return was handled above (early return); a callback return is checker-
+                // rejected (param-only); a `None`/void return falls here.
+                Some(CType::Struct { .. }) | Some(CType::Callback { .. }) | None => {
                     let _: () = cif.call(code, &ffi_args);
                     NativeRet::Nil
                 }
             }
         };
         // `cstrings` / `struct_bufs` (and the other storage) are dropped here, after the call returns
-        // — never before.
+        // — never before. The callback closures are dropped last (freed) — also only after the call.
         drop(cstrings);
         drop(struct_bufs);
+        drop(callback_closures);
+        // A callback may have stashed a fault during the call; re-raise it over the C result (stronger
+        // than ctypes' swallow-to-stderr-and-return-0). The fault slot was zeroed by the trampoline.
+        if let Some(err) = callback_fault.take() {
+            return Err(err);
+        }
         Ok(ret)
     }
 
@@ -852,6 +1173,20 @@ mod tests {
     use super::*;
     use crate::native::{Host, HostError, NativeRet};
 
+    /// How a [`MockHost`] callback slot reacts when the C side invokes it (drives the callback
+    /// trampoline tests without an engine): a pure scalar transform, an explicit `HostError`, or a
+    /// Rust panic (to exercise the trampoline's `catch_unwind` + re-raise fault rule).
+    enum CbBehavior {
+        /// `f(int) -> int`: double the int arg, +1 (so the C fixture's `f(x)+1` is testable end-to-end).
+        DoubleIntPlusOne,
+        /// `f(double) -> double`: negate the float arg.
+        NegateFloat,
+        /// Always return an `Err(HostError)` — the trampoline must stash + re-raise it.
+        ReturnsError,
+        /// Panic in the callback body — `catch_unwind` must catch it and re-raise a fault, not abort.
+        Panics,
+    }
+
     /// A standalone `Host` over fixed args, for unit-testing the FFI marshalling in isolation.
     #[derive(Default)]
     struct MockHost {
@@ -861,6 +1196,8 @@ mod tests {
         ptrs: Vec<usize>,
         /// Struct args: each is its fields as engine-neutral [`NativeRet`] scalars (declaration order).
         structs: Vec<Vec<NativeRet>>,
+        /// Callback args: each is a [`CbBehavior`] the host's `invoke_callback` applies to the C args.
+        callbacks: Vec<CbBehavior>,
         // Each arg names which vec + index it lives in.
         kinds: Vec<(char, usize)>,
     }
@@ -890,6 +1227,12 @@ mod tests {
         fn strukt(mut self, fields: Vec<NativeRet>) -> Self {
             self.structs.push(fields);
             self.kinds.push(('S', self.structs.len() - 1));
+            self
+        }
+        /// Push a callback arg with the given reaction behavior.
+        fn callback(mut self, b: CbBehavior) -> Self {
+            self.callbacks.push(b);
+            self.kinds.push(('C', self.callbacks.len() - 1));
             self
         }
     }
@@ -925,6 +1268,31 @@ mod tests {
         fn arg_struct_fields(&mut self, i: usize) -> Result<Vec<NativeRet>, HostError> {
             let (_, idx) = self.kinds[i];
             Ok(self.structs[idx].clone())
+        }
+        fn invoke_callback(
+            &mut self,
+            arg_index: usize,
+            args: &[NativeRet],
+        ) -> Result<NativeRet, HostError> {
+            let (_, idx) = self.kinds[arg_index];
+            match &self.callbacks[idx] {
+                CbBehavior::DoubleIntPlusOne => match args.first() {
+                    Some(NativeRet::Int(n)) => Ok(NativeRet::Int(n * 2 + 1)),
+                    other => Err(HostError {
+                        message: format!("callback expected int, got {other:?}"),
+                    }),
+                },
+                CbBehavior::NegateFloat => match args.first() {
+                    Some(NativeRet::Float(f)) => Ok(NativeRet::Float(-*f)),
+                    other => Err(HostError {
+                        message: format!("callback expected float, got {other:?}"),
+                    }),
+                },
+                CbBehavior::ReturnsError => Err(HostError {
+                    message: "callback deliberately failed".into(),
+                }),
+                CbBehavior::Panics => panic!("callback deliberately panicked"),
+            }
         }
         fn arg_str_map(&mut self, _i: usize) -> Result<Vec<(String, String)>, HostError> {
             Err(HostError {
@@ -1311,5 +1679,195 @@ mod tests {
             read_field(&buf, offsets[1], &CType::Int8),
             NativeRet::Int(7)
         );
+    }
+
+    // ---- Sync scalar callbacks (callbacks #4) ----
+
+    /// Compile a tiny C fixture to a `.so` in a unique temp dir and return its path. The fixture
+    /// exports `int apply(int x, int (*f)(int)) { return f(x) + 1; }` and
+    /// `double applyd(double x, double (*f)(double)) { return f(x); }` — enough to round-trip an int
+    /// and a float callback synchronously. Built with the system `cc` (the same toolchain the FFI
+    /// tests already require: a unix LP64 host with libc/libm); a `cc` failure `panic!`s the test
+    /// loudly rather than silently skipping (matching how `dlopen` failures are asserted, not skipped).
+    fn build_callback_so() -> std::path::PathBuf {
+        use std::io::Write;
+        // A unique dir per call keeps parallel test threads from racing on the same file name.
+        let dir = std::env::temp_dir().join(format!(
+            "chezzi_cb_ffi_{}_{}",
+            std::process::id(),
+            CB_SO_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let csrc = dir.join("apply.c");
+        let mut f = std::fs::File::create(&csrc).expect("create apply.c");
+        f.write_all(
+            br#"
+int apply(int x, int (*f)(int)) { return f(x) + 1; }
+double applyd(double x, double (*f)(double)) { return f(x); }
+"#,
+        )
+        .expect("write apply.c");
+        drop(f);
+        let so = dir.join("libapply.so");
+        let status = std::process::Command::new("cc")
+            .args(["-shared", "-fPIC", "-o"])
+            .arg(&so)
+            .arg(&csrc)
+            .status()
+            .expect("spawn cc (a working C toolchain is required for the FFI callback tests)");
+        assert!(status.success(), "cc failed to build the callback fixture");
+        so
+    }
+
+    static CB_SO_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    #[test]
+    fn callback_int_roundtrip() {
+        // `apply(x, f) == f(x) + 1`, with `f` a Chezzi-side callback that computes `2*n + 1`.
+        // apply(10, f) == (2*10 + 1) + 1 == 22.
+        let so = build_callback_so();
+        let f = Cffi::new(
+            so.to_str().unwrap(),
+            "apply",
+            vec![
+                CType::Int32,
+                CType::Callback {
+                    params: vec![CType::Int32],
+                    ret: Box::new(CType::Int32),
+                },
+            ],
+            Some(CType::Int32),
+        )
+        .expect("dlopen apply");
+        let mut host = MockHost::default()
+            .int(10)
+            .callback(CbBehavior::DoubleIntPlusOne);
+        assert_eq!(f.call(&mut host), Ok(NativeRet::Int(22)));
+    }
+
+    #[test]
+    fn callback_float_roundtrip() {
+        // `applyd(x, f) == f(x)`, with `f` a callback that negates its float arg. applyd(2.5, f) == -2.5.
+        let so = build_callback_so();
+        let f = Cffi::new(
+            so.to_str().unwrap(),
+            "applyd",
+            vec![
+                CType::Float,
+                CType::Callback {
+                    params: vec![CType::Float],
+                    ret: Box::new(CType::Float),
+                },
+            ],
+            Some(CType::Float),
+        )
+        .expect("dlopen applyd");
+        let mut host = MockHost::default()
+            .float(2.5)
+            .callback(CbBehavior::NegateFloat);
+        assert_eq!(f.call(&mut host), Ok(NativeRet::Float(-2.5)));
+    }
+
+    #[test]
+    fn callback_fault_is_reraised() {
+        // A callback that returns Err must surface as `Cffi::call` returning that error (re-raised),
+        // and the C side must have seen a defined (zeroed) return — no UB/abort.
+        let so = build_callback_so();
+        let f = Cffi::new(
+            so.to_str().unwrap(),
+            "apply",
+            vec![
+                CType::Int32,
+                CType::Callback {
+                    params: vec![CType::Int32],
+                    ret: Box::new(CType::Int32),
+                },
+            ],
+            Some(CType::Int32),
+        )
+        .expect("dlopen apply");
+        let mut host = MockHost::default()
+            .int(10)
+            .callback(CbBehavior::ReturnsError);
+        let err = f
+            .call(&mut host)
+            .expect_err("a failing callback must re-raise as the extern call's error");
+        assert!(
+            err.message.contains("callback deliberately failed"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn callback_panic_is_caught_and_reraised() {
+        // A callback that PANICS must be caught by the trampoline's catch_unwind (no unwind into the
+        // C frames / abort) and re-raised as the extern call's error.
+        let so = build_callback_so();
+        let f = Cffi::new(
+            so.to_str().unwrap(),
+            "apply",
+            vec![
+                CType::Int32,
+                CType::Callback {
+                    params: vec![CType::Int32],
+                    ret: Box::new(CType::Int32),
+                },
+            ],
+            Some(CType::Int32),
+        )
+        .expect("dlopen apply");
+        let mut host = MockHost::default().int(10).callback(CbBehavior::Panics);
+        let err = f
+            .call(&mut host)
+            .expect_err("a panicking callback must re-raise as the extern call's error");
+        assert!(err.message.contains("callback panicked"), "{}", err.message);
+    }
+
+    #[test]
+    fn callback_two_engine_parity() {
+        // End-to-end: a real `.chz` program passing a Chezzi closure as a callback to a C fn, run
+        // through BOTH the interpreter (frozen oracle) and the VM. `apply(10, n => n*n) == 10*10 + 1`.
+        let so = build_callback_so();
+        let src = format!(
+            "extern \"{}\":\n    fn apply(x: int, f: fn(int) -> int) -> int\n\nprint(apply(10, fn(n: int) -> int: n * n))\n",
+            so.to_str().unwrap()
+        );
+        let vm_out = crate::vm::run_capture(&src).expect("vm run");
+        let interp_out = crate::interp::run_capture(&src).expect("interp run");
+        assert_eq!(vm_out, "101\n", "vm stdout");
+        assert_eq!(interp_out, "101\n", "interp stdout");
+        assert_eq!(vm_out, interp_out, "two-engine parity");
+    }
+
+    #[test]
+    fn callback_float_two_engine_parity() {
+        let so = build_callback_so();
+        let src = format!(
+            "extern \"{}\":\n    fn applyd(x: float, f: fn(float) -> float) -> float\n\nprint(applyd(2.5, fn(n: float) -> float: n + 1.0))\n",
+            so.to_str().unwrap()
+        );
+        let vm_out = crate::vm::run_capture(&src).expect("vm run");
+        let interp_out = crate::interp::run_capture(&src).expect("interp run");
+        assert_eq!(vm_out, "3.5\n", "vm stdout");
+        assert_eq!(interp_out, "3.5\n", "interp stdout");
+        assert_eq!(vm_out, interp_out, "two-engine parity");
+    }
+
+    #[test]
+    fn callback_three_engine_parity() {
+        // The M:N --parallel engine reuses the VM's invoke_value re-entry; a sync callback fires on
+        // the calling worker thread (no cross-thread hand-off), so it matches serial VM + interp.
+        let so = build_callback_so();
+        let src = format!(
+            "extern \"{}\":\n    fn apply(x: int, f: fn(int) -> int) -> int\n\nprint(apply(10, fn(n: int) -> int: n * n))\n",
+            so.to_str().unwrap()
+        );
+        let serial = crate::vm::run_capture(&src).expect("vm serial run");
+        let parallel = crate::vm::run_capture_parallel(&src).expect("vm parallel run");
+        let interp = crate::interp::run_capture(&src).expect("interp run");
+        assert_eq!(serial, "101\n");
+        assert_eq!(parallel, serial, "M:N parity with serial VM");
+        assert_eq!(interp, serial, "interp parity with VM");
     }
 }

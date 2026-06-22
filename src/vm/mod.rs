@@ -5978,6 +5978,25 @@ impl Vm {
     /// Lower a native fn's engine-neutral [`crate::native::NativeRet`] into a VM `Value`, allocating
     /// heap objects for the reference kinds. `Ok`/`Err`/`Some`/`None` become the built-in
     /// `Result` / `Option` enum objects.
+    /// Map a SCALAR callback result [`Value`] back to an engine-neutral [`crate::native::NativeRet`]
+    /// for the FFI trampoline to write into C's return slot (the reverse of `lower_native`, scalar-
+    /// only: a callback return is checker-restricted to int/float/bool/ptr). A non-scalar is a
+    /// checker-prevented case; default to `Int(0)` defensively (the trampoline then writes a zeroed
+    /// register, never UB).
+    fn value_to_native_ret(&self, v: Value) -> crate::native::NativeRet {
+        use crate::native::NativeRet as N;
+        match v {
+            Value::Int(n) => N::Int(n),
+            Value::Float(f) => N::Float(f),
+            Value::Bool(b) => N::Bool(b),
+            Value::Nil => N::Nil,
+            Value::Obj(h) => match self.heap.get(h) {
+                Obj::Ptr(a) => N::Ptr(*a),
+                _ => N::Int(0),
+            },
+        }
+    }
+
     fn lower_native(&mut self, ret: crate::native::NativeRet) -> Value {
         use crate::native::NativeRet as N;
         match ret {
@@ -14541,6 +14560,34 @@ impl crate::native::Host for VmHost<'_> {
             )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
+    }
+    fn invoke_callback(
+        &mut self,
+        arg_index: usize,
+        args: &[crate::native::NativeRet],
+    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        // The Chezzi closure passed as extern arg `arg_index` (a function pointer to C). Re-enter the
+        // engine to run it on the C scalars, then lower its result back to a NativeRet. Same-thread,
+        // synchronous: this fires inside the extern `ffi_call` on the calling (worker) thread, so it
+        // is plain Rust-stack recursion through the proven `guarded`+`invoke_value` re-entry path
+        // (the one map/filter/sort use). No span is available at the FFI boundary; use a zero span.
+        let callee = *self
+            .args
+            .get(arg_index)
+            .ok_or_else(|| crate::native::HostError {
+                message: format!("callback argument {arg_index} is missing"),
+            })?;
+        let span = Span { line: 0, col: 0 };
+        // Lower the C scalar args to engine `Value`s (allocations happen here, at the boundary).
+        let vals: Vec<Value> = args
+            .iter()
+            .map(|a| self.vm.lower_native(a.clone()))
+            .collect();
+        let result = self
+            .vm
+            .guarded(|vm| vm.invoke_value(callee, vals, span))
+            .map_err(|e| crate::native::HostError { message: e.message })?;
+        Ok(self.vm.value_to_native_ret(result))
     }
     fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
         match self.args.get(i) {

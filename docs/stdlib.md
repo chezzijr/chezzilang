@@ -213,6 +213,8 @@ Non-blocking TCP (scheduler-aware). `connect(addr: "host:port") -> Socket` ·
 C-ABI vocabulary for `extern "lib":` blocks (see the FFI section of `syntax.md`).
 `null() -> ptr` · `is_null(p: ptr) -> bool`. Also re-exports the fixed-width integer marshalling type
 names: `int8`, `int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`.
+(Sync scalar **callbacks** need no `std.ffi` surface — a callback extern param is just a function-typed
+param spelled `fn(scalars) -> scalar`; see the FFI section of `syntax.md`.)
 
 ---
 

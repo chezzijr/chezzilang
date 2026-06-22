@@ -199,6 +199,25 @@ pub trait Host {
             message: "this host does not support struct arguments".into(),
         })
     }
+    /// Synchronously RE-ENTER the engine to invoke the closure passed as extern arg `arg_index`,
+    /// with `args` the C scalars the C library handed back to the callback trampoline. The engine
+    /// fetches its own closure value at that arg index (the cffi layer never sees an engine `Value`),
+    /// runs it, and lowers the result back to an engine-neutral [`NativeRet`]. This is the one seam
+    /// that lets a `fn(...)`-typed extern param work on BOTH engines (the cffi layer builds a libffi
+    /// trampoline whose userdata holds `*mut dyn Host` + `arg_index`; when C calls it the trampoline
+    /// routes here). Sync, same-thread, scalar-only (callbacks #4): the closure fires inside the
+    /// extern call on the calling thread (no GC rooting, no cross-thread hand-off). The default errors
+    /// so a host that never passes callbacks (the std-module / off-heap fixtures) needn't implement it.
+    fn invoke_callback(
+        &mut self,
+        arg_index: usize,
+        args: &[NativeRet],
+    ) -> Result<NativeRet, HostError> {
+        let _ = (arg_index, args);
+        Err(HostError {
+            message: "this host does not support callbacks".into(),
+        })
+    }
     /// `args[i]` as an owned string; errors if it is not a str.
     fn arg_str(&mut self, i: usize) -> Result<String, HostError>;
     /// `args[i]` as an insertion-ordered `map[str, str]`, returned as owned `(key, value)` pairs in
