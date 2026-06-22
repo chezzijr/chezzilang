@@ -28512,6 +28512,17 @@ main()
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/ffi_qsort.chz");
+        // Also exercise the M:N `--parallel` engine: the qsort comparator re-enters the VM as a
+        // libffi callback under worker pinning — the highest-risk callback+alloc composition, and
+        // the one path the cooperative-VM + interp parity above does not cover. Keeps the engine
+        // matrix honest (the sibling deref test runs `--parallel` too).
+        let (par_out, _par_err, par_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
+        assert!(par_res.is_ok(), "{par_res:?}");
+        assert_eq!(
+            par_out, expected,
+            "M:N --parallel diverged for ffi_qsort.chz"
+        );
     }
 
     /// C-ABI deeper `str` returns golden (VM twin of `interp::golden_ffi_str_chz`): `strdup -> owned_str`
