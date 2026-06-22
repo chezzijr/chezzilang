@@ -399,8 +399,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >   **v1 limits:** nested structs, `str`/`owned_str` struct fields, and generic structs are rejected (a
 >   struct with a non-scalar field errors naming the struct + field); **sync scalar callbacks shipped**
 >   (a `fn(scalars) -> scalar` extern param → a libffi closure trampoline C calls back synchronously,
->   scalars only, fault caught + re-raised; stored/cross-thread callbacks + pointer-deref deref builtins
->   deferred), varargs, the rich Rust `Box<dyn Any>` userdata handle, and a custom user-named
+>   scalars only, fault caught + re-raised; **pointer-deref builtins now shipped** — see below —
+>   stored/cross-thread callbacks deferred), varargs, the rich Rust `Box<dyn Any>` userdata handle, and a custom user-named
 >   deallocator are deferred. **Fixed-width integers shipped:** beyond bare `int` (↔ C `long`), the marshalling type
 >   names `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` bind C `int32_t`/`uint32_t`/…
 >   (bidirectional, truncate-on-param / sign-or-zero-extend-on-return; `examples/ffi_int.chz`). They are
@@ -413,7 +413,12 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >   (`FILE*`/`sqlite3*`/…) across calls — `Obj::Ptr(usize)` / `Value::Ptr(usize)`, a GC leaf, sendable
 >   by value (`WireValue::Ptr`), value-compared by address, `<ptr null>`/`<ptr>` stringify (never the
 >   raw address — non-deterministic), never auto-freed (manual destroy). The `std.ffi` module adds the
->   value vocab (`null()`/`is_null`); see `examples/ffi_ptr.chz`. A slow C call runs inline (extern
+>   value vocab (`null()`/`is_null`); see `examples/ffi_ptr.chz`. **The memory behind a `ptr` is now
+>   readable/writable** via `std.ffi` `load_*`/`store_*` (every C scalar width + `load_str`, each with
+>   an `_at(p, off)` byte-offset form) — so struct fields, return buffers, and C output-params a library
+>   hands you can be read/written. **Unsafe, like ctypes:** a bad pointer segfaults; only the NULL base
+>   pointer is guarded (recoverable error, no fault) — a `ptr` cannot be forged from an int (provenance
+>   is C-sourced). See `stdlib.md §std.ffi`. A slow C call runs inline (extern
 >   names are NOT in `is_blocking`, so it pins its worker under `--parallel`).
 > - **FFI v1 limits (known + by design):**
 >   - **Integer width (FFI-2 — RESOLVED, opt-in):** bare Chezzi `int` (i64) still marshals as C
@@ -473,7 +478,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >     C-level UB, the author's cross-boundary assertion) — and is **never auto-freed**: the program
 >     calls the library's own destroy (`fclose(f)`); forgetting **leaks** (same stance as a borrowed
 >     `str` return). NULL is allowed (a `ptr` return of NULL is `<ptr null>`, not a fault — unlike a
->     non-nullable `str`/`owned_str` return; use `str?` for a nullable `char*`).
+>     non-nullable `str`/`owned_str` return; use `str?` for a nullable `char*`). The `ptr` is opaque
+>     *as a value* (no `FILE*` vs `sqlite3*` distinction, cannot be forged from an int), but its memory
+>     is **no longer opaque**: `std.ffi` `load_*`/`store_*` read/write the bytes behind it (unsafe — a
+>     bad pointer segfaults; only NULL is guarded). See `stdlib.md §std.ffi`.
 >   - **Flat-scalar structs only (FFI-`struct`):** a struct passed/returned by value must have **only
 >     scalar fields** (`int`/`float`/`bool`/`ptr`/`int8`..`uint64`) in v1. A **nested struct** field or a
 >     **`str`/`owned_str`** field is rejected at the checker with an error naming the struct + offending
@@ -490,9 +498,9 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >   Rust libraries like Burn — distinct from the C `void*` `ptr` above, which shipped), a **custom
 >   user-named deallocator** (only libc `free` backs `owned_str`), and the deferred FFI features above
 >   (nested structs-by-value /
->   `str` struct fields / **the rest of callbacks #4** — stored/cross-thread callbacks + pointer-deref
->   builtins; **sync scalar callbacks have shipped** / **varargs #5**, with design notes + the callback
->   feasibility ladder + workaround in `docs/ffi-and-packaging.md §1b`). See
+>   `str` struct fields / **the rest of callbacks #4** — stored/cross-thread callbacks; **sync scalar
+>   callbacks AND pointer-deref `load_*`/`store_*` builtins have shipped** / **varargs #5**, with design
+>   notes + the callback feasibility ladder + workaround in `docs/ffi-and-packaging.md §1b`). See
 >   `docs/ffi-and-packaging.md`. (`std.os.exit` with a real exit-code channel through the run drivers
 >   has since **shipped** — see `examples/exit.chz`.)
 
@@ -563,10 +571,11 @@ tests/          # Rust unit + golden tests
 > shipped** (`extern "lib":` scalar calls via dlopen+libffi, **plus opaque `void*` handles** via the
 > `ptr` type + `std.ffi`, the return-only `str` opt-ins **`owned_str`** (copy + libc `free`) and
 > **`str?`** (`NULL` → `None`), **plus flat-scalar structs by value**, **plus sync scalar callbacks**
-> — a `fn(scalars) -> scalar` extern param C calls back synchronously, same-thread, scalars only) — see
+> — a `fn(scalars) -> scalar` extern param C calls back synchronously, same-thread, scalars only,
+> **plus pointer-deref `load_*`/`store_*` builtins** reading/writing the memory behind a `ptr`) — see
 > the *Standard library* note above. The remaining Level-3 surface (nested structs-by-value, `str`
-> struct fields, stored/cross-thread callbacks + pointer-deref builtins, varargs, a custom user-named
-> deallocator, and the rich Rust `Box<dyn Any>` userdata handle) is still a future idea.
+> struct fields, stored/cross-thread callbacks, a C-buffer alloc layer (`ffi.alloc`/`free`), varargs,
+> a custom user-named deallocator, and the rich Rust `Box<dyn Any>` userdata handle) is still a future idea.
 
 ## Verification
 

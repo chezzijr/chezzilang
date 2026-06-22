@@ -6184,6 +6184,60 @@ fn extern_fixed_width_int_param_and_return_ok() {
 }
 
 #[test]
+fn ffi_deref_load_sigs_typecheck() {
+    // The memory deref builtins resolve through the `std.ffi` module member dispatch: a load of an int
+    // width returns `int`, a float width returns `float`, bool/ptr/str their kind. `ffi.null()` gives a
+    // ptr value to feed them (no extern needed for type-checking).
+    entry_ok(
+        "import std.ffi\nfn main():\n    p := ffi.null()\n    n: int = ffi.load_int(p)\n    print(n)\n",
+    );
+    entry_ok(
+        "import std.ffi\nfn main():\n    p := ffi.null()\n    x: int = ffi.load_int32_at(p, 8)\n    print(x)\n",
+    );
+    entry_ok(
+        "import std.ffi\nfn main():\n    p := ffi.null()\n    f: float = ffi.load_float(p)\n    print(f)\n",
+    );
+    entry_ok(
+        "import std.ffi\nfn main():\n    p := ffi.null()\n    g: float = ffi.load_float32_at(p, 4)\n    print(g)\n",
+    );
+    entry_ok(
+        "import std.ffi\nfn main():\n    p := ffi.null()\n    b: bool = ffi.load_bool(p)\n    print(b)\n",
+    );
+    entry_ok(
+        "import std.ffi\nfn main():\n    p := ffi.null()\n    q: ptr = ffi.load_ptr(p)\n    print(ffi.is_null(q))\n",
+    );
+    entry_ok(
+        "import std.ffi\nfn main():\n    p := ffi.null()\n    s: str = ffi.load_str_at(p, 2)\n    print(s)\n",
+    );
+}
+
+#[test]
+fn ffi_deref_store_returns_nil_and_takes_matching_value() {
+    entry_ok(
+        "import std.ffi\nfn main():\n    p := ffi.null()\n    ffi.store_int(p, 42)\n    ffi.store_int32_at(p, 8, -7)\n    ffi.store_float(p, 2.5)\n    ffi.store_bool(p, true)\n    ffi.store_ptr_at(p, 0, p)\n",
+    );
+}
+
+#[test]
+fn ffi_deref_wrong_arg_type_rejected() {
+    // load_int's param is `ptr`; passing an int is a type error.
+    entry_rejects(
+        "import std.ffi\nfn main():\n    print(ffi.load_int(5))\n",
+        "load_int",
+    );
+    // store_int's value must be an int; a str value is rejected.
+    entry_rejects(
+        "import std.ffi\nfn main():\n    p := ffi.null()\n    ffi.store_int(p, \"x\")\n",
+        "store_int",
+    );
+    // store returns nil — using it as an int is a type error.
+    entry_rejects(
+        "import std.ffi\nfn main():\n    p := ffi.null()\n    n: int = ffi.store_int(p, 1)\n    print(n)\n",
+        "nil",
+    );
+}
+
+#[test]
 fn extern_fixed_width_int_via_alias_ok() {
     // A transparent `type Len = int32` used in an extern sig must behave identically to bare `int32`
     // (the alias trap from the prior FFI task): resolve_type maps Len -> int32 -> Ty::Int (program

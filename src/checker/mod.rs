@@ -593,6 +593,50 @@ fn native_module_sig(name: &str) -> ModuleSig {
             // `null()` is the NULL sentinel; `is_null(p)` tests it. The `ptr` *type* is builtin.
             func("null", vec![], Ty::Ptr);
             func("is_null", vec![Ty::Ptr], Ty::Bool);
+            // Memory deref builtins — read/write the C-owned memory behind a `ptr` (load_*/store_*).
+            // Each LOAD has a base form `(ptr) -> T` and an `_at(ptr, int) -> T` byte-offset form;
+            // each STORE has `(ptr, V) -> nil` and `_at(ptr, int, V) -> nil`. Loads of every int
+            // width return `int`, float widths `float`, `bool`/`ptr`/`str` their kind; stores take a
+            // value of the matching kind and return `nil`. (See `src/native/ffi.rs` for the runtime;
+            // both engines reach these via the engine-neutral Host/NativeFn path — parity by
+            // construction.) A NULL base pointer is a recoverable runtime error, NOT a static one.
+            for (n, t) in [
+                ("load_int", Ty::Int),
+                ("load_int8", Ty::Int),
+                ("load_int16", Ty::Int),
+                ("load_int32", Ty::Int),
+                ("load_int64", Ty::Int),
+                ("load_uint8", Ty::Int),
+                ("load_uint16", Ty::Int),
+                ("load_uint32", Ty::Int),
+                ("load_uint64", Ty::Int),
+                ("load_float", Ty::Float),
+                ("load_float32", Ty::Float),
+                ("load_bool", Ty::Bool),
+                ("load_ptr", Ty::Ptr),
+                ("load_str", Ty::Str),
+            ] {
+                func(n, vec![Ty::Ptr], t.clone());
+                func(&format!("{n}_at"), vec![Ty::Ptr, Ty::Int], t);
+            }
+            for (n, v) in [
+                ("store_int", Ty::Int),
+                ("store_int8", Ty::Int),
+                ("store_int16", Ty::Int),
+                ("store_int32", Ty::Int),
+                ("store_int64", Ty::Int),
+                ("store_uint8", Ty::Int),
+                ("store_uint16", Ty::Int),
+                ("store_uint32", Ty::Int),
+                ("store_uint64", Ty::Int),
+                ("store_float", Ty::Float),
+                ("store_float32", Ty::Float),
+                ("store_bool", Ty::Bool),
+                ("store_ptr", Ty::Ptr),
+            ] {
+                func(n, vec![Ty::Ptr, v.clone()], Ty::Nil);
+                func(&format!("{n}_at"), vec![Ty::Ptr, Ty::Int, v], Ty::Nil);
+            }
             // `std.ffi` ALSO exports the eight fixed-width C-ABI integer TYPE names (Chezzi's first
             // type imports). They live in `sig.types` so `import int32 from std.ffi` validates; the
             // checker's `bind_import` records the import into `imported_ffi_types` and `resolve_type`

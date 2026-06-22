@@ -216,6 +216,36 @@ names: `int8`, `int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`.
 (Sync scalar **callbacks** need no `std.ffi` surface — a callback extern param is just a function-typed
 param spelled `fn(scalars) -> scalar`; see the FFI section of `syntax.md`.)
 
+**Memory deref (`load_*` / `store_*`).** Read/write the C-owned memory *behind* an opaque `ptr` — for
+struct fields, return buffers, event payloads, and C output-params. Each has a base form (byte offset
+`0`) and an `_at(p, off)` form that takes a **byte** offset (the `_at` store puts the offset *before*
+the value). Loads:
+
+- `load_int(p)` / `load_int_at(p, off) -> int` — C `long`.
+- `load_int8`/`load_int16`/`load_int32`/`load_int64` (+ `_at`) `-> int` — sign-extended to `int`.
+- `load_uint8`/`load_uint16`/`load_uint32`/`load_uint64` (+ `_at`) `-> int` — zero-extended (a
+  `uint64` with the top bit set wraps negative — the documented v1 limit).
+- `load_float(p)` / `_at -> float` (C `double`); `load_float32(p)` / `_at -> float` (C `float`, widened).
+- `load_bool(p)` / `_at -> bool` (1 byte, nonzero = true).
+- `load_ptr(p)` / `_at -> ptr` — deref a `void**` (the result may itself be NULL).
+- `load_str(p)` / `_at -> str` — copy a NUL-terminated C string (the buffer is **not** freed; the
+  precondition is a well-formed, NUL-terminated string — there is no max-length cap).
+
+Stores mirror every width except `str` (a `store_str` is deferred — an unbounded write into a caller
+buffer is a footgun). Each returns `nil`:
+`store_int`/`store_int8`..`store_int64`/`store_uint8`..`store_uint64`/`store_float`/`store_float32`/
+`store_bool`/`store_ptr` — base form `(p, v)`, `_at` form `(p, off, v)`. Stores write at the value's
+**natural C width** (`store_int8` writes one byte only, leaving adjacent bytes untouched).
+
+> **Unsafe surface.** `load_*`/`store_*` read/write *arbitrary* memory through a C-sourced address —
+> like Python `ctypes` (`POINTER(c_int)` + `a[0]`), a bad pointer **segfaults**. Chezzi's one
+> mitigation ctypes lacks: a `ptr` is **opaque** and cannot be forged from an `int` (only an `extern`
+> return, a callback arg, or `ffi.null()` yields one — provenance is C-sourced). The only cheaply
+> checkable guard is the **NULL** base pointer: a `load_*`/`store_*` on address `0` returns a
+> *recoverable* error (`ffi.<fn>: null pointer`), it does **not** segfault. A dangling, misaligned, or
+> out-of-bounds *non-null* pointer is undefined behavior (not detectable — documented limit). These
+> builtins are **unix-only** (a non-unix build registers the names but every call errors).
+
 ---
 
 ## 5. Pure-Chezzi modules
