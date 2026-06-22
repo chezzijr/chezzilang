@@ -255,16 +255,20 @@ is converted to a real `f64`; the reverse (`float`→`int`) is always a type err
 fires at every value-DEFINITION boundary: a typed binding (`x: float = 3` → `3.0`), a `float` function /
 method / closure parameter (incl. when you pass an `int` *variable*, not just a literal — it is coerced
 at the callee), a `-> float` return, a `float` struct field (`P(3)` for `v: float`), and a
-`float`-element collection literal (`xs: list[float] = [1, 2.3]`, a `map[_, float]` value, or an
-un-annotated all-literal mix like `[1, 2.3]`). Because the conversion is real, the stored value behaves
-as a float everywhere — e.g. `x: float = 3` makes `x / 2 == 1.5` (float division), not `1`. The
-mixed-type arithmetic / comparison operators (`1 + 2.0`, `1 < 2.3`, `1 == 2.3`) follow the same
-one-way rule. Anti-lossy cases stay type errors: `y: int = 2.3`, `fn f() -> int: return 2.3`, a `float`
-into a `list[int]`, and an `int`→`float` into a **newtype** (a newtype is nominal — no widening across
-its boundary). Two scoped carve-outs: a plain reassignment `x = 3` to a `float`-declared local is
-rejected (a reassignment target is type-blind, like `p.x = 3`), and an UN-annotated NON-literal mixed
-collection (`xs := [a, b]` with `a:int`, `b:float`) is inferred `list[float]` but its non-literal `int`
-element is not widened at runtime (rare; annotate `xs: list[float] = …` for the conversion).
+**mixed-numeric-literal** collection — a list/map literal with ≥1 float literal infers `list[float]` /
+`map[_, float]` and coerces its int literals (`xs: list[float] = [1, 2.3]`, a `map[_, float]` value, or
+a bare `[1, 2.3]`). Because the conversion is real, the stored value behaves as a float everywhere — e.g.
+`x: float = 3` makes `x / 2 == 1.5` (float division), not `1`. The mixed-type arithmetic / comparison
+operators (`1 + 2.0`, `1 < 2.3`, `1 == 2.3`) follow the same one-way rule. Anti-lossy cases stay type
+errors: `y: int = 2.3`, `fn f() -> int: return 2.3`, a `float` into a `list[int]`, and an `int`→`float`
+into a **newtype** (a newtype is nominal — no widening across its boundary). Widening is
+**scalar-at-the-sink** — a compound/nested float annotation is NOT widened: `list[list[float]] = [[1]]`,
+`float? = Some(3)`, `float! = Ok(3)`, an all-int literal `list[float] = [1, 2]`, and a non-literal RHS
+(`list[float] = f()`) all stay type errors; write explicit floats (`[[1.0]]`, `Some(3.0)`, `[1.0, 2.0]`)
+or a mixed literal. Two further scoped carve-outs: a plain reassignment `x = 3` to a `float`-declared
+local is rejected (a reassignment target is type-blind, like `p.x = 3`), and an UN-annotated NON-literal
+mixed collection (`xs := [a, b]` with `a:int`, `b:float`) is inferred `list[float]` but its non-literal
+`int` element is not widened at runtime (rare; annotate `xs: list[float] = …` for the conversion).
 
 ## 4. Operators & precedence
 

@@ -810,7 +810,15 @@ impl Compiler {
         let mut fc = FnComp::new(format!("__new_{name}"), 0, false);
         for f in fields {
             match &f.default {
-                Some(d) => self.compile_expr(&mut fc, d)?,
+                Some(d) => {
+                    self.compile_expr(&mut fc, d)?;
+                    // One-way int→float widening: a `float` suite field coerces its int default, so
+                    // the constructed suite instance stores a genuine f64 (the suite thunk bypasses
+                    // `compile_ctor_args`, which does this for a regular ctor).
+                    if crate::ast::is_float_ty(&f.ty) {
+                        fc.emit(Op::CoerceFloat, d.span);
+                    }
+                }
                 None => {
                     return Err(CompileError {
                         message: format!(

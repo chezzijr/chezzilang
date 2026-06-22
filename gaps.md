@@ -100,8 +100,9 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
   (`x: float = 3`), function / method / closure args incl. an int VARIABLE (coerced at the callee
   prologue), `-> float` returns (incl. inline-expr bodies), `float` struct fields, native std.math float
   params (`sqrt(16)`; already runtime-promoted — this resolves the old "inconsistent" complaint),
-  `extern` C `double` params (FFI host promotes), and `float`-annotated / all-literal collection literals
-  (`xs: list[float] = [1, 2.3]`, `[1, 2.3]`, `map[_, float]` values). **Anti-lossy stays a type error:**
+  `extern` C `double` params (FFI host promotes), and **mixed-numeric-literal** collections — a list/map
+  literal with ≥1 float literal infers `list[float]`/`map[_, float]` and its int literals are coerced
+  (`xs: list[float] = [1, 2.3]`, bare `[1, 2.3]`, `map[_, float]` values). **Anti-lossy stays a type error:**
   `y: int = 2.3`, `f() -> int: return 2.3`, a `float` into a `list[int]`, an int→float into a NEWTYPE
   (nominal). **Scoped carve-outs (documented, not holes):** (1) an UN-annotated NON-literal mixed
   collection (`xs := [a, b]` with `a:int`, `b:float`) — the checker now infers `list[float]`, but the
@@ -110,6 +111,13 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
   target (rejected by the checker) — like the type-blind `p.x = 3` / `xs[0] = 3` / `m[k] = 3` targets,
   which the compiler cannot coerce against and which therefore remain rejected (no runtime hole). (3) a
   generic field/param typed `T` bound to `float` is not widened (matches existing no-generic-widening).
+  (4) widening is **scalar-at-the-sink** only: a COMPOUND/nested/wrapped float annotation does not widen
+  an int-bearing value — `list[list[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`, an all-int
+  literal `list[float] = [1, 2]`, and a non-literal RHS (`list[float] = f()` where `f` returns
+  `list[int]`) all stay type errors. Write explicit floats (`[[1.0]]`, `Some(3.0)`, `[1.0, 2.0]`) or a
+  mixed literal. The checker cannot tell a safe literal `[1, 2]` from an unsafe non-literal `f()`, and
+  only a scalar `float` sink is compiler-coerced — so compound widening is deliberately strict to avoid
+  an `Int` in a `float` slot.
   - Sibling: **`1 << 63` wraps silently to `INT_MIN`** (no overflow check) while `+ - * / %` are
     checked (recoverable-panic on overflow) — so the "Verified working" line below ("integer overflow →
     recoverable panic (never wraps)") is false for shifts. Also `INT_MIN` is unwritable as a literal

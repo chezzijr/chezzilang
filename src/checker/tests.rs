@@ -101,6 +101,34 @@ fn widen_float_into_int_still_rejected() {
     rejects("n: int = 0\nn = 2.3\nprint(n)\n", "cannot assign");
 }
 
+/// Widening is SCALAR-ONLY: a compound/nested/wrapped `float` annotation does NOT accept an
+/// int-bearing value, because only a scalar `float` sink is coerced by the compiler — widening a
+/// compound would leave an `Int` in a `float` slot (the exact runtime hole this design avoids; the
+/// checker cannot distinguish a safe literal `[1, 2]` from an unsafe non-literal `f()`). Collection
+/// floats come instead from mixed-literal inference (`[1, 2.3]` ⇒ `list[float]`, accepted above).
+#[test]
+fn widen_compound_float_positions_rejected() {
+    rejects(
+        "xs: list[list[float]] = [[1]]\nprint(xs)\n",
+        "cannot assign",
+    );
+    rejects(
+        "m: map[str, list[float]] = {\"a\": [1]}\nprint(m)\n",
+        "cannot assign",
+    );
+    rejects(
+        "xs: list[map[str, float]] = [{\"a\": 1}]\nprint(xs)\n",
+        "cannot assign",
+    );
+    rejects("o: float? = Some(3)\nprint(o)\n", "cannot assign");
+    rejects("r: float! = Ok(3)\nprint(r)\n", "cannot assign");
+    // A non-literal RHS (a fn returning list[int]) into list[float]: no literal to coerce → reject.
+    rejects(
+        "fn f() -> list[int]:\n    return [1]\nxs: list[float] = f()\nprint(xs)\n",
+        "cannot assign",
+    );
+}
+
 /// A plain `x = <int>` reassignment to a `float`-declared local is a STRICT assign target (no
 /// widening — the documented carve-out): the checker rejects it. (Annotated/param/return/field DO
 /// widen; a reassignment target is type-blind for the same reason `p.x = 3` is.)

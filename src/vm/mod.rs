@@ -15742,6 +15742,32 @@ mod tests {
     }
 
     #[test]
+    fn widen_suite_float_field_coerced() {
+        // A `float` suite field with an int default stores a genuine f64 — the suite-construction
+        // thunk emits `Op::CoerceFloat` (it bypasses `compile_ctor_args`). Regression for the
+        // prosecutor charge "Int in a float slot via the suite thunk" (suites are VM-only, so no
+        // two-engine parity test covers this path).
+        let src = "struct SuiteF:\n    v: float = 3\n    test fn t(self):\n        assert self.v / 2 == 1.5\n";
+        let module = parser::parse(lexer::tokenize(src).unwrap()).unwrap();
+        let program = crate::compiler::compile_module_standalone(&module).unwrap();
+        let thunk = program.suites[0].new_thunk;
+        let mut vm = Vm::new(Arc::new(program));
+        vm.init_for_tests().unwrap();
+        let inst = vm.build_suite_instance(thunk).unwrap();
+        let Value::Obj(h) = inst else {
+            panic!("suite instance is not an object");
+        };
+        let Obj::Struct { fields, .. } = vm.heap.get(h) else {
+            panic!("suite instance is not a struct");
+        };
+        assert_eq!(
+            fields[0],
+            Value::Float(3.0),
+            "float suite field must store f64(3.0), not Int(3)"
+        );
+    }
+
+    #[test]
     fn quicken_table_presized_and_based() {
         // White-box wiring: the per-`Vm` quicken side table has one state byte per program
         // instruction, and `quicken_base` is the prefix sum of per-proto code lengths so a site is

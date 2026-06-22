@@ -7703,41 +7703,15 @@ impl Checker {
     /// concrete type is assignable to a `Protocol(P)` slot iff it satisfies `P` — which needs the
     /// protocol/struct registry, so it can't live in the context-free `compatible`. Recurses through
     /// compound types so a nested existential (the `E` in `Result[T, Error]`) is checked structurally.
+    /// Strict assignability — NO int→float widening (the reverse `float`→`int` is always rejected).
     fn assignable(&self, expected: &Ty, actual: &Ty) -> bool {
-        self.assignable_w(expected, actual, false)
-    }
-
-    /// Like [`Checker::assignable`], but C-like **one-way int→float widening** is accepted when
-    /// `widen` is true: `(Float, Int) => true` at the top level, and through `list`/`set`/`option`
-    /// element + `map`/`result` VALUE positions (so `list[float] = [1, 2.3]` accepts the int element).
-    /// Widening is ONLY enabled at value-DEFINITION sinks the COMPILER coerces from a static
-    /// annotation (typed `let`, function/struct/method args, returns, struct-field defaults) — so the
-    /// stored value is a genuine `f64`, never an `Int` in a float slot. Widening is deliberately NOT
-    /// propagated into `map` KEYS (float keys are banned), into `struct`/`tuple`/`func` element
-    /// positions (those flow to type-blind assign targets — `p.x = 3`, `(a,_) = …` — that the compiler
-    /// cannot coerce, so they must stay strict to avoid a runtime hole), nor into the `result` ERROR
-    /// position. `widen=false` is the strict behaviour (identical to the old `assignable`).
-    fn assignable_w(&self, expected: &Ty, actual: &Ty, widen: bool) -> bool {
         use Ty::*;
         match (expected, actual) {
             (Unknown, _) | (_, Unknown) => true,
-            // One-way C-like widening: an `int` value flows into a `float` slot (never the reverse).
-            (Float, Int) if widen => true,
             (Protocol(p), a) => self.satisfies(a, p).is_ok(),
-            (List(e), List(a)) | (Option(e), Option(a)) | (Set(e), Set(a)) => {
-                self.assignable_w(e, a, widen)
-            }
-            // The error position stays strict; only the success/value position widens.
-            (Result(et, ee), Result(at, ae)) => {
-                self.assignable_w(et, at, widen) && self.assignable(ee, ae)
-            }
-            // The key stays strict (floats are banned as map keys); only the value position widens.
-            (Map(ek, ev), Map(ak, av)) => {
-                self.assignable(ek, ak) && self.assignable_w(ev, av, widen)
-            }
-            // Struct/tuple/func element positions stay STRICT even under `widen`: they reach
-            // type-blind assign targets the compiler can't coerce, so widening them would store an
-            // `Int` in a `float` slot.
+            (List(e), List(a)) | (Option(e), Option(a)) | (Set(e), Set(a)) => self.assignable(e, a),
+            (Result(et, ee), Result(at, ae)) => self.assignable(et, at) && self.assignable(ee, ae),
+            (Map(ek, ev), Map(ak, av)) => self.assignable(ek, ak) && self.assignable(ev, av),
             (Struct(n, ea), Struct(m, aa)) | (Enum(n, ea), Enum(m, aa)) => {
                 n == m
                     && ea.len() == aa.len()
@@ -7762,6 +7736,23 @@ impl Checker {
             }
             _ => compatible(expected, actual),
         }
+    }
+
+    /// Like [`Checker::assignable`], but accepts C-like **one-way int→float widening** at a SCALAR
+    /// value-DEFINITION sink (typed `let`, function/struct/method arg, return, struct-field default):
+    /// `(Float, Int)` only. Widening is deliberately NOT propagated into ANY compound position
+    /// (list/set/option element, map/result value, struct/tuple/func) — only a scalar `float` sink is
+    /// coerced by the compiler (`Op::CoerceFloat`), so widening a compound would accept an int-bearing
+    /// value the runtime never converts (an `Int` left in a `float` slot — the exact hole this design
+    /// avoids; the checker cannot tell a safe literal `[1, 2]` from an unsafe non-literal `f()`).
+    /// Collection floats come instead from mixed-literal element inference (`[1, 2.3]` infers
+    /// `list[float]`) + literal element coercion, which is independently sound. `widen=false` ⇒
+    /// identical to [`Checker::assignable`].
+    fn assignable_w(&self, expected: &Ty, actual: &Ty, widen: bool) -> bool {
+        if widen && matches!((expected, actual), (Ty::Float, Ty::Int)) {
+            return true;
+        }
+        self.assignable(expected, actual)
     }
 
     fn satisfies(&self, ty: &Ty, protocol: &str) -> Result<(), String> {
