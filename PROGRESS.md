@@ -11,6 +11,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Feature — one-way C-like `int`→`float` implicit widening (2026-06-22).** An `int` value now flows
+into a `float` SLOT automatically, converted to a real `f64` (the reverse stays a lossy type error).
+The design (Architecture C) emits a **real** runtime conversion at each value-DEFINITION boundary,
+driven by the static annotation already in the AST — so it is byte-identical on the checked CLI path
+AND the checker-bypassing parity harness (two-engine VM↔interp parity by construction; the M:N
+`--parallel` engine shares the compiler so it is covered too). **Checker** (read-only): a scoped
+`assignable_w(expected, actual, widen)` adds `(Float, Int) => true` only at compiler-coercible sinks
+(typed `let`, fn/method/closure args via `check_args_w`, returns, struct-field defaults, native/extern
+float params) — the type-blind assign targets (`p.x = 3`, `xs[0] = 3`, `m[k] = 3`, tuple-target,
+reassign-to-float-local) stay STRICT (no runtime hole); `infer_list`/`infer_map`-value unify an
+int/float mix to `float` (one-way). **Compiler**: new cheap inline `Op::CoerceFloat` (mirrors `AsInt`,
+reuses `n as f64`), emitted at typed `let`, the float-param callee prologue (so an int *variable* widens
+at the boundary, any caller), `-> float` returns (incl. inline-expr bodies), per-`float`-field struct
+construction, and `float`-annotated / all-literal collection literals. **Interp** (frozen oracle, a
+tree-walker — no bytecode): an equivalent `coerce_float`/`coerce_value_to_annotation` helper at the
+SAME AST boundaries → parity. **Semantic proof:** `x: float = 3` makes `x / 2 == 1.5` (real float
+division), not `1`. **Anti-lossy negatives stay type errors** (`y: int = 2.3`, `-> int: return 2.3`,
+`float` into `list[int]`, `int`→`float` across a **newtype**, reassign-int-to-float-local). **Scoped
+carve-outs (documented, not holes):** an un-annotated NON-literal mixed collection (`xs := [a, b]`,
+a:int b:float) infers `list[float]` but its non-literal int element isn't widened at runtime; a plain
+reassign `x = 3` to a float local is a strict (rejected) target. Tests: 9 checker + 11 two/three-engine
+runtime (`widen_*`); native `sqrt(16)` / extern `cos(2)` widening confirmed hole-free (host promotes).
+Docs: `gaps.md` → RESOLVED log, `docs/syntax.md §3`, `docs/spec.md`, `docs/stdlib.md`.
+
 **✅ Bug fix — `ref` shared-method-name dispatch no longer falsely rejects an EXPRESSION receiver
 (2026-06-22).** When ≥2 structs share a method name with differing param ref-ness (the receiver type
 disambiguates which signature applies, per `docs/syntax.md §3`), a call with a *named-local* receiver

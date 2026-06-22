@@ -3928,6 +3928,21 @@ impl Vm {
                     );
                 }
             }
+            Op::CoerceFloat => {
+                // One-way int→float widening (idempotent on Float). Reuses `builtin_float`'s
+                // `n as f64`; any non-numeric top is a runtime error (the checker guarantees numeric).
+                let top = self.stack.last_mut().unwrap();
+                match *top {
+                    Value::Int(n) => *top = Value::Float(n as f64),
+                    Value::Float(_) => {}
+                    other => {
+                        return Err(self.err(
+                            format!("expected number, found {}", self.type_name(other)),
+                            span,
+                        ));
+                    }
+                }
+            }
             // ----- M19 superinstructions. Bodies live in `#[inline(never)]` helpers so `step`'s own
             // stack frame stays lean. Plain calls no longer recurse the host stack (call-flattening:
             // `Op::Call` pushes a frame and the running `run_until` loop executes it), but the
@@ -15723,6 +15738,32 @@ mod tests {
         assert_eq!(
             program.structs["<main>::S"].test_methods,
             vec!["a".to_string()]
+        );
+    }
+
+    #[test]
+    fn widen_suite_float_field_coerced() {
+        // A `float` suite field with an int default stores a genuine f64 — the suite-construction
+        // thunk emits `Op::CoerceFloat` (it bypasses `compile_ctor_args`). Regression for the
+        // prosecutor charge "Int in a float slot via the suite thunk" (suites are VM-only, so no
+        // two-engine parity test covers this path).
+        let src = "struct SuiteF:\n    v: float = 3\n    test fn t(self):\n        assert self.v / 2 == 1.5\n";
+        let module = parser::parse(lexer::tokenize(src).unwrap()).unwrap();
+        let program = crate::compiler::compile_module_standalone(&module).unwrap();
+        let thunk = program.suites[0].new_thunk;
+        let mut vm = Vm::new(Arc::new(program));
+        vm.init_for_tests().unwrap();
+        let inst = vm.build_suite_instance(thunk).unwrap();
+        let Value::Obj(h) = inst else {
+            panic!("suite instance is not an object");
+        };
+        let Obj::Struct { fields, .. } = vm.heap.get(h) else {
+            panic!("suite instance is not a struct");
+        };
+        assert_eq!(
+            fields[0],
+            Value::Float(3.0),
+            "float suite field must store f64(3.0), not Int(3)"
         );
     }
 
@@ -29801,5 +29842,114 @@ main()";
             "main()\n"
         );
         assert_eq!(run_capture(src).expect("vm"), "Some(1)\nSome(2)\nNone\n");
+    }
+
+    // ===== one-way int→float implicit widening (Architecture C: real runtime coercion) =====
+
+    /// Assert all three engines (VM serial default, interp oracle, VM `--parallel`) produce `want`.
+    fn widen_three_engines(src: &str, want: &str) {
+        assert_eq!(run_capture(src).expect("vm"), want, "vm engine");
+        assert_eq!(
+            crate::interp::run_capture(src).expect("interp"),
+            want,
+            "interp engine"
+        );
+        assert_eq!(
+            run_capture_parallel(src).expect("parallel"),
+            want,
+            "parallel engine"
+        );
+    }
+
+    /// A `float`-annotated let binding stores a genuine `f64` (display `3.0`), and `x / 2` is FLOAT
+    /// division (`1.5`), NOT int division (`1`). The division is the load-bearing semantic proof.
+    #[test]
+    fn widen_let_display_and_division() {
+        widen_three_engines("x: float = 3\nprint(x)\nprint(x / 2)\n", "3.0\n1.5\n");
+    }
+
+    /// Passing an int VARIABLE into a `float` param coerces at the callee prologue: `z / 2` is float
+    /// division. Proves the coercion is at the callee boundary (works for any caller, not just literals).
+    #[test]
+    fn widen_param_int_variable_division() {
+        widen_three_engines("fn f(z: float):\n    print(z / 2)\na := 3\nf(a)\n", "1.5\n");
+    }
+
+    /// A non-literal int expression returned from a `-> float` function is coerced before `Return`.
+    #[test]
+    fn widen_return_nonliteral_int_expr() {
+        widen_three_engines(
+            "fn g(n: int) -> float:\n    return n + 1\nprint(g(2) / 2)\n",
+            "1.5\n",
+        );
+    }
+
+    /// An int field value widens into a `float` struct field (per-field coercion at `NewStruct`).
+    #[test]
+    fn widen_struct_float_field_division() {
+        widen_three_engines(
+            "struct P:\n    v: float\np := P(3)\nprint(p.v / 2)\n",
+            "1.5\n",
+        );
+    }
+
+    /// An inline-expr fn body (`fn g(n: int) -> float: n + 1`) coerces its implicit return too.
+    #[test]
+    fn widen_inline_expr_body_return() {
+        widen_three_engines("fn g(n: int) -> float: n + 1\nprint(g(2) / 2)\n", "1.5\n");
+    }
+
+    /// A `float`-param closure coerces at its prologue.
+    #[test]
+    fn widen_closure_float_param_division() {
+        widen_three_engines("f := fn(z: float): z / 2\nprint(f(3))\n", "1.5\n");
+    }
+
+    /// (A) Annotated `list[float] = [1, 2.3]` — `xs[0]` is a genuine float (`1 / 2 == 0.5`).
+    /// (B) Un-annotated all-literal mix `[1, 2.3]` widens its int LITERAL via the peephole.
+    /// (C) A map VALUE float position likewise widens.
+    #[test]
+    fn widen_collection_annotated_and_literal() {
+        widen_three_engines("xs: list[float] = [1, 2.3]\nprint(xs[0] / 2)\n", "0.5\n");
+        widen_three_engines(
+            "ys := [1, 2.3]\nprint(ys[0] / 2)\nprint(ys[1])\n",
+            "0.5\n2.3\n",
+        );
+        widen_three_engines(
+            "m: map[str, float] = {\"a\": 1, \"b\": 2.3}\nprint(m[\"a\"] / 2)\n",
+            "0.5\n",
+        );
+    }
+
+    /// An all-int literal collection must NOT widen (the peephole only fires when ≥1 float literal is
+    /// present): `[1, 2, 3]` stays `list[int]`, so `xs[0] / 2` is int division (`0`).
+    #[test]
+    fn widen_all_int_literal_collection_stays_int() {
+        widen_three_engines("xs := [1, 2, 3]\nprint(xs[0] / 2)\n", "0\n");
+    }
+
+    /// Regression-pin: mixed int/float COMPARISONS already widen at runtime; ensure no double-coerce
+    /// or divergence after the new coercion ops.
+    #[test]
+    fn widen_mixed_comparisons_pinned() {
+        widen_three_engines("print(1 < 2.3)\nprint(1 == 2.3)\n", "true\nfalse\n");
+    }
+
+    /// An ANNOTATED `list[float]` widens a NON-LITERAL int element too (all elements coerced): both
+    /// engines must agree (`a` is an int variable, not a literal).
+    #[test]
+    fn widen_annotated_list_widens_nonliteral_element() {
+        widen_three_engines(
+            "a := 1\nxs: list[float] = [a, 2.3]\nprint(xs[0] / 2)\n",
+            "0.5\n",
+        );
+    }
+
+    /// CARVE-OUT pinned: an UN-ANNOTATED non-literal mixed collection (`xs := [a, b]`, a:int, b:float)
+    /// is NOT element-widened (the compiler is type-blind about non-literal `a`), so `xs[0]` stays Int
+    /// → `xs[0] / 2` is int division (`0`). Both engines must AGREE on this (parity, not correctness).
+    #[test]
+    fn widen_unannotated_nonliteral_mixed_collection_carveout() {
+        widen_three_engines("a := 1\nb := 2.3\nxs := [a, b]\nprint(xs[0] / 2)\n", "0\n");
     }
 }

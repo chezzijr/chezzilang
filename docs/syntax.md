@@ -250,6 +250,26 @@ and `T!` for `Result[T, Error]` (E defaults to the built-in `Error` protocol). E
 `list[int]?`, `int!` (= `Result[int, Error]`), `int!DbErr` (= `Result[int, DbErr]`). Pure spelling —
 `Some`/`None`/`Ok`/`Err`, `match`, and `?` behave exactly as on the long forms.
 
+**One-way `int`→`float` widening (C-like).** An `int` value flows into a `float` SLOT automatically and
+is converted to a real `f64`; the reverse (`float`→`int`) is always a type error (lossy). Widening
+fires at every value-DEFINITION boundary: a typed binding (`x: float = 3` → `3.0`), a `float` function /
+method / closure parameter (incl. when you pass an `int` *variable*, not just a literal — it is coerced
+at the callee), a `-> float` return, a `float` struct field (`P(3)` for `v: float`), and a
+**mixed-numeric-literal** collection — a list/map literal with ≥1 float literal infers `list[float]` /
+`map[_, float]` and coerces its int literals (`xs: list[float] = [1, 2.3]`, a `map[_, float]` value, or
+a bare `[1, 2.3]`). Because the conversion is real, the stored value behaves as a float everywhere — e.g.
+`x: float = 3` makes `x / 2 == 1.5` (float division), not `1`. The mixed-type arithmetic / comparison
+operators (`1 + 2.0`, `1 < 2.3`, `1 == 2.3`) follow the same one-way rule. Anti-lossy cases stay type
+errors: `y: int = 2.3`, `fn f() -> int: return 2.3`, a `float` into a `list[int]`, and an `int`→`float`
+into a **newtype** (a newtype is nominal — no widening across its boundary). Widening is
+**scalar-at-the-sink** — a compound/nested float annotation is NOT widened: `list[list[float]] = [[1]]`,
+`float? = Some(3)`, `float! = Ok(3)`, an all-int literal `list[float] = [1, 2]`, and a non-literal RHS
+(`list[float] = f()`) all stay type errors; write explicit floats (`[[1.0]]`, `Some(3.0)`, `[1.0, 2.0]`)
+or a mixed literal. Two further scoped carve-outs: a plain reassignment `x = 3` to a `float`-declared
+local is rejected (a reassignment target is type-blind, like `p.x = 3`), and an UN-annotated NON-literal
+mixed collection (`xs := [a, b]` with `a:int`, `b:float`) is inferred `list[float]` but its non-literal
+`int` element is not widened at runtime (rare; annotate `xs: list[float] = …` for the conversion).
+
 ## 4. Operators & precedence
 
 Highest → lowest. Same row = same precedence, left-associative unless noted.
@@ -1637,8 +1657,9 @@ C `int32_t`/`uint32_t`/… use the dedicated `int8`..`uint64` names below — th
 `isdigit`, which returns an *arbitrary* nonzero `int` for true — must be bound `-> int` and tested
 `!= 0`, **not** `bool`), `str` → null-terminated `const char*` (a `char*` return is copied into a Chezzi
 `str`; **return-only** `owned_str` also frees it, `str?` makes a `NULL` return `None` — see below), and
-`ptr` ↔ C `void*` (an **opaque handle** — see below). No implicit `int`→`float` (`cos(2)`
-is a type error — pass `2.0`). A no-return signature (`fn srand(seed: int)`) — or an explicit
+`ptr` ↔ C `void*` (an **opaque handle** — see below). One-way `int`→`float` widening applies at a
+C `double` param too (`cos(2)` widens the int to `2.0` before marshalling — the FFI host promotes it;
+a non-numeric arg like a `str`/`bool` is still rejected). A no-return signature (`fn srand(seed: int)`) — or an explicit
 `-> nil` — maps to C `void`; `nil` is a **return-only** type (it is rejected as a parameter). A
 **flat-scalar `struct`** marshals **by value** as a C struct (see below). The checker rejects any
 other non-marshallable param/return (list/map/set/tuple/enum/generic struct/struct-with-non-scalar-

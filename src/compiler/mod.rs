@@ -198,6 +198,60 @@ struct Compiler {
     /// (collision-proof). Filled once in `compile_graph` (multi-file) or by
     /// `resolve_extern_signatures_standalone` (single-file) — the ONE extern-type resolver.
     extern_sigs: crate::checker::ExternTable,
+    /// One-way int→float widening — the element-coercion hint for the collection literal currently
+    /// being compiled as a typed `let` value (`xs: list[float] = [..]`). Set transiently by
+    /// `compile_stmt`'s `Let` arm around the value compile and consumed by the `List`/`Map`/`Set` arms
+    /// of `compile_expr` so int ELEMENTS widen to float. `None` outside an annotated collection let.
+    float_elem_hint: Option<ElemFloatHint>,
+}
+
+/// One-way int→float element-widening hint for a collection literal compiled as a typed `let` value.
+/// `List`/`Set` widen their elements; `MapValue` widens only the value position (map keys stay strict —
+/// a float key is banned anyway).
+#[derive(Clone, Copy, PartialEq)]
+enum ElemFloatHint {
+    /// `list[float]` / (unused for set: float is not Hashable) — widen every element.
+    Elem,
+    /// `map[_, float]` — widen every VALUE, leave keys untouched.
+    MapValue,
+}
+
+/// All-literal int→float widening peephole: true iff `exprs` contains BOTH at least one float
+/// literal and at least one int literal (the trigger to widen the int LITERAL siblings of an
+/// un-annotated mixed collection like `[1, 2.3]`). Only strict `Int`/`Float` AST literals count — a
+/// non-literal element (variable / call) is neither, so an un-annotated NON-literal mixed collection
+/// (`[a, b]` with `a: int`, `b: float`) does NOT fire here (the documented compiler-type-blind
+/// carve-out: the checker infers `list[float]` but the backend can't widen the non-literal `a`).
+pub(crate) fn literal_numeric_mix<'a>(exprs: impl Iterator<Item = &'a Expr>) -> bool {
+    let mut has_int = false;
+    let mut has_float = false;
+    for e in exprs {
+        match &e.kind {
+            ExprKind::Int(_) => has_int = true,
+            ExprKind::Float(_) => has_float = true,
+            _ => {}
+        }
+    }
+    has_int && has_float
+}
+
+/// Derive the collection element-widening hint from a `let` annotation: `list[float]` → `Elem`,
+/// `map[_, float]` → `MapValue`. A non-collection / non-float-element annotation yields `None`.
+/// (`set[float]` is impossible — float is not Hashable — so it is intentionally not handled.)
+fn float_elem_hint(ty: &Type) -> Option<ElemFloatHint> {
+    match ty {
+        Type::Generic(n, args)
+            if n == "list" && args.len() == 1 && crate::ast::is_float_ty(&args[0]) =>
+        {
+            Some(ElemFloatHint::Elem)
+        }
+        Type::Generic(n, args)
+            if n == "map" && args.len() == 2 && crate::ast::is_float_ty(&args[1]) =>
+        {
+            Some(ElemFloatHint::MapValue)
+        }
+        _ => None,
+    }
 }
 
 /// M19 lever #2 — register an enum variant into BOTH program tables, assigning it the next dense
@@ -295,6 +349,7 @@ impl Compiler {
             current_module_idx: 0,
             bare_types: HashMap::new(),
             extern_sigs: crate::checker::ExternTable::new(),
+            float_elem_hint: None,
         }
     }
 
@@ -755,7 +810,15 @@ impl Compiler {
         let mut fc = FnComp::new(format!("__new_{name}"), 0, false);
         for f in fields {
             match &f.default {
-                Some(d) => self.compile_expr(&mut fc, d)?,
+                Some(d) => {
+                    self.compile_expr(&mut fc, d)?;
+                    // One-way int→float widening: a `float` suite field coerces its int default, so
+                    // the constructed suite instance stores a genuine f64 (the suite thunk bypasses
+                    // `compile_ctor_args`, which does this for a regular ctor).
+                    if crate::ast::is_float_ty(&f.ty) {
+                        fc.emit(Op::CoerceFloat, d.span);
+                    }
+                }
                 None => {
                     return Err(CompileError {
                         message: format!(
@@ -780,9 +843,14 @@ impl Compiler {
         let mut fc = FnComp::new(decl.name.clone(), decl.params.len(), false);
         fc.is_generator = decl.is_generator;
         fc.is_test = decl.is_test;
+        // One-way int→float widening: a `-> float` return type coerces every `return` value.
+        fc.ret_is_float = decl.ret.as_ref().is_some_and(crate::ast::is_float_ty);
         for p in &decl.params {
             fc.add_local(p.name.clone());
         }
+        // A `float` param coerces any int argument at the callee prologue — so EVERY caller (incl. an
+        // int VARIABLE, not just a literal) widens.
+        self.emit_float_param_prologue(&mut fc, &decl.params);
         // An inline-expr body (`fn a(): <expr>`) implicitly returns its single expression — exactly
         // like a closure `fn(x): expr` (see `compile_closure`): compile the expr and emit `Return`
         // instead of evaluating-then-discarding it and falling through to `Nil`/`Return`. An inline
@@ -797,6 +865,9 @@ impl Compiler {
             ] = decl.body.as_slice()
         {
             self.compile_expr(&mut fc, e)?;
+            if fc.ret_is_float {
+                fc.emit(Op::CoerceFloat, e.span);
+            }
             fc.emit(Op::Return, e.span);
             return Ok(self.finish(fc));
         }
@@ -817,6 +888,25 @@ impl Compiler {
         fc.emit(Op::Nil, Span { line: 1, col: 1 });
         fc.emit(Op::Return, Span { line: 1, col: 1 });
         Ok(self.finish(fc))
+    }
+
+    /// One-way int→float widening — emit the callee-prologue coercion for every `float`-typed param:
+    /// `GetLocal(slot), CoerceFloat, SetLocal(slot)`. Done at the callee boundary (not the call site)
+    /// so an int argument widens regardless of how it was passed (literal OR variable OR field) and
+    /// regardless of which caller called — the single general coverage point for float params. The
+    /// param slots are `0..params.len()` in declaration order (matching the `add_local` loop). A
+    /// non-`float` (incl. a generic `T`) param emits nothing, so a fn with no float params is
+    /// byte-identical to before.
+    fn emit_float_param_prologue(&mut self, fc: &mut FnComp, params: &[crate::ast::Param]) {
+        for (i, p) in params.iter().enumerate() {
+            if p.ty.as_ref().is_some_and(crate::ast::is_float_ty) {
+                let slot = i;
+                let span = Span { line: 1, col: 1 };
+                fc.emit(Op::GetLocal(slot), span);
+                fc.emit(Op::CoerceFloat, span);
+                fc.emit(Op::SetLocal(slot), span);
+            }
+        }
     }
 
     fn finish(&mut self, fc: FnComp) -> ProtoId {
@@ -920,8 +1010,19 @@ impl Compiler {
 
     fn compile_stmt(&mut self, fc: &mut FnComp, stmt: &Stmt) -> Result<(), CompileError> {
         match &stmt.kind {
-            StmtKind::Let { names, value, .. } => {
+            StmtKind::Let { names, value, ty, .. } => {
+                // One-way int→float widening: a collection-element annotation (`list[float]` /
+                // `map[_, float]`) widens int ELEMENTS at the literal-compile site (hint consumed by
+                // `compile_expr`'s `List`/`Map` arms); a scalar `float` annotation coerces the whole
+                // value below. (A later plain `x = <int>` to a float local is rejected by the checker —
+                // strict assign target — so it needs no runtime coercion; see gaps.md carve-out.)
+                let elem_hint = ty.as_ref().and_then(float_elem_hint);
+                let prev_hint = std::mem::replace(&mut self.float_elem_hint, elem_hint);
                 self.compile_expr(fc, value)?;
+                self.float_elem_hint = prev_hint;
+                if names.len() == 1 && ty.as_ref().is_some_and(crate::ast::is_float_ty) {
+                    fc.emit(Op::CoerceFloat, value.span);
+                }
                 if names.len() > 1 {
                     // destructuring let `a, b := value`: stash the tuple in a hidden local, then for
                     // each binding load it and read element `.i` (the tuple-aware `GetField`). No new
@@ -977,7 +1078,13 @@ impl Compiler {
             | StmtKind::Import(_) => Ok(()),
             StmtKind::Return(value) => {
                 match value {
-                    Some(e) => self.compile_expr(fc, e)?,
+                    Some(e) => {
+                        self.compile_expr(fc, e)?;
+                        // One-way int→float widening: a `-> float` fn coerces its return value.
+                        if fc.ret_is_float {
+                            fc.emit(Op::CoerceFloat, e.span);
+                        }
+                    }
                     None => fc.emit(Op::Nil, stmt.span),
                 }
                 fc.emit(Op::Return, stmt.span);
@@ -2436,6 +2543,11 @@ impl Compiler {
     // ----- expressions -----
 
     fn compile_expr(&mut self, fc: &mut FnComp, expr: &Expr) -> Result<(), CompileError> {
+        // One-way int→float widening — the collection-element hint set by a typed `let` value applies
+        // to the IMMEDIATE collection literal only. Take it (clearing the field) so any non-collection
+        // value, a nested element, or a call argument does NOT inherit it; the `List`/`Map` arms below
+        // re-read it from this local.
+        let elem_hint = self.float_elem_hint.take();
         match &expr.kind {
             ExprKind::Int(n) => fc.emit(Op::ConstInt(*n), expr.span),
             ExprKind::Float(x) => fc.emit(Op::ConstFloat(*x), expr.span),
@@ -2447,12 +2559,21 @@ impl Compiler {
             ExprKind::Bytes(b) => fc.emit(Op::ConstBytes(b.clone().into_boxed_slice()), expr.span),
             ExprKind::Ident(name) => self.compile_ident(fc, name, expr.span),
             ExprKind::List(items) => {
+                // One-way int→float widening for THIS list: widen an int element when the
+                // `list[float]` annotation says so OR the all-literal peephole fires (≥1 float literal
+                // sibling present → widen int LITERAL siblings).
+                let annotated = elem_hint == Some(ElemFloatHint::Elem);
+                let peephole = literal_numeric_mix(items.iter());
                 for it in items {
                     self.compile_expr(fc, it)?;
+                    if annotated || (peephole && matches!(it.kind, ExprKind::Int(_))) {
+                        fc.emit(Op::CoerceFloat, it.span);
+                    }
                 }
                 fc.emit(Op::NewList(items.len()), expr.span);
             }
             ExprKind::Tuple(items) => {
+                // A tuple is heterogeneous (positional types), so no element widening.
                 for it in items {
                     self.compile_expr(fc, it)?;
                 }
@@ -2460,13 +2581,21 @@ impl Compiler {
             }
             ExprKind::Map(entries) => {
                 // Push `[k0, v0, k1, v1, …]`, then build the map (last duplicate key wins at runtime).
+                // One-way int→float widening on the VALUE position only (keys are never float): the
+                // `map[_, float]` annotation, or the all-literal peephole over the value column.
+                let annotated = elem_hint == Some(ElemFloatHint::MapValue);
+                let peephole = literal_numeric_mix(entries.iter().map(|(_, v)| v));
                 for (k, v) in entries {
                     self.compile_expr(fc, k)?;
                     self.compile_expr(fc, v)?;
+                    if annotated || (peephole && matches!(v.kind, ExprKind::Int(_))) {
+                        fc.emit(Op::CoerceFloat, v.span);
+                    }
                 }
                 fc.emit(Op::NewMap(entries.len()), expr.span);
             }
             ExprKind::Set(elems) => {
+                // No widening: a `float` is not Hashable, so a set element is never float.
                 for e in elems {
                     self.compile_expr(fc, e)?;
                 }
@@ -2840,6 +2969,40 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile a struct constructor's positional argument list, coercing any argument whose declared
+    /// field type is `float` (one-way int→float widening) with `Op::CoerceFloat` right after that
+    /// argument is pushed — so the value sits on the stack as a genuine `f64` before `NewStruct`
+    /// consumes it. The field types come from the desugar-completed `struct_fields[key]` (defaults are
+    /// already filled, so `args.len()` matches the field count). A generic field typed `T` is not
+    /// `float`, so it is left untouched (matching the no-generic-widening carve-out). With no float
+    /// fields this is byte-identical to the old flat `for a in args { compile_expr }` loop.
+    fn compile_ctor_args(
+        &mut self,
+        fc: &mut FnComp,
+        key: &str,
+        args: &[Expr],
+    ) -> Result<(), CompileError> {
+        // Snapshot the per-field float-ness up front so we don't borrow `self.struct_fields` across
+        // the `&mut self` call to `compile_expr`.
+        let float_field: Vec<bool> = self
+            .struct_fields
+            .get(key)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .map(|f| crate::ast::is_float_ty(&f.ty))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (i, a) in args.iter().enumerate() {
+            self.compile_expr(fc, a)?;
+            if float_field.get(i).copied().unwrap_or(false) {
+                fc.emit(Op::CoerceFloat, a.span);
+            }
+        }
+        Ok(())
+    }
+
     fn compile_call(
         &mut self,
         fc: &mut FnComp,
@@ -2862,9 +3025,7 @@ impl Compiler {
             {
                 let key = self.type_key(tidx, name);
                 if self.program.structs.contains_key(&key) {
-                    for a in args {
-                        self.compile_expr(fc, a)?;
-                    }
+                    self.compile_ctor_args(fc, &key, args)?;
                     fc.emit(Op::NewStruct(key, args.len()), span);
                     return Ok(());
                 }
@@ -3025,9 +3186,7 @@ impl Compiler {
             if let Some(struct_key) = self.bare_types.get(name).cloned()
                 && self.program.structs.contains_key(&struct_key)
             {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
+                self.compile_ctor_args(fc, &struct_key, args)?;
                 fc.emit(Op::NewStruct(struct_key, args.len()), span);
                 return Ok(());
             }
@@ -3078,6 +3237,9 @@ impl Compiler {
         for p in params {
             child.add_local(p.name.clone());
         }
+        // A `float`-typed closure param coerces at the prologue, like a named-fn param. (A closure
+        // declares no return type, so there is no return-coercion here.)
+        self.emit_float_param_prologue(&mut child, params);
         self.compile_expr(&mut child, body)?;
         child.emit(Op::Return, span);
         let pid = self.finish(child);
@@ -3412,6 +3574,10 @@ struct FnComp {
     /// This proto is a `test fn` body (free test or suite method). Stamped onto the [`Proto`] in
     /// `finish`; used only by `chezzi test` discovery.
     is_test: bool,
+    /// One-way int→float widening — this fn's declared return type is `float`, so every `return`
+    /// (and an inline-expr body's implicit return) coerces its value with `Op::CoerceFloat` before
+    /// `Op::Return`. Set from `FnDecl.ret` at the start of `compile_fn` (closures declare no ret type).
+    ret_is_float: bool,
 }
 
 impl FnComp {
@@ -3433,6 +3599,7 @@ impl FnComp {
             has_implicit_nursery: false,
             is_generator: false,
             is_test: false,
+            ret_is_float: false,
         }
     }
 

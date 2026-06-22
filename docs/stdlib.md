@@ -153,7 +153,9 @@ Each is `import std.<name>` then `name.func(...)`. Implemented in Rust (`src/nat
 ### `std.math`
 Functions: `abs`, `floor`, `ceil`, `round`, `pow(base, exp)`, `sqrt`, `sin`, `cos`, `tan`,
 `asin`, `acos`, `atan`, `atan2(y, x)`, `exp`, `ln`, `log2`, `log10`, `log(value, base)`.
-`abs` is numeric-polymorphic (`int`→`int`, `float`→`float`); the rest take/return `float`.
+`abs` is numeric-polymorphic (`int`→`int`, `float`→`float`); the rest take/return `float`. A `float`
+parameter accepts an `int` argument via one-way `int`→`float` widening — `sqrt(16)` / `floor(2)` are
+the same as `sqrt(16.0)` / `floor(2.0)` (the int is converted to a real `f64`; see `syntax.md §3`).
 Constants: `math.pi`, `math.e`.
 
 ### `std.io`

@@ -151,6 +151,13 @@ pub enum Op {
     AsBool,
     /// Require the top of stack to be an int (range bounds, list index).
     AsInt,
+    /// One-way int→float coercion (C-like implicit widening). Replaces the top of stack: `Int(n)` →
+    /// `Float(n as f64)`; a `Float` is left unchanged (idempotent — so a re-coerced float param or a
+    /// double-coerce is a harmless no-op); any other type is a runtime error (the checker guarantees
+    /// the operand is numeric at every emit site). Emitted by the compiler at value-DEFINITION
+    /// boundaries whose static annotation is `float` (typed `let`, float params, float returns, float
+    /// struct fields, annotated/all-literal float collections) — a cheap inline op, not a builtin call.
+    CoerceFloat,
 
     // ----- superinstructions (M19 perf): peephole-fused windows of the hot numeric paths.
     // Each carries a `BinKind` (arith + ordered-compare; not `Eq`/`NotEq`, which use a different

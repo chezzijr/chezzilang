@@ -423,6 +423,15 @@ pub enum Type {
     Tuple(Vec<Type>),
 }
 
+/// True iff `ty` is the primitive `float` (bare `Type::Named("float")`). Used by the compiler and the
+/// interpreter to drive one-way int→float coercion at value-definition boundaries (`let x: float = 3`,
+/// float params, float returns, float struct fields). A generic param typed `T`, a `Qualified`/`Generic`
+/// type, or any non-`float` `Named` is NOT float — so no coercion fires there (matching the
+/// no-generic-widening carve-out). Shared so both engines coerce from the IDENTICAL annotation.
+pub fn is_float_ty(ty: &Type) -> bool {
+    matches!(ty, Type::Named(n) if n == "float")
+}
+
 // ===== expressions =====
 
 #[derive(Debug, Clone, PartialEq)]
