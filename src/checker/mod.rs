@@ -3679,7 +3679,10 @@ impl Checker {
             // declaration even when every call overrides it.
             if let Some(def) = &param.default {
                 let actual = self.infer(def);
-                if !matches!(ty, Ty::Unknown) && !self.assignable(&ty, &actual) {
+                // One-way int→float widening (scalar sink): a `float` param accepts an int default,
+                // coerced to f64 at the callee prologue (the default is desugar-spliced into the call
+                // when omitted). Mirrors the typed-`let`/arg/return/struct-field sinks.
+                if !matches!(ty, Ty::Unknown) && !self.assignable_w(&ty, &actual, true) {
                     self.error(
                         def.span,
                         format!(

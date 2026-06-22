@@ -29893,6 +29893,16 @@ main()";
         );
     }
 
+    /// An int DEFAULT value widens into a `float` param: omitted (`g()` → spliced default coerced at
+    /// the prologue) AND explicit int (`g(5)`) both store a genuine f64.
+    #[test]
+    fn widen_default_param_division() {
+        widen_three_engines(
+            "fn g(a: float = 3) -> float:\n    return a / 2\nprint(g())\nprint(g(5))\n",
+            "1.5\n2.5\n",
+        );
+    }
+
     /// An inline-expr fn body (`fn g(n: int) -> float: n + 1`) coerces its implicit return too.
     #[test]
     fn widen_inline_expr_body_return() {
