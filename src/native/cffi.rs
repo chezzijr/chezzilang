@@ -383,13 +383,7 @@ unsafe fn read_c_arg(slot: *const c_void, ct: &CType) -> NativeRet {
 unsafe fn write_c_result(slot: *mut c_void, ct: &CType, v: &NativeRet) {
     let as_int = |v: &NativeRet| match v {
         NativeRet::Int(n) => *n,
-        NativeRet::Bool(b) => {
-            if *b {
-                1
-            } else {
-                0
-            }
-        }
+        NativeRet::Bool(b) => i64::from(*b),
         _ => 0,
     };
     // SAFETY (all arms): `slot` is libffi's result buffer, >= register width and aligned (caller
