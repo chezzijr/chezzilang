@@ -6,14 +6,17 @@ to a one-line log — full detail lives in `PROGRESS.md` + the cited `examples/*
 
 Legend: 🔴 blocks real apps · 🟡 notable friction · ⚪ latent (not currently reachable) · 🟢 works.
 
-Last updated: 2026-06-21 (adversarial fuzz pass, 6 parallel hunters — 9 issues filed under "🔴 Soundness
+Last updated: 2026-06-22 (adversarial fuzz pass, 6 parallel hunters — 9 issues filed under "🔴 Soundness
 holes" below, all verified on both engines: **2 Rust panics** (interpolation w/ undefined name; list
-`map`/`filter`/`fold` when the callback shrinks the list), the **`Ty::Unknown` permissive-sentinel
-family** (empty collections + recursive-return inference + generic nullary variants — one root fix
-closes all three) incl. the float-key/NaN-footgun bypass, import name-collision mis-resolution,
-duplicate-binding-in-pattern last-wins, `--serial` generator-airlock parity divergence, inconsistent
-int→float coercion (the `ref` shared-method expression-receiver false rejection is now RESOLVED).
-Concurrency core (airlock, channel
+`map`/`filter`/`fold` when the callback shrinks the list) **✅ both RESOLVED**, the **`Ty::Unknown`
+permissive-sentinel family** (empty collections + recursive-return inference + generic nullary variants)
+**✅ three reachable producers RESOLVED** — residual: cross/post-branch refinement join still leaks (verified
+still live 2026-06-22), import name-collision mis-resolution **✅ RESOLVED**,
+duplicate-binding-in-pattern last-wins **✅ RESOLVED**, `--serial` generator-airlock parity divergence
+**[mooted-by-removal — `--serial` deprecated]**, inconsistent int→float coercion (still open), `ref`
+shared-method expression-receiver false rejection **✅ RESOLVED**. `break`/`continue` out of `parallel:`
+nursery-reclaim **✅ RESOLVED** (was mislabeled residual). `Shared.update` same-box hold-and-wait is
+**WON'T-FIX by design** (not an open gap). Concurrency core (airlock, channel
 close, deadlock detect, CAS, 100k spawns, cancel-tree) fuzzed clean.). Baseline: post-M21 (`newtype`), plus enum methods, raw string literals
 (`r"…"`), the `extern "lib"` header, module-scoped user types + module-qualified match patterns, and
 the `chezzi docs` / `chezzi init` CLI + `module:function` manifest entrypoint. Earlier baseline
@@ -186,16 +189,15 @@ concurrency D6 complete (Path C resolved). Gaps pass III.
   `duplicate_nested_pattern_binder_rejected`, `wildcard_repeated_in_pattern_ok`, `same_binder_across_arms_ok`,
   `or_pattern_same_names_across_alts_ok`.
 
-- **🟡 `--serial` lets a generator cross the `spawn`/`parallel:` airlock — engine-parity divergence; the
-  oracle is the unsound one.** A live generator captured as a module global and driven from inside a
-  `spawn`ed task is correctly rejected at runtime by the default OS-thread engine
-  (`a generator cannot be sent across tasks`), but `--serial` (the deprecated cooperative oracle) runs it,
-  sharing one mutable generator across the task boundary (parent reads 0, task advances to 1, parent reads
-  2). Same program → different observable output on the two engines, violating the byte-identical
-  invariant; `--serial` permits the airlock-forbidden behavior. Low urgency (serial is the
-  slated-for-removal parity oracle and the *default* engine is correct), but it is a real divergence.
-  **Pre-emptive fix:** mirror the VM's send-time generator-sendability check in the serial engine's
-  spawn/closure-capture path.
+- **🟡 [mooted-by-removal] `--serial` lets a generator cross the `spawn`/`parallel:` airlock — engine-parity
+  divergence; the oracle is the unsound one (NOT an open issue — `--serial` is deprecated/slated-for-removal).**
+  A live generator captured as a module global and driven from inside a `spawn`ed task is correctly
+  rejected at runtime by the default OS-thread engine (`a generator cannot be sent across tasks`), but
+  `--serial` (the deprecated cooperative oracle) runs it, sharing one mutable generator across the task
+  boundary (parent reads 0, task advances to 1, parent reads 2) — a real byte-identical divergence, but
+  the *default* engine is correct and `--serial` is going away. WON'T-FIX pending engine consolidation; if
+  `--serial` is instead kept as the oracle, the fix is to mirror the VM's send-time generator-sendability
+  check in the serial engine's spawn/closure-capture path.
 
 - **✅ RESOLVED (2026-06-22) — `ref` shared-method-name dispatch no longer falsely rejects an expression
   receiver.** When ≥2 structs share a method name with differing param ref-ness (so the receiver type must
@@ -288,15 +290,8 @@ netpoller + `std.net`). Remaining items are correctness/semantics nits, not miss
   goldens. **M:N already preempts** (reduction-counting, D3, `vm:2871`), so removing the cooperative
   engines closes this for free; the only coop-side fix worth considering is the back-edge yield budget
   *if* `--serial` is kept as the oracle.
-- **🟡 `Shared.update` same-box hold-and-wait — WON'T FIX by design.** Path C resolved the *general*
-  case (a `recv` inside `update(f)` waiting on a **different** box thread-demotes + resumes). The
-  carve-out: `update(f)` holds `update_lock` across `f`, so a `recv` needing the **same** box deadlocks
-  any sender for it. The universal hold-and-wait class (Go #13759 global-only; Rust
-  `clippy::await_holding_lock`; BEAM no shared locks). Rule: don't block on a value needing the same
-  `Shared` box. Future: a lint when the tooling track lands.
-- **🟡 (residual) `break`/`continue` out of `parallel:` inside a loop reclaims its nursery only at fn
-  return**, not block-scoped like interp's `exec_parallel` pop — bounded to frame lifetime, output always
-  correct. Closing it needs loop-exit-jump codegen to emit a nursery-drain across a nursery boundary.
+(`Shared.update` same-box hold-and-wait is **not an open issue** — WON'T-FIX by design; see the
+⚫ by-design section below.)
 
 ### 🟡 Stdlib breadth (low priority — core constructs are in place; this is library fill)
 
@@ -495,6 +490,15 @@ Recorded for completeness — likely stay as-is unless a real program forces the
   scope C5). Narrow cross-nursery M:N limits beyond the coop-flatten above: contended shared channel
   (2+ receivers racing one channel — concurrent-divergent **by design**, never panics/hangs), inline-body
   *blocking* recv (case B — put it in a `spawn:`), eager-nursery cross-wake (concurrency.md §11).
+- **`Shared.update` same-box hold-and-wait — WON'T-FIX by design (not an open gap).** Path C resolved
+  the *general* case (a `recv` inside `update(f)` waiting on a **different** box thread-demotes +
+  resumes). The carve-out: `update(f)` holds `update_lock` across `f`, so a `recv` needing the **same**
+  box deadlocks any sender for it. Universal hold-and-wait class (Go #13759 global-only; Rust
+  `clippy::await_holding_lock`; BEAM no shared locks). Rule: don't block on a value needing the same
+  `Shared` box. `update` stays — it is the only atomic RMW; dropping it for get/set reintroduces a
+  silent lost-update race (worse footgun). Future: may surface this via a `share` binding modifier
+  (mirroring `ref T` for `Ref[T]`) and/or a lint when the tooling track lands. Tracked:
+  `docs/concurrency-tier-d.md:245`.
 - **`int32` / unsigned C ints** — no such scalar (feature-frozen by design; FFI widens at the boundary).
 - **Defaults / named args on built-in methods** (`map`/`push`/`len`/…) — unsupported by design
   (syntax.md:216); user methods + free fns + ctors have them.
@@ -566,6 +570,8 @@ thread-demotion — #1 false-positive + #3 sleep/socket (`f828ef7`, D-tier compl
 WON'T-FIX carve-out above); **`std.cancel`** task cancellation/timeout `Token` + `Channel.trip()` latch
 (flat tokens v1; `docs/concurrency.md` §6e); cross-nursery M:N flat scheduler (coop flatten still open above);
 `Channel.close()`, per-socket `timeout_ms` (D6c), per-connection `spawn` all landed.
+**`break`/`continue` out of `parallel:` in a loop** — block-scoped nursery reclaim at the jump
+(`emit_loop_nursery_drain` → `Op::ReclaimNursery`, `d8fc2b4`); was mislabeled residual, verified resolved both engines.
 
 **Round 1 (#1–9) ✅** · index/field assignment, HOF params, list methods (`map`/`filter`/`fold`),
 `map` type, literal/wildcard `match`, `break`/`continue`, tuples + destructuring, strict compound assign.
