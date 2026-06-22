@@ -2826,9 +2826,18 @@ impl Vm {
         f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
         self.native_reentry += 1;
-        let r = f(self);
+        // The guard counter MUST return to its entry value on every exit path, including an unwind:
+        // it gates park-vs-demote for all blocking concurrency ops, and a re-entered FFI callback's
+        // Rust panic is caught one frame up (`callback_trampoline`'s `catch_unwind`) and re-raised as
+        // a recoverable error — so a plain `-= 1` after `f(self)` would be skipped on panic and leak
+        // the counter at +1 for the VM's lifetime. A `Drop`-based guard can't be used here (it would
+        // alias `self` across `f(self)`), so catch the unwind, decrement, then resume it unchanged.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
         self.native_reentry -= 1;
-        r
+        match r {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     // ----- experimental generators (VM-only) -----
@@ -16433,6 +16442,33 @@ main()
         vm.push(Value::Int(2));
         vm.do_call(2, Span { line: 1, col: 1 }).unwrap();
         assert_eq!(vm.pop(), Value::Int(42));
+    }
+
+    #[test]
+    fn guarded_restores_native_reentry_on_panic() {
+        // Regression (FFI callbacks): a Rust panic re-entered through a native FFI callback is caught
+        // one frame up by `callback_trampoline`'s `catch_unwind` and re-raised as a recoverable error.
+        // `guarded` MUST restore `native_reentry` on that unwind — otherwise the counter leaks at +1
+        // for the VM's lifetime, and every blocking op gated on `native_reentry == 0` silently
+        // demotes/inlines instead of parking on `--parallel` after a recovered callback panic
+        // (diverging from interp, which has no such counter). A `Drop` guard can't fix this (it would
+        // alias `self` across the re-entry), so `guarded` catches + decrements + resumes the unwind.
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        assert_eq!(vm.native_reentry, 0);
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the expected panic print
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vm.guarded(|_vm| -> Result<(), RuntimeError> { panic!("callback boom") })
+        }));
+        std::panic::set_hook(prev);
+        assert!(
+            caught.is_err(),
+            "the panic must propagate out of guarded unchanged"
+        );
+        assert_eq!(
+            vm.native_reentry, 0,
+            "native_reentry must return to its entry value after a panicking re-entry"
+        );
     }
 
     #[test]

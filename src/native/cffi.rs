@@ -430,7 +430,11 @@ unsafe fn write_c_result(slot: *mut c_void, ct: &CType, v: &NativeRet) {
 /// a host error / caught panic into for [`Cffi::call`] to re-raise. NOT stored, never sent across a
 /// thread: built on the `call` stack, freed when `call` returns.
 struct TrampolineCtx<'h> {
-    host: *mut (dyn Host + 'h),
+    // Filled in AFTER the whole arg-reading loop finishes (see `Cffi::call`): deriving this raw
+    // pointer from the `&mut dyn Host` param mid-loop would be invalidated by the later `host.arg_*`
+    // reborrows for trailing params (Stacked/Tree Borrows), so we capture it as the final use of
+    // `host`. `None` only in the window before that patch; always `Some` by the time C can fire.
+    host: Option<*mut (dyn Host + 'h)>,
     arg_index: usize,
     params: *const [CType],
     ret: *const CType,
@@ -474,11 +478,15 @@ unsafe extern "C" fn callback_trampoline(
             let slot = unsafe { *args.add(i) } as *const c_void;
             native_args.push(unsafe { read_c_arg(slot, p) });
         }
-        // SAFETY: `ctx.host` is the live `&mut dyn Host` (this trampoline fires synchronously inside
-        // the same `ffi_call`, on the same thread, while that borrow is live one frame up). No other
-        // alias is active during this call (the engine is single-threaded; re-entry is plain Rust-
-        // stack recursion through the Host trait).
-        let host: &mut dyn Host = unsafe { &mut *ctx.host };
+        // SAFETY: `ctx.host` is the raw pointer captured as the FINAL use of the `&mut dyn Host` param
+        // (after every `host.arg_*` read), so no later reborrow has invalidated it. The trampoline
+        // fires synchronously inside the same `ffi_call`, on the same thread, while that borrow is
+        // dormant one frame up; the engine is single-threaded so no other alias is active. `expect`
+        // can't trip: `Cffi::call` always patches `host` to `Some` before `ffi_call`.
+        let host_ptr = ctx
+            .host
+            .expect("trampoline host pointer set before ffi_call");
+        let host: &mut dyn Host = unsafe { &mut *host_ptr };
         host.invoke_callback(ctx.arg_index, &native_args)
     }));
 
@@ -519,7 +527,9 @@ unsafe extern "C" fn callback_trampoline(
 struct CallbackClosure<'h> {
     handle: *mut libffi::raw::ffi_closure,
     _cif: Cif,
-    _ctx: Box<TrampolineCtx<'h>>,
+    // Patched (its `host` field) after the arg loop, then read by libffi during the call via the
+    // userdata pointer; kept alive until drop. Not `_`-prefixed because `Cffi::call` writes it.
+    ctx: Box<TrampolineCtx<'h>>,
 }
 
 impl Drop for CallbackClosure<'_> {
@@ -807,13 +817,13 @@ impl Cffi {
                 }
                 CType::Callback { params, ret } => {
                     // Build a libffi closure trampoline for this callback param. Its userdata holds a
-                    // raw `*mut dyn Host` + this arg index + the callback signature + the shared fault
-                    // slot; when C invokes the code pointer, `callback_trampoline` re-enters the engine
-                    // via `host.invoke_callback(arg_index, ...)`. The host raw pointer is valid for the
-                    // whole `ffi_call` (it fires synchronously, same thread, while `host` is live).
-                    let host_ptr: *mut (dyn Host + '_) = host;
+                    // this arg index + the callback signature + the shared fault slot; when C invokes
+                    // the code pointer, `callback_trampoline` re-enters the engine via
+                    // `host.invoke_callback(arg_index, ...)`. The host raw pointer is deliberately NOT
+                    // captured here — it is patched in after the loop (as the final use of `host`), so
+                    // a trailing `host.arg_*` reborrow can't invalidate it (Stacked/Tree Borrows).
                     let mut ctx = Box::new(TrampolineCtx {
-                        host: host_ptr,
+                        host: None,
                         arg_index: i,
                         params: params.as_slice() as *const [CType],
                         ret: ret.as_ref() as *const CType,
@@ -850,7 +860,7 @@ impl Cffi {
                     callback_closures.push(CallbackClosure {
                         handle,
                         _cif: cb_cif,
-                        _ctx: ctx,
+                        ctx,
                     });
                     cb_codes.push(code_ptr);
                     slots.push(Slot::Callback(cb_codes.len() - 1));
@@ -870,6 +880,18 @@ impl Cffi {
                 }
             }
         }
+        // Capture the host pointer for every callback trampoline NOW — as the final use of `host`,
+        // after all `host.arg_*` reads are done. Deriving it earlier (mid-loop) would be invalidated
+        // by the subsequent reborrows for trailing params under Stacked/Tree Borrows; capturing it
+        // last makes the raw pointer the live tag for the duration of `ffi_call` (where the
+        // trampoline, firing synchronously on this thread, dereferences it).
+        if !callback_closures.is_empty() {
+            let host_ptr: *mut (dyn Host + '_) = host;
+            for cc in &mut callback_closures {
+                cc.ctx.host = Some(host_ptr);
+            }
+        }
+
         // Fill the pointer args now that `cstrings` won't move again.
         for slot in &slots {
             if let Slot::Ptr(idx) = slot {
@@ -1684,9 +1706,11 @@ mod tests {
     // ---- Sync scalar callbacks (callbacks #4) ----
 
     /// Compile a tiny C fixture to a `.so` in a unique temp dir and return its path. The fixture
-    /// exports `int apply(int x, int (*f)(int)) { return f(x) + 1; }` and
-    /// `double applyd(double x, double (*f)(double)) { return f(x); }` — enough to round-trip an int
-    /// and a float callback synchronously. Built with the system `cc` (the same toolchain the FFI
+    /// exports `int apply(int x, int (*f)(int)) { return f(x) + 1; }`,
+    /// `double applyd(double x, double (*f)(double)) { return f(x); }`, and
+    /// `int apply2(int (*f)(int), int x) { return f(x) + 1; }` (callback-FIRST, for the not-last
+    /// arg path) — enough to round-trip an int and a float callback synchronously. Built with the
+    /// system `cc` (the same toolchain the FFI
     /// tests already require: a unix LP64 host with libc/libm); a `cc` failure `panic!`s the test
     /// loudly rather than silently skipping (matching how `dlopen` failures are asserted, not skipped).
     fn build_callback_so() -> std::path::PathBuf {
@@ -1704,6 +1728,7 @@ mod tests {
             br#"
 int apply(int x, int (*f)(int)) { return f(x) + 1; }
 double applyd(double x, double (*f)(double)) { return f(x); }
+int apply2(int (*f)(int), int x) { return f(x) + 1; }
 "#,
         )
         .expect("write apply.c");
@@ -1742,6 +1767,33 @@ double applyd(double x, double (*f)(double)) { return f(x); }
         let mut host = MockHost::default()
             .int(10)
             .callback(CbBehavior::DoubleIntPlusOne);
+        assert_eq!(f.call(&mut host), Ok(NativeRet::Int(22)));
+    }
+
+    #[test]
+    fn callback_not_last_arg_roundtrip() {
+        // Regression: a callback param that is NOT the final parameter. The host raw pointer baked
+        // into the trampoline ctx is captured AFTER the whole arg loop (the last use of `host`), so
+        // the trailing `host.arg_int` reborrow for `x` cannot invalidate it (Stacked/Tree Borrows
+        // UB). Every other callback test puts the callback last, so this is the only one exercising
+        // the not-last path. `apply2(f, 10) == f(10) + 1 == (2*10 + 1) + 1 == 22`.
+        let so = build_callback_so();
+        let f = Cffi::new(
+            so.to_str().unwrap(),
+            "apply2",
+            vec![
+                CType::Callback {
+                    params: vec![CType::Int32],
+                    ret: Box::new(CType::Int32),
+                },
+                CType::Int32,
+            ],
+            Some(CType::Int32),
+        )
+        .expect("dlopen apply2");
+        let mut host = MockHost::default()
+            .callback(CbBehavior::DoubleIntPlusOne)
+            .int(10);
         assert_eq!(f.call(&mut host), Ok(NativeRet::Int(22)));
     }
 
