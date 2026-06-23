@@ -1074,6 +1074,8 @@ label := match shape:
 
 # if-expression: inline, ternary-style — `else` is REQUIRED
 sign := if n > 0: "pos" else: "neg"
+# chained: `else if` chains without parentheses (the final `else` stays mandatory)
+grade := if s >= 90: "A" else if s >= 80: "B" else: "F"
 ```
 
 All arms (and both `if` branches) must agree on a type. The statement forms — `match s:` /

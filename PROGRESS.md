@@ -11,6 +11,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ DX — chained `else if` in expression-`if` (gaps.md DX gap #2) (2026-06-23).** `a := if p: 1
+else if q: 2 else: 3` parses without parentheses. Parser-only (~10 lines): `parse_if_expr`
+(`src/parser/mod.rs`) now branches after consuming `Else` — if the next token is `If` it captures the
+inner `if` span and recurses into `parse_if_expr` for the else-branch (right-associative nested
+`ExprKind::IfElse`), else the existing `else: <expr>` tail. Final `else` stays mandatory (the recursion
+ends in its own `expect(Else)`). No checker/compiler/interp/VM change — the nested `IfElse` is the same
+AST shape the hand-parenthesized workaround produced, so both engines already evaluate it byte-identically.
+**Parity by construction.** Tests: 2 parser unit tests (chain nests right-associatively; chain still
+requires final else) + golden `examples/expr_else_if.chz` (VM == interp == `.expected`). Docs:
+`docs/grammar.bnf` (`<ifExpr>` + new `<ifExprTail>` tail rule), `docs/syntax.md` (chained example),
+`gaps.md` (gap #2 → RESOLVED log, others renumbered). Full suite + conformance + `clippy --all-targets
+-D warnings` clean.
+
 **✅ Feature — FFI C-buffer alloc layer `std.ffi.alloc`/`alloc_zeroed`/`free` (feasibility-ladder
 tier 3) (2026-06-22).** Allocate raw C-laid-out memory to hand to a C array/buffer API (`qsort`,
 `bsearch`, `fread`-into-buffer): `alloc(nbytes) -> ptr` (`malloc`; garbage bytes),
