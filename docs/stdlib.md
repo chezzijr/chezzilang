@@ -197,9 +197,25 @@ Constants: `math.pi`, `math.e`.
 | `exit` | `(code: int) -> never` | Hard, uncatchable halt (status clamped `0..=255`), unwinding past any `recover:`. **Does NOT run `defer`s.** |
 
 ### `std.fs`
-`list_dir(path) -> Result[list[str]]` (sorted names) · `exists(path) -> bool` ·
+**Queries:** `list_dir(path) -> Result[list[str]]` (sorted names) · `exists(path) -> bool` ·
 `is_file(path) -> bool` · `is_dir(path) -> bool` · `size(path) -> Result[int]` ·
 `glob(pattern) -> Result[list[str]]` (`*`/`?` in the final path component).
+
+**Mutations** (all `Result[nil]` — a permission-denied / missing-parent failure is a catchable `Err`,
+never a panic):
+`mkdir(path) -> Result[nil]` — create a directory **recursively** (like `mkdir -p`: missing parents
+are created, an existing dir is a no-op/idempotent) ·
+`remove_file(path) -> Result[nil]` — delete a file (`Err` if missing or a directory) ·
+`remove_dir(path) -> Result[nil]` — delete an **empty** directory; **non-recursive** (`Err` on a
+non-empty dir — there is intentionally no silent `rm -rf`) ·
+`rename(from, to) -> Result[nil]` — move/rename a path ·
+`copy(from, to) -> Result[nil]` — copy a file's contents (file-only; the byte count is dropped) ·
+`append(path, contents) -> Result[nil]` — append a string to a file, creating it if absent and
+**never truncating** (complements `std.io.write_file`, which overwrites).
+
+**Limit (v1):** recursive directory removal (`remove_dir_all` / `rm -rf`) is intentionally **not**
+provided — `remove_dir` is empty-only to avoid an accidental recursive wipe. Walk + remove in Chezzi
+if you need it.
 
 ### `std.time`
 `now() -> int` (Unix epoch seconds, UTC) · `monotonic() -> float` (seconds, immune to clock changes) ·

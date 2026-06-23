@@ -11,6 +11,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ stdlib — `std.fs` filesystem mutations (gaps.md "fs mutations") (2026-06-24).** `std.fs` was
+read-only; it now writes. Six new natives in `src/native/fs.rs`, each mirroring `std.io.write_file`'s
+fault idiom (`Ok(NativeRet::Ok(Nil))` / `Ok(NativeRet::Err("{path}: {e}"))`) so an I/O failure is a
+catchable `Err`, never a panic — and all are `Result[nil]`: `mkdir(path)` (recursive via
+`create_dir_all`, mkdir -p, idempotent on an existing dir), `remove_file(path)`, `remove_dir(path)`
+(**empty-only / non-recursive** — faults on a non-empty dir, no silent `rm -rf`), `rename(from, to)`,
+`copy(from, to)` (file contents; byte count dropped for `Result[nil]` parity with `write_file`),
+`append(path, contents)` (`OpenOptions` create+append — creates if absent, **never truncates**,
+complementing `write_file`'s overwrite). 3-engine parity is by construction at the NativeFn seam (interp
+/ cooperative VM / M:N all call the same `fs.rs` fn). Wired into `is_blocking()` (std.fs arm) so the M:N
+engine offloads them like the read ops; checker `native_module_sig` std.fs arm gains the six sigs
+(`mkdir`/`remove_file`/`remove_dir`: `str -> Result[nil]`; `rename`/`copy`/`append`: `str, str ->
+Result[nil]`). **Limit (documented, deferred):** recursive dir removal (`rm -rf`) is intentionally not
+provided — `remove_dir` is empty-only to avoid an accidental wipe. Tests (RED-first): 2 `fs.rs` unit
+(roundtrip mkdir→append→rename→copy→remove + recoverable-error cases via a temp-dir `Host` mock), the
+`is_blocking` offloadable-set + uniqueness-guard lists, 2 checker tests (the six sigs typecheck as
+`Result[nil]`; wrong-arity rejected), and the self-cleaning golden `examples/fs_mutations.chz`
+(VM + interp twins, serialized via `FS_SCRATCH_LOCK` on the shared `examples/.fs_scratch`; gitignored;
+fixed status lines + read-back contents, no absolute paths) — manually verified byte-identical under
+run / --serial / --parallel and leaves no scratch behind. No grammar change (plain import + member
+calls; conformance clean). Docs: `docs/stdlib.md` (§std.fs split into Queries/Mutations + the
+non-recursive/never-truncate limits), `gaps.md` (fs mutations → ✅ RESOLVED). Full suite + conformance +
+`clippy --all-targets -D warnings` clean.
+
 **✅ stdlib — `std.rand` native RNG (gaps.md highest stdlib gap) (2026-06-23).** A SplitMix64 PRNG.
 **Native module `std.rand`** (`src/native/rand.rs`) exposes scalars only: `seed(n: int) -> nil`
 (deterministic reseed), `float() -> float` in `[0, 1)`, `int(lo, hi) -> int` (half-open `[lo, hi)`;

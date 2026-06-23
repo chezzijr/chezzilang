@@ -3,3 +3,6 @@
 
 # git worktrees (local, not tracked)
 .worktrees/
+
+# scratch dir written by examples/fs_mutations.chz (self-cleaning; this guards a crashed run)
+/examples/.fs_scratch

@@ -283,8 +283,9 @@ pub fn is_blocking(name: &str) -> bool {
         name,
         // std.io (file I/O only — print/eprint/read_line touch host stdio, run inline)
         "read_file" | "write_file"
-        // std.fs (all members are filesystem syscalls)
+        // std.fs (all members are filesystem syscalls — reads + mutations)
         | "list_dir" | "exists" | "is_file" | "is_dir" | "size" | "glob"
+        | "mkdir" | "remove_file" | "remove_dir" | "rename" | "copy" | "append"
         // std.time
         | "sleep_ms"
         // std.request (network I/O) + std.process (subprocess) — D5 owe #1.
@@ -488,6 +489,13 @@ mod tests {
             "is_dir",
             "size",
             "glob",
+            // std.fs mutations — filesystem syscalls, off-heap-safe (only str args, primitive returns).
+            "mkdir",
+            "remove_file",
+            "remove_dir",
+            "rename",
+            "copy",
+            "append",
             "sleep_ms",
         ] {
             assert!(is_blocking(name), "{name} should be blocking");

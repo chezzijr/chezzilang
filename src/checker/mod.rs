@@ -547,6 +547,14 @@ fn native_module_sig(name: &str) -> ModuleSig {
             func("is_dir", vec![Ty::Str], Ty::Bool);
             func("size", vec![Ty::Str], Ty::result(Ty::Int));
             func("glob", vec![Ty::Str], Ty::result(Ty::list(Ty::Str)));
+            // Mutations (M8+) — all `Result[nil]`. `mkdir` is recursive (mkdir -p); `remove_dir` is
+            // non-recursive (faults on a non-empty dir); `append` creates-if-absent + never truncates.
+            func("mkdir", vec![Ty::Str], Ty::result(Ty::Nil));
+            func("remove_file", vec![Ty::Str], Ty::result(Ty::Nil));
+            func("remove_dir", vec![Ty::Str], Ty::result(Ty::Nil));
+            func("rename", vec![Ty::Str, Ty::Str], Ty::result(Ty::Nil));
+            func("copy", vec![Ty::Str, Ty::Str], Ty::result(Ty::Nil));
+            func("append", vec![Ty::Str, Ty::Str], Ty::result(Ty::Nil));
         }
         "std.time" => {
             func("now", vec![], Ty::Int);

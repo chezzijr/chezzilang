@@ -1,0 +1,81 @@
+# examples/fs_mutations.chz — the std.fs MUTATION surface (M8+): mkdir / append / rename / copy /
+# remove_file / remove_dir, exercised as a self-cleaning round-trip. Output is FIXED status lines +
+# read-back contents only (never an absolute path), so the golden is deterministic and
+# path-independent across run / --serial / --parallel. The scratch dir is `examples/.fs_scratch`
+# (gitignored) and is fully torn down at the end.
+
+import std.fs
+import std.io
+
+root := "examples/.fs_scratch"
+nested := root + "/a/b/c"
+log := nested + "/log.txt"
+moved := nested + "/moved.txt"
+copied := nested + "/copy.txt"
+
+# mkdir is recursive (mkdir -p): one call creates a/b/c and all parents.
+match fs.mkdir(nested):
+    Ok(_): print("mkdir: " + str(fs.is_dir(nested)))
+    Err(e): print("mkdir err: " + e.message())
+
+# mkdir is idempotent on an existing dir (no error the second time).
+match fs.mkdir(nested):
+    Ok(_): print("mkdir again: ok")
+    Err(e): print("mkdir again err: " + e.message())
+
+# append creates the file if absent, then appends (never truncates).
+match fs.append(log, "hello"):
+    Ok(_): print("append1: ok")
+    Err(e): print("append1 err: " + e.message())
+match fs.append(log, " world"):
+    Ok(_): print("append2: ok")
+    Err(e): print("append2 err: " + e.message())
+
+# read back the appended contents (proves append accumulated).
+match io.read_file(log):
+    Ok(s): print("contents: " + s)
+    Err(e): print("read err: " + e.message())
+
+# rename moves the file.
+match fs.rename(log, moved):
+    Ok(_): print("rename: gone=" + str(not fs.exists(log)) + " present=" + str(fs.exists(moved)))
+    Err(e): print("rename err: " + e.message())
+
+# copy duplicates the file (source stays).
+match fs.copy(moved, copied):
+    Ok(_): print("copy: present=" + str(fs.exists(copied)) + " src=" + str(fs.exists(moved)))
+    Err(e): print("copy err: " + e.message())
+
+match io.read_file(copied):
+    Ok(s): print("copy contents: " + s)
+    Err(e): print("read err: " + e.message())
+
+# remove_file on a missing path is a catchable error (recoverable fault, not a crash).
+match fs.remove_file(nested + "/nope.txt"):
+    Ok(_): print("remove missing: unexpected ok")
+    Err(_): print("remove missing: err (expected)")
+
+# remove_dir on a NON-empty dir is a catchable error (non-recursive — no silent rm -rf).
+match fs.remove_dir(nested):
+    Ok(_): print("remove nonempty: unexpected ok")
+    Err(_): print("remove nonempty: err (expected)")
+
+# tear down: remove the files, then the (now-empty) dirs bottom-up.
+match fs.remove_file(moved):
+    Ok(_): print("rm moved: ok")
+    Err(e): print("rm moved err: " + e.message())
+match fs.remove_file(copied):
+    Ok(_): print("rm copy: ok")
+    Err(e): print("rm copy err: " + e.message())
+match fs.remove_dir(nested):
+    Ok(_): print("rm c: ok")
+    Err(e): print("rm c err: " + e.message())
+match fs.remove_dir(root + "/a/b"):
+    Ok(_): print("rm b: ok")
+    Err(e): print("rm b err: " + e.message())
+match fs.remove_dir(root + "/a"):
+    Ok(_): print("rm a: ok")
+    Err(e): print("rm a err: " + e.message())
+match fs.remove_dir(root):
+    Ok(_): print("rm root: gone=" + str(not fs.exists(root)))
+    Err(e): print("rm root err: " + e.message())

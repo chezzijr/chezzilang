@@ -49,7 +49,11 @@ Current: `fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`
   Native scalars `seed`/`float`/`int`/`bool`; generic `shuffle`/`choice`/`sample` in `std.iter` (the
   native seam can't carry generic `list[T]`). Limit: concurrent draws under `--parallel` interleave on
   the shared global RNG (documented in docs/stdlib.md §std.rand).
-- **fs mutations** — read-only today; missing `mkdir`/`remove`/`rename`/`copy`/`append`.
+- ✅ **fs mutations** *(RESOLVED)* — `std.fs` now writes: `mkdir` (recursive, mkdir -p), `remove_file`,
+  `remove_dir` (empty-only, non-recursive), `rename`, `copy` (file contents), `append` (create-if-absent,
+  never truncates). All `Result[nil]`, faulting (catchable `Err`) on I/O error — never a panic. Wired into
+  `is_blocking` so the M:N engine offloads them. Limit: recursive dir removal (`rm -rf`) intentionally
+  deferred — `remove_dir` is empty-only to avoid a silent wipe (documented in docs/stdlib.md §std.fs).
 - **Encoding/crypto** — no base64, hex, sha/md5, uuid, url-encode.
 - **`std.process` polish** — only `cmd(line)` via `sh -c` (injection-prone), stdout discarded on failure.
   Want structured result (both streams + exit code) + args-array form.
