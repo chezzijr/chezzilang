@@ -8720,6 +8720,31 @@ b := Buf([10, 20, 30])
         assert_eq!(out, expected);
     }
 
+    /// std.fs mutations (mkdir/append/rename/copy/remove_file/remove_dir): interp-side twin of the VM
+    /// `golden_fs_mutations_via_run_file`. Imports std modules, so it drives `run_file` and byte-matches
+    /// `.expected`. The script self-cleans `examples/.fs_scratch`; pre/post-remove guards a crashed run.
+    #[test]
+    fn golden_fs_mutations_chz() {
+        // Serialize against the VM golden: both write the single fixed examples/.fs_scratch.
+        let _g = crate::native::fs::FS_SCRATCH_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let scratch =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/.fs_scratch");
+        let _ = std::fs::remove_dir_all(&scratch);
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fs_mutations.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/fs_mutations.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("fs_mutations.chz should run on the interp");
+        assert_eq!(out, expected);
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     /// `Channel.trip()` latch + `std.cancel` (interp twins of the VM `*_via_run_file` goldens). Each
     /// imports a std module, so they drive `run_file` (the module-graph path) and byte-match `.expected`.
     #[test]

@@ -1,0 +1,16 @@
+mkdir: true
+mkdir again: ok
+append1: ok
+append2: ok
+contents: hello world
+rename: gone=true present=true
+copy: present=true src=true
+copy contents: hello world
+remove missing: err (expected)
+remove nonempty: err (expected)
+rm moved: ok
+rm copy: ok
+rm c: ok
+rm b: ok
+rm a: ok
+rm root: gone=true

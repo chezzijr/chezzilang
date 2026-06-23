@@ -29303,6 +29303,32 @@ main()
         assert_file_parity("examples/sys.chz");
     }
 
+    /// M8+ golden: `examples/fs_mutations.chz` — the std.fs mutation surface (mkdir/append/rename/
+    /// copy/remove_file/remove_dir) as a self-cleaning round-trip. The script writes into the
+    /// gitignored `examples/.fs_scratch` and tears it down; the test pre/post-removes the scratch so a
+    /// prior crash cannot poison the run, and asserts byte-identical stdout on the VM + interp.
+    #[test]
+    fn golden_fs_mutations_via_run_file() {
+        // Serialize against the interp twin: both write the single fixed examples/.fs_scratch.
+        let _g = crate::native::fs::FS_SCRATCH_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let scratch = fixture("examples/.fs_scratch");
+        let _ = std::fs::remove_dir_all(&scratch); // guard against a stale dir from a crashed run
+        let path = fixture("examples/fs_mutations.chz");
+        let expected = std::fs::read_to_string(fixture("examples/fs_mutations.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/fs_mutations.chz");
+        // The round-trip removes its own scratch; assert nothing leaked into the working tree.
+        assert!(
+            !scratch.exists(),
+            "fs_mutations.chz left examples/.fs_scratch behind"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     /// Comprehensions golden: `examples/comprehensions.chz` — list/set/map comprehensions, a guard,
     /// and a range source. Byte-matches `.expected` and stays identical on interp + VM.
     #[test]
