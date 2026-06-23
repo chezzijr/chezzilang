@@ -11,6 +11,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ DX — print `sep=`/`end=` + assert message format (gaps.md DX gaps #5 + #6) (2026-06-23).** Two
+cohesive builtin-ergonomics fixes. **print (#5):** `print` is now special-cased to accept exactly two
+named arguments — `sep` (default `" "`, joins the positional args) and `end` (default `"\n"`, appended
+after). Both must be `str` and may be runtime expressions (not just literals). `print("a","b")` → `a b\n`
+(unchanged), `print("a", end="")` → `a` (no newline → incremental output), `print("a","b", sep="-",
+end="!")` → `a-b!`. Wired through **desugar** (`print` keeps only `sep`/`end` on its Call un-rewritten,
+rejecting any other kwarg / a dup with "print() only accepts the named arguments 'sep' and 'end'"),
+**checker** (each `sep`/`end` value must be `str`, else "print() sep/end must be str, found <T>"),
+**compiler** (new `Op::CallPrintSep{argc}` that pushes `sep`+`end` after the args; a plain `print(...)`
+with no kwargs still emits `Op::CallPrint` → output byte-identical to before), and **both engines**
+(`vm::do_print_sep` + the interp print branch, same join-with-`sep`/append-`end` order: positional args →
+sep → end). **assert (#6):** the `assert cond, "msg"` STATEMENT form already existed end-to-end; the fix
+is the **fault wording** — a failing `assert false, "boom"` now faults as `assertion failed: boom` (was
+the raw `boom`), bare `assert false` keeps exactly `assertion failed`, and `msg` is still evaluated lazily
+on the failing path only. Two fault sites (`vm/mod.rs` `Op::Assert` + `interp/mod.rs` `Assert`),
+byte-identical across engines. Tests (all RED-first): 4 desugar (sep/end kept, unknown/dup kwarg rejected),
+3 checker (sep/end str ok, sep/end non-str rejected), 7 VM behavior (end="", sep=, both, default unchanged,
+runtime expr, only-end), 1 VM↔interp print parity (8 forms), updated assert tests + new lazy-on-pass guards
+on both engines, and golden `examples/print_kwargs.chz` (VM == interp == `.expected`). Docs:
+`docs/syntax.md` (assert fault wording + lazy msg), `docs/stdlib.md` (print signature with `sep=`/`end=`),
+`gaps.md` (gaps #5/#6 → RESOLVED log). No grammar change (print kwargs are ordinary call named-args;
+conformance clean). Full suite + conformance + `clippy --all-targets -D warnings` clean.
+
 **✅ DX — stepped / reverse range (gaps.md DX gap #4) (2026-06-23).** `range()` gained a 3-arg
 `range(start, end, step)` form (the 1-arg/2-arg forms are byte-unchanged). `step` is a **non-zero int**:
 positive counts up half-open `[start, end)`, negative counts down half-open (excludes `end`), e.g.

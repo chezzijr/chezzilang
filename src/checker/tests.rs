@@ -6979,6 +6979,27 @@ fn assert_ok() {
     ok("assert true, \"m\"\n");
 }
 
+// ===== print sep=/end= =====
+
+#[test]
+fn print_sep_end_str_ok() {
+    // The `sep`/`end` named args (kept on the Call by desugar) type-check when str.
+    ok_desugared("print(\"a\", \"b\", sep=\"-\", end=\"!\")\n");
+    ok_desugared("print(\"a\", end=\"\")\n");
+    // str expressions (not just literals) are fine.
+    ok_desugared("s := \"-\"\nprint(\"a\", \"b\", sep=s)\n");
+}
+
+#[test]
+fn print_sep_non_str_rejected() {
+    rejects_desugared("print(\"a\", sep=1)\n", "print() sep/end must be str");
+}
+
+#[test]
+fn print_end_non_str_rejected() {
+    rejects_desugared("print(\"a\", end=1)\n", "print() sep/end must be str");
+}
+
 // ===== test fn =====
 
 #[test]

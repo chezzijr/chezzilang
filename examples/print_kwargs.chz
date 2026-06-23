@@ -1,0 +1,27 @@
+# `print` with `sep=` / `end=` named arguments (the only builtin that takes kwargs).
+#   sep (default " ") joins the positional args; end (default "\n") is appended after.
+# This proves: the default form is unchanged, `end=""` suppresses the newline (incremental
+# output), `sep=` rejoins, both combine, and both accept runtime str expressions — all
+# byte-identical on the VM and the interpreter.
+
+# default: space-joined, newline-terminated
+print("a", "b", "c")
+
+# end="" — no trailing newline; build one line in pieces, then close it
+print("x", end="")
+print("y", end="")
+print("z")
+
+# sep="-" — custom separator, default newline
+print("a", "b", "c", sep="-")
+
+# both together
+print("a", "b", sep=", ", end="!\n")
+
+# runtime str expressions (not just literals)
+dash := " | "
+nl := "\n"
+print(1, 2, 3, sep=dash, end=nl)
+
+# only end=, default space separator preserved
+print("p", "q", end="\n")

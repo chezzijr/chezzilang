@@ -3863,8 +3863,10 @@ impl Vm {
                 // which only evaluates `msg` when the assertion fails.
                 let message = if *has_msg {
                     let m = self.pop();
-                    self.val_str(m)
-                        .unwrap_or_else(|| "assertion failed".to_string())
+                    match self.val_str(m) {
+                        Some(s) => format!("assertion failed: {s}"),
+                        None => "assertion failed".to_string(),
+                    }
                 } else {
                     "assertion failed".to_string()
                 };
@@ -4053,6 +4055,7 @@ impl Vm {
             Op::CallMethod { name, argc, ic } => self.do_method_call(name, *argc, *ic, span)?,
             Op::CallBuiltin(name, argc) => self.do_builtin(name, *argc, span)?,
             Op::CallPrint(argc) => self.do_print(*argc, span)?,
+            Op::CallPrintSep { argc } => self.do_print_sep(*argc, span)?,
             Op::Return => self.do_return(false)?,
             Op::DeferCall(argc) => self.do_defer(None, *argc, span),
             Op::DeferMethod(name, argc) => self.do_defer(Some(name.clone()), *argc, span),
@@ -13382,6 +13385,28 @@ impl Vm {
         Ok(())
     }
 
+    /// `print(args…, sep=, end=)`. Stack layout on entry: `[args… , sep, end]`. Pops `end` then
+    /// `sep` (both `str`, copied out so they're no longer GC roots), stringifies the `argc` user
+    /// args (kept rooted on the stack across `stringify`, which can run user code + GC), joins with
+    /// `sep` and appends `end`. Byte-identical join/append semantics to the interpreter.
+    fn do_print_sep(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
+        let end = self.pop();
+        let sep = self.pop();
+        let end = self.val_str(end).unwrap_or_default();
+        let sep = self.val_str(sep).unwrap_or_default();
+        let at = self.stack.len() - argc;
+        let mut parts = Vec::with_capacity(argc);
+        for i in 0..argc {
+            let v = self.stack[at + i];
+            parts.push(self.stringify(v, span, 0)?);
+        }
+        self.stack.truncate(at);
+        self.out.push_str(&parts.join(&sep));
+        self.out.push_str(&end);
+        self.push(Value::Nil);
+        Ok(())
+    }
+
     fn do_builtin(&mut self, name: &str, argc: usize, span: Span) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
@@ -15753,10 +15778,17 @@ mod tests {
 
     #[test]
     fn assert_false_faults_with_custom_msg_and_line() {
-        // The assert is on line 2; the fault must carry that line and the custom message.
+        // The assert is on line 2; the fault carries that line and the FORMATTED custom message
+        // (`assertion failed: <msg>`), giving the failure context Python's `assert` does.
         let err = run_capture("print(\"a\")\nassert false, \"boom\"\n").unwrap_err();
-        assert_eq!(err.message, "boom");
+        assert_eq!(err.message, "assertion failed: boom");
         assert_eq!(err.span.line, 2);
+    }
+
+    #[test]
+    fn assert_true_with_msg_does_not_evaluate_msg() {
+        // A passing assert must NOT evaluate its message expression (laziness): the program runs on.
+        assert_eq!(run("assert true, \"never\"\nprint(\"ok\")\n"), "ok\n");
     }
 
     #[test]
@@ -20937,6 +20969,39 @@ print(Shape.Dot)";
         assert_eq!(run(r#"print("a", 1, true)"#), "a 1 true\n");
     }
 
+    #[test]
+    fn print_end_suppresses_newline() {
+        assert_eq!(run("print(\"a\", end=\"\")\n"), "a");
+    }
+
+    #[test]
+    fn print_sep_joins_args() {
+        assert_eq!(run("print(\"a\", \"b\", sep=\"-\")\n"), "a-b\n");
+    }
+
+    #[test]
+    fn print_sep_and_end_together() {
+        assert_eq!(run("print(\"a\", \"b\", sep=\"-\", end=\"!\")\n"), "a-b!");
+    }
+
+    #[test]
+    fn print_default_unchanged_with_no_kwargs() {
+        // The no-kwarg path must stay byte-identical: space-joined, newline-terminated.
+        assert_eq!(run("print(\"a\", \"b\")\n"), "a b\n");
+        assert_eq!(run("print(\"a\")\n"), "a\n");
+    }
+
+    #[test]
+    fn print_end_with_runtime_str_expr() {
+        // `end` can be a runtime str expression, not just a literal.
+        assert_eq!(run("e := \"?\"\nprint(\"a\", end=e)\n"), "a?");
+    }
+
+    #[test]
+    fn print_only_end_keeps_default_space_sep() {
+        assert_eq!(run("print(\"a\", \"b\", end=\"\")\n"), "a b");
+    }
+
     // ----- functions / control flow -----
 
     #[test]
@@ -22702,6 +22767,18 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
     fn golden_range_step_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/range_step.chz");
         let expected = include_str!("../../examples/range_step.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `print` kwargs golden: `examples/print_kwargs.chz` (default form, `end=""`, `sep=`, both, and
+    /// runtime str exprs) byte-identical on the VM, the interpreter, and `.expected` — the two-engine
+    /// parity guard for `print`'s `sep=`/`end=`.
+    #[test]
+    fn golden_print_kwargs_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/print_kwargs.chz");
+        let expected = include_str!("../../examples/print_kwargs.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));

@@ -443,6 +443,11 @@ be any expression that doesn't
 reference another parameter — a literal, a global, arithmetic, or a call; only param-referencing
 defaults are rejected.)
 
+Built-ins take no named arguments, with **one** exception: **`print`** accepts `sep=` (default `" "`,
+joins the positional args) and `end=` (default `"\n"`, appended after) — both `str` (see `docs/stdlib.md`).
+So `print("a", end="")` writes `a` with no trailing newline, and `print("a","b", sep="-", end="!")`
+writes `a-b!`. Any other named argument on a built-in is an error.
+
 **`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
 **explicit `-> Result[…]`/`-> Option[…]`** return type. The `?` propagates to *that closure's*
 return, not the enclosing function. A closure with an inferred or non-`Result`/`Option` return type
@@ -1287,10 +1292,11 @@ assert x == 1                       # bare form
 assert even_sum(10) == 20, "0..10"  # with a custom message
 ```
 
-`cond` must be `bool`; the optional `msg` must be `str` (both checker-enforced). A passing assert is
-a silent no-op; a failing one faults like any runtime error — the message is the custom `msg`, or
-`"assertion failed"` — carrying the line you can see in `chezzi run` and in the test report. `assert`
-works anywhere, not just in tests.
+`cond` must be `bool`; the optional `msg` must be `str` (both checker-enforced) and is evaluated
+**only on failure** (a passing assert never runs it). A passing assert is a silent no-op; a failing
+one faults like any runtime error — the fault message is `assertion failed: <msg>` when a `msg` is
+given, or just `assertion failed` otherwise — carrying the line you can see in `chezzi run` and in
+the test report. `assert` works anywhere, not just in tests.
 
 **`test fn`** — a `test` modifier before `fn` marks a test. A free `test fn` is an **independent**
 test (no parameters, returns nothing); a `test fn name(self)` **method** turns its struct into a

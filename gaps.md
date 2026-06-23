@@ -77,13 +77,9 @@ is a predictable first-hour stumble. Ranked by friction.
      free fns**; `min`/`max`/`clamp` are **`std.cmp` free fns**.
    - Remaining fix: (a) re-export the common `std.iter`/`std.cmp` ops as receiver methods (thin forwarders
      in the checker method table), or (b) document a hard rule. The str asymmetry — the worst one — is gone.
-2. **No `print` newline/sep control.** `print(a, end="")` → "named arguments not supported on builtins"
-   (`checker/mod.rs:6274`); `std.io` has no `write`; no `println`/bare split. Incremental output is
-   impossible without a trailing newline. Fix: add native `std.io.write(s)` (no newline) or special-case
-   `end=`/`sep=` on `print`.
-3. **`assert` takes no message.** `assert(x==y, "msg")` → type error (args parse as a tuple); failure
-   prints only `assertion failed`, no context. Fix: accept optional 2nd `str` arg in the `assert`
-   checker special-case + thread into the panic message.
+
+*(Gaps #2 `print` newline/sep control and #3 `assert` message — both RESOLVED 2026-06-23, see the
+resolved log.)*
 
 **Minor / noted:** no `map.items()` (have `.keys()`/`.values()` + `for k,v`); no `type()`/`typeof`; no
 `input()` (have `std.io.read_line`); no chained comparison (`1<2<3`); `json.parse` widens all numbers to
@@ -230,7 +226,19 @@ engines (interp `builtins::range` + VM `builtin_range`); a **range literal is no
 (`(0..10)[::2]`) by materializing it via the `range` builtin then reusing the existing `GetSlice` /
 `slice_indices` `::step` machinery (compiler Slice arm + interp `eval_slice`). `a..b` stays **ascending**
 (no auto-reverse — `for i in 10..0` still yields nothing); the down-count idiom is `range(start, end, -1)`.
-`examples/range_step.chz`.
+`examples/range_step.chz`. · print `sep=`/`end=` (2026-06-23, gap #5) — `print` is now special-cased to
+accept the two named args `sep` (default `" "`, joins the positional args) and `end` (default `"\n"`,
+appended after); both must be `str` and may be runtime expressions. `print("a", end="")` → `a` (no
+newline, incremental output); `print("a","b", sep="-", end="!")` → `a-b!`. Wired desugar (keeps only
+`sep`/`end` on the `print` Call, rejects any other kwarg / dup — "print() only accepts the named
+arguments 'sep' and 'end'"), checker (str-typed, else "print() sep/end must be str"), compiler (new
+`Op::CallPrintSep{argc}` pushing `sep`+`end`; plain `print(...)` keeps `Op::CallPrint` → byte-identical),
+and BOTH engines (`vm::do_print_sep` + interp print branch, byte-identical join/append). `examples/
+print_kwargs.chz`. · assert message format (2026-06-23, gap #6) — the `assert cond, "msg"` STATEMENT form
+already existed end-to-end; the fix is the **fault wording**: a failing `assert false, "boom"` now faults
+as `assertion failed: boom` (was the raw `boom`), bare `assert false` keeps exactly `assertion failed`,
+and the `msg` is still evaluated lazily on the failing path only. Two fault sites (`vm/mod.rs` Op::Assert
++ `interp/mod.rs` Assert), byte-identical across engines; `examples/assert.chz`.
 
 **Type-system/runtime ✅** · one-way C-like `int`→`float` widening (2026-06-22) — runtime
 `Op::CoerceFloat`/`coerce_float` at every value-def sink (typed `let`, fn/method/closure args incl. int
