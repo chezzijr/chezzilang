@@ -490,31 +490,24 @@ fn len(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
     }
 }
 
-/// Upper bound on the length of a list produced by `range()`, to prevent an absurd argument from
-/// exhausting memory. (A `for` loop over a range is lazy and not subject to this; this only caps
-/// building an actual list.)
-const MAX_RANGE_LEN: i64 = 10_000_000;
-
 fn range(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-    let (start, end) = match args {
-        [Value::Int(n)] => (0, *n),
-        [Value::Int(a), Value::Int(b)] => (*a, *b),
+    let (start, end, step) = match args {
+        [Value::Int(n)] => (0, *n, 1),
+        [Value::Int(a), Value::Int(b)] => (*a, *b, 1),
+        [Value::Int(a), Value::Int(b), Value::Int(s)] => (*a, *b, *s),
         _ => {
             return Err(RuntimeError {
-                message: "range() expects range(end) or range(start, end) of ints".to_string(),
+                message: "range() expects range(end), range(start, end), or range(start, end, step) of ints"
+                    .to_string(),
                 span,
             });
         }
     };
-    let len = i128::from(end) - i128::from(start);
-    if len > i128::from(MAX_RANGE_LEN) {
-        return Err(RuntimeError {
-            message: format!("range() length {len} exceeds the maximum of {MAX_RANGE_LEN}"),
-            span,
-        });
-    }
-    let items = (start..end).map(Value::Int).collect();
-    Ok(Value::List(Rc::new(RefCell::new(items))))
+    let items = crate::slice::range_values(start, end, step)
+        .map_err(|message| RuntimeError { message, span })?;
+    Ok(Value::List(Rc::new(RefCell::new(
+        items.into_iter().map(Value::Int).collect(),
+    ))))
 }
 
 fn cast_int(args: &[Value], span: Span) -> Result<Value, RuntimeError> {

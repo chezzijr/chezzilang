@@ -2526,7 +2526,20 @@ impl Interp {
         step: Option<&Expr>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let target = self.eval(obj)?;
+        // Slicing a range literal `(a..b)[start:end:step]` materializes the (ascending, step-1) range
+        // to a `list[int]` first, then slices that list — reusing the shared `slice_indices` path. A
+        // bare range has no value elsewhere; only this slice-receiver position unblocks it.
+        let target = if let ExprKind::Range { start: rs, end: re } = &obj.kind {
+            let lo = self.eval_int(rs)?;
+            let hi = self.eval_int(re)?;
+            let items = crate::slice::range_values(lo, hi, 1)
+                .map_err(|message| RuntimeError { message, span })?;
+            Value::List(std::rc::Rc::new(std::cell::RefCell::new(
+                items.into_iter().map(Value::Int).collect(),
+            )))
+        } else {
+            self.eval(obj)?
+        };
         // Each present component must be an int; an omitted one is `None` (direction-dependent default).
         let comp = |me: &mut Self, c: Option<&Expr>| -> Result<Option<i64>, RuntimeError> {
             match c {
@@ -8195,6 +8208,44 @@ fn safe_div(a: int, b: int) -> Result[int]:
     }
 
     #[test]
+    fn range_three_arg_up() {
+        assert_eq!(run("print(range(0, 10, 2))\n"), "[0, 2, 4, 6, 8]\n");
+        assert_eq!(run("print(range(1, 7, 3))\n"), "[1, 4]\n");
+    }
+
+    #[test]
+    fn range_three_arg_down() {
+        assert_eq!(
+            run("print(range(10, 0, -1))\n"),
+            "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]\n"
+        );
+        assert_eq!(run("print(range(10, 2, -3))\n"), "[10, 7, 4]\n");
+    }
+
+    #[test]
+    fn range_step_zero_faults() {
+        let err = run_capture("print(range(0, 5, 0))\n").unwrap_err();
+        assert!(err.message.contains("range"), "msg: {}", err.message);
+        assert!(err.message.contains("step"), "msg: {}", err.message);
+        assert!(err.message.contains("zero"), "msg: {}", err.message);
+    }
+
+    #[test]
+    fn range_empty_cases() {
+        assert_eq!(run("print(range(5, 5, 1))\n"), "[]\n");
+        assert_eq!(run("print(range(5, 5, -1))\n"), "[]\n");
+        assert_eq!(run("print(range(0, 10, -1))\n"), "[]\n");
+        assert_eq!(run("print(range(10, 0, 1))\n"), "[]\n");
+    }
+
+    #[test]
+    fn range_slice_step() {
+        assert_eq!(run("print((0..10)[::2])\n"), "[0, 2, 4, 6, 8]\n");
+        assert_eq!(run("print((0..10)[1:8:3])\n"), "[1, 4, 7]\n");
+        assert_eq!(run("print((0..5)[::-1])\n"), "[4, 3, 2, 1, 0]\n");
+    }
+
+    #[test]
     fn builtin_casts() {
         assert_eq!(run("print(int(3.9))\n"), "3\n");
         assert_eq!(run("print(int(\"42\"))\n"), "42\n");
@@ -8557,6 +8608,18 @@ b := Buf([10, 20, 30])
         let expected = include_str!("../../examples/slicing.expected");
         assert_eq!(
             run_capture(source).expect("slicing.chz should run"),
+            expected
+        );
+    }
+
+    /// Stepped-range golden: `examples/range_step.chz` (3-arg up/down/by-N, empty cases, the
+    /// unchanged 1/2-arg forms, and slicing a `..` range literal with a `::step`).
+    #[test]
+    fn golden_range_step_chz() {
+        let source = include_str!("../../examples/range_step.chz");
+        let expected = include_str!("../../examples/range_step.expected");
+        assert_eq!(
+            run_capture(source).expect("range_step.chz should run"),
             expected
         );
     }

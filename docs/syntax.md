@@ -463,8 +463,16 @@ else if x == 0:        # 'else if', chainable
 else:
     print("neg")
 
-for i in 0..10:        # range: 0..10 is 0 through 9 (end-exclusive)
+for i in 0..10:        # range: 0..10 is 0 through 9 (end-exclusive, ascending only)
     print(i)
+
+# `a..b` is always ascending: `for i in 10..0` yields nothing (no auto-reverse). To count down or
+# by N, use the 3-arg `range(start, end, step)` builtin — `step` is a non-zero int, negative counts
+# down (end-exclusive). It returns a materialized `list[int]` (capped at 10M; `step == 0` faults).
+for i in range(10, 0, -1):   # 10, 9, 8, … , 1
+    print(i)
+print(range(0, 10, 2))       # [0, 2, 4, 6, 8]   — by-N
+print((0..10)[::2])          # [0, 2, 4, 6, 8]   — a range literal is sliceable like a list
 
 for item in items:     # iterate a list
     print(item)
@@ -579,7 +587,9 @@ Slicing is **Python-style** `obj[start:end:step]`. Each component is optional �
 defaults per direction (forward: start `0`, end `len`; reverse: start `len-1`, end "before 0"), and an
 omitted step defaults to `1`. A `step` of `0` faults (`slice step cannot be zero`). The `..` operator
 is unchanged — it stays the **range** used by `for i in 0..10` and match range-patterns (`0..10 =>`);
-only the subscript-slice form moved from `[a..b]` to `[a:b]`.
+only the subscript-slice form moved from `[a..b]` to `[a:b]`. A **range literal is sliceable** like a
+list: `(0..10)[::2]` materializes the (ascending) range then slices it with the same `start:end:step`
+machinery (`(0..5)[::-1]` → `[4, 3, 2, 1, 0]`).
 
 **Negative indexing** counts from the end (`xs[-1]` is the last element) for plain indexing *and*
 slice bounds, on `list`/`str`, including as an assignment target (`xs[-1] = v`). The out-of-range

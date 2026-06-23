@@ -4123,6 +4123,28 @@ fn range_pattern_ok() {
     );
 }
 
+#[test]
+fn range_three_arg_typechecks() {
+    // 1/2/3-arg `range()` of ints all type-check to `list[int]`; 0 or >3 args reject.
+    ok("fn main():\n    a: list[int] = range(0, 10, 2)\n    print(len(a))\nmain()\n");
+    ok("fn main():\n    a: list[int] = range(10, 0, -1)\n    print(len(a))\nmain()\n");
+    rejects("fn main():\n    print(range())\nmain()\n", "range");
+    rejects(
+        "fn main():\n    print(range(0, 1, 2, 3))\nmain()\n",
+        "range",
+    );
+    rejects(
+        "fn main():\n    print(range(0, 10, \"x\"))\nmain()\n",
+        "int",
+    );
+}
+
+#[test]
+fn range_slice_typechecks() {
+    // Slicing a range literal infers `list[int]` (the SECONDARY range-slicing path).
+    ok("fn main():\n    a: list[int] = (0..10)[::2]\n    print(len(a))\nmain()\n");
+}
+
 // ===== default + named arguments (end-to-end through desugar) =====
 
 #[test]

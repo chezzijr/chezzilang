@@ -11,6 +11,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ DX — stepped / reverse range (gaps.md DX gap #4) (2026-06-23).** `range()` gained a 3-arg
+`range(start, end, step)` form (the 1-arg/2-arg forms are byte-unchanged). `step` is a **non-zero int**:
+positive counts up half-open `[start, end)`, negative counts down half-open (excludes `end`), e.g.
+`range(10, 0, -1)` → `[10, 9, …, 1]`, `range(0, 10, 2)` → `[0, 2, 4, 6, 8]`. A wrong-direction step or
+`start == end` → `[]`; `step == 0` raises a recoverable fault `range() step cannot be zero`. All the
+element-count / cap math runs in **i128** so a huge span or an `i64::MIN` bound/step can't overflow or
+panic (`i64::MIN.abs()` would); the 10M result cap is unchanged. The materialization is a single shared
+`slice::range_values(start, end, step) -> Result<Vec<i64>, String>` called by **both** engines (interp
+`builtins::range` + VM `builtin_range`) so the values and fault text are byte-identical. **SECONDARY
+(landed): a range literal is now sliceable** like a list — `(0..10)[::2]` → `[0, 2, 4, 6, 8]`,
+`(0..5)[::-1]` → `[4, 3, 2, 1, 0]` — by materializing the (ascending, step-1) range via the `range`
+builtin then reusing the **existing** `Op::GetSlice` / `slice::slice_indices` `::step` machinery (compiler
+Slice arm emits `CallBuiltin("range", 2)` when the obj is a `Range`; interp `eval_slice` mirrors it). A
+bare range still has no value anywhere else (`let x = 0..10` keeps its compile error). **Decision: `a..b`
+stays ascending — no auto-reverse** (`for i in 10..0` yields nothing, the lazy for-loop path is
+untouched); the down-count idiom is `range(start, end, -1)`. No grammar change (the `..` syntax is
+untouched; conformance clean). **Parity by construction** (shared helper). Tests (all RED-first): 3
+`slice::range_values` unit tests (up/down/by-N, empty + zero-step, overflow/INT_MIN edges) + interp +
+VM runtime tests (up/down/step-zero/empty/range-slice) + 2 checker tests (1/2/3-arg accept, 0/>3 reject,
+non-int reject; range-slice infers `list[int]`) + golden `examples/range_step.chz` (VM == interp ==
+`.expected`). Docs: `docs/syntax.md` (range section + slicing note), `docs/stdlib.md` (range signature),
+`gaps.md` (gap #4 → RESOLVED log, open DX items renumbered 1..3). Full suite + conformance +
+`clippy --all-targets -D warnings` clean.
+
 **✅ DX — collection operators (gaps.md DX gap #3) (2026-06-23).** List `+` (concat) / `*` (repeat)
 and set `| & - ^` (union / intersection / difference / symmetric-difference) now work as operators,
 behaviour **identical to the existing methods** (`.concat`, `.union`/`.intersection`/`.difference`;

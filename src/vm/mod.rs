@@ -13875,25 +13875,23 @@ impl Vm {
     }
 
     fn builtin_range(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-        const MAX_RANGE_LEN: i64 = 10_000_000;
-        let (start, end) = match args {
-            [Value::Int(n)] => (0, *n),
-            [Value::Int(a), Value::Int(b)] => (*a, *b),
+        let (start, end, step) = match args {
+            [Value::Int(n)] => (0, *n, 1),
+            [Value::Int(a), Value::Int(b)] => (*a, *b, 1),
+            [Value::Int(a), Value::Int(b), Value::Int(s)] => (*a, *b, *s),
             _ => {
                 return Err(self.err(
-                    "range() expects range(end) or range(start, end) of ints".to_string(),
+                    "range() expects range(end), range(start, end), or range(start, end, step) of ints"
+                        .to_string(),
                     span,
                 ));
             }
         };
-        let len = i128::from(end) - i128::from(start);
-        if len > i128::from(MAX_RANGE_LEN) {
-            return Err(self.err(
-                format!("range() length {len} exceeds the maximum of {MAX_RANGE_LEN}"),
-                span,
-            ));
-        }
-        let items: Vec<Value> = (start..end).map(Value::Int).collect();
+        let items: Vec<Value> = crate::slice::range_values(start, end, step)
+            .map_err(|message| self.err(message, span))?
+            .into_iter()
+            .map(Value::Int)
+            .collect();
         Ok(Value::Obj(self.heap.alloc(Obj::List(items))))
     }
 
@@ -21420,6 +21418,44 @@ main()";
     }
 
     #[test]
+    fn range_three_arg_up_vm() {
+        assert_eq!(run("print(range(0, 10, 2))"), "[0, 2, 4, 6, 8]\n");
+        assert_eq!(run("print(range(1, 7, 3))"), "[1, 4]\n");
+    }
+
+    #[test]
+    fn range_three_arg_down_vm() {
+        assert_eq!(
+            run("print(range(10, 0, -1))"),
+            "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]\n"
+        );
+        assert_eq!(run("print(range(10, 2, -3))"), "[10, 7, 4]\n");
+    }
+
+    #[test]
+    fn range_step_zero_faults_vm() {
+        let msg = run_err("print(range(0, 5, 0))");
+        assert!(msg.contains("range"), "msg: {msg}");
+        assert!(msg.contains("step"), "msg: {msg}");
+        assert!(msg.contains("zero"), "msg: {msg}");
+    }
+
+    #[test]
+    fn range_empty_cases_vm() {
+        assert_eq!(run("print(range(5, 5, 1))"), "[]\n");
+        assert_eq!(run("print(range(5, 5, -1))"), "[]\n");
+        assert_eq!(run("print(range(0, 10, -1))"), "[]\n");
+        assert_eq!(run("print(range(10, 0, 1))"), "[]\n");
+    }
+
+    #[test]
+    fn range_slice_step_parity_vm() {
+        assert_eq!(run("print((0..10)[::2])"), "[0, 2, 4, 6, 8]\n");
+        assert_eq!(run("print((0..10)[1:8:3])"), "[1, 4, 7]\n");
+        assert_eq!(run("print((0..5)[::-1])"), "[4, 3, 2, 1, 0]\n");
+    }
+
+    #[test]
     fn builtin_casts() {
         assert_eq!(run(r#"print(int("42"))"#), "42\n");
         assert_eq!(run("print(float(3))"), "3.0\n");
@@ -22654,6 +22690,18 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
     fn golden_slicing_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/slicing.chz");
         let expected = include_str!("../../examples/slicing.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// `range` golden: `examples/range_step.chz` (3-arg up/down/by-N, empty / wrong-direction cases,
+    /// the unchanged 1/2-arg forms, and slicing a `..` range literal with a `::step`) byte-identical
+    /// on the VM, the interpreter, and `.expected` — the two-engine parity guard for stepped ranges.
+    #[test]
+    fn golden_range_step_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/range_step.chz");
+        let expected = include_str!("../../examples/range_step.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));

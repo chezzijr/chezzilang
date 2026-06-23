@@ -20,7 +20,7 @@ Conventions used below:
 |----------|-----------|-------|
 | `print` | `print(...args) -> nil` | Write each argument (any type) to stdout, then a newline. Variadic. |
 | `len` | `len(x) -> int` | Length of a `list`, `str`, `bytes`, or `bytearray`. (Types also have a `.len()` method.) |
-| `range` | `range(end) -> list[int]` / `range(start, end) -> list[int]` | End-exclusive list of ints. |
+| `range` | `range(end)` / `range(start, end)` / `range(start, end, step) -> list[int]` | End-exclusive list of ints. `step` is a non-zero int: positive counts up, negative counts down (e.g. `range(10, 0, -1)` → `10,9,…,1`). A wrong-direction step or `start == end` gives `[]`; `step == 0` is a recoverable fault. Capped at 10M elements. |
 | `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. |
 | `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. |
 | `str` | `str(x) -> str` | Stringify an `int`/`float`/`bool` (and more — see the `Stringable` protocol in `syntax.md`). |

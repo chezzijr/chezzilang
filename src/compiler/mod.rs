@@ -2729,7 +2729,18 @@ impl Compiler {
                 end,
                 step,
             } => {
-                self.compile_expr(fc, obj)?;
+                // Slicing a range literal `(a..b)[start:end:step]` materializes the (ascending,
+                // step-1) range to a `list[int]` first (via the `range` builtin), then slices that
+                // list through the shared `GetSlice` path — reusing the `::step` machinery, not a
+                // parallel one. A bare range still has no value anywhere else (the error below fires
+                // for `let x = 0..10`); only this slice-receiver position is unblocked.
+                if let ExprKind::Range { start: rs, end: re } = &obj.kind {
+                    self.compile_expr(fc, rs)?;
+                    self.compile_expr(fc, re)?;
+                    fc.emit(Op::CallBuiltin("range".to_string(), 2), obj.span);
+                } else {
+                    self.compile_expr(fc, obj)?;
+                }
                 // Each omitted component compiles to `nil` (mapped to `None`/default at runtime).
                 for comp in [start, end, step] {
                     match comp {
