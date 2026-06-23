@@ -69,15 +69,60 @@ impl std::fmt::Display for RunError {
     }
 }
 
+/// When rendering a stack trace, after run-collapsing show at most this many collapsed lines from
+/// the head (innermost — closest to the fault) and tail (outermost — includes `main`); the middle is
+/// elided. Bounds deep non-recursive chains. Mirrored byte-identically in `vm::format_trace`.
+const TRACE_HEAD: usize = 10;
+const TRACE_TAIL: usize = 10;
+
 /// Render a runtime error plus its stack trace for the CLI: the error line, then one indented
 /// `  at <function> (<call site>)` line per frame, innermost first. Mirrors `vm::format_trace`.
+///
+/// Two bounding transforms keep an infinite-recursion fault from flooding ~10_001 lines (gap #8):
+/// (1) runs of consecutive frames with the SAME function name collapse to the run's innermost `at`
+/// line plus a `  … (× N more identical frames) …` marker when the run length N>1; (2) if the
+/// collapsed line list still exceeds `TRACE_HEAD + TRACE_TAIL`, the head and tail collapsed lines are
+/// kept and the middle replaced by a `  … (M frames elided) …` marker. Both transforms are no-ops on
+/// small traces with distinct names, so existing exact-trace goldens are unchanged.
 pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
     let mut s = format!("runtime error ({span}): {message}");
-    for frame in trace {
-        s.push_str(&format!(
-            "\n  at {} (called at {})",
-            frame.function, frame.span
-        ));
+    // (1) Collapse consecutive same-name runs into one entry: the run's innermost `at` line plus an
+    // optional `× N` marker (kept in the SAME entry so the cap below can never orphan the marker).
+    let mut entries: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < trace.len() {
+        let frame = &trace[i];
+        let mut j = i + 1;
+        while j < trace.len() && trace[j].function == frame.function {
+            j += 1;
+        }
+        let mut entry = format!("  at {} (called at {})", frame.function, frame.span);
+        let run = j - i;
+        if run > 1 {
+            entry.push_str(&format!("\n  … (× {} more identical frames) …", run - 1));
+        }
+        entries.push(entry);
+        i = j;
+    }
+    // (2) Cap the collapsed entries: keep head + tail entries, elide the middle. Capping whole
+    // entries (not raw lines) keeps each `× N` marker attached to its `at` line across the boundary.
+    if entries.len() > TRACE_HEAD + TRACE_TAIL {
+        let elided = entries.len() - TRACE_HEAD - TRACE_TAIL;
+        let tail_start = entries.len() - TRACE_TAIL;
+        for entry in &entries[..TRACE_HEAD] {
+            s.push('\n');
+            s.push_str(entry);
+        }
+        s.push_str(&format!("\n  … ({elided} frames elided) …"));
+        for entry in &entries[tail_start..] {
+            s.push('\n');
+            s.push_str(entry);
+        }
+    } else {
+        for entry in &entries {
+            s.push('\n');
+            s.push_str(entry);
+        }
     }
     s
 }

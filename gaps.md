@@ -99,9 +99,6 @@ is a predictable first-hour stumble. Ranked by friction.
 7. **No safe numeric parse.** `int("abc")`/`float("x")` raise a (recoverable) panic — no
    `str.to_int() -> int?` / `int?(s)`. Untrusted input must be wrapped in `recover:`. Fix: add
    `to_int`/`to_float` str methods returning `Option`.
-8. **Infinite-recursion stack trace unbounded** (`vm/mod.rs:3301`). One frame per call → 10001 lines at
-   the 10000-depth cap, flooding the terminal. Fix: collapse consecutive identical frames (`… × N`) + cap
-   printed trace (e.g. first 10 + last 10).
 
 **Minor / noted:** no `map.items()` (have `.keys()`/`.values()` + `for k,v`); no `type()`/`typeof`; no
 `input()` (have `std.io.read_line`); no chained comparison (`1<2<3`); `json.parse` widens all numbers to
@@ -230,6 +227,11 @@ refine pass · import name-collision rejection (`bind_import`/`import_binds`) ·
 pattern → compile error (`first_duplicate_binder`) · `ref` shared-method-name expr-receiver false
 rejection (desugar `receiver_struct_ty`/`fn_ret_struct`) · `list.map`/`.filter`/`.fold` shrink-callback
 panic → rooted snapshot · two Rust panics fixed; concurrency core fuzzed clean.
+
+**DX / diagnostics ✅** · infinite-recursion stack trace bounded (2026-06-23) — `format_trace`
+(both engines, byte-identical) now collapses consecutive same-name frames to `… (× N more identical
+frames) …` + caps the collapsed list to head 10 / tail 10 with a `… (M frames elided) …` marker, so a
+recursion fault prints ~4 lines instead of ~10_001 (`vm/mod.rs`/`interp/mod.rs` `format_trace`).
 
 **Type-system/runtime ✅** · one-way C-like `int`→`float` widening (2026-06-22) — runtime
 `Op::CoerceFloat`/`coerce_float` at every value-def sink (typed `let`, fn/method/closure args incl. int
