@@ -1,0 +1,41 @@
+# examples/encoding.chz — std.encoding codecs: base64 (std + url-safe), hex, URL percent-encoding.
+# All deterministic str<->str round-trips (no entropy), so the golden is byte-identical across
+# run / --serial / --parallel and on both engines.
+
+import std.encoding as enc
+import std.io
+
+# --- base64 (RFC 4648 std alphabet) ---
+print("b64 Man     = " + enc.base64_encode("Man"))
+print("b64 foobar  = " + enc.base64_encode("foobar"))
+match enc.base64_decode("Zm9vYmFy"):
+    Ok(s): print("b64 decode  = " + s)
+    Err(e): print("b64 decode err: " + e.message())
+match enc.base64_decode("not valid!!"):
+    Ok(s): print("unexpected ok: " + s)
+    Err(e): print("b64 bad     = err")
+
+# --- base64 url-safe ---
+print("b64url f?>  = " + enc.base64_encode_url("f?>"))
+match enc.base64_decode_url(enc.base64_encode_url("hello/world+more")):
+    Ok(s): print("b64url rt   = " + s)
+    Err(e): print("b64url err: " + e.message())
+
+# --- hex ---
+print("hex foo     = " + enc.hex_encode("foo"))
+match enc.hex_decode("68656c6c6f"):
+    Ok(s): print("hex decode  = " + s)
+    Err(e): print("hex err: " + e.message())
+match enc.hex_decode("zz"):
+    Ok(s): print("unexpected ok: " + s)
+    Err(e): print("hex bad     = err")
+
+# --- url percent-encoding (RFC 3986 component) ---
+print("url enc     = " + enc.url_encode("a b/c?d=e&f"))
+print("url unres   = " + enc.url_encode("keep~these-chars_.ok"))
+match enc.url_decode("a%20b%2Fc%3Fd"):
+    Ok(s): print("url decode  = " + s)
+    Err(e): print("url err: " + e.message())
+match enc.url_decode("%2G"):
+    Ok(s): print("unexpected ok: " + s)
+    Err(e): print("url bad     = err")

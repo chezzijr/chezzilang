@@ -19,6 +19,8 @@
 // only reached on unix. All supported Chezzi targets are unix; non-unix is unsupported by design.
 #[cfg(unix)]
 pub mod cffi;
+pub mod crypto;
+pub mod encoding;
 pub mod ffi;
 pub mod fs;
 pub mod io;
@@ -30,6 +32,7 @@ pub mod rand;
 pub mod regex;
 pub mod request;
 pub mod time;
+pub mod uuid;
 
 use std::collections::HashMap;
 
@@ -323,6 +326,9 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
             "request" => Some("std.request"),
             "net" => Some("std.net"),
             "ffi" => Some("std.ffi"),
+            "encoding" => Some("std.encoding"),
+            "crypto" => Some("std.crypto"),
+            "uuid" => Some("std.uuid"),
             _ => None,
         },
         _ => None,
@@ -345,6 +351,9 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn)] {
         "std.request" => request::MEMBERS,
         "std.net" => net::MEMBERS,
         "std.ffi" => ffi::MEMBERS,
+        "std.encoding" => encoding::MEMBERS,
+        "std.crypto" => crypto::MEMBERS,
+        "std.uuid" => uuid::MEMBERS,
         _ => &[],
     }
 }
@@ -461,6 +470,54 @@ mod tests {
         }
     }
 
+    /// `std.encoding` / `std.crypto` / `std.uuid` are native (virtual) modules: each resolves to a
+    /// canonical name, exposes its members, and NONE are blocking (pure CPU str transforms / RNG
+    /// draws, never I/O — so they run inline on every engine, not offloaded to the dirty pool).
+    #[test]
+    fn native_encoding_crypto_uuid_wired_and_non_blocking() {
+        assert_eq!(
+            native_name(&["std".into(), "encoding".into()]),
+            Some("std.encoding")
+        );
+        assert_eq!(
+            native_name(&["std".into(), "crypto".into()]),
+            Some("std.crypto")
+        );
+        assert_eq!(
+            native_name(&["std".into(), "uuid".into()]),
+            Some("std.uuid")
+        );
+
+        let enc: Vec<&str> = native_members("std.encoding")
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+            enc,
+            [
+                "base64_encode",
+                "base64_encode_url",
+                "base64_decode",
+                "base64_decode_url",
+                "hex_encode",
+                "hex_decode",
+                "url_encode",
+                "url_decode",
+            ]
+        );
+        let cry: Vec<&str> = native_members("std.crypto")
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(cry, ["sha256", "md5"]);
+        let uid: Vec<&str> = native_members("std.uuid").iter().map(|(n, _)| *n).collect();
+        assert_eq!(uid, ["v4", "uuid_seed"]);
+
+        for name in enc.iter().chain(cry.iter()).chain(uid.iter()) {
+            assert!(!is_blocking(name), "{name} must not be blocking");
+        }
+    }
+
     #[test]
     fn native_name_recognizes_the_three_native_modules() {
         assert_eq!(
@@ -551,6 +608,9 @@ mod tests {
             "std.regex",
             "std.request",
             "std.ffi",
+            "std.encoding",
+            "std.crypto",
+            "std.uuid",
         ];
         let mut seen: HashMap<&str, &str> = HashMap::new();
         for module in modules {

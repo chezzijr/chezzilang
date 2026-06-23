@@ -11,6 +11,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ stdlib — encoding/crypto/uuid native modules (gaps.md "Encoding/crypto") (2026-06-24).** Three
+new native modules, all hand-rolled with **zero new crates** (repo dependency-free policy):
+`std.encoding` (`src/native/encoding.rs`) — base64 std + URL-safe (RFC 4648), hex, RFC 3986 URL
+percent-encode/decode; `std.crypto` (`src/native/crypto.rs`) — `sha256` (FIPS 180-4) + `md5` (RFC 1321),
+both validated against published test vectors + cross-checked vs `sha256sum`/`md5sum`; `std.uuid`
+(`src/native/uuid.rs`) — `v4` (random, RFC 4122) + `uuid_seed` (deterministic), with its OWN
+process-global SplitMix64 stream that reuses `rand::next_u64` (the RNG step is not duplicated) and
+auto-seeds from OS entropy. The native seam carries only `str`, so every fn is `str`-in and
+`str`/`Result[str]`-out: encoders/digests are infallible `str`; base64/hex/url `decode` UTF-8-validate
+their output and surface malformed input OR non-UTF-8 bytes as a catchable `Err` (never a panic). All
+members are pure CPU transforms → NOT in `is_blocking()` (run inline on every engine), giving 3-engine
+parity (interp == cooperative VM == M:N) by construction at the NativeFn seam. Wiring mirrors std.rand/
+std.fs: `MEMBERS` table per file, `src/native/mod.rs` (`pub mod` + `native_name`/`native_members` arms +
+the uniqueness/non-blocking test lists — `uuid` reseed is named `uuid_seed`, not `seed`, to keep bare
+member names unique since `std.rand` owns `seed`), `src/checker/mod.rs` `native_module_sig` arms.
+Goldens (VM == interp via `assert_file_parity`): `examples/encoding.chz` / `crypto.chz` (deterministic
+round-trips + digests) and `examples/uuid_shape.chz` (`uuid_seed`-deterministic stream + shape check,
+serialized on `TEST_UUID_LOCK`). Docs: `docs/stdlib.md` (new §std.encoding/§std.crypto/§std.uuid),
+`gaps.md` (Encoding/crypto → ✅ RESOLVED). **Deferred:** the str-only seam can't return raw bytes, so
+binary round-trip (image → bytes) needs a bytes-arg/return seam expansion; `sha512`/`sha1`/`uuid-v7`
+not added. Full suite + conformance + `clippy --all-targets -D warnings` clean.
+
 **✅ stdlib — `std.fs` filesystem mutations (gaps.md "fs mutations") (2026-06-24).** `std.fs` was
 read-only; it now writes. Six new natives in `src/native/fs.rs`, each mirroring `std.io.write_file`'s
 fault idiom (`Ok(NativeRet::Ok(Nil))` / `Ok(NativeRet::Err("{path}: {e}"))`) so an I/O failure is a

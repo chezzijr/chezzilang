@@ -1,0 +1,13 @@
+b64 Man     = TWFu
+b64 foobar  = Zm9vYmFy
+b64 decode  = foobar
+b64 bad     = err
+b64url f?>  = Zj8-
+b64url rt   = hello/world+more
+hex foo     = 666f6f
+hex decode  = hello
+hex bad     = err
+url enc     = a%20b%2Fc%3Fd%3De%26f
+url unres   = keep~these-chars_.ok
+url decode  = a b/c?d
+url bad     = err

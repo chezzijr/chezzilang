@@ -1,0 +1,21 @@
+# examples/uuid_shape.chz — std.uuid v4 generation. uuid_seed(N) makes the stream deterministic so
+# the golden is byte-identical across run / --serial / --parallel and on both engines (an UNSEEDED
+# v4() draws from OS entropy and cannot be value-golden — only its SHAPE is stable). The drawn UUIDs
+# satisfy RFC 4122 v4: 36 chars, version nibble '4', variant in 8/9/a/b.
+
+import std.uuid
+import std.io
+
+uuid.uuid_seed(42)
+print("u1 = " + uuid.v4())
+print("u2 = " + uuid.v4())
+print("u3 = " + uuid.v4())
+
+# Re-seeding reproduces the same stream (deterministic).
+uuid.uuid_seed(42)
+print("again u1 = " + uuid.v4())
+
+# SHAPE check on a fresh draw: length 36, char-14 is the version nibble '4'.
+u := uuid.v4()
+print("len = " + str(len(u)))
+print("version = " + u[14:15])

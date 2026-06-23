@@ -339,6 +339,44 @@ for i in range(len(data)):
     print(ffi.load_int64_at(buf, i * 8)) # 1 2 5 7 9
 ```
 
+### `std.encoding`
+Reversible text codecs. Every function takes a `str` and operates on its **UTF-8 bytes** (like
+`bytes(s)` / `s.encode()`); encoders return `str` (infallible), decoders return `Result[str]`
+(malformed input — or decoded bytes that aren't valid UTF-8 — is a recoverable `Err`, never a panic).
+*All members are pure CPU str transforms (no I/O); they run inline on every engine.*
+- base64 (RFC 4648): `base64_encode(s) -> str` / `base64_decode(s) -> Result[str]` (std `+/` alphabet,
+  `=` padding) · `base64_encode_url(s) -> str` / `base64_decode_url(s) -> Result[str]` (URL-safe `-_`
+  alphabet). The std decoder rejects `-_`; the URL decoder rejects `+/`.
+- hex: `hex_encode(s) -> str` (lowercase) · `hex_decode(s) -> Result[str]` (rejects odd length /
+  non-hex digits).
+- URL percent-encoding (RFC 3986 **component** form): `url_encode(s) -> str` keeps the unreserved set
+  `A-Za-z0-9-._~` literal and `%XX`-escapes everything else (uppercase hex) · `url_decode(s) ->
+  Result[str]` reverses it. **Strict 3986** — `+` is *not* treated as a space (that's
+  `application/x-www-form-urlencoded`, a different scheme).
+
+**Seam limit (deferred, not a bug):** the native FFI seam carries only `str` (no raw-bytes arg/return),
+so base64/hex `decode` UTF-8-validate their output and surface non-UTF-8 results as `Err`. Round-tripping
+**arbitrary binary** (e.g. an image) back to raw bytes through this surface is therefore not possible
+yet — it needs a bytes-arg/bytes-return seam expansion (a separate, larger change). Text round-trips
+fully.
+
+### `std.crypto`
+Hand-rolled digests (zero dependencies). Each hashes the str's UTF-8 bytes and returns the
+lowercase-hex digest as a `str` (always valid UTF-8 → infallible, no `Result`).
+`sha256(s) -> str` (FIPS 180-4) · `md5(s) -> str` (RFC 1321).
+**Security:** MD5 is **cryptographically broken** — use it only for checksums / legacy interop, never
+for passwords, signatures, or integrity against an adversary. *Pure CPU (no I/O); inline on every engine.*
+
+### `std.uuid`
+RFC 4122 version-4 (random) UUIDs. `v4() -> str` returns a fresh random UUID as the canonical 36-char
+`8-4-4-4-12` lowercase-hex string (version nibble `4`, variant in `8/9/a/b`). `uuid_seed(n: int) -> nil`
+reseeds the generator deterministically (for reproducible/golden runs). The generator has its **own**
+process-global stream (separate from `std.rand`, auto-seeded from OS entropy), so a `v4()` draw never
+perturbs a program's `rand` sequence. *Pure CPU draws (no I/O); inline on every engine.*
+**Limit (not a bug, same as `std.rand`):** the stream is a single process-global, so under `--parallel`
+*concurrent* `v4()` draws interleave nondeterministically; an EXACT seeded value is reproducible only for
+*sequential* draws.
+
 ---
 
 ## 5. Pure-Chezzi modules

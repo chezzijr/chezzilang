@@ -29329,6 +29329,40 @@ main()
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    /// std.encoding + std.crypto goldens — deterministic str<->str codecs / digests (no entropy), so
+    /// they need no lock and are byte-identical on VM + interp + `.expected`.
+    #[test]
+    fn golden_encoding_crypto_via_run_file() {
+        for rel in ["examples/encoding.chz", "examples/crypto.chz"] {
+            let path = fixture(rel);
+            let expected =
+                std::fs::read_to_string(fixture(&format!("{}.expected", &rel[..rel.len() - 4])))
+                    .unwrap();
+            let (out, _err, res, _) = run_file(&path);
+            assert!(res.is_ok(), "{rel}: {res:?}");
+            assert_eq!(out, expected, "stdout mismatch for {rel}");
+            assert_file_parity(rel);
+        }
+    }
+
+    /// std.uuid golden — `examples/uuid_shape.chz` uses `uuid_seed(N)` so the v4() stream is
+    /// deterministic and byte-identical on VM + interp. The UUID RNG is a process-global shared by
+    /// VM + interp + every test; serialize against the uuid unit tests (see TEST_UUID_LOCK) so a
+    /// concurrent seeded draw can't interleave on the global and diverge (the documented `--parallel`
+    /// concurrent-draw limit, surfacing in the parallel test runner — same as std.rand's golden).
+    #[test]
+    fn golden_uuid_via_run_file() {
+        let _g = crate::native::uuid::TEST_UUID_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let path = fixture("examples/uuid_shape.chz");
+        let expected = std::fs::read_to_string(fixture("examples/uuid_shape.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/uuid_shape.chz");
+    }
+
     /// Comprehensions golden: `examples/comprehensions.chz` — list/set/map comprehensions, a guard,
     /// and a range source. Byte-matches `.expected` and stays identical on interp + VM.
     #[test]
