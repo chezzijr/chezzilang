@@ -63,8 +63,15 @@ Current: `fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`
   NativeFn seam. **Deferred:** the str-only seam can't return raw bytes, so base64/hex `decode`
   UTF-8-validate their output — binary round-trip (e.g. an image → raw bytes) needs a bytes-arg/return
   seam expansion; `sha512`/`sha1`/`uuid-v7` not yet added. (See docs/stdlib.md §std.encoding/§std.crypto/§std.uuid.)
-- **`std.process` polish** — only `cmd(line)` via `sh -c` (injection-prone), stdout discarded on failure.
-  Want structured result (both streams + exit code) + args-array form.
+- ✅ **`std.process` polish** *(RESOLVED)* — added `run(line) -> Result[ProcResult]` and
+  `run_args(prog, args: list[str]) -> Result[ProcResult]` where `struct ProcResult { stdout, stderr,
+  code }` carries **both streams + the exit code** (a non-zero exit is `Ok` with `code != 0`, stdout
+  no longer discarded; only a spawn failure is `Err`). `run_args` runs the program **without** `sh -c`,
+  so its arguments are passed literally — **injection-safe**. New `NativeArg::List`/`Host::arg_str_list`
+  seam carries the `list[str]` argv across all 3 hosts (mirrors the `map[str,str]` triad);
+  `run`/`run_args` wired into `is_blocking` so the M:N engine offloads. `cmd(line)` kept unchanged for
+  back-compat. **Deferred:** stdin piping, output streaming, per-process env/cwd overrides. (See
+  docs/stdlib.md §std.process; golden `examples/process_polish.chz`.)
 - **`std.request` nit** — remaining: per-call timeout override + query (`?k=v`) builder (timeouts hardcoded).
 
 **Pure-Chezzi `std/*.chz` now (dogfood):** path ops (`join`/`basename`/`dirname`/`ext`/`normalize`),

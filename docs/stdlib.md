@@ -222,8 +222,21 @@ if you need it.
 `sleep_ms(ms: int) -> nil` · `format(epoch: int) -> str` (`"YYYY-MM-DD HH:MM:SS"`, UTC).
 
 ### `std.process`
-`cmd(line: str) -> Result[str]` — run `sh -c <line>`, capture stdout; `Err(stderr)` on non-zero exit.
-**Security:** `line` is a shell string — never interpolate untrusted input (shell-injection risk).
+`cmd(line: str) -> Result[str]` — run `sh -c <line>`, capture stdout; `Err(stderr)` on non-zero exit
+(on failure stdout is discarded — use `run` for the full result).
+`run(line: str) -> Result[ProcResult]` — run `sh -c <line>` and return the **structured** result:
+`struct ProcResult { stdout: str, stderr: str, code: int }`. A non-zero exit is a normal
+`Ok(ProcResult)` with `code != 0` (both streams kept); **only a spawn failure** (no such program,
+permission denied) is `Err`. A signal-killed process has no exit code and reports `code = -1`.
+`run_args(prog: str, args: list[str]) -> Result[ProcResult]` — run `prog` directly with `args` as the
+argv vector, **NO shell** — so metacharacters in `args` (`$(...)`, `;`, `&&`, …) are passed literally
+and are **injection-safe**. Same `Ok`/`Err` contract as `run`. Prefer `run_args` over `run`/`cmd` when
+any argument comes from untrusted input.
+All three are blocking subprocess I/O (offloaded under the OS-thread engine). `ProcResult` is a
+reserved (program-global) struct name.
+**Security:** `cmd`/`run` hand `line` to the shell — never interpolate untrusted input (shell-injection
+risk); use `run_args` instead.
+**Not yet:** stdin piping, output streaming, per-process env/cwd overrides.
 
 ### `std.rand`
 Pseudo-random scalars (SplitMix64 PRNG). `seed(n: int) -> nil` (reseed deterministically) ·
@@ -249,7 +262,7 @@ strings, so a literal backslash is doubled: `"\\d+"`, `"\\."`.
 Returns use `struct Response { status: int, body: str, headers: map[str, str] }` (header names
 lowercased). A ≥400 status is **not** an error — the code rides in `Response.status`; only
 transport/DNS/TLS failures become `Err`. Blocking (offloaded under the OS-thread engine).
-`Match` and `Response` are reserved (program-global) struct names.
+`Match`, `Response`, and `ProcResult` are reserved (program-global) struct names.
 `get(url) -> Result[Response]` · `post(url, body) -> Result[Response]` ·
 `put(url, body)` · `patch(url, body)` · `delete(url)` · `head(url)` ·
 `request(method, url, body, headers: map[str, str]) -> Result[Response]` (method in UPPERCASE).

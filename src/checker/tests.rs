@@ -3546,6 +3546,28 @@ fn native_process_cmd_arg_must_be_str() {
 }
 
 #[test]
+fn native_process_run_returns_result_proc_result() {
+    entry_ok(
+        "import std.process\nfn main():\n    match process.run(\"echo hi\"):\n        Ok(r):\n            o: str = r.stdout\n            e: str = r.stderr\n            c: int = r.code\n            print(o + e + str(c))\n        Err(msg): print(msg)\n",
+    );
+}
+
+#[test]
+fn native_process_run_args_takes_prog_and_list_str() {
+    entry_ok(
+        "import std.process\nfn main():\n    match process.run_args(\"echo\", [\"a\", \"b\"]):\n        Ok(r): print(r.stdout + str(r.code))\n        Err(msg): print(msg)\n",
+    );
+}
+
+#[test]
+fn native_process_run_args_argv_must_be_list_str() {
+    entry_rejects(
+        "import std.process\nfn main():\n    print(process.run_args(\"echo\", \"notalist\"))\n",
+        "argument 2 of 'run_args'",
+    );
+}
+
+#[test]
 fn list_comprehension_infers_element_type() {
     // `[x * 2 for x in [1, 2, 3]]` is a `list[int]` — the loop var binds to the list's element.
     ok("xs: list[int] = [x * 2 for x in [1, 2, 3]]\n");

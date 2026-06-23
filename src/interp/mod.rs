@@ -6444,6 +6444,29 @@ impl crate::native::Host for InterpHost<'_> {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
+    fn arg_str_list(&mut self, i: usize) -> Result<Vec<String>, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::List(items)) => {
+                // Iterate in list order (it IS the argv). Every element must be a str. Parity twin of
+                // `VmHost::arg_str_list`.
+                let items = items.borrow();
+                let mut out = Vec::with_capacity(items.len());
+                for v in items.iter() {
+                    let Value::Str(s) = v else {
+                        return Err(crate::native::HostError::arg_type(i, "list[str]", "other"));
+                    };
+                    out.push(s.to_string());
+                }
+                Ok(out)
+            }
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "list[str]",
+                other.type_name(),
+            )),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
     fn write_stdout(&mut self, s: &str) {
         self.out.push_str(s);
     }
@@ -7546,6 +7569,41 @@ mod tests {
             vec![("one".into(), "1".into()), ("two".into(), "2".into())]
         );
         assert!(host.arg_str_map(1).is_err(), "a non-map arg must error");
+    }
+
+    /// `InterpHost::arg_str_list` reads a `list[str]` Value in order; a non-list / non-str arg errors.
+    /// Parity twin of `vm::tests::vm_host_arg_str_list_reads_live_list`.
+    #[test]
+    fn interp_host_arg_str_list_reads_list() {
+        use crate::native::Host;
+        let list = Value::List(std::rc::Rc::new(std::cell::RefCell::new(vec![
+            Value::Str("one".into()),
+            Value::Str("two".into()),
+        ])));
+        let bad = Value::List(std::rc::Rc::new(std::cell::RefCell::new(vec![
+            Value::Str("z".into()),
+            Value::Int(3),
+        ])));
+
+        let (mut out, mut stderr) = (String::new(), String::new());
+        let mut cfg = crate::native::HostConfig::default();
+        let mut exit = None;
+        let mut host = InterpHost {
+            args: vec![list, bad, Value::Int(9)],
+            out: &mut out,
+            stderr: &mut stderr,
+            cfg: &mut cfg,
+            exit: &mut exit,
+        };
+        assert_eq!(
+            host.arg_str_list(0).unwrap(),
+            vec!["one".to_string(), "two".to_string()]
+        );
+        assert!(
+            host.arg_str_list(1).is_err(),
+            "a non-str element must error"
+        );
+        assert!(host.arg_str_list(2).is_err(), "a non-list arg must error");
     }
 
     /// M-C implicit nurseries (interp side of the cross-engine parity twins in `vm::tests`): a bare

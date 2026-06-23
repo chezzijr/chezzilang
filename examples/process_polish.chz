@@ -1,0 +1,26 @@
+# examples/process_polish.chz — std.process structured forms: run(line) and run_args(prog, args).
+# Both return Result[ProcResult{stdout, stderr, code}]: a non-zero exit is a NORMAL Ok with code !=
+# 0 (stdout is NOT discarded), only a spawn failure is Err. run_args runs WITHOUT a shell, so its
+# arguments are passed literally (injection-safe). Only deterministic output is printed.
+
+import std.process
+
+# --- run: full structured result over `sh -c` ---
+match process.run("echo structured"):
+    Ok(r): print("run stdout: " + r.stdout.trim() + " code: " + str(r.code))
+    Err(e): print("run error: " + e.message())
+
+# A non-zero exit is Ok, carrying both streams + the code (NOT an Err, NOT discarded stdout).
+match process.run("echo out; echo oops 1>&2; exit 5"):
+    Ok(r): print("nonzero stdout: " + r.stdout.trim() + " stderr: " + r.stderr.trim() + " code: " + str(r.code))
+    Err(e): print("run error: " + e.message())
+
+# --- run_args: no shell → metacharacters are literal (injection-safe) ---
+match process.run_args("echo", ["$(echo PWNED)", ";", "&&"]):
+    Ok(r): print("args stdout: " + r.stdout.trim() + " code: " + str(r.code))
+    Err(e): print("args error: " + e.message())
+
+# A spawn failure (no such program) is a catchable Err, never a panic.
+match process.run_args("no-such-prog-xyz", []):
+    Ok(r): print("unexpected ok code: " + str(r.code))
+    Err(e): print("spawn failed")

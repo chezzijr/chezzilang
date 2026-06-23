@@ -11,6 +11,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ stdlib — `std.process` polish (gaps.md "std.process polish") (2026-06-24).** `std.process` had
+only `cmd(line)` via `sh -c` (injection-prone, stdout discarded on a non-zero exit). Added two
+structured forms in `src/native/process.rs`: `run(line) -> Result[ProcResult]` (still `sh -c`, same
+shell semantics as `cmd`) and `run_args(prog, args: list[str]) -> Result[ProcResult]` (runs the
+program **directly, no shell** → arguments are passed literally, **injection-safe**). The new synthetic
+struct `ProcResult { stdout: str, stderr: str, code: int }` carries **both streams + the exit code**: a
+non-zero exit is a normal `Ok(ProcResult)` with `code != 0` (stdout NOT discarded), **only a spawn
+failure** (no such program / permission) is `Err`; a signal-killed process reports `code = -1`. `cmd`
+is unchanged (back-compat — `examples/sys.chz` still green). The `list[str]` argv crosses the off-heap
+offload boundary via a NEW seam variant `NativeArg::List(Vec<String>)` + `Host::arg_str_list` (default-
+err), implemented on all three hosts (`VmHost` reads the live heap list, `extract_native_args`
+snapshots it to `NativeArg::List`, `OffloadHost` serves it back off-thread, `InterpHost` reads the live
+list) — a direct clone of the existing `map[str,str]` triad, so 3-engine parity (interp == cooperative
+VM == M:N) holds by construction at the NativeFn seam. `run`/`run_args` wired into `is_blocking()`
+(subprocess I/O → offloaded under the OS-thread engine). `ProcResult` is registered with the other
+synthetic stdlib structs in the compiler (`src/compiler/mod.rs`, declaration-order field names) and
+seeded in the checker (`seed_stdlib_structs` + `native_module_sig` std.process arm). Golden (VM ==
+interp via `assert_file_parity`, byte-identical under run/--serial/--parallel):
+`examples/process_polish.chz` — proves nonzero-is-Ok-with-code, the `$(...)`/`;`/`&&` injection-safety
+of `run_args`, and the spawn-failure `Err` path. Docs: `docs/stdlib.md` (§std.process extended +
+`ProcResult` reserved), `gaps.md` (std.process polish → ✅ RESOLVED). **Deferred:** stdin piping,
+output streaming, per-process env/cwd overrides. Full suite + conformance + `clippy --all-targets -D
+warnings` clean.
+
 **✅ stdlib — encoding/crypto/uuid native modules (gaps.md "Encoding/crypto") (2026-06-24).** Three
 new native modules, all hand-rolled with **zero new crates** (repo dependency-free policy):
 `std.encoding` (`src/native/encoding.rs`) — base64 std + URL-safe (RFC 4648), hex, RFC 3986 URL

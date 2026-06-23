@@ -6179,6 +6179,22 @@ impl Vm {
                         }
                         Some(A::Map(pairs))
                     }
+                    // A `list[str]` arg (today only `run_args`'s argv) is snapshotted into owned
+                    // strings so it survives the off-heap handoff. Any non-str element reverts to
+                    // `None` → run inline (the checker guarantees str for typed code).
+                    Obj::List(items) => {
+                        let mut out = Vec::with_capacity(items.len());
+                        for v in items {
+                            let Value::Obj(eh) = v else {
+                                return None;
+                            };
+                            let Obj::Str(s) = self.heap.get(*eh) else {
+                                return None;
+                            };
+                            out.push(s.to_string());
+                        }
+                        Some(A::List(out))
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -14767,6 +14783,14 @@ impl crate::native::Host for OffloadHost {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
+    fn arg_str_list(&mut self, i: usize) -> Result<Vec<String>, crate::native::HostError> {
+        match self.args.get(i) {
+            // Pre-extracted on the worker (heap live) into owned strings; served back off-thread.
+            Some(crate::native::NativeArg::List(items)) => Ok(items.clone()),
+            Some(_) => Err(crate::native::HostError::arg_type(i, "list[str]", "other")),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
     fn write_stdout(&mut self, _s: &str) {
         unreachable!("offloaded blocking native must not write stdout (off-heap host)")
     }
@@ -14988,6 +15012,44 @@ impl crate::native::Host for VmHost<'_> {
             Some(other) => Err(crate::native::HostError::arg_type(
                 i,
                 "map[str, str]",
+                self.vm.type_name(*other),
+            )),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    fn arg_str_list(&mut self, i: usize) -> Result<Vec<String>, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
+                Obj::List(items) => {
+                    // Iterate in list order (it IS the argv). Every element must be a str.
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in items {
+                        let Value::Obj(eh) = v else {
+                            return Err(crate::native::HostError::arg_type(
+                                i,
+                                "list[str]",
+                                "other",
+                            ));
+                        };
+                        let Obj::Str(s) = self.vm.heap.get(*eh) else {
+                            return Err(crate::native::HostError::arg_type(
+                                i,
+                                "list[str]",
+                                "other",
+                            ));
+                        };
+                        out.push(s.to_string());
+                    }
+                    Ok(out)
+                }
+                _ => {
+                    let got = self.vm.type_name(self.args[i]);
+                    Err(crate::native::HostError::arg_type(i, "list[str]", got))
+                }
+            },
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "list[str]",
                 self.vm.type_name(*other),
             )),
             None => Err(crate::native::HostError::missing_arg(i)),
@@ -15514,6 +15576,75 @@ mod tests {
             vec![("one".into(), "1".into()), ("two".into(), "2".into())]
         );
         assert!(host.arg_str_map(1).is_err(), "a non-map arg must error");
+    }
+
+    /// `OffloadHost::arg_str_list` serves the pre-extracted `NativeArg::List` argv back (so an
+    /// offloaded `run_args` reads its arguments off-thread); a non-list arg errors with `arg_type`.
+    #[test]
+    fn offload_host_arg_str_list_roundtrips() {
+        use crate::native::Host;
+        let mut host = OffloadHost {
+            args: vec![
+                crate::native::NativeArg::List(vec!["a".into(), "b".into()]),
+                crate::native::NativeArg::Str("not-a-list".into()),
+            ],
+        };
+        assert_eq!(
+            host.arg_str_list(0).unwrap(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert!(
+            host.arg_str_list(1).is_err(),
+            "a non-list NativeArg must error"
+        );
+        assert!(host.arg_str_list(9).is_err(), "a missing arg must error");
+    }
+
+    /// `extract_native_args` snapshots a `list[str]` Value into `NativeArg::List` (order preserved)
+    /// so `run_args` can offload; a list with a non-str element reverts to `None` (run inline).
+    #[test]
+    fn extract_native_args_snapshots_str_list() {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        let a = vm.alloc_str("echo".to_string());
+        let b = vm.alloc_str("hi".to_string());
+        let list = Value::Obj(vm.heap.alloc(Obj::List(vec![a, b])));
+        let got = vm.extract_native_args(&[list]).expect("str list extracts");
+        assert_eq!(
+            got,
+            vec![crate::native::NativeArg::List(vec![
+                "echo".into(),
+                "hi".into()
+            ])]
+        );
+        // A list with a non-str element is not snapshottable → None (safe inline fallback).
+        let s = vm.alloc_str("x".to_string());
+        let bad = Value::Obj(vm.heap.alloc(Obj::List(vec![s, Value::Int(7)])));
+        assert_eq!(vm.extract_native_args(&[bad]), None);
+    }
+
+    /// `VmHost::arg_str_list` reads a live heap `list[str]` in order; a non-list / non-str arg errors.
+    #[test]
+    fn vm_host_arg_str_list_reads_live_list() {
+        use crate::native::Host;
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        let a = vm.alloc_str("one".to_string());
+        let b = vm.alloc_str("two".to_string());
+        let list = Value::Obj(vm.heap.alloc(Obj::List(vec![a, b])));
+        let s = vm.alloc_str("z".to_string());
+        let bad = Value::Obj(vm.heap.alloc(Obj::List(vec![s, Value::Int(3)])));
+        let mut host = VmHost {
+            vm: &mut vm,
+            args: vec![list, bad, Value::Int(9)],
+        };
+        assert_eq!(
+            host.arg_str_list(0).unwrap(),
+            vec!["one".to_string(), "two".to_string()]
+        );
+        assert!(
+            host.arg_str_list(1).is_err(),
+            "a non-str element must error"
+        );
+        assert!(host.arg_str_list(2).is_err(), "a non-list arg must error");
     }
 
     /// M-C implicit nurseries: a bare `spawn` at function scope (no explicit `parallel:`) joins at
@@ -29301,6 +29432,21 @@ main()
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/sys.chz");
+    }
+
+    /// std.process polish golden: `examples/process_polish.chz` — the structured `run`/`run_args`
+    /// forms. Proves (a) a non-zero exit is `Ok(ProcResult)` carrying both streams + code (stdout NOT
+    /// discarded), (b) `run_args` runs WITHOUT a shell so `$(...)`/`;`/`&&` are passed literally
+    /// (injection-safe), (c) a spawn failure is a catchable `Err`. Byte-identical on the VM + interp.
+    #[test]
+    fn golden_process_polish_via_run_file() {
+        let path = fixture("examples/process_polish.chz");
+        let expected =
+            std::fs::read_to_string(fixture("examples/process_polish.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/process_polish.chz");
     }
 
     /// M8+ golden: `examples/fs_mutations.chz` — the std.fs mutation surface (mkdir/append/rename/
