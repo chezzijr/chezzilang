@@ -183,7 +183,19 @@ fn str_method(
             if n <= 0 {
                 Ok(Value::Str("".into()))
             } else {
-                Ok(Value::Str(s.repeat(n as usize).into()))
+                // Guard the allocation: `str::repeat` hard-panics on capacity overflow.
+                // Raise a recoverable fault instead (repo convention for overflow).
+                match s
+                    .len()
+                    .checked_mul(n as usize)
+                    .filter(|&t| t <= isize::MAX as usize)
+                {
+                    Some(_) => Ok(Value::Str(s.repeat(n as usize).into())),
+                    None => Err(RuntimeError {
+                        message: "string repeat capacity overflow".to_string(),
+                        span,
+                    }),
+                }
             }
         }
         "reverse" => {

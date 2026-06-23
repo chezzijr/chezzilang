@@ -9895,7 +9895,8 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
         "encode" => (vec![], Ty::Bytes),
         // gap #1 (minimal subset): receiver methods forwarding to the `std.str` free fns, so
         // `s.ends_with(x)` works just like `s.starts_with(x)` (no import needed). Native in both
-        // engines; byte-identical to the std.str codepoint-loop oracle.
+        // engines; byte-identical to the std.str codepoint-loop oracle for valid inputs (repeat
+        // raises a recoverable capacity-overflow fault instead of aborting on a huge count).
         "replace" => (vec![Ty::Str, Ty::Str], Ty::Str),
         "repeat" => (vec![Ty::Int], Ty::Str),
         "reverse" => (vec![], Ty::Str),

@@ -55,7 +55,7 @@ Conventions used below:
 | `contains` | `(sub: str) -> bool` | Substring test. |
 | `join` | `(xs: list[str]) -> str` | Join `xs` with the receiver as the separator. |
 | `replace` | `(old: str, new: str) -> str` | Replace every non-overlapping `old`; empty `old` → unchanged. |
-| `repeat` | `(n: int) -> str` | `n <= 0` → `""`. |
+| `repeat` | `(n: int) -> str` | `n <= 0` → `""`. Raises a recoverable `string repeat capacity overflow` fault if `n * len` would exceed allocatable capacity. |
 | `reverse` | `() -> str` | Reversed copy (by codepoint). |
 | `pad_left` | `(width: int, fill: str) -> str` | Left-pad to `width` codepoints; never shrinks. |
 | `index_of` | `(sub: str) -> int` | First **codepoint** index, `-1` if absent, `0` for empty `sub`. |
@@ -71,7 +71,9 @@ Conventions used below:
 
 The `ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines`
 methods are receiver-method aliases of the identically-named `std.str` free fns — `s.replace(a, b)` and
-`text.replace(s, a, b)` (after `import std.str as text`) are byte-identical; the free fns keep working.
+`text.replace(s, a, b)` (after `import std.str as text`) are byte-identical for valid inputs; the free fns
+keep working. (One safety divergence: `s.repeat(n)` raises a recoverable capacity-overflow fault for a
+huge `n` rather than allocating until it aborts.)
 
 ### `list[T]`
 | Method | Signature | Notes |

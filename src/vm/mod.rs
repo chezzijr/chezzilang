@@ -7473,7 +7473,19 @@ impl Vm {
                         if n <= 0 {
                             Ok(self.alloc_str(String::new()))
                         } else {
-                            Ok(self.alloc_str(s.repeat(n as usize)))
+                            // Guard the allocation: `str::repeat` hard-panics on capacity overflow.
+                            // Raise a recoverable fault instead (repo convention for overflow).
+                            match s
+                                .len()
+                                .checked_mul(n as usize)
+                                .filter(|&t| t <= isize::MAX as usize)
+                            {
+                                Some(_) => Ok(self.alloc_str(s.repeat(n as usize))),
+                                None => {
+                                    Err(self
+                                        .err("string repeat capacity overflow".to_string(), span))
+                                }
+                            }
                         }
                     }
                     "reverse" => {
@@ -24659,6 +24671,24 @@ main()
             assert_eq!(vm, want, "vm mismatch for `{src}`");
             assert_eq!(crate::interp::run_capture(src).expect("interp"), want);
         }
+    }
+
+    /// `str.repeat(n)` with a huge `n` must raise a RECOVERABLE fault (not hard-panic the process via
+    /// Rust's `str::repeat` capacity-overflow abort), on both engines, matching the repo's
+    /// checked-overflow policy. Normal repeats still work and stay parity-equal.
+    #[test]
+    fn str_repeat_capacity_overflow_is_recoverable_fault() {
+        // `expect_err` (not a process abort) proves the panic was converted to a fault.
+        let src = r#"print("ab".repeat(9223372036854775807))"#;
+        let vm = run_capture(src).expect_err("vm: repeat overflow should fault");
+        assert_eq!(vm.message, "string repeat capacity overflow");
+        let it = crate::interp::run_capture(src).expect_err("interp: repeat overflow should fault");
+        assert_eq!(it.message, "string repeat capacity overflow");
+
+        // Sane repeats are unaffected and agree across engines.
+        let ok = r#"print("ab".repeat(3))"#;
+        assert_eq!(run_capture(ok).expect("vm"), "ababab\n");
+        assert_eq!(crate::interp::run_capture(ok).expect("interp"), "ababab\n");
     }
 
     /// `examples/evaluator.chz` — a full tokenizer + recursive-descent parser + AST evaluator with
