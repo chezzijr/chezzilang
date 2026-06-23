@@ -78,7 +78,7 @@ is a predictable first-hour stumble. Ranked by friction.
    - Remaining fix: (a) re-export the common `std.iter`/`std.cmp` ops as receiver methods (thin forwarders
      in the checker method table), or (b) document a hard rule. The str asymmetry — the worst one — is gone.
 
-*(Gaps #2 `print` newline/sep control and #3 `assert` message — both RESOLVED 2026-06-23, see the
+*(`print` newline/sep control (gap #5) and `assert` message (gap #6) — both RESOLVED 2026-06-23, see the
 resolved log.)*
 
 **Minor / noted:** no `map.items()` (have `.keys()`/`.values()` + `for k,v`); no `type()`/`typeof`; no
