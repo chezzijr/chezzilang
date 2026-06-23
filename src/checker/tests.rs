@@ -2454,6 +2454,80 @@ fn list_concat_returns_list() {
     ok("xs := [1, 2]\nys := xs.concat([3, 4])\nn: int = ys[0]\nprint(n)\n");
 }
 
+// --- Collection operators (gap #3): list `+`/`*`, set `| & - ^` ---
+
+#[test]
+fn list_plus_operator_returns_list() {
+    ok("xs := [1, 2] + [3, 4]\nn: int = xs[0]\nprint(n)\n");
+}
+
+#[test]
+fn list_plus_empty_infers_element_type() {
+    // An empty `[]` side must not poison the element type — `[] + [1]` is `list[int]`.
+    ok("xs := [] + [1, 2]\nn: int = xs[0]\nprint(n)\n");
+    ok("xs := [1, 2] + []\nn: int = xs[0]\nprint(n)\n");
+}
+
+#[test]
+fn list_plus_mismatched_element_rejected() {
+    rejects(
+        "xs := [1, 2] + [\"a\"]\n",
+        "cannot apply + to list[int] and list[str]",
+    );
+}
+
+#[test]
+fn list_plus_non_list_rejected() {
+    rejects("xs := [1, 2] + 1\n", "cannot apply + to list[int] and int");
+}
+
+#[test]
+fn list_times_int_returns_list() {
+    ok("xs := [1] * 3\nn: int = xs[0]\nprint(n)\n");
+}
+
+#[test]
+fn int_times_list_returns_list() {
+    // Commutative, Python-style: `3 * [1]` is also `list[int]`.
+    ok("xs := 3 * [1]\nn: int = xs[0]\nprint(n)\n");
+}
+
+#[test]
+fn list_times_non_int_rejected() {
+    rejects(
+        "xs := [1] * [2]\n",
+        "cannot apply * to list[int] and list[int]",
+    );
+}
+
+#[test]
+fn set_union_operator_returns_set() {
+    ok("a: set[int] = {1}\nb: set[int] = {2}\nc := a | b\nx: set[int] = c\nprint(x.len())\n");
+}
+
+#[test]
+fn set_intersection_difference_xor_operators_return_set() {
+    ok(
+        "a: set[int] = {1, 2}\nb: set[int] = {2, 3}\ni := a & b\nd := a - b\ns := a ^ b\nxi: set[int] = i\nxd: set[int] = d\nxs: set[int] = s\nprint(xi.len() + xd.len() + xs.len())\n",
+    );
+}
+
+#[test]
+fn set_op_mismatched_element_rejected() {
+    rejects(
+        "a: set[int] = {1}\nb: set[str] = {\"a\"}\nc := a | b\n",
+        "bitwise operator | requires int operands or two sets",
+    );
+}
+
+#[test]
+fn set_difference_mismatched_element_rejected() {
+    rejects(
+        "a: set[int] = {1}\nb: set[str] = {\"a\"}\nc := a - b\n",
+        "cannot apply - to set[int] and set[str]",
+    );
+}
+
 #[test]
 fn list_extend_returns_nil() {
     ok("xs := [1, 2]\nxs.extend([3, 4])\nprint(xs.len())\n");

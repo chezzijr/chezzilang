@@ -330,6 +330,16 @@ impl GeneratorCore {
     }
 }
 
+/// The four set operators (gap #3): `|`→union, `&`→intersection, `-`→difference,
+/// `^`→symmetric-difference. Selects the algebra in `Vm::set_op` / `interp::set_op`.
+#[derive(Clone, Copy)]
+enum SetOp {
+    Union,
+    Intersection,
+    Difference,
+    SymmetricDifference,
+}
+
 /// A call registered by `defer`, with its receiver/arguments already evaluated. The held values are
 /// GC roots while the deferred call is pending.
 #[derive(Clone)]
@@ -4821,20 +4831,44 @@ impl Vm {
                 self.struct_arith(op, l, r, span)?
             }
             (Value::Obj(ha), Value::Obj(hb)) if matches!(op, Op::Add) => {
-                if let (Obj::Str(a), Obj::Str(b)) = (self.heap.get(ha), self.heap.get(hb)) {
-                    let s = format!("{a}{b}");
-                    let h = self.heap.alloc(Obj::Str(s.into()));
-                    Value::Obj(h)
-                } else {
-                    return Err(self.err(
-                        format!(
-                            "cannot apply {name} to {} and {}",
-                            self.type_name(l),
-                            self.type_name(r)
-                        ),
-                        span,
-                    ));
+                match (self.heap.get(ha), self.heap.get(hb)) {
+                    (Obj::Str(a), Obj::Str(b)) => {
+                        let s = format!("{a}{b}");
+                        let h = self.heap.alloc(Obj::Str(s.into()));
+                        Value::Obj(h)
+                    }
+                    // List concat (gap #3): `[1,2] + [3,4]` — identical to `.concat` (vm:7688).
+                    (Obj::List(a), Obj::List(b)) => {
+                        let mut out = a.clone();
+                        out.extend(b.iter().copied());
+                        Value::Obj(self.heap.alloc(Obj::List(out)))
+                    }
+                    _ => {
+                        return Err(self.err(
+                            format!(
+                                "cannot apply {name} to {} and {}",
+                                self.type_name(l),
+                                self.type_name(r)
+                            ),
+                            span,
+                        ));
+                    }
                 }
+            }
+            // Set difference (gap #3): `a - b` — identical to `.difference` (vm:7918).
+            (Value::Obj(ha), Value::Obj(hb))
+                if matches!(op, Op::Sub)
+                    && matches!(self.heap.get(ha), Obj::Set(_))
+                    && matches!(self.heap.get(hb), Obj::Set(_)) =>
+            {
+                self.set_op(SetOp::Difference, ha, hb)
+            }
+            // List repeat (gap #3): `[0] * 3` / `3 * [0]` (commutative, Python-style). `n <= 0` →
+            // empty; guard capacity against the Vec overflow abort, like `str.repeat` (vm:7514).
+            (Value::Obj(ha), Value::Int(n)) | (Value::Int(n), Value::Obj(ha))
+                if matches!(op, Op::Mul) && matches!(self.heap.get(ha), Obj::List(_)) =>
+            {
+                self.list_repeat(ha, n, span)?
             }
             _ => {
                 return Err(self.err(
@@ -4849,6 +4883,103 @@ impl Vm {
         };
         self.push(result);
         Ok(())
+    }
+
+    /// `[elem...] * n` — repeat the list `n` times into a fresh list (gap #3). `n <= 0` → empty.
+    /// Guards the allocation against capacity overflow (a giant `n` would otherwise abort the
+    /// process via Vec's panic) — raises a RECOVERABLE fault, mirroring `str.repeat`. Mirrored
+    /// byte-for-byte in `interp::eval_binary`.
+    fn list_repeat(&mut self, h: GcRef, n: i64, span: Span) -> Result<Value, RuntimeError> {
+        let Obj::List(items) = self.heap.get(h) else {
+            unreachable!("list_repeat receiver is a list")
+        };
+        if n <= 0 {
+            return Ok(Value::Obj(self.heap.alloc(Obj::List(Vec::new()))));
+        }
+        let n = n as usize;
+        // Guard the allocation: a giant `n` would abort the process via `Vec`'s capacity panic.
+        // Bound the BYTE size (`count * size_of::<Value>()`) by `isize::MAX`, matching `Vec`'s own
+        // limit — `str.repeat` does the same on its byte length (vm:7514). Recoverable fault.
+        match items
+            .len()
+            .checked_mul(n)
+            .and_then(|t| t.checked_mul(std::mem::size_of::<Value>()))
+            .filter(|&bytes| bytes <= isize::MAX as usize)
+        {
+            Some(_) => {
+                let src = items.clone();
+                let mut out = Vec::with_capacity(src.len() * n);
+                for _ in 0..n {
+                    out.extend(src.iter().copied());
+                }
+                Ok(Value::Obj(self.heap.alloc(Obj::List(out))))
+            }
+            None => Err(self.err("list repeat capacity overflow".to_string(), span)),
+        }
+    }
+
+    /// Set algebra for the operator forms `| & - ^` (gap #3). Mirrors the
+    /// `union`/`intersection`/`difference` set methods (vm:7918) using the cached per-element
+    /// hashes (no re-hashing, no user re-entry). `^` (symmetric-difference) has no method form:
+    /// it is the union of (mine ∉ other) THEN (other ∉ mine), in that canonical insertion order so
+    /// the result's print order is deterministic and parity-equal with the interpreter.
+    fn set_op(&mut self, op: SetOp, ha: GcRef, hb: GcRef) -> Value {
+        let mine = match self.heap.get(ha) {
+            Obj::Set(s) => s.entries.clone(),
+            _ => unreachable!(),
+        };
+        let other = match self.heap.get(hb) {
+            Obj::Set(s) => s.entries.clone(),
+            _ => unreachable!(),
+        };
+        let mut out = SetData::default();
+        let add = |vm: &Vm, set: &mut SetData, he: u64, e: Value| {
+            if !set
+                .candidates(he)
+                .iter()
+                .any(|&p| vm.values_equal(set.entries[p].1, e))
+            {
+                set.push(he, e);
+            }
+        };
+        let in_set = |vm: &Vm, set: &[(u64, Value)], he: u64, e: Value| {
+            set.iter()
+                .any(|&(h2, e2)| h2 == he && vm.values_equal(e2, e))
+        };
+        match op {
+            SetOp::Union => {
+                for (he, e) in mine.iter().chain(other.iter()) {
+                    add(self, &mut out, *he, *e);
+                }
+            }
+            SetOp::Intersection => {
+                for (he, e) in &mine {
+                    if in_set(self, &other, *he, *e) {
+                        add(self, &mut out, *he, *e);
+                    }
+                }
+            }
+            SetOp::Difference => {
+                for (he, e) in &mine {
+                    if !in_set(self, &other, *he, *e) {
+                        add(self, &mut out, *he, *e);
+                    }
+                }
+            }
+            SetOp::SymmetricDifference => {
+                for (he, e) in &mine {
+                    if !in_set(self, &other, *he, *e) {
+                        add(self, &mut out, *he, *e);
+                    }
+                }
+                for (he, e) in &other {
+                    if !in_set(self, &mine, *he, *e) {
+                        add(self, &mut out, *he, *e);
+                    }
+                }
+            }
+        }
+        Value::Obj(self.heap.alloc(Obj::Set(out)))
     }
 
     /// Arithmetic operator overloading: dispatch `+`/`-`/`*` on two structs to the receiver's
@@ -5079,6 +5210,21 @@ impl Vm {
                     _ => unreachable!(),
                 };
                 Value::Int(v)
+            }
+            // Set algebra (gap #3): `|`→union, `&`→intersection, `^`→symmetric-difference on two
+            // sets. (`<< >>` stay int-only and fall through to the error below.) Identical to the
+            // `.union`/`.intersection` methods; `^` has no method form. Mirrors interp.
+            (Value::Obj(ha), Value::Obj(hb))
+                if matches!(op, Op::BitOr | Op::BitAnd | Op::BitXor)
+                    && matches!(self.heap.get(ha), Obj::Set(_))
+                    && matches!(self.heap.get(hb), Obj::Set(_)) =>
+            {
+                let set_op = match op {
+                    Op::BitOr => SetOp::Union,
+                    Op::BitAnd => SetOp::Intersection,
+                    _ => SetOp::SymmetricDifference,
+                };
+                self.set_op(set_op, ha, hb)
             }
             _ => {
                 return Err(self.err(
@@ -24752,6 +24898,46 @@ main()
         assert_eq!(crate::interp::run_capture(ok).expect("interp"), "ababab\n");
     }
 
+    /// Collection operators (gap #3): list `+` (concat) / `*` (repeat) and set `| & - ^`
+    /// (union/intersection/difference/symmetric-difference). Value-correctness on the VM; the
+    /// golden parity test below proves VM==interp. Set print preserves insertion order (mine-then-
+    /// other for union; mine-filtered for intersection/difference; mine-not-in-other then
+    /// other-not-in-mine for symmetric-difference).
+    #[test]
+    fn collection_operators_eval_correct() {
+        // list concat
+        assert_eq!(
+            run_capture("print([1, 2] + [3, 4])").expect("vm"),
+            "[1, 2, 3, 4]\n"
+        );
+        // empty-side concat keeps element type / values
+        assert_eq!(run_capture("print([] + [1, 2])").expect("vm"), "[1, 2]\n");
+        assert_eq!(run_capture("print([1, 2] + [])").expect("vm"), "[1, 2]\n");
+        // list repeat (both orders)
+        assert_eq!(run_capture("print([0] * 3)").expect("vm"), "[0, 0, 0]\n");
+        assert_eq!(run_capture("print(2 * [7])").expect("vm"), "[7, 7]\n");
+        // zero / negative repeat → empty
+        assert_eq!(run_capture("print([1] * 0)").expect("vm"), "[]\n");
+        assert_eq!(run_capture("print([1] * -2)").expect("vm"), "[]\n");
+        // set algebra (insertion-order preserved)
+        let setops = "a: set[int] = {1, 2, 3}\nb: set[int] = {2, 3, 4}\nprint(\"{a | b}\")\nprint(\"{a & b}\")\nprint(\"{a - b}\")\nprint(\"{a ^ b}\")\n";
+        assert_eq!(
+            run_capture(setops).expect("vm"),
+            "{1, 2, 3, 4}\n{2, 3}\n{1}\n{1, 4}\n"
+        );
+    }
+
+    /// `[0] * n` with a huge `n` must raise a RECOVERABLE fault, not abort the process via a Vec
+    /// capacity-overflow panic — same checked-overflow policy as `str.repeat`, on both engines.
+    #[test]
+    fn list_repeat_capacity_overflow_is_recoverable_fault() {
+        let src = "print([0] * 9223372036854775807)";
+        let vm = run_capture(src).expect_err("vm: list repeat overflow should fault");
+        assert_eq!(vm.message, "list repeat capacity overflow");
+        let it = crate::interp::run_capture(src).expect_err("interp: list repeat overflow");
+        assert_eq!(it.message, "list repeat capacity overflow");
+    }
+
     /// `examples/evaluator.chz` — a full tokenizer + recursive-descent parser + AST evaluator with
     /// `Result`/`?` error paths (bad char, unbalanced parens, trailing input, divide-by-zero).
     #[test]
@@ -28472,6 +28658,21 @@ main()
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/mutate.chz");
+    }
+
+    /// `examples/collection_ops.chz` — golden coverage of every collection operator (gap #3): list
+    /// `+`/`*` and set `| & - ^` (multi-element, empty, type-correct mixes). Uses `std.io`, so it
+    /// runs through `run_file` (module resolution) and asserts two-engine parity via
+    /// `assert_file_parity` (VM==interp==expected).
+    #[test]
+    fn golden_collection_ops_via_run_file() {
+        let path = fixture("examples/collection_ops.chz");
+        let expected =
+            std::fs::read_to_string(fixture("examples/collection_ops.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/collection_ops.chz");
     }
 
     /// M6c golden: the std-library demo (native std.io/math/os + Chezzi std.str) runs end-to-end on

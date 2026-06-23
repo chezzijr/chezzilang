@@ -5270,6 +5270,16 @@ impl Checker {
                     numeric_result(&l, &r)
                 } else if let Some(t) = self.op_overload_result(&l, &r, "Add") {
                     t
+                } else if let (Ty::List(le), Ty::List(re)) = (&l, &r) {
+                    // List concat (gap #3): `[1,2] + [3,4]` → `list[T]`, identical to `.concat`.
+                    // Element types must be compatible; an empty `[]` side (Unknown elem) is
+                    // joined by `merge_unknown` so `[] + [1]` infers `list[int]`.
+                    if compatible(le, re) {
+                        Ty::List(Box::new(merge_unknown(le, re)))
+                    } else {
+                        self.error(lhs.span, format!("cannot apply + to {l} and {r}"));
+                        Ty::Unknown
+                    }
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
@@ -5285,6 +5295,25 @@ impl Checker {
                     numeric_result(&l, &r)
                 } else if let Some(t) = self.op_overload_result(&l, &r, proto) {
                     t
+                } else if op == Mul && matches!((&l, &r), (Ty::List(_), Ty::Int)) {
+                    // List repeat (gap #3): `[0] * 3` → `list[T]`. Result keeps the list's element.
+                    l.clone()
+                } else if op == Mul && matches!((&l, &r), (Ty::Int, Ty::List(_))) {
+                    // Commutative, Python-style: `3 * [0]` → `list[T]`.
+                    r.clone()
+                } else if op == Sub
+                    && let (Ty::Set(le), Ty::Set(re)) = (&l, &r)
+                {
+                    // Set difference (gap #3): `a - b` → `set[T]`, identical to `.difference`.
+                    if compatible(le, re) {
+                        Ty::Set(Box::new(merge_unknown(le, re)))
+                    } else {
+                        self.error(
+                            lhs.span,
+                            format!("cannot apply {} to {l} and {r}", op_sym(op)),
+                        );
+                        Ty::Unknown
+                    }
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
@@ -5324,17 +5353,36 @@ impl Checker {
                 }
                 Ty::Bool
             }
-            // Bitwise/shift ops are int-only (gap #13).
+            // Bitwise/shift ops are int-only (gap #13), EXCEPT `| & ^` also do set algebra
+            // (gap #3): union / intersection / symmetric-difference on two `set[T]`. Shifts
+            // (`<< >>`) stay strictly int-only.
             BitAnd | BitOr | BitXor | Shl | Shr => {
                 if l == Ty::Int && r == Ty::Int {
                     Ty::Int
+                } else if matches!(op, BitAnd | BitOr | BitXor)
+                    && let (Ty::Set(le), Ty::Set(re)) = (&l, &r)
+                {
+                    // Set `|`→union, `&`→intersection, `^`→symmetric-difference → `set[T]`,
+                    // identical to the `.union`/`.intersection` methods (`^` has no method form).
+                    if compatible(le, re) {
+                        Ty::Set(Box::new(merge_unknown(le, re)))
+                    } else {
+                        self.error(
+                            lhs.span,
+                            format!(
+                                "bitwise operator {} requires int operands or two sets, found {l} and {r}",
+                                op_sym(op)
+                            ),
+                        );
+                        Ty::Unknown
+                    }
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
                     self.error(
                         lhs.span,
                         format!(
-                            "bitwise operator {} requires int operands, found {l} and {r}",
+                            "bitwise operator {} requires int operands or two sets, found {l} and {r}",
                             op_sym(op)
                         ),
                     );
