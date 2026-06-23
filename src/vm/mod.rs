@@ -24927,6 +24927,45 @@ main()
         );
     }
 
+    /// Compound-assign forms (`+= *= |= &= ^= -=`) of the collection operators lower through the
+    /// same opcodes as the binary forms, so they must produce identical values — and stay in
+    /// lock-step across both engines.
+    #[test]
+    fn collection_compound_assign_eval_correct() {
+        let cases = [
+            ("xs := [1, 2]\nxs += [3, 4]\nprint(xs)", "[1, 2, 3, 4]\n"),
+            ("xs := [7]\nxs *= 3\nprint(xs)", "[7, 7, 7]\n"),
+            (
+                "a: set[int] = {1, 2, 3}\nb: set[int] = {2, 3, 4}\na |= b\nprint(\"{a}\")",
+                "{1, 2, 3, 4}\n",
+            ),
+            (
+                "a: set[int] = {1, 2, 3}\nb: set[int] = {2, 3, 4}\na &= b\nprint(\"{a}\")",
+                "{2, 3}\n",
+            ),
+            (
+                "a: set[int] = {1, 2, 3}\nb: set[int] = {2, 3, 4}\na -= b\nprint(\"{a}\")",
+                "{1}\n",
+            ),
+            (
+                "a: set[int] = {1, 2, 3}\nb: set[int] = {2, 3, 4}\na ^= b\nprint(\"{a}\")",
+                "{1, 4}\n",
+            ),
+        ];
+        for (src, want) in cases {
+            assert_eq!(
+                run_capture(src).expect("vm"),
+                want,
+                "vm mismatch for `{src}`"
+            );
+            assert_eq!(
+                crate::interp::run_capture(src).expect("interp"),
+                want,
+                "interp mismatch for `{src}`"
+            );
+        }
+    }
+
     /// `[0] * n` with a huge `n` must raise a RECOVERABLE fault, not abort the process via a Vec
     /// capacity-overflow panic — same checked-overflow policy as `str.repeat`, on both engines.
     #[test]

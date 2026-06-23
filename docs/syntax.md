@@ -307,6 +307,9 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 > - `set[T] | set[T]` → union (= `.union`), `& ` → intersection (= `.intersection`), `-` → difference
 >   (= `.difference`), `^` → symmetric-difference (no method form). Result preserves insertion order.
 >
+> The compound-assign forms work too: `xs += ys` / `xs *= n` (list), `s |= t` / `s &= t` / `s ^= t` /
+> `s -= t` (set) — identical to the binary form.
+>
 > Plain bitwise (`& ^ | << >>`) on **int** operands is unchanged; `<< >>` are int-only (no set form),
 > and a float operand is still a type error.
 

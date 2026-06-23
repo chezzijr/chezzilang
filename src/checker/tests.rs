@@ -2528,6 +2528,38 @@ fn set_difference_mismatched_element_rejected() {
     );
 }
 
+// Compound-assign forms of the collection operators must mirror their binary forms (they lower
+// through the same opcodes) — and the bitwise compound diagnostic must not falsely claim sets are
+// disallowed when `s = s | t` type-checks.
+
+#[test]
+fn list_compound_assign_ops_ok() {
+    ok("xs := [1, 2]\nxs += [3, 4]\nxs *= 2\nprint(xs.len())\n");
+}
+
+#[test]
+fn set_compound_assign_ops_ok() {
+    ok(
+        "a: set[int] = {1, 2}\nb: set[int] = {2, 3}\na |= b\na &= b\na ^= b\na -= b\nprint(a.len())\n",
+    );
+}
+
+#[test]
+fn list_plus_eq_mismatched_element_rejected() {
+    rejects(
+        "xs := [1, 2]\nxs += [\"a\"]\n",
+        "cannot apply += to list[int] and list[str]",
+    );
+}
+
+#[test]
+fn set_pipe_eq_mismatched_element_rejected() {
+    rejects(
+        "a: set[int] = {1}\nb: set[str] = {\"a\"}\na |= b\n",
+        "bitwise operator |= requires int operands or two sets",
+    );
+}
+
 #[test]
 fn list_extend_returns_nil() {
     ok("xs := [1, 2]\nxs.extend([3, 4])\nprint(xs.len())\n");

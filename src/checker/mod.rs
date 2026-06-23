@@ -3455,8 +3455,18 @@ impl Checker {
                 let str_ok = op == AssignOp::PlusEq && *target_ty == Ty::Str && *val_ty == Ty::Str;
                 let widens = *target_ty == Ty::Int && *val_ty == Ty::Float;
                 let num_ok = target_ty.is_numeric() && val_ty.is_numeric() && !widens;
+                // Collection forms mirror `infer_binary`: `list += list` (concat), `list *= int`
+                // (repeat), `set -= set` (difference). Compound-assign lowers through the same
+                // `Op::Add`/`Op::Mul`/`Op::Sub` opcodes the binary form uses, so the runtime already
+                // handles these — only the checker had to be taught to accept them.
+                let coll_ok = match (op, target_ty, val_ty) {
+                    (AssignOp::PlusEq, Ty::List(a), Ty::List(b)) => compatible(a, b),
+                    (AssignOp::StarEq, Ty::List(_), Ty::Int) => true,
+                    (AssignOp::MinusEq, Ty::Set(a), Ty::Set(b)) => compatible(a, b),
+                    _ => false,
+                };
                 let known = !target_ty.is_unknown() && !val_ty.is_unknown();
-                if known && !str_ok && !num_ok {
+                if known && !str_ok && !num_ok && !coll_ok {
                     let sym = match op {
                         AssignOp::PlusEq => "+=",
                         AssignOp::MinusEq => "-=",
@@ -3470,16 +3480,19 @@ impl Checker {
                     );
                 }
             }
-            // Bitwise/shift compound ops `&= |= ^= <<= >>=` — int-only (mirrors `infer_binary`'s
-            // bitwise arm).
+            // Bitwise/shift compound ops `&= |= ^= <<= >>=` — int-only, EXCEPT `&= |= ^=` also do
+            // set algebra on two `set[T]` (mirrors `infer_binary`'s bitwise arm; `<<= >>=` stay
+            // strictly int). Lowers through the same `Op::BitOr`/etc opcodes as the binary form.
             AssignOp::AmpEq
             | AssignOp::PipeEq
             | AssignOp::CaretEq
             | AssignOp::ShlEq
             | AssignOp::ShrEq => {
                 let int_ok = *target_ty == Ty::Int && *val_ty == Ty::Int;
+                let set_ok = matches!(op, AssignOp::AmpEq | AssignOp::PipeEq | AssignOp::CaretEq)
+                    && matches!((target_ty, val_ty), (Ty::Set(a), Ty::Set(b)) if compatible(a, b));
                 let known = !target_ty.is_unknown() && !val_ty.is_unknown();
-                if known && !int_ok {
+                if known && !int_ok && !set_ok {
                     let sym = match op {
                         AssignOp::AmpEq => "&=",
                         AssignOp::PipeEq => "|=",
@@ -3489,7 +3502,7 @@ impl Checker {
                     };
                     self.error(
                         span,
-                        format!("bitwise operator {sym} requires int operands, found {target_ty} and {val_ty}"),
+                        format!("bitwise operator {sym} requires int operands or two sets, found {target_ty} and {val_ty}"),
                     );
                 }
             }
