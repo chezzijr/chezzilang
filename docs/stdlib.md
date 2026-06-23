@@ -209,6 +209,18 @@ Constants: `math.pi`, `math.e`.
 `cmd(line: str) -> Result[str]` — run `sh -c <line>`, capture stdout; `Err(stderr)` on non-zero exit.
 **Security:** `line` is a shell string — never interpolate untrusted input (shell-injection risk).
 
+### `std.rand`
+Pseudo-random scalars (SplitMix64 PRNG). `seed(n: int) -> nil` (reseed deterministically) ·
+`float() -> float` (uniform in `[0, 1)`) · `int(lo: int, hi: int) -> int` (uniform in the half-open
+`[lo, hi)`; **faults** `rand.int(lo, hi): hi must be > lo` if `hi <= lo`) · `bool() -> bool`.
+The stream auto-seeds from OS entropy on first use; call `seed(n)` to make it reproducible. Draws are
+inline CPU (not I/O). Generic collection helpers (`shuffle`/`choice`/`sample`) live in `std.iter` —
+the native seam carries only scalars, so it cannot return a generic `list[T]`.
+**Limit (not a bug):** the PRNG state is a single process-global, so under `--parallel` *concurrent*
+draws from multiple tasks interleave nondeterministically (engines may diverge). *Sequential* draws
+are deterministic and byte-identical across all engines once seeded — draw in one task, or guard with a
+`Shared`/lock, when you need reproducibility under concurrency.
+
 ### `std.regex`
 Returns use `struct Match { text: str, start: int, end: int, groups: list[str] }` (byte offsets;
 `groups` are capture groups 1..n; a non-participating optional group is `""`).
@@ -334,6 +346,11 @@ All of these except `is_empty` are also available as receiver methods on `str` (
 `fold(xs, init, f)` · `reduce(xs, f) -> T` (non-empty) · `take(xs, n)` · `drop(xs, n)` ·
 `any(xs, pred) -> bool` · `all(xs, pred) -> bool` · `find(xs, pred) -> Option[T]` ·
 `flatten(xss) -> list[T]`.
+Random helpers (call `std.rand`; seed via `rand.seed(n)` for reproducibility — these are pure-Chezzi
+because the native seam can't return a generic `list[T]`):
+`shuffle(xs) -> list[T]` (new randomly-permuted list, Fisher–Yates, non-mutating) ·
+`choice(xs) -> Option[T]` (`None` on empty) ·
+`sample(xs, k) -> list[T]` (`k` elements without replacement; `k` clamped to `[0, len]`).
 
 ### `std.json` — JSON
 ```chezzi

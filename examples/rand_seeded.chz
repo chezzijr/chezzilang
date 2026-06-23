@@ -1,0 +1,27 @@
+# examples/rand_seeded.chz — std.rand SEEDED golden. Seeds a fixed value, then draws all four
+# scalar fns STRICTLY SEQUENTIALLY in one main() so the output is deterministic across all three
+# engines (interp / cooperative VM / M:N --parallel) — the shared process-global RNG yields one
+# byte-identical stream for any sequential draw sequence. (CONCURRENT draws would interleave; that
+# is a documented limit, not a bug — see docs/stdlib.md §std.rand.)
+
+import std.rand
+
+fn main():
+    rand.seed(42)
+
+    # int(lo, hi): half-open [lo, hi).
+    print("ints:")
+    for _ in 0..5:
+        print(rand.int(0, 100))
+
+    # float(): [0, 1).
+    print("floats:")
+    for _ in 0..3:
+        print(rand.float())
+
+    # bool().
+    print("bools:")
+    for _ in 0..4:
+        print(rand.bool())
+
+main()

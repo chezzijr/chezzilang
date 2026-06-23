@@ -29244,6 +29244,40 @@ main()
         assert_file_parity("examples/iter_more.chz");
     }
 
+    /// std.rand goldens — run as ONE test so they execute sequentially. The PRNG is a process-global
+    /// (shared by VM + interp + every test in the run); two *separate* `#[test]`s seeding-then-drawing
+    /// would interleave on that global under the test harness's parallel runner and diverge. Drawn
+    /// sequentially within one test body, each program's `rand.seed()`-then-draw stream is
+    /// deterministic and byte-identical across engines (`assert_file_parity` checks VM == interp).
+    /// (This is the same concurrent-draw limit documented in docs/stdlib.md §std.rand — the goldens
+    /// avoid it by serializing.)
+    ///
+    /// - `rand_seeded`: all four scalar fns (seed/int/float/bool), seeded → deterministic values.
+    /// - `rand_shape`: UNSEEDED (OS-entropy path); asserts only range/shape, prints fixed "ok" lines
+    ///   (value-independent, so byte-identical across engines despite the nondeterministic seed).
+    /// - `rand_iter`: std.iter `shuffle`/`choice`/`sample` (pure Chezzi over native `rand.int`).
+    #[test]
+    fn golden_rand_via_run_file() {
+        // Serialize against the rand unit tests (shared process-global RNG); see TEST_RNG_LOCK.
+        let _g = crate::native::rand::TEST_RNG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for rel in [
+            "examples/rand_seeded.chz",
+            "examples/rand_shape.chz",
+            "examples/rand_iter.chz",
+        ] {
+            let path = fixture(rel);
+            let expected =
+                std::fs::read_to_string(fixture(&format!("{}.expected", &rel[..rel.len() - 4])))
+                    .unwrap();
+            let (out, _err, res, _) = run_file(&path);
+            assert!(res.is_ok(), "{rel}: {res:?}");
+            assert_eq!(out, expected, "stdout mismatch for {rel}");
+            assert_file_parity(rel);
+        }
+    }
+
     /// M8-M5 golden: `examples/json_decode.chz` — type-directed `json.decode[T]` into struct /
     /// typed map / list / scalar, with Option fields, extra-key tolerance, and an error case.
     /// Byte-identical on interp + VM.

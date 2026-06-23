@@ -1,10 +1,17 @@
 # std.iter — small iterator helpers as generic functions over lists.
 #
+# `shuffle`/`choice`/`sample` are the generic random-collection helpers: they live here (not under
+# `rand.*`) because the native FFI seam carries only engine-neutral scalars — it cannot return a
+# generic `list[T]` — so they are written in pure Chezzi and call the native `rand.int` for their
+# randomness. (Seed the stream via `rand.seed(n)` for deterministic output.)
+#
 # Written entirely in Chezzi: these return `list[(...)]`, so they compose with the
 # tuple-destructuring `for` (`for i, x in iter.enumerate(xs)`) and comprehensions
 # (`[a + b for a, b in iter.zip(xs, ys)]`). No builtin special-casing — ordinary library funcs.
 # The empty accumulator `out := []` recovers its element type from each function's return
 # annotation (`-> list[(int, T)]`), so the first `push` of a tuple type-checks.
+
+import std.rand
 
 # Pair each element with its 0-based index: `[a, b]` → `[(0, a), (1, b)]`.
 fn enumerate[T](xs: list[T]) -> list[(int, T)]:
@@ -113,4 +120,52 @@ fn flatten[T](xss: list[list[T]]) -> list[T]:
     out := []
     for xs in xss:
         out.extend(xs)
+    return out
+
+# --- Random helpers (call native rand.int; seed with rand.seed(n) for deterministic output) ---
+
+# Return a NEW list with the elements of `xs` randomly permuted (Fisher–Yates). Non-mutating:
+# `xs` is left untouched (matches std.iter's copy-and-return idiom).
+fn shuffle[T](xs: list[T]) -> list[T]:
+    out := []
+    for x in xs:
+        out.push(x)
+    # Walk from the high index down, swapping each element with a uniformly-chosen earlier-or-self.
+    i := out.len() - 1
+    while i > 0:
+        j := rand.int(0, i + 1)
+        tmp := out[i]
+        out[i] = out[j]
+        out[j] = tmp
+        i -= 1
+    return out
+
+# A uniformly-random element of `xs`, `Some(x)`, or `None` if `xs` is empty.
+fn choice[T](xs: list[T]) -> Option[T]:
+    if xs.len() == 0:
+        return None
+    return Some(xs[rand.int(0, xs.len())])
+
+# `k` elements drawn WITHOUT replacement (a random subset, in random order). `k` is clamped to
+# `[0, len]`. Uses a partial Fisher–Yates on a copy, then takes the first `k`. Non-mutating.
+fn sample[T](xs: list[T], k: int) -> list[T]:
+    n := xs.len()
+    take_n := k
+    if take_n > n:
+        take_n = n
+    if take_n < 0:
+        take_n = 0
+    pool := []
+    for x in xs:
+        pool.push(x)
+    out := []
+    i := 0
+    while i < take_n:
+        # Pick from the unshuffled tail [i, n), swap into position i, then take it.
+        j := rand.int(i, n)
+        tmp := pool[i]
+        pool[i] = pool[j]
+        pool[j] = tmp
+        out.push(pool[i])
+        i += 1
     return out

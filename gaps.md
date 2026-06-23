@@ -42,10 +42,13 @@ Last updated: 2026-06-23.
 ### 🟡 Stdlib breadth (low priority — library fill)
 
 Current: `fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`str`/`iter`/`cancel`/
-`ref`/`net`. Gaps block write-heavy automation, randomness, crypto, CLI. Ranked by leverage.
+`ref`/`net`/`rand`. Gaps block write-heavy automation, crypto, CLI. Ranked by leverage.
 
 **Native (Rust):**
-- **`std.rand`** *(highest)* — no RNG. Unblocks shuffle/sample/test-data/sims/games. OS entropy → seedable PRNG.
+- ✅ **`std.rand`** *(RESOLVED)* — SplitMix64 PRNG, OS-entropy auto-seed + `seed(n)` for determinism.
+  Native scalars `seed`/`float`/`int`/`bool`; generic `shuffle`/`choice`/`sample` in `std.iter` (the
+  native seam can't carry generic `list[T]`). Limit: concurrent draws under `--parallel` interleave on
+  the shared global RNG (documented in docs/stdlib.md §std.rand).
 - **fs mutations** — read-only today; missing `mkdir`/`remove`/`rename`/`copy`/`append`.
 - **Encoding/crypto** — no base64, hex, sha/md5, uuid, url-encode.
 - **`std.process` polish** — only `cmd(line)` via `sh -c` (injection-prone), stdout discarded on failure.
