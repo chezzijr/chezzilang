@@ -42,7 +42,7 @@ Last updated: 2026-06-23.
 ### 🟡 Stdlib breadth (low priority — library fill)
 
 Current: `fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`str`/`iter`/`cancel`/
-`ref`/`net`/`rand`. Gaps block write-heavy automation, crypto, CLI. Ranked by leverage.
+`ref`/`net`/`rand`/`encoding`/`crypto`/`uuid`. Gaps block write-heavy automation, CLI. Ranked by leverage.
 
 **Native (Rust):**
 - ✅ **`std.rand`** *(RESOLVED)* — SplitMix64 PRNG, OS-entropy auto-seed + `seed(n)` for determinism.
@@ -54,7 +54,15 @@ Current: `fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`
   never truncates). All `Result[nil]`, faulting (catchable `Err`) on I/O error — never a panic. Wired into
   `is_blocking` so the M:N engine offloads them. Limit: recursive dir removal (`rm -rf`) intentionally
   deferred — `remove_dir` is empty-only to avoid a silent wipe (documented in docs/stdlib.md §std.fs).
-- **Encoding/crypto** — no base64, hex, sha/md5, uuid, url-encode.
+- ✅ **Encoding/crypto** *(RESOLVED)* — three native modules, all hand-rolled (zero new crates):
+  `std.encoding` (base64 std + URL-safe, hex, RFC 3986 URL percent-encode/decode — all `str`-in,
+  `str`/`Result[str]`-out; decode faults are catchable `Err`, never panic), `std.crypto`
+  (`sha256` FIPS 180-4, `md5` RFC 1321 — lowercase-hex digests; MD5 for checksums/interop only, NOT
+  secure), `std.uuid` (`v4` random + `uuid_seed` deterministic, RFC 4122; own process-global stream
+  reusing `std.rand`'s SplitMix64 step). All pure CPU (not in `is_blocking`), 3-engine parity at the
+  NativeFn seam. **Deferred:** the str-only seam can't return raw bytes, so base64/hex `decode`
+  UTF-8-validate their output — binary round-trip (e.g. an image → raw bytes) needs a bytes-arg/return
+  seam expansion; `sha512`/`sha1`/`uuid-v7` not yet added. (See docs/stdlib.md §std.encoding/§std.crypto/§std.uuid.)
 - **`std.process` polish** — only `cmd(line)` via `sh -c` (injection-prone), stdout discarded on failure.
   Want structured result (both streams + exit code) + args-array form.
 - **`std.request` nit** — remaining: per-call timeout override + query (`?k=v`) builder (timeouts hardcoded).

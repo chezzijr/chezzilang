@@ -556,6 +556,29 @@ fn native_module_sig(name: &str) -> ModuleSig {
             func("copy", vec![Ty::Str, Ty::Str], Ty::result(Ty::Nil));
             func("append", vec![Ty::Str, Ty::Str], Ty::result(Ty::Nil));
         }
+        "std.encoding" => {
+            // Reversible text codecs. Every fn takes a `str` (operating on its UTF-8 bytes) and
+            // returns `str` (encode) or `Result[str]` (decode — malformed input or non-UTF-8
+            // decoded bytes are a recoverable fault). See `src/native/encoding.rs`.
+            func("base64_encode", vec![Ty::Str], Ty::Str);
+            func("base64_encode_url", vec![Ty::Str], Ty::Str);
+            func("base64_decode", vec![Ty::Str], Ty::result(Ty::Str));
+            func("base64_decode_url", vec![Ty::Str], Ty::result(Ty::Str));
+            func("hex_encode", vec![Ty::Str], Ty::Str);
+            func("hex_decode", vec![Ty::Str], Ty::result(Ty::Str));
+            func("url_encode", vec![Ty::Str], Ty::Str);
+            func("url_decode", vec![Ty::Str], Ty::result(Ty::Str));
+        }
+        "std.crypto" => {
+            // Hand-rolled digests: hash the str's UTF-8 bytes → lowercase-hex `str` (infallible).
+            func("sha256", vec![Ty::Str], Ty::Str);
+            func("md5", vec![Ty::Str], Ty::Str);
+        }
+        "std.uuid" => {
+            // `v4()` → random UUID str; `uuid_seed(n)` → deterministic reseed (golden runs).
+            func("v4", vec![], Ty::Str);
+            func("uuid_seed", vec![Ty::Int], Ty::Nil);
+        }
         "std.time" => {
             func("now", vec![], Ty::Int);
             func("monotonic", vec![], Ty::Float);
