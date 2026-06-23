@@ -86,8 +86,9 @@ const TRACE_TAIL: usize = 10;
 /// small traces with distinct names, so existing exact-trace goldens are unchanged.
 pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
     let mut s = format!("runtime error ({span}): {message}");
-    // (1) Collapse consecutive same-name runs into one line (+ a `× N` marker for the rest).
-    let mut lines: Vec<String> = Vec::new();
+    // (1) Collapse consecutive same-name runs into one entry: the run's innermost `at` line plus an
+    // optional `× N` marker (kept in the SAME entry so the cap below can never orphan the marker).
+    let mut entries: Vec<String> = Vec::new();
     let mut i = 0;
     while i < trace.len() {
         let frame = &trace[i];
@@ -95,33 +96,32 @@ pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
         while j < trace.len() && trace[j].function == frame.function {
             j += 1;
         }
-        lines.push(format!(
-            "  at {} (called at {})",
-            frame.function, frame.span
-        ));
+        let mut entry = format!("  at {} (called at {})", frame.function, frame.span);
         let run = j - i;
         if run > 1 {
-            lines.push(format!("  … (× {} more identical frames) …", run - 1));
+            entry.push_str(&format!("\n  … (× {} more identical frames) …", run - 1));
         }
+        entries.push(entry);
         i = j;
     }
-    // (2) Cap the collapsed-line list: keep head + tail, elide the middle.
-    if lines.len() > TRACE_HEAD + TRACE_TAIL {
-        let elided = lines.len() - TRACE_HEAD - TRACE_TAIL;
-        let tail_start = lines.len() - TRACE_TAIL;
-        for line in &lines[..TRACE_HEAD] {
+    // (2) Cap the collapsed entries: keep head + tail entries, elide the middle. Capping whole
+    // entries (not raw lines) keeps each `× N` marker attached to its `at` line across the boundary.
+    if entries.len() > TRACE_HEAD + TRACE_TAIL {
+        let elided = entries.len() - TRACE_HEAD - TRACE_TAIL;
+        let tail_start = entries.len() - TRACE_TAIL;
+        for entry in &entries[..TRACE_HEAD] {
             s.push('\n');
-            s.push_str(line);
+            s.push_str(entry);
         }
         s.push_str(&format!("\n  … ({elided} frames elided) …"));
-        for line in &lines[tail_start..] {
+        for entry in &entries[tail_start..] {
             s.push('\n');
-            s.push_str(line);
+            s.push_str(entry);
         }
     } else {
-        for line in &lines {
+        for entry in &entries {
             s.push('\n');
-            s.push_str(line);
+            s.push_str(entry);
         }
     }
     s

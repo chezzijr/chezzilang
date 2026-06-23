@@ -100,8 +100,9 @@ const TRACE_TAIL: usize = 10;
 /// small traces with distinct names, so existing exact-trace goldens are unchanged.
 pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
     let mut s = format!("runtime error ({span}): {message}");
-    // (1) Collapse consecutive same-name runs into one line (+ a `× N` marker for the rest).
-    let mut lines: Vec<String> = Vec::new();
+    // (1) Collapse consecutive same-name runs into one entry: the run's innermost `at` line plus an
+    // optional `× N` marker (kept in the SAME entry so the cap below can never orphan the marker).
+    let mut entries: Vec<String> = Vec::new();
     let mut i = 0;
     while i < trace.len() {
         let frame = &trace[i];
@@ -109,33 +110,32 @@ pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
         while j < trace.len() && trace[j].function == frame.function {
             j += 1;
         }
-        lines.push(format!(
-            "  at {} (called at {})",
-            frame.function, frame.span
-        ));
+        let mut entry = format!("  at {} (called at {})", frame.function, frame.span);
         let run = j - i;
         if run > 1 {
-            lines.push(format!("  … (× {} more identical frames) …", run - 1));
+            entry.push_str(&format!("\n  … (× {} more identical frames) …", run - 1));
         }
+        entries.push(entry);
         i = j;
     }
-    // (2) Cap the collapsed-line list: keep head + tail, elide the middle.
-    if lines.len() > TRACE_HEAD + TRACE_TAIL {
-        let elided = lines.len() - TRACE_HEAD - TRACE_TAIL;
-        let tail_start = lines.len() - TRACE_TAIL;
-        for line in &lines[..TRACE_HEAD] {
+    // (2) Cap the collapsed entries: keep head + tail entries, elide the middle. Capping whole
+    // entries (not raw lines) keeps each `× N` marker attached to its `at` line across the boundary.
+    if entries.len() > TRACE_HEAD + TRACE_TAIL {
+        let elided = entries.len() - TRACE_HEAD - TRACE_TAIL;
+        let tail_start = entries.len() - TRACE_TAIL;
+        for entry in &entries[..TRACE_HEAD] {
             s.push('\n');
-            s.push_str(line);
+            s.push_str(entry);
         }
         s.push_str(&format!("\n  … ({elided} frames elided) …"));
-        for line in &lines[tail_start..] {
+        for entry in &entries[tail_start..] {
             s.push('\n');
-            s.push_str(line);
+            s.push_str(entry);
         }
     } else {
-        for line in &lines {
+        for entry in &entries {
             s.push('\n');
-            s.push_str(line);
+            s.push_str(entry);
         }
     }
     s
@@ -28846,11 +28846,13 @@ main()
     /// Helper: write deep-infinite-recursion source to a temp file and return its path. The recursion
     /// hits `MAX_CALL_DEPTH` → a `recursion limit exceeded` fault with a ~10_000-frame raw trace.
     #[cfg(test)]
-    fn deep_recursion_fixture() -> std::path::PathBuf {
+    fn deep_recursion_fixture(tag: &str) -> std::path::PathBuf {
         let src = "fn rec(n: int) -> int:\n    return rec(n + 1)\nfn main():\n    print(rec(0))\nmain()\n";
         let dir = std::env::temp_dir().join("chezzi_deep_recursion_trace_test");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("rec.chz");
+        // Unique per-test filename so concurrently-running tests never truncate each other's source
+        // mid-read (a shared path would race: one test reads an empty/partial file → no fault).
+        let path = dir.join(format!("rec_{tag}.chz"));
         std::fs::write(&path, src).unwrap();
         path
     }
@@ -28860,7 +28862,7 @@ main()
     /// so the output stays a couple dozen lines while the raw captured trace is still ~10_000 frames.
     #[test]
     fn recursion_trace_is_bounded_and_collapsed() {
-        let path = deep_recursion_fixture();
+        let path = deep_recursion_fixture("bounded");
         let (_out, _err, res, _) = run_file(&path);
         let e = res.expect_err("deep recursion should fault");
         // Raw trace really is huge.
@@ -28895,7 +28897,7 @@ main()
     /// Gap #8 parity: the bounded/collapsed trace must be byte-identical across both engines.
     #[test]
     fn recursion_trace_parity_vm_vs_interp() {
-        let path = deep_recursion_fixture();
+        let path = deep_recursion_fixture("parity");
         let (_o, _e, res, _) = run_file(&path);
         let e = res.expect_err("deep recursion should fault");
         let vm_fmt = format_trace(&e.message, e.span, &e.trace);
@@ -28938,6 +28940,61 @@ main()
             .collect();
         let ip_fmt = crate::interp::format_trace("boom", span, &ip_trace);
         assert_eq!(vm_fmt, ip_fmt, "engines must agree on the capped trace");
+    }
+
+    /// Gap #8 cap boundary: with many short same-name runs the collapse emits `× N` markers; the cap
+    /// must never split a marker from its `at` line (markers stay inside their entry). Every `× N`
+    /// line must be immediately preceded by its `at` line, head and tail alike, and engines agree.
+    #[test]
+    fn format_trace_cap_never_orphans_collapse_marker() {
+        let span = Span { line: 1, col: 1 };
+        // 25 names × 2 consecutive frames each → 25 collapsed entries (each an `at` line + `× 1`
+        // marker), > TRACE_HEAD + TRACE_TAIL so the cap fires across marker-bearing entries.
+        let trace: Vec<TraceFrame> = (0..25)
+            .flat_map(|n| {
+                let f = format!("g{n}");
+                [
+                    TraceFrame {
+                        function: f.clone(),
+                        span,
+                    },
+                    TraceFrame { function: f, span },
+                ]
+            })
+            .collect();
+        let vm_fmt = format_trace("boom", span, &trace);
+        let lines: Vec<&str> = vm_fmt.lines().collect();
+        assert!(
+            vm_fmt.contains("frames elided"),
+            "cap must fire, got:\n{vm_fmt}"
+        );
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim_start().starts_with("… (×") {
+                let prev = lines.get(i - 1).copied().unwrap_or("");
+                assert!(
+                    prev.trim_start().starts_with("at "),
+                    "orphaned collapse marker at line {i}; prev={prev:?}\n{vm_fmt}"
+                );
+            }
+        }
+        // Parity with interp on the same synthetic trace.
+        let ip_trace: Vec<crate::interp::TraceFrame> = (0..25)
+            .flat_map(|n| {
+                let f = format!("g{n}");
+                [
+                    crate::interp::TraceFrame {
+                        function: f.clone(),
+                        span,
+                    },
+                    crate::interp::TraceFrame { function: f, span },
+                ]
+            })
+            .collect();
+        let ip_fmt = crate::interp::format_trace("boom", span, &ip_trace);
+        assert_eq!(
+            vm_fmt, ip_fmt,
+            "engines must agree on the capped collapsed trace"
+        );
     }
 
     /// A `recover:`-caught fault leaves no stale frames: a *later* uncaught fault's trace shows only
