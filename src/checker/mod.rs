@@ -9889,10 +9889,26 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
         "split" => (vec![Ty::Str], Ty::list(Ty::Str)),
         "chars" => (vec![], Ty::list(Ty::Str)),
         "join" => (vec![Ty::list(Ty::Str)], Ty::Str),
-        "starts_with" | "contains" => (vec![Ty::Str], Ty::Bool),
+        "starts_with" | "contains" | "ends_with" => (vec![Ty::Str], Ty::Bool),
         // `encode()` -> `bytes`: UTF-8 encode (str is UTF-8 internally; copies the bytes out).
         // No encoding-name argument — UTF-8 only (other codecs are an explicit future non-goal).
         "encode" => (vec![], Ty::Bytes),
+        // gap #1 (minimal subset): receiver methods forwarding to the `std.str` free fns, so
+        // `s.ends_with(x)` works just like `s.starts_with(x)` (no import needed). Native in both
+        // engines; byte-identical to the std.str codepoint-loop oracle for valid inputs (repeat
+        // raises a recoverable capacity-overflow fault instead of aborting on a huge count).
+        "replace" => (vec![Ty::Str, Ty::Str], Ty::Str),
+        "repeat" => (vec![Ty::Int], Ty::Str),
+        "reverse" => (vec![], Ty::Str),
+        "pad_left" => (vec![Ty::Int, Ty::Str], Ty::Str),
+        "index_of" | "count" => (vec![Ty::Str], Ty::Int),
+        "strip_prefix" | "strip_suffix" => (vec![Ty::Str], Ty::Str),
+        "split_lines" => (vec![], Ty::list(Ty::Str)),
+        // `strip` is a trim alias.
+        "strip" => (vec![], Ty::Str),
+        // gap #7: safe numeric parse — Option-returning (None on bad input) instead of raising.
+        "to_int" => (vec![], Ty::option(Ty::Int)),
+        "to_float" => (vec![], Ty::option(Ty::Float)),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))

@@ -21,8 +21,8 @@ Conventions used below:
 | `print` | `print(...args) -> nil` | Write each argument (any type) to stdout, then a newline. Variadic. |
 | `len` | `len(x) -> int` | Length of a `list`, `str`, `bytes`, or `bytearray`. (Types also have a `.len()` method.) |
 | `range` | `range(end) -> list[int]` / `range(start, end) -> list[int]` | End-exclusive list of ints. |
-| `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). |
-| `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. |
+| `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. |
+| `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. |
 | `str` | `str(x) -> str` | Stringify an `int`/`float`/`bool` (and more — see the `Stringable` protocol in `syntax.md`). |
 | `ord` | `ord(s) -> int` | Unicode codepoint of the first character of `s`. |
 | `chr` | `chr(code) -> str` | One-character string for codepoint `code`. |
@@ -51,12 +51,29 @@ Conventions used below:
 | `split` | `(sep: str) -> list[str]` | Split on `sep`. |
 | `chars` | `() -> list[str]` | One-character strings. |
 | `starts_with` | `(prefix: str) -> bool` | |
+| `ends_with` | `(suffix: str) -> bool` | Empty suffix is always true. |
 | `contains` | `(sub: str) -> bool` | Substring test. |
 | `join` | `(xs: list[str]) -> str` | Join `xs` with the receiver as the separator. |
+| `replace` | `(old: str, new: str) -> str` | Replace every non-overlapping `old`; empty `old` → unchanged. |
+| `repeat` | `(n: int) -> str` | `n <= 0` → `""`. Raises a recoverable `string repeat capacity overflow` fault if `n * len` would exceed allocatable capacity. |
+| `reverse` | `() -> str` | Reversed copy (by codepoint). |
+| `pad_left` | `(width: int, fill: str) -> str` | Left-pad to `width` codepoints; never shrinks. |
+| `index_of` | `(sub: str) -> int` | First **codepoint** index, `-1` if absent, `0` for empty `sub`. |
+| `count` | `(sub: str) -> int` | Non-overlapping occurrences; empty `sub` → `0`. |
+| `strip` | `() -> str` | Trim alias (strip leading/trailing whitespace). |
+| `strip_prefix` | `(p: str) -> str` | Remove `p` from the front if present, else unchanged. |
+| `strip_suffix` | `(p: str) -> str` | Remove `p` from the end if present, else unchanged. |
+| `split_lines` | `() -> list[str]` | Split on `"\n"`. |
+| `to_int` | `() -> int?` | Safe parse (trims first): `Some(n)` or `None` on bad input. |
+| `to_float` | `() -> float?` | Safe parse (trims first): `Some(f)` or `None` on bad input. |
 | `encode` | `() -> bytes` | UTF-8 encode. |
 | `message` | `() -> str` | Returns self — lets a bare `str` satisfy the `Error` protocol. |
 
-(See `std.str` below for more string helpers: `repeat`, `reverse`, `pad_left`, `replace`, `index_of`, etc.)
+The `ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines`
+methods are receiver-method aliases of the identically-named `std.str` free fns — `s.replace(a, b)` and
+`text.replace(s, a, b)` (after `import std.str as text`) are byte-identical for valid inputs; the free fns
+keep working. (One safety divergence: `s.repeat(n)` raises a recoverable capacity-overflow fault for a
+huge `n` rather than allocating until it aborts.)
 
 ### `list[T]`
 | Method | Signature | Notes |
@@ -300,6 +317,9 @@ Written in Chezzi (`std/*.chz`); same `import std.<name>` surface.
 `is_empty(s)` · `repeat(s, n)` · `reverse(s)` · `pad_left(s, width, fill)` · `split_lines(s)` ·
 `ends_with(s, suffix)` · `index_of(s, sub) -> int` (or `-1`) · `count(s, sub) -> int` ·
 `replace(s, old, new)` · `strip_prefix(s, p)` · `strip_suffix(s, p)`.
+
+All of these except `is_empty` are also available as receiver methods on `str` (no import needed):
+`s.ends_with(x)` ≡ `text.ends_with(s, x)`. See the `str` method table in §2.
 
 ### `std.cmp` — ordering generics (`Comparable`)
 `max[T: Comparable](a, b) -> T` · `min[T: Comparable](a, b) -> T` ·

@@ -65,18 +65,18 @@ Current: `fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`
 Found probing the language cold as a Python/Go/Rust dev. None block apps (workarounds exist), but each
 is a predictable first-hour stumble. Ranked by friction.
 
-1. **Method vs free-function split-brain** *(highest friction)*. The same conceptual op is a receiver
-   method in one place and an import-required free fn in another, with no predictable rule:
-   - **str:** `upper`/`lower`/`trim`/`split`/`join`/`starts_with` are **methods**, but `ends_with`/
-     `replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines`
-     are **`std.str` free fns** — so `s.starts_with(x)` works yet `s.ends_with(x)` is a type error.
-   - **list/iter:** `map`/`filter`/`fold`/`sum`/`sort`/`contains`/`index_of`/`concat` are **methods**, but
-     `enumerate`/`zip`/`any`/`all`/`find`/`flatten`/`reduce`/`take`/`drop` are **`std.iter` free fns**;
-     `min`/`max`/`clamp` are **`std.cmp` free fns**.
-   - A dev can't guess which surface an op lives on. Fix: (a) re-export the common `std.iter`/`std.str`/
-     `std.cmp` ops as receiver methods (thin forwarders in the checker method table), or (b) document a
-     hard rule + add the obvious missing methods. Lowest-effort high-value: add `ends_with`/`replace`/
-     `strip`/`find` as **str methods** to kill the worst asymmetry.
+1. **Method vs free-function split-brain** *(highest friction)* — **str half RESOLVED** (minimal subset
+   landed; `std.iter`/`std.cmp` half still open). The same conceptual op is a receiver method in one
+   place and an import-required free fn in another, with no predictable rule:
+   - **str:** ~~`ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/
+     `strip_suffix`/`split_lines` were `std.str`-only~~ — now also **str methods** (thin forwarders, both
+     engines, byte-identical to the free fns), plus `strip` (trim alias). `s.ends_with(x)` works like
+     `s.starts_with(x)`. The `std.str` free fns are untouched and keep working.
+   - **list/iter (still open):** `map`/`filter`/`fold`/`sum`/`sort`/`contains`/`index_of`/`concat` are
+     **methods**, but `enumerate`/`zip`/`any`/`all`/`find`/`flatten`/`reduce`/`take`/`drop` are **`std.iter`
+     free fns**; `min`/`max`/`clamp` are **`std.cmp` free fns**.
+   - Remaining fix: (a) re-export the common `std.iter`/`std.cmp` ops as receiver methods (thin forwarders
+     in the checker method table), or (b) document a hard rule. The str asymmetry — the worst one — is gone.
 2. **No collection operators.** `[1,2] + [3,4]` (concat), `[0] * 3` (repeat-init), set `| & - ^` are all
    type errors (`checker/mod.rs:5276/5337`). Functionality exists via methods (`.concat`, `.union`/
    `.difference`) but operator forms are reflexive for Python/Rust devs; set algebra reads badly as
@@ -92,9 +92,6 @@ is a predictable first-hour stumble. Ranked by friction.
 5. **`assert` takes no message.** `assert(x==y, "msg")` → type error (args parse as a tuple); failure
    prints only `assertion failed`, no context. Fix: accept optional 2nd `str` arg in the `assert`
    checker special-case + thread into the panic message.
-6. **No safe numeric parse.** `int("abc")`/`float("x")` raise a (recoverable) panic — no
-   `str.to_int() -> int?` / `int?(s)`. Untrusted input must be wrapped in `recover:`. Fix: add
-   `to_int`/`to_float` str methods returning `Option`.
 
 **Minor / noted:** no `map.items()` (have `.keys()`/`.values()` + `for k,v`); no `type()`/`typeof`; no
 `input()` (have `std.io.read_line`); no chained comparison (`1<2<3`); `json.parse` widens all numbers to
@@ -274,3 +271,10 @@ nominal `newtype` (`31f2f85`) · enum methods (`008444f`) · raw strings (`7a645
 (`15e7818`) · module-scoped types + qualified match patterns (`e269f16`) · CLI `init`/`docs`/
 `module:function` entrypoint, `--interp` flag dropped (`7a8cc2e`) · std.math fill (`5a25a5c`) ·
 std.request verbs.
+
+**DX (fresh-dev audit) ✅** · #1 (str half) method/free-fn split-brain — `ends_with`/`replace`/`repeat`/
+`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines` + `strip` (trim
+alias) added as **str methods** (thin native forwarders to the `std.str` free fns, both engines,
+byte-identical; free fns kept; `examples/str_methods.chz`); the `std.iter`/`std.cmp` half stays open · #7
+safe numeric parse — `str.to_int() -> int?` / `str.to_float() -> float?` (trim + `parse`, `Some`/`None`,
+no raise; reuse the `int()`/`float()` parse path).

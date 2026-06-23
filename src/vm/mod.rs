@@ -7349,6 +7349,20 @@ impl Vm {
         }
     }
 
+    /// An `int` method-argument, with a uniform type error matching the interp.
+    fn int_arg(&self, method: &str, v: &Value, span: Span) -> Result<i64, RuntimeError> {
+        match v {
+            Value::Int(n) => Ok(*n),
+            other => Err(self.err(
+                format!(
+                    "{method}() expects an int argument, got {}",
+                    self.type_name(*other)
+                ),
+                span,
+            )),
+        }
+    }
+
     fn core_method(
         &mut self,
         h: GcRef,
@@ -7478,6 +7492,124 @@ impl Vm {
                             out.push_str(part);
                         }
                         Ok(self.alloc_str(out))
+                    }
+                    // gap #1 (minimal subset): receiver methods forwarding to the `std.str` free
+                    // fns. Pure native Rust, byte-identical to the std.str codepoint-loop oracle
+                    // (see std/str.chz) and to the interp arms.
+                    "ends_with" => {
+                        self.arity_err("ends_with", args, 1, span)?;
+                        Ok(Value::Bool(s.ends_with(str_arg(self, 0)?.as_str())))
+                    }
+                    "replace" => {
+                        self.arity_err("replace", args, 2, span)?;
+                        let old = str_arg(self, 0)?;
+                        let new = str_arg(self, 1)?;
+                        // std.str returns `s` unchanged for an empty `old`.
+                        if old.is_empty() {
+                            Ok(self.alloc_str(s))
+                        } else {
+                            Ok(self.alloc_str(s.replace(old.as_str(), new.as_str())))
+                        }
+                    }
+                    "repeat" => {
+                        self.arity_err("repeat", args, 1, span)?;
+                        let n = self.int_arg("repeat", &args[0], span)?;
+                        // std.str: n <= 0 yields "".
+                        if n <= 0 {
+                            Ok(self.alloc_str(String::new()))
+                        } else {
+                            // Guard the allocation: `str::repeat` hard-panics on capacity overflow.
+                            // Raise a recoverable fault instead (repo convention for overflow).
+                            match s
+                                .len()
+                                .checked_mul(n as usize)
+                                .filter(|&t| t <= isize::MAX as usize)
+                            {
+                                Some(_) => Ok(self.alloc_str(s.repeat(n as usize))),
+                                None => {
+                                    Err(self
+                                        .err("string repeat capacity overflow".to_string(), span))
+                                }
+                            }
+                        }
+                    }
+                    "reverse" => {
+                        self.arity_err("reverse", args, 0, span)?;
+                        Ok(self.alloc_str(s.chars().rev().collect::<String>()))
+                    }
+                    "pad_left" => {
+                        self.arity_err("pad_left", args, 2, span)?;
+                        let width = self.int_arg("pad_left", &args[0], span)?;
+                        let fill = str_arg(self, 1)?;
+                        // std.str: prepend `fill` until the codepoint length reaches `width`.
+                        let mut out = s.clone();
+                        while (out.chars().count() as i64) < width {
+                            out = format!("{fill}{out}");
+                        }
+                        Ok(self.alloc_str(out))
+                    }
+                    "index_of" => {
+                        self.arity_err("index_of", args, 1, span)?;
+                        let sub = str_arg(self, 0)?;
+                        // std.str: empty -> 0; otherwise the CODEPOINT index (not byte offset).
+                        if sub.is_empty() {
+                            Ok(Value::Int(0))
+                        } else {
+                            match s.find(sub.as_str()) {
+                                Some(byte) => Ok(Value::Int(s[..byte].chars().count() as i64)),
+                                None => Ok(Value::Int(-1)),
+                            }
+                        }
+                    }
+                    "count" => {
+                        self.arity_err("count", args, 1, span)?;
+                        let sub = str_arg(self, 0)?;
+                        // std.str: empty -> 0; otherwise non-overlapping count.
+                        if sub.is_empty() {
+                            Ok(Value::Int(0))
+                        } else {
+                            Ok(Value::Int(s.matches(sub.as_str()).count() as i64))
+                        }
+                    }
+                    "strip_prefix" => {
+                        self.arity_err("strip_prefix", args, 1, span)?;
+                        let p = str_arg(self, 0)?;
+                        let out = s.strip_prefix(p.as_str()).unwrap_or(&s).to_string();
+                        Ok(self.alloc_str(out))
+                    }
+                    "strip_suffix" => {
+                        self.arity_err("strip_suffix", args, 1, span)?;
+                        let p = str_arg(self, 0)?;
+                        let out = s.strip_suffix(p.as_str()).unwrap_or(&s).to_string();
+                        Ok(self.alloc_str(out))
+                    }
+                    "split_lines" => {
+                        self.arity_err("split_lines", args, 0, span)?;
+                        let parts: Vec<Value> = s
+                            .split('\n')
+                            .map(|p| self.alloc_str(p.to_string()))
+                            .collect();
+                        Ok(Value::Obj(self.heap.alloc(Obj::List(parts))))
+                    }
+                    // `strip` is a trim alias.
+                    "strip" => {
+                        self.arity_err("strip", args, 0, span)?;
+                        Ok(self.alloc_str(s.trim().to_string()))
+                    }
+                    // gap #7: safe numeric parse — None on bad input (trims like int()/float()).
+                    "to_int" => {
+                        self.arity_err("to_int", args, 0, span)?;
+                        match s.trim().parse::<i64>() {
+                            Ok(n) => Ok(self.alloc_enum("Option", "Some", vec![Value::Int(n)])),
+                            Err(_) => Ok(self.alloc_enum("Option", "None", vec![])),
+                        }
+                    }
+                    "to_float" => {
+                        self.arity_err("to_float", args, 0, span)?;
+                        match s.trim().parse::<f64>() {
+                            Ok(f) => Ok(self.alloc_enum("Option", "Some", vec![Value::Float(f)])),
+                            Err(_) => Ok(self.alloc_enum("Option", "None", vec![])),
+                        }
                     }
                     _ => Err(self.err(format!("type str has no method '{method}'"), span)),
                 }
@@ -24602,6 +24734,24 @@ main()
         }
     }
 
+    /// `str.repeat(n)` with a huge `n` must raise a RECOVERABLE fault (not hard-panic the process via
+    /// Rust's `str::repeat` capacity-overflow abort), on both engines, matching the repo's
+    /// checked-overflow policy. Normal repeats still work and stay parity-equal.
+    #[test]
+    fn str_repeat_capacity_overflow_is_recoverable_fault() {
+        // `expect_err` (not a process abort) proves the panic was converted to a fault.
+        let src = r#"print("ab".repeat(9223372036854775807))"#;
+        let vm = run_capture(src).expect_err("vm: repeat overflow should fault");
+        assert_eq!(vm.message, "string repeat capacity overflow");
+        let it = crate::interp::run_capture(src).expect_err("interp: repeat overflow should fault");
+        assert_eq!(it.message, "string repeat capacity overflow");
+
+        // Sane repeats are unaffected and agree across engines.
+        let ok = r#"print("ab".repeat(3))"#;
+        assert_eq!(run_capture(ok).expect("vm"), "ababab\n");
+        assert_eq!(crate::interp::run_capture(ok).expect("interp"), "ababab\n");
+    }
+
     /// `examples/evaluator.chz` — a full tokenizer + recursive-descent parser + AST evaluator with
     /// `Result`/`?` error paths (bad char, unbalanced parens, trailing input, divide-by-zero).
     #[test]
@@ -28701,6 +28851,20 @@ main()
         assert!(res.is_ok(), "{res:?}");
         assert_eq!(out, expected);
         assert_file_parity("examples/str_more.chz");
+    }
+
+    /// str receiver-method golden: `examples/str_methods.chz` — the gap #1 forwarder methods
+    /// (ends_with/replace/repeat/reverse/pad_left/index_of/count/strip_prefix/strip_suffix/
+    /// split_lines/strip) + gap #7 safe parse (to_int/to_float), end-to-end on the VM,
+    /// byte-identical to `.expected` and the interpreter.
+    #[test]
+    fn golden_str_methods_via_run_file() {
+        let path = fixture("examples/str_methods.chz");
+        let expected = std::fs::read_to_string(fixture("examples/str_methods.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/str_methods.chz");
     }
 
     /// std.iter helpers golden: `examples/iter_more.chz` — the additive take/drop/any/all/find/

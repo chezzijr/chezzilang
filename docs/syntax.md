@@ -1449,11 +1449,19 @@ Core-type string methods (built in — no import needed):
 
 ```chezzi
 s.len()          s.upper()        s.lower()
-s.trim()         s.split(",")     s.starts_with("ab")
-s.contains("b")  ",".join(parts)  # join: separator.join(list[str])
+s.trim()         s.strip()        s.split(",")
+s.starts_with("ab")  s.ends_with("yz")  s.contains("b")
+",".join(parts)  # join: separator.join(list[str])
 s.chars()        # → list[str] of 1-char strings; also `for c in s:` iterates them
+s.replace("a","b")  s.repeat(3)   s.reverse()      s.pad_left(4,"0")
+s.index_of("x")  s.count("x")     s.strip_prefix("p")  s.strip_suffix("s")
+s.split_lines()  # → list[str] split on "\n"
+s.to_int()       s.to_float()     # → int? / float? (Some/None — None on bad input)
 "a" + "b"        # concatenation
 ```
+
+The `ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/
+`strip_suffix`/`split_lines` methods forward to the matching `std.str` free fns (no import needed).
 
 A character is just a 1-char `str` (Python-style — there is no `char` type): index with `s[i]`,
 iterate with `for c in s:` or `s.chars()`, and bridge to codepoints with `ord`/`chr`.

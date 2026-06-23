@@ -9852,6 +9852,20 @@ mod module_tests {
         assert_eq!(run_ok(&entry), expected);
     }
 
+    // str receiver-method golden (interp side): `examples/str_methods.chz` exercises the gap #1
+    // forwarder methods (ends_with/replace/repeat/reverse/pad_left/index_of/count/strip_prefix/
+    // strip_suffix/split_lines/strip) + gap #7 safe parse (to_int/to_float). The frozen interpreter
+    // must produce exactly the captured `.expected` (so VM==expected==interp).
+    #[test]
+    fn golden_str_methods_chz() {
+        let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/str_methods.chz");
+        let expected = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/str_methods.expected"),
+        )
+        .expect("str_methods.expected should exist");
+        assert_eq!(run_ok(&entry), expected);
+    }
+
     // std.iter helpers golden (interp side): `examples/iter_more.chz` imports `std.iter` and
     // exercises the additive take/drop/any/all/find/flatten funcs. The frozen interpreter must
     // produce exactly the captured `.expected` (so VM==expected==interp).
