@@ -26,6 +26,7 @@ pub mod math;
 pub mod net;
 pub mod os;
 pub mod process;
+pub mod rand;
 pub mod regex;
 pub mod request;
 pub mod time;
@@ -314,6 +315,7 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
             "io" => Some("std.io"),
             "os" => Some("std.os"),
             "process" => Some("std.process"),
+            "rand" => Some("std.rand"),
             "fs" => Some("std.fs"),
             "time" => Some("std.time"),
             "regex" => Some("std.regex"),
@@ -335,6 +337,7 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn)] {
         "std.io" => io::MEMBERS,
         "std.os" => os::MEMBERS,
         "std.process" => process::MEMBERS,
+        "std.rand" => rand::MEMBERS,
         "std.fs" => fs::MEMBERS,
         "std.time" => time::MEMBERS,
         "std.regex" => regex::MEMBERS,
@@ -441,6 +444,22 @@ mod tests {
         );
     }
 
+    /// `std.rand` is a native (virtual, no-file) module: it resolves to a canonical name, exposes its
+    /// four scalar members, and none of them are blocking (draws are inline CPU, not I/O).
+    #[test]
+    fn native_rand_module_is_wired_and_non_blocking() {
+        assert_eq!(
+            native_name(&["std".into(), "rand".into()]),
+            Some("std.rand")
+        );
+        assert_eq!(native_members("std.rand").len(), 4);
+        let names: Vec<&str> = native_members("std.rand").iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["seed", "float", "int", "bool"]);
+        for name in ["seed", "float", "int", "bool"] {
+            assert!(!is_blocking(name), "{name} must not be blocking");
+        }
+    }
+
     #[test]
     fn native_name_recognizes_the_three_native_modules() {
         assert_eq!(
@@ -518,6 +537,7 @@ mod tests {
             "std.io",
             "std.os",
             "std.process",
+            "std.rand",
             "std.fs",
             "std.time",
             "std.regex",
@@ -551,6 +571,11 @@ mod tests {
             "format",
             "abs",
             "sqrt",
+            // std.rand — draws are inline CPU (SplitMix64), never I/O.
+            "seed",
+            "float",
+            "int",
+            "bool",
         ] {
             assert!(!is_blocking(name), "{name} should not be blocking");
         }

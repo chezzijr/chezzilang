@@ -1,0 +1,34 @@
+# examples/rand_iter.chz — std.iter random helpers (shuffle / choice / sample) golden. Seeds the
+# shared rand stream first, then draws STRICTLY SEQUENTIALLY so the output is deterministic and
+# byte-identical across all three engines (interp / cooperative VM / M:N --parallel).
+
+import std.iter
+import std.rand
+
+fn main():
+    nums := [1, 2, 3, 4, 5, 6, 7, 8]
+
+    rand.seed(7)
+    print("shuffle:")
+    print(iter.shuffle(nums))
+    # shuffle is non-mutating: the source is unchanged.
+    print("source unchanged:")
+    print(nums)
+
+    print("choice:")
+    match iter.choice(nums):
+        Some(v): print(v)
+        None: print("none")
+
+    empty: list[int] = []
+    print("choice empty:")
+    match iter.choice(empty):
+        Some(v): print(v)
+        None: print("none")
+
+    print("sample 3:")
+    print(iter.sample(nums, 3))
+    print("sample clamped (k > len):")
+    print(iter.sample(nums, 99))
+
+main()

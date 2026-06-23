@@ -11,6 +11,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ stdlib — `std.rand` native RNG (gaps.md highest stdlib gap) (2026-06-23).** A SplitMix64 PRNG.
+**Native module `std.rand`** (`src/native/rand.rs`) exposes scalars only: `seed(n: int) -> nil`
+(deterministic reseed), `float() -> float` in `[0, 1)`, `int(lo, hi) -> int` (half-open `[lo, hi)`;
+faults `rand.int(lo, hi): hi must be > lo` if `hi <= lo`, unbiased via rejection sampling), `bool()`.
+State is a single **process-global** `OnceLock<Mutex<u64>>` (NOT thread-local / NOT Host-side), so all
+three engines (interp / cooperative VM / M:N `--parallel`) share one stream at the NativeFn seam →
+any *sequential* draw sequence is byte-identical across engines (3-engine parity by construction).
+Auto-seeds from OS entropy (`libc::getrandom` on Linux, with a time/address/counter SplitMix64-mix
+fallback) on first use; `seed(n)` makes it deterministic. Draws are inline CPU → **not** in
+`is_blocking()`. **Generic helpers in `std.iter`** (pure Chezzi, call native `rand.int`): `shuffle[T]`
+(new Fisher–Yates permutation, non-mutating), `choice[T] -> Option[T]` (`None` on empty), `sample[T]`
+(`k` without replacement, `k` clamped to len). The split is **forced**: the native seam carries only
+engine-neutral scalars (cannot return a generic `list[T]`), and a native module name short-circuits a
+same-named `std/<name>.chz` in the resolver — so scalars + helpers cannot co-inhabit a `rand`
+namespace. **Limit (documented, not a bug):** under `--parallel`, *concurrent* draws from multiple
+tasks interleave nondeterministically on the shared global RNG (engines may diverge) — the goldens draw
+strictly sequentially to stay deterministic on all three engines; this is the same class as the existing
+cooperative-vs-MN timing escape hatches. Tests (RED-first): 5 `rand.rs` unit (SplitMix64 golden vector
+in isolation, float/int/bool range + half-open + empty-range fault + auto-seed shape), native wiring +
+non-blocking + uniqueness lists, and 3 run-file goldens (`rand_seeded` all-four-fns seeded,
+`rand_shape` unseeded range-only "ok" lines, `rand_iter` shuffle/choice/sample) run as ONE serialized
+test (shared global RNG) + `assert_file_parity` (VM == interp); manually verified VM == `--serial` ==
+`--parallel` byte-identical on the seeded goldens. No grammar change (plain import + member calls;
+conformance clean). Docs: `docs/stdlib.md` (new §std.rand + std.iter shuffle/choice/sample),
+`gaps.md` (std.rand → ✅ RESOLVED). Full suite + conformance + `clippy --all-targets -D warnings` clean.
+
 **✅ DX — print `sep=`/`end=` + assert message format (gaps.md DX gaps #5 + #6) (2026-06-23).** Two
 cohesive builtin-ergonomics fixes. **print (#5):** `print` is now special-cased to accept exactly two
 named arguments — `sep` (default `" "`, joins the positional args) and `end` (default `"\n"`, appended

@@ -524,6 +524,14 @@ fn native_module_sig(name: &str) -> ModuleSig {
         "std.process" => {
             func("cmd", vec![Ty::Str], Ty::result(Ty::Str));
         }
+        "std.rand" => {
+            // SplitMix64 PRNG scalars (std.rand). Generic collection helpers (shuffle/choice/sample)
+            // live in the pure-Chezzi std.iter and call `int` — the native seam carries only scalars.
+            func("seed", vec![Ty::Int], Ty::Nil);
+            func("float", vec![], Ty::Float);
+            func("int", vec![Ty::Int, Ty::Int], Ty::Int);
+            func("bool", vec![], Ty::Bool);
+        }
         "std.net" => {
             // D6 — minimal TCP surface. `connect`/`listen` take a `"host:port"` address; the sockets
             // are non-blocking (a would-block op parks the fiber on the netpoller). The `connect`/
