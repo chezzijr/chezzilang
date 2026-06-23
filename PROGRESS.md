@@ -1355,6 +1355,20 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **str methods (split-brain, minimal subset) + safe numeric parse** (2026-06-23,
+  `auto-task/str-methods-safe-parse`) — gaps #1 (str half) + #7. Added 11 receiver methods on `str`
+  that forward to the existing `std.str` free fns (`ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/
+  `index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines` + `strip`, a `trim` alias) so
+  `s.ends_with(x)` works like `s.starts_with(x)` with no import; plus `to_int() -> int?` /
+  `to_float() -> float?` that return `Some`/`None` instead of raising on bad input (trim + `parse`,
+  reusing the `int()`/`float()` parse path). Pure-native Rust in **both** engines (checker
+  `str_method_sig`, VM `core_method` Str arm, interp `str_method`), byte-identical to the std.str
+  codepoint-loop oracle — `index_of` returns a **codepoint** index (not Rust's byte offset), `replace`/
+  `count` guard the empty-arg edge, `repeat` n≤0 → `""`. The `std.str` free fns are untouched
+  (`examples/str_more.chz` still green). Golden `examples/str_methods.chz` exercises every method incl.
+  multibyte + `Some`/`None`, asserted byte-identical across all three engines. Out of scope (left open):
+  the full `std.iter`/`std.cmp` receiver re-export half of #1. Docs: `docs/stdlib.md` str method table +
+  `std.str` note, `docs/syntax.md` method cheat-sheet, `gaps.md` (#1 str half + #7 → resolved log).
 - ✅ **Left-shift overflow now a recoverable fault** (2026-06-23, `auto-task/shift-overflow`) — `1 << 63`
   silently wrapped to `i64::MIN`, violating the "every i64 overflow is a recoverable fault" policy
   (the shift handler validated only the shift-*amount* range, never value overflow, unlike `+ - * / %`).

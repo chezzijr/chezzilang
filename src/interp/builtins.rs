@@ -158,10 +158,136 @@ fn str_method(
             }
             Ok(Value::Str(out.into()))
         }
+        // gap #1 (minimal subset): receiver methods forwarding to the `std.str` free fns. Pure
+        // native Rust, byte-identical to the std.str codepoint-loop oracle (see std/str.chz).
+        "ends_with" => {
+            arity("ends_with", args, 1, span)?;
+            Ok(Value::Bool(s.ends_with(str_arg(0)?.as_ref())))
+        }
+        "replace" => {
+            arity("replace", args, 2, span)?;
+            let old = str_arg(0)?;
+            let new = str_arg(1)?;
+            // std.str returns `s` unchanged for an empty `old` (Rust would insert `new`
+            // between every char) — guard to match the oracle.
+            if old.is_empty() {
+                Ok(Value::Str(s.clone()))
+            } else {
+                Ok(Value::Str(s.replace(old.as_ref(), new.as_ref()).into()))
+            }
+        }
+        "repeat" => {
+            arity("repeat", args, 1, span)?;
+            let n = int_arg(method, &args[0], span)?;
+            // std.str: n <= 0 yields "".
+            if n <= 0 {
+                Ok(Value::Str("".into()))
+            } else {
+                Ok(Value::Str(s.repeat(n as usize).into()))
+            }
+        }
+        "reverse" => {
+            arity("reverse", args, 0, span)?;
+            Ok(Value::Str(s.chars().rev().collect::<String>().into()))
+        }
+        "pad_left" => {
+            arity("pad_left", args, 2, span)?;
+            let width = int_arg(method, &args[0], span)?;
+            let fill = str_arg(1)?;
+            // std.str: prepend `fill` until the codepoint length reaches `width`; never shrink.
+            let mut out = s.to_string();
+            while (out.chars().count() as i64) < width {
+                out = format!("{fill}{out}");
+            }
+            Ok(Value::Str(out.into()))
+        }
+        "index_of" => {
+            arity("index_of", args, 1, span)?;
+            let sub = str_arg(0)?;
+            // std.str: empty substring is found at 0; otherwise return the CODEPOINT index.
+            if sub.is_empty() {
+                Ok(Value::Int(0))
+            } else {
+                match s.find(sub.as_ref()) {
+                    Some(byte) => Ok(Value::Int(s[..byte].chars().count() as i64)),
+                    None => Ok(Value::Int(-1)),
+                }
+            }
+        }
+        "count" => {
+            arity("count", args, 1, span)?;
+            let sub = str_arg(0)?;
+            // std.str: empty substring counts as 0; otherwise non-overlapping count
+            // (Rust `matches` is non-overlapping, matching the std.str `i += m` loop).
+            if sub.is_empty() {
+                Ok(Value::Int(0))
+            } else {
+                Ok(Value::Int(s.matches(sub.as_ref()).count() as i64))
+            }
+        }
+        "strip_prefix" => {
+            arity("strip_prefix", args, 1, span)?;
+            let p = str_arg(0)?;
+            Ok(Value::Str(s.strip_prefix(p.as_ref()).unwrap_or(s).into()))
+        }
+        "strip_suffix" => {
+            arity("strip_suffix", args, 1, span)?;
+            let p = str_arg(0)?;
+            Ok(Value::Str(s.strip_suffix(p.as_ref()).unwrap_or(s).into()))
+        }
+        "split_lines" => {
+            arity("split_lines", args, 0, span)?;
+            let parts: Vec<Value> = s.split('\n').map(|p| Value::Str(p.into())).collect();
+            Ok(Value::List(Rc::new(RefCell::new(parts))))
+        }
+        // `strip` is a trim alias.
+        "strip" => {
+            arity("strip", args, 0, span)?;
+            Ok(Value::Str(s.trim().into()))
+        }
+        // gap #7: safe numeric parse — None on bad input (trims like int()/float()).
+        "to_int" => {
+            arity("to_int", args, 0, span)?;
+            Ok(option_value(s.trim().parse::<i64>().ok().map(Value::Int)))
+        }
+        "to_float" => {
+            arity("to_float", args, 0, span)?;
+            Ok(option_value(s.trim().parse::<f64>().ok().map(Value::Float)))
+        }
         _ => Err(RuntimeError {
             message: format!("type str has no method '{method}'"),
             span,
         }),
+    }
+}
+
+/// An `int` method-argument, with a uniform type error matching the VM.
+fn int_arg(method: &str, v: &Value, span: Span) -> Result<i64, RuntimeError> {
+    match v {
+        Value::Int(n) => Ok(*n),
+        other => Err(RuntimeError {
+            message: format!(
+                "{method}() expects an int argument, got {}",
+                other.type_name()
+            ),
+            span,
+        }),
+    }
+}
+
+/// Wrap an optional payload into the native `Option` enum (`Some(v)` / `None`).
+fn option_value(v: Option<Value>) -> Value {
+    match v {
+        Some(v) => Value::Enum {
+            ty: "Option".into(),
+            variant: "Some".into(),
+            payload: vec![v],
+        },
+        None => Value::Enum {
+            ty: "Option".into(),
+            variant: "None".into(),
+            payload: vec![],
+        },
     }
 }
 

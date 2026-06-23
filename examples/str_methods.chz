@@ -1,0 +1,61 @@
+# gap #1 (minimal subset) + #7 demo: receiver methods on `str` that forward to the std.str free
+# fns (no import needed), plus the Option-returning safe-parse methods to_int / to_float.
+
+fn main():
+    # ends_with: hit, miss, empty suffix (always true), suffix longer than s (false).
+    print("report.txt".ends_with(".txt"))
+    print("report.txt".ends_with(".csv"))
+    print("hi".ends_with(""))
+    print("hi".ends_with("hello"))
+
+    # replace: all occurrences, overlapping advance, no-op when absent, empty old -> unchanged.
+    print("a.b.c".replace(".", "-"))
+    print("aaaa".replace("aa", "b"))
+    print("hello".replace("z", "Z"))
+    print("keep".replace("", "X"))
+
+    # repeat: normal, zero (-> ""), negative (-> "").
+    print("ab".repeat(3))
+    print("ab".repeat(0))
+    print("ab".repeat(-2))
+
+    # reverse: ascii + multibyte (codepoint reversal).
+    print("hello".reverse())
+    print("héllo".reverse())
+
+    # pad_left: grows to width, no shrink when already wide enough.
+    print("7".pad_left(3, "0"))
+    print("12345".pad_left(3, "0"))
+
+    # index_of: first occurrence, multibyte (CODEPOINT index), absent (-1), empty (0).
+    print("abcabc".index_of("bc"))
+    print("héllo".index_of("llo"))
+    print("abcabc".index_of("zz"))
+    print("abc".index_of(""))
+
+    # count: non-overlapping, none, empty substring (0).
+    print("aaa".count("aa"))
+    print("a.b.c.d".count("."))
+    print("abc".count("z"))
+    print("abc".count(""))
+
+    # strip_prefix / strip_suffix: present -> stripped, absent -> unchanged.
+    print("unhappy".strip_prefix("un"))
+    print("happy".strip_prefix("un"))
+    print("file.tmp".strip_suffix(".tmp"))
+    print("file.txt".strip_suffix(".tmp"))
+
+    # split_lines: split on "\n".
+    print("a\nb\nc".split_lines())
+
+    # strip: trim alias.
+    print("  x  ".strip())
+
+    # to_int / to_float: Some on good input (with whitespace trim), None on bad.
+    print("42".to_int())
+    print("  9 ".to_int())
+    print("abc".to_int())
+    print("4.5".to_float())
+    print("x".to_float())
+
+main()

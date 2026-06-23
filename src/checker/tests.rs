@@ -2370,6 +2370,42 @@ fn str_split_arg_must_be_str() {
 }
 
 #[test]
+fn str_new_methods_infer_types_ok() {
+    // gap #1 minimal subset: receiver methods forwarding to std.str free fns.
+    ok("s := \"hi\"\nb: bool = s.ends_with(\"i\")\nprint(b)\n");
+    ok("s := \"aXaX\"\nr: str = s.replace(\"X\", \"y\")\nprint(r)\n");
+    ok("s := \"ab\"\nr: str = s.repeat(3)\nprint(r)\n");
+    ok("s := \"abc\"\nr: str = s.reverse()\nprint(r)\n");
+    ok("s := \"7\"\nr: str = s.pad_left(3, \"0\")\nprint(r)\n");
+    ok("s := \"hello\"\nn: int = s.index_of(\"llo\")\nprint(n)\n");
+    ok("s := \"aaa\"\nn: int = s.count(\"aa\")\nprint(n)\n");
+    ok("s := \"prefix-x\"\nr: str = s.strip_prefix(\"prefix-\")\nprint(r)\n");
+    ok("s := \"x-suffix\"\nr: str = s.strip_suffix(\"-suffix\")\nprint(r)\n");
+    ok("s := \"a\\nb\"\nr: list[str] = s.split_lines()\nprint(r)\n");
+    ok("s := \"  x  \"\nr: str = s.strip()\nprint(r)\n");
+}
+
+#[test]
+fn str_to_int_is_option() {
+    // gap #7: safe parse returns Option, not a bare int.
+    ok("x: int? = \"42\".to_int()\nprint(x)\n");
+}
+
+#[test]
+fn str_to_float_is_option() {
+    ok("x: float? = \"4.5\".to_float()\nprint(x)\n");
+}
+
+#[test]
+fn str_to_int_result_is_option_not_int() {
+    // The result is Option[int], so binding it to a bare int must be rejected.
+    rejects(
+        "n: int = \"4\".to_int()\n",
+        "Option[int] to variable of type int",
+    );
+}
+
+#[test]
 fn unknown_str_method_rejected() {
     rejects(
         "s := \"hi\"\nx := s.frobnicate()\n",
