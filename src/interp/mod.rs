@@ -6649,7 +6649,18 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, Ru
                             });
                         }
                         if op == Shl {
-                            a << (*b as u32)
+                            // Left shift can overflow (drop high bits) like `+ - * / %`; treat
+                            // it as a recoverable fault, not a silent wrap. Round-trip test:
+                            // `(a << b) >> b == a` holds iff no significant bit was shifted out
+                            // (correct for negative operands too — `-1 << 63` round-trips).
+                            let v = a << (*b as u32);
+                            if (v >> (*b as u32)) != *a {
+                                return Err(RuntimeError {
+                                    message: format!("integer overflow in {op:?}"),
+                                    span,
+                                });
+                            }
+                            v
                         } else {
                             a >> (*b as u32)
                         }

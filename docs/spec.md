@@ -289,7 +289,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `import std.math` / `import f from std.io`. `std.cmp` holds generic `min`/`max`/`clamp`
   (`[T: Comparable]`); `list.sort()` is likewise Comparable. (`std.math.min`/`max` were retired into
   `std.cmp`; `abs` stays native.) **Integer overflow policy:** the one integer type is `i64`; every
-  overflow — arithmetic (`+ - * / %`), negation, `MIN / -1`, and `math.abs(MIN)` — is a *recoverable
+  overflow — arithmetic (`+ - * / %`), left shift (`<<`, when a significant bit is shifted out),
+  negation, `MIN / -1`, and `math.abs(MIN)` — is a *recoverable
   panic* (`"integer overflow in <op>"`, catchable by `recover:`), never a silent wrap and never a host
   crash. **One-way `int`→`float` widening (C-like):** an `int` value flows into a `float` slot and is
   converted to a real `f64` (the reverse is a lossy type error). It fires at every value-definition

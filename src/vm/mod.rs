@@ -5018,7 +5018,15 @@ impl Vm {
                             );
                         }
                         if matches!(op, Op::Shl) {
-                            a << (b as u32)
+                            // Left shift can overflow (drop high bits) like `+ - * / %`; treat
+                            // it as a recoverable fault, not a silent wrap. Round-trip test:
+                            // `(a << b) >> b == a` holds iff no significant bit was shifted out
+                            // (correct for negative operands too — `-1 << 63` round-trips).
+                            let v = a << (b as u32);
+                            if (v >> (b as u32)) != a {
+                                return Err(self.err(format!("integer overflow in {name}"), span));
+                            }
+                            v
                         } else {
                             a >> (b as u32)
                         }
@@ -24502,6 +24510,35 @@ main()
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Left-shift overflow is a recoverable fault (`integer overflow in Shl`), matching the
+    /// `+ - * / %` checked-arith policy — not a silent wrap to `i64::MIN`. Right shift and every
+    /// non-overflowing left shift (incl. negative operands that round-trip) stay byte-identical,
+    /// and the VM stays in lock-step with the interpreter.
+    #[test]
+    fn shift_left_overflow_is_recoverable_fault() {
+        // overflow → recoverable fault with the shared arith-overflow message, on both engines
+        for src in ["print(1 << 63)", "print(3 << 62)", "print(2 << 62)"] {
+            let vm = run_capture(src).expect_err("vm: shift overflow should fault");
+            assert_eq!(vm.message, "integer overflow in Shl");
+            let it = crate::interp::run_capture(src).expect_err("interp: shift overflow");
+            assert_eq!(it.message, "integer overflow in Shl");
+        }
+
+        // non-overflowing shifts (incl. `-1 << 63 == i64::MIN` which round-trips, `>>` which
+        // never overflows) must NOT fault and must agree across engines
+        for (src, want) in [
+            ("print((0 - 1) << 63)", "-9223372036854775808\n"),
+            ("print(1 << 62)", "4611686018427387904\n"),
+            ("print(0 << 63)", "0\n"),
+            ("print(1024 >> 2)", "256\n"),
+            ("print((0 - 8) >> 1)", "-4\n"),
+        ] {
+            let vm = run_capture(src).expect("vm: non-overflowing shift");
+            assert_eq!(vm, want, "vm mismatch for `{src}`");
+            assert_eq!(crate::interp::run_capture(src).expect("interp"), want);
+        }
     }
 
     /// `examples/evaluator.chz` — a full tokenizer + recursive-descent parser + AST evaluator with

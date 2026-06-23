@@ -295,7 +295,9 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 
 > This table is the contract for the Pratt parser. Bitwise ops are **int-only** (a float operand is
 > a type error); the relative order follows Python (comparison looser than `\|` < `^` < `&` < shifts).
-> A shift amount outside `0..64` is a runtime error.
+> A shift amount outside `0..64` is a runtime error. A left shift (`<<`) that drops a significant
+> bit overflows like `+ - * / %` — a recoverable `integer overflow in Shl` (e.g. `1 << 63`), not a
+> silent wrap; round-trip-safe shifts incl. `-1 << 63 == INT_MIN` still succeed. `>>` never overflows.
 
 **Membership `in`.** `x in xs` is a `bool`: element-of for a `list`/`set`, **key**-of for a `map`
 (Python-style — `k in m` tests keys, not values), and substring-of for a `str`. The container type
