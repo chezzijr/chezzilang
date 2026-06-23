@@ -314,13 +314,15 @@ impl Compiler {
             crate::vm::op::VID_NONE_VARIANT
         );
         // M19 memory-layout lever #1 — register the synthetic native std structs (`Match` from
-        // `std.regex`, `Response` from `std.request`). They have no AST (the checker seeds their
-        // shapes in `seed_stdlib_structs`), so with the positional struct layout the runtime must
-        // know their declaration-order field names HERE to resolve field reads + Display. Order must
-        // match the native builders (`match_to_ret` / `response_ret`) and the checker's seed.
+        // `std.regex`, `Response` from `std.request`, `ProcResult` from `std.process`). They have no
+        // AST (the checker seeds their shapes in `seed_stdlib_structs`), so with the positional
+        // struct layout the runtime must know their declaration-order field names HERE to resolve
+        // field reads + Display. Order must match the native builders (`match_to_ret` /
+        // `response_ret` / `proc_result_ret`) and the checker's seed.
         for (name, fields) in [
             ("Match", &["text", "start", "end", "groups"][..]),
             ("Response", &["status", "body", "headers"][..]),
+            ("ProcResult", &["stdout", "stderr", "code"][..]),
         ] {
             let tid = program.structs.len() as u32;
             program.structs.insert(

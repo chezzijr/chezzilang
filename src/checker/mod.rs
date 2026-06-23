@@ -523,6 +523,14 @@ fn native_module_sig(name: &str) -> ModuleSig {
         }
         "std.process" => {
             func("cmd", vec![Ty::Str], Ty::result(Ty::Str));
+            // `ProcResult` is the synthetic struct seeded in `seed_stdlib_structs`.
+            let proc = || Ty::Struct("ProcResult".to_string(), vec![]);
+            func("run", vec![Ty::Str], Ty::result(proc()));
+            func(
+                "run_args",
+                vec![Ty::Str, Ty::list(Ty::Str)],
+                Ty::result(proc()),
+            );
         }
         "std.rand" => {
             // SplitMix64 PRNG scalars (std.rand). Generic collection helpers (shuffle/choice/sample)
@@ -935,10 +943,11 @@ impl Checker {
     }
 
     /// Register the synthetic struct shapes that native std modules return (M9): `Match`
-    /// (`std.regex`) and `Response` (`std.request`). They have no AST, so their field layouts are
-    /// seeded here; `infer_field` then types `m.text`, `resp.status`, etc. Like all type names in
-    /// M4.5 these are program-global, so `Match`/`Response` become reserved names (a user struct of
-    /// the same name collides, as intended).
+    /// (`std.regex`), `Response` (`std.request`), and `ProcResult` (`std.process`). They have no
+    /// AST, so their field layouts are seeded here; `infer_field` then types `m.text`, `resp.status`,
+    /// `r.code`, etc. Like all type names in M4.5 these are program-global, so
+    /// `Match`/`Response`/`ProcResult` become reserved names (a user struct of the same name
+    /// collides, as intended).
     fn seed_stdlib_structs(&mut self) {
         let mk = |fields: Vec<(&str, Ty)>| StructInfo {
             type_params: Vec::new(),
@@ -968,6 +977,15 @@ impl Checker {
             ]),
         );
         self.struct_names.insert("Response".into());
+        self.structs.insert(
+            "ProcResult".into(),
+            mk(vec![
+                ("stdout", Ty::Str),
+                ("stderr", Ty::Str),
+                ("code", Ty::Int),
+            ]),
+        );
+        self.struct_names.insert("ProcResult".into());
     }
 
     fn error(&mut self, span: Span, message: impl Into<String>) {

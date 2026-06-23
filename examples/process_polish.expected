@@ -1,0 +1,4 @@
+run stdout: structured code: 0
+nonzero stdout: out stderr: oops code: 5
+args stdout: $(echo PWNED) ; && code: 0
+spawn failed

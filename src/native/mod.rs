@@ -156,6 +156,12 @@ pub enum NativeArg {
     /// before the handoff and served back via [`Host::arg_str_map`]. Order is preserved (the engine
     /// reads `MapData.entries`), so header order is deterministic across engines.
     Map(Vec<(String, String)>),
+    /// An ordered `list[str]`, pre-extracted so a blocking native that reads a list-of-strings arg
+    /// (today only `std.process.run_args`'s argv) can still offload to the dirty pool: the off-heap
+    /// host has no `Vm`/heap, so the list is snapshotted into owned `String`s before the handoff and
+    /// served back via [`Host::arg_str_list`]. Order is preserved (it IS the argv), so the spawned
+    /// process sees the same argument vector across engines.
+    List(Vec<String>),
 }
 
 /// The engine-agnostic context a native function operates through. Object-safe (`&mut dyn Host`):
@@ -228,6 +234,16 @@ pub trait Host {
     /// map insertion order. Errors if the arg is not a map or any key/value is not a str. Used by
     /// `std.request.request` to read custom request headers.
     fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, HostError>;
+    /// `args[i]` as an ordered `list[str]`, returned as owned `String`s in list order. Errors if the
+    /// arg is not a list or any element is not a str. Used by `std.process.run_args` to read the argv
+    /// it spawns without a shell. The default returns a "no list args" error so a host that never
+    /// passes lists (the std-module test fixtures, the FFI callback host) needn't implement it.
+    fn arg_str_list(&mut self, i: usize) -> Result<Vec<String>, HostError> {
+        let _ = i;
+        Err(HostError {
+            message: "this host does not support list arguments".into(),
+        })
+    }
 
     /// Append to the program's captured stdout buffer.
     fn write_stdout(&mut self, s: &str);
@@ -294,7 +310,9 @@ pub fn is_blocking(name: &str) -> bool {
         // std.request (network I/O) + std.process (subprocess) — D5 owe #1.
         // `request`/`put`/`patch`/`delete`/`head` are the verb wrappers + the general header-carrying
         // call; `request` offloads its `map[str, str]` headers via `NativeArg::Map` (off-heap-safe).
-        | "get" | "post" | "request" | "put" | "patch" | "delete" | "head" | "cmd"
+        // `run`/`run_args` are the structured subprocess forms (alongside `cmd`); `run_args` offloads
+        // its `list[str]` argv via `NativeArg::List` (off-heap-safe).
+        | "get" | "post" | "request" | "put" | "patch" | "delete" | "head" | "cmd" | "run" | "run_args"
     )
 }
 
@@ -568,6 +586,30 @@ mod tests {
         for name in ["get", "post", "cmd"] {
             assert!(is_blocking(name), "{name} should be blocking");
         }
+    }
+
+    /// `std.process` exposes exactly `cmd`/`run`/`run_args` and all three are blocking subprocess I/O
+    /// (must offload to the dirty pool under `--parallel`).
+    #[test]
+    fn native_process_members_and_blocking() {
+        let names: Vec<&str> = native_members("std.process")
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(names, vec!["cmd", "run", "run_args"]);
+        for name in ["cmd", "run", "run_args"] {
+            assert!(is_blocking(name), "{name} should be blocking");
+        }
+    }
+
+    /// `NativeArg::List` carries an ordered `list[str]` across the off-heap offload boundary so
+    /// `run_args`'s argv survives the handoff to the dirty pool. The off-heap host serves it back.
+    #[test]
+    fn native_arg_list_variant_carries_str_vec() {
+        let a = NativeArg::List(vec!["a".into(), "b".into()]);
+        let b = NativeArg::List(vec!["a".into(), "b".into()]);
+        assert_eq!(a, b);
+        assert_ne!(a, NativeArg::List(vec![]));
     }
 
     /// The new `std.request` verbs (`put`/`patch`/`delete`/`head`) and the general `request()` are
