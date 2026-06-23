@@ -1,0 +1,25 @@
+# range() stepping + range-slicing golden. Covers the 3-arg range form (up / down / by-N),
+# the empty / wrong-direction cases, and slicing a range literal with a step.
+fn main():
+    # 3-arg range, counting up (half-open [start, end)).
+    print(range(0, 10, 2))
+    print(range(1, 7, 3))
+
+    # 3-arg range, counting down with a negative step (still excludes end).
+    print(range(10, 0, -1))
+    print(range(10, 2, -3))
+
+    # Empty cases: start == end, and a wrong-direction step.
+    print(range(5, 5, 1))
+    print(range(0, 10, -1))
+    print(range(10, 0, 1))
+
+    # The 1-arg and 2-arg forms still work unchanged.
+    print(range(3))
+    print(range(2, 5))
+
+    # Slicing a range literal reuses the list step machinery.
+    print((0..10)[::2])
+    print((0..10)[1:8:3])
+    print((0..5)[::-1])
+main()

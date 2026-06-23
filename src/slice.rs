@@ -18,6 +18,53 @@ pub fn norm_index(n: i64, len: usize) -> Option<usize> {
     }
 }
 
+/// Upper bound on the number of elements a `range()` call may materialize, to keep an absurd argument
+/// from exhausting memory. (A `for` loop over a `..` range is lazy and not subject to this; this only
+/// caps building an actual list — via `range()` or slicing a range value.) Shared by BOTH engines so
+/// the cap (and its fault message) is byte-identical.
+pub const MAX_RANGE_LEN: i64 = 10_000_000;
+
+/// Materialize `range(start, end, step)` into the concrete list of ints, half-open `[start, end)`.
+/// A positive `step` counts up, a negative `step` counts down (still excluding `end`); a
+/// wrong-direction step or `start == end` yields `[]`. Returns `Err` with the byte-identical runtime
+/// fault text for a zero step or an over-cap length. All arithmetic is done in `i128` so a huge span
+/// or `i64::MIN` bound/step can't overflow or panic (`i64::MIN.abs()` would). Shared by BOTH engines.
+pub fn range_values(start: i64, end: i64, step: i64) -> Result<Vec<i64>, String> {
+    if step == 0 {
+        return Err("range() step cannot be zero".to_string());
+    }
+    let (start, end, step) = (i128::from(start), i128::from(end), i128::from(step));
+    // Number of emitted elements when the step points toward `end`, else 0 (wrong-direction/empty).
+    let span = end - start;
+    let n: i128 = if (step > 0 && span > 0) || (step < 0 && span < 0) {
+        // ceil(|span| / |step|) without overflow: (|span| + |step| - 1) / |step|.
+        let s = span.abs();
+        let st = step.abs();
+        (s + st - 1) / st
+    } else {
+        0
+    };
+    if n > i128::from(MAX_RANGE_LEN) {
+        return Err(format!(
+            "range() length {n} exceeds the maximum of {MAX_RANGE_LEN}"
+        ));
+    }
+    let mut out = Vec::with_capacity(n as usize);
+    let mut i = start;
+    if step > 0 {
+        while i < end {
+            out.push(i as i64);
+            i += step;
+        }
+    } else {
+        while i > end {
+            out.push(i as i64);
+            i += step;
+        }
+    }
+    Ok(out)
+}
+
 /// Resolve a Python slice `start:end:step` against a length-`len` sequence into the concrete list of
 /// indices to materialize, in order. `None` components take their direction-dependent defaults.
 /// Returns `Err` only for a zero step (the message is the runtime fault text, byte-identical across
@@ -183,6 +230,53 @@ mod tests {
         assert_eq!(
             slice_indices(None, None, Some(0), 5),
             Err("slice step cannot be zero")
+        );
+    }
+
+    #[test]
+    fn range_values_up_down_byn() {
+        assert_eq!(range_values(0, 10, 2).unwrap(), vec![0, 2, 4, 6, 8]);
+        assert_eq!(range_values(1, 7, 3).unwrap(), vec![1, 4]);
+        assert_eq!(
+            range_values(10, 0, -1).unwrap(),
+            vec![10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+        );
+        assert_eq!(range_values(10, 2, -3).unwrap(), vec![10, 7, 4]);
+    }
+
+    #[test]
+    fn range_values_empty_and_zero_step() {
+        assert_eq!(range_values(5, 5, 1).unwrap(), Vec::<i64>::new());
+        assert_eq!(range_values(5, 5, -1).unwrap(), Vec::<i64>::new());
+        assert_eq!(range_values(0, 10, -1).unwrap(), Vec::<i64>::new());
+        assert_eq!(range_values(10, 0, 1).unwrap(), Vec::<i64>::new());
+        assert_eq!(
+            range_values(0, 5, 0),
+            Err("range() step cannot be zero".to_string())
+        );
+    }
+
+    #[test]
+    fn range_values_overflow_edges() {
+        // INT_MIN step must not panic (i64::MIN.abs() overflows); single huge step → one or zero elems.
+        assert_eq!(
+            range_values(i64::MAX, i64::MAX - 1, -1).unwrap(),
+            vec![i64::MAX]
+        );
+        // Negative step with an ascending span is wrong-direction → empty (no i64::MIN.abs() panic).
+        assert_eq!(range_values(0, 10, i64::MIN).unwrap(), Vec::<i64>::new());
+        // A huge positive step over a small ascending span emits exactly one element.
+        assert_eq!(range_values(0, 10, i64::MAX).unwrap(), vec![0]);
+        // INT_MIN step counting down by a giant stride still emits just the start.
+        assert_eq!(range_values(0, i64::MIN, i64::MIN).unwrap(), vec![0]);
+        // Over-cap length is rejected, not materialized.
+        assert!(range_values(0, MAX_RANGE_LEN + 5, 1).is_err());
+        // A large step keeps the count under the cap.
+        assert_eq!(
+            range_values(0, 10_000_000_000, 1_000_000_000)
+                .unwrap()
+                .len(),
+            10
         );
     }
 

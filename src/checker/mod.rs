@@ -6370,8 +6370,11 @@ impl Checker {
                 for a in args {
                     self.expect_int_val(a);
                 }
-                if args.is_empty() || args.len() > 2 {
-                    self.error(span, "range() expects range(end) or range(start, end)");
+                if args.is_empty() || args.len() > 3 {
+                    self.error(
+                        span,
+                        "range() expects range(end), range(start, end), or range(start, end, step)",
+                    );
                 }
                 Some(Ty::list(Ty::Int))
             }

@@ -77,15 +77,11 @@ is a predictable first-hour stumble. Ranked by friction.
      free fns**; `min`/`max`/`clamp` are **`std.cmp` free fns**.
    - Remaining fix: (a) re-export the common `std.iter`/`std.cmp` ops as receiver methods (thin forwarders
      in the checker method table), or (b) document a hard rule. The str asymmetry — the worst one — is gone.
-2. **No stepped / reverse range.** `for i in 10..0` yields nothing (no auto-reverse); `range()` takes only
-   `(end)`/`(start,end)` — no step; a range isn't sliceable (`(0..10)[::2]` errors). Counting down/by-N
-   forces a manual `while`. Slices already do `::step`; ranges should mirror it (3-arg `range` and/or
-   reverse on `..`).
-3. **No `print` newline/sep control.** `print(a, end="")` → "named arguments not supported on builtins"
+2. **No `print` newline/sep control.** `print(a, end="")` → "named arguments not supported on builtins"
    (`checker/mod.rs:6274`); `std.io` has no `write`; no `println`/bare split. Incremental output is
    impossible without a trailing newline. Fix: add native `std.io.write(s)` (no newline) or special-case
    `end=`/`sep=` on `print`.
-4. **`assert` takes no message.** `assert(x==y, "msg")` → type error (args parse as a tuple); failure
+3. **`assert` takes no message.** `assert(x==y, "msg")` → type error (args parse as a tuple); failure
    prints only `assertion failed`, no context. Fix: accept optional 2nd `str` arg in the `assert`
    checker special-case + thread into the panic message.
 
@@ -225,7 +221,16 @@ collection operators (2026-06-23, gap #3) — list `+` (concat) / `*` (repeat, c
 `n<=0`→`[]`, capacity-overflow → recoverable fault) and set `\|`/`&`/`-`/`^`
 (union/intersection/difference/symmetric-difference) added as runtime-opcode arms in `vm::arith`/
 `vm::bitwise` + `interp::eval_binary` + checker `infer_binary`, behaviour identical to the existing
-methods (`^` has no method form); `examples/collection_ops.chz`.
+methods (`^` has no method form); `examples/collection_ops.chz`. · stepped / reverse range (2026-06-23,
+gap #4) — `range()` gained a 3-arg `range(start, end, step)` form (non-zero int step; positive counts up
+half-open, negative counts down half-open, e.g. `range(10, 0, -1)` → `10..1`; wrong-direction step or
+`start == end` → `[]`; `step == 0` → recoverable fault `range() step cannot be zero`; 10M cap, all edge
+math in i128 so a huge span / `i64::MIN` step can't overflow), shared `slice::range_values` across BOTH
+engines (interp `builtins::range` + VM `builtin_range`); a **range literal is now sliceable** like a list
+(`(0..10)[::2]`) by materializing it via the `range` builtin then reusing the existing `GetSlice` /
+`slice_indices` `::step` machinery (compiler Slice arm + interp `eval_slice`). `a..b` stays **ascending**
+(no auto-reverse — `for i in 10..0` still yields nothing); the down-count idiom is `range(start, end, -1)`.
+`examples/range_step.chz`.
 
 **Type-system/runtime ✅** · one-way C-like `int`→`float` widening (2026-06-22) — runtime
 `Op::CoerceFloat`/`coerce_float` at every value-def sink (typed `let`, fn/method/closure args incl. int
