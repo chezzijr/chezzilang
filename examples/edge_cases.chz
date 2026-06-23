@@ -27,6 +27,8 @@ fn f_shift_hi() -> int:
     return 1 << 99
 fn f_shift_neg() -> int:
     return 1 << (0 - 1)
+fn f_shift_ovf63() -> int:
+    return 1 << 63
 fn f_fdiv0() -> int:
     x := 1.0 / 0.0
     return int(x)
@@ -39,6 +41,7 @@ fn faults():
     probe("underflow", f_underflow)
     probe("shift_hi", f_shift_hi)
     probe("shift_neg", f_shift_neg)
+    probe("shift_ovf63", f_shift_ovf63)
     probe("fdiv0", f_fdiv0)
 
 # ---- integer / float boundaries that DON'T fault -------------------------------------------------

@@ -1355,6 +1355,15 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- ✅ **Left-shift overflow now a recoverable fault** (2026-06-23, `auto-task/shift-overflow`) — `1 << 63`
+  silently wrapped to `i64::MIN`, violating the "every i64 overflow is a recoverable fault" policy
+  (the shift handler validated only the shift-*amount* range, never value overflow, unlike `+ - * / %`).
+  Fix (both engines, `vm/mod.rs` `bitwise()` + `interp/mod.rs` `eval_binary` Shl arm): a left-shift-only
+  round-trip check — `(a << b) >> b != a` ⇒ raise the shared `integer overflow in Shl`. Round-trip-safe
+  shifts incl. `-1 << 63 == INT_MIN` still succeed; `>>` is unchanged (arithmetic, never overflows).
+  Golden `examples/edge_cases.chz` `shift_ovf63` probe pins it on all three engines + a VM unit test
+  guards the non-overflow regressions. Docs: `gaps.md` nit resolved, `docs/spec.md` overflow policy +
+  `docs/syntax.md` shift note updated.
 - ✅ **`list.map`/`.filter`/`.fold` OOB-on-shrink fixed** (2026-06-21, `auto-task/list-hof-shrink-oob`) —
   VM `list_hof` captured `n = v.len()` once then indexed the *live* heap list, so a callback that
   shrank the receiver (`xs.pop()`) ran a stale index past the now-shorter `Vec` → `index out of bounds`

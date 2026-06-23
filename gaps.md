@@ -19,10 +19,11 @@ Last updated: 2026-06-23.
 
 ### 🔴 Soundness / correctness nits
 
-- **`1 << 63` wraps silently to `INT_MIN`** — shifts skip the overflow check that `+ - * / %` get
-  (recoverable-panic). So "integer overflow never wraps" is false for shifts. Also `INT_MIN` is
-  unwritable as a literal (`-9223372036854775808` lexes as unary-minus over `i64::MAX` → "number too
-  large", same as Rust).
+- **`INT_MIN` is unwritable as a literal** — `-9223372036854775808` lexes as unary-minus over
+  `i64::MAX` → "number too large", same as Rust. (The companion soundness nit — left-shift wrapping
+  silently to `INT_MIN` — is **resolved**: `<<` now overflow-checks like `+ - * / %` and raises a
+  recoverable `integer overflow in Shl`; only round-trip-safe shifts incl. `-1 << 63 == INT_MIN`
+  still succeed.)
 
 ### 🟡 Type-system + runtime depth (latent — unreachable on HEAD)
 
@@ -148,7 +149,7 @@ are the parity oracles (differential testing caught most resolved bugs); removin
 - Struct equality (structural), string indexing/ops, list-of-structs + nested-list read, by-ref list
   sharing across calls.
 - `if`/`match` as expressions (incl. interpolation), `Result`/`Option` + `?`, exhaustive-match, deep
-  recursion, integer `+ - * / %` overflow → recoverable panic (but **shifts wrap** — see nit above),
+  recursion, integer `+ - * / %` **and `<<`** overflow → recoverable panic,
   int-div truncation, `%` on negatives.
 - **Fuzz-pass robustness** (2026-06-21, both engines): parser nesting-depth guard, structural-depth
   guard (self-referential cycle), call-depth cap (10000), index/slice OOB + Python-asymmetric clamp,
