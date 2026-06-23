@@ -6,7 +6,7 @@ a fix sketch with `file:line`. Resolved gaps collapse to a one-line log — full
 
 Legend: 🔴 blocks apps · 🟡 friction · ⚪ latent (unreachable) · 🟢 works.
 
-Last updated: 2026-06-22.
+Last updated: 2026-06-23.
 
 > Core constructs all in place (language **still evolves** — features land via own milestone; M19 is
 > pre-JIT perf, not a freeze). This doc = unified actionable backlog (open language/stdlib gaps + M19
@@ -56,7 +56,8 @@ Current: `fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`
 
 **Language-level:** `i64`-only (no `byte`/`u8` scalar). `bytes`/`bytearray`/str↔bytes/`list()`/`set()`/
 `map()` ctors/`Iterable[T]`+`.iter()` all SHIPPED. Remaining: no `byte`/`u8` scalar, no non-UTF-8 codecs
-(latin1/utf16), no `tuple()`/`bool()` ctors. `bignum` + `yield`/generators are non-goals.
+(latin1/utf16), no `tuple()`/`bool()` ctors. `bignum` stays a non-goal. **`yield`/generators SHIPPED
+(VM-only)** — `fn -> Iterator[T]` may `yield`; see resolved log + `examples/generators_basic.chz`.
 
 ### Tier 4 — ecosystem (toolchain)
 REPL, formatter, LSP, package manager/registry, debugger, doc comments + docgen.
@@ -96,7 +97,7 @@ positional struct/enum/closure layout (memory levers #1/#2/#3).
   - **NaN-box `Value` (16B→8B) — ⛔ BLOCKED by full i64** (`value.rs:18`): i64 + tag don't fit in 8B.
   - **Register VM** — low ROI (dispatch near match floor).
   - **Gen/incremental GC** — low ROI (GC moves no bench).
-  - **String concat/split builder** — medium; `join` already buffers (`mod.rs:4377`), `+`/`split` unbenched.
+  - **String concat/split builder** — medium; `join` already buffers (`vm/mod.rs:7402`), `+`/`split` unbenched.
 
 ### 🟠 Deferred — real work, lower urgency
 
@@ -192,7 +193,9 @@ in loop → `Op::ReclaimNursery` (`d8fc2b4`).
 + stateful-iter laziness · Python-colon slicing (`src/slice.rs`) · `Iterator[T]` (M13) · `os.exit` ·
 list `.concat`/`.extend` + map `.merge`/`.update` · hex/bin/oct literals · tuple-`for` + `enumerate`/
 `zip` · optional-chaining + `??` · `defer` block-scoped + `defer:` form · `ref T` transparent ref
-bindings (auto-deref, lowers to `Ref[T]`, parser/checker/desugar only; non-sendable).
+bindings (auto-deref, lowers to `Ref[T]`, parser/checker/desugar only; non-sendable) · **`yield`/
+generators** (VM-only; `fn -> Iterator[T]` may `yield`, call returns a suspendable coroutine driven by
+`.next()`; interp rejects `yield` so two-engine parity waived; `examples/generators_basic.chz`).
 
 **Concurrency ✅** · pending-spawn drop on early `parallel:` escape · VM nursery-leak on `?`/return
 escape · Path C recv-in-native-callback thread-demotion (`f828ef7`, D complete) · `std.cancel`

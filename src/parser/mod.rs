@@ -1199,7 +1199,7 @@ impl Parser {
         }
     }
 
-    /// `yield <expr>` — always carries a value (unlike `return`). Experimental generator syntax.
+    /// `yield <expr>` — always carries a value (unlike `return`). Generator syntax (VM-only; shipped).
     fn parse_yield(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Yield)?;
         Ok(StmtKind::Yield(self.parse_expr()?))
