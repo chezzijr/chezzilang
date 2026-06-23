@@ -340,7 +340,9 @@
              | <relExpr> "LT" <bitOrExpr>   | <relExpr> "LTEQ" <bitOrExpr>
              | <relExpr> "GT" <bitOrExpr>   | <relExpr> "GTEQ" <bitOrExpr>
 # Bitwise / shift cascade (gap #13), Python's relative order: `|` looser than `^` looser than `&`
-# looser than the shifts, which sit just above range. All int-only (enforced by the checker).
+# looser than the shifts, which sit just above range. Int-only on int operands; `| & ^` ALSO do set
+# algebra (union/intersection/symmetric-difference) on two `set[T]` (gap #3). `<< >>` stay int-only.
+# (Type-directed by the checker; same tokens, no grammar change.)
 <bitOrExpr> ::= <bitXorExpr> | <bitOrExpr> "BITOR" <bitXorExpr>
 <bitXorExpr>::= <bitAndExpr> | <bitXorExpr> "CARET" <bitAndExpr>
 <bitAndExpr>::= <shiftExpr>  | <bitAndExpr> "AMP" <shiftExpr>

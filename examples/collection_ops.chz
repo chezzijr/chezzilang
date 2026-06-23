@@ -1,0 +1,41 @@
+# Collection operators (gap #3): list `+`/`*` and set `| & - ^`.
+# All of these mirror existing methods (list `.concat`, set `.union`/`.intersection`/
+# `.difference`) — `^` is symmetric-difference (no method form). Behaviour is identical.
+import std.io
+
+fn main():
+    # --- list concat (`+`) ---
+    io.print("{[1, 2] + [3, 4]}")        # multi-element
+    io.print("{[] + [5, 6]}")            # empty left side keeps element type
+    io.print("{[7, 8] + []}")            # empty right side
+    io.print("{[] + []}")                # both empty
+
+    # --- list repeat (`*`, commutative) ---
+    io.print("{[0] * 3}")                # list * int
+    io.print("{2 * [9]}")                # int * list (Python-style)
+    io.print("{[1, 2] * 2}")             # multi-element repeat
+    io.print("{[1] * 0}")                # zero → empty
+    io.print("{[1] * -1}")               # negative → empty
+
+    # --- set union / intersection / difference / symmetric-difference ---
+    a: set[int] = {1, 2, 3}
+    b: set[int] = {3, 4, 5}
+    io.print("{a | b}")                  # union     → {1, 2, 3, 4, 5}
+    io.print("{a & b}")                  # intersect → {3}
+    io.print("{a - b}")                  # diff      → {1, 2}
+    io.print("{a ^ b}")                  # symdiff   → {1, 2, 4, 5}
+
+    # set ops with an empty set
+    empty: set[int] = set()
+    io.print("{a | empty}")              # → {1, 2, 3}
+    io.print("{a & empty}")              # → {}
+    io.print("{a - empty}")              # → {1, 2, 3}
+    io.print("{a ^ empty}")              # → {1, 2, 3}
+
+    # set of strings (element type other than int)
+    s1: set[str] = {"x", "y"}
+    s2: set[str] = {"y", "z"}
+    io.print("{s1 | s2}")                # → {x, y, z}
+    io.print("{s1 & s2}")                # → {y}
+
+main()

@@ -3455,8 +3455,18 @@ impl Checker {
                 let str_ok = op == AssignOp::PlusEq && *target_ty == Ty::Str && *val_ty == Ty::Str;
                 let widens = *target_ty == Ty::Int && *val_ty == Ty::Float;
                 let num_ok = target_ty.is_numeric() && val_ty.is_numeric() && !widens;
+                // Collection forms mirror `infer_binary`: `list += list` (concat), `list *= int`
+                // (repeat), `set -= set` (difference). Compound-assign lowers through the same
+                // `Op::Add`/`Op::Mul`/`Op::Sub` opcodes the binary form uses, so the runtime already
+                // handles these — only the checker had to be taught to accept them.
+                let coll_ok = match (op, target_ty, val_ty) {
+                    (AssignOp::PlusEq, Ty::List(a), Ty::List(b)) => compatible(a, b),
+                    (AssignOp::StarEq, Ty::List(_), Ty::Int) => true,
+                    (AssignOp::MinusEq, Ty::Set(a), Ty::Set(b)) => compatible(a, b),
+                    _ => false,
+                };
                 let known = !target_ty.is_unknown() && !val_ty.is_unknown();
-                if known && !str_ok && !num_ok {
+                if known && !str_ok && !num_ok && !coll_ok {
                     let sym = match op {
                         AssignOp::PlusEq => "+=",
                         AssignOp::MinusEq => "-=",
@@ -3470,16 +3480,19 @@ impl Checker {
                     );
                 }
             }
-            // Bitwise/shift compound ops `&= |= ^= <<= >>=` — int-only (mirrors `infer_binary`'s
-            // bitwise arm).
+            // Bitwise/shift compound ops `&= |= ^= <<= >>=` — int-only, EXCEPT `&= |= ^=` also do
+            // set algebra on two `set[T]` (mirrors `infer_binary`'s bitwise arm; `<<= >>=` stay
+            // strictly int). Lowers through the same `Op::BitOr`/etc opcodes as the binary form.
             AssignOp::AmpEq
             | AssignOp::PipeEq
             | AssignOp::CaretEq
             | AssignOp::ShlEq
             | AssignOp::ShrEq => {
                 let int_ok = *target_ty == Ty::Int && *val_ty == Ty::Int;
+                let set_ok = matches!(op, AssignOp::AmpEq | AssignOp::PipeEq | AssignOp::CaretEq)
+                    && matches!((target_ty, val_ty), (Ty::Set(a), Ty::Set(b)) if compatible(a, b));
                 let known = !target_ty.is_unknown() && !val_ty.is_unknown();
-                if known && !int_ok {
+                if known && !int_ok && !set_ok {
                     let sym = match op {
                         AssignOp::AmpEq => "&=",
                         AssignOp::PipeEq => "|=",
@@ -3489,7 +3502,7 @@ impl Checker {
                     };
                     self.error(
                         span,
-                        format!("bitwise operator {sym} requires int operands, found {target_ty} and {val_ty}"),
+                        format!("bitwise operator {sym} requires int operands or two sets, found {target_ty} and {val_ty}"),
                     );
                 }
             }
@@ -5270,6 +5283,16 @@ impl Checker {
                     numeric_result(&l, &r)
                 } else if let Some(t) = self.op_overload_result(&l, &r, "Add") {
                     t
+                } else if let (Ty::List(le), Ty::List(re)) = (&l, &r) {
+                    // List concat (gap #3): `[1,2] + [3,4]` → `list[T]`, identical to `.concat`.
+                    // Element types must be compatible; an empty `[]` side (Unknown elem) is
+                    // joined by `merge_unknown` so `[] + [1]` infers `list[int]`.
+                    if compatible(le, re) {
+                        Ty::List(Box::new(merge_unknown(le, re)))
+                    } else {
+                        self.error(lhs.span, format!("cannot apply + to {l} and {r}"));
+                        Ty::Unknown
+                    }
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
@@ -5285,6 +5308,25 @@ impl Checker {
                     numeric_result(&l, &r)
                 } else if let Some(t) = self.op_overload_result(&l, &r, proto) {
                     t
+                } else if op == Mul && matches!((&l, &r), (Ty::List(_), Ty::Int)) {
+                    // List repeat (gap #3): `[0] * 3` → `list[T]`. Result keeps the list's element.
+                    l.clone()
+                } else if op == Mul && matches!((&l, &r), (Ty::Int, Ty::List(_))) {
+                    // Commutative, Python-style: `3 * [0]` → `list[T]`.
+                    r.clone()
+                } else if op == Sub
+                    && let (Ty::Set(le), Ty::Set(re)) = (&l, &r)
+                {
+                    // Set difference (gap #3): `a - b` → `set[T]`, identical to `.difference`.
+                    if compatible(le, re) {
+                        Ty::Set(Box::new(merge_unknown(le, re)))
+                    } else {
+                        self.error(
+                            lhs.span,
+                            format!("cannot apply {} to {l} and {r}", op_sym(op)),
+                        );
+                        Ty::Unknown
+                    }
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
@@ -5324,17 +5366,36 @@ impl Checker {
                 }
                 Ty::Bool
             }
-            // Bitwise/shift ops are int-only (gap #13).
+            // Bitwise/shift ops are int-only (gap #13), EXCEPT `| & ^` also do set algebra
+            // (gap #3): union / intersection / symmetric-difference on two `set[T]`. Shifts
+            // (`<< >>`) stay strictly int-only.
             BitAnd | BitOr | BitXor | Shl | Shr => {
                 if l == Ty::Int && r == Ty::Int {
                     Ty::Int
+                } else if matches!(op, BitAnd | BitOr | BitXor)
+                    && let (Ty::Set(le), Ty::Set(re)) = (&l, &r)
+                {
+                    // Set `|`→union, `&`→intersection, `^`→symmetric-difference → `set[T]`,
+                    // identical to the `.union`/`.intersection` methods (`^` has no method form).
+                    if compatible(le, re) {
+                        Ty::Set(Box::new(merge_unknown(le, re)))
+                    } else {
+                        self.error(
+                            lhs.span,
+                            format!(
+                                "bitwise operator {} requires int operands or two sets, found {l} and {r}",
+                                op_sym(op)
+                            ),
+                        );
+                        Ty::Unknown
+                    }
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
                     self.error(
                         lhs.span,
                         format!(
-                            "bitwise operator {} requires int operands, found {l} and {r}",
+                            "bitwise operator {} requires int operands or two sets, found {l} and {r}",
                             op_sym(op)
                         ),
                     );

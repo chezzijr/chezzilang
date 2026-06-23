@@ -84,7 +84,7 @@ huge `n` rather than allocating until it aborts.)
 | `reverse` | `() -> nil` | *mutates* — reverse in place. |
 | `contains` | `(x: T) -> bool` | |
 | `index_of` | `(x: T) -> int` | First index, or `-1`. |
-| `concat` | `(other: list[T]) -> list[T]` | Returns a **new** list. |
+| `concat` | `(other: list[T]) -> list[T]` | Returns a **new** list. Operator form: `a + b`. |
 | `extend` | `(other: list[T]) -> nil` | *mutates* — append all of `other`. |
 | `sum` | `() -> T` | Numeric lists only (`int`→`int`). |
 | `sort` | `() -> nil` | *mutates* — ascending. Orderable elements (`int`/`float`/`str`) or `Comparable` structs. |
@@ -119,7 +119,11 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 | `has` | `(x: T) -> bool` | |
 | `add` | `(x: T) -> nil` | *mutates* — idempotent insert. |
 | `remove` | `(x: T) -> bool` | *mutates* — returns whether it was present. |
-| `union` / `intersection` / `difference` | `(other: set[T]) -> set[T]` | Return a **new** set. |
+| `union` / `intersection` / `difference` | `(other: set[T]) -> set[T]` | Return a **new** set. Operator forms: `a \| b` / `a & b` / `a - b`. |
+
+> **Set operators.** `\| & - ^` on two `set[T]` are union / intersection / difference /
+> symmetric-difference, identical to the methods above (`^` has no method form). Lists support `+`
+> (concat) and `*` (repeat); see [`syntax.md` §4](syntax.md).
 
 ### `bytes` (immutable) and `bytearray` (mutable)
 | Type | Method | Signature | Notes |

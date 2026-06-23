@@ -6602,6 +6602,107 @@ fn json_num(variant: &str, payload: &[Value]) -> Option<f64> {
     }
 }
 
+/// The four set operators (gap #3): `|`→union, `&`→intersection, `-`→difference,
+/// `^`→symmetric-difference. Mirrors the VM's `SetOp`.
+#[derive(Clone, Copy)]
+enum SetOp {
+    Union,
+    Intersection,
+    Difference,
+    SymmetricDifference,
+}
+
+/// Set algebra for the operator forms `| & - ^` (gap #3). Mirrors `Vm::set_op` AND the
+/// `union`/`intersection`/`difference` set methods (interp:3645) using the cached per-element
+/// hashes. `^` (symmetric-difference) has no method form: union of (mine ∉ other) THEN
+/// (other ∉ mine), in that canonical insertion order so the print order is parity-equal.
+fn set_op(op: SetOp, mine: &SetData, other: &SetData) -> Value {
+    let mut out = SetData::default();
+    let add = |out: &mut SetData, he: u64, e: &Value| {
+        if !out
+            .candidates(he)
+            .iter()
+            .any(|&p| values_equal(&out.entries[p].1, e))
+        {
+            out.push(he, e.clone());
+        }
+    };
+    let in_set = |set: &SetData, he: u64, e: &Value| {
+        set.candidates(he)
+            .iter()
+            .any(|&p| values_equal(&set.entries[p].1, e))
+    };
+    match op {
+        SetOp::Union => {
+            for (he, e) in mine.entries.iter().chain(other.entries.iter()) {
+                add(&mut out, *he, e);
+            }
+        }
+        SetOp::Intersection => {
+            for (he, e) in &mine.entries {
+                if in_set(other, *he, e) {
+                    add(&mut out, *he, e);
+                }
+            }
+        }
+        SetOp::Difference => {
+            for (he, e) in &mine.entries {
+                if !in_set(other, *he, e) {
+                    add(&mut out, *he, e);
+                }
+            }
+        }
+        SetOp::SymmetricDifference => {
+            for (he, e) in &mine.entries {
+                if !in_set(other, *he, e) {
+                    add(&mut out, *he, e);
+                }
+            }
+            for (he, e) in &other.entries {
+                if !in_set(mine, *he, e) {
+                    add(&mut out, *he, e);
+                }
+            }
+        }
+    }
+    Value::Set(std::rc::Rc::new(std::cell::RefCell::new(out)))
+}
+
+/// `[elem...] * n` — repeat the list `n` times (gap #3). `n <= 0` → empty. Guards the allocation
+/// against capacity overflow (bytes bounded by `isize::MAX`, like `str.repeat`) — recoverable
+/// fault, not a process abort. Mirrors `Vm::list_repeat` byte-for-byte.
+fn list_repeat(
+    items: &std::rc::Rc<std::cell::RefCell<Vec<Value>>>,
+    n: i64,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    if n <= 0 {
+        return Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(
+            Vec::new(),
+        ))));
+    }
+    let n = n as usize;
+    let src = items.borrow();
+    match src
+        .len()
+        .checked_mul(n)
+        .and_then(|t| t.checked_mul(std::mem::size_of::<Value>()))
+        .filter(|&bytes| bytes <= isize::MAX as usize)
+    {
+        Some(_) => {
+            let mut out = Vec::with_capacity(src.len() * n);
+            for _ in 0..n {
+                out.extend(src.iter().cloned());
+            }
+            Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(out))))
+        }
+        None => Err(RuntimeError {
+            message: "list repeat capacity overflow".to_string(),
+            span,
+        }),
+    }
+}
+
 /// Apply a binary operator to two already-evaluated operands.
 fn eval_binary(op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, RuntimeError> {
     use BinaryOp::*;
@@ -6666,6 +6767,21 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, Ru
                 }))
             }
             (Str(a), Str(b)) if op == Add => Ok(Str(format!("{a}{b}").into())),
+            // List concat (gap #3): `[1,2] + [3,4]` — identical to `.concat`. Mirrors the VM.
+            (Value::List(a), Value::List(b)) if op == Add => {
+                let mut out = a.borrow().clone();
+                out.extend(b.borrow().iter().cloned());
+                Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(out))))
+            }
+            // Set difference (gap #3): `a - b` — identical to `.difference`. Mirrors the VM.
+            (Value::Set(a), Value::Set(b)) if op == Sub => {
+                Ok(set_op(SetOp::Difference, &a.borrow(), &b.borrow()))
+            }
+            // List repeat (gap #3): `[0] * 3` / `3 * [0]` (commutative). `n <= 0` → empty; guard
+            // capacity against the Vec overflow abort like `str.repeat`. Mirrors the VM.
+            (Value::List(a), Int(n)) | (Int(n), Value::List(a)) if op == Mul => {
+                list_repeat(a, *n, span)
+            }
             _ => Err(type_err(op, &l, &r)),
         },
         Lt | LtEq | Gt | GtEq => {
@@ -6713,6 +6829,16 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, Ru
                     _ => unreachable!(),
                 };
                 Ok(Int(v))
+            }
+            // Set algebra (gap #3): `|`→union, `&`→intersection, `^`→symmetric-difference on two
+            // sets (`<< >>` stay int-only and fall through to the error). Mirrors the VM.
+            (Value::Set(a), Value::Set(b)) if matches!(op, BitOr | BitAnd | BitXor) => {
+                let set_kind = match op {
+                    BitOr => SetOp::Union,
+                    BitAnd => SetOp::Intersection,
+                    _ => SetOp::SymmetricDifference,
+                };
+                Ok(set_op(set_kind, &a.borrow(), &b.borrow()))
             }
             _ => Err(type_err(op, &l, &r)),
         },

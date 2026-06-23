@@ -77,19 +77,15 @@ is a predictable first-hour stumble. Ranked by friction.
      free fns**; `min`/`max`/`clamp` are **`std.cmp` free fns**.
    - Remaining fix: (a) re-export the common `std.iter`/`std.cmp` ops as receiver methods (thin forwarders
      in the checker method table), or (b) document a hard rule. The str asymmetry — the worst one — is gone.
-2. **No collection operators.** `[1,2] + [3,4]` (concat), `[0] * 3` (repeat-init), set `| & - ^` are all
-   type errors (`checker/mod.rs:5276/5337`). Functionality exists via methods (`.concat`, `.union`/
-   `.difference`) but operator forms are reflexive for Python/Rust devs; set algebra reads badly as
-   `.union(.difference(...))`. Fix: desugar list `+`/`*` and set `|&-^` to existing methods in the binop arms.
-3. **No stepped / reverse range.** `for i in 10..0` yields nothing (no auto-reverse); `range()` takes only
+2. **No stepped / reverse range.** `for i in 10..0` yields nothing (no auto-reverse); `range()` takes only
    `(end)`/`(start,end)` — no step; a range isn't sliceable (`(0..10)[::2]` errors). Counting down/by-N
    forces a manual `while`. Slices already do `::step`; ranges should mirror it (3-arg `range` and/or
    reverse on `..`).
-4. **No `print` newline/sep control.** `print(a, end="")` → "named arguments not supported on builtins"
+3. **No `print` newline/sep control.** `print(a, end="")` → "named arguments not supported on builtins"
    (`checker/mod.rs:6274`); `std.io` has no `write`; no `println`/bare split. Incremental output is
    impossible without a trailing newline. Fix: add native `std.io.write(s)` (no newline) or special-case
    `end=`/`sep=` on `print`.
-5. **`assert` takes no message.** `assert(x==y, "msg")` → type error (args parse as a tuple); failure
+4. **`assert` takes no message.** `assert(x==y, "msg")` → type error (args parse as a tuple); failure
    prints only `assertion failed`, no context. Fix: accept optional 2nd `str` arg in the `assert`
    checker special-case + thread into the panic message.
 
@@ -224,7 +220,12 @@ panic → rooted snapshot · two Rust panics fixed; concurrency core fuzzed clea
 **DX / diagnostics ✅** · infinite-recursion stack trace bounded (2026-06-23) — `format_trace`
 (both engines, byte-identical) now collapses consecutive same-name frames to `… (× N more identical
 frames) …` + caps the collapsed list to head 10 / tail 10 with a `… (M frames elided) …` marker, so a
-recursion fault prints ~4 lines instead of ~10_001 (`vm/mod.rs`/`interp/mod.rs` `format_trace`).
+recursion fault prints ~4 lines instead of ~10_001 (`vm/mod.rs`/`interp/mod.rs` `format_trace`). ·
+collection operators (2026-06-23, gap #3) — list `+` (concat) / `*` (repeat, commutative `int*list`,
+`n<=0`→`[]`, capacity-overflow → recoverable fault) and set `\|`/`&`/`-`/`^`
+(union/intersection/difference/symmetric-difference) added as runtime-opcode arms in `vm::arith`/
+`vm::bitwise` + `interp::eval_binary` + checker `infer_binary`, behaviour identical to the existing
+methods (`^` has no method form); `examples/collection_ops.chz`.
 
 **Type-system/runtime ✅** · one-way C-like `int`→`float` widening (2026-06-22) — runtime
 `Op::CoerceFloat`/`coerce_float` at every value-def sink (typed `let`, fn/method/closure args incl. int

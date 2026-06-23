@@ -11,6 +11,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ DX — collection operators (gaps.md DX gap #3) (2026-06-23).** List `+` (concat) / `*` (repeat)
+and set `| & - ^` (union / intersection / difference / symmetric-difference) now work as operators,
+behaviour **identical to the existing methods** (`.concat`, `.union`/`.intersection`/`.difference`;
+`^` symmetric-difference has no method form). Implemented as **runtime-opcode dispatch** (NOT compiler
+desugar — the compiler has no operand type info): new value-typed match arms in `vm::arith` +
+`vm::bitwise` (a shared `Vm::set_op` + `Vm::list_repeat`), mirrored byte-for-byte in
+`interp::eval_binary` (free-fn `set_op`/`list_repeat`), plus the type arms in checker `infer_binary`
+(list/set element types must match — a mismatch is the existing `cannot apply …`/`bitwise operator …
+requires int operands or two sets` error; `[] + [1]` infers `list[int]` via `merge_unknown`).
+`list * int` is **commutative** (`3 * [0]` too, Python-style); `n <= 0` → `[]`; a giant `n` raises a
+recoverable `list repeat capacity overflow` (byte-bounded by `isize::MAX`, like `str.repeat`), never a
+process abort. Set results preserve insertion order (union = mine-then-other; intersection/difference =
+mine-filtered; symmetric-difference = mine∉other then other∉mine) so both engines print identically.
+Plain int bitwise + `<< >>` are unchanged (`<< >>` stay int-only). **Parity:** golden
+`examples/collection_ops.chz` runs VM == interp == `.expected` (via `assert_file_parity`), confirmed on
+`--serial` and `--parallel` too. Tests: 11 checker inference/rejection tests + VM eval-correctness +
+list-repeat overflow recoverable-fault + the golden parity test (all RED-first). Docs:
+`docs/syntax.md` §4 operator table + collection-operators note, `docs/stdlib.md` (list/set method
+operator forms), `docs/grammar.bnf` (bitwise cascade note — same tokens, no grammar change; conformance
+clean), `gaps.md` (gap #3 → RESOLVED log, open DX items renumbered 1..4). Full suite (2517) +
+conformance + `clippy --all-targets -D warnings` clean.
+
 **✅ DX — chained `else if` in expression-`if` (gaps.md DX gap #2) (2026-06-23).** `a := if p: 1
 else if q: 2 else: 3` parses without parentheses. Parser-only (~10 lines): `parse_if_expr`
 (`src/parser/mod.rs`) now branches after consuming `Else` — if the next token is `If` it captures the

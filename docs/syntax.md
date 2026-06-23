@@ -280,24 +280,38 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 | 1 | `f(x)` `a.b` `a[i]` | call, field access, index |
 | 2 | `?` | error propagation (postfix, §9) |
 | 3 | `not` `-` (unary) | |
-| 4 | `*` `/` `%` | |
-| 5 | `+` `-` | |
+| 4 | `*` `/` `%` | `*` also list repeat: `[0] * 3` (and `3 * [0]`, commutative) |
+| 5 | `+` `-` | `+` also list concat: `[1,2] + [3,4]`; `-` also set difference: `a - b` |
 | 6 | `..` | range (end-exclusive) |
 | 7 | `<<` `>>` | bitwise shift (int-only) |
-| 8 | `&` | bitwise and (int-only) |
-| 9 | `^` | bitwise xor (int-only) |
-| 10 | `\|` | bitwise or (int-only) |
+| 8 | `&` | bitwise and (int) / set intersection (`set[T]`) |
+| 9 | `^` | bitwise xor (int) / set symmetric-difference (`set[T]`) |
+| 10 | `\|` | bitwise or (int) / set union (`set[T]`) |
 | 11 | `<` `<=` `>` `>=` | |
 | 12 | `==` `!=` `in` | `in` = membership, yields `bool` (see below) |
 | 13 | `and` | |
 | 14 | `or` | |
 | 15 | `\|>` | pipe (§11), left-assoc |
 
-> This table is the contract for the Pratt parser. Bitwise ops are **int-only** (a float operand is
-> a type error); the relative order follows Python (comparison looser than `\|` < `^` < `&` < shifts).
-> A shift amount outside `0..64` is a runtime error. A left shift (`<<`) that drops a significant
-> bit overflows like `+ - * / %` — a recoverable `integer overflow in Shl` (e.g. `1 << 63`), not a
-> silent wrap; round-trip-safe shifts incl. `-1 << 63 == INT_MIN` still succeed. `>>` never overflows.
+> This table is the contract for the Pratt parser. The relative order follows Python (comparison
+> looser than `\|` < `^` < `&` < shifts). A shift amount outside `0..64` is a runtime error. A left
+> shift (`<<`) that drops a significant bit overflows like `+ - * / %` — a recoverable
+> `integer overflow in Shl` (e.g. `1 << 63`), not a silent wrap; round-trip-safe shifts incl.
+> `-1 << 63 == INT_MIN` still succeed. `>>` never overflows.
+>
+> **Collection operators.** `+ *` and `& ^ |` also operate on collections, with behaviour identical
+> to the equivalent methods (so a mismatched element type is a type error, same as the method form):
+> - `list[T] + list[T]` → concat (= `.concat`); element types must match. `[] + [1]` infers `list[int]`.
+> - `list[T] * int` / `int * list[T]` → repeat (commutative, Python-style); `n <= 0` → `[]`. A giant
+>   `n` raises a recoverable `list repeat capacity overflow`, never a process abort.
+> - `set[T] | set[T]` → union (= `.union`), `& ` → intersection (= `.intersection`), `-` → difference
+>   (= `.difference`), `^` → symmetric-difference (no method form). Result preserves insertion order.
+>
+> The compound-assign forms work too: `xs += ys` / `xs *= n` (list), `s |= t` / `s &= t` / `s ^= t` /
+> `s -= t` (set) — identical to the binary form.
+>
+> Plain bitwise (`& ^ | << >>`) on **int** operands is unchanged; `<< >>` are int-only (no set form),
+> and a float operand is still a type error.
 
 **Membership `in`.** `x in xs` is a `bool`: element-of for a `list`/`set`, **key**-of for a `map`
 (Python-style — `k in m` tests keys, not values), and substring-of for a `str`. The container type
