@@ -60,6 +60,58 @@ Current: `fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`
 (latin1/utf16), no `tuple()`/`bool()` ctors. `bignum` stays a non-goal. **`yield`/generators SHIPPED
 (VM-only)** — `fn -> Iterator[T]` may `yield`; see resolved log + `examples/generators_basic.chz`.
 
+### 🟡 Surface ergonomics / DX (fresh-dev audit, 2026-06-23)
+
+Found probing the language cold as a Python/Go/Rust dev. None block apps (workarounds exist), but each
+is a predictable first-hour stumble. Ranked by friction.
+
+1. **Method vs free-function split-brain** *(highest friction)*. The same conceptual op is a receiver
+   method in one place and an import-required free fn in another, with no predictable rule:
+   - **str:** `upper`/`lower`/`trim`/`split`/`join`/`starts_with` are **methods**, but `ends_with`/
+     `replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines`
+     are **`std.str` free fns** — so `s.starts_with(x)` works yet `s.ends_with(x)` is a type error.
+   - **list/iter:** `map`/`filter`/`fold`/`sum`/`sort`/`contains`/`index_of`/`concat` are **methods**, but
+     `enumerate`/`zip`/`any`/`all`/`find`/`flatten`/`reduce`/`take`/`drop` are **`std.iter` free fns**;
+     `min`/`max`/`clamp` are **`std.cmp` free fns**.
+   - A dev can't guess which surface an op lives on. Fix: (a) re-export the common `std.iter`/`std.str`/
+     `std.cmp` ops as receiver methods (thin forwarders in the checker method table), or (b) document a
+     hard rule + add the obvious missing methods. Lowest-effort high-value: add `ends_with`/`replace`/
+     `strip`/`find` as **str methods** to kill the worst asymmetry.
+2. **Chained `else if` rejected in expression-`if`** (`parser/mod.rs:1034`). Statement chains fine; the
+   expression form does not — `a := if p: 1 else if q: 2 else: 3` → "expected ':', found 'if'". Must nest
+   with parens. Fix: in `parse_if_expr`, after consuming `Else`, if next token is `If` recurse into
+   `parse_if_expr` for the else-branch instead of `expect(Colon)` (~3 lines).
+3. **No collection operators.** `[1,2] + [3,4]` (concat), `[0] * 3` (repeat-init), set `| & - ^` are all
+   type errors (`checker/mod.rs:5276/5337`). Functionality exists via methods (`.concat`, `.union`/
+   `.difference`) but operator forms are reflexive for Python/Rust devs; set algebra reads badly as
+   `.union(.difference(...))`. Fix: desugar list `+`/`*` and set `|&-^` to existing methods in the binop arms.
+4. **No stepped / reverse range.** `for i in 10..0` yields nothing (no auto-reverse); `range()` takes only
+   `(end)`/`(start,end)` — no step; a range isn't sliceable (`(0..10)[::2]` errors). Counting down/by-N
+   forces a manual `while`. Slices already do `::step`; ranges should mirror it (3-arg `range` and/or
+   reverse on `..`).
+5. **No `print` newline/sep control.** `print(a, end="")` → "named arguments not supported on builtins"
+   (`checker/mod.rs:6274`); `std.io` has no `write`; no `println`/bare split. Incremental output is
+   impossible without a trailing newline. Fix: add native `std.io.write(s)` (no newline) or special-case
+   `end=`/`sep=` on `print`.
+6. **`assert` takes no message.** `assert(x==y, "msg")` → type error (args parse as a tuple); failure
+   prints only `assertion failed`, no context. Fix: accept optional 2nd `str` arg in the `assert`
+   checker special-case + thread into the panic message.
+7. **No safe numeric parse.** `int("abc")`/`float("x")` raise a (recoverable) panic — no
+   `str.to_int() -> int?` / `int?(s)`. Untrusted input must be wrapped in `recover:`. Fix: add
+   `to_int`/`to_float` str methods returning `Option`.
+8. **Infinite-recursion stack trace unbounded** (`vm/mod.rs:3301`). One frame per call → 10001 lines at
+   the 10000-depth cap, flooding the terminal. Fix: collapse consecutive identical frames (`… × N`) + cap
+   printed trace (e.g. first 10 + last 10).
+
+**Minor / noted:** no `map.items()` (have `.keys()`/`.values()` + `for k,v`); no `type()`/`typeof`; no
+`input()` (have `std.io.read_line`); no chained comparison (`1<2<3`); `json.parse` widens all numbers to
+float (int-ness lost). `**`/`//` absence is by-design (no base operator).
+
+**Docs clarity (not a bug):** `/` is integer division and `%`/`/` truncate toward zero (`-7%3 == -1`,
+`-7/2 == -3`) — correct-as-designed (see Verified working) but **conflicts with the "Python-feel"
+branding** a newcomer reads (`7/2==3.5`, `-7%3==2` in Python). Add a loud one-liner in `syntax.md` §4 so
+the surprise is caught at read-time, not via a silent wrong result.
+
 ### Tier 4 — ecosystem (toolchain)
 REPL, formatter, LSP, package manager/registry, debugger, doc comments + docgen.
 
