@@ -21620,6 +21620,22 @@ main()";
         assert_eq!(vm_out, interp_out, "vm/interp divergence on inline_fn");
     }
 
+    /// Chained `else if` in expression position: `examples/expr_else_if.chz` exercises a multi-arm
+    /// `if p: a else if q: b else: c` chain (right-associative nesting) selecting each branch.
+    /// Byte-identical on VM, interp, and the checked-in `.expected` is the parity gate.
+    #[test]
+    fn golden_expr_else_if_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/expr_else_if.chz");
+        let expected = include_str!("../../examples/expr_else_if.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from expr_else_if.expected"
+        );
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on expr_else_if");
+    }
+
     #[test]
     fn golden_hello_chz_matches_interpreter() {
         let src = include_str!("../../examples/hello.chz");

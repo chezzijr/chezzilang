@@ -77,26 +77,22 @@ is a predictable first-hour stumble. Ranked by friction.
      `std.cmp` ops as receiver methods (thin forwarders in the checker method table), or (b) document a
      hard rule + add the obvious missing methods. Lowest-effort high-value: add `ends_with`/`replace`/
      `strip`/`find` as **str methods** to kill the worst asymmetry.
-2. **Chained `else if` rejected in expression-`if`** (`parser/mod.rs:1034`). Statement chains fine; the
-   expression form does not — `a := if p: 1 else if q: 2 else: 3` → "expected ':', found 'if'". Must nest
-   with parens. Fix: in `parse_if_expr`, after consuming `Else`, if next token is `If` recurse into
-   `parse_if_expr` for the else-branch instead of `expect(Colon)` (~3 lines).
-3. **No collection operators.** `[1,2] + [3,4]` (concat), `[0] * 3` (repeat-init), set `| & - ^` are all
+2. **No collection operators.** `[1,2] + [3,4]` (concat), `[0] * 3` (repeat-init), set `| & - ^` are all
    type errors (`checker/mod.rs:5276/5337`). Functionality exists via methods (`.concat`, `.union`/
    `.difference`) but operator forms are reflexive for Python/Rust devs; set algebra reads badly as
    `.union(.difference(...))`. Fix: desugar list `+`/`*` and set `|&-^` to existing methods in the binop arms.
-4. **No stepped / reverse range.** `for i in 10..0` yields nothing (no auto-reverse); `range()` takes only
+3. **No stepped / reverse range.** `for i in 10..0` yields nothing (no auto-reverse); `range()` takes only
    `(end)`/`(start,end)` — no step; a range isn't sliceable (`(0..10)[::2]` errors). Counting down/by-N
    forces a manual `while`. Slices already do `::step`; ranges should mirror it (3-arg `range` and/or
    reverse on `..`).
-5. **No `print` newline/sep control.** `print(a, end="")` → "named arguments not supported on builtins"
+4. **No `print` newline/sep control.** `print(a, end="")` → "named arguments not supported on builtins"
    (`checker/mod.rs:6274`); `std.io` has no `write`; no `println`/bare split. Incremental output is
    impossible without a trailing newline. Fix: add native `std.io.write(s)` (no newline) or special-case
    `end=`/`sep=` on `print`.
-6. **`assert` takes no message.** `assert(x==y, "msg")` → type error (args parse as a tuple); failure
+5. **`assert` takes no message.** `assert(x==y, "msg")` → type error (args parse as a tuple); failure
    prints only `assertion failed`, no context. Fix: accept optional 2nd `str` arg in the `assert`
    checker special-case + thread into the panic message.
-7. **No safe numeric parse.** `int("abc")`/`float("x")` raise a (recoverable) panic — no
+6. **No safe numeric parse.** `int("abc")`/`float("x")` raise a (recoverable) panic — no
    `str.to_int() -> int?` / `int?(s)`. Untrusted input must be wrapped in `recover:`. Fix: add
    `to_int`/`to_float` str methods returning `Option`.
 
@@ -250,7 +246,10 @@ list `.concat`/`.extend` + map `.merge`/`.update` · hex/bin/oct literals · tup
 `zip` · optional-chaining + `??` · `defer` block-scoped + `defer:` form · `ref T` transparent ref
 bindings (auto-deref, lowers to `Ref[T]`, parser/checker/desugar only; non-sendable) · **`yield`/
 generators** (VM-only; `fn -> Iterator[T]` may `yield`, call returns a suspendable coroutine driven by
-`.next()`; interp rejects `yield` so two-engine parity waived; `examples/generators_basic.chz`).
+`.next()`; interp rejects `yield` so two-engine parity waived; `examples/generators_basic.chz`) ·
+**chained `else if` in expression-`if`** (DX gap #2; `parse_if_expr` recurses on `else if` →
+right-associative nested `IfElse`, final `else` still mandatory; both engines + `.expected` parity via
+`examples/expr_else_if.chz`).
 
 **Concurrency ✅** · pending-spawn drop on early `parallel:` escape · VM nursery-leak on `?`/return
 escape · Path C recv-in-native-callback thread-demotion (`f828ef7`, D complete) · `std.cancel`

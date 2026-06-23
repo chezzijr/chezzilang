@@ -1032,8 +1032,17 @@ impl Parser {
         self.expect(&Token::Colon)?;
         let then = self.parse_expr()?;
         self.expect(&Token::Else)?;
-        self.expect(&Token::Colon)?;
-        let els = self.parse_expr()?;
+        // `else if ...` chains: recurse into another expression-`if` for the else-branch
+        // (right-associative nesting), mirroring statement-form `parse_if`. Otherwise the
+        // plain `else: <expr>` tail.
+        let els = if self.check(&Token::If) {
+            let if_span = self.cur_span();
+            self.expect(&Token::If)?;
+            self.parse_if_expr(if_span)?
+        } else {
+            self.expect(&Token::Colon)?;
+            self.parse_expr()?
+        };
         Ok(Expr {
             kind: ExprKind::IfElse {
                 cond: Box::new(cond),
@@ -4128,6 +4137,34 @@ mod tests {
     #[test]
     fn if_expression_requires_else() {
         assert!(parse_err("x := if c: 1\n").message.contains("else"));
+    }
+
+    /// `if c: 1 else if d: 2 else: 3` chains in expression position, nesting right-associatively:
+    /// the outer `els` is itself an `IfElse` (`then`=2, `els`=3); the outer `then` is 1.
+    #[test]
+    fn if_expr_else_if_chain() {
+        let StmtKind::Let { value, .. } = only("x := if c: 1 else if d: 2 else: 3\n") else {
+            panic!()
+        };
+        let ExprKind::IfElse { then, els, .. } = value.kind else {
+            panic!("{value:?}")
+        };
+        assert!(matches!(then.kind, ExprKind::Int(1)));
+        let ExprKind::IfElse { then, els, .. } = els.kind else {
+            panic!("else branch should be a nested IfElse, got {els:?}")
+        };
+        assert!(matches!(then.kind, ExprKind::Int(2)));
+        assert!(matches!(els.kind, ExprKind::Int(3)));
+    }
+
+    /// A chained expression `else if` still demands a final `else` (no optional-else leak).
+    #[test]
+    fn if_expr_else_if_still_requires_final_else() {
+        assert!(
+            parse_err("x := if c: 1 else if d: 2\n")
+                .message
+                .contains("else")
+        );
     }
 
     /// Guards the `expect_stmt_end` Dedent-acceptance: a sibling statement may follow a
